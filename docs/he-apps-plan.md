@@ -81,19 +81,42 @@ die `fs`-Gruppe existieren, letztere ist absichtlich auf `Saved/` eingesperrt.
 
 Der größte Brocken und der, ohne den nichts anderes zählt.
 
-**A0 Backend-Baseline: Metal auf macOS, OpenGL überall sonst.** Entscheidung des Users vom
-26.08.2026, und sie räumt mehr weg als sie kostet. Eine App braucht keine visuellen
-Fähigkeiten, für die sich fünf Backends anstrengen müssten, also muss sie auch nicht auf
-allen fünf laufen. OpenGL läuft auf jeder Plattform, Metal ist auf macOS ohnehin der
-Standard und der bessere Weg (Apple hat GL abgekündigt, und Metal hat den vollständigen
-UI-Pfad bereits).
+**A0 Backend-Baseline, gesteuert von einem Schalter beim Anlegen des Projekts.** Zwei
+Entscheidungen des Users, die zusammengehören.
 
-Das Entscheidende daran: **beide Baseline-Backends können heute schon alles, was UI braucht**,
-also Eckenradius, Texturen und Material-Graphen. Daraus folgt:
-- D3D und Vulkan fallen als App-Ziel weg (siehe F1, das damit aus diesem Plan ausscheidet).
-- Schicht 0 aus D5 ist in **zwei** Backends umzusetzen, nicht in fünf.
-- Material-Graphen sind auf jedem App-Ziel verfügbar, also kein degradiertes Feature mehr.
-- Der Software-Renderer aus Block G verliert seine Hauptbegründung und rutscht ans Ende.
+*26.08.2026:* eine App braucht keine visuellen Fähigkeiten, für die sich fünf Backends
+anstrengen müssten, also zielt sie nur auf **Metal (macOS) und OpenGL (Rest)**. D3D und Vulkan
+fallen als App-Ziel weg (siehe F1, das damit aus diesem Plan ausscheidet). Beide
+Baseline-Backends können heute schon alles, was UI braucht: Eckenradius, Texturen,
+Material-Graphen.
+
+*27.08.2026:* beim Anlegen eines Werkzeugprojekts gibt es ein Häkchen **„Advanced Shader
+Effects"**, und es entscheidet, **welcher einzige Renderer** in den App-Runtime gelinkt wird:
+
+| Häkchen | Renderer | Materialien | Effekte |
+|---|---|---|---|
+| **aus** | `RendererSoftware`, als eigene Rendering-Bibliothek, der einzige in HorizonRendering | keine, im Editor auch nicht erstellbar | Schicht 0 (Eckenradius, Rahmen, Verläufe, Schatten) |
+| **an** | der Forward-Renderer, ebenfalls als einziger gelinkt | Material-Graphen, Schicht 1 | Schicht 0 + Schicht 1 |
+
+Das ist die sauberere Version dessen, was in A3b als „dünner UIRenderer pro Backend" stand.
+Eine App ohne Effekte linkt dann nämlich **gar keinen GPU-Stack**, statt einen dünn
+geschnittenen. Und der Schalter fällt genau auf die Naht, die D5 ohnehin gezogen hat:
+Schicht 0 kommt ohne Shader-Graph aus, Schicht 1 ist der Graph. „Advanced Shader Effects"
+heißt also schlicht „Schicht 1", und alles hängt an einem Häkchen statt an drei.
+
+Damit ist auch Block G rehabilitiert: ich hatte den Software-Renderer gestern auf „optional,
+Welle 4" zurückgestuft, mit dem Argument, Mesa llvmpipe erledige „läuft überall" billiger.
+Das Argument des Users ist ein anderes und besseres, nämlich **Paketgröße**, und darauf
+antwortet llvmpipe überhaupt nicht: das ist eine zusätzliche DLL, keine kleinere. Für
+Advanced-**an**-Apps auf treiberlosen Windows-Kisten bleibt llvmpipe eine Zeile wert, mehr
+nicht.
+
+**Offen und nachzufragen:** „der OpenGL-Forward-Renderer" schließt wörtlich Metal aus und
+widerspräche der Entscheidung vom Vortag. Ich lese es als „der Forward-Pfad statt des
+deferred", also Metal auf macOS und GL sonst. Die wörtliche Lesart hätte einen echten Vorteil:
+**ein einziger Shader-Dialekt** (GLSL410) für die vorkompilierten UI-Material-Varianten statt
+MSL und GLSL nebeneinander. Auf die Zahl der Binärsätze wirkt sich das nicht aus, jede
+Plattform baut ohnehin ihre eigenen.
 
 **Die 4.1 ist keine Anforderung, sie ist eine Untergrenze.** Erste Fassung dieses Abschnitts
 wollte den Kontext außerhalb von macOS auf 4.1 herunterziehen. Das war unbegründet: die 4.1
@@ -158,14 +181,20 @@ UI zeichnet, soll nicht den ganzen GL- oder Metal-Renderer mitschleppen. Richtig
 dahin ist **nicht**, die 11.000-Zeilen-Renderer mit `#ifdef` zu zerschneiden. Das erzeugt
 genau die zweite Konfiguration, die laut Risikoliste still verrottet.
 
-Stattdessen: ein **dünner `UIRenderer` pro Baseline-Backend** (GL und Metal), der `IRenderer`
-implementiert und nichts tut außer Clear, UI-Pass, Present. Möglich, weil `IRenderer` nur vier
-rein virtuelle Methoden hat; die anderen 37 haben Standard-Rümpfe. Die schweren statischen
-Bibliotheken werden in einem App-Build dann schlicht nicht gelinkt.
+Stattdessen entscheidet der Advanced-Schalter aus A0, **welcher einzige Renderer gelinkt
+wird**. Advanced aus: `RendererSoftware`, gar kein GPU-Stack. Advanced an: der Forward-Renderer
+der Plattform, allein. Beides geht, weil `IRenderer` nur vier rein virtuelle Methoden hat und
+die anderen 37 Standard-Rümpfe haben, und weil die Renderer schon eigene statische
+Bibliotheken sind.
 
-Bedingung dabei: den UI-Pass **einmal** herausziehen und von dünnem wie dickem Renderer
-benutzen lassen, sonst driften zwei Kopien auseinander. Dieselbe Extraktion macht später das
-Software-Backend aus Block G fast geschenkt.
+Für den Advanced-an-Fall bleibt zu entscheiden, ob dort wirklich der volle Forward-Renderer
+gelinkt wird oder ein **dünner `UIRenderer`**, der nur Clear, UI-Pass und Present kann. Der
+volle ist billiger zu haben (existiert), der dünne ist kleiner. Vorschlag: erst den vollen
+nehmen, messen, und den dünnen nur bauen, wenn die 25-MB-Marke sonst reißt.
+
+Bedingung in jedem Fall: den UI-Pass **einmal** herausziehen und von jedem Renderer benutzen
+lassen, sonst driften Kopien auseinander. Genau diese Extraktion ist auch das, was das
+Software-Backend aus Block G überhaupt bezahlbar macht.
 
 Dazu zwei konkrete Punkte, beide am Code geprüft:
 - **`WidgetManager` gehört nicht in `HE_Scene`.** Heute muss eine App die Bibliothek linken,
@@ -188,10 +217,18 @@ Dazu zwei konkrete Punkte, beide am Code geprüft:
      wahr zu falsch.
 
 **Ein Kostenpunkt, der leicht untergeht:** der Exporter kopiert die Binaries aus
-`gameRuntimeDir` wörtlich. Ein schlanker App-Runtime heißt also einen **zweiten Binärsatz**
-(App-exe plus schlanke dylibs), der gebaut, mit dem Editor ausgeliefert und beim Export nach
-Projekttyp ausgewählt wird. Eine Zeile im Plan, aber ohne sie setzt er Dateien voraus, die es
-nicht gibt.
+`gameRuntimeDir` wörtlich. Mit dem Schalter aus A0 heißt das **drei Runtime-Ausprägungen pro
+Plattform**, die gebaut, mit dem Editor ausgeliefert und beim Export ausgewählt werden:
+
+| Ausprägung | Gelinkter Renderer | Shader-Übersetzer | Wofür |
+|---|---|---|---|
+| Spiel | alle Backends der Plattform | ja | wie heute |
+| App, Advanced an | Forward-Renderer, einer | nein (vorkompilierte Varianten) | Werkzeug mit Material-Graphen |
+| App, Advanced aus | `RendererSoftware`, einer | nein | Werkzeug ohne Effekte |
+
+Ohne diese Zeile setzt der Plan Dateien voraus, die es nicht gibt. Und die Risikoliste bekommt
+einen Eintrag: der headless-Starttest muss **beide** App-Ausprägungen fahren, sonst verrottet
+eine davon still.
 
 **Einordnung:** Welle 1 liefert bewusst noch die fetten ~70 MB, sonst verschiebt sich die
 erste lauffähige App hinter einen Umbau. A3a gehört in Welle 2, A3b in Welle 3.
@@ -366,15 +403,20 @@ Scanlines und Ähnliches schon heute baubar. Es fehlt:
   MaterialFunction-Assets existieren bereits, das ist der fertige Mechanismus für eine
   Effektbibliothek, die sich im Graph-Editor zusammenstecken lässt statt kopiert zu werden.
 
-*Schicht 2, der Rückfall-Vertrag,* ist seit A0 fast leer: beide Baseline-Backends fahren
-Material-Graphen, Materialien sind also auf keinem App-Ziel ein degradiertes Feature. Der
-Vertrag gilt nur noch für das optionale Software-Backend aus Block G, und lautet dort: ein
-Material-Quad zeichnet Schicht 0 plus Farbton.
+*Schicht 2, der Rückfall-Vertrag.* Der Schalter aus A0 gibt ihm seine endgültige Form, und
+zwar eine ganz einfache: **Schicht 1 ist genau das, was „Advanced Shader Effects" ein- und
+ausschaltet.** Daraus folgt der Vertrag:
+- Advanced **an**: beide Baseline-Backends fahren Material-Graphen, Materialien sind kein
+  degradiertes Feature.
+- Advanced **aus**: es gibt keine Materialien, weil der Editor keine anlegen lässt. Der Vertrag
+  greift nur für Altbestand, also für Projekte, in denen der Schalter nachträglich umgelegt
+  wurde: solche Quads zeichnen **Schicht 0 plus Farbton**.
 
-Die Trennung der beiden Schichten bleibt trotzdem richtig, aber aus einem anderen Grund als
-Backend-Deckung: Schicht 0 kostet keinen Shader-Übersetzungslauf, ist im Designer sofort
-sichtbar, im Theme (D1) als Rolle referenzierbar und von einem Gestalter ohne Graph-Wissen
-bedienbar. Ein Eckenradius soll ein Zahlenfeld sein, kein Knoten.
+Genau deshalb ist Schicht 0 ein geschlossenes Vokabular und keine Sammlung von Graphen. Und
+sie wäre auch dann richtig getrennt, wenn es den Schalter nicht gäbe: sie kostet keinen
+Shader-Übersetzungslauf, ist im Designer sofort sichtbar, im Theme (D1) als Rolle
+referenzierbar und ohne Graph-Wissen bedienbar. Ein Eckenradius soll ein Zahlenfeld sein,
+kein Knoten.
 
 **Zwei Funde, die dabei aufgefallen sind:**
 
@@ -406,6 +448,31 @@ Einrasten im Designer, „an Inhalt anpassen" als Größenmodus, Mindest-/Maxima
 **E1 App-Projekttyp.** Beim Anlegen „Anwendung" neben „Spiel". Setzt `appMode`, legt keine
 Szene an, erzeugt eine GameInstance und ein Haupt-Widget, öffnet direkt den UI-Designer statt
 des 3D-Viewports.
+
+**E1b Der Advanced-Schalter im Editor.** Das Häkchen aus A0 ist ein Feld in `ProjectData`,
+neben `scriptLanguage`, und folgt genau dessen Vorbild. Dessen Kommentar beschreibt das
+Muster schon: „This is a HARD restriction: the editor only offers the matching logic-authoring
+assets (the Content Browser hides the other languages' creators)". Dieselbe Mechanik, nur für
+Materialien.
+
+Zu schließende Stellen, wenn der Schalter aus ist:
+- Die Ersteller im Content Browser: „Material" und „Material Function"
+  (`ContentBrowserPanel.cpp:2300`, `:2301`) und „Create Material Instance" (`:2755`).
+- Der Material-Editor als Panel, samt Doppelklick-Öffnen.
+- Die Material-Slots, wo ein Widget eines wählt (`UIEditorPanel`, `InspectorPanel`).
+- Die Asset-Auswahl und die Thumbnails für Material-Assets.
+
+Im Editor referenzieren 31 Stellen in 14 Dateien `AssetType::Material`, aber die meisten
+gehören zu Terrain, Skeletal Mesh und Partikeln, also zu Panels, die E2 im App-Modus ohnehin
+ausblendet. Die eigentliche Liste ist die oben.
+
+**Zwei Regeln dazu, die sonst wehtun:**
+- *„Nicht auffindbar" heißt Ersteller, Auswahl und Panel weg, nicht die Dateien.* Eine Datei,
+  die es gibt und die niemand sieht, verwirrt Source Control und die Referenzsuche. Vorhandene
+  Materialien bleiben im Browser sichtbar, aber gekennzeichnet.
+- *Der Schalter ist nachträglich umlegbar, aber das Ausschalten fragt nach.* Es listet die
+  betroffenen Materialien auf, wofür `findReferrers` schon da ist, und die referenzierenden
+  Widgets zeichnen danach Schicht 0 plus Farbton.
 
 **E2 App-Modus im Editor.** Viewport, Outliner, Details, Terrain, Landschaft, Physik und
 Rendering-Einstellungen sind in einem App-Projekt Lärm. Panels ausblenden, Layout auf
@@ -451,11 +518,11 @@ Rändern und Snap-Verhalten auf Windows.
 
 ---
 
-## 8b. Block G: Software-Renderer (optional, siehe A0)
+## 8b. Block G: Software-Renderer (der Renderer für „Advanced aus")
 
-> Die Analyse unten ist unverändert richtig, die **Priorität nicht mehr**: seit der
-> Baseline-Entscheidung A0 ist dieser Block optional und steht in Welle 4. Warum, steht am
-> Ende des Abschnitts.
+> Dieser Block hat zwei Rückstufungen und eine Rehabilitierung hinter sich. Stand jetzt: er
+> ist **nicht optional**, sondern der Renderer, den jedes Werkzeugprojekt ohne Advanced
+> Shader Effects benutzt, und damit der Normalfall statt der Ausnahme. Siehe A0.
 
 Nicht „ein Software-Renderer für die Engine". Ein **Software-Backend, das nur UI zeichnet**.
 Der Unterschied ist der ganze Punkt: 3D auf der CPU (PBR, Schatten, GI, Terrain) wäre ein
@@ -505,22 +572,31 @@ genau die Sorte Punkt, die im Umfang explodiert.
 - Ein Fall in `RendererFactory::Create`, und wählbar über das Backend-Feld, das die
   ausgelieferte `config.json` bereits hat.
 
-**Einordnung nach der Baseline-Entscheidung (A0): optional, Welle 4, nur bei Bedarf.** Die
-ursprüngliche Begründung war „läuft überall, auch ohne brauchbaren Treiber". Mit OpenGL als
-Baseline und der Versionsleiter aus A0 ist die zweimal billiger zu haben, ohne eine Zeile
-eigenen Rasterizer:
+**Zwei harte Bedingungen, die aus der Beförderung folgen.** Als optionaler Rückfall durfte
+das Backend gemütlich sein, als Normalfall nicht:
 
-- **Windows ohne Grafiktreiber:** Mesa **llvmpipe** als `opengl32.dll` neben die exe legen.
-  Das ist GL in Software, von anderen gepflegt, und die App merkt keinen Unterschied.
-- **Headless-Test in der CI:** auf Linux-Runnern Xvfb plus llvmpipe, auf diesem Mac Metal,
-  so wie `he_shot.py` es headless heute schon erzwingt. Das Ziel „eine komplette App
-  headless hochfahren und das Bild ansehen" bleibt also erreichbar, nur nicht über ein
-  eigenes Backend.
+1. **A2 ist Voraussetzung, nicht Kür.** Ein CPU-Rasterizer, der 60 mal pro Sekunde ein
+   ganzes Fenster neu malt, ist inakzeptabel. Ereignisgetriebenes Zeichnen muss vorher stehen.
+2. **Dirty Rectangles sind Pflicht.** Ein Retina-Fenster in Vollbild sind 3840 × 2160, also
+   8,3 Millionen Pixel pro Vollbild-Neuzeichnung. Im Leerlauf rettet A2 das, beim Ziehen eines
+   Sliders oder beim Vergrößern des Fensters nicht. Nur die geänderten Rechtecke neu zu malen
+   ist der Unterschied zwischen flüssig und zäh.
 
-Was einem eigenen Software-Backend bleibt, sind Startzeit, Paketgröße und die Unabhängigkeit
-von Treibern überhaupt. Das ist real, aber es rechtfertigt keine 600 bis 1000 Zeilen
-Rasterizer, solange llvmpipe die Lücke füllt. Der Abschnitt bleibt hier stehen, weil die
-Analyse gilt, falls der Bedarf doch auftaucht. Der Editor bleibt in jedem Fall auf der GPU.
+Dazu wächst der Umfang: das Backend trägt jetzt **ganz Schicht 0**, also Eckenradius mit
+Kantenglättung, Rahmen, Verläufe und Schatten, nicht nur die Grundformen. Ehrlicher als meine
+erste Schätzung sind **1500 bis 2500 Zeilen**.
+
+**Texturen:** die BCn- und ASTC-Frage erledigt sich per Export-Einstellung statt per
+CPU-Dekoder. Ein Advanced-aus-Profil kocht UI-Texturen als RGBA8. Blockkompression ist eine
+Optimierung für 3D-Speicherbedarf, UI-Texturen sind klein, eine App braucht das nicht.
+
+**llvmpipe bleibt trotzdem eine Zeile wert**, aber nur noch für Advanced-**an**-Apps auf
+Windows-Kisten ohne Grafiktreiber: dort `opengl32.dll` daneben legen. Für Advanced-aus ist es
+gegenstandslos, da läuft ohnehin kein GL.
+
+**Einordnung:** Welle 2, zusammen mit dem schlanken Binärsatz. Welle 1 liefert den Schalter
+und die Editor-Sperren, exportiert aber übergangsweise noch den GPU-Runtime, siehe
+Reihenfolge. Der Editor bleibt in jedem Fall auf der GPU.
 
 ---
 
@@ -552,18 +628,25 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 - C: `dialog`, `json`, `prefs`, `timer` (`clipboard` ist im Textfeld schon verdrahtet, fehlt
   nur als Skript-Gruppe)
 - B1 TextInput-Restarbeiten (Ziehen zum Auswählen, Wortsprünge, Scrollen, Undo, I-Beam)
-- E1 App-Projekttyp plus eine Vorlage
+- E1 App-Projekttyp plus eine Vorlage, **E1b Advanced-Schalter im `.heproj` + Editor-Sperren**
 - E5 Export-Voreinstellung „App"
 - Abnahme: Todo-App, exportiert als `.app`, speichert nach `~`, unter 2 % CPU im Leerlauf
 
+> **Zum Schalter in Welle 1:** er wird hier schon gesetzt und sperrt schon, aber ein
+> Advanced-aus-Projekt exportiert übergangsweise noch den GPU-Runtime. Funktional ist das
+> identisch, es gibt ja keine Materialien zu zeichnen, nur eben noch fett. Der Software-Runtime
+> kommt in Welle 2 dazu. So bleibt „erste lauffähige App in Welle 1" stehen, ohne dass der
+> Schalter erst später etwas bedeutet.
+
 **Welle 2, brauchbar**
-- D5 Schicht 0: Eckenradius pro Ecke, Rahmen, Verläufe, Schatten, in Metal und GL
+- G `RendererSoftware` als eigene Bibliothek, plus Dirty Rectangles (setzt A2 voraus)
+- D5 Schicht 0: Eckenradius pro Ecke, Rahmen, Verläufe, Schatten, in Metal, GL **und Software**
+- A3a Diät zur Linkzeit, plus die drei Runtime-Ausprägungen im Editor
 - D1 Theme-System
 - D2 erste zwölf Komponenten
 - B2 ListView, B3 Grid, B4 Dialoge/Kontextmenü/Tooltip
 - C: `fs` entsperrt mit Dialog-Erteilung, `datetime`, `process`
 - E3 echte Designer-Vorschau
-- A3a Diät zur Linkzeit (nur die Baseline-Backends linken, Net und crypto optional)
 
 **Welle 3, konkurrenzfähig**
 - A6 Menüleiste, A7 Icon und Dateitypen
@@ -571,12 +654,11 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 - C: `http`, `notify`
 - D3 alle App-Vorlagen
 - D5 Schicht 1: Parameter pro Instanz, UI-Nodes, MaterialFunction-Effektbibliothek, Backdrop
-- A3b dünner UIRenderer, WidgetManager-Umzug, UI-Materialien aus vorkompilierten Varianten,
-  zweiter Binärsatz im Editor, Größenschwelle in der CI
+- A3b WidgetManager-Umzug, UI-Materialien aus vorkompilierten Varianten (beide Hälften!),
+  Advanced-an-Ausprägung ohne Shader-Übersetzer, Größenschwelle in der CI
 
 **Welle 4, Kür**
 - A5 mehrere Fenster
-- G Software-Backend, nur falls llvmpipe die Lücke doch nicht füllt
 - B9 Feinschliff-Widgets
 - B10 Zugänglichkeit und Lokalisierung
 - `db`, Drucken, Auto-Update
@@ -585,9 +667,10 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 
 ## 11. Risiken und Fallen
 
-- **Zwei Betriebsmodi bedeuten zwei Testpfade.** Ein Schalter, der die halbe Initialisierung
-  überspringt, verrottet still. Ab Tag eins ein Test, der eine App-Konfiguration headless
-  hochfährt.
+- **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein
+  Schalter, der die halbe Initialisierung überspringt, verrottet still. Ab Tag eins ein Test,
+  der eine App-Konfiguration headless hochfährt, und ab Welle 2 muss er **beide**
+  App-Ausprägungen fahren, Advanced an und aus, sonst verrottet eine davon.
 - **Der Leerlauf-Modus ist der subtilste Punkt.** Ein vergessenes Dirty-Flag heißt: eine
   Änderung erscheint erst, wenn die Maus wackelt. Ein zu großzügiges Flag heißt: es war
   umsonst. Eine sichtbare Diagnosezeile („Frames pro Sekunde im Leerlauf") spart Stunden.
