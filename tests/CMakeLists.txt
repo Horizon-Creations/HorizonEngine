@@ -83,6 +83,7 @@ add_executable(he_tests
     test_tutorial.cpp
     test_docs_library.cpp
     test_editor_help.cpp
+    test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
     ImGuiSoftwareRaster.cpp
@@ -153,6 +154,9 @@ add_executable(he_tests
     # still exists in the documentation bundle. It is also linked because
     # EditorRowWidgets.cpp (below) looks its rows up in it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorHelp.cpp
+    # Per-node documentation: plain data over the engine's own registries,
+    # so the coverage test can walk both against each other.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcNodeDocs.cpp
     # The documentation reader itself, so test_ui_shot.cpp can render the real
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).

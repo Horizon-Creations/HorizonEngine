@@ -7,6 +7,10 @@
 #include "EditorHelp.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "HcEditorUtil.h"
+
+#include <HorizonCode/HorizonCode.h>
+#include <HorizonScene/EngineApi.h>
 
 #include <imgui.h>
 
@@ -326,6 +330,61 @@ TEST_CASE("ui shot: the documentation reader lays a page out")
 	CHECK(bodyInk > 3000);
 
 	DocsPanel::close();
+}
+
+TEST_CASE("ui shot: a node explains itself on hover")
+{
+	// What a graph author sees when the cursor rests on a node: the call's name,
+	// where it comes from, what it does, and its pins — in the same colours and
+	// glyphs the canvas draws those pins with. Rendered here because it is the
+	// one place the pin vocabulary can actually be checked: "is the exec pin a
+	// white triangle" is not a question a string comparison can answer.
+	constexpr int W = 560, H = 320;
+	Harness harness(W, H);
+
+	HorizonCode::Node node;
+	node.type   = HorizonCode::NodeType::EngineCall;
+	node.s      = "physics.addImpulse";
+	node.hasArg = true;   // an exec call
+	if (const HE::api::ApiFn* fn = HE::api::find(node.s))
+	{
+		for (const auto& p : fn->params)  node.params.push_back({ p.name, p.type, p.isArray });
+		for (const auto& r : fn->results) node.results.push_back({ r.name, r.type, r.isArray });
+	}
+
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("node", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		{
+			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 32.0f);
+			HcEditorUtil::drawNodeDoc(node);
+		}
+		ImGui::End();
+	};
+
+	const he_ui::Image img = shoot("node-doc", W, H, 4, scene);
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 8000);
+
+	// The pin glyphs are the point: somewhere in the lower half there has to be
+	// ink in a pin colour that is neither the background nor the text — the
+	// teal of an Int, the mint of a Vec3. A tooltip that lost its dots would
+	// still be full of text and pass every other check here.
+	int coloured = 0;
+	for (int y = H / 2; y < H - 10; ++y)
+		for (int x = 10; x < 80; ++x)
+		{
+			std::uint8_t r, g, b, a;
+			img.pixel(x, y, r, g, b, a);
+			const int mx = std::max({ int(r), int(g), int(b) });
+			const int mn = std::min({ int(r), int(g), int(b) });
+			if (mx - mn > 40 && mx > 90) ++coloured;   // saturated = a pin dot
+		}
+	INFO("saturated pixels in the pin column: " << coloured);
+	CHECK(coloured > 20);
 }
 
 TEST_CASE("ui shot: searching the manual from the reader")

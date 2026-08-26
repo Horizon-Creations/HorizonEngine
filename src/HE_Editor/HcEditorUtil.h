@@ -287,15 +287,26 @@ namespace HcEditorUtil
 	// owning function name + mirrors its result pins. Returns true if it changed.
 	bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret);
 
-	// ── Hover tooltips ────────────────────────────────────────────────────────
-	// Full hover-tooltip text for a node instance: what it does (HC::nodeTooltip,
-	// or the engine registry entry for an Engine Call), then its inputs and
-	// outputs with their value types, derived from HC::signatureOf. Shared by the
-	// level/class and widget graph editors so every node documents itself the
-	// same way.
-	std::string nodeTooltipText(const HorizonCode::Node& n);
+	// ── Node documentation ────────────────────────────────────────────────────
+	// Draws what a node is: its name, what it does (HorizonCode::nodeTooltip, or
+	// the engine-call description from HcNodeDocs for an Engine Call), and its
+	// inputs and outputs — with the SAME glyphs and colours the canvas draws
+	// those pins with, so the tooltip teaches the vocabulary the wires use
+	// instead of a second one made of punctuation.
+	//
+	// Draws CONTENT only: the caller owns the window, which is what lets the
+	// same thing appear in a hover tooltip on the canvas, on an add-menu row and
+	// on the reference page in the manual.
+	//
+	// Returns the node's topic in the manual ("horizoncode-nodes#…", empty when
+	// it has none) so a caller can offer F1 on it.
+	std::string drawNodeDoc(const HorizonCode::Node& n);
 	// Same, for a bare node type (add-menu items — no configured instance yet).
-	std::string nodeTooltipText(HorizonCode::NodeType t);
+	std::string drawNodeDoc(HorizonCode::NodeType t);
+
+	// The manual topic for a node without drawing anything. Engine calls are
+	// keyed by their registry id, built-ins by their display name.
+	std::string nodeDocTopic(const HorizonCode::Node& n);
 
 	// ── Shared graph colors (ImU32; keep every HC editor consistent) ──────────
 	// A stable color per value type — Bool always red, Float green, Ref purple, …

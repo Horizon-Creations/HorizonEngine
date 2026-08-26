@@ -1,6 +1,8 @@
 #include "HcEditorUtil.h"
 #include <Types/TypeRegistry.h>
 #include "EditorWidgets.h"    // danger buttons for deletion
+#include "EditorTheme.h"      // the tooltip's heading / dim tiers
+#include "HcNodeDocs.h"       // what each engine call does
 #include <cstdint>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -148,122 +150,180 @@ namespace
 		}
 	}
 
-	// One "  Name: Type[]" line per pin; exec pins draw as "  ▶ Name".
-	void appendPinLines(std::string& out, const std::vector<HorizonCode::PinDesc>& execPins,
-	                    const std::vector<HorizonCode::PinDesc>& dataPins, const char* execFallback)
+	// ── One pin, drawn the way the canvas draws it ───────────────────────────
+	// The pin list used to be text: "  > In (exec)" and "  entity: Int". Two
+	// problems with that, and they are the same problem twice — the reader has
+	// to translate. A ">" is not what an exec pin looks like on a node, and a
+	// type name in grey says nothing about the colour of the wire that fits it.
+	//
+	// So the tooltip borrows the canvas's own vocabulary: a triangle for exec, a
+	// filled circle for data, a 2×2 grid for a container, each in the type's
+	// colour — the same three shapes GraphEditor draws, in the same colours
+	// pinTypeColor hands it.
+	void drawPinGlyph(bool isExec, bool isContainer, std::uint32_t color)
+	{
+		const float line = ImGui::GetTextLineHeight();
+		const float r    = line * 0.28f;
+		const ImVec2 p   = ImGui::GetCursorScreenPos();
+		const ImVec2 c(p.x + line * 0.5f, p.y + line * 0.5f);
+		ImDrawList* dl   = ImGui::GetWindowDrawList();
+
+		if (isExec)
+			dl->AddTriangleFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x - r, c.y + r),
+			                      ImVec2(c.x + r, c.y), color);
+		else if (isContainer)
+		{
+			const float o = r * 0.55f, h = r * 0.42f;
+			for (int gy = -1; gy <= 1; gy += 2)
+				for (int gx = -1; gx <= 1; gx += 2)
+					dl->AddRectFilled(ImVec2(c.x + gx * o - h, c.y + gy * o - h),
+					                  ImVec2(c.x + gx * o + h, c.y + gy * o + h), color);
+		}
+		else
+			dl->AddCircleFilled(c, r, color);
+
+		// The glyph is drawn, not laid out — this is what reserves its space.
+		ImGui::Dummy(ImVec2(line, line));
+		ImGui::SameLine(0.0f, 6.0f);
+	}
+
+	// "Inputs" / "Outputs", as a quiet caption rather than another line of prose.
+	void drawPinHeading(const char* text)
+	{
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+		ImGui::TextUnformatted(text);
+		ImGui::PopStyleColor();
+	}
+
+	void drawPinRows(const std::vector<HorizonCode::PinDesc>& execPins,
+	                 const std::vector<HorizonCode::PinDesc>& dataPins,
+	                 const char* execFallback)
 	{
 		for (const auto& p : execPins)
 		{
-			out += "  > ";
-			out += (p.name && *p.name) ? p.name : execFallback;
-			out += " (exec)\n";
+			drawPinGlyph(true, false, pinTypeColor(HorizonCode::PinType::Exec));
+			ImGui::TextUnformatted((p.name && *p.name) ? p.name : execFallback);
 		}
 		for (const auto& p : dataPins)
 		{
-			out += "  ";
-			if (p.name && *p.name) { out += p.name; out += ": "; }
-			out += tooltipTypeName(p.type);
-			out += containerSuffix(p.isArray, p.container, p.keyType);
-			out += '\n';
+			const HorizonCode::ContainerKind k =
+				HorizonCode::containerKindOf(p.isArray, p.container);
+			drawPinGlyph(false, k != HorizonCode::ContainerKind::None, pinTypeColor(p.type));
+			if (p.name && *p.name)
+			{
+				ImGui::TextUnformatted(p.name);
+				ImGui::SameLine(0.0f, 6.0f);
+			}
+			// The type in the pin's own colour: the one thing that says which
+			// wires will connect to it.
+			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(
+				pinTypeColor(p.type)));
+			ImGui::TextUnformatted((std::string(tooltipTypeName(p.type)) +
+			                        containerSuffix(p.isArray, p.container, p.keyType)).c_str());
+			ImGui::PopStyleColor();
 		}
 	}
 } // namespace
 
-// Per-registry-id help for the entries whose behaviour the id alone doesn't
-// convey. Deliberately NOT a doc field on every one of the ~140 registry rows:
-// only the calls with real preconditions need a sentence.
-static const char* engineCallDoc(const std::string& id)
+// ── Node documentation (see the header) ──────────────────────────────────────
+std::string nodeDocTopic(const HorizonCode::Node& n)
 {
-	struct Row { const char* id; const char* doc; };
-	static constexpr Row kDocs[] = {
-		{ "save.create",   "Starts a NEW save from the project's SaveGame Template\n(fields seeded with the template defaults) and makes it active.\nIn memory only until Write Save." },
-		{ "save.load",     "Loads Saves/<id>.json, re-validates it against the template\nit names and makes it active. Fails if the save or its template\nis missing." },
-		{ "save.write",    "Persists the active save to disk (atomically)." },
-		{ "save.close",    "Drops the active save without writing." },
-		{ "save.activeId", "Id of the active save; empty when there is none." },
-		{ "save.list",     "Ids of every save on disk." },
-		{ "save.exists",   "Is there a save with this id on disk?" },
-		{ "save.delete",   "Deletes a save file. Does not touch the active save." },
-		{ "save.fields",   "Field names the active save's template declares —\nso a graph never has to hardcode them." },
-		{ "save.setNumber","Writes a Float/Int/Enum field of the active save.\nThe field is picked from the template below." },
-		{ "save.getNumber","Reads a Float/Int/Enum field; unknown field or no active\nsave yields the Default input." },
-		{ "save.setString","Writes a String field of the active save." },
-		{ "save.getString","Reads a String field; falls back to the Default input." },
-		{ "save.setBool",  "Writes a Bool field of the active save." },
-		{ "save.getBool",  "Reads a Bool field; falls back to the Default input." },
-		{ "save.setStruct","Writes a Struct field; the value's definition must match\nthe one the template declares." },
-		{ "save.getStruct","Reads a Struct field of the active save." },
-		{ "entity.saveState",       "Stores this entity's flagged attributes (see its Save State\ncomponent) in the active save, keyed by its UUID.\nPlay mode only." },
-		{ "entity.hasSavedState",   "Does the active save carry state for this entity?" },
-		{ "entity.applySavedState", "Applies every attribute the active save carries for this\nentity back onto it. Partial: what the save lacks stays.\nPlay mode only." },
-	};
-	for (const Row& r : kDocs) if (id == r.id) return r.doc;
-	return nullptr;
+	// The reference page is generated per FUNCTION, so the anchor is the thing
+	// itself: a registry id for an engine call, the display name for a built-in.
+	// Display names are already what the scene format stores, so they are as
+	// stable an identifier as the format is.
+	if (n.type == HorizonCode::NodeType::EngineCall && !n.s.empty())
+		return "horizoncode-nodes#" + n.s;
+	std::string id = HorizonCode::nodeDisplayName(n.type);
+	id.erase(std::remove(id.begin(), id.end(), ' '), id.end());
+	return id.empty() ? std::string() : "horizoncode-nodes#node." + id;
 }
 
-std::string nodeTooltipText(const HorizonCode::Node& n)
+std::string drawNodeDoc(const HorizonCode::Node& n)
 {
 	using T = HorizonCode::NodeType;
-	std::string out;
+	const HE::api::ApiFn* fn =
+		(n.type == T::EngineCall && !n.s.empty()) ? HE::api::find(n.s) : nullptr;
 
-	// Description: the static per-type text; an Engine Call names its registry
-	// entry instead (the generic EngineCall blurb says less than the id does).
-	if (n.type == T::EngineCall && !n.s.empty())
+	// ── Heading ─────────────────────────────────────────────────────────────
+	// The name the node carries on the canvas, so the tooltip and the thing it
+	// describes are recognisably the same object.
+	const std::string title = fn ? (fn->displayName ? fn->displayName : fn->id)
+	                             : HorizonCode::nodeDisplayName(n.type);
+	ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+	ImGui::TextUnformatted(title.c_str());
+	ImGui::PopStyleColor();
+
+	// The provenance line: which category it comes from, and — for an engine
+	// call — the registry id, which is what a script or a bug report names.
+	ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+	if (fn)  ImGui::Text("%s  \xc2\xb7  %s", fn->category, fn->id);
+	else if (const char* cat = HorizonCode::nodeCategory(n.type); cat && *cat)
+		ImGui::TextUnformatted(cat);
+	ImGui::PopStyleColor();
+	ImGui::Spacing();
+
+	// ── What it does ────────────────────────────────────────────────────────
 	{
-		if (const HE::api::ApiFn* fn = HE::api::find(n.s))
+		std::string body;
+		if (fn)
 		{
-			out += "Engine API call: ";
-			out += fn->category; out += " - "; out += fn->id;
-			// The savegame calls carry real semantics the id can't convey (an
-			// active document, a template, a play-mode gate) — spell those out.
-			// Ids not listed here fall back to the generic line above.
-			if (const char* doc = engineCallDoc(n.s)) { out += "\n"; out += doc; }
-			out += fn->isExec ? "\nRuns when executed." : "\nPure — evaluated whenever an output is used.";
+			body = HE::Ed::NodeDocs::engineCall(fn->id);
+			if (body.empty()) body = "No description yet for this engine call.";
 		}
-		else { out += "Engine API call: "; out += n.s; out += " (unknown registry id)"; }
-	}
-	else
-	{
-		const char* d = HorizonCode::nodeTooltip(n.type);
-		if (d && *d) out += d;
-		// User-defined-type nodes: name the definition they are bound to, so a
-		// canvas full of "Make Struct" nodes is readable on hover.
-		if (!n.typeName.empty())
+		else if (const char* d = HorizonCode::nodeTooltip(n.type); d && *d)
 		{
-			out += "\nType: ";
-			out += std::filesystem::path(n.typeName).stem().string();
-			const bool known = HE::TypeRegistry::instance().hasStruct(n.typeName)
-			                || HE::TypeRegistry::instance().hasEnum(n.typeName);
-			if (!known) out += "  (definition missing!)";
+			body = d;
 		}
+		if (!body.empty()) ImGui::TextUnformatted(body.c_str());
 	}
 
+	// Exec or pure is a property of the node, not of the sentence describing it,
+	// so it is its own line rather than something every description repeats.
+	if (fn)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+		ImGui::TextUnformatted(fn->isExec ? "Runs when executed."
+		                                  : "Pure - evaluated whenever an output is used.");
+		ImGui::PopStyleColor();
+	}
+
+	// User-defined-type nodes: name the definition they are bound to, so a
+	// canvas full of "Make Struct" nodes is readable on hover.
+	if (!fn && !n.typeName.empty())
+	{
+		const bool known = HE::TypeRegistry::instance().hasStruct(n.typeName)
+		                || HE::TypeRegistry::instance().hasEnum(n.typeName);
+		ImGui::PushStyleColor(ImGuiCol_Text, known ? HE::Ed::Theme::TextDim
+		                                           : ImVec4(0.95f, 0.55f, 0.45f, 1.0f));
+		ImGui::Text("Type: %s%s",
+		            std::filesystem::path(n.typeName).stem().string().c_str(),
+		            known ? "" : "  (definition missing!)");
+		ImGui::PopStyleColor();
+	}
+
+	// ── Pins ────────────────────────────────────────────────────────────────
 	const HorizonCode::NodeSig sig = HorizonCode::signatureOf(n);
-	std::string pins;
 	if (!sig.execIns.empty() || !sig.dataIns.empty())
 	{
-		pins += "Inputs:\n";
-		appendPinLines(pins, sig.execIns, sig.dataIns, "In");
+		drawPinHeading("Inputs");
+		drawPinRows(sig.execIns, sig.dataIns, "In");
 	}
 	if (!sig.execOuts.empty() || !sig.dataOuts.empty())
 	{
-		pins += "Outputs:\n";
-		appendPinLines(pins, sig.execOuts, sig.dataOuts, "Out");
+		drawPinHeading("Outputs");
+		drawPinRows(sig.execOuts, sig.dataOuts, "Out");
 	}
-	if (!pins.empty())
-	{
-		if (!out.empty()) out += "\n\n";
-		out += pins;
-	}
-	if (!out.empty() && out.back() == '\n') out.pop_back();
-	return out;
+
+	return nodeDocTopic(n);
 }
 
-std::string nodeTooltipText(HorizonCode::NodeType t)
+std::string drawNodeDoc(HorizonCode::NodeType t)
 {
 	HorizonCode::Node tmp;
 	tmp.type = t;
-	return nodeTooltipText(tmp);
+	return drawNodeDoc(tmp);
 }
 
 // ── Shared graph colors ──────────────────────────────────────────────────────
@@ -940,7 +1000,12 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 			tmp.s = fn.id; tmp.hasArg = fn.isExec;
 			for (const auto& p : fn.params)  tmp.params.push_back({ p.name, p.type, p.isArray });
 			for (const auto& r : fn.results) tmp.results.push_back({ r.name, r.type, r.isArray });
-			ImGui::SetTooltip("%s", nodeTooltipText(tmp).c_str());
+			if (ImGui::BeginTooltip())
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				drawNodeDoc(tmp);
+				ImGui::EndTooltip();
+			}
 		}
 	}
 	return picked;

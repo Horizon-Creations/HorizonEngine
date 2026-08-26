@@ -178,9 +178,12 @@ struct Model
     // the node box, over the normal border. Used for error/status markers
     // (e.g. a HorizonCode compile error anchored to a node).
     std::function<ImU32(int nodeId)> nodeOutline;
-    // Hover tooltip: text shown after the cursor rests on a node for a moment
-    // (what the node does, its inputs/outputs). Empty string = no tooltip.
-    std::function<std::string(int nodeId)> nodeTooltip;
+    // Hover documentation: called inside a tooltip after the cursor has rested
+    // on a node for a moment, to draw what the node does and what its pins are.
+    // The component decides WHEN (and wraps the prose); the host decides what it
+    // looks like — which is what lets the pin list use the same coloured glyphs
+    // this canvas draws the pins with, instead of a string approximating them.
+    std::function<void(int nodeId)> drawNodeTooltip;
     // Right-click on a node opens a popup; the host draws its items here.
     std::function<void(int nodeId)> drawNodeContextMenu;
     // Double-click on a node (e.g. open a referenced function).

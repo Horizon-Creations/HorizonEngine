@@ -682,7 +682,7 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     }
 
     // ── Hover tooltip (after the cursor rests on a node briefly) ─────────────
-    if (model.nodeTooltip)
+    if (model.drawNodeTooltip)
     {
         const bool idle = interact && st.dragNode == 0 && st.linkSrcNode == 0 && !st.boxSel;
         if (idle && hoverNodeNow != 0)
@@ -691,32 +691,28 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             else st.hoverTime += ImGui::GetIO().DeltaTime;
             if (st.hoverTime > 0.6f)
             {
-                const std::string tip = model.nodeTooltip(hoverNodeNow);
-                if (!tip.empty())
+                // The one tooltip in the editor that is a paragraph rather than
+                // a label: for an engine-API node this is the call's category
+                // and registry id, its documentation, and a line per parameter.
+                // Unwrapped, a tooltip sizes itself to its widest line, so that
+                // became a bar running off the side of a laptop screen with the
+                // parameter semantics — the reason anyone hovers a node — past
+                // the edge and unreachable.
+                //
+                // An absolute column because a tooltip window has no width of
+                // its own to wrap at, and the inner block so the pop happens
+                // while the tooltip is still the current window: EndTooltip()
+                // below would otherwise have moved on. The `if` is imgui.h's
+                // rule — EndTooltip is only valid when BeginTooltip returned
+                // true, which today it always does and one upgrade from now
+                // may not.
+                if (ImGui::BeginTooltip())
                 {
-                    // The one tooltip in the editor that is a paragraph rather
-                    // than a label: for an engine-API node this is the call's
-                    // category and registry id, its documentation, and a line per
-                    // parameter. Unwrapped, a tooltip sizes itself to its widest
-                    // line, so that became a bar running off the side of a laptop
-                    // screen with the parameter semantics — the reason anyone
-                    // hovers a node — past the edge and unreachable.
-                    //
-                    // An absolute column because a tooltip window has no width of
-                    // its own to wrap at, and the inner block so the pop happens
-                    // while the tooltip is still the current window: EndTooltip()
-                    // below would otherwise have moved on. The `if` is imgui.h's
-                    // rule — EndTooltip is only valid when BeginTooltip returned
-                    // true, which today it always does and one upgrade from now
-                    // may not.
-                    if (ImGui::BeginTooltip())
                     {
-                        {
-                            EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-                            ImGui::TextUnformatted(tip.c_str());
-                        }
-                        ImGui::EndTooltip();
+                        EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+                        model.drawNodeTooltip(hoverNodeNow);
                     }
+                    ImGui::EndTooltip();
                 }
             }
         }

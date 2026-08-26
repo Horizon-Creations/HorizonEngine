@@ -3,6 +3,8 @@
 #include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
+#include "EditorTheme.h"         // the hover tooltip's dim tier
+#include "DocsPanel.h"           // F1 over a node opens its entry in the manual
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
@@ -531,10 +533,19 @@ GraphEditor::Model buildModel(const Host& h)
 		bool committed = false;
 		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
 		if (committed) h.onEdit(true); };
-	// Hovering a node shows what it does + its inputs/outputs.
-	m.nodeTooltip = [&graph](int id){
+	// Hovering a node shows what it does + its inputs/outputs, and F1 while it is
+	// up opens the manual at that node's own entry — the reference is generated
+	// per function, so this lands on the call itself and not on its category.
+	m.drawNodeTooltip = [&graph](int id){
 		const HC::Node* n = graph.findNode(id);
-		return n ? HcEditorUtil::nodeTooltipText(*n) : std::string(); };
+		if (!n) return;
+		const std::string topic = HcEditorUtil::drawNodeDoc(*n);
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+		ImGui::TextUnformatted("F1  documentation");
+		ImGui::PopStyleColor();
+		if (!topic.empty() && ImGui::IsKeyPressed(ImGuiKey_F1, false))
+			DocsPanel::openTopic(topic.c_str()); };
 	// Right-click a node → context menu. When the clicked node is part of a
 	// multi-selection, Delete removes the whole selection.
 	m.drawNodeContextMenu = [&h, &graph](int nodeId)
@@ -638,7 +649,12 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			bool hov = false;
 			if (menuItemWithHint(HC::nodeDisplayName(t), HcGraphShortcuts::hintFor(t), &hov))
 			{ created = addNode(graph, t, drop, h.currentGraph); ImGui::CloseCurrentPopup(); }
-			if (hov) ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
+			if (hov && ImGui::BeginTooltip())
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				HcEditorUtil::drawNodeDoc(t);
+				ImGui::EndTooltip();
+			}
 		}
 		if (header) ImGui::Spacing();
 	}
@@ -766,7 +782,12 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				if (ImGui::IsItemHovered())
 				{
 					HC::Node probe; probe.type = r.t; probe.typeName = d.assetPath;
-					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(probe).c_str());
+					if (ImGui::BeginTooltip())
+					{
+						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+						HcEditorUtil::drawNodeDoc(probe);
+						ImGui::EndTooltip();
+					}
 				}
 				if (picked) spawn(r.t, d.assetPath);
 			}
@@ -807,7 +828,12 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				if (ImGui::IsItemHovered())
 				{
 					HC::Node probe; probe.type = r.t; probe.typeName = d.assetPath;
-					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(probe).c_str());
+					if (ImGui::BeginTooltip())
+					{
+						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+						HcEditorUtil::drawNodeDoc(probe);
+						ImGui::EndTooltip();
+					}
 				}
 				if (picked) spawn(r.t, d.assetPath);
 			}
@@ -1020,7 +1046,12 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				if (realPin >= 0) wireAt(id, realPin);
 				created = id; ImGui::CloseCurrentPopup();
 			}
-			if (hov) ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
+			if (hov && ImGui::BeginTooltip())
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				HcEditorUtil::drawNodeDoc(t);
+				ImGui::EndTooltip();
+			}
 		}
 		if (gh) ImGui::Spacing();
 	}
