@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <Application/InputAssets.h>   // the ONE spelling of the input event names
 #include <Diagnostics/Logger.h>
+#include <Scripting/ScriptTypes.h>   // scriptLogLine — the Print node's language tag
 #include <Types/TypeRegistry.h>   // struct/enum definitions (field/entry resolution)
 #include <GraphCommon/GraphJson.h>
 #include <GraphCommon/GraphModel.h>
@@ -2198,6 +2199,100 @@ bool canConvertPinType(PinType from, PinType to)
     return false;
 }
 
+bool conversionNodeFor(PinType from, ContainerKind fromKind,
+                       PinType to, ContainerKind toKind, NodeType& out)
+{
+    // Exec is control flow, not a value. Nothing converts it.
+    if (from == P::Exec || to == P::Exec) return false;
+    // Set → Array is the one container crossing a node answers, and it has to be
+    // decided BEFORE the implicit test below: both sides carry the same element
+    // type, which canConvertPinType calls convertible — true for a scalar wire,
+    // false the moment the kinds differ (see Graph::connect).
+    if (fromKind == CK::Set && toKind == CK::Array)
+    {
+        if (!canConvertPinType(from, to)) return false;
+        out = T::SetToArray;
+        return true;
+    }
+    // Every other kind mismatch — Array↔Map, container↔scalar — would take more
+    // than one node, or means nothing at all.
+    if (fromKind != CK::None || toKind != CK::None) return false;
+    // The wire already carries the value: a node here would convert nothing.
+    // This is also what keeps Enum to Int / Int to Enum out — the number and its
+    // enum reach each other implicitly.
+    if (canConvertPinType(from, to)) return false;
+
+    if (to == P::String)
+    {
+        // Enum first: it is int-backed, so it would coerce straight into To
+        // String's Float pin and print the NUMBER where the name was meant.
+        if (from == P::Enum) { out = T::EnumToString; return true; }
+        // To String's input is Float; Int and Bool reach it through the very
+        // coercion Graph::connect performs, so both halves provably connect.
+        if (from == P::Float || from == P::Int || from == P::Bool)
+        { out = T::ToString; return true; }
+    }
+    return false;
+}
+
+bool connectWithConversion(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin,
+                           const std::vector<NodeType>& excluded)
+{
+    const Node* s = g.findNode(srcNode);
+    const Node* d = g.findNode(dstNode);
+    if (!s || !d || srcNode == dstNode) return false;
+
+    // The pin ROLES are re-checked here instead of being read out of connect's
+    // failure: it answers false for an exec pin, for a reversed drag and for a
+    // type mismatch alike, and only the last of those is ours to repair.
+    const PinRanges sr = pinRanges(*s);
+    const PinRanges dr = pinRanges(*d);
+    if (srcPin < sr.dataOut0 || srcPin >= sr.end)      return false;
+    if (dstPin < dr.dataIn0  || dstPin >= dr.dataOut0) return false;
+
+    PinDesc sd{}, dd{};
+    if (!dataPinDescOf(*s, false, srcPin - sr.dataOut0, sd) ||
+        !dataPinDescOf(*d, true,  dstPin - dr.dataIn0,  dd)) return false;
+
+    NodeType convType{};
+    if (!conversionNodeFor(sd.type, sd.kind(), dd.type, dd.kind(), convType)) return false;
+    // A type this frontend hides from its palette gets no back door here either.
+    for (NodeType x : excluded) if (x == convType) return false;
+
+    Node conv;
+    conv.type     = convType;
+    conv.subgraph = s->subgraph;        // a drawn wire never leaves its sub-graph
+    conv.x = (s->x + d->x) * 0.5f;      // graph coordinates: half-way down the wire
+    conv.y = (s->y + d->y) * 0.5f;
+    // Set To Array builds BOTH its pins out of propType — left at the default it
+    // would advertise a Set<Float>, and neither half would land.
+    if (convType == T::SetToArray) conv.propType = sd.type;
+    // The definition, off the source pin — Enum/Struct pins are the only ones it
+    // means anything on (PinDesc's contract). inferUserTypeNames below covers
+    // what this cannot: a source at the generic boundary (an engine call's
+    // untyped Enum) whose definition sits further up the wire.
+    if (sd.typeName && (sd.type == P::Enum || sd.type == P::Struct))
+        conv.typeName = sd.typeName;
+
+    // Ranges off the seeded node, before it moves into the graph: these three
+    // types have a fixed layout (one data-in, one data-out, no exec pins and no
+    // mirrored params), so nothing can shift it afterwards.
+    const PinRanges cr = pinRanges(conv);
+    const int convId = g.addNode(std::move(conv));   // `s` and `d` dangle from here
+
+    if (!g.connect(srcNode, srcPin, convId, cr.dataIn0) ||
+        !g.connect(convId, cr.dataOut0, dstNode, dstPin))
+    {
+        // Half a conversion is litter on the canvas. Every one of connect's
+        // rejections happens before it touches an existing link, so dropping the
+        // node (and with it the first wire) restores the graph exactly.
+        g.removeNode(convId);
+        return false;
+    }
+    inferUserTypeNames(g);
+    return true;
+}
+
 void inferUserTypeNames(Graph& g)
 {
     // Declared variables are authoritative for their own Get/Set nodes.
@@ -2790,8 +2885,13 @@ void Runner::execNode(const Node& n, int depth)
         break;
     }
     case T::Print:
+        // Tagged with the PROJECT's language, not with "[Widget] ": Print dates
+        // from when HorizonCode drove nothing but widgets, and it now runs in
+        // level scripts, classes and the GameInstance too. HE::scriptLogLine is
+        // shared with generated C++ (hc::print) and with ScriptApi::log — the
+        // one place the prefix is decided, so the three cannot diverge again.
         HE_LOG_INFO(HorizonCode, "%s",
-            ("[Widget] " + coerce(evalInput(n, 0, depth + 1), P::String).s).c_str());
+            HE::scriptLogLine(coerce(evalInput(n, 0, depth + 1), P::String).s).c_str());
         break;
     case T::Delay:
         // Latent: hand the continuation to the host scheduler and stop the

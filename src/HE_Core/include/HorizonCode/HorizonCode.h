@@ -698,6 +698,44 @@ HE_API std::string eventName(EventId id);
 // would read the wrong field of every item.
 HE_API bool canConvertPinType(PinType from, PinType to);
 
+// The wire canConvertPinType just refused — is there ONE node that would carry
+// it? "Float into a String pin" has an answer (To String) and "Object into a
+// Float pin" has none, and today both look the same to whoever dragged them.
+// Lives beside canConvertPinType on purpose: the two are halves of one
+// question, and a rule that drifted from the other would either offer a node
+// for a wire that already connects or leave a convertible pair looking
+// impossible.
+//
+// FALSE whenever the implicit conversion already suffices — Float↔Int, Enum
+// against a number, Vec3/Vec4/Color — otherwise a caller inserts a node for a
+// wire that would have connected on its own.
+//
+// The container kinds are REQUIRED rather than defaulted because they are the
+// whole of one row: Set→Array is the same element type on both sides, and a
+// caller who forgot them would be told a Set<Float> reaches a String pin.
+HE_API bool conversionNodeFor(PinType from, ContainerKind fromKind,
+                              PinType to,   ContainerKind toKind,
+                              NodeType& out);
+
+// Connect through a conversion node: the fallback for a wire Graph::connect
+// refused ON TYPE. Spawns the node conversionNodeFor names, half-way between
+// the two on the canvas and in the source's sub-graph, wires src→conv→dst and
+// re-infers user-type definitions (a fresh Enum to String learns its definition
+// from the wire it was born on). False when there is no such node, or when
+// either half is refused after all — and then the node goes with it, because
+// half a conversion left on the canvas is worse than the wire not appearing.
+// The reasons that are NOT about the type (an exec pin, a pin that is not an
+// output/input, both ends on one node) are recognised here rather than read out
+// of Graph::connect's single false, and never spawn anything.
+//
+// `excluded` is the frontend's hidden-node list. A type the palette does not
+// offer must not appear through this door either: the Animator sync graph hides
+// Delay and Sequence on purpose, and a wire that conjured one would be a way
+// around a restriction the menu states. Same rule the quick-spawn keys follow.
+HE_API bool connectWithConversion(Graph& g, int srcNode, int srcPin,
+                                  int dstNode, int dstPin,
+                                  const std::vector<NodeType>& excluded = {});
+
 // Equality of two SCALAR values of type `t` — the rule behind Array Contains,
 // Set membership and Map key identity. Public because the boundaries need the
 // same answer the interpreter gives: the savegame decoder dedupes a set with

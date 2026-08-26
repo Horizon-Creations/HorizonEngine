@@ -1637,6 +1637,202 @@ TEST_CASE("elementary types convert on the wire")
     CHECK(v.i == 3);                      // (int)3.9, the interpreter's own rule
 }
 
+// ── Conversion nodes on a refused wire ───────────────────────────────────────
+namespace
+{
+	const Node* nodeOfType(const Graph& g, NodeType t)
+	{
+		for (const Node& n : g.nodes) if (n.type == t) return &n;
+		return nullptr;
+	}
+
+	// How many links run from one node to another (pin-agnostic).
+	int linkCount(const Graph& g, int from, int to)
+	{
+		int c = 0;
+		for (const Link& l : g.links) if (l.srcNode == from && l.dstNode == to) ++c;
+		return c;
+	}
+}
+
+TEST_CASE("conversionNodeFor names a node only where the wire has no other way")
+{
+	using CK = ContainerKind;
+	NodeType n{};
+
+	CHECK(conversionNodeFor(PinType::Float, CK::None, PinType::String, CK::None, n));
+	CHECK(n == NodeType::ToString);
+	CHECK(conversionNodeFor(PinType::Int,   CK::None, PinType::String, CK::None, n));
+	CHECK(n == NodeType::ToString);
+	CHECK(conversionNodeFor(PinType::Bool,  CK::None, PinType::String, CK::None, n));
+	CHECK(n == NodeType::ToString);
+	// Enum beats To String: its int backing would slide into that node's Float
+	// pin and print the NUMBER where the entry name was meant.
+	CHECK(conversionNodeFor(PinType::Enum,  CK::None, PinType::String, CK::None, n));
+	CHECK(n == NodeType::EnumToString);
+	CHECK(conversionNodeFor(PinType::Float, CK::Set,  PinType::Float,  CK::Array, n));
+	CHECK(n == NodeType::SetToArray);
+
+	// Whatever canConvertPinType already carries needs no node. Enum to Int and
+	// Int to Enum EXIST as nodes and must still never be inserted for a wire.
+	CHECK_FALSE(conversionNodeFor(PinType::Enum,   CK::None, PinType::Int,    CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Int,    CK::None, PinType::Enum,   CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Float,  CK::None, PinType::Int,    CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Vec3,   CK::None, PinType::Color,  CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::String, CK::None, PinType::String, CK::None, n));
+	// Exec is control flow, not a value.
+	CHECK_FALSE(conversionNodeFor(PinType::Exec,  CK::None, PinType::Exec,   CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Exec,  CK::None, PinType::String, CK::None, n));
+	// Pairs no single node bridges.
+	CHECK_FALSE(conversionNodeFor(PinType::Ref,       CK::None, PinType::Float,  CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::String,    CK::None, PinType::Float,  CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Vec3,      CK::None, PinType::String, CK::None, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Transform, CK::None, PinType::String, CK::None, n));
+	// Container mismatches Set To Array does not solve, either way round.
+	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Array, PinType::Float,  CK::Set,   n));
+	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Array, PinType::Float,  CK::Map,   n));
+	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Set,   PinType::Float,  CK::None,  n));
+	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::None,  PinType::String, CK::Array, n));
+	// Set To Array converts the CONTAINER; it does not also convert the elements.
+	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Set,   PinType::String, CK::Array, n));
+}
+
+TEST_CASE("a refused Float → String wire builds a To String node between the two")
+{
+	Graph g;
+	Variable out; out.name = "out"; out.type = PinType::String;
+	g.variables.push_back(out);
+	Node ev; ev.type = NodeType::Event; ev.s = "Go";
+	const int e = g.addNode(std::move(ev));
+	Node cf; cf.type = NodeType::ConstFloat; cf.f[0] = 3.9f; cf.x = 100.0f; cf.y = 40.0f;
+	const int c = g.addNode(std::move(cf));
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::String;
+	sv.x = 300.0f; sv.y = 80.0f;
+	const int s = g.addNode(std::move(sv));
+	REQUIRE(g.connect(e, 0, s, 0));
+
+	// A Float at a String pin is refused outright — that used to be the end of it.
+	REQUIRE_FALSE(g.connect(c, 0, s, 2));
+	REQUIRE(connectWithConversion(g, c, 0, s, 2));
+	REQUIRE(g.nodes.size() == 4);
+
+	const Node* conv = nodeOfType(g, NodeType::ToString);
+	REQUIRE(conv != nullptr);
+	CHECK(conv->x == doctest::Approx(200.0f));    // half-way down the wire
+	CHECK(conv->y == doctest::Approx(60.0f));
+	// Through the node, never straight across.
+	CHECK(linkCount(g, c, conv->id) == 1);
+	CHECK(linkCount(g, conv->id, s) == 1);
+	CHECK(linkCount(g, c, s) == 0);
+
+	Runtime rt;
+	const InstanceId id = rt.add(std::move(g));
+	rt.fireEvent(id, "Go", 0, {});
+	const Value v = rt.getVariable(id, "out");
+	CHECK(v.type == PinType::String);
+	CHECK(v.s == "3.9");                          // "%g", the To String node's rule
+}
+
+TEST_CASE("an Enum at a String pin gets an Enum to String that knows the definition")
+{
+	SUBCASE("straight off a typed pin")
+	{
+		Graph g;
+		Variable label; label.name = "label"; label.type = PinType::String;
+		g.variables.push_back(label);
+		Node ce; ce.type = NodeType::ConstEnum; ce.typeName = "Types/Mood.henum"; ce.f[0] = 1.0f;
+		const int c = g.addNode(std::move(ce));
+		Node sv; sv.type = NodeType::SetVariable; sv.s = "label"; sv.propType = PinType::String;
+		const int s = g.addNode(std::move(sv));
+
+		REQUIRE_FALSE(g.connect(c, 0, s, 2));
+		REQUIRE(connectWithConversion(g, c, 0, s, 2));
+		const Node* conv = nodeOfType(g, NodeType::EnumToString);
+		REQUIRE(conv != nullptr);
+		CHECK(conv->typeName == "Types/Mood.henum");
+	}
+	SUBCASE("off a pin that names no definition of its own")
+	{
+		// The editor leaves a Get Variable node's typeName empty; the declaration
+		// is what knows the enum. So the spawned node cannot copy it off the pin
+		// and has to learn it the way every other bare node does — along the wire.
+		Graph g;
+		Variable mood; mood.name = "mood"; mood.type = PinType::Enum;
+		mood.typeName = "Types/Mood.henum";
+		g.variables.push_back(mood);
+		Variable label; label.name = "label"; label.type = PinType::String;
+		g.variables.push_back(label);
+		Node gv; gv.type = NodeType::GetVariable; gv.s = "mood"; gv.propType = PinType::Enum;
+		const int r = g.addNode(std::move(gv));
+		Node sv; sv.type = NodeType::SetVariable; sv.s = "label"; sv.propType = PinType::String;
+		const int s = g.addNode(std::move(sv));
+
+		REQUIRE_FALSE(g.connect(r, 0, s, 2));
+		REQUIRE(connectWithConversion(g, r, 0, s, 2));
+		const Node* conv = nodeOfType(g, NodeType::EnumToString);
+		REQUIRE(conv != nullptr);
+		CHECK(conv->typeName == "Types/Mood.henum");
+	}
+}
+
+TEST_CASE("a pair with no conversion node stays unconnected, and spawns nothing")
+{
+	Graph g;
+	Variable out; out.name = "out"; out.type = PinType::Float;
+	g.variables.push_back(out);
+	Node gs; gs.type = NodeType::GetSelf;
+	const int self = g.addNode(std::move(gs));
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Float;
+	const int s = g.addNode(std::move(sv));
+
+	CHECK_FALSE(g.connect(self, 0, s, 2));            // Object into a Float pin
+	CHECK_FALSE(connectWithConversion(g, self, 0, s, 2));
+	CHECK(g.nodes.size() == 2);
+	CHECK(g.links.empty());
+
+	// Exec pins are none of a conversion's business, at either end — not even a
+	// perfectly legal exec wire, which is the plain connect's to make.
+	Node ev; ev.type = NodeType::Event; ev.s = "Go";
+	const int e = g.addNode(std::move(ev));
+	CHECK_FALSE(connectWithConversion(g, e, 0, s, 0));
+	CHECK_FALSE(connectWithConversion(g, self, 0, s, 0));
+	// Nor does a node reach its own pins (Set Variable passes its value through).
+	CHECK_FALSE(connectWithConversion(g, s, 3, s, 2));
+	CHECK(g.nodes.size() == 3);
+	CHECK(g.links.empty());
+}
+
+TEST_CASE("a conversion whose second half is refused leaves nothing behind")
+{
+	// Set<Alpha> → Array<Beta>: the lookup answers Set To Array (the kinds are
+	// what it converts), but the definitions differ, so the node's own output is
+	// refused at the destination. The half-built node must not survive that.
+	Graph g;
+	Node sm; sm.type = NodeType::SetMake; sm.propType = PinType::Enum;
+	sm.typeName = "Types/Alpha.henum"; sm.container = ContainerKind::Set;
+	const int mk = g.addNode(std::move(sm));
+	Node al; al.type = NodeType::ArrayLength; al.propType = PinType::Enum;
+	al.typeName = "Types/Beta.henum";
+	const int len = g.addNode(std::move(al));
+
+	REQUIRE_FALSE(g.connect(mk, 0, len, 0));
+	CHECK_FALSE(connectWithConversion(g, mk, 0, len, 0));
+	CHECK(g.nodes.size() == 2);
+	CHECK(g.links.empty());
+
+	// The same wire between two nodes of the SAME definition does get its node.
+	Node al2; al2.type = NodeType::ArrayLength; al2.propType = PinType::Enum;
+	al2.typeName = "Types/Alpha.henum";
+	const int len2 = g.addNode(std::move(al2));
+	REQUIRE(connectWithConversion(g, mk, 0, len2, 0));
+	const Node* conv = nodeOfType(g, NodeType::SetToArray);
+	REQUIRE(conv != nullptr);
+	CHECK(conv->propType == PinType::Enum);       // both its pins are built from this
+	CHECK(conv->typeName == "Types/Alpha.henum");
+	CHECK(linkCount(g, mk, conv->id) == 1);
+	CHECK(linkCount(g, conv->id, len2) == 1);
+}
+
 // ── Input Action nodes ───────────────────────────────────────────────────────
 namespace
 {
