@@ -81,10 +81,10 @@ die `fs`-Gruppe existieren, letztere ist absichtlich auf `Saved/` eingesperrt.
 
 Der größte Brocken und der, ohne den nichts anderes zählt.
 
-**A0 Backend-Baseline: Metal auf macOS, OpenGL 4.1 überall sonst.** Entscheidung des Users
-vom 26.08.2026, und sie räumt mehr weg als sie kostet. Eine App braucht keine visuellen
+**A0 Backend-Baseline: Metal auf macOS, OpenGL überall sonst.** Entscheidung des Users vom
+26.08.2026, und sie räumt mehr weg als sie kostet. Eine App braucht keine visuellen
 Fähigkeiten, für die sich fünf Backends anstrengen müssten, also muss sie auch nicht auf
-allen fünf laufen. GL 4.1 läuft auf jeder Plattform, Metal ist auf macOS ohnehin der
+allen fünf laufen. OpenGL läuft auf jeder Plattform, Metal ist auf macOS ohnehin der
 Standard und der bessere Weg (Apple hat GL abgekündigt, und Metal hat den vollständigen
 UI-Pfad bereits).
 
@@ -95,13 +95,26 @@ also Eckenradius, Texturen und Material-Graphen. Daraus folgt:
 - Material-Graphen sind auf jedem App-Ziel verfügbar, also kein degradiertes Feature mehr.
 - Der Software-Renderer aus Block G verliert seine Hauptbegründung und rutscht ans Ende.
 
-Ein konkreter Punkt gehört dazu, sonst stimmt der Satz nur auf dem Papier: `Window::Init`
-verlangt außerhalb von macOS **GL 4.6** (`Window.cpp:52`). Auf einer Maschine mit nur 4.1
-scheitert die Kontexterzeugung. Der App-Modus muss 4.1 anfordern oder absteigen. Geprüft:
-das ist gefahrlos, denn der einzige `#version 430`-Shader und alle drei
-`glDispatchCompute`-Stellen gehören zur GI und hängen an `m_giSupported`
-(`GLAD_GL_VERSION_4_3`), schalten sich auf 4.1 also von selbst ab. Eine App ohne Welt
-berührt sie ohnehin nie.
+**Die 4.1 ist keine Anforderung, sie ist eine Untergrenze.** Erste Fassung dieses Abschnitts
+wollte den Kontext außerhalb von macOS auf 4.1 herunterziehen. Das war unbegründet: die 4.1
+stammt allein daher, dass macOS OpenGL dort deckelt, und auf macOS läuft eine App auf Metal.
+Auf Windows und Linux gibt ein normaler Treiber 4.6, und es kostet nichts, das zu nehmen.
+
+Was aber bleibt, und im Code nachgesehen ist: `Window::Init` fordert außerhalb von macOS
+**hart 4.6 an und hat keinen Rückfall** (`Window.cpp:52`). Schlägt `SDL_GL_CreateContext`
+fehl, wirft es und die Anwendung stirbt. Auf 4.6 fehlt es genau dort, wo der Rückfall aus
+Block G greifen soll: Mesa llvmpipe deckelt unterhalb von 4.6, ältere Intel-iGPUs auf Windows
+liefern 4.4 oder 4.5, VM-GL-Stacks oft nur 3.3 bis 4.1. Eine App, die dort gar nicht startet,
+ist schlimmer als eine ohne Rundungen.
+
+Der Punkt ist also **nicht** „4.1 anfordern", sondern eine **Leiter**: 4.6 anfordern, bei
+Fehlschlag 4.5, dann 4.3, dann 4.1, und die erreichte Version protokollieren. Ein paar Zeilen,
+der Normalfall bleibt exakt wie heute, und „läuft überall" wird wahr statt behauptet. Für die
+UI reicht jede Stufe, ihre Shader sind `#version 410 core`. Geprüft: das Absteigen ist
+gefahrlos, denn der einzige `#version 430`-Shader und alle drei `glDispatchCompute`-Stellen
+gehören zur GI und hängen an `m_giSupported` (`GLAD_GL_VERSION_4_3`), schalten sich unterhalb
+von 4.3 also von selbst ab. Eine App ohne Welt berührt sie ohnehin nie, und ein Spiel verliert
+auf so einer Maschine GI statt zu sterben.
 
 **A1 Weltloser Modus.** Ein Schalter im Projekt (`.heproj` „appMode") und in `project.hcfg`.
 Ist er an, erzeugt der Runtime keine `HorizonWorld`, keine `PhysicsWorld`, keine Default-Kamera,
@@ -429,8 +442,9 @@ genau die Sorte Punkt, die im Umfang explodiert.
   ausgelieferte `config.json` bereits hat.
 
 **Einordnung nach der Baseline-Entscheidung (A0): optional, Welle 4, nur bei Bedarf.** Die
-ursprüngliche Begründung war „läuft überall, auch ohne brauchbaren Treiber". Mit GL 4.1 als
-Baseline ist die zweimal billiger zu haben, ohne eine Zeile Engine-Code:
+ursprüngliche Begründung war „läuft überall, auch ohne brauchbaren Treiber". Mit OpenGL als
+Baseline und der Versionsleiter aus A0 ist die zweimal billiger zu haben, ohne eine Zeile
+eigenen Rasterizer:
 
 - **Windows ohne Grafiktreiber:** Mesa **llvmpipe** als `opengl32.dll` neben die exe legen.
   Das ist GL in Software, von anderen gepflegt, und die App merkt keinen Unterschied.
@@ -466,7 +480,8 @@ Leitgedanke: der erste Meilenstein ist eine **exportierbare Taschenrechner- oder
 die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt später.
 
 **Welle 1, das Fundament**
-- A0 Baseline festschreiben (GL-4.1-Anforderung statt 4.6 außerhalb macOS)
+- A0 Baseline festschreiben, plus die GL-Versionsleiter 4.6 → 4.5 → 4.3 → 4.1 statt des
+  harten 4.6 ohne Rückfall
 - A1 weltloser Modus
 - A2 ereignisgetriebenes Zeichnen
 - A4 `app`-Gruppe (Titel, Größe, Beenden, Schließen-Veto)
