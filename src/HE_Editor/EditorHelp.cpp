@@ -1709,6 +1709,127 @@ namespace
 	  "on its own, so this is what to press after an install finishes elsewhere.",
 	  "", "horizoncode#compiler" },
 
+	// ── The material editor ──────────────────────────────────────────────────
+	// The graph's nodes are drawn small, so their fields carry the shortest
+	// labels anywhere in the editor: "Pow", "Off", "Tile", "Clip". A three-letter
+	// label on a node is a control with no explanation at all — which is exactly
+	// the case these entries exist for.
+	{ "Material Node/Pow", "Power",
+	  "How sharply the Fresnel effect falls off towards the middle of a surface. "
+	  "1 is a soft, wide rim; higher numbers pull the brightness into a thin edge, "
+	  "the way a glancing reflection actually behaves.",
+	  "", "materials#nodes" },
+	{ "Material Node/Tile", "Tiling",
+	  "How often the texture repeats across the mesh's UVs. 1 is one copy over "
+	  "the whole unwrap; 4 is sixteen copies, four in each direction.",
+	  "", "materials#nodes" },
+	{ "Material Node/Off", "Offset",
+	  "Slides the texture across the surface. In whole tiles: 0.5 shifts it by "
+	  "half a repeat. Animating this is what makes a texture scroll.",
+	  "", "materials#nodes" },
+	{ "Material Node/Strength", "Normal Strength",
+	  "How far the normal map is allowed to tilt the surface. 1 is the map as it "
+	  "was authored, 0 flattens it back to the geometry, and past 1 the bumps "
+	  "start lighting themselves in ways no real surface does.",
+	  "", "materials#nodes" },
+	{ "Material Node/Scale", "Noise Scale",
+	  "How fine the procedural noise is. Bigger numbers mean smaller speckle: the "
+	  "value is how many noise cells fit across one UV unit.",
+	  "", "materials#nodes" },
+	{ "Material Node/Clear", "Clear",
+	  "Drops the picked texture and puts the node back on the material's own "
+	  "base texture — whatever the mesh brought with it.",
+	  "", "materials#nodes" },
+	{ "Material Node/+ Layer", "Add Layer",
+	  "Adds a paint layer to this blend node, which also adds its pin. The list "
+	  "here IS the set of layers the Landscape tool offers, in this order — one "
+	  "RGBA weightmap holds four of them, which is the limit.",
+	  "", "materials#nodes" },
+	{ "Material Node/Lit", "",
+	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
+	  "the graph's colour is the pixel, useful for skies, holograms and anything "
+	  "that should not take a shadow.",
+	  "", "materials#concept" },
+	{ "Material Node/True", "",
+	  "The value this constant hands out. It is baked into the shader, so the two "
+	  "settings are two different shaders, not one shader with a branch.",
+	  "", "materials#nodes" },
+	{ "Material Node/Default", "",
+	  "What this boolean parameter is before anything overrides it. It stays "
+	  "changeable at run time, unlike the static switch.",
+	  "", "materials#parameters" },
+	{ "Material Node/On (default)", "",
+	  "Which branch the static switch takes when nothing overrides it. Static "
+	  "means the choice is made while the shader is compiled: the other branch is "
+	  "not in the shader at all, so it costs nothing, and flipping this rebuilds "
+	  "the shader rather than setting a value.",
+	  "", "materials#nodes" },
+	{ "Material Node/Set Texture", "Set Texture",
+	  "Picks the texture this node samples, from the project's textures. Dragging "
+	  "one onto the node from the Content Browser does the same thing.",
+	  "", "materials#nodes" },
+	{ "Material Node/(mesh texture)", "(mesh texture)",
+	  "Leaves the slot empty, which means the node samples whatever texture the "
+	  "mesh's material already carries. That is what makes one graph work for many "
+	  "different meshes.",
+	  "", "materials#nodes" },
+	{ "Material Node/Open Function", "Open Function",
+	  "Opens the material function this node calls, in its own tab. "
+	  "Double-clicking the node does the same.",
+	  "", "materials#functions" },
+	{ "Material Node/Preview This Node", "Preview This Node",
+	  "Puts THIS node's output on the preview ball instead of the finished "
+	  "material, unlit. The way to see what a branch of the graph actually "
+	  "produces before it is mixed into everything else.",
+	  "", "materials#editor-usage" },
+	{ "Material Node/Delete Node", "Delete Node",
+	  "Removes the node and every link that ran through it. The Output node "
+	  "cannot be deleted — a graph without one has nothing to compile.",
+	  "", "materials#editor-usage" },
+	{ "Material Graph/Delete Comment", "Delete Comment",
+	  "Removes the comment frame. The nodes inside it stay where they are; a "
+	  "comment groups them visually and owns none of them.",
+	  "", "materials#editor-usage" },
+
+	{ "Material Parameter/..", "Parameter metadata",
+	  "The range, group and hint for this parameter — everything about how it is "
+	  "PRESENTED to whoever sets it later, on a material instance or from a "
+	  "script.",
+	  "", "materials#parameters" },
+	{ "Material Parameter/Min", "",
+	  "Lower end of the slider this parameter is edited with. Leave min and max "
+	  "equal and it stays a free drag with no bounds at all.",
+	  "", "materials#parameters" },
+	{ "Material Parameter/Max", "",
+	  "Upper end of that slider. It bounds the editing widget, not the shader — "
+	  "a script can still write past it.",
+	  "", "materials#parameters" },
+	{ "Material Parameter/Group", "",
+	  "A heading to file this parameter under. Parameters sharing a group are "
+	  "shown together, which is what keeps a material with twenty of them "
+	  "readable.",
+	  "", "materials#parameters" },
+	{ "Material Parameter/Tooltip", "",
+	  "A sentence for whoever uses this material later. It becomes the hint on "
+	  "the parameter's own row, so it is worth writing in the same voice as the "
+	  "rest of the editor.",
+	  "", "materials#parameters" },
+
+	{ "Material Settings/Clip", "Clip Threshold",
+	  "Where a masked material cuts: pixels whose opacity falls below this are "
+	  "discarded entirely, leaving a hard edge. It is what makes leaves and "
+	  "chain-link fences out of one quad.",
+	  "", "materials#concept" },
+	{ "Material Preview/Show Material", "Show Material",
+	  "Puts the finished material back on the preview ball, after Preview This "
+	  "Node put a single node's output there.",
+	  "", "materials#editor-usage" },
+	{ "Material Preview/Load", "Load",
+	  "Loads this mesh for the preview anyway. It is asked because the file is "
+	  "large: the whole mesh stays in memory and goes to the GPU. The read runs "
+	  "in the background, so the editor keeps working while it happens.",
+	  "", "materials#editor-usage" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -1829,7 +1950,12 @@ namespace
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
 		{ "Build Tools/",    "editor-settings", "Settings Reference", "Build tools" },
 		// ── The asset editors ────────────────────────────────────────────────
-		{ "material.", "editor-materials", "Material Editor",   "Material graph" },
+		{ "material.",           "editor-materials", "Material Editor", "Material graph" },
+		{ "Material Node/",      "editor-materials", "Material Editor", "Values on a node" },
+		{ "Material Graph/",     "editor-materials", "Material Editor", "The graph canvas" },
+		{ "Material Parameter/", "editor-materials", "Material Editor", "Parameters" },
+		{ "Material Settings/",  "editor-materials", "Material Editor", "Material settings" },
+		{ "Material Preview/",   "editor-materials", "Material Editor", "The preview" },
 		{ "ui.",       "editor-ui",        "UI Designer",       "Widget designer" },
 		{ "input.",    "editor-input",     "Input Reference",   "Input assets" },
 		{ "hc.",       "editor-horizoncode", "HorizonCode Editor", "Graph editing" },

@@ -170,6 +170,19 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Build Tools",     "Install Automatically" },
 		{ "Build Tools",     "Recheck" },
 		{ "Build Tools",     "Don't show this again" },
+		// The material editor's five. Its nodes are drawn small enough that a
+		// label is three letters, so a scope that stopped resolving here would
+		// leave the shortest labels in the editor with nothing behind them.
+		{ "Material Node",      "Pow" },
+		{ "Material Node",      "Tile" },
+		{ "Material Node",      "Set Texture" },
+		{ "Material Node",      "Delete Node" },
+		{ "Material Graph",     "Delete Comment" },
+		{ "Material Parameter", ".." },
+		{ "Material Parameter", "Min" },
+		{ "Material Settings",  "Clip" },
+		{ "Material Preview",   "Show Material" },
+		{ "Material Preview",   "Load" },
 	};
 	for (const Case& c : cases)
 	{

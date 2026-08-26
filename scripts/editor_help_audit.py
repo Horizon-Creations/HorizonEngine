@@ -106,7 +106,7 @@ AREAS: dict[str, list[str]] = {
 # added without an entry; --check is what says so. Lower them as areas are
 # covered — never raise one to make the check pass.
 BASELINE = {
-    "interface": 0, "components": 0, "settings": 0, "materials": 25, "ui": 32,
+    "interface": 0, "components": 0, "settings": 0, "materials": 0, "ui": 32,
     "horizoncode": 28, "input": 6, "animation": 15, "landscape": 17, "export": 29,
     "collab": 39,
 }

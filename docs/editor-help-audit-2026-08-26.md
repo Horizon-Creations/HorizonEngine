@@ -144,7 +144,8 @@ den Test zu beruhigen.
 | 0 · Generierte Referenzseiten | erledigt | — |
 | 1 · Interface | erledigt (~90 neue Einträge, 19 Area-Regeln, `menuItem`/`button`/`selectable`) | 0 |
 | 2 · Einstellungen | erledigt (18 Einträge, `smallButton`, drei neue Scopes) | 0 |
-| 3–10 | offen | 191 |
+| 3 · Materialien | erledigt (25 Einträge, fünf neue Scopes) | 0 |
+| 4–10 | offen | 166 |
 
 Zwei Dinge, die die Stufe 2 nebenbei gefunden hat und die für die restlichen Stufen
 gelten:
@@ -159,6 +160,16 @@ gelten:
   Beschriftung nie an die Hilfe-Tabelle gegeben, obwohl das Audit sie als
   Bedienelemente gezählt hat. Ein Dialog-Bestätiger ist der Knopf, der einen Satz am
   nötigsten hat. Jetzt schlagen sie alle nach.
+
+Dazu aus Stufe 3:
+
+* **Ein Untermenü kann man nicht nachträglich fragen.** `BeginMenu` gibt `true` zurück
+  und öffnet dabei ein Fenster; ab da ist das letzte Element ein Eintrag *im* Popup, nicht
+  die Kopfzeile. Der Lookup muss also direkt nach dem Aufruf passieren und nur solange
+  das Untermenü zu ist.
+* **Wo schon ein handgeschriebener Tooltip stand, muss er weg.** Der eine wird sofort
+  gezeichnet, der andere am Frameende, und man sieht beide. Beim „…"-Knopf der
+  Material-Parameter ist der handgeschriebene jetzt der Eintrag.
 
 ## 6. Was bewusst NICHT abgedeckt wird
 

@@ -5,6 +5,7 @@
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "AssetThumbnailCache.h"                // Content-Browser tile, re-rendered on save
 #include "EditorPanelState.h"                   // shared per-tab state map + lazy asset open
+#include "EditorHelp.h"                         // "Material Node/<label>" scopes for the tooltips
 #include "EditorWidgets.h"                      // shared Content-Browser drop resolution
 #include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
@@ -463,6 +464,13 @@ using GraphEditor::popWidgetScale;
 bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
                       HE::MaterialGraph* g = nullptr)
 {
+	// These are the values printed ON a node, so they get the shortest labels in
+	// the editor: "Pow", "Off", "Tile". Hovering one is the only way to find out
+	// what it means, which is what the entries under this scope are for. The
+	// lookups sit AFTER each `committed = …` line, because the queue reads the
+	// last submitted item and the undo tracking reads the same one.
+	HE::Ed::Help::Scope helpScope("Material Node");
+
 	bool committed = false;
 	switch (n.type)
 	{
@@ -480,6 +488,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
 			ImGui::DragFloat("Pow", &n.p[0], 0.05f, 0.01f, 16.0f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Pow");
 			break;
 		case MatNodeType::ConstVec2:
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -506,7 +515,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			if (removeAt >= 0 && names.size() > 1)
 				names.erase(names.begin() + removeAt);
 			if (static_cast<int>(names.size()) < HE::kMatMaxLandscapeLayers &&
-			    ImGui::SmallButton("+ Layer"))
+			    EditorWidgets::smallButton("+ Layer"))
 			{
 				names.push_back("Layer " + std::to_string(names.size() + 1));
 				committed = true;
@@ -548,9 +557,11 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::SetNextItemWidth((kNodeW - 62.0f) * scale);
 			ImGui::DragFloat2("Tile", &n.p[0], 0.05f, 0.0f, 1024.0f);
 			committed  = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Tile");
 			ImGui::SetNextItemWidth((kNodeW - 62.0f) * scale);
 			ImGui::DragFloat2("Off", &n.p[2], 0.01f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Off");
 			break;
 		case MatNodeType::ConstVec4:
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
@@ -562,6 +573,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
 			ImGui::DragFloat("Strength", &n.p[0], 0.05f, 0.0f, 4.0f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Strength");
 			const std::string label = n.s.empty()
 				? std::string("(mesh texture)")
 				: std::filesystem::path(n.s).filename().string();
@@ -594,7 +606,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			const bool ui = n.p[3] > 0.5f;
 			bool lit = n.p[0] > 0.5f;
 			ImGui::BeginDisabled(ui);   // a UI material has nothing to light it
-			if (ImGui::Checkbox("Lit", &lit)) { n.p[0] = lit ? 1.0f : 0.0f; committed = true; }
+			if (EditorWidgets::checkbox("Lit", &lit)) { n.p[0] = lit ? 1.0f : 0.0f; committed = true; }
 			ImGui::EndDisabled();
 			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
 			int dom = ui ? 1 : 0;
@@ -659,7 +671,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		case MatNodeType::ConstBool:
 		{
 			bool on = n.p[0] > 0.5f;
-			if (ImGui::Checkbox("True", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			if (EditorWidgets::checkbox("True", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
 		case MatNodeType::ParamVec2:
@@ -690,14 +702,14 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
 			}
 			bool on = n.p[0] > 0.5f;
-			if (ImGui::Checkbox("Default", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			if (EditorWidgets::checkbox("Default", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
 		// ── v8: compile-time switch — toggling REGENERATES the shader (that's the point) ──
 		case MatNodeType::StaticSwitch:
 		{
 			bool on = n.p[0] > 0.5f;
-			if (ImGui::Checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			if (EditorWidgets::checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
@@ -705,6 +717,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
 			ImGui::DragFloat("Scale", &n.p[0], 0.1f, 0.01f, 256.0f);
 			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Scale");
 			break;
 		default: break;
 	}
@@ -778,6 +791,11 @@ bool drawParamConstPanel(MaterialGraph& graph)
 	bool committed = false;
 	if (!params.empty())
 	{
+		// The parameter list and the "…" popup behind each row. Its own scope: a
+		// parameter's Min is not a node's value, it is what the slider that edits
+		// that value is allowed to reach.
+		HE::Ed::Help::Scope helpScope("Material Parameter");
+
 		ImGui::TextDisabled("Parameters (runtime-settable uniforms)");
 		ImGui::Separator();
 		// Group by the params' metadata group (first-seen order; "" first as ungrouped).
@@ -798,8 +816,10 @@ bool drawParamConstPanel(MaterialGraph& graph)
 				committed |= nodeParamWidgets(*n, 1.0f, true, &graph);
 				// Tooltip marker + metadata editor ("⋯" popup: slider range/group/tooltip).
 				ImGui::SameLine();
-				if (ImGui::SmallButton("..")) ImGui::OpenPopup("##pmeta");
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edit metadata (range / group / tooltip)");
+				// The hand-written tooltip this used to carry is now the help
+				// entry — two tooltips for one button, one drawn inline and one at
+				// the end of the frame, is what having both would mean.
+				if (EditorWidgets::smallButton("..")) ImGui::OpenPopup("##pmeta");
 				if (!n->tooltip.empty())
 				{
 					ImGui::SameLine();
@@ -847,18 +867,22 @@ bool drawParamConstPanel(MaterialGraph& graph)
 						ImGui::SetNextItemWidth(64.0f);
 						ImGui::DragFloat("Min", &n->p[1], 0.05f);
 						committed |= ImGui::IsItemDeactivatedAfterEdit();
+						EditorWidgets::helpForLabel("Min");
 						ImGui::SameLine();
 						ImGui::SetNextItemWidth(64.0f);
 						ImGui::DragFloat("Max", &n->p[2], 0.05f);
 						committed |= ImGui::IsItemDeactivatedAfterEdit();
+						EditorWidgets::helpForLabel("Max");
 						ImGui::TextDisabled("(min < max shows a slider)");
 					}
 					ImGui::SetNextItemWidth(150.0f);
 					ImGui::InputText("Group", &n->group);
 					committed |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Group");
 					ImGui::SetNextItemWidth(150.0f);
 					ImGui::InputText("Tooltip", &n->tooltip);
 					committed |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Tooltip");
 					ImGui::EndPopup();
 				}
 				ImGui::PopID();
@@ -1092,6 +1116,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				if (ImGui::IsItemDeactivated()) commentEdit = true; // move finished → persist
 				if (ImGui::BeginPopupContextItem("##cmtCtx"))
 				{
+					HE::Ed::Help::Scope helpScope("Material Graph");
 					if (ImGui::MenuItem("Rename")) st.editingComment = cb.id;
 					if (EditorWidgets::dangerMenuItem("Delete Comment")) deleteComment = cb.id;
 					ImGui::EndPopup();
@@ -1166,22 +1191,33 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	// ── Per-node context menu (Open Function / Preview This Node / Delete). ──
 	m.drawNodeContextMenu = [&st, &deleteNode, &togglePreviewNode, &structuralEdit, &ctx](int nodeId)
 	{
+		HE::Ed::Help::Scope helpScope("Material Node");
+
 		const MatGraphNode* n = st.graph.findNode(nodeId);
 		if (!n) return;
 		const bool deletable = n->type != MatNodeType::Output;
 		// Pick a texture from a dropdown (no path typing; drag-drop still works).
 		if (n->type == MatNodeType::TextureSample || n->type == MatNodeType::NormalMapSample)
-			if (ImGui::BeginMenu("Set Texture"))
+		{
+			// A submenu header cannot be asked about after its body has begun —
+			// by then the last item is inside the popup, not the header. So the
+			// lookup happens while the header is still the last thing submitted,
+			// and only while the submenu is shut: once it is open it is answering
+			// the question itself.
+			const bool openTex = ImGui::BeginMenu("Set Texture");
+			if (!openTex) EditorWidgets::helpForLabel("Set Texture");
+			if (openTex)
 			{
-				if (ImGui::MenuItem("(mesh texture)", nullptr, n->s.empty()))
+				if (EditorWidgets::menuItem("(mesh texture)", nullptr, n->s.empty()))
 					if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s.clear(); structuralEdit = true; }
 				for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Texture))
 					if (ImGui::MenuItem((a.label + "##" + a.path).c_str(), nullptr, n->s == a.path))
 						if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s = a.path; structuralEdit = true; }
 				ImGui::EndMenu();
 			}
+		}
 		if (n->type == MatNodeType::FunctionCall && !n->s.empty() && ctx.contentManager)
-			if (ImGui::MenuItem("Open Function"))
+			if (EditorWidgets::menuItem("Open Function"))
 				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(n->s);
 		// Route THIS node's first output (unlit) onto the preview mesh.
 		std::vector<HE::MatPinDesc> dIn, dOut;
@@ -1192,7 +1228,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		if (!st.isFunction && n->type != MatNodeType::Output && !outs->empty())
 		{
 			const bool on = st.previewNodeId == nodeId;
-			if (ImGui::MenuItem("Preview This Node", nullptr, on)) togglePreviewNode = nodeId;
+			if (EditorWidgets::menuItem("Preview This Node", nullptr, on)) togglePreviewNode = nodeId;
 		}
 		if (EditorWidgets::dangerMenuItem("Delete Node", deletable)) deleteNode = nodeId;
 	};
@@ -1683,6 +1719,7 @@ void drawHeavyMeshConfirm(State& st, AppContext& ctx)
 		// being measured. The column sits wide of the three hand-broken lines below,
 		// so those keep the breaks they were written with.
 		EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 45.0f);
+		HE::Ed::Help::Scope helpScope("Material Preview");
 
 		ImGui::Text("\"%s\" is %s on disk.", st.confirmMeshLabel.c_str(),
 		            formatBytes(st.confirmMeshBytes).c_str());
@@ -2004,6 +2041,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 			if (ImGui::BeginPopup("##blendPopup"))
 			{
+				HE::Ed::Help::Scope helpScope("Material Settings");
 				for (int i = 0; i < 3; ++i)
 				{
 					if (!ImGui::Selectable(kBlend[i], i == bmCur)) continue;
@@ -2018,6 +2056,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					ImGui::SetNextItemWidth(120.0f);
 					ImGui::DragFloat("Clip", &outN->p[2], 0.01f, 0.01f, 1.0f);
 					headerEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Clip");
 				}
 				ImGui::EndPopup();
 			}
@@ -2312,11 +2351,12 @@ void render(AppContext& ctx, const std::string& assetPath,
 		// (unlit) and offers the way back to previewing the whole material.
 		if (st.previewNodeId != 0)
 		{
+			HE::Ed::Help::Scope helpScope("Material Preview");
 			const MatGraphNode* pn = st.graph.findNode(st.previewNodeId);
 			ImGui::TextColored(HE::Ed::Theme::TextHeading, "Previewing: %s",
 				pn ? HE::matNodeDesc(pn->type).name : "?");
 			ImGui::SameLine();
-			if (ImGui::SmallButton("Show Material"))
+			if (EditorWidgets::smallButton("Show Material"))
 			{ st.previewNodeId = 0; st.previewDirty = true; }
 		}
 		ImGui::Spacing();
