@@ -1,6 +1,7 @@
 #include "HorizonCode/HorizonCodeGenSupport.h"
 #include <cstdint>
 #include <Diagnostics/Logger.h>
+#include <Scripting/ScriptTypes.h>   // scriptLogLine — the same tag the interpreter prepends
 
 // The out-of-line pieces of hc:: — everything that needs the Logger. Each log
 // text is byte-identical to the interpreter's (HorizonCode.cpp), so a packaged
@@ -37,7 +38,11 @@ uint32_t createObject(const Context& c, const char* classPath,
 
 void print(const std::string& s)
 {
-    HE_LOG_INFO(HorizonCode, "%s", ("[Widget] " + s).c_str());
+    // Through HE::scriptLogLine, exactly like the interpreter's Print. This used
+    // to concatenate its own "[Widget] " prefix, which is how the editor and the
+    // packaged build ended up logging the same Print node differently — the tag
+    // has one owner now so that cannot come back.
+    HE_LOG_INFO(HorizonCode, "%s", HE::scriptLogLine(s).c_str());
 }
 
 void warnStepLimit()

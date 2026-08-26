@@ -484,7 +484,12 @@ void GameApplication::OnInit()
 		                     const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
-			if (!fn) return {};
+			// Unknown id — an old graph naming a row that was removed or renamed.
+			// See the editor's twin for why this is said here and not in find().
+			if (!fn) {
+				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
+				return {};
+			}
 			// The caller travels along — see the editor's twin. So does what
 			// "quit" means here: the shipped game IS the application, so app.quit
 			// leaves the loop for real (the editor binds the same hook to

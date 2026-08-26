@@ -30,6 +30,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Types/TypeRegistry.h>    // project-open refresh of struct/enum defs
+#include <Scripting/ScriptTypes.h> // setScriptLogTag — the project's script log prefix
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
@@ -212,6 +213,28 @@ std::unique_ptr<IRenderer> EditorApplication::CreateRenderer()
 	m_backend = GetConfig().backend;
 	HE_LOG_INFO(Editor, "%s", "EditorApplication: creating renderer");
 	return RendererFactory::Create(m_backend);
+}
+
+// The prefix every script log line of THIS project carries (HE::scriptLogLine).
+// The editor is where the two ends meet: ProjectScriptLanguage lives in the tool
+// layer, the log tag in HE_Core, and neither may include the other — so the
+// translation happens here, in the application that knows both.
+static const char* scriptLogTagFor(ProjectScriptLanguage lang)
+{
+	switch (lang)
+	{
+	case ProjectScriptLanguage::Lua:    return "[Lua] ";
+	case ProjectScriptLanguage::Python: return "[Python] ";
+	// A C++ project also authors HorizonCode graphs, so this tag sits on Print
+	// lines that a graph produced. It still says "[C++] ", because the tag names
+	// the PROJECT's language, not the node that spoke — and native game logic
+	// reaches the very same sink (EngineApi's `log` registry line goes to
+	// ScriptApi::log), so "[HC] " would mislabel every one of those. Which of
+	// the two spoke is already in the log CATEGORY: HorizonCode vs Script.
+	case ProjectScriptLanguage::Cpp:    return "[C++] ";
+	case ProjectScriptLanguage::HorizonCode:
+	default:                            return "[HC] ";
+	}
 }
 
 void EditorApplication::OnInit()
@@ -1245,7 +1268,18 @@ void EditorApplication::OnInit()
 		                     const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
-			if (!fn) return {};
+			// An id the registry does not know is almost always an OLD graph whose
+			// EngineCall node names a row that has since been removed or renamed
+			// (widget.create and its three lifecycle siblings, most recently).
+			// Returning {} silently made that look like a call that simply did
+			// nothing. The codegen path already throws on it; only the interpreter
+			// was quiet. Deliberately NOT inside HE::api::find(): nullptr is
+			// ordinary control flow for its other callers, which run per frame
+			// while drawing.
+			if (!fn) {
+				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
+				return {};
+			}
 			// fs/save sandbox: the project's Saved/ directory (follows the loaded
 			// project; setSandboxRoot is a cheap string assign).
 			const std::string& projPath = m_projectManager.currentProject().path;
@@ -1325,6 +1359,12 @@ void EditorApplication::OnInit()
 			if (m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
 				HE::writeCppTypesHeader(projectPath);
 		}
+
+		// Script log lines say which language wrote them. Same rule as the type
+		// registry above — process-global state that follows the CURRENT project,
+		// so it is re-set on every open rather than once at startup, and the
+		// previous project's language cannot bleed into this one.
+		HE::setScriptLogTag(scriptLogTagFor(m_projectManager.currentProject().scriptLanguage));
 
 		// Load this project's app-wide GameInstance script (referenceable from
 		// any scene via Get Game Instance; OnInit fires when play mode starts).

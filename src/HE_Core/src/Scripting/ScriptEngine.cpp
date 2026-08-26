@@ -7,6 +7,38 @@ extern "C" {
 #include <lauxlib.h>
 }
 
+namespace HE
+{
+// The script log tag (declared in ScriptTypes.h). It is defined here because
+// ScriptTypes.h is a header with no .cpp of its own and this is the only
+// translation unit that already belongs to it — what matters is that there is
+// exactly ONE, so every module that links HorizonCore shares the storage
+// instead of getting a private copy behind a dllimport.
+//
+// No mutex: the tag is written once, by the application, before any script
+// runs (project load in the editor), and only read afterwards. Same shape as
+// the other process-wide script settings (EngineApi.cpp's sandbox root and
+// default save template).
+static std::string& scriptLogTagStorage()
+{
+	static std::string tag;   // empty = no prefix, see ScriptTypes.h
+	return tag;
+}
+
+void setScriptLogTag(const std::string& tag) { scriptLogTagStorage() = tag; }
+
+const std::string& scriptLogTag() { return scriptLogTagStorage(); }
+
+std::string scriptLogLine(const std::string& message)
+{
+	// Untagged is not "tag plus empty string": with no tag the line must come
+	// out exactly as it went in, so a project that never set one keeps the log
+	// it always had.
+	const std::string& tag = scriptLogTagStorage();
+	return tag.empty() ? message : tag + message;
+}
+} // namespace HE
+
 ScriptEngine::ScriptEngine()
 {
     m_L = luaL_newstate();

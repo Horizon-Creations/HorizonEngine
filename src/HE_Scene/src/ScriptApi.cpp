@@ -11,6 +11,7 @@
 #include "HorizonScene/Components/UIButtonComponent.h"
 #include "ContentManager/ContentManager.h"
 #include <Diagnostics/Log.h>
+#include <Scripting/ScriptTypes.h>   // scriptLogLine — the project's language tag
 
 namespace {
 
@@ -35,7 +36,12 @@ void log(const char* message)
 	// HE::Log (the log file, the editor's console) only sees what goes there.
 	// The bare printf is gone rather than kept alongside — HE::Log echoes to
 	// stdout itself, so keeping it would print every script line twice.
-	HE_LOG_INFO(Script, "%s", message ? message : "");
+	//
+	// This is the shared exit for Lua (ScriptContext), Python (PyScriptBackend)
+	// and the api registry's `log` line, so tagging it here tags all three; the
+	// tag itself comes from HE::scriptLogLine, which HorizonCode's Print uses
+	// too, so no path invents a prefix of its own.
+	HE_LOG_INFO(Script, "%s", HE::scriptLogLine(message ? message : "").c_str());
 }
 
 std::string getName(HorizonWorld& world, uint32_t entityId)

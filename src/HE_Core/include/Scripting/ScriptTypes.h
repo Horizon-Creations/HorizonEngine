@@ -1,4 +1,5 @@
 #pragma once
+#include <Types/Defines.h>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,38 @@ namespace HE
 			return ScriptLanguage::Python;
 		return ScriptLanguage::Lua;
 	}
+
+	// ── the script log tag ───────────────────────────────────────────────────
+	// One process-wide prefix naming the language the PROJECT is authored in
+	// ("[HC] ", "[Lua] ", "[Python] ", "[C++] "), prepended to every log line a
+	// script emits. A project has exactly one gameplay language — the editor
+	// enforces that (ProjectScriptLanguage in ProjectManager.h) — so one process
+	// variable is the whole model.
+	//
+	// It lives HERE, in HE_Core, because the two sides that must agree are both
+	// below the tool layer: the HorizonCode interpreter and its generated C++
+	// (HE_Core) and ScriptApi::log, the Lua/Python/registry path (HE_Scene).
+	// Neither may include ProjectManager.h — that would point the dependency
+	// upward — so the applications, which DO know the project, push the tag down.
+	//
+	// NOT a header-only inline getter over a function-local static: on Windows an
+	// inline function is emitted per module, so HorizonCore.dll, HorizonScene.dll
+	// and the editor executable would each get their OWN static and the editor
+	// would set a tag the interpreter never reads. Declared HE_API and defined in
+	// exactly one translation unit (ScriptEngine.cpp), the whole process shares
+	// one variable on every platform.
+	//
+	// Default: EMPTY, i.e. no prefix at all. An application that never sets the
+	// tag (the packaged game today, the tests, the tools) logs byte-identically
+	// to before this existed, and a line that cannot name its language says
+	// nothing rather than guessing — a WRONG language label is worse than none.
+	HE_API void               setScriptLogTag(const std::string& tag);
+	HE_API const std::string& scriptLogTag();
+
+	// The ONE place the tag is applied. All three script log paths call this so
+	// they cannot drift apart again: the interpreter's Print, the same Print in
+	// generated C++, and ScriptApi::log once printed three different prefixes.
+	HE_API std::string scriptLogLine(const std::string& message);
 }
 
 // UI pointer events dispatched to a UI element's behavior script. Handler

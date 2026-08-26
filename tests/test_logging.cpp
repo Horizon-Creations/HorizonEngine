@@ -3,6 +3,9 @@
 
 #include <Diagnostics/Log.h>
 #include <Diagnostics/Logger.h>
+#include <Scripting/ScriptTypes.h>              // the script log tag under test
+#include <HorizonCode/HorizonCodeGenSupport.h>  // hc::print — generated HorizonCode
+#include <HorizonScene/ScriptApi.h>             // ScriptApi::log — Lua / Python / api registry
 
 #include <atomic>
 #include <filesystem>
@@ -87,6 +90,16 @@ struct VerbosityGuard
 			HE::Log::setVerbosity(static_cast<HE::Log::Cat>(i), m_saved[static_cast<size_t>(i)]);
 	}
 	std::vector<HE::Log::Level> m_saved;
+};
+
+// The script log tag is process-global and every test runs in the same process,
+// so a tag left behind here would prefix (and break) another test's log
+// assertions. Same reason VerbosityGuard exists.
+struct ScriptLogTagGuard
+{
+	ScriptLogTagGuard() : m_saved(HE::scriptLogTag()) {}
+	~ScriptLogTagGuard() { HE::setScriptLogTag(m_saved); }
+	std::string m_saved;
 };
 } // namespace
 
@@ -525,4 +538,46 @@ TEST_CASE("Message counters track warnings and errors for the session summary")
 
 	CHECK(HE::Log::messageCount(HE::Log::Level::Warning) == warnBefore + 2);
 	CHECK(HE::Log::messageCount(HE::Log::Level::Error)   == errBefore + 1);
+}
+
+TEST_CASE("Script log lines carry the project's language tag")
+{
+	ScriptLogTagGuard tagGuard;
+	VerbosityGuard    guard;
+	HE::Log::setVerbosity(HE::Log::Cat::HorizonCode, HE::Log::Level::Trace);
+	HE::Log::setVerbosity(HE::Log::Cat::Script,      HE::Log::Level::Trace);
+
+	// No tag set → the message passes through untouched. This is what an
+	// application that never sets one (the packaged game, the tools) still logs.
+	HE::setScriptLogTag("");
+	CHECK(HE::scriptLogLine("untagged-line") == "untagged-line");
+
+	HE::setScriptLogTag("[Lua] ");
+	CHECK(HE::scriptLogTag() == "[Lua] ");
+	CHECK(HE::scriptLogLine("tagged-line") == "[Lua] tagged-line");
+
+	// The point of the shared helper: the interpreter's Print (via generated
+	// C++, hc::print) and the Lua/Python/api path (ScriptApi::log) must emit the
+	// SAME prefix. They once did not — generated code hard-coded "[Widget] "
+	// after the interpreter had dropped it.
+	{
+		Capture capture;
+		hc::print("hc-print-line");
+		ScriptApi::log("script-api-line");
+
+		CHECK(capture.contains("[Lua] hc-print-line"));
+		CHECK(capture.contains("[Lua] script-api-line"));
+		CHECK_FALSE(capture.contains("[Widget] "));
+	}
+
+	// A different project language re-tags both the same way.
+	HE::setScriptLogTag("[HC] ");
+	{
+		Capture capture;
+		hc::print("hc-print-again");
+		ScriptApi::log("script-api-again");
+
+		CHECK(capture.contains("[HC] hc-print-again"));
+		CHECK(capture.contains("[HC] script-api-again"));
+	}
 }

@@ -588,7 +588,7 @@ inline void scheduleResume(const Context& c, int nodeId, float seconds, bool rea
 { if (c.scheduleResume) c.scheduleResume(nodeId, seconds, realTime); }
 inline bool isValidRef(const Context& c, uint32_t target)
 { return c.isValid && c.isValid(target); }
-HE_API void print(const std::string& s);       // "[Widget] " + Logger Info, like Print
+HE_API void print(const std::string& s);       // HE::scriptLogLine + Logger Info, like Print
 
 // ── declared variables: one table instead of four name chains ───────────────
 // The Runtime reaches a compiled class's variables BY NAME (Get/SetExternal,
