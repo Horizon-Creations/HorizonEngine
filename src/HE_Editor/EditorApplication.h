@@ -469,6 +469,11 @@ struct AppContext
 	// Project hub transient state
 	int&   hubSelectedPreset;
 	int&   hubSelectedLang;   // scripting-language pick (ProjectScriptLanguage order)
+	// "Advanced Shader Effects" in the create form. Decides whether the new
+	// project may author MATERIALS at all, and therefore which renderer its
+	// packaged build links (docs/he-apps-plan.md A0/E1b). On by default: that is
+	// what every project before the switch existed had.
+	bool&  hubAdvancedShaderFx;
 	char*  hubProjectName = nullptr;  // points into EditorApplication's char array
 	int    hubProjectNameSize = 0;
 	char*  hubProjectDir  = nullptr;
@@ -908,6 +913,7 @@ private:
 	// Project Hub transient state
 	int         m_hubSelectedPreset  = 0;
 	int         m_hubSelectedLang    = 0;  // index into the wizard's ProjectScriptLanguage order
+	bool        m_hubAdvancedShaderFx = true; // see EditorContext::hubAdvancedShaderFx
 	char        m_hubProjectName[256]= {};
 	char        m_hubProjectDir[512] = {};
 	std::string m_hubCreateError;

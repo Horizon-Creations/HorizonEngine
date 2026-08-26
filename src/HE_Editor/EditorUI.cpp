@@ -2092,6 +2092,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
             ImGui::PopStyleColor();
 
+            // Advanced Shader Effects: whether this project may author materials
+            // (docs/he-apps-plan.md A0). Unlike the language above this one CAN be
+            // changed later, in the project settings — turning it off then asks
+            // about the materials that already exist.
+            ImGui::Spacing();
+            ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
+            ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
+                ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
+                : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
+                  "Smaller build, no GPU required.");
+
             ImGui::Spacing();
             if (!ctx.hubCreateError.empty())
             {
@@ -2119,7 +2130,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     bool ok = ctx.projectManager->createNewProject(
                         projRoot.string(), name,
                         static_cast<ProjectPreset>(ctx.hubSelectedPreset),
-                        static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang));
+                        static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang),
+                        /*appProject*/ false, ctx.hubAdvancedShaderFx);
                     if (ok)
                     {
                         const std::string& heprojPath = ctx.projectManager->currentProject().path;
@@ -2706,7 +2718,32 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             GameInstancePanel::render(ctx, tabPos, tabSize);
         else if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
             MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
-            MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        {
+            // Advanced Shader Effects off = this project does not author
+            // materials (docs/he-apps-plan.md E1b). An existing one can still be
+            // opened — the file is right there in the browser — but it says why
+            // it is inert rather than showing an editor whose result nothing
+            // would draw.
+            const bool allowMaterials = !ctx.projectManager ||
+                ctx.projectManager->currentProject().advancedShaderEffects;
+            if (allowMaterials)
+                MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+            else
+            {
+                ImGui::SetNextWindowPos(tabPos);
+                ImGui::SetNextWindowSize(tabSize);
+                ImGui::Begin("##MaterialsDisabled", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+                ImGui::TextWrapped(
+                    "Advanced Shader Effects are switched off for this project, so materials "
+                    "are not used. Widgets are styled with corner radius, borders, gradients "
+                    "and shadows instead.");
+                ImGui::Spacing();
+                ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
+                ImGui::End();
+            }
+        }
         else if (UIEditorPanel::isWidgetAsset(tabPath))
             UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (HorizonCodeClassPanel::isClassAsset(tabPath))

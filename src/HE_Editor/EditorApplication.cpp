@@ -5195,6 +5195,7 @@ AppContext EditorApplication::makeContext()
 		.cbTreeWidth         = m_editorConfig.CbTreeWidth,
 		.hubSelectedPreset   = m_hubSelectedPreset,
 		.hubSelectedLang     = m_hubSelectedLang,
+		.hubAdvancedShaderFx = m_hubAdvancedShaderFx,
 		.hubProjectName      = m_hubProjectName,
 		.hubProjectNameSize  = (int)sizeof(m_hubProjectName),
 		.hubProjectDir       = m_hubProjectDir,

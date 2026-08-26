@@ -373,7 +373,8 @@ void render(AppContext& ctx)
             bool ok = ctx.projectManager->createNewProject(
                 projRoot.string(), name,
                 static_cast<ProjectPreset>(ctx.hubSelectedPreset),
-                static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang));
+                static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang),
+                /*appProject*/ false, ctx.hubAdvancedShaderFx);
             if (ok)
             {
                 const std::string& heprojPath = ctx.projectManager->currentProject().path;
