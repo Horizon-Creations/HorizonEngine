@@ -658,8 +658,15 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			{ created = addNode(graph, t, drop, h.currentGraph); ImGui::CloseCurrentPopup(); }
 			if (hov && ImGui::BeginTooltip())
 			{
-				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-				HcEditorUtil::drawNodeDoc(t);
+				// The guard has to expire BEFORE EndTooltip: PopTextWrapPos acts on
+				// whatever window is current, and EndTooltip has by then switched back
+				// to the canvas — so an unscoped guard pushes on the tooltip and pops
+				// on the canvas. That is the imbalance ImGui reports as "Calling
+				// PopTextWrapPos() too many times". Same rule EditorWidgets.h states.
+				{
+					EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+					HcEditorUtil::drawNodeDoc(t);
+				}
 				ImGui::EndTooltip();
 			}
 		}
@@ -791,8 +798,12 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 					HC::Node probe; probe.type = r.t; probe.typeName = d.assetPath;
 					if (ImGui::BeginTooltip())
 					{
-						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-						HcEditorUtil::drawNodeDoc(probe);
+						// Scoped so the pop lands on the tooltip, not on the palette
+						// EndTooltip returns to — see the note at the canvas tooltip.
+						{
+							EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+							HcEditorUtil::drawNodeDoc(probe);
+						}
 						ImGui::EndTooltip();
 					}
 				}
@@ -837,8 +848,12 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 					HC::Node probe; probe.type = r.t; probe.typeName = d.assetPath;
 					if (ImGui::BeginTooltip())
 					{
-						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-						HcEditorUtil::drawNodeDoc(probe);
+						// Scoped so the pop lands on the tooltip, not on the palette
+						// EndTooltip returns to — see the note at the canvas tooltip.
+						{
+							EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+							HcEditorUtil::drawNodeDoc(probe);
+						}
 						ImGui::EndTooltip();
 					}
 				}
@@ -1055,8 +1070,15 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			}
 			if (hov && ImGui::BeginTooltip())
 			{
-				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-				HcEditorUtil::drawNodeDoc(t);
+				// The guard has to expire BEFORE EndTooltip: PopTextWrapPos acts on
+				// whatever window is current, and EndTooltip has by then switched back
+				// to the canvas — so an unscoped guard pushes on the tooltip and pops
+				// on the canvas. That is the imbalance ImGui reports as "Calling
+				// PopTextWrapPos() too many times". Same rule EditorWidgets.h states.
+				{
+					EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+					HcEditorUtil::drawNodeDoc(t);
+				}
 				ImGui::EndTooltip();
 			}
 		}

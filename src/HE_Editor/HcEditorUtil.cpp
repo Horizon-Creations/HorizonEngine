@@ -1004,8 +1004,14 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 			for (const auto& r : fn.results) tmp.results.push_back({ r.name, r.type, r.isArray });
 			if (ImGui::BeginTooltip())
 			{
-				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-				drawNodeDoc(tmp);
+				// Scoped: PopTextWrapPos acts on the CURRENT window, and EndTooltip
+				// switches back to the menu underneath — an unscoped guard would push
+				// on the tooltip and pop on the menu, which is the "too many times"
+				// error the add menu showed.
+				{
+					EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+					drawNodeDoc(tmp);
+				}
 				ImGui::EndTooltip();
 			}
 		}
