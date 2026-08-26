@@ -211,6 +211,12 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "UI Graph Node", "Delete Node" },
 		{ "UI Variable",   "Access" },
 		{ "UI Variable",   "Scale##vdef" },
+		// Input. "Bind" is drawn by a helper defined above every one of its
+		// callers, so its scope is pushed inside that helper.
+		{ "Input Action",  "Bind" },
+		{ "Input Action",  "Auto Detect" },
+		{ "Input Action",  "Press any input\xE2\x80\xA6" },
+		{ "Input Action",  "Fires while the game is paused" },
 	};
 	for (const Case& c : cases)
 	{

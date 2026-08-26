@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
+#include "EditorHelp.h"           // "Input Action/<label>" scope for the tooltips
 #include "EditorPanelState.h"
 #include "EditorToolbar.h"       // shared toolbar strip
 #include "EditorWidgets.h"    // danger buttons for deletion     // shared per-tab state map
@@ -159,10 +160,15 @@ void bindButtonCell(const std::string& assetPath, int entryIndex, int subIndex,
 	}
 	else
 	{
-		if (ImGui::Button("Bind", ImVec2(-FLT_MIN, 0.0f)))
+		// Its own scope, pushed here: this helper is defined above every panel
+		// that calls it, and the coverage scan reads a file top to bottom.
+		//
+		// The per-slot one-liner that used to be the tooltip here ("Press the key
+		// you want to bind.") is now the help entry, said once for every slot —
+		// and with the cancel rule, which no call site was passing.
+		HE::Ed::Help::Scope helpScope("Input Action");
+		if (EditorWidgets::button("Bind", ImVec2(-FLT_MIN, 0.0f)))
 			beginCapture(assetPath, entryIndex, subIndex, slot);
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s", armedTip);
 	}
 }
 
@@ -387,6 +393,8 @@ void InputAssetPanel::forget(const std::string& path)
 void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
                              const ImVec2& pos, const ImVec2& size)
 {
+	HE::Ed::Help::Scope helpScope("Input Action");
+
 	PanelState& st = s_states[assetPath];
 	if (!st.loaded && ctx.contentManager)
 	{
@@ -466,7 +474,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGui::Spacing();
 		ImGui::Separator();
 		ImGui::Spacing();
-		if (ImGui::Checkbox("Fires while the game is paused", &st.runWhilePaused))
+		if (EditorWidgets::checkbox("Fires while the game is paused", &st.runWhilePaused))
 			st.dirty = true;
 		{
 			EditorWidgets::WrapText wrap;
@@ -964,7 +972,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGui::Spacing();
 		// One entry point for everything: a searchable, type-aware list — or
 		// (below) a press on the actual hardware.
-		if (ImGui::Button("+ Add Binding", ImVec2(130.0f, 0.0f)))
+		if (EditorWidgets::button("+ Add Binding", ImVec2(130.0f, 0.0f)))
 		{
 			s_addFilter.clear();
 			ImGui::OpenPopup("##addbinding");
@@ -978,25 +986,18 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			{
 				ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
 				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
-				if (ImGui::Button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
+				// Both hand-written tooltips here are entries now, so F1 reaches
+				// them and the reference lists them. The one this replaced said
+				// different things for a button action and an axis action; the
+				// entry says both, which is a sentence longer and no less true.
+				if (EditorWidgets::button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
 					s_capture.slot = BindSlot::None;
 				ImGui::PopStyleColor(2);
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip(offerButtons
-						? "Press a key, click a mouse button or press a\n"
-						  "gamepad button to bind it. Esc or click to cancel."
-						: "Press a key or pad button (becomes the + half of a\n"
-						  "pair), move a stick or pull a trigger to bind it.\n"
-						  "Esc or click to cancel.");
 			}
-			else if (ImGui::Button("Auto Detect", ImVec2(150.0f, 0.0f)))
+			else if (EditorWidgets::button("Auto Detect", ImVec2(150.0f, 0.0f)))
 			{
 				beginCapture(assetPath, i, 0, BindSlot::EntryAny);
 			}
-			if (!detecting && ImGui::IsItemHovered())
-				ImGui::SetTooltip("Listens on keyboard, mouse AND gamepad at once\n"
-				                  "and ADDS whatever you press first. To replace one\n"
-				                  "binding instead, use the Bind button in its row.");
 		}
 
 		// ── Add Binding popup: searchable, shaped by the action's type ──────
@@ -1130,7 +1131,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 	if (removeEntry >= 0) { st.entries.erase(st.entries.begin() + removeEntry); st.dirty = true; cancelCaptureForThisAsset(); }
 
-	if (ImGui::Button("+ Add Action Entry", ImVec2(220.0f, 0.0f)))
+	if (EditorWidgets::button("+ Add Action Entry", ImVec2(220.0f, 0.0f)))
 	{ st.entries.emplace_back(); st.dirty = true; }
 
 	ImGui::End();

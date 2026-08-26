@@ -146,7 +146,8 @@ den Test zu beruhigen.
 | 2 · Einstellungen | erledigt (18 Einträge, `smallButton`, drei neue Scopes) | 0 |
 | 3 · Materialien | erledigt (25 Einträge, fünf neue Scopes) | 0 |
 | 4 · UI-Designer | erledigt (39 Einträge, sechs neue Scopes) | 0 |
-| 5–10 | offen | 134 |
+| 5 · Input | erledigt (6 Einträge, ein Scope) | 0 |
+| 6–10 | offen | 128 |
 
 Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
 ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren

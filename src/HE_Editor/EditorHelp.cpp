@@ -2020,6 +2020,45 @@ namespace
 	  "Removes the selected node and the links that ran through it.",
 	  "", "ui#graph" },
 
+	// ── Input actions ────────────────────────────────────────────────────────
+	// An input asset is a list of actions and, under each, the physical things
+	// that fire it. The panel's buttons are short verbs whose difference is the
+	// whole point: Bind REPLACES one row, Auto Detect ADDS a row.
+	{ "Input Action/Bind", "Bind",
+	  "Arms this row and waits for the input it should read — a key, a gamepad "
+	  "button, a mouse button, a stick or a trigger, whichever the row is for. "
+	  "What you press REPLACES what the row had. Click again or press Esc to "
+	  "cancel; a mouse row takes Esc only, because the click would be the "
+	  "binding.",
+	  "", "systems#input" },
+	{ "Input Action/+ Add Binding", "Add Binding",
+	  "Opens a searchable list of everything this action could be bound to, "
+	  "narrowed to what its type can use. The way in when you know the name of "
+	  "the key or button you want.",
+	  "", "systems#input" },
+	{ "Input Action/Auto Detect", "Auto Detect",
+	  "Listens on the keyboard, the mouse and the gamepad at once, and ADDS "
+	  "whatever you press first as a new binding. To replace one that is already "
+	  "there, use the Bind button in its own row instead.",
+	  "", "systems#input" },
+	{ "Input Action/Press any input\xE2\x80\xA6", "Press any input",
+	  "Auto Detect is listening. Press a key, click a mouse button or press a "
+	  "gamepad button and it is added. On an axis action a key or pad button "
+	  "becomes the + half of the pair, and moving a stick or pulling a trigger "
+	  "binds that instead. Esc, or this button, cancels.",
+	  "", "systems#input" },
+	{ "Input Action/+ Add Action Entry", "Add Action Entry",
+	  "Adds another action to this asset — one more named thing the game can "
+	  "ask about, with its own bindings.",
+	  "", "systems#input" },
+	{ "Input Action/Fires while the game is paused", "",
+	  "A pause (Set Time Scale 0) silences every action by default, or the "
+	  "player would keep shooting through the pause menu. Switch this on for the "
+	  "few that have to get through anyway: opening and closing the menu, "
+	  "navigating it, confirming. Presses that arrive while a silenced action is "
+	  "paused are dropped, not queued for the moment the game resumes.",
+	  "", "systems#input" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -2168,7 +2207,8 @@ namespace
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
-		{ "input.",    "editor-input",     "Input Reference",   "Input assets" },
+		{ "input.",         "editor-input", "Input Reference", "Input assets" },
+		{ "Input Action/",  "editor-input", "Input Reference", "Actions and bindings" },
 		{ "hc.",       "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
 		{ "terrain.",  "editor-landscape", "Landscape Tools",   "Terrain brush" },
 		{ "env.",      "editor-landscape", "Landscape Tools",   "Environment window" },

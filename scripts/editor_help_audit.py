@@ -114,7 +114,7 @@ AREAS: dict[str, list[str]] = {
 # covered — never raise one to make the check pass.
 BASELINE = {
     "interface": 0, "components": 0, "settings": 0, "materials": 0, "ui": 0,
-    "horizoncode": 28, "input": 6, "animation": 15, "landscape": 17, "export": 29,
+    "horizoncode": 28, "input": 0, "animation": 15, "landscape": 17, "export": 29,
     "collab": 39,
 }
 
