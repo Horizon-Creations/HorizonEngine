@@ -1,5 +1,6 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <entt/entt.hpp>   // entt::entity — the per-entity queries below take one
 
 class HorizonWorld;
 struct TransformComponent;
@@ -34,5 +35,32 @@ namespace HE {
     // Recomputing everything is cheap at current scene sizes; dirty-flag pruning
     // can come back with profiling.
     void propagateTransforms(HorizonWorld& world);
+
+    // ONE entity's world matrix, composed on the spot by walking its parent
+    // chain upward — NOT read out of worldMatrix.
+    //
+    // That distinction is the whole point of these two. worldMatrix is only as
+    // fresh as the last propagateTransforms, and the callers of that are the
+    // render extractor, the camera rig and the NavMesh collector: a script
+    // asking mid-frame would get the value from before whatever moved this
+    // frame, and an entity spawned this frame would answer with the identity.
+    // Walking upward costs the depth of the entity instead of the size of the
+    // scene, and it is true at the instant it is asked.
+    //
+    // Composition goes through localMatrix, deliberately, so this can never
+    // drift from what propagateTransforms produces.
+    glm::mat4 worldMatrixOf(HorizonWorld& world, entt::entity e);
+
+    // The translation of the above. Identity-safe: an entity without a
+    // TransformComponent has no position, and (0,0,0) is the answer everything
+    // else in the transform API gives for that case.
+    glm::vec3 worldPositionOf(HorizonWorld& world, entt::entity e);
+
+    // The local position an entity needs in order to STAND at `worldPos`, given
+    // where its parents are. Without a parent the two are the same; with one it
+    // is the parent's world matrix inverted and applied. This is the half that
+    // makes "read a world position, offset it, put it back" possible at all.
+    glm::vec3 localPositionForWorld(HorizonWorld& world, entt::entity e,
+                                    const glm::vec3& worldPos);
 
 }

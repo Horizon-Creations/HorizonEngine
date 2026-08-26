@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/TransformHierarchy.h"   // world position, composed on demand
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/AudioEngine.h"
 #include "HorizonScene/Components/CameraComponent.h"
@@ -251,6 +252,22 @@ glm::vec3 getRotation(Ctx& c, Entity e)                    { return c.world ? Sc
 void      setRotation(Ctx& c, Entity e, const glm::vec3& r){ if (c.world) ScriptApi::setRotation(*c.world, e, r); }
 glm::vec3 getScale(Ctx& c, Entity e)                       { return c.world ? ScriptApi::getScale(*c.world, e) : glm::vec3(1.0f); }
 void      setScale(Ctx& c, Entity e, const glm::vec3& s)   { if (c.world) ScriptApi::setScale(*c.world, e, s); }
+
+glm::vec3 getWorldPosition(Ctx& c, Entity e)
+{
+    return c.world ? HE::worldPositionOf(*c.world, static_cast<entt::entity>(e))
+                   : glm::vec3(0.0f);
+}
+
+void setWorldPosition(Ctx& c, Entity e, const glm::vec3& p)
+{
+    // Written through the LOCAL setter on purpose: that one is what marks the
+    // transform dirty and what physics and the hierarchy already listen to.
+    // Converting here and delegating keeps one writer for the position.
+    if (c.world)
+        ScriptApi::setPosition(*c.world, e,
+            HE::localPositionForWorld(*c.world, static_cast<entt::entity>(e), p));
+}
 } // namespace transform
 
 // ── Physics ──────────────────────────────────────────────────────────────────
@@ -1712,6 +1729,12 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ v3(transform::getScale(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "transform.setScale", "Transform", true, {{"entity", P::Int}, {"scale", P::Vec3}}, {}, "HE::api::transform::setScale",
             [](Ctx& c, const VV& a){ transform::setScale(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
+        // World space. The six above are local — for a parented entity that is
+        // its offset inside the parent, not where it stands.
+        t.push_back({ "transform.getWorldPosition", "Transform", false, {{"entity", P::Int}}, {{"position", P::Vec3}}, "HE::api::transform::getWorldPosition",
+            [](Ctx& c, const VV& a){ return VV{ v3(transform::getWorldPosition(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "transform.setWorldPosition", "Transform", true, {{"entity", P::Int}, {"position", P::Vec3}}, {}, "HE::api::transform::setWorldPosition",
+            [](Ctx& c, const VV& a){ transform::setWorldPosition(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
 
         // Physics
         t.push_back({ "physics.raycast", "Physics", false,
@@ -2220,6 +2243,8 @@ const std::vector<ApiFn>& registry()
             { "entity.instance", "Get Object On Entity" },
             { "entity.selfObject", "Get Owning Object" },
             { "transform.getPosition", "Get Position" }, { "transform.setPosition", "Set Position" },
+            { "transform.getWorldPosition", "Get World Position" },
+            { "transform.setWorldPosition", "Set World Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },

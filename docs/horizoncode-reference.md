@@ -299,7 +299,7 @@ there with no script changes at all.
 |-------|---|-----------|
 | **Debug** | 5 | `log`, `debug.line`, `debug.sphere`, `debug.box`, `debug.clear` |
 | **Entity** | 13 | `getName`, `spawn`, `destroy`, `distance`, `findByName`, `exists`, `self`, `owned`, `setVisible`, `getVisible`, `saveState`, `hasSavedState`, `applySavedState` |
-| **Transform** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getScale`/`setScale` |
+| **Transform** | 8 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getScale`/`setScale`, `getWorldPosition`/`setWorldPosition` |
 | **Physics** | 3 | `raycast`, `setVelocity`, `isGrounded` |
 | **Material** | 2 | `getParam`, `setParam` |
 | **UI** | 11 | element access: `getText`/`setText`, `getColor`/`setColor`, `getVisible`/`setVisible`, `getPosition`/`setPosition`, `getSize`/`setSize`, `setMaterialParam` |

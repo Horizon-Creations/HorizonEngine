@@ -131,6 +131,21 @@ namespace transform {
     void      setRotation(Ctx&, Entity e, const glm::vec3& r);
     glm::vec3 getScale(Ctx&, Entity e);                       // default (1,1,1)
     void      setScale(Ctx&, Entity e, const glm::vec3& s);
+
+    // The six above are LOCAL: what the entity's own transform holds, which for
+    // a child is relative to its parent. These two are the world-space pair.
+    //
+    // For an entity with no parent the two answer the same thing, which is why
+    // the distinction goes unnoticed until the first attached object: a weapon
+    // parented to a hand, a chunk under a terrain, a character parented to a
+    // moving platform. Asking getPosition there answers "where it sits inside
+    // its parent", which is almost never the question a graph is asking.
+    //
+    // Composed by walking the parent chain at the moment of the call rather
+    // than reading TransformComponent::worldMatrix — see TransformHierarchy.h
+    // for why that cached matrix is not trustworthy from gameplay code.
+    glm::vec3 getWorldPosition(Ctx&, Entity e);               // default (0,0,0)
+    void      setWorldPosition(Ctx&, Entity e, const glm::vec3& p);
 }
 
 // ── Physics (queries, forces, and the character-controller helpers) ──────────

@@ -123,6 +123,58 @@ TEST_CASE("EngineApi: side-effect classification is correct")
 
 // ═══ Marshalling round-trips against a real world ═════════════════════════════
 
+TEST_CASE("Transform: world position walks the parent chain, local does not")
+{
+    HorizonWorld world;
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // A parent moved 10 along X and turned a quarter turn about Y, with a child
+    // sitting 2 in FRONT of it. The rotation is what makes this test worth
+    // having: a parent that is only translated would pass even if the code
+    // simply added the two positions together.
+    const auto parent = spawnWithTransform(world);
+    const auto child  = spawnWithTransform(world);
+    REQUIRE(world.reparentEntity(static_cast<entt::entity>(child),
+                                 static_cast<entt::entity>(parent)));
+
+    call("transform.setPosition", { Value::ofInt((int)parent), Value::ofVec3({ 10.0f, 0.0f, 0.0f }) });
+    call("transform.setRotation", { Value::ofInt((int)parent), Value::ofVec3({ 0.0f, 90.0f, 0.0f }) });
+    call("transform.setPosition", { Value::ofInt((int)child),  Value::ofVec3({ 0.0f, 0.0f, 2.0f }) });
+
+    // Local is unchanged by any of that — it is the offset inside the parent.
+    const Value local = call("transform.getPosition", { Value::ofInt((int)child) })[0];
+    CHECK(local.v3.z == doctest::Approx(2.0f));
+    CHECK(local.v3.x == doctest::Approx(0.0f));
+
+    // World: +Z rotated 90° about Y lands on +X, so the child stands 2 further
+    // along X than its parent.
+    const Value w = call("transform.getWorldPosition", { Value::ofInt((int)child) })[0];
+    CHECK(w.type == P::Vec3);
+    CHECK(w.v3.x == doctest::Approx(12.0f).epsilon(0.001));
+    CHECK(w.v3.y == doctest::Approx(0.0f).epsilon(0.001));
+    CHECK(w.v3.z == doctest::Approx(0.0f).epsilon(0.001));
+
+    // NOT propagated first, on purpose: worldMatrix is stale until someone runs
+    // propagateTransforms, and a graph asking mid-frame must still get the truth.
+    CHECK(world.registry().get<TransformComponent>(static_cast<entt::entity>(child)).worldMatrix
+          == glm::mat4(1.0f));
+
+    // Writing a world position puts the entity there, whatever its parent does.
+    call("transform.setWorldPosition", { Value::ofInt((int)child), Value::ofVec3({ 0.0f, 5.0f, 0.0f }) });
+    const Value back = call("transform.getWorldPosition", { Value::ofInt((int)child) })[0];
+    CHECK(back.v3.x == doctest::Approx(0.0f).epsilon(0.001));
+    CHECK(back.v3.y == doctest::Approx(5.0f).epsilon(0.001));
+    CHECK(back.v3.z == doctest::Approx(0.0f).epsilon(0.001));
+
+    // An unparented entity answers the same in both spaces — which is why the
+    // distinction goes unnoticed until the first attached object.
+    const auto lone = spawnWithTransform(world);
+    call("transform.setPosition", { Value::ofInt((int)lone), Value::ofVec3({ 3.0f, 4.0f, 5.0f }) });
+    CHECK(call("transform.getWorldPosition", { Value::ofInt((int)lone) })[0].v3
+          == glm::vec3(3.0f, 4.0f, 5.0f));
+}
+
 TEST_CASE("EngineApi: transform round-trips through the registry")
 {
     HorizonWorld world;
