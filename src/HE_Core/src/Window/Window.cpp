@@ -1,11 +1,49 @@
 #include "Window/Window.h"
 #include <cstdint>
+#include <iterator>
 #include <SDL3/SDL.h>
 #include "Diagnostics/Log.h"
 #include <stdexcept>
 
 namespace HE
 {
+namespace
+{
+    // ── The OpenGL versions a window will accept, best first ──────────────────
+    // Asking for one fixed version and dying when the driver cannot give it is
+    // the difference between "runs everywhere" and "runs on my machine": Mesa's
+    // llvmpipe caps below 4.6, older Intel iGPUs on Windows report 4.4/4.5, and
+    // VM GL stacks often stop at 3.3–4.1. Descending costs a few lines and
+    // nothing at runtime, because everything above 4.1 is already gated where it
+    // is used — GI checks GLAD_GL_VERSION_4_3 and turns itself off, and the UI
+    // and material shaders are #version 410 core.
+    struct GlVersion { int major; int minor; };
+
+#ifdef __APPLE__
+    // macOS caps OpenGL at 4.1 Core and requires a forward-compatible context,
+    // so there is nothing to descend through. (A game/app on macOS runs on Metal
+    // anyway; this path is for the odd GL-forced run.)
+    constexpr GlVersion kGlVersions[] = { { 4, 1 } };
+#else
+    constexpr GlVersion kGlVersions[] = { { 4, 6 }, { 4, 5 }, { 4, 3 }, { 4, 1 } };
+#endif
+
+    // Every attribute the GL path needs, for one version. Called once before the
+    // window is created (the pixel format is chosen there) and again per attempt,
+    // because SDL_GL_CreateContext reads these at call time.
+    void setGlAttributes(const GlVersion& v)
+    {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, v.major);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, v.minor);
+#ifdef __APPLE__
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    }
+} // namespace
+
     Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
     Window::~Window()                        { Shutdown(); }
 
@@ -43,18 +81,9 @@ namespace HE
         switch (props.api)
         {
         case RendererBackend::OpenGL:
-#ifdef __APPLE__
-            // macOS caps OpenGL at 4.1 Core and requires a forward-compatible context
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
-#else
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
-#endif
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+            // Best version first; the context loop below descends if the driver
+            // refuses it (see kGlVersions).
+            setGlAttributes(kGlVersions[0]);
             // High-DPI: render at the display's true pixel density (Retina) so the
             // drawable isn't upscaled by the OS (otherwise the whole UI is blurry).
             // GL/Metal/Vulkan size their drawable from SDL_GetWindowSizeInPixels;
@@ -107,16 +136,27 @@ namespace HE
 
         if (props.api == RendererBackend::OpenGL)
         {
-            m_glContext = SDL_GL_CreateContext(m_window);
+            // Descend through kGlVersions until one context sticks. Every rung
+            // but the last logs a warning rather than dying: a machine that can
+            // only do 4.5 should run with GI off, not refuse to start.
+            for (const GlVersion& v : kGlVersions)
+            {
+                setGlAttributes(v);
+                m_glContext = SDL_GL_CreateContext(m_window);
+                if (m_glContext) break;
+                HE_LOG_WARN(Window, "SDL_GL_CreateContext(GL %d.%d core) failed: %s — trying a "
+                                    "lower version", v.major, v.minor, SDL_GetError());
+            }
             if (!m_glContext)
             {
-                // Usually a driver that cannot give the requested core profile —
-                // the requested version is the essential half of the report.
-                int major = 0, minor = 0;
-                SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
-                SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
-                HE_LOG_CRIT(Window, "SDL_GL_CreateContext failed (requested GL %d.%d core): %s",
-                            major, minor, SDL_GetError());
+                // Every rung refused: the driver has no core profile we can use.
+                // The list is the essential half of the report.
+                HE_LOG_CRIT(Window, "SDL_GL_CreateContext failed for every requested version "
+                                    "(GL %d.%d down to %d.%d core): %s",
+                            kGlVersions[0].major, kGlVersions[0].minor,
+                            kGlVersions[std::size(kGlVersions) - 1].major,
+                            kGlVersions[std::size(kGlVersions) - 1].minor,
+                            SDL_GetError());
                 throw std::runtime_error("SDL_GL_CreateContext failed: " + std::string(SDL_GetError()));
             }
             if (!SDL_GL_SetSwapInterval(props.vsync ? 1 : 0))
@@ -142,9 +182,11 @@ namespace HE
 
     void Window::PollEvents()
     {
+        m_eventsLastPoll = 0;
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
+            ++m_eventsLastPoll;
             if (event.type == SDL_EVENT_QUIT)
                 m_shouldClose = true;
             if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
@@ -173,6 +215,15 @@ namespace HE
 
             if (m_eventCallback) m_eventCallback(event);
         }
+    }
+
+    void Window::WaitForEvent(int timeoutMs)
+    {
+        // Null event pointer = wait for something to arrive but leave it queued,
+        // so the caller's PollEvents() still dispatches it normally. Returns
+        // false on timeout, which is not an error here: the caller wakes up on a
+        // heartbeat either way.
+        SDL_WaitEventTimeout(nullptr, timeoutMs);
     }
 
     void Window::SwapBuffers()

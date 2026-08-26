@@ -147,6 +147,12 @@ private:
     HE::WindowMode      m_windowMode   = HE::WindowMode::Fullscreen;
     HE::RendererBackend m_backend      = HE::RendererBackend::OpenGL;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
+    // Mirror of ProjectConfig::appMode, latched by applyShippedConfig before the
+    // window exists (docs/he-apps-plan.md A1). True = this build is an
+    // application: no scene, no physics, no gameplay hosts, no camera control,
+    // no ECS systems tick. The world object itself still exists — it is what
+    // routes the widget API — it is simply empty.
+    bool m_appMode       = false;
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance

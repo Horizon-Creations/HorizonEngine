@@ -29,10 +29,15 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     HAsset::Writer::appendString(buf, cfg.hpakFilename);
     HAsset::Writer::appendString(buf, cfg.mainSceneName);
     buf.insert(buf.end(), cfg.projectUuidBytes, cfg.projectUuidBytes + 16);
-    const uint32_t flags = (cfg.enableModSupport    ? 1u : 0u)
-                         | (cfg.encrypted           ? 2u : 0u)
-                         | (cfg.hasPackedScene      ? 4u : 0u)
-                         | (cfg.horizonCodeCompiled ? 8u : 0u);
+    // Bits 16/32 are the application flags (see ProjectConfig). 32 stores the
+    // NEGATION of advancedShaderEffects so that every config ever written
+    // before it existed — bit clear — reads back as enabled.
+    const uint32_t flags = (cfg.enableModSupport      ? 1u  : 0u)
+                         | (cfg.encrypted             ? 2u  : 0u)
+                         | (cfg.hasPackedScene        ? 4u  : 0u)
+                         | (cfg.horizonCodeCompiled   ? 8u  : 0u)
+                         | (cfg.appMode               ? 16u : 0u)
+                         | (cfg.advancedShaderEffects ? 0u  : 32u);
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
@@ -69,10 +74,12 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     off += 16;
     uint32_t flags = 0;
     if (!HAsset::Reader::readPOD(buf, off, flags)) return false;
-    out.enableModSupport    = (flags & 1u) != 0;
-    out.encrypted           = (flags & 2u) != 0;
-    out.hasPackedScene      = (flags & 4u) != 0;
-    out.horizonCodeCompiled = (flags & 8u) != 0;
+    out.enableModSupport      = (flags & 1u) != 0;
+    out.encrypted             = (flags & 2u) != 0;
+    out.hasPackedScene        = (flags & 4u) != 0;
+    out.horizonCodeCompiled   = (flags & 8u) != 0;
+    out.appMode               = (flags & 16u) != 0;
+    out.advancedShaderEffects = (flags & 32u) == 0;   // stored negated, see save()
     if (off + 32 > buf.size()) return false;
     std::memcpy(out.encKey, buf.data() + off, 32);
     off += 32;

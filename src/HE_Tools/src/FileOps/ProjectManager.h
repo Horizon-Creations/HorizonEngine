@@ -165,6 +165,20 @@ struct ProjectData
 	// (".heproj \"defaultSaveTemplate\""). Empty = the project's single template
 	// if exactly one exists, else create() fails loud.
 	std::string defaultSaveTemplate;
+
+	// ── Application projects (docs/he-apps-plan.md A0/A1/E1b) ────────────────
+	// appProject: this is an APPLICATION, not a game. No scene, no world, no
+	// physics; the packaged build gets ProjectConfig::appMode and draws only when
+	// something changed. Persisted as ".heproj \"appProject\"".
+	bool appProject = false;
+	// advancedShaderEffects: may this project author MATERIALS (the node graphs
+	// that give a widget a custom shader, "Schicht 1" in the plan)? Off is the
+	// same kind of HARD restriction as scriptLanguage above: the Content Browser
+	// hides the material creators, the material editor stays shut, widgets offer
+	// no material slot, and the packaged runtime can be built without a shader
+	// compiler. Default TRUE, because every project that predates the flag has
+	// them and a game always does.
+	bool advancedShaderEffects = true;
 };
 
 class HE_TOOLS_API ProjectManager
@@ -178,10 +192,14 @@ public:
 	// projectName – display name (also used as .heproj filename)
 	// preset      – which folder template to apply
 	// scriptLanguage – the project's primary gameplay scripting language
+	// appProject / advancedShaderEffects – see ProjectData. Defaulted so every
+	// existing call site keeps creating exactly the game it created before.
 	bool createNewProject(const std::string& projectDir,
 						  const std::string& projectName,
 						  ProjectPreset preset = ProjectPreset::Empty,
-						  ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode);
+						  ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode,
+						  bool appProject = false,
+						  bool advancedShaderEffects = true);
 
 	bool loadProject(const std::string& projectPath);
 	bool saveProject(const std::string& projectPath);

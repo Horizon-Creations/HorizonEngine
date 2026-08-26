@@ -216,8 +216,22 @@ namespace HE
 		Uint64 lastTick = SDL_GetTicksNS();
 		EngineProfiler& profiler = EngineProfiler::instance();
 
+		// Last frame that was actually drawn — the reference the event-driven
+		// heartbeat measures against (see setEventDriven).
+		Uint64 lastDrawTick = SDL_GetTicksNS();
+
 		while (m_running && !m_window->ShouldClose())
 		{
+			// Event-driven idle: sleep inside SDL until something arrives instead
+			// of spinning a full frame to discover that nothing did. The event is
+			// left queued, so the PollEvents() below dispatches it as usual. A
+			// pending redraw request skips the wait — it IS the something.
+			if (m_eventDriven && !m_redrawRequested)
+			{
+				HE_PROFILE_SCOPE_N("IdleWait");
+				Window::WaitForEvent(m_idleHeartbeatMs);
+			}
+
 			const Uint64 nowTick = SDL_GetTicksNS();
 			const Uint64 delta   = nowTick - lastTick;
 			const float  dt      = delta > 0 ? static_cast<float>(delta) * 1e-9f
@@ -251,6 +265,29 @@ namespace HE
 			// this batch is reflected and every consumer in the frame sees the
 			// same stick/button values.
 			m_input.PollGamepads();
+
+			// Does this frame get drawn at all? A game always draws. An
+			// event-driven application draws when the OS gave it something, when
+			// something asked for a redraw, or when the heartbeat expired — the
+			// last one being the safety net under everything that changes the
+			// screen without announcing it.
+			const bool heartbeatDue =
+				(nowTick - lastDrawTick) >= static_cast<Uint64>(m_idleHeartbeatMs) * 1000000ull;
+			const bool drawThisFrame = !m_eventDriven
+			                        || m_window->EventsLastPoll() > 0
+			                        || m_redrawRequested
+			                        || heartbeatDue;
+			m_redrawRequested = false;
+			if (!drawThisFrame)
+			{
+				// Nothing happened. No OnRender, no Render, no swap — and the
+				// input frame still has to end, or the next real frame would
+				// read a stale mouse delta.
+				m_input.EndFrame();
+				HE_PROFILE_FRAME();
+				continue;
+			}
+			lastDrawTick = nowTick;
 
 			try
 				{

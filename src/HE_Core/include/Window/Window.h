@@ -44,6 +44,16 @@ namespace HE
         void PollEvents();
         void SwapBuffers();
 
+        // How many SDL events the last PollEvents() actually handled. An
+        // event-driven application (docs/he-apps-plan.md A2) redraws when this
+        // is non-zero and sleeps when it is not, which is the whole difference
+        // between an idle app costing nothing and one costing a core.
+        uint32_t    EventsLastPoll() const { return m_eventsLastPoll; }
+        // Block until an event arrives or the timeout expires. The event is
+        // LEFT in the queue (SDL takes a null event pointer for exactly this),
+        // so the PollEvents() that follows still sees and dispatches it.
+        static void WaitForEvent(int timeoutMs);
+
         void        SetTitle(const std::string& title);
         void        SetSize(uint32_t width, uint32_t height);
         void        SetVSync(bool enabled);
@@ -89,6 +99,7 @@ namespace HE
         uint32_t        m_height        = 0;   // points
         uint32_t        m_pixelWidth    = 0;   // pixels (HiDPI-scaled points)
         uint32_t        m_pixelHeight   = 0;   // pixels (HiDPI-scaled points)
+        uint32_t        m_eventsLastPoll = 0;  // events handled by the last PollEvents()
         RendererBackend m_api           = RendererBackend::OpenGL;
         EventCallback   m_eventCallback;
     };

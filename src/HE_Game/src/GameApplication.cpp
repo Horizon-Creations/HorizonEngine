@@ -249,6 +249,23 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
+	// Application build (docs/he-apps-plan.md A1): everything below that belongs
+	// to a GAME is skipped. Latched into a member because half a dozen places
+	// downstream ask, and reaching into m_config at each of them invites one of
+	// them being forgotten.
+	m_appMode = m_config.appMode;
+	if (m_appMode)
+	{
+		HE_LOG_INFO(Core, "%s", "GameApplication: application mode — no world, no physics, "
+		                        "no scene");
+		// The FPS-style grab above happens before this config is readable, so it
+		// is undone here rather than made conditional there — an app must not
+		// swallow the cursor, and the early-return paths above (no hcfg, no pak)
+		// keep behaving exactly as they always did.
+		setMouseCaptured(false);
+		// A2: draw on events, not on a clock.
+		setEventDriven(true);
+	}
 
 	// Override content root set by Application base (it uses argv[0] + "Content")
 	contentManager().setContentRoot((exeDir / "Content").string());
@@ -520,7 +537,11 @@ void GameApplication::OnInit()
 
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
-	if (m_config.hasPackedScene)
+	// An application has no scene to load. The world above still exists and is
+	// still handed to the renderer below, because it is what routes the widget
+	// API (ScriptApi::createWidget goes through HorizonWorld::widgets) — it just
+	// stays empty.
+	if (!m_appMode && m_config.hasPackedScene)
 	{
 		// Preferred: binary (CBOR) scene packed into the .hpak.
 		const auto sceneBytes = contentManager().readMountedEntry(sceneUuid);
@@ -535,7 +556,7 @@ void GameApplication::OnInit()
 		else
 			HE_LOG_WARN(Core, "%s", "GameApplication: failed to load packed startup scene");
 	}
-	if (!sceneLoaded && !m_config.mainSceneName.empty())
+	if (!m_appMode && !sceneLoaded && !m_config.mainSceneName.empty())
 	{
 		// Fallback: loose .hescene (JSON) next to the executable.
 		const std::filesystem::path scenePath = exeDir / m_config.mainSceneName;
@@ -550,27 +571,40 @@ void GameApplication::OnInit()
 	// assets, spawn the controllers on the shared runtime (Construct + BeginPlay)
 	// and start pumping Tick/Input.* events (OnRender). After the scene load so
 	// BeginPlay can reach scene entities through the engine-call API.
-	startPhysics();
-	// The entity host FIRST: a controller's BeginPlay is where the game spawns its
-	// character with Create Object, and that spawn is only served with a body
-	// while the entity host is running.
-	if (m_world)
-		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
-	// The entity host is handed over so the player host can find the characters
-	// the LEVEL already placed; it never spawns through it.
-	m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
-	// Last of the hosts: a player character spawned just above may be the very
-	// entity whose state machine needs a sync graph.
-	m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	// None of this exists in an application: no bodies to simulate, no player to
+	// possess, no characters to animate. Left unstarted rather than started and
+	// then fed an empty world, so the cost is zero rather than nearly zero — and
+	// so their per-frame ticks below no-op on their own.
+	if (!m_appMode)
+	{
+		startPhysics();
+		// The entity host FIRST: a controller's BeginPlay is where the game spawns its
+		// character with Create Object, and that spawn is only served with a body
+		// while the entity host is running.
+		if (m_world)
+			m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+		// The entity host is handed over so the player host can find the characters
+		// the LEVEL already placed; it never spawns through it.
+		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// Last of the hosts: a player character spawned just above may be the very
+		// entity whose state machine needs a sync graph.
+		m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	}
 
 	// AFTER the player spawns, not before: a PlayerCharacter class brings its own
 	// camera along, and that camera only exists once the class has been
 	// instantiated. Checking first would find an empty scene, add a fallback
 	// camera flagged isMain, and that fallback — created earlier — is the one the
 	// extractor picks. The player would then own a camera nothing renders through.
+	// Kept in application mode too, deliberately: the extractor and every backend
+	// build their frame around an active camera, and a UI-only frame still goes
+	// through that path. It costs one entity and nothing per frame — what an app
+	// skips is the CONTROLLER (updateCameraController below), so the camera sits
+	// still and WASD belongs to the UI.
 	if (ensureDefaultCamera(*m_world))
 		HE_LOG_INFO(Core, "%s",
-			"GameApplication: added a default free-fly camera (scene had none)");
+			m_appMode ? "GameApplication: added the still camera the UI frame renders through"
+			          : "GameApplication: added a default free-fly camera (scene had none)");
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
@@ -580,9 +614,12 @@ void GameApplication::OnInit()
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");
 
-	HE_LOG_INFO(Core, "%s",
-		("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
-		 " scene-referenced asset roots").c_str());
+	// Nothing to stream without a scene: an app's assets are reached through its
+	// widgets, which load on demand.
+	if (!m_appMode)
+		HE_LOG_INFO(Core, "%s",
+			("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
+			 " scene-referenced asset roots").c_str());
 
 	// Native C++ game logic: an optional GameLogic library next to the executable
 	// (built from the game's C++ project). Once loaded, the base Application loop
@@ -1312,7 +1349,10 @@ void GameApplication::OnRender(float deltaTime)
 	// following a target it updated before the step would follow where that
 	// target was LAST frame, and that lag is visible. Still before the systems
 	// tick, so LOD and precipitation get this frame's camera position.
-	updateCameraController(gameDt);
+	// Not in an application: its camera is a still one that exists only so the
+	// frame has a viewpoint, and a fly-camera controller there would answer WASD
+	// while the user is typing into a text field.
+	if (!m_appMode) updateCameraController(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
@@ -1352,7 +1392,9 @@ void GameApplication::OnRender(float deltaTime)
 	// Tick the shared gameplay/visual systems (weather, animation, particles, …) so a
 	// shipped game animates exactly like the editor preview. Feed the active scene
 	// camera's world position so LOD + precipitation follow the player.
-	if (m_world)
+	// An application has none of these in its (empty) world, and every one of them
+	// would walk a view of zero entities per frame for the rest of its life.
+	if (m_world && !m_appMode)
 	{
 		glm::vec3 camPos(0.0f);
 		for (auto [e, tc, cam] : m_world->registry().view<TransformComponent, CameraComponent>().each())

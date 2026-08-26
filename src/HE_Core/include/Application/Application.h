@@ -125,6 +125,29 @@ namespace HE
 		void  setMaxFps(float fps) { m_maxFps = fps > 0.0f ? fps : 0.0f; }
 		float maxFps() const       { return m_maxFps; }
 
+		// ── Event-driven drawing (docs/he-apps-plan.md A2) ────────────────
+		// A game redraws 60 times a second because the world moved. An
+		// application redraws because something CHANGED, and an app that burns
+		// a core while its window just sits there is not shippable. When this
+		// is on, the loop sleeps in SDL until an event arrives (or the
+		// heartbeat below expires) and skips the whole render when nothing
+		// happened.
+		//
+		// Off by default: a game must not accidentally inherit it.
+		void setEventDriven(bool on)  { m_eventDriven = on; }
+		bool eventDriven() const      { return m_eventDriven; }
+		// Draw one more frame even though no event arrived. Anything that
+		// changes what is on screen without an OS event behind it — a script
+		// setting a widget's text, a finished asset load, an animation step —
+		// calls this. Cleared by the loop once the frame is drawn.
+		void requestRedraw()          { m_redrawRequested = true; }
+		// Longest an event-driven loop may sleep before drawing anyway, in
+		// milliseconds. The safety net under requestRedraw(): whatever fails to
+		// invalidate still appears within this long, at a cost of a few frames
+		// per second instead of sixty.
+		void  setIdleHeartbeatMs(int ms) { m_idleHeartbeatMs = ms > 0 ? ms : 1; }
+		int   idleHeartbeatMs() const    { return m_idleHeartbeatMs; }
+
 		// ── Multi-window API ──────────────────────────────────────────────
 		// Open a new secondary window.  The renderer's AttachWindow() is called
 		// automatically.  Returns an invalid handle if Run() has not been called.
@@ -159,6 +182,13 @@ namespace HE
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture
 		float                      m_maxFps       = 0.0f;  // VSync-off frame cap (0 = unlimited)
+		bool                       m_eventDriven     = false; // see setEventDriven
+		bool                       m_redrawRequested = false; // see requestRedraw
+		// 100 ms = ten frames a second while idle. Low enough that a sleeping app
+		// costs nothing, high enough that a HorizonCode Delay or a widget
+		// animation still moves before requestRedraw() is wired into every
+		// setter that changes the screen.
+		int                        m_idleHeartbeatMs = 100;   // see setIdleHeartbeatMs
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;
 		// Opened at the very top of Run(), closed before the main loop. A

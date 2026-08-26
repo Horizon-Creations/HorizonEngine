@@ -382,7 +382,9 @@ static json startupSceneJson(ProjectPreset preset)
 bool ProjectManager::createNewProject(const std::string& projectDir,
 									  const std::string& projectName,
 									  ProjectPreset preset,
-									  ProjectScriptLanguage scriptLanguage)
+									  ProjectScriptLanguage scriptLanguage,
+									  bool appProject,
+									  bool advancedShaderEffects)
 {
 	fs::path root(projectDir);
 	if (!fs::exists(root))
@@ -449,6 +451,8 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["preset"]         = static_cast<int>(preset);
 	j["startupScene"]   = "Content/StartupScene.hescene";
 	j["scriptLanguage"] = HE::tools::toString(scriptLanguage);
+	j["appProject"]            = appProject;
+	j["advancedShaderEffects"] = advancedShaderEffects;
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -482,12 +486,17 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	m_currentProject.exportProfiles      = profiles;
 	m_currentProject.activeExportProfile = profiles.front().name;
 	m_currentProject.scriptLanguage      = scriptLanguage;
+	m_currentProject.appProject            = appProject;
+	m_currentProject.advancedShaderEffects = advancedShaderEffects;
 	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
-	                    "%zu export profile(s), startup scene '%s'",
+	                    "%zu export profile(s), startup scene '%s', kind %s, "
+	                    "advanced shader effects %s",
 	            m_currentProject.name.c_str(), m_currentProject.path.c_str(),
 	            HE::tools::toString(m_currentProject.scriptLanguage),
 	            static_cast<int>(preset), m_currentProject.exportProfiles.size(),
-	            m_currentProject.startupScene.c_str());
+	            m_currentProject.startupScene.c_str(),
+	            appProject ? "application" : "game",
+	            advancedShaderEffects ? "on" : "off");
 
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
@@ -557,6 +566,10 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.scriptLanguage =
 		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
 	m_currentProject.defaultSaveTemplate = jsonString(j, "defaultSaveTemplate");
+	// Absent keys mean a project written before applications existed: a game,
+	// with materials. Both defaults therefore have to be the game's answer.
+	m_currentProject.appProject            = jsonBool(j, "appProject", false);
+	m_currentProject.advancedShaderEffects = jsonBool(j, "advancedShaderEffects", true);
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -621,6 +634,10 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
 	j["scriptLanguage"]      = HE::tools::toString(m_currentProject.scriptLanguage);
 	j["defaultSaveTemplate"] = m_currentProject.defaultSaveTemplate;
+	// Application flags. Written unconditionally so the file always states what
+	// it is, rather than a missing key having to mean "game" forever.
+	j["appProject"]            = m_currentProject.appProject;
+	j["advancedShaderEffects"] = m_currentProject.advancedShaderEffects;
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an
