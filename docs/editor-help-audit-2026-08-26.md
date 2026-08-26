@@ -174,11 +174,14 @@ zwei davon haben einen Fehler im Editor selbst aufgedeckt.
 
 * Der Hinweis am Netzwerk-Haken der Zusammenarbeit hing an der zuletzt gezeichneten
   Textzeile statt am Haken.
-* Das Umbenennen einer HorizonCode-Funktion soll die zugehörigen Call- und Return-Knoten
-  mitbenennen. Der Code dafür kann nie laufen: `oldName` wird jeden Frame neu gelesen, und
-  in dem Frame, in dem `IsItemDeactivatedAfterEdit()` zuschlägt, ist er schon gleich dem
-  neuen Namen. Betrifft `UIEditorPanel` und `LevelScriptPanel`, ist als eigene Aufgabe
-  notiert, und die beiden Einträge behaupten es solange nicht.
+* Das Umbenennen einer HorizonCode-Funktion sollte die zugehörigen Call- und Return-Knoten
+  mitbenennen. Der Code dafür konnte nie laufen: `oldName` wurde jeden Frame neu gelesen,
+  und in dem Frame, in dem `IsItemDeactivatedAfterEdit()` zuschlägt, war er längst gleich
+  dem neuen Namen. Betraf `UIEditorPanel` und `LevelScriptPanel` gleichermaßen.
+  **Inzwischen behoben** (f442fca4): beide Zeilen bearbeiten einen Zwischenpuffer und
+  schreiben die Umbenennung in einem Zug fest (`HcEditorUtil::seedFunctionName` /
+  `commitFunctionName`), `tests/test_hc_function_rename.cpp` weist die alte Falle an einem
+  echten `InputText` nach, und die beiden Einträge sagen es wieder.
 * `cancelButton` hat nie nachgeschlagen, obwohl der Header es seit Stufe 2 behauptet.
 * Der Tooltip an „Start Game" wäre doppelt erschienen, weil der Hilfe-Lookup absichtlich
   auch an deaktivierten Elementen feuert.
