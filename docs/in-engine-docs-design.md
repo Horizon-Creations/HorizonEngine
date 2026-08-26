@@ -67,12 +67,47 @@ dieselbe Stelle auf der Website.
   Zeilenabstand (genau so gesehen im ersten Screenshot, siehe unten).
 - **Betonung ist Farbe, nicht Schnitt.** Die einzige Schrift des Editors ist bereits fett;
   `**fett**` nimmt das Überschriften-Gold, Code das hellere Gold plus Plättchen.
+- **Lesebreite statt Fensterbreite** (42 em). Ab etwa neunzig Zeichen verliert das Auge den
+  Anfang der nächsten Zeile — das ist der Unterschied zwischen einer Seite und einer Wand.
+  Die Begrenzung sitzt am **scrollenden** Child: ein Child darin wäre das, mit dem
+  `SetScrollHereY` spricht, und mit `AutoResizeY` scrollt das nie. Und ein `Indent()` nach
+  einem `SameLine()` verschiebt die NÄCHSTE Zeile, nicht diese.
+- **Die Seitenleiste klappt lange Seiten in ihre Kategorien** (ab 30 Abschnitten), die
+  Gruppe des gelesenen Abschnitts öffnet sich selbst. Dafür sortiert die Node-Referenz ihre
+  Abschnitte nach Kategorie: die Enum-Reihenfolge ist die, in der Nodes zur Engine kamen.
+- **Abbildungen, die zeigen wo etwas ist**, zeichnet der Editor selbst (`he_uishot.py
+  --docs` → `EditorDeps/Docs/img`, platziert über die `FIGURES`-Tabelle des Generators):
+  eine beschriftete Karte des Layouts mit dem gesuchten Panel in Amber. Ein Screenshot
+  würde zugleich jemandes Projekt zeigen und veralten.
 - **`draw()` nimmt einen schmalen `Host`** (vier Fonts, ein Renderer), nicht den ganzen
   `AppContext`. Sonst könnte ihn nur etwas zeichnen, das ein Projekt, eine Welt und eine
   GPU hinter sich hat — und genau das verhinderte, ihn je anzusehen.
 - **„Show me"** öffnet das Panel, um das ein Abschnitt geht, und lässt den Umriss pulsen
   (`PanelSpotlight`, aus dem Rundgang herausgelöst). Nur wo die Zuordnung wirklich eins
   kennt und nur mit geladenem Projekt.
+
+## Die Node-Referenz: gebaut, nicht geschrieben
+
+`HcNodeReference.cpp` baut aus **den Registern selbst** eine Seite: einen Abschnitt pro
+aufrufbarer Sache (311 Engine-Calls + alle Built-in-Nodes), mit den Pins aus
+`signatureOf` und den Beschreibungen aus `HcNodeDocs.cpp`.
+
+- **Pro Funktion, nicht pro Kategorie.** Dort muss F1 aus dem Node-Tooltip landen; ein
+  Anker pro Kategorie setzt den Leser sechzehn Einträge über der Frage ab.
+- **Sie behält die Seiten-Id der Website-Seite** (`horizoncode-nodes`), damit Querverweise
+  und Anker weiter auflösen — der Generator überspringt die HTML-Seite jetzt. Weil sie
+  eine gewöhnliche Seite ist, brauchen Suche, Navigation, Verlauf und Themen **keinen
+  einzigen Sonderfall**. `appendPage` ersetzt nach Id, ist also idempotent.
+- **Die Beschreibungen sagen, was die Signatur nicht kann:** Einheiten, Verhalten bei
+  falscher Eingabe, Vorbedingungen, Konsequenzen von pure/exec. Die 116 Sky-Zeilen
+  entstehen aus derselben X-Liste wie das Register, mit einer Beschreibung pro FELD.
+- Der Coverage-Test läuft über das **lebende** Register: 16 Mathe-Funktionen werden über
+  einen Helfer registriert und sind beim Lesen der Quelldatei unsichtbar.
+
+**Der Tooltip wird gezeichnet, nicht zusammengesetzt** (`HcEditorUtil::drawNodeDoc`), damit
+die Pins die Sprache des Canvas sprechen: Dreieck für Exec, gefüllter Kreis für Daten,
+2×2-Raster für Container, jeweils in der Farbe des Typs. `GraphEditor::Model::nodeTooltip`
+(String) wurde dafür zu `drawNodeTooltip` — die Komponente entscheidet WANN, der Host WIE.
 
 ## Tooltips: `HE::Ed::Help` (`EditorHelp.{h,cpp}`)
 
@@ -128,6 +163,8 @@ Zeilenabstand und die fehlenden Glyphen.
 
 - Der Reader hat **keine Volltext-Sprungmarken innerhalb eines Abschnitts** — die Suche
   scrollt auf den Abschnitt, nicht auf die Zeile.
+- **Die Node-Referenz-Seite der Website steht noch da**, sie wird nur nicht mehr ins Bündel
+  übernommen. Sie zu löschen ist ein Deploy und braucht eine Bestätigung.
 - **Kein Command-Palette-Ersatz.** „Wo ist X" beantwortet heute die Suche plus „Show me";
   eine Palette über Menübefehle und Einstellungen wäre der nächste Schritt.
 - Die Hilfe-Tabelle deckt **alle 252 beschrifteten Zeilen** von Details-Panel und
