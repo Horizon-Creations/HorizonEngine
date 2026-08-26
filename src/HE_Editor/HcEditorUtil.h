@@ -252,7 +252,14 @@ namespace HcEditorUtil
 	// caller's cue for an undo snapshot). Renaming TO nothing leaves the calls
 	// alone rather than pointing them all at an unnamed function, and naming a
 	// function that had no name does not adopt the calls that have none either.
-	bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e);
+	//
+	// `selfKey` is this graph's own asset path, which is what a Call Function
+	// (Ref) pointed back at this class through a Get Self resolves to. Empty when
+	// the asset has none yet: nothing outside can reference it either way.
+	// Reaching the REST of the project is the sweep's job (HcRename), not this
+	// function's — this one only ever touches the graph it is handed.
+	bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e,
+	                        const std::string& selfKey);
 
 	// ── Literal node bodies (inline value editors on the node) ────────────────
 	// Const/literal nodes show their value right on the node body: a checkbox for

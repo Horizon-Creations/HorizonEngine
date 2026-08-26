@@ -1,6 +1,7 @@
 #include "HcGraphHost.h"
 #include <Types/TypeRegistry.h>
 #include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
+#include "HcRename.h"            // which class a Ref points at — one rule for menus and renames
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
 #include "EditorHelp.h"          // Help::Scope — the shared node rows key their help here
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
@@ -446,34 +447,17 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
                                    const HC::Graph* giGraph, ContentManager* content,
                                    HC::Graph& scratch)
 {
-	switch (srcNode.type)
-	{
-		case NT::GetSelf:         return &selfGraph;
-		case NT::GetGameInstance: return giGraph;
-		case NT::CreateObject:
-		case NT::CreateWidget:
-			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
-		// The whole point of a Cast: the Success reference is TYPED, so its
-		// member menu is the target class's. An engine base class has no graph
-		// of its own — its members come from the taxonomy table instead, so
-		// there is nothing to load here and null is the right answer.
-		case NT::Cast:
-			if (srcNode.s.empty() || HC::findEngineClass(srcNode.s)) return nullptr;
-			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
-		case NT::GetVariable:
-		case NT::SetVariable: // the set node passes the value through as its output
-		{
-			const HC::Variable* v = selfGraph.findVariable(srcNode.s);
-			if (v && v->type == PT::Ref && !v->className.empty())
-				return loadClassGraph(content, v->className, scratch) ? &scratch : nullptr;
-			return nullptr;
-		}
-		case NT::ForEach: // Element of an object array (class adopted on connect)
-			if (srcNode.propType == PT::Ref && !srcNode.s.empty())
-				return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
-			return nullptr;
-		default: return nullptr;
-	}
+	// These two are the graphs already in hand, not something to load.
+	if (srcNode.type == NT::GetSelf)         return &selfGraph;
+	if (srcNode.type == NT::GetGameInstance) return giGraph;
+
+	// Everything else names an asset, and WHICH asset is decided in exactly one
+	// place — the same one the cross-asset rename asks, so a menu can never offer
+	// members of a class the rename would then fail to find. An engine class (a
+	// Cast to PlayerCharacter, say) resolves to nothing on purpose: the taxonomy
+	// rows have no graph, their members come from the table instead.
+	const std::string key = HcRename::classOfRefSource(selfGraph, srcNode, {}, {});
+	return (!key.empty() && loadClassGraph(content, key, scratch)) ? &scratch : nullptr;
 }
 
 namespace

@@ -878,7 +878,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		ImGui::InputText("Name", &g.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
 		if (ImGui::IsItemDeactivatedAfterEdit() &&
-		    HcEditorUtil::commitFunctionName(graph, *n, g.fnNameEdit))
+		    HcEditorUtil::commitFunctionName(graph, *n, g.fnNameEdit, g.graphFor))
 			edited = true;
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "public\0private\0"))

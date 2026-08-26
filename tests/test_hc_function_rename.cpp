@@ -45,6 +45,11 @@ Graph makeGraph()
 	return g;
 }
 
+// The graph's own asset path. Only a Call Function (Ref) aimed back at this
+// class through a Get Self resolves to it, and this graph has none — but the
+// commit wants to know, so the tests say.
+constexpr const char* kSelf = "Classes/Turret.hasset";
+
 Node& entryOf(Graph& g)  { return g.nodes[0]; }
 Node& callOf(Graph& g)   { return g.nodes[1]; }
 Node& returnOf(Graph& g) { return g.nodes[2]; }
@@ -206,7 +211,7 @@ TEST_CASE("HorizonCode rename: the entry's new name carries to Call and Return")
 		HcEditorUtil::seedFunctionName(e, ed);
 		ImGui::InputText("Name", &ed.buf);
 		if (ImGui::IsItemDeactivatedAfterEdit())
-			committed |= HcEditorUtil::commitFunctionName(g, e, ed);
+			committed |= HcEditorUtil::commitFunctionName(g, e, ed, kSelf);
 	};
 
 	SUBCASE("committed with Enter")
@@ -269,7 +274,7 @@ TEST_CASE("HorizonCode rename: what a commit does and does not touch")
 		Graph g = makeGraph();
 		HcEditorUtil::FnNameEdit ed;
 		HcEditorUtil::seedFunctionName(entryOf(g), ed);
-		CHECK_FALSE(HcEditorUtil::commitFunctionName(g, entryOf(g), ed));
+		CHECK_FALSE(HcEditorUtil::commitFunctionName(g, entryOf(g), ed, kSelf));
 		CHECK(entryOf(g).s == "Fire");
 	}
 
@@ -281,7 +286,7 @@ TEST_CASE("HorizonCode rename: what a commit does and does not touch")
 		HcEditorUtil::FnNameEdit ed;
 		HcEditorUtil::seedFunctionName(entryOf(g), ed);
 		ed.buf.clear();
-		CHECK(HcEditorUtil::commitFunctionName(g, entryOf(g), ed));
+		CHECK(HcEditorUtil::commitFunctionName(g, entryOf(g), ed, kSelf));
 		CHECK(entryOf(g).s.empty());
 		CHECK(callOf(g).s   == "Fire");
 		CHECK(returnOf(g).s == "Fire");
@@ -298,7 +303,7 @@ TEST_CASE("HorizonCode rename: what a commit does and does not touch")
 		HcEditorUtil::FnNameEdit ed;
 		HcEditorUtil::seedFunctionName(entryOf(g), ed);
 		ed.buf = "Ignite";
-		CHECK(HcEditorUtil::commitFunctionName(g, entryOf(g), ed));
+		CHECK(HcEditorUtil::commitFunctionName(g, entryOf(g), ed, kSelf));
 		CHECK(entryOf(g).s == "Ignite");
 		CHECK(callOf(g).s.empty());
 	}
@@ -311,7 +316,7 @@ TEST_CASE("HorizonCode rename: what a commit does and does not touch")
 		HcEditorUtil::FnNameEdit ed;
 		HcEditorUtil::seedFunctionName(entryOf(g), ed);
 		ed.buf = "Ignite";
-		CHECK(HcEditorUtil::commitFunctionName(g, entryOf(g), ed));
+		CHECK(HcEditorUtil::commitFunctionName(g, entryOf(g), ed, kSelf));
 		CHECK(g.nodes[4].s == "Reload");
 		CHECK(otherOf(g).s == "Reload");
 	}

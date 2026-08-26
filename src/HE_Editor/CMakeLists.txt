@@ -145,6 +145,7 @@ add_executable(HorizonEditor WIN32
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
 	HcEditorUtil.cpp
+	HcRename.cpp
 	HcGraphClipboard.cpp
 	HcGraphHost.cpp
 	HcGraphShortcuts.cpp

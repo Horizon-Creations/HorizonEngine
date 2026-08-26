@@ -2306,7 +2306,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		ImGui::InputText("Name", &st.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
 		if (ImGui::IsItemDeactivatedAfterEdit() &&
-		    HcEditorUtil::commitFunctionName(st.graph, *n, st.fnNameEdit))
+		    HcEditorUtil::commitFunctionName(st.graph, *n, st.fnNameEdit, st.relPath))
 			committed = true;
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "Public\0Private\0"))

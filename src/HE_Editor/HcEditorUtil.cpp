@@ -1,4 +1,5 @@
 #include "HcEditorUtil.h"
+#include "HcRename.h"         // one planner for what a rename touches
 #include <Types/TypeRegistry.h>
 #include "EditorHelp.h"       // Help::Scope — the shared default-value rows key their help here
 #include "EditorWidgets.h"    // danger buttons for deletion
@@ -916,19 +917,28 @@ void seedFunctionName(const HorizonCode::Node& entry, FnNameEdit& e)
 	e.seed = entry.s;
 }
 
-bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e)
+bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e,
+                        const std::string& selfKey)
 {
-	using T = HorizonCode::NodeType;
 	const std::string oldName = entry.s;
 	if (e.buf == oldName) return false;
 
-	entry.s = e.buf;
 	// An empty name on either side is not a name, it is the absence of one, and
 	// matching on it would sweep up every call that has picked no function yet.
-	if (!oldName.empty() && !e.buf.empty())
-		for (HorizonCode::Node& c : g.nodes)
-			if ((c.type == T::FunctionCall || c.type == T::FunctionReturn) && c.s == oldName)
-				c.s = e.buf;
+	if (oldName.empty() || e.buf.empty())
+	{
+		entry.s = e.buf;
+	}
+	else
+	{
+		// One planner decides what a rename touches, here and in the sweep over
+		// the rest of the project — including this graph's own Call Function (Ref)
+		// nodes pointed back at itself through a Get Self.
+		const HcRename::Target t{ selfKey, HcRename::Member::Function, oldName, e.buf };
+		const HcRename::Plan p = HcRename::planGraph(g, HcRename::Role::Declares, { selfKey },
+		                                             selfKey, {}, t);
+		HcRename::apply(g, p, t);
+	}
 
 	// The field goes on showing what it just committed instead of being re-seeded
 	// from the node it changed.

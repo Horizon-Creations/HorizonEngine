@@ -17,6 +17,7 @@ add_executable(he_tests
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
     test_hc_function_rename.cpp
+    test_hc_rename_scope.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
     test_gizmo_pick.cpp
@@ -170,6 +171,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcEditorUtil.cpp
+    # Renaming a HorizonCode member across assets. Deliberately free of ImGui and
+    # of the content system, which is what lets the whole decision — whose call is
+    # this, may it be rewritten — be asserted here instead of clicked through.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcRename.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PanelSpotlight.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
