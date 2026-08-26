@@ -515,6 +515,18 @@ void GameApplication::OnInit()
 			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine,
 			                &m_gameInstance.runtime(), self, &m_entityHost,
 			                [this]{ Quit(); } };
+			// The window rows (app.setTitle/setSize/size, app.requestRedraw). The
+			// shipped build owns its window outright, so unlike the editor there
+			// is nothing to protect here — a graph that resizes it means it.
+			c.setWindowTitle = [this](const std::string& t) { setWindowTitle(t); };
+			c.setWindowSize  = [this](uint32_t w, uint32_t h) { setWindowSize(w, h); };
+			c.windowSize     = [this] {
+				const HE::Window* w = window();
+				return w ? glm::vec2(static_cast<float>(w->GetWidth()),
+				                     static_cast<float>(w->GetHeight()))
+				         : glm::vec2(0.0f);
+			};
+			c.requestRedraw  = [this] { requestRedraw(); };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));

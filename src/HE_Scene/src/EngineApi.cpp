@@ -461,6 +461,50 @@ void quit(Ctx& c)
     }
     c.requestQuit();
 }
+
+void setTitle(Ctx& c, const std::string& title)
+{
+    if (!c.setWindowTitle)
+    {
+        HE_LOG_WARN(Script, "%s", "app.setTitle: no window bound by the host — ignored");
+        return;
+    }
+    c.setWindowTitle(title);
+}
+
+void setSize(Ctx& c, int width, int height)
+{
+    if (!c.setWindowSize)
+    {
+        HE_LOG_WARN(Script, "%s", "app.setSize: no window bound by the host — ignored");
+        return;
+    }
+    // A window of zero or negative size is not a window. Rejected here rather
+    // than passed on, because SDL's behaviour for it differs per platform and
+    // "my app vanished" is a miserable thing to debug.
+    if (width <= 0 || height <= 0)
+    {
+        HE_LOG_WARN(Script, "app.setSize(%d, %d): both sides must be positive — ignored",
+                    width, height);
+        return;
+    }
+    c.setWindowSize(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+}
+
+glm::vec2 size(Ctx& c)
+{
+    // Silent zero rather than a warning: this is a getter, and a graph polling
+    // the window size every tick would drown the log.
+    return c.windowSize ? c.windowSize() : glm::vec2(0.0f);
+}
+
+void requestRedraw(Ctx& c)
+{
+    // Deliberately silent when unbound: a game host binds nothing here because a
+    // game already draws every frame, and asking for a redraw there is a
+    // harmless no-op rather than a mistake worth reporting.
+    if (c.requestRedraw) c.requestRedraw();
+}
 } // namespace app
 
 // ── Camera ───────────────────────────────────────────────────────────────────
@@ -1859,9 +1903,20 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
             [](Ctx& c, const VV& a){ cursor::setVisible(c, aB(a, 0)); return VV{}; } });
 
-        // Application — what a main menu's last button does.
+        // Application — what a main menu's last button does, plus the window an
+        // application owns (docs/he-apps-plan.md A4). A game leaves the window
+        // rows unbound, so they warn once and do nothing there.
         t.push_back({ "app.quit", "App", true, {}, {}, "HE::api::app::quit",
             [](Ctx& c, const VV&){ app::quit(c); return VV{}; } });
+        t.push_back({ "app.setTitle", "App", true, {{"title", P::String}}, {}, "HE::api::app::setTitle",
+            [](Ctx& c, const VV& a){ app::setTitle(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "app.setSize", "App", true, {{"width", P::Int}, {"height", P::Int}}, {},
+            "HE::api::app::setSize",
+            [](Ctx& c, const VV& a){ app::setSize(c, aI(a, 0), aI(a, 1)); return VV{}; } });
+        t.push_back({ "app.size", "App", false, {}, {{"size", P::Vec2}}, "HE::api::app::size",
+            [](Ctx& c, const VV&){ return VV{ Value::ofVec2(app::size(c)) }; } });
+        t.push_back({ "app.requestRedraw", "App", true, {}, {}, "HE::api::app::requestRedraw",
+            [](Ctx& c, const VV&){ app::requestRedraw(c); return VV{}; } });
 
         // Math (pure)
         auto unary  = [&](const char* id, const char* cpp, float(*fn)(float)) {
@@ -2277,6 +2332,8 @@ const std::vector<ApiFn>& registry()
             { "widget.callFunction", "Call Widget Function" },
             { "cursor.setVisible", "Set Cursor Visible" },
             { "app.quit", "Quit Game" },
+            { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },
+            { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
             { "math.sin", "Sine" },   { "math.cos", "Cosine" }, { "math.tan", "Tangent" },
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },

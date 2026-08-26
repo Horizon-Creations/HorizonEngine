@@ -76,6 +76,19 @@ struct Ctx
     // an ordinary state, like every null handle above — app::quit then says so
     // and does nothing.
     std::function<void()> requestQuit;
+    // The host's WINDOW, as the three things a script may do to it. Callbacks
+    // for the same reason requestQuit is one: HE_Scene cannot reach an
+    // HE::Application, and the answer differs per host (a packaged app owns its
+    // window outright; the editor must not let a previewed graph resize the
+    // editor). Unset = the row logs once and does nothing, like every other
+    // unbound service here.
+    std::function<void(const std::string&)>   setWindowTitle;
+    std::function<void(uint32_t, uint32_t)>   setWindowSize;
+    std::function<glm::vec2()>                windowSize;
+    // Draw one more frame. An event-driven application (docs/he-apps-plan.md A2)
+    // sleeps until something happens, and a script changing a widget is exactly
+    // the kind of "something" that carries no OS event with it.
+    std::function<void()> requestRedraw;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -300,6 +313,12 @@ namespace cursor {
 // through Ctx::requestQuit — see there for why the host supplies it.
 namespace app {
     void quit(Ctx&);
+    // The window an application lives in. All four are no-ops (with one warning)
+    // when the host bound no window — see the callbacks on Ctx.
+    void      setTitle(Ctx&, const std::string& title);
+    void      setSize(Ctx&, int width, int height);
+    glm::vec2 size(Ctx&);                 // logical points; (0,0) when unbound
+    void      requestRedraw(Ctx&);        // draw one more frame (event-driven apps)
 }
 
 // ── Camera (the world's main camera: isMain, else the first CameraComponent) ──

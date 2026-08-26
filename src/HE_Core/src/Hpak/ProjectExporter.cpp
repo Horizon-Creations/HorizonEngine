@@ -923,6 +923,8 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.encrypted = settings.encrypt;
     cfg.horizonCodeCompiled = ctx.hcGenShipped;
     cfg.defaultSaveTemplate = settings.defaultSaveTemplate;
+    cfg.appMode               = settings.appProject;
+    cfg.advancedShaderEffects = settings.advancedShaderEffects;
     // Key placement: inside the game executable when the patch succeeded (the
     // hcfg then carries only the encrypted flag), in the hcfg otherwise.
     if (settings.encrypt && !ctx.keyEmbedded)

@@ -46,6 +46,12 @@ struct HE_API ExportSettings {
     // (.heproj "defaultSaveTemplate") — written into project.hcfg so
     // save.create() in the shipped game resolves the same schema.
     std::string defaultSaveTemplate;
+    // Application project (.heproj "appProject" / "advancedShaderEffects") —
+    // written straight into project.hcfg, where the runtime reads them to decide
+    // whether it builds a world at all and whether it draws on a clock or on
+    // events. See docs/he-apps-plan.md A0/A1/A2.
+    bool appProject = false;
+    bool advancedShaderEffects = true;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.

@@ -1133,7 +1133,15 @@ void startExport(AppContext& ctx)
                 // The project's default SaveGameTemplate rides into project.hcfg
                 // so save.create() in the shipped game finds the same schema.
                 if (ctx.projectManager)
+                {
                     es.defaultSaveTemplate = ctx.projectManager->currentProject().defaultSaveTemplate;
+                    // What KIND of thing is being exported. The runtime reads
+                    // both out of project.hcfg: appProject decides whether it
+                    // builds a world and draws on events, advancedShaderEffects
+                    // whether material graphs can appear at all.
+                    es.appProject            = ctx.projectManager->currentProject().appProject;
+                    es.advancedShaderEffects = ctx.projectManager->currentProject().advancedShaderEffects;
+                }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 // Texture-compression cook target, chosen automatically from the
                 // export target's GPU family (all encoding happens at pack time —
