@@ -324,6 +324,25 @@ enum class NodeType : uint8_t
     MapValues,    // Map → Array of values, in the SAME order as MapKeys
     ForEachMap,   // exec: Body per pair (Key + Value + Index), then Done
 
+    // ── The way BACK, and the set algebra ────────────────────────────────────
+    // Appended at the END rather than slotted into the two blocks above: a
+    // NodeType's integer position is not something anything should have to
+    // depend on, and appending keeps that true without anyone having to prove
+    // it. (Same rule PinType's tail carries.) The pin cases still live inside
+    // the Set/Map regions of signatureInto, where the pin macros are.
+    //
+    // Every one is PURE and copy-semantic like the container nodes it joins,
+    // and every one states an ORDER — with insertion-ordered containers a
+    // result order is a promise, not an implementation detail.
+    SetFromArray,     // Array<T> → Set<T>; duplicates collapse to the FIRST
+    SetUnion,         // A ∪ B: A's order, then B's elements A did not have
+    SetIntersect,     // A ∩ B: A's order, keeping only what B also has
+    SetDifference,    // A \ B: A's order, dropping everything B has
+    MapFromArrays,    // Array<K> + Array<V> paired by INDEX → Map<K,V>
+    MapBreak,         // Map → Array<K> Keys + Array<V> Values (index-parallel)
+    MapFindByValue,   // Map + V → the FIRST key holding it, + Found
+    MapRemoveByValue, // Map + V → Map without EVERY pair holding it
+
     COUNT
 };
 
@@ -490,6 +509,16 @@ HE_API bool dataPinDescOf(const Node& n, bool input, int index, PinDesc& out);
 
 // Static metadata for the editor add-menu (category + display name).
 HE_API const char* nodeDisplayName(NodeType t);
+// Extra words the add-menu's search matches BESIDES the display name,
+// space-separated, or "" — never null.
+//
+// It exists because the display name is the node's key on disk (see the boxed
+// warning at nodeDisplayName's definition): "Map Set" cannot be renamed to
+// "Map Add" without every saved graph losing that node on load. So the name
+// stays and the SYNONYM moves here, where a user typing "map add" still finds
+// it. Aliases are search-only — nothing serializes them, so unlike a display
+// name they can be changed at any time.
+HE_API const char* nodeSearchAliases(NodeType t);
 HE_API const char* nodeCategory(NodeType t);
 // One-or-two-sentence usage description for the editor's hover tooltips
 // (what the node does, what its inputs expect, what comes out).

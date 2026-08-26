@@ -511,13 +511,21 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         {
             const Pin& p = n.pins[i];
             const ImVec2 pp = n.pinPos[i];
+            // A data pin's shape says WHICH container it carries — the type system
+            // tells an Array<T>, a Set<T> and a Map<K,T> apart, so the pin has to
+            // as well, or the canvas hides the one thing a wire can fail on. All
+            // three fill the same ±0.97·kPinR box the array grid always did, so a
+            // node's pin column keeps its rhythm, and all three scale with the
+            // zoom like every other glyph here. Only the GLYPH changes: the pin's
+            // position and its hit circle are untouched (see pinAt).
+            const Container ck = containerOf(p);
             if (p.isExec)
             {
                 const float s = kPinR * st.zoom;
                 dl->AddTriangleFilled(ImVec2(pp.x - s, pp.y - s), ImVec2(pp.x - s, pp.y + s),
                                       ImVec2(pp.x + s, pp.y), p.color);
             }
-            else if (p.isArray)
+            else if (ck == Container::Array)
             {
                 // Array pin: a 2×2 grid of small squares (Unreal-style container pin)
                 // so a list-of-T is visually distinct from a scalar T of the same color.
@@ -527,6 +535,31 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                     for (int gx = -1; gx <= 1; gx += 2)
                         dl->AddRectFilled(ImVec2(pp.x + gx * o - h, pp.y + gy * o - h),
                                           ImVec2(pp.x + gx * o + h, pp.y + gy * o + h), p.color);
+            }
+            else if (ck == Container::Set)
+            {
+                // Set pin: three of the SCALAR dot, clustered in a triangle. Round
+                // because a set holds exactly what the round pin holds; clustered
+                // and un-stacked because a set has no order and no index — which is
+                // the whole difference from the array's tidy grid.
+                const float d = kPinR * st.zoom * 0.55f;   // center distance
+                const float r = kPinR * st.zoom * 0.42f;   // dot radius
+                dl->AddCircleFilled(ImVec2(pp.x, pp.y - d), r, p.color);
+                dl->AddCircleFilled(ImVec2(pp.x - d * 0.866f, pp.y + d * 0.5f), r, p.color);
+                dl->AddCircleFilled(ImVec2(pp.x + d * 0.866f, pp.y + d * 0.5f), r, p.color);
+            }
+            else if (ck == Container::Map)
+            {
+                // Map pin: two columns, KEY color left and value color right. A map
+                // pin used to wear the value type's color alone, which drew
+                // Map<String,Int> and Map<Int,Int> identically — the key type was
+                // not readable off the node at all. Hosts that supply no key color
+                // fall back to the value color on both columns.
+                const float e = kPinR * st.zoom * 0.97f;   // outer half-extent
+                const float g = kPinR * st.zoom * 0.08f;   // half the gap between columns
+                dl->AddRectFilled(ImVec2(pp.x - e, pp.y - e), ImVec2(pp.x - g, pp.y + e),
+                                  p.keyColor ? p.keyColor : p.color);
+                dl->AddRectFilled(ImVec2(pp.x + g, pp.y - e), ImVec2(pp.x + e, pp.y + e), p.color);
             }
             else
                 dl->AddCircleFilled(pp, kPinR * st.zoom, p.color);

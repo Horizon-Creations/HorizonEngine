@@ -65,6 +65,68 @@ int mapNode(Graph& g, NodeType t)
     return g.addNode(std::move(n));
 }
 
+// A plain Array node: container None, which reads as Array — the shape every
+// array node written before Set/Map existed has.
+int arrNode(Graph& g, NodeType t, PinType elem)
+{ Node n; n.type = t; n.propType = elem; return g.addNode(std::move(n)); }
+
+// Where a built container came out: the node and its data-out pin.
+struct Out { int node = 0; int pin = 0; };
+
+// Make Array → Array Append → … over the given strings/ints.
+Out buildStrArray(Graph& g, const std::vector<const char*>& items)
+{
+    Out o{ arrNode(g, NodeType::ArrayMake, PinType::String), 0 };
+    for (const char* s : items)
+    {
+        const int add = arrNode(g, NodeType::ArrayAdd, PinType::String);
+        REQUIRE(g.connect(o.node, o.pin, add, 0));
+        REQUIRE(g.connect(constStr(g, s), 0, add, 1));
+        o = { add, 2 };                 // Array 0, Value 1, Array-out 2
+    }
+    return o;
+}
+Out buildIntArray(Graph& g, const std::vector<int>& items)
+{
+    Out o{ arrNode(g, NodeType::ArrayMake, PinType::Int), 0 };
+    for (const int i : items)
+    {
+        const int add = arrNode(g, NodeType::ArrayAdd, PinType::Int);
+        REQUIRE(g.connect(o.node, o.pin, add, 0));
+        REQUIRE(g.connect(constInt(g, i), 0, add, 1));
+        o = { add, 2 };
+    }
+    return o;
+}
+// Make Set → Set Add → … over strings.
+Out buildSet(Graph& g, const std::vector<const char*>& items)
+{
+    Out o{ setNode(g, NodeType::SetMake), 0 };
+    for (const char* s : items)
+    {
+        const int add = setNode(g, NodeType::SetAdd);
+        REQUIRE(g.connect(o.node, o.pin, add, 0));
+        REQUIRE(g.connect(constStr(g, s), 0, add, 1));
+        o = { add, 2 };                 // Set 0, Value 1, Set-out 2
+    }
+    return o;
+}
+// Make Map → Map Set → … over String → Int.
+struct KV { const char* k; int v; };
+Out buildMap(Graph& g, const std::vector<KV>& pairs)
+{
+    Out o{ mapNode(g, NodeType::MapMake), 0 };
+    for (const KV& p : pairs)
+    {
+        const int st = mapNode(g, NodeType::MapSet);
+        REQUIRE(g.connect(o.node, o.pin, st, 0));
+        REQUIRE(g.connect(constStr(g, p.k), 0, st, 1));
+        REQUIRE(g.connect(constInt(g, p.v), 0, st, 2));
+        o = { st, 3 };                  // Map 0, Key 1, Value 2, Map-out 3
+    }
+    return o;
+}
+
 // Store `src`'s data-out 0 into a variable of the given shape, fired by "Go".
 void storeInto(Graph& g, int src, int srcPin, const char* varName,
                PinType type, ContainerKind kind, PinType keyType = PinType::String)
@@ -227,6 +289,127 @@ TEST_CASE("For Each Set walks insertion order")
     CHECK(strings(store.vars["seen"].items) == std::vector<std::string>{ "z", "a", "m" });
 }
 
+// ── Set: the way back, and the set algebra ───────────────────────────────────
+
+TEST_CASE("Set From Array drops duplicates, keeping the FIRST occurrence's slot")
+{
+    // The decision this pins: an array MAY repeat and a set may not, so the
+    // later "b" disappears and the earlier one keeps its position — the same
+    // answer a chain of Set Add nodes gives, which is the point.
+    Graph g;
+    const Out a = buildStrArray(g, { "b", "a", "b", "c" });
+    const int fs = setNode(g, NodeType::SetFromArray);
+    REQUIRE(g.connect(a.node, a.pin, fs, 0));
+    storeInto(g, fs, 1, "s", PinType::String, ContainerKind::Set);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    const Value& v = store.vars["s"];
+    CHECK(v.kind() == ContainerKind::Set);
+    CHECK(strings(v.items) == std::vector<std::string>{ "b", "a", "c" });
+}
+
+TEST_CASE("Set From Array and Set To Array are each other's inverse on a set")
+{
+    Graph g;
+    const Out s = buildSet(g, { "z", "a", "m" });
+    const int ta = setNode(g, NodeType::SetToArray);
+    REQUIRE(g.connect(s.node, s.pin, ta, 0));
+    const int fs = setNode(g, NodeType::SetFromArray);
+    REQUIRE(g.connect(ta, 1, fs, 0));
+    storeInto(g, fs, 1, "s", PinType::String, ContainerKind::Set);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    // Round trip, ORDER INCLUDED — anything sorted on the way would show here.
+    CHECK(strings(store.vars["s"].items) == std::vector<std::string>{ "z", "a", "m" });
+}
+
+TEST_CASE("Set Union is A's order, then the elements only B has")
+{
+    Graph g;
+    const Out a = buildSet(g, { "b", "a" });
+    const Out b = buildSet(g, { "c", "a", "d" });
+    const int un = setNode(g, NodeType::SetUnion);
+    REQUIRE(g.connect(a.node, a.pin, un, 0));
+    REQUIRE(g.connect(b.node, b.pin, un, 1));
+    storeInto(g, un, 2, "u", PinType::String, ContainerKind::Set);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    // "a" is in both and keeps A's slot; "c"/"d" follow in B's order. A sorted
+    // result would read a,b,c,d and a B-first one c,a,d,b.
+    CHECK(strings(store.vars["u"].items) == std::vector<std::string>{ "b", "a", "c", "d" });
+}
+
+TEST_CASE("Set Intersect keeps only what both have, in A's order")
+{
+    Graph g;
+    const Out a = buildSet(g, { "c", "b", "a" });
+    const Out b = buildSet(g, { "a", "b" });
+    const int in = setNode(g, NodeType::SetIntersect);
+    REQUIRE(g.connect(a.node, a.pin, in, 0));
+    REQUIRE(g.connect(b.node, b.pin, in, 1));
+    storeInto(g, in, 2, "i", PinType::String, ContainerKind::Set);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    // B lists a before b; the result follows A, which lists b before a.
+    CHECK(strings(store.vars["i"].items) == std::vector<std::string>{ "b", "a" });
+}
+
+TEST_CASE("Set Difference is A without B — and swapping the sides is a different answer")
+{
+    Graph g;
+    const Out a = buildSet(g, { "c", "b", "a" });
+    const Out b = buildSet(g, { "b", "x" });
+    const int ab = setNode(g, NodeType::SetDifference);
+    REQUIRE(g.connect(a.node, a.pin, ab, 0));
+    REQUIRE(g.connect(b.node, b.pin, ab, 1));
+    const int ba = setNode(g, NodeType::SetDifference);
+    REQUIRE(g.connect(b.node, b.pin, ba, 0));
+    REQUIRE(g.connect(a.node, a.pin, ba, 1));
+    storeInto(g, ab, 2, "ab", PinType::String, ContainerKind::Set);
+    storeInto(g, ba, 2, "ba", PinType::String, ContainerKind::Set);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    CHECK(strings(store.vars["ab"].items) == std::vector<std::string>{ "c", "a" });
+    CHECK(strings(store.vars["ba"].items) == std::vector<std::string>{ "x" });
+}
+
+TEST_CASE("A set operation on an UNWIRED side is the identity / the empty set")
+{
+    // An unwired container pin reads as an empty container, so union leaves A
+    // alone and intersect empties it — not "whatever a scalar zero would be".
+    Graph g;
+    const Out a = buildSet(g, { "a", "b" });
+    const int un = setNode(g, NodeType::SetUnion);
+    REQUIRE(g.connect(a.node, a.pin, un, 0));            // B left unwired
+    const int in = setNode(g, NodeType::SetIntersect);
+    REQUIRE(g.connect(a.node, a.pin, in, 0));
+    storeInto(g, un, 2, "u", PinType::String, ContainerKind::Set);
+    storeInto(g, in, 2, "i", PinType::String, ContainerKind::Set);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    CHECK(strings(store.vars["u"].items) == std::vector<std::string>{ "a", "b" });
+    CHECK(store.vars["i"].items.empty());
+    CHECK(store.vars["i"].kind() == ContainerKind::Set);
+}
+
 // ── Map ──────────────────────────────────────────────────────────────────────
 
 TEST_CASE("Map Set inserts in order and UPDATES an existing key in place")
@@ -385,6 +568,164 @@ TEST_CASE("For Each Map walks pairs in insertion order")
     r.fireEvent("Go");
 
     CHECK(strings(store.vars["seen"].items) == std::vector<std::string>{ "z", "a" });
+}
+
+// ── Map: the way back, and searching by VALUE ────────────────────────────────
+
+TEST_CASE("Make Map From Arrays pairs by index; the SHORTER array wins")
+{
+    // The decision this pins: a surplus key would need a value nobody supplied,
+    // so the pair simply does not appear — Map Keys / Map Values truncate to the
+    // pairs that exist for the same reason.
+    Graph g;
+    const Out ks = buildStrArray(g, { "a", "b", "c" });
+    const Out vs = buildIntArray(g, { 1, 2 });
+    const int mk = mapNode(g, NodeType::MapFromArrays);
+    REQUIRE(g.connect(ks.node, ks.pin, mk, 0));
+    REQUIRE(g.connect(vs.node, vs.pin, mk, 1));
+    const int br = mapNode(g, NodeType::MapBreak);
+    REQUIRE(g.connect(mk, 2, br, 0));
+
+    // The half-wired node an author has on the canvas while still building it:
+    // an unwired container pin is an EMPTY container, so "shorter wins" makes it
+    // an empty map rather than keys with invented values.
+    const int half = mapNode(g, NodeType::MapFromArrays);
+    REQUIRE(g.connect(ks.node, ks.pin, half, 0));      // Values left unwired
+    const int len = mapNode(g, NodeType::MapLength);
+    REQUIRE(g.connect(half, 2, len, 0));
+
+    storeInto(g, br, 1, "k", PinType::String, ContainerKind::Array);
+    storeInto(g, br, 2, "v", PinType::Int, ContainerKind::Array);
+    storeInto(g, len, 1, "halfLen", PinType::Int, ContainerKind::None);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    CHECK(strings(store.vars["k"].items) == std::vector<std::string>{ "a", "b" });
+    CHECK(ints(store.vars["v"].items) == std::vector<int>{ 1, 2 });
+    CHECK(store.vars["halfLen"].i == 0);
+}
+
+TEST_CASE("Make Map From Arrays: a repeated key keeps its slot and takes the LAST value")
+{
+    // Map Set's house rule, applied to a list — the two ways of building a map
+    // from the same pairs have to agree.
+    Graph g;
+    const Out ks = buildStrArray(g, { "b", "a", "b" });
+    const Out vs = buildIntArray(g, { 1, 2, 3 });
+    const int mk = mapNode(g, NodeType::MapFromArrays);
+    REQUIRE(g.connect(ks.node, ks.pin, mk, 0));
+    REQUIRE(g.connect(vs.node, vs.pin, mk, 1));
+    const int br = mapNode(g, NodeType::MapBreak);
+    REQUIRE(g.connect(mk, 2, br, 0));
+
+    storeInto(g, br, 1, "k", PinType::String, ContainerKind::Array);
+    storeInto(g, br, 2, "v", PinType::Int, ContainerKind::Array);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    CHECK(strings(store.vars["k"].items) == std::vector<std::string>{ "b", "a" });
+    CHECK(ints(store.vars["v"].items) == std::vector<int>{ 3, 2 });
+}
+
+TEST_CASE("Break Map answers exactly what Map Keys and Map Values do")
+{
+    Graph g;
+    const Out m = buildMap(g, { { "z", 9 }, { "a", 1 } });
+    const int br = mapNode(g, NodeType::MapBreak);
+    REQUIRE(g.connect(m.node, m.pin, br, 0));
+    const int keys = mapNode(g, NodeType::MapKeys);
+    REQUIRE(g.connect(m.node, m.pin, keys, 0));
+    const int vals = mapNode(g, NodeType::MapValues);
+    REQUIRE(g.connect(m.node, m.pin, vals, 0));
+
+    storeInto(g, br, 1, "bk", PinType::String, ContainerKind::Array);
+    storeInto(g, br, 2, "bv", PinType::Int, ContainerKind::Array);
+    storeInto(g, keys, 1, "k", PinType::String, ContainerKind::Array);
+    storeInto(g, vals, 1, "v", PinType::Int, ContainerKind::Array);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    CHECK(strings(store.vars["bk"].items) == strings(store.vars["k"].items));
+    CHECK(ints(store.vars["bv"].items) == ints(store.vars["v"].items));
+    CHECK(strings(store.vars["bk"].items) == std::vector<std::string>{ "z", "a" });
+    CHECK(ints(store.vars["bv"].items) == std::vector<int>{ 9, 1 });
+}
+
+TEST_CASE("Map Find By Value answers with the FIRST key, and says when there is none")
+{
+    Graph g;
+    const Out m = buildMap(g, { { "a", 1 }, { "b", 2 }, { "c", 2 } });
+    const int hit = mapNode(g, NodeType::MapFindByValue);
+    REQUIRE(g.connect(m.node, m.pin, hit, 0));
+    REQUIRE(g.connect(constInt(g, 2), 0, hit, 1));
+    const int miss = mapNode(g, NodeType::MapFindByValue);
+    REQUIRE(g.connect(m.node, m.pin, miss, 0));
+    REQUIRE(g.connect(constInt(g, 99), 0, miss, 1));
+
+    storeInto(g, hit, 2, "k", PinType::String, ContainerKind::None);
+    storeInto(g, hit, 3, "found", PinType::Bool, ContainerKind::None);
+    storeInto(g, miss, 2, "mk", PinType::String, ContainerKind::None);
+    storeInto(g, miss, 3, "mfound", PinType::Bool, ContainerKind::None);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    // Two keys hold 2; the FIRST in insertion order wins.
+    CHECK(store.vars["k"].s == "b");
+    CHECK(store.vars["found"].b == true);
+    // A miss: Found says so, and the Key output is the key type's zero. This is
+    // why Found is a pin at all — "" is a perfectly good String key.
+    CHECK(store.vars["mfound"].b == false);
+    CHECK(store.vars["mk"].type == PinType::String);
+    CHECK(store.vars["mk"].s.empty());
+}
+
+TEST_CASE("Map Remove By Value drops EVERY match and keeps the rest in order")
+{
+    Graph g;
+    const Out m = buildMap(g, { { "a", 1 }, { "b", 2 }, { "c", 2 }, { "d", 3 } });
+    const int rm = mapNode(g, NodeType::MapRemoveByValue);
+    REQUIRE(g.connect(m.node, m.pin, rm, 0));
+    REQUIRE(g.connect(constInt(g, 2), 0, rm, 1));
+    const int br = mapNode(g, NodeType::MapBreak);
+    REQUIRE(g.connect(rm, 2, br, 0));
+
+    storeInto(g, br, 1, "k", PinType::String, ContainerKind::Array);
+    storeInto(g, br, 2, "v", PinType::Int, ContainerKind::Array);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    // Both 2s go — Map Remove would have taken one KEY; this takes every pair.
+    CHECK(strings(store.vars["k"].items) == std::vector<std::string>{ "a", "d" });
+    CHECK(ints(store.vars["v"].items) == std::vector<int>{ 1, 3 });
+}
+
+TEST_CASE("Map Remove By Value with no match returns the map unchanged")
+{
+    Graph g;
+    const Out m = buildMap(g, { { "a", 1 }, { "b", 2 } });
+    const int rm = mapNode(g, NodeType::MapRemoveByValue);
+    REQUIRE(g.connect(m.node, m.pin, rm, 0));
+    REQUIRE(g.connect(constInt(g, 7), 0, rm, 1));
+    storeInto(g, rm, 2, "m", PinType::Int, ContainerKind::Map);
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go");
+
+    const Value& v = store.vars["m"];
+    CHECK(v.kind() == ContainerKind::Map);
+    CHECK(strings(v.keys) == std::vector<std::string>{ "a", "b" });
+    CHECK(ints(v.items) == std::vector<int>{ 1, 2 });
 }
 
 // ── Wiring rules ─────────────────────────────────────────────────────────────
@@ -612,4 +953,44 @@ TEST_CASE("A map key whose enum entry is gone drops the pair instead of merging 
     CHECK(ints(seeded.items[0].keys)  == std::vector<int>{ 7 });
     CHECK(ints(seeded.items[0].items) == std::vector<int>{ 30 });
     HE::TypeRegistry::instance().removeType(def.assetPath);
+}
+
+// ── Container wires carry their element type, they do not convert it ─────────
+// A wire between two containers passes the values through untouched: coerce
+// leaves a container alone, by design. Accepting Array<Float> into an Array<Int>
+// pin would therefore hand the reader elements still tagged Float while every
+// comparison it makes runs on Int — and scalarValueEquals(Int) reads Value::i,
+// which a Float value leaves at 0. Every element would look equal to every
+// other, so a five-element array would dedupe to one. That is a silent wrong
+// answer; a refused wire is a question the author can still answer.
+TEST_CASE("Containers only join when the ELEMENT types match, not merely convert")
+{
+    Graph g;
+    auto setMake = [&](PinType elem) {
+        Node n; n.type = NodeType::SetMake; n.propType = elem;
+        n.isArray = true; n.container = ContainerKind::Set;
+        return g.addNode(std::move(n));
+    };
+    auto setAdd = [&](PinType elem) {
+        Node n; n.type = NodeType::SetAdd; n.propType = elem;
+        n.isArray = true; n.container = ContainerKind::Set;
+        return g.addNode(std::move(n));
+    };
+
+    // Float and Int convert freely as SCALARS. That is what makes this worth
+    // pinning: the permissive rule is right one level down and wrong here.
+    CHECK(canConvertPinType(PinType::Float, PinType::Int));
+
+    const int intAdd = setAdd(PinType::Int);
+    // Set<Float> into a Set<Int> pin: refused. Accepting it would hand the
+    // reader values still tagged Float while every comparison it makes runs on
+    // Int, and scalarValueEquals(Int) reads Value::i, which a Float value
+    // leaves at 0 — every element would look equal to every other.
+    CHECK_FALSE(g.connect(setMake(PinType::Float), 0, intAdd, 0));
+    // The same wire with matching elements is fine, which is what shows the
+    // refusal is about the TYPE and not about container wires in general.
+    CHECK(g.connect(setMake(PinType::Int), 0, intAdd, 0));
+
+    const int floatAdd = setAdd(PinType::Float);
+    CHECK(g.connect(setMake(PinType::Float), 0, floatAdd, 0));
 }

@@ -109,20 +109,45 @@ yaw/pitch, FOV) while `Sine`/`Cosine`/`Tangent` take radians — convert with
 ### Arrays (pure, copy-semantics)
 **Make Array**, **Array Length**, **Array Get**, **Array Append**, **Array Set**,
 **Array Insert**, **Array Remove**, **Array Contains**, **Array Index Of**.
-Array pins draw as a 2×2 grid to distinguish a list-of-T from a scalar T.
+Container pins carry their kind in the glyph, so a wire's shape says what is on
+it before you read a single label:
+
+| Pin | Glyph |
+|---|---|
+| scalar `T` | one filled circle |
+| `Array<T>` | a 2×2 grid of squares — ordered and indexable |
+| `Set<T>` | three dots in a triangle — round like the scalar it holds, clustered, no order implied |
+| `Map<K,V>` | two columns, the **left one in the KEY type's colour** and the right one in the value's |
+
+The Map pin is the one that answers a question the others never could: before it,
+a map pin wore the value type's colour alone, so `Map<String, Int>` and
+`Map<Int, Int>` looked identical on the node.
 **For Each** walks one, Body per element (Element + Index), then Done.
 
 ### Sets (pure, copy-semantics)
 **Make Set**, **Set Add**, **Set Remove**, **Set Contains**, **Set Length**,
-**Set Clear**, **Set To Array**, **For Each Set**.
+**Set Clear**, **Set To Array**, **Set From Array**, **Set Union**,
+**Set Intersect**, **Set Difference**, **For Each Set**.
 
 A set holds no duplicates and **iterates in the order elements were first
 added**. Adding one it already has changes nothing — it does *not* move to the
 back — and removing one keeps the order of the rest.
 
+**Set From Array** is Set To Array's way back. Duplicates disappear: the *first*
+occurrence in the array decides the element's position, exactly as a chain of
+Set Add nodes would leave it.
+
+The three set operations all answer **in A's order** — with an insertion-ordered
+container the result order is a promise, not an accident. `Set Union` appends the
+elements only B has behind A's; `Set Intersect` keeps what both hold; `Set
+Difference` is A without B, and is the one of the three whose sides are *not*
+interchangeable.
+
 ### Maps (pure, copy-semantics)
 **Make Map**, **Map Set**, **Map Remove**, **Map Contains**, **Map Length**,
-**Map Clear**, **Map Get**, **Map Keys**, **Map Values**, **For Each Map**.
+**Map Clear**, **Map Get**, **Map Keys**, **Map Values**,
+**Make Map From Arrays**, **Break Map**, **Map Find By Value**,
+**Map Remove By Value**, **For Each Map**.
 
 Keys may be **Int, String, Enum or Object** — the types with a cheap, exact
 identity. Float is not a key type (equality on floats is not something keyed
@@ -133,6 +158,20 @@ already holds updates the value *in place* and keeps that key's position;
 `Map Remove` keeps the order of the rest; `Map Keys` and `Map Values` come out
 index-parallel. **Map Get** takes a Default input, so "no entry yet" is an
 ordinary answer rather than a warning.
+
+**Break Map** hands you both arrays at once, and **Make Map From Arrays** puts
+them back together, pairing **by index**. Given arrays of different lengths the
+shorter one wins — the surplus is dropped rather than paired with an invented
+value. A key listed twice keeps its first position and takes the *last* value,
+which is Map Set's rule applied to a list.
+
+**Map Find By Value** is the search a map cannot otherwise do: it walks in
+insertion order and outputs the **first** key holding that value, plus a `Found`
+output — a map of Strings may legitimately hold `""`, so an empty key is not an
+answer. **Map Remove By Value** drops **every** pair holding it, where `Map
+Remove` drops one key. Both compare values the way `Array Contains` does, and
+**Struct values never compare equal** — a map of structs finds nothing and loses
+nothing; search on a field you can compare instead.
 
 The order is the same in the editor's interpreter and in the C++ a packaged
 build runs — both are vector-backed, and a parity fixture asserts it. See

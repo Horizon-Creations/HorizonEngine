@@ -2048,6 +2048,10 @@ inline HE::hccg::ClassSource fxInputActions()
 // Deliberately built with keys whose insertion order is NOT their sorted order
 // ("z" before "a", Angry(5) before Calm(0)), so "it happens to match" is not a
 // way for a wrong implementation to pass.
+//
+// The second half of the class (events SetAlgebra / MapPairs / EnumAlgebra) is
+// the same contract for the nodes that work on WHOLE containers — the
+// conversions and the set/map algebra. See the comment there.
 inline HE::hccg::ClassSource fxContainers()
 {
     Fx f;
@@ -2291,6 +2295,248 @@ inline HE::hccg::ClassSource fxContainers()
         f.data(gg, 0, sAngry, 0);
     }
     f.exec(sMoodHp, sAngry);
+
+    // ── the CONVERSIONS and the set/map algebra ──────────────────────────────
+    // Everything above builds a container one element at a time. The eight nodes
+    // below build them from WHOLE containers, and each has an answer that only an
+    // insertion-ordered implementation gives:
+    //   • Array → Set collapses duplicates onto the FIRST occurrence's position
+    //   • A ∪ B is A's order, then only what B adds — each element exactly once
+    //   • A \ B is not B \ A, and each keeps the LEFT operand's order
+    //   • Keys and Values pair BY INDEX, the shorter list wins, and a repeated key
+    //     keeps its slot while taking the LAST value — Map Set's rule
+    //   • Break Map fed straight back into Make Map From Arrays is the identity
+    //   • the reverse lookup answers with the FIRST key holding the value, and
+    //     Map Remove By Value drops EVERY pair holding it (Map Remove drops one)
+    //
+    // They live in THIS class rather than a new one because the generated classes
+    // are listed by name in tests/CMakeLists.txt (HCGEN_CLASSES) — a new fixture
+    // class would be generated and then never compiled, and findCompiled() would
+    // hand the harness a null it would report as a missing class.
+    //
+    // ── Set side ─────────────────────────────────────────────────────────────
+    f.setVarDecl("fromArr", PT::String);
+    f.setVarDecl("uni", PT::String);
+    f.setVarDecl("inter", PT::String);
+    f.setVarDecl("diffAB", PT::String);
+    f.setVarDecl("diffBA", PT::String);
+    f.setVarDecl("uniSelf", PT::String);
+    f.setVarDecl("uniChain", PT::String);
+    f.var("uniLen", PT::Int);
+    // ── Map side ─────────────────────────────────────────────────────────────
+    f.mapVarDecl("built", PT::String, PT::Int);
+    f.arrVar("bk", PT::String, {});
+    f.arrVar("bv", PT::Int, {});
+    f.mapVarDecl("roundTrip", PT::String, PT::Int);
+    f.var("foundKey", PT::String);
+    f.var("found", PT::Bool);
+    // Seeded NON-empty so the miss is observable: a Find By Value that never ran
+    // and one that answered "no key" would otherwise read the same.
+    f.var("missKey", PT::String, 0.0f, "untouched");
+    f.var("missFound", PT::Bool);
+    f.mapVarDecl("dupMap", PT::String, PT::Int);
+    f.var("dupFirst", PT::String);
+    f.mapVarDecl("pruned", PT::String, PT::Int);
+    f.var("prunedLen", PT::Int);
+    f.mapVarDecl("prunedMiss", PT::String, PT::Int);
+    // ── Enum elements / enum keys ────────────────────────────────────────────
+    // The element type that is a plain int in generated C++ and a tagged Value at
+    // the boundary, so the new helpers get a SECOND instantiation whose boxing
+    // path differs from String's.
+    f.setVarDecl("moodsFromArr", PT::Enum, {}, kMoodEnum);
+    f.setVarDecl("moodUnion", PT::Enum, {}, kMoodEnum);
+    f.mapVarDecl("moodMap", PT::Enum, PT::Int, {}, {}, kMoodEnum);
+    f.enumVar("moodKey", kMoodEnum, "Calm");   // written to Happy below
+    f.var("moodFound", PT::Bool);
+
+    // ── builders (the wiring the container-ops codegen test already proves) ───
+    auto strArray = [&f](std::initializer_list<const char*> items)
+    {
+        int prev = f.arrayOp(NT::ArrayMake, PT::String);
+        for (const char* s : items)
+        {
+            const int a = f.arrayOp(NT::ArrayAdd, PT::String);
+            f.data(prev, 0, a, 0);
+            f.data(f.constS(s), 0, a, 1);
+            prev = a;
+        }
+        return prev;
+    };
+    auto intArray = [&f](std::initializer_list<int> items)
+    {
+        int prev = f.arrayOp(NT::ArrayMake, PT::Int);
+        for (const int v : items)
+        {
+            const int a = f.arrayOp(NT::ArrayAdd, PT::Int);
+            f.data(prev, 0, a, 0);
+            f.data(f.constI(v), 0, a, 1);
+            prev = a;
+        }
+        return prev;
+    };
+    auto strSet = [&f](std::initializer_list<const char*> items)
+    {
+        int prev = f.setOp(NT::SetMake, PT::String);
+        for (const char* s : items)
+        {
+            const int a = f.setOp(NT::SetAdd, PT::String);
+            f.data(prev, 0, a, 0);
+            f.data(f.constS(s), 0, a, 1);
+            prev = a;
+        }
+        return prev;
+    };
+    auto moodArray = [&f](std::initializer_list<int> vals)
+    {
+        int prev = f.arrayOpT(NT::ArrayMake, PT::Enum, kMoodEnum);
+        for (const int v : vals)
+        {
+            const int a = f.arrayOpT(NT::ArrayAdd, PT::Enum, kMoodEnum);
+            f.data(prev, 0, a, 0);
+            f.data(f.constEnum(kMoodEnum, v), 0, a, 1);
+            prev = a;
+        }
+        return prev;
+    };
+    auto moodSet = [&f](std::initializer_list<int> vals)
+    {
+        int prev = f.setOp(NT::SetMake, PT::Enum, kMoodEnum);
+        for (const int v : vals)
+        {
+            const int a = f.setOp(NT::SetAdd, PT::Enum, kMoodEnum);
+            f.data(prev, 0, a, 0);
+            f.data(f.constEnum(kMoodEnum, v), 0, a, 1);
+            prev = a;
+        }
+        return prev;
+    };
+
+    int prevExec = 0;
+    auto store = [&f, &prevExec](int sink) { f.exec(prevExec, sink); prevExec = sink; };
+
+    // ── Set From Array + the set algebra ─────────────────────────────────────
+    prevExec = f.event("SetAlgebra");
+
+    const int fromArr = f.setOp(NT::SetFromArray, PT::String);
+    f.data(strArray({ "c", "a", "c", "b", "a" }), 0, fromArr, 0);   // → c, a, b
+    { const int s = f.setSetVar("fromArr", PT::String); f.data(fromArr, 0, s, 0); store(s); }
+
+    // Chosen so NONE of the four results is in sorted order and each holds a
+    // different subset: "it happened to match" is not a way to pass.
+    const int setA = strSet({ "b", "a", "e" });
+    const int setB = strSet({ "c", "a", "d" });
+    auto algebra = [&](NT t, int lhs, int rhs, const char* varName)
+    {
+        const int op = f.setOp(t, PT::String);
+        f.data(lhs, 0, op, 0);
+        f.data(rhs, 0, op, 1);
+        const int s = f.setSetVar(varName, PT::String);
+        f.data(op, 0, s, 0);
+        store(s);
+        return op;
+    };
+    const int uni = algebra(NT::SetUnion, setA, setB, "uni");        // b a e c d
+    algebra(NT::SetIntersect, setA, setB, "inter");                  // a
+    algebra(NT::SetDifference, setA, setB, "diffAB");                // b e
+    // The same two sets the other way round: Difference is the one op whose
+    // sides are not interchangeable, and this is what says so.
+    algebra(NT::SetDifference, setB, setA, "diffBA");                // c d
+    // A ∪ A must still be a SET — the clause a union that copies A wholesale and
+    // only filters B would get wrong for any A that carries a duplicate.
+    algebra(NT::SetUnion, setA, setA, "uniSelf");                    // b a e
+    // …and the conversion composed with the algebra: the set that came out of an
+    // array is an ordinary operand.
+    algebra(NT::SetUnion, fromArr, setB, "uniChain");                // c a b d
+
+    { const int len = f.setOp(NT::SetLength, PT::String);
+      f.data(uni, 0, len, 0);
+      const int s = f.setVar("uniLen", PT::Int); f.data(len, 0, s, 0); store(s); }
+
+    // ── Make Map From Arrays / Break Map, in BOTH directions ─────────────────
+    prevExec = f.event("MapPairs");
+
+    // Four keys, three values: the surplus "z" never becomes a pair, and the
+    // repeated "b" keeps slot 0 while taking the LAST value — which makes this
+    // the very {b→3, a→2} the Map Set chain in `containers` builds.
+    const int built = f.mapOp(NT::MapFromArrays, PT::String, PT::Int);
+    f.data(strArray({ "b", "a", "b", "z" }), 0, built, 0);
+    f.data(intArray({ 1, 2, 3 }), 0, built, 1);
+    { const int s = f.setMapVar("built", PT::String, PT::Int); f.data(built, 0, s, 0); store(s); }
+
+    const int brk = f.mapOp(NT::MapBreak, PT::String, PT::Int);
+    f.data(built, 0, brk, 0);
+    { const int s = f.setVar("bk", PT::String, true); f.data(brk, 0, s, 0); store(s); }
+    { const int s = f.setVar("bv", PT::Int, true);    f.data(brk, 1, s, 0); store(s); }
+    // …and straight back in. Break Map's two outs are read a SECOND time here —
+    // a pure node re-emits per read (§3.3) — so the round trip pins that reading
+    // a pin twice answers the same thing twice, on both backends.
+    const int again = f.mapOp(NT::MapFromArrays, PT::String, PT::Int);
+    f.data(brk, 0, again, 0);
+    f.data(brk, 1, again, 1);
+    { const int s = f.setMapVar("roundTrip", PT::String, PT::Int); f.data(again, 0, s, 0); store(s); }
+
+    const int hit = f.mapOp(NT::MapFindByValue, PT::String, PT::Int);
+    f.data(built, 0, hit, 0);
+    f.data(f.constI(2), 0, hit, 1);
+    { const int s = f.setVar("foundKey", PT::String); f.data(hit, 0, s, 0); store(s); }
+    { const int s = f.setVar("found", PT::Bool);      f.data(hit, 1, s, 0); store(s); }
+
+    const int miss = f.mapOp(NT::MapFindByValue, PT::String, PT::Int);
+    f.data(built, 0, miss, 0);
+    f.data(f.constI(99), 0, miss, 1);          // no pair holds it → the KEY's zero
+    { const int s = f.setVar("missKey", PT::String); f.data(miss, 0, s, 0); store(s); }
+    { const int s = f.setVar("missFound", PT::Bool); f.data(miss, 1, s, 0); store(s); }
+
+    // One value under TWO keys — the case that separates Map Remove (one key,
+    // one pair) from Map Remove By Value (every pair holding it).
+    const int dup = f.mapOp(NT::MapFromArrays, PT::String, PT::Int);
+    f.data(strArray({ "x", "y", "w" }), 0, dup, 0);
+    f.data(intArray({ 7, 7, 8 }), 0, dup, 1);
+    { const int s = f.setMapVar("dupMap", PT::String, PT::Int); f.data(dup, 0, s, 0); store(s); }
+
+    const int first = f.mapOp(NT::MapFindByValue, PT::String, PT::Int);
+    f.data(dup, 0, first, 0);
+    f.data(f.constI(7), 0, first, 1);          // two keys hold it → the FIRST one
+    { const int s = f.setVar("dupFirst", PT::String); f.data(first, 0, s, 0); store(s); }
+
+    const int prune = f.mapOp(NT::MapRemoveByValue, PT::String, PT::Int);
+    f.data(dup, 0, prune, 0);
+    f.data(f.constI(7), 0, prune, 1);          // BOTH pairs go
+    { const int s = f.setMapVar("pruned", PT::String, PT::Int); f.data(prune, 0, s, 0); store(s); }
+    { const int len = f.mapOp(NT::MapLength, PT::String, PT::Int);
+      f.data(prune, 0, len, 0);
+      const int s = f.setVar("prunedLen", PT::Int); f.data(len, 0, s, 0); store(s); }
+
+    const int keep = f.mapOp(NT::MapRemoveByValue, PT::String, PT::Int);
+    f.data(dup, 0, keep, 0);
+    f.data(f.constI(42), 0, keep, 1);          // nothing holds it → unchanged
+    { const int s = f.setMapVar("prunedMiss", PT::String, PT::Int); f.data(keep, 0, s, 0); store(s); }
+
+    // ── the same nodes, with an ENUM element and an ENUM key ─────────────────
+    prevExec = f.event("EnumAlgebra");
+
+    const int mFrom = f.setOp(NT::SetFromArray, PT::Enum, kMoodEnum);
+    f.data(moodArray({ 5, 0, 5 }), 0, mFrom, 0);          // Angry, Calm, Angry
+    { const int s = f.setSetVar("moodsFromArr", PT::Enum, kMoodEnum);
+      f.data(mFrom, 0, s, 0); store(s); }
+
+    const int mUni = f.setOp(NT::SetUnion, PT::Enum, kMoodEnum);
+    f.data(mFrom, 0, mUni, 0);                            // {Angry, Calm}
+    f.data(moodSet({ 1, 5 }), 0, mUni, 1);                // {Happy, Angry}
+    { const int s = f.setSetVar("moodUnion", PT::Enum, kMoodEnum);
+      f.data(mUni, 0, s, 0); store(s); }
+
+    const int mMap = f.mapOp(NT::MapFromArrays, PT::Enum, PT::Int, kMoodEnum);
+    f.data(moodArray({ 5, 1 }), 0, mMap, 0);              // Angry, Happy
+    f.data(intArray({ 11, 22 }), 0, mMap, 1);
+    { const int s = f.setMapVar("moodMap", PT::Enum, PT::Int, kMoodEnum);
+      f.data(mMap, 0, s, 0); store(s); }
+
+    const int mFind = f.mapOp(NT::MapFindByValue, PT::Enum, PT::Int, kMoodEnum);
+    f.data(mMap, 0, mFind, 0);
+    f.data(f.constI(22), 0, mFind, 1);
+    { const int s = f.setVarT("moodKey", PT::Enum, kMoodEnum); f.data(mFind, 0, s, 0); store(s); }
+    { const int s = f.setVar("moodFound", PT::Bool);           f.data(mFind, 1, s, 0); store(s); }
 
     return f.done("containers");
 }

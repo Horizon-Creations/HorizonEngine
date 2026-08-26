@@ -1688,13 +1688,18 @@ TEST_CASE("conversionNodeFor names a node only where the wire has no other way")
 	CHECK_FALSE(conversionNodeFor(PinType::String,    CK::None, PinType::Float,  CK::None, n));
 	CHECK_FALSE(conversionNodeFor(PinType::Vec3,      CK::None, PinType::String, CK::None, n));
 	CHECK_FALSE(conversionNodeFor(PinType::Transform, CK::None, PinType::String, CK::None, n));
-	// Container mismatches Set To Array does not solve, either way round.
-	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Array, PinType::Float,  CK::Set,   n));
+	// Array → Set is answered too, since Set From Array exists: the drag that
+	// used to be a dead end now costs one node.
+	CHECK(conversionNodeFor(PinType::Float, CK::Array, PinType::Float, CK::Set, n));
+	CHECK(n == NodeType::SetFromArray);
+	// Container mismatches neither conversion solves.
 	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Array, PinType::Float,  CK::Map,   n));
 	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Set,   PinType::Float,  CK::None,  n));
 	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::None,  PinType::String, CK::Array, n));
-	// Set To Array converts the CONTAINER; it does not also convert the elements.
+	// Both container conversions change the CONTAINER; neither also converts the
+	// elements, so a differing element type is a refusal, not a two-step job.
 	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Set,   PinType::String, CK::Array, n));
+	CHECK_FALSE(conversionNodeFor(PinType::Float, CK::Array, PinType::String, CK::Set,   n));
 }
 
 TEST_CASE("a refused Float → String wire builds a To String node between the two")

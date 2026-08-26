@@ -11,6 +11,7 @@
 #include <mutex>
 #include <array>
 #include <cmath>
+#include <cstddef>   // std::ptrdiff_t — iterator arithmetic in the container nodes
 #include <cstdio>
 #include <cstring>
 #include <unordered_set>
@@ -327,6 +328,21 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { HC_SET_PIN("Set") };
         s.dataOuts = { { "Element", n.propType, false, tn }, { "Index", P::Int } };
         break;
+    case T::SetFromArray:
+        // Set To Array read backwards, and the same pin descriptors — which is
+        // what makes the pair round-trip on the canvas.
+        s.dataIns  = { { "Array", n.propType, true, tn } };
+        s.dataOuts = { HC_SET_PIN("Set") };
+        break;
+    case T::SetUnion:
+    case T::SetIntersect:
+    case T::SetDifference:
+        // "A" and "B" and not "Set"/"Other": Difference is the one op where the
+        // two sides are not interchangeable, and a pin pair that reads the same
+        // on all three is what stops someone wiring it the wrong way round.
+        s.dataIns  = { HC_SET_PIN("A"), HC_SET_PIN("B") };
+        s.dataOuts = { HC_SET_PIN("Set") };
+        break;
 #undef HC_SET_PIN
 
     // ── Map<K,V> ─────────────────────────────────────────────────────────────
@@ -381,6 +397,29 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { HC_MAP_PIN("Map") };
         s.dataOuts = { HC_KEY_PIN("Key"), { "Value", n.propType, false, tn },
                        { "Index", P::Int } };
+        break;
+    case T::MapFromArrays:
+        s.dataIns  = { { "Keys", n.keyType, true, ktn },
+                       { "Values", n.propType, true, tn } };
+        s.dataOuts = { HC_MAP_PIN("Map") };
+        break;
+    case T::MapBreak:
+        // Exactly Map Keys' and Map Values' output pins, in that order: Break Map
+        // IS the two of them on one node, so the pins have to be the same ones or
+        // the pair would disagree about what a map comes apart into.
+        s.dataIns  = { HC_MAP_PIN("Map") };
+        s.dataOuts = { { "Keys", n.keyType, true, ktn },
+                       { "Values", n.propType, true, tn } };
+        break;
+    case T::MapFindByValue:
+        // "Found" is a pin and not "an empty Key means no": a map of Strings can
+        // legitimately hold "" under some key, so the miss needs its own answer.
+        s.dataIns  = { HC_MAP_PIN("Map"), { "Value", n.propType, false, tn } };
+        s.dataOuts = { HC_KEY_PIN("Key"), { "Found", P::Bool } };
+        break;
+    case T::MapRemoveByValue:
+        s.dataIns  = { HC_MAP_PIN("Map"), { "Value", n.propType, false, tn } };
+        s.dataOuts = { HC_MAP_PIN("Map") };
         break;
 #undef HC_MAP_PIN
 #undef HC_KEY_PIN
@@ -641,6 +680,14 @@ const char* nodeDisplayName(NodeType t)
         case T::MapKeys:      return "Map Keys";
         case T::MapValues:    return "Map Values";
         case T::ForEachMap:   return "For Each Map";
+        case T::SetFromArray: return "Set From Array";
+        case T::SetUnion:     return "Set Union";
+        case T::SetIntersect: return "Set Intersect";
+        case T::SetDifference:return "Set Difference";
+        case T::MapFromArrays:return "Make Map From Arrays";
+        case T::MapBreak:     return "Break Map";
+        case T::MapFindByValue:  return "Map Find By Value";
+        case T::MapRemoveByValue:return "Map Remove By Value";
         case T::Delay:        return "Delay";
         case T::IsValid:      return "Is Valid";
         // Deliberately NOT "Cast To <Class>": this string is the node's key on
@@ -688,6 +735,44 @@ const char* nodeDisplayName(NodeType t)
         case T::BreakVector3:   return "Break Vector 3";
         case T::BreakVector4:   return "Break Vector 4";
         default:              return "?";
+    }
+}
+
+const char* nodeSearchAliases(NodeType t)
+{
+    // Search-only synonyms — see the declaration for WHY they cannot simply be
+    // added to the display name. Lower case and space-separated; a caller
+    // matches against these the same way it matches the name. Only nodes whose
+    // name is not the word a user would reach for need a row here.
+    switch (t)
+    {
+        // The container ops whose names come from the DATA STRUCTURE rather
+        // than from the verb: "Map Set" is an insert, "Set Add" a put, and
+        // "Map Get" a lookup. Every one of these names is a key on disk.
+        case T::MapSet:       return "add insert put store";
+        case T::SetAdd:       return "insert put";
+        case T::MapGet:       return "find lookup read at";
+        case T::MapContains:  return "has find key";
+        case T::SetContains:  return "has find member";
+        case T::MapRemove:    return "delete erase";
+        case T::SetRemove:    return "delete erase";
+        case T::ArrayAdd:     return "append push add";
+        // The new arrivals. Union/Intersect/Difference get their symbols and
+        // their everyday words: nobody searches for "difference" when they
+        // mean "subtract these".
+        case T::SetFromArray: return "array to set convert dedupe unique distinct";
+        case T::SetUnion:     return "merge combine or plus join";
+        case T::SetIntersect: return "common shared and both";
+        case T::SetDifference:return "subtract minus without except";
+        case T::MapFromArrays:return "zip pair build map from arrays";
+        case T::MapBreak:     return "split keys values map to arrays unpack";
+        case T::MapFindByValue:   return "search reverse lookup key of value";
+        case T::MapRemoveByValue: return "delete erase purge by value";
+        // The other two halves of the conversions, so one search finds the pair.
+        case T::SetToArray:   return "set to array convert list";
+        case T::MapKeys:      return "keys to array";
+        case T::MapValues:    return "values to array";
+        default: return "";
     }
 }
 
@@ -868,6 +953,37 @@ const char* nodeTooltip(NodeType t)
         case T::ForEachMap:
             return "Runs Body once per key/value pair (Key + Value + Index data outputs),\n"
                    "in insertion order, then continues from Done.";
+        case T::SetFromArray:
+            return "Outputs the array's elements as a set. Duplicates disappear — the FIRST\n"
+                   "occurrence in the array decides the position, so the set iterates in the\n"
+                   "order the array first mentioned each element.";
+        case T::SetUnion:
+            return "Outputs a set holding everything in A or in B: A's elements in A's order,\n"
+                   "then the elements only B has, in B's order.";
+        case T::SetIntersect:
+            return "Outputs a set holding only the elements BOTH sets have, in A's order.";
+        case T::SetDifference:
+            return "Outputs A without the elements B has, in A's order. The one set operation\n"
+                   "whose sides are NOT interchangeable — swapping A and B is a different\n"
+                   "question.";
+        case T::MapFromArrays:
+            return "Builds a map by pairing Keys and Values BY INDEX. Different lengths: the\n"
+                   "shorter one wins and the surplus is dropped, rather than inventing values.\n"
+                   "A key listed twice keeps its FIRST position and takes the LAST value — the\n"
+                   "same rule Map Set follows.";
+        case T::MapBreak:
+            return "Splits a map into its Keys and its Values as two arrays, in insertion\n"
+                   "order and index-parallel — index i of one belongs to index i of the other.\n"
+                   "Make Map From Arrays puts them back together.";
+        case T::MapFindByValue:
+            return "Searches the map by VALUE instead of by key: outputs the first key\n"
+                   "holding it, in insertion order, and Found = false when no pair does.\n"
+                   "Struct values never compare equal, so a map of structs never finds\n"
+                   "anything — search on a field you can compare instead.";
+        case T::MapRemoveByValue:
+            return "Outputs a COPY of the map without EVERY pair holding that value (Map\n"
+                   "Remove drops one key; this one drops all matches). The order of the rest\n"
+                   "is kept. Struct values never compare equal, so nothing is removed.";
         case T::IsValid:
             return "True when the Target reference points to a live instance — the guard\n"
                    "to run before touching an object that may have been destroyed.";
@@ -988,10 +1104,16 @@ const char* nodeCategory(NodeType t)
         case T::ArrayContains: case T::ArrayIndexOf: case T::ForEach: return "Array";
         case T::SetMake: case T::SetAdd: case T::SetRemove: case T::SetContains:
         case T::SetLength: case T::SetClear: case T::SetToArray:
-        case T::ForEachSet: return "Set";
+        case T::ForEachSet:
+        // Set From Array lives with the SETS and not with the arrays: it is the
+        // node that PRODUCES one, which is what a reader is looking for.
+        case T::SetFromArray: case T::SetUnion: case T::SetIntersect:
+        case T::SetDifference: return "Set";
         case T::MapMake: case T::MapSet: case T::MapRemove: case T::MapContains:
         case T::MapLength: case T::MapClear: case T::MapGet: case T::MapKeys:
-        case T::MapValues: case T::ForEachMap: return "Map";
+        case T::MapValues: case T::ForEachMap:
+        case T::MapFromArrays: case T::MapBreak:
+        case T::MapFindByValue: case T::MapRemoveByValue: return "Map";
         case T::MakeStruct: case T::BreakStruct:
         case T::GetStructField: case T::SetStructField: return "Structs";
         case T::ConstEnum: case T::SwitchOnEnum:
@@ -1314,6 +1436,16 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
             dataPinDescOf(*s, false, si, sd);
             dataPinDescOf(*d, true,  di, dd);
             if (sd.kind() != dd.kind()) return false;
+            // …and neither do containers of different ELEMENT types, for exactly
+            // the same reason one line up: the convertibility test above is about
+            // a value coerce() will convert on arrival, and coerce leaves a
+            // container alone. An accepted Array<Float> → Array<Int> wire would
+            // hand the reader elements still tagged Float while every comparison
+            // it makes runs on its own pin type — scalarValueEquals(Int) reads
+            // a.i, a Float value's i is 0, so every element looks equal to every
+            // other and a five-element array dedupes to one. A refused wire is a
+            // question the author can answer; that one is a silent wrong answer.
+            if (sd.kind() != ContainerKind::None && sd.type != dd.type) return false;
             if (sd.kind() == ContainerKind::Map)
             {
                 if (sd.keyType != dd.keyType) return false;
@@ -2204,14 +2336,26 @@ bool conversionNodeFor(PinType from, ContainerKind fromKind,
 {
     // Exec is control flow, not a value. Nothing converts it.
     if (from == P::Exec || to == P::Exec) return false;
-    // Set → Array is the one container crossing a node answers, and it has to be
-    // decided BEFORE the implicit test below: both sides carry the same element
-    // type, which canConvertPinType calls convertible — true for a scalar wire,
-    // false the moment the kinds differ (see Graph::connect).
-    if (fromKind == CK::Set && toKind == CK::Array)
+    // The two container crossings a node answers, both decided BEFORE the
+    // implicit test below: the two sides carry the same element type, which
+    // canConvertPinType calls convertible — true for a scalar wire, false the
+    // moment the kinds differ (see Graph::connect).
+    //
+    // Element types must MATCH here, not merely convert: the conversion node
+    // changes the container, never the elements, so an Array<Float> reaching a
+    // Set<Int> pin is not a job Set From Array can do. Graph::connect refuses
+    // that wire for the same reason.
+    if (fromKind == CK::Set && toKind == CK::Array && from == to)
     {
-        if (!canConvertPinType(from, to)) return false;
         out = T::SetToArray;
+        return true;
+    }
+    // …and back. Set From Array exists now, so the drag that used to be a dead
+    // end is one node away. It deduplicates on the way, which is what the target
+    // pin asked for by being a Set.
+    if (fromKind == CK::Array && toKind == CK::Set && from == to)
+    {
+        out = T::SetFromArray;
         return true;
     }
     // Every other kind mismatch — Array↔Map, container↔scalar — would take more
@@ -3213,6 +3357,44 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         arr.keys.clear();
         return arr;                                        // items are already in order
     }
+    case T::SetFromArray:
+    {
+        Value set = evalInput(n, 0, depth + 1);
+        set.isArray = true; set.container = CK::Set; set.type = n.propType;
+        set.typeName = n.typeName;
+        set.keys.clear();
+        // An array MAY hold duplicates and a set may not, so something has to
+        // go. dedupeSetItems keeps the FIRST occurrence in place — the same rule
+        // a chain of Set Add nodes would produce, which is what makes the two
+        // ways of building a set from a list agree.
+        dedupeSetItems(set);
+        return set;
+    }
+    case T::SetUnion:
+    case T::SetIntersect:
+    case T::SetDifference:
+    {
+        // A's ORDER is the result's order in all three: A is what the reader
+        // wired first, and with an insertion-ordered container the order is a
+        // promised property, not an incidental one. Union appends B's extras
+        // behind it, exactly as folding Set Add over B would.
+        const Value a = evalInput(n, 0, depth + 1);
+        const Value b = evalInput(n, 1, depth + 1);
+        Value out = Value::ofSet(n.propType, n.typeName);
+        for (const Value& v : a.items)
+        {
+            const bool inB = indexOfValue(b.items, v, n.propType) >= 0;
+            const bool want = n.type == T::SetUnion ? true
+                            : n.type == T::SetIntersect ? inB : !inB;
+            // A hand-fed input (a script's list) may carry duplicates; the
+            // membership test keeps the OUTPUT a set regardless.
+            if (want && indexOfValue(out.items, v, n.propType) < 0) out.items.push_back(v);
+        }
+        if (n.type == T::SetUnion)
+            for (const Value& v : b.items)
+                if (indexOfValue(out.items, v, n.propType) < 0) out.items.push_back(v);
+        return out;
+    }
 
     // ── Map<K,V> ─────────────────────────────────────────────────────────────
     case T::MapMake:
@@ -3278,6 +3460,70 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         r.items = map.items;
         r.items.resize(std::min(map.keys.size(), map.items.size()));
         return r;
+    }
+    case T::MapBreak:
+    {
+        // Map Keys and Map Values on one node — including their truncation, so
+        // the two nodes and this one cannot answer differently.
+        const Value map = evalInput(n, 0, depth + 1);
+        const size_t pairs = std::min(map.keys.size(), map.items.size());
+        // Pin 1 is Values, anything else Keys — spelled the way the codegen
+        // spells it, so even an out-of-range read cannot differ between them.
+        const bool wantKeys = dataOutPin != 1;
+        Value r = wantKeys ? Value::ofArray(n.keyType, n.keyTypeName)
+                           : Value::ofArray(n.propType, n.typeName);
+        r.items = wantKeys ? map.keys : map.items;
+        r.items.resize(pairs);
+        return r;
+    }
+    case T::MapFromArrays:
+    {
+        const Value ks = evalInput(n, 0, depth + 1);
+        const Value vs = evalInput(n, 1, depth + 1);
+        Value map = Value::ofMap(n.keyType, n.propType, n.keyTypeName, n.typeName);
+        // UNEQUAL LENGTHS: the shorter one wins. A missing value would have to be
+        // invented (the type's zero), and a map that silently holds a key nobody
+        // gave a value to is worse than a pair that never appears — Map Keys and
+        // Map Values already truncate to the pairs that exist, for the same
+        // reason, and this is the node that undoes them.
+        const auto pairs = (std::ptrdiff_t)std::min(ks.items.size(), vs.items.size());
+        map.keys.assign(ks.items.begin(), ks.items.begin() + pairs);
+        map.items.assign(vs.items.begin(), vs.items.begin() + pairs);
+        // A REPEATED KEY: the house rule is Map Set's — the key keeps its first
+        // position and takes the LAST value written to it — and dedupeMapKeys is
+        // where that rule already lives, so this is not a second copy of it.
+        dedupeMapKeys(map);
+        return map;
+    }
+    case T::MapFindByValue:
+    {
+        // The reverse lookup: keys are unique and values are not, so the answer
+        // is the FIRST pair in iteration order. Same equality as Map Get's keys
+        // and Array Contains (scalarValueEquals) — Struct values compare unequal
+        // there, so a map of structs never finds anything, which the tooltip says.
+        const Value map = evalInput(n, 0, depth + 1);
+        const Value want = coerce(evalInput(n, 1, depth + 1), n.propType);
+        const size_t pairs = std::min(map.keys.size(), map.items.size());
+        for (size_t i = 0; i < pairs; ++i)
+            if (scalarValueEquals(map.items[i], want, n.propType))
+                return dataOutPin == 1 ? Value::ofBool(true) : map.keys[i];
+        // A miss answers with the KEY TYPE's zero, which is what an unwired key
+        // pin reads — never a half-filled Value of some other type.
+        return dataOutPin == 1 ? Value::ofBool(false) : coerce(Value{}, n.keyType);
+    }
+    case T::MapRemoveByValue:
+    {
+        // Removes EVERY match, unlike Map Remove (one key, one pair): a value
+        // can sit under any number of keys, and "remove the first one" would be
+        // a rule nobody could predict the effect of. Survivors keep their order.
+        const Value map = evalInput(n, 0, depth + 1);
+        const Value want = coerce(evalInput(n, 1, depth + 1), n.propType);
+        Value out = Value::ofMap(n.keyType, n.propType, n.keyTypeName, n.typeName);
+        const size_t pairs = std::min(map.keys.size(), map.items.size());
+        for (size_t i = 0; i < pairs; ++i)
+            if (!scalarValueEquals(map.items[i], want, n.propType))
+            { out.keys.push_back(map.keys[i]); out.items.push_back(map.items[i]); }
+        return out;
     }
 
     case T::GetProperty:

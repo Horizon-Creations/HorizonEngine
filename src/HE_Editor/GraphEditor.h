@@ -24,6 +24,13 @@
 
 namespace GraphEditor {
 
+// Which container a data pin carries, as far as the CANVAS is concerned: it only
+// decides which glyph is drawn. Deliberately the canvas's own enum and not
+// HorizonCode's ContainerKind — this component is shared with the material,
+// particle and animator graphs, none of which know HorizonCode exists. Hosts
+// that do (HcGraphHost) map onto it.
+enum class Container : unsigned char { None = 0, Array, Set, Map };
+
 // One pin as the host describes it for a node this frame. `id` is the host's own
 // pin index (material: per-side index; HorizonCode: unified index) — the
 // component passes it back verbatim to connect()/clearPinLinks() and matches
@@ -36,8 +43,26 @@ struct Pin
     ImU32       color;
     bool        input;   // left column (true) or right column (false)
     bool        isExec;  // draw as a triangle (exec flow) vs a circle (data)
-    bool        isArray = false; // draw as a 2×2 grid (array of the data type)
+    // "Is it a container at all", kept for the hosts that predate `container`
+    // and still say only this (material / particle / animator pins). Widened,
+    // not replaced, exactly like HorizonCode::PinDesc::isArray: a host that has
+    // not learned about Set/Map still gets the array glyph rather than a scalar
+    // one. containerOf() below resolves the pair.
+    bool        isArray = false;
+    Container   container = Container::None;
+    // Map pins only: the color of the KEY type, drawn as the glyph's left
+    // column (the value type keeps `color` on the right). 0 = no key color, so
+    // the glyph is single-colored — which is every non-Map pin.
+    ImU32       keyColor = 0;
 };
+
+// The kind a pin actually draws as. The legacy row is `isArray == true,
+// container == None`, which reads as Array — this is the one place that says so.
+inline Container containerOf(const Pin& p)
+{
+    if (p.container != Container::None) return p.container;
+    return p.isArray ? Container::Array : Container::None;
+}
 
 // ── Quick spawn ("hold a key, click") ────────────────────────────────────────
 // What the host is told when a bound key fires: where the node goes, plus the

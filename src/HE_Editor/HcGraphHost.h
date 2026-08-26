@@ -41,7 +41,9 @@ PinRanges pinRanges(const HC::Node& n);
 const char* pinTypeName(HC::PinType t);
 
 // Pins for the GraphEditor, in unified index order (positions are laid out by
-// the canvas itself, so only id/label/type/side/exec-ness are provided).
+// the canvas itself, so only id/label/type/side/exec-ness are provided — plus
+// the container kind and, for a Map, the key type's color, which is what makes
+// an Array, a Set and a Map<K,V> three different glyphs on the node).
 std::vector<GraphEditor::Pin> nodePins(const HC::Node& n);
 
 void removePinLinks(HC::Graph& g, int nodeId, int pin);

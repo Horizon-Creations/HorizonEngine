@@ -280,17 +280,27 @@ HE_API std::string toStringG(float v);   // snprintf "%g", buffer 48 — like To
 
 // ── arrays (§3.4: pure copy semantics, clamped ops, exact-equality search) ───
 HE_API void warnArrayGet(int idx, size_t size);   // the interpreter's out-of-range log
+// The element parameters below are NON-DEDUCING (std::type_identity_t): the
+// container argument alone fixes T, so a string literal on the value pin
+// converts to std::string instead of failing to deduce `const char[2]` against
+// T. The Set/Map family (further down) was written this way from the start; the
+// Array family predates it and got the same treatment only when a parity fixture
+// finally INSTANTIATED these templates — until then `hc::arrAdd(Array<string>{},
+// "c")` had never been compiled, and an uninstantiated template body is not
+// fully type-checked. That is the whole reason the fixture exists.
+template <typename T> using Same = std::type_identity_t<T>;
+
 template <typename T> inline T arrGet(const Array<T>& a, int idx)
 {
     if (idx >= 0 && idx < (int)a.size()) return a[(size_t)idx];
     warnArrayGet(idx, a.size());
     return zeroOf<T>();
 }
-template <typename T> inline Array<T> arrAdd(Array<T> a, const T& v)
+template <typename T> inline Array<T> arrAdd(Array<T> a, const Same<T>& v)
 { a.push_back(v); return a; }
-template <typename T> inline Array<T> arrSet(Array<T> a, int idx, const T& v)
+template <typename T> inline Array<T> arrSet(Array<T> a, int idx, const Same<T>& v)
 { if (idx >= 0 && idx < (int)a.size()) a[(size_t)idx] = v; return a; }
-template <typename T> inline Array<T> arrInsert(Array<T> a, int idx, const T& v)
+template <typename T> inline Array<T> arrInsert(Array<T> a, int idx, const Same<T>& v)
 {
     if (idx < 0) idx = 0;
     if (idx > (int)a.size()) idx = (int)a.size();
@@ -299,12 +309,12 @@ template <typename T> inline Array<T> arrInsert(Array<T> a, int idx, const T& v)
 }
 template <typename T> inline Array<T> arrRemove(Array<T> a, int idx)
 { if (idx >= 0 && idx < (int)a.size()) a.erase(a.begin() + idx); return a; }
-template <typename T> inline bool arrContains(const Array<T>& a, const T& key)
+template <typename T> inline bool arrContains(const Array<T>& a, const Same<T>& key)
 {
     for (const T& e : a) if (e == key) return true;   // exact equality, like valueEquals
     return false;
 }
-template <typename T> inline int arrIndexOf(const Array<T>& a, const T& key)
+template <typename T> inline int arrIndexOf(const Array<T>& a, const Same<T>& key)
 {
     for (size_t i = 0; i < a.size(); ++i) if (a[i] == key) return (int)i;
     return -1;
@@ -313,8 +323,8 @@ template <typename T> inline int arrIndexOf(const Array<T>& a, const T& key)
 // default arm makes EVERY comparison false — Contains never hits and IndexOf is
 // always -1 for a struct array. Both inputs are still parameters, so they are
 // still evaluated (pure-EngineCall dispatch counts are part of the trace, §3.4).
-template <typename T> inline bool arrContainsNever(const Array<T>&, const T&) { return false; }
-template <typename T> inline int  arrIndexOfNever (const Array<T>&, const T&) { return -1; }
+template <typename T> inline bool arrContainsNever(const Array<T>&, const Same<T>&) { return false; }
+template <typename T> inline int  arrIndexOfNever (const Array<T>&, const Same<T>&) { return -1; }
 
 // ── Set<T> / Map<K,V> ────────────────────────────────────────────────────────
 // INSERTION-ORDERED, and vector-backed for exactly that reason: the interpreter
@@ -362,11 +372,6 @@ template <typename T> inline int indexOfElem(const Array<T>& a, const T& key)
     return -1;
 }
 
-// The element parameters are NON-DEDUCING (std::type_identity_t): the container
-// argument alone fixes T, so a string literal on the value pin converts to
-// std::string instead of failing to deduce `const char[2]` against T.
-template <typename T> using Same = std::type_identity_t<T>;
-
 template <typename T> inline Set<T> setAdd(Set<T> s, const Same<T>& v)
 {
     // Already present → unchanged, and NOT moved to the back.
@@ -384,6 +389,45 @@ template <typename T> inline bool setContains(const Set<T>& s, const Same<T>& v)
 template <typename T> inline int setLength(const Set<T>& s) { return (int)s.items.size(); }
 template <typename T> inline Set<T> setClear(const Set<T>&) { return Set<T>{}; }
 template <typename T> inline Array<T> setToArray(const Set<T>& s) { return s.items; }
+// Array → Set: duplicates collapse to the FIRST occurrence, which is both what
+// the interpreter's dedupeSetItems does and what folding setAdd over the array
+// would leave. Spelled as that fold so the two cannot drift.
+template <typename T> inline Set<T> setFromArray(const Array<T>& a)
+{
+    Set<T> s;
+    for (const T& e : a) if (indexOfElem(s.items, e) < 0) s.items.push_back(e);
+    return s;
+}
+// The set algebra. A's ORDER is the result's order in all three (union then
+// appends B's extras behind it) — with an insertion-ordered container that is a
+// promised property, and the interpreter promises the same one.
+template <typename T> inline Set<T> setUnion(const Set<T>& a, const Set<T>& b)
+{
+    // A is filtered too, not copied wholesale. A hand-fed input — a Set built at
+    // a script boundary, or one a caller assembled itself — may carry
+    // duplicates, and the OUTPUT has to be a set whatever went in. The
+    // interpreter states exactly that rule; the two sides of a node are not
+    // allowed to promise different things, which is the whole point of the
+    // parity harness.
+    Set<T> out;
+    for (const T& e : a.items) if (indexOfElem(out.items, e) < 0) out.items.push_back(e);
+    for (const T& e : b.items) if (indexOfElem(out.items, e) < 0) out.items.push_back(e);
+    return out;
+}
+template <typename T> inline Set<T> setIntersect(const Set<T>& a, const Set<T>& b)
+{
+    Set<T> out;
+    for (const T& e : a.items)
+        if (indexOfElem(b.items, e) >= 0 && indexOfElem(out.items, e) < 0) out.items.push_back(e);
+    return out;
+}
+template <typename T> inline Set<T> setDifference(const Set<T>& a, const Set<T>& b)
+{
+    Set<T> out;
+    for (const T& e : a.items)
+        if (indexOfElem(b.items, e) < 0 && indexOfElem(out.items, e) < 0) out.items.push_back(e);
+    return out;
+}
 
 template <typename K, typename V>
 inline Map<K, V> mapSet(Map<K, V> m, const Same<K>& k, const Same<V>& v)
@@ -427,6 +471,56 @@ template <typename K, typename V> inline Array<V> mapValues(const Map<K, V>& m)
 {
     Array<V> out = m.values;
     out.resize(m.keys.size() < m.values.size() ? m.keys.size() : m.values.size());
+    return out;
+}
+// Break Map has no helper of its own: it lowers onto mapKeys/mapValues, so the
+// truncation rule stays in one place.
+//
+// Two arrays → one map, paired by INDEX. The SHORTER one wins (a surplus key
+// would need an invented value), and a repeated key keeps its first position
+// while taking the last value — which is precisely what folding mapSet over the
+// pairs does, so that is how it is written.
+template <typename K, typename V>
+inline Map<K, V> mapFromArrays(const Array<K>& keys, const Array<V>& values)
+{
+    Map<K, V> m;
+    const size_t n = keys.size() < values.size() ? keys.size() : values.size();
+    for (size_t i = 0; i < n; ++i)
+    {
+        const int at = indexOfElem(m.keys, keys[i]);
+        if (at >= 0) m.values[(size_t)at] = values[i];
+        else { m.keys.push_back(keys[i]); m.values.push_back(values[i]); }
+    }
+    return m;
+}
+// The reverse lookup: the FIRST pair holding `v`, in iteration order. Two
+// helpers rather than one returning a pair, because the node's two data-outs are
+// re-emitted independently at every read (§3.3) and neither may depend on the
+// other having been read. A miss answers with K's zero — the same value an
+// unwired key pin reads, and what zeroLit emits for it.
+template <typename K, typename V>
+inline int mapIndexOfValue(const Map<K, V>& m, const Same<V>& v)
+{
+    const size_t n = m.keys.size() < m.values.size() ? m.keys.size() : m.values.size();
+    for (size_t i = 0; i < n; ++i) if (sameElem(m.values[i], v)) return (int)i;
+    return -1;
+}
+template <typename K, typename V> inline K mapFindByValue(const Map<K, V>& m, const Same<V>& v)
+{
+    const int at = mapIndexOfValue(m, v);
+    return at >= 0 ? m.keys[(size_t)at] : K{};
+}
+template <typename K, typename V> inline bool mapFoundByValue(const Map<K, V>& m, const Same<V>& v)
+{ return mapIndexOfValue(m, v) >= 0; }
+// Removes EVERY pair holding `v` (mapRemove drops one key; this drops all
+// matches), survivors in their original order.
+template <typename K, typename V>
+inline Map<K, V> mapRemoveByValue(const Map<K, V>& m, const Same<V>& v)
+{
+    Map<K, V> out;
+    const size_t n = m.keys.size() < m.values.size() ? m.keys.size() : m.values.size();
+    for (size_t i = 0; i < n; ++i)
+        if (!sameElem(m.values[i], v)) { out.keys.push_back(m.keys[i]); out.values.push_back(m.values[i]); }
     return out;
 }
 

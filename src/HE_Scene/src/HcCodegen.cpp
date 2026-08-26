@@ -1809,6 +1809,17 @@ private:
             return "hc::setContains(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::SetToArray:
             return "hc::setToArray(" + input(n, 0, fnCtx) + ")";
+        // The way back, and the set algebra. Same story as the ops above: the
+        // helpers reproduce the ordering rules, and hc::sameElem answers false
+        // for a struct element exactly where scalarValueEquals has no case.
+        case NT::SetFromArray:
+            return "hc::setFromArray(" + input(n, 0, fnCtx) + ")";
+        case NT::SetUnion:
+            return "hc::setUnion(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::SetIntersect:
+            return "hc::setIntersect(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::SetDifference:
+            return "hc::setDifference(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         // ── Map<K,V> ─────────────────────────────────────────────────────────
         case NT::MapMake:
         case NT::MapClear:
@@ -1829,6 +1840,21 @@ private:
             return "hc::mapKeys(" + input(n, 0, fnCtx) + ")";
         case NT::MapValues:
             return "hc::mapValues(" + input(n, 0, fnCtx) + ")";
+        case NT::MapBreak:
+            // Break Map IS Map Keys + Map Values on one node, so it lowers onto
+            // the very same helpers — no third truncation rule to keep in sync.
+            // A pure node with two outs re-emits per read (§3.3), like Break
+            // Vector: the map expression appears once per pin that is wired.
+            return (outIdx == 1 ? "hc::mapValues(" : "hc::mapKeys(") + input(n, 0, fnCtx) + ")";
+        case NT::MapFromArrays:
+            return "hc::mapFromArrays(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::MapFindByValue:
+            // Two outs, two helpers, one shared scan — split rather than cached
+            // because the node is pure and a data-out is re-emitted at every read.
+            return (outIdx == 1 ? "hc::mapFoundByValue(" : "hc::mapFindByValue(") +
+                   input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::MapRemoveByValue:
+            return "hc::mapRemoveByValue(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::IsValid:
             return "hc::isValidRef(m_ctx, " + input(n, 0, fnCtx) + ")";
         case NT::Cast:

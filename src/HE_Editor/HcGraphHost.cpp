@@ -30,6 +30,34 @@ bool listed(const std::vector<NT>& v, NT t)
 	return std::find(v.begin(), v.end(), t) != v.end();
 }
 
+// HorizonCode's container kind → the canvas's own. Spelled out rather than cast:
+// the two enums agree today by coincidence of ordering, and the canvas is shared
+// with graphs that have never heard of HorizonCode, so nothing keeps them lined
+// up. A new kind here is a compile-time gap, not a silently wrong glyph.
+GraphEditor::Container containerPin(HC::ContainerKind k)
+{
+	switch (k)
+	{
+		case HC::ContainerKind::Array: return GraphEditor::Container::Array;
+		case HC::ContainerKind::Set:   return GraphEditor::Container::Set;
+		case HC::ContainerKind::Map:   return GraphEditor::Container::Map;
+		case HC::ContainerKind::None:  break;
+	}
+	return GraphEditor::Container::None;
+}
+
+// Does the search query hit the words people actually TYPE for this node, as
+// opposed to what it is called? A node's display name is its serialisation key
+// (fromJson resolves the type by comparing against nodeDisplayName), so a node
+// can never be renamed to what someone looks for — "Map Set" is what a search
+// for "map add" means. The registry keeps that vocabulary beside the name.
+bool aliasHit(NT t, const std::string& lowerQuery)
+{
+	if (lowerQuery.empty()) return false;   // an empty query already matches everything
+	const char* a = HC::nodeSearchAliases(t);
+	return a && *a && lower(a).find(lowerQuery) != std::string::npos;
+}
+
 // What kind of pin a wire is being dragged off: exec vs data, and for a data pin
 // its value type + array-ness. Both the drag-off menu and the quick-spawn keys
 // need it to find a compatible pin on the node they are about to create.
@@ -173,7 +201,20 @@ std::vector<GraphEditor::Pin> nodePins(const HC::Node& n)
 		GraphEditor::Pin p;
 		p.id = id++; p.label = pd.name ? pd.name : "";
 		p.color = HcEditorUtil::pinTypeColor(pd.type); p.input = input; p.isExec = isExec;
-		p.isArray = pd.isArray;   // array pins draw as a 2×2 grid
+		// The canvas draws one glyph per container KIND, so hand it the resolved
+		// kind — pd.kind(), not pd.container, or the legacy "isArray without a
+		// kind" rows that every pre-Set/Map graph on disk carries would come out
+		// as scalars. isArray stays set beside it: it is the flag the material /
+		// particle / animator hosts still speak, and Pin resolves the pair the
+		// same way HorizonCode::containerKindOf does.
+		const HC::ContainerKind ck = pd.kind();
+		p.isArray   = ck != HC::ContainerKind::None;
+		p.container = containerPin(ck);
+		// A map pin wears BOTH its types: the key color on the left column. Without
+		// it Map<String,Int> and Map<Int,Int> are the same glyph, and the key type
+		// is readable only in the details panel.
+		if (ck == HC::ContainerKind::Map)
+			p.keyColor = HcEditorUtil::pinTypeColor(pd.keyType);
 		out.push_back(std::move(p));
 	};
 	for (const auto& pd : s.execIns)  push(pd, true,  true);
@@ -685,7 +726,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 		{
 			if (listed(h.menus->addExcluded, t)) continue;
 			if (std::string(HC::nodeCategory(t)) != cat) continue;
-			if (!matches(HC::nodeDisplayName(t), cat)) continue;
+			if (!matches(HC::nodeDisplayName(t), cat) && !aliasHit(t, q)) continue;
 			if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
 			bool hov = false;
 			if (menuItemWithHint(HC::nodeDisplayName(t), HcGraphShortcuts::hintFor(t), &hov))
@@ -1090,7 +1131,9 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (std::find(refOffered.begin(), refOffered.end(), t) != refOffered.end())
 				continue;   // the "Reference" section above already offers it
 			const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragCtr, srcInput, isExecPin);
-			if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
+			// Same alias vocabulary as the add menu: a search that finds a node in
+			// one menu and not in the other is the more confusing of the two.
+			if (pin < 0 || (!matches(HC::nodeDisplayName(t)) && !aliasHit(t, q))) continue;
 			if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
 			// The hint is live here too: the same key hit MID-DRAG skips this
 			// menu and drops the node already wired.
@@ -1342,6 +1385,13 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::SetClear:
 	case NT::SetToArray:
 	case NT::ForEachSet:
+	// The conversion and the set algebra pick their element the same way: one
+	// propType stands for every Set (and Array) pin on the node, so both sides
+	// of a union are the same kind of set by construction rather than by check.
+	case NT::SetFromArray:
+	case NT::SetUnion:
+	case NT::SetIntersect:
+	case NT::SetDifference:
 	{
 		const PT before = n.propType;
 		if (HcEditorUtil::drawTypePicker("Element", h.content, n.propType, &n.s) && n.propType != before)
@@ -1364,6 +1414,14 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::MapKeys:
 	case NT::MapValues:
 	case NT::ForEachMap:
+	// The four new map nodes carry both halves too: Make Map From Arrays takes
+	// its key type from the Array<K> input, and Break Map / Find By Value /
+	// Remove By Value all lay out a key pin, so none of them can be described
+	// by the value picker alone.
+	case NT::MapFromArrays:
+	case NT::MapBreak:
+	case NT::MapFindByValue:
+	case NT::MapRemoveByValue:
 	{
 		// A map node needs BOTH halves picked; either one changing re-lays the
 		// pins, so both drop the node's links the way the element picker does.

@@ -8,6 +8,12 @@
 #include "fixtures.h"      // tests/fixtures/hcodegen — the shared graphs
 #include "hc_registry.h"   // generated at build time by hc_codegen
 #include <HorizonCode/HorizonCodeCompiled.h>
+// hc:: itself — the runtime support library generated classes are built on. The
+// container helpers are function TEMPLATES, so a clause of one is only ever type
+// checked where it is INSTANTIATED: the fixtures below do that by being compiled,
+// and a dedicated case beside the container parity tests reaches the one clause
+// no fixture graph can build (see "hc::setUnion keeps its OUTPUT a set").
+#include <HorizonCode/HorizonCodeGenSupport.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/EngineApi.h>
 #include <algorithm>
@@ -656,6 +662,312 @@ TEST_CASE("codegen parity: containers (Set/Map, and their ITERATION ORDER)")
 	CHECK(moodHp.keys[0].i == 5);
 	CHECK(moodHp.keys[1].i == 1);
 	CHECK(p.var("angryHp").i == 11);
+}
+
+TEST_CASE("codegen: the container conversions and set algebra lower onto hc:: helpers")
+{
+	// This case READS the emitted text; it does not compile it — the parity case
+	// right below (fix/containers, events SetAlgebra / MapPairs / EnumAlgebra) is
+	// what compiles these eight nodes and runs them against the interpreter. What
+	// is left for this one is the thing a green build does NOT tell you: expr()'s
+	// default arm throws FallbackError, so a node with no emitter case does not
+	// fail the build — it silently ships the whole class interpreted, and every
+	// "parity" assertion about it would then be comparing the interpreter with
+	// itself. `fallbacks.empty()` is that guard, and the helper names below say
+	// WHICH lowering was chosen.
+	//
+	// The graph goes through Fx::done()'s JSON round trip on the way, so it also
+	// pins that the eight new display names resolve back to their node types.
+	using NT = HorizonCode::NodeType;
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.setVarDecl("fromArr", PT::String);
+	f.setVarDecl("uni", PT::String);
+	f.setVarDecl("inter", PT::String);
+	f.setVarDecl("diff", PT::String);
+	f.mapVarDecl("built", PT::String, PT::Int);
+	f.mapVarDecl("pruned", PT::String, PT::Int);
+	f.arrVar("bk", PT::String, {});
+	f.arrVar("bv", PT::Int, {});
+	f.var("foundKey", PT::String);
+	f.var("found", PT::Bool);
+
+	// Two source sets and the two source arrays every op below reads.
+	auto strArray = [&f](std::initializer_list<const char*> items)
+	{
+		int prev = f.arrayOp(NT::ArrayMake, PT::String);
+		for (const char* s : items)
+		{
+			const int add = f.arrayOp(NT::ArrayAdd, PT::String);
+			f.data(prev, 0, add, 0);
+			f.data(f.constS(s), 0, add, 1);
+			prev = add;
+		}
+		return prev;
+	};
+	auto strSet = [&f](std::initializer_list<const char*> items)
+	{
+		int prev = f.setOp(NT::SetMake, PT::String);
+		for (const char* s : items)
+		{
+			const int add = f.setOp(NT::SetAdd, PT::String);
+			f.data(prev, 0, add, 0);
+			f.data(f.constS(s), 0, add, 1);
+			prev = add;
+		}
+		return prev;
+	};
+	const int arrA = strArray({ "b", "a", "b" });
+	const int setA = strSet({ "b", "a" });
+	const int setB = strSet({ "c", "a" });
+	const int keysA = strArray({ "a", "b" });
+	int valsA = f.arrayOp(NT::ArrayMake, PT::Int);
+	for (const int v : { 1, 2 })
+	{
+		const int add = f.arrayOp(NT::ArrayAdd, PT::Int);
+		f.data(valsA, 0, add, 0);
+		f.data(f.constI(v), 0, add, 1);
+		valsA = add;
+	}
+
+	const int ev = f.event("Ops");
+	int prevExec = ev;
+	auto store = [&f, &prevExec](int sink) { f.exec(prevExec, sink); prevExec = sink; };
+
+	const int fromArr = f.setOp(NT::SetFromArray, PT::String);
+	f.data(arrA, 0, fromArr, 0);
+	{ const int s = f.setSetVar("fromArr", PT::String); f.data(fromArr, 0, s, 0); store(s); }
+
+	const NT algebra[] = { NT::SetUnion, NT::SetIntersect, NT::SetDifference };
+	const char* algebraVar[] = { "uni", "inter", "diff" };
+	for (int i = 0; i < 3; ++i)
+	{
+		const int op = f.setOp(algebra[i], PT::String);
+		f.data(setA, 0, op, 0);
+		f.data(setB, 0, op, 1);
+		const int s = f.setSetVar(algebraVar[i], PT::String);
+		f.data(op, 0, s, 0);
+		store(s);
+	}
+
+	const int built = f.mapOp(NT::MapFromArrays, PT::String, PT::Int);
+	f.data(keysA, 0, built, 0);
+	f.data(valsA, 0, built, 1);
+	{ const int s = f.setMapVar("built", PT::String, PT::Int); f.data(built, 0, s, 0); store(s); }
+
+	const int brk = f.mapOp(NT::MapBreak, PT::String, PT::Int);
+	f.data(built, 0, brk, 0);
+	{ const int s = f.setVar("bk", PT::String, true); f.data(brk, 0, s, 0); store(s); }
+	{ const int s = f.setVar("bv", PT::Int, true);    f.data(brk, 1, s, 0); store(s); }
+
+	const int find = f.mapOp(NT::MapFindByValue, PT::String, PT::Int);
+	f.data(built, 0, find, 0);
+	f.data(f.constI(2), 0, find, 1);
+	{ const int s = f.setVar("foundKey", PT::String); f.data(find, 0, s, 0); store(s); }
+	{ const int s = f.setVar("found", PT::Bool);      f.data(find, 1, s, 0); store(s); }
+
+	const int prune = f.mapOp(NT::MapRemoveByValue, PT::String, PT::Int);
+	f.data(built, 0, prune, 0);
+	f.data(f.constI(2), 0, prune, 1);
+	{ const int s = f.setMapVar("pruned", PT::String, PT::Int); f.data(prune, 0, s, 0); store(s); }
+
+	HE::hccg::Options opt;   // Interpret: a fallback would still leave ok true…
+	HE::hccg::Result r = HE::hccg::generate({ f.done("container_ops") }, opt);
+	REQUIRE(r.ok);
+	// …so THIS is the assertion. A missing emitter case lands here, named.
+	std::string why;
+	for (const auto& fb : r.fallbacks) why += fb.reason + "; ";
+	CHECK_MESSAGE(r.fallbacks.empty(), "the class did not compile: ", why);
+
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+	for (const char* helper : { "hc::setFromArray(", "hc::setUnion(", "hc::setIntersect(",
+	                            "hc::setDifference(", "hc::mapFromArrays(",
+	                            "hc::mapFindByValue(", "hc::mapFoundByValue(",
+	                            "hc::mapRemoveByValue(" })
+		CHECK_MESSAGE(all.find(helper) != std::string::npos, "not emitted: ", helper);
+	// Break Map has no helper of its own — it lowers onto the very two Map Keys
+	// and Map Values use, which is what keeps one truncation rule in the build.
+	CHECK(all.find("hc::mapKeys(") != std::string::npos);
+	CHECK(all.find("hc::mapValues(") != std::string::npos);
+}
+
+TEST_CASE("codegen parity: containers, the conversions and the set/map algebra")
+{
+	// The eight nodes above, this time GENERATED, COMPILED and RUN. That is the
+	// difference that matters: hc::setFromArray & co. are function TEMPLATES, so
+	// their bodies are only fully type checked where they are instantiated — the
+	// generated class is what instantiates them, and this is where its answers are
+	// held against the interpreter's.
+	//
+	// The same fixture class as the ordering case above (its own events), because
+	// the generated classes are listed by NAME in tests/CMakeLists.txt: a new
+	// fixture class would be generated and never compiled.
+	//
+	// Every p.fire() ends in checkParity(), which compares the WHOLE variable
+	// snapshot through valueEq — container kind included, map keys IN ORDER. So a
+	// divergence fails at the fire, before any assertion below is reached; the
+	// checks then pin down WHICH value the two backends agreed on.
+	ParityPair p("fix/containers");
+
+	p.fire("SetAlgebra");
+	// Array → Set. "c" and "a" each appear twice in the source array; each keeps
+	// its FIRST position, and the result is not in sorted order.
+	const Value fromArr = p.var("fromArr");
+	CHECK(fromArr.kind() == HorizonCode::ContainerKind::Set);
+	REQUIRE(fromArr.items.size() == 3);
+	CHECK(fromArr.items[0].s == "c");
+	CHECK(fromArr.items[1].s == "a");
+	CHECK(fromArr.items[2].s == "b");
+	// A = {b, a, e}, B = {c, a, d}. The union is A's order, then only what B adds
+	// — and "a", which BOTH hold, appears exactly once, at A's position.
+	const Value uni = p.var("uni");
+	CHECK(uni.kind() == HorizonCode::ContainerKind::Set);
+	REQUIRE(uni.items.size() == 5);
+	CHECK(uni.items[0].s == "b");
+	CHECK(uni.items[1].s == "a");
+	CHECK(uni.items[2].s == "e");
+	CHECK(uni.items[3].s == "c");
+	CHECK(uni.items[4].s == "d");
+	CHECK(p.var("uniLen").i == 5);
+	const Value inter = p.var("inter");
+	REQUIRE(inter.items.size() == 1);
+	CHECK(inter.items[0].s == "a");
+	// A \ B and B \ A are different answers, each in ITS left operand's order.
+	const Value diffAB = p.var("diffAB");
+	REQUIRE(diffAB.items.size() == 2);
+	CHECK(diffAB.items[0].s == "b");
+	CHECK(diffAB.items[1].s == "e");
+	const Value diffBA = p.var("diffBA");
+	REQUIRE(diffBA.items.size() == 2);
+	CHECK(diffBA.items[0].s == "c");
+	CHECK(diffBA.items[1].s == "d");
+	// A ∪ A is A — a set, not A twice.
+	const Value uniSelf = p.var("uniSelf");
+	REQUIRE(uniSelf.items.size() == 3);
+	CHECK(uniSelf.items[0].s == "b");
+	CHECK(uniSelf.items[2].s == "e");
+	// The conversion composed with the algebra: {c,a,b} ∪ {c,a,d}.
+	const Value uniChain = p.var("uniChain");
+	REQUIRE(uniChain.items.size() == 4);
+	CHECK(uniChain.items[0].s == "c");
+	CHECK(uniChain.items[1].s == "a");
+	CHECK(uniChain.items[2].s == "b");
+	CHECK(uniChain.items[3].s == "d");
+
+	p.fire("MapPairs");
+	// Keys ["b","a","b","z"] against values [1,2,3]: "z" has no value so it is
+	// not a pair at all, and the repeated "b" keeps slot 0 while taking the LAST
+	// value — the very {b→3, a→2} the Map Set chain in `containers` builds.
+	const Value built = p.var("built");
+	CHECK(built.kind() == HorizonCode::ContainerKind::Map);
+	REQUIRE(built.keys.size() == 2);
+	REQUIRE(built.items.size() == 2);
+	CHECK(built.keys[0].s == "b");
+	CHECK(built.items[0].i == 3);
+	CHECK(built.keys[1].s == "a");
+	CHECK(built.items[1].i == 2);
+	// Break Map: index-parallel, in the map's order.
+	const Value bk = p.var("bk");
+	const Value bv = p.var("bv");
+	CHECK(bk.kind() == HorizonCode::ContainerKind::Array);
+	REQUIRE(bk.items.size() == 2);
+	REQUIRE(bv.items.size() == 2);
+	CHECK(bk.items[0].s == "b");
+	CHECK(bk.items[1].s == "a");
+	CHECK(bv.items[0].i == 3);
+	CHECK(bv.items[1].i == 2);
+	// …and the way back, which is the direction the pair was missing: Break Map's
+	// two arrays fed straight into Make Map From Arrays give the same map back.
+	// They can: the truncation and the repeated key were resolved on the way IN,
+	// so what comes out of a Break is already clean.
+	const Value round = p.var("roundTrip");
+	REQUIRE(round.keys.size() == 2);
+	REQUIRE(round.items.size() == 2);
+	CHECK(round.keys[0].s == "b");
+	CHECK(round.items[0].i == 3);
+	CHECK(round.keys[1].s == "a");
+	CHECK(round.items[1].i == 2);
+	// The reverse lookup, hit and miss. A miss answers with the KEY type's zero
+	// (the variable was seeded "untouched", so this says the node really wrote).
+	CHECK(p.var("foundKey").s == "a");
+	CHECK(p.var("found").b == true);
+	CHECK(p.var("missKey").s == "");
+	CHECK(p.var("missFound").b == false);
+	// One value under two keys: found answers with the FIRST of them…
+	CHECK(p.var("dupFirst").s == "x");
+	// …and Remove By Value drops BOTH pairs, survivors keeping their order.
+	const Value pruned = p.var("pruned");
+	REQUIRE(pruned.keys.size() == 1);
+	REQUIRE(pruned.items.size() == 1);
+	CHECK(pruned.keys[0].s == "w");
+	CHECK(pruned.items[0].i == 8);
+	CHECK(p.var("prunedLen").i == 1);
+	// A value nothing holds removes nothing — not "the first pair" or "all".
+	const Value kept = p.var("prunedMiss");
+	REQUIRE(kept.keys.size() == 3);
+	CHECK(kept.keys[0].s == "x");
+	CHECK(kept.keys[2].s == "w");
+
+	p.fire("EnumAlgebra");
+	// The same nodes with an int-backed element/key type, whose boxing at the
+	// Value boundary is a different path than String's.
+	const Value moodsFromArr = p.var("moodsFromArr");
+	REQUIRE(moodsFromArr.items.size() == 2);   // Angry, Calm, Angry
+	CHECK(moodsFromArr.items[0].i == 5);       // Angry kept its FIRST position…
+	CHECK(moodsFromArr.items[1].i == 0);       // …and Calm was NOT sorted ahead of it
+	const Value moodUnion = p.var("moodUnion");
+	REQUIRE(moodUnion.items.size() == 3);
+	CHECK(moodUnion.items[0].i == 5);          // Angry
+	CHECK(moodUnion.items[1].i == 0);          // Calm
+	CHECK(moodUnion.items[2].i == 1);          // Happy — only B had it
+	const Value moodMap = p.var("moodMap");
+	REQUIRE(moodMap.keys.size() == 2);
+	REQUIRE(moodMap.items.size() == 2);
+	CHECK(moodMap.keys[0].i == 5);
+	CHECK(moodMap.items[0].i == 11);
+	CHECK(moodMap.keys[1].i == 1);
+	CHECK(moodMap.items[1].i == 22);
+	CHECK(p.var("moodKey").i == 1);            // Happy holds 22
+	CHECK(p.var("moodFound").b == true);
+}
+
+TEST_CASE("hc::setUnion keeps its OUTPUT a set, including A's own duplicates")
+{
+	// The one clause of the eight that the parity harness above cannot reach, and
+	// the reason it is asserted directly instead of by a fixture:
+	//
+	// every path that CONSTRUCTS an hc::Set dedupes — hc::setAdd, hc::setFromArray,
+	// hc::rawSet at a Value boundary, and a seeded default (HcCodegen emits it
+	// through HorizonCode::variableDefaultValue, which runs dedupeSetItems). So no
+	// graph this harness can build hands setUnion an A that carries a duplicate,
+	// and with a clean A a union that copies A wholesale answers identically.
+	//
+	// It is still a clause the interpreter states (HorizonCode.cpp filters A
+	// against the OUTPUT, not just B), and hc::Set is an aggregate — anything that
+	// hands one in, a hand-written C++ caller or a future boundary that forgets to
+	// dedupe, can carry duplicates. Built here the only way that reaches it, in the
+	// very shape HcCodegen's valueLit emits for a seeded set.
+	const hc::Set<std::string> a{ hc::Array<std::string>{ "b", "a", "b", "e" } };
+	const hc::Set<std::string> b{ hc::Array<std::string>{ "c", "a", "d", "c" } };
+
+	const hc::Set<std::string> u = hc::setUnion(a, b);
+	REQUIRE(u.items.size() == 5);
+	CHECK(u.items[0] == "b");   // A's order, and "b" ONCE despite arriving twice
+	CHECK(u.items[1] == "a");
+	CHECK(u.items[2] == "e");
+	CHECK(u.items[3] == "c");   // then what only B has, in B's order, "c" once
+	CHECK(u.items[4] == "d");
+
+	// The other two already filtered A; asserted alongside so the three stay one
+	// rule rather than three implementations that happen to agree.
+	const hc::Set<std::string> i = hc::setIntersect(a, b);
+	REQUIRE(i.items.size() == 1);
+	CHECK(i.items[0] == "a");
+	const hc::Set<std::string> d = hc::setDifference(a, b);
+	REQUIRE(d.items.size() == 2);
+	CHECK(d.items[0] == "b");
+	CHECK(d.items[1] == "e");
 }
 
 TEST_CASE("codegen parity: events_multi (order, elem filter, shared per-fire cache)")
