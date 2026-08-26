@@ -2,7 +2,9 @@
 #include "EditorHelp.h"       // the tooltip table every labelled row is looked up in
 #include "EditorTheme.h"      // the brand accent behind primaryButton
 
-#include <imgui_internal.h>   // PushMultiItemsWidths — the same splitter DragFloatN uses
+#include <imgui_internal.h>   // PushMultiItemsWidths (the splitter DragFloatN uses)
+                              // + the window's WorkRect, which is what moves a
+                              // SeparatorText's rule short of a trailing button
 
 #include <cfloat>
 #include <cstdarg>
@@ -68,6 +70,79 @@ bool addButton(const char* id, const char* tooltip)
 	const float sz = ImGui::GetFrameHeight();
 	const bool pressed = ImGui::Button(label, ImVec2(sz, sz));
 	if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+	return pressed;
+}
+
+bool sectionHeaderAdd(const char* label, const char* id, const char* tooltip)
+{
+	ImGuiWindow* window = ImGui::GetCurrentWindow();
+	if (window->SkipItems) return false;
+
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const float       btn   = ImGui::GetFrameHeight();   // addButton draws a btn×btn square
+
+	// ── Making room in the RULE, not just on the line ────────────────────────
+	// Checked in the vendored ImGui (1.92.9 WIP) rather than assumed:
+	// SeparatorTextEx builds its bounding box as
+	//     ImRect bb(pos, ImVec2(window->WorkRect.Max.x, pos.y + min_size.y))
+	// and draws the right-hand rule out to bb.Max.x. So the work rect is the
+	// only lever that moves the LINE — SameLine() alone would leave it running
+	// straight through the button. Narrowing it for the duration of the call
+	// also shortens the label's ellipsis budget (bb.Max.x is what
+	// RenderTextEllipsis clips to), so a heading too long for the panel now
+	// truncates BEFORE the button instead of underneath it.
+	//
+	// Truncated to whole pixels first so "line ends exactly one ItemSpacing.x
+	// left of the button" holds without a sub-pixel seam between the two.
+	// Both clamped to the row's left edge, so a panel dragged narrower than one
+	// button still keeps the "+" inside itself instead of pushing it out over
+	// whatever is docked to the left.
+	const float workMaxX = window->WorkRect.Max.x;
+	const float btnX     = ImMax(ImTrunc(workMaxX - btn), window->DC.CursorPos.x);
+	window->WorkRect.Max.x = ImMax(btnX - style.ItemSpacing.x, window->DC.CursorPos.x);
+
+	// The row's own metrics, computed the way SeparatorTextEx computes them, so
+	// the button can be placed without having to ask ImGui afterwards.
+	const ImVec2 labelSize = ImGui::CalcTextSize(label, ImGui::FindRenderedTextEnd(label), false);
+	const float  rowH      = ImMax(labelSize.y + style.SeparatorTextPadding.y * 2.0f,
+	                               style.SeparatorTextBorderSize);
+	const float  rowTopY   = window->DC.CursorPos.y;
+
+	ImGui::SeparatorText(label);
+	window->WorkRect.Max.x = workMaxX;
+
+	// ── The button, leaving no trace in the layout ───────────────────────────
+	// The two are not the same height: a "+" is GetFrameHeight() tall, the
+	// heading row is the text plus 2 × SeparatorTextPadding.y. So the button is
+	// CENTRED on the row rather than aligned to it, and the row keeps the height
+	// it would have had — otherwise everything the caller draws below shifts.
+	//
+	// Submitting an item moves the cursor and rewrites the line bookkeeping, so
+	// all of it is put back afterwards. Written through window->DC rather than
+	// SetCursorScreenPos()/GetCursorScreenPos(): those set DC.IsSetPos, and End()
+	// then runs ErrorCheckUsingSetCursorPosToExtendParentBoundaries(), which
+	// asserts whenever the restored cursor sits past CursorMaxPos — which it
+	// always does, by exactly one ItemSpacing.y. CursorMaxPos itself is
+	// deliberately left grown by the button: the window must still size and
+	// scroll to include it.
+	const ImVec2 cursor       = window->DC.CursorPos;
+	const ImVec2 cursorPrev   = window->DC.CursorPosPrevLine;
+	const ImVec2 prevLineSize = window->DC.PrevLineSize;
+	const ImVec2 currLineSize = window->DC.CurrLineSize;
+	const float  prevBaseline = window->DC.PrevLineTextBaseOffset;
+	const float  currBaseline = window->DC.CurrLineTextBaseOffset;
+	const bool   isSameLine   = window->DC.IsSameLine;
+
+	window->DC.CursorPos = ImVec2(btnX, ImTrunc(rowTopY + (rowH - btn) * 0.5f));
+	const bool pressed   = addButton(id, tooltip);
+
+	window->DC.CursorPos              = cursor;
+	window->DC.CursorPosPrevLine      = cursorPrev;
+	window->DC.PrevLineSize           = prevLineSize;
+	window->DC.CurrLineSize           = currLineSize;
+	window->DC.PrevLineTextBaseOffset = prevBaseline;
+	window->DC.CurrLineTextBaseOffset = currBaseline;
+	window->DC.IsSameLine             = isSameLine;
 	return pressed;
 }
 

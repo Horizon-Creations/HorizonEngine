@@ -1819,8 +1819,10 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 void drawGraphVariables(State& st, AppContext& ctx)
 {
 	// ── Widget elements (drag → Get/Set a UI element property) ────────────────
-	ImGui::TextDisabled("Widget Elements");
-	ImGui::Separator();
+	// SeparatorText like every other category in this panel, even though this one
+	// has nothing to add to it: the sections that DO carry a "+" now draw a rule,
+	// and a lone heading in the old style reads as a different kind of thing.
+	ImGui::SeparatorText("Widget Elements");
 	ImGui::TextWrapped("Drag an element onto the graph to read or write its properties.");
 	ImGui::Spacing();
 
@@ -1857,10 +1859,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	}
 
 	// ── Graph variables (user-defined, persistent per running widget) ─────────
-	ImGui::Spacing();
-	ImGui::TextDisabled("Variables");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight());
-	if (EditorWidgets::addButton("##addvar", "Add a variable"))
+	if (EditorWidgets::sectionHeaderAdd("Variables", "##addvar", "Add a variable"))
 	{
 		HC::Variable v;
 		v.name = HGH::uniqueVarName(st.graph);
@@ -1870,8 +1869,6 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		st.selectedGraphNode = 0;
 		commitEdit(st, ctx);
 	}
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a variable");
-	ImGui::Separator();
 
 	// Read once for the whole list, not once per row: it goes through the config
 	// store, and every row in a frame has to agree anyway.
@@ -1906,10 +1903,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	// usable only inside that function.
 	if (st.currentGraph != 0)
 	{
-		ImGui::Spacing();
-		ImGui::TextDisabled("Local Variables");
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight());
-		if (EditorWidgets::addButton("##addlvar", "Add a local variable — reset to its default on every call"))
+		if (EditorWidgets::sectionHeaderAdd("Local Variables", "##addlvar", "Add a local variable — reset to its default on every call"))
 		{
 			HC::Variable v;
 			v.name = HGH::uniqueVarName(st.graph);
@@ -1920,25 +1914,22 @@ void drawGraphVariables(State& st, AppContext& ctx)
 			st.selectedGraphNode = 0;
 			commitEdit(st, ctx);
 		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Local to this function — reset to its default on every call.");
-		ImGui::Separator();
 		for (const auto& v : st.graph.variables)
 			if (v.scope == st.currentGraph) varRow(v);
 	}
 
 	// ── Graphs: the event graph + one sub-graph per function ──────────────────
-	ImGui::Spacing();
+	// Named, like the level script panel names it: the Event Graph entry used to
+	// sit under nothing at all, which left it looking like a stray row belonging
+	// to the variable list above it.
+	ImGui::SeparatorText("Graphs");
 	{
 		HE::Ed::Help::Scope helpScope("UI Graph");
 		if (EditorWidgets::selectable("Event Graph", st.currentGraph == 0))
 		{ st.currentGraph = 0; st.selectedGraphNode = 0; st.selectedVar.clear(); }
 	}
 
-	ImGui::Spacing();
-	ImGui::TextDisabled("Functions");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight());
-	if (EditorWidgets::addButton("##addfn", "Add a function"))
+	if (EditorWidgets::sectionHeaderAdd("Functions", "##addfn", "Add a function"))
 	{
 		// A function is its own sub-graph: a start (entry) + a Return node.
 		HC::Node fn; fn.type = NT::FunctionEntry; fn.s = HGH::uniqueFunctionName(st.graph);
@@ -1955,8 +1946,6 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		st.gFocusSelected = true;
 		commitEdit(st, ctx);
 	}
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a function");
-	ImGui::Separator();
 
 	for (const auto& gn : st.graph.nodes)
 	{

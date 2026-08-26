@@ -93,6 +93,21 @@ bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 // kept these buttons from being three different spellings of "+ Add".
 bool addButton(const char* id, const char* tooltip = nullptr);
 
+// A section heading and its "+" on the SAME line, the button right-aligned and
+// centred on the heading, the heading's rule stopping short of it.
+//
+// Worth a helper because the obvious spellings are both wrong in the same
+// place: ImGui::SeparatorText draws its rule across the whole work rect, so a
+// following SameLine() puts the button ON the line, and leaving the SameLine
+// out — which is what every call site did — drops the button onto a row of its
+// own underneath the heading, which is what it looked like.
+//
+// Returns true on the frame the button was pressed. The cursor is left exactly
+// where a plain SeparatorText(label) would have left it, so callers keep drawing
+// straight underneath as before; the LAST submitted item is the button, so
+// IsItemHovered() / GetItemRect*() after the call refer to the "+".
+bool sectionHeaderAdd(const char* label, const char* id, const char* tooltip = nullptr);
+
 // The compact variants, for deletion that lives INSIDE content rather than at
 // the foot of a dialog. Ghost-red on purpose — red text, fill only under the
 // mouse: a list where every row ends in a filled red block has no warning

@@ -311,8 +311,7 @@ void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& i
 		ImGui::PopID();
 	};
 
-	ImGui::SeparatorText("Variables");
-	if (EditorWidgets::addButton("##var", "Add a variable"))
+	if (EditorWidgets::sectionHeaderAdd("Variables", "##var", "Add a variable"))
 	{
 		HC::Variable v;
 		v.name = HGH::uniqueVarName(graph);
@@ -376,8 +375,7 @@ void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& i
 	// usable only inside that function (menus/drops elsewhere won't offer them).
 	if (g.currentGraph != 0)
 	{
-		ImGui::SeparatorText("Local Variables");
-		if (EditorWidgets::addButton("##lvar", "Add a local variable — reset to its default on every call"))
+		if (EditorWidgets::sectionHeaderAdd("Local Variables", "##lvar", "Add a local variable — reset to its default on every call"))
 		{
 			HC::Variable v;
 			v.name = HGH::uniqueVarName(graph);
@@ -387,8 +385,6 @@ void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& i
 			g.selectedNode = 0;
 			edited = true;
 		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Local to this function — reset to its default on every call.");
 		for (const auto& v : graph.variables)
 			if (v.scope == g.currentGraph) varRow(v);
 	}
@@ -406,8 +402,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 	// Declared once here, then PICKED in Emit/Bind/Event nodes instead of typed
 	// three times. Rename rewrites every node that used the old name, so the two
 	// halves of a binding cannot drift apart.
-	ImGui::SeparatorText("Events");
-	if (EditorWidgets::addButton("##evt", "Declare an event this class raises"))
+	if (EditorWidgets::sectionHeaderAdd("Events", "##evt", "Declare an event this class raises"))
 	{
 		std::string name = "NewEvent";
 		for (int i = 2; graph.findEvent(name); ++i) name = "NewEvent" + std::to_string(i);
@@ -443,8 +438,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 		}
 	}
 
-	ImGui::SeparatorText("Functions");
-	if (EditorWidgets::addButton("##fn", "Add a function"))
+	if (EditorWidgets::sectionHeaderAdd("Functions", "##fn", "Add a function"))
 	{
 		// A function is its own sub-graph: a start (FunctionEntry) + a Return node.
 		const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));

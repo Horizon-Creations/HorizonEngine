@@ -17,6 +17,7 @@
 
 #include <imgui.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -1146,4 +1147,196 @@ TEST_CASE("Variable rows: Detailed and Compact are two real, different looks")
 			if (r1 != r2 || g1 != g2 || b1 != b2) ++differing;
 		}
 	CHECK(differing > 0);
+}
+
+// ── The "+" of a section header ──────────────────────────────────────────────
+// The complaint this answers, verbatim: "der + button zum hinzufuegen sollte
+// auf einer hoehe mit dem title variables ... sein, das sieht doof aus wenn der
+// allein in einer zeile drunter steht". Every call site drew
+// SeparatorText("Variables") and then addButton() with nothing between them, so
+// the button landed on the next row.
+//
+// That is a layout claim, and layout is exactly what this harness can answer:
+// where the ink for the heading is, and where the ink for the button is.
+TEST_CASE("Section header: the + sits on the heading, not on a row below it")
+{
+	constexpr int W = 360, H = 200;
+
+	// What one scene reports back. Screen coordinates, which are image
+	// coordinates here: the harness viewport starts at (0, 0).
+	struct Probe
+	{
+		float  rowTopY   = 0.0f;   // where the heading row starts
+		float  rowBotY   = 0.0f;   // and where it ends
+		float  sectionH  = 0.0f;   // what the header cost in layout height
+		float  labelX0   = 0.0f;   // the heading glyphs' column range
+		float  labelX1   = 0.0f;
+		float  spacingX  = 0.0f;
+		float  frameH    = 0.0f;   // how tall a "+" is
+		ImVec2 btnMin{}, btnMax{};
+		float  windowLeft = 0.0f;
+	};
+
+	// `withButton == false` draws a bare SeparatorText in an otherwise identical
+	// scene — the baseline the header must not cost more than.
+	auto run = [&](const char* name, bool withButton, Probe& p)
+	{
+		Harness harness(W, H);
+		return shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f));
+			ImGui::SetNextWindowSize(ImVec2(W - 16.0f, H - 16.0f));
+			ImGui::Begin("##section", nullptr,
+				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+				ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+				ImGuiWindowFlags_NoSavedSettings);
+
+			const ImGuiStyle& style = ImGui::GetStyle();
+			const ImVec2 before = ImGui::GetCursorScreenPos();
+			if (withButton)
+				EditorWidgets::sectionHeaderAdd("Variables", "##var", "Add a variable");
+			else
+				ImGui::SeparatorText("Variables");
+			const ImVec2 after = ImGui::GetCursorScreenPos();
+
+			p.windowLeft = ImGui::GetWindowPos().x;
+			p.rowTopY    = before.y;
+			p.rowBotY    = after.y - style.ItemSpacing.y;
+			p.sectionH   = after.y - before.y;
+			p.spacingX   = style.ItemSpacing.x;
+			p.frameH     = ImGui::GetFrameHeight();
+			// SeparatorTextAlign.x is 0 in this theme, so the label starts one
+			// SeparatorTextPadding.x in from the row's left edge. Reading the
+			// range from the style rather than from the picture keeps the two
+			// column bands below independent of what was actually drawn.
+			p.labelX0 = before.x + style.SeparatorTextPadding.x;
+			p.labelX1 = p.labelX0 + ImGui::CalcTextSize("Variables").x;
+			// The helper leaves the "+" as the last submitted item on purpose.
+			if (withButton)
+			{
+				p.btnMin = ImGui::GetItemRectMin();
+				p.btnMax = ImGui::GetItemRectMax();
+			}
+
+			// Content underneath, so a header that pushed the cursor down has
+			// somewhere visible to push it to.
+			ImGui::TextUnformatted("Health");
+			ImGui::TextUnformatted("Score");
+			ImGui::End();
+		});
+	};
+
+	Probe hdr, plain;
+	const he_ui::Image img = run("section-header-add", true, hdr);
+	run("section-header-plain", false, plain);
+	REQUIRE(img.valid());
+
+	// ── 1. The section costs no more height than the heading alone ───────────
+	// Red for the layout that prompted this: SeparatorText() followed by a bare
+	// addButton() spends one ItemSpacing.y plus a whole GetFrameHeight() extra,
+	// and everything below the header slides down by that much. Also red for a
+	// helper that positions the button but forgets to put the cursor back.
+	CHECK(hdr.sectionH == doctest::Approx(plain.sectionH));
+
+	// ── 2. Heading and button share the same rows ────────────────────────────
+	// "Ink" is anything that is not the panel's own background. Sampled from the
+	// window's top padding band rather than computed: the rasteriser blends in
+	// 8-bit sRGB and nothing at all is drawn up there.
+	std::uint8_t bgR, bgG, bgB, bgA;
+	img.pixel(int(hdr.windowLeft) + 40, int(hdr.rowTopY) - 4, bgR, bgG, bgB, bgA);
+	auto isInk = [&](int x, int y)
+	{
+		std::uint8_t r, g, b, a;
+		img.pixel(x, y, r, g, b, a);
+		return std::abs(int(r) - int(bgR)) + std::abs(int(g) - int(bgG))
+		     + std::abs(int(b) - int(bgB)) > 12;
+	};
+
+	// The rows a column band has ink on. Returns false for an empty band, so an
+	// implementation that draws no button cannot pass the overlap test below by
+	// having nothing to disagree with.
+	auto inkRows = [&](int x0, int x1, int y0, int y1, int& top, int& bot)
+	{
+		bool any = false;
+		for (int y = y0; y <= y1; ++y)
+			for (int x = x0; x <= x1; ++x)
+				if (isInk(x, y))
+				{
+					if (!any) { top = y; any = true; }
+					bot = y;
+					break;
+				}
+		return any;
+	};
+
+	// The heading's own columns: past the short rule stub that SeparatorText
+	// draws to the LEFT of the label, and stopping before the rule picks up
+	// again on the right, so this band holds the glyphs and nothing else.
+	int labelTop = 0, labelBot = 0;
+	const bool labelInked = inkRows(int(hdr.labelX0) + 1, int(hdr.labelX1) - 1,
+	                                int(hdr.rowTopY), int(hdr.rowBotY),
+	                                labelTop, labelBot);
+	// The button's own columns, inset so the rounded corners' antialiasing is
+	// not what the span is measured from — and scanned over the HEADING ROW
+	// only, never past it. That bound is the point: a button that fell onto the
+	// row below leaves these rows to the separator's rule, which also inks them.
+	int btnTop = 0, btnBot = 0;
+	const bool btnInked = inkRows(int(hdr.btnMin.x) + 3, int(hdr.btnMax.x) - 3,
+	                              int(hdr.rowTopY), int(hdr.rowBotY),
+	                              btnTop, btnBot);
+	REQUIRE(labelInked);
+	REQUIRE(btnInked);
+
+	// So what is found here has to be a BLOCK, not a line: the "+" fills a
+	// GetFrameHeight() square, a rule crossing the same columns is two pixels
+	// tall. This is the assertion that stays red for the layout as it shipped —
+	// SeparatorText() then addButton() with nothing between them leaves the rule
+	// running through this band and the button a whole row further down, which
+	// scores 2 here instead of the twenty-odd a button scores.
+	const float rowH  = hdr.rowBotY - hdr.rowTopY;
+	const int   solid = int(hdr.frameH < rowH ? hdr.frameH : rowH) - 4;
+	INFO("button ink in the heading row: " << (btnBot - btnTop + 1)
+	     << " rows, expected at least " << solid);
+	CHECK(btnBot - btnTop + 1 >= solid);
+
+	// And this is the complaint itself, as an assertion: heading and button
+	// share rows. Red the moment the "+" drops onto a line of its own.
+	INFO("heading rows " << labelTop << ".." << labelBot
+	     << ", button rows " << btnTop << ".." << btnBot);
+	CHECK(labelTop <= btnBot);
+	CHECK(btnTop <= labelBot);
+
+	// And it is CENTRED on the row rather than merely somewhere on it. The two
+	// are not the same height — a "+" is GetFrameHeight(), the row is the text
+	// plus twice SeparatorTextPadding.y — so "equal margins above and below" is
+	// the only spelling of centred that does not depend on which of them happens
+	// to be taller in a given theme. Red for a button left at the row's top
+	// edge, which is where a plain SameLine() puts it.
+	//
+	// One pixel of slack, and one only: the offset is truncated to whole pixels,
+	// so a row whose spare height is odd splits it 4/5 rather than 4.5/4.5.
+	const float above = hdr.btnMin.y - hdr.rowTopY;
+	const float below = hdr.rowBotY  - hdr.btnMax.y;
+	INFO("margin above the + " << above << ", below " << below);
+	CHECK(std::fabs(above - below) <= 1.0f);
+
+	// ── 3. The rule stops short of the button ────────────────────────────────
+	// SeparatorText draws its line out to the window's work rect, so the naive
+	// repair — SeparatorText() + SameLine() + addButton() — puts the button ON
+	// the line instead of after it. The helper narrows the work rect for the
+	// duration of the call, which leaves exactly one ItemSpacing.x of clear
+	// space before the button. Insetting by two columns on each side keeps an
+	// antialiased line END from reading as a line that never stopped.
+	const int gapX0 = int(hdr.btnMin.x - hdr.spacingX) + 2;
+	const int gapX1 = int(hdr.btnMin.x) - 2;
+	REQUIRE(gapX1 >= gapX0);
+	int gapInk = 0;
+	for (int y = int(hdr.rowTopY); y <= int(hdr.rowBotY); ++y)
+		for (int x = gapX0; x <= gapX1; ++x)
+			if (isInk(x, y)) ++gapInk;
+	INFO("ink between the rule's end and the button: " << gapInk);
+	CHECK(gapInk == 0);
+
+	// And the button really is at the right-hand end of the row, not tucked in
+	// behind the label — red for a helper that only fixed the height.
+	CHECK(hdr.btnMin.x > hdr.labelX1);
 }
