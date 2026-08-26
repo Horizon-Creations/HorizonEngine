@@ -158,6 +158,27 @@ Baseline auf 0.** Die Zahl in Abschnitt 2 war 574 Bedienelemente bei 257 gedeckt
 ist heute höher, weil getrennte Scopes Bedienelemente sichtbar machen, die der Scan
 vorher nach `(Scope, Label)` zusammengefasst hat.
 
+### Was die Gegenprüfung gefunden hat
+
+Für die letzten fünf Stufen hat je ein zweiter Durchgang versucht, jede Tatsachen­behauptung
+im Entwurf zu widerlegen. Das hat sich gelohnt: **13 Sätze waren schlicht falsch**, und
+zwei davon haben einen Fehler im Editor selbst aufgedeckt.
+
+* Der Hinweis am Netzwerk-Haken der Zusammenarbeit hing an der zuletzt gezeichneten
+  Textzeile statt am Haken.
+* Das Umbenennen einer HorizonCode-Funktion soll die zugehörigen Call- und Return-Knoten
+  mitbenennen. Der Code dafür kann nie laufen: `oldName` wird jeden Frame neu gelesen, und
+  in dem Frame, in dem `IsItemDeactivatedAfterEdit()` zuschlägt, ist er schon gleich dem
+  neuen Namen. Betrifft `UIEditorPanel` und `LevelScriptPanel`, ist als eigene Aufgabe
+  notiert, und die beiden Einträge behaupten es solange nicht.
+* `cancelButton` hat nie nachgeschlagen, obwohl der Header es seit Stufe 2 behauptet.
+* Der Tooltip an „Start Game" wäre doppelt erschienen, weil der Hilfe-Lookup absichtlich
+  auch an deaktivierten Elementen feuert.
+* Kleinere, aber ebenso falsche Sätze: „Array Add" heißt „Array Append"; das Gist wird nur
+  hochgeladen wenn das Log angehängt ist; ein doppelter Feldname wird rot markiert, nicht
+  abgelehnt; der Ordner für Profiler-Dumps existiert immer; die Einschränkung der
+  detaillierten GPU-Messung gilt den Pro-Pass-Zahlen und nicht den Framezeiten.
+
 Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
 ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren
 `Position`, `Rotation` und `Scale` des Widgets und die der Variablen-Vorgabe ein und

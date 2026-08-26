@@ -2000,8 +2000,8 @@ namespace
 	  "", "ui#graph" },
 
 	{ "UI Graph Node/Name", "",
-	  "What this function is called. Renaming it renames the Call and Return "
-	  "nodes that go with it, so the wiring stays valid.",
+	  "What this function is called. Calls resolve by name, so a Call node "
+	  "elsewhere in the graph goes on naming whatever it named before.",
 	  "", "ui#graph" },
 	{ "UI Graph Node/Access", "",
 	  "Public makes the function callable from a script through "
@@ -2628,7 +2628,7 @@ namespace
 	{ "Script Variable/Delete Variable", "Delete Variable",
 	  "Removes the variable from this graph. Get Variable and Set Variable nodes "
 	  "that used it are left where they are, still naming something no longer "
-	  "declared — nothing breaks silently, but nothing is repaired either.",
+	  "declared — nothing is repaired for you.",
 	  "", "horizoncode#functions" },
 
 	{ "Script Node/Overridable", "",
@@ -2643,11 +2643,14 @@ namespace
 	  "picked from the list; a class names its own instead. Two Event nodes may "
 	  "not share a name, so one that is already handled is greyed out.",
 	  "", "horizoncode#communication" },
+	// No claim that the rename carries to the Call and Return nodes: the code
+	// meant to do that cannot run (it compares against a name it re-reads every
+	// frame), so saying so would be documenting an intention. The bug is filed;
+	// when it is fixed the sentence belongs back here.
 	{ "Script Node/Name", "",
-	  "What this function is called. Renaming it renames the Call and Return "
-	  "nodes bound to the old name, so the wiring stays valid. Calls resolve by "
-	  "name and the first match wins, so a second function with the same name is "
-	  "dead code that still looks live.",
+	  "What this function is called. Calls resolve by name and the first match "
+	  "wins, so a second function with the same name is dead code that still "
+	  "looks live.",
 	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
@@ -2668,9 +2671,10 @@ namespace
 	{ "HorizonCode Node/Variable", "",
 	  "Which variable the node reads or writes. Get Variable and Set Variable "
 	  "choose from this graph's own variables plus the public ones a base class "
-	  "brings, and a function-local only while its own function is open; the node "
-	  "then takes that variable's type, and a wire the pin can no longer carry is "
-	  "dropped. Get (Ref) and Set (Ref) take a typed name instead: the public "
+	  "brings, and a function-local only when the node itself sits in that "
+	  "function's sub-graph; the node then takes that variable's type, and a wire "
+	  "the pin can no longer carry is dropped. Get (Ref) and Set (Ref) take a "
+	  "typed name instead: the public "
 	  "variable of that name on the object wired to Target.",
 	  "", "horizoncode#functions" },
 	{ "HorizonCode Node/Function", "",
@@ -2701,8 +2705,8 @@ namespace
 	{ "HorizonCode Default Value/+ Add Slot", "Add Slot",
 	  "Appends one more element to the list that seeds this container when it is "
 	  "created. A new slot starts at the element type's zero, which for a "
-	  "Transform means scale 1. The length is not fixed: the Array nodes grow and "
-	  "shrink it the same way at run time.",
+	  "Transform means scale 1. The length is not fixed: Array Append, Insert and "
+	  "Remove grow and shrink it the same way at run time.",
 	  "", "horizoncode#functions" },
 
 	{ "Class Components/Add Child", "Add Child",
@@ -2716,15 +2720,16 @@ namespace
 	// chapter about project types yet, and a link to a near-miss is worse than
 	// none.
 	{ "Type Editor/+ Add Entry", "Add Entry",
-	  "Adds one named constant to this enum. It takes the next free value, one "
-	  "past the highest already in the list, and both the name and the number can "
-	  "be changed afterwards. Two entries may not share a name: a duplicate is "
-	  "boxed in red, because the generated constants would be ambiguous.",
+	  "Adds one named constant to this enum. It takes the next free value — one "
+	  "past the highest already in the list, never below 0 — and both the name "
+	  "and the number can be changed afterwards. Two entries sharing a name are "
+	  "flagged in red, because the generated constants would be ambiguous.",
 	  "", "" },
 	{ "Type Editor/+ Add Field", "Add Field",
-	  "Adds one field to this struct. Give it a type, optionally a container, and "
-	  "a default. Two fields may not share a name, and a struct whose fields lead "
-	  "back to itself refuses to save — that cycle would never finish.",
+	  "Adds one field to this struct or savegame template. Give it a type, "
+	  "optionally a container, and a default. A duplicate field name is flagged "
+	  "in red, and a struct whose fields lead back to itself refuses to save — "
+	  "that cycle would never finish.",
 	  "", "" },
 	{ "Type Editor/Set as Project Default", "Set as Project Default",
 	  "Makes this savegame template the one a script gets when it creates a save "
@@ -2766,8 +2771,8 @@ namespace
 	  "Announces that a session exists here, so people on the same network find "
 	  "it in their list and join without an address. The join code is never "
 	  "announced, so it still has to be given out. It is one switch for both "
-	  "halves of discovery: while you are not hosting, the same setting listens "
-	  "for other people's sessions.",
+	  "halves of discovery: the same setting also listens for other people's "
+	  "sessions, whether or not you are hosting.",
 	  "", "collaboration#starting" },
 	{ "Collaboration Session/Look for sessions on this network", "",
 	  "Listens for hosts announcing themselves nearby and lists what it hears: "
@@ -2797,10 +2802,11 @@ namespace
 	  "", "collaboration#starting" },
 	{ "Collaboration Session/Enable and join", "",
 	  "Agrees to this session's larger assets — meshes, textures and audio — and "
-	  "dials the same host again straight away. The setting is remembered and "
-	  "applies to every session from then on; it can be turned off again in "
-	  "Preferences while you are not in a session. It can use considerably more "
-	  "data than an ordinary session.",
+	  "dials the same host again. If there is no join left to retry the setting "
+	  "is turned on anyway and the panel says to join again by hand. It is "
+	  "remembered and applies to every session from then on; it can be turned off "
+	  "again in Preferences while you are not in a session, and it can use "
+	  "considerably more data than an ordinary session.",
 	  "", "collaboration#bigassets" },
 	{ "Collaboration Session/Approve", "",
 	  "Lets this delete or rename go through, for everyone including you. Nothing "
@@ -2855,8 +2861,8 @@ namespace
 	{ "Source Control Panel/New branch…", "New branch",
 	  "Opens the branch dialog, starting from the current state of the project "
 	  "rather than from a commit in the history. It is unavailable while a git "
-	  "command is running and before the first commit exists, since there is "
-	  "nothing yet to branch from.",
+	  "command is running, before the first commit exists, and for a guest in a "
+	  "collaboration session, where the host manages source control.",
 	  "", "" },
 	{ "Source Control Panel/Tree view", "",
 	  "Shows the changed files as a folder tree, with single-child folders folded "
@@ -2901,7 +2907,7 @@ namespace
 	  "nothing changed, and while a conflict is unresolved — a commit that keeps "
 	  "conflict markers preserves the mess for good. With auto-push on, the "
 	  "commit goes to the remote as it is made.",
-	  "", "editor#preferences" },
+	  "", "" },
 
 	// ── The startup dialog for a missing git ─────────────────────────────────
 	// Under the Preferences page's scope on purpose: the dialog and that page
@@ -2910,8 +2916,8 @@ namespace
 	// there and is deliberately not repeated here.
 	{ "Source Control/Don't show this again", "",
 	  "Stops this dialog appearing at startup. Nothing is installed or configured "
-	  "by dismissing it: source control stays unavailable, and Preferences still "
-	  "says so.",
+	  "by dismissing it: source control stays unavailable, and the Tools page in "
+	  "Preferences still reports git, Git LFS and your git identity as missing.",
 	  "", "editor#preferences" },
 	{ "Source Control/Recheck", "",
 	  "Looks for git and Git LFS again, without restarting the editor. A clean "
@@ -2988,10 +2994,10 @@ namespace
 	  "for you; it is used once and never stored.",
 	  "", "advanced#diagnostics" },
 	{ "Report Issue/File on GitHub", "",
-	  "Files the issue from here, under your own GitHub account, and uploads the "
-	  "complete log as a secret gist. It needs a title, because GitHub rejects an "
-	  "issue without one, and either an account the credential helper already "
-	  "holds or a token in the field above.",
+	  "Files the issue from here, under your own GitHub account. With the log "
+	  "attached it also uploads the log file as a secret gist and links it. It "
+	  "needs a title, because GitHub rejects an issue without one, and either an "
+	  "account the credential helper already holds or a token in the field above.",
 	  "", "advanced#diagnostics" },
 	{ "Report Issue/Open in Browser", "",
 	  "Opens the pre-filled issue form on GitHub instead of filing it from here, "
