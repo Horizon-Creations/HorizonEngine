@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include "EditorApplication.h"           // AppContext
+#include "EditorHelp.h"                  // "New Landscape/" and "Landscape/" scopes
 #include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
@@ -477,25 +478,39 @@ void renderPanel(AppContext& ctx)
         // Parameters live on EditorConfig so the renderer can draw a 3D grid
         // preview of the terrain-to-be (see EditorApplication debug-draw).
         auto& np = ctx.editorConfig.newTerrain;
+        // The creation form's own scope. It has to sit above the fields rather
+        // than at the top of this function: the coverage scan walks the file top
+        // to bottom, and the panel's other half (the brush numbers below) is a
+        // different scope with a "Radius" of its own.
+        HE::Ed::Help::Scope helpScope("New Landscape");
         ImGui::SeparatorText("Create Landscape");
         ImGui::TextDisabled("Green grid in the viewport previews the result");
 
         ImGui::DragFloat("Width (X)",    &np.sizeX,       1.0f,  1.0f, 10000.0f, "%.1f m");
+        EditorWidgets::helpForLabel("Width (X)");
         ImGui::DragFloat("Depth (Z)",    &np.sizeZ,       1.0f,  1.0f, 10000.0f, "%.1f m");
+        EditorWidgets::helpForLabel("Depth (Z)");
         ImGui::DragInt  ("Resolution",   &np.resolution,  1,     2,    512);
+        EditorWidgets::helpForLabel("Resolution");
         ImGui::DragFloat("Height Scale", &np.heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m");
+        EditorWidgets::helpForLabel("Height Scale");
         ImGui::SeparatorText("Noise (seed 0 = flat)");
         ImGui::DragInt  ("Seed",         &np.seed,        1,     0,    0x7fffffff);
+        EditorWidgets::helpForLabel("Seed");
         ImGui::DragInt  ("Octaves",      &np.octaves,     1,     1,    8);
+        EditorWidgets::helpForLabel("Octaves");
         ImGui::DragFloat("Frequency",    &np.frequency,   0.01f, 0.01f, 16.0f, "%.2f");
+        EditorWidgets::helpForLabel("Frequency");
         ImGui::DragFloat("Lacunarity",   &np.lacunarity,  0.01f, 1.0f,  8.0f,  "%.2f");
+        EditorWidgets::helpForLabel("Lacunarity");
         ImGui::DragFloat("Gain",         &np.gain,        0.01f, 0.0f,  1.0f,  "%.2f");
+        EditorWidgets::helpForLabel("Gain");
 
         ImGui::Spacing();
         const float btnW = 160.0f;
         ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - btnW) * 0.5f
                              + ImGui::GetCursorPosX());
-        if (ImGui::Button("Create Landscape", ImVec2(btnW, 0)))
+        if (EditorWidgets::button("Create Landscape", ImVec2(btnW, 0)))
         {
             if (ctx.undoSys) ctx.undoSys->snapshotNow();
 
@@ -539,6 +554,10 @@ void renderPanel(AppContext& ctx)
     }
     else
     {
+        // Everything below is drawn once a landscape exists: the material slot,
+        // the Sculpt/Paint choice, the brush numbers, and the two reset buttons.
+        HE::Ed::Help::Scope helpScope("Landscape");
+
         // ── Landscape material ───────────────────────────────────────────
         // Right here, not only on the Terrain entity in the Outliner: the
         // material IS a landscape authoring tool (it defines the paint
@@ -563,6 +582,9 @@ void renderPanel(AppContext& ctx)
             // Full-width button + a "Reset to Engine Default" instead of a Clear,
             // so only the drop half is the shared widget.
             ImGui::Button((label + "##lsmat").c_str(), ImVec2(-1.0f, 0.0f));
+            // The label is the material's NAME, so there is nothing to look up
+            // by label — the key is named directly instead.
+            EditorWidgets::helpForKey("Landscape/Material");
             if (const EditorWidgets::AssetDrop drop =
                     EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Material, "material"))
             {
@@ -573,7 +595,7 @@ void renderPanel(AppContext& ctx)
             }
             if (!builtIn && lmat)
             {
-                if (ImGui::SmallButton("Reset to Engine Default##lsmat"))
+                if (EditorWidgets::smallButton("Reset to Engine Default##lsmat"))
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tmat->materialAssetId = HE::kDefaultTerrainMaterialId;
@@ -607,15 +629,21 @@ void renderPanel(AppContext& ctx)
                 T::Bar bar;
                 bar.group();
                 if (bar.item("##lsSculpt", T::iconBrush, "Sculpt", !s_landscapePaint, true,
-                             "Raise, lower and smooth the ground"))
+                             "Raise, lower and smooth the ground",
+                             "Landscape/Sculpt"))
                 {
                     s_landscapePaint = false;
                 }
+                // The help entry matters most here: the one-liner explaining WHY
+                // Paint is greyed out is suppressed on a dimmed cell, so until
+                // now the only state that needed an explanation was the one
+                // state that got none.
                 if (bar.item("##lsPaint", T::iconLayers, "Paint", s_landscapePaint,
                              !layers.empty(),
                              layers.empty()
                                  ? "Painting needs a material with a Landscape Layer Blend node"
-                                 : "Paint the material layers onto the ground"))
+                                 : "Paint the material layers onto the ground",
+                             "Landscape/Paint"))
                 {
                     s_landscapePaint = true;
                 }
@@ -632,11 +660,17 @@ void renderPanel(AppContext& ctx)
                     if (i % 2 != 0) ImGui::SameLine();
                     if (ImGui::RadioButton(layers[i].c_str(), s_paintLayer == i))
                         s_paintLayer = i;
+                    // The label is a layer NAME out of the material, so there is
+                    // nothing to look up by label here either.
+                    EditorWidgets::helpForKey("Landscape/Layer");
                 }
                 ImGui::Spacing();
                 ImGui::DragFloat("Radius##paint",   &s_brushRadius,   0.5f, 0.5f, 500.0f, "%.1f m");
+                EditorWidgets::helpForLabel("Radius##paint");
                 ImGui::DragFloat("Falloff##paint",  &s_falloffRadius, 0.5f, 0.0f, 500.0f, "%.1f m");
+                EditorWidgets::helpForLabel("Falloff##paint");
                 ImGui::DragFloat("Strength##paint", &s_brushStrength, 0.1f, 0.1f,  50.0f, "%.2f");
+                EditorWidgets::helpForLabel("Strength##paint");
                 s_brushRadius   = std::max(0.5f, s_brushRadius);
                 s_falloffRadius = std::max(0.0f, s_falloffRadius);
 
@@ -647,6 +681,7 @@ void renderPanel(AppContext& ctx)
                 ImGui::BeginDisabled(!ptc.layerWeights.empty());
                 if (ImGui::SliderInt("Weightmap##paint", &wres, 32, 2048))
                     ptc.weightRes = static_cast<uint32_t>(std::clamp(wres, 32, 2048));
+                EditorWidgets::helpForLabel("Weightmap##paint");
                 ImGui::EndDisabled();
                 if (!ptc.layerWeights.empty())
                     ImGui::TextDisabled("Resolution is fixed once painted.");
@@ -678,6 +713,12 @@ void renderPanel(AppContext& ctx)
                 { "Ramp",    T::iconFlip,      "Blend between two heights along the drag" },
                 { "Roughen", T::iconSparkle,   "Add noise to the surface" },
             };
+            // Keyed by the tool's own label — the six entries say what a drag
+            // actually does, which the six four-word tips could only hint at.
+            static const char* kToolHelp[] = {
+                "Landscape/Raise",   "Landscape/Lower",   "Landscape/Smooth",
+                "Landscape/Flatten", "Landscape/Ramp",    "Landscape/Roughen",
+            };
             const int toolIdx = static_cast<int>(s_terrainTool);
             for (int row = 0; row < 2; ++row)
             {
@@ -688,7 +729,7 @@ void renderPanel(AppContext& ctx)
                     char id[24];
                     std::snprintf(id, sizeof(id), "##lsTool%d", i);
                     if (bar.item(id, kTools[i].icon, kTools[i].label, toolIdx == i, true,
-                                 kTools[i].tip))
+                                 kTools[i].tip, kToolHelp[i]))
                     {
                         s_terrainTool = static_cast<TerrainTool>(i);
                     }
@@ -699,8 +740,11 @@ void renderPanel(AppContext& ctx)
 
         ImGui::Spacing();
         ImGui::DragFloat("Radius##brush",   &s_brushRadius,   0.5f,  0.5f, 500.0f, "%.1f m");
+        EditorWidgets::helpForLabel("Radius##brush");
         ImGui::DragFloat("Falloff##brush",  &s_falloffRadius, 0.5f,  0.0f, 500.0f, "%.1f m");
+        EditorWidgets::helpForLabel("Falloff##brush");
         ImGui::DragFloat("Strength##brush", &s_brushStrength, 0.1f,  0.1f,  50.0f, "%.2f");
+        EditorWidgets::helpForLabel("Strength##brush");
         s_brushRadius   = std::max(0.5f, s_brushRadius);
         s_falloffRadius = std::max(0.0f, s_falloffRadius);
 

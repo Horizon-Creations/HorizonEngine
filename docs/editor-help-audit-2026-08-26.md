@@ -147,7 +147,8 @@ den Test zu beruhigen.
 | 3 · Materialien | erledigt (25 Einträge, fünf neue Scopes) | 0 |
 | 4 · UI-Designer | erledigt (39 Einträge, sechs neue Scopes) | 0 |
 | 5 · Input | erledigt (6 Einträge, ein Scope) | 0 |
-| 6–10 | offen | 128 |
+| 6 · Landschaft | erledigt (33 Einträge, drei Scopes, Werkzeugleiste nachgerüstet) | 0 |
+| 7–10 | offen | 111 |
 
 Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
 ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren
@@ -188,6 +189,21 @@ Und aus Stufe 4:
 * **`Position` und `Position` sind zwei Bedienelemente, sobald sie zwei Scopes haben.**
   Der Scan entdoppelt nach `(Scope, Label)`. Ohne Scope verschwindet die zweite Stelle
   still hinter der ersten, und die Zahl sieht besser aus als sie ist.
+
+Aus Stufe 6:
+
+* **Was der Scan nicht sieht, ist trotzdem ein Bedienelement.** `ImGui::RadioButton`,
+  `ImGui::BeginCombo` und alle Zellen von `EditorToolbar` stehen nicht in den Regexen des
+  Skripts, sind aber Dinge, über die man hovert. Die Landschafts-Werkzeuge (Raise, Lower,
+  Smooth, Flatten, Ramp, Roughen, dazu Sculpt und Paint) sind so acht Runden lang durch
+  jedes Netz gefallen. Wo das Label Daten sind (ein Materialname, ein Ebenenname), hilft
+  nur `helpForKey` mit einem festen Schlüssel, und ein Tippfehler darin ist unsichtbar,
+  deshalb prüft der Test diese Schlüssel jetzt einzeln.
+* **`Bar::item` konnte gar keinen Hilfe-Schlüssel nennen.** `cellImpl` kann es seit dem
+  Umbau der Werkzeugleiste, `Bar::item` reichte ihn nur nicht durch. Der Fall, der das
+  wichtig macht: der Einzeiler einer Zelle wird unterdrückt, solange sie ausgegraut ist,
+  der Hilfe-Eintrag nicht. „Warum kann ich das nicht drücken" ist genau die Frage, die
+  eine graue Zelle stellt, und die Antwort war bis eben abgeschaltet.
 
 ## 6. Was bewusst NICHT abgedeckt wird
 

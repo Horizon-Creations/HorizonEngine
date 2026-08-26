@@ -176,9 +176,12 @@ public:
 	// break than the usual well-to-well gap.
 	void gap();
 
-	// One cell. Same semantics as cell() above.
+	// One cell. Same semantics as cell() above, `helpKey` included — a bar built
+	// with Bar could not name one until now, so every tool drawn through here was
+	// stuck with the one-liner, and with that one-liner being suppressed exactly
+	// when the cell is greyed out.
 	bool item(const char* id, IconFn icon, const char* label, bool on, bool enabled,
-	          const char* tooltip);
+	          const char* tooltip, const char* helpKey = nullptr);
 	// A cell whose foreground colour is forced — for a readout rather than a tool.
 	bool itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
 	                bool enabled, const char* tooltip);

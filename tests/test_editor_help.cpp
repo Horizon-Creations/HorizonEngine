@@ -217,6 +217,18 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Input Action",  "Auto Detect" },
 		{ "Input Action",  "Press any input\xE2\x80\xA6" },
 		{ "Input Action",  "Fires while the game is paused" },
+		// Landscape. The panel has two mutually exclusive halves and each has a
+		// "Radius": the creation form and the brush. Two scopes, and the brush's
+		// three numbers are looked up by their "##paint"/"##brush" spelling and
+		// fall back to the shared entry.
+		{ "New Landscape",      "Seed" },
+		{ "New Landscape",      "Create Landscape" },
+		{ "Landscape",          "Radius##paint" },
+		{ "Landscape",          "Radius##brush" },
+		{ "Landscape",          "Weightmap##paint" },
+		{ "Landscape",          "Reset Sculpting" },
+		{ "Environment Window", "Select##sky" },
+		{ "Environment Window", "Add Weather" },
 	};
 	for (const Case& c : cases)
 	{
@@ -226,6 +238,23 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		if (!e) continue;
 		// And it has to reach the manual, or F1 over it opens nothing.
 		CHECK(!Help::referenceTopic(e->key).empty());
+	}
+
+	// The controls whose LABEL is data — a material's name, a paint layer's
+	// name, a toolbar cell drawn through the draw list — name their key by hand
+	// instead. A typo in one of those is invisible: the lookup simply returns
+	// nothing and the control stays as silent as it was before.
+	const char* byKey[] = {
+		"Landscape/Material", "Landscape/Layer",
+		"Landscape/Sculpt",   "Landscape/Paint",
+		"Landscape/Raise",    "Landscape/Lower",   "Landscape/Smooth",
+		"Landscape/Flatten",  "Landscape/Ramp",    "Landscape/Roughen",
+	};
+	for (const char* k : byKey)
+	{
+		const Help::Entry* e = Help::findKey(k);
+		CHECK_MESSAGE(e != nullptr, "no entry for key ", std::string(k));
+		if (e) CHECK(!Help::referenceTopic(e->key).empty());
 	}
 }
 

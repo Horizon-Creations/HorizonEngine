@@ -1,4 +1,5 @@
 #include "EnvironmentPanel.h"
+#include "EditorHelp.h"       // "Environment Window/<label>" scope for the tooltips
 #include "EditorWidgets.h"    // danger buttons for deletion
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
 #include <HorizonScene/HorizonScene.h>
@@ -43,6 +44,9 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
     // top-level panel is none at all.
     {
         EditorWidgets::WrapText wrap;
+        // Not "Environment" — that scope is the Details panel's component of the
+        // same name and already owns some sixty keys.
+        HE::Ed::Help::Scope helpScope("Environment Window");
 
         ImGui::TextWrapped("Add or remove the scene's Sky and Weather. Select one to edit "
                            "its settings in the Details panel.");
@@ -52,7 +56,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
         if (const Entity sky = world.environmentEntity(); sky != entt::null)
         {
             ImGui::TextUnformatted("Sky is in the scene.");
-            if (ImGui::Button("Select##sky")) ctx.selectedEntity = sky;
+            if (EditorWidgets::button("Select##sky")) ctx.selectedEntity = sky;
             ImGui::SameLine();
             if (EditorWidgets::dangerButton("Remove##sky"))
             {
@@ -64,7 +68,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
         else
         {
             ImGui::TextDisabled("No sky — the background is flat.");
-            if (ImGui::Button("Add Sky"))
+            if (EditorWidgets::button("Add Sky"))
             {
                 snapshot();
                 ctx.selectedEntity = world.addSky();
@@ -78,7 +82,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
             ImGui::TextUnformatted("Weather is in the scene.");
             if (world.environmentEntity() == entt::null)
                 ImGui::TextDisabled("(needs a Sky to drive — add one above)");
-            if (ImGui::Button("Select##weather")) ctx.selectedEntity = weather;
+            if (EditorWidgets::button("Select##weather")) ctx.selectedEntity = weather;
             ImGui::SameLine();
             if (EditorWidgets::dangerButton("Remove##weather"))
             {
@@ -90,7 +94,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
         else
         {
             ImGui::TextDisabled("No weather system.");
-            if (ImGui::Button("Add Weather"))
+            if (EditorWidgets::button("Add Weather"))
             {
                 snapshot();
                 ctx.selectedEntity = world.addWeather();

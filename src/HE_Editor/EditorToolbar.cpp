@@ -347,14 +347,14 @@ void Bar::endGroup()
 void Bar::gap() { if (!m_inGroup) m_left += kGroupGap; }
 
 bool Bar::item(const char* id, IconFn icon, const char* label, bool on, bool enabled,
-               const char* tooltip)
+               const char* tooltip, const char* helpKey)
 {
 	const float w = EditorToolbar::cellWidth(m_m, label);
 	if (!m_first) m_cursor += kSegGap;
 	const float x = m_groupX + m_cursor;
 	m_cursor += w;
 	m_first = false;
-	return EditorToolbar::cell(m_m, x, w, id, icon, label, on, enabled, tooltip);
+	return EditorToolbar::cell(m_m, x, w, id, icon, label, on, enabled, tooltip, helpKey);
 }
 
 bool Bar::itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,

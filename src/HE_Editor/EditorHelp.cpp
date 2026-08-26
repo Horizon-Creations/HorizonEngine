@@ -2059,6 +2059,175 @@ namespace
 	  "paused are dropped, not queued for the moment the game resumes.",
 	  "", "systems#input" },
 
+	// ── Landscape: the creation form ─────────────────────────────────────────
+	// Nine numbers that decide what the ground looks like before there is any
+	// ground to look at. Octaves, Lacunarity and Gain are the noise vocabulary,
+	// and nobody should have to know it to make a hill.
+	{ "New Landscape/Width (X)", "",
+	  "How wide the new landscape will be along X, in metres. The green preview "
+	  "grid in the viewport is this size.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Depth (Z)", "",
+	  "How deep it will be along Z, in metres. With the width it sets the "
+	  "footprint the preview grid shows.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Resolution", "",
+	  "How many vertices the landscape has per side, from 2 to 512. Detail and "
+	  "cost both grow with the square of this number, so a wide landscape does "
+	  "not need a high one unless it is seen from close up.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Height Scale", "",
+	  "How tall the generated hills are, in metres from the lowest point to the "
+	  "highest. It scales the noise, so it does nothing at all while the seed is "
+	  "0 and the ground is flat.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Seed", "",
+	  "Which random landscape is generated. 0 makes flat ground; any other "
+	  "number is a different set of hills, reproduced exactly from the same "
+	  "number. The shape is baked into editable heights the moment the landscape "
+	  "is created, so the seed is a starting point and not a live setting.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Octaves", "",
+	  "How many layers of noise are stacked into the shape, from 1 to 8. Each "
+	  "further layer adds finer detail on top of the big landforms, and costs a "
+	  "little more to generate.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Frequency", "",
+	  "How many hills the noise packs across the landscape. The noise runs from "
+	  "0 to 1 over the whole terrain, so raising this makes the same ground "
+	  "bumpier rather than bigger.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Lacunarity", "",
+	  "How much finer each noise layer is than the one below it. 2, the usual "
+	  "value, means every layer has twice the detail of the last.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Gain", "",
+	  "How much each finer noise layer contributes compared with the one below, "
+	  "between 0 and 1. Under 0.5 gives smooth rolling ground, above it rough "
+	  "and noisy ground.",
+	  "", "scenes#terrain" },
+	{ "New Landscape/Create Landscape", "",
+	  "Creates the landscape from the settings above and selects it: one Terrain "
+	  "entity with a transform, the Terrain component and the engine's default "
+	  "landscape material. With a seed other than 0 the generated surface is "
+	  "baked into editable per-vertex heights straight away, so the sculpt "
+	  "brushes start from those hills rather than from flat ground.",
+	  "", "scenes#terrain" },
+
+	// ── Landscape: the tools, once there is ground ───────────────────────────
+	{ "Landscape/Material", "Landscape Material",
+	  "The material the landscape is shaded with — drag one onto it from the "
+	  "Content Browser. It is also what makes painting possible: the layers you "
+	  "can paint are the ones named by the material's Landscape Layer Blend "
+	  "node, and with no such node the Paint tool stays greyed out.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Reset to Engine Default", "",
+	  "Puts the built-in landscape material back on the terrain. It is only "
+	  "offered while a material of your own is assigned.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Sculpt", "Sculpt",
+	  "Shapes the ground itself: the six brushes below raise, lower, smooth, "
+	  "flatten, ramp and roughen the heights under the cursor.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint", "Paint",
+	  "Paints the material's layers onto the ground instead of reshaping it. It "
+	  "needs a material whose graph has a Landscape Layer Blend node, because "
+	  "that node's list IS the set of layers there are to paint — without one "
+	  "this stays greyed out.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Layer", "Paint Layer",
+	  "Which of the material's layers the brush paints. The names come from the "
+	  "material's Landscape Layer Blend node, in weightmap-channel order, and "
+	  "one weightmap holds four of them.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Radius", "Brush Radius",
+	  "The inner, full-strength part of the brush, in metres — the tight circle "
+	  "drawn on the ground. The same value is used for sculpting and for "
+	  "painting, so changing it in one mode changes it in the other.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Falloff", "Brush Falloff",
+	  "How far past the radius the brush keeps working, in metres — the faint "
+	  "outer circle. Strength falls off linearly from full at the radius to "
+	  "nothing at the outer edge, so 0 gives a hard-edged brush and a large "
+	  "value a very soft one. Shared with painting.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Strength", "Brush Strength",
+	  "How fast the brush works while the left button is held. Raise and Lower "
+	  "move the ground by roughly this many metres a second under the "
+	  "full-strength part of the brush; Smooth, Flatten and Ramp use it as a "
+	  "rate of blending towards their target instead.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Weightmap", "Weightmap Resolution",
+	  "How many texels per side the layer weightmap has, from 32 to 2048, "
+	  "stretched over the whole landscape — a large terrain needs more of them "
+	  "before a painted edge stops looking blocky. It is locked as soon as "
+	  "anything has been painted, because changing it would throw the existing "
+	  "paint away; Clear Paint unlocks it again.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Raise", "Raise",
+	  "Pulls the ground up under the brush while you drag, at the brush's "
+	  "strength per second.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Lower", "Lower",
+	  "Pushes the ground down, the same way round.", "", "editor#landscape-mode" },
+	{ "Landscape/Smooth", "Smooth",
+	  "Averages each height with its neighbours, which takes the sharpness out "
+	  "of whatever the other brushes left behind.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Flatten", "Flatten",
+	  "Levels the ground towards one height: the height under the cursor when "
+	  "the drag BEGAN. That is what makes it a plateau tool rather than a "
+	  "smoother — where you start the drag decides the level.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Ramp", "Ramp",
+	  "Blends between two heights along the drag: the ground at the start of the "
+	  "stroke and the ground at the end. A road up a hillside is one drag.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Roughen", "Roughen",
+	  "Adds fixed noise bumps under the brush, for ground that came out too "
+	  "clean to read as earth.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Clear Paint", "",
+	  "Throws away every painted layer weight, putting the whole landscape back "
+	  "on the first layer. It is one undo step, but it removes the entire "
+	  "weightmap rather than the last stroke — and it is what unlocks the "
+	  "weightmap resolution again.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Reset Sculpting", "",
+	  "Discards every sculpted height, so the landscape falls back to the shape "
+	  "its Seed and noise settings generate — flat ground if the seed is 0. It "
+	  "is one undo step, but it drops the whole sculpt, not the last stroke. "
+	  "Painted layers are left alone.",
+	  "", "editor#landscape-mode" },
+
+	// ── The Environment window ───────────────────────────────────────────────
+	{ "Environment Window/Select", "Select the entity",
+	  "Selects the Sky or Weather entity, which is what puts its settings into "
+	  "the Details panel. This window only adds and removes them; everything "
+	  "there is to tune lives on the entity itself.",
+	  "", "editor#environment-window" },
+	{ "Environment Window/Add Sky", "",
+	  "Creates the scene's Sky and selects it: an entity carrying the "
+	  "Environment component, with the built-in sun and moon lights attached "
+	  "underneath it. Without a sky the background is flat and there is no "
+	  "sunlight.",
+	  "", "scenes#sky-weather-entities" },
+	{ "Environment Window/Add Weather", "",
+	  "Creates the scene's Weather entity and selects it; its preset, intensity "
+	  "and automatic cycle are then edited in the Details panel. Weather works "
+	  "by writing cloud coverage, fog and wind into the Sky, so with no Sky in "
+	  "the scene there is nothing for it to change.",
+	  "", "scenes#sky-weather-entities" },
+	{ "Environment Window/Remove##sky", "Remove Sky",
+	  "Deletes the Sky entity and everything under it, the built-in sun and moon "
+	  "lights included, leaving the scene with a flat background and no "
+	  "sunlight. It is one undo step.",
+	  "", "scenes#sky-weather-entities" },
+	{ "Environment Window/Remove##weather", "Remove Weather",
+	  "Deletes the Weather entity, so nothing drives the sky's clouds and fog "
+	  "any more. The Sky itself is left untouched. It is one undo step.",
+	  "", "scenes#sky-weather-entities" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -2210,8 +2379,11 @@ namespace
 		{ "input.",         "editor-input", "Input Reference", "Input assets" },
 		{ "Input Action/",  "editor-input", "Input Reference", "Actions and bindings" },
 		{ "hc.",       "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
-		{ "terrain.",  "editor-landscape", "Landscape Tools",   "Terrain brush" },
-		{ "env.",      "editor-landscape", "Landscape Tools",   "Environment window" },
+		{ "terrain.",             "editor-landscape", "Landscape Tools", "Terrain brush" },
+		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
+		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },
+		{ "Landscape/",           "editor-landscape", "Landscape Tools", "Sculpting and painting" },
+		{ "Environment Window/",  "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "anim.",     "editor-animation", "Animation Editors", "Animator" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",   "editor-export",    "Export & Diagnostics", "Export" },
