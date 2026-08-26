@@ -456,10 +456,13 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGui::Spacing();
 		int vt = st.valueType;
 		if (ImGui::RadioButton("Button", &vt, 0))  { st.valueType = 0; st.dirty = true; }
+		EditorWidgets::helpForLabel("Button");
 		ImGui::SameLine();
 		if (ImGui::RadioButton("Axis", &vt, 1))    { st.valueType = 1; st.dirty = true; }
+		EditorWidgets::helpForLabel("Axis");
 		ImGui::SameLine();
 		if (ImGui::RadioButton("Axis 2D", &vt, 2)) { st.valueType = 2; st.dirty = true; }
+		EditorWidgets::helpForLabel("Axis 2D");
 		{
 			// Retyping is not free, and saying so beats letting it be discovered.
 			EditorWidgets::WrapText wrap;

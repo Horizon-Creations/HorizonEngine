@@ -153,10 +153,18 @@ den Test zu beruhigen.
 | 9 · HorizonCode-Panels | erledigt (33 Einträge, acht Scopes) | 0 |
 | 10 · Zusammenarbeit + Source Control | erledigt (50 Einträge, fünf Scopes) | 0 |
 
-**Damit ist der Audit geschlossen: 576 von 576 Bedienelementen, 792 Einträge, jede
+**Damit ist der Audit geschlossen: 600 von 600 Bedienelementen, 815 Einträge, jede
 Baseline auf 0.** Die Zahl in Abschnitt 2 war 574 Bedienelemente bei 257 gedeckten; sie
 ist heute höher, weil getrennte Scopes Bedienelemente sichtbar machen, die der Scan
-vorher nach `(Scope, Label)` zusammengefasst hat.
+vorher nach `(Scope, Label)` zusammengefasst hat — und weil er inzwischen mehr sieht:
+`ImGui::BeginCombo` und `ImGui::RadioButton` fehlten in seinen Regexen, und damit 24
+Auswahlfelder, die man sehr wohl anfassen kann. Acht davon in den HorizonCode-Graphen
+sind so acht Runden lang durch jedes Netz gefallen.
+
+Bewusst NICHT gedeckt sind Abschnitts-Überschriften (`ImGui::TreeNode`,
+`ImGui::CollapsingHeader`): „Transitions", „Default Params", „History", „Details",
+„Preview what gets sent". Sie öffnen und schließen einen Bereich, und das ist die ganze
+Erklärung — dieselbe Begründung, aus der der Scan auch die Titel der Hauptmenüs ignoriert.
 
 ### Was die Gegenprüfung gefunden hat
 

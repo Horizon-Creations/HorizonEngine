@@ -1296,13 +1296,23 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 bool drawDefinitionPicker(HC::Graph& g, HC::Node& n, bool isStruct,
                           const std::function<void(bool)>& edit)
 {
+	// The same scope every caller has open. Redundant at run time, not on paper:
+	// this helper is defined above the node rows that call it, and the coverage
+	// scan reads a file from top to bottom.
+	HE::Ed::Help::Scope helpScope("HorizonCode Node");
+
 	auto& reg = HE::TypeRegistry::instance();
 	const bool bound = isStruct ? reg.hasStruct(n.typeName) : reg.hasEnum(n.typeName);
 	const std::string cur = n.typeName.empty()
 		? std::string("(pick a definition)")
 		: std::filesystem::path(n.typeName).stem().string() + (bound ? "" : "  (missing!)");
 	bool changed = false;
-	if (ImGui::BeginCombo(isStruct ? "Struct" : "Enum", cur.c_str()))
+	// One control, two labels — so two entries, and the lookup asks for whichever
+	// is on screen. The scope is the caller's; every path into here is a node.
+	const char* defLabel = isStruct ? "Struct" : "Enum";
+	const bool defOpen = ImGui::BeginCombo(defLabel, cur.c_str());
+	if (!defOpen) EditorWidgets::helpForLabel(defLabel);
+	if (defOpen)
 	{
 		if (isStruct)
 			for (const auto& d : reg.structs())
@@ -1551,7 +1561,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		HE::StructDef def;
 		if (!HE::TypeRegistry::instance().getStruct(n.typeName, def)) return true;
 		const std::string cur = n.params.empty() ? "(pick a field)" : n.params[0].name;
-		if (ImGui::BeginCombo("Field", cur.c_str()))
+		const bool fieldOpen = ImGui::BeginCombo("Field", cur.c_str());
+		if (!fieldOpen) EditorWidgets::helpForLabel("Field");
+		if (fieldOpen)
 		{
 			for (const auto& f : def.fields)
 				if (ImGui::Selectable(f.name.c_str(), !n.params.empty() && n.params[0].name == f.name))
@@ -1652,7 +1664,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 
 	case NT::CreateWidget:
 	{
-		if (ImGui::BeginCombo("Widget", n.s.empty() ? "(none)" : n.s.c_str()))
+		const bool widgetOpen = ImGui::BeginCombo("Widget", n.s.empty() ? "(none)" : n.s.c_str());
+		if (!widgetOpen) EditorWidgets::helpForLabel("Widget");
+		if (widgetOpen)
 		{
 			for (const auto& a : HcEditorUtil::listAssets(h.content, HE::AssetType::Widget))
 				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n.s == a.path))
@@ -1664,7 +1678,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	}
 	case NT::CreateObject:
 	{
-		if (ImGui::BeginCombo("Class", n.s.empty() ? "(none)" : n.s.c_str()))
+		const bool classOpen = ImGui::BeginCombo("Class", n.s.empty() ? "(none)" : n.s.c_str());
+		if (!classOpen) EditorWidgets::helpForLabel("Class");
+		if (classOpen)
 		{
 			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(h.content))
 				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n.s == c.path))
@@ -1685,7 +1701,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		// with an engine name because it always carries a '/' and '.hasset'.
 		const std::string cur = n.s.empty() ? std::string("(pick a class)")
 		                                    : HcEditorUtil::castTargetLabel(n.s);
-		if (ImGui::BeginCombo("Cast to", cur.c_str()))
+		const bool castOpen = ImGui::BeginCombo("Cast to", cur.c_str());
+		if (!castOpen) EditorWidgets::helpForLabel("Cast to");
+		if (castOpen)
 		{
 			ImGui::TextDisabled("Engine");
 			for (const auto& c : HC::engineClasses())

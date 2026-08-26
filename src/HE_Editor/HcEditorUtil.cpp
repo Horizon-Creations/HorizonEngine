@@ -909,8 +909,15 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret)
 {
 	using namespace HorizonCode;
+	// Its own scope, because "Function" already means something else one row
+	// away: on a Call node it is the name of a function on ANOTHER object, and
+	// here it is which of this graph's functions this Return belongs to.
+	HE::Ed::Help::Scope helpScope("Function Return");
+
 	bool changed = false;
-	if (ImGui::BeginCombo("Function", ret.s.empty() ? "(none)" : ret.s.c_str()))
+	const bool fnOpen = ImGui::BeginCombo("Function", ret.s.empty() ? "(none)" : ret.s.c_str());
+	if (!fnOpen) EditorWidgets::helpForLabel("Function");
+	if (fnOpen)
 	{
 		for (const Node& e : g.nodes)
 			if (e.type == NodeType::FunctionEntry && !e.s.empty())
@@ -1653,9 +1660,16 @@ bool drawSaveFieldParamPicker(HorizonCode::Node& n, ContentManager* cm)
 	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
 		cur = it->second.s;
 
+	// "Node Parameter", not "HorizonCode Node": a Field on a save call is a slot
+	// in the savegame template, and a Field on a Get Struct Field node is a
+	// member of a struct. Two questions, so two scopes.
+	HE::Ed::Help::Scope helpScope("Node Parameter");
+
 	bool changed = false;
 	ImGui::SetNextItemWidth(-FLT_MIN);
-	if (ImGui::BeginCombo("Field", cur.empty() ? "(pick a field)" : cur.c_str()))
+	const bool fieldOpen = ImGui::BeginCombo("Field", cur.empty() ? "(pick a field)" : cur.c_str());
+	if (!fieldOpen) EditorWidgets::helpForLabel("Field");
+	if (fieldOpen)
 	{
 		bool any = false;
 		if (haveSchema)
@@ -1698,9 +1712,13 @@ bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
 	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
 		cur = it->second.s;
 
+	HE::Ed::Help::Scope helpScope("Node Parameter");
+
 	bool changed = false;
 	ImGui::SetNextItemWidth(-FLT_MIN);
-	if (ImGui::BeginCombo("Scene", cur.empty() ? "(pick a scene)" : cur.c_str()))
+	const bool sceneOpen = ImGui::BeginCombo("Scene", cur.empty() ? "(pick a scene)" : cur.c_str());
+	if (!sceneOpen) EditorWidgets::helpForLabel("Scene");
+	if (sceneOpen)
 	{
 		for (const auto& s : listScenes(cm))
 			if (ImGui::Selectable((s.label + "##" + s.path).c_str(), cur == s.path))

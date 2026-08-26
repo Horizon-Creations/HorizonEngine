@@ -736,16 +736,10 @@ void render(AppContext& ctx)
                 ImGui::Indent();
                 int mode = s_exportHcStop ? 1 : 0;
                 if (ImGui::RadioButton("Interpret on failure", &mode, 0)) s_exportHcStop = false;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("A graph that cannot be translated ships interpreted.\n"
-                                      "The build always succeeds; compiled and interpreted\n"
-                                      "instances interoperate.");
+                EditorWidgets::helpForLabel("Interpret on failure");
                 ImGui::SameLine();
                 if (ImGui::RadioButton("Stop on failure", &mode, 1)) s_exportHcStop = true;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("A graph that cannot be translated FAILS the export,\n"
-                                      "naming every offending graph and node. Use this when\n"
-                                      "the packaged build must be fully native.");
+                EditorWidgets::helpForLabel("Stop on failure");
                 ImGui::Unindent();
             }
             if (!hcCompileOk) ImGui::EndDisabled();

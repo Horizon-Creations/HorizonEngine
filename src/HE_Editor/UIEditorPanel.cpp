@@ -946,7 +946,9 @@ void drawDetails(State& st, AppContext& ctx)
 	ImGui::SeparatorText("Interaction");
 	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
 	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
-	if (ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor)))
+	const bool cursorOpen = ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor));
+	if (!cursorOpen) EditorWidgets::helpForLabel("Hover cursor");
+	if (cursorOpen)
 	{
 		for (int c = 0; c < (int)HE::UICursor::COUNT; ++c)
 			if (ImGui::Selectable(HE::uiCursorName((HE::UICursor)c), (int)n->hoverCursor == c))
@@ -2266,7 +2268,9 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		// allProperties: type-specific props + the shared base ones (Visible,
 		// Hit Testable, Position, Size, Layer, Hover Cursor, Material, Font).
 		const std::vector<UIPropDesc> props = tgt ? tgt->allProperties() : std::vector<UIPropDesc>{};
-		if (ImGui::BeginCombo("Property", n->s.empty() ? "(none)" : n->s.c_str()))
+		const bool propOpen = ImGui::BeginCombo("Property", n->s.empty() ? "(none)" : n->s.c_str());
+		if (!propOpen) EditorWidgets::helpForLabel("Property");
+		if (propOpen)
 		{
 			for (const UIPropDesc& pd : props)
 				if (ImGui::Selectable(pd.name.c_str(), n->s == pd.name))
@@ -2319,7 +2323,9 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	// them. Same widget otherwise.
 	case NT::FunctionCall:
 	{
-		if (ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str()))
+		const bool fnOpen = ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str());
+		if (!fnOpen) EditorWidgets::helpForLabel("Function");
+		if (fnOpen)
 		{
 			for (const auto& fn : st.graph.nodes)
 				if (fn.type == NT::FunctionEntry)

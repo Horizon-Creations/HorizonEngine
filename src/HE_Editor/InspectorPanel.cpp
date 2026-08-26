@@ -1320,7 +1320,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					cur ? HcEditorUtil::castTargetLabel(cur->path) : std::string();
 				const char* preview = !curLabel.empty() ? curLabel.c_str()
 				                    : (s->scriptAssetId == HE::UUID{} ? "(none)" : "(script)");
-				if (ImGui::BeginCombo("Class", preview))
+				const bool classOpen = ImGui::BeginCombo("Class", preview);
+				if (!classOpen) EditorWidgets::helpForLabel("Class");
+				if (classOpen)
 				{
 					// The scan happens only while the list is open — the same
 					// rule the Create Object picker follows.

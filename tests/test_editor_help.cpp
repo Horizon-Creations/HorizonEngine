@@ -295,6 +295,21 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Source Control",        "Save Identity" },
 		{ "Report Issue",          "File on GitHub" },
 		{ "Report Issue",          "Warnings & errors" },
+		// The combos and radio buttons the coverage scan could not see until it
+		// learnt about ImGui::BeginCombo and ImGui::RadioButton. They went eight
+		// rounds unnoticed, which is the argument for checking them by hand here
+		// as well.
+		{ "HorizonCode Node",  "Struct" },
+		{ "HorizonCode Node",  "Enum" },
+		{ "HorizonCode Node",  "Cast to" },
+		{ "Function Return",   "Function" },
+		{ "Node Parameter",    "Scene" },
+		{ "Graph Appearance",  "Compact" },
+		{ "Input Action",      "Axis 2D" },
+		{ "Export",            "Stop on failure" },
+		{ "UI Widget",         "Hover cursor" },
+		{ "UI Graph Node",     "Property" },
+		{ "Script",            "Class" },
 	};
 	for (const Case& c : cases)
 	{

@@ -396,6 +396,11 @@ namespace
 	  "", "rendering#cameras" },
 
 	// ── Script ───────────────────────────────────────────────────────────────
+	{ "Script/Class", "",
+	  "Which HorizonCode class this entity runs, picked from the project's "
+	  "classes. The class's own variables then appear underneath, so an entity "
+	  "can be set up differently from every other instance of the same class.",
+	  "", "horizoncode#hosts" },
 	{ "Script/Script Name", "",
 	  "The Lua or Python file this entity runs. Its exposed properties appear "
 	  "below, and each entity can override them.",
@@ -1603,6 +1608,14 @@ namespace
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
+	{ "Graph Appearance/Detailed", "",
+	  "How a variable is drawn in a HorizonCode graph's list: name and type on "
+	  "two lines, with the type written out and coloured. The default.",
+	  "", "horizoncode#graphs" },
+	{ "Graph Appearance/Compact", "",
+	  "Name and type on one line instead. Half the height per variable, so a long "
+	  "list stays readable without scrolling.",
+	  "", "horizoncode#graphs" },
 	{ "Preferences/Restore Defaults", "Restore Defaults",
 	  "Puts the settings in the category you are looking at back the way they "
 	  "shipped. Only this category, and only the ones the engine owns — your "
@@ -1948,6 +1961,11 @@ namespace
 	  "Fades this widget and everything inside it. One value on a root panel "
 	  "fades a whole menu, which is what a menu fade-in is made of.",
 	  "", "ui#widgets" },
+	{ "UI Widget/Hover cursor", "",
+	  "Which mouse cursor is shown while the pointer is over this widget. It "
+	  "needs the widget to be hit-testable, since a widget the pointer passes "
+	  "through is never hovered.",
+	  "", "ui#runtime" },
 	{ "UI Widget/Hit-testable", "",
 	  "Off makes the widget transparent to the pointer: clicks pass straight "
 	  "through it to whatever is behind. For decoration that must not swallow "
@@ -2016,6 +2034,16 @@ namespace
 	  "Bind this node to no particular widget. It then answers for the widget as "
 	  "a whole, which is what the lifecycle events need.",
 	  "", "ui#graph" },
+	{ "UI Graph Node/Property", "",
+	  "Which property of the bound widget this node reads or writes — its own "
+	  "type-specific ones plus the shared set every widget has. Picking one "
+	  "re-types the node's value pin, and a wire that no longer typechecks is "
+	  "dropped.",
+	  "", "ui#graph" },
+	{ "UI Graph Node/Function", "",
+	  "Which of this widget's functions the call runs. Picking one re-syncs the "
+	  "call's pins with that function's inputs and results.",
+	  "", "ui#graph" },
 	{ "UI Graph Node/Delete Node", "Delete Node",
 	  "Removes the selected node and the links that ran through it.",
 	  "", "ui#graph" },
@@ -2024,6 +2052,19 @@ namespace
 	// An input asset is a list of actions and, under each, the physical things
 	// that fire it. The panel's buttons are short verbs whose difference is the
 	// whole point: Bind REPLACES one row, Auto Detect ADDS a row.
+	{ "Input Action/Button", "",
+	  "The action is on or off — a key, a mouse button, a pad button. It fires a "
+	  "pressed and a released event and carries no number.",
+	  "", "systems#input" },
+	{ "Input Action/Axis", "",
+	  "The action is one number, from -1 to 1. A stick or a trigger drives it "
+	  "directly; a pair of keys drives it as the + and the - half.",
+	  "", "systems#input" },
+	{ "Input Action/Axis 2D", "",
+	  "The action is two numbers, a direction rather than an amount — a stick, or "
+	  "four keys. Movement wants this rather than two separate axes, because "
+	  "diagonal is then one movement and not two.",
+	  "", "systems#input" },
 	{ "Input Action/Bind", "Bind",
 	  "Arms this row and waits for the input it should read — a key, a gamepad "
 	  "button, a mouse button, a stick or a trigger, whichever the row is for. "
@@ -2293,6 +2334,15 @@ namespace
 	  "cmake and a C++ toolchain on this machine and only runs for a Host target. "
 	  "The graphs ship as well either way, so by default anything that fails to "
 	  "translate simply runs interpreted.",
+	  "", "horizoncode#compiler" },
+	{ "Export/Interpret on failure", "",
+	  "A graph that cannot be translated ships interpreted. The build always "
+	  "succeeds, and compiled and interpreted objects work together.",
+	  "", "horizoncode#compiler" },
+	{ "Export/Stop on failure", "",
+	  "A graph that cannot be translated FAILS the export instead, naming every "
+	  "offending graph and node. Use this when the packaged build has to be fully "
+	  "native.",
 	  "", "horizoncode#compiler" },
 	{ "Export/macOS .app bundle", "",
 	  "Emits a signed .app instead of a flat folder: the executable and libraries "
@@ -2683,6 +2733,49 @@ namespace
 	  "that has a function of that name — so the spelling here has to match the "
 	  "one declared there.",
 	  "", "horizoncode#communication" },
+	{ "HorizonCode Node/Struct", "",
+	  "Which struct definition this node is bound to. Rebinding re-mirrors the "
+	  "node's pins to the new definition's fields and carries the links over "
+	  "where it can, because the shape of the node IS the definition.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Node/Enum", "",
+	  "Which enum definition this node is bound to. The value list below it comes "
+	  "from that definition, so picking a different one re-offers a different set "
+	  "of entries.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Node/Field", "",
+	  "Which member of the struct above this node reads or writes. The node's "
+	  "value pin takes that member's type.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Node/Widget", "",
+	  "Which UI Widget asset to instantiate. The node outputs the new widget's "
+	  "id, which is what the rest of the graph then talks to it by.",
+	  "", "ui#runtime" },
+	{ "HorizonCode Node/Class", "",
+	  "Which HorizonCode class to instantiate as a live object. The node outputs "
+	  "a reference to it. Wire Location and Rotation to place it; left unwired it "
+	  "keeps the placement the class was authored with.",
+	  "", "horizoncode#hosts" },
+	{ "HorizonCode Node/Cast to", "",
+	  "What to try to read the incoming reference as — one of the engine's own "
+	  "kinds, or one of the project's HorizonCode classes. The cast succeeds only "
+	  "when the object really is that thing or derives from it, and the output is "
+	  "valid on the Success branch alone.",
+	  "", "horizoncode#hosts" },
+	{ "Function Return/Function", "Return of",
+	  "Which of this graph's functions this Return node belongs to. Picking one "
+	  "mirrors that function's results onto the node, so its input pins are the "
+	  "values the function promises to hand back.",
+	  "", "horizoncode#functions" },
+	{ "Node Parameter/Field", "Save Field",
+	  "Which field of the project's savegame template this call reads or writes. "
+	  "The list holds only the fields whose type this particular call can carry.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Scene", "Scene",
+	  "Which scene this call loads, picked from the project rather than typed, so "
+	  "a renamed or moved scene cannot leave a path behind that no longer points "
+	  "anywhere.",
+	  "", "horizoncode#palette" },
 	{ "HorizonCode Node/Type", "",
 	  "The type of the external variable this node reads or writes, so the node's "
 	  "value pin matches the variable on the other side. Changing it drops the "
@@ -3152,7 +3245,8 @@ namespace
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
-		{ "Build Tools/",    "editor-settings", "Settings Reference", "Build tools" },
+		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
+		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────
 		{ "material.",           "editor-materials", "Material Editor", "Material graph" },
 		{ "Material Node/",      "editor-materials", "Material Editor", "Values on a node" },
@@ -3176,6 +3270,8 @@ namespace
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },
 		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "HorizonCode Default Value/",  "editor-horizoncode", "HorizonCode Editor", "Default values" },
+		{ "Function Return/",            "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
+		{ "Node Parameter/",             "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
 		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },
 		{ "terrain.",             "editor-landscape", "Landscape Tools", "Terrain brush" },

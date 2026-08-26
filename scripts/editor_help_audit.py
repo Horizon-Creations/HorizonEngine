@@ -36,6 +36,10 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "HE_Editor"
 VALUE = (r"(?:EditorWidgets::Row::\w+|Row::\w+|EditorWidgets::checkbox|ImGui::Checkbox"
          r"|ImGui::SliderFloat|ImGui::SliderInt|ImGui::DragFloat\d?|ImGui::DragInt"
          r"|ImGui::InputText|ImGui::InputInt|ImGui::InputFloat|ImGui::Combo"
+         # BeginCombo is a labelled widget like any other, and leaving it out is
+         # how eight pickers in the HorizonCode graphs went eight rounds without
+         # anyone noticing — the scan simply never asked about them.
+         r"|ImGui::BeginCombo|ImGui::RadioButton"
          r"|ImGui::ColorEdit\d)")
 ACTION = (r"(?:ImGui::Button|ImGui::SmallButton|ImGui::MenuItem|ImGui::BeginMenu"
           r"|ImGui::Selectable"

@@ -1386,6 +1386,8 @@ void drawStatusPage(AppContext& ctx)
 // catalog category: nothing here is engine state worth pinning to Quick
 // Settings, and it persists through GlobalState rather than EditorConfig.
 
+// Its own scope: this page is not the settings CATALOGUE (which keys by
+// category) and not the tool status above it.
 void drawHorizonCodePage()
 {
 	// Every explanation below is a full sentence and the tab is as wide as the
@@ -1399,6 +1401,7 @@ void drawHorizonCodePage()
 	// Read back through the accessor every frame instead of keeping a page-local
 	// copy: the radios then cannot disagree with what the graph editor is
 	// actually drawing, whatever else wrote the value.
+	HE::Ed::Help::Scope helpScope("Graph Appearance");
 	const HcVariableStyle style = hcVariableStyle();
 
 	const auto select = [](HcVariableStyle want)
@@ -1423,6 +1426,7 @@ void drawHorizonCodePage()
 	if (ImGui::RadioButton("Detailed", style == HcVariableStyle::Detailed) &&
 	    style != HcVariableStyle::Detailed)
 		select(HcVariableStyle::Detailed);
+	EditorWidgets::helpForLabel("Detailed");
 	ImGui::Indent();
 	EditorWidgets::hint("The default. Name and type on two lines, with the type written "
 	                    "out and coloured \xe2\x80\x94 \"Map<String, Bool>\", each part in "
@@ -1434,6 +1438,7 @@ void drawHorizonCodePage()
 	if (ImGui::RadioButton("Compact", style == HcVariableStyle::Compact) &&
 	    style != HcVariableStyle::Compact)
 		select(HcVariableStyle::Compact);
+	EditorWidgets::helpForLabel("Compact");
 	ImGui::Indent();
 	EditorWidgets::hint("Name and type on one line. Half the height per variable, so a "
 	                    "long list stays readable without scrolling.");
