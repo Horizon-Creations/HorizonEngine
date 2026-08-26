@@ -69,6 +69,12 @@ namespace
 			// The renderer here IS the one that owns textures — it honours the
 			// atlas requests in ImDrawData::Textures.
 			io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+			// And it reads ImDrawCmd::VtxOffset, which a scene big enough to pass
+			// 64k vertices depends on: without this flag ImGui keeps writing
+			// 16-bit indices into one buffer and they wrap, which rasterises as
+			// long diagonal smears of text — how this was found. The editor's own
+			// backends all set it, so only the harness was ever wrong.
+			io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
 
 			const std::string font = std::string(depsDir()) + "/Fonts/Roboto_Condensed-Bold.ttf";
 			ImFontConfig cfg;
@@ -535,6 +541,15 @@ TEST_CASE("ui shot: the generated node reference")
 	                               [&](int) { DocsPanel::draw(host); });
 	REQUIRE(img.valid());
 	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 80000);
+
+	// A built-in as well: those have exec pins on both sides and headers in a
+	// different colour family, so they are where a preview drawn from one
+	// example would come apart.
+	DocsPanel::openTopic("horizoncode-nodes#node.Branch");
+	const he_ui::Image builtin = shoot("node-reference-builtin", W, H, 4,
+	                                   [&](int) { DocsPanel::draw(host); });
+	REQUIRE(builtin.valid());
+	CHECK(builtin.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
 }
 
@@ -568,6 +583,36 @@ TEST_CASE("docs reader: an F1 that was already answered is not toggled back shut
 	CHECK_FALSE(DocsPanel::openedThisFrame());
 	ImGui::Render();
 	ImGui::EndFrame();
+	DocsPanel::close();
+}
+
+TEST_CASE("ui shot: a page of tables and a diagram")
+{
+	// The rendering page is the reader's hardest case: a wide reference table
+	// (Backends), a second one under it, and the frame pipeline as a diagram.
+	// All three are the kinds of block that look fine in prose and wrong in a
+	// panel, which is why they get a shot of their own.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+
+	DocsPanel::openTopic("rendering#pipeline");
+	const he_ui::Image flow = shoot("docs-flow", W, H, 4,
+	                                [&](int) { DocsPanel::draw(host); });
+	REQUIRE(flow.valid());
+	CHECK(flow.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+
+	DocsPanel::openTopic("rendering#backends");
+	const he_ui::Image table = shoot("docs-tables", W, H, 4,
+	                                 [&](int) { DocsPanel::draw(host); });
+	REQUIRE(table.valid());
+	CHECK(table.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
 }
 

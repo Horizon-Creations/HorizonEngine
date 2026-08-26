@@ -88,12 +88,19 @@ namespace
 			sec.blocks.push_back(std::move(b));
 		}
 
+		// A picture of the node plus its pins. The title and header colour are
+		// the ones the canvas uses, so the drawing in the manual and the node in
+		// the graph are recognisably the same object.
 		const HC::NodeSig sig = HC::signatureOf(node);
 		Docs::Block pins;
-		pins.kind = Docs::BlockKind::Pins;
+		pins.kind   = Docs::BlockKind::NodePreview;
+		pins.title  = sec.title;
+		pins.accent = HcEditorUtil::nodeHeaderColor(node);
 		appendPins(pins, sig.execIns,  sig.dataIns,  "In",  true,  search);
 		appendPins(pins, sig.execOuts, sig.dataOuts, "Out", false, search);
-		if (!pins.pins.empty()) sec.blocks.push_back(std::move(pins));
+		// A node with no pins at all is still worth drawing: the shape and the
+		// colour of the header are half of what makes it findable.
+		sec.blocks.push_back(std::move(pins));
 
 		sec.text = std::move(search);
 		return sec;

@@ -360,14 +360,33 @@ namespace
 		                              ImGuiTableFlags_NoHostExtendX;
 		if (!ImGui::BeginTable("##docsTable", cols, flags)) return;
 
-		// The first column is a term ("Panel", "Node", "Setting") and the rest is
-		// its explanation, so the term column gets a smaller share and stops the
-		// prose from being squeezed into a two-word column.
-		if (cols >= 2)
+		// ── Column widths, from what is actually in them ─────────────────────
+		// A fixed "narrow first column, wide rest" split is right for the
+		// two-column term/explanation tables and catastrophic for the others:
+		// the backend support matrix is one term column and five columns of a
+		// single bullet, and an even share squeezed the terms into one character
+		// per line while the bullets sat in a hundred pixels of nothing.
+		//
+		// So each column is weighted by the longest thing in it, clamped at both
+		// ends — under the floor a column of bullets would vanish, over the
+		// ceiling one long sentence would starve everything else.
 		{
-			ImGui::TableSetupColumn("##c0", ImGuiTableColumnFlags_WidthStretch, 0.34f);
-			for (int c = 1; c < cols; ++c)
-				ImGui::TableSetupColumn("##c", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+			std::vector<float> weight(static_cast<std::size_t>(cols), 0.0f);
+			auto measure = [&](const docs::Cells& row) {
+				for (int c = 0; c < cols && c < static_cast<int>(row.size()); ++c)
+				{
+					std::size_t n = 0;
+					for (const docs::Run& r : row[static_cast<std::size_t>(c)]) n += r.text.size();
+					weight[static_cast<std::size_t>(c)] =
+						std::max(weight[static_cast<std::size_t>(c)], static_cast<float>(n));
+				}
+			};
+			if (!b.head.empty()) measure(b.head);
+			for (const docs::Cells& row : b.rows) measure(row);
+			for (float& w : weight) w = std::clamp(w, 6.0f, 44.0f);
+			for (int c = 0; c < cols; ++c)
+				ImGui::TableSetupColumn("##c", ImGuiTableColumnFlags_WidthStretch,
+				                        weight[static_cast<std::size_t>(c)]);
 		}
 
 		if (!b.head.empty())
@@ -456,34 +475,166 @@ namespace
 
 	void drawFlow(const Ctx& ctx, const docs::Block& b)
 	{
-		// The website draws these as a chain of boxes with arrows. A docked panel
-		// has no width for that, and the arrows say nothing the order does not —
-		// so it becomes a numbered sequence, with every word kept.
+		// The website draws these as a chain of boxes with arrows. Written out as
+		// a numbered list — which is what this was at first — a pipeline stops
+		// looking like a pipeline: the reader gets eight paragraphs and has to
+		// reassemble the fact that each one feeds the next.
+		//
+		// So it stays a diagram, turned to run DOWN the column instead of across
+		// it. A docked panel has height and no width; the arrows are the same
+		// arrows either way.
 		ImGui::Spacing();
-		int n = 1;
-		for (const docs::Block::Step& s : b.steps)
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float arrowH = ImGui::GetTextLineHeight() * 0.9f;
+
+		for (std::size_t i = 0; i < b.steps.size(); ++i)
 		{
-			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-			ImGui::Text("%d.", n++);
-			ImGui::PopStyleColor();
-			ImGui::SameLine(0.0f, 8.0f);
-			ImGui::BeginGroup();
-			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-			ImGui::TextUnformatted(s.label.c_str());
-			ImGui::PopStyleColor();
-			if (!s.sub.empty())
+			const docs::Block::Step& s = b.steps[i];
+			if (i > 0)
 			{
-				EditorWidgets::WrapText wrap;
-				ImGui::TextUnformatted(s.sub.c_str());
+				// The connector: a short stem and a filled head, centred under
+				// the box above. Drawn into the gap rather than as an item, so
+				// the boxes stay a tight column.
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				const float cx = p.x + ImGui::GetContentRegionAvail().x * 0.5f;
+				const ImU32 col = ImGui::GetColorU32(HE::Ed::Theme::TextDim);
+				dl->AddLine(ImVec2(cx, p.y), ImVec2(cx, p.y + arrowH * 0.55f), col, 1.5f);
+				dl->AddTriangleFilled(ImVec2(cx - arrowH * 0.28f, p.y + arrowH * 0.5f),
+				                      ImVec2(cx + arrowH * 0.28f, p.y + arrowH * 0.5f),
+				                      ImVec2(cx, p.y + arrowH), col);
+				ImGui::Dummy(ImVec2(0.0f, arrowH));
 			}
-			ImGui::EndGroup();
-			ImGui::Spacing();
+
+			ImGui::PushID(static_cast<int>(i));
+			ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.145f));
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 7.0f));
+			ImGui::BeginChild("##step", ImVec2(0.0f, 0.0f),
+			                  ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
+			{
+				// The step number stays — in a chain of eight it is how someone
+				// says "it goes wrong at four" — but as a quiet index, not as the
+				// structure.
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+				ImGui::Text("%d", static_cast<int>(i) + 1);
+				ImGui::PopStyleColor();
+				ImGui::SameLine(0.0f, 10.0f);
+				ImGui::BeginGroup();
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+				ImGui::TextUnformatted(s.label.c_str());
+				ImGui::PopStyleColor();
+				if (!s.sub.empty())
+				{
+					EditorWidgets::WrapText wrap;
+					ImGui::TextUnformatted(s.sub.c_str());
+				}
+				ImGui::EndGroup();
+			}
+			ImGui::EndChild();
+			ImGui::PopStyleVar();
+			ImGui::PopStyleColor();
+			// The accent edge, over the child's left border once its rect is
+			// known — the same device the callouts use, so a diagram and a note
+			// read as the same family of block.
+			const ImVec2 mn = ImGui::GetItemRectMin();
+			const ImVec2 mx = ImGui::GetItemRectMax();
+			dl->AddRectFilled(mn, ImVec2(mn.x + 3.0f, mx.y),
+			                  ImGui::GetColorU32(HE::Ed::Theme::AccentHi), 2.0f);
+			ImGui::PopID();
 		}
+		ImGui::Spacing();
 	}
 
-	// A node's pins, in the canvas's own vocabulary: triangle for exec, filled
-	// circle for data, 2×2 grid for a container, each in the type's colour. Two
-	// columns, inputs on the left, because that is where they are on the node.
+	// ── A picture of the node ────────────────────────────────────────────────
+	// The reference draws each entry's node the way the canvas draws it: a
+	// coloured header with the name, inputs down the left with their pins on the
+	// left edge, outputs down the right with theirs on the right. Not a
+	// screenshot — a drawing from the same signature the real node has, so it
+	// cannot show a node the engine has since changed, and costs no files.
+	//
+	// This is the answer to "what am I looking for in the palette": a name in a
+	// list is a name, and this is the shape you will actually see.
+	void drawNodePreview(const docs::Block& b)
+	{
+		const float line   = ImGui::GetTextLineHeight();
+		const float pad    = 8.0f;
+		const float rowH   = line + 4.0f;
+		const ImU32 accent = b.accent ? b.accent
+		                              : ImGui::GetColorU32(HE::Ed::Theme::warm(0.30f));
+
+		int nIn = 0, nOut = 0;
+		float wIn = 0.0f, wOut = 0.0f;
+		for (const docs::PinRow& p : b.pins)
+		{
+			const std::string label = p.name.empty() ? p.type : p.name;
+			const float w = ImGui::CalcTextSize(label.c_str()).x + line + 8.0f;
+			if (p.isInput) { ++nIn;  wIn  = std::max(wIn,  w); }
+			else           { ++nOut; wOut = std::max(wOut, w); }
+		}
+
+		const float titleW = ImGui::CalcTextSize(b.title.c_str()).x + pad * 2.0f;
+		const float bodyW  = std::max({ titleW, wIn + wOut + pad * 3.0f, 160.0f });
+		const float width  = std::min(bodyW, ImGui::GetContentRegionAvail().x);
+		const float headH  = line + 8.0f;
+		const float height = headH + std::max(nIn, nOut) * rowH + pad;
+
+		ImGui::Spacing();
+		const ImVec2 p0 = ImGui::GetCursorScreenPos();
+		const ImVec2 p1(p0.x + width, p0.y + height);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+
+		// Body, header, border — the node's own three parts.
+		dl->AddRectFilled(p0, p1, ImGui::GetColorU32(HE::Ed::Theme::warm(0.115f)), 6.0f);
+		dl->AddRectFilled(p0, ImVec2(p1.x, p0.y + headH), accent, 6.0f,
+		                  ImDrawFlags_RoundCornersTop);
+		dl->AddRect(p0, p1, ImGui::GetColorU32(HE::Ed::Theme::warm(0.26f)), 6.0f, 0, 1.0f);
+		dl->AddText(ImVec2(p0.x + pad, p0.y + 4.0f),
+		            IM_COL32(240, 238, 232, 255), b.title.c_str());
+
+		auto glyph = [&](ImVec2 c, const docs::PinRow& p) {
+			const float r = line * 0.28f;
+			if (p.isExec)
+				dl->AddTriangleFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x - r, c.y + r),
+				                      ImVec2(c.x + r, c.y), p.color);
+			else if (p.isContainer)
+			{
+				const float o = r * 0.55f, h = r * 0.42f;
+				for (int gy = -1; gy <= 1; gy += 2)
+					for (int gx = -1; gx <= 1; gx += 2)
+						dl->AddRectFilled(ImVec2(c.x + gx * o - h, c.y + gy * o - h),
+						                  ImVec2(c.x + gx * o + h, c.y + gy * o + h), p.color);
+			}
+			else
+				dl->AddCircleFilled(c, r, p.color);
+		};
+
+		int iIn = 0, iOut = 0;
+		for (const docs::PinRow& p : b.pins)
+		{
+			const std::string label = p.name.empty() ? p.type : p.name;
+			const float y = p0.y + headH + (p.isInput ? iIn++ : iOut++) * rowH + rowH * 0.5f;
+			const ImU32 text = ImGui::GetColorU32(HE::Ed::Theme::Text);
+			if (p.isInput)
+			{
+				glyph(ImVec2(p0.x + pad, y), p);
+				dl->AddText(ImVec2(p0.x + pad + line * 0.6f, y - line * 0.5f), text,
+				            label.c_str());
+			}
+			else
+			{
+				const float tw = ImGui::CalcTextSize(label.c_str()).x;
+				glyph(ImVec2(p1.x - pad, y), p);
+				dl->AddText(ImVec2(p1.x - pad - line * 0.6f - tw, y - line * 0.5f), text,
+				            label.c_str());
+			}
+		}
+
+		// Reserve what was drawn, so the blocks after it start below.
+		ImGui::Dummy(ImVec2(width, height));
+		ImGui::Spacing();
+	}
+
+	// The same pins as a read-down list with their TYPES — the picture above
+	// shows where a pin sits, this says what it carries.
 	void drawPins(const docs::Block& b)
 	{
 		const float line = ImGui::GetTextLineHeight();
@@ -613,7 +764,14 @@ namespace
 			ImGui::Spacing();
 			break;
 		}
-		case docs::BlockKind::Pins:    drawPins(b);         break;
+		case docs::BlockKind::NodePreview:
+			// The picture of the node, then the same pins with their types under
+			// it. Two views of one thing on purpose: the drawing answers "which
+			// one is it in the palette", the list answers "what does that pin
+			// take".
+			drawNodePreview(b);
+			drawPins(b);
+			break;
 		case docs::BlockKind::Table:   drawTable(ctx, b);   break;
 		case docs::BlockKind::Code:    drawCode(ctx, b);    break;
 		case docs::BlockKind::Callout: drawCallout(ctx, b); break;

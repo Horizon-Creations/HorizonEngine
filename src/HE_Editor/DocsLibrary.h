@@ -55,12 +55,13 @@ enum class BlockKind : std::uint8_t
 	Flow,       // steps — the website's arrow diagrams, as an ordered list
 	Figure,     // src (a file in Docs/img) + alt
 	Tile,       // title + sub + href — a "read on" link card
-	// A node's inputs and outputs, drawn with the graph canvas's own glyphs and
-	// colours. Never comes from the website bundle: the node reference is built
-	// from the engine's registries at run time (HcNodeReference), and this is
-	// the one thing on that page that would lose its meaning as prose — a pin's
-	// colour IS which wires fit it.
-	Pins,
+	// A picture of the node itself: its header in its own colour, its pins where
+	// they sit on it, in the glyphs and colours the canvas draws them with.
+	// Never comes from the website bundle — the node reference is built from the
+	// engine's registries at run time (HcNodeReference), so the picture is drawn
+	// from the same signature the real node has rather than photographed from a
+	// build that has since moved on.
+	NodePreview,
 	Unknown,
 };
 
@@ -93,6 +94,7 @@ struct Block
 	std::string        src;     // Figure image file name (inside Docs/img)
 	std::string        alt;     // Figure description
 	Tone               tone = Tone::Note;   // Callout
+	std::uint32_t      accent = 0;          // NodePreview: the node's header colour
 
 	struct Step { std::string label, sub; };
 	std::vector<Step>   steps;   // Flow
