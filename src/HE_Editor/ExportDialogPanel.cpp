@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "BuildProgressDialog.h"         // the window a running export is watched in
 #include "EditorApplication.h"           // AppContext, ProjectManager
+#include "EditorHelp.h"                  // "Export/<label>" scope for the dialog's controls
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include "HorizonVersion.h"
@@ -506,6 +507,11 @@ void render(AppContext& ctx)
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
         {
             s_modalVisible = true;
+            // Everything in this dialog is looked up as "Export/<label>". Pushed
+            // inside the popup body so it pops before EndPopup, and not at the
+            // top of render(): the Build window that follows is its own scope.
+            HE::Ed::Help::Scope helpScope("Export");
+
             ProjectManager* pm = ctx.projectManager;
             const std::filesystem::path projectRoot = pm
                 ? std::filesystem::path(pm->currentProject().path).parent_path()
@@ -542,14 +548,12 @@ void render(AppContext& ctx)
                     ImGui::EndCombo();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Save Profile"))
+                if (EditorWidgets::button("Save Profile"))
                 {
                     exportDialogToProfile(proj.exportProfiles[s_exportProfileIdx]);
                     proj.activeExportProfile = proj.exportProfiles[s_exportProfileIdx].name;
                     pm->saveProject(proj.path);
                 }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Store the fields below into the selected profile\n(persisted in the .heproj manifest).");
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(120.0f);
                 ImGui::InputTextWithHint("##newProfileName", "new profile",
@@ -557,7 +561,7 @@ void render(AppContext& ctx)
                 ImGui::SameLine();
                 const bool canAdd = !s_exportNewProfileName.empty();
                 if (!canAdd) ImGui::BeginDisabled();
-                if (ImGui::Button("Save As"))
+                if (EditorWidgets::button("Save As"))
                 {
                     // Same name = overwrite that profile, otherwise append a new one.
                     int idx = -1;
@@ -591,7 +595,7 @@ void render(AppContext& ctx)
                 ? "(currently open scene)" : s_exportStartupScene.c_str();
             if (ImGui::BeginCombo("##exportScene", scenePreview))
             {
-                if (ImGui::Selectable("(currently open scene)", s_exportStartupScene.empty()))
+                if (EditorWidgets::selectable("(currently open scene)", s_exportStartupScene.empty()))
                     s_exportStartupScene.clear();
                 for (const auto& sc : s_exportSceneChoices)
                     if (ImGui::Selectable(sc.c_str(), sc == s_exportStartupScene))
@@ -682,7 +686,7 @@ void render(AppContext& ctx)
                 ImGui::EndCombo();
             }
             ImGui::SameLine();
-            ImGui::Checkbox("VSync", &s_exportGameVSync);
+            EditorWidgets::checkbox("VSync", &s_exportGameVSync);
 
             ImGui::Text("Graphics Backend:");
             ImGui::SameLine();
@@ -691,7 +695,7 @@ void render(AppContext& ctx)
                                   s_exportBackend.empty() ? "(platform default)"
                                                           : s_exportBackend.c_str()))
             {
-                if (ImGui::Selectable("(platform default)", s_exportBackend.empty()))
+                if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
                     s_exportBackend.clear();
                 for (const char* name : exportBackendChoices(s_exportPlatform))
                     if (ImGui::Selectable(name, s_exportBackend == name))
@@ -702,20 +706,17 @@ void render(AppContext& ctx)
                                 "the target runtime lacks falls back to its default.");
 
             ImGui::Spacing();
-            ImGui::Checkbox("Compress assets",       &s_exportCompress);
-            ImGui::Checkbox("Encrypt assets",        &s_exportEncrypt);
+            EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
+            EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
-            ImGui::Checkbox("Enable mod support",    &s_exportModSupport);
+            EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
             if (s_exportModSupport)
                 ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
-            ImGui::Checkbox("Incremental packing",   &s_exportIncremental);
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Reuse unchanged assets from the previous export at the same output\n"
-                                  "directory instead of re-compressing them (via a .manifest sidecar).\n"
-                                  "Falls back to a full pack automatically when settings changed.");
+            // The "(?)" marker and its tooltip are gone from the next three: the
+            // sentence is the help entry now, the whole checkbox is the hover
+            // target instead of a two-character mark beside it, and F1 opens it.
+            EditorWidgets::checkbox("Incremental packing",   &s_exportIncremental);
 
             // "Compile HorizonCode" needs cmake + a working compiler; disable it (and
             // force it off) when the startup probe couldn't find them, so the export
@@ -725,16 +726,7 @@ void render(AppContext& ctx)
                 !ctx.toolchainProbe ||
                 (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
             if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
-            ImGui::Checkbox("Compile HorizonCode",   &s_exportCompileHC);
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Translate HorizonCode graphs (classes, widgets, level scripts,\n"
-                                  "GameInstance) to native C++ and ship them as a compiled library.\n"
-                                  "Needs cmake + a C++ toolchain on this machine, matching this\n"
-                                  "editor build. Graphs always ship too: anything that fails\n"
-                                  "validation or compilation runs interpreted, per asset.\n"
-                                  "Host platform only (cross-targets ship interpreted).");
+            EditorWidgets::checkbox("Compile HorizonCode",   &s_exportCompileHC);
             // What an untranslatable graph means. The default keeps compiling an
             // optimization; the other makes "everything is native" a build
             // guarantee — which is also what lets calls between compiled classes
@@ -770,13 +762,7 @@ void render(AppContext& ctx)
 
             if (exportAppBundleApplicable(s_exportPlatform))
             {
-                ImGui::Checkbox("macOS .app bundle", &s_exportAppBundle);
-                ImGui::SameLine();
-                ImGui::TextDisabled("(?)");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Emit a signed <project>.app instead of a flat folder:\n"
-                                      "executable + libraries in Contents/MacOS, pak + config in\n"
-                                      "Contents/Resources, generated Info.plist, ad-hoc codesigned.");
+                EditorWidgets::checkbox("macOS .app bundle", &s_exportAppBundle);
             }
 
             ImGui::Spacing();
@@ -816,7 +802,7 @@ void render(AppContext& ctx)
                 {
                     const uint32_t bit = 1u << static_cast<uint32_t>(b.rb);
                     bool on = (s_exportShaderBackends & bit) != 0;
-                    if (ImGui::Checkbox(b.label, &on))
+                    if (EditorWidgets::checkbox(b.label, &on))
                     {
                         if (on) s_exportShaderBackends |=  bit;
                         else    s_exportShaderBackends &= ~bit;

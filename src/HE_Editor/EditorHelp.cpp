@@ -2228,6 +2228,212 @@ namespace
 	  "any more. The Sky itself is left untouched. It is one undo step.",
 	  "", "scenes#sky-weather-entities" },
 
+	// ── The export dialog ────────────────────────────────────────────────────
+	// Every option here changes what ships, and several of them are irreversible
+	// once a build is in someone's hands. Four of these sentences used to live in
+	// a hand-written tooltip behind a "(?)" mark beside the checkbox; they are
+	// entries now, so the whole checkbox is the hover target and F1 works.
+	{ "Export/Save Profile", "",
+	  "Writes the fields below back into the profile chosen in the dropdown and "
+	  "makes it the project's active one. The profile lives in the .heproj "
+	  "manifest, so it is saved with the project. It overwrites the selected "
+	  "profile in place — use Save As to keep the old settings under a different "
+	  "name.",
+	  "", "export#profiles" },
+	{ "Export/Save As", "",
+	  "Saves the fields below under the name typed in the box to its left. A name "
+	  "that already exists overwrites that profile rather than adding a second "
+	  "one; otherwise a new profile is appended. Either way the result becomes "
+	  "the selected and active profile.",
+	  "", "export#profiles" },
+	{ "Export/(currently open scene)", "Currently Open Scene",
+	  "Boots the packaged game into whichever scene the editor has open at the "
+	  "moment you export, instead of a fixed one. The scene is read from its file "
+	  "on disk and not from the live editor world, so unsaved edits are not in "
+	  "the build — save the scene first.",
+	  "", "export#overview" },
+	{ "Export/(platform default)", "Platform Default",
+	  "Ships no graphics-backend choice at all, so the packaged game picks its "
+	  "own default for whatever machine it starts on. That is a different answer "
+	  "from naming a backend: an absent key lets the runtime decide, a named one "
+	  "the target does not have only falls back after trying.",
+	  "", "export#shipped-files" },
+	{ "Export/VSync", "",
+	  "Whether the shipped game waits for the display's refresh before presenting "
+	  "a frame. This rides to the player in config.json beside the executable "
+	  "rather than inside the archive, so it stays editable after the export.",
+	  "", "export#shipped-files" },
+	{ "Export/Compress assets", "",
+	  "Compresses every packed asset on the way into the archive — zstd where "
+	  "this build has it, LZ4 otherwise. Off stores the bytes as they are: a much "
+	  "larger file that needs no decompression at load.",
+	  "", "export#hpak" },
+	{ "Export/Encrypt assets", "",
+	  "Encrypts the packed archive so the shipped assets cannot simply be "
+	  "unpacked. The key travels inside the build, which makes this a barrier "
+	  "against casual copying rather than against a determined attacker — "
+	  "managing anything stronger is the project's own job.",
+	  "", "export#encryption" },
+	{ "Export/Enable mod support", "",
+	  "The shipped game scans a Mods/ folder next to its executable and mounts "
+	  "every .hpak it finds as an overlay on the base archive. An entry with the "
+	  "same UUID replaces the original and a new UUID is added, the packed "
+	  "startup scene included.",
+	  "", "export#mods" },
+	{ "Export/Incremental packing", "",
+	  "Reuses the stored bytes of unchanged assets from the previous export at "
+	  "the same output directory instead of compressing them again, matched by a "
+	  "hash kept in a sidecar file. It falls back to a full pack on its own "
+	  "whenever that pak or sidecar is missing, does not match, or the packing "
+	  "settings changed, so it cannot quietly ship a stale archive.",
+	  "", "export#incremental" },
+	{ "Export/Compile HorizonCode", "",
+	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "
+	  "GameInstance — into C++ and ships them as a compiled library. It needs "
+	  "cmake and a C++ toolchain on this machine and only runs for a Host target. "
+	  "The graphs ship as well either way, so by default anything that fails to "
+	  "translate simply runs interpreted.",
+	  "", "horizoncode#compiler" },
+	{ "Export/macOS .app bundle", "",
+	  "Emits a signed .app instead of a flat folder: the executable and libraries "
+	  "in Contents/MacOS, the pak and config in Contents/Resources, a generated "
+	  "Info.plist, and an ad-hoc codesign of the whole bundle. It appears only "
+	  "when this editor runs on macOS and the target is macOS or Host, because "
+	  "building it needs codesign.",
+	  "", "export#platforms" },
+	{ "Export/Metal", "Precompile for Metal",
+	  "Cross-compiles every node-graph material into the pak as Metal shaders, so "
+	  "the shipped game never cross-compiles at load. Tick only the backends the "
+	  "target actually runs; with none ticked the game compiles shaders on first "
+	  "use instead.",
+	  "", "materials#pipeline" },
+	{ "Export/OpenGL", "Precompile for OpenGL",
+	  "The same for OpenGL. Every backend ticked adds its own copy of every "
+	  "material to the archive.",
+	  "", "materials#pipeline" },
+	{ "Export/Vulkan", "Precompile for Vulkan",
+	  "The same for Vulkan, on the targets that run it.",
+	  "", "materials#pipeline" },
+	{ "Export/D3D11", "Precompile for Direct3D 11",
+	  "The same for Direct3D 11, which is the Windows fallback path.",
+	  "", "materials#pipeline" },
+	{ "Export/D3D12", "Precompile for Direct3D 12",
+	  "The same for Direct3D 12, the newer of the two Windows backends.",
+	  "", "materials#pipeline" },
+	{ "Export/Export", "",
+	  "Starts the export with the settings above and hands over to the Build "
+	  "window, which shows each step, its own progress and its log. The packing "
+	  "runs on a worker thread; the Build window stays up for the whole run so "
+	  "nothing changes the project's content underneath it. Disabled until an "
+	  "output directory is set, and while a run is going.",
+	  "", "export#overview" },
+
+	// ── The Build window ─────────────────────────────────────────────────────
+	// Not "Build": that scope is the menu bar's Build menu.
+	{ "Build Window/Start Game", "",
+	  "Launches the executable this export just produced. It runs as a separate "
+	  "process and keeps running when you close the editor. Available only after "
+	  "an export that succeeded and shipped a runtime this machine can run: an "
+	  "export aimed at another platform, or one that shipped no game runtime at "
+	  "all, leaves it greyed out.",
+	  "", "export#shipped-files" },
+	{ "Build Window/Build Again", "",
+	  "Runs the same export once more with the settings the last run used, "
+	  "reporting into this window. Unlike the other two buttons it leaves the "
+	  "window open, because the next run reports here anyway.",
+	  "", "export#overview" },
+	{ "Build Window/Build Settings", "",
+	  "Closes this window and reopens the export dialog on the same profile, so "
+	  "the target, packing options or output directory can be changed before the "
+	  "next run. The next export reports back into this window.",
+	  "", "export#profiles" },
+
+	// ── The profiler ─────────────────────────────────────────────────────────
+	{ "Profiler/Target", "Target Frame Rate",
+	  "The frame rate everything on this tab is judged against. It fixes the "
+	  "budget in milliseconds — 60 FPS is 16.67 ms — which colours the FPS tile, "
+	  "draws the budget line across the frame-time graph and scales the CPU and "
+	  "GPU bars. It changes how the numbers are presented, never how the engine "
+	  "runs.",
+	  "", "editor#profiler" },
+	{ "Profiler/GPU time graph", "",
+	  "Adds a second graph under the frame-time one plotting GPU milliseconds per "
+	  "frame, so a frame that is slow on the GPU can be told apart from one that "
+	  "is slow on the CPU. It appears only when the frames on screen carry GPU "
+	  "times at all.",
+	  "", "editor#profiler" },
+	{ "Profiler/Fit", "",
+	  "Resets the timeline's zoom and pan so the whole capture fits the view "
+	  "again. The way back after wheel-zooming into one span.",
+	  "", "editor#profiler" },
+	{ "Profiler/Back to live", "",
+	  "Leaves the recorded capture you loaded and points all the tabs back at "
+	  "this editor session. It also clears the frame picked for Frame Detail and "
+	  "the timeline's zoom, because neither means anything against a different "
+	  "set of frames.",
+	  "", "editor#profiler" },
+	{ "Profiler/Start Benchmark Capture  (F9)", "Start Benchmark Capture",
+	  "Records every frame until you stop it, with vsync forced off so the frame "
+	  "times show what a frame actually costs rather than what the display "
+	  "allows. Only the newest frames are kept, so a capture left running cannot "
+	  "grow without limit. Any capture file you had loaded is closed first.",
+	  "F9", "editor#profiler" },
+	{ "Profiler/Stop & Dump  (F9)", "Stop & Dump",
+	  "Ends the running benchmark capture, writes it to a file in the dumps "
+	  "folder, and puts back the vsync setting the capture switched off.",
+	  "F9", "editor#profiler" },
+	{ "Profiler/Capture Single Frame", "",
+	  "Records exactly one frame in full — every CPU scope, the counters and the "
+	  "per-pass GPU times — and shows it in the Frame Detail tab. No file is "
+	  "written. It forces detailed GPU timing for that frame, which makes the "
+	  "frame itself slow; that is the price of an exclusive per-pass breakdown.",
+	  "", "editor#profiler" },
+	// The label carries a real em dash, and the key has to carry the same
+	// character rather than an escape: the coverage scan reads this file as text.
+	{ "Profiler/Detailed GPU pass timing (serializes GPU — capture only)",
+	  "Detailed GPU Pass Timing",
+	  "Makes the backends that support it submit each render pass in its own "
+	  "command buffer, so each pass is measured on its own and the per-pass "
+	  "numbers add up. Those per-pass costs are a reliable ranking and an upper "
+	  "bound rather than the real cost. It serialises the GPU while it is on, so "
+	  "the frame times measured during such a capture are not numbers to quote "
+	  "for a shipping build.",
+	  "", "editor#profiler" },
+	{ "Profiler/Per-thread timeline (worker lanes)", "Per-thread Timeline",
+	  "Records scopes on every thread rather than the main one alone. This is "
+	  "what fills the Timeline tab and what shows whether the job pool is "
+	  "actually being fed — gaps on a worker lane are idle cores. It costs memory "
+	  "during a capture.",
+	  "", "editor#profiler" },
+	{ "Profiler/Debug: shadow cascades (cascade-index tint)", "Shadow Cascade Debug",
+	  "Tints lit surfaces by which shadow cascade they sample, to check where the "
+	  "cascade splits land — cascade 0 should hug the camera. It is a rendering "
+	  "debug view, not a measurement, and only some backends honour it. It is not "
+	  "saved, so it is off again after a restart.",
+	  "", "rendering#shadows" },
+	{ "Profiler/Dump Now", "",
+	  "Writes whatever has been recorded so far to a file in the dumps folder "
+	  "without stopping a capture that is running. It does nothing when nothing "
+	  "has been recorded yet. The path it wrote is logged to the Console.",
+	  "", "editor#profiler" },
+	{ "Profiler/Open Dumps Folder", "",
+	  "Opens the folder the capture files are written to in the system file "
+	  "browser. The path itself is printed on the line below the button; it sits "
+	  "next to the engine log, and the engine creates it if it is not there yet.",
+	  "", "advanced#diagnostics" },
+	{ "Profiler/Open Capture...", "",
+	  "Reads a dump written by an earlier run — this machine's or someone "
+	  "else's — and shows it through these same tabs. A banner appears above them "
+	  "naming the file, the backend and the resolution it was recorded at, so a "
+	  "recording is never mistaken for the live session.",
+	  "", "editor#profiler" },
+	{ "Profiler/clear", "Clear Frame Selection",
+	  "Drops the frame you picked — from the hitch list, or by clicking a spike "
+	  "in the frame-time graph of a loaded capture. Frame Detail then falls back "
+	  "to the last single-frame capture, or failing that to the last frame of the "
+	  "benchmark.",
+	  "", "editor#profiler" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -2386,8 +2592,11 @@ namespace
 		{ "Environment Window/",  "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "anim.",     "editor-animation", "Animation Editors", "Animator" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
-		{ "export.",   "editor-export",    "Export & Diagnostics", "Export" },
-		{ "profiler.", "editor-export",    "Export & Diagnostics", "Profiler" },
+		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
+		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },
+		{ "Export/",       "editor-export", "Export & Diagnostics", "Export dialog" },
+		{ "Build Window/", "editor-export", "Export & Diagnostics", "Build window" },
+		{ "Profiler/",     "editor-export", "Export & Diagnostics", "Profiler" },
 		{ "collab.",   "editor-collab",    "Collaboration & Source Control", "Collaboration" },
 		{ "sc.",       "editor-collab",    "Collaboration & Source Control", "Source control" },
 	};

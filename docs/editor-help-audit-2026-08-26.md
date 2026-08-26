@@ -148,7 +148,8 @@ den Test zu beruhigen.
 | 4 · UI-Designer | erledigt (39 Einträge, sechs neue Scopes) | 0 |
 | 5 · Input | erledigt (6 Einträge, ein Scope) | 0 |
 | 6 · Landschaft | erledigt (33 Einträge, drei Scopes, Werkzeugleiste nachgerüstet) | 0 |
-| 7–10 | offen | 111 |
+| 7 · Export + Profiler | erledigt (37 Einträge, drei Scopes, vier „(?)"-Tooltips aufgelöst) | 0 |
+| 8–10 | offen | 82 |
 
 Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
 ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren
@@ -199,6 +200,21 @@ Aus Stufe 6:
   jedes Netz gefallen. Wo das Label Daten sind (ein Materialname, ein Ebenenname), hilft
   nur `helpForKey` mit einem festen Schlüssel, und ein Tippfehler darin ist unsichtbar,
   deshalb prüft der Test diese Schlüssel jetzt einzeln.
+Aus Stufe 7:
+
+* **Das „(?)"-Zeichen neben einer Checkbox ist ein Notbehelf.** Der Export-Dialog hatte
+  vier davon: ein zwei Zeichen breites Hover-Ziel neben dem eigentlichen Bedienelement,
+  weil ImGui sonst keinen Platz für die Erklärung ließ. Als Eintrag ist die ganze Checkbox
+  das Ziel, und F1 führt zur Referenz.
+* **Ein Tooltip, der nur an einem deaktivierten Knopf erscheint, kollidiert trotzdem.**
+  Der Entwurf wollte den an `Start Game` behalten, mit dem Argument, er feuere nur solange
+  der Knopf aus ist. Die Gegenprüfung hat das widerlegt: der Hilfe-Lookup benutzt
+  `ImGuiHoveredFlags_ForTooltip`, und darin steckt `AllowWhenDisabled` — absichtlich, denn
+  „warum kann ich das nicht drücken" ist die Frage eines grauen Knopfes.
+* **Ein Schlüssel mit Sonderzeichen muss das Zeichen selbst enthalten.**
+  `"\xe2\x80\x94"` im Quelltext ist für den Compiler ein Geviertstrich und für das
+  Audit-Skript, das die Datei als Text liest, ein Backslash. Die Zeile muss den echten
+  Strich tragen.
 * **`Bar::item` konnte gar keinen Hilfe-Schlüssel nennen.** `cellImpl` kann es seit dem
   Umbau der Werkzeugleiste, `Bar::item` reichte ihn nur nicht durch. Der Fall, der das
   wichtig macht: der Einzeiler einer Zelle wird unterdrückt, solange sie ausgegraut ist,

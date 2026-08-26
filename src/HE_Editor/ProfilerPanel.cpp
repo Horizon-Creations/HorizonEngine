@@ -10,6 +10,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include "EditorTheme.h"
+#include "EditorHelp.h"                  // "Profiler/<label>" scope for its controls
 #include "EditorWidgets.h"               // WrapText
 #include "ProfilerLayout.h"
 #include "ProfilerWidgets.h"
@@ -206,6 +207,11 @@ void CountersGrid(uint32_t draws, uint32_t tris, uint32_t visible, uint32_t tota
 // ── Overview ────────────────────────────────────────────────────────────────
 void DrawOverview(EngineProfiler& prof)
 {
+	// Each tab pushes the scope for itself. They are drawn from DrawProfilerWindow
+	// further down this file, and the coverage scan reads top to bottom, so a
+	// single push at the window would be invisible to it up here.
+	HE::Ed::Help::Scope helpScope("Profiler");
+
 	// One tab, two sources. Live: the always-on ring, "cur" is this instant.
 	// Loaded: the recorded frames, and "cur" is the capture's median rather than a
 	// live reading — a recorded run has no "now", and showing its last frame as if
@@ -299,6 +305,7 @@ void DrawOverview(EngineProfiler& prof)
 	int fpsIdx = g_ui.targetFps >= 144.0 ? 3 : g_ui.targetFps >= 120.0 ? 2 : g_ui.targetFps >= 60.0 ? 1 : 0;
 	if (ImGui::Combo("Target", &fpsIdx, "30 FPS\0" "60 FPS\0" "120 FPS\0" "144 FPS\0"))
 		g_ui.targetFps = (fpsIdx == 0) ? 30.0 : (fpsIdx == 1) ? 60.0 : (fpsIdx == 2) ? 120.0 : 144.0;
+	EditorWidgets::helpForLabel("Target");
 	ImGui::SameLine();
 	ImGui::TextDisabled("budget %.2f ms/frame", budgetMs());
 
@@ -342,7 +349,7 @@ void DrawOverview(EngineProfiler& prof)
 
 	if (anyGpu)
 	{
-		ImGui::Checkbox("GPU time graph", &g_ui.showGpuGraph);
+		EditorWidgets::checkbox("GPU time graph", &g_ui.showGpuGraph);
 		if (g_ui.showGpuGraph)
 			ProfilerWidgets::FrameGraph("##gpugraph", gpuSpark, budgetMs(), 0.0, 0.0, 60.0f);
 	}
@@ -363,6 +370,8 @@ void DrawOverview(EngineProfiler& prof)
 // ── Timeline ────────────────────────────────────────────────────────────────
 void DrawTimeline(EngineProfiler& prof)
 {
+	HE::Ed::Help::Scope helpScope("Profiler");
+
 	refreshLanes(prof);
 	const bool loaded = g_ui.viewingLoaded;
 	const std::vector<ProfThreadTimeline>& lanes = loaded ? g_ui.loaded.threads : g_cache.lanes;
@@ -373,7 +382,7 @@ void DrawTimeline(EngineProfiler& prof)
 		ImGui::TextDisabled("Wheel = zoom, drag = pan. One lane per thread; rows are nesting depth. "
 		                    "Gaps on a worker lane are idle cores.");
 	}
-	if (ImGui::Button("Fit")) g_ui.timelineView = {};   // invalid → refit to the capture
+	if (EditorWidgets::button("Fit")) g_ui.timelineView = {};   // invalid → refit to the capture
 	ImGui::SameLine();
 	// A loaded dump carries only as much timeline as the writer's budget allowed.
 	// Saying so is the whole point: a lane that stops halfway looks like a thread
@@ -660,6 +669,8 @@ void DrawHitches(EngineProfiler& prof)
 // file, what resolution, whether vsync was on, and which GPU-timing mode ran.
 void DrawLoadedBanner()
 {
+	HE::Ed::Help::Scope helpScope("Profiler");
+
 	const HE::Prof::LoadedCapture& lc = g_ui.loaded;
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.20f, 0.16f, 0.06f, 0.55f));
 	ImGui::BeginChild("##loadedBanner", ImVec2(0, ImGui::GetTextLineHeight() * 3.6f), true);
@@ -695,7 +706,7 @@ void DrawLoadedBanner()
 	}
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
-	if (ImGui::Button("Back to live"))
+	if (EditorWidgets::button("Back to live"))
 	{
 		g_ui.viewingLoaded     = false;
 		g_ui.haveSelectedFrame = false;
@@ -748,6 +759,7 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
     // Feed the live HUD only while the window is actually visible (not collapsed).
     prof.setLiveEnabled(visible);
     if (!visible) { ImGui::End(); return; }
+    HE::Ed::Help::Scope helpScope("Profiler");
 
     PollPendingLoad();
     if (g_ui.viewingLoaded) DrawLoadedBanner();
@@ -770,14 +782,14 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             if (recording)
             {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.20f, 0.20f, 1.0f));
-                if (ImGui::Button("Stop & Dump  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
+                if (EditorWidgets::button("Stop & Dump  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
                     ctx.toggleProfilerCapture();
                 ImGui::PopStyleColor();
                 ImGui::TextDisabled("Recording — %zu frames (vsync off)", prof.recordedFrames());
             }
             else
             {
-                if (ImGui::Button("Start Benchmark Capture  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
+                if (EditorWidgets::button("Start Benchmark Capture  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
                 {
                     // Recording something new means you want to look at the new
                     // thing: leaving a loaded file in front of a running capture
@@ -790,7 +802,7 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
 
                 // Single-frame capture: one frame in full detail (forces detailed GPU),
                 // shown in the Frame Detail tab. No dump.
-                if (ImGui::Button("Capture Single Frame", ImVec2(-1, 0)))
+                if (EditorWidgets::button("Capture Single Frame", ImVec2(-1, 0)))
                     prof.requestSingleFrameCapture();
                 ImGui::TextDisabled("One frame (CPU scopes + counters + GPU) → 'Frame Detail'. Fast unless");
                 ImGui::TextDisabled("'Detailed GPU' is ticked (then exclusive per-pass, but that frame is slow).");
@@ -799,12 +811,12 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             ImGui::Separator();
             // Detailed GPU capture (serialized per-pass). Also auto-forced for single frames.
             bool detailed = prof.detailedGpuCapture();
-            if (ImGui::Checkbox("Detailed GPU pass timing (serializes GPU — capture only)", &detailed))
+            if (EditorWidgets::checkbox("Detailed GPU pass timing (serializes GPU — capture only)", &detailed))
                 prof.setDetailedGpuCapture(detailed);
             ImGui::TextDisabled("On = exclusive per-pass GPU (ranking/upper bound). FPS during capture is meaningless.");
 
             bool timeline = prof.threadTimelineEnabled();
-            if (ImGui::Checkbox("Per-thread timeline (worker lanes)", &timeline))
+            if (EditorWidgets::checkbox("Per-thread timeline (worker lanes)", &timeline))
                 prof.setThreadTimelineEnabled(timeline);
             ImGui::TextDisabled("Records every thread's scopes, not just the main one — this is what fills the "
                                 "Timeline tab and shows whether the job pool is actually being fed. Costs memory "
@@ -813,17 +825,17 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             // Debug: tint lit fragments by shadow-cascade index (red/green/blue) to
             // verify the CSM split placement (cascade 0 should hug the camera).
             static bool s_dbgCascades = false;
-            if (ImGui::Checkbox("Debug: shadow cascades (cascade-index tint)", &s_dbgCascades))
+            if (EditorWidgets::checkbox("Debug: shadow cascades (cascade-index tint)", &s_dbgCascades))
                 if (ctx.renderer) ctx.renderer->SetShadowDebug(s_dbgCascades);
 
             ImGui::Separator();
-            if (ImGui::Button("Dump Now"))
+            if (EditorWidgets::button("Dump Now"))
             {
                 std::string p = prof.dumpNow();
                 if (!p.empty()) HE_LOG_INFO(Editor, "%s", ("Profiler dump: " + p).c_str());
             }
             ImGui::SameLine();
-            if (ImGui::Button("Open Dumps Folder"))
+            if (EditorWidgets::button("Open Dumps Folder"))
             {
                 std::string dir = !prof.dumpsDir().empty()
                                 ? prof.dumpsDir()
@@ -842,7 +854,7 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             // which is a strange place to end up for a tool whose whole job is
             // showing this data. Loading one puts it through the same five tabs.
             ImGui::Separator();
-            if (ImGui::Button("Open Capture..."))
+            if (EditorWidgets::button("Open Capture..."))
             {
                 static SDL_DialogFileFilter filters[] = {
                     { "Profiler capture", "json" },
@@ -889,7 +901,7 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
                     ImGui::TextDisabled("Source: frame %llu, picked from the hitch list",
                                         static_cast<unsigned long long>(g_ui.selectedFrame));
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("clear")) g_ui.haveSelectedFrame = false;
+                    if (EditorWidgets::smallButton("clear")) g_ui.haveSelectedFrame = false;
                 }
                 else
                 {

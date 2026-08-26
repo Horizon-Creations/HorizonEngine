@@ -229,6 +229,19 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Landscape",          "Reset Sculpting" },
 		{ "Environment Window", "Select##sky" },
 		{ "Environment Window", "Add Weather" },
+		// Export, the build window and the profiler. Three of these labels carry
+		// characters that are easy to get wrong in a key: two spaces before the
+		// bracket, and a real em dash.
+		{ "Export",       "Compile HorizonCode" },
+		{ "Export",       "Metal" },
+		{ "Export",       "Export" },
+		{ "Build Window", "Start Game" },
+		{ "Build Window", "Build Settings" },
+		{ "Profiler",     "Target" },
+		{ "Profiler",     "Stop & Dump  (F9)" },
+		{ "Profiler",     "Start Benchmark Capture  (F9)" },
+		{ "Profiler",     "Detailed GPU pass timing (serializes GPU — capture only)" },
+		{ "Profiler",     "clear" },
 	};
 	for (const Case& c : cases)
 	{

@@ -1,5 +1,6 @@
 #include "BuildProgressDialog.h"
 #include "EditorApplication.h"   // AppContext
+#include "EditorHelp.h"          // "Build Window/<label>" scope for its buttons
 #include "EditorWidgets.h"       // primaryButton, pinDialogToEditorWindow
 #include <Diagnostics/Logger.h>
 
@@ -358,6 +359,9 @@ void render([[maybe_unused]] AppContext& ctx)
 	// immediately: ImGui calls below can run user code, and holding a worker's
 	// mutex across them is how a UI ends up waiting on a compiler.
 	s_visible = true;
+	// Not "Build": that scope belongs to the Build MENU in the menu bar, and its
+	// entries are about starting an export, not about the window that watches one.
+	HE::Ed::Help::Scope helpScope("Build Window");
 
 	std::vector<Step> steps;
 	bool running = false, finished = false, success = false;
@@ -486,18 +490,17 @@ void render([[maybe_unused]] AppContext& ctx)
 	if (EditorWidgets::primaryButton("Start Game", ImVec2(120.0f, 0.0f)))
 		launchGame(exePath);
 	ImGui::EndDisabled();
-	if (!canLaunch && finished && success && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-		ImGui::SetTooltip("%s", exePath.empty()
-			? "This export shipped no game runtime."
-			: "The export targets another platform — it cannot run on this machine.");
+	// The tooltip that stood here fired only while the button was disabled, and
+	// the help lookup fires then too (its hover flags allow a disabled item on
+	// purpose), so both would have shown at once. The entry says both cases.
 
 	ImGui::SameLine();
 	// Stays open, unlike the other two: the next run reports into this same
 	// window, and closing it here only to reopen it a frame later would flash.
-	if (ImGui::Button("Build Again", ImVec2(120.0f, 0.0f)))
+	if (EditorWidgets::button("Build Again", ImVec2(120.0f, 0.0f)))
 		s_action = Action::Rebuild;
 	ImGui::SameLine();
-	if (ImGui::Button("Build Settings", ImVec2(130.0f, 0.0f)))
+	if (EditorWidgets::button("Build Settings", ImVec2(130.0f, 0.0f)))
 	{
 		s_action = Action::BackToSetup;
 		ImGui::CloseCurrentPopup();
