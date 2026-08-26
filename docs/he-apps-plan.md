@@ -121,11 +121,34 @@ Autostart, Tray-Icon. Alles klein einzeln, zusammen der Unterschied zwischen „
 Die offene Liste aus dem UI-Ausbau existiert schon, aber in Spiel-Reihenfolge. Für Apps sieht
 die Rangfolge anders aus:
 
-**B1 TextInput richtig.** Heute kann das Feld Anhängen und Backspace. Für eine App ist das
-nichts. Gebraucht: Cursor mit Klickpositionierung, Auswahl per Ziehen und Shift+Pfeil,
-Wort-Sprünge, Doppelklick wählt Wort, Dreifachklick wählt Zeile, Ctrl+A/C/X/V/Z,
-Mehrzeiligkeit, Platzhaltertext, Zeichenlimit, Validierung, Passwortmodus, IME für CJK,
-Scrollen bei Überlänge. Das ist der einzelne wichtigste Punkt im ganzen Dokument.
+**B1 TextInput, Restarbeiten.** Korrektur gegenüber der ersten Fassung dieses Dokuments: das
+Feld ist längst ein richtiges Textfeld, nicht „Anhängen und Backspace". Verifiziert im Code
+(`UIElements.h:224`, `WidgetManager.cpp:619–780`, `GameApplication.cpp:1114–1160`): Cursor als
+Byte-Offset auf UTF-8-Grenzen mit Klickpositionierung über `caretAtX`, Auswahl mit Anker,
+Shift+Pfeil, Home/End, Entf, Ctrl+A, Ctrl+C/X/V gegen die SDL-Zwischenablage (im Spiel **und**
+im Editor verdrahtet), Tippen ersetzt die Auswahl, Zeichenlimit in Zeichen statt Bytes,
+Passwortmodus, `editable` und `selectable` getrennt, Platzhalter, Auswahlrechteck hinter den
+Glyphen, Cursor als Strich an der richtigen Stelle, dazu `OnTextChanged`, `OnTextCommitted`,
+`OnFocused`, `OnUnfocused`.
+
+Was wirklich noch fehlt, klein und abzählbar:
+- **Ziehen zum Auswählen.** Der Druck setzt Cursor *und* Anker (`setCaretFromPointer`); einen
+  Ziehpfad gibt es nur für den Slider (`draggingSlider`).
+- **Doppelklick wählt Wort, Dreifachklick wählt Zeile.**
+- **Wortsprünge.** `TextEdit` kennt nur `Left, Right, Home, End, Delete, SelectAll`; Ctrl+Pfeil
+  und Ctrl+Backspace fehlen.
+- **Undo/Redo im Feld** (keine Historie pro Feld).
+- **Waagerechtes Scrollen bei Überlänge.** `render` zeichnet ab `tp.x` ohne Versatz, also
+  läuft der Cursor bei langem Text aus dem Feld heraus.
+- **IME.** `SDL_EVENT_TEXT_EDITING` kommt im ganzen Baum nicht vor, ebenso wenig
+  `SDL_SetTextInputArea` für das Kandidatenfenster. Ohne das ist CJK-Eingabe nicht benutzbar.
+- **I-Beam automatisch.** `UICursor::Text` existiert, `hoverCursor` ist aber eine gestaltete
+  Eigenschaft pro Element mit Standard `Default`, kein Automatismus für TextInput.
+- **Eingabefilter** (nur Zahlen, Muster, Live-Validierung).
+
+**B1b Mehrzeiligkeit** ist der einzige große Rest davon und deshalb ein eigener Punkt:
+Umbruch, Cursor hoch/runter, Auswahl über Zeilen hinweg, senkrechtes Scrollen. Der Rest oben
+ist Feinarbeit an etwas Fertigem.
 
 **B2 ListView und Tabelle.** Datengebunden, virtualisiert (10.000 Zeilen dürfen nicht 10.000
 Elemente sein), Zeilenvorlage als WidgetRef, Auswahl (einzeln/mehrfach), Sortierung,
@@ -267,6 +290,68 @@ Rändern und Snap-Verhalten auf Windows.
 
 ---
 
+## 8b. Block G: Software-Renderer
+
+Nicht „ein Software-Renderer für die Engine". Ein **Software-Backend, das nur UI zeichnet**.
+Der Unterschied ist der ganze Punkt: 3D auf der CPU (PBR, Schatten, GI, Terrain) wäre ein
+eigenes Projekt mit fragwürdigem Nutzen. Die UI dagegen ist eine winzige, geschlossene
+Sprache, und für eine App ist die UI alles.
+
+**Warum es billig ist, belegt am Code:**
+- `IRenderer` hat genau **vier rein virtuelle Methoden**: `Initialize`, `Shutdown`, `Render`,
+  `GetCapabilities`. Die anderen 37 haben Standard-Rümpfe. Ein Backend, das nichts von SSR,
+  GI, Bloom oder Skelett-Vorschauen weiß, lässt sie einfach stehen.
+- `UIRenderObject` ist abgeschlossen: Rechteck, Farbe, Eckenradius, Textur *oder*
+  Glyphen-Kachel, Clip-Rechteck, Rotation, Ebene. Mehr Vokabular gibt es nicht.
+- Die UI kommt fertig extrahiert an (`m_renderWorld.uiObjects`), derselbe Weg, den OpenGL
+  und Metal gehen.
+- Die Schrift liegt **schon auf der CPU**: `BakedUIFont::pixels`, ein einkanaliger
+  1024×1024-Atlas.
+- Texturen liegen **auch schon auf der CPU**: `TextureAsset::data` behält die Pixelbytes.
+  Einschränkung: `TextureFormat` kennt neben `RGBA8` auch `BC7`, `BC3` und `ASTC_4x4`; die
+  müsste das Backend entweder auf der CPU auspacken oder ablehnen.
+- Der Präzedenzfall steht im Repo: `tests/ImGuiSoftwareRaster.h`, 63 Zeilen, rastert
+  ImGui-Dreiecke auf der CPU und speist `scripts/he_uishot.py`. Unsere Quads sind einfacher
+  als ImGui-Dreieckslisten.
+
+**Was es kostet:** ein echter Quad-Rasterizer, keine achsenparallelen Füllungen, weil
+`rotation` gedrehte Rechtecke erlaubt. Dazu Kantenglättung an Eckenradien, bilineares
+Abtasten für Glyphen und Texturen, Source-over-Blending, Scissor. Realistisch 600 bis 1000
+Zeilen, plus Präsentation ins Fenster.
+
+**Die harte Grenze, ausdrücklich:** `materialAssetId` kann ein CPU-Backend nicht bedienen, ein
+Material ist ein übersetzter Shader-Graph. Vorschlag: Quads mit Material zeichnen den reinen
+Farbton, genau wie D3D und Vulkan es heute mit Texturen tun. Das gehört dokumentiert, nicht
+stillschweigend gemacht.
+
+**Mechanik:**
+- `RendererBackend::Software = 5` **angehängt**, nie eingefügt. Der Kommentar an `Metal = 4`
+  („appended last") sagt, dass die Reihenfolge tragend ist.
+- Ein Fall in `Window::Init`: der überspringt für D3D, Vulkan und Metal schon die
+  GL-Kontexterzeugung, Software verhält sich genauso.
+- Präsentation über `SDL_GetWindowSurface` plus `SDL_UpdateWindowSurface`, alternativ eine
+  streamende SDL-Textur. Kein GPU-Kontext, kein Treiber, keine Shader-Übersetzung.
+- Ein Fall in `RendererFactory::Create`, und wählbar über das Backend-Feld, das die
+  ausgelieferte `config.json` bereits hat.
+
+**Was es einbringt, über Apps hinaus:**
+1. **Läuft überall.** VM ohne 3D, Remote-Desktop, RDP-Sitzung, alter Rechner, Server,
+   Container, Rechner mit kaputtem Treiber. Für eine App ist „braucht Metal 3" absurd.
+2. **Startzeit und Größe.** Kein Treiber, keine Pipeline-Kompilierung, keine
+   Shader-Archive, kein `MTLBinaryArchive`-Beta-Krach. Ein Fenster ist sofort da.
+3. **Akku.** Zusammen mit A2 (nur zeichnen wenn sich etwas ändert) ist eine ruhende App
+   wirklich ruhend.
+4. **Und der Grund, ihn früher zu bauen als „irgendwann":** er macht die eigene
+   Selbstprüfung für ganze Apps möglich. Heute prüfe ich Szenen über `he_shot.py` und
+   Editor-Panels über `he_uishot.py`. Ein Software-Backend heißt: eine **komplette App**
+   headless hochfahren, Bild rausschreiben, ansehen, als ctest festnageln. Genau der Test,
+   den die Risikoliste unten ohnehin fordert, damit der App-Modus nicht still verrottet.
+
+**Einordnung:** hängt an A1 (weltloser Modus), also frühestens Welle 2. Der Editor bleibt auf
+der GPU, dort ist das Backend weder nötig noch sinnvoll.
+
+---
+
 ## 9. Zwei Entscheidungen, die diese Richtung erzwingt
 
 Beide standen schon offen; die App-Richtung entscheidet sie.
@@ -290,13 +375,15 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 - A1 weltloser Modus
 - A2 ereignisgetriebenes Zeichnen
 - A4 `app`-Gruppe (Titel, Größe, Beenden, Schließen-Veto)
-- C: `clipboard`, `dialog`, `json`, `prefs`, `timer`
-- B1 TextInput richtig
+- C: `dialog`, `json`, `prefs`, `timer` (`clipboard` ist im Textfeld schon verdrahtet, fehlt
+  nur als Skript-Gruppe)
+- B1 TextInput-Restarbeiten (Ziehen zum Auswählen, Wortsprünge, Scrollen, Undo, I-Beam)
 - E1 App-Projekttyp plus eine Vorlage
 - E5 Export-Voreinstellung „App"
 - Abnahme: Todo-App, exportiert als `.app`, speichert nach `~`, unter 2 % CPU im Leerlauf
 
 **Welle 2, brauchbar**
+- G Software-Backend (hängt an A1; bringt zugleich den headless App-Test)
 - D1 Theme-System
 - D2 erste zwölf Komponenten
 - B2 ListView, B3 Grid, B4 Dialoge/Kontextmenü/Tooltip
@@ -306,7 +393,7 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 
 **Welle 3, konkurrenzfähig**
 - A6 Menüleiste, A7 Icon und Dateitypen
-- B5 Tabs/Splitter, B6 RichText, B7 Drag & Drop, B8 Animationen
+- B1b mehrzeiliges Textfeld, B5 Tabs/Splitter, B6 RichText, B7 Drag & Drop, B8 Animationen
 - C: `http`, `notify`
 - D3 alle App-Vorlagen
 - A3 schlanker Runtime
