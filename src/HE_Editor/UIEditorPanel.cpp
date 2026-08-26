@@ -7,6 +7,7 @@
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "AssetThumbnailCache.h"                // texture previews on the designer canvas
+#include "EditorHelp.h"                         // "UI Widget/<label>" scopes for the tooltips
 #include "EditorPanelState.h"                   // shared per-tab state map
 #include "EditorWidgets.h"                      // shared Content-Browser asset drop target
 #include "GraphEditor.h"                        // shared node-graph canvas
@@ -464,7 +465,8 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	// Context menu: delete / duplicate.
 	if (ImGui::BeginPopupContextItem((std::string("##hctx") + std::to_string(nodeId)).c_str()))
 	{
-		if (ImGui::MenuItem("Duplicate"))
+		HE::Ed::Help::Scope helpScope("UI Hierarchy");
+		if (EditorWidgets::menuItem("Duplicate"))
 		{
 			st.selected = duplicateSubtree(st, nodeId, n->parentId);
 			structureEdit = true;
@@ -590,16 +592,21 @@ void drawDetails(State& st, AppContext& ctx)
 	if (!n)
 	{
 		// Canvas settings when nothing is selected.
+		HE::Ed::Help::Scope helpScope("Canvas");
 		ImGui::TextDisabled("Canvas");
 		ImGui::Separator();
 		bool edit = false;
 		edit |= ImGui::DragFloat("Width",  &st.tree.canvasWidth,  1.0f, 64.0f, 7680.0f);
+		EditorWidgets::helpForLabel("Width");
 		edit |= ImGui::DragFloat("Height", &st.tree.canvasHeight, 1.0f, 64.0f, 4320.0f);
+		EditorWidgets::helpForLabel("Height");
 		if (edit) { st.dirty = true; }
 		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
 
 		// How the canvas above meets a screen that is not exactly this size.
-		if (ImGui::BeginCombo("Scale", HE::uiCanvasScaleModeName(st.tree.scaleMode)))
+		const bool scaleOpen = ImGui::BeginCombo("Scale", HE::uiCanvasScaleModeName(st.tree.scaleMode));
+		if (!scaleOpen) EditorWidgets::helpForLabel("Scale");
+		if (scaleOpen)
 		{
 			for (int m = 0; m <= static_cast<int>(HE::UICanvasScaleMode::ConstantPixel); ++m)
 			{
@@ -613,15 +620,8 @@ void drawDetails(State& st, AppContext& ctx)
 			}
 			ImGui::EndCombo();
 		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip(
-				"Stretch fits both axes SEPARATELY: the canvas always covers the\n"
-				"screen exactly, and everything on it is distorted as soon as the\n"
-				"screen's aspect differs from the size above.\n\n"
-				"Every other mode scales both axes by ONE factor — nothing is\n"
-				"distorted — and treats the size above as a reference for how big\n"
-				"things appear. The canvas is then as large as the screen really\n"
-				"is, so an element anchored to an edge stays on that edge.");
+		// The paragraph that used to be written out here is the help entry now —
+		// same words, and reachable with F1 instead of only by hovering.
 
 		ImGui::Spacing();
 		ImGui::TextDisabled("Preview");
@@ -663,6 +663,12 @@ void drawDetails(State& st, AppContext& ctx)
 		return;
 	}
 
+	// Everything below belongs to the selected widget. The layout fields change
+	// their MEANING with the anchor — "Position X" becomes "Left/Right" when the
+	// element is stretched across that axis — which is the single thing about
+	// this panel people get wrong, so each of the shapes has its own entry.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+
 	bool edit      = false; // any value changed this frame (live view update)
 	bool committed = false; // an edit finished (undo snapshot + live asset)
 
@@ -671,6 +677,7 @@ void drawDetails(State& st, AppContext& ctx)
 
 	ImGui::InputText("Name", &n->name);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Name");
 
 	// Layout — shared base fields.
 	ImGui::SeparatorText("Layout");
@@ -687,11 +694,10 @@ void drawDetails(State& st, AppContext& ctx)
 		edit |= ImGui::DragFloat("Slot Fill", &n->slotFill, 0.05f, 0.0f, 100.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		if (n->slotFill < 0.0f) n->slotFill = 0.0f;
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("0 = keep my own %s. Above 0 = take a share of the\n"
-			                  "space left over, split between the filling children\n"
-			                  "in proportion (two at 1 each take half).",
-			                  vert ? "height" : "width");
+		// The tooltip that stood here named the axis ("keep my own height") and
+		// the entry cannot, since it is one sentence for both. Worth the trade:
+		// the entry is also what F1 opens, and the axis is on screen anyway.
+		EditorWidgets::helpForLabel("Slot Fill");
 		// The size across the axis is the box's; the one along it is only used
 		// while this slot does not fill.
 		if (n->slotFill <= 0.0f)
@@ -699,9 +705,11 @@ void drawDetails(State& st, AppContext& ctx)
 			edit |= vert ? ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f)
 			             : ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel(vert ? "Height" : "Width");
 		}
 		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Pivot");
 	}
 	else
 	{
@@ -724,17 +732,16 @@ void drawDetails(State& st, AppContext& ctx)
 			float lt[2] = { left, top }, rb[2] = { right, bottom };
 			bool changed = ImGui::DragFloat2("Offset TL", lt, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Offset TL");
 			changed |= ImGui::DragFloat2("Offset BR", rb, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Offset BR");
 			if (changed)
 			{
 				HE::uiSetAnchorInsetsX(*n, lt[0], rb[0]);
 				HE::uiSetAnchorInsetsY(*n, lt[1], rb[1]);
 				edit = true;
 			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Distance from each anchored edge of the parent.\n"
-				                  "All four at 0 = exactly the anchored area.");
 		}
 		else if (stretchX)
 		{
@@ -742,26 +749,33 @@ void drawDetails(State& st, AppContext& ctx)
 			if (ImGui::DragFloat2("Left/Right", lr, 1.0f))
 			{ HE::uiSetAnchorInsetsX(*n, lr[0], lr[1]); edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Left/Right");
 			edit |= ImGui::DragFloat("Position Y", &n->posY, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Position Y");
 			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Height");
 		}
 		else if (stretchY)
 		{
 			edit |= ImGui::DragFloat("Position X", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Position X");
 			edit |= ImGui::DragFloat("Width", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Width");
 			float tb[2] = { top, bottom };
 			if (ImGui::DragFloat2("Top/Bottom", tb, 1.0f))
 			{ HE::uiSetAnchorInsetsY(*n, tb[0], tb[1]); edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Top/Bottom");
 		}
 		else
 		{
 			edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Position");
 			// A container that sizes itself to its content owns those two
 			// numbers: showing them editable would be offering a value that is
 			// overwritten before it is ever drawn.
@@ -769,6 +783,7 @@ void drawDetails(State& st, AppContext& ctx)
 			ImGui::BeginDisabled(measured);
 			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Size");
 			ImGui::EndDisabled();
 			if (measured)
 				ImGui::TextDisabled("Measured from the content (Min Width/Height below).");
@@ -776,6 +791,7 @@ void drawDetails(State& st, AppContext& ctx)
 	}
 	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Pivot");
 
 	// Anchor: the UMG 4×4 grid. The first three rows and columns are the nine
 	// points the anchor has always been; the fourth of each stretches the
@@ -832,25 +848,20 @@ void drawDetails(State& st, AppContext& ctx)
 		                  "Re-anchoring keeps the element exactly where it is.");
 	} // end of the anchored (non-box-child) branch
 
+	// The four tooltips that stood here are entries now, so F1 reaches them too.
 	int layer = n->layer;
 	if (ImGui::DragInt("Layer", &layer, 1)) { n->layer = layer; edit = true; }
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	if (ImGui::Checkbox("Visible", &n->visible)) committed = true;
+	EditorWidgets::helpForLabel("Layer");
+	if (EditorWidgets::checkbox("Visible", &n->visible)) committed = true;
 	ImGui::SameLine();
-	if (ImGui::Checkbox("Enabled", &n->enabled)) committed = true;
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Off = greyed out and inert, this element and everything in it.");
+	if (EditorWidgets::checkbox("Enabled", &n->enabled)) committed = true;
 	edit |= ImGui::DragFloat("Rotation", &n->rotation, 0.5f, -360.0f, 360.0f, "%.1f\xc2\xb0");
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Turns this element AND its children about its pivot.\n"
-		                  "Layout is computed unrotated, so a tilted element does\n"
-		                  "not shove its neighbours around.");
+	EditorWidgets::helpForLabel("Rotation");
 	edit |= ImGui::SliderFloat("Opacity", &n->renderOpacity, 0.0f, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Fades this element AND its children — one value on a\n"
-		                  "root panel fades the whole menu.");
+	EditorWidgets::helpForLabel("Opacity");
 
 	// Type-specific properties (generic, driven by properties()).
 	const std::vector<UIPropDesc> props = n->properties();
@@ -933,15 +944,8 @@ void drawDetails(State& st, AppContext& ctx)
 
 	// Pointer interaction: hit-testability + the cursor shown on hover.
 	ImGui::SeparatorText("Interaction");
-	if (ImGui::Checkbox("Hit-testable", &n->hitTestable)) committed = true;
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Off = transparent to the mouse (pointer passes through).");
-	if (ImGui::Checkbox("Clip children", &n->clipChildren)) committed = true;
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Cut everything inside this element off at its own edge.\n"
-		                  "Clipped pixels are neither drawn nor clickable — this is\n"
-		                  "what makes a list longer than its box look like a list\n"
-		                  "in a box instead of spilling across the screen.");
+	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
+	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
 	if (ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor)))
 	{
 		for (int c = 0; c < (int)HE::UICursor::COUNT; ++c)
@@ -1925,8 +1929,11 @@ void drawGraphVariables(State& st, AppContext& ctx)
 
 	// ── Graphs: the event graph + one sub-graph per function ──────────────────
 	ImGui::Spacing();
-	if (ImGui::Selectable("Event Graph", st.currentGraph == 0))
-	{ st.currentGraph = 0; st.selectedGraphNode = 0; st.selectedVar.clear(); }
+	{
+		HE::Ed::Help::Scope helpScope("UI Graph");
+		if (EditorWidgets::selectable("Event Graph", st.currentGraph == 0))
+		{ st.currentGraph = 0; st.selectedGraphNode = 0; st.selectedVar.clear(); }
+	}
 
 	ImGui::Spacing();
 	ImGui::TextDisabled("Functions");
@@ -1984,6 +1991,9 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		// Fixing it properly means giving Host a small "selection" block first.
 		if (HC::Variable* v = !st.selectedVar.empty() ? st.graph.findVariable(st.selectedVar) : nullptr)
 		{
+			// A variable's Name and a node's Name are not the same question, so
+			// they are not the same scope either.
+			HE::Ed::Help::Scope helpScope("UI Variable");
 			ImGui::TextDisabled("Variable");
 			ImGui::Separator();
 
@@ -2000,6 +2010,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				st.varNameEditFor = v->name;
 			}
 			ImGui::InputText("Name", &st.varNameEdit);
+			EditorWidgets::helpForLabel("Name");
 			if (ImGui::IsItemDeactivatedAfterEdit())
 			{
 				const std::string oldName = v->name;
@@ -2057,6 +2068,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				int vaccess = v->access;
 				if (ImGui::Combo("Access", &vaccess, "Public\0Private\0"))
 					{ v->access = vaccess; commitEdit(st, ctx); }
+				EditorWidgets::helpForLabel("Access");
 			}
 
 			// Single value, or a container of the type. Changing it re-types the
@@ -2094,8 +2106,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 					case PT::Color:  ed = ImGui::ColorEdit4("##vdef", v->f); break;
 					case PT::Transform:
 						ed |= ImGui::DragFloat3("Position##vdef", &v->tpos.x, 0.1f);
+						EditorWidgets::helpForLabel("Position##vdef");
 						ed |= ImGui::DragFloat3("Rotation##vdef", &v->trot.x, 0.5f);
+						EditorWidgets::helpForLabel("Rotation##vdef");
 						ed |= ImGui::DragFloat3("Scale##vdef",    &v->tscl.x, 0.05f);
+						EditorWidgets::helpForLabel("Scale##vdef");
 						break;
 					case PT::Enum:
 					{
@@ -2149,6 +2164,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		return;
 	}
 
+	HE::Ed::Help::Scope helpScope("UI Graph Node");
+
 	bool committed = false;
 	ImGui::TextDisabled("%s", HC::nodeDisplayName(n->type));
 	ImGui::Separator();
@@ -2159,7 +2176,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			: elemLabel(st, n->elem);
 		if (ImGui::BeginCombo(label, cur.c_str()))
 		{
-			if (includeAny && ImGui::Selectable("(Any)", n->elem == 0))
+			if (includeAny && EditorWidgets::selectable("(Any)", n->elem == 0))
 				{ n->elem = 0; committed = true; }
 			for (const auto& ep : st.tree.elements)
 			{
@@ -2225,6 +2242,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			};
 			if (st.gEvtNameEditFor != n->id) { st.gEvtNameEdit = n->s; st.gEvtNameEditFor = n->id; }
 			ImGui::InputText("Event", &st.gEvtNameEdit);
+			EditorWidgets::helpForLabel("Event");
 			if (ImGui::IsItemDeactivatedAfterEdit())
 			{
 				if (!st.gEvtNameEdit.empty() && used(st.gEvtNameEdit)) st.gEvtNameEdit = n->s; // reject dup
@@ -2287,6 +2305,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	{
 		std::string oldName = n->s;
 		ImGui::InputText("Name", &n->s);
+		EditorWidgets::helpForLabel("Name");
 		if (ImGui::IsItemDeactivatedAfterEdit())
 		{
 			// Rename the matching Call + Return nodes so the wiring stays valid.
@@ -2299,6 +2318,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "Public\0Private\0"))
 			{ n->access = access; committed = true; }
+		EditorWidgets::helpForLabel("Access");
 		ImGui::TextDisabled(n->access == 0
 			? "Callable from scripts via\nhorizon.callWidgetFunction()."
 			: "Internal — not script-callable.");
@@ -2328,6 +2348,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	{
 		ImGui::InputText("Event", &n->s);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Event");
 		ImGui::TextDisabled(n->type == NT::BindEvent
 			? "When Target fires this event, this\nwidget's Event of the same name runs."
 			: "Broadcast to everyone bound to this\nwidget's event of this name.");
@@ -2459,6 +2480,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.gOpenDropPopup) { ImGui::OpenPopup("##graph_elem_drop"); st.gOpenDropPopup = false; }
 	if (ImGui::BeginPopup("##graph_elem_drop"))
 	{
+		HE::Ed::Help::Scope helpScope("UI Graph");
 		ImGui::TextDisabled("%s", elemLabel(st, st.gDropElem).c_str());
 		ImGui::Separator();
 		const UIElement* tgt = st.tree.find(st.gDropElem);
@@ -2473,13 +2495,19 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.selectedGraphNode = id;
 			commitEdit(st, ctx);
 		};
-		if (ImGui::BeginMenu("Get", !props.empty()))
+		// Same rule as everywhere a submenu carries an entry: ask while the header
+		// is still the last item, and only while the submenu is shut.
+		const bool getOpen = ImGui::BeginMenu("Get", !props.empty());
+		if (!getOpen) EditorWidgets::helpForLabel("Get");
+		if (getOpen)
 		{
 			for (const UIPropDesc& pd : props)
 				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::GetProperty, pd);
 			ImGui::EndMenu();
 		}
-		if (ImGui::BeginMenu("Set", !props.empty()))
+		const bool setOpen = ImGui::BeginMenu("Set", !props.empty());
+		if (!setOpen) EditorWidgets::helpForLabel("Set");
+		if (setOpen)
 		{
 			for (const UIPropDesc& pd : props)
 				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::SetProperty, pd);
@@ -2492,6 +2520,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.gOpenVarDrop) { ImGui::OpenPopup("##graph_var_drop"); st.gOpenVarDrop = false; }
 	if (ImGui::BeginPopup("##graph_var_drop"))
 	{
+		HE::Ed::Help::Scope helpScope("UI Graph");
 		const HC::Variable* v = st.graph.findVariable(st.gDropVar);
 		// A function-local can only be placed inside its owning function's graph.
 		const bool scopeOk = v && (v->scope == 0 || v->scope == st.currentGraph);
@@ -2514,8 +2543,8 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.selectedVar.clear();
 			commitEdit(st, ctx);
 		};
-		if (ImGui::MenuItem("Get", nullptr, false, scopeOk)) makeVarNode(NT::GetVariable);
-		if (ImGui::MenuItem("Set", nullptr, false, scopeOk)) makeVarNode(NT::SetVariable);
+		if (EditorWidgets::menuItem("Get", nullptr, false, scopeOk)) makeVarNode(NT::GetVariable);
+		if (EditorWidgets::menuItem("Set", nullptr, false, scopeOk)) makeVarNode(NT::SetVariable);
 		if (v && !scopeOk)
 			ImGui::TextDisabled("Local to another function.");
 		ImGui::EndPopup();
@@ -2756,8 +2785,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGui::Separator();
 
 			// Canvas root: select-none target + reparent-to-root drop target.
+			HE::Ed::Help::Scope helpScope("UI Hierarchy");
 			const bool rootSel = st.selected == 0;
-			if (ImGui::Selectable("Canvas##uiwroot", rootSel)) st.selected = 0;
+			if (EditorWidgets::selectable("Canvas##uiwroot", rootSel)) st.selected = 0;
 			if (ImGui::BeginDragDropTarget())
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
@@ -2914,7 +2944,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				if (st.compileNode != 0)
 				{
-					if (ImGui::SmallButton("Show the node that failed"))
+					HE::Ed::Help::Scope helpScope("UI Graph");
+					if (EditorWidgets::smallButton("Show the node that failed"))
 						if (const HC::Node* n = st.graph.findNode(st.compileNode))
 						{
 							st.currentGraph      = n->subgraph;

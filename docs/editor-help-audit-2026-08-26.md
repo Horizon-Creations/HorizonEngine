@@ -145,7 +145,14 @@ den Test zu beruhigen.
 | 1 · Interface | erledigt (~90 neue Einträge, 19 Area-Regeln, `menuItem`/`button`/`selectable`) | 0 |
 | 2 · Einstellungen | erledigt (18 Einträge, `smallButton`, drei neue Scopes) | 0 |
 | 3 · Materialien | erledigt (25 Einträge, fünf neue Scopes) | 0 |
-| 4–10 | offen | 166 |
+| 4 · UI-Designer | erledigt (39 Einträge, sechs neue Scopes) | 0 |
+| 5–10 | offen | 134 |
+
+Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
+ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren
+`Position`, `Rotation` und `Scale` des Widgets und die der Variablen-Vorgabe ein und
+dasselbe Bedienelement. Sobald sie getrennte Scopes haben, sind es getrennte Zeilen, so
+wie es auf dem Bildschirm auch aussieht.
 
 Zwei Dinge, die die Stufe 2 nebenbei gefunden hat und die für die restlichen Stufen
 gelten:
@@ -170,6 +177,16 @@ Dazu aus Stufe 3:
 * **Wo schon ein handgeschriebener Tooltip stand, muss er weg.** Der eine wird sofort
   gezeichnet, der andere am Frameende, und man sieht beide. Beim „…"-Knopf der
   Material-Parameter ist der handgeschriebene jetzt der Eintrag.
+
+Und aus Stufe 4:
+
+* **Handgeschriebene Tooltips sind das Rohmaterial, nicht der Gegner.** Der UI-Designer
+  hatte acht davon, teils gut formuliert. Sie sind jetzt Einträge, wörtlich übernommen wo
+  es passte. Der einzige Verlust: der `Slot Fill`-Tooltip nannte die Achse („keep my own
+  height"), ein Eintrag kann das nicht, weil er ein Satz für beide Fälle ist.
+* **`Position` und `Position` sind zwei Bedienelemente, sobald sie zwei Scopes haben.**
+  Der Scan entdoppelt nach `(Scope, Label)`. Ohne Scope verschwindet die zweite Stelle
+  still hinter der ersten, und die Zahl sieht besser aus als sie ist.
 
 ## 6. Was bewusst NICHT abgedeckt wird
 

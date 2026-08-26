@@ -1830,6 +1830,190 @@ namespace
 	  "in the background, so the editor keeps working while it happens.",
 	  "", "materials#editor-usage" },
 
+	// ── The UI designer ──────────────────────────────────────────────────────
+	// The layout fields here are the one part of the editor whose labels CHANGE
+	// with the state of another control: anchor an element across a whole side
+	// and "Position X" becomes "Left/Right", because on a stretched axis the
+	// element has no position, it has two margins. Each shape gets its own
+	// entry, and each says why it is the shape it is.
+	{ "UI Hierarchy/Canvas", "Canvas",
+	  "The root of the widget tree. Selecting it selects nothing in particular, "
+	  "which is what puts the canvas settings in the details panel; dropping a "
+	  "widget on it moves that widget out to the top level.",
+	  "", "ui#designer" },
+	{ "UI Hierarchy/Duplicate", "Duplicate",
+	  "Copies this widget and everything under it, as a sibling. The copy keeps "
+	  "the properties and the layout, and gets its own name.",
+	  "", "ui#designer" },
+
+	{ "Canvas/Width", "Canvas Width",
+	  "The width this layout is DESIGNED for, in pixels. It is a reference, not a "
+	  "promise: what the canvas becomes on a real screen is the Scale mode's "
+	  "business.",
+	  "", "ui#designer" },
+	{ "Canvas/Height", "Canvas Height",
+	  "The height the layout is designed for. Together with the width it fixes "
+	  "the aspect the anchors were placed against.",
+	  "", "ui#designer" },
+	{ "Canvas/Scale", "Canvas Scale",
+	  "How this canvas meets a screen that is not exactly the size above. Stretch "
+	  "fits each axis separately: the canvas always covers the screen exactly, "
+	  "and everything on it is distorted the moment the aspect differs. Every "
+	  "other mode scales both axes by one factor, so nothing is distorted, and "
+	  "treats the size above as a reference for how big things appear — the "
+	  "canvas is then as large as the screen really is, so an element anchored to "
+	  "an edge stays on that edge.",
+	  "", "ui#designer" },
+
+	{ "UI Widget/Name", "",
+	  "What this widget is called. The graph finds it by this name, so renaming "
+	  "one that the logic already refers to is worth doing deliberately.",
+	  "", "ui#designer" },
+	{ "UI Widget/Slot Fill", "",
+	  "0 keeps the widget's own size along the box's axis. Above 0 it takes a "
+	  "share of the space left over instead, split between the filling children "
+	  "in proportion — two at 1 each take half.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Width", "",
+	  "How wide the widget is, in canvas pixels. It is gone from this panel on an "
+	  "axis the widget is stretched across: there it has margins, not a width.",
+	  "", "ui#designer" },
+	{ "UI Widget/Height", "",
+	  "How tall the widget is. Same rule as the width — a stretched axis has "
+	  "margins instead.",
+	  "", "ui#designer" },
+	{ "UI Widget/Position", "",
+	  "Where the widget's pivot sits, measured from its anchor. Not from the "
+	  "corner of the screen: that is the whole point of the anchor, and it is why "
+	  "these numbers stay small and stay right on a different screen.",
+	  "", "ui#designer" },
+	{ "UI Widget/Position X", "",
+	  "The horizontal half of that, shown alone because the vertical axis is "
+	  "stretched and has margins instead.",
+	  "", "ui#designer" },
+	{ "UI Widget/Position Y", "",
+	  "The vertical half, shown alone because the horizontal axis is stretched.",
+	  "", "ui#designer" },
+	{ "UI Widget/Size", "",
+	  "Width and height together. A container set to size itself to its content "
+	  "owns these two numbers, so there they are greyed out.",
+	  "", "ui#designer" },
+	{ "UI Widget/Pivot", "",
+	  "The point of the widget that its position refers to, and the point it "
+	  "rotates about. 0,0 is the top left corner, 0.5,0.5 the middle, 1,1 the "
+	  "bottom right.",
+	  "", "ui#designer" },
+	{ "UI Widget/Left/Right", "",
+	  "The margins from the parent's left and right edges. They replace position "
+	  "and width because this widget is anchored across the whole horizontal "
+	  "axis: it has no width of its own there, it has two distances.",
+	  "", "ui#designer" },
+	{ "UI Widget/Top/Bottom", "",
+	  "The same for the vertical axis: distance from the top edge, distance from "
+	  "the bottom.",
+	  "", "ui#designer" },
+	{ "UI Widget/Offset TL", "",
+	  "Distance from the anchored top and left edges of the parent. Stretched on "
+	  "both axes, a widget is four margins and nothing else — all four at 0 means "
+	  "exactly the anchored area.",
+	  "", "ui#designer" },
+	{ "UI Widget/Offset BR", "",
+	  "Distance from the anchored right and bottom edges. Positive numbers pull "
+	  "the edge inwards, whichever edge it is.",
+	  "", "ui#designer" },
+	{ "UI Widget/Layer", "",
+	  "Who is drawn on top when two widgets overlap. Higher wins; ties fall back "
+	  "to the order in the hierarchy.",
+	  "", "ui#designer" },
+	{ "UI Widget/Visible", "",
+	  "Off hides this widget and everything inside it. It still exists, the graph "
+	  "can still reach it, and it takes no clicks while hidden.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Enabled", "",
+	  "Off greys the widget out and makes it inert — this one and everything "
+	  "inside it. Visible but not usable, which is the state a form control wants "
+	  "while it is not applicable.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Rotation", "",
+	  "Turns this widget AND its children about the pivot. Layout is computed "
+	  "unrotated, so a tilted widget does not shove its neighbours around.",
+	  "", "ui#designer" },
+	{ "UI Widget/Opacity", "",
+	  "Fades this widget and everything inside it. One value on a root panel "
+	  "fades a whole menu, which is what a menu fade-in is made of.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Hit-testable", "",
+	  "Off makes the widget transparent to the pointer: clicks pass straight "
+	  "through it to whatever is behind. For decoration that must not swallow "
+	  "input.",
+	  "", "ui#runtime" },
+	{ "UI Widget/Clip children", "",
+	  "Cuts everything inside this widget off at its own edge. Clipped pixels are "
+	  "neither drawn nor clickable — it is what makes a list longer than its box "
+	  "look like a list in a box instead of spilling across the screen.",
+	  "", "ui#widgets" },
+
+	{ "UI Graph/Event Graph", "Event Graph",
+	  "The widget's main graph, where the event handlers live. The functions "
+	  "below it are sub-graphs of their own; this is the one that runs by itself.",
+	  "", "ui#graph" },
+	{ "UI Graph/Get", "Get",
+	  "Adds a node that READS this property or variable. Dropping something from "
+	  "the hierarchy or the variables list onto the canvas is what offers this.",
+	  "", "ui#graph" },
+	{ "UI Graph/Set", "Set",
+	  "Adds a node that WRITES it. A function-local variable can only be used "
+	  "inside its own function, which is why this is sometimes greyed out.",
+	  "", "ui#graph" },
+	{ "UI Graph/Show the node that failed", "Show the node that failed",
+	  "Jumps to the node the compile check stopped at, opening its sub-graph and "
+	  "selecting it. The message says what went wrong; this says where.",
+	  "", "horizoncode#compiler" },
+
+	{ "UI Variable/Name", "",
+	  "What this variable is called. The rename carries: every Get and Set node "
+	  "using it is renamed with it, so the wiring survives.",
+	  "", "ui#graph" },
+	{ "UI Variable/Access", "",
+	  "Public can be read and written from a script through "
+	  "horizon.callWidgetFunction and friends. Private is the widget's own "
+	  "business.",
+	  "", "ui#graph" },
+	{ "UI Variable/Position##vdef", "Default Position",
+	  "The position this transform variable starts at, when the widget is "
+	  "created. It is a starting value, not a binding to anything.",
+	  "", "ui#graph" },
+	{ "UI Variable/Rotation##vdef", "Default Rotation",
+	  "The rotation it starts at, in degrees per axis.", "", "ui#graph" },
+	{ "UI Variable/Scale##vdef", "Default Scale",
+	  "The scale it starts at. 1,1,1 is unscaled.", "", "ui#graph" },
+	{ "UI Variable/Delete Variable", "Delete Variable",
+	  "Removes the variable. Get and Set nodes that used it are left where they "
+	  "are and read a default from then on, so nothing breaks silently — but "
+	  "nothing is repaired either.",
+	  "", "ui#graph" },
+
+	{ "UI Graph Node/Name", "",
+	  "What this function is called. Renaming it renames the Call and Return "
+	  "nodes that go with it, so the wiring stays valid.",
+	  "", "ui#graph" },
+	{ "UI Graph Node/Access", "",
+	  "Public makes the function callable from a script through "
+	  "horizon.callWidgetFunction(). Private keeps it inside the widget.",
+	  "", "ui#graph" },
+	{ "UI Graph Node/Event", "",
+	  "Which event this handler answers. Picked from the bound widget's own "
+	  "events, or typed freely when the node is bound to no particular widget — "
+	  "Construct, Tick and Destruct are fired by every widget there is.",
+	  "", "ui#graph" },
+	{ "UI Graph Node/(Any)", "(Any)",
+	  "Bind this node to no particular widget. It then answers for the widget as "
+	  "a whole, which is what the lifecycle events need.",
+	  "", "ui#graph" },
+	{ "UI Graph Node/Delete Node", "Delete Node",
+	  "Removes the selected node and the links that ran through it.",
+	  "", "ui#graph" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -1956,7 +2140,13 @@ namespace
 		{ "Material Parameter/", "editor-materials", "Material Editor", "Parameters" },
 		{ "Material Settings/",  "editor-materials", "Material Editor", "Material settings" },
 		{ "Material Preview/",   "editor-materials", "Material Editor", "The preview" },
-		{ "ui.",       "editor-ui",        "UI Designer",       "Widget designer" },
+		{ "ui.",             "editor-ui", "UI Designer", "Widget designer" },
+		{ "UI Hierarchy/",   "editor-ui", "UI Designer", "The hierarchy" },
+		{ "Canvas/",         "editor-ui", "UI Designer", "The canvas" },
+		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
+		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
+		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
+		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
 		{ "input.",    "editor-input",     "Input Reference",   "Input assets" },
 		{ "hc.",       "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
 		{ "terrain.",  "editor-landscape", "Landscape Tools",   "Terrain brush" },

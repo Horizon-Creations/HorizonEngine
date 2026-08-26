@@ -183,6 +183,21 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Material Settings",  "Clip" },
 		{ "Material Preview",   "Show Material" },
 		{ "Material Preview",   "Load" },
+		// The UI designer's six. Its layout fields change their MEANING with the
+		// anchor, so a wrong scope here would hand somebody the sentence for a
+		// field they are not looking at.
+		{ "UI Hierarchy",  "Canvas##uiwroot" },
+		{ "Canvas",        "Width" },
+		{ "Canvas",        "Scale" },
+		{ "UI Widget",     "Width" },
+		{ "UI Widget",     "Left/Right" },
+		{ "UI Widget",     "Clip children" },
+		{ "UI Graph",      "Event Graph" },
+		{ "UI Graph",      "Get" },
+		{ "UI Graph Node", "(Any)" },
+		{ "UI Graph Node", "Delete Node" },
+		{ "UI Variable",   "Access" },
+		{ "UI Variable",   "Scale##vdef" },
 	};
 	for (const Case& c : cases)
 	{
