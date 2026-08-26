@@ -82,12 +82,21 @@ namespace
 
 	// ── Transform ────────────────────────────────────────────────────────────
 	{ "transform.getPosition",
-	  "World position in metres. For a child entity this is where it ends up, not "
-	  "its offset from the parent." },
+	  "LOCAL position in metres: for a child entity this is its offset from the "
+	  "parent, not where it ends up. Use Get World Position for that. Without a "
+	  "parent the two are the same, which is why the difference only shows up on "
+	  "the first attached object." },
 	{ "transform.setPosition",
-	  "Moves the entity to a world position. It teleports: nothing sweeps for "
-	  "collisions on the way, so a physics body can end up inside a wall. For a "
-	  "character use Move instead." },
+	  "Moves the entity to a LOCAL position — relative to its parent, if it has "
+	  "one. It teleports: nothing sweeps for collisions on the way, so a physics "
+	  "body can end up inside a wall. For a character use Move instead." },
+	{ "transform.getWorldPosition",
+	  "Where the entity actually stands, with every parent taken into account. "
+	  "Composed on the spot from the parent chain, so it is true even for an "
+	  "entity that moved or was spawned this frame." },
+	{ "transform.setWorldPosition",
+	  "Puts the entity at a world position whatever its parents are doing, by "
+	  "converting through them. Teleports like Set Position." },
 	{ "transform.getRotation",
 	  "Rotation as euler angles in degrees (X pitch, Y yaw, Z roll)." },
 	{ "transform.setRotation",
