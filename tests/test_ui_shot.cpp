@@ -16,6 +16,7 @@
 #include <imgui.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 // ── Editor UI, rendered without a GPU ────────────────────────────────────────
@@ -133,6 +134,130 @@ namespace
 		return host;
 	}
 } // namespace
+
+// ── Documentation figures ────────────────────────────────────────────────────
+// Scenes whose name starts with "doc-" are not just for looking at: they are the
+// manual's own illustrations. scripts/he_uishot.py --docs converts them into
+// EditorDeps/Docs/img, where the reader loads its figures from, and the bundle
+// generator places them on the sections named in its FIGURES table.
+//
+// They are drawn rather than screenshotted from a running editor because a
+// picture of where something IS should not also be a picture of somebody's
+// project, their panel widths and whatever scene they had open. A labelled map
+// of the layout answers "where do I find this" and stays true when the editor's
+// contents change.
+namespace
+{
+	// The editor's dock layout as a map, with one panel picked out. `highlight`
+	// names the panel to pick out ("" = label them all evenly, which is the
+	// figure for the layout section itself).
+	void drawLayoutMap(const Harness& h, const char* highlight)
+	{
+		const ImGuiViewport* vp = ImGui::GetMainViewport();
+		ImGui::SetNextWindowPos(vp->Pos);
+		ImGui::SetNextWindowSize(vp->Size);
+		ImGui::Begin("##layoutmap", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+		             ImGuiWindowFlags_NoSavedSettings);
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const ImVec2 o = vp->Pos, s = vp->Size;
+
+		struct Box { const char* name; float x, y, w, h; };
+		// Proportions of the editor's default layout: menu and toolbar strips
+		// across the top, the outliner left, details right, content browser
+		// along the bottom, the viewport in the middle, the footer under it.
+		const float menuH = 0.055f, toolH = 0.075f, footH = 0.055f;
+		const float leftW = 0.20f,  rightW = 0.24f, contentH = 0.26f;
+		const float midY  = menuH + toolH;
+		const float midH  = 1.0f - midY - footH;
+		const Box boxes[] = {
+			{ "Menu Bar",        0.0f,            0.0f,  1.0f,                    menuH },
+			{ "Toolbar",         0.0f,            menuH, 1.0f,                    toolH },
+			{ "World Outliner",  0.0f,            midY,  leftW,                   midH - contentH },
+			{ "Quick Settings",  0.0f,            midY + midH - contentH, leftW,  contentH },
+			{ "Scene",           leftW,           midY,  1.0f - leftW - rightW,   midH - contentH },
+			{ "Content Browser", leftW,           midY + midH - contentH,
+			                     1.0f - leftW - rightW, contentH },
+			{ "Details",         1.0f - rightW,   midY,  rightW,                  midH },
+			{ "Footer",          0.0f,            1.0f - footH, 1.0f,             footH },
+		};
+
+		for (const Box& b : boxes)
+		{
+			const ImVec2 p0(o.x + b.x * s.x + 3.0f, o.y + b.y * s.y + 3.0f);
+			const ImVec2 p1(o.x + (b.x + b.w) * s.x - 3.0f, o.y + (b.y + b.h) * s.y - 3.0f);
+			const bool on = highlight && *highlight && std::strcmp(highlight, b.name) == 0;
+			const bool dim = highlight && *highlight && !on;
+
+			dl->AddRectFilled(p0, p1, ImGui::GetColorU32(on ? Theme::warm(0.18f)
+			                                                : Theme::warm(0.105f)), 5.0f);
+			dl->AddRect(p0, p1, ImGui::GetColorU32(on ? Theme::Accent : Theme::warm(0.22f)),
+			            5.0f, 0, on ? 2.5f : 1.0f);
+
+			if (h.subheading && on) ImGui::PushFont(h.subheading, 0.0f);
+			const ImVec2 t = ImGui::CalcTextSize(b.name);
+			dl->AddText(ImVec2((p0.x + p1.x - t.x) * 0.5f, (p0.y + p1.y - t.y) * 0.5f),
+			            ImGui::GetColorU32(on ? Theme::TextHeading
+			                                  : dim ? Theme::TextDim : Theme::Text),
+			            b.name);
+			if (h.subheading && on) ImGui::PopFont();
+		}
+		ImGui::End();
+	}
+} // namespace
+
+TEST_CASE("ui shot: the documentation's own figures")
+{
+	constexpr int W = 900, H = 560;
+
+	struct Fig { const char* name; const char* highlight; };
+	const Fig figures[] = {
+		{ "doc-layout",          ""                },
+		{ "doc-layout-outliner", "World Outliner"  },
+		{ "doc-layout-details",  "Details"         },
+		{ "doc-layout-content",  "Content Browser" },
+		{ "doc-layout-scene",    "Scene"           },
+	};
+	for (const Fig& f : figures)
+	{
+		Harness harness(W, H);
+		const he_ui::Image img =
+			shoot(f.name, W, H, 3, [&](int) { drawLayoutMap(harness, f.highlight); });
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+	}
+
+	// The node tooltip, as the manual's illustration of what hovering gives you.
+	{
+		constexpr int TW = 620, TH = 300;
+		Harness harness(TW, TH);
+		HorizonCode::Node node;
+		node.type   = HorizonCode::NodeType::EngineCall;
+		node.s      = "physics.addImpulse";
+		node.hasArg = true;
+		if (const HE::api::ApiFn* fn = HE::api::find(node.s))
+		{
+			for (const auto& p : fn->params)  node.params.push_back({ p.name, p.type, p.isArray });
+			for (const auto& r : fn->results) node.results.push_back({ r.name, r.type, r.isArray });
+		}
+		const he_ui::Image img = shoot("doc-node-tooltip", TW, TH, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f));
+			ImGui::SetNextWindowSize(ImVec2(TW - 24.0f, TH - 24.0f));
+			ImGui::Begin("##nodedoc", nullptr,
+			             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 32.0f);
+				HcEditorUtil::drawNodeDoc(node);
+			}
+			ImGui::End();
+		});
+		REQUIRE(img.valid());
+		CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 6000);
+	}
+}
 
 TEST_CASE("ui shot: a Details-style panel draws its rows")
 {

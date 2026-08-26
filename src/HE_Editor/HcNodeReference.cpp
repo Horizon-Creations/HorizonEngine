@@ -112,6 +112,39 @@ void install(Docs::Library& lib)
 		"built-in nodes and all of the engine API. What each one does, and the "
 		"pins it has.";
 
+	// ── How to read this page ────────────────────────────────────────────────
+	// First, because the reference is three hundred entries long and the fastest
+	// route through it is not reading it: it is hovering the node.
+	{
+		Docs::Section sec;
+		sec.id      = "how-to-read";
+		sec.eyebrow = "Start here";
+		sec.title   = "Hovering beats reading";
+		sec.text    = "hover tooltip F1 pins exec pure colour how to read this reference";
+		sec.blocks.push_back(paragraph(
+			"Every entry below is also on the node itself: rest the cursor on a "
+			"node in a graph and the same description appears, with its pins. F1 "
+			"while that tooltip is up opens this page at that node."));
+		{
+			Docs::Block fig;
+			fig.kind = Docs::BlockKind::Figure;
+			fig.src  = "doc-node-tooltip.jpg";
+			fig.alt  = "Hovering a node: what it does, and its pins in the colours "
+			           "of the wires that fit them";
+			sec.blocks.push_back(std::move(fig));
+		}
+		sec.blocks.push_back(paragraph(
+			"A pin's shape says what it carries: a triangle is execution order, a "
+			"filled circle a value, a 2x2 grid a container of that value. The "
+			"colour is the type, and it is the same colour on the wire — two pins "
+			"of one colour connect."));
+		sec.blocks.push_back(paragraph(
+			"An exec node runs when the chain reaches it. A pure node has no exec "
+			"pins at all and is evaluated wherever its output is read, which can "
+			"be more than once in a frame or not at all."));
+		page.sections.push_back(std::move(sec));
+	}
+
 	// ── Built-in nodes ───────────────────────────────────────────────────────
 	// The flow, literal and container nodes — the ones the enum knows about.
 	for (HC::NodeType t : HC::nodeRegistry())
@@ -159,7 +192,9 @@ void install(Docs::Library& lib)
 	// apart. Stable, so a category's own entries stay in registry order.
 	std::stable_sort(page.sections.begin(), page.sections.end(),
 	                 [](const Docs::Section& a, const Docs::Section& b) {
-		// Built-in nodes first: they are what a graph is made of, and the engine
+		// The "how to read this" card stays first whatever else moves.
+		if ((a.id == "how-to-read") != (b.id == "how-to-read")) return a.id == "how-to-read";
+		// Built-in nodes next: they are what a graph is made of, and the engine
 		// API is the reference you go looking for something specific in.
 		const bool builtinA = a.id.rfind("node.", 0) == 0;
 		const bool builtinB = b.id.rfind("node.", 0) == 0;

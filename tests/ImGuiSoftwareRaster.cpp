@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace he_ui
 {
@@ -174,6 +175,7 @@ Image rasterize(const ImDrawData* drawData, int width, int height, std::uint32_t
 	// REQUESTS. A backend that ignores them gets no glyphs at all, so honour them
 	// the cheapest way a CPU renderer can: the identifier IS the ImTextureData,
 	// and there is nothing to upload — the pixels are already in memory.
+	std::vector<ImTextureID> known;
 	if (drawData->Textures)
 		for (ImTextureData* tex : *drawData->Textures)
 		{
@@ -184,6 +186,7 @@ Image rasterize(const ImDrawData* drawData, int width, int height, std::uint32_t
 				tex->SetTexID(reinterpret_cast<ImTextureID>(tex));
 				tex->SetStatus(ImTextureStatus_OK);
 			}
+			known.push_back(tex->GetTexID());
 		}
 
 	const ImVec2 off   = drawData->DisplayPos;
@@ -209,9 +212,18 @@ Image rasterize(const ImDrawData* drawData, int width, int height, std::uint32_t
 			clip.w = (cmd.ClipRect.w - off.y) * scale.y;
 			if (clip.z <= clip.x || clip.w <= clip.y) continue;
 
+			// A draw command's texture id is only dereferenced when it is one
+			// this renderer handed out. An ImGui::Image drawn with a handle from
+			// somewhere else — a GPU backend's, a test's stand-in — is a number
+			// that means nothing here, and casting it to a pointer would read
+			// wild memory. Those draw untextured (white × the vertex colour),
+			// which is the honest answer: the shape is right, the picture is not
+			// available.
 			Tex tex;
-			if (ImTextureData* td = reinterpret_cast<ImTextureData*>(cmd.GetTexID()))
+			const ImTextureID id = cmd.GetTexID();
+			if (std::find(known.begin(), known.end(), id) != known.end())
 			{
+				ImTextureData* td = reinterpret_cast<ImTextureData*>(id);
 				tex.pixels = td->Pixels;
 				tex.width  = td->Width;
 				tex.height = td->Height;

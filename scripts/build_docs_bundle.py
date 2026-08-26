@@ -427,6 +427,35 @@ def figure_name(src: str) -> str:
     return Path(src).stem + ".jpg"
 
 
+# ── Figures the EDITOR draws for itself ──────────────────────────────────────
+# The website illustrates its pages with screenshots of a real editor. Half of
+# what a reader needs is more basic than that — WHERE a panel is — and a
+# screenshot answers it badly: it also shows somebody's project, their panel
+# widths and whatever scene they had open, and it goes stale the first time any
+# of that changes.
+#
+# So the manual gets a second kind of figure: a labelled map of the layout with
+# the panel in question picked out, drawn by the editor's own UI code and
+# published by scripts/he_uishot.py --docs. This table places them; the images
+# themselves live in EditorDeps/Docs/img like the website's, because the reader
+# loads figures from one folder and does not care which kind they are.
+#
+# Kept short on purpose. A figure per section would be a picture-book, and the
+# same map five times over teaches nothing after the first.
+FIGURES = {
+    "editor#layout": ("doc-layout.jpg",
+                      "The editor's default layout: the panels and where they sit"),
+    "editor#outliner": ("doc-layout-outliner.jpg",
+                        "Where the World Outliner sits in the default layout"),
+    "editor#details": ("doc-layout-details.jpg",
+                       "Where the Details panel sits in the default layout"),
+    "editor#content-browser": ("doc-layout-content.jpg",
+                               "Where the Content Browser sits in the default layout"),
+    "editor#viewport": ("doc-layout-scene.jpg",
+                        "Where the Scene viewport sits in the default layout"),
+}
+
+
 def copy_figures(docs_dir: Path, img_dir: Path, images: set[str]) -> int:
     try:
         from PIL import Image
@@ -541,6 +570,15 @@ def convert_page(path: Path, images: set[str]) -> dict | None:
         blocks = blocks_of(sec, images)
         if not blocks:
             continue
+
+        # The editor's own figure for this section, if there is one. Placed
+        # after the opening paragraph rather than at the end: "where is it" is
+        # the question the reader arrives with, not the one left over.
+        fig = FIGURES.get(f"{page_id(path.name)}#{sid}")
+        if fig:
+            at = 1 if blocks and blocks[0]["k"] in ("lead", "p") else 0
+            blocks.insert(at, {"k": "figure", "src": fig[0], "alt": fig[1]})
+
         sections.append({
             "id": sid,
             "title": plain(h2) if h2 is not None else sid.replace("-", " ").title(),

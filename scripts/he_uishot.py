@@ -51,6 +51,36 @@ def find_tests(explicit: str | None) -> Path:
     sys.exit("error: he_tests not found — build it, or pass --tests PATH")
 
 
+# Where the reader loads its figures from. The manual's own illustrations are
+# committed here next to the website's screenshots, because the editor reads
+# figures from one place and neither knows nor cares which of them was drawn.
+DOCS_IMG = REPO / "EditorDeps" / "Docs" / "img"
+
+
+def publish_doc_figures(out_dir: Path) -> int:
+    """Copy the doc- scenes into the docs image folder, as JPEG.
+
+    Same treatment the website's screenshots get in build_docs_bundle.py: these
+    ship with every editor build, so they are encoded rather than left as the
+    raw bitmaps the rasteriser writes.
+    """
+    figures = sorted(out_dir.glob("doc-*.bmp"))
+    if not figures:
+        return 0
+    try:
+        from PIL import Image
+    except ImportError:
+        print("note: Pillow not installed — cannot publish figures")
+        return 0
+
+    DOCS_IMG.mkdir(parents=True, exist_ok=True)
+    for bmp in figures:
+        with Image.open(bmp) as im:
+            im.convert("RGB").save(DOCS_IMG / (bmp.stem + ".jpg"), "JPEG",
+                                   quality=90, optimize=True)
+    return len(figures)
+
+
 def to_png(out_dir: Path) -> list[Path]:
     """Convert the dumped BMPs. The rasteriser writes BMP because the engine
     ships no PNG encoder; every viewer reads PNG, so convert here."""
@@ -78,6 +108,8 @@ def main() -> int:
     ap.add_argument("--tests", default=None, help="path to the he_tests binary")
     ap.add_argument("--filter", default="ui shot*",
                     help='doctest test-case filter (default: "ui shot*")')
+    ap.add_argument("--docs", action="store_true",
+                    help="also publish the doc- scenes into EditorDeps/Docs/img")
     args = ap.parse_args()
 
     tests = find_tests(args.tests)
@@ -90,11 +122,14 @@ def main() -> int:
     print(f"running {tests} -tc=\"{args.filter}\"")
     result = subprocess.run([str(tests), f"-tc={args.filter}"], env=env)
 
+    published = publish_doc_figures(out_dir) if args.docs else 0
     files = to_png(out_dir)
     for f in files:
         print(f"  {f}")
     if not files:
         print("no shots were produced — did the filter match any scene?")
+    if args.docs:
+        print(f"published {published} figure(s) into {DOCS_IMG}")
     return result.returncode
 
 

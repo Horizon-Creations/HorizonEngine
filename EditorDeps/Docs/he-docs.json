@@ -4625,6 +4625,11 @@
        ]
       },
       {
+       "alt": "The editor's default layout: the panels and where they sit",
+       "k": "figure",
+       "src": "doc-layout.jpg"
+      },
+      {
        "head": [
         [
          {
@@ -4799,7 +4804,7 @@
      ],
      "eyebrow": "Orientation",
      "id": "layout",
-     "text": "The editor is a single window built from dockable panels around a central Scene viewport. Double-clicking assets opens additional full-size asset editor tabs (material graphs, widget designer, particle graphs …) alongside the Scene tab. Panel Purpose Scene The 3D viewport — camera navigation, gizmos, play mode, landscape sculpting. Has its own inline toolbar. World Outliner Hierarchy tree of every entity in the active scene; create, rename, reparent, delete, save as prefab. Details All components and properties of the selected entity, plus the Add Component menu. Content Browser Every asset in the project — create, import, organise and open assets in their editors. Quick Settings Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode. Environment (View menu) Add or remove the scene's Sky and Weather entities. Performance Profiler (View menu) Live FPS/CPU/GPU HUD, benchmark captures, per-pass frame analysis. Play Session Report Summary shown after a play-in-editor session ends. The footer bar holds Undo/Redo buttons on the left, the status text in the centre, and the current resolution and FPS on the right. Log output is written to HorizonEngine.log next to the executable (truncated each launch).",
+     "text": "The editor is a single window built from dockable panels around a central Scene viewport. Double-clicking assets opens additional full-size asset editor tabs (material graphs, widget designer, particle graphs …) alongside the Scene tab. The editor's default layout: the panels and where they sit Panel Purpose Scene The 3D viewport — camera navigation, gizmos, play mode, landscape sculpting. Has its own inline toolbar. World Outliner Hierarchy tree of every entity in the active scene; create, rename, reparent, delete, save as prefab. Details All components and properties of the selected entity, plus the Add Component menu. Content Browser Every asset in the project — create, import, organise and open assets in their editors. Quick Settings Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode. Environment (View menu) Add or remove the scene's Sky and Weather entities. Performance Profiler (View menu) Live FPS/CPU/GPU HUD, benchmark captures, per-pass frame analysis. Play Session Report Summary shown after a play-in-editor session ends. The footer bar holds Undo/Redo buttons on the left, the status text in the centre, and the current resolution and FPS on the right. Log output is written to HorizonEngine.log next to the executable (truncated each launch).",
      "title": "Editor Layout"
     },
     {
@@ -5195,6 +5200,11 @@
        ]
       },
       {
+       "alt": "Where the Scene viewport sits in the default layout",
+       "k": "figure",
+       "src": "doc-layout-scene.jpg"
+      },
+      {
        "k": "h3",
        "r": [
         {
@@ -5422,7 +5432,7 @@
      ],
      "eyebrow": "Where you live",
      "id": "viewport",
-     "text": "The Scene panel renders the world through the editor camera and carries an inline toolbar: a mode selector (View / Landscape), the gizmo buttons Move / Rotate / Scale, a gizmo-space combo (Local / World), a Screen ring toggle for the rotate gizmo, and the centred Play / Stop button. Camera navigation Input Action RMB hold Fly-look — steer with W A S D, E/Q up/down, Shift = fast Alt + LMB Orbit around the pivot MMB drag Pan Mouse wheel Zoom (works on hover, no button needed) F Frame the selected entity Gizmos W / E / R switch between translate, rotate and scale (mirrored by the toolbar buttons). The space combo toggles manipulation in local or world axes; Screen ring adds the view-axis outer ring to the rotate gizmo. Gizmos are suppressed while flying, while Alt is held, and in Landscape mode. Every edit is undoable (Ctrl/Cmd+Z). Static-mesh assets can be dragged from the Content Browser into the viewport to spawn an entity at the drop point.",
+     "text": "The Scene panel renders the world through the editor camera and carries an inline toolbar: a mode selector (View / Landscape), the gizmo buttons Move / Rotate / Scale, a gizmo-space combo (Local / World), a Screen ring toggle for the rotate gizmo, and the centred Play / Stop button. Where the Scene viewport sits in the default layout Camera navigation Input Action RMB hold Fly-look — steer with W A S D, E/Q up/down, Shift = fast Alt + LMB Orbit around the pivot MMB drag Pan Mouse wheel Zoom (works on hover, no button needed) F Frame the selected entity Gizmos W / E / R switch between translate, rotate and scale (mirrored by the toolbar buttons). The space combo toggles manipulation in local or world axes; Screen ring adds the view-axis outer ring to the rotate gizmo. Gizmos are suppressed while flying, while Alt is held, and in Landscape mode. Every edit is undoable (Ctrl/Cmd+Z). Static-mesh assets can be dragged from the Content Browser into the viewport to spawn an entity at the drop point.",
      "title": "Scene Viewport"
     },
     {
@@ -5485,6 +5495,11 @@
        ]
       },
       {
+       "alt": "Where the World Outliner sits in the default layout",
+       "k": "figure",
+       "src": "doc-layout-outliner.jpg"
+      },
+      {
        "k": "p",
        "r": [
         {
@@ -5521,7 +5536,7 @@
      ],
      "eyebrow": "Hierarchy",
      "id": "outliner",
-     "text": "The Outliner shows the entity hierarchy of the active scene. Drag an entity onto another to reparent it. Right-click the background for Create Entity; right-click an entity for Create Child Entity, Rename, Save as Prefab and Delete. The special Sky and Weather entities (added through the Environment window) appear here like any other entity — select them to edit the full sky and weather settings in the Details panel. The Sun and Moon are children of the Sky entity and are driven automatically.",
+     "text": "The Outliner shows the entity hierarchy of the active scene. Drag an entity onto another to reparent it. Right-click the background for Create Entity; right-click an entity for Create Child Entity, Rename, Save as Prefab and Delete. Where the World Outliner sits in the default layout The special Sky and Weather entities (added through the Environment window) appear here like any other entity — select them to edit the full sky and weather settings in the Details panel. The Sun and Moon are children of the Sky entity and are driven automatically.",
      "title": "World Outliner"
     },
     {
@@ -5550,6 +5565,11 @@
          "t": ", Audio Source, Audio Listener, Particle System, LOD and Foliage."
         }
        ]
+      },
+      {
+       "alt": "Where the Details panel sits in the default layout",
+       "k": "figure",
+       "src": "doc-layout-details.jpg"
       },
       {
        "k": "p",
@@ -5581,7 +5601,7 @@
      ],
      "eyebrow": "Properties",
      "id": "details",
-     "text": "The Details panel lists every component on the selected entity with full property editors, and ends with the Add Component button. Components you can add directly: Transform, Transform 2D, Mesh, Skeletal Mesh, Nav Mesh, Nav Agent, Material, Camera, Light, Rigid Body, Collider, Script (Lua/Python projects), Audio Source, Audio Listener, Particle System, LOD and Foliage. Additional components appear with full editors when an entity carries them through other workflows — the Animator family (Animator, Animator Blend, Animator State Machine, Property Animator), Character Controller, Terrain, the in-world UI components, and the Environment/Weather editors on the Sky and Weather entities. The complete component reference — every property of every component — lives on Scenes & Entities.",
+     "text": "The Details panel lists every component on the selected entity with full property editors, and ends with the Add Component button. Components you can add directly: Transform, Transform 2D, Mesh, Skeletal Mesh, Nav Mesh, Nav Agent, Material, Camera, Light, Rigid Body, Collider, Script (Lua/Python projects), Audio Source, Audio Listener, Particle System, LOD and Foliage. Where the Details panel sits in the default layout Additional components appear with full editors when an entity carries them through other workflows — the Animator family (Animator, Animator Blend, Animator State Machine, Property Animator), Character Controller, Terrain, the in-world UI components, and the Environment/Weather editors on the Sky and Weather entities. The complete component reference — every property of every component — lives on Scenes & Entities.",
      "title": "Details Panel"
     },
     {
@@ -5594,6 +5614,11 @@
          "t": "A folder tree on the left, an asset grid on the right. There are up to three roots:"
         }
        ]
+      },
+      {
+       "alt": "Where the Content Browser sits in the default layout",
+       "k": "figure",
+       "src": "doc-layout-content.jpg"
       },
       {
        "items": [
@@ -6224,7 +6249,7 @@
      ],
      "eyebrow": "Assets",
      "id": "content-browser",
-     "text": "A folder tree on the left, an asset grid on the right. There are up to three roots: Content — your project's assets. Engine — built-in default assets (read-only). Source — the C++ class tree (C++ projects only). Creating assets Right-click the background (or an item's Create Asset submenu) to create an asset; a naming popup follows immediately. Always available: Asset Opens in Scene Scene viewport (.hescene) Material · Material Function Material graph editor Particle System Particle graph editor Animator State Machine State machine editor UI Widget Widget Designer + Graph Input Action · Input Mapping Context Input asset editor Texture · Static Mesh · Skeletal Mesh · Shader · Audio · Font Type-specific inspectors Gameplay-logic assets depend on the project language: HorizonCode Class plus Player Controller / Player Character (HorizonCode projects), Script (Lua/Python projects), or C++ Class (C++ projects — writes a .h/.cpp pair under Source/). Importing Assets » Import Asset… (or a folder's Import context item) dispatches by extension to the mesh, texture, audio, material and font importers. Audio import currently accepts WAV. An imported asset remembers where it came from, so its right-click menu offers Reimport — it re-reads the original file and keeps the asset's identity, which means every reference to it survives. The entry is only there when a source path was actually recorded; nothing guesses one. Finding things The box above the grid searches the folder you are in and everything under it — a search that only looked at the level you already opened would require you to know the answer before asking the question. Beside it, a type filter narrows to scenes, materials, meshes, prefabs, widgets and the rest, and a single × clears both at once. While a search or filter is active the grid shows matches from the whole subtree rather than the current folder's contents, so a hit three folders down is one click away. Selecting, moving, renaming Action What it does Click Select one. Ctrl / Cmd + click Add or remove one from the selection. Shift + click Select a range. Drag onto a folder Move it — the whole selection if you drag one of the selected tiles, otherwise just the one you grabbed. F2 Rename. Delete Delete, after a confirmation. Enter Open. Moving an asset carries everything that pointed at it — other assets' stored references, the asset's own embedded path, its thumbnail — over to the new location. A move that quietly broke those is how a project loses its materials. With several assets selected, Rename becomes a pattern rename: find and replace inside the name, a prefix, a suffix, and a live preview of every resulting name before anything is written. Renaming twenty files one dialog at a time is the kind of task nobody does, so nobody tidies up. Deleting, and what depended on it Deleting asks first — a red menu entry is not a confirmation — and the confirmation says who still needs the file. The scan runs in the background over the whole project and reports each referrer, plus how it points at the asset: a stored path can be repaired by renaming instead, while a scene's stored id can only dangle once the asset is gone. Deleting a folder scans everything inside it the same way. And when a file cannot be read, the dialog says so rather than reporting “nothing references it” — “I could not check” and “I checked and found nothing” are different answers, and only one of them is safe to act on. There is no trash. A deleted asset is gone from disk — which is one more reason to keep a project under source control. Find References The same scan is available on its own, from any asset's right-click menu, without having to threaten to delete something to see the answer. It reads both encodings a reference can take: the path stored inside another authored asset, and the UUID stored in a scene. In a collaboration session The content browser is part of a session. Creating is open to everyone; deleting, renaming and moving are requests the host answers; an asset somebody else is editing carries a padlock in their colour. See Assets in a Session.",
+     "text": "A folder tree on the left, an asset grid on the right. There are up to three roots: Where the Content Browser sits in the default layout Content — your project's assets. Engine — built-in default assets (read-only). Source — the C++ class tree (C++ projects only). Creating assets Right-click the background (or an item's Create Asset submenu) to create an asset; a naming popup follows immediately. Always available: Asset Opens in Scene Scene viewport (.hescene) Material · Material Function Material graph editor Particle System Particle graph editor Animator State Machine State machine editor UI Widget Widget Designer + Graph Input Action · Input Mapping Context Input asset editor Texture · Static Mesh · Skeletal Mesh · Shader · Audio · Font Type-specific inspectors Gameplay-logic assets depend on the project language: HorizonCode Class plus Player Controller / Player Character (HorizonCode projects), Script (Lua/Python projects), or C++ Class (C++ projects — writes a .h/.cpp pair under Source/). Importing Assets » Import Asset… (or a folder's Import context item) dispatches by extension to the mesh, texture, audio, material and font importers. Audio import currently accepts WAV. An imported asset remembers where it came from, so its right-click menu offers Reimport — it re-reads the original file and keeps the asset's identity, which means every reference to it survives. The entry is only there when a source path was actually recorded; nothing guesses one. Finding things The box above the grid searches the folder you are in and everything under it — a search that only looked at the level you already opened would require you to know the answer before asking the question. Beside it, a type filter narrows to scenes, materials, meshes, prefabs, widgets and the rest, and a single × clears both at once. While a search or filter is active the grid shows matches from the whole subtree rather than the current folder's contents, so a hit three folders down is one click away. Selecting, moving, renaming Action What it does Click Select one. Ctrl / Cmd + click Add or remove one from the selection. Shift + click Select a range. Drag onto a folder Move it — the whole selection if you drag one of the selected tiles, otherwise just the one you grabbed. F2 Rename. Delete Delete, after a confirmation. Enter Open. Moving an asset carries everything that pointed at it — other assets' stored references, the asset's own embedded path, its thumbnail — over to the new location. A move that quietly broke those is how a project loses its materials. With several assets selected, Rename becomes a pattern rename: find and replace inside the name, a prefix, a suffix, and a live preview of every resulting name before anything is written. Renaming twenty files one dialog at a time is the kind of task nobody does, so nobody tidies up. Deleting, and what depended on it Deleting asks first — a red menu entry is not a confirmation — and the confirmation says who still needs the file. The scan runs in the background over the whole project and reports each referrer, plus how it points at the asset: a stored path can be repaired by renaming instead, while a scene's stored id can only dangle once the asset is gone. Deleting a folder scans everything inside it the same way. And when a file cannot be read, the dialog says so rather than reporting “nothing references it” — “I could not check” and “I checked and found nothing” are different answers, and only one of them is safe to act on. There is no trash. A deleted asset is gone from disk — which is one more reason to keep a project under source control. Find References The same scan is available on its own, from any asset's right-click menu, without having to threaten to delete something to see the answer. It reads both encodings a reference can take: the path stored inside another authored asset, and the UUID stored in a scene. In a collaboration session The content browser is part of a session. Creating is open to everyone; deleting, renaming and moving are requests the host answers; an asset somebody else is editing carries a padlock in their colour. See Assets in a Session.",
      "title": "Content Browser"
     },
     {
