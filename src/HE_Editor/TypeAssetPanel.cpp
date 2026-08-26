@@ -3,6 +3,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
 #include "EditorToolbar.h"        // shared toolbar strip
+#include "EditorHelp.h"           // Help::Scope — "Type Editor/<label>" for the tooltips
 #include "EditorWidgets.h"        // danger buttons for deletion
 #include "HcEditorUtil.h"         // listAssets (Enum/Struct pickers for field types)
 #include <ContentManager/ContentManager.h>
@@ -288,6 +289,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		st.loaded = true;
 	}
 
+	HE::Ed::Help::Scope helpScope("Type Editor");
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
 	ImGui::Begin(("##typeasset_" + assetPath).c_str(), nullptr,
@@ -377,7 +379,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		if (removeAt >= 0)
 		{ st.enumDef.entries.erase(st.enumDef.entries.begin() + removeAt); st.dirty = true; }
 
-		if (ImGui::Button("+ Add Entry", ImVec2(160.0f, 0.0f)))
+		if (EditorWidgets::button("+ Add Entry", ImVec2(160.0f, 0.0f)))
 		{
 			// Next free value: max + 1 (0 for the first entry).
 			int next = 0;
@@ -409,7 +411,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				ImGui::TextUnformatted("Project default â save.create() uses this template.");
 				ImGui::PopStyleColor();
 			}
-			else if (ImGui::Button("Set as Project Default", ImVec2(220.0f, 0.0f)))
+			else if (EditorWidgets::button("Set as Project Default", ImVec2(220.0f, 0.0f)))
 			{
 				proj.defaultSaveTemplate = st.relPath;
 				ctx.projectManager->saveProject(proj.path);
@@ -547,7 +549,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	if (removeAt >= 0)
 	{ st.structDef.fields.erase(st.structDef.fields.begin() + removeAt); st.dirty = true; }
 
-	if (ImGui::Button("+ Add Field", ImVec2(160.0f, 0.0f)))
+	if (EditorWidgets::button("+ Add Field", ImVec2(160.0f, 0.0f)))
 	{
 		HE::StructField f;
 		f.name = "Field" + std::to_string(st.structDef.fields.size() + 1);

@@ -2545,6 +2545,194 @@ namespace
 	  "tab, so it is not saved with the asset and pushes no undo step.",
 	  "", "systems#animation" },
 
+	// ── HorizonCode: the panels around the graph ─────────────────────────────
+	// The node reference covers what each NODE does. This covers the panels that
+	// surround the canvas — the graph list, the declared events, the variables,
+	// the selected node's rows — and the two shared files every host draws
+	// through, which is why some of these scopes are pushed in HcGraphHost and
+	// HcEditorUtil rather than in a panel: four editors share those rows, and a
+	// sentence under those scopes has to be true in all four.
+	{ "Script Graph/Event Graph", "Event Graph",
+	  "The graph that holds the event handlers. The functions listed under it are "
+	  "sub-graphs of their own; this is the one that runs by itself when the host "
+	  "raises an event.",
+	  "", "horizoncode#graphs" },
+	{ "Script Graph/Show node", "Show node",
+	  "Jumps to the node the compile check stopped at: it opens that node's "
+	  "sub-graph, selects it and scrolls it into view. The strip above says what "
+	  "went wrong; this says where.",
+	  "", "horizoncode#compiler" },
+	{ "Script Graph/Get", "Get",
+	  "Adds a node that READS the variable you dropped on the canvas, already "
+	  "typed like the variable. Greyed out when that variable is local to another "
+	  "function, because a function's locals do not exist outside it.",
+	  "", "horizoncode#graphs" },
+	{ "Script Graph/Set", "Set",
+	  "Adds a node that WRITES it. Same rule as Get: a variable belonging to "
+	  "another function cannot be reached from here.",
+	  "", "horizoncode#graphs" },
+
+	{ "HorizonCode Event/Name", "",
+	  "What this declared event is called. Renaming it rewrites every Event, Emit "
+	  "Event and Bind Event node that used the old name, so the two halves of a "
+	  "binding cannot drift apart by a typo. A name another event already has, or "
+	  "one the engine declares, is refused and the box snaps back.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Event/Carries a value", "",
+	  "Gives the event one argument. Every Event and Emit Event node of this name "
+	  "takes the declaration's shape, so an Emit that sent a number and a handler "
+	  "that read text can no longer disagree. Changing that shape drops the wire "
+	  "on the value pin.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Event/Delete Event", "Delete Event",
+	  "Removes the declaration. Nodes that used the name are left exactly where "
+	  "they are: this says the event is no longer part of the class's interface, "
+	  "not that the graph should be rewritten.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Event/Event", "",
+	  "Which declared event this node binds to or raises. Picking one copies the "
+	  "declaration's argument shape onto the node, so its value pin always "
+	  "matches. The list holds the events this graph declares; the box under it "
+	  "declares a new one.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Event/Declare", "Declare",
+	  "Declares the name typed beside it as a new event on this graph and points "
+	  "the node at it. Greyed out while the box is empty, while the name is "
+	  "already declared, or while it names an engine event — every class can "
+	  "handle those and none declares them.",
+	  "", "horizoncode#communication" },
+
+	{ "Script Variable/Name", "",
+	  "What this variable is called. The rename carries: every Get Variable and "
+	  "Set Variable node using it is renamed with it, so the wiring survives. A "
+	  "name this graph or a base class already uses is refused, private ones "
+	  "included — an instance has one variable store, so the same name would be "
+	  "that variable rather than a new one.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Access", "",
+	  "Public lets another graph reach the variable through a Get (Ref) or Set "
+	  "(Ref) node on a reference to this object. Private keeps it to this graph. "
+	  "A function-local has no access at all, which is why a \"Local to\" line "
+	  "stands here instead for those.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Position##vdef", "Default Position",
+	  "The position this Transform variable starts at. It is a starting value, "
+	  "not a binding to anything.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Rotation##vdef", "Default Rotation",
+	  "The rotation it starts at, in degrees per axis.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Scale##vdef", "Default Scale",
+	  "The scale it starts at. 1, 1, 1 is unscaled.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Delete Variable", "Delete Variable",
+	  "Removes the variable from this graph. Get Variable and Set Variable nodes "
+	  "that used it are left where they are, still naming something no longer "
+	  "declared — nothing breaks silently, but nothing is repaired either.",
+	  "", "horizoncode#functions" },
+
+	{ "Script Node/Overridable", "",
+	  "Lets a class derived from this one replace this event or function. It then "
+	  "appears in the derived class's add menu as an override, and only the "
+	  "derived version runs. The row shows only on a class asset — a level script "
+	  "and the Game Instance are nobody's base class.",
+	  "", "horizoncode#functions" },
+	{ "Script Node/Event", "",
+	  "Which event this handler answers. Where the graph has a fixed catalogue — "
+	  "the level script's world events, the Game Instance's app events — it is "
+	  "picked from the list; a class names its own instead. Two Event nodes may "
+	  "not share a name, so one that is already handled is greyed out.",
+	  "", "horizoncode#communication" },
+	{ "Script Node/Name", "",
+	  "What this function is called. Renaming it renames the Call and Return "
+	  "nodes bound to the old name, so the wiring stays valid. Calls resolve by "
+	  "name and the first match wins, so a second function with the same name is "
+	  "dead code that still looks live.",
+	  "", "horizoncode#functions" },
+	{ "Script Node/Access", "",
+	  "Public functions can be called from outside the graph: from Lua and "
+	  "Python, and through a Call Function (Ref) node on a reference to this "
+	  "object. Private keeps the function inside the graph.",
+	  "", "horizoncode#functions" },
+	{ "Script Node/Function", "",
+	  "Which of this graph's own functions the call runs. Only named functions "
+	  "are offered — an unnamed one has no label to click. Picking one re-syncs "
+	  "the call's pins with that function's inputs and results.",
+	  "", "horizoncode#functions" },
+
+	{ "HorizonCode Node/Value", "",
+	  "The constant this literal node hands out. Nothing feeds it: it is typed "
+	  "here and read by whatever its output pin is wired to. On an enum literal "
+	  "the list holds the entries of the definition picked above it.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Node/Variable", "",
+	  "Which variable the node reads or writes. Get Variable and Set Variable "
+	  "choose from this graph's own variables plus the public ones a base class "
+	  "brings, and a function-local only while its own function is open; the node "
+	  "then takes that variable's type, and a wire the pin can no longer carry is "
+	  "dropped. Get (Ref) and Set (Ref) take a typed name instead: the public "
+	  "variable of that name on the object wired to Target.",
+	  "", "horizoncode#functions" },
+	{ "HorizonCode Node/Function", "",
+	  "The name of the public function to call on the object wired to Target. It "
+	  "is typed rather than picked from a list, because the target is any object "
+	  "that has a function of that name — so the spelling here has to match the "
+	  "one declared there.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Node/Type", "",
+	  "The type of the external variable this node reads or writes, so the node's "
+	  "value pin matches the variable on the other side. Changing it drops the "
+	  "wire on that pin.",
+	  "", "horizoncode#communication" },
+
+	{ "HorizonCode Default Value/Pos", "Position",
+	  "The position part of this Transform default.",
+	  "", "horizoncode#functions" },
+	{ "HorizonCode Default Value/Rot", "Rotation",
+	  "The rotation part, in degrees per axis.",
+	  "", "horizoncode#functions" },
+	{ "HorizonCode Default Value/Scl", "Scale",
+	  "The scale part. 1, 1, 1 is unscaled.",
+	  "", "horizoncode#functions" },
+	{ "HorizonCode Default Value/Reset", "Reset",
+	  "Drops the value set here and follows the struct's own default for this "
+	  "field again. It appears only while the field is overridden.",
+	  "", "horizoncode#functions" },
+	{ "HorizonCode Default Value/+ Add Slot", "Add Slot",
+	  "Appends one more element to the list that seeds this container when it is "
+	  "created. A new slot starts at the element type's zero, which for a "
+	  "Transform means scale 1. The length is not fixed: the Array nodes grow and "
+	  "shrink it the same way at run time.",
+	  "", "horizoncode#functions" },
+
+	{ "Class Components/Add Child", "Add Child",
+	  "Adds a child entity under the selected one, with a Transform of its own. A "
+	  "class is a real subtree rather than a flat list — a character carrying a "
+	  "camera has it as a child — so what is selected decides where the new "
+	  "entity lands.",
+	  "", "scenes#components" },
+
+	// The struct, enum and savegame-template editor. No topic: the manual has no
+	// chapter about project types yet, and a link to a near-miss is worse than
+	// none.
+	{ "Type Editor/+ Add Entry", "Add Entry",
+	  "Adds one named constant to this enum. It takes the next free value, one "
+	  "past the highest already in the list, and both the name and the number can "
+	  "be changed afterwards. Two entries may not share a name: a duplicate is "
+	  "boxed in red, because the generated constants would be ambiguous.",
+	  "", "" },
+	{ "Type Editor/+ Add Field", "Add Field",
+	  "Adds one field to this struct. Give it a type, optionally a container, and "
+	  "a default. Two fields may not share a name, and a struct whose fields lead "
+	  "back to itself refuses to save — that cycle would never finish.",
+	  "", "" },
+	{ "Type Editor/Set as Project Default", "Set as Project Default",
+	  "Makes this savegame template the one a script gets when it creates a save "
+	  "without naming a template. It is stored in the project, so it applies "
+	  "project-wide; the template that already holds the role shows a note here "
+	  "instead of the button.",
+	  "", "" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -2695,7 +2883,15 @@ namespace
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
 		{ "input.",         "editor-input", "Input Reference", "Input assets" },
 		{ "Input Action/",  "editor-input", "Input Reference", "Actions and bindings" },
-		{ "hc.",       "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
+		{ "hc.",                         "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
+		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
+		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
+		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
+		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },
+		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
+		{ "HorizonCode Default Value/",  "editor-horizoncode", "HorizonCode Editor", "Default values" },
+		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
+		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },
 		{ "terrain.",             "editor-landscape", "Landscape Tools", "Terrain brush" },
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },

@@ -1,5 +1,6 @@
 #include "HcEditorUtil.h"
 #include <Types/TypeRegistry.h>
+#include "EditorHelp.h"       // Help::Scope — the shared default-value rows key their help here
 #include "EditorWidgets.h"    // danger buttons for deletion
 #include "EditorTheme.h"      // the tooltip's heading / dim tiers
 #include "HcNodeDocs.h"       // what each engine call does
@@ -1347,6 +1348,7 @@ void setCastTarget(HorizonCode::Node& n, const std::string& targetKey)
 bool drawStructDefaultEditor(HorizonCode::Variable& v)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	HE::Ed::Help::Scope helpScope("HorizonCode Default Value");
 	HE::StructDef def;
 	ImGui::SeparatorText("Default");
 	if (v.typeName.empty() || !HE::TypeRegistry::instance().getStruct(v.typeName, def))
@@ -1421,8 +1423,11 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 			case P::Vec4:   if (ImGui::DragFloat4("##sd", &edit.v4.x, 0.1f)) touched = true; break;
 			case P::Transform:
 				if (ImGui::DragFloat3("Pos##sd", &edit.tpos.x, 0.1f))  touched = true;
+				EditorWidgets::helpForLabel("Pos##sd");
 				if (ImGui::DragFloat3("Rot##sd", &edit.trot.x, 0.5f))  touched = true;
+				EditorWidgets::helpForLabel("Rot##sd");
 				if (ImGui::DragFloat3("Scl##sd", &edit.tscl.x, 0.05f)) touched = true;
+				EditorWidgets::helpForLabel("Scl##sd");
 				break;
 			case P::Enum:
 			{
@@ -1449,9 +1454,7 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 		ImGui::SameLine();
 		if (overridden)
 		{
-			if (ImGui::SmallButton("Reset")) { v.structDefaults.erase(f.name); changed = true; }
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Follow the struct's own default for this field again.");
+			if (EditorWidgets::smallButton("Reset")) { v.structDefaults.erase(f.name); changed = true; }
 		}
 		else
 		{
@@ -1467,6 +1470,7 @@ bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
 	bool changed = false;
+	HE::Ed::Help::Scope helpScope("HorizonCode Default Value");
 	ImGui::TextDisabled("%d element%s seed the array on creation.",
 	                    (int)items.size(), items.size() == 1 ? "" : "s");
 	int removeIdx = -1;
@@ -1491,8 +1495,11 @@ bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
 			case P::Vec4:   if (ImGui::DragFloat4("##el", &it.v4.x, 0.1f)) changed = true; break;
 			case P::Transform:
 				if (ImGui::DragFloat3("Pos##el", &it.tpos.x, 0.1f))  changed = true;
+				EditorWidgets::helpForLabel("Pos##el");
 				if (ImGui::DragFloat3("Rot##el", &it.trot.x, 0.5f))  changed = true;
+				EditorWidgets::helpForLabel("Rot##el");
 				if (ImGui::DragFloat3("Scl##el", &it.tscl.x, 0.05f)) changed = true;
+				EditorWidgets::helpForLabel("Scl##el");
 				break;
 			case P::Enum:
 			{
@@ -1525,7 +1532,7 @@ bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
 	}
 	// The list has no fixed length: slots are added and removed freely here, and
 	// at runtime Array Append/Insert/Remove grow and shrink it the same way.
-	if (ImGui::Button("+ Add Slot"))
+	if (EditorWidgets::button("+ Add Slot"))
 	{
 		V nv; nv.type = elemType; nv.typeName = elemTypeName;  // per-type zeros (scale 1)
 		items.push_back(std::move(nv));

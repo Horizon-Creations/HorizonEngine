@@ -2,6 +2,7 @@
 #include <Types/TypeRegistry.h>
 #include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
+#include "EditorHelp.h"          // Help::Scope — the shared node rows key their help here
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
 #include "EditorTheme.h"         // the hover tooltip's dim tier
 #include "EditorSettingsPanel.h" // which of the two variable-list looks the user picked
@@ -1327,8 +1328,15 @@ bool drawDefinitionPicker(HC::Graph& g, HC::Node& n, bool isStruct,
 bool drawEventPicker(HC::Graph& g, HC::Node& n, const char* label)
 {
 	bool changed = false;
+	// Its own scope, and the same one the level-script panel's event details use:
+	// this picker is shared by every host, so the entry has to read correctly
+	// whether the graph belongs to a widget, a level script or a state machine.
+	HE::Ed::Help::Scope helpScope("HorizonCode Event");
+
 	const std::string cur = n.s.empty() ? "(none)" : n.s;
-	if (ImGui::BeginCombo(label, cur.c_str()))
+	const bool comboOpen = ImGui::BeginCombo(label, cur.c_str());
+	if (!comboOpen) EditorWidgets::helpForLabel(label);
+	if (comboOpen)
 	{
 		if (g.events.empty())
 			ImGui::TextDisabled("This class declares no events yet.");
@@ -1354,7 +1362,7 @@ bool drawEventPicker(HC::Graph& g, HC::Node& n, const char* label)
 	const bool canAdd = !s_newName.empty() && !g.findEvent(s_newName) &&
 	                    !HC::findEngineEvent(s_newName);
 	if (!canAdd) ImGui::BeginDisabled();
-	if (ImGui::Button("Declare"))
+	if (EditorWidgets::button("Declare"))
 	{
 		HC::EventDecl d;
 		d.name = s_newName;
@@ -1377,6 +1385,11 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	// The hosts differ only in HOW an edit is recorded, which is what onEdit is
 	// for: committed = the edit is finished (undo/save point), false = a value is
 	// still being dragged.
+	// The node rows every host shares. Four panels call in here — the level
+	// script, the widget designer, the class editor and the animator's sync
+	// graph — so every sentence under this scope has to be true in all four.
+	HE::Ed::Help::Scope helpScope("HorizonCode Node");
+
 	const auto edit = [&h](bool committed){ if (h.onEdit) h.onEdit(committed); };
 
 	switch (n.type)
@@ -1480,31 +1493,36 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::ConstFloat:
 		if (ImGui::DragFloat("Value", &n.f[0], 0.1f)) edit(false);
 		if (ImGui::IsItemDeactivatedAfterEdit())      edit(true);
+		EditorWidgets::helpForLabel("Value");
 		return true;
 	case NT::ConstInt:
 	{
 		int v = (int)n.f[0];
 		if (ImGui::DragInt("Value", &v, 1)) { n.f[0] = (float)v; edit(false); }
 		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		EditorWidgets::helpForLabel("Value");
 		return true;
 	}
 	case NT::ConstBool:
 	{
 		bool b = n.f[0] != 0.0f;
-		if (ImGui::Checkbox("Value", &b)) { n.f[0] = b ? 1.0f : 0.0f; edit(true); }
+		if (EditorWidgets::checkbox("Value", &b)) { n.f[0] = b ? 1.0f : 0.0f; edit(true); }
 		return true;
 	}
 	case NT::ConstString:
 		ImGui::InputText("Value", &n.s);
 		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		EditorWidgets::helpForLabel("Value");
 		return true;
 	case NT::ConstVec2:
 		if (ImGui::DragFloat2("Value", n.f, 0.1f)) edit(false);
 		if (ImGui::IsItemDeactivatedAfterEdit())   edit(true);
+		EditorWidgets::helpForLabel("Value");
 		return true;
 	case NT::ConstColor:
 		if (ImGui::ColorEdit4("Value", n.f)) edit(false);
 		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		EditorWidgets::helpForLabel("Value");
 		return true;
 
 	// ── User-defined types ───────────────────────────────────────────────────
@@ -1514,7 +1532,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		HE::EnumDef def;
 		if (!HE::TypeRegistry::instance().getEnum(n.typeName, def)) return true;
 		const HE::EnumEntry* cur = def.findValue((int)n.f[0]);
-		if (ImGui::BeginCombo("Value", cur ? cur->name.c_str() : "(pick)"))
+		const bool valOpen = ImGui::BeginCombo("Value", cur ? cur->name.c_str() : "(pick)");
+		if (!valOpen) EditorWidgets::helpForLabel("Value");
+		if (valOpen)
 		{
 			for (const auto& e : def.entries)
 				if (ImGui::Selectable(e.name.c_str(), cur && cur->name == e.name))
@@ -1580,7 +1600,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::GetVariable:
 	case NT::SetVariable:
 	{
-		if (ImGui::BeginCombo("Variable", n.s.empty() ? "(none)" : n.s.c_str()))
+		const bool varOpen = ImGui::BeginCombo("Variable", n.s.empty() ? "(none)" : n.s.c_str());
+		if (!varOpen) EditorWidgets::helpForLabel("Variable");
+		if (varOpen)
 		{
 			for (const HC::Variable* vp : offerableVariables(g))
 			{
@@ -1624,6 +1646,7 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::CallExternal:
 		ImGui::InputText("Function", &n.s);
 		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		EditorWidgets::helpForLabel("Function");
 		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
 		return true;
 
@@ -1687,6 +1710,7 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	{
 		ImGui::InputText("Variable", &n.s);
 		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+		EditorWidgets::helpForLabel("Variable");
 		int t = (int)n.propType;
 		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
 		{
@@ -1701,6 +1725,7 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 				edit(true);
 			}
 		}
+		EditorWidgets::helpForLabel("Type");
 		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
 		return true;
 	}

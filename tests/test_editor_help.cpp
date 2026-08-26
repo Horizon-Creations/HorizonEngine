@@ -257,6 +257,26 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Mesh Viewer",               "Ground grid" },
 		{ "Mesh Viewer",               "Studio" },
 		{ "Mesh Viewer",               "Clip:" },
+		// HorizonCode. Two of these scopes are pushed in files SHARED by four
+		// editors (HcGraphHost, HcEditorUtil), so their entries have to read
+		// correctly in a level script, a widget, a class and a sync graph alike.
+		{ "Script Graph",               "Event Graph" },
+		{ "Script Graph",               "Show node" },
+		{ "Script Variable",            "Access" },
+		{ "Script Variable",            "Scale##vdef" },
+		{ "Script Node",                "Overridable" },
+		{ "Script Node",                "Function" },
+		{ "HorizonCode Event",          "Carries a value" },
+		{ "HorizonCode Event",          "Declare" },
+		{ "HorizonCode Node",           "Value" },
+		{ "HorizonCode Node",           "Variable" },
+		{ "HorizonCode Default Value",  "Pos##sd" },
+		{ "HorizonCode Default Value",  "Pos##el" },
+		{ "HorizonCode Default Value",  "Reset" },
+		{ "HorizonCode Default Value",  "+ Add Slot" },
+		{ "Class Components",           "Add Child" },
+		{ "Type Editor",                "+ Add Field" },
+		{ "Type Editor",                "Set as Project Default" },
 	};
 	for (const Case& c : cases)
 	{

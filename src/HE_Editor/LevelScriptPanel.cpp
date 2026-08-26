@@ -1,6 +1,7 @@
 #include "LevelScriptPanel.h"
 #include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
+#include "EditorHelp.h"       // Help::Scope — the keys these panels look their tooltips up by
 #include "EditorWidgets.h"    // primary/danger/cancel buttons
 #include <cstdint>
 #include "GameInstancePanel.h"
@@ -394,8 +395,9 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 {
 	// The event graph (top-level Events) + one sub-graph per function; the list
 	// switches which sub-graph the canvas shows (Blueprint-style).
+	HE::Ed::Help::Scope helpScope("Script Graph");
 	ImGui::SeparatorText("Graphs");
-	if (ImGui::Selectable("Event Graph", g.currentGraph == 0))
+	if (EditorWidgets::selectable("Event Graph", g.currentGraph == 0))
 	{ g.currentGraph = 0; g.selectedNode = 0; g.selectedVar.clear(); g.selectedEvent.clear(); }
 
 	// ── Events this class raises ─────────────────────────────────────────────
@@ -520,12 +522,14 @@ void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 {
 	HC::EventDecl* e = graph.findEvent(g.selectedEvent);
 	if (!e) { g.selectedEvent.clear(); return; }
+	HE::Ed::Help::Scope helpScope("HorizonCode Event");
 
 	ImGui::TextDisabled("Event");
 	static std::string s_nameEdit;
 	static std::string s_nameFor;
 	if (s_nameFor != e->name) { s_nameEdit = e->name; s_nameFor = e->name; }
 	ImGui::InputText("Name", &s_nameEdit);
+	EditorWidgets::helpForLabel("Name");
 	if (ImGui::IsItemDeactivatedAfterEdit())
 	{
 		const std::string nn = s_nameEdit;
@@ -547,7 +551,7 @@ void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 	}
 
 	bool hasArg = e->hasArg;
-	if (ImGui::Checkbox("Carries a value", &hasArg))
+	if (EditorWidgets::checkbox("Carries a value", &hasArg))
 	{
 		e->hasArg = hasArg;
 		syncEventNodes(graph, *e);
@@ -583,6 +587,7 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 {
 	HC::Variable* v = graph.findVariable(g.selectedVar);
 	if (!v) { g.selectedVar.clear(); return; }
+	HE::Ed::Help::Scope helpScope("Script Variable");
 
 	ImGui::TextDisabled("Variable");
 	ImGui::Separator();
@@ -598,6 +603,7 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		g.varNameErrorName.clear();
 	}
 	ImGui::InputText("Name", &g.varNameEdit);
+	EditorWidgets::helpForLabel("Name");
 	if (ImGui::IsItemDeactivatedAfterEdit())
 	{
 		const std::string oldName = v->name;
@@ -678,6 +684,7 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 	{
 		int vaccess = v->access;
 		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
+		EditorWidgets::helpForLabel("Access");
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching
@@ -713,8 +720,11 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			case PT::Color:  if (ImGui::ColorEdit4("##vdef", v->f)) edited = true; break;
 			case PT::Transform:
 				if (ImGui::DragFloat3("Position##vdef", &v->tpos.x, 0.1f)) edited = true;
+				EditorWidgets::helpForLabel("Position##vdef");
 				if (ImGui::DragFloat3("Rotation##vdef", &v->trot.x, 0.5f)) edited = true;
+				EditorWidgets::helpForLabel("Rotation##vdef");
 				if (ImGui::DragFloat3("Scale##vdef",    &v->tscl.x, 0.05f)) edited = true;
+				EditorWidgets::helpForLabel("Scale##vdef");
 				break;
 			case PT::Enum:
 			{
@@ -771,6 +781,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 {
 	HC::Node* n = graph.findNode(g.selectedNode);
 	if (!n) { g.selectedNode = 0; return; }
+	HE::Ed::Help::Scope helpScope("Script Node");
 
 	ImGui::TextDisabled("%s", HC::nodeDisplayName(n->type));
 	ImGui::Separator();
@@ -790,14 +801,13 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	// replaced. Only a CLASS asset can be a base, so only that frontend shows
 	// it. An overridden member is fully replaced: if the child has one, only
 	// the child's runs.
-	auto overridableRow = [&](HC::Node& node, const char* what)
+	// The `what` parameter existed only to fill the %s in a hand-written tooltip.
+	// The tooltip is the help entry now, one sentence for both callers, so the
+	// parameter has nothing left to do.
+	auto overridableRow = [&](HC::Node& node)
 	{
 		if (!derivable) return;
-		if (ImGui::Checkbox("Overridable", &node.overridable)) edited = true;
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Classes deriving from this one can replace this %s.\n"
-			                  "It then appears in their add menu as an override, and\n"
-			                  "only their version runs.", what);
+		if (EditorWidgets::checkbox("Overridable", &node.overridable)) edited = true;
 	};
 
 	switch (n->type)
@@ -813,6 +823,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			// Event nodes ever share a name.
 			if (g.evtNameEditFor != n->id) { g.evtNameEdit = n->s; g.evtNameEditFor = n->id; }
 			ImGui::InputText("Event", &g.evtNameEdit);
+			EditorWidgets::helpForLabel("Event");
 			if (ImGui::IsItemDeactivatedAfterEdit())
 			{
 				if (!g.evtNameEdit.empty() && eventNameUsed(graph, g.evtNameEdit, n->id))
@@ -829,29 +840,37 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 				if (used) ImGui::EndDisabled();
 			}
 		}
-		else if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
+		else
 		{
-			for (const std::string& ev : events)
+			// The header stops being the last item once the list opens, so ask
+			// for the help while it is still shut.
+			const bool evtOpen = ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str());
+			if (!evtOpen) EditorWidgets::helpForLabel("Event");
+			if (evtOpen)
 			{
-				const bool used = eventNameUsed(graph, ev, n->id); // no duplicate handlers
-				if (ImGui::Selectable(ev.c_str(), n->s == ev,
-				        used ? ImGuiSelectableFlags_Disabled : 0) && !used)
+				for (const std::string& ev : events)
 				{
-					n->s = ev; n->hasArg = (ev == "OnWindowFocusChanged");
-					n->propType = n->hasArg ? PT::Bool : PT::Float; n->elem = 0;
-					edited = true;
+					const bool used = eventNameUsed(graph, ev, n->id); // no duplicate handlers
+					if (ImGui::Selectable(ev.c_str(), n->s == ev,
+					        used ? ImGuiSelectableFlags_Disabled : 0) && !used)
+					{
+						n->s = ev; n->hasArg = (ev == "OnWindowFocusChanged");
+						n->propType = n->hasArg ? PT::Bool : PT::Float; n->elem = 0;
+						edited = true;
+					}
 				}
+				ImGui::EndCombo();
 			}
-			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Fires when this class raises this event.");
-		overridableRow(*n, "event");
+		overridableRow(*n);
 		break;
 	}
 	case NT::FunctionEntry:
 	{
 		std::string oldName = n->s;
 		ImGui::InputText("Name", &n->s);
+		EditorWidgets::helpForLabel("Name");
 		if (ImGui::IsItemDeactivatedAfterEdit())
 		{
 			if (!n->s.empty() && n->s != oldName)
@@ -865,8 +884,9 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		{
 			n->access = access; edited = true;
 		}
+		EditorWidgets::helpForLabel("Access");
 		ImGui::TextDisabled("public functions are callable from Lua/Python.");
-		overridableRow(*n, "function");
+		overridableRow(*n);
 		HcEditorUtil::drawFunctionInterface(graph, *n, edited);
 		break;
 	}
@@ -874,7 +894,9 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	// unclickable), the widget editor's copy lists them. Same widget otherwise.
 	case NT::FunctionCall:
 	{
-		if (ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str()))
+		const bool fnOpen = ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str());
+		if (!fnOpen) EditorWidgets::helpForLabel("Function");
+		if (fnOpen)
 		{
 			for (const auto& e : graph.nodes)
 				if (e.type == NT::FunctionEntry && !e.s.empty())
@@ -1188,6 +1210,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 
 	ImGui::SameLine();
 
+	HE::Ed::Help::Scope helpScope("Script Graph");
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	// A stale compile result from another tab must not anchor to this graph.
 	if (g.compileHas && g.compileFor != title) g.compileHas = false;
@@ -1243,7 +1266,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			if (g.compileNode != 0)
 			{
 				ImGui::SameLine();
-				if (ImGui::SmallButton("Show node"))
+				if (EditorWidgets::smallButton("Show node"))
 					if (const HC::Node* n = graph.findNode(g.compileNode))
 					{
 						g.currentGraph = n->subgraph;
@@ -1284,8 +1307,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			g.selectedNode = id;
 			edited = true;
 		};
-		if (ImGui::MenuItem("Get", nullptr, false, scopeOk)) make(NT::GetVariable);
-		if (ImGui::MenuItem("Set", nullptr, false, scopeOk)) make(NT::SetVariable);
+		if (EditorWidgets::menuItem("Get", nullptr, false, scopeOk)) make(NT::GetVariable);
+		if (EditorWidgets::menuItem("Set", nullptr, false, scopeOk)) make(NT::SetVariable);
 		if (v && !scopeOk)
 			ImGui::TextDisabled("Local to another function.");
 		ImGui::EndPopup();
@@ -2141,6 +2164,7 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 			st.compFocus.clear();
 	}
 
+	HE::Ed::Help::Scope helpScope("Class Components");
 	const float listW = 220.0f;
 	ImGui::BeginChild("##hccomp_tree", ImVec2(listW, 0), true);
 	ImGui::TextDisabled("Components");
@@ -2231,7 +2255,7 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 		drawNode(drawNode, st.compRoot);
 	}
 	ImGui::Separator();
-	if (ImGui::SmallButton("Add Child"))
+	if (EditorWidgets::smallButton("Add Child"))
 	{
 		// Under the SELECTION, not always under the root: a tree you can only
 		// grow one level deep is a list with indentation.
