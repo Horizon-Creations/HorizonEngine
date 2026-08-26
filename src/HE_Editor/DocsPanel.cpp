@@ -73,6 +73,11 @@ namespace
 	// final height yet (fonts, wrapped paragraphs, tables), so the offset ImGui
 	// computes lands near the section rather than on it.
 	int   s_scrollFrames = 0;
+	// Frames left in which the sidebar may still force its groups open — the
+	// same "we just navigated" window as the scroll, kept separate because the
+	// scroll stops as soon as it has landed and the sidebar has to survive the
+	// frame the user clicks a group in.
+	int   s_navFrames = 0;
 	// The ImGui frame in which the reader was last opened. See
 	// DocsPanel::openedThisFrame() — F1 has two handlers in one frame.
 	int   s_openedFrame = -1;
@@ -147,6 +152,7 @@ namespace
 		s_section     = section;
 		s_scrollTo    = section;
 		s_scrollFrames = 3;
+		s_navFrames    = 3;
 	}
 
 	void goTopic(const char* topic)
@@ -873,6 +879,7 @@ namespace
 			ImGui::PopID();
 		}
 		if (s_scrollFrames > 0 && --s_scrollFrames == 0) s_scrollTo = -1;
+		if (s_navFrames > 0) --s_navFrames;
 	}
 
 	// ── Search results ───────────────────────────────────────────────────────
@@ -970,7 +977,18 @@ namespace
 
 				const bool holdsCurrent = s_section >= si && s_section < end;
 				ImGui::PushID(si);
-				ImGui::SetNextItemOpen(holdsCurrent, ImGuiCond_Always);
+				// Only FORCE the state right after a navigation — the group
+				// holding what was just opened unfolds itself, and everything
+				// else closes so the list does not grow with every visit.
+				//
+				// Every frame (which is what this was) is the same call and a
+				// completely different control: the user's click flips the node,
+				// the next frame sets it straight back, and the group cannot be
+				// opened by hand at all.
+				if (s_navFrames > 0)
+					ImGui::SetNextItemOpen(holdsCurrent, ImGuiCond_Always);
+				else
+					ImGui::SetNextItemOpen(holdsCurrent, ImGuiCond_FirstUseEver);
 				ImGui::PushStyleColor(ImGuiCol_Text, holdsCurrent ? HE::Ed::Theme::TextHeading
 				                                                  : HE::Ed::Theme::Text);
 				const bool open = ImGui::TreeNodeEx(
@@ -1132,6 +1150,15 @@ bool openedThisFrame()
 {
 #ifdef HE_DOCS_PANEL_IMPL
 	return s_openedFrame == ImGui::GetFrameCount();
+#else
+	return false;
+#endif
+}
+
+bool navigatingGroups()
+{
+#ifdef HE_DOCS_PANEL_IMPL
+	return s_navFrames > 0;
 #else
 	return false;
 #endif

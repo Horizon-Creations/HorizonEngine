@@ -38,6 +38,16 @@ namespace DocsPanel
 	// interaction this whole feature exists for, doing nothing.
 	bool openedThisFrame();
 
+	// True while the sidebar is still allowed to force its category groups
+	// open — the short window after a navigation, when the group holding the
+	// section just opened unfolds itself and the others close.
+	//
+	// Outside that window the groups belong to the user. Forcing them EVERY
+	// frame (which is what this did at first) is the same call and a completely
+	// different control: a click flips the group, the next frame sets it back,
+	// and it cannot be opened by hand at all.
+	bool navigatingGroups();
+
 	// ── What the reader needs from the editor ────────────────────────────────
 	// Four fonts and a renderer — not an AppContext. The panel used to take one,
 	// which meant it could only be drawn by something that had a project, a

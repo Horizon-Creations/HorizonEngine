@@ -542,6 +542,15 @@ TEST_CASE("ui shot: the generated node reference")
 	REQUIRE(img.valid());
 	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 80000);
 
+	// A generated sky row: the biggest family on the page, and the one a reader
+	// is most likely to land on first. One input or one output and nothing else,
+	// which is the narrowest a node preview ever gets.
+	DocsPanel::openTopic("horizoncode-nodes#env.getCycleSeconds");
+	const he_ui::Image env = shoot("node-reference-env", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(env.valid());
+	CHECK(env.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+
 	// A built-in as well: those have exec pins on both sides and headers in a
 	// different colour family, so they are where a preview drawn from one
 	// example would come apart.
@@ -550,6 +559,44 @@ TEST_CASE("ui shot: the generated node reference")
 	                                   [&](int) { DocsPanel::draw(host); });
 	REQUIRE(builtin.valid());
 	CHECK(builtin.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+	DocsPanel::close();
+}
+
+TEST_CASE("docs reader: the sidebar's groups belong to the user once it has landed")
+{
+	// The node reference's sidebar folds its three hundred sections into their
+	// categories, and the group holding the section just opened unfolds itself.
+	// Doing that EVERY frame is the bug: the user's click flips the group and
+	// the next frame sets it straight back, so no group can be opened by hand.
+	//
+	// This is the window in which the sidebar may still override — it has to
+	// close, and it has to be open long enough to survive the frames a
+	// navigation takes to settle.
+	Harness harness(400, 300);
+	const DocsPanel::Host host = hostOf(harness);
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+
+	DocsPanel::openTopic("horizoncode-nodes#physics.addImpulse");
+	CHECK(DocsPanel::navigatingGroups());
+
+	int frames = 0;
+	for (; frames < 20 && DocsPanel::navigatingGroups(); ++frames)
+	{
+		ImGui::NewFrame();
+		DocsPanel::draw(host);
+		ImGui::Render();
+		ImGui::EndFrame();
+	}
+	CHECK_FALSE(DocsPanel::navigatingGroups());
+	// Long enough to survive a navigation settling, short enough that the very
+	// next thing the user does is theirs.
+	INFO("frames the sidebar kept control: " << frames);
+	CHECK(frames >= 2);
+	CHECK(frames <= 6);
 	DocsPanel::close();
 }
 
