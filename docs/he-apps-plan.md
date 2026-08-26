@@ -81,6 +81,28 @@ die `fs`-Gruppe existieren, letztere ist absichtlich auf `Saved/` eingesperrt.
 
 Der größte Brocken und der, ohne den nichts anderes zählt.
 
+**A0 Backend-Baseline: Metal auf macOS, OpenGL 4.1 überall sonst.** Entscheidung des Users
+vom 26.08.2026, und sie räumt mehr weg als sie kostet. Eine App braucht keine visuellen
+Fähigkeiten, für die sich fünf Backends anstrengen müssten, also muss sie auch nicht auf
+allen fünf laufen. GL 4.1 läuft auf jeder Plattform, Metal ist auf macOS ohnehin der
+Standard und der bessere Weg (Apple hat GL abgekündigt, und Metal hat den vollständigen
+UI-Pfad bereits).
+
+Das Entscheidende daran: **beide Baseline-Backends können heute schon alles, was UI braucht**,
+also Eckenradius, Texturen und Material-Graphen. Daraus folgt:
+- D3D und Vulkan fallen als App-Ziel weg (siehe F1, das damit aus diesem Plan ausscheidet).
+- Schicht 0 aus D5 ist in **zwei** Backends umzusetzen, nicht in fünf.
+- Material-Graphen sind auf jedem App-Ziel verfügbar, also kein degradiertes Feature mehr.
+- Der Software-Renderer aus Block G verliert seine Hauptbegründung und rutscht ans Ende.
+
+Ein konkreter Punkt gehört dazu, sonst stimmt der Satz nur auf dem Papier: `Window::Init`
+verlangt außerhalb von macOS **GL 4.6** (`Window.cpp:52`). Auf einer Maschine mit nur 4.1
+scheitert die Kontexterzeugung. Der App-Modus muss 4.1 anfordern oder absteigen. Geprüft:
+das ist gefahrlos, denn der einzige `#version 430`-Shader und alle drei
+`glDispatchCompute`-Stellen gehören zur GI und hängen an `m_giSupported`
+(`GLAD_GL_VERSION_4_3`), schalten sich auf 4.1 also von selbst ab. Eine App ohne Welt
+berührt sie ohnehin nie.
+
 **A1 Weltloser Modus.** Ein Schalter im Projekt (`.heproj` „appMode") und in `project.hcfg`.
 Ist er an, erzeugt der Runtime keine `HorizonWorld`, keine `PhysicsWorld`, keine Default-Kamera,
 kein Audio-System-Tick, keinen Szenen-Ladepfad. Der Renderer macht genau einen Pass: Clear plus
@@ -267,12 +289,15 @@ Scanlines und Ähnliches schon heute baubar. Es fehlt:
   MaterialFunction-Assets existieren bereits, das ist der fertige Mechanismus für eine
   Effektbibliothek, die sich im Graph-Editor zusammenstecken lässt statt kopiert zu werden.
 
-*Schicht 2, der Rückfall-Vertrag.* Wo ein Graph nicht laufen kann (Software-Backend, und
-heute D3D und Vulkan), zeichnet ein Material-Quad **Schicht 0 plus Farbton**. Dokumentiert,
-nicht stillschweigend. Daraus folgt die Regel für die Bibliothek: was eine App täglich
-braucht, gehört in Schicht 0 und läuft überall; das Auffällige darf ein Graph sein und
-degradiert sauber. „Viel vordefiniert" darf nicht heimlich heißen „nichts davon auf Windows
-oder im Software-Modus".
+*Schicht 2, der Rückfall-Vertrag,* ist seit A0 fast leer: beide Baseline-Backends fahren
+Material-Graphen, Materialien sind also auf keinem App-Ziel ein degradiertes Feature. Der
+Vertrag gilt nur noch für das optionale Software-Backend aus Block G, und lautet dort: ein
+Material-Quad zeichnet Schicht 0 plus Farbton.
+
+Die Trennung der beiden Schichten bleibt trotzdem richtig, aber aus einem anderen Grund als
+Backend-Deckung: Schicht 0 kostet keinen Shader-Übersetzungslauf, ist im Designer sofort
+sichtbar, im Theme (D1) als Rolle referenzierbar und von einem Gestalter ohne Graph-Wissen
+bedienbar. Ein Eckenradius soll ein Zahlenfeld sein, kein Knoten.
 
 **Zwei Funde, die dabei aufgefallen sind:**
 
@@ -328,14 +353,15 @@ kein „Escape beendet". Klingt trivial, ist der Unterschied zwischen profession
 
 ## 8. Block F: Plattform-Parität
 
-**F1 UI-Renderpfad-Parität auf D3D11/D3D12/Vulkan.** Korrektur gegenüber der ersten Fassung,
-die nur von Texturen sprach: die Lücke ist größer. Der UI-Pass dieser drei Backends zeichnet
-**ausschließlich** einfarbige Quads, Glyphen, Clip und Rotation. Der D3D11-Konstantenpuffer
-hat kein Feld für den Eckenradius, und `cornerRadius` kommt in D3D11, D3D12 und Vulkan
-überhaupt nicht vor (Metal und GL: ja). Es fehlen dort also **Eckenradius, Texturen und
-Materialien** zugleich. Ein abgerundeter Knopf ist auf Windows heute ein Rechteck. Das ist
-ein Blocker für Apps auf Windows, kein Feinschliff, und es ist zugleich die Vorarbeit für
-Schicht 0 aus D5.
+**F1 UI-Renderpfad-Parität auf D3D11/D3D12/Vulkan — gehört nicht mehr in diesen Plan.** Der
+Fund bleibt, die Einordnung ändert sich durch A0. Gemessen: der UI-Pass dieser drei Backends
+zeichnet **ausschließlich** einfarbige Quads, Glyphen, Clip und Rotation. Der
+D3D11-Konstantenpuffer hat kein Feld für den Eckenradius, und `cornerRadius` kommt in D3D11,
+D3D12 und Vulkan überhaupt nicht vor (Metal und GL: ja). Es fehlen dort also Eckenradius,
+Texturen und Materialien zugleich, ein abgerundeter Knopf ist dort ein Rechteck.
+
+Für Apps ist das seit A0 gleichgültig, sie zielen auf Metal und GL. Der Punkt wandert damit
+in die **Spiel-Spur**, zur ohnehin offenen Backend-Parität, und blockiert hier nichts mehr.
 
 **F2 HiDPI.** Die Pixel-Größe kennt das Fenster schon. Ob der Canvas-Skalierungsmodus die
 Systemskalierung auf Windows und Linux korrekt aufnimmt, ist ungeprüft.
@@ -348,7 +374,11 @@ Rändern und Snap-Verhalten auf Windows.
 
 ---
 
-## 8b. Block G: Software-Renderer
+## 8b. Block G: Software-Renderer (optional, siehe A0)
+
+> Die Analyse unten ist unverändert richtig, die **Priorität nicht mehr**: seit der
+> Baseline-Entscheidung A0 ist dieser Block optional und steht in Welle 4. Warum, steht am
+> Ende des Abschnitts.
 
 Nicht „ein Software-Renderer für die Engine". Ein **Software-Backend, das nur UI zeichnet**.
 Der Unterschied ist der ganze Punkt: 3D auf der CPU (PBR, Schatten, GI, Terrain) wäre ein
@@ -398,21 +428,21 @@ genau die Sorte Punkt, die im Umfang explodiert.
 - Ein Fall in `RendererFactory::Create`, und wählbar über das Backend-Feld, das die
   ausgelieferte `config.json` bereits hat.
 
-**Was es einbringt, über Apps hinaus:**
-1. **Läuft überall.** VM ohne 3D, Remote-Desktop, RDP-Sitzung, alter Rechner, Server,
-   Container, Rechner mit kaputtem Treiber. Für eine App ist „braucht Metal 3" absurd.
-2. **Startzeit und Größe.** Kein Treiber, keine Pipeline-Kompilierung, keine
-   Shader-Archive, kein `MTLBinaryArchive`-Beta-Krach. Ein Fenster ist sofort da.
-3. **Akku.** Zusammen mit A2 (nur zeichnen wenn sich etwas ändert) ist eine ruhende App
-   wirklich ruhend.
-4. **Und der Grund, ihn früher zu bauen als „irgendwann":** er macht die eigene
-   Selbstprüfung für ganze Apps möglich. Heute prüfe ich Szenen über `he_shot.py` und
-   Editor-Panels über `he_uishot.py`. Ein Software-Backend heißt: eine **komplette App**
-   headless hochfahren, Bild rausschreiben, ansehen, als ctest festnageln. Genau der Test,
-   den die Risikoliste unten ohnehin fordert, damit der App-Modus nicht still verrottet.
+**Einordnung nach der Baseline-Entscheidung (A0): optional, Welle 4, nur bei Bedarf.** Die
+ursprüngliche Begründung war „läuft überall, auch ohne brauchbaren Treiber". Mit GL 4.1 als
+Baseline ist die zweimal billiger zu haben, ohne eine Zeile Engine-Code:
 
-**Einordnung:** hängt an A1 (weltloser Modus), also frühestens Welle 2. Der Editor bleibt auf
-der GPU, dort ist das Backend weder nötig noch sinnvoll.
+- **Windows ohne Grafiktreiber:** Mesa **llvmpipe** als `opengl32.dll` neben die exe legen.
+  Das ist GL in Software, von anderen gepflegt, und die App merkt keinen Unterschied.
+- **Headless-Test in der CI:** auf Linux-Runnern Xvfb plus llvmpipe, auf diesem Mac Metal,
+  so wie `he_shot.py` es headless heute schon erzwingt. Das Ziel „eine komplette App
+  headless hochfahren und das Bild ansehen" bleibt also erreichbar, nur nicht über ein
+  eigenes Backend.
+
+Was einem eigenen Software-Backend bleibt, sind Startzeit, Paketgröße und die Unabhängigkeit
+von Treibern überhaupt. Das ist real, aber es rechtfertigt keine 600 bis 1000 Zeilen
+Rasterizer, solange llvmpipe die Lücke füllt. Der Abschnitt bleibt hier stehen, weil die
+Analyse gilt, falls der Bedarf doch auftaucht. Der Editor bleibt in jedem Fall auf der GPU.
 
 ---
 
@@ -436,6 +466,7 @@ Leitgedanke: der erste Meilenstein ist eine **exportierbare Taschenrechner- oder
 die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt später.
 
 **Welle 1, das Fundament**
+- A0 Baseline festschreiben (GL-4.1-Anforderung statt 4.6 außerhalb macOS)
 - A1 weltloser Modus
 - A2 ereignisgetriebenes Zeichnen
 - A4 `app`-Gruppe (Titel, Größe, Beenden, Schließen-Veto)
@@ -447,9 +478,7 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 - Abnahme: Todo-App, exportiert als `.app`, speichert nach `~`, unter 2 % CPU im Leerlauf
 
 **Welle 2, brauchbar**
-- G Software-Backend (hängt an A1; bringt zugleich den headless App-Test)
-- D5 Schicht 0: Eckenradius pro Ecke, Rahmen, Verläufe, Schatten in allen Backends
-- F1 UI-Renderpfad-Parität auf D3D/Vulkan (dieselbe Arbeit, anderes Ende)
+- D5 Schicht 0: Eckenradius pro Ecke, Rahmen, Verläufe, Schatten, in Metal und GL
 - D1 Theme-System
 - D2 erste zwölf Komponenten
 - B2 ListView, B3 Grid, B4 Dialoge/Kontextmenü/Tooltip
@@ -466,6 +495,7 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 
 **Welle 4, Kür**
 - A5 mehrere Fenster
+- G Software-Backend, nur falls llvmpipe die Lücke doch nicht füllt
 - B9 Feinschliff-Widgets
 - B10 Zugänglichkeit und Lokalisierung
 - `db`, Drucken, Auto-Update
