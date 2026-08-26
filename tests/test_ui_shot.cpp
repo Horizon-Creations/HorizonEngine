@@ -830,3 +830,70 @@ TEST_CASE("Graph canvas: clicking an overlap selects the node in front")
 	// pick up the one behind while the click highlighted the one in front.
 	CHECK(st.dragNode == 2);
 }
+
+// ── The hover tooltip must describe a Map as a Map ──────────────────────────
+// Reported from a screenshot: hovering a Get Variable node for a Map showed the
+// output as an array of the VALUE type. The node itself drew the right pin all
+// along — it was the tooltip that lied, and the tooltip is the half a reader
+// trusts, because it is the one that spells the type out.
+//
+// The cause: drawPinGlyph took a BOOL for "is a container" and drew the array
+// grid for all three kinds. The proof is the KEY colour: a Map glyph paints its
+// left column in the key type's colour, so a String key has to be findable in
+// the glyph. With the old bool there was only ever the value colour.
+TEST_CASE("Node tooltip: a Map output shows the map glyph, key colour and all")
+{
+	constexpr int W = 460, H = 260;
+	Harness harness(W, H);
+
+	// Map<String, Bool>: two pin types whose colours differ, or the assertion
+	// below could not tell the columns apart.
+	HorizonCode::Node node;
+	node.type      = HorizonCode::NodeType::GetVariable;
+	node.s         = "NewVar";
+	node.propType  = HorizonCode::PinType::Bool;     // the VALUE type
+	node.isArray   = true;
+	node.container = HorizonCode::ContainerKind::Map;
+	node.keyType   = HorizonCode::PinType::String;
+
+	const std::uint32_t keyCol = HcEditorUtil::pinTypeColor(HorizonCode::PinType::String);
+	const std::uint32_t valCol = HcEditorUtil::pinTypeColor(HorizonCode::PinType::Bool);
+	REQUIRE(keyCol != valCol);
+
+	const he_ui::Image img = shoot("doc-map-pin-tooltip", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("##maptip", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		{
+			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 32.0f);
+			HcEditorUtil::drawNodeDoc(node);
+		}
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+
+	auto countExact = [&](std::uint32_t col)
+	{
+		const std::uint8_t wr = (std::uint8_t)((col >> IM_COL32_R_SHIFT) & 0xFF);
+		const std::uint8_t wg = (std::uint8_t)((col >> IM_COL32_G_SHIFT) & 0xFF);
+		const std::uint8_t wb = (std::uint8_t)((col >> IM_COL32_B_SHIFT) & 0xFF);
+		int n = 0;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = 0; x < img.width; ++x)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (r == wr && g == wg && b == wb) ++n;
+			}
+		return n;
+	};
+
+	// The value colour is everywhere anyway (the glyph's right column and the
+	// type text), so it only guards against an empty render.
+	CHECK(countExact(valCol) > 0);
+	// This is the actual assertion: the KEY colour only exists in a map glyph.
+	// It was absent before the fix — the tooltip drew one flat array grid.
+	CHECK(countExact(keyCol) > 0);
+}

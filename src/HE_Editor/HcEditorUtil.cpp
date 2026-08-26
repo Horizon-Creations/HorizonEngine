@@ -160,7 +160,14 @@ namespace
 	// filled circle for data, a 2×2 grid for a container, each in the type's
 	// colour — the same three shapes GraphEditor draws, in the same colours
 	// pinTypeColor hands it.
-	void drawPinGlyph(bool isExec, bool isContainer, std::uint32_t color)
+	// The same four shapes the canvas draws (GraphEditor.cpp), at text height.
+	// It used to take a BOOL for "is a container" and drew the array grid for all
+	// three, so a hover on a Map pin claimed an array of the value type — the pin
+	// on the node said Map, the tooltip explaining it said something else, and the
+	// tooltip is the half a reader trusts. `keyColor` is the Map's left column;
+	// 0 means "not a map" and the single colour is used throughout.
+	void drawPinGlyph(bool isExec, HorizonCode::ContainerKind kind, std::uint32_t color,
+	                  std::uint32_t keyColor = 0)
 	{
 		const float line = ImGui::GetTextLineHeight();
 		const float r    = line * 0.28f;
@@ -171,13 +178,32 @@ namespace
 		if (isExec)
 			dl->AddTriangleFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x - r, c.y + r),
 			                      ImVec2(c.x + r, c.y), color);
-		else if (isContainer)
+		else if (kind == HorizonCode::ContainerKind::Array)
 		{
 			const float o = r * 0.55f, h = r * 0.42f;
 			for (int gy = -1; gy <= 1; gy += 2)
 				for (int gx = -1; gx <= 1; gx += 2)
 					dl->AddRectFilled(ImVec2(c.x + gx * o - h, c.y + gy * o - h),
 					                  ImVec2(c.x + gx * o + h, c.y + gy * o + h), color);
+		}
+		else if (kind == HorizonCode::ContainerKind::Set)
+		{
+			// Three dots in a triangle: round like the scalar it holds, clustered,
+			// no order implied. Same proportions as the canvas glyph.
+			const float d = r * 0.55f, dr = r * 0.42f;
+			dl->AddCircleFilled(ImVec2(c.x,                c.y - d),        dr, color, 10);
+			dl->AddCircleFilled(ImVec2(c.x - d * 0.866f,   c.y + d * 0.5f), dr, color, 10);
+			dl->AddCircleFilled(ImVec2(c.x + d * 0.866f,   c.y + d * 0.5f), dr, color, 10);
+		}
+		else if (kind == HorizonCode::ContainerKind::Map)
+		{
+			// Two columns, key on the left. Without the key colour a Map<String,
+			// Int> and a Map<Int,Int> would look the same here, which is exactly
+			// the question a hover is asked.
+			const float e = r * 0.97f, g = r * 0.08f;
+			dl->AddRectFilled(ImVec2(c.x - e, c.y - e), ImVec2(c.x - g, c.y + e),
+			                  keyColor ? keyColor : color);
+			dl->AddRectFilled(ImVec2(c.x + g, c.y - e), ImVec2(c.x + e, c.y + e), color);
 		}
 		else
 			dl->AddCircleFilled(c, r, color);
@@ -202,14 +228,16 @@ namespace
 	{
 		for (const auto& p : execPins)
 		{
-			drawPinGlyph(true, false, pinTypeColor(HorizonCode::PinType::Exec));
+			drawPinGlyph(true, HorizonCode::ContainerKind::None,
+			             pinTypeColor(HorizonCode::PinType::Exec));
 			ImGui::TextUnformatted((p.name && *p.name) ? p.name : execFallback);
 		}
 		for (const auto& p : dataPins)
 		{
 			const HorizonCode::ContainerKind k =
 				HorizonCode::containerKindOf(p.isArray, p.container);
-			drawPinGlyph(false, k != HorizonCode::ContainerKind::None, pinTypeColor(p.type));
+			drawPinGlyph(false, k, pinTypeColor(p.type),
+			             k == HorizonCode::ContainerKind::Map ? pinTypeColor(p.keyType) : 0u);
 			if (p.name && *p.name)
 			{
 				ImGui::TextUnformatted(p.name);
