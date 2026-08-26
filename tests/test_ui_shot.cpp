@@ -768,3 +768,65 @@ TEST_CASE("Graph canvas: a node in front covers the widgets of the node behind i
 	// reach it — that is what "the node in front covers what is behind it" means.
 	CHECK(loudPixels(110, 85, 200, 120) == 0);
 }
+
+// ── A click picks the node in FRONT ─────────────────────────────────────────
+// Reported as "es wird nicht immer die oberste Node ausgewählt beim Klick bzw.
+// beim Drag", and the cause was placement rather than maths: selection ran
+// INSIDE the node loop and stopped at the first node it hit. The loop draws
+// back-to-front, so the first hit is the node at the BOTTOM — in an overlap the
+// node behind was selected and dragged, every time.
+//
+// No pixels needed here, just ImGui's own input path: the harness feeds a mouse
+// position and a press, and the canvas is asked who it picked.
+TEST_CASE("Graph canvas: clicking an overlap selects the node in front")
+{
+	constexpr int W = 320, H = 240;
+	Harness harness(W, H);
+
+	GraphEditor::Model m;
+	GraphEditor::State st;
+	st.pan  = ImVec2(0.0f, 0.0f);
+	st.zoom = 1.0f;
+
+	// Node 2 is listed second, so it is drawn second — in front of node 1 — and
+	// their boxes overlap around screen (98,68)…(225,132).
+	m.nodeIds = []{ return std::vector<int>{ 1, 2 }; };
+	m.getPos  = [](int id, float& x, float& y)
+	{ x = (id == 1) ? 40.0f : 90.0f; y = (id == 1) ? 40.0f : 60.0f; };
+	m.setPos  = [](int, float, float){};
+	m.title   = [](int id){ return id == 1 ? std::string("Back") : std::string("Front"); };
+	m.headerColor = [](int){ return IM_COL32(60, 60, 70, 255); };
+	m.pins    = [](int){ return std::vector<GraphEditor::Pin>{}; };
+	m.links   = []{ return std::vector<std::array<int, 4>>{}; };
+	m.connect = [](int, int, int, int){ return false; };
+	m.nodeBodyHeight = [](int){ return 60.0f; };
+
+	ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 inOverlap(150.0f, 100.0f);
+
+	auto frame = [&](bool mouseDown)
+	{
+		io.MousePos = inOverlap;
+		io.MouseDown[0] = mouseDown;
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##canvas", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		GraphEditor::draw("##ge", m, st, ImVec2((float)W, (float)H));
+		ImGui::End();
+		ImGui::Render();
+	};
+
+	// Two settling frames: ImGui resolves hover from the PREVIOUS frame, so a
+	// press on frame one would land on a canvas that does not know it is hovered.
+	frame(false);
+	frame(false);
+	frame(true);          // the press
+
+	CHECK(st.selected == 2);
+	// …and the drag that press started must move the same node, or a drag would
+	// pick up the one behind while the click highlighted the one in front.
+	CHECK(st.dragNode == 2);
+}

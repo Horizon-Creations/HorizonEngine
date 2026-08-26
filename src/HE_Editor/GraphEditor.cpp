@@ -682,50 +682,64 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                               mouse.y >= n.pos.y - kNodeHitPad && mouse.y <= br.y + kNodeHitPad;
         if (overNode) hoverNodeNow = n.id;
 
+    }
+
+    // ── What a press on a node does ──────────────────────────────────────────
+    // AFTER the loop, on `hoverNodeNow`, and that placement is the fix for a
+    // real bug: this used to run INSIDE the loop and stop at the first node it
+    // hit. The loop draws back-to-front, so the first hit is the node at the
+    // BOTTOM — click where two nodes overlap and the one behind was selected and
+    // dragged, never the one you were pointing at. `hoverNodeNow` keeps the LAST
+    // hit instead, which is the node in front.
+    //
+    // Double-click had a second version of the same fault: with no `consumed`
+    // guard it fired for every node under the cursor at once.
+    if (interact && hoverNodeNow != 0)
+    {
+        const int hn = hoverNodeNow;
+
         // Double-click a node (open a referenced function, …).
-        if (interact && overNode && model.onNodeDoubleClick &&
-            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-            model.onNodeDoubleClick(n.id);
+        if (model.onNodeDoubleClick && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+            model.onNodeDoubleClick(hn);
 
         // Right-click a node → per-node context menu. If the node is already part
         // of a multi-selection, keep the whole group so the menu (Delete/Duplicate
         // Selection) acts on all of them; otherwise select just this one.
-        if (interact && overNode && model.drawNodeContextMenu &&
-            ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        if (model.drawNodeContextMenu && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
         {
-            st.ctxNode = n.id;
+            st.ctxNode = hn;
             const bool inSel =
-                std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
-            if (!inSel) { st.selected = n.id; st.selection = { n.id }; }
-            else        { st.selected = n.id; }
+                std::find(st.selection.begin(), st.selection.end(), hn) != st.selection.end();
+            if (!inSel) { st.selected = hn; st.selection = { hn }; }
+            else        { st.selected = hn; }
             ImGui::OpenPopup("##ge_nodectx");
             consumed = true;
         }
 
         // Body click → select + start move. A pin grab was already resolved
         // above and consumed the press, so this is the "not a pin" case.
-        if (interact && !consumed && st.linkSrcNode == 0 && st.dragNode == 0 && !st.boxSel &&
-            overNode && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        if (!consumed && st.linkSrcNode == 0 && st.dragNode == 0 && !st.boxSel &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
             const bool add = ImGui::GetIO().KeyShift && model.multiSelect;
             const bool inSel =
-                std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
+                std::find(st.selection.begin(), st.selection.end(), hn) != st.selection.end();
             st.selectClickNode = 0;
             if (add)
             {
-                if (!inSel) st.selection.push_back(n.id);
+                if (!inSel) st.selection.push_back(hn);
             }
             else if (inSel)
             {
                 // Clicked a node already in the multi-selection: keep the whole
                 // group so the drag moves all of it. A click with no drag
                 // collapses to just this node (on mouse release).
-                st.selectClickNode = n.id;
+                st.selectClickNode = hn;
             }
-            else { st.selection.clear(); st.selection.push_back(n.id); }
-            st.selected = n.id;
-            float gx = 0, gy = 0; model.getPos(n.id, gx, gy);
-            st.dragNode = n.id; st.dragStartMouse = mouse; st.dragStartPos = ImVec2(gx, gy);
+            else { st.selection.clear(); st.selection.push_back(hn); }
+            st.selected = hn;
+            float gx = 0, gy = 0; model.getPos(hn, gx, gy);
+            st.dragNode = hn; st.dragStartMouse = mouse; st.dragStartPos = ImVec2(gx, gy);
             st.dragMoved = false;
             consumed = true;
         }
