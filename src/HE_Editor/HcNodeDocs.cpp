@@ -57,7 +57,8 @@ namespace
 	  "The entity an object reference sits on — the inverse of Instance." },
 	{ "entity.distance",
 	  "Straight-line distance between two entities in metres. Cheaper than "
-	  "subtracting two positions and taking the length, and reads better." },
+	  "subtracting two positions and taking the length, and reads better. "
+	  "Negative when there is no world to measure in, which no running game has." },
 	{ "entity.findByName",
 	  "Finds the first entity with this name in the active scene. A linear search "
 	  "over every named entity: fine once in a while, wasteful every frame — "
@@ -285,8 +286,9 @@ namespace
 	  "The tangent of an angle in radians. Runs off to infinity near 90 degrees, "
 	  "so keep the input away from it." },
 	{ "math.sqrt",
-	  "The square root. A negative input has none and yields 0 rather than a NaN "
-	  "that would spread through everything downstream." },
+	  "The square root. A negative input has none and yields NaN, which then "
+	  "spreads silently through everything downstream — clamp at 0 first if the "
+	  "value can go negative." },
 	{ "math.abs",
 	  "Drops the sign: -3 and 3 both come out as 3. How a distance is made out of "
 	  "a difference." },
@@ -303,7 +305,7 @@ namespace
 	  "Raises the base to the exponent." },
 	{ "math.mod",
 	  "The remainder after division. Wrapping an angle back into 0..360, or doing "
-	  "something every Nth item." },
+	  "something every Nth item. A divisor of 0 yields 0 rather than a NaN." },
 	{ "math.min",
 	  "The smaller of the two values." },
 	{ "math.max",
