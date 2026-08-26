@@ -345,7 +345,14 @@ const char* drawQueuedHelp()
 		ImGui::TextUnformatted(e->body);
 		ImGui::PopTextWrapPos();
 
-		if (e->shortcut[0] || e->topic[0])
+		// Where F1 goes: this control's OWN entry in the generated reference,
+		// not the chapter its concept belongs to. The chapter is a link inside
+		// that entry — see EditorHelp.h, and the audit that made the difference
+		// measurable (320 entries pointed at 47 chapters).
+		static std::string s_topic;
+		s_topic = HE::Ed::Help::referenceTopic(e->key);
+
+		if (e->shortcut[0] || !s_topic.empty())
 		{
 			ImGui::Spacing();
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
@@ -353,21 +360,25 @@ const char* drawQueuedHelp()
 			{
 				const std::string sc = HE::Ed::Help::shortcutLabel(e->shortcut);
 				ImGui::TextUnformatted(sc.c_str());
-				if (e->topic[0]) ImGui::SameLine(0.0f, 12.0f);
+				if (!s_topic.empty()) ImGui::SameLine(0.0f, 12.0f);
 			}
 			// Only advertised where there is a page to open. A hint that does
 			// nothing on a third of the controls teaches people to ignore it.
-			if (e->topic[0]) ImGui::TextUnformatted("F1  documentation");
+			if (!s_topic.empty()) ImGui::TextUnformatted("F1  documentation");
 			ImGui::PopStyleColor();
 		}
 		ImGui::EndTooltip();
+
+		// F1 belongs to whatever is under the mouse right now, which is what the
+		// tooltip is showing. Checked here rather than in a global shortcut
+		// block for exactly that reason.
+		if (!s_topic.empty() && ImGui::IsKeyPressed(ImGuiKey_F1, false))
+		{
+			ImGui::PopStyleVar();
+			return s_topic.c_str();
+		}
 	}
 	ImGui::PopStyleVar();
-
-	// F1 belongs to whatever is under the mouse right now, which is what the
-	// tooltip above is showing. Checked here rather than in a global shortcut
-	// block for exactly that reason.
-	if (e->topic[0] && ImGui::IsKeyPressed(ImGuiKey_F1, false)) return e->topic;
 	return nullptr;
 }
 

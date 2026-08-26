@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""editor_help_audit — which editor controls explain themselves, and which do not.
+
+The editor's manual is meant to answer one question well: "what does THIS
+control do?" A tooltip that is missing is invisible — nothing fails to build,
+nothing fails a test, the user simply hovers and gets nothing. So the gap is
+measured here instead, by walking the panels' source for labelled widgets and
+holding them against the keys in src/HE_Editor/EditorHelp.cpp.
+
+    scripts/editor_help_audit.py            # the table, by area
+    scripts/editor_help_audit.py --list AREA  # the open ones in that area
+    scripts/editor_help_audit.py --check    # exit 1 if coverage dropped
+
+--check is the regression guard, wired into ctest as `editor_help_audit`: it
+fails when a NEW uncovered control appears, using the counts recorded in
+BASELINE below. Raise the numbers there in the same commit that covers an area
+— that is the whole ritual.
+
+It reads source, not the binary, so it is approximate by construction: a label
+built at run time cannot be seen here, and a widget behind a macro will be
+missed. It is a floor on the gap, never a ceiling.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import os
+import re
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parent.parent / "src" / "HE_Editor"
+
+# Widgets that put a label on screen the user can hover.
+VALUE = (r"(?:EditorWidgets::Row::\w+|Row::\w+|EditorWidgets::checkbox|ImGui::Checkbox"
+         r"|ImGui::SliderFloat|ImGui::SliderInt|ImGui::DragFloat\d?|ImGui::DragInt"
+         r"|ImGui::InputText|ImGui::InputInt|ImGui::InputFloat|ImGui::Combo"
+         r"|ImGui::ColorEdit\d)")
+ACTION = (r"(?:ImGui::Button|ImGui::SmallButton|ImGui::MenuItem|ImGui::BeginMenu"
+          r"|EditorWidgets::primaryButton|EditorWidgets::dangerButton"
+          r"|EditorWidgets::dangerMenuItem|EditorWidgets::dangerSmallButton)")
+
+# Buttons whose wording IS the explanation. Counting these would inflate the gap
+# with work nobody should do: "Cancel" does not need a paragraph.
+CHROME = {
+    "OK", "Cancel", "Close", "Save", "Apply", "Done", "Yes", "No", "Browse",
+    "Remove", "Copy", "Paste", "Cut", "Undo", "Redo", "Delete", "Rename",
+    "Refresh", "Back", "Next", "Open", "Create", "+", "-", "x",
+}
+
+COMPONENT_HEADER = re.compile(r'componentHeader\("([^"]+)"')
+
+AREAS: dict[str, list[str]] = {
+    "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "OutlinerPanel.cpp",
+                  "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
+                  "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
+                  "TutorialPanel.cpp"],
+    "components": ["InspectorPanel.cpp"],
+    "settings": ["EditorSettingsPanel.cpp", "ToolchainDialog.cpp"],
+    "materials": ["MaterialEditorPanel.cpp"],
+    "ui": ["UIEditorPanel.cpp"],
+    "horizoncode": ["LevelScriptPanel.cpp", "HcGraphHost.cpp", "HcEditorUtil.cpp",
+                    "TypeAssetPanel.cpp"],
+    "input": ["InputAssetPanel.cpp"],
+    "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
+                  "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp"],
+    "landscape": ["TerrainTools.cpp", "EnvironmentPanel.cpp"],
+    "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
+    "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",
+               "GitMissingDialog.cpp", "EngineContentPublishDialog.cpp",
+               "ReportIssueDialog.cpp"],
+}
+
+# The gap as it stands, per area. A number that goes UP is a control somebody
+# added without an entry; --check is what says so. Lower them as areas are
+# covered — never raise one to make the check pass.
+BASELINE = {
+    "interface": 97, "components": 11, "settings": 18, "materials": 26, "ui": 30,
+    "horizoncode": 30, "input": 7, "animation": 15, "landscape": 17, "export": 27,
+    "collab": 39,
+}
+
+
+def help_keys() -> set[str]:
+    text = (SRC / "EditorHelp.cpp").read_text(encoding="utf-8")
+    return {m.group(1) for m in re.finditer(r'\{\s*"([^"]+)",\s*"', text)}
+
+
+def scan(filename: str, keys: set[str]) -> tuple[list, list]:
+    """(covered, open) labels of one panel, as (scope, label) pairs."""
+    path = SRC / filename
+    if not path.exists():
+        return [], []
+    text = path.read_text(encoding="utf-8")
+    # The Details panel names its section per component; Preferences is one scope.
+    scope = "Preferences" if filename == "EditorSettingsPanel.cpp" else None
+    covered, missing, seen = [], [], set()
+    for line in text.split("\n"):
+        m = COMPONENT_HEADER.search(line)
+        if m:
+            scope = m.group(1)
+        for pattern, is_action in ((VALUE, False), (ACTION, True)):
+            for hit in re.finditer(pattern + r'\(\s*"([^"]+)"', line):
+                raw = hit.group(1)
+                if raw.startswith("##") or not raw.strip():
+                    continue
+                visible = raw.split("##")[0]
+                if is_action and visible.strip(". ") in CHROME:
+                    continue
+                if (scope, visible) in seen:
+                    continue
+                seen.add((scope, visible))
+                candidates = [raw, visible, f"Component/{visible}"]
+                if scope:
+                    candidates += [f"{scope}/{raw}", f"{scope}/{visible}"]
+                (covered if any(c in keys for c in candidates) else missing).append(
+                    (scope, visible))
+    return covered, missing
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--list", metavar="AREA", help="print the open controls of one area")
+    ap.add_argument("--check", action="store_true",
+                    help="fail when an area has more open controls than the baseline")
+    args = ap.parse_args()
+
+    keys = help_keys()
+    result = {}
+    for area, files in AREAS.items():
+        cov, miss = [], []
+        for f in files:
+            c, m = scan(f, keys)
+            cov += c
+            miss += m
+        result[area] = (cov, miss)
+
+    if args.list:
+        cov, miss = result.get(args.list, ([], []))
+        if not miss:
+            print(f"{args.list}: nothing open")
+        for scope, label in miss:
+            print(f"  [{scope or '-'}] {label}")
+        return 0
+
+    print(f"{'Area':14s} {'controls':>9s} {'covered':>8s} {'open':>6s} {'baseline':>9s}")
+    worse = []
+    for area, (cov, miss) in result.items():
+        base = BASELINE.get(area)
+        flag = ""
+        if base is not None and len(miss) > base:
+            flag = "  <-- REGRESSED"
+            worse.append(area)
+        print(f"{area:14s} {len(cov) + len(miss):9d} {len(cov):8d} {len(miss):6d} "
+              f"{base if base is not None else '-':>9}{flag}")
+    total_open = sum(len(m) for _, m in result.values())
+    total_cov = sum(len(c) for c, _ in result.values())
+    print(f"{'TOTAL':14s} {total_cov + total_open:9d} {total_cov:8d} {total_open:6d}")
+    print(f"\nhelp entries: {len(keys)}")
+
+    if args.check and worse:
+        print(f"\nnew uncovered controls in: {', '.join(worse)}", file=sys.stderr)
+        print("add a help entry for them, or lower the baseline if one was removed",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

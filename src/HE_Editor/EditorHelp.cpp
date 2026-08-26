@@ -1226,6 +1226,54 @@ namespace
 		{ "systems#physics",           "Details",             "" },
 	};
 
+	// ── Which page of the reference an entry lands on ────────────────────────
+	// Longest prefix wins. The component scopes all fold into one page — a
+	// reader looking up "Mass" is in the Details panel whichever component it
+	// belongs to, and the component's own name becomes the group inside the
+	// page, which is exactly how the panel is arranged.
+	constexpr Area kAreas[] = {
+		// ── Interface ────────────────────────────────────────────────────────
+		{ "viewport.", "editor-interface", "Editor Interface", "Scene viewport" },
+		{ "outliner.", "editor-interface", "Editor Interface", "World Outliner" },
+		{ "content.",  "editor-interface", "Editor Interface", "Content Browser" },
+		{ "details.",  "editor-interface", "Editor Interface", "Details panel" },
+		{ "panel.",    "editor-interface", "Editor Interface", "Panels and windows" },
+		{ "menu.",     "editor-interface", "Editor Interface", "Menus" },
+		{ "hub.",      "editor-interface", "Editor Interface", "Project Hub" },
+		// ── The Details panel's components ───────────────────────────────────
+		{ "Component/", "editor-components", "Component Reference", "The components" },
+		// ── Settings ─────────────────────────────────────────────────────────
+		{ "Preferences/", "editor-settings", "Settings Reference", "Preferences" },
+		{ "settings.",    "editor-settings", "Settings Reference", "Preferences" },
+		// ── The asset editors ────────────────────────────────────────────────
+		{ "material.", "editor-materials", "Material Editor",   "Material graph" },
+		{ "ui.",       "editor-ui",        "UI Designer",       "Widget designer" },
+		{ "input.",    "editor-input",     "Input Reference",   "Input assets" },
+		{ "hc.",       "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
+		{ "terrain.",  "editor-landscape", "Landscape Tools",   "Terrain brush" },
+		{ "env.",      "editor-landscape", "Landscape Tools",   "Environment window" },
+		{ "anim.",     "editor-animation", "Animation Editors", "Animator" },
+		// ── Build, diagnose, collaborate ─────────────────────────────────────
+		{ "export.",   "editor-export",    "Export & Diagnostics", "Export" },
+		{ "profiler.", "editor-export",    "Export & Diagnostics", "Profiler" },
+		{ "collab.",   "editor-collab",    "Collaboration & Source Control", "Collaboration" },
+		{ "sc.",       "editor-collab",    "Collaboration & Source Control", "Source control" },
+	};
+
+	// Every component scope maps to the component page, with the component as
+	// the group. Listed rather than pattern-matched: a scope is a display name,
+	// and "does this string contain a slash" is not a statement about the
+	// editor.
+	constexpr const char* kComponentScopes[] = {
+		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
+		"Decal", "Rigid Body", "Collider", "Character Controller", "Movement",
+		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
+		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
+		"Animator State Machine", "Property Animator", "Particle System",
+		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"UI Text", "UI Image", "UI Button",
+	};
+
 	// The current section, as a stack. A vector rather than one string because
 	// panels nest (a component inside the Details panel inside a tab) and an
 	// unwound scope has to restore what was there, not clear it.
@@ -1322,8 +1370,66 @@ const PanelTopic* panelForTopic(std::string_view topic)
 	return nullptr;
 }
 
+const Area* areaOf(std::string_view key)
+{
+	// Longest matching prefix, so a specific rule can sit in front of a general
+	// one without depending on the order they were written in.
+	const Area* best = nullptr;
+	std::size_t bestLen = 0;
+	for (const Area& a : kAreas)
+	{
+		const std::string_view p(a.prefix);
+		if (key.size() >= p.size() && key.substr(0, p.size()) == p && p.size() > bestLen)
+		{
+			best = &a;
+			bestLen = p.size();
+		}
+	}
+	if (best) return best;
+
+	// A component's own rows ("Rigid Body/Mass"): the scope names the component,
+	// which is both the page's group and how the Details panel is arranged.
+	//
+	// The rows are built ONCE, in full, and never appended to afterwards — the
+	// first version grew the vector per component and handed out pointers into
+	// it, so the next component to be looked up reallocated the storage and
+	// every pointer returned so far became a dangling one. It crashed in the
+	// test that walks all of them, which is the only place that looks up enough
+	// of them to reallocate.
+	static const std::vector<Area> s_components = [] {
+		std::vector<Area> v;
+		v.reserve(std::size(kComponentScopes));
+		for (const char* c : kComponentScopes)
+			v.push_back({ c, "editor-components", "Component Reference", c });
+		return v;
+	}();
+
+	const std::size_t slash = key.find('/');
+	if (slash != std::string_view::npos)
+	{
+		const std::string_view scope = key.substr(0, slash);
+		for (const Area& a : s_components)
+			if (scope == a.group) return &a;
+	}
+	return nullptr;
+}
+
+std::string referenceTopic(std::string_view key)
+{
+	const Area* a = areaOf(key);
+	if (!a) return {};
+	// The key IS the anchor: it is already unique, already stable, and already
+	// what the call site names. Only the slash has to go — it separates page
+	// from section in a topic.
+	std::string anchor(key);
+	std::replace(anchor.begin(), anchor.end(), '/', '.');
+	return std::string(a->page) + "#" + anchor;
+}
+
 int          entryCount()          { return static_cast<int>(std::size(kEntries)); }
 const Entry& entryAt(int i)        { return kEntries[i]; }
+int          areaCount()           { return static_cast<int>(std::size(kAreas)); }
+const Area&  areaAt(int i)         { return kAreas[i]; }
 int          panelTopicCount()     { return static_cast<int>(std::size(kPanelTopics)); }
 const PanelTopic& panelTopicAt(int i) { return kPanelTopics[i]; }
 

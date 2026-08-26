@@ -3,6 +3,7 @@
 #include "DocsLibrary.h"
 #include "EditorHelp.h"          // topic → the panel it is about ("Show me")
 #include "HcNodeReference.h"     // the node reference, generated from the engine
+#include "EditorReference.h"     // the editor reference, generated from the tooltips
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "PanelSpotlight.h"
@@ -191,7 +192,13 @@ namespace
 		// registries, so it can neither miss a call nor list one that is gone.
 		// It takes the page id the website's hand-written version had, which is
 		// what keeps every cross-link and F1 anchor pointing at it resolving.
-		if (lib.loaded()) HE::Ed::NodeReference::install(lib);
+		if (lib.loaded())
+		{
+			HE::Ed::NodeReference::install(lib);
+			// And the editor's own controls, from the same table the hover
+			// tooltips come from — so F1 on a control opens the control.
+			HE::Ed::EditorReference::install(lib);
+		}
 	}
 
 	// ── Inline text ──────────────────────────────────────────────────────────

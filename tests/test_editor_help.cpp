@@ -2,6 +2,7 @@
 
 #include "DocsLibrary.h"
 #include "EditorHelp.h"
+#include "EditorReference.h"
 #include "EditorWidgets.h"
 
 #include <imgui.h>
@@ -62,6 +63,58 @@ TEST_CASE("editor help: every entry is a usable tooltip")
 	// Guards the case where a bad merge leaves the table almost empty: it would
 	// still compile, and every tooltip in the editor would simply be gone.
 	CHECK(Help::entryCount() > 120);
+}
+
+TEST_CASE("editor reference: F1 on a control opens the control, not a chapter")
+{
+	// The point of the generated reference, and the thing that was wrong before
+	// it: 320 entries shared 47 topics, so F1 anywhere in the sky settings
+	// opened one chapter about the sky. Now every entry has a section of its
+	// own, and this is what says so.
+	Docs::Library lib = shipped();
+	REQUIRE_MESSAGE(lib.loaded(), lib.error());
+	HE::Ed::EditorReference::install(lib);
+
+	std::set<std::string> anchors;
+	int checked = 0;
+	for (int i = 0; i < Help::entryCount(); ++i)
+	{
+		const Help::Entry& e = Help::entryAt(i);
+		const std::string key(e.key);
+
+		// Every entry has a home. A key with no area rule would never appear in
+		// the manual at all, and nothing else would say so.
+		const Help::Area* area = Help::areaOf(key);
+		REQUIRE_MESSAGE(area != nullptr, "help key with no area — add a rule: ", key);
+
+		const std::string topic = Help::referenceTopic(key);
+		REQUIRE(!topic.empty());
+		int page = -1, section = -1;
+		CHECK_MESSAGE(lib.resolve(topic, page, section),
+		              "F1 target does not resolve: ", topic);
+		CHECK_MESSAGE(section >= 0, "F1 lands on a page, not on the control: ", topic);
+		// Two controls sharing an anchor would mean F1 on one opens the other.
+		CHECK_MESSAGE(anchors.insert(topic).second, "two controls share an anchor: ", topic);
+		++checked;
+	}
+	INFO("controls with an entry of their own: " << checked);
+	CHECK(checked > 300);
+
+	// And the reverse: the reference lists nothing that is not a control.
+	int sections = 0;
+	for (int i = 0; i < Help::areaCount(); ++i)
+	{
+		const Docs::Page* p = lib.page(Help::areaAt(i).page);
+		if (!p) continue;
+		for (const Docs::Section& s : p->sections)
+		{
+			++sections;
+			CHECK(!s.title.empty());
+			CHECK(!s.blocks.empty());
+		}
+	}
+	INFO("sections in the generated reference: " << sections);
+	CHECK(sections >= checked);
 }
 
 TEST_CASE("editor help: every topic it points at exists in the manual")
@@ -256,11 +309,15 @@ TEST_CASE("editor help: a Details row explains itself with no call site of its o
 	io.AddMousePosEvent(control.x, control.y);
 	for (int i = 0; i < 40; ++i) frame("Rigid Body");
 
-	// F1 while it is showing hands back the section of the manual to open.
+	// F1 while it is showing hands back the section of the manual to open — the
+	// control's OWN entry in the generated reference. It used to hand back the
+	// chapter the concept belongs to ("systems#physics"), which is what the
+	// reference pages exist to replace: that chapter is now a link inside this
+	// entry rather than the place F1 drops you.
 	io.AddKeyEvent(ImGuiKey_F1, true);
 	frame("Rigid Body");
 	REQUIRE(topic != nullptr);
-	CHECK(std::string(topic) == "systems#physics");
+	CHECK(std::string(topic) == "editor-components#Rigid Body.Mass");
 	io.AddKeyEvent(ImGuiKey_F1, false);
 	frame("Rigid Body");
 

@@ -47,8 +47,14 @@ struct Entry
 	const char* body;
 	// "Ctrl+S" — rewritten to "Cmd+S" on macOS by shortcutLabel(). Empty = none.
 	const char* shortcut;
-	// Topic in the documentation bundle ("editor#play-mode"), or empty. Every
-	// non-empty one is asserted to resolve.
+	// The CONCEPT this control belongs to, as a topic in the manual
+	// ("rendering#sky"), or empty. Not where F1 goes — F1 goes to the control's
+	// own entry in the generated reference (referenceTopic below). This is the
+	// "more about the idea behind it" link printed inside that entry.
+	//
+	// It used to be the F1 target, and that was the whole problem the reference
+	// pages exist to fix: 320 entries shared 47 topics, so F1 on "Cloud
+	// Fluffiness" opened a chapter about the sky.
 	const char* topic;
 };
 
@@ -107,9 +113,36 @@ struct PanelTopic
 // when the topic is not about a panel.
 const PanelTopic* panelForTopic(std::string_view topic);
 
+// ── Where an entry belongs in the manual ─────────────────────────────────────
+// The generated reference is one page per area of the editor, and this is what
+// says which. Declared as a table rather than inferred from the key: "Rigid
+// Body/Mass" happens to name a component, but "viewport.play" names nothing an
+// algorithm could place, and a rule that works for one and guesses at the other
+// is a rule that will be wrong quietly.
+struct Area
+{
+	// Key prefix this rule matches: a dotted namespace ("viewport."), or a
+	// scope followed by "/" ("Preferences/"). Longest match wins, so a specific
+	// rule can sit in front of a general one.
+	const char* prefix;
+	const char* page;    // page id + title of the generated reference page
+	const char* title;
+	const char* group;   // the eyebrow inside that page ("Viewport toolbar")
+};
+
+// The area an entry belongs to, or null when no rule matches (which the test
+// treats as an error — a new key with no home would silently never appear).
+const Area* areaOf(std::string_view key);
+
+// Where F1 on this control goes: its own section in the generated reference
+// ("editor-interface#viewport.play"). Empty when the key has no area.
+std::string referenceTopic(std::string_view key);
+
 // Table access, for the tests and for anything that wants to walk the set.
 int          entryCount();
 const Entry& entryAt(int i);
+int          areaCount();
+const Area&  areaAt(int i);
 int          panelTopicCount();
 const PanelTopic& panelTopicAt(int i);
 

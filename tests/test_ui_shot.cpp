@@ -10,6 +10,7 @@
 #include "HcEditorUtil.h"
 #include "HcNodeReference.h"
 #include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
+#include "EditorReference.h"
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
@@ -631,6 +632,31 @@ TEST_CASE("docs reader: an F1 that was already answered is not toggled back shut
 	CHECK_FALSE(DocsPanel::openedThisFrame());
 	ImGui::Render();
 	ImGui::EndFrame();
+	DocsPanel::close();
+}
+
+TEST_CASE("ui shot: the generated editor reference")
+{
+	// The manual's new middle: one entry per control, generated from the same
+	// table the hover tooltips come from, so F1 on a slider opens the slider.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+	HE::Ed::EditorReference::install(lib);
+
+	// Exactly where F1 on the sky's Fluffiness slider now lands — the entry
+	// that used to be a chapter about the sky.
+	DocsPanel::openTopic("editor-components#Environment.Fluffiness");
+	const he_ui::Image img = shoot("editor-reference", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
 }
 

@@ -160,6 +160,9 @@ add_executable(he_tests
     # The generated node-reference page — built from the registries, so the
     # test can check the manual has an entry per callable thing.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcNodeReference.cpp
+    # The editor reference, generated from the help table — the test walks
+    # both against each other.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorReference.cpp
     # The documentation reader itself, so test_ui_shot.cpp can render the real
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).
@@ -449,6 +452,20 @@ foreach(_src IN LISTS _he_test_sources)
     set_tests_properties(${_stem} PROPERTIES
         ENVIRONMENT "TMPDIR=${_tmp};TMP=${_tmp};TEMP=${_tmp}")
 endforeach()
+
+# ── "Does every control explain itself?" ─────────────────────────────────────
+# A missing tooltip is invisible: nothing fails to build and nothing fails a
+# test, the user just hovers and gets nothing. The audit walks the panels'
+# SOURCE for labelled widgets and holds them against the help table, which is
+# why it is a script rather than a doctest — C++ cannot read its own call sites.
+# It fails when an area gains an uncovered control, against the baseline
+# recorded in the script itself.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME editor_help_audit
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/scripts/editor_help_audit.py" --check)
+endif()
 
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP
 # multicast) and hand sessions between two live endpoints. Letting two of them
