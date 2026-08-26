@@ -117,6 +117,19 @@ struct SubGroup
 	~SubGroup()            { ImGui::Unindent(12.0f); ImGui::EndDisabled(); }
 };
 
+// "Preferences/<category>", with a lifetime the help stack can hold on to.
+// Help::setScope keeps the POINTER it is handed — every other caller passes a
+// string literal, and this one would be passing a temporary — so the composed
+// strings are interned here and never move again.
+const char* prefScopeFor(const char* cat)
+{
+	static std::map<std::string, std::string> cache;
+	auto it = cache.find(cat);
+	if (it == cache.end())
+		it = cache.emplace(std::string(cat), "Preferences/" + std::string(cat)).first;
+	return it->second.c_str();
+}
+
 } // namespace
 
 // Renders the engine-settings catalog. Each `row(key, category, widget)` is a
@@ -137,10 +150,16 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	// own column's edge and not at the window's, which would run it under the pin.
 	EditorWidgets::WrapText wrap;
 
-	// Every row below is looked up as "Preferences/<its label>" in the help
-	// table, which is what gives the whole catalogue its tooltips without a
-	// single changed call site. Scoped, so the docked Quick Settings panel —
+	// Every row below is looked up as "Preferences/<its category>/<its label>" in
+	// the help table, which is what gives the whole catalogue its tooltips without
+	// a single changed call site. Scoped, so the docked Quick Settings panel —
 	// which draws through here too — does not leave it set for the next panel.
+	//
+	// The CATEGORY is in the key because the reference page is grouped by it, and
+	// the category a setting belongs to is decided here, in the row() call, and
+	// nowhere else. Putting it in a second table in EditorHelp.cpp would be a
+	// second answer to the same question, and the two would drift the first time
+	// somebody moved a setting from Display to Effects.
 	HE::Ed::Help::Scope helpScope("Preferences");
 
 	EditorConfig& cfg = ctx.editorConfig;
@@ -151,6 +170,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (categoryFilter && std::strcmp(cat, categoryFilter) != 0) return;
 		const bool fav = isFavorite(cfg, key);
 		if (mode == SettingsMode::QuickSettings && !fav) return;
+		// Retarget the open scope at this row's category. setScope rather than a
+		// second Scope object: this lambda returns from several places, and the
+		// one push above already owns the stack slot.
+		HE::Ed::Help::setScope(prefScopeFor(cat));
 		// With a category filter the page heading already names the category, so
 		// the per-category separator is only drawn for the unfiltered catalog.
 		if (!categoryFilter && (!lastCat || std::strcmp(lastCat, cat) != 0))
@@ -201,7 +224,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	row("backend", "Display", [&]{
 		ImGui::TextUnformatted("Backend");
 		ImGui::SetNextItemWidth(-FLT_MIN);
-		if (ImGui::BeginCombo("##backend", ctx.backendName.c_str()))
+		const bool backendOpen = ImGui::BeginCombo("##backend", ctx.backendName.c_str());
+		// The label is a line of text above the combo, not the combo's own label,
+		// so the lookup has to be asked for by name — and only while the list is
+		// shut, since an open combo makes its entries the last item.
+		if (!backendOpen) EditorWidgets::helpForLabel("Backend");
+		if (backendOpen)
 		{
 			auto pick = [&](const char* label, HE::RendererBackend api){
 				if (ImGui::Selectable(label)) { ctx.globalState->setSelectedRHI(api); ctx.backendName = getRHIName(api); }

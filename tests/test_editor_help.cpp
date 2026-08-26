@@ -167,6 +167,19 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Tool Status",     "Fix" },
 		{ "Tool Status",     "Recheck all" },
 		{ "Preferences",     "Restore Defaults" },
+		// The settings catalog retargets its scope at each row's category, so a
+		// setting resolves under "Preferences/<category>". One per category, so a
+		// category renamed in the panel and not in the table fails here.
+		{ "Preferences/Display",             "VSync" },
+		{ "Preferences/Display",             "Backend" },
+		{ "Preferences/Post-Processing",     "Bloom Threshold" },
+		{ "Preferences/Global Illumination", "GI Refl Blur" },
+		{ "Preferences/Effects",             "GPU Weather Particles" },
+		{ "Preferences/Collaboration",       "Largest Asset to Transfer (MB)" },
+		{ "Preferences/Viewport",            "Camera Speed" },
+		{ "Preferences/Input",               "Stick Deadzone" },
+		{ "Preferences/Appearance",          "UI Font Scale" },
+		{ "Preferences/Content Browser",     "Refresh Interval (s)" },
 		{ "Build Tools",     "Install Automatically" },
 		{ "Build Tools",     "Recheck" },
 		{ "Build Tools",     "Don't show this again" },

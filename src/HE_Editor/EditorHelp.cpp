@@ -1448,152 +1448,158 @@ namespace
 	// Scoped "Preferences" and keyed by the label, like the Details rows — the
 	// settings catalog draws through the same Row helpers, so these need no call
 	// site either. The labels are the panel's, exactly.
-	{ "Preferences/Render Path", "",
+	{ "Preferences/Display/Backend", "Backend",
+	  "Which graphics API the editor and the game render through. Changing it "
+	  "takes effect on the next start, and the list holds only what this build "
+	  "and this machine actually support — some features (deferred shading, "
+	  "ray-traced GI) exist on some backends and not on others.",
+	  "", "rendering#backends" },
+	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",
 	  "", "rendering#pipeline" },
-	{ "Preferences/VSync", "",
+	{ "Preferences/Display/VSync", "",
 	  "Waits for the display before showing a frame: no tearing, and the frame "
 	  "rate is capped to the monitor's. Off is for measuring performance.",
 	  "", "rendering#performance" },
-	{ "Preferences/Max FPS (VSync off)", "",
+	{ "Preferences/Display/Max FPS (VSync off)", "",
 	  "Upper limit on frames per second once VSync is off. A cap keeps a laptop "
 	  "quiet without giving up responsiveness. 0 is unlimited.",
 	  "", "rendering#performance" },
-	{ "Preferences/Anti-Aliasing", "",
+	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
 	  "motion but needs the deferred path.",
 	  "", "rendering#postfx" },
-	{ "Preferences/AA Sharpness", "",
+	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "
 	  "Too much re-introduces the edges it just removed.",
 	  "", "rendering#postfx" },
-	{ "Preferences/Render Scale", "",
+	{ "Preferences/Post-Processing/Render Scale", "",
 	  "Renders the 3D view at a fraction of the window size and upscales it. The "
 	  "single most effective performance dial there is; 0.75 is often invisible.",
 	  "", "rendering#performance" },
-	{ "Preferences/Specular AA", "",
+	{ "Preferences/Post-Processing/Specular AA", "",
 	  "Tames the sparkle that fine, shiny detail produces in motion, by widening "
 	  "the highlight where the surface curves too fast for the pixel.",
 	  "", "rendering#postfx" },
-	{ "Preferences/Specular AA Strength", "",
+	{ "Preferences/Post-Processing/Specular AA Strength", "",
 	  "How aggressively that is done. Too high and polished surfaces go dull.",
 	  "", "rendering#postfx" },
-	{ "Preferences/Bloom", "",
+	{ "Preferences/Post-Processing/Bloom", "",
 	  "Lets bright areas bleed light into what surrounds them, the way a camera "
 	  "does.",
 	  "", "rendering#postfx" },
-	{ "Preferences/Bloom Threshold", "",
+	{ "Preferences/Post-Processing/Bloom Threshold", "",
 	  "How bright a pixel has to be before it blooms. Low values make the whole "
 	  "image glow, which is rarely what is wanted.",
 	  "", "rendering#postfx" },
-	{ "Preferences/Bloom Intensity", "",
+	{ "Preferences/Post-Processing/Bloom Intensity", "",
 	  "How much of the bloom is added back on top of the image.",
 	  "", "rendering#postfx" },
-	{ "Preferences/AO", "",
+	{ "Preferences/Post-Processing/AO", "",
 	  "Ambient occlusion: darkens the creases and contact points that ambient "
 	  "light cannot reach. It is what stops objects looking as if they float.",
 	  "", "rendering#postfx" },
-	{ "Preferences/AO Method", "",
+	{ "Preferences/Post-Processing/AO Method", "",
 	  "SSAO is the cheapest. HBAO follows the surface horizon and is more "
 	  "accurate; GTAO is the most accurate and the most expensive.",
 	  "", "rendering#postfx" },
-	{ "Preferences/AO Radius", "",
+	{ "Preferences/Post-Processing/AO Radius", "",
 	  "How far, in world units, a surface looks for neighbours that might be "
 	  "shadowing it. Large radii darken whole surfaces rather than their creases.",
 	  "", "rendering#postfx" },
-	{ "Preferences/AO Intensity", "",
+	{ "Preferences/Post-Processing/AO Intensity", "",
 	  "How dark the occlusion gets. Past 1 it stops reading as shadow and starts "
 	  "reading as dirt.",
 	  "", "rendering#postfx" },
-	{ "Preferences/Screen-Space Reflections", "",
+	{ "Preferences/Post-Processing/Screen-Space Reflections", "",
 	  "Reflects what is already on screen in wet and polished surfaces. What is "
 	  "off screen cannot be reflected — that is the method's limit, not a bug.",
 	  "", "rendering#postfx" },
-	{ "Preferences/SSR Intensity", "",
+	{ "Preferences/Post-Processing/SSR Intensity", "",
 	  "How strongly the screen-space reflection is blended in.",
 	  "", "rendering#postfx" },
-	{ "Preferences/SSR Max Roughness", "",
+	{ "Preferences/Post-Processing/SSR Max Roughness", "",
 	  "The roughest surface still worth reflecting into. Rough surfaces scatter "
 	  "so much that the reflection costs more than it shows.",
 	  "", "rendering#postfx" },
-	{ "Preferences/SSR Quality", "",
+	{ "Preferences/Post-Processing/SSR Quality", "",
 	  "How many steps each reflection ray takes. More steps reach further before "
 	  "the reflection gives up and fades.",
 	  "", "rendering#performance" },
-	{ "Preferences/Global Illumination (ray-traced, Metal)", "",
+	{ "Preferences/Global Illumination/Global Illumination (ray-traced, Metal)", "",
 	  "Ray-traced bounce light: colour carried from lit surfaces into the shadows "
 	  "around them. Needs a ray-tracing capable GPU.",
 	  "", "rendering#lighting" },
-	{ "Preferences/GI Indirect Intensity", "",
+	{ "Preferences/Global Illumination/GI Indirect Intensity", "",
 	  "How much of that bounced light is applied. Above 1 rooms glow from their "
 	  "own walls.",
 	  "", "rendering#lighting" },
-	{ "Preferences/GI Light Radius (deg)", "",
+	{ "Preferences/Global Illumination/GI Light Radius (deg)", "",
 	  "How large the light source is treated as being, in degrees. Wider means "
 	  "softer, more diffuse indirect shadows.",
 	  "", "rendering#lighting" },
-	{ "Preferences/GI Reflections (ray-traced)", "",
+	{ "Preferences/Global Illumination/GI Reflections (ray-traced)", "",
 	  "Traced reflections instead of screen-space ones: they can show what is "
 	  "behind the camera, at the cost of tracing the scene.",
 	  "", "rendering#postfx" },
-	{ "Preferences/GI Refl Intensity", "",
+	{ "Preferences/Global Illumination/GI Refl Intensity", "",
 	  "How strongly the traced reflection is blended in.", "", "rendering#postfx" },
-	{ "Preferences/GI Refl Max Roughness", "",
+	{ "Preferences/Global Illumination/GI Refl Max Roughness", "",
 	  "The roughest surface still traced. Above it the cheaper approximation "
 	  "takes over.",
 	  "", "rendering#postfx" },
-	{ "Preferences/GI Refl Quality", "",
+	{ "Preferences/Global Illumination/GI Refl Quality", "",
 	  "Rays per pixel for the traced reflections — the dial between noise and "
 	  "frame time.",
 	  "", "rendering#performance" },
-	{ "Preferences/GI Refl Bounces (Metal)", "",
+	{ "Preferences/Global Illumination/GI Refl Bounces (Metal)", "",
 	  "How many times a reflection ray may bounce on. Two is enough for a mirror "
 	  "facing a mirror to look right.",
 	  "", "rendering#performance" },
-	{ "Preferences/GI Refl Blur", "",
+	{ "Preferences/Global Illumination/GI Refl Blur", "",
 	  "Smooths the traced reflections before they are composited, which is what "
 	  "hides the noise a low ray count leaves.",
 	  "", "rendering#postfx" },
-	{ "Preferences/GPU Weather Particles", "",
+	{ "Preferences/Effects/GPU Weather Particles", "",
 	  "Simulate rain and snow on the GPU. Far more drops for the same frame time; "
 	  "it needs a backend that can do it, and falls back quietly where it cannot.",
 	  "", "rendering#weather" },
-	{ "Preferences/Find Sessions on the Local Network", "",
+	{ "Preferences/Collaboration/Find Sessions on the Local Network", "",
 	  "Announce and discover collaboration sessions on this network, so joining "
 	  "needs no address. Off, a session is still reachable by its id and code.",
 	  "", "collaboration#discovery" },
-	{ "Preferences/Sync Large Assets (Meshes, Textures, Audio)", "",
+	{ "Preferences/Collaboration/Sync Large Assets (Meshes, Textures, Audio)", "",
 	  "Send the big files to peers as well as the small ones. Off, everybody needs "
 	  "their own copy of the meshes and textures — but joining is instant.",
 	  "", "collaboration#bigassets" },
-	{ "Preferences/Largest Asset to Transfer (MB)", "",
+	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
 	  "", "collaboration#bigassets" },
-	{ "Preferences/Camera Speed", "",
+	{ "Preferences/Viewport/Camera Speed", "",
 	  "How fast the editor's fly camera moves, in units per second. The viewport "
 	  "toolbar's speed field is the same value.",
 	  "", "editor#viewport" },
-	{ "Preferences/Pointer Device", "",
+	{ "Preferences/Viewport/Pointer Device", "",
 	  "Whether the preview panes expect a mouse or a trackpad. On a trackpad a "
 	  "two-finger swipe steers and zoom moves behind the modifier key.",
 	  "", "editor#preferences" },
-	{ "Preferences/Stick Deadzone", "",
+	{ "Preferences/Input/Stick Deadzone", "",
 	  "How far a gamepad stick must be pushed before it counts as moved. It is "
 	  "what stops a worn stick from drifting the camera on its own.",
 	  "", "systems#input" },
-	{ "Preferences/Trigger Deadzone", "",
+	{ "Preferences/Input/Trigger Deadzone", "",
 	  "The same for the analogue triggers.", "", "systems#input" },
-	{ "Preferences/UI Font Scale", "",
+	{ "Preferences/Appearance/UI Font Scale", "",
 	  "Scales the editor's entire interface. For a high-resolution display, or "
 	  "simply for reading comfort.",
 	  "", "editor#preferences" },
-	{ "Preferences/Keep CPU Asset Cache", "",
+	{ "Preferences/Content Browser/Keep CPU Asset Cache", "",
 	  "Keeps mesh and texture data in main memory after it has been uploaded to "
 	  "the GPU. It costs RAM and saves a re-read.",
 	  "", "advanced#assets" },
-	{ "Preferences/Refresh Interval (s)", "",
+	{ "Preferences/Content Browser/Refresh Interval (s)", "",
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
@@ -2128,6 +2134,21 @@ namespace
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────
+		// One rule per category of the Preferences window, so the reference page
+		// is split the way the window is: the group heading a reader sees here is
+		// the SeparatorText they see there. The plain "Preferences/" rule stays
+		// underneath as the fallback — longest prefix wins, so a categorised key
+		// takes its category's rule and anything else (the footer's Restore
+		// Defaults) still lands on the page.
+		{ "Preferences/Display/",             "editor-settings", "Settings Reference", "Display" },
+		{ "Preferences/Post-Processing/",     "editor-settings", "Settings Reference", "Post-Processing" },
+		{ "Preferences/Global Illumination/", "editor-settings", "Settings Reference", "Global Illumination" },
+		{ "Preferences/Effects/",             "editor-settings", "Settings Reference", "Effects" },
+		{ "Preferences/Collaboration/",       "editor-settings", "Settings Reference", "Collaboration" },
+		{ "Preferences/Viewport/",            "editor-settings", "Settings Reference", "Viewport" },
+		{ "Preferences/Input/",               "editor-settings", "Settings Reference", "Input" },
+		{ "Preferences/Appearance/",          "editor-settings", "Settings Reference", "Appearance" },
+		{ "Preferences/Content Browser/",     "editor-settings", "Settings Reference", "Content Browser" },
 		{ "Preferences/",    "editor-settings", "Settings Reference", "Preferences" },
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },

@@ -650,11 +650,21 @@ TEST_CASE("ui shot: the generated editor reference")
 	HE::Ed::NodeReference::install(lib);
 	HE::Ed::EditorReference::install(lib);
 
-	// Exactly where F1 on the settings page's "Create & push" now lands — the
-	// entry for that button, not a chapter about source control. The settings
-	// page is the one worth shooting: its four groups come from four different
-	// scopes, so it is where a scope that stopped resolving would show.
-	DocsPanel::openTopic("editor-settings#Source Control.Create & push");
+	// Exactly where F1 on the Bloom Threshold slider now lands — the entry for
+	// that slider, not a chapter about post-processing. The settings page is the
+	// one worth shooting: its groups are the Preferences window's own categories,
+	// read out of the catalog's row() calls, so a category renamed there and not
+	// here shows up in this picture.
+	//
+	// Asserted rather than assumed: openTopic on an anchor that does not exist
+	// leaves the reader wherever it was, which in a shot looks like a page that
+	// simply scrolled somewhere else. That is how a broken anchor hides.
+	{
+		int pg = -1, sec = -1;
+		REQUIRE(lib.resolve("editor-settings#Preferences.Post-Processing.Bloom Threshold", pg, sec));
+		REQUIRE(sec >= 0);
+	}
+	DocsPanel::openTopic("editor-settings#Preferences.Post-Processing.Bloom Threshold");
 	const he_ui::Image img = shoot("editor-reference", W, H, 4,
 	                               [&](int) { DocsPanel::draw(host); });
 	REQUIRE(img.valid());

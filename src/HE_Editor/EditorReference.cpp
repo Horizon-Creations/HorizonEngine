@@ -39,7 +39,10 @@ namespace
 	{
 		if (e.title && e.title[0]) return e.title;
 		const std::string key(e.key);
-		const std::size_t slash = key.find('/');
+		// The LAST slash, not the first: a key can carry more than one level of
+		// scope ("Preferences/Post-Processing/Bloom Threshold"), and what the
+		// section is called is the label at the end of it.
+		const std::size_t slash = key.rfind('/');
 		return slash == std::string::npos ? key : key.substr(slash + 1);
 	}
 

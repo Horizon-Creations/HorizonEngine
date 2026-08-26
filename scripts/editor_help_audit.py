@@ -81,6 +81,13 @@ COMPONENT_HEADER = re.compile(r'componentHeader\("([^"]+)"')
 # rather than controls that got covered.
 HELP_SCOPE = re.compile(r'Help::Scope\s+\w+\("([^"]*)"\)')
 
+# The settings catalog does not push a scope per section — it retargets the open
+# one at each row's CATEGORY, so a setting is keyed
+# "Preferences/<category>/<label>" and the reference page can be split the way
+# the window is. The category lives in the row() call and nowhere else, which is
+# what keeps the two from drifting; this is the scan reading the same argument.
+SETTINGS_ROW = re.compile(r'row\("[^"]*",\s*"([^"]+)"')
+
 AREAS: dict[str, list[str]] = {
     "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "OutlinerPanel.cpp",
                   "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
@@ -133,6 +140,10 @@ def scan(filename: str, keys: set[str]) -> tuple[list, list]:
         m = HELP_SCOPE.search(line)
         if m and m.group(1):
             scope = m.group(1)
+        if filename == "EditorSettingsPanel.cpp":
+            m = SETTINGS_ROW.search(line)
+            if m:
+                scope = "Preferences/" + m.group(1)
         for pattern, is_action in ((VALUE, False), (ACTION, True)):
             for hit in re.finditer(pattern + r'\(\s*"([^"]+)"', line):
                 raw = hit.group(1)
