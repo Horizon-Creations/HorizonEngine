@@ -1,11 +1,14 @@
 #include "doctest.h"
 
 #include "HcNodeDocs.h"
+#include "DocsLibrary.h"
+#include "HcNodeReference.h"
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 
 #include <algorithm>
+#include <vector>
 #include <set>
 #include <string>
 
@@ -75,6 +78,51 @@ TEST_CASE("node docs: every built-in node type explains itself too")
 	}
 	INFO("built-in node types documented: " << checked);
 	CHECK(checked > 30);
+}
+
+TEST_CASE("node reference: the manual has an entry per callable thing")
+{
+	// The page the hover tooltip's F1 lands on. Generated from the same
+	// registries the palette is built from, so "is it complete" is answerable
+	// rather than a matter of somebody having remembered.
+	HE::Ed::Docs::Library lib;
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+
+	const HE::Ed::Docs::Page* page = lib.page(HE::Ed::NodeReference::kPageId);
+	REQUIRE(page != nullptr);
+	CHECK(page->sections.size() > 300);
+
+	std::set<std::string> ids;
+	for (const HE::Ed::Docs::Section& s : page->sections) ids.insert(s.id);
+
+	for (const HE::api::ApiFn& fn : HE::api::registry())
+		CHECK_MESSAGE(ids.count(fn.id) == 1,
+		              "engine call missing from the node reference: ", std::string(fn.id));
+	for (HorizonCode::NodeType t : HorizonCode::nodeRegistry())
+	{
+		std::string id = HorizonCode::nodeDisplayName(t);
+		id.erase(std::remove(id.begin(), id.end(), ' '), id.end());
+		if (id.empty()) continue;
+		CHECK_MESSAGE(ids.count("node." + id) == 1,
+		              "built-in node missing from the node reference: ", id);
+	}
+
+	// Installing twice must replace, not duplicate — the reader can reach
+	// ensureLoaded with a library another reader already filled.
+	const std::size_t before = lib.pages().size();
+	HE::Ed::NodeReference::install(lib);
+	CHECK(lib.pages().size() == before);
+	CHECK(lib.page(HE::Ed::NodeReference::kPageId)->sections.size() == page->sections.size());
+
+	// And it has to be findable: the whole point of it being a page rather than
+	// a special screen is that search reaches it.
+	const std::vector<HE::Ed::Docs::Hit> hits = lib.search("addImpulse");
+	REQUIRE(!hits.empty());
+	CHECK(lib.pages()[hits[0].page].id == HE::Ed::NodeReference::kPageId);
+	CHECK(lib.pages()[hits[0].page].sections[hits[0].section].id == "physics.addImpulse");
 }
 
 TEST_CASE("node docs: the generated sky rows are covered by the field list")

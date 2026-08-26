@@ -147,6 +147,11 @@ namespace HcEditorUtil
 	std::string containerSuffix(bool isArray, HorizonCode::ContainerKind container,
 	                            HorizonCode::PinType keyType);
 
+	// A value type's name as the editor spells it ("Vec3", "Bool", "Exec").
+	// Exported because the node reference in the manual is built outside this
+	// file and has to name types the same way the graph editor does.
+	const char* pinTypeName(HorizonCode::PinType t);
+
 	// Interface editor for a HorizonCode function: edit the FunctionEntry's typed
 	// Inputs (params) and Outputs (results). On any change it re-syncs the matching
 	// Call/Return nodes and prunes now-invalid links, then sets `edited`. Shared by

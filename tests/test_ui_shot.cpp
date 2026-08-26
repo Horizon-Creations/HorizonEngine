@@ -8,6 +8,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "HcEditorUtil.h"
+#include "HcNodeReference.h"
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
@@ -385,6 +386,31 @@ TEST_CASE("ui shot: a node explains itself on hover")
 		}
 	INFO("saturated pixels in the pin column: " << coloured);
 	CHECK(coloured > 20);
+}
+
+TEST_CASE("ui shot: the generated node reference")
+{
+	// The page that replaced the website's hand-written node reference: one
+	// section per callable thing, with the pins the node really has. Shot
+	// because the two things worth checking about it are visual — that the
+	// three hundred sections do not read as a wall, and that the pin colours
+	// made it onto the page.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+
+	DocsPanel::openTopic("horizoncode-nodes#physics.addImpulse");
+	const he_ui::Image img = shoot("node-reference", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 80000);
+	DocsPanel::close();
 }
 
 TEST_CASE("ui shot: searching the manual from the reader")

@@ -363,6 +363,36 @@ bool Library::loadFromJson(std::string_view text)
 	return true;
 }
 
+void Library::appendPage(Page page)
+{
+	if (page.id.empty()) return;
+
+	// The section→page back-reference is an index, so it has to be fixed up for
+	// wherever the page lands — and a replacement must land in the SAME slot, or
+	// every group entry pointing at the old index would now name another page.
+	int slot = pageIndex(page.id);
+	if (slot < 0)
+	{
+		slot = static_cast<int>(m_pages.size());
+		m_pages.push_back(std::move(page));
+	}
+	else
+	{
+		m_pages[static_cast<std::size_t>(slot)] = std::move(page);
+	}
+	for (Section& s : m_pages[static_cast<std::size_t>(slot)].sections) s.page = slot;
+
+	// A page that no group lists is unreachable from the sidebar. Put a new one
+	// in the last group ("Reference", where the bundle's own reference pages
+	// live) rather than inventing one for it.
+	bool listed = false;
+	for (const Group& g : m_groups)
+		for (int i : g.pages) if (i == slot) listed = true;
+	if (!listed && !m_groups.empty()) m_groups.back().pages.push_back(slot);
+
+	buildIndex();
+}
+
 void Library::buildIndex()
 {
 	m_index.clear();

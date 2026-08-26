@@ -2,6 +2,7 @@
 
 #include "DocsLibrary.h"
 #include "EditorHelp.h"          // topic → the panel it is about ("Show me")
+#include "HcNodeReference.h"     // the node reference, generated from the engine
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "PanelSpotlight.h"
@@ -67,6 +68,11 @@ namespace
 	int   s_scrollTo    = -1;    // section to scroll to on the next draw
 	bool  s_focusSearch = false;
 	char  s_query[128]  = "";
+	// How many more frames to keep asking for the scroll. One is not enough: on
+	// the frame a page opens, nothing above the target has been laid out at its
+	// final height yet (fonts, wrapped paragraphs, tables), so the offset ImGui
+	// computes lands near the section rather than on it.
+	int   s_scrollFrames = 0;
 
 	// Where the reader has been, so Back means what it does in a browser. Pairs
 	// of (page, section); -1 for "the top of the page".
@@ -134,9 +140,10 @@ namespace
 			s_history.emplace_back(page, section);
 			s_historyPos = static_cast<int>(s_history.size()) - 1;
 		}
-		s_page     = page;
-		s_section  = section;
-		s_scrollTo = section;
+		s_page        = page;
+		s_section     = section;
+		s_scrollTo    = section;
+		s_scrollFrames = 3;
 	}
 
 	void goTopic(const char* topic)
@@ -171,6 +178,11 @@ namespace
 		docs::Library& lib = docs::library();
 		if (!lib.load(docs::bundlePath(base ? base : "")))
 			HE_LOG_WARN(Editor, "%s", ("DocsPanel: " + lib.error()).c_str());
+		// The node reference is not written, it is built — from the engine's own
+		// registries, so it can neither miss a call nor list one that is gone.
+		// It takes the page id the website's hand-written version had, which is
+		// what keeps every cross-link and F1 anchor pointing at it resolving.
+		if (lib.loaded()) HE::Ed::NodeReference::install(lib);
 	}
 
 	// ── Inline text ──────────────────────────────────────────────────────────
@@ -466,6 +478,73 @@ namespace
 		}
 	}
 
+	// A node's pins, in the canvas's own vocabulary: triangle for exec, filled
+	// circle for data, 2×2 grid for a container, each in the type's colour. Two
+	// columns, inputs on the left, because that is where they are on the node.
+	void drawPins(const docs::Block& b)
+	{
+		const float line = ImGui::GetTextLineHeight();
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		auto glyph = [&](const docs::PinRow& p) {
+			const float r  = line * 0.28f;
+			const ImVec2 q = ImGui::GetCursorScreenPos();
+			const ImVec2 c(q.x + line * 0.5f, q.y + line * 0.5f);
+			if (p.isExec)
+				dl->AddTriangleFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x - r, c.y + r),
+				                      ImVec2(c.x + r, c.y), p.color);
+			else if (p.isContainer)
+			{
+				const float o = r * 0.55f, h = r * 0.42f;
+				for (int gy = -1; gy <= 1; gy += 2)
+					for (int gx = -1; gx <= 1; gx += 2)
+						dl->AddRectFilled(ImVec2(c.x + gx * o - h, c.y + gy * o - h),
+						                  ImVec2(c.x + gx * o + h, c.y + gy * o + h), p.color);
+			}
+			else
+				dl->AddCircleFilled(c, r, p.color);
+			ImGui::Dummy(ImVec2(line, line));
+			ImGui::SameLine(0.0f, 6.0f);
+		};
+		auto column = [&](bool input) {
+			bool any = false;
+			for (const docs::PinRow& p : b.pins)
+			{
+				if (p.isInput != input) continue;
+				if (!any)
+				{
+					ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+					ImGui::TextUnformatted(input ? "Inputs" : "Outputs");
+					ImGui::PopStyleColor();
+					any = true;
+				}
+				glyph(p);
+				if (!p.name.empty()) { ImGui::TextUnformatted(p.name.c_str()); ImGui::SameLine(0.0f, 6.0f); }
+				ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(p.color));
+				ImGui::TextUnformatted(p.type.c_str());
+				ImGui::PopStyleColor();
+			}
+			return any;
+		};
+
+		ImGui::Spacing();
+		// Side by side while there is room for two columns; stacked in a narrow
+		// reader, where a half-width column would wrap every type name.
+		const bool wide = ImGui::GetContentRegionAvail().x > 420.0f;
+		if (wide && ImGui::BeginTable("##pins", 2, ImGuiTableFlags_SizingStretchSame))
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0); column(true);
+			ImGui::TableSetColumnIndex(1); column(false);
+			ImGui::EndTable();
+		}
+		else
+		{
+			column(true);
+			column(false);
+		}
+		ImGui::Spacing();
+	}
+
 	void drawFigure(const Ctx& ctx, const docs::Block& b)
 	{
 		const Figure& f = figure(ctx, b.src);
@@ -531,6 +610,7 @@ namespace
 			ImGui::Spacing();
 			break;
 		}
+		case docs::BlockKind::Pins:    drawPins(b);         break;
 		case docs::BlockKind::Table:   drawTable(ctx, b);   break;
 		case docs::BlockKind::Code:    drawCode(ctx, b);    break;
 		case docs::BlockKind::Callout: drawCallout(ctx, b); break;
@@ -587,7 +667,7 @@ namespace
 			// The scroll lands here, on the section's first item — set while the
 			// section is being submitted, which is the only moment ImGui can turn
 			// "this one" into a scroll offset.
-			if (s_scrollTo == i) ImGui::SetScrollHereY(0.0f);
+			if (s_scrollTo == i && s_scrollFrames > 0) ImGui::SetScrollHereY(0.0f);
 
 			if (!sec.eyebrow.empty())
 			{
@@ -631,7 +711,7 @@ namespace
 			ImGui::Spacing();
 			ImGui::PopID();
 		}
-		s_scrollTo = -1;
+		if (s_scrollFrames > 0 && --s_scrollFrames == 0) s_scrollTo = -1;
 	}
 
 	// ── Search results ───────────────────────────────────────────────────────
@@ -686,6 +766,68 @@ namespace
 		}
 	}
 
+	// ── Sidebar: the sections of the open page ───────────────────────────────
+	// A flat list works for a manual page with a dozen sections. The node
+	// reference has three hundred — one per callable thing — and a flat list of
+	// those is not navigation, it is the problem it was supposed to solve. Past
+	// a threshold the list collapses into its eyebrows, which on that page are
+	// the categories (Physics, Save, Transform …), and only the open one
+	// unfolds.
+	void drawSectionList(const docs::Page& page)
+	{
+		const int count = static_cast<int>(page.sections.size());
+		ImGui::Indent(12.0f);
+
+		auto row = [&](int si) {
+			ImGui::PushID(si);
+			ImGui::PushStyleColor(ImGuiCol_Text, si == s_section ? HE::Ed::Theme::TextHeading
+			                                                     : HE::Ed::Theme::TextDim);
+			if (ImGui::Selectable(page.sections[static_cast<std::size_t>(si)].title.c_str(),
+			                      si == s_section))
+				go(s_page, si);
+			ImGui::PopStyleColor();
+			ImGui::PopID();
+		};
+
+		if (count <= 30)
+		{
+			for (int si = 0; si < count; ++si) row(si);
+		}
+		else
+		{
+			// Walk the sections once, opening a group per new eyebrow. The
+			// sections are already grouped in page order, so no sorting and no
+			// second structure is needed — and the group holding the section
+			// being read opens itself, which is what makes the sidebar follow
+			// the reader instead of the other way round.
+			for (int si = 0; si < count; )
+			{
+				const std::string& cat = page.sections[static_cast<std::size_t>(si)].eyebrow;
+				int end = si;
+				while (end < count &&
+				       page.sections[static_cast<std::size_t>(end)].eyebrow == cat) ++end;
+
+				const bool holdsCurrent = s_section >= si && s_section < end;
+				ImGui::PushID(si);
+				ImGui::SetNextItemOpen(holdsCurrent, ImGuiCond_Always);
+				ImGui::PushStyleColor(ImGuiCol_Text, holdsCurrent ? HE::Ed::Theme::TextHeading
+				                                                  : HE::Ed::Theme::Text);
+				const bool open = ImGui::TreeNodeEx(
+					"##cat", ImGuiTreeNodeFlags_SpanAvailWidth,
+					"%s  (%d)", cat.empty() ? "Other" : cat.c_str(), end - si);
+				ImGui::PopStyleColor();
+				if (open)
+				{
+					for (int k = si; k < end; ++k) row(k);
+					ImGui::TreePop();
+				}
+				ImGui::PopID();
+				si = end;
+			}
+		}
+		ImGui::Unindent(12.0f);
+	}
+
 	// ── Sidebar ──────────────────────────────────────────────────────────────
 	void drawNav()
 	{
@@ -705,24 +847,7 @@ namespace
 				// page" list, which is how a long reference page is navigated at
 				// all. Only for the open page: all of them at once would be a
 				// hundred and twelve rows.
-				if (idx == s_page)
-				{
-					ImGui::Indent(12.0f);
-					for (int si = 0; si < static_cast<int>(p.sections.size()); ++si)
-					{
-						ImGui::PushID(si);
-						ImGui::PushStyleColor(ImGuiCol_Text,
-						                      si == s_section ? HE::Ed::Theme::TextHeading
-						                                      : HE::Ed::Theme::TextDim);
-						if (ImGui::Selectable(p.sections[static_cast<std::size_t>(si)]
-						                          .title.c_str(),
-						                      si == s_section))
-							go(idx, si);
-						ImGui::PopStyleColor();
-						ImGui::PopID();
-					}
-					ImGui::Unindent(12.0f);
-				}
+				if (idx == s_page) drawSectionList(p);
 				ImGui::PopID();
 			}
 			ImGui::Spacing();
@@ -918,31 +1043,53 @@ void draw(const Host& host)
 	ImGui::Separator();
 
 	const float navWidth = 230.0f;
+	// Measured before the sidebar is drawn, because the reading column's left
+	// margin has to be part of the SameLine that places it — an Indent() after a
+	// SameLine moves the NEXT line, not this one, which put the body on top of
+	// the sidebar the first time this was written.
+	const float bodyAvail = ImGui::GetContentRegionAvail().x - navWidth
+	                      - ImGui::GetStyle().ItemSpacing.x;
+
 	ImGui::BeginChild("##docsNav", ImVec2(navWidth, 0.0f), ImGuiChildFlags_Borders);
 	{
 		drawNav();
 	}
 	ImGui::EndChild();
 
-	ImGui::SameLine();
-
-	ImGui::BeginChild("##docsBody", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
+	// ── The reading column ──────────────────────────────────────────────────
+	// The body is capped at a reading width instead of filling the window. Long
+	// measures are why a page of documentation reads as a wall: past roughly
+	// ninety characters the eye loses the start of the next line, and a
+	// maximised reader on a wide screen was well past that. The cap is in EM, so
+	// it follows the UI font scale rather than fighting it.
+	//
+	// The cap is on the SCROLLING child itself rather than on a column inside
+	// it. A child nested in it would be the one SetScrollHereY talks to, and
+	// with AutoResizeY that child never scrolls — so every jump to a section
+	// would silently do nothing.
 	{
-		// Everything in the body is prose in a narrow column, so the wrap
-		// position is pushed once for the whole child (see EditorWidgets::
-		// WrapText — this is the BeginChild case, where the guard's own block
-		// ends before EndChild).
-		EditorWidgets::WrapText wrap;
-		if (s_query[0]) drawResults(s_query);
-		else            drawPage(ctx);
+		const float cap = ImGui::GetFontSize() * 42.0f;
+		const float pad = bodyAvail > cap ? (bodyAvail - cap) * 0.35f : 0.0f;
+		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x + pad);
+		ImGui::BeginChild("##docsBody", ImVec2(std::min(bodyAvail, cap), 0.0f),
+		                  ImGuiChildFlags_None);
+		{
+			// Everything in the body is prose in a narrow column, so the wrap
+			// position is pushed once for the whole child (see EditorWidgets::
+			// WrapText — this is the BeginChild case, where the guard's own block
+			// ends before EndChild).
+			EditorWidgets::WrapText wrap;
+			if (s_query[0]) drawResults(s_query);
+			else            drawPage(ctx);
 
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-		ImGui::Text("Offline copy of the manual, generated %s.", lib.generated().c_str());
-		ImGui::PopStyleColor();
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::Text("Offline copy of the manual, generated %s.", lib.generated().c_str());
+			ImGui::PopStyleColor();
+		}
+		ImGui::EndChild();
 	}
-	ImGui::EndChild();
 
 	ImGui::End();
 #else

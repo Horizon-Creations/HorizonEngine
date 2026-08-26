@@ -70,7 +70,15 @@ SCHEMA_VERSION = 1
 # The docs home is a link grid, not prose: it has no <main class="docs-content">
 # and nothing in it that is not already the group listing this bundle builds
 # from the sidebar.
-SKIP_PAGES = {"index.html"}
+SKIP_PAGES = {
+    "index.html",
+    # The node reference is GENERATED in the editor from HE::api::registry() and
+    # the node enum (src/HE_Editor/HcNodeReference.cpp) — one section per
+    # callable thing, with its real pins. The website's hand-written version was
+    # two sections of tables and already behind the engine, so shipping it would
+    # only give the reader a worse copy under the same page id.
+    "horizoncode-nodes.html",
+}
 
 TITLE_TAIL = re.compile(r"\s*[—–-]\s*Horizon Engine Documentation\s*$")
 

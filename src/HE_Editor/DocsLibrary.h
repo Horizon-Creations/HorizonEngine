@@ -55,7 +55,25 @@ enum class BlockKind : std::uint8_t
 	Flow,       // steps — the website's arrow diagrams, as an ordered list
 	Figure,     // src (a file in Docs/img) + alt
 	Tile,       // title + sub + href — a "read on" link card
+	// A node's inputs and outputs, drawn with the graph canvas's own glyphs and
+	// colours. Never comes from the website bundle: the node reference is built
+	// from the engine's registries at run time (HcNodeReference), and this is
+	// the one thing on that page that would lose its meaning as prose — a pin's
+	// colour IS which wires fit it.
+	Pins,
 	Unknown,
+};
+
+// One row of a Pins block. The colour is resolved when the page is built, so
+// this file needs to know nothing about HorizonCode's types.
+struct PinRow
+{
+	std::string   name;
+	std::string   type;        // "Vec3", "Int[]" — already suffixed
+	std::uint32_t color = 0;   // ImU32, from HcEditorUtil::pinTypeColor
+	bool          isExec      = false;
+	bool          isContainer = false;
+	bool          isInput     = true;
 };
 
 enum class Tone : std::uint8_t { Note, Warning, Tip };
@@ -77,8 +95,9 @@ struct Block
 	Tone               tone = Tone::Note;   // Callout
 
 	struct Step { std::string label, sub; };
-	std::vector<Step>  steps;   // Flow
-	std::vector<Block> blocks;  // Callout body
+	std::vector<Step>   steps;   // Flow
+	std::vector<Block>  blocks;  // Callout body
+	std::vector<PinRow> pins;    // Pins
 };
 
 struct Section
@@ -158,6 +177,14 @@ public:
 	// text), which is what keeps a two-word query from returning half the manual.
 	// Empty query → no hits.
 	std::vector<Hit> search(std::string_view query, int maxHits = 40) const;
+
+	// Add a page that was not in the bundle, or REPLACE the one with its id.
+	// The node reference is generated from the engine's own registries rather
+	// than written on the website, and this is how it joins the manual: once it
+	// is a page, search, navigation, topics and F1 all reach it with no special
+	// case anywhere. Replace-by-id keeps it idempotent — building it twice (a
+	// second reader, a test) must not produce two.
+	void appendPage(Page page);
 
 private:
 	std::vector<Page>  m_pages;

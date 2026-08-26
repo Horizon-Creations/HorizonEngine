@@ -157,6 +157,9 @@ add_executable(he_tests
     # Per-node documentation: plain data over the engine's own registries,
     # so the coverage test can walk both against each other.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcNodeDocs.cpp
+    # The generated node-reference page — built from the registries, so the
+    # test can check the manual has an entry per callable thing.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcNodeReference.cpp
     # The documentation reader itself, so test_ui_shot.cpp can render the real
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).

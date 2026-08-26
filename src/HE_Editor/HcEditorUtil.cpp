@@ -327,6 +327,8 @@ std::string drawNodeDoc(HorizonCode::NodeType t)
 }
 
 // ── Shared graph colors ──────────────────────────────────────────────────────
+const char* pinTypeName(HorizonCode::PinType t) { return tooltipTypeName(t); }
+
 std::uint32_t pinTypeColor(HorizonCode::PinType t)
 {
 	using P = HorizonCode::PinType;

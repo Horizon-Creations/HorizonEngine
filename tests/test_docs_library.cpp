@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include "DocsLibrary.h"
+#include "HcNodeReference.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -28,12 +29,19 @@ namespace
 	// editor. Passed in by the build (tests/CMakeLists.txt) rather than found by
 	// walking up from the working directory, which differs between ctest, an IDE
 	// runner and a packaged test binary.
+	// The manual as the reader assembles it: the shipped bundle PLUS the node
+	// reference, which is generated from the engine's registries rather than
+	// converted from the website (see HcNodeReference.h). Assembling it the same
+	// way here is not tidiness — the docs cross-link to that page, so a test
+	// that loaded only the bundle would report every one of those links as
+	// dangling, and be right.
 	Library loadShipped()
 	{
 		Library lib;
 #ifdef HE_DOCS_BUNDLE_PATH
 		lib.load(HE_DOCS_BUNDLE_PATH);
 #endif
+		if (lib.loaded()) HE::Ed::NodeReference::install(lib);
 		return lib;
 	}
 
@@ -100,8 +108,11 @@ TEST_CASE("docs bundle: the shipped file loads and is complete")
 	{
 		CHECK(!p.id.empty());
 		CHECK(!p.title.empty());
-		CHECK(!p.file.empty());
 		CHECK(!p.sections.empty());
+		// A page converted from the website names the file it came from, which
+		// is what the reader's "Online" button opens. The generated node
+		// reference has no counterpart there and deliberately carries none.
+		if (p.id != "horizoncode-nodes") CHECK(!p.file.empty());
 		for (const Section& s : p.sections)
 		{
 			++sections;
