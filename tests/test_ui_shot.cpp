@@ -866,7 +866,13 @@ TEST_CASE("Graph canvas: clicking an overlap selects the node in front")
 // The cause: drawPinGlyph took a BOOL for "is a container" and drew the array
 // grid for all three kinds. The proof is the KEY colour: a Map glyph paints its
 // left column in the key type's colour, so a String key has to be findable in
-// the glyph. With the old bool there was only ever the value colour.
+// the picture.
+//
+// The words next to the glyph had the same problem for longer: the type read
+// "Bool{String:}", which nobody parses as "a map of String to Bool". Both halves
+// are checked here — the picture through its pixels, the wording through
+// typeLabel(), which is the string the tooltip rasterises. There is no OCR: the
+// image says a map glyph was drawn, typeLabel says what was written beside it.
 TEST_CASE("Node tooltip: a Map output shows the map glyph, key colour and all")
 {
 	constexpr int W = 460, H = 260;
@@ -882,9 +888,31 @@ TEST_CASE("Node tooltip: a Map output shows the map glyph, key colour and all")
 	node.container = HorizonCode::ContainerKind::Map;
 	node.keyType   = HorizonCode::PinType::String;
 
+	// The wording, before anything is drawn. Key FIRST, the way the type is read
+	// aloud and the way the manual already writes it.
+	using PT = HorizonCode::PinType;
+	using CK = HorizonCode::ContainerKind;
+	CHECK(HcEditorUtil::typeLabel(PT::Bool, true, CK::Map, PT::String) == "Map<String, Bool>");
+	CHECK(HcEditorUtil::typeLabel(PT::Bool, true, CK::Array, PT::String) == "Array<Bool>");
+	CHECK(HcEditorUtil::typeLabel(PT::String, true, CK::Set, PT::String) == "Set<String>");
+	CHECK(HcEditorUtil::typeLabel(PT::Bool, false, CK::None, PT::String) == "Bool");
+	// A graph saved before Set/Map existed carries isArray with no kind, and has
+	// to keep reading as the array it is.
+	CHECK(HcEditorUtil::typeLabel(PT::Bool, true, CK::None, PT::String) == "Array<Bool>");
+	// Enum and Struct name their DEFINITION — "Enum" is not a type anybody has.
+	CHECK(HcEditorUtil::typeLabel(PT::Struct, false, CK::None, PT::String,
+	                              "Content/Types/Loadout.hasset") == "Loadout");
+	CHECK(HcEditorUtil::typeLabel(PT::Int, true, CK::Map, PT::Enum, "",
+	                              "Content/Types/Team.hasset") == "Map<Team, Int>");
+
 	const std::uint32_t keyCol = HcEditorUtil::pinTypeColor(HorizonCode::PinType::String);
 	const std::uint32_t valCol = HcEditorUtil::pinTypeColor(HorizonCode::PinType::Bool);
 	REQUIRE(keyCol != valCol);
+
+	// Captured out of the render so the assertions can talk about WHERE the ink
+	// is instead of just how much: the glyph sits in the first `line` pixels of
+	// the content column, the words start after it.
+	float contentX = 0.0f, lineH = 0.0f;
 
 	const he_ui::Image img = shoot("doc-map-pin-tooltip", W, H, 3, [&](int) {
 		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
@@ -894,13 +922,182 @@ TEST_CASE("Node tooltip: a Map output shows the map glyph, key colour and all")
 			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
 		{
 			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 32.0f);
+			contentX = ImGui::GetCursorScreenPos().x;
+			lineH    = ImGui::GetTextLineHeight();
 			HcEditorUtil::drawNodeDoc(node);
 		}
 		ImGui::End();
 	});
 	REQUIRE(img.valid());
+	REQUIRE(lineH > 0.0f);
 
-	auto countExact = [&](std::uint32_t col)
+	// Exact-colour pixels inside an x band. Exact, because the pin colours are
+	// only ever painted flat: anti-aliased edges land on neighbouring values and
+	// are not counted, which is what keeps this from matching the whole panel.
+	auto countBand = [&](std::uint32_t col, int x0, int x1)
+	{
+		const std::uint8_t wr = (std::uint8_t)((col >> IM_COL32_R_SHIFT) & 0xFF);
+		const std::uint8_t wg = (std::uint8_t)((col >> IM_COL32_G_SHIFT) & 0xFF);
+		const std::uint8_t wb = (std::uint8_t)((col >> IM_COL32_B_SHIFT) & 0xFF);
+		int n = 0;
+		for (int y = 0; y < img.height; ++y)
+			for (int x = (x0 < 0 ? 0 : x0); x < (x1 > img.width ? img.width : x1); ++x)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (r == wr && g == wg && b == wb) ++n;
+			}
+		return n;
+	};
+	const int glyphEnd = (int)(contentX + lineH) + 1;
+
+	// The value colour is everywhere anyway (the glyph's right column and the
+	// "Bool" in the type), so it only guards against an empty render.
+	CHECK(countBand(valCol, 0, img.width) > 0);
+
+	// Two separate claims, deliberately not one count over the whole picture.
+	// They used to be the same assertion, and then the type label started
+	// spelling "String" in the key colour as well — after which a regression to
+	// the flat array grid would have gone through unnoticed, on the strength of
+	// the WORD alone.
+	//
+	// The glyph: nothing but a Map paints its left column in the key type's
+	// colour, and only the glyph is drawn this far left.
+	CHECK(countBand(keyCol, 0, glyphEnd) > 0);
+	// The words: the "String" in "Map<String, Bool>", out where the label is.
+	CHECK(countBand(keyCol, glyphEnd, img.width) > 0);
+
+}
+
+// ── A type label must not fall apart at the wrap column ─────────────────────
+// The label is five separate ImGui items (one per colour), and that is at the
+// mercy of whatever wrap column the caller pushed. A piece that STARTS past that
+// column gets a wrap width of one pixel and breaks after every character;
+// ItemSize then reports the top of that stack as the previous line, so
+// SameLine(0,0) puts the rest of the label back ABOVE it. The result is a pile
+// of single letters, and no count of pixels notices — the ink is all still
+// there, just spread down the panel. So the span is the assertion.
+//
+// The wrap here is TIGHTER than any real caller's: at the 35 em the tooltips
+// actually push, the label starts around 75 px in and never reaches the column,
+// so the fault is latent rather than live. It is guarded anyway, because what
+// keeps it latent is a pin happening to be called "Value" — nothing structural —
+// and this scene is what holds the guard in place.
+TEST_CASE("Node tooltip: a type label stays on one line past the wrap column")
+{
+	// Tall enough that the Outputs row is still in frame once a narrow wrap has
+	// stretched the description down the panel — otherwise the label under test
+	// is simply off the bottom and the assertions have nothing to look at.
+	constexpr int W = 420, H = 520;
+	Harness harness(W, H);
+
+	HorizonCode::Node node;
+	node.type      = HorizonCode::NodeType::GetVariable;
+	node.s         = "SpawnedActorsByTeamIdentifier";
+	node.propType  = HorizonCode::PinType::Bool;
+	node.isArray   = true;
+	node.container = HorizonCode::ContainerKind::Map;
+	node.keyType   = HorizonCode::PinType::String;
+
+	const std::uint32_t keyCol = HcEditorUtil::pinTypeColor(HorizonCode::PinType::String);
+
+	float lineH = 0.0f;
+	const he_ui::Image img = shoot("doc-long-type-label", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("##longtip", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		{
+			// Chosen so the column falls INSIDE the label: "Map<" starts before it
+			// and "String" after, which is exactly the condition the fault needs.
+			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 6.0f);
+			lineH = ImGui::GetTextLineHeight();
+			HcEditorUtil::drawNodeDoc(node);
+		}
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(lineH > 0.0f);
+
+	// Where the key colour is, top to bottom. It belongs to two things only: the
+	// map glyph's left column and the word "String" beside it, which sit on the
+	// same row — so one line height, plus slack for the two being a pixel or two
+	// apart. Character-stacking spreads it over half the panel.
+	int minY = img.height, maxY = -1;
+	const std::uint8_t wr = (std::uint8_t)((keyCol >> IM_COL32_R_SHIFT) & 0xFF);
+	const std::uint8_t wg = (std::uint8_t)((keyCol >> IM_COL32_G_SHIFT) & 0xFF);
+	const std::uint8_t wb = (std::uint8_t)((keyCol >> IM_COL32_B_SHIFT) & 0xFF);
+	for (int y = 0; y < img.height; ++y)
+		for (int x = 0; x < img.width; ++x)
+		{
+			std::uint8_t r, g, b, a;
+			img.pixel(x, y, r, g, b, a);
+			if (r == wr && g == wg && b == wb) { if (y < minY) minY = y; if (y > maxY) maxY = y; }
+		}
+	REQUIRE(maxY >= 0);
+	CHECK((float)(maxY - minY) < lineH * 2.0f);
+}
+
+// ── The variable list has two looks, and both of them exist ──────────────────
+// Preferences ▸ Editor ▸ HorizonCode offers Detailed and Compact. A setting that
+// writes a config key nothing reads is worse than no setting, so this renders
+// the same variable under both and asserts they differ in the way the page
+// promises: Detailed puts the type on a second line, Compact keeps it on one.
+//
+// This is also where the spelling is checked in the place the complaint came
+// from. The list used to append the type in brackets — "NewVar (Bool{String:})"
+// — which is two problems in one row: a shape nobody reads, and a name whose
+// type is glued to it.
+TEST_CASE("Variable rows: Detailed and Compact are two real, different looks")
+{
+	constexpr int W = 320, H = 160;
+	using PT = HorizonCode::PinType;
+	using CK = HorizonCode::ContainerKind;
+
+	HcEditorUtil::VariableRowDesc var;
+	var.name      = "NewVar";
+	var.type      = PT::Bool;        // the VALUE type
+	var.isArray   = true;
+	var.container = CK::Map;
+	var.keyType   = PT::String;
+
+	const std::uint32_t keyCol = HcEditorUtil::pinTypeColor(PT::String);
+	const std::uint32_t valCol = HcEditorUtil::pinTypeColor(PT::Bool);
+	REQUIRE(keyCol != valCol);
+
+	auto shootStyle = [&](const char* name, HcEditorUtil::VariableRowStyle style,
+	                      float& heightOut)
+	{
+		Harness harness(W, H);
+		float h = 0.0f;
+		he_ui::Image img = shoot(name, W, H, 3, [&](int) {
+			ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f));
+			ImGui::SetNextWindowSize(ImVec2(W - 16.0f, H - 16.0f));
+			ImGui::Begin("##vars", nullptr,
+				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+				ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+			const float y0 = ImGui::GetCursorPosY();
+			HcEditorUtil::variableRow(var, false, style);
+			h = ImGui::GetCursorPosY() - y0;
+			ImGui::End();
+		});
+		heightOut = h;
+		return img;
+	};
+
+	float detailedH = 0.0f, compactH = 0.0f;
+	const he_ui::Image detailed = shootStyle("var-row-detailed",
+		HcEditorUtil::VariableRowStyle::Detailed, detailedH);
+	const he_ui::Image compact = shootStyle("var-row-compact",
+		HcEditorUtil::VariableRowStyle::Compact, compactH);
+	REQUIRE(detailed.valid());
+	REQUIRE(compact.valid());
+
+	// The promise on the settings page: two lines against one.
+	CHECK(detailedH > compactH);
+
+	auto count = [](const he_ui::Image& img, std::uint32_t col)
 	{
 		const std::uint8_t wr = (std::uint8_t)((col >> IM_COL32_R_SHIFT) & 0xFF);
 		const std::uint8_t wg = (std::uint8_t)((col >> IM_COL32_G_SHIFT) & 0xFF);
@@ -916,10 +1113,25 @@ TEST_CASE("Node tooltip: a Map output shows the map glyph, key colour and all")
 		return n;
 	};
 
-	// The value colour is everywhere anyway (the glyph's right column and the
-	// type text), so it only guards against an empty render.
-	CHECK(countExact(valCol) > 0);
-	// This is the actual assertion: the KEY colour only exists in a map glyph.
-	// It was absent before the fix — the tooltip drew one flat array grid.
-	CHECK(countExact(keyCol) > 0);
+	// Neither look may drop the type: the glyph's key column and the "String" of
+	// "Map<String, Bool>" are both painted in the key type's colour, so a row
+	// that shows a name and nothing else scores zero here.
+	CHECK(count(detailed, keyCol) > 0);
+	CHECK(count(compact, keyCol) > 0);
+	CHECK(count(detailed, valCol) > 0);
+	CHECK(count(compact, valCol) > 0);
+
+	// And the two are actually different pictures — not one look shipped twice.
+	REQUIRE(detailed.width == compact.width);
+	REQUIRE(detailed.height == compact.height);
+	int differing = 0;
+	for (int y = 0; y < detailed.height; ++y)
+		for (int x = 0; x < detailed.width; ++x)
+		{
+			std::uint8_t r1, g1, b1, a1, r2, g2, b2, a2;
+			detailed.pixel(x, y, r1, g1, b1, a1);
+			compact.pixel(x, y, r2, g2, b2, a2);
+			if (r1 != r2 || g1 != g2 || b1 != b2) ++differing;
+		}
+	CHECK(differing > 0);
 }

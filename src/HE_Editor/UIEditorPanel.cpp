@@ -1806,12 +1806,12 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 }
 
 // ── Graph left panel: element variables + functions ──────────────────────────
-// Deliberately NOT shared with LevelScriptPanel's drawVariables: only the type
-// label is (HcGraphHost::variableTypeLabel). The lists agree on what a variable
-// IS but not on how it is presented — this one opens with a UI-element browser
-// the other frontends have nothing to put in, shows the type as a trailing
-// TextDisabled + tooltip instead of inside the row label, and drags a
-// "HE_UIWGRAPH_ELEM"/"HE_UIWGRAPH_VAR" payload.
+// Deliberately NOT shared with LevelScriptPanel's drawVariables, though the ROW
+// itself now is (HcGraphHost::variableRow — a variable has to look the same
+// wherever it is listed, and the user picks that look once, on Preferences ▸
+// Editor ▸ HorizonCode). What differs is everything around the row: this one
+// opens with a UI-element browser the other frontends have nothing to put in
+// and drags a "HE_UIWGRAPH_ELEM"/"HE_UIWGRAPH_VAR" payload.
 void drawGraphVariables(State& st, AppContext& ctx)
 {
 	// ── Widget elements (drag → Get/Set a UI element property) ────────────────
@@ -1869,10 +1869,13 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a variable");
 	ImGui::Separator();
 
+	// Read once for the whole list, not once per row: it goes through the config
+	// store, and every row in a frame has to agree anyway.
+	const HcEditorUtil::VariableRowStyle rowStyle = HGH::variableRowStyle();
+
 	auto varRow = [&](const HC::Variable& v)
 	{
-		const std::string label = v.name + "##v" + v.name;
-		if (ImGui::Selectable(label.c_str(), st.selectedVar == v.name))
+		if (HGH::variableRow(v, st.selectedVar == v.name, rowStyle))
 		{
 			st.selectedVar = v.name;
 			st.selectedGraphNode = 0; // editing the variable, not a node
@@ -1886,11 +1889,11 @@ void drawGraphVariables(State& st, AppContext& ctx)
 			ImGui::Text("%s", v.name.c_str());
 			ImGui::EndDragDropSource();
 		}
-		const std::string typeStr = HGH::variableTypeLabel(v);
+		// The type is on the row itself now, so the hover only has to say what
+		// dragging does.
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s — drag to graph for Get/Set", typeStr.c_str());
-		ImGui::SameLine();
-		ImGui::TextDisabled("%s", typeStr.c_str());
+			ImGui::SetTooltip("%s — drag to graph for Get/Set",
+			                  HGH::variableTypeLabel(v).c_str());
 	};
 	for (const auto& v : st.graph.variables)
 		if (v.scope == 0) varRow(v);

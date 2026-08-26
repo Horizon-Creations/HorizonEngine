@@ -1,5 +1,6 @@
 #pragma once
 #include "GraphEditor.h"
+#include "HcEditorUtil.h"        // VariableRowStyle/VariableRowDesc for the list rows
 #include <HorizonCode/HorizonCode.h>
 #include <imgui.h>
 #include <functional>
@@ -51,9 +52,22 @@ void removePinLinks(HC::Graph& g, int nodeId, int pin);
 std::string uniqueFunctionName(const HC::Graph& g);
 std::string uniqueVarName(const HC::Graph& g);
 
-// How a variable's type reads in a list ("Float", "PlayerState", "Int[]") — an
-// Object variable shows its class, not a bare "Object".
+// How a variable's type reads as text ("Float", "PlayerState", "Array<Int>",
+// "Map<String, Bool>") — an Object variable shows its class, not a bare
+// "Object". For tooltips and search results; a variable LIST draws the type in
+// colour instead, via variableRow below.
 std::string variableTypeLabel(const HC::Variable& v);
+
+// The variable-list look the user picked, in the form variableRow wants. Read
+// it ONCE per frame and pass it down — it goes through the config store.
+HcEditorUtil::VariableRowStyle variableRowStyle();
+
+// One row of a variable list, in that look. The Selectable stays the last ImGui
+// item, so the caller still owns what a click means, the drag payload and the
+// tooltip. `note` replaces the type line when set (the inherited list says
+// "private" there).
+bool variableRow(const HC::Variable& v, bool selected, HcEditorUtil::VariableRowStyle style,
+                 const char* note = nullptr);
 
 // Add a node at `pos`, owned by the visible sub-graph.
 int addNode(HC::Graph& g, HC::NodeType type, const ImVec2& pos, int subgraph);

@@ -55,8 +55,13 @@ namespace
 		{
 			Docs::PinRow row;
 			row.name        = (p.name && *p.name) ? p.name : "";
-			row.type        = std::string(HcEditorUtil::pinTypeName(p.type)) +
-			                  HcEditorUtil::containerSuffix(p.isArray, p.container, p.keyType);
+			// Spelled out ("Map<String, Bool>"), not punctuated: a PinRow carries
+			// ONE colour, so the reference page cannot lean on the key's colour the
+			// way the canvas tooltip does — the words have to carry it alone.
+			// typeName/keyTypeName are borrowed and null for every built-in type.
+			row.type        = HcEditorUtil::typeLabel(p.type, p.isArray, p.container, p.keyType,
+			                                          p.typeName ? p.typeName : "",
+			                                          p.keyTypeName ? p.keyTypeName : "");
 			row.color       = HcEditorUtil::pinTypeColor(p.type);
 			row.isContainer = HC::containerKindOf(p.isArray, p.container) != HC::ContainerKind::None;
 			row.isInput     = input;

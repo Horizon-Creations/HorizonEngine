@@ -70,7 +70,7 @@ enum class BlockKind : std::uint8_t
 struct PinRow
 {
 	std::string   name;
-	std::string   type;        // "Vec3", "Int[]" — already suffixed
+	std::string   type;        // spelled out: "Vec3", "Array<Int>", "Map<String, Bool>"
 	std::uint32_t color = 0;   // ImU32, from HcEditorUtil::pinTypeColor
 	bool          isExec      = false;
 	bool          isContainer = false;

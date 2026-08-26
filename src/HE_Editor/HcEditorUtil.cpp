@@ -166,14 +166,21 @@ namespace
 	// on the node said Map, the tooltip explaining it said something else, and the
 	// tooltip is the half a reader trusts. `keyColor` is the Map's left column;
 	// 0 means "not a map" and the single colour is used throughout.
-	void drawPinGlyph(bool isExec, HorizonCode::ContainerKind kind, std::uint32_t color,
-	                  std::uint32_t keyColor = 0)
+	//
+	// Painted in SCREEN space rather than at the cursor, because a variable row
+	// draws its glyph on top of a Selectable it has already emitted — an ImGui
+	// item there would steal IsItemHovered() from the row. drawPinGlyph below is
+	// the cursor-driven wrapper for everyone else.
+	void addPinGlyph(ImDrawList* dl, ImVec2 p, float line, bool isExec,
+	                 HorizonCode::ContainerKind kind, std::uint32_t color,
+	                 std::uint32_t keyColor = 0)
 	{
-		const float line = ImGui::GetTextLineHeight();
-		const float r    = line * 0.28f;
-		const ImVec2 p   = ImGui::GetCursorScreenPos();
+		const float r = line * 0.28f;
 		const ImVec2 c(p.x + line * 0.5f, p.y + line * 0.5f);
-		ImDrawList* dl   = ImGui::GetWindowDrawList();
+		// Through GetColorU32 so a row inside BeginDisabled dims with everything
+		// else: a raw pin colour would paint a disabled row at full brightness.
+		color = ImGui::GetColorU32(color);
+		if (keyColor) keyColor = ImGui::GetColorU32(keyColor);
 
 		if (isExec)
 			dl->AddTriangleFilled(ImVec2(c.x - r, c.y - r), ImVec2(c.x - r, c.y + r),
@@ -207,10 +214,20 @@ namespace
 		}
 		else
 			dl->AddCircleFilled(c, r, color);
+	}
 
+	// The gap between a glyph and the text that belongs to it.
+	constexpr float kGlyphGap = 6.0f;
+
+	void drawPinGlyph(bool isExec, HorizonCode::ContainerKind kind, std::uint32_t color,
+	                  std::uint32_t keyColor = 0)
+	{
+		const float line = ImGui::GetTextLineHeight();
+		addPinGlyph(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), line,
+		            isExec, kind, color, keyColor);
 		// The glyph is drawn, not laid out — this is what reserves its space.
 		ImGui::Dummy(ImVec2(line, line));
-		ImGui::SameLine(0.0f, 6.0f);
+		ImGui::SameLine(0.0f, kGlyphGap);
 	}
 
 	// "Inputs" / "Outputs", as a quiet caption rather than another line of prose.
@@ -243,13 +260,16 @@ namespace
 				ImGui::TextUnformatted(p.name);
 				ImGui::SameLine(0.0f, 6.0f);
 			}
-			// The type in the pin's own colour: the one thing that says which
-			// wires will connect to it.
-			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(
-				pinTypeColor(p.type)));
-			ImGui::TextUnformatted((std::string(tooltipTypeName(p.type)) +
-			                        containerSuffix(p.isArray, p.container, p.keyType)).c_str());
-			ImGui::PopStyleColor();
+			// The type in the pin's own colours: the one thing that says which
+			// wires will connect to it. Spelled out rather than punctuated —
+			// "Map<String, Bool>", not "Bool{String:}", which is the shape this
+			// tooltip used to claim was self-explanatory.
+			// PinDesc's typeName/keyTypeName are BORROWED and nullable (they are
+			// null for every built-in type), so they cannot go into a std::string
+			// unguarded.
+			drawTypeLabel(p.type, p.isArray, p.container, p.keyType,
+			              p.typeName ? p.typeName : "",
+			              p.keyTypeName ? p.keyTypeName : "");
 		}
 	}
 } // namespace
@@ -615,17 +635,197 @@ bool drawKeyTypePicker(const char* label, HorizonCode::PinType& keyType,
 	return changed;
 }
 
-std::string containerSuffix(bool isArray, HorizonCode::ContainerKind container,
-                            HorizonCode::PinType keyType)
+// ── Readable type labels ─────────────────────────────────────────────────────
+// Types used to be spelled as a suffix on the value type, so a map of String to
+// Bool read "Bool{String:}". It is compact and nobody reads it: the value comes
+// first, the key sits inside braces, and the trailing colon points at nothing.
+// So types are written the way they are said — "Map<String, Bool>", key first,
+// which is also how docs/horizoncode-reference.md has always written them.
+namespace
 {
-	switch (HorizonCode::containerKindOf(isArray, container))
+	// The name ONE half of a label carries. A user-defined type is named by its
+	// DEFINITION (the asset stem, exactly like the variable list and the "Type:"
+	// line in a node tooltip) — "Enum" and "Struct" say nothing about which one.
+	// Shared by every emitter below so the written and the drawn label cannot
+	// drift apart.
+	//
+	// Ref is in here too: an Object variable knows the CLASS it holds, and
+	// "Array<PlayerState>" is the answer to what an "Array<Object>" leaves open.
+	// An untyped object has no class, falls through, and stays "Object".
+	std::string typePartName(HorizonCode::PinType t, const std::string& typeName)
 	{
-		case HorizonCode::ContainerKind::Array: return "[]";
-		case HorizonCode::ContainerKind::Set:   return "{}";
-		case HorizonCode::ContainerKind::Map:
-			return std::string("{") + valueTypeName(keyType) + ":}";
-		default: return {};
+		using P = HorizonCode::PinType;
+		if (t == P::Enum || t == P::Struct || t == P::Ref)
+			if (const std::string stem = std::filesystem::path(typeName).stem().string();
+			    !stem.empty())
+				return stem;
+		// pinTypeName rather than the local valueTypeName, which has no Enum case
+		// at all — that is how an enum-keyed map came out as "{Exec:}".
+		return pinTypeName(t);
 	}
+
+	// "Array" / "Set" / "Map", or nullptr when the type is a plain value.
+	const char* containerWord(HorizonCode::ContainerKind k)
+	{
+		switch (k)
+		{
+			case HorizonCode::ContainerKind::Array: return "Array";
+			case HorizonCode::ContainerKind::Set:   return "Set";
+			case HorizonCode::ContainerKind::Map:   return "Map";
+			default: return nullptr;
+		}
+	}
+
+	// One coloured piece of a type label. `color` is the RAW colour — every
+	// emitter runs it through GetColorU32 so a disabled row dims properly.
+	struct LabelPart
+	{
+		std::string   text;
+		std::uint32_t color;
+	};
+
+	// The label, broken into its coloured pieces. The ONE place the spelling
+	// lives: the text form, the ImGui-item form and the draw-list form are all
+	// this list joined differently, so no two of them can disagree about what a
+	// map is called.
+	std::vector<LabelPart> typeLabelParts(HorizonCode::PinType type, bool isArray,
+	                                      HorizonCode::ContainerKind container,
+	                                      HorizonCode::PinType keyType,
+	                                      const std::string& typeName,
+	                                      const std::string& keyTypeName)
+	{
+		// The RESOLVED kind: a pin authored before Set/Map existed carries isArray
+		// with no kind at all and still has to read as an Array.
+		const HorizonCode::ContainerKind k = HorizonCode::containerKindOf(isArray, container);
+		const std::uint32_t valueCol = pinTypeColor(type);
+		const std::uint32_t dim = ImGui::ColorConvertFloat4ToU32(HE::Ed::Theme::TextDim);
+
+		const char* word = containerWord(k);
+		if (!word) return { { typePartName(type, typeName), valueCol } };
+		if (k == HorizonCode::ContainerKind::Map)
+			// The key in the KEY's colour is the whole point: it is what separates a
+			// Map<String,Bool> from a Map<Int,Bool> — and a map from an array —
+			// before a single word has been read.
+			return { { "Map<", dim },
+			         { typePartName(keyType, keyTypeName), pinTypeColor(keyType) },
+			         { ", ", dim },
+			         { typePartName(type, typeName), valueCol },
+			         { ">", dim } };
+		return { { std::string(word) + "<", dim },
+		         { typePartName(type, typeName), valueCol },
+		         { ">", dim } };
+	}
+
+	// The label painted straight into a draw list, returning its width. Used
+	// where an ImGui item would be in the way (a variable row keeps its
+	// Selectable as the last item) — and it cannot wrap, which is what a type
+	// label wants anyway.
+	float addTypeLabel(ImDrawList* dl, ImVec2 pos, HorizonCode::PinType type, bool isArray,
+	                   HorizonCode::ContainerKind container, HorizonCode::PinType keyType,
+	                   const std::string& typeName, const std::string& keyTypeName)
+	{
+		const float x0 = pos.x;
+		for (const LabelPart& p : typeLabelParts(type, isArray, container, keyType,
+		                                         typeName, keyTypeName))
+		{
+			dl->AddText(pos, ImGui::GetColorU32(p.color), p.text.c_str());
+			pos.x += ImGui::CalcTextSize(p.text.c_str()).x;
+		}
+		return pos.x - x0;
+	}
+
+}
+
+std::string typeLabel(HorizonCode::PinType type, bool isArray,
+                      HorizonCode::ContainerKind container, HorizonCode::PinType keyType,
+                      const std::string& typeName, const std::string& keyTypeName)
+{
+	std::string out;
+	for (const LabelPart& p : typeLabelParts(type, isArray, container, keyType,
+	                                         typeName, keyTypeName))
+		out += p.text;
+	return out;
+}
+
+void drawTypeLabel(HorizonCode::PinType type, bool isArray,
+                   HorizonCode::ContainerKind container, HorizonCode::PinType keyType,
+                   const std::string& typeName, const std::string& keyTypeName)
+{
+	// Wrapping OFF for the whole label. Every caller draws this inside a tooltip
+	// under WrapText(35 em), and a label built from several items does not wrap
+	// like one string: a piece that starts past the wrap column gets a wrap width
+	// of one pixel and breaks after EVERY character, after which SameLine(0,0)
+	// picks up the top of that stack and the rest of the label lands on the line
+	// above. A type label is short — a hard line that widens the tooltip is the
+	// better failure. (< 0 disables wrapping; paired exactly once below.)
+	ImGui::PushTextWrapPos(-1.0f);
+
+	// Every part is its own ImGui item, so they need SameLine(0,0) between them
+	// or each one starts a new line. The LAST part is left as a plain
+	// TextUnformatted — that is what leaves the cursor where the header promises
+	// it, so a caller's following SameLine() lands after the whole label.
+	const std::vector<LabelPart> parts =
+		typeLabelParts(type, isArray, container, keyType, typeName, keyTypeName);
+	for (std::size_t i = 0; i < parts.size(); ++i)
+	{
+		// The raw colour: TextUnformatted runs ImGuiCol_Text through GetColorU32
+		// itself, so pre-dimming it here would apply the alpha twice.
+		ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(parts[i].color));
+		ImGui::TextUnformatted(parts[i].text.c_str());
+		ImGui::PopStyleColor();
+		if (i + 1 < parts.size()) ImGui::SameLine(0.0f, 0.0f);
+	}
+
+	ImGui::PopTextWrapPos();
+}
+
+bool variableRow(const VariableRowDesc& v, bool selected, VariableRowStyle style)
+{
+	const bool twoLine = (style == VariableRowStyle::Detailed);
+	const float line = ImGui::GetTextLineHeight();
+	const ImGuiStyle& st = ImGui::GetStyle();
+	// Detailed reserves the second line INSIDE the selectable, so the whole entry
+	// is the hit area and the click target does not shrink to the name.
+	const float gap = st.ItemSpacing.y * 0.5f;
+	const float height = twoLine ? line * 2.0f + gap : 0.0f;
+
+	ImGui::PushID(v.name);
+	const ImVec2 p0 = ImGui::GetCursorScreenPos();
+	const bool clicked = ImGui::Selectable("##var", selected, 0, ImVec2(0.0f, height));
+	ImGui::PopID();
+
+	// Draw list from here on. Another ImGui item would become "the last item" and
+	// the caller's IsItemHovered()/BeginDragDropSource() would attach to the
+	// label instead of to the row.
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const HorizonCode::ContainerKind k = HorizonCode::containerKindOf(v.isArray, v.container);
+	// An Object variable is named by the class it holds; everything else by its
+	// own definition asset. They are different fields and never both set.
+	const std::string& valueName = v.className.empty() ? v.typeName : v.className;
+
+	addPinGlyph(dl, p0, line, false, k, pinTypeColor(v.type),
+	            k == HorizonCode::ContainerKind::Map ? pinTypeColor(v.keyType) : 0u);
+
+	const float textX = p0.x + line + kGlyphGap;
+	dl->AddText(ImVec2(textX, p0.y), ImGui::GetColorU32(ImGuiCol_Text), v.name);
+
+	if (v.note && *v.note)
+	{
+		// A note replaces the type: the inherited list says "private", and there
+		// the type is not the thing the reader came for.
+		const ImVec2 at = twoLine ? ImVec2(textX, p0.y + line + gap)
+		                          : ImVec2(textX + ImGui::CalcTextSize(v.name).x + kGlyphGap * 2.0f,
+		                                   p0.y);
+		dl->AddText(at, ImGui::GetColorU32(HE::Ed::Theme::TextDim), v.note);
+	}
+	else if (twoLine)
+		addTypeLabel(dl, ImVec2(textX, p0.y + line + gap), v.type, v.isArray, v.container,
+		             v.keyType, valueName, v.keyTypeName);
+	else
+		addTypeLabel(dl, ImVec2(textX + ImGui::CalcTextSize(v.name).x + kGlyphGap * 2.0f, p0.y),
+		             v.type, v.isArray, v.container, v.keyType, valueName, v.keyTypeName);
+
+	return clicked;
 }
 
 std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)

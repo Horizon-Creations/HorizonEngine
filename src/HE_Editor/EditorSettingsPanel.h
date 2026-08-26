@@ -5,9 +5,9 @@ struct AppContext;
 
 // ── Preferences tab + engine-settings catalog ────────────────────────────────
 // The Preferences UI is a full editor tab (Edit ▸ Preferences, Ctrl+,): a
-// category navigation on the left (General / Rendering / Source Control /
-// Tools, each with sub-pages) and the selected page's settings on the right.
-// It replaced the old modal popup.
+// category navigation on the left (General / Editor / Rendering / Collaboration
+// / Source Control / Tools, each with sub-pages) and the selected page's
+// settings on the right. It replaced the old modal popup.
 //
 // The engine-settings catalog is shared with the Quick Settings dock panel:
 // every setting row carries a "pin" toggle in the Preferences tab, and Quick
@@ -24,6 +24,8 @@ namespace EditorSettingsPanel
 	{
 		// General
 		Appearance, Viewport, ContentBrowser,
+		// Editor (settings of the editor's own tools, not of the renderer)
+		HorizonCode,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
 		// Collaboration
@@ -36,6 +38,16 @@ namespace EditorSettingsPanel
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
 	constexpr const char* kTabPath = "::Preferences::";
+
+	// How the HorizonCode graph editor spells a variable in its variable list:
+	// Detailed puts the name and the (coloured) type on two lines, Compact puts
+	// both on one. Set on the Editor ▸ HorizonCode page.
+	enum class HcVariableStyle { Detailed = 0, Compact = 1 };
+
+	// The setting, read back for whoever draws the list. An accessor rather than
+	// a shared key so the graph editor never has to know where this is persisted,
+	// and so an absent or damaged value has ONE place to fall back to Detailed.
+	HcVariableStyle hcVariableStyle();
 
 	// Renders the engine-settings catalog. Each `row(key, category, widget)` is a
 	// logical setting group; `widget` draws its control(s). `categoryFilter`

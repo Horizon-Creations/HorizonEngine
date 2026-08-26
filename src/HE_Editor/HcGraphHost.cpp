@@ -4,6 +4,7 @@
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
 #include "EditorTheme.h"         // the hover tooltip's dim tier
+#include "EditorSettingsPanel.h" // which of the two variable-list looks the user picked
 #include "DocsPanel.h"           // F1 over a node opens its entry in the manual
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include <HorizonScene/EngineApi.h>
@@ -378,17 +379,45 @@ std::string lower(std::string v)
 	return v;
 }
 
+// An Object variable is named by the class it holds, not by a bare "Object" —
+// and an Enum/Struct variable by its definition asset — otherwise every one of
+// them looks the same in a list. They are different fields and never both set.
+HcEditorUtil::VariableRowDesc variableRowDesc(const HC::Variable& v, const char* note)
+{
+	HcEditorUtil::VariableRowDesc d;
+	d.name        = v.name.c_str();
+	d.type        = v.type;
+	d.isArray     = v.isArray;
+	d.container   = v.container;
+	d.keyType     = v.keyType;
+	d.typeName    = v.typeName;
+	d.keyTypeName = v.keyTypeName;
+	d.className   = v.className;
+	d.note        = note;
+	return d;
+}
+
 std::string variableTypeLabel(const HC::Variable& v)
 {
-	// An Object variable shows the class it holds, not a bare "Object" — and an
-	// Enum/Struct variable its definition asset — otherwise every one of them
-	// looks the same in the list.
-	return ((v.type == PT::Ref && !v.className.empty())
-		? std::filesystem::path(v.className).stem().string()
-		: ((v.type == PT::Enum || v.type == PT::Struct) && !v.typeName.empty())
-		? std::filesystem::path(v.typeName).stem().string()
-		: std::string(pinTypeName(v.type))) +
-		HcEditorUtil::containerSuffix(v.isArray, v.container, v.keyType);
+	return HcEditorUtil::typeLabel(v.type, v.isArray, v.container, v.keyType,
+	                               v.className.empty() ? v.typeName : v.className,
+	                               v.keyTypeName);
+}
+
+HcEditorUtil::VariableRowStyle variableRowStyle()
+{
+	// Converted in ONE place: the two variable lists must not be able to disagree
+	// about what the user picked, and HcEditorUtil stays free of the settings
+	// header.
+	return EditorSettingsPanel::hcVariableStyle() == EditorSettingsPanel::HcVariableStyle::Compact
+		? HcEditorUtil::VariableRowStyle::Compact
+		: HcEditorUtil::VariableRowStyle::Detailed;
+}
+
+bool variableRow(const HC::Variable& v, bool selected, HcEditorUtil::VariableRowStyle style,
+                 const char* note)
+{
+	return HcEditorUtil::variableRow(variableRowDesc(v, note), selected, style);
 }
 
 bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
@@ -1755,7 +1784,7 @@ void drawQuickPickPopup(const Host& h)
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
 			if (!q.empty() && lower(v.name).find(q) == std::string::npos) continue;
 			any = true;
-			if (HcEditorUtil::searchMenuItem(v.name + "  (" + variableTypeLabel(v) + ")"))
+			if (HcEditorUtil::searchMenuItem(v.name + "  \xe2\x80\x94  " + variableTypeLabel(v)))
 			{
 				const int id = addNode(graph, wantSet ? NT::SetVariable : NT::GetVariable,
 				                       s_pick.pos, h.currentGraph);

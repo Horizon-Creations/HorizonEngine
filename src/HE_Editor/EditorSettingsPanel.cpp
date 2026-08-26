@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
+#include "NotificationStore.h"         // a settings write that fails has to say so
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
@@ -80,6 +81,22 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 	cfg.QuickSettingsFavorites.clear();
 	for (size_t i = 0; i < keys.size(); ++i)
 		cfg.QuickSettingsFavorites += (i ? "," : "") + keys[i];
+}
+
+// ─── Editor ▸ HorizonCode ────────────────────────────────────────────────────
+// The config key, in the one file that owns it. Outside the ImGui guard because
+// this is a plain value read: whoever draws the variable list asks for the
+// setting, not for the page that sets it.
+static const char* kHcVariableDisplayKey = "HcVariableDisplay";
+
+HcVariableStyle hcVariableStyle()
+{
+	// Compared against 1 rather than cast: an int from config.json is whatever
+	// was in the file, and a stray 7 (or a hand-edited string, which
+	// getCustomConfigInt already answers with the default) must land on the
+	// default look, not on a style that does not exist.
+	const int v = GlobalState::getInstance().getCustomConfigInt(kHcVariableDisplayKey, 0);
+	return v == 1 ? HcVariableStyle::Compact : HcVariableStyle::Detailed;
 }
 
 #ifdef HE_IMGUI_ENABLED
@@ -1317,6 +1334,65 @@ void drawStatusPage(AppContext& ctx)
 // table's cmake and compiler rows already say, so the rows kept the facts and
 // their Fix button opens the install dialog that carries the remedy.
 
+// ─── HorizonCode page (Editor) ───────────────────────────────────────────────
+// Settings of the HorizonCode graph editor itself. A bespoke page rather than a
+// catalog category: nothing here is engine state worth pinning to Quick
+// Settings, and it persists through GlobalState rather than EditorConfig.
+
+void drawHorizonCodePage()
+{
+	// Every explanation below is a full sentence and the tab is as wide as the
+	// user left it.
+	EditorWidgets::WrapText wrap;
+
+	ImGui::SeparatorText("Variables");
+	ImGui::TextWrapped("How the graph editor's variable list spells a variable.");
+	ImGui::Spacing();
+
+	// Read back through the accessor every frame instead of keeping a page-local
+	// copy: the radios then cannot disagree with what the graph editor is
+	// actually drawing, whatever else wrote the value.
+	const HcVariableStyle style = hcVariableStyle();
+
+	const auto select = [](HcVariableStyle want)
+	{
+		GlobalState& gs = GlobalState::getInstance();
+		gs.setCustomConfigEntry(kHcVariableDisplayKey, static_cast<int>(want));
+		// Written now rather than left to the exit save: this is a look the user
+		// picks once, and a session that ends in a crash should not hand it back
+		// the look it just rejected. Which only holds if the write lands, so a
+		// failure is said out loud instead of being discovered next launch.
+		if (!gs.writeConfig())
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the variable display setting",
+			               "The choice applies now, but this session's config file could "
+			               "not be written — the next launch will show the old look.");
+	};
+
+	// Two radios, not a combo: these are two APPEARANCES, and a closed combo
+	// shows a name that tells the user nothing about what the list will become.
+	// Hence a sentence under each — the choice is made before the click, not by
+	// trying both.
+	if (ImGui::RadioButton("Detailed", style == HcVariableStyle::Detailed) &&
+	    style != HcVariableStyle::Detailed)
+		select(HcVariableStyle::Detailed);
+	ImGui::Indent();
+	EditorWidgets::hint("The default. Name and type on two lines, with the type written "
+	                    "out and coloured \xe2\x80\x94 \"Map<String, Bool>\", each part in "
+	                    "its own pin colour.");
+	ImGui::Unindent();
+
+	ImGui::Spacing();
+
+	if (ImGui::RadioButton("Compact", style == HcVariableStyle::Compact) &&
+	    style != HcVariableStyle::Compact)
+		select(HcVariableStyle::Compact);
+	ImGui::Indent();
+	EditorWidgets::hint("Name and type on one line. Half the height per variable, so a "
+	                    "long list stays readable without scrolling.");
+	ImGui::Unindent();
+}
+
 // ─── Navigation + page plumbing ──────────────────────────────────────────────
 
 struct NavItem  { Page page; const char* label; };
@@ -1326,6 +1402,9 @@ constexpr NavItem kGeneralItems[] = {
 	{ Page::Appearance,     "Appearance" },
 	{ Page::Viewport,       "Viewport" },
 	{ Page::ContentBrowser, "Content Browser" },
+};
+constexpr NavItem kEditorItems[] = {
+	{ Page::HorizonCode, "HorizonCode" },
 };
 constexpr NavItem kRenderingItems[] = {
 	{ Page::Display,            "Display" },
@@ -1344,6 +1423,9 @@ constexpr NavItem kToolsItems[] = {
 };
 constexpr NavGroup kNavGroups[] = {
 	{ "General",        kGeneralItems,       IM_ARRAYSIZE(kGeneralItems) },
+	// Right behind General: these are the editor's own tools, so they belong
+	// next to the rest of "how the editor behaves" and ahead of the renderer.
+	{ "Editor",         kEditorItems,        IM_ARRAYSIZE(kEditorItems) },
 	{ "Rendering",      kRenderingItems,     IM_ARRAYSIZE(kRenderingItems) },
 	{ "Collaboration",  kCollaborationItems, IM_ARRAYSIZE(kCollaborationItems) },
 	{ "Source Control", kSourceControlItems, IM_ARRAYSIZE(kSourceControlItems) },
@@ -1452,8 +1534,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		ImGui::Spacing();
 		DrawEngineSettings(ctx, SettingsMode::Preferences, category);
 	}
-	else if (s_page == Page::Repository) drawSourceControlPage(ctx);
-	else if (s_page == Page::Status)     drawStatusPage(ctx);
+	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
+	else if (s_page == Page::Status)      drawStatusPage(ctx);
+	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

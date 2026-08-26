@@ -139,13 +139,67 @@ namespace HcEditorUtil
 	bool drawKeyTypePicker(const char* label, HorizonCode::PinType& keyType,
 	                       std::string& keyTypeName);
 
-	// A pin/variable's shape as a suffix: "[]" for an array, "{}" for a set,
-	// "{Key:}" for a map, "" for a scalar. One spelling, used everywhere a type
-	// is shown, so the three kinds never read alike.
-	// `keyType` is only read for a map; the forward-declared PinType has no
-	// enumerators here, so it is a required argument rather than a default.
-	std::string containerSuffix(bool isArray, HorizonCode::ContainerKind container,
-	                            HorizonCode::PinType keyType);
+	// "Map<String, Bool>" / "Array<Bool>" / "Set<String>" / "Bool" as text.
+	// The key comes FIRST, the way the type is read aloud and the way
+	// docs/horizoncode-reference.md already writes it.
+	//
+	// `typeName` names the definition behind an Enum/Struct value ("Bool" is a
+	// type, "Enum" is not — the asset stem is) or the CLASS behind an Object,
+	// `keyTypeName` the same for an Enum key. Both are asset paths; only the stem
+	// is shown, exactly like every other place the editor names a user-defined
+	// type.
+	std::string typeLabel(HorizonCode::PinType type, bool isArray,
+	                      HorizonCode::ContainerKind container, HorizonCode::PinType keyType,
+	                      const std::string& typeName = {}, const std::string& keyTypeName = {});
+	// The same label, but drawn: each part in ITS pin colour — the key in the key
+	// type's colour, the value in the value type's, the container word and the
+	// punctuation dimmed. That is what tells a Map from an Array at a glance,
+	// before the words are read at all.
+	//
+	// Draws at the current cursor and leaves it where a plain
+	// ImGui::TextUnformatted of the whole label would (same line for a following
+	// SameLine, next line otherwise).
+	void drawTypeLabel(HorizonCode::PinType type, bool isArray,
+	                   HorizonCode::ContainerKind container, HorizonCode::PinType keyType,
+	                   const std::string& typeName = {}, const std::string& keyTypeName = {});
+
+	// ── Variable list rows ───────────────────────────────────────────────────
+	// How a variable list spells one variable. The user picks this on
+	// Preferences ▸ Editor ▸ HorizonCode.
+	//
+	// The style is a PARAMETER rather than something this unit looks up: the
+	// panels read the setting once per frame instead of once per row, this unit
+	// keeps knowing nothing about where preferences live, and a test can shoot
+	// both looks without linking the settings panel.
+	enum class VariableRowStyle : std::uint8_t
+	{
+		Detailed = 0, // glyph + name, with the type spelled out on a second line
+		Compact  = 1, // glyph + name + type, all on one line
+	};
+
+	// One variable, as much of it as a list row shows.
+	struct VariableRowDesc
+	{
+		const char*                name = "";
+		HorizonCode::PinType       type{};
+		bool                       isArray = false;
+		HorizonCode::ContainerKind container{};
+		HorizonCode::PinType       keyType{};
+		std::string typeName;    // Enum/Struct: the definition asset
+		std::string keyTypeName; // an Enum key's definition asset
+		std::string className;   // Object: the class it holds
+		// Drawn INSTEAD of the type when set. The inherited list uses it to say
+		// "private", where what the reader needs is not the type.
+		const char* note = nullptr;
+	};
+
+	// Draws one row as a Selectable and answers whether it was clicked.
+	//
+	// The Selectable stays the LAST ImGui item: name, type and glyph are painted
+	// into the draw list on top of it, not emitted as further items. So the
+	// caller keeps IsItemHovered(), BeginDragDropSource() and its tooltip, and
+	// they all address the whole row.
+	bool variableRow(const VariableRowDesc& v, bool selected, VariableRowStyle style);
 
 	// A value type's name as the editor spells it ("Vec3", "Bool", "Exec").
 	// Exported because the node reference in the manual is built outside this

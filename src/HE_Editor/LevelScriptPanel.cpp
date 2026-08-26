@@ -255,12 +255,13 @@ const HGH::MenuOpts kMenus = {
 };
 
 // ── Left sidebar: variables + functions + details ─────────────────────────────
-// Deliberately NOT shared with the widget editor's drawGraphVariables: only the
-// type label is (HcGraphHost::variableTypeLabel). The two lists agree on what a
-// variable IS but not on how it is presented — this one puts the type in the row
-// label and drags a "HE_LSGRAPH_VAR" payload, the widget one puts the type in a
-// trailing TextDisabled + tooltip, drags "HE_UIWGRAPH_VAR", and leads with a UI
-// element browser that has no counterpart here.
+// Deliberately NOT shared with the widget editor's drawGraphVariables, though
+// the ROW itself now is (HcGraphHost::variableRow — a variable has to look the
+// same wherever it is listed, and the user picks that look once, on Preferences
+// ▸ Editor ▸ HorizonCode). What differs is everything around the row: this one
+// drags a "HE_LSGRAPH_VAR" payload and owns selection, the widget one drags
+// "HE_UIWGRAPH_VAR" and leads with a UI element browser that has no counterpart
+// here.
 
 // Which ancestor declared `name`, or "" — only for the hints and the refusal
 // message; everything functional reads Graph::inherited.
@@ -285,13 +286,16 @@ bool varNameTaken(const HC::Graph& graph, const std::string& name)
 void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& inheritedVars,
                    bool& edited)
 {
+	// Read once for the whole list, not once per row: it goes through the config
+	// store, and every row in a frame has to agree anyway.
+	const HcEditorUtil::VariableRowStyle rowStyle = HGH::variableRowStyle();
+
 	// One row: selectable + drag source. Shared by the instance list and the
 	// per-function locals list below it.
 	auto varRow = [&](const HC::Variable& v)
 	{
 		ImGui::PushID(v.name.c_str());
-		const std::string label = v.name + "  (" + HGH::variableTypeLabel(v) + ")";
-		if (ImGui::Selectable(label.c_str(), g.selectedVar == v.name))
+		if (HGH::variableRow(v, g.selectedVar == v.name, rowStyle))
 		{
 			g.selectedVar = v.name;
 			g.selectedNode = 0;
@@ -335,8 +339,11 @@ void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& i
 			ImGui::PushID(v.name.c_str());
 			if (v.access != 0)
 			{
+				// "private" where the type would go: an inherited private is a
+				// name that is taken, and its type is not what the reader is
+				// after.
 				ImGui::BeginDisabled();
-				ImGui::Selectable((v.name + "  (private)").c_str(), false);
+				HGH::variableRow(v, false, rowStyle, "private");
 				ImGui::EndDisabled();
 			}
 			else
@@ -345,7 +352,7 @@ void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& i
 				// class's variable list, and an inherited declaration is not in
 				// it. Dragging is the whole interaction — it makes a Get/Set node
 				// that names the variable, which is all a derived class can do.
-				ImGui::Selectable((v.name + "  (" + HGH::variableTypeLabel(v) + ")").c_str(), false);
+				HGH::variableRow(v, false, rowStyle);
 				if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 				{
 					char buf[64] = {};
