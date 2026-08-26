@@ -507,6 +507,74 @@ void requestRedraw(Ctx& c)
 }
 } // namespace app
 
+// ── Clipboard ────────────────────────────────────────────────────────────────
+namespace clipboard {
+std::string getText(Ctx&)
+{
+    // SDL hands back an owned copy even when the clipboard is empty (an empty
+    // string), and null only on failure. Freed either way.
+    char* raw = SDL_GetClipboardText();
+    if (!raw) return {};
+    std::string out(raw);
+    SDL_free(raw);
+    return out;
+}
+
+void setText(Ctx&, const std::string& text)
+{
+    if (!SDL_SetClipboardText(text.c_str()))
+        HE_LOG_WARN(Script, "clipboard.setText failed: %s", SDL_GetError());
+}
+
+bool hasText(Ctx&) { return SDL_HasClipboardText(); }
+} // namespace clipboard
+
+// ── Native dialogs ───────────────────────────────────────────────────────────
+namespace dialog {
+void message(Ctx&, const std::string& title, const std::string& text, int kind)
+{
+    const SDL_MessageBoxFlags flag = kind == 2 ? SDL_MESSAGEBOX_ERROR
+                                   : kind == 1 ? SDL_MESSAGEBOX_WARNING
+                                               : SDL_MESSAGEBOX_INFORMATION;
+    // Null parent window: HE_Scene has no window handle, and a modeless box is
+    // better than none. The call blocks until the user dismisses it, which is
+    // the whole point of reaching for a native dialog.
+    if (!SDL_ShowSimpleMessageBox(flag, title.c_str(), text.c_str(), nullptr))
+        HE_LOG_WARN(Script, "dialog.message failed: %s", SDL_GetError());
+}
+
+bool confirm(Ctx&, const std::string& title, const std::string& text,
+             const std::string& affirmative, const std::string& negative)
+{
+    // Button 0 is the affirmative one and carries BOTH default flags: Return
+    // takes it, Escape takes the other. A dialog where Escape does nothing traps
+    // a keyboard user.
+    SDL_MessageBoxButtonData buttons[2] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1,
+          affirmative.empty() ? "OK" : affirmative.c_str() },
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0,
+          negative.empty() ? "Cancel" : negative.c_str() },
+    };
+    SDL_MessageBoxData data{};
+    data.flags      = SDL_MESSAGEBOX_INFORMATION;
+    data.title      = title.c_str();
+    data.message    = text.c_str();
+    data.numbuttons = 2;
+    data.buttons    = buttons;
+
+    int chosen = 0;
+    if (!SDL_ShowMessageBox(&data, &chosen))
+    {
+        // Answering "no" on failure is the safe direction: the caller asked
+        // whether to go ahead with something, and an unanswered question is not
+        // a yes.
+        HE_LOG_WARN(Script, "dialog.confirm failed: %s — answering no", SDL_GetError());
+        return false;
+    }
+    return chosen == 1;
+}
+} // namespace dialog
+
 // ── Camera ───────────────────────────────────────────────────────────────────
 namespace {
 // The world's main camera: isMain wins, else the first CameraComponent.
@@ -1918,6 +1986,30 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "app.requestRedraw", "App", true, {}, {}, "HE::api::app::requestRedraw",
             [](Ctx& c, const VV&){ app::requestRedraw(c); return VV{}; } });
 
+        // Clipboard — the same system clipboard Ctrl+C/V already use in a focused
+        // text field, reachable from a graph.
+        t.push_back({ "clipboard.getText", "Clipboard", false, {}, {{"text", P::String}},
+            "HE::api::clipboard::getText",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(clipboard::getText(c)) }; } });
+        t.push_back({ "clipboard.setText", "Clipboard", true, {{"text", P::String}}, {},
+            "HE::api::clipboard::setText",
+            [](Ctx& c, const VV& a){ clipboard::setText(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "clipboard.hasText", "Clipboard", false, {}, {{"has", P::Bool}},
+            "HE::api::clipboard::hasText",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(clipboard::hasText(c)) }; } });
+
+        // Native dialogs — the blocking, OS-drawn kind.
+        t.push_back({ "dialog.message", "Dialog", true,
+            {{"title", P::String}, {"text", P::String}, {"kind", P::Int}}, {},
+            "HE::api::dialog::message",
+            [](Ctx& c, const VV& a){ dialog::message(c, aS(a, 0), aS(a, 1), aI(a, 2)); return VV{}; } });
+        t.push_back({ "dialog.confirm", "Dialog", true,
+            {{"title", P::String}, {"text", P::String},
+             {"affirmative", P::String}, {"negative", P::String}},
+            {{"confirmed", P::Bool}}, "HE::api::dialog::confirm",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofBool(dialog::confirm(c, aS(a, 0), aS(a, 1), aS(a, 2), aS(a, 3))) }; } });
+
         // Math (pure)
         auto unary  = [&](const char* id, const char* cpp, float(*fn)(float)) {
             t.push_back({ id, "Math", false, {{"x", P::Float}}, {{"result", P::Float}}, cpp,
@@ -2334,6 +2426,11 @@ const std::vector<ApiFn>& registry()
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },
             { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
+            { "clipboard.getText", "Get Clipboard Text" },
+            { "clipboard.setText", "Set Clipboard Text" },
+            { "clipboard.hasText", "Has Clipboard Text" },
+            { "dialog.message", "Show Message Dialog" },
+            { "dialog.confirm", "Show Confirm Dialog" },
             { "math.sin", "Sine" },   { "math.cos", "Cosine" }, { "math.tan", "Tangent" },
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },

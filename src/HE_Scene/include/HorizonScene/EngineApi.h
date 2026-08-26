@@ -321,6 +321,31 @@ namespace app {
     void      requestRedraw(Ctx&);        // draw one more frame (event-driven apps)
 }
 
+// ── Clipboard ────────────────────────────────────────────────────────────────
+// The system clipboard, as text. Already wired into the focused TextInput for
+// Ctrl+C/X/V; this is the same clipboard for a graph that wants to put something
+// there itself ("Copy result", "Paste from clipboard").
+namespace clipboard {
+    std::string getText(Ctx&);                    // "" when empty or unavailable
+    void        setText(Ctx&, const std::string& text);
+    bool        hasText(Ctx&);
+}
+
+// ── Native dialogs ───────────────────────────────────────────────────────────
+// The blocking, OS-drawn kind. An application that has to tell the user
+// something before it can go on ("unsaved changes", "that file is not readable")
+// needs one that is not made of widgets, because a widget dialog cannot exist
+// before the widget tree does.
+namespace dialog {
+    // Kind: 0 = info, 1 = warning, 2 = error. Anything else is treated as info.
+    void message(Ctx&, const std::string& title, const std::string& text, int kind);
+    // Returns true for the FIRST button (the affirmative one). The two labels
+    // are given rather than fixed, so a graph can ask "Save"/"Discard" instead of
+    // only ever "Yes"/"No".
+    bool confirm(Ctx&, const std::string& title, const std::string& text,
+                 const std::string& affirmative, const std::string& negative);
+}
+
 // ── Camera (the world's main camera: isMain, else the first CameraComponent) ──
 namespace camera {
     glm::vec3 getPosition(Ctx&);
