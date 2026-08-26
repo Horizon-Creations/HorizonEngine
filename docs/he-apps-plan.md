@@ -127,10 +127,74 @@ braucht es `SDL_WaitEvent` mit Timeout plus ein Dirty-Flag: neu zeichnen, wenn e
 ankam, ein Widget sich geändert hat, eine Animation läuft oder ein Timer fällig ist. Sonst
 schlafen. Das ist der Unterschied zwischen 0,3 % und 40 % CPU im Leerlauf.
 
-**A3 Schlanker Runtime.** Eine App, die 200 MB wiegt, weil Physik, Terrain, GI und der
-Python-Interpreter mitfahren, verkauft sich schlecht. Build-Optionen: ohne Jolt, ohne
-Terrain/Foliage/Weather, ohne die schweren Renderpfade. Ziel als Zahl formulieren, sonst
-passiert es nie.
+**A3 Schlanker Runtime.** Gemessen statt geschätzt, an `out/deploy/Game` (macOS, Release):
+
+| Bestandteil | Größe | Braucht eine App das? |
+|---|---:|---|
+| Python (`libpython3.14` + `python314.zip` + `lib-dynload`) | **52,9 MB** | nur bei Python-Projekten, **schon gegated** (`settings.bundlePython`) |
+| `libHorizonScene` | 25,4 MB | nein: enthält Jolt, Recast/Detour, Terrain, Animation, Partikel |
+| `libHorizonRendering` | 22,7 MB | zum kleinen Teil: alle Backends + glslang/SPIRV-Cross |
+| `libHorizonCore` | 12,0 MB | ja, aber inklusive Lua und der Textur-Encoder (Cook-Zeit) |
+| `libcrypto.3` | 4,8 MB | nur bei verschlüsselter Pak |
+| `libSDL3` | 4,3 MB | ja |
+| `libHorizonNet` | 2,5 MB | nur mit Netzwerk |
+| `HorizonGame` | 2,0 MB | ja |
+| zstd + lz4 | 0,8 MB | ja |
+| **Summe** | **123 MB**, ohne Python **≈ 70 MB** | |
+
+Eine Todo-App in HorizonCode wiegt heute also rund 70 MB. **Ziel: unter 25 MB**, und die Zahl
+gehört als Schwelle in einen ctest oder CI-Schritt, sonst kriecht sie zurück.
+
+**A3a Diät zur Linkzeit, billig.** Nichts davon ist Umbau, nur Weglassen:
+- Python: schon erledigt, ein Nicht-Python-Projekt trägt die 52,9 MB nicht.
+- Backends: die Renderer sind bereits **eigene statische Bibliotheken** (`RendererOpenGL`,
+  `RendererMetal`, `RendererVulkan`, `RendererD3D11/12`). Was eine App nicht anzielt, wird
+  nicht gelinkt. Kein Code muss dafür angefasst werden.
+- `libHorizonNet` und `libcrypto` nur, wenn Netzwerk beziehungsweise Pak-Verschlüsselung
+  wirklich benutzt werden (`HE_PREFER_MBEDTLS` existiert als Schalter).
+
+**A3b Der strukturelle Teil, die eigentliche Arbeit.** Der User hat den Punkt gemacht: wer nur
+UI zeichnet, soll nicht den ganzen GL- oder Metal-Renderer mitschleppen. Richtig, und der Weg
+dahin ist **nicht**, die 11.000-Zeilen-Renderer mit `#ifdef` zu zerschneiden. Das erzeugt
+genau die zweite Konfiguration, die laut Risikoliste still verrottet.
+
+Stattdessen: ein **dünner `UIRenderer` pro Baseline-Backend** (GL und Metal), der `IRenderer`
+implementiert und nichts tut außer Clear, UI-Pass, Present. Möglich, weil `IRenderer` nur vier
+rein virtuelle Methoden hat; die anderen 37 haben Standard-Rümpfe. Die schweren statischen
+Bibliotheken werden in einem App-Build dann schlicht nicht gelinkt.
+
+Bedingung dabei: den UI-Pass **einmal** herausziehen und von dünnem wie dickem Renderer
+benutzen lassen, sonst driften zwei Kopien auseinander. Dieselbe Extraktion macht später das
+Software-Backend aus Block G fast geschenkt.
+
+Dazu zwei konkrete Punkte, beide am Code geprüft:
+- **`WidgetManager` gehört nicht in `HE_Scene`.** Heute muss eine App die Bibliothek linken,
+  in der Jolt und Recast stecken, nur um Widgets zu bekommen. Der Header zieht ausschließlich
+  Core-Sachen (`UIWidget/*`, `HorizonCode/*`, `Renderer/UIRenderObject.h`, `Types/UUID.h`) und
+  deklariert `ContentManager` vorwärts; `HorizonWorld` hängt laut Kommentar nur an der
+  Lebensdauer. Das ist ein Umzug, kein Umbau. Mitzunehmen wäre `sortKey` aus `UISystem`.
+- **Der Shader-Übersetzer muss aus dem App-Runtime raus, aber ohne Schicht 1 zu killen.**
+  `MaterialShaderVariant` sagt es selbst: „baked at export time **so the shipped game never
+  cross-compiles**", und hält Backend-Quelltext (MSL, HLSL, Desktop-GLSL) oder SPIR-V. Der
+  Exporter erzeugt die Varianten bereits (`shaderBackends`). Nur: der **UI**-Materialpfad
+  benutzt sie nicht, `GetOrBuildUIMaterialProgram` geht direkt auf
+  `m_matShaderLib.fragment(...)`, also auf glslang. Die Arbeit hat deshalb **zwei** Hälften,
+  und die zweite ist die, die man übersieht:
+  1. Der UI-Pfad liest `precompiledShaders`, so wie der Mesh-Pfad es vormacht.
+  2. Dieser Ladepfad muss **außerhalb** des `HE_HAVE_SHADERC`-Gates liegen. Heute baut
+     `he_materialshader` gar nicht erst, wenn `he_shadercompiler` fehlt (`if(TARGET …)` in
+     der CMake). Ohne diese zweite Hälfte hat ein shaderc-freier Build **keinen**
+     UI-Materialpfad statt eines abgespeckten, und „eigene Shader in kleinen Apps" wird von
+     wahr zu falsch.
+
+**Ein Kostenpunkt, der leicht untergeht:** der Exporter kopiert die Binaries aus
+`gameRuntimeDir` wörtlich. Ein schlanker App-Runtime heißt also einen **zweiten Binärsatz**
+(App-exe plus schlanke dylibs), der gebaut, mit dem Editor ausgeliefert und beim Export nach
+Projekttyp ausgewählt wird. Eine Zeile im Plan, aber ohne sie setzt er Dateien voraus, die es
+nicht gibt.
+
+**Einordnung:** Welle 1 liefert bewusst noch die fetten ~70 MB, sonst verschiebt sich die
+erste lauffähige App hinter einen Umbau. A3a gehört in Welle 2, A3b in Welle 3.
 
 **A4 Fenster-API im Skript.** Neue `app`-Gruppe: `setTitle`, `getSize`/`setSize`,
 `setMinSize`, `center`, `maximize`, `minimize`, `setResizable`, `setFullscreen`, `quit`,
@@ -499,6 +563,7 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 - B2 ListView, B3 Grid, B4 Dialoge/Kontextmenü/Tooltip
 - C: `fs` entsperrt mit Dialog-Erteilung, `datetime`, `process`
 - E3 echte Designer-Vorschau
+- A3a Diät zur Linkzeit (nur die Baseline-Backends linken, Net und crypto optional)
 
 **Welle 3, konkurrenzfähig**
 - A6 Menüleiste, A7 Icon und Dateitypen
@@ -506,7 +571,8 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 - C: `http`, `notify`
 - D3 alle App-Vorlagen
 - D5 Schicht 1: Parameter pro Instanz, UI-Nodes, MaterialFunction-Effektbibliothek, Backdrop
-- A3 schlanker Runtime
+- A3b dünner UIRenderer, WidgetManager-Umzug, UI-Materialien aus vorkompilierten Varianten,
+  zweiter Binärsatz im Editor, Größenschwelle in der CI
 
 **Welle 4, Kür**
 - A5 mehrere Fenster
