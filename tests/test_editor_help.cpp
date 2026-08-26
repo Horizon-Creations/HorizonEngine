@@ -147,6 +147,29 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Tutorial",        "Start over" },
 		{ "Collaboration",   "Ask to edit" },
 		{ "Source Root",     "C++ Class" },
+		// The settings window's three pages. Its catalogue is scoped
+		// "Preferences", but the source-control and tool pages are not part of
+		// that catalogue and push their own — which is how the first three of
+		// these came to be written as "Preferences/…" and to resolve to nothing
+		// at all for as long as they existed.
+		{ "Source Control",  "Private" },
+		{ "Source Control",  "Push automatically after each commit" },
+		{ "Source Control",  "Check the remote for new commits periodically" },
+		{ "Source Control",  "Initialize Git repository" },
+		{ "Source Control",  "Create & push" },
+		{ "Source Control",  "Save token" },
+		{ "Source Control",  "Save Identity" },
+		// The "##" suffix is part of the key: two buttons say "Recheck" and one
+		// field says "Name", and only the suffix tells them apart.
+		{ "Source Control",  "Recheck##git" },
+		{ "Source Control",  "Set##remote" },
+		{ "Source Control",  "Name##gh" },
+		{ "Tool Status",     "Fix" },
+		{ "Tool Status",     "Recheck all" },
+		{ "Preferences",     "Restore Defaults" },
+		{ "Build Tools",     "Install Automatically" },
+		{ "Build Tools",     "Recheck" },
+		{ "Build Tools",     "Don't show this again" },
 	};
 	for (const Case& c : cases)
 	{

@@ -32,6 +32,10 @@ bool filledButton(const char* label, const ImVec2& size,
 	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
 	const bool pressed = ImGui::Button(label, size);
 	ImGui::PopStyleColor(4);
+	// Styled the same as an unstyled one for the purpose of help: the colour says
+	// what KIND of thing this is, the entry says what it does. Queued after the
+	// button so the last submitted item is still the caller's.
+	helpForLabel(label);
 	return pressed;
 }
 } // namespace
@@ -75,6 +79,7 @@ bool dangerSmallButton(const char* label)
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
 	const bool pressed = ImGui::SmallButton(label);
 	ImGui::PopStyleColor(4);
+	helpForLabel(label);
 	return pressed;
 }
 
@@ -83,6 +88,7 @@ bool dangerMenuItem(const char* label, bool enabled)
 	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.48f, 0.45f, 1.0f));
 	const bool pressed = ImGui::MenuItem(label, nullptr, false, enabled);
 	ImGui::PopStyleColor();
+	helpForLabel(label);
 	return pressed;
 }
 
@@ -342,6 +348,13 @@ bool selectable(const char* label, bool selected, ImGuiSelectableFlags flags,
                 const ImVec2& size)
 {
 	const bool pressed = ImGui::Selectable(label, selected, flags, size);
+	helpForLabel(label);
+	return pressed;
+}
+
+bool smallButton(const char* label)
+{
+	const bool pressed = ImGui::SmallButton(label);
 	helpForLabel(label);
 	return pressed;
 }

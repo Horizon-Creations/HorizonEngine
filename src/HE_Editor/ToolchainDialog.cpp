@@ -1,5 +1,6 @@
 #include "ToolchainDialog.h"
 #include "EditorApplication.h"           // AppContext
+#include "EditorHelp.h"                  // "Build Tools/<label>" scope for the tooltips
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe
 #include <SDL3/SDL.h>
@@ -72,6 +73,13 @@ void DrawToolchainDialog(AppContext& ctx)
 	if (ImGui::BeginPopupModal("##ToolchainMissing", nullptr,
 		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
 	{
+		// "Build Tools/<label>" for everything in this dialog. Its own scope and
+		// not Preferences': the "Recheck" here and the "Recheck" on the settings
+		// page are the same word for the same probe, but this one is the last
+		// thing standing between the user and a build that works, so it gets to
+		// say so.
+		HE::Ed::Help::Scope helpScope("Build Tools");
+
 		const bool missing = !s_last.cmakeFound || !s_last.compilerFound;
 		if (!missing)
 		{
@@ -176,23 +184,23 @@ void DrawToolchainDialog(AppContext& ctx)
 
 		// Manual fallbacks — copy the command / open the download page.
 #if defined(__APPLE__)
-		if (ImGui::SmallButton("Copy 'brew install cmake'")) ImGui::SetClipboardText("brew install cmake");
+		if (EditorWidgets::smallButton("Copy 'brew install cmake'")) ImGui::SetClipboardText("brew install cmake");
 		ImGui::SameLine();
-		if (ImGui::SmallButton("cmake.org")) SDL_OpenURL("https://cmake.org/download/");
+		if (EditorWidgets::smallButton("cmake.org")) SDL_OpenURL("https://cmake.org/download/");
 #elif defined(_WIN32)
 		static const char* kWinCmd =
 			"winget install --id Kitware.CMake -e ; "
 			"winget install --id Microsoft.VisualStudio.2022.BuildTools -e "
 			"--override \"--add Microsoft.VisualStudio.Workload.VCTools --quiet\"";
-		if (ImGui::SmallButton("Copy winget Command")) ImGui::SetClipboardText(kWinCmd);
+		if (EditorWidgets::smallButton("Copy winget Command")) ImGui::SetClipboardText(kWinCmd);
 		ImGui::SameLine();
-		if (ImGui::SmallButton("Download Page"))
+		if (EditorWidgets::smallButton("Download Page"))
 			SDL_OpenURL("https://visualstudio.microsoft.com/visual-cpp-build-tools/");
 #else
-		if (ImGui::SmallButton("Copy 'sudo apt install build-essential cmake'"))
+		if (EditorWidgets::smallButton("Copy 'sudo apt install build-essential cmake'"))
 			ImGui::SetClipboardText("sudo apt install build-essential cmake");
 		ImGui::SameLine();
-		if (ImGui::SmallButton("cmake.org")) SDL_OpenURL("https://cmake.org/download/");
+		if (EditorWidgets::smallButton("cmake.org")) SDL_OpenURL("https://cmake.org/download/");
 #endif
 
 		// ── Live progress log ────────────────────────────────────────────────
@@ -230,11 +238,11 @@ void DrawToolchainDialog(AppContext& ctx)
 
 		ImGui::Spacing();
 		ImGui::Separator();
-		ImGui::Checkbox("Don't show this again", &s_dontShowAgain);
+		EditorWidgets::checkbox("Don't show this again", &s_dontShowAgain);
 		ImGui::Spacing();
 
 		if (s_checking) ImGui::BeginDisabled();
-		if (ImGui::Button("Recheck") && ctx.recheckToolchain)
+		if (EditorWidgets::button("Recheck") && ctx.recheckToolchain)
 			ctx.recheckToolchain();
 		if (s_checking) ImGui::EndDisabled();
 		ImGui::SameLine();

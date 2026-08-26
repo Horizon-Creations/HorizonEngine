@@ -685,6 +685,14 @@ void drawGitMessages(GitController* git)
 // driver.
 void drawRepositorySection(AppContext& ctx)
 {
+	// "Source Control/<label>" for everything below, the same trick the settings
+	// catalogue uses. It has to be pushed HERE and not once for the whole panel:
+	// the catalogue's own scope is "Preferences", and this page's "Private" is a
+	// repository's visibility on GitHub, not a preference. The three entries this
+	// page already had were written as "Preferences/…" and never resolved,
+	// because at run time no scope is open on this path at all.
+	HE::Ed::Help::Scope helpScope("Source Control");
+
 	GitController* git = ctx.git;
 	if (!git)
 	{
@@ -737,7 +745,7 @@ void drawRepositorySection(AppContext& ctx)
 		}
 		ImGui::Spacing();
 		if (git->busy()) ImGui::BeginDisabled();
-		if (ImGui::Button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
+		if (EditorWidgets::button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
 			git->requestInit(lfs);
 		if (git->busy()) ImGui::EndDisabled();
 		drawGitMessages(git);
@@ -773,6 +781,7 @@ void drawRepositorySection(AppContext& ctx)
 		}
 		ImGui::SetNextItemWidth(180.0f);
 		ImGui::InputText("Name##gh", s_ghRepoName, sizeof(s_ghRepoName));
+		EditorWidgets::helpForLabel("Name##gh");
 		ImGui::SameLine();
 		EditorWidgets::checkbox("Private", &s_ghPrivate);
 
@@ -803,7 +812,7 @@ void drawRepositorySection(AppContext& ctx)
 		                         s_remoteUrl, sizeof(s_remoteUrl));
 		ImGui::SameLine();
 		ImGui::BeginDisabled(git->busy() || s_remoteUrl[0] == '\0');
-		if (ImGui::Button("Set##remote"))
+		if (EditorWidgets::button("Set##remote"))
 		{
 			git->requestSetRemote(s_remoteUrl);
 			s_remoteUrl[0] = '\0';
@@ -953,6 +962,8 @@ void drawRepositorySection(AppContext& ctx)
 // make the repository section bail out (no project open, git missing).
 void drawGitSetupSection(AppContext& ctx)
 {
+	HE::Ed::Help::Scope helpScope("Source Control");
+
 	if (!ctx.gitProbe)
 	{
 		ImGui::TextDisabled("Checking git installation…");
@@ -1057,7 +1068,7 @@ void drawGitSetupSection(AppContext& ctx)
 	}
 
 	ImGui::Spacing();
-	if (ImGui::Button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
+	if (EditorWidgets::button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
 }
 
 // The Source Control page: what git looks like on this machine, then what this
@@ -1119,6 +1130,12 @@ const char* statusMark(StatusLevel s)
 void statusRow(const char* name, StatusLevel level, const std::string& detail,
                const std::function<void()>& onFix = {})
 {
+	// The same scope its only caller pushes. Redundant at run time, not on paper:
+	// the coverage scan reads a file top to bottom, and this helper is defined
+	// above the page that pushes it — so without this, "Fix" would be audited
+	// under whatever scope happened to appear earlier in the file.
+	HE::Ed::Help::Scope helpScope("Tool Status");
+
 	ImGui::TableNextRow();
 	ImGui::TableSetColumnIndex(0);
 	ImGui::TextUnformatted(name);
@@ -1136,13 +1153,15 @@ void statusRow(const char* name, StatusLevel level, const std::string& detail,
 	if (onFix && level != StatusLevel::Ok && level != StatusLevel::Checking)
 	{
 		ImGui::PushID(name);
-		if (ImGui::SmallButton("Fix")) onFix();
+		if (EditorWidgets::smallButton("Fix")) onFix();
 		ImGui::PopID();
 	}
 }
 
 void drawStatusPage(AppContext& ctx)
 {
+	HE::Ed::Help::Scope helpScope("Tool Status");
+
 	// Safe over the table below because ImGui resolves a 0.0f wrap position
 	// against the current cell's column, not the window — so a Detail cell wraps
 	// inside its own column and the fixed Tool/State/Fix columns are unaffected.
@@ -1302,7 +1321,7 @@ void drawStatusPage(AppContext& ctx)
 	ImGui::Separator();
 	const bool checking = !ctx.gitProbe || !ctx.toolchainProbe || !ctx.routerProbe;
 	ImGui::BeginDisabled(checking);
-	if (ImGui::Button("Recheck all"))
+	if (EditorWidgets::button("Recheck all"))
 	{
 		if (ctx.recheckGit)       ctx.recheckGit();
 		if (ctx.recheckToolchain) ctx.recheckToolchain();
@@ -1541,10 +1560,12 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 
 	// ── Footer ───────────────────────────────────────────────────────────────
 	ImGui::Separator();
+	// Outside the pages, so no page's scope is open here any more.
+	HE::Ed::Help::Scope footerScope("Preferences");
 	if (category)
 	{
 		EditorConfig& cfg = ctx.editorConfig;
-		if (ImGui::Button("Restore Defaults"))
+		if (EditorWidgets::button("Restore Defaults"))
 		{
 			cfg.UiFontScale       = 1.0f;
 			cfg.EditorCameraSpeed = 6.0f;

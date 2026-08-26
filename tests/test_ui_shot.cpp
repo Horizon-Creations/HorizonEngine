@@ -650,9 +650,11 @@ TEST_CASE("ui shot: the generated editor reference")
 	HE::Ed::NodeReference::install(lib);
 	HE::Ed::EditorReference::install(lib);
 
-	// Exactly where F1 on the File menu's "Save All" now lands — the entry for
-	// that row, not a chapter about menus.
-	DocsPanel::openTopic("editor-interface#File.Save All");
+	// Exactly where F1 on the settings page's "Create & push" now lands — the
+	// entry for that button, not a chapter about source control. The settings
+	// page is the one worth shooting: its four groups come from four different
+	// scopes, so it is where a scope that stopped resolving would show.
+	DocsPanel::openTopic("editor-settings#Source Control.Create & push");
 	const he_ui::Image img = shoot("editor-reference", W, H, 4,
 	                               [&](int) { DocsPanel::draw(host); });
 	REQUIRE(img.valid());

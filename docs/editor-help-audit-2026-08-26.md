@@ -132,6 +132,34 @@ die die anderen erst zu Einträgen macht.
 | 9 | **Zusammenarbeit + Source Control** | 39 |
 | 10 | Animation, Audio, Mesh-Editoren | 15 |
 
+## 5b. Umsetzungsstand
+
+Die laufende Zahl steht in `scripts/editor_help_audit.py` als `BASELINE`, und
+`ctest -R editor_help_audit` schlägt fehl, sobald ein Bereich schlechter wird als dort
+notiert. Die Baseline wird gesenkt, wenn eine Stufe fertig ist, und nie angehoben, um
+den Test zu beruhigen.
+
+| Stufe | Stand | Offen |
+|---|---|---:|
+| 0 · Generierte Referenzseiten | erledigt | — |
+| 1 · Interface | erledigt (~90 neue Einträge, 19 Area-Regeln, `menuItem`/`button`/`selectable`) | 0 |
+| 2 · Einstellungen | erledigt (18 Einträge, `smallButton`, drei neue Scopes) | 0 |
+| 3–10 | offen | 191 |
+
+Zwei Dinge, die die Stufe 2 nebenbei gefunden hat und die für die restlichen Stufen
+gelten:
+
+* **Ein Eintrag ohne offenen Scope ist tot.** `Help::find` hängt den obersten Scope
+  davor; ist keiner offen, wird `"Preferences/Private"` nie nachgeschlagen. Genau das
+  war bei den drei Repository-Einträgen der Fall, seit es sie gibt. Das Audit-Skript hat
+  es nicht gesehen, weil es den Scope für die ganze Datei angenommen hat. Deshalb prüft
+  `tests/test_editor_help.cpp` jetzt jeden neuen Scope zur Laufzeit.
+* **Die gestylten Knöpfe haben gar nicht nachgeschlagen.** `primaryButton`,
+  `dangerButton`, `cancelButton`, `dangerSmallButton` und `dangerMenuItem` haben ihre
+  Beschriftung nie an die Hilfe-Tabelle gegeben, obwohl das Audit sie als
+  Bedienelemente gezählt hat. Ein Dialog-Bestätiger ist der Knopf, der einen Satz am
+  nötigsten hat. Jetzt schlagen sie alle nach.
+
 ## 6. Was bewusst NICHT abgedeckt wird
 
 * **Bestätigungs-Chrome** (`OK`, `Abbrechen`, `Schließen`): das Wort ist die Erklärung.

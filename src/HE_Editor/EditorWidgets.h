@@ -79,6 +79,10 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 // One helper per verb rather than colour-pushing at every call site — the ban
 // dialog, the restore dialog and the unsaved-changes prompt had each hand-rolled
 // their own shade of the same idea, all slightly different.
+//
+// All three look their label up in the help table, like button() below — a
+// dialog's confirm is the button most in need of a sentence, and styling it was
+// no reason to lose that. Nothing happens where there is no entry.
 bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 bool dangerButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
@@ -208,6 +212,11 @@ bool button(const char* label, const ImVec2& size = ImVec2(0, 0));
 // Hub's lists are built from these rather than from menu items.
 bool selectable(const char* label, bool selected = false, ImGuiSelectableFlags flags = 0,
                 const ImVec2& size = ImVec2(0, 0));
+// And the compact one, for buttons that sit inside a table cell or a paragraph:
+// the "Fix" in the tool-status table, the copy-this-command buttons in the
+// build-tools dialog. Exactly the places where the button is too small to say
+// what it does.
+bool smallButton(const char* label);
 
 // A section caption inside a component (Details panel) — "Surface",
 // "Precipitation". Same role as ImGui::SeparatorText, but styled as a heading

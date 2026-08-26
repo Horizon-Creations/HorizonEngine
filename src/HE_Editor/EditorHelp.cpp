@@ -891,19 +891,6 @@ namespace
 	  "", "ui#entity-ui" },
 	{ "Environment/Auto-Advance", "",
 	  "Let the moon phase move with the days on its own.", "", "rendering#sky" },
-	{ "Preferences/Private", "",
-	  "Create the new repository as private. It can be made public later on the "
-	  "hosting side; the other direction is the awkward one.",
-	  "", "editor#layout" },
-	{ "Preferences/Push automatically after each commit", "",
-	  "Send every commit to the remote as it is made. Convenient alone, and a "
-	  "way to publish half-finished work when several people share the branch.",
-	  "", "editor#layout" },
-	{ "Preferences/Check the remote for new commits periodically", "",
-	  "Poll for what the others have pushed, so the footer's status is about the "
-	  "repository rather than about the last time you looked.",
-	  "", "editor#layout" },
-
 	// ── Details: the actions inside a component ──────────────────────────────
 	// Buttons rather than values, and the earlier pass counted only values —
 	// which is why these were missing while every row above them was covered.
@@ -1610,6 +1597,117 @@ namespace
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
+	{ "Preferences/Restore Defaults", "Restore Defaults",
+	  "Puts the settings in the category you are looking at back the way they "
+	  "shipped. Only this category, and only the ones the engine owns — your "
+	  "pinned settings and the project itself are untouched.",
+	  "", "editor#preferences" },
+
+	// ── Preferences » Source Control ─────────────────────────────────────────
+	// The one-time setup page: is git usable on this machine, and is this
+	// project in a repository. Its own scope rather than "Preferences" because
+	// its labels are about a repository, not about the editor — and because the
+	// three entries this page used to have were keyed "Preferences/…" and never
+	// resolved: no scope is open on that path at all.
+	{ "Source Control/Recheck##git", "Recheck",
+	  "Looks for git and git-lfs again. Press this after installing one of them, "
+	  "rather than restarting the editor.",
+	  "", "editor#preferences" },
+	{ "Source Control/Save Identity", "Save Identity",
+	  "Writes your name and email into git's global configuration. git records "
+	  "who made each change and refuses to commit without them, so this is asked "
+	  "once and then holds for every project on this machine.",
+	  "", "editor#preferences" },
+	{ "Source Control/Initialize Git repository", "Initialize Git repository",
+	  "Turns the project folder into a git repository. It also writes a "
+	  ".gitignore, so the engine's own output stays out of it, and a "
+	  ".gitattributes, so meshes, textures and audio go through Git LFS instead "
+	  "of being stored whole in every commit.",
+	  "", "editor#preferences" },
+	{ "Source Control/Name##gh", "Name",
+	  "What the repository will be called on GitHub. It defaults to the project "
+	  "folder's name, which is nearly always the answer.",
+	  "", "editor#preferences" },
+	{ "Source Control/Private", "",
+	  "Create the new repository as private. It can be made public later on the "
+	  "hosting side; the other direction is the awkward one.",
+	  "", "editor#preferences" },
+	{ "Source Control/Create & push", "Create & push",
+	  "Creates the repository on GitHub with the token above, points this project "
+	  "at it and pushes what is committed. The token is handed to git's "
+	  "credential helper and wiped from the field, never written to a project "
+	  "file.",
+	  "", "editor#preferences" },
+	{ "Source Control/Set##remote", "Set",
+	  "Points the project at a repository that already exists — GitHub, GitLab, "
+	  "Azure DevOps, anything git can push to. Use this instead of Create & push "
+	  "when somebody else made the repository.",
+	  "", "editor#preferences" },
+	{ "Source Control/Save token", "Save token",
+	  "Stores an access token for pushing and pulling. It goes straight into the "
+	  "system keychain through git's credential helper; the engine keeps no copy "
+	  "and no project or engine file ever contains it.",
+	  "", "editor#preferences" },
+	{ "Source Control/Push automatically after each commit", "",
+	  "Send every commit to the remote as it is made. Convenient alone, and a "
+	  "way to publish half-finished work when several people share the branch.",
+	  "", "editor#preferences" },
+	{ "Source Control/Check the remote for new commits periodically", "",
+	  "Poll for what the others have pushed, so the footer's status is about the "
+	  "repository rather than about the last time you looked.",
+	  "", "editor#preferences" },
+
+	// ── Preferences » Tools ──────────────────────────────────────────────────
+	// One table of every external thing the editor leans on. The rows are text;
+	// only these two are controls.
+	{ "Tool Status/Fix", "Fix",
+	  "Goes where this row can be put right — the page that installs the tool, "
+	  "or the dialog that does it for you. It only appears on rows that are not "
+	  "already in order.",
+	  "", "editor#preferences" },
+	{ "Tool Status/Recheck all", "Recheck all",
+	  "Runs all three probes again: git, the C++ toolchain, and the router. The "
+	  "results are cached from startup, so this is what to press after installing "
+	  "something or changing the network.",
+	  "", "editor#preferences" },
+
+	// ── The build-tools dialog ───────────────────────────────────────────────
+	// Shown at startup when cmake or a C++ compiler is missing. Its own scope
+	// because its "Recheck" and the settings page's are the same word for the
+	// same probe in two very different situations.
+	{ "Build Tools/Install Automatically", "Install Automatically",
+	  "Installs cmake and the compiler through this system's package manager — "
+	  "Homebrew and the Xcode Command Line Tools on macOS, winget on Windows, "
+	  "apt, dnf or pacman on Linux. It can be a several hundred MB download, and "
+	  "the log below says what it is doing.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/Copy 'brew install cmake'", "Copy the brew command",
+	  "Puts the install command on the clipboard, for running it in your own "
+	  "terminal instead of letting the editor do it.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/Copy winget Command", "Copy the winget command",
+	  "Puts the install command for CMake and the Visual Studio C++ Build Tools "
+	  "on the clipboard, for running it in your own shell.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/Copy 'sudo apt install build-essential cmake'", "Copy the apt command",
+	  "Puts the install command on the clipboard. On a distribution without apt, "
+	  "the package names are the same for dnf and pacman.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/cmake.org", "cmake.org",
+	  "Opens the CMake download page in a browser, for installing it by hand.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/Download Page", "Download Page",
+	  "Opens Microsoft's page for the Visual Studio C++ Build Tools, which is "
+	  "where the compiler comes from on Windows.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/Don't show this again", "",
+	  "Stops this dialog appearing at startup. The tools stay missing, and "
+	  "Preferences » Tools still says so — this only silences the interruption.",
+	  "", "horizoncode#compiler" },
+	{ "Build Tools/Recheck", "Recheck",
+	  "Probes for cmake and a compiler again. A clean result closes this dialog "
+	  "on its own, so this is what to press after an install finishes elsewhere.",
+	  "", "horizoncode#compiler" },
 
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
@@ -1725,8 +1823,11 @@ namespace
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────
-		{ "Preferences/", "editor-settings", "Settings Reference", "Preferences" },
-		{ "settings.",    "editor-settings", "Settings Reference", "Preferences" },
+		{ "Preferences/",    "editor-settings", "Settings Reference", "Preferences" },
+		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
+		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
+		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
+		{ "Build Tools/",    "editor-settings", "Settings Reference", "Build tools" },
 		// ── The asset editors ────────────────────────────────────────────────
 		{ "material.", "editor-materials", "Material Editor",   "Material graph" },
 		{ "ui.",       "editor-ui",        "UI Designer",       "Widget designer" },
