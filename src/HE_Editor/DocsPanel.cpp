@@ -863,7 +863,7 @@ namespace
 			    pt && s_panelOpener)
 			{
 				ImGui::SameLine();
-				if (ImGui::SmallButton("Show me"))
+				if (EditorWidgets::button("Show me"))
 				{
 					if (s_panelOpener(pt->window))
 					{
@@ -1069,7 +1069,7 @@ namespace
 		ImGui::SetItemTooltip("Forward");
 
 		ImGui::SameLine(0.0f, 8.0f);
-		if (ImGui::Button("Start")) go(0, -1);
+		if (EditorWidgets::button("Start")) go(0, -1);
 		ImGui::SetItemTooltip("The first page of the manual");
 
 		ImGui::SameLine(0.0f, 12.0f);
@@ -1079,7 +1079,7 @@ namespace
 		                         s_query, sizeof(s_query));
 
 		ImGui::SameLine(0.0f, 8.0f);
-		if (ImGui::Button("Online"))
+		if (EditorWidgets::button("Online"))
 			SDL_OpenURL(lib.url(s_page, s_section).c_str());
 		ImGui::SetItemTooltip("Open this page on horizoncreations.dev");
 	}
@@ -1197,6 +1197,11 @@ void draw(const Host& host)
 	if (!s_open) return;
 	ensureLoaded();
 
+	// The reader's own controls explain themselves too — and the scope covers the
+	// whole window, not just its toolbar: "Show me" sits inside a page and the
+	// "open it online" button only appears on the error screen.
+	HE::Ed::Help::Scope helpScope("Documentation");
+
 	ImGui::SetNextWindowSize(ImVec2(1000.0f, 680.0f), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowSizeConstraints(ImVec2(520.0f, 320.0f), ImVec2(FLT_MAX, FLT_MAX));
 	if (!ImGui::Begin(kWindowTitle, &s_open, ImGuiWindowFlags_NoScrollbar))
@@ -1224,7 +1229,7 @@ void draw(const Host& host)
 			ImGui::TextUnformatted("It ships next to the editor as Docs/he-docs.json.");
 			ImGui::PopStyleColor();
 			ImGui::Spacing();
-			if (EditorWidgets::primaryButton("Open the manual online"))
+			if (EditorWidgets::button("Open the manual online"))
 				SDL_OpenURL("https://horizoncreations.dev/HorizonEngineDocs/");
 		}
 		ImGui::End();

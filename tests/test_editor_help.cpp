@@ -117,6 +117,48 @@ TEST_CASE("editor reference: F1 on a control opens the control, not a chapter")
 	CHECK(sections >= checked);
 }
 
+TEST_CASE("editor help: the interface's own controls resolve under their panel")
+{
+	// The static audit (scripts/editor_help_audit.py) walks a file top to bottom
+	// and cannot see a scope that a CALLER pushes — the documentation reader
+	// opens its scope in draw(), at the end of its file, for helpers defined
+	// above it. So those four are checked here instead, where the lookup is the
+	// real one.
+	struct Case { const char* scope; const char* label; };
+	const Case cases[] = {
+		{ "Documentation", "Start" },
+		{ "Documentation", "Online" },
+		{ "Documentation", "Show me" },
+		{ "Documentation", "Open the manual online" },
+		// And one from every other panel scoped this round, so a scope renamed
+		// in the panel and not in the table fails here rather than in silence.
+		{ "File",            "Save All" },
+		{ "View",            "Console" },
+		{ "Help",            "Documentation" },
+		{ "World Outliner",  "Save as Prefab" },
+		{ "New Entity",      "Cube" },
+		{ "Content Browser", "Find References" },
+		{ "New Asset",       "Input Action" },
+		{ "Console",         "Auto-scroll" },
+		{ "Notifications",   "Mark all as seen" },
+		{ "Play Report",     "Show warnings" },
+		{ "Project Hub",     "Remove from list" },
+		{ "Viewport Options", "Snap to grid" },
+		{ "Tutorial",        "Start over" },
+		{ "Collaboration",   "Ask to edit" },
+		{ "Source Root",     "C++ Class" },
+	};
+	for (const Case& c : cases)
+	{
+		Help::Scope scope(c.scope);
+		const Help::Entry* e = Help::find(c.label);
+		CHECK_MESSAGE(e != nullptr, "no entry for ", std::string(c.scope) + "/" + c.label);
+		if (!e) continue;
+		// And it has to reach the manual, or F1 over it opens nothing.
+		CHECK(!Help::referenceTopic(e->key).empty());
+	}
+}
+
 TEST_CASE("editor help: every topic it points at exists in the manual")
 {
 	Docs::Library lib = shipped();

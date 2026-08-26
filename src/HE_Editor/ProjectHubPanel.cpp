@@ -1,6 +1,7 @@
 #include "ProjectHubPanel.h"
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
-#include "EditorWidgets.h"               // pinDialogToEditorWindow
+#include "EditorWidgets.h"
+#include "EditorHelp.h"                  // "Project Hub/<label>" for its controls
 #include "EditorTheme.h"                 // brand palette — the hub is the first
                                          // surface after the splash, so it is the
                                          // one that must not look like a different
@@ -39,6 +40,8 @@ namespace ProjectHubPanel
 // ─── Project Hub ──────────────────────────────────────────────────────────────
 void render(AppContext& ctx)
 {
+    // The first screen anyone sees: "Project Hub/<label>".
+    HE::Ed::Help::Scope helpScope("Project Hub");
 #ifdef HE_IMGUI_ENABLED
     const ImGuiViewport* vp = ImGui::GetMainViewport();
 
@@ -267,7 +270,7 @@ void render(AppContext& ctx)
     ImGui::InputText("##ProjDir", ctx.hubProjectDir, ctx.hubProjectDirSize);
     ImGui::PopItemWidth();
     ImGui::SameLine();
-    if (ImGui::Button("Browse##dir"))
+    if (EditorWidgets::button("Browse##dir"))
     {
 #ifdef _WIN32
         {
@@ -454,7 +457,7 @@ void render(AppContext& ctx)
 
             if (ImGui::BeginPopupContextItem("##KnownCtx"))
             {
-                if (ImGui::MenuItem("Aus Liste entfernen"))
+                if (EditorWidgets::menuItem("Remove from list"))
                 {
                     ctx.hubRemoveIndex     = i;
                     ctx.hubRemoveRequested = true;
@@ -496,7 +499,7 @@ void render(AppContext& ctx)
                     ImGui::Spacing();
                     ImGui::Separator();
                     ImGui::Spacing();
-                    if (ImGui::Button("Remove", ImVec2(120, 0)))
+                    if (EditorWidgets::button("Remove", ImVec2(120, 0)))
                     {
                         ctx.globalState->removeKnownProject(known[ctx.hubRemoveIndex]);
                         ctx.globalState->writeConfig();
@@ -504,7 +507,7 @@ void render(AppContext& ctx)
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                    if (EditorWidgets::button("Cancel", ImVec2(120, 0)))
                     {
                         ctx.hubRemoveIndex = -1;
                         ImGui::CloseCurrentPopup();
@@ -566,7 +569,7 @@ void render(AppContext& ctx)
     }
 
     ImGui::SetCursorPosX(padding);
-    if (ImGui::Button("Browse .heproj...", ImVec2(panelW - padding * 2.0f, 36.0f))
+    if (EditorWidgets::button("Browse .heproj...", ImVec2(panelW - padding * 2.0f, 36.0f))
         || s_hubOpenBrowseRequested)
     {
         s_hubOpenBrowseRequested = false;

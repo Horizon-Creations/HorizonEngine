@@ -6,7 +6,8 @@
 #include <cstdint>
 #include <mutex>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
-#include "EditorWidgets.h"               // pinDialogToEditorWindow
+#include "EditorWidgets.h"
+#include "EditorHelp.h"               // pinDialogToEditorWindow
 #include "EditorUI.h"                    // discardPanelState on delete
 #include "ScriptEditorPanel.h"
 #include "CppClassEditorPanel.h"
@@ -2105,8 +2106,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			s_quietContentRefresh = true;
 		};
 
+		// The create menu, drawn from two places (the context menu and the "+"
+		// button), so the scope belongs to the list rather than to either caller.
+		// Its rows are asset KINDS — the one place the editor says what each kind
+		// is for, rather than only what it is called.
 		auto drawCreateAssetItems = [&](const std::string& targetFolder)
 		{
+			HE::Ed::Help::Scope helpScope("New Asset");
 			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
 			                     HE::ScriptLanguage scriptLang = HE::ScriptLanguage::Lua,
 			                     const char* hcBaseClass = nullptr)
@@ -2229,8 +2235,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// time instead of aiming at. The two that stay loose are the ones you
 			// make most and open as documents in their own right; everything else
 			// sits under the thing it belongs to.
-			if (ImGui::MenuItem("Scene"))     tryCreate("NewScene",  ".hescene", HE::AssetType::Scene);
-			if (ImGui::MenuItem("UI Widget")) tryCreate("NewWidget", ".hasset",  HE::AssetType::Widget);
+			if (EditorWidgets::menuItem("Scene"))     tryCreate("NewScene",  ".hescene", HE::AssetType::Scene);
+			if (EditorWidgets::menuItem("UI Widget")) tryCreate("NewWidget", ".hasset",  HE::AssetType::Widget);
 			ImGui::Separator();
 
 			// ── Gameplay logic — restricted to the project's chosen language ──────
@@ -2251,22 +2257,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// (HorizonCode.h engineClasses()). "Object" is the plain class
 					// and stores an EMPTY baseClass — the spelling every asset
 					// predating the taxonomy already carries.
-					if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
-					if (ImGui::MenuItem("Entity"))
+					if (EditorWidgets::menuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
+					if (EditorWidgets::menuItem("Entity"))
 						tryCreate("NewEntity", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "Entity");
-					if (ImGui::MenuItem("Player Controller"))
+					if (EditorWidgets::menuItem("Player Controller"))
 						tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerController");
-					if (ImGui::MenuItem("Player Character"))
+					if (EditorWidgets::menuItem("Player Character"))
 						tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerCharacter");
 					break;
 				case ProjectScriptLanguage::Lua:
-					if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
+					if (EditorWidgets::menuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
 					break;
 				case ProjectScriptLanguage::Python:
-					if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
+					if (EditorWidgets::menuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
 					break;
 				case ProjectScriptLanguage::Cpp:
-					if (ImGui::MenuItem("C++ Class"))
+					if (EditorWidgets::menuItem("C++ Class"))
 					{
 						std::strncpy(s_cppClassName, "GameplayClass", sizeof(s_cppClassName) - 1);
 						s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
@@ -2278,22 +2284,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Authored next to character logic and only ever used by it, so it
 				// sits here rather than in a submenu of its own.
 				ImGui::Separator();
-				if (ImGui::MenuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
+				if (EditorWidgets::menuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
 				ImGui::EndMenu();
 			}
 
 			if (ImGui::BeginMenu("Input"))
 			{
-				if (ImGui::MenuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
-				if (ImGui::MenuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
+				if (EditorWidgets::menuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
+				if (EditorWidgets::menuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
 				ImGui::EndMenu();
 			}
 
 			if (ImGui::BeginMenu("Rendering"))
 			{
-				if (ImGui::MenuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
-				if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-				if (ImGui::MenuItem("Particle System"))   tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
+				if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+				if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+				if (EditorWidgets::menuItem("Particle System"))   tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
 				ImGui::EndMenu();
 			}
 
@@ -2301,9 +2307,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// constants, C++ codegen all consume them) — offered in every project.
 			if (ImGui::BeginMenu("Data"))
 			{
-				if (ImGui::MenuItem("Struct")) tryCreate("NewStruct", ".hasset", HE::AssetType::StructType);
-				if (ImGui::MenuItem("Enum"))   tryCreate("NewEnum",   ".hasset", HE::AssetType::EnumType);
-				if (ImGui::MenuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
+				if (EditorWidgets::menuItem("Struct")) tryCreate("NewStruct", ".hasset", HE::AssetType::StructType);
+				if (EditorWidgets::menuItem("Enum"))   tryCreate("NewEnum",   ".hasset", HE::AssetType::EnumType);
+				if (EditorWidgets::menuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
 				ImGui::EndMenu();
 			}
 
@@ -2312,7 +2318,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// folder could create a Material inside it but not another folder —
 			// you had to navigate into it first and then click the empty space.
 			ImGui::Separator();
-			if (ImGui::MenuItem("Folder")) createFolderIn(targetFolder);
+			if (EditorWidgets::menuItem("Folder")) createFolderIn(targetFolder);
 
 			// Texture, Static Mesh, Skeletal Mesh, Shader, Audio and Font used to
 			// stand here too, and every one of them wrote a file that could never
@@ -2564,6 +2570,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// ── Item context menu (folder + file) ─────────────────────────────
 		if (ImGui::BeginPopup("##cb_item_ctx"))
 		{
+			// "Content Browser/<label>" for everything this menu offers.
+			HE::Ed::Help::Scope helpScope("Content Browser");
 			std::string displayName = s_ctxMenuIsFolder
 				? std::filesystem::path(s_ctxMenuItem).filename().string()
 				: std::filesystem::path(s_ctxMenuItem).stem().string();
@@ -2606,7 +2614,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::Separator();
 
 			if (isEngineOverride && !ContentManager::isEngineContentDevMode() && !s_ctxMenuIsFolder &&
-			    ImGui::MenuItem("Revert to Default"))
+			    EditorWidgets::menuItem("Revert to Default"))
 			{
 				const std::string relPath = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
 				if (!relPath.empty())
@@ -2666,7 +2674,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// two had already drifted: fonts imported from this menu and not
 				// from that one.
 				if (!engineLocked && Importer::isImportableSource(srcPath) &&
-				    ImGui::MenuItem("Import"))
+				    EditorWidgets::menuItem("Import"))
 				{
 					// The item being imported lives in whichever root is currently
 					// browsed (s_selectedRootKind) — NOT always Content.
@@ -2694,7 +2702,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				if (!engineLocked && ext == ".hasset" && ctx.contentManager)
 				{
 					const std::string recordedSource = Importer::sourceFileOf(s_ctxMenuItem);
-					if (!recordedSource.empty() && ImGui::MenuItem("Reimport"))
+					if (!recordedSource.empty() && EditorWidgets::menuItem("Reimport"))
 					{
 						// A reimport REPLACES a file everyone in the session shares,
 						// without anybody asking for it — so the lock is taken BEFORE
@@ -2745,7 +2753,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// rather than mutating the default.
 				if (ext == ".hasset" && ctx.contentManager &&
 				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
-				    ImGui::MenuItem("Create Material Instance"))
+				    EditorWidgets::menuItem("Create Material Instance"))
 				{
 					// registerMaterial() below stores inst.path directly (no later
 					// loadAsset() to correct it), so it MUST carry the "Engine/"
@@ -2784,7 +2792,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// per tile from the cached header sniff, so asking costs nothing.
 				if (ext == ".hasset" && ctx.world && ctx.contentManager &&
 				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::StaticMesh) &&
-				    ImGui::MenuItem("Add to Scene"))
+				    EditorWidgets::menuItem("Add to Scene"))
 				{
 					std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
 					if (!rel.empty())
@@ -2853,7 +2861,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						ImGui::TextDisabled("waiting for %s to answer\xE2\x80\xA6",
 						                    who.c_str());
 					}
-					else if (ImGui::MenuItem("Ask to Edit"))
+					else if (EditorWidgets::menuItem("Ask to Edit"))
 					{
 						ctx.collab->requestAssetEdit(rel);
 						ImGui::CloseCurrentPopup();
@@ -2871,7 +2879,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// before changing a material everything shares. It was reachable only by
 			// starting a deletion and then backing out — so the safe way to ask was
 			// to pretend to do the dangerous thing.
-			if (ImGui::MenuItem("Find References"))
+			if (EditorWidgets::menuItem("Find References"))
 			{
 				s_referencesTarget    = s_ctxMenuItem;
 				s_referencesIsFolder  = s_ctxMenuIsFolder;
@@ -2885,7 +2893,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// renaming both files AND rewriting the class name/registration inside —
 			// a refactor best left to the user's C++ toolchain, so Rename is hidden.
 			const bool renameShown = !engineLocked && s_selectedRootKind != 2;
-			const bool doRename    = renameShown && ImGui::MenuItem("Rename");
+			const bool doRename    = renameShown && EditorWidgets::menuItem("Rename");
 			if (renameShown) EditorWidgets::helpForKey("content.rename");
 			if (doRename)
 			{
@@ -2909,7 +2917,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				const std::string label =
 					"Rename " + std::to_string(s_selection.size()) + " Assets\xE2\x80\xA6";
-				if (ImGui::MenuItem(label.c_str()))
+				if (EditorWidgets::menuItem(label.c_str()))
 				{
 					s_patternTargets.clear();
 					for (const std::string& p : s_selection)
@@ -4274,9 +4282,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Source root holds native C++ files, not engine assets — offer only
 				// "C++ Class" (writes to this project's Source/). The .hasset list
 				// would create engine assets under Source/, which doesn't belong here.
+				// The Source root creates native classes, not engine assets — its own
+				// scope, because the entry is about the C++ build, not the content tree.
+				HE::Ed::Help::Scope helpScope("Source Root");
 				ImGui::TextDisabled("Create C++");
 				ImGui::Separator();
-				if (ImGui::MenuItem("C++ Class"))
+				if (EditorWidgets::menuItem("C++ Class"))
 				{
 					std::strncpy(s_cppClassName, "GameplayClass", sizeof(s_cppClassName) - 1);
 					s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';

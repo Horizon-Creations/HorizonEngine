@@ -1,7 +1,8 @@
 #include "TutorialPanel.h"
 #include "TutorialSteps.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig, ProjectManager
-#include "EditorWidgets.h"       // dialog placement (stay inside the editor window)
+#include "EditorWidgets.h"       // dialog placement + the help-aware button
+#include "EditorHelp.h"          // "Project Hub/<label>" for the welcome card
 #include "EditorTheme.h"         // brand palette (the action line)
 #include "EditorAssetTypeCache.h" // asset-type sniff for the create/open checks
 #include "PanelSpotlight.h"      // the pulsing panel outline, shared with the docs reader
@@ -389,6 +390,8 @@ void showWelcome() { s_forceWelcome = true; }
 // ─── First-start welcome (Project Hub) ────────────────────────────────────────
 void renderWelcome(AppContext& ctx)
 {
+	// The card sits on the Hub, so its two buttons belong to it.
+	HE::Ed::Help::Scope helpScope("Project Hub");
 #ifdef HE_IMGUI_ENABLED
 	if (!ctx.globalState) return;
 	loadOnce(ctx.globalState);
@@ -472,7 +475,7 @@ void renderWelcome(AppContext& ctx)
 	// From the actual content width, not the nominal 560: the card is capped to
 	// the editor window, so on a small editor it is narrower than it asked for.
 	const float btnW = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
-	if (ImGui::Button("Start the tutorial", ImVec2(btnW, 34.0f)))
+	if (EditorWidgets::button("Start the tutorial", ImVec2(btnW, 34.0f)))
 	{
 		s_error.clear();
 		if (s_name.empty() || s_dir.empty())
@@ -507,7 +510,7 @@ void renderWelcome(AppContext& ctx)
 		}
 	}
 	ImGui::SameLine();
-	if (ImGui::Button("Not now", ImVec2(btnW, 34.0f)))
+	if (EditorWidgets::button("Not now", ImVec2(btnW, 34.0f)))
 	{
 		// Answered once = never offered again unprompted. Help ▸ Interactive
 		// Tutorial is how it comes back.
@@ -531,6 +534,8 @@ void renderWelcome(AppContext& ctx)
 // ─── The tour itself ──────────────────────────────────────────────────────────
 void render(AppContext& ctx, float dt, const UiFlags& flags)
 {
+	// The tour card's own controls.
+	HE::Ed::Help::Scope helpScope("Tutorial");
 #ifdef HE_IMGUI_ENABLED
 	loadOnce(ctx.globalState);
 
@@ -610,7 +615,7 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 				"You have been through every chapter. Help - Interactive Tutorial starts "
 				"it again from the top whenever you want a refresher.");
 			ImGui::Spacing();
-			if (ImGui::Button("Start over", ImVec2(-1.0f, 30.0f)))
+			if (EditorWidgets::button("Start over", ImVec2(-1.0f, 30.0f)))
 				gotoCursor(tut::Cursor{ 0, 0 }, ctx.globalState);
 		}
 		ImGui::End();

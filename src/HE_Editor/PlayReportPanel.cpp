@@ -1,5 +1,7 @@
 #include "PlayReportPanel.h"
-#include "EditorApplication.h"           // AppContext (playLog / playLogMutex / playReportOpen)
+#include "EditorApplication.h"
+#include "EditorWidgets.h"
+#include "EditorHelp.h"           // AppContext (playLog / playLogMutex / playReportOpen)
 #include <Diagnostics/Logger.h>
 #include <cstdio>
 #include <mutex>
@@ -18,6 +20,9 @@ namespace PlayReportPanel
 // (EditorApplication installs a Logger sink for the duration of play).
 void drawPlayReport(AppContext& ctx)
 {
+    // "Play Report/<label>" — the report is read once, after something went
+    // wrong, by someone who has not seen it before.
+    HE::Ed::Help::Scope helpScope("Play Report");
     if (!ctx.playReportOpen || !*ctx.playReportOpen || !ctx.playLog || !ctx.playLogMutex)
         return;
 
@@ -47,9 +52,9 @@ void drawPlayReport(AppContext& ctx)
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.45f, 1.0f),
                 "%d warning(s) during the last play session", warnings);
 
-        ImGui::Checkbox("Show warnings", &s_showWarnings);
+        EditorWidgets::checkbox("Show warnings", &s_showWarnings);
         ImGui::SameLine();
-        if (ImGui::SmallButton("Copy All"))
+        if (EditorWidgets::button("Copy All"))
         {
             std::string all;
             for (const auto& e : *ctx.playLog)

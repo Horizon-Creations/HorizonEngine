@@ -904,6 +904,466 @@ namespace
 	  "repository rather than about the last time you looked.",
 	  "", "editor#layout" },
 
+	// ── Details: the actions inside a component ──────────────────────────────
+	// Buttons rather than values, and the earlier pass counted only values —
+	// which is why these were missing while every row above them was covered.
+	{ "Component/Remove Component", "Remove Component",
+	  "Takes this component off the entity. What it drove stops: a Mesh removed "
+	  "leaves the entity in the scene with nothing to draw.",
+	  "", "editor#details" },
+	{ "Nav Mesh/Bake", "",
+	  "Walks the scene's static geometry and builds the walkable surface from "
+	  "it. Nothing can path until this has run, and it has to run again after "
+	  "the level's shape changes.",
+	  "", "systems#navigation" },
+	{ "Nav Agent/Go", "",
+	  "Sends the agent to the target position now, from the editor — the way to "
+	  "check a nav mesh without entering play mode.",
+	  "", "systems#navigation" },
+	{ "Nav Agent/Stop", "",
+	  "Drops the current path and leaves the agent where it is.",
+	  "", "systems#navigation" },
+	{ "Material/+ Texture Slot", "",
+	  "Adds a texture slot to this entity's material override. The material's "
+	  "graph decides what a slot is used for; this only fills one in per entity.",
+	  "", "materials#parameters" },
+	{ "Material/Reset to material default", "",
+	  "Drops this entity's override of the parameter and goes back to what the "
+	  "material asset itself says.",
+	  "", "materials#parameters" },
+	{ "Terrain/Set for 4 m tiles", "",
+	  "Sets the texture tiling so one repeat covers four metres of ground, "
+	  "computed from this terrain's size — the usual starting point, instead of "
+	  "one texture stretched over the whole landscape.",
+	  "", "scenes#terrain" },
+	{ "Foliage/Regenerate", "",
+	  "Scatters the instances again from the current seed and density. Needed "
+	  "after the terrain under them was sculpted.",
+	  "", "scenes#foliage" },
+	{ "LOD/+ Level", "",
+	  "Adds a detail level: a cheaper mesh and the distance from which it takes "
+	  "over.",
+	  "", "rendering#performance" },
+	{ "UI Canvas/Screen Space", "",
+	  "The canvas is drawn flat on the screen, at the same size wherever the "
+	  "camera is — a HUD, a menu.",
+	  "", "ui#runtime" },
+	{ "UI Canvas/World Space", "",
+	  "The canvas stands in the world as a surface you can walk up to and view "
+	  "from an angle — a terminal, a sign.",
+	  "", "ui#entity-ui" },
+
+	// ── The menu bar ─────────────────────────────────────────────────────────
+	// Each menu pushes its own name as the scope, so these are keyed by the
+	// label the row carries. A menu is the densest place in the editor where a
+	// verb does more than the word says — "Save All" is the example everyone
+	// meets first.
+	{ "File/New Project", "",
+	  "Creates a project folder with its content tree, settings and a first "
+	  "scene, from a template. The editor then opens it — the current project is "
+	  "closed, after asking about anything unsaved.",
+	  "Ctrl+N", "editor#project-hub" },
+	{ "File/Open Project", "",
+	  "Opens a .heproj from disk. Everything in the editor belongs to a project: "
+	  "the content tree, the settings, the layout.",
+	  "Ctrl+O", "editor#project-hub" },
+	{ "File/Close Project", "",
+	  "Returns to the Project Hub. Tabs, scene and undo history end with the "
+	  "project — the next one starts clean.",
+	  "Ctrl+W", "editor#project-hub" },
+	{ "File/New Scene", "",
+	  "Replaces what is open with an empty scene. The old one is not deleted, "
+	  "only closed, and you are asked about unsaved changes first.",
+	  "", "scenes#scene-files" },
+	{ "File/Open Scene...", "",
+	  "Loads a scene from the project, replacing the open one.",
+	  "", "scenes#scene-files" },
+	{ "File/Add Scene Additive...", "",
+	  "Loads a second scene ALONGSIDE the open one, at an offset — the editor "
+	  "side of zone streaming. Both are live at once; the additive one keeps its "
+	  "own file.",
+	  "", "scenes#streaming" },
+	{ "File/Save All", "",
+	  "Writes every unsaved asset — open tabs and closed ones that still hold "
+	  "edits — and then the scene. Saving the scene alone leaves a changed "
+	  "material or graph on disk as it was.",
+	  "Ctrl+Shift+S", "editor#menus" },
+	{ "File/Save Scene As...", "",
+	  "Writes the scene to a new file and continues in that one. The original "
+	  "stays on disk as it was.",
+	  "Ctrl+Alt+S", "scenes#scene-files" },
+	{ "File/Exit", "",
+	  "Closes the editor, asking about anything unsaved first — including asset "
+	  "tabs, which the scene's own saved state says nothing about.",
+	  "", "editor#menus" },
+	{ "Edit/Duplicate", "",
+	  "Copies the selected entity with all its components and children, next to "
+	  "the original.",
+	  "Ctrl+D", "editor#outliner" },
+	{ "Edit/Preferences", "",
+	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
+	  "tools. They belong to the editor, not to the project.",
+	  "Ctrl+,", "editor#preferences" },
+	{ "View/Toggle Fullscreen", "",
+	  "Fills the screen with the editor window. On a Mac the View menu's own "
+	  "system entry is the reliable one — the key is usually claimed before the "
+	  "editor sees it.",
+	  "F11", "editor#layout" },
+	{ "View/Reset Layout", "",
+	  "Puts every panel back where it started. The escape hatch for a layout "
+	  "that ended up with a panel dragged somewhere it cannot be reached.",
+	  "", "editor#layout" },
+	{ "View/Performance Profiler", "",
+	  "Where the frame time goes: a live CPU and GPU readout, and captures that "
+	  "break one frame down pass by pass.",
+	  "", "editor#profiler" },
+	{ "View/Collaboration", "",
+	  "Host or join a live editing session — several people in one scene, with "
+	  "locks so two of you cannot edit the same thing.",
+	  "", "collaboration#overview" },
+	{ "View/Source Control", "",
+	  "The repository: what changed, what to commit, what the others have "
+	  "pushed. Large assets included.",
+	  "", "editor#layout" },
+	{ "View/Console", "",
+	  "Everything the engine logged this session. The first place to look when "
+	  "something did not happen.",
+	  "Ctrl+`", "advanced#diagnostics" },
+	{ "View/Ground Grid", "",
+	  "The reference grid on the ground plane. Hidden while the scene plays "
+	  "either way.",
+	  "", "editor#viewport" },
+	{ "View/Level Script", "",
+	  "The HorizonCode graph belonging to THIS scene — where its own events and "
+	  "logic live. Opens as a tab.",
+	  "", "horizoncode#hosts" },
+	{ "View/Game Instance", "",
+	  "The graph that outlives every scene: the app-wide state a level change "
+	  "must not reset.",
+	  "", "horizoncode#hosts" },
+	{ "Assets/Import Asset...", "",
+	  "Brings a file from outside into the project — meshes, textures, audio, "
+	  "fonts — converting it to the engine's own format on the way in.",
+	  "", "editor#content-browser" },
+	{ "Assets/Refresh Assets", "",
+	  "Re-walks the content tree. What makes a file dropped in from the Finder "
+	  "appear without restarting the editor.",
+	  "", "editor#content-browser" },
+	{ "Assets/Publish Engine Content to Server...", "",
+	  "Uploads the engine-wide content library to the shared server. Only for "
+	  "maintainers of that library — a project's own assets are not touched.",
+	  "", "editor#engine-content" },
+	{ "Assets/Rebuild Manifest from Server...", "",
+	  "Rebuilds the engine library's index from what is actually on the server. "
+	  "The repair path for a manifest that no longer matches.",
+	  "", "editor#engine-content" },
+	{ "Build/Export Project...", "",
+	  "Packages the project as a standalone game: cooked assets, the runtime, "
+	  "and a config beside it. The export profile decides platform and packing.",
+	  "", "export#overview" },
+	{ "Help/Documentation", "",
+	  "This manual, inside the editor. The reference half is generated from the "
+	  "editor itself, so it describes the build you are running.",
+	  "F1", "editor#menus" },
+	{ "Help/Search the Documentation...", "",
+	  "Opens the manual with the search box focused — the fastest route when you "
+	  "know a word but not a page.",
+	  "Ctrl+F1", "editor#menus" },
+	{ "Help/Documentation (Website)", "",
+	  "The same manual in a browser: shareable, always current, and the only "
+	  "version with the pictures at full size.",
+	  "", "editor#menus" },
+	{ "Help/Interactive Tutorial", "",
+	  "A guided tour through the editor in a sandbox project it creates for you. "
+	  "It watches what you do rather than telling you to press Next.",
+	  "", "getting-started#first-project" },
+	{ "Help/Report Issue...", "",
+	  "Opens a pre-filled issue on the project's tracker, with the version, the "
+	  "platform and the recent log already in it.",
+	  "", "editor#notifications" },
+	{ "Help/About", "",
+	  "Which version this is — the number to quote in a bug report.",
+	  "", "editor#menus" },
+	{ "Help/Website", "",
+	  "horizoncreations.dev: releases, the roadmap and the devlog.",
+	  "", "editor#menus" },
+
+	// ── The viewport's options popup ─────────────────────────────────────────
+	{ "Viewport Options/Snap to grid", "",
+	  "Constrain dragging to fixed steps, so pieces line up exactly instead of "
+	  "nearly. The three steps below are separate because a metre, a degree and "
+	  "a factor are not the same number.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Move (m)", "",
+	  "How far one snapped step moves, in metres.", "", "editor#viewport" },
+	{ "Viewport Options/Rotate (\xc2\xb0)", "",
+	  "How far one snapped step turns, in degrees. 15 gives you the eight "
+	  "compass directions.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Scale (\xc3\x97)", "",
+	  "How much one snapped step scales by.", "", "editor#viewport" },
+	{ "Viewport Options/Screen-space rotation ring", "",
+	  "The rotate gizmo's outer ring, which turns the object about the axis you "
+	  "are looking along. Off by default: it behaves relative to the camera, "
+	  "which surprises people mid-drag.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Speed", "",
+	  "The editor fly camera's speed in units per second. Hold Shift while "
+	  "flying for three times this.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Ground grid", "",
+	  "The reference grid under the scene. Off while playing either way.",
+	  "", "editor#viewport" },
+
+	// ── World Outliner ───────────────────────────────────────────────────────
+	{ "World Outliner/Create Child", "",
+	  "Creates an entity parented to this one. A child follows its parent's "
+	  "transform, which is how a hierarchy is built.",
+	  "", "editor#outliner" },
+	{ "World Outliner/Duplicate", "",
+	  "Copies this entity, its components and its children, beside the original.",
+	  "Ctrl+D", "editor#outliner" },
+	{ "World Outliner/Save as Prefab", "",
+	  "Saves this entity and everything under it as a reusable asset, so the "
+	  "same thing can be dropped into any scene.",
+	  "", "scenes#prefabs" },
+
+	// ── Content Browser ──────────────────────────────────────────────────────
+	{ "Content Browser/Create Asset", "",
+	  "Makes a new asset in this folder. What kinds there are is the list below "
+	  "it — everything the editor can author itself, as opposed to import.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Import", "",
+	  "Brings this file into the project as an engine asset. The original is not "
+	  "moved; a .hasset beside it records where it came from.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Reimport", "",
+	  "Reads the source file again and rebuilds the asset from it — after the "
+	  "model was changed in the program it came from.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Create Material Instance", "",
+	  "A new material that inherits this one and overrides only what you change. "
+	  "The way to get twenty variants without twenty graphs.",
+	  "", "materials#parameters" },
+	{ "Content Browser/Add to Scene", "",
+	  "Puts this asset into the open scene as an entity, at the origin, already "
+	  "carrying the components it needs.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Find References", "",
+	  "Everything in the project that points at this asset. What to check before "
+	  "deleting or renaming one.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Revert to Default", "",
+	  "Throws away this project's copy of an engine asset and goes back to the "
+	  "one the editor ships.",
+	  "", "editor#engine-content" },
+	{ "Content Browser/Remove Local Copy", "",
+	  "Deletes the downloaded copy of an engine-library asset. It stays "
+	  "available and is fetched again when something needs it.",
+	  "", "editor#engine-content" },
+	{ "Content Browser/Download", "",
+	  "Fetches this engine-library asset from the server so it is available "
+	  "offline and can be opened.",
+	  "", "editor#engine-content" },
+	{ "Content Browser/Ask to Edit", "",
+	  "Asks the session host to hand you the lock on this asset. In a "
+	  "collaboration session only one person may edit a thing at a time.",
+	  "", "collaboration#locks" },
+	{ "Content Browser/Number them", "",
+	  "Renaming several files at once: appends a running number instead of "
+	  "giving them all the same name.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/starting at", "",
+	  "The first number of that run.", "", "editor#content-browser" },
+
+	// ── What the Create Asset menu offers ────────────────────────────────────
+	{ "New Asset/Scene", "",
+	  "A level: entities, their components, and the sky and weather that belong "
+	  "to it.",
+	  "", "scenes#scene-files" },
+	{ "New Asset/UI Widget", "",
+	  "A screen — HUD, menu, dialog — laid out in the widget designer, with its "
+	  "own graph for what its buttons do.",
+	  "", "ui#designer" },
+	{ "New Asset/HorizonCode Class", "",
+	  "A visual-scripting class: variables, functions and events, instantiated "
+	  "at run time or put on an entity.",
+	  "", "horizoncode#hosts" },
+	{ "New Asset/Entity", "",
+	  "A HorizonCode class that lives on an entity in the world — the usual "
+	  "shape for a pickup, a door, an enemy.",
+	  "", "horizoncode#hosts" },
+	{ "New Asset/Player Controller", "",
+	  "The class that receives the player's input and decides what to possess. "
+	  "It outlives the character it drives.",
+	  "", "horizoncode#players" },
+	{ "New Asset/Player Character", "",
+	  "The class for the thing the player moves: a character controller, a "
+	  "camera rig and the logic between them.",
+	  "", "horizoncode#players" },
+	{ "New Asset/C++ Class", "",
+	  "A native gameplay class, scaffolded into the project's Source folder and "
+	  "compiled into the game module.",
+	  "", "scripting#cpp" },
+	{ "New Asset/Input Action", "",
+	  "One named thing the player can do — Jump, Fire, Move. Bound to keys, "
+	  "buttons and axes by a mapping context, never to a device directly.",
+	  "", "systems#input" },
+	{ "New Asset/Input Mapping Context", "",
+	  "A set of bindings that can be switched as a whole: on foot, in a vehicle, "
+	  "in a menu.",
+	  "", "systems#input" },
+	{ "New Asset/Material Function", "",
+	  "A piece of material graph saved for reuse, with its own inputs and "
+	  "outputs — a function, in a graph made of nodes.",
+	  "", "materials#functions" },
+	{ "New Asset/Struct", "",
+	  "A named group of fields you can pass around as one value in graphs, "
+	  "scripts and savegames.",
+	  "", "horizoncode#functions" },
+	{ "New Asset/Enum", "",
+	  "A fixed list of named states — Idle, Walking, Dead — instead of numbers "
+	  "nobody can read at the call site.",
+	  "", "horizoncode#functions" },
+	{ "New Asset/SaveGame Template", "",
+	  "Declares what a savegame holds: the fields, their types and their "
+	  "defaults. Every save is validated against it.",
+	  "", "scenes#scene-files" },
+	{ "New Asset/Folder", "",
+	  "A folder in the content tree. Only that — the engine finds assets by "
+	  "their id, so moving one breaks nothing.",
+	  "", "editor#content-browser" },
+
+	{ "Collaboration/Ask to edit", "",
+	  "Asks the session host for the lock on this asset. Until it is granted the "
+	  "tab is read-only: in a session exactly one person may edit a thing, and "
+	  "this is how it changes hands.",
+	  "", "collaboration#locks" },
+	{ "Source Root/C++ Class", "",
+	  "Scaffolds a native class into this project's Source folder — header, "
+	  "source and its registration — and it is compiled into the game module on "
+	  "the next build.",
+	  "", "scripting#cpp" },
+	{ "New Asset/Gameplay", "",
+	  "The classes that run logic: HorizonCode classes, the player controller "
+	  "and character, and native C++ classes.",
+	  "", "horizoncode#hosts" },
+	{ "New Asset/Input", "",
+	  "Actions and the contexts that bind them — what the player can do, and "
+	  "which keys mean it right now.",
+	  "", "systems#input" },
+	{ "New Asset/Rendering", "",
+	  "What things look like: materials and the graph pieces they are built "
+	  "from.",
+	  "", "materials#concept" },
+	{ "New Asset/Data", "",
+	  "Types you define yourself: structs, enums, and the template a savegame is "
+	  "validated against.",
+	  "", "horizoncode#functions" },
+
+	// ── Console and notifications ────────────────────────────────────────────
+	{ "Console/Clear", "",
+	  "Empties the view. The log file next to the executable keeps everything.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Auto-scroll", "",
+	  "Follow the newest line. Switch it off to read something while the log "
+	  "keeps growing.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Copy Line", "",
+	  "Copies the selected line — the one to paste into a bug report.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Copy All Shown", "",
+	  "Copies everything the current filter leaves visible, not the whole log.",
+	  "", "advanced#diagnostics" },
+	{ "Notifications/Mark all as seen", "",
+	  "Clears the bell without discarding the entries — they stay readable in "
+	  "the list.",
+	  "", "editor#notifications" },
+	{ "Notifications/Clear", "",
+	  "Discards every notification. Anything that still needs doing is not "
+	  "undone by this — only the reminder is gone.",
+	  "", "editor#notifications" },
+	{ "Play Report/Show warnings", "",
+	  "Include the warnings the session logged, not just the errors. Off keeps "
+	  "the report to what actually went wrong.",
+	  "", "editor#play-mode" },
+	{ "Play Report/Copy All", "",
+	  "Copies the whole report as text — what to paste into a bug report after a "
+	  "session went wrong.",
+	  "", "editor#play-mode" },
+
+	// ── Project Hub and the reader itself ────────────────────────────────────
+	{ "Project Hub/Remove from list", "",
+	  "Takes the project off this list. The project itself is untouched on disk "
+	  "— this is the list of what you have opened, not of what exists.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Browse .heproj...", "",
+	  "Opens a project the list does not know yet. It is added to the list "
+	  "afterwards.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Start the tutorial", "",
+	  "Creates a sandbox project and starts the guided tour in it. Nothing you "
+	  "build there is lost — it is an ordinary project.",
+	  "", "getting-started#first-project" },
+	{ "Project Hub/Not now", "",
+	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
+	  "whenever you want it.",
+	  "", "getting-started#first-project" },
+	{ "Documentation/Start", "",
+	  "Back to the first page of the manual.", "", "editor#menus" },
+	{ "Documentation/Online", "",
+	  "Opens the page you are reading on the website — the version to send "
+	  "somebody a link to.",
+	  "", "editor#menus" },
+	{ "Documentation/Open the manual online", "",
+	  "The offline copy could not be read — this opens the same manual on the "
+	  "website instead. The copy ships beside the editor as Docs/he-docs.json, "
+	  "so a missing one usually means an incomplete install.",
+	  "", "editor#menus" },
+	{ "Documentation/Show me", "",
+	  "Opens the panel this entry is about and outlines it, so \"where is that\" "
+	  "is answered by pointing rather than by describing.",
+	  "", "editor#layout" },
+	{ "Tutorial/Start over", "",
+	  "Begins the guided tour again from its first step. What you built while "
+	  "following it stays where it is.",
+	  "", "getting-started#first-project" },
+
+	// ── Creating an entity ───────────────────────────────────────────────────
+	// The Outliner's create menu offers recipes, not components — which is the
+	// knowledge the menu used to hide rather than teach.
+	{ "New Entity/Empty", "",
+	  "An entity with a name and a transform and nothing else. Everything it "
+	  "does comes from components you add in the Details panel.",
+	  "", "editor#outliner" },
+	{ "New Entity/Cube", "",
+	  "A visible box: the engine's default cube mesh on a fresh entity. What to "
+	  "reach for when you need something to stand on or aim at.",
+	  "", "scenes#components" },
+	{ "New Entity/Third Person", "",
+	  "A camera on a boom behind the player, already following whoever the "
+	  "player possesses — the whole setup, not just a camera.",
+	  "", "rendering#cameras" },
+	{ "New Entity/First Person", "",
+	  "A camera in the player's head, with the character turning to face where "
+	  "it looks. Same rig as third person with the boom at zero.",
+	  "", "rendering#cameras" },
+	{ "New Entity/Plain (no rig)", "",
+	  "A camera that stays exactly where you put it — for a fixed shot, a "
+	  "security monitor, a cutscene.",
+	  "", "rendering#cameras" },
+	{ "New Entity/Directional", "",
+	  "A light with a direction and no position, like the sun: it lights the "
+	  "whole scene from one angle.",
+	  "", "rendering#lighting" },
+	{ "New Entity/Point", "",
+	  "A light shining in every direction from where it stands, out to its "
+	  "range — a lamp, a fire, a torch.",
+	  "", "rendering#lighting" },
+	{ "New Entity/Spot", "",
+	  "A light shining in a cone — a torch, a headlight, a stage light.",
+	  "", "rendering#lighting" },
+
 	// ── The viewport and its toolbar ─────────────────────────────────────────
 	{ "viewport.play", "Play",
 	  "Runs the scene in the viewport: scripts start, physics ticks and the game's "
@@ -1238,8 +1698,30 @@ namespace
 		{ "content.",  "editor-interface", "Editor Interface", "Content Browser" },
 		{ "details.",  "editor-interface", "Editor Interface", "Details panel" },
 		{ "panel.",    "editor-interface", "Editor Interface", "Panels and windows" },
-		{ "menu.",     "editor-interface", "Editor Interface", "Menus" },
 		{ "hub.",      "editor-interface", "Editor Interface", "Project Hub" },
+		// The menu bar, one rule per menu — the scope a menu pushes IS its name,
+		// so an entry is keyed "File/Save All" and needs nothing at the call
+		// site but the wrapper.
+		{ "File/",   "editor-interface", "Editor Interface", "File menu" },
+		{ "Edit/",   "editor-interface", "Editor Interface", "Edit menu" },
+		{ "View/",   "editor-interface", "Editor Interface", "View menu" },
+		{ "Assets/", "editor-interface", "Editor Interface", "Assets menu" },
+		{ "Build/",  "editor-interface", "Editor Interface", "Build menu" },
+		{ "Help/",   "editor-interface", "Editor Interface", "Help menu" },
+		// The panels whose controls are looked up by label within the panel.
+		{ "World Outliner/",   "editor-interface", "Editor Interface", "World Outliner" },
+		{ "Content Browser/",  "editor-interface", "Editor Interface", "Content Browser" },
+		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
+		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
+		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
+		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
+		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },
+		{ "Documentation/",    "editor-interface", "Editor Interface", "Documentation reader" },
+		{ "Tutorial/",         "editor-interface", "Editor Interface", "Interactive tutorial" },
+		{ "Collaboration/",    "editor-interface", "Editor Interface", "Collaboration" },
+		{ "Source Root/",      "editor-interface", "Editor Interface", "Source root" },
+		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
+		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────

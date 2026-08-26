@@ -7,6 +7,7 @@
 #include "ViewportPanel.h"       // renderSizePx() for the options popup readout
 #include "EditorToolbar.h"        // palette, metrics, cell/well — shared with the SC bar
 #include "EditorWidgets.h"        // helpForKey — the bar's controls explain themselves
+#include "EditorHelp.h"          // the options popup's scope
 
 #include <imgui.h>
 #include <imgui_internal.h>      // dock node: the hidden-tab-bar "unhide" corner
@@ -254,9 +255,13 @@ void snapPresets(State& st, ImGuizmo::OPERATION op)
 // were never worth a permanent cell.
 void optionsPopup(AppContext& ctx, State& st)
 {
+	// Everything in here is looked up as "Viewport Options/<its label>" — the
+	// popup is where the bar hides what it cannot fit, so it is also where a
+	// reader is least likely to know what they are looking at.
+	HE::Ed::Help::Scope helpScope("Viewport Options");
 	ImGui::TextDisabled("Snapping");
 	ImGui::Separator();
-	ImGui::Checkbox("Snap to grid", &st.snapEnabled);
+	EditorWidgets::checkbox("Snap to grid", &st.snapEnabled);
 	ImGui::SetNextItemWidth(90.0f);
 	ImGui::InputFloat("Move (m)",    &st.snapTranslate, 0.1f, 1.0f, "%g");
 	ImGui::SetNextItemWidth(90.0f);
@@ -270,7 +275,7 @@ void optionsPopup(AppContext& ctx, State& st)
 	ImGui::Spacing();
 	ImGui::TextDisabled("Gizmo");
 	ImGui::Separator();
-	ImGui::Checkbox("Screen-space rotation ring", &st.rotateScreenRing);
+	EditorWidgets::checkbox("Screen-space rotation ring", &st.rotateScreenRing);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("The rotate gizmo's outer ring, which rotates about the view axis");
 
@@ -289,7 +294,7 @@ void optionsPopup(AppContext& ctx, State& st)
 	// the grid's switch belongs to ViewportPanel (the only code that draws it),
 	// and the config restores it there at startup without this bar being told.
 	bool grid = ViewportPanel::groundGridEnabled();
-	if (ImGui::Checkbox("Ground grid", &grid))
+	if (EditorWidgets::checkbox("Ground grid", &grid))
 		ViewportPanel::setGroundGridEnabled(grid);
 	EditorWidgets::helpForKey("viewport.grid");
 	int pxW = 0, pxH = 0;

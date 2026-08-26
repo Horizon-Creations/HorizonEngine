@@ -38,6 +38,8 @@ VALUE = (r"(?:EditorWidgets::Row::\w+|Row::\w+|EditorWidgets::checkbox|ImGui::Ch
          r"|ImGui::InputText|ImGui::InputInt|ImGui::InputFloat|ImGui::Combo"
          r"|ImGui::ColorEdit\d)")
 ACTION = (r"(?:ImGui::Button|ImGui::SmallButton|ImGui::MenuItem|ImGui::BeginMenu"
+          r"|ImGui::Selectable"
+          r"|EditorWidgets::menuItem|EditorWidgets::button|EditorWidgets::selectable"
           r"|EditorWidgets::primaryButton|EditorWidgets::dangerButton"
           r"|EditorWidgets::dangerMenuItem|EditorWidgets::dangerSmallButton)")
 
@@ -47,9 +49,36 @@ CHROME = {
     "OK", "Cancel", "Close", "Save", "Apply", "Done", "Yes", "No", "Browse",
     "Remove", "Copy", "Paste", "Cut", "Undo", "Redo", "Delete", "Rename",
     "Refresh", "Back", "Next", "Open", "Create", "+", "-", "x",
+    "\u00d7", "\\xc3\\x97", "\\xC3\\x97",   # the clear-a-slot glyph, as text and as escapes
+    "(none)",          # a combo's empty placeholder, not a control
 }
 
+# Controls the scan sees but that are covered another way, or are not controls.
+# Listed with the reason, because an ignore list without one is a place for
+# things to hide.
+IGNORE = {
+    # Covered by an explicit helpForKey("details.add-component") call — the scan
+    # matches labels against scopes and cannot see a key passed by hand.
+    ("UI Button", "Add Component"),
+    # The documentation reader pushes its scope in draw(), which is at the END
+    # of the file, while these buttons are drawn by helpers defined above it.
+    # At run time the scope is open before the helper is called; a scan that
+    # walks a file top to bottom cannot see that. Covered by the runtime lookup
+    # test in tests/test_editor_help.cpp instead.
+    (None, "Show me"), (None, "Start"), (None, "Online"),
+    ("Documentation", "Open the manual online"),
+}
+
+# Top-level menu titles. A menu opens when you touch it, which is the whole
+# explanation; an entry would be a tooltip fighting with the menu it describes.
+MENU_TITLES = {"File", "Edit", "View", "Assets", "Build", "Help", "Window"}
+
 COMPONENT_HEADER = re.compile(r'componentHeader\("([^"]+)"')
+# A panel says which section its controls belong to by pushing a scope; the
+# lookup at run time is "<scope>/<label>", so the scan has to follow the same
+# thing. Without this the wrapped menus would look like controls that vanished
+# rather than controls that got covered.
+HELP_SCOPE = re.compile(r'Help::Scope\s+\w+\("([^"]*)"\)')
 
 AREAS: dict[str, list[str]] = {
     "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "OutlinerPanel.cpp",
@@ -76,8 +105,8 @@ AREAS: dict[str, list[str]] = {
 # added without an entry; --check is what says so. Lower them as areas are
 # covered — never raise one to make the check pass.
 BASELINE = {
-    "interface": 97, "components": 11, "settings": 18, "materials": 26, "ui": 30,
-    "horizoncode": 30, "input": 7, "animation": 15, "landscape": 17, "export": 27,
+    "interface": 0, "components": 0, "settings": 18, "materials": 25, "ui": 32,
+    "horizoncode": 28, "input": 6, "animation": 15, "landscape": 17, "export": 29,
     "collab": 39,
 }
 
@@ -100,6 +129,9 @@ def scan(filename: str, keys: set[str]) -> tuple[list, list]:
         m = COMPONENT_HEADER.search(line)
         if m:
             scope = m.group(1)
+        m = HELP_SCOPE.search(line)
+        if m and m.group(1):
+            scope = m.group(1)
         for pattern, is_action in ((VALUE, False), (ACTION, True)):
             for hit in re.finditer(pattern + r'\(\s*"([^"]+)"', line):
                 raw = hit.group(1)
@@ -108,7 +140,9 @@ def scan(filename: str, keys: set[str]) -> tuple[list, list]:
                 visible = raw.split("##")[0]
                 if is_action and visible.strip(". ") in CHROME:
                     continue
-                if (scope, visible) in seen:
+                if (scope, visible) in seen or (scope, visible) in IGNORE:
+                    continue
+                if visible in MENU_TITLES and "BeginMenu" in hit.group(0):
                     continue
                 seen.add((scope, visible))
                 candidates = [raw, visible, f"Component/{visible}"]

@@ -191,6 +191,24 @@ const char* drawQueuedHelp();
 // explain itself.
 bool checkbox(const char* label, bool* v);
 
+// ── The same for the two widgets a menu bar is made of ───────────────────────
+// A menu is the densest help surface in the editor — thirty-odd verbs, each of
+// which does something the word alone does not fully say ("Save All": every
+// unsaved asset, then the scene). These are ImGui::MenuItem and ImGui::Button
+// with the label looked up, so a menu covers itself by pushing one
+// HE::Ed::Help::Scope and changing nothing else.
+//
+// The scope is what tells two identical labels apart: "Duplicate" is in the
+// Edit menu and in the Outliner's context menu, and they are not the same
+// sentence.
+bool menuItem(const char* label, const char* shortcut = nullptr,
+              bool selected = false, bool enabled = true);
+bool button(const char* label, const ImVec2& size = ImVec2(0, 0));
+// ImGui::Selectable with the lookup — the Content Browser's create menu and the
+// Hub's lists are built from these rather than from menu items.
+bool selectable(const char* label, bool selected = false, ImGuiSelectableFlags flags = 0,
+                const ImVec2& size = ImVec2(0, 0));
+
 // A section caption inside a component (Details panel) — "Surface",
 // "Precipitation". Same role as ImGui::SeparatorText, but styled as a heading
 // so the eye can find the group boundaries in a long component.

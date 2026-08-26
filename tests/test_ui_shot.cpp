@@ -650,9 +650,9 @@ TEST_CASE("ui shot: the generated editor reference")
 	HE::Ed::NodeReference::install(lib);
 	HE::Ed::EditorReference::install(lib);
 
-	// Exactly where F1 on the sky's Fluffiness slider now lands — the entry
-	// that used to be a chapter about the sky.
-	DocsPanel::openTopic("editor-components#Environment.Fluffiness");
+	// Exactly where F1 on the File menu's "Save All" now lands — the entry for
+	// that row, not a chapter about menus.
+	DocsPanel::openTopic("editor-interface#File.Save All");
 	const he_ui::Image img = shoot("editor-reference", W, H, 4,
 	                               [&](int) { DocsPanel::draw(host); });
 	REQUIRE(img.valid());

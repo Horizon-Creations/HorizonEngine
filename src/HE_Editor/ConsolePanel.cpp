@@ -1,5 +1,7 @@
 #include "ConsolePanel.h"
-#include "EditorApplication.h"   // AppContext (the monospace code font)
+#include "EditorApplication.h"
+#include "EditorWidgets.h"       // the help-aware checkbox / button / menu item
+#include "EditorHelp.h"          // "Console/<label>" scope for its controls
 #include "EditorTheme.h"         // body / dimmed text
 #include "EditorToolbar.h"       // the shared "needs attention" / "went wrong" colours
 
@@ -329,7 +331,7 @@ namespace
 			const unsigned bit = 1u << i;
 			bool           on  = (s_levelMask & bit) != 0;
 			ImGui::PushStyleColor(ImGuiCol_Text, colourFor(static_cast<HE::LogLevel>(i)));
-			if (ImGui::Checkbox(kLevelName[i], &on))
+			if (EditorWidgets::checkbox(kLevelName[i], &on))
 			{
 				s_levelMask    = on ? (s_levelMask | bit) : (s_levelMask & ~bit);
 				s_visibleDirty = true;
@@ -343,6 +345,8 @@ namespace
 
 void DrawConsoleWindow(AppContext& ctx, bool& open)
 {
+	// Every control here is looked up as "Console/<its label>".
+	HE::Ed::Help::Scope helpScope("Console");
 #ifdef HE_IMGUI_ENABLED
 	if (!open) return;
 
@@ -359,7 +363,7 @@ void DrawConsoleWindow(AppContext& ctx, bool& open)
 	// Only the context menu inside the row loop defers its clear — see there.
 	bool clearRequested = false;
 
-	if (ImGui::Button("Clear")) clearLines();
+	if (EditorWidgets::button("Clear")) clearLines();
 	ImGui::SameLine();
 	if (ImGui::Button("Copy")) copyVisible();
 	if (ImGui::IsItemHovered())
@@ -367,7 +371,7 @@ void DrawConsoleWindow(AppContext& ctx, bool& open)
 	ImGui::SameLine();
 	drawLevelFilter();
 	ImGui::SameLine();
-	ImGui::Checkbox("Auto-scroll", &s_autoScroll);
+	EditorWidgets::checkbox("Auto-scroll", &s_autoScroll);
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	if (ImGui::InputTextWithHint("##consoleSearch", "Search", &s_search)) s_visibleDirty = true;
@@ -419,12 +423,12 @@ void DrawConsoleWindow(AppContext& ctx, bool& open)
 					ImGui::PopStyleColor();
 					if (ImGui::BeginPopupContextItem("##consoleLine"))
 					{
-						if (ImGui::MenuItem("Copy Line")) ImGui::SetClipboardText(row.c_str());
-						if (ImGui::MenuItem("Copy All Shown")) copyVisible();
+						if (EditorWidgets::menuItem("Copy Line")) ImGui::SetClipboardText(row.c_str());
+						if (EditorWidgets::menuItem("Copy All Shown")) copyVisible();
 						ImGui::Separator();
 						// Deferred: clearing here would drop the vector this loop
 						// is walking.
-						if (ImGui::MenuItem("Clear")) clearRequested = true;
+						if (EditorWidgets::menuItem("Clear")) clearRequested = true;
 						ImGui::EndPopup();
 					}
 					ImGui::PopID();

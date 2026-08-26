@@ -4,7 +4,8 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
-#include "EditorWidgets.h"   // WrapText — everything a notification shows is a sentence
+#include "EditorWidgets.h"
+#include "EditorHelp.h"   // WrapText — everything a notification shows is a sentence
 #endif
 
 #include <algorithm>
@@ -280,6 +281,8 @@ namespace
 	// closing the instant the pointer leaves the bell.
 	bool drawFlyout(AppContext& ctx, const Cache& c)
 	{
+		// The flyout's own controls: "Notifications/<label>".
+		HE::Ed::Help::Scope helpScope("Notifications");
 		// Anchored bottom-left onto the bell with no gap, so the mouse can travel
 		// from one to the other without crossing a third window and closing the
 		// flyout out from under itself. Clamped to the viewport because the bell
@@ -475,7 +478,7 @@ namespace
 			// Reading a list of twelve because you opened it to check one is how
 			// a notification centre becomes a thing people stop opening.
 			ImGui::BeginDisabled(c.unseen == 0);
-			if (ImGui::SmallButton("Mark all as seen") && ctx.notifications)
+			if (EditorWidgets::button("Mark all as seen") && ctx.notifications)
 				ctx.notifications->markAllSeen();
 			ImGui::EndDisabled();
 
@@ -483,7 +486,7 @@ namespace
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 			                     std::max(0.0f, ImGui::GetContentRegionAvail().x - 52.0f));
 			ImGui::BeginDisabled(c.entries.empty());
-			if (ImGui::SmallButton("Clear") && ctx.notifications)
+			if (EditorWidgets::button("Clear") && ctx.notifications)
 			{
 				// The store empties, so the list is replaced by the empty state
 				// next frame — the bell itself stays, it is permanent now.
@@ -549,6 +552,8 @@ void DrawFooter(AppContext& ctx)
 
 void DrawOverlay(AppContext& ctx)
 {
+	// Every control here is looked up as "Notifications/<its label>".
+	HE::Ed::Help::Scope helpScope("Notifications");
 #ifdef HE_IMGUI_ENABLED
 	if (!ctx.notifications) { closeFlyout(); return; }
 

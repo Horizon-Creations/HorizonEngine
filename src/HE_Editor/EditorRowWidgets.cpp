@@ -321,6 +321,31 @@ bool checkbox(const char* label, bool* v)
 	return changed;
 }
 
+bool menuItem(const char* label, const char* shortcut, bool selected, bool enabled)
+{
+	const bool pressed = ImGui::MenuItem(label, shortcut, selected, enabled);
+	// AFTER the item, and the lookup is hover-gated, so a disabled entry still
+	// explains itself — "why can I not press this" is the question a greyed
+	// menu row raises, and the answer is usually in the sentence.
+	helpForLabel(label);
+	return pressed;
+}
+
+bool button(const char* label, const ImVec2& size)
+{
+	const bool pressed = ImGui::Button(label, size);
+	helpForLabel(label);
+	return pressed;
+}
+
+bool selectable(const char* label, bool selected, ImGuiSelectableFlags flags,
+                const ImVec2& size)
+{
+	const bool pressed = ImGui::Selectable(label, selected, flags, size);
+	helpForLabel(label);
+	return pressed;
+}
+
 const char* drawQueuedHelp()
 {
 	const HE::Ed::Help::Entry* e = s_queued;

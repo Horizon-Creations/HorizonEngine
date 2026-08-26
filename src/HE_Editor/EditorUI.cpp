@@ -41,6 +41,7 @@
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
+#include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
@@ -1341,31 +1342,37 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	ImGui::BeginMainMenuBar();
 	if (ImGui::BeginMenu("File"))
 	{
-		if (ImGui::MenuItem("New Project", "Ctrl+N"))
+		// Every row below is looked up as "File/<its label>" — one scope, and
+		// the menu explains itself (see EditorWidgets::menuItem).
+		HE::Ed::Help::Scope helpScope("File");
+		if (EditorWidgets::menuItem("New Project", "Ctrl+N"))
 		{
 			beginNewProject();
 			openNewProjectPopup = true;
 		}
-        if (ImGui::MenuItem("Open Project", "Ctrl+O"))
+        if (EditorWidgets::menuItem("Open Project", "Ctrl+O"))
             requestGuarded(GuardedAction::OpenProjectDialog);
-		if (ImGui::MenuItem("Close Project", "Ctrl+W"))
+		if (EditorWidgets::menuItem("Close Project", "Ctrl+W"))
 			requestGuarded(GuardedAction::CloseProject);
         ImGui::Separator();
-        if (ImGui::MenuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
-        if (ImGui::MenuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
-        if (ImGui::MenuItem("Add Scene Additive...")) triggerAddSceneAdditive();
+        if (EditorWidgets::menuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
+        if (EditorWidgets::menuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
+        if (EditorWidgets::menuItem("Add Scene Additive...")) triggerAddSceneAdditive();
         // Keep these three in step with MacMenuBar.mm's File block — a Mac user
         // never sees this row (see MacMenuBar.h).
-        if (ImGui::MenuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
-        if (ImGui::MenuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
-        if (ImGui::MenuItem("Save Scene As...", "Ctrl+Alt+S"))    triggerSaveSceneAs();
+        if (EditorWidgets::menuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
+        if (EditorWidgets::menuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
+        if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S"))    triggerSaveSceneAs();
         ImGui::Separator();
-        if (ImGui::MenuItem("Exit", "Alt+F4"))
+        if (EditorWidgets::menuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit"))
     {
+        // Every row below is looked up as "Edit/<its label>" — one scope, and
+        // the menu explains itself (see EditorWidgets::menuItem).
+        HE::Ed::Help::Scope helpScope("Edit");
         // In a session, undo/redo operate on YOUR OWN changes as inverse
         // operations that get republished — the snapshot stack would restore a
         // whole world and revert everyone else's work with it (CollabUndo.h).
@@ -1377,10 +1384,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             const std::string rLabel = ctx.collabUndo->canRedo()
                 ? ctx.collabUndo->redoLabel() : std::string("Redo");
 
-            if (ImGui::MenuItem(uLabel.c_str(), "Ctrl+Z", false,
+            if (EditorWidgets::menuItem(uLabel.c_str(), "Ctrl+Z", false,
                                 ctx.collabUndo->canUndo()))
                 ctx.collabUndo->undo();
-            if (ImGui::MenuItem(rLabel.c_str(), "Ctrl+Y", false,
+            if (EditorWidgets::menuItem(rLabel.c_str(), "Ctrl+Y", false,
                                 ctx.collabUndo->canRedo()))
                 ctx.collabUndo->redo();
 
@@ -1393,8 +1400,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // one undo history in the editor, and this is a second door onto it.
             const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
             const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
-            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo) && ctx.undo) ctx.undo();
-            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo) && ctx.redo) ctx.redo();
+            if (EditorWidgets::menuItem("Undo", "Ctrl+Z", false, canUndo) && ctx.undo) ctx.undo();
+            if (EditorWidgets::menuItem("Redo", "Ctrl+Y", false, canRedo) && ctx.redo) ctx.redo();
         }
         ImGui::Separator();
         // Cut/Copy/Paste act on the SELECTED ENTITY, not on text: an editor's Edit
@@ -1403,55 +1410,61 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         {
             const bool canEdit  = canEditEntity();
             const bool canPaste = canPasteEntity();
-            if (ImGui::MenuItem("Cut",   "Ctrl+X", false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
-            if (ImGui::MenuItem("Copy",  "Ctrl+C", false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
-            if (ImGui::MenuItem("Paste", "Ctrl+V", false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
-            if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, canEdit) && ctx.duplicateEntity)
+            if (EditorWidgets::menuItem("Cut",   "Ctrl+X", false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
+            if (EditorWidgets::menuItem("Copy",  "Ctrl+C", false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
+            if (EditorWidgets::menuItem("Paste", "Ctrl+V", false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
+            if (EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, canEdit) && ctx.duplicateEntity)
                 ctx.duplicateEntity();
-            if (ImGui::MenuItem("Delete", "Del", false, canEdit) && ctx.deleteEntity)
+            if (EditorWidgets::menuItem("Delete", "Del", false, canEdit) && ctx.deleteEntity)
                 ctx.deleteEntity();
         }
         ImGui::Separator();
-		if (ImGui::MenuItem("Preferences", "Ctrl+,"))
+		if (EditorWidgets::menuItem("Preferences", "Ctrl+,"))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View"))
     {
-        if (ImGui::MenuItem("Toggle Fullscreen", "F11")) toggleFullscreen();
-        if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
-        if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler))
+        // Every row below is looked up as "View/<its label>" — one scope, and
+        // the menu explains itself (see EditorWidgets::menuItem).
+        HE::Ed::Help::Scope helpScope("View");
+        if (EditorWidgets::menuItem("Toggle Fullscreen", "F11")) toggleFullscreen();
+        if (EditorWidgets::menuItem("Reset Layout")) { s_resetLayoutRequested = true; }
+        if (EditorWidgets::menuItem("Performance Profiler", nullptr, s_showProfiler))
             togglePanelWindow(s_showProfiler, "Performance Profiler");
-        if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment))
+        if (EditorWidgets::menuItem("Environment", nullptr, s_showEnvironment))
             togglePanelWindow(s_showEnvironment, "Environment");
-        if (ImGui::MenuItem("Collaboration", nullptr, s_showCollab))
+        if (EditorWidgets::menuItem("Collaboration", nullptr, s_showCollab))
             togglePanelWindow(s_showCollab, "Collaboration");
-        if (ImGui::MenuItem("Source Control", nullptr, s_showSourceControl))
+        if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
-        if (ImGui::MenuItem("Console", "Ctrl+`", s_showConsole))
+        if (EditorWidgets::menuItem("Console", "Ctrl+`", s_showConsole))
             togglePanelWindow(s_showConsole, "Console");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
         // look for it the first time.
-        if (ImGui::MenuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
+        if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
                             ctx.projectLoaded))
             ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
-        if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
+        if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
-        if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
+        if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
         ImGui::EndMenu();
     }
 	if (ImGui::BeginMenu("Assets"))
 	{
-		const bool doImport = ImGui::MenuItem("Import Asset...", nullptr, false,
+		// Every row below is looked up as "Assets/<its label>" — one scope, and
+		// the menu explains itself (see EditorWidgets::menuItem).
+		HE::Ed::Help::Scope helpScope("Assets");
+		const bool doImport = EditorWidgets::menuItem("Import Asset...", nullptr, false,
 		                                      ctx.projectLoaded);
 		EditorWidgets::helpForKey("content.import");
 		if (doImport) triggerImportAsset();
 		// The same rescan an import raises — the Content Browser picks the flag up
 		// and re-walks the content tree, which is what makes a file dropped in
 		// from the Finder appear.
-		if (ImGui::MenuItem("Refresh Assets", nullptr, false, ctx.projectLoaded))
+		if (EditorWidgets::menuItem("Refresh Assets", nullptr, false, ctx.projectLoaded))
 			ctx.contentRefreshPending = true;
 #ifdef HE_HAVE_LIBSSH2
 		// Dev-only: publishes the local EngineContent library to the SFTP
@@ -1461,13 +1474,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (ContentManager::isEngineContentDevMode())
 		{
 			ImGui::Separator();
-			if (ImGui::MenuItem("Publish Engine Content to Server..."))
+			if (EditorWidgets::menuItem("Publish Engine Content to Server..."))
 				EngineContentPublishDialog::open(ctx);
 			// For a server that already has content this tool never uploaded
 			// (e.g. a pre-existing archive of raw source audio) — lists the
 			// server directly instead of assuming local EngineContent is the
 			// source of truth. See EngineContentPublish.h.
-			if (ImGui::MenuItem("Rebuild Manifest from Server..."))
+			if (EditorWidgets::menuItem("Rebuild Manifest from Server..."))
 				EngineContentPublishDialog::openRebuildFromServer(ctx);
 		}
 #endif
@@ -1475,28 +1488,32 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	}
 	if (ImGui::BeginMenu("Build", ctx.projectLoaded))
 	{
-		if (ImGui::MenuItem("Export Project..."))
+		HE::Ed::Help::Scope helpScope("Build");
+		if (EditorWidgets::menuItem("Export Project..."))
 			openExportDialog();
 		ImGui::EndMenu();
 	}
 	if (ImGui::BeginMenu("Help"))
 	{
+		// Every row below is looked up as "Help/<its label>" — one scope, and
+		// the menu explains itself (see EditorWidgets::menuItem).
+		HE::Ed::Help::Scope helpScope("Help");
 		// The manual first, and in the editor: it is the answer to most of what
 		// brings anyone into this menu, and the version that opens a browser is
 		// the one that loses whatever the user was in the middle of.
-		if (ImGui::MenuItem("Documentation", "F1", DocsPanel::isOpen()))
+		if (EditorWidgets::menuItem("Documentation", "F1", DocsPanel::isOpen()))
 			DocsPanel::open();
-		if (ImGui::MenuItem("Search the Documentation...", "Ctrl+F1"))
+		if (EditorWidgets::menuItem("Search the Documentation...", "Ctrl+F1"))
 			DocsPanel::openSearch("");
-		if (ImGui::MenuItem("Documentation (Website)")) SDL_OpenURL(kDocsUrl);
+		if (EditorWidgets::menuItem("Documentation (Website)")) SDL_OpenURL(kDocsUrl);
 		ImGui::Separator();
-		if (ImGui::MenuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
+		if (EditorWidgets::menuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
 			TutorialPanel::open();
 		ImGui::Separator();
-		if (ImGui::MenuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
+		if (EditorWidgets::menuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
 			ReportIssueDialog::open();
 		ImGui::Separator();
-		if (ImGui::MenuItem("About")) openAboutPopup = true;
+		if (EditorWidgets::menuItem("About")) openAboutPopup = true;
 		ImGui::EndMenu();
 	}
     ImGui::EndMainMenuBar();
@@ -2657,7 +2674,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     }
                     else
                     {
-                        if (ImGui::Button("Ask to edit", ImVec2(130, 0)))
+                        // Its own scope: the button sits in the read-only banner of an asset
+                        // tab, which is a collaboration state, not a menu.
+                        HE::Ed::Help::Scope lockScope("Collaboration");
+                        if (EditorWidgets::button("Ask to edit", ImVec2(130, 0)))
                             ctx.collab->requestAssetEdit(rel);
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip(

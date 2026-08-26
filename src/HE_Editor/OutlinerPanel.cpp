@@ -1,6 +1,7 @@
 #include "OutlinerPanel.h"
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
-#include "EditorWidgets.h"               // pinDialogToEditorWindow
+#include "EditorWidgets.h"
+#include "EditorHelp.h"                  // scopes for the context and create menus
 #include <HorizonScene/HorizonScene.h>
 #include <Diagnostics/Logger.h>
 #include <cstdio>
@@ -102,9 +103,12 @@ namespace
     // child" menu — one list, so the two can never drift apart.
     bool drawCreateMenu(Preset& out)
     {
+        // Both callers — the background menu and "Create Child" — draw this one
+        // list, so the scope belongs to the list rather than to either of them.
+        HE::Ed::Help::Scope helpScope("New Entity");
         bool picked = false;
         auto item = [&](const char* label, Preset p)
-        { if (ImGui::MenuItem(label)) { out = p; picked = true; } };
+        { if (EditorWidgets::menuItem(label)) { out = p; picked = true; } };
 
         item("Empty", Preset::Empty);
         item("Cube",  Preset::Cube);
@@ -306,6 +310,8 @@ void render(AppContext& ctx)
             // ── Per-entity context menu ───────────────────────────────────
             if (ImGui::BeginPopupContextItem())
             {
+                // Every row is looked up as "World Outliner/<its label>".
+                HE::Ed::Help::Scope helpScope("World Outliner");
                 ctx.selectedEntity = node.entity;
                 if (ImGui::BeginMenu("Create Child"))
                 {
@@ -320,7 +326,7 @@ void render(AppContext& ctx)
                     }
                     ImGui::EndMenu();
                 }
-                if (ImGui::MenuItem("Rename"))
+                if (EditorWidgets::menuItem("Rename"))
                 {
                     s_renameEntity = node.entity;
                     std::strncpy(s_entityRenameBuf, node.name.c_str(), sizeof(s_entityRenameBuf) - 1);
@@ -336,23 +342,23 @@ void render(AppContext& ctx)
                     const bool editable = !isRoot && !ctx.isPlaying;
                     ImGui::Separator();
                     const bool doDuplicate =
-                        ImGui::MenuItem("Duplicate", "Ctrl+D", false, editable);
+                        EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, editable);
                     EditorWidgets::helpForKey("outliner.duplicate");
                     if (doDuplicate && ctx.duplicateEntity)
                         ctx.duplicateEntity();
-                    if (ImGui::MenuItem("Copy", "Ctrl+C", false, editable) && ctx.copyEntity)
+                    if (EditorWidgets::menuItem("Copy", "Ctrl+C", false, editable) && ctx.copyEntity)
                         ctx.copyEntity();
-                    if (ImGui::MenuItem("Cut", "Ctrl+X", false, editable) && ctx.cutEntity)
+                    if (EditorWidgets::menuItem("Cut", "Ctrl+X", false, editable) && ctx.cutEntity)
                         ctx.cutEntity();
                     // Paste needs no row of its own to be meaningful — it lands
                     // beside this one, under the same parent.
-                    if (ImGui::MenuItem("Paste", "Ctrl+V", false,
+                    if (EditorWidgets::menuItem("Paste", "Ctrl+V", false,
                                         ctx.entityClipboardFull && !ctx.isPlaying) &&
                         ctx.pasteEntity)
                         ctx.pasteEntity();
                     ImGui::Separator();
                 }
-                const bool doPrefab = !isRoot && ImGui::MenuItem("Save as Prefab");
+                const bool doPrefab = !isRoot && EditorWidgets::menuItem("Save as Prefab");
                 if (!isRoot) EditorWidgets::helpForKey("outliner.prefab");
                 if (doPrefab && ctx.contentManager)
                 {
