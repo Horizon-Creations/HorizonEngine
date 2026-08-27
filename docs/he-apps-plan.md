@@ -760,10 +760,35 @@ dafür steht der headless-Starttest in der Risikoliste.
   `OnRender`, weil erst danach feststeht, ob sich etwas geändert hat). Ein Herzschlag ohne
   Änderung tickt die App also weiter, ohne die GPU anzufassen und ohne Swap.
 
-**Als Nächstes in Welle 1:** IME und Eingabefilter am Textfeld, und die `timer`-Gruppe — für
-die ist noch zu klären, ob sie überhaupt gebraucht wird, denn Widgets bekommen ein Tick-Event
-und Lua/Python ein `onUpdate`, und ein Timer, der einen Callback feuert, braucht Runtime-Arbeit,
-die diese beiden schon leisten.
+**Vierter Durchgang (1983 Tests): Welle 1 ist inhaltlich fertig.**
+- **Eingabefilter** am Textfeld: `Input Filter` (alles / ganze Zahlen / Dezimalzahlen / eigene
+  Liste) plus `Allowed Characters`, gefiltert dort wo Text hereinkommt, also auch beim
+  Einfügen. Ein `-` nur vorn und einmal, ein `.` nur einmal, beides gegen den wachsenden Text
+  geprüft; ein eingefügtes `-12-34` behält `-1234` statt ganz abgelehnt zu werden.
+- **IME**: `SDL_EVENT_TEXT_EDITING` in beiden Anwendungen, Preedit-Text am Cursor mit
+  Unterstreichung gezeichnet und **nicht** Teil des Feldwerts, IME-Cursor innerhalb der
+  Komposition, Commit beendet sie (sonst doppelt gezeichnet), `SDL_SetTextInputArea` pro Frame
+  aus `focusedFieldRect`, damit das Kandidatenfenster am Feld steht.
+- **Create Widget zeigt nicht mehr.** Entscheidung des Users: Create Widget erzeugt eine
+  Instanz der Widget-Klasse, Show Widget bringt sie auf den Bildschirm. 40 Testfälle mussten
+  angepasst werden. **Migrationshinweis für bestehende Projekte:** ein Graph, der bisher nur
+  Create Widget hatte, braucht jetzt ein Show Widget dahinter.
+- **Editor im App-Modus weiter entkernt:** Add-Menü auf vier Einträge, Export-Dialog ohne
+  Fenstergröße, Fenstermodus, Backend, Mod-Support und (ohne Materialien) ohne vorkompilierte
+  Shader, Szenen-Zeilen aus beiden Menüleisten (nativ **versteckt**, nicht ausgegraut).
+- **Leistungsfund:** der App-Runtime schaltete für die leere Welt jeden Frame Bloom, SSAO,
+  Anti-Aliasing, GI, SSR und den Deferred-Pfad ein — die volle Nachbearbeitungskette über
+  nichts. Im App-Modus jetzt ausdrücklich aus (nicht weggelassen: der Renderer behält sonst
+  seine eigenen Standards, und Bloom und SSAO sind bei ihm an).
+
+**Nicht gebaut, mit Begründung:** die `timer`-Gruppe. Widgets bekommen ein Tick-Event,
+Lua/Python ein `onUpdate`, und ein Timer, der einen Callback feuert, bräuchte genau die
+Runtime-Arbeit, die diese beiden schon leisten. Was übrig bliebe, kann `datetime`.
+
+**Was von Welle 1 offen bleibt, ist keine Zeile Code, sondern der Nachweis:** die Abnahme
+(„Todo-App, exportiert, unter 2 % CPU im Leerlauf") steht aus, solange die Live-Vorschau beim
+User nichts zeigt. IME ist zudem **nicht real geprüft** — dafür braucht es eine echte
+Eingabemethode, headless testbar ist nur die Zustandsmaschine.
 
 ---
 
