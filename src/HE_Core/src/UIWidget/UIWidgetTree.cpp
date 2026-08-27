@@ -730,6 +730,9 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         o["gradientColor"] = { e.gradientColor.r, e.gradientColor.g,
                                e.gradientColor.b, e.gradientColor.a };
         o["gradientAngle"] = e.gradientAngle;
+        // Only the radial one is written: linear is what every gradient authored
+        // so far is, and absent has to keep meaning exactly that.
+        if (e.gradientShape == 1) o["gradientShape"] = 1;
     }
     e.writeJson(o); // type-specific fields
     return o;
@@ -791,6 +794,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
                            (*bc)[2].get<float>(), (*bc)[3].get<float>() };
     e->gradient      = o.value("gradient", false);
     e->gradientAngle = o.value("gradientAngle", 0.0f);
+    e->gradientShape = o.value("gradientShape", 0) == 1 ? 1 : 0;
     if (const auto gc = o.find("gradientColor");
         gc != o.end() && gc->is_array() && gc->size() == 4)
         e->gradientColor = { (*gc)[0].get<float>(), (*gc)[1].get<float>(),

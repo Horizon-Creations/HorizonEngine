@@ -1932,6 +1932,12 @@ namespace
 	  "The colour the surface fades TO. It starts at the element's own colour, so "
 	  "a gradient is two colours and an angle and nothing else.",
 	  "", "ui#elements" },
+	{ "UI Widget/Gradient Shape", "",
+	  "Linear fades along an angle, across the whole surface. Radial fades out of "
+	  "the middle to the farthest corner — a glow behind a dialog, a spotlit card, "
+	  "the soft centre of a button. A radial fade has no direction, so the angle "
+	  "is not offered while it is picked.",
+	  "", "ui#elements" },
 	{ "UI Widget/Gradient Angle", "",
 	  "Which way the fade runs, clockwise from straight down: 0 fades top to "
 	  "bottom, 90 left to right. Down at zero because a vertical fade is what a "

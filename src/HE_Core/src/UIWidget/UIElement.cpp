@@ -399,6 +399,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Gradient")     { out = UIPropValue::ofBool(e.gradient);           return true; }
     if (n == "Gradient Color"){out = UIPropValue::ofColor(e.gradientColor);     return true; }
     if (n == "Gradient Angle"){out = UIPropValue::ofFloat(e.gradientAngle);     return true; }
+    if (n == "Gradient Shape"){out = UIPropValue::ofInt(e.gradientShape);       return true; }
     return false;
 }
 
@@ -438,6 +439,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Gradient")     { e.gradient = v.b; return true; }
     if (n == "Gradient Color"){ e.gradientColor = v.col; return true; }
     if (n == "Gradient Angle"){ e.gradientAngle = v.f; return true; }
+    if (n == "Gradient Shape"){ e.gradientShape = (v.i == 1) ? 1 : 0; return true; }
     return false;
 }
 } // namespace
@@ -477,6 +479,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
         out.push_back({ "Gradient",       UIPropType::Bool });
         out.push_back({ "Gradient Color", UIPropType::Color });
         out.push_back({ "Gradient Angle", UIPropType::Float, 0.0f, 360.0f });
+        out.push_back({ "Gradient Shape", UIPropType::Int, 0.0f, 1.0f });
     }
     // Asset slots only where the editor exposes them: Material behind
     // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic

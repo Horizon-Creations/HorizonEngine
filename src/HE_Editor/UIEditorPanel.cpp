@@ -659,10 +659,26 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 		edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		EditorWidgets::helpForLabel("Gradient Color");
-		edit |= ImGui::DragFloat("Gradient Angle", &n.gradientAngle, 1.0f,
-		                         -360.0f, 360.0f, "%.0f\xc2\xb0");
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		EditorWidgets::helpForLabel("Gradient Angle");
+		static const char* kShapes[] = { "Linear", "Radial" };
+		const bool shapeOpen = ImGui::BeginCombo("Gradient Shape",
+			kShapes[n.gradientShape == 1 ? 1 : 0]);
+		if (!shapeOpen) EditorWidgets::helpForLabel("Gradient Shape");
+		if (shapeOpen)
+		{
+			for (int i = 0; i < 2; ++i)
+				if (ImGui::Selectable(kShapes[i], n.gradientShape == i))
+				{ n.gradientShape = i; committed = true; }
+			ImGui::EndCombo();
+		}
+		// A radial fade has no direction, so the angle is not offered rather
+		// than offered and ignored.
+		if (n.gradientShape != 1)
+		{
+			edit |= ImGui::DragFloat("Gradient Angle", &n.gradientAngle, 1.0f,
+			                         -360.0f, 360.0f, "%.0f\xc2\xb0");
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Gradient Angle");
+		}
 	}
 }
 
@@ -1250,8 +1266,10 @@ void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		const int vtx0 = dl->VtxBuffer.Size;
 		pathRoundedRect(dl, mn, mx, radii);
-		dl->PathFillConvex(C(fill));
-		if (n.gradient)
+		// A radial fade reaches its far colour at the corners, so that is what
+		// the shape is filled with and the rings below work inwards from it.
+		dl->PathFillConvex(C(n.gradient && n.gradientShape == 1 ? n.gradientColor : fill));
+		if (n.gradient && n.gradientShape != 1)
 		{
 			// The same rule the shaders use: an angle clockwise from "down",
 			// projected onto the box. Shading the vertices the fill just wrote
@@ -1267,6 +1285,30 @@ void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 				ImVec2(c.x - d.x * half, c.y - d.y * half),
 				ImVec2(c.x + d.x * half, c.y + d.y * half),
 				C(fill), C(n.gradientColor));
+		}
+		else if (n.gradient)
+		{
+			// Radial. ImGui can shade a path's VERTICES, and this path's are all
+			// on its outline — every one of them out at the far stop — so
+			// shading it comes out flat. Rings do the fade instead.
+			//
+			// They stop at the circle INSCRIBED in the box, never at the corner:
+			// a circle centred in a rounded rectangle and no wider than its
+			// shorter side cannot leave it, and ImDrawList has no way to clip to
+			// a path. So the corners keep the far colour and only the last ring
+			// is a slightly compressed step. The engine fades all the way to the
+			// farthest corner; this is the preview's approximation of it.
+			const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+			const float w = mx.x - mn.x, h = mx.y - mn.y;
+			const float farR = std::max(1e-4f, 0.5f * std::sqrt(w * w + h * h));
+			const float inR  = 0.5f * std::min(w, h);
+			constexpr int kRings = 24;
+			for (int i = kRings; i >= 1; --i)
+			{
+				const float r = inR * static_cast<float>(i) / kRings;
+				const glm::vec4 col = fill + (n.gradientColor - fill) * (r / farR);
+				dl->AddCircleFilled(c, r, C(col), 48);
+			}
 		}
 	}
 	if (n.borderWidth > 0.0f)

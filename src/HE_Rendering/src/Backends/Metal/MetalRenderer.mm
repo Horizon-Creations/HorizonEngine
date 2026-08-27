@@ -1246,7 +1246,7 @@ static float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
 // border = { widthPx, r, g, b } and borderA carries its alpha in .x — the border
 // needs five numbers and a float4 holds four. Width 0 = no border, which is what
 // every quad drew before borders existed.
-// grad = the second colour of a linear gradient; gradP = { on, angleDegrees }.
+// grad = the gradient's second colour; gradP = { on, angleDegrees, radial }.
 // Off, the quad is `color` throughout — what every quad was before gradients.
 fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& color [[buffer(0)]],
@@ -1279,9 +1279,20 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
     // screen, and shifted by 0.5 so the middle of the box is the middle of it.
     float4 fill = color;
     if (gradP.x > 0.5) {
-        float  a = gradP.y * 0.017453292;           // degrees → radians
-        float2 dir = float2(sin(a), cos(a));        // 0° = down, 90° = right
-        float  t = clamp(dot(in.luv - 0.5, dir) + 0.5, 0.0, 1.0);
+        float t;
+        if (gradP.z > 0.5) {
+            // Radial: the middle of the box out to its FARTHEST CORNER, which is
+            // where CSS puts the far stop by default and the only normalization
+            // under which the second colour reaches every part of the box.
+            // Measured in the quad's own 0..1 space so the circle follows the
+            // box's proportions rather than coming out an ellipse on a wide one.
+            float2 d = (in.luv - 0.5) * shape.zw;
+            t = clamp(length(d) / max(1e-4, length(shape.zw * 0.5)), 0.0, 1.0);
+        } else {
+            float  a = gradP.y * 0.017453292;       // degrees → radians
+            float2 dir = float2(sin(a), cos(a));    // 0° = down, 90° = right
+            t = clamp(dot(in.luv - 0.5, dir) + 0.5, 0.0, 1.0);
+        }
         fill = mix(color, grad, t);
     }
     // Square AND borderless is the one case that needs no distance field at all,
@@ -11198,7 +11209,8 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		const simd::float4 grad  = { obj.gradientColor.r, obj.gradientColor.g,
 		                             obj.gradientColor.b, obj.gradientColor.a };
 		const simd::float4 gradP = { obj.gradient ? 1.0f : 0.0f,
-		                             obj.gradientAngleDeg, 0.0f, 0.0f };
+		                             obj.gradientAngleDeg,
+		                             obj.gradientShape == 1 ? 1.0f : 0.0f, 0.0f };
 		[enc setFragmentBytes:&color   length:sizeof(color)   atIndex:0];
 		[enc setFragmentBytes:&shape   length:sizeof(shape)   atIndex:1];
 		[enc setFragmentBytes:&border  length:sizeof(border)  atIndex:2];

@@ -4685,6 +4685,7 @@ uniform vec4  uBorderColor;
 uniform float uGradient;      // 0 = solid, 1 = linear fade to uGradientColor
 uniform vec4  uGradientColor;
 uniform float uGradientAngle; // degrees, clockwise from "down"
+uniform float uGradientShape; // 0 = linear along the angle, 1 = radial from the centre
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 // One rounded box, four radii. `p` is relative to the box's centre (y down),
@@ -4731,9 +4732,20 @@ void main()
     vec4 fill = uColor;
     if (uGradient > 0.5)
     {
-        float a = uGradientAngle * 0.017453292;
-        vec2  dir = vec2(sin(a), cos(a));
-        float t = clamp(dot(vLocal - 0.5, dir) + 0.5, 0.0, 1.0);
+        float t;
+        if (uGradientShape > 0.5)
+        {
+            // Radial: centre out to the FARTHEST CORNER, measured in pixels so
+            // the circle follows the box instead of coming out an ellipse.
+            vec2 dpx = (vLocal - 0.5) * uRect.zw;
+            t = clamp(length(dpx) / max(1e-4, length(uRect.zw * 0.5)), 0.0, 1.0);
+        }
+        else
+        {
+            float a = uGradientAngle * 0.017453292;
+            vec2  dir = vec2(sin(a), cos(a));
+            t = clamp(dot(vLocal - 0.5, dir) + 0.5, 0.0, 1.0);
+        }
         fill = mix(uColor, uGradientColor, t);
     }
     // Square AND borderless needs no distance field at all — the crisp fast path.
@@ -5782,6 +5794,7 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIGradient      = glGetUniformLocation(m_uiProgram, "uGradient");
 		m_uUIGradientColor = glGetUniformLocation(m_uiProgram, "uGradientColor");
 		m_uUIGradientAngle = glGetUniformLocation(m_uiProgram, "uGradientAngle");
+		m_uUIGradientShape = glGetUniformLocation(m_uiProgram, "uGradientShape");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
@@ -7508,6 +7521,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIGradientColor, obj.gradientColor.r, obj.gradientColor.g,
 		            obj.gradientColor.b, obj.gradientColor.a);
 		glUniform1f(m_uUIGradientAngle, obj.gradientAngleDeg);
+		glUniform1f(m_uUIGradientShape, obj.gradientShape == 1 ? 1.0f : 0.0f);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 

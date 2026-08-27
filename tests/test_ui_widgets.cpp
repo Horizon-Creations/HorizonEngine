@@ -2882,7 +2882,7 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         static const std::vector<std::string> kSurfaceRows = {
             "Corner Radius", "Corner TL", "Corner TR", "Corner BR", "Corner BL",
             "Border Width", "Border Color",
-            "Gradient", "Gradient Color", "Gradient Angle" };
+            "Gradient", "Gradient Color", "Gradient Angle", "Gradient Shape" };
         const std::vector<UIPropDesc> all = e->allProperties();
         for (const std::string& row : kSurfaceRows)
         {
@@ -3216,6 +3216,34 @@ TEST_CASE("A gradient rides on the same surface as the border")
             CHECK(o.gradientAngleDeg == doctest::Approx(90.0f));
         }
     CHECK(gradients == 1);
+}
+
+// The second gradient shape. Linear is what every gradient authored so far is,
+// so "absent" has to keep meaning exactly that on disk.
+TEST_CASE("A gradient can be radial instead of linear")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& e = *t.find(id);
+    e.gradient = true;
+    e.gradientColor = glm::vec4(0.1f, 0.2f, 0.3f, 1.0f);
+    CHECK(e.gradientShape == 0);                       // linear by default
+
+    const std::string linear = HE::uiWidgetTreeToJson(t);
+    CHECK(linear.find("gradientShape") == std::string::npos);
+
+    e.setPropAny("Gradient Shape", HE::UIPropValue::ofInt(1));
+    CHECK(e.gradientShape == 1);
+    // Anything that is not the radial one is the linear one — the shape is a
+    // choice of two, not an int a graph can put 7 into.
+    e.setPropAny("Gradient Shape", HE::UIPropValue::ofInt(7));
+    CHECK(e.gradientShape == 0);
+    e.setPropAny("Gradient Shape", HE::UIPropValue::ofInt(1));
+
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), loaded));
+    CHECK(loaded.find(id)->gradientShape == 1);
+    CHECK(loaded.find(id)->getPropAny("Gradient Shape").i == 1);
 }
 
 TEST_CASE("A border survives a save and a load")

@@ -1436,6 +1436,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 						first.gradient         = true;
 						first.gradientColor    = e.gradientColor;
 						first.gradientAngleDeg = e.gradientAngle;
+						first.gradientShape    = e.gradientShape;
 					}
 				}
 			}

@@ -270,6 +270,11 @@ public:
     bool      gradient = false;
     glm::vec4 gradientColor{ 1.0f, 1.0f, 1.0f, 1.0f };
     float     gradientAngle = 0.0f;   // degrees
+    // 0 = linear, along the angle above. 1 = radial, from the middle of the
+    // element out to its farthest corner — a glow behind a dialog, a spotlit
+    // card, the soft middle of a button. The angle means nothing then, and the
+    // editor stops offering it.
+    int       gradientShape = 0;
 
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
@@ -431,6 +436,7 @@ protected:
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;
         dst.gradient = gradient; dst.gradientColor = gradientColor;
         dst.gradientAngle = gradientAngle;
+        dst.gradientShape = gradientShape;
     }
 };
 

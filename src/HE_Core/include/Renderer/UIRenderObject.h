@@ -50,6 +50,12 @@ struct UIRenderObject {
     bool        gradient = false;
     glm::vec4   gradientColor{ 1.0f, 1.0f, 1.0f, 1.0f };
     float       gradientAngleDeg = 0.0f;
+    // 0 = linear (the angle above), 1 = radial: `color` at the centre of the
+    // quad fading to `gradientColor` at its FARTHEST CORNER, which is the rule
+    // CSS's radial-gradient uses by default. Farthest corner rather than
+    // nearest side because it is the only normalization under which the second
+    // colour actually reaches every part of the box.
+    int         gradientShape = 0;
     // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
     // font; other keys index UIFontCache (an imported Font asset).
     uint32_t    fontAtlasKey = 0;

@@ -723,6 +723,7 @@ private:
 	int          m_uUIGradient      = -1; // 0 = solid, 1 = linear fade
 	int          m_uUIGradientColor = -1;
 	int          m_uUIGradientAngle = -1; // degrees, clockwise from "down"
+	int          m_uUIGradientShape = -1; // 0 = linear, 1 = radial from the centre
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;
