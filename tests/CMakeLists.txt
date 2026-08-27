@@ -165,6 +165,14 @@ add_executable(he_tests
     # The editor reference, generated from the help table — the test walks
     # both against each other.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorReference.cpp
+    # The guides — the third generated part of the manual, and the one a reader
+    # starts in. Same reason as the two above: DocsPanel installs them, so the
+    # test target has to carry them or it does not link.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorGuides.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesFirstSteps.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesCharacter.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesWorld.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesShipping.cpp
     # The documentation reader itself, so test_ui_shot.cpp can render the real
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).

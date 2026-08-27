@@ -4,6 +4,7 @@
 #include "EditorHelp.h"          // topic → the panel it is about ("Show me")
 #include "HcNodeReference.h"     // the node reference, generated from the engine
 #include "EditorReference.h"     // the editor reference, generated from the tooltips
+#include "EditorGuides.h"        // the guides — recipes, generated the same way
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "PanelSpotlight.h"
@@ -198,6 +199,10 @@ namespace
 			// And the editor's own controls, from the same table the hover
 			// tooltips come from — so F1 on a control opens the control.
 			HE::Ed::EditorReference::install(lib);
+			// And the guides: the recipes, which are what most readers actually
+			// came for. Last, so their cross-links into the two references
+			// above resolve while the pages are being built.
+			HE::Ed::Guides::install(lib);
 		}
 	}
 
@@ -1015,10 +1020,60 @@ namespace
 	}
 
 	// ── Sidebar ──────────────────────────────────────────────────────────────
+	// The table of contents, in the order it is READ rather than the order it
+	// arrived in. The bundle's groups come from the website's sidebar; the
+	// guides are generated here and belong at the top, because "how do I make an
+	// enemy chase the player" is the question people open this panel with and
+	// "how does navigation work" is not.
+	//
+	// Assembled for drawing rather than in the library, because the library has
+	// no way to express it: appendPage can only extend the LAST group, so the
+	// guide pages land in "Reference" and there is no call that would put a new
+	// group in front. So the pages keep the group they were given, and this
+	// lifts them out of it for the one place it shows.
+	//
+	// The indices stay real indices into pages() throughout — go(), F1, search
+	// hits and history all address pages that way, and a remapped one here would
+	// break every one of them.
+	struct NavGroup { std::string title; std::vector<int> pages; };
+
+	std::vector<NavGroup> navGroups()
+	{
+		const docs::Library& lib = docs::library();
+		std::vector<NavGroup> out;
+
+		NavGroup guides;
+		guides.title = HE::Ed::Guides::kGroupTitle;
+		for (const std::string& id : HE::Ed::Guides::pageIds())
+		{
+			const int idx = lib.pageIndex(id);
+			if (idx >= 0) guides.pages.push_back(idx);
+		}
+		// Empty whenever the guides were never installed — the test target draws
+		// this panel with nothing but the bundle in it, and an empty heading over
+		// nothing is worse than no heading.
+		const std::vector<int> guideIdx = guides.pages;
+		if (!guides.pages.empty()) out.push_back(std::move(guides));
+
+		for (const docs::Group& g : lib.groups())
+		{
+			NavGroup ng;
+			ng.title = g.title;
+			for (int idx : g.pages)
+			{
+				if (std::find(guideIdx.begin(), guideIdx.end(), idx) != guideIdx.end())
+					continue;   // already listed above, under its own heading
+				ng.pages.push_back(idx);
+			}
+			if (!ng.pages.empty()) out.push_back(std::move(ng));
+		}
+		return out;
+	}
+
 	void drawNav()
 	{
 		const docs::Library& lib = docs::library();
-		for (const docs::Group& g : lib.groups())
+		for (const NavGroup& g : navGroups())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
 			ImGui::TextUnformatted(g.title.c_str());
