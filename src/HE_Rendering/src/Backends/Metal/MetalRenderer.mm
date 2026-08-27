@@ -1248,6 +1248,8 @@ static float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
 // every quad drew before borders existed.
 // grad = the gradient's second colour; gradP = { on, angleDegrees, radial }.
 // Off, the quad is `color` throughout — what every quad was before gradients.
+// fx = { dropBlurPx, innerBlurPx, 0, 0 }, innerCol = the inner shadow's colour.
+// Both 0 = the crisp edge every quad had before shadows existed.
 fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& color [[buffer(0)]],
                            constant float4& shape [[buffer(1)]],
@@ -1256,6 +1258,8 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& grad [[buffer(4)]],
                            constant float4& gradP [[buffer(5)]],
                            constant float4& radii [[buffer(6)]],
+                           constant float4& fx [[buffer(7)]],
+                           constant float4& innerCol [[buffer(8)]],
                            texture2d<float> atlas [[texture(0)]])
 {
     if (shape.x > 0.5 && shape.x < 1.5) {
@@ -1297,10 +1301,26 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
     }
     // Square AND borderless is the one case that needs no distance field at all,
     // so it stays the crisp fast path it always was.
-    if (shape.y <= 0.0 && border.x <= 0.0) return fill;
-    // Solid quad with rounded corners (all four at min(w,h)/2 → circle).
-    float d    = heRoundedBoxSDF((in.luv - 0.5) * shape.zw, shape.zw * 0.5, radii);
-    float cov  = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d is in pixels)
+    if (shape.y <= 0.0 && border.x <= 0.0 && fx.x <= 0.0 && fx.y <= 0.0) return fill;
+    // A blurred quad is a DROP SHADOW: the producer grew the rect by the blur on
+    // every side so the falloff is not cut off, so the shape itself sits inset by
+    // exactly that much. Nothing else applies to it — a shadow has no border, no
+    // gradient and no inner shadow, it is one colour with an edge.
+    float2 halfSz = shape.zw * 0.5 - fx.x;
+    float d    = heRoundedBoxSDF((in.luv - 0.5) * shape.zw, halfSz, radii);
+    // Crisp is the ~1px antialiased edge every quad has always had; blurred
+    // fades across `blur` pixels either side of the edge.
+    float cov  = (fx.x > 0.0) ? (1.0 - smoothstep(-fx.x, fx.x, d))
+                              : clamp(0.5 - d, 0.0, 1.0);
+    if (fx.x > 0.0) return float4(fill.rgb, fill.a * cov);
+    // The INNER shadow, cast from the shape's own edge inwards: `d` is negative
+    // inside, so -d is how deep in this pixel is, and the same falloff read the
+    // other way round darkens the rim. Over the fill, under the border.
+    if (fx.y > 0.0) {
+        float t = 1.0 - smoothstep(0.0, fx.y, -d);
+        float a = innerCol.a * clamp(t, 0.0, 1.0);
+        fill = float4(mix(fill.rgb, innerCol.rgb, a), fill.a);
+    }
     if (border.x <= 0.0) return float4(fill.rgb, fill.a * cov);
     // The border is the ring between the shape's edge and the same shape shrunk
     // by its width: `d` is a signed distance in pixels, so the inner edge is
@@ -11218,6 +11238,11 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setFragmentBytes:&grad    length:sizeof(grad)    atIndex:4];
 		[enc setFragmentBytes:&gradP   length:sizeof(gradP)   atIndex:5];
 		[enc setFragmentBytes:&radii   length:sizeof(radii)   atIndex:6];
+		const simd::float4 fx = { obj.blur, obj.innerShadowBlur, 0.0f, 0.0f };
+		const simd::float4 innerCol = { obj.innerShadowColor.r, obj.innerShadowColor.g,
+		                                obj.innerShadowColor.b, obj.innerShadowColor.a };
+		[enc setFragmentBytes:&fx       length:sizeof(fx)       atIndex:7];
+		[enc setFragmentBytes:&innerCol length:sizeof(innerCol) atIndex:8];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	}
 	// Hand the encoder back in the state it was given in: the scissor is

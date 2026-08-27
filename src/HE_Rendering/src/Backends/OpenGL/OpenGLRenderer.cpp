@@ -4686,6 +4686,9 @@ uniform float uGradient;      // 0 = solid, 1 = linear fade to uGradientColor
 uniform vec4  uGradientColor;
 uniform float uGradientAngle; // degrees, clockwise from "down"
 uniform float uGradientShape; // 0 = linear along the angle, 1 = radial from the centre
+uniform float uBlur;          // px: > 0 = this quad IS a drop shadow (soft edge)
+uniform float uInnerBlur;     // px: > 0 = a shadow cast inwards from the edge
+uniform vec4  uInnerColor;
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 // One rounded box, four radii. `p` is relative to the box's centre (y down),
@@ -4749,10 +4752,24 @@ void main()
         fill = mix(uColor, uGradientColor, t);
     }
     // Square AND borderless needs no distance field at all — the crisp fast path.
-    if (heMaxRadius(uCornerRadius) <= 0.0 && uBorderWidth <= 0.0) { FragColor = fill; return; }
-    // Solid quad with rounded corners.
-    float d = heRoundedBoxSDF((vLocal - 0.5) * uRect.zw, uRect.zw * 0.5, uCornerRadius);
-    float cov = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d in pixels)
+    if (heMaxRadius(uCornerRadius) <= 0.0 && uBorderWidth <= 0.0 &&
+        uBlur <= 0.0 && uInnerBlur <= 0.0) { FragColor = fill; return; }
+    // A blurred quad IS a drop shadow: the producer grew the rect by the blur on
+    // every side, so the shape sits inset by exactly that much. Nothing else
+    // applies to it — one colour with a soft edge. Mirrors the Metal path.
+    vec2 halfsz = uRect.zw * 0.5 - uBlur;
+    float d = heRoundedBoxSDF((vLocal - 0.5) * uRect.zw, halfsz, uCornerRadius);
+    float cov = (uBlur > 0.0) ? (1.0 - smoothstep(-uBlur, uBlur, d))
+                              : clamp(0.5 - d, 0.0, 1.0);
+    if (uBlur > 0.0) { FragColor = vec4(fill.rgb, fill.a * cov); return; }
+    // The inner shadow: `d` is negative inside, so -d is how deep in this pixel
+    // is and the same falloff read the other way darkens the rim.
+    if (uInnerBlur > 0.0)
+    {
+        float t = 1.0 - smoothstep(0.0, uInnerBlur, -d);
+        float ia = uInnerColor.a * clamp(t, 0.0, 1.0);
+        fill = vec4(mix(fill.rgb, uInnerColor.rgb, ia), fill.a);
+    }
     if (uBorderWidth <= 0.0) { FragColor = vec4(fill.rgb, fill.a * cov); return; }
     // The ring between the shape and itself shrunk by the border width: `d` is a
     // signed distance in pixels, so the inner edge is d + width. Mirrors the
@@ -5795,6 +5812,9 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIGradientColor = glGetUniformLocation(m_uiProgram, "uGradientColor");
 		m_uUIGradientAngle = glGetUniformLocation(m_uiProgram, "uGradientAngle");
 		m_uUIGradientShape = glGetUniformLocation(m_uiProgram, "uGradientShape");
+		m_uUIBlur       = glGetUniformLocation(m_uiProgram, "uBlur");
+		m_uUIInnerBlur  = glGetUniformLocation(m_uiProgram, "uInnerBlur");
+		m_uUIInnerColor = glGetUniformLocation(m_uiProgram, "uInnerColor");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
@@ -7522,6 +7542,10 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		            obj.gradientColor.b, obj.gradientColor.a);
 		glUniform1f(m_uUIGradientAngle, obj.gradientAngleDeg);
 		glUniform1f(m_uUIGradientShape, obj.gradientShape == 1 ? 1.0f : 0.0f);
+		glUniform1f(m_uUIBlur, obj.blur);
+		glUniform1f(m_uUIInnerBlur, obj.innerShadowBlur);
+		glUniform4f(m_uUIInnerColor, obj.innerShadowColor.r, obj.innerShadowColor.g,
+		            obj.innerShadowColor.b, obj.innerShadowColor.a);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 

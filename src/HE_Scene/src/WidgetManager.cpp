@@ -1391,6 +1391,35 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// big — the one part of an element that is not a rectangle.
 			float eus = 1.0f, evs = 1.0f;
 			HE::uiElementUnitScale(w.tree, e, eus, evs, &canvas);
+			// ── The drop shadow, emitted BEFORE the element ──────────────────
+			// It is the element's own shape once more, in one colour, offset and
+			// softened — a quad like any other, which is why "Schicht 0" needs
+			// no blur pass and works in every backend.
+			//
+			// Before render() so it lands UNDER this element's own quads and
+			// over everything drawn earlier, which is where a shadow belongs;
+			// the vector is appended to, never inserted into.
+			//
+			// Grown by the blur on every side: the falloff reaches that far past
+			// the shape, and a quad cut off at the shape's edge would show the
+			// shadow as a hard line. The shader measures the shape against a box
+			// inset by exactly that much (see UIRenderObject::blur).
+			const size_t emitStart = out.size();
+			if (e.shadow && e.hasSurfaceStyle() && e.shadowColor.a > 0.001f)
+			{
+				const float blurPx = std::max(0.0f, e.shadowBlur * sy * evs);
+				UIRenderObject sh;
+				// The offset is a length on each axis and takes that axis's
+				// factor; the blur is one number and follows the radius.
+				sh.position = { px.x + e.shadowOffsetX * sx * eus - blurPx,
+				                px.y + e.shadowOffsetY * sy * evs - blurPx };
+				sh.size     = { px.w + 2.0f * blurPx, px.h + 2.0f * blurPx };
+				sh.color    = e.shadowColor;
+				sh.type     = 0;
+				sh.cornerRadius = e.cornerRadius * (sy * evs);
+				sh.blur     = blurPx;
+				out.push_back(std::move(sh));
+			}
 			const size_t firstQuad = out.size();
 			e.render(px, st, matId, sy * evs, out);
 
@@ -1402,8 +1431,8 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// its groove; testing the rect is what tells a background apart from
 			// a part drawn on top of one, without any widget type knowing that
 			// borders exist.
-			if ((e.maxCornerRadius() > 0.0f || e.borderWidth > 0.0f || e.gradient) &&
-			    out.size() > firstQuad)
+			if ((e.maxCornerRadius() > 0.0f || e.borderWidth > 0.0f || e.gradient ||
+			     e.innerShadow) && out.size() > firstQuad)
 			{
 				UIRenderObject& first = out[firstQuad];
 				const bool coversRect =
@@ -1438,6 +1467,15 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 						first.gradientAngleDeg = e.gradientAngle;
 						first.gradientShape    = e.gradientShape;
 					}
+					// The inner shadow rides on the surface itself, because it
+					// has to be cut off by the surface's own shape — a second
+					// quad could not be.
+					if (e.innerShadow && e.innerShadowColor.a > 0.001f)
+					{
+						first.innerShadowBlur  = std::max(0.0f, e.innerShadowBlur)
+						                       * sy * evs;
+						first.innerShadowColor = e.innerShadowColor;
+					}
 				}
 			}
 
@@ -1451,7 +1489,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			if (alpha < 1.0f || !usable)
 			{
 				const float dim = usable ? 1.0f : HE::kUIDisabledDim;
-				for (size_t i = firstQuad; i < out.size(); ++i)
+				for (size_t i = emitStart; i < out.size(); ++i)
 				{
 					out[i].color.r *= dim;
 					out[i].color.g *= dim;
@@ -1468,7 +1506,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			{
 				const glm::vec4 r(clip.x * sx, clip.y * sy,
 				                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
-				for (size_t i = firstQuad; i < out.size(); ++i) out[i].clipRect = r;
+				for (size_t i = emitStart; i < out.size(); ++i) out[i].clipRect = r;
 			}
 
 			// Rotation, folded down the chain: the quads are shifted so the
@@ -1483,7 +1521,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 					const float shiftY = (rot.dstY - rot.srcY) * sy;
 					const float rad = rot.degrees * 3.14159265358979323846f / 180.0f;
 					const glm::vec2 pivot(rot.dstX * sx, rot.dstY * sy);
-					for (size_t i = firstQuad; i < out.size(); ++i)
+					for (size_t i = emitStart; i < out.size(); ++i)
 					{
 						out[i].position.x += shiftX;
 						out[i].position.y += shiftY;

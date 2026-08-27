@@ -1944,6 +1944,36 @@ namespace
 	  "button or a header almost always wants, and the common case should need no "
 	  "number typed into it.",
 	  "", "ui#elements" },
+	{ "UI Widget/Shadow", "",
+	  "A drop shadow: the element's own shape drawn again underneath it, in one "
+	  "colour, offset and softened. It is not a blur pass — it is one more "
+	  "rectangle, which is why it costs nothing and works everywhere.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow Color", "",
+	  "The shadow's colour, alpha included. Real shadows are not black: a shadow "
+	  "tinted towards the surface under it looks like light instead of like dirt.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow Blur", "",
+	  "How far the shadow fades out past the shape, in canvas pixels. Small and "
+	  "tight reads as a card lying on the page, wide and faint as something "
+	  "floating well above it.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow Offset", "",
+	  "How far the shadow is pushed from the shape, x then y, positive being right "
+	  "and down. It is where the light is: one offset for everything on a screen "
+	  "looks lit, a different one per element looks broken.",
+	  "", "ui#elements" },
+	{ "UI Widget/Inner Shadow", "",
+	  "The same falloff cast INWARDS from the element's own edge, drawn on its "
+	  "surface: a pressed key, a well, a field sunk into the page. Independent of "
+	  "the drop shadow — an element may have both, one, or neither.",
+	  "", "ui#elements" },
+	{ "UI Widget/Inner Shadow Color", "",
+	  "The colour darkening the inside of the rim, alpha included.",
+	  "", "ui#elements" },
+	{ "UI Widget/Inner Shadow Blur", "",
+	  "How deep into the element the rim shading reaches, in canvas pixels.",
+	  "", "ui#elements" },
 	{ "UI Widget/Text Align", "",
 	  "Where the text sits inside its own box: the nine cells are left/centre/right "
 	  "across and top/middle/bottom down. This is not the anchor — the anchor places "

@@ -400,6 +400,14 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Gradient Color"){out = UIPropValue::ofColor(e.gradientColor);     return true; }
     if (n == "Gradient Angle"){out = UIPropValue::ofFloat(e.gradientAngle);     return true; }
     if (n == "Gradient Shape"){out = UIPropValue::ofInt(e.gradientShape);       return true; }
+    if (n == "Shadow")       { out = UIPropValue::ofBool(e.shadow);             return true; }
+    if (n == "Shadow Color") { out = UIPropValue::ofColor(e.shadowColor);       return true; }
+    if (n == "Shadow Blur")  { out = UIPropValue::ofFloat(e.shadowBlur);        return true; }
+    if (n == "Shadow Offset"){ out = UIPropValue::ofVec2({ e.shadowOffsetX, e.shadowOffsetY });
+                               return true; }
+    if (n == "Inner Shadow") { out = UIPropValue::ofBool(e.innerShadow);        return true; }
+    if (n == "Inner Shadow Color"){ out = UIPropValue::ofColor(e.innerShadowColor); return true; }
+    if (n == "Inner Shadow Blur") { out = UIPropValue::ofFloat(e.innerShadowBlur);  return true; }
     return false;
 }
 
@@ -440,6 +448,13 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Gradient Color"){ e.gradientColor = v.col; return true; }
     if (n == "Gradient Angle"){ e.gradientAngle = v.f; return true; }
     if (n == "Gradient Shape"){ e.gradientShape = (v.i == 1) ? 1 : 0; return true; }
+    if (n == "Shadow")       { e.shadow = v.b; return true; }
+    if (n == "Shadow Color") { e.shadowColor = v.col; return true; }
+    if (n == "Shadow Blur")  { e.shadowBlur = std::max(0.0f, v.f); return true; }
+    if (n == "Shadow Offset"){ e.shadowOffsetX = v.v2.x; e.shadowOffsetY = v.v2.y; return true; }
+    if (n == "Inner Shadow") { e.innerShadow = v.b; return true; }
+    if (n == "Inner Shadow Color"){ e.innerShadowColor = v.col; return true; }
+    if (n == "Inner Shadow Blur") { e.innerShadowBlur = std::max(0.0f, v.f); return true; }
     return false;
 }
 } // namespace
@@ -480,6 +495,13 @@ std::vector<UIPropDesc> UIElement::allProperties() const
         out.push_back({ "Gradient Color", UIPropType::Color });
         out.push_back({ "Gradient Angle", UIPropType::Float, 0.0f, 360.0f });
         out.push_back({ "Gradient Shape", UIPropType::Int, 0.0f, 1.0f });
+        out.push_back({ "Shadow",         UIPropType::Bool });
+        out.push_back({ "Shadow Color",   UIPropType::Color });
+        out.push_back({ "Shadow Blur",    UIPropType::Float });
+        out.push_back({ "Shadow Offset",  UIPropType::Vec2 });
+        out.push_back({ "Inner Shadow",       UIPropType::Bool });
+        out.push_back({ "Inner Shadow Color", UIPropType::Color });
+        out.push_back({ "Inner Shadow Blur",  UIPropType::Float });
     }
     // Asset slots only where the editor exposes them: Material behind
     // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic

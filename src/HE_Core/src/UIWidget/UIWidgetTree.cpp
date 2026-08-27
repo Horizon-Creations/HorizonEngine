@@ -734,6 +734,23 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         // so far is, and absent has to keep meaning exactly that.
         if (e.gradientShape == 1) o["gradientShape"] = 1;
     }
+    // Both shadows follow the same "only once switched on" rule as everything
+    // else here, so a widget without one saves byte-identically to before.
+    if (e.shadow)
+    {
+        o["shadow"]        = true;
+        o["shadowColor"]   = { e.shadowColor.r, e.shadowColor.g,
+                               e.shadowColor.b, e.shadowColor.a };
+        o["shadowBlur"]    = e.shadowBlur;
+        o["shadowOffset"]  = { e.shadowOffsetX, e.shadowOffsetY };
+    }
+    if (e.innerShadow)
+    {
+        o["innerShadow"]      = true;
+        o["innerShadowColor"] = { e.innerShadowColor.r, e.innerShadowColor.g,
+                                  e.innerShadowColor.b, e.innerShadowColor.a };
+        o["innerShadowBlur"]  = e.innerShadowBlur;
+    }
     e.writeJson(o); // type-specific fields
     return o;
 }
@@ -795,6 +812,21 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->gradient      = o.value("gradient", false);
     e->gradientAngle = o.value("gradientAngle", 0.0f);
     e->gradientShape = o.value("gradientShape", 0) == 1 ? 1 : 0;
+    e->shadow     = o.value("shadow", false);
+    e->shadowBlur = o.value("shadowBlur", e->shadowBlur);
+    if (const auto sc = o.find("shadowColor");
+        sc != o.end() && sc->is_array() && sc->size() == 4)
+        e->shadowColor = { (*sc)[0].get<float>(), (*sc)[1].get<float>(),
+                           (*sc)[2].get<float>(), (*sc)[3].get<float>() };
+    if (const auto so = o.find("shadowOffset");
+        so != o.end() && so->is_array() && so->size() == 2)
+    { e->shadowOffsetX = (*so)[0].get<float>(); e->shadowOffsetY = (*so)[1].get<float>(); }
+    e->innerShadow     = o.value("innerShadow", false);
+    e->innerShadowBlur = o.value("innerShadowBlur", e->innerShadowBlur);
+    if (const auto ic = o.find("innerShadowColor");
+        ic != o.end() && ic->is_array() && ic->size() == 4)
+        e->innerShadowColor = { (*ic)[0].get<float>(), (*ic)[1].get<float>(),
+                                (*ic)[2].get<float>(), (*ic)[3].get<float>() };
     if (const auto gc = o.find("gradientColor");
         gc != o.end() && gc->is_array() && gc->size() == 4)
         e->gradientColor = { (*gc)[0].get<float>(), (*gc)[1].get<float>(),

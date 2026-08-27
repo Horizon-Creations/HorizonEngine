@@ -56,6 +56,20 @@ struct UIRenderObject {
     // nearest side because it is the only normalization under which the second
     // colour actually reaches every part of the box.
     int         gradientShape = 0;
+    // ── Soft edge ("Schicht 0") ──────────────────────────────────────────────
+    // 0 = the crisp ~1px antialiased edge every quad has always had. Above 0,
+    // the shape's coverage fades across `blur` pixels either side of its edge,
+    // which is what makes a drop shadow one ordinary quad rather than a blur
+    // pass: the producer emits the shape again, offset, in the shadow's colour,
+    // GROWN by `blur` on every side so the falloff is not cut off — and this
+    // shader therefore measures the shape against a box inset by `blur`.
+    float       blur = 0.0f;
+    // A second shadow, cast INWARDS from the shape's own edge: same falloff,
+    // drawn on top of the fill and inside the shape, so it darkens the rim
+    // instead of the ground. 0 = none. It rides on the element's own quad,
+    // because it has to be clipped to that quad's shape.
+    float       innerShadowBlur = 0.0f;
+    glm::vec4   innerShadowColor{ 0.0f, 0.0f, 0.0f, 0.0f };
     // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
     // font; other keys index UIFontCache (an imported Font asset).
     uint32_t    fontAtlasKey = 0;

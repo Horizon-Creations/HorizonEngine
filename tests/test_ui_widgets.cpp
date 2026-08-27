@@ -2882,7 +2882,9 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         static const std::vector<std::string> kSurfaceRows = {
             "Corner Radius", "Corner TL", "Corner TR", "Corner BR", "Corner BL",
             "Border Width", "Border Color",
-            "Gradient", "Gradient Color", "Gradient Angle", "Gradient Shape" };
+            "Gradient", "Gradient Color", "Gradient Angle", "Gradient Shape",
+            "Shadow", "Shadow Color", "Shadow Blur", "Shadow Offset",
+            "Inner Shadow", "Inner Shadow Color", "Inner Shadow Blur" };
         const std::vector<UIPropDesc> all = e->allProperties();
         for (const std::string& row : kSurfaceRows)
         {
@@ -3244,6 +3246,134 @@ TEST_CASE("A gradient can be radial instead of linear")
     REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), loaded));
     CHECK(loaded.find(id)->gradientShape == 1);
     CHECK(loaded.find(id)->getPropAny("Gradient Shape").i == 1);
+}
+
+// A drop shadow is one more quad, emitted UNDER the element and grown by its
+// own blur so the falloff is not cut off at the shape's edge.
+TEST_CASE("A drop shadow is a quad of its own, under the element")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = authored.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement* e = authored.find(panel);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 50.0f; e->posY = 40.0f; e->sizeX = 200.0f; e->sizeY = 60.0f;
+        e->cornerRadius = glm::vec4(6.0f);
+        e->shadow = true;
+        e->shadowColor = glm::vec4(0.0f, 0.0f, 0.0f, 0.5f);
+        e->shadowBlur = 8.0f;
+        e->shadowOffsetX = 2.0f; e->shadowOffsetY = 4.0f;
+    }
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+    REQUIRE(out.size() >= 2);
+
+    // First the shadow, then the surface — painter order, no insert.
+    const UIRenderObject& sh = out[0];
+    const UIRenderObject& surf = out[1];
+    CHECK(sh.blur == doctest::Approx(8.0f));
+    CHECK(sh.color.a == doctest::Approx(0.5f));
+    // Offset applied, then grown by the blur on every side.
+    CHECK(sh.position.x == doctest::Approx(50.0f + 2.0f - 8.0f));
+    CHECK(sh.position.y == doctest::Approx(40.0f + 4.0f - 8.0f));
+    CHECK(sh.size.x == doctest::Approx(200.0f + 16.0f));
+    CHECK(sh.size.y == doctest::Approx(60.0f + 16.0f));
+    // Same rounding as the thing casting it.
+    CHECK(sh.cornerRadius.x == doctest::Approx(6.0f));
+    // The element itself is untouched by any of it.
+    CHECK(surf.blur == doctest::Approx(0.0f));
+    CHECK(surf.position.x == doctest::Approx(50.0f));
+    CHECK(surf.size.x == doctest::Approx(200.0f));
+
+    // Switched off, there is no extra quad at all — a shadow nobody asked for
+    // must not cost a draw.
+    wm.clear();
+    authored.find(panel)->shadow = false;
+    registerWidget(cm, authored);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    out.clear();
+    wm.extract(400.0f, 200.0f, out);
+    CHECK(out.size() == 1);
+    CHECK(out[0].blur == doctest::Approx(0.0f));
+}
+
+// The inner one is not a second quad: it has to be cut off by the surface's own
+// shape, so it rides on the surface quad like the border and the gradient do.
+TEST_CASE("An inner shadow rides on the surface it darkens")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    // A progress bar draws a track AND a fill. Only the track is the surface.
+    const int bar = authored.add(HE::UIWidgetType::ProgressBar);
+    {
+        HE::UIElement* e = authored.find(bar);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 20.0f;
+        e->innerShadow = true;
+        e->innerShadowBlur = 5.0f;
+        e->innerShadowColor = glm::vec4(0.0f, 0.0f, 0.0f, 0.6f);
+        if (auto* pb = dynamic_cast<HE::UIProgressBar*>(e)) pb->value = 0.5f;
+    }
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+
+    int shaded = 0;
+    for (const UIRenderObject& o : out)
+        if (o.innerShadowBlur > 0.0f)
+        {
+            ++shaded;
+            CHECK(o.innerShadowBlur == doctest::Approx(5.0f));
+            CHECK(o.innerShadowColor.a == doctest::Approx(0.6f));
+            CHECK(o.size.x == doctest::Approx(200.0f));   // the track, not the fill
+        }
+    CHECK(shaded == 1);
+}
+
+TEST_CASE("Both shadows survive a save and a load")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& e = *t.find(id);
+
+    // Nothing switched on writes nothing — an old widget saves byte-identically.
+    CHECK(HE::uiWidgetTreeToJson(t).find("shadow") == std::string::npos);
+
+    e.setPropAny("Shadow", HE::UIPropValue::ofBool(true));
+    e.setPropAny("Shadow Blur", HE::UIPropValue::ofFloat(12.0f));
+    e.setPropAny("Shadow Offset", HE::UIPropValue::ofVec2({ 3.0f, -2.0f }));
+    e.setPropAny("Shadow Color", HE::UIPropValue::ofColor({ 0.1f, 0.2f, 0.3f, 0.7f }));
+    e.setPropAny("Inner Shadow", HE::UIPropValue::ofBool(true));
+    e.setPropAny("Inner Shadow Blur", HE::UIPropValue::ofFloat(4.0f));
+    // A blur is a distance and cannot be negative, whoever asks.
+    e.setPropAny("Shadow Blur", HE::UIPropValue::ofFloat(-5.0f));
+    CHECK(e.shadowBlur == doctest::Approx(0.0f));
+    e.setPropAny("Shadow Blur", HE::UIPropValue::ofFloat(12.0f));
+
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), loaded));
+    const HE::UIElement& r = *loaded.find(id);
+    CHECK(r.shadow);
+    CHECK(r.shadowBlur == doctest::Approx(12.0f));
+    CHECK(r.shadowOffsetX == doctest::Approx(3.0f));
+    CHECK(r.shadowOffsetY == doctest::Approx(-2.0f));
+    CHECK(r.shadowColor.a == doctest::Approx(0.7f));
+    CHECK(r.innerShadow);
+    CHECK(r.innerShadowBlur == doctest::Approx(4.0f));
 }
 
 TEST_CASE("A border survives a save and a load")

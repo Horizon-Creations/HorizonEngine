@@ -724,6 +724,9 @@ private:
 	int          m_uUIGradientColor = -1;
 	int          m_uUIGradientAngle = -1; // degrees, clockwise from "down"
 	int          m_uUIGradientShape = -1; // 0 = linear, 1 = radial from the centre
+	int          m_uUIBlur       = -1;    // px; > 0 = this quad is a drop shadow
+	int          m_uUIInnerBlur  = -1;    // px; > 0 = shadow cast inwards from the edge
+	int          m_uUIInnerColor = -1;
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;

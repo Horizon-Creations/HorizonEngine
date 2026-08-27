@@ -680,6 +680,35 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 			EditorWidgets::helpForLabel("Gradient Angle");
 		}
 	}
+
+	if (EditorWidgets::checkbox("Shadow", &n.shadow)) committed = true;
+	if (n.shadow)
+	{
+		edit |= ImGui::ColorEdit4("Shadow Color", &n.shadowColor.r);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Shadow Color");
+		if (ImGui::DragFloat("Shadow Blur", &n.shadowBlur, 0.5f, 0.0f, 500.0f))
+		{ n.shadowBlur = std::max(0.0f, n.shadowBlur); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Shadow Blur");
+		float off[2] = { n.shadowOffsetX, n.shadowOffsetY };
+		if (ImGui::DragFloat2("Shadow Offset", off, 0.5f))
+		{ n.shadowOffsetX = off[0]; n.shadowOffsetY = off[1]; edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Shadow Offset");
+	}
+
+	if (EditorWidgets::checkbox("Inner Shadow", &n.innerShadow)) committed = true;
+	if (n.innerShadow)
+	{
+		edit |= ImGui::ColorEdit4("Inner Shadow Color", &n.innerShadowColor.r);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Inner Shadow Color");
+		if (ImGui::DragFloat("Inner Shadow Blur", &n.innerShadowBlur, 0.5f, 0.0f, 500.0f))
+		{ n.innerShadowBlur = std::max(0.0f, n.innerShadowBlur); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Inner Shadow Blur");
+	}
 }
 
 // ── Generic property editor ─────────────────────────────────────────────────────
@@ -1252,6 +1281,28 @@ void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
 	};
 	const glm::vec4 radii = n.cornerRadius * s;
+	// The drop shadow, under everything this element draws. ImDrawList has no
+	// soft edge, so it is approximated by a handful of nested shapes at rising
+	// alpha — the same picture, out of coarser material.
+	if (drawFill && n.shadow && n.shadowColor.a > 0.001f)
+	{
+		const float blur = std::max(0.0f, n.shadowBlur * s);
+		const ImVec2 o(n.shadowOffsetX * s, n.shadowOffsetY * s);
+		// Outermost first, each the same faint alpha: stacked "over", they build
+		// up to roughly the authored alpha where they all overlap and fade out
+		// where only the widest one reaches. That is a falloff, drawn with the
+		// only tool a draw list has.
+		constexpr int kSteps = 6;
+		glm::vec4 c = n.shadowColor;
+		c.a /= kSteps;
+		for (int i = kSteps; i >= 1; --i)
+		{
+			const float g = blur * static_cast<float>(i) / kSteps;
+			pathRoundedRect(dl, ImVec2(mn.x + o.x - g, mn.y + o.y - g),
+			                    ImVec2(mx.x + o.x + g, mx.y + o.y + g), radii + g);
+			dl->PathFillConvex(C(c));
+		}
+	}
 	// A picture on the surface is the surface: the texture is drawn square (a
 	// rounded image needs a clip ImDrawList cannot express along a path), and
 	// the border still follows the authored shape on top of it.
@@ -1309,6 +1360,25 @@ void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 				const glm::vec4 col = fill + (n.gradientColor - fill) * (r / farR);
 				dl->AddCircleFilled(c, r, C(col), 48);
 			}
+		}
+	}
+	// The inner shadow, over the fill and under the border: rings drawn just
+	// inside the edge, the same stacking trick as the drop shadow. They stay
+	// within the shape by construction, so nothing spills.
+	if (drawFill && n.innerShadow && n.innerShadowColor.a > 0.001f)
+	{
+		const float depth = std::max(1.0f, n.innerShadowBlur * s);
+		constexpr int kSteps = 5;
+		glm::vec4 c = n.innerShadowColor;
+		c.a /= kSteps;
+		for (int i = 1; i <= kSteps; ++i)
+		{
+			const float g = depth * static_cast<float>(i) / kSteps;
+			if (mx.x - g <= mn.x + g || mx.y - g <= mn.y + g) break;
+			pathRoundedRect(dl, ImVec2(mn.x + g * 0.5f, mn.y + g * 0.5f),
+			                    ImVec2(mx.x - g * 0.5f, mx.y - g * 0.5f),
+			                    radii - g * 0.5f);
+			dl->PathStroke(C(c), ImDrawFlags_Closed, g);
 		}
 	}
 	if (n.borderWidth > 0.0f)

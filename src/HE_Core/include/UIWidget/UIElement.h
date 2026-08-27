@@ -275,6 +275,21 @@ public:
     // card, the soft middle of a button. The angle means nothing then, and the
     // editor stops offering it.
     int       gradientShape = 0;
+    // ── Shadows ──────────────────────────────────────────────────────────────
+    // A drop shadow is the element's own shape drawn again underneath it, in
+    // one colour, offset and softened. Off by default, because a shadow on
+    // everything is a shadow on nothing.
+    bool      shadow = false;
+    glm::vec4 shadowColor{ 0.0f, 0.0f, 0.0f, 0.45f };
+    float     shadowBlur = 8.0f;      // canvas units of falloff
+    float     shadowOffsetX = 0.0f;   // canvas units, positive = right
+    float     shadowOffsetY = 3.0f;   // canvas units, positive = down
+    // The same falloff cast INWARDS from the element's own edge, drawn on its
+    // surface: a pressed key, a well, an inset field. Independent of the drop
+    // shadow — an element may have both, one, or neither.
+    bool      innerShadow = false;
+    glm::vec4 innerShadowColor{ 0.0f, 0.0f, 0.0f, 0.45f };
+    float     innerShadowBlur = 6.0f;
 
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
@@ -437,6 +452,11 @@ protected:
         dst.gradient = gradient; dst.gradientColor = gradientColor;
         dst.gradientAngle = gradientAngle;
         dst.gradientShape = gradientShape;
+        dst.shadow = shadow; dst.shadowColor = shadowColor;
+        dst.shadowBlur = shadowBlur;
+        dst.shadowOffsetX = shadowOffsetX; dst.shadowOffsetY = shadowOffsetY;
+        dst.innerShadow = innerShadow; dst.innerShadowColor = innerShadowColor;
+        dst.innerShadowBlur = innerShadowBlur;
     }
 };
 
