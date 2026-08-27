@@ -897,7 +897,53 @@ jede Beschriftung links-mittig gezeichnet, egal welche der neun Zellen gewählt 
 Engine es richtig machte. Jetzt gibt es `propIntOr` daneben. Die Lehre: **jeder typgeprüfte
 Leser braucht seine Variante, sonst ist ein Typfehler kein Fehler, sondern ein Standardwert.**
 
-**Als Nächstes in Schicht 0:** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
+### Schicht 0 ist fertig (27.08.2026)
+
+Das Vokabular aus D5 steht vollständig, in Metal **und** GL, mit Editor-Zeilen, Designer-Vorschau,
+Serialisierung und Tests. Vier Scheiben, jede für sich grün und committet:
+
+**1. Eckenradius pro Ecke.** `cornerRadius` ist ein `glm::vec4` in CSS-Reihenfolge (TL, TR, BR, BL),
+auf `UIElement` wie auf `UIRenderObject`. Die SDF wählt den Radius nach dem Quadranten, in dem der
+Punkt liegt (`heRoundedBoxSDF`, wortgleich in MSL und GLSL); bei vier gleichen Werten ist es exakt
+die alte Formel, es ändert sich also kein Pixel an irgendetwas Bestehendem. **Der Schreiber hat drei
+Stufen:** unverändert schreibt nichts, ein Wert für alle vier behält den **alten** Schlüssel
+`cornerRadius`, und nur wirklich verschiedene Ecken kosten das Array `cornerRadii`. Skripte behalten
+`"Corner Radius"` (schreibt alle vier, liest die obere linke) und bekommen `"Corner TL/TR/BR/BL"`
+dazu.
+
+**2. Radialer Verlauf.** `gradientShape` 0/1. Radial läuft von der Mitte bis zur **entferntesten
+Ecke** — die CSS-Voreinstellung und die einzige Normierung, unter der die zweite Farbe jeden Teil
+der Fläche erreicht. Der Winkel bedeutet dann nichts, also bietet der Editor ihn nicht mehr an.
+
+**3. Schlagschatten.** Ein `blur` an `UIRenderObject`: über 0 wird die Deckung über `blur` Pixel
+beiderseits der Kante weich, statt der gewohnten 1-Pixel-Kante. Damit ist der Schatten **ein
+gewöhnliches Quad** und kein Blur-Pass — der WidgetManager stellt es **vor** `render()` in die
+Liste (Malerreihenfolge, kein Einfügen), versetzt, und um den Blur auf jeder Seite **vergrößert**,
+weil der Abfall so weit über die Form hinausreicht. Der Shader misst die Form deshalb gegen eine um
+genau so viel eingerückte Box.
+
+**4. Innenschatten.** Kein zweites Quad: er muss von der Form selbst beschnitten werden, also
+reitet er wie Rahmen und Verlauf auf dem Flächen-Quad. `d` ist innen negativ, `-d` ist die Tiefe,
+derselbe Abfall andersherum gelesen dunkelt den Rand.
+
+**Verifiziert, nicht nur behauptet:** neu ist `HE_DUMP_UITEST=1`, das ein Musterblatt aus zwölf
+Kacheln über den ordentlichen Weg (Widget-Asset → WidgetManager → Extractor → UI-Shader) auf den
+Bildschirm stellt, sodass `scripts/he_shot.py OUT.png UITEST=1` es headless fotografiert. Auf Metal
+angeschaut und richtig: Tab (oben rund, unten eckig), Blatt (diagonal), Rahmen, linearer Verlauf
+nach unten und nach rechts, radialer Verlauf, Schlagschatten, Innenschatten, Kapsel. **GL ist
+weiterhin nur offline validiert** — die Sandbox hat kein Display.
+
+**Nebenbefund, dieselbe Lehre wie beim Int-Leser:** die Designer-Vorschau hat Rundung, Rahmen und
+Verlauf **überhaupt nicht** gezeigt. Sechs Typen hatten je eine feste Rundung von 3 oder 4
+einkodiert und die Flächen-Eigenschaften standen nur in `allProperties()`, also nur für Skripte. Es
+gibt jetzt ein `drawSurfacePreview`, das die Fläche einmal für alle sechs zeichnet, und einen
+Abschnitt „Surface" im Details-Panel, in dem die Eigenschaften überhaupt zum ersten Mal bedienbar
+sind. Vier Radien kann `AddRectFilled` nicht, also läuft das über einen eigenen Pfad aus vier
+`PathArcTo`.
+
+**Als Nächstes:** Block G (`RendererSoftware`), der Schicht 0 ebenfalls tragen muss.
+
+**Frühere Notiz (erledigt):** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier
 Zeilen, ein „vier Radien"-Feld wäre Handarbeit). Danach Block G (`RendererSoftware`), der
 Schicht 0 ebenfalls tragen muss.

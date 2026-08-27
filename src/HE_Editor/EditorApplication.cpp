@@ -4552,6 +4552,76 @@ void EditorApplication::dumpFrameHeadless()
 			 + "° -> " + std::to_string(endDeg) + "°").c_str());
 	}
 
+	// HE_DUMP_UITEST: put a sheet of "Schicht 0" samples on screen, so the UI
+	// style vocabulary can be LOOKED AT headless instead of only asserted about.
+	// Everything here goes through the ordinary path — a widget asset, the
+	// widget manager, the extractor, the backend's UI shader — so what the
+	// capture shows is what an application would get, not a demo drawn beside it.
+	if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
+	{
+		HE::UIWidgetTree t;
+		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+		t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+		// One tile per feature, laid out by hand: 4 across, each 260x110.
+		int col = 0, row = 0;
+		auto tile = [&](const std::function<void(HE::UIElement&)>& style)
+		{
+			const int id = t.add(HE::UIWidgetType::Panel);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.setProp("Color", HE::UIPropValue::ofColor({ 0.26f, 0.30f, 0.38f, 1.0f }));
+			style(e);
+			if (++col == 4) { col = 0; ++row; }
+		};
+		tile([](HE::UIElement&){});                                        // plain
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(24.0f); });   // all round
+		tile([](HE::UIElement& e){ e.cornerRadius = { 28.0f, 28.0f, 0.0f, 0.0f }; });  // a tab
+		tile([](HE::UIElement& e){ e.cornerRadius = { 30.0f, 0.0f, 30.0f, 0.0f }; });  // a leaf
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f);
+		                           e.borderWidth = 4.0f;
+		                           e.borderColor = glm::vec4(1.0f, 0.72f, 0.20f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.gradient = true;
+		                           e.gradientColor = glm::vec4(0.90f, 0.35f, 0.25f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.gradient = true;
+		                           e.gradientShape = 1;
+		                           e.gradientColor = glm::vec4(0.10f, 0.10f, 0.14f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.gradient = true;
+		                           e.gradientAngle = 90.0f;
+		                           e.gradientColor = glm::vec4(0.25f, 0.70f, 0.45f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.shadow = true;
+		                           e.shadowBlur = 18.0f; e.shadowOffsetY = 8.0f; });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.innerShadow = true;
+		                           e.innerShadowBlur = 14.0f; });
+		tile([](HE::UIElement& e){ e.cornerRadius = { 30.0f, 4.0f, 30.0f, 4.0f };
+		                           e.shadow = true; e.shadowBlur = 14.0f;
+		                           e.shadowOffsetX = 6.0f; e.shadowOffsetY = 6.0f;
+		                           e.borderWidth = 2.0f;
+		                           e.borderColor = glm::vec4(1.0f, 1.0f, 1.0f, 0.55f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(55.0f);   // capsule (clamped)
+		                           e.gradient = true; e.gradientShape = 1;
+		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
+		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
+
+		UIWidgetAsset wa;
+		wa.type = HE::AssetType::Widget;
+		wa.name = "__uiStyleWitness";
+		wa.path = "__uiStyleWitness.hasset";
+		wa.treeJson = HE::uiWidgetTreeToJson(t);
+		const HE::UUID wid = contentManager().registerWidget(std::move(wa));
+		if (wid != HE::UUID{})
+		{
+			const int inst = m_editorWorld->widgets().createWidget(
+				contentManager(), "__uiStyleWitness.hasset");
+			if (inst) m_editorWorld->widgets().showWidget(inst);
+			else HE_LOG_WARN(Editor, "%s",
+				"EditorApplication: the UI style witness could not be instantiated");
+		}
+	}
+
 	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal
 	// features (GI-reflection glossy accumulation, probe convergence) need more
 	// frames to settle than the default — headless A/Bs raise this.
