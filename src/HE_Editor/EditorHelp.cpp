@@ -260,8 +260,11 @@ namespace
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
 	{ "Collider/Shape", "",
-	  "Box, Sphere or Capsule. A capsule stands along Y and is what a character "
-	  "usually wants; the sides let it slide past corners instead of catching.",
+	  "Box, Sphere or Capsule for a shape from the numbers below; Mesh, Convex "
+	  "Hull or Height Field to take the geometry from the entity itself. A "
+	  "capsule stands along Y and is what a character usually wants; the sides "
+	  "let it slide past corners instead of catching. Mesh and Height Field are "
+	  "static-only, so a moving body wants Convex Hull.",
 	  "", "systems#physics" },
 	{ "Collider/Half Extents", "",
 	  "Half the box's size on each axis — so 0.5 is a one-metre cube.",

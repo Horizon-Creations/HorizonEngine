@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
@@ -156,10 +157,30 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 		t.dirty = true;
 	}
 
+	// Physics BEFORE bind(), for the same reason the placement is: bind() fires
+	// Construct and BeginPlay before it returns, and a graph's opening move is
+	// routinely a physics one — raycast down for the ground, add an impulse to a
+	// projectile, ask whether it is grounded. Building the body afterwards would
+	// answer every one of those against a bodiless world for exactly the frame in
+	// which the answer matters most.
+	//
+	// Wired here rather than in the applications' Create Object service because
+	// this is the only point that both precedes bind() and knows the new entity:
+	// both services keep only the instance id and throw Spawned::entity away.
+	//
+	// The whole subtree: the class's component list is a prefab, and a
+	// PlayerCharacter's arrives with children.
+	if (m_physics)
+		m_physics->addEntityTree(*m_world, static_cast<uint32_t>(out.entity));
+
 	out.instance = bind(out.entity, classPath);
 	if (!out.instance)
 	{
-		// Never leave a body without its logic standing in the scene.
+		// Never leave a body without its logic standing in the scene — and that
+		// now means the physics body too. Before destroyEntity, while the
+		// hierarchy this walks still exists.
+		if (m_physics)
+			m_physics->removeEntityTree(*m_world, static_cast<uint32_t>(out.entity));
 		m_world->destroyEntity(out.entity);
 		out.entity = entt::null;
 	}
@@ -178,7 +199,17 @@ void EntityHost::tick(float dt)
 	// this host.
 	std::vector<HorizonCode::InstanceId> dead;
 	for (const auto& [raw, inst] : m_byEntity)
-		if (!m_world->registry().valid(static_cast<Entity>(raw))) dead.push_back(inst);
+		if (!m_world->registry().valid(static_cast<Entity>(raw)))
+		{
+			dead.push_back(inst);
+			// The entity went away by some path that did not hand its body back
+			// (a graph's entity.destroy, the outliner). PhysicsWorld sweeps for
+			// these itself, but only on its next step — until then the collider
+			// stands there invisibly, blocking and answering raycasts. Returning
+			// it the moment we notice costs nothing and closes that window.
+			// Safe inside the loop: this touches Jolt, never m_byEntity.
+			if (m_physics) m_physics->removeEntity(raw);
+		}
 	for (const HorizonCode::InstanceId inst : dead) unbind(inst);
 
 	// Tick over a SNAPSHOT, never over the live map. A graph is running here,

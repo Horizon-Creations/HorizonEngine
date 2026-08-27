@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/Components/HierarchyComponent.h"   // the parent chain the world/local boundary walks
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
@@ -76,6 +77,123 @@ void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
     if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
     if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
     if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
+}
+
+// ── The local↔world boundary ─────────────────────────────────────────────────
+// This API and PhysicsWorld do not speak the same space, and until these
+// existed nothing converted between them. TransformComponent holds a LOCAL pose
+// (relative to the parent), while EVERY position and rotation in PhysicsWorld's
+// public API is a WORLD one — see the space convention at the top of that class.
+// So every value handed to physics is converted here first, and PhysicsWorld
+// converts back on its way into the transform.
+//
+// HE::localPositionForWorld does the world→local half; these are the missing
+// other direction. Composed by walking the parent chain, never from
+// TransformComponent::worldMatrix, for the reason TransformHierarchy.h gives:
+// that matrix is only as fresh as the last propagateTransforms and is the
+// identity for an entity spawned this frame.
+//
+// A top-level entity gets identity out of all of them, so its poses pass through
+// untouched — which is why nothing noticed the missing conversion until the
+// first parented physics entity.
+
+// The matrix an entity's LOCAL pose is expressed in. Guarded exactly like
+// HE::localPositionForWorld, which is the inverse direction: the two have to
+// agree on what counts as "has a parent", and the world root carries no
+// transform of its own.
+glm::mat4 parentWorldMatrix(HorizonWorld& world, entt::entity e)
+{
+    entt::registry& reg = world.registry();
+    if (!reg.valid(e)) return glm::mat4(1.0f);
+
+    const auto*        h      = reg.try_get<HierarchyComponent>(e);
+    const entt::entity parent = h ? h->parent : entt::null;
+    if (parent == entt::null || parent == world.rootEntity() || !reg.valid(parent))
+        return glm::mat4(1.0f);   // nothing above it: local IS world
+    return HE::worldMatrixOf(world, parent);
+}
+
+// The world position an entity stands at while `localPos` is its local one.
+glm::vec3 worldPositionForLocal(HorizonWorld& world, entt::entity e, const glm::vec3& localPos)
+{
+    return glm::vec3(parentWorldMatrix(world, e) * glm::vec4(localPos, 1.0f));
+}
+
+// The rotation half of the same. Built as parentRotation * localRotation rather
+// than by decomposing the entity's own world matrix, because PhysicsWorld's
+// write-back computes local = inverse(parentRotation) * world — composing from
+// the parent is that expression's exact inverse, so a pose written here and
+// mirrored back arrives as the local rotation it started as.
+//
+// Normalising the columns and folding a mirror onto X mirrors PhysicsWorld's
+// own file-local decomposition; a shared home for it would be
+// TransformHierarchy, next to the position half. A parent chain with
+// NON-UNIFORM scale shears its children, and a sheared basis has no rotation to
+// extract — what comes out is the closest one, the same limitation the
+// write-back documents.
+glm::quat worldRotationForLocal(HorizonWorld& world, entt::entity e,
+                                const glm::vec3& localEulerDegrees)
+{
+    const glm::mat4 parentWorld = parentWorldMatrix(world, e);
+
+    glm::vec3 axis[3] = { glm::vec3(parentWorld[0]), glm::vec3(parentWorld[1]),
+                          glm::vec3(parentWorld[2]) };
+    const float len[3]  = { glm::length(axis[0]), glm::length(axis[1]), glm::length(axis[2]) };
+    // A zero scale is a real input (the inspector lets one be typed), and
+    // dividing by it would put a NaN into the body, where it surfaces as "the
+    // object disappeared".
+    for (int i = 0; i < 3; ++i)
+        axis[i] /= std::max(len[i], 1.0e-6f);
+    // Column lengths cannot see a MIRROR: an odd number of negative scale axes
+    // leaves three positive lengths and a left-handed basis, which quat_cast
+    // reads as a rotation that does not exist. The determinant is what sees it.
+    if (glm::determinant(glm::mat3(parentWorld)) < 0.0f)
+        axis[0] = -axis[0];
+
+    const glm::quat parentRot =
+        glm::normalize(glm::quat_cast(glm::mat3(axis[0], axis[1], axis[2])));
+    return glm::normalize(parentRot * glm::quat(glm::radians(localEulerDegrees)));
+}
+
+// Teleport an entity's physics representation to wherever its CURRENT local
+// pose puts it in the world. The caller writes the transform first; this is the
+// second half, for the entities that own their position in Jolt.
+//
+// It puts the local values back afterwards on purpose. PhysicsWorld mirrors the
+// world pose it is given into the transform by converting it back, which for a
+// child means passing through a matrix and its inverse: the value that lands is
+// the one that went in only up to float noise, and a script nudging a child
+// every frame would accumulate that noise. Restoring costs two assignments and
+// makes the round trip exact — which is also what keeps an entity's saved pose
+// byte-identical across save → load → save.
+//
+// `withRotation` picks the physics call: setPosition explicitly does not touch
+// rotation, so turning an entity has to go through setTransform with the
+// position it already has.
+//
+// Ctx::world and Ctx::physics must both be there — every caller has already
+// asked hasPhysics, which needs both, so this one is not tolerant like the API
+// functions above it.
+bool teleportToLocalPose(Ctx& c, Entity e, TransformComponent& tc,
+                         bool withRotation, bool resetVelocity)
+{
+    const auto      ent      = static_cast<entt::entity>(e);
+    const auto      id       = static_cast<uint32_t>(e);
+    const glm::vec3 localPos = tc.position;
+    const glm::vec3 localRot = tc.rotation;
+
+    const bool ok =
+        withRotation
+            ? c.physics->setTransform(id, worldPositionForLocal(*c.world, ent, localPos),
+                                      worldRotationForLocal(*c.world, ent, localRot),
+                                      resetVelocity)
+            : c.physics->setPosition(id, worldPositionForLocal(*c.world, ent, localPos),
+                                     resetVelocity);
+
+    tc.position = localPos;
+    tc.rotation = localRot;
+    tc.dirty    = true;
+    return ok;
 }
 } // namespace
 
@@ -236,6 +354,24 @@ bool applySavedState(Ctx& c, Entity e)
             vec3("pos", tc->position);
             vec3("rot", tc->rotation);
             vec3("scl", tc->scale);
+
+            // Restoring a physics entity means moving the BODY, not the
+            // transform: the step overwrites the transform from Jolt, so a save
+            // restore on the one kind of entity a save exists for (the player,
+            // the crate the player pushed) used to be undone the same frame.
+            // Velocity is reset because the save carries none — arriving with
+            // the motion the entity had before the load is an artefact of the
+            // restore, not restored state.
+            //
+            // The pose above is LOCAL — it came out of TransformComponent when
+            // the save was written — so it goes through teleportToLocalPose,
+            // which converts it to the world pose physics deals in and puts the
+            // saved spelling back afterwards (setTransform would otherwise
+            // return the rotation as degrees(eulerAngles(q)), the same
+            // orientation written differently, and save → load → save would stop
+            // being byte-identical).
+            if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+                teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
         }
     }
     if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
@@ -247,11 +383,55 @@ bool applySavedState(Ctx& c, Entity e)
 // ── Transform ────────────────────────────────────────────────────────────────
 namespace transform {
 glm::vec3 getPosition(Ctx& c, Entity e)                    { return c.world ? ScriptApi::getPosition(*c.world, e) : glm::vec3(0.0f); }
-void      setPosition(Ctx& c, Entity e, const glm::vec3& p){ if (c.world) ScriptApi::setPosition(*c.world, e, p); }
 glm::vec3 getRotation(Ctx& c, Entity e)                    { return c.world ? ScriptApi::getRotation(*c.world, e) : glm::vec3(0.0f); }
-void      setRotation(Ctx& c, Entity e, const glm::vec3& r){ if (c.world) ScriptApi::setRotation(*c.world, e, r); }
 glm::vec3 getScale(Ctx& c, Entity e)                       { return c.world ? ScriptApi::getScale(*c.world, e) : glm::vec3(1.0f); }
 void      setScale(Ctx& c, Entity e, const glm::vec3& s)   { if (c.world) ScriptApi::setScale(*c.world, e, s); }
+
+void setPosition(Ctx& c, Entity e, const glm::vec3& p)
+{
+    if (!c.world) return;
+    // `p` is LOCAL, like everything TransformComponent holds, so the transform
+    // write is the plain one and it always happens.
+    ScriptApi::setPosition(*c.world, e, p);
+
+    // An entity with a body or a character owns its position in Jolt, and the
+    // step writes that pose back over TransformComponent — so the write above
+    // used to be undone within the same frame and "set the position" quietly
+    // meant nothing for exactly the entities a game moves most. Teleporting the
+    // body as well is what makes it stick; teleportToLocalPose is what turns the
+    // local value into the world one physics takes. Guarded by hasPhysics rather
+    // than by the return value: PhysicsWorld logs when it is asked to move
+    // something bodiless, and that is the common case here, not an error.
+    auto&      reg = c.world->registry();
+    const auto ent = static_cast<entt::entity>(e);
+    auto*      tc  = reg.valid(ent) ? reg.try_get<TransformComponent>(ent) : nullptr;
+    if (tc && c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+        teleportToLocalPose(c, e, *tc, /*withRotation=*/false, /*resetVelocity=*/false);
+}
+
+void setRotation(Ctx& c, Entity e, const glm::vec3& r)
+{
+    if (!c.world) return;
+    // `r` is LOCAL Euler degrees, so the transform write is the plain one, like
+    // setPosition's.
+    ScriptApi::setRotation(*c.world, e, r);
+
+    // The same defect setPosition fixes, one axis further: the step writes
+    // Jolt's orientation back over TransformComponent, so a script turning a
+    // dynamic body was undone in the frame it happened. There is no
+    // rotation-only teleport, so this goes through setTransform with the pose
+    // the entity now has — position included, read from TransformComponent
+    // rather than via getPosition so a physics entity that somehow lost its
+    // transform does not get teleported to the origin as a side effect of being
+    // turned. teleportToLocalPose converts both halves to world space and puts
+    // the caller's Euler spelling back, so getRotation answers with what was
+    // just set instead of an equivalent triple.
+    auto&      reg = c.world->registry();
+    const auto ent = static_cast<entt::entity>(e);
+    auto*      tc  = reg.valid(ent) ? reg.try_get<TransformComponent>(ent) : nullptr;
+    if (tc && c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+        teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/false);
+}
 
 glm::vec3 getWorldPosition(Ctx& c, Entity e)
 {
@@ -261,12 +441,22 @@ glm::vec3 getWorldPosition(Ctx& c, Entity e)
 
 void setWorldPosition(Ctx& c, Entity e, const glm::vec3& p)
 {
-    // Written through the LOCAL setter on purpose: that one is what marks the
-    // transform dirty and what physics and the hierarchy already listen to.
-    // Converting here and delegating keeps one writer for the position.
-    if (c.world)
-        ScriptApi::setPosition(*c.world, e,
-            HE::localPositionForWorld(*c.world, static_cast<entt::entity>(e), p));
+    if (!c.world) return;
+    const auto ent = static_cast<entt::entity>(e);
+    // Each side gets `p` in the space it stores: the transform holds a local
+    // position, physics takes a world one — and `p` ALREADY IS the world one.
+    //
+    // Deliberately not delegating to setPosition: that one converts local→world
+    // for physics, so handing it a converted `p` would run the value through a
+    // matrix and its inverse for nothing, and this is the one function whose
+    // entire job is landing a parented entity exactly where the caller said.
+    // (It also used to be worse than that: setPosition read its argument as
+    // local only after this had already made it local, and the body ended up at
+    // the local value while the transform ended up at the parent's offset
+    // removed twice.)
+    ScriptApi::setPosition(*c.world, e, HE::localPositionForWorld(*c.world, ent, p));
+    if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+        c.physics->setPosition(static_cast<uint32_t>(e), p);
 }
 } // namespace transform
 
@@ -300,6 +490,34 @@ glm::vec3 getVelocity(Ctx& c, Entity e)                { return c.physics ? c.ph
 bool isGrounded(Ctx& c, Entity e)                      { return ScriptApi::isGrounded(c.physics, e); }
 void setGravity(Ctx& c, const glm::vec3& g)            { if (c.physics) c.physics->setGravity(g); }
 glm::vec3 getGravity(Ctx& c)                           { return c.physics ? c.physics->gravity() : glm::vec3(0.0f); }
+
+// Two functions rather than one with a defaulted flag: a registry row names one
+// C++ callee, and test_engine_api holds that mapping distinct per row.
+//
+// `p` is a LOCAL position — see the header for why these two say local while
+// PhysicsWorld underneath says world. Converted here, which is the only place
+// that knows both spaces. Without a world there is no hierarchy to convert
+// through, so the value passes as it is (and for a top-level entity that is the
+// same answer either way).
+bool setPosition(Ctx& c, Entity e, const glm::vec3& p)
+{
+    if (!c.physics) return false;
+    const auto ent = static_cast<entt::entity>(e);
+    return c.physics->setPosition(static_cast<uint32_t>(e),
+                                  c.world ? worldPositionForLocal(*c.world, ent, p) : p);
+}
+bool setPositionAndReset(Ctx& c, Entity e, const glm::vec3& p)
+{
+    if (!c.physics) return false;
+    const auto ent = static_cast<entt::entity>(e);
+    return c.physics->setPosition(static_cast<uint32_t>(e),
+                                  c.world ? worldPositionForLocal(*c.world, ent, p) : p,
+                                  /*resetVelocity=*/true);
+}
+bool hasPhysics(Ctx& c, Entity e)
+{
+    return c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e));
+}
 } // namespace physics
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -1318,9 +1536,26 @@ void setZonePosition(Ctx& c, int zone, const glm::vec3& p)
     if (!z || !c.world) return;
     const auto e = (entt::entity)z->root;
     if (!c.world->registry().valid(e)) return;
-    // Children follow via the hierarchy's world-matrix composition — moving the
-    // zone's sub-root moves the whole zone.
+    // Children follow via the hierarchy's world-matrix composition — but only
+    // what is DRAWN does. A physics representation is baked once, out of the
+    // pose the entity had when it was built, and nothing re-derives it when an
+    // ancestor moves: without the rebuild below a moved zone renders at its new
+    // place and collides at its old one.
     c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
+
+    // Rebuild every zone body from the pose the entity has NOW. addEntity tears
+    // the old representation down first, so this is a move, not a leak — at the
+    // price of a dynamic body's velocity, which a zone placement is entitled to
+    // drop. Gated on hasPhysics so the placement both applications do straight
+    // after loading a zone (setZonePosition, THEN their addEntity pass) stays
+    // the no-op it is today.
+    if (c.physics)
+    {
+        auto& reg = c.world->registry();
+        for (uint32_t id : z->entities)
+            if (reg.valid((entt::entity)id) && c.physics->hasPhysics(id))
+                c.physics->addEntity(*c.world, id);
+    }
 }
 void setZoneVisible(Ctx& c, int zone, bool visible)
 {
@@ -1773,6 +2008,15 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ physics::setGravity(c, aV3(a, 0)); return VV{}; } });
         t.push_back({ "physics.getGravity", "Physics", false, {}, {{"gravity", P::Vec3}}, "HE::api::physics::getGravity",
             [](Ctx& c, const VV&){ return VV{ v3(physics::getGravity(c)) }; } });
+        // The teleport. A Vec3 parameter spreads as three numbers on the text
+        // bindings, so from Lua and Python these read setPosition(entity, x, y, z)
+        // — the shape the rest of the flat surface already has.
+        t.push_back({ "physics.setPosition", "Physics", true, {{"entity", P::Int}, {"position", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::setPosition",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setPosition(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.setPositionAndReset", "Physics", true, {{"entity", P::Int}, {"position", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::setPositionAndReset",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setPositionAndReset(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.hasPhysics", "Physics", false, {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasPhysics",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasPhysics(c, (Entity)aI(a, 0))) }; } });
 
         // Materials
         t.push_back({ "material.getParam", "Material", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Color}}, "HE::api::material::getParam",
@@ -2261,6 +2505,11 @@ const std::vector<ApiFn>& registry()
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
             { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },
+            { "physics.hasPhysics", "Has Physics" },
+            // Suffixed for the same reason as Get Velocity below: Transform owns
+            // the unqualified "Set Position", and the add menu lists both flat.
+            { "physics.setPosition", "Set Position (Physics)" },
+            { "physics.setPositionAndReset", "Set Position And Stop (Physics)" },
             // Suffixed like "Length (Vec2)"/"Length (Vec3)": Movement already
             // owns a "Get Velocity", and the drag-off menu lists the registry
             // flat, where two identically named rows are a coin toss.

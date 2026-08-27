@@ -126,8 +126,28 @@ namespace entity {
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────
 namespace transform {
     glm::vec3 getPosition(Ctx&, Entity e);                    // default (0,0,0)
+    // Sets the LOCAL position — the exact value getPosition reads back, and for
+    // a child the offset inside its parent — and TELEPORTS an entity that has a
+    // physics representation to the world position that local one puts it at.
+    //
+    // Both halves are needed: the physics step writes Jolt's pose back over
+    // TransformComponent every frame, so a plain transform write on a body or a
+    // character was undone within the same frame and looked like nothing
+    // happened. Physics deals in world poses only, so the local→world conversion
+    // happens on the way there — nothing else in this API asks the caller to
+    // think about it. Velocity is kept; physics.setPositionAndReset is the call
+    // that says otherwise.
+    //
+    // This is the ONE teleport: the flat script bindings (horizon.setPosition in
+    // Lua and Python) route through here rather than writing the transform, so
+    // "set the position" means the same thing in every language.
     void      setPosition(Ctx&, Entity e, const glm::vec3& p);
     glm::vec3 getRotation(Ctx&, Entity e);                    // default (0,0,0)
+    // Sets the LOCAL rotation and teleports a physics entity for the same reason
+    // setPosition does — the step writes Jolt's orientation back too, so a turned
+    // body used to snap back within the frame. The entity's own position and its
+    // velocity are left as they are, and the Euler triple that comes back out of
+    // getRotation is the one passed in.
     void      setRotation(Ctx&, Entity e, const glm::vec3& r);
     glm::vec3 getScale(Ctx&, Entity e);                       // default (1,1,1)
     void      setScale(Ctx&, Entity e, const glm::vec3& s);
@@ -145,6 +165,15 @@ namespace transform {
     // than reading TransformComponent::worldMatrix — see TransformHierarchy.h
     // for why that cached matrix is not trustworthy from gameplay code.
     glm::vec3 getWorldPosition(Ctx&, Entity e);               // default (0,0,0)
+    // Puts the entity AT `p`, whatever its parents do, and teleports a physics
+    // entity there for the same reason setPosition does.
+    //
+    // One conversion per side, not a detour through setPosition: the transform
+    // gets `p` with the parent's offset removed, physics gets `p` unchanged
+    // (physics already speaks world). Converting to local and back through the
+    // local setter would be the same value twice through a matrix and its
+    // inverse — and this is the one call whose entire job is landing a parented
+    // entity exactly where the caller said.
     void      setWorldPosition(Ctx&, Entity e, const glm::vec3& p);
 }
 
@@ -188,6 +217,47 @@ namespace physics {
     void       setVelocity(Ctx&, Entity e, const glm::vec3& v);
     glm::vec3  getVelocity(Ctx&, Entity e);
     bool       isGrounded(Ctx&, Entity e);
+
+    // TELEPORT — where the entity IS, not a push towards it. Both write Jolt
+    // directly and mirror the value into the transform in the same call, so the
+    // camera, the render extraction and every script that reads the position
+    // afterwards see one pose instead of the old one until the next step.
+    // Nothing sweeps on the way: a target inside geometry stays inside it.
+    //
+    // `position` is LOCAL, exactly like transform.setPosition's — a deliberate
+    // decision, because the two are documented below as the same operation
+    // reached from two directions, and one of them meaning something else for
+    // parented entities would make that sentence a trap. The rule for this whole
+    // API is: a position paired with an ENTITY is local unless the name says
+    // World. (PhysicsWorld underneath speaks world poses only; the conversion
+    // lives in EngineApi.cpp, at the one boundary that knows both.)
+    //
+    // The gap that leaves, named rather than hidden: raycast/sphereCast report
+    // WORLD points, so "teleport onto what I hit" needs
+    // transform.setWorldPosition for a parented entity. There is no world+reset
+    // variant — a graph that needs both writes the world position first and
+    // stops the linear velocity with setVelocity(0) (which is less than
+    // ...AndReset does: that one zeroes the angular velocity as well).
+    //
+    // Rotation is left alone, and the character controller wins over the rigid
+    // body when an entity has both — the full argument for both rules lives on
+    // PhysicsWorld::setPosition.
+    //
+    // ...AndReset zeroes the velocity as well, which is what a respawn wants: a
+    // player put back at a checkpoint should not arrive carrying the fall that
+    // killed them.
+    //
+    // Both answer false (and log) for an entity with no body and no character.
+    // transform.setPosition is the call for those — and it performs this same
+    // teleport, from the same local position, for the entities that do have
+    // physics, so a graph that only ever moves things one way keeps working.
+    bool setPosition(Ctx&, Entity e, const glm::vec3& position);
+    bool setPositionAndReset(Ctx&, Entity e, const glm::vec3& position);
+
+    // Does this entity have a body or a character controller at all? The guard
+    // to ask before pushing, and the one honest answer to "why did my impulse do
+    // nothing" — false without a PhysicsWorld too.
+    bool hasPhysics(Ctx&, Entity e);
 
     // World gravity in m/s². Rigid bodies only — a character controller falls
     // by its own component's gravity value.
@@ -569,6 +639,11 @@ namespace scene {
     std::vector<int>         loadedZones();
     std::string              zoneScene(int zone);            // "" unknown
     glm::vec3                zonePosition(Ctx&, int zone);   // the zone root's position
+    // Moves the zone root, then REBUILDS the zone's physics bodies from where
+    // their entities now are: a body is baked once and nothing re-derives it
+    // when an ancestor moves, so without the rebuild a moved zone would render
+    // at its new place and collide at its old one. Costs the velocity of any
+    // dynamic body in the zone — the rebuild tears the old one down first.
     void                     setZonePosition(Ctx&, int zone, const glm::vec3& p); // move the whole zone
     void                     setZoneVisible(Ctx&, int zone, bool visible);        // flip its meshes
     // Every scene the game can load: the packed scene index in shipped builds,

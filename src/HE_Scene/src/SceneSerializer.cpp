@@ -689,6 +689,34 @@ namespace
 		}
 	}
 
+	// The same courtesy for the collider shape, which is a raw uint8 in the file.
+	// The APPEND-ONLY rule in Types/Enums.h protects the BACKWARDS direction (an
+	// old scene keeps meaning what it meant); it says nothing about the forwards
+	// one, which is the direction that bites here. An old build reading a scene
+	// that uses Mesh/Convex Hull/Height Field (3..5, added with the runtime-shapes
+	// work) cast the value straight through, so every one of them landed as
+	// Box == 0: the imported house collided as a crate again, with nothing in the
+	// log to point at. Box is still the only answer — there is no other shape to
+	// fall back to — but it is now said out loud, and it matches what physics does
+	// with a shape it does not know (buildColliderShape's default branch logs and
+	// builds a box). Reported once per unknown value, not once per entity.
+	ColliderShape jsonToColliderShape(uint8_t raw, ColliderShape fallback)
+	{
+		if (raw <= static_cast<uint8_t>(ColliderShape::HeightField))
+			return static_cast<ColliderShape>(raw);
+
+		static std::mutex                s_mutex;
+		static std::unordered_set<uint8_t> s_reported;
+		{
+			std::lock_guard<std::mutex> lk(s_mutex);
+			if (!s_reported.insert(raw).second) return fallback;
+		}
+		HE_LOG_WARN(Serialize, "Scene contains unknown collider shape %u — loading it as a Box "
+		                       "(scene written by a newer build; SAVING IT BACK MAKES THAT "
+		                       "PERMANENT)", static_cast<unsigned>(raw));
+		return fallback;
+	}
+
 	void applyComponents(entt::registry& registry, Entity entity, const json& comps)
 	{
 		warnUnknownComponents(comps);
@@ -821,7 +849,8 @@ namespace
 		{
 			const json& c = comps["collider"];
 			ColliderComponent col;
-			col.shape     = static_cast<ColliderShape>(c.value("shape", static_cast<uint8_t>(col.shape)));
+			col.shape     = jsonToColliderShape(c.value("shape", static_cast<uint8_t>(col.shape)),
+			                                    col.shape);
 			col.radius    = c.value("radius",    col.radius);
 			col.height    = c.value("height",    col.height);
 			col.isTrigger = c.value("isTrigger", col.isTrigger);

@@ -95,7 +95,13 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // nobody was profiling.
     HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickWorld");
 
-    { HE_PROFILE_SCOPE_N("Terrain");               TerrainSystem::updateTerrains(world, cm, renderer); }
+    // Terrain runs first, so a landscape whose heights just changed has its
+    // collider rebuilt before Movement and before physics steps this same frame.
+    // const_cast for the same reason MovementSystem needs one four lines below:
+    // the parameter is const because most of the tick only reads physics, and
+    // the two systems that write it are the exception.
+    { HE_PROFILE_SCOPE_N("Terrain");               TerrainSystem::updateTerrains(world, cm, renderer,
+        const_cast<PhysicsWorld*>(physics)); }
     // Movement turns this frame's intent into character motion. Gameplay side,
     // like navigation — it must land before physics steps and long before the
     // animation phase reads the result.

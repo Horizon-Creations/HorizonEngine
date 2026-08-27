@@ -147,6 +147,17 @@ namespace
 	  "is (0, -9.81, 0)." },
 	{ "physics.getGravity",
 	  "The physics world's gravity vector." },
+	{ "physics.setPosition",
+	  "Teleports the entity's physics body and its transform to this position in "
+	  "one step. Nothing sweeps on the way, and the velocity is kept — Set Position "
+	  "And Stop is the respawn variant." },
+	{ "physics.setPositionAndReset",
+	  "Teleports like Set Position and zeroes the velocity on arrival. What a "
+	  "respawn wants, so a player put back at a checkpoint does not keep the fall "
+	  "that killed them." },
+	{ "physics.hasPhysics",
+	  "Whether the entity has a rigid body or a character controller at all. False "
+	  "without a physics world, and the honest answer to why a force did nothing." },
 
 	// ── Material ─────────────────────────────────────────────────────────────
 	{ "material.getParam",

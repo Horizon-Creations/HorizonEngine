@@ -17,6 +17,8 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -544,4 +546,85 @@ TEST_CASE("tearing the host down while Destruct spawns does not corrupt its maps
 
 	CHECK_NOTHROW(host.end());
 	CHECK(host.count() == 0);
+}
+
+// Red under two independent source mutations, both applied, built and observed:
+//   - deleting the `m_physics->addEntityTree(...)` call in EntityHost::spawn:
+//     both hasPhysics checks go false and the ray finds nothing.
+//   - making PhysicsWorld::buildBodyFor use the entity's LOCAL transform as its
+//     pose instead of worldPoseOf(): the bodies exist but stand at the authored
+//     origin, so the gun is not at the spawn point.
+TEST_CASE("EntityHost::spawn gives the whole spawned subtree its physics, at the spawn point")
+{
+	// The ANSCHLUSS, not the class: PhysicsWorld::addEntityTree having a test of
+	// its own says nothing about whether a spawn ever calls it. Everything here
+	// goes through the real path — setPhysicsWorld, then spawn — so that removing
+	// the one line in EntityHost::spawn that reaches for physics fails a test
+	// instead of quietly shipping bodiless prefabs.
+	TempDir dir("he_test_entityhost_physics");
+	ContentManager cm(dir.path.string());
+
+	// A turret-shaped prefab: a base, and a gun mounted 3 m above it. Both carry
+	// bodies, which is what makes the SUBTREE part of the contract testable —
+	// addEntity alone would build the base and leave the gun bodiless.
+	std::vector<uint8_t> blob;
+	{
+		HorizonWorld scratch;
+		const Entity base = scratch.createEntity("TurretBase");
+		TransformComponent bt; bt.position = { 0.0f, 0.0f, 0.0f }; bt.scale = { 1.0f, 1.0f, 1.0f };
+		scratch.addComponent(base, bt);
+		RigidBodyComponent brb; brb.type = RigidBodyType::Static;
+		scratch.addComponent(base, brb);
+
+		const Entity gun = scratch.createEntity("TurretGun");
+		TransformComponent gt; gt.position = { 0.0f, 3.0f, 0.0f }; gt.scale = { 1.0f, 1.0f, 1.0f };
+		scratch.addComponent(gun, gt);
+		RigidBodyComponent grb; grb.type = RigidBodyType::Static;
+		scratch.addComponent(gun, grb);
+		REQUIRE(scratch.reparentEntity(gun, base));
+
+		SceneSerializer ser;
+		blob = ser.serializeSubtree(scratch, base);
+	}
+	REQUIRE_FALSE(blob.empty());
+	const std::string cls = writeClass(cm, "Turret", "Entity", lifecycleGraph(), blob);
+
+	HorizonWorld world;
+	Runtime      rt;
+	EntityHost   host;
+	PhysicsWorld phys;
+	phys.initialize(world);          // empty world: only the spawn can add bodies
+	host.setPhysicsWorld(&phys);
+	host.begin(rt, world, cm);
+
+	// Spawned far from the origin, because that is where the authored-origin bug
+	// hides: at (0,0,0) a collider built from the local transform is right by
+	// accident.
+	const float where[3] = { 50.0f, 0.0f, -25.0f };
+	const EntityHost::Spawned s = host.spawn(cls, entt::null, where);
+	REQUIRE(s.instance != 0);
+	REQUIRE((s.entity != entt::null));
+
+	auto& reg = world.registry();
+	REQUIRE(reg.all_of<HierarchyComponent>(s.entity));
+	const auto& kids = reg.get<HierarchyComponent>(s.entity).children;
+	REQUIRE(kids.size() == 1);
+	const Entity gun = kids.front();
+
+	// BEFORE THE CHANGE: spawn() never touched physics, so both of these were
+	// false and a spawned turret stood in the level with nothing to shoot at it.
+	CHECK(phys.hasPhysics(static_cast<uint32_t>(s.entity)));
+	CHECK(phys.hasPhysics(static_cast<uint32_t>(gun)));
+
+	const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+
+	// The gun sits 3 m up at the SPAWN POINT — root placement composed with the
+	// child's local offset. A ray from above finds the gun first, being higher.
+	const auto onGun = phys.raycast({ 50.0f, 60.0f, -25.0f }, down, 200.0f);
+	REQUIRE(onGun.hit);
+	CHECK(onGun.entityId == static_cast<uint32_t>(gun));
+	CHECK(onGun.point.y == doctest::Approx(3.5f).epsilon(0.02));
+
+	// Nothing was left behind at the coordinates the prefab was authored around.
+	CHECK_FALSE(phys.raycast({ 0.0f, 60.0f, 0.0f }, down, 200.0f).hit);
 }

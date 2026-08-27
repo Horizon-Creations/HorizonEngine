@@ -31,14 +31,48 @@ struct CollisionSystem
     // silently break existing scripts. onBeginOverlap/onEndOverlap are the new,
     // trigger-only pair. HorizonCode has the two apart from the start:
     // OnHit/OnHitEnd for blocking, OnBeginOverlap/OnEndOverlap for triggers.
-    static void dispatch(PhysicsWorld& physics,
+    //
+    // `world` is what makes an event's two entity ids checkable, and it is
+    // MANDATORY — a reference, second, where it cannot be left out. It was a
+    // trailing `HorizonWorld* = nullptr` first, and every caller simply kept
+    // the old shape: the guard below was compiled in and never armed once, so
+    // the bug it exists for stayed open. A default that switches a check off
+    // silently is worse than no check, because the code reads as if it checks.
+    static void dispatch(PhysicsWorld& physics, HorizonWorld& world,
                          ScriptContext* scripts, const InstanceMap& instances,
                          HorizonCode::Runtime* runtime = nullptr,
                          const HcInstanceMap& hcInstances = {})
     {
+        // An event names two entities, and one of them can already be gone by
+        // the time it is delivered. entity.destroy from Lua/Python (ScriptApi's
+        // destroy → HorizonWorld::destroyEntity) touches NO physics at all: the
+        // body outlives the entity until the next PhysicsWorld::step() reaps it,
+        // and the contact it generates in between carries an id that resolves to
+        // nothing. A script receiving it looks up a name, a transform or a
+        // component on a corpse — and the id looks perfectly ordinary, so there
+        // is no shape of defensive scripting that would catch it.
+        //
+        // PhysicsWorld::removeEntity keeps that promise for its own path by
+        // dropping the pair's pending bookkeeping; this keeps it for the path
+        // that never calls removeEntity. It is a registry lookup per contact,
+        // which is nothing next to the script call it is guarding.
+        //
+        // The WHOLE event is dropped, not just the dead half: firing a handler
+        // on a dead entity's own instance is as wrong as handing a live one a
+        // dead id, and a contact where either end no longer exists has nothing
+        // left to mean. entt handles carry a version, so this also rejects an id
+        // whose slot has already been recycled by a newly spawned entity —
+        // which would otherwise deliver the event to the WRONG entity.
+        const auto alive = [&](uint32_t id)
+        {
+            return world.registry().valid(static_cast<Entity>(id));
+        };
+
         // Both directions of one pair, for one kind of contact.
         auto deliver = [&](const PhysicsWorld::CollisionEvent& ev, bool overlap, bool begin)
         {
+            if (!alive(ev.entityA) || !alive(ev.entityB)) return;
+
             auto one = [&](uint32_t self, uint32_t other)
             {
                 if (scripts)
@@ -77,11 +111,12 @@ struct CollisionSystem
         for (const auto& ev : physics.pollOverlapExit())    deliver(ev, true,  false);
     }
 
-    // The pre-HorizonCode spelling, kept so the existing call sites and tests
-    // read unchanged.
-    static void dispatch(PhysicsWorld& physics, ScriptContext& scripts,
-                         const InstanceMap& instances)
+    // The pre-HorizonCode spelling: Lua/Python only, no HorizonCode runtime.
+    // It carries the world for the same reason the full form does — there is no
+    // shape of this call that may hand a script a destroyed entity's id.
+    static void dispatch(PhysicsWorld& physics, HorizonWorld& world,
+                         ScriptContext& scripts, const InstanceMap& instances)
     {
-        dispatch(physics, &scripts, instances);
+        dispatch(physics, world, &scripts, instances);
     }
 };

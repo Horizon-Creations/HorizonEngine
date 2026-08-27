@@ -472,7 +472,15 @@ void GameApplication::OnInit()
 			rt.destroy(ref); // fires "Destruct"
 			if (owned != 0 && m_world &&
 			    m_world->registry().valid(static_cast<Entity>(owned)))
+			{
+				// Hand the bodies back BEFORE the entities go: afterwards the
+				// hierarchy is gone and the subtree cannot be walked. After
+				// Destruct rather than before, so a dying object's last frame of
+				// logic still sees the physics it lived in.
+				if (m_physicsWorld)
+					m_physicsWorld->removeEntityTree(*m_world, owned);
 				m_world->destroyEntity(static_cast<Entity>(owned));
+			}
 		};
 		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
 		// world, physics and content — all resolved at CALL time, which is what
@@ -550,10 +558,14 @@ void GameApplication::OnInit()
 	// assets, spawn the controllers on the shared runtime (Construct + BeginPlay)
 	// and start pumping Tick/Input.* events (OnRender). After the scene load so
 	// BeginPlay can reach scene entities through the engine-call API.
+	// Physics first of the three, because startPhysics() is what hands the entity
+	// host the world it builds spawned bodies in.
 	startPhysics();
-	// The entity host FIRST: a controller's BeginPlay is where the game spawns its
-	// character with Create Object, and that spawn is only served with a body
-	// while the entity host is running.
+	// Then the entity host, still before the player host: a controller's
+	// BeginPlay is where the game spawns its character with Create Object, and
+	// that spawn is only served — with an entity, and now with a body on it —
+	// while the entity host is running. The body half of that sentence used to
+	// be a claim rather than a fact; EntityHost::spawn makes it true.
 	if (m_world)
 		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 	// The entity host is handed over so the player host can find the characters
@@ -806,7 +818,7 @@ void GameApplication::executeSceneRequests()
 			if (info.root == 0 && !created.empty()) info.root = (uint32_t)created.front();
 			HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
 
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine };
 			// Placement: move the zone's root to the requested position (zero =
 			// as authored; the merge root is a fresh identity entity).
 			if (r.pos != glm::vec3(0.0f))
@@ -814,6 +826,21 @@ void GameApplication::executeSceneRequests()
 			// Hidden zones load with their renderables invisible until Show Zone.
 			if (r.hidden)
 				HE::api::scene::setZoneVisible(c, r.zone, false);
+
+			// A streamed-in zone needs COLLISION, or the player walks through its
+			// floor: loadSceneInto only deserialises components, and nothing
+			// builds bodies for entities that arrive that way — initialize() ran
+			// once at scene start, and step() only reaps what has gone away.
+			// `created` already holds every entity of the zone, strays included,
+			// so it is one addEntity each rather than a tree walk per root.
+			//
+			// Placed between the two on purpose: after setZonePosition, so the
+			// root's body is built where the zone ends up, and before
+			// startScriptsFor, so a zone graph's BeginPlay sees a world it can
+			// stand on.
+			if (m_physicsWorld)
+				for (entt::entity e : created)
+					m_physicsWorld->addEntity(*m_world, (uint32_t)e);
 
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
@@ -829,14 +856,20 @@ void GameApplication::executeSceneRequests()
 		case Kind::ZoneVisible: // show/hide a zone (queued so it orders after a load)
 		{
 			if (!m_world) break;
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine };
 			HE::api::scene::setZoneVisible(c, r.zone, r.flag);
 			break;
 		}
 		case Kind::ZonePosition: // move a zone (queued so it orders after a load)
 		{
 			if (!m_world) break;
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			// The physics world travels in the Ctx because setZonePosition needs
+			// it: moving the root moves what is DRAWN, while a body is baked once
+			// from the pose its entity had when it was built. So the call moves
+			// the root AND rebuilds every zone entity that already has physics,
+			// at the place it now stands. With a null here that rebuild is
+			// skipped and the zone would keep colliding where it was authored.
+			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine };
 			HE::api::scene::setZonePosition(c, r.zone, r.pos);
 			break;
 		}
@@ -845,6 +878,15 @@ void GameApplication::executeSceneRequests()
 			const HE::api::scene::ZoneInfo* z = HE::api::scene::zoneInfo(r.zone);
 			if (!z || !m_world) break;
 			auto& reg = m_world->registry();
+			// Bodies go back in a pass of their OWN, before anything is
+			// destroyed. Destroying a zone entity takes its whole subtree with
+			// it, so by the time the loop below reaches a child's id that child
+			// is already invalid and skipped — most of the zone's colliders
+			// would then survive until step()'s sweep noticed them. removeEntity
+			// needs no valid handle and is a silent no-op on an unknown id,
+			// which is what makes an unconditional first pass the simple answer.
+			if (m_physicsWorld)
+				for (uint32_t id : z->entities) m_physicsWorld->removeEntity(id);
 			int gone = 0;
 			for (uint32_t id : z->entities)
 			{
@@ -884,7 +926,20 @@ void GameApplication::startPhysics()
 	// away, and a stale contact from it would report entity ids the new
 	// world knows nothing about.
 	m_physicsWorld = std::make_unique<PhysicsWorld>();
+	// BEFORE initialize(): mesh and convex-hull colliders are cut from the
+	// entity's mesh asset, and without a content manager to hand it over they
+	// fall back to a box — a house that collides as a crate. PhysicsWorld says
+	// so at ERROR, which in the editor reaches the notification centre; a
+	// packaged game has nothing but its log file, so this line is the only
+	// thing standing between a shipped level and crate-shaped houses.
+	m_physicsWorld->setContentManager(&contentManager());
 	m_physicsWorld->initialize(*m_world);
+	// Every runtime spawn goes through the entity host, so it is the host that
+	// has to know where bodies are built. Set HERE rather than at the two call
+	// sites because this function is the only place the physics world is
+	// replaced — including on a scene switch, where a host still pointing at the
+	// previous one would spawn into freed memory.
+	m_entityHost.setPhysicsWorld(m_physicsWorld.get());
 	m_physicsAccum = 0.0f;
 }
 
@@ -1303,8 +1358,15 @@ void GameApplication::OnRender(float deltaTime)
 		// ONE dispatch for both frontends: polling drains the queues, so a
 		// second call would find nothing left and it would look like the
 		// events simply never fire for that language.
+		//
+		// The world goes with it because a contact can name an entity that was
+		// destroyed earlier in this very frame: entity.destroy from a script
+		// touches no physics at all, so the body outlives the entity until the
+		// next step reaps it. dispatch checks both ids against the registry and
+		// drops the whole event — the guard is only as good as this argument.
 		HE_PROFILE_SCOPE_N("CollisionDispatch");
-		CollisionSystem::dispatch(*m_physicsWorld, m_scriptContext.get(), m_scriptInstances,
+		CollisionSystem::dispatch(*m_physicsWorld, *m_world,
+		                          m_scriptContext.get(), m_scriptInstances,
 		                          &m_gameInstance.runtime(), m_entityHost.instances());
 	}
 
@@ -1335,7 +1397,9 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
 		playerMouse.buttons = 0;
 	m_playerHost.tick(input(), gameDt, playerMouse);
-	// Entity classes: Tick, plus reaping the ones whose entity is gone.
+	// Entity classes: Tick, plus reaping the ones whose entity is gone — and
+	// handing their bodies back as it notices them, rather than leaving them to
+	// step()'s own sweep a frame later.
 	m_entityHost.tick(gameDt);
 
 	// Latent HorizonCode flow (Delay nodes): resume expired continuations on
@@ -1484,6 +1548,10 @@ void GameApplication::OnShutdown()
 	m_animatorHost.end();
 	m_entityHost.end();
 	m_playerHost.end();
+	// The host borrows the physics world and end() deliberately does not clear
+	// that (the apps set it before begin()), so it is dropped here — before the
+	// world it points at goes away.
+	m_entityHost.setPhysicsWorld(nullptr);
 	m_physicsWorld.reset();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).

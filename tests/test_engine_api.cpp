@@ -5,6 +5,8 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SaveStateComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/AudioEngine.h>
@@ -208,6 +210,280 @@ TEST_CASE("Transform: world position walks the parent chain, local does not")
     call("transform.setPosition", { Value::ofInt((int)lone), Value::ofVec3({ 3.0f, 4.0f, 5.0f }) });
     CHECK(call("transform.getWorldPosition", { Value::ofInt((int)lone) })[0].v3
           == glm::vec3(3.0f, 4.0f, 5.0f));
+}
+
+// ═══ The local↔world boundary, with a real physics world behind it ════════════
+//
+// The four cases below are the ones nothing covered: every other transform test
+// runs with a null-physics Ctx, and every physics test goes at PhysicsWorld
+// directly. The boundary lives in between — HE::api::transform speaks LOCAL
+// (TransformComponent's space), PhysicsWorld speaks WORLD ("EVERY pose this
+// class exchanges is a WORLD pose"), and EngineApi.cpp is the only place that
+// knows both. Nothing converted there until now, so a PARENTED physics entity
+// put its body at the local value and its transform at inv(parent) * value:
+// two different wrong places from one call.
+//
+// A rotated parent is what makes these tests worth having. With a parent that is
+// only translated, the composed position and the sum of the two positions agree,
+// so broken math passes.
+
+namespace
+{
+    // A child with a body of its own, parented to `parent`. Static rather than
+    // dynamic on purpose: these tests are about WHERE a teleport puts the body,
+    // and a body that also falls would blur the answer with gravity.
+    HE::api::Entity spawnParentedBody(HorizonWorld& world, HE::api::Entity parent,
+                                      const glm::vec3& localPos)
+    {
+        auto e = world.createEntity("ParentedBody");
+        TransformComponent t;
+        t.position = localPos;
+        t.scale    = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(e, t);
+        RigidBodyComponent rb;
+        rb.type = RigidBodyType::Static;
+        world.addComponent(e, rb);
+        REQUIRE(world.reparentEntity(e, static_cast<entt::entity>(parent)));
+        return static_cast<HE::api::Entity>(e);
+    }
+
+    // A top-level dynamic box, the "no parent" half of each pair below.
+    HE::api::Entity spawnLoneDynamicBody(HorizonWorld& world, const glm::vec3& pos)
+    {
+        auto e = world.createEntity("LoneBody");
+        TransformComponent t;
+        t.position = pos;
+        t.scale    = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(e, t);
+        RigidBodyComponent rb;
+        rb.type = RigidBodyType::Dynamic;
+        rb.mass = 1.0f;
+        world.addComponent(e, rb);
+        return static_cast<HE::api::Entity>(e);
+    }
+}
+
+TEST_CASE("Transform: setPosition on a PARENTED physics entity places the body in world space")
+{
+    HorizonWorld world;
+
+    // Parent 10 along X and turned a quarter turn about Y, exactly the shape the
+    // hierarchy test above uses: a child sitting 2 in front of it (local +Z)
+    // therefore stands 2 further along X (world +X), at (12, 0, 0).
+    const auto parent = spawnWithTransform(world, { 10.0f, 0.0f, 0.0f });
+    world.registry().get<TransformComponent>(static_cast<entt::entity>(parent)).rotation =
+        { 0.0f, 90.0f, 0.0f };
+    const auto child = spawnParentedBody(world, parent, { 0.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(child)));
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    call("transform.setPosition", { Value::ofInt((int)child), Value::ofVec3({ 0.0f, 0.0f, 2.0f }) });
+
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+
+    // Where the child is DRAWN — the composed world position — is where its
+    // collider has to be.
+    const auto atWorld = phys.raycast({ 12.0f, 50.0f, 0.0f }, down, 100.0f);
+    REQUIRE(atWorld.hit);
+    CHECK(atWorld.entityId == static_cast<uint32_t>(child));
+
+    // And nothing is at the RAW LOCAL value. This is the half that fails without
+    // the conversion: PhysicsWorld reads what it is handed as a world pose, so
+    // an unconverted local (0,0,2) parked the body here, 12 m from its mesh.
+    CHECK_FALSE(phys.raycast({ 0.0f, 50.0f, 2.0f }, down, 100.0f).hit);
+
+    // Read back in the space it was written in. Exact rather than approximate on
+    // purpose: teleportToLocalPose puts the caller's local values back after the
+    // body move, so the round trip does not drift through a matrix and its
+    // inverse. Asked BEFORE any step() — a body's own pose only overwrites the
+    // transform when the simulation runs.
+    const Value back = call("transform.getPosition", { Value::ofInt((int)child) })[0];
+    CHECK(back.v3.x == doctest::Approx(0.0f));
+    CHECK(back.v3.y == doctest::Approx(0.0f));
+    CHECK(back.v3.z == doctest::Approx(2.0f));
+}
+
+TEST_CASE("Transform: setWorldPosition on a PARENTED physics entity lands both halves on the spot")
+{
+    // The regression this pins down. setWorldPosition converts world→local and
+    // used to hand the result to transform::setPosition — which, once that one
+    // started teleporting the body, read the already-converted value as a world
+    // one again. The single function whose entire job is hierarchy-correct
+    // placement was the one that misplaced parented entities, and it did so
+    // WORSE than the committed tree does.
+    HorizonWorld world;
+
+    const auto parent = spawnWithTransform(world, { 10.0f, 0.0f, 0.0f });
+    world.registry().get<TransformComponent>(static_cast<entt::entity>(parent)).rotation =
+        { 0.0f, 90.0f, 0.0f };
+    const auto child = spawnParentedBody(world, parent, { 0.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(child)));
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    const glm::vec3 target{ 5.0f, 0.0f, -7.0f };
+    call("transform.setWorldPosition", { Value::ofInt((int)child), Value::ofVec3(target) });
+
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+
+    // The body is at the world position the caller named. Nothing else is
+    // acceptable here — "world" is in the name.
+    const auto atTarget = phys.raycast({ 5.0f, 50.0f, -7.0f }, down, 100.0f);
+    REQUIRE(atTarget.hit);
+    CHECK(atTarget.entityId == static_cast<uint32_t>(child));
+
+    // And NOT at the double-converted place. inverse(parent) applied to the
+    // target is (7, 0, -5) — the local position the transform legitimately gets,
+    // and the exact spot the body used to be dumped at when that local value was
+    // passed on to a setter that reads world.
+    CHECK_FALSE(phys.raycast({ 7.0f, 50.0f, -5.0f }, down, 100.0f).hit);
+
+    // Both spaces agree with the two questions asked of them: world is the
+    // target, local is the target expressed inside the parent.
+    const Value w = call("transform.getWorldPosition", { Value::ofInt((int)child) })[0];
+    CHECK(w.v3.x == doctest::Approx(5.0f).epsilon(0.001));
+    CHECK(w.v3.z == doctest::Approx(-7.0f).epsilon(0.001));
+    const Value l = call("transform.getPosition", { Value::ofInt((int)child) })[0];
+    CHECK(l.v3.x == doctest::Approx(7.0f).epsilon(0.001));
+    CHECK(l.v3.z == doctest::Approx(-5.0f).epsilon(0.001));
+}
+
+TEST_CASE("Transform: setPosition on an UNPARENTED physics entity is unchanged by the conversion")
+{
+    // The other side of the boundary, and the reason it can ship: with no parent
+    // above it every conversion is the identity, so the overwhelming majority of
+    // scenes behave exactly as they did.
+    //
+    // Not written as a pure "nothing changed" check, because that would pass
+    // without any of this code existing. It asserts the thing that IS new for a
+    // top-level entity too: the teleport reaches the body, so the move survives
+    // the step instead of being overwritten by Jolt's own pose.
+    HorizonWorld world;
+    const auto box = spawnLoneDynamicBody(world, { 0.0f, 10.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Fall a while first, so the body's own idea of where it is has drifted far
+    // from where the teleport wants it.
+    for (int i = 0; i < 120; ++i)
+        phys.step(world, 1.0f / 60.0f);
+    REQUIRE(world.registry().get<TransformComponent>(static_cast<entt::entity>(box)).position.y < 0.0f);
+
+    call("transform.setPosition", { Value::ofInt((int)box), Value::ofVec3({ 3.0f, 50.0f, -4.0f }) });
+
+    // Immediately readable, in the spelling it was written in.
+    const Value back = call("transform.getPosition", { Value::ofInt((int)box) })[0];
+    CHECK(back.v3.x == doctest::Approx(3.0f));
+    CHECK(back.v3.y == doctest::Approx(50.0f));
+    CHECK(back.v3.z == doctest::Approx(-4.0f));
+
+    // …and it is where the COLLIDER is, not just where the mesh is drawn.
+    const auto hit = phys.raycast({ 3.0f, 60.0f, -4.0f }, { 0.0f, -1.0f, 0.0f }, 100.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId == static_cast<uint32_t>(box));
+
+    // The step is the judge: without the body move it writes the falling pose
+    // back over the transform and the set means nothing.
+    phys.step(world, 1.0f / 60.0f);
+    const auto& tr = world.registry().get<TransformComponent>(static_cast<entt::entity>(box));
+    CHECK(tr.position.y > 49.0f);
+    CHECK(tr.position.x == doctest::Approx(3.0f).epsilon(0.02));
+    CHECK(tr.position.z == doctest::Approx(-4.0f).epsilon(0.02));
+}
+
+TEST_CASE("Transform: setWorldPosition on an UNPARENTED physics entity is the same operation")
+{
+    // Top-level: local IS world, so this and the case above must agree. The
+    // assertion that matters is again that the body followed — setWorldPosition
+    // reaches physics on its own path rather than through setPosition, so its
+    // teleport needs its own coverage.
+    HorizonWorld world;
+    const auto box = spawnLoneDynamicBody(world, { 0.0f, 10.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    for (int i = 0; i < 120; ++i)
+        phys.step(world, 1.0f / 60.0f);
+    REQUIRE(world.registry().get<TransformComponent>(static_cast<entt::entity>(box)).position.y < 0.0f);
+
+    call("transform.setWorldPosition", { Value::ofInt((int)box), Value::ofVec3({ -6.0f, 40.0f, 8.0f }) });
+
+    const auto hit = phys.raycast({ -6.0f, 60.0f, 8.0f }, { 0.0f, -1.0f, 0.0f }, 100.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId == static_cast<uint32_t>(box));
+
+    phys.step(world, 1.0f / 60.0f);
+    const auto& tr = world.registry().get<TransformComponent>(static_cast<entt::entity>(box));
+    CHECK(tr.position.y > 39.0f);
+    CHECK(tr.position.x == doctest::Approx(-6.0f).epsilon(0.02));
+    CHECK(tr.position.z == doctest::Approx(8.0f).epsilon(0.02));
+
+    // Both spaces answer the same for a top-level entity — the property that
+    // lets a whole codebase confuse the two and never notice.
+    const Value w = call("transform.getWorldPosition", { Value::ofInt((int)box) })[0];
+    const Value l = call("transform.getPosition", { Value::ofInt((int)box) })[0];
+    CHECK(w.v3.x == doctest::Approx(l.v3.x));
+    CHECK(w.v3.y == doctest::Approx(l.v3.y));
+    CHECK(w.v3.z == doctest::Approx(l.v3.z));
+}
+
+TEST_CASE("Transform: setRotation on a dynamic body survives the next step")
+{
+    // The rotation axis of the same defect. The physics loop writes Jolt's
+    // orientation back over TransformComponent every step, so turning a dynamic
+    // body from a script was undone in the frame it happened — a door that
+    // swings open and is shut again before anyone sees it.
+    //
+    // There is no rotation-only teleport, so this goes through setTransform with
+    // the position the entity already has; the test therefore also checks the
+    // entity did not move as a side effect of being turned.
+    HorizonWorld world;
+    const auto box = spawnLoneDynamicBody(world, { 0.0f, 20.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // In the air and awake — a sleeping body is not written back at all, which
+    // would make this pass for a reason that has nothing to do with the fix.
+    for (int i = 0; i < 10; ++i)
+        phys.step(world, 1.0f / 60.0f);
+    const float yBefore =
+        world.registry().get<TransformComponent>(static_cast<entt::entity>(box)).position.y;
+    REQUIRE(yBefore < 20.0f);
+
+    call("transform.setRotation", { Value::ofInt((int)box), Value::ofVec3({ 0.0f, 37.0f, 0.0f }) });
+
+    // Nothing torques a free-falling box, so one step must leave the orientation
+    // where it was put.
+    phys.step(world, 1.0f / 60.0f);
+
+    const Value r = call("transform.getRotation", { Value::ofInt((int)box) })[0];
+    CHECK(r.v3.x == doctest::Approx(0.0f).epsilon(0.01));
+    CHECK(r.v3.y == doctest::Approx(37.0f).epsilon(0.01));
+    CHECK(r.v3.z == doctest::Approx(0.0f).epsilon(0.01));
+
+    // Turned, not teleported: it is still falling from where it was.
+    const auto& tr = world.registry().get<TransformComponent>(static_cast<entt::entity>(box));
+    CHECK(tr.position.x == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK(tr.position.z == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK(tr.position.y < yBefore);
 }
 
 TEST_CASE("EngineApi: transform round-trips through the registry")

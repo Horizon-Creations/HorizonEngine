@@ -93,10 +93,17 @@ static int lua_horizon_getPosition(lua_State* L)
     return 3;
 }
 
+// The two transform WRITES go through HE::api::transform rather than straight to
+// ScriptApi: that layer turns a write on an entity with a body or a character
+// into a teleport. Without it the physics step overwrote the transform in the
+// same frame, so horizon.setPosition/setRotation were silent no-ops on exactly
+// the entities a script moves most — a Lua respawn never arrived. The arity the
+// bindings expose is unchanged; only who does the work is.
 static int lua_horizon_setPosition(lua_State* L)
 {
     const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
-    ScriptApi::setPosition(*getWorld(L), id,
+    HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
+    HE::api::transform::setPosition(c, id,
         { static_cast<float>(luaL_checknumber(L, 2)),
           static_cast<float>(luaL_checknumber(L, 3)),
           static_cast<float>(luaL_checknumber(L, 4)) });
@@ -114,7 +121,8 @@ static int lua_horizon_getRotation(lua_State* L)
 static int lua_horizon_setRotation(lua_State* L)
 {
     const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
-    ScriptApi::setRotation(*getWorld(L), id,
+    HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
+    HE::api::transform::setRotation(c, id,
         { static_cast<float>(luaL_checknumber(L, 2)),
           static_cast<float>(luaL_checknumber(L, 3)),
           static_cast<float>(luaL_checknumber(L, 4)) });

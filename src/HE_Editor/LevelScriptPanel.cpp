@@ -27,6 +27,10 @@
 #include "PreviewPick.h"              // click-to-select in an offscreen 3D pane
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+// The collider outline and the click box measure the shapes whose geometry is
+// the entity's own, so they read the two components that carry it.
+#include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/LODComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HcClassResolve.h>
 #include <ContentManager/ContentManager.h>
@@ -1628,9 +1632,74 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 // rather than being rebuilt here: the framing depends on GPU-side bounds only
 // the renderer has, and a copy of that rule would drift into looking like a
 // wrong collider.
+//
+// `content` is nullable — with no ContentManager the mesh-sourced shapes fall
+// back to the authored box, which is the same thing physics does with them.
+// Declared here and defined past the two helpers it needs.
 void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
                        const std::string& focus,
-                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize)
+                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize,
+                       ContentManager* content);
+
+// Defined below; the collider outline needs it for the shapes whose geometry is
+// the entity's mesh rather than the collider's own numbers.
+const HE::AABB* previewMeshBounds(ContentManager& cm, const HE::UUID& id);
+
+// Local-space bounds of the three shapes that take their geometry FROM THE
+// ENTITY (Mesh, Convex Hull, Height Field) — false when the source is not there
+// to measure. Min and max, not half extents: a mesh's bounds need not straddle
+// the entity's origin, and centring them would move the outline off the model.
+//
+// Both the outline and the click box need this, and they need the same answer:
+// before the runtime shapes existed everything non-Box was drawn as a capsule
+// and picked as a sphere of `radius`, so a mesh collider got an outline and a
+// focus box that had nothing to do with the geometry physics builds. `radius`
+// and `halfExtents` are not even read for these shapes (ColliderComponent
+// spells that out), which is why guessing from them could not be right.
+//
+// The mesh precedence is PhysicsWorld's own (colliderSourceMesh): the
+// MeshComponent's asset, overridden by LOD level 0. Drawing the bounds rather
+// than the hull is deliberate — the true silhouette needs the cooked shape Jolt
+// builds, which does not exist until play, and a bounding box is what both
+// failed mesh branches fall back to anyway.
+bool colliderSourceBounds(const entt::registry& reg, Entity e,
+                          const ColliderComponent& col, ContentManager* content,
+                          glm::vec3& outMin, glm::vec3& outMax)
+{
+	if (col.shape == ColliderShape::HeightField)
+	{
+		const auto* tc = reg.try_get<TerrainComponent>(e);
+		if (!tc) return false;
+		// The landscape's FOOTPRINT, centred like buildHeightFieldShape's offset
+		// of (-sizeX/2, 0, -sizeZ/2). Vertical extent is the noise envelope
+		// (±heightScale) rather than the real surface: the true min/max means
+		// scanning up to a million samples, which is not something an overlay
+		// redrawn every frame gets to do. A sculpted terrain can therefore poke
+		// out of this box — it is a handle to grab, not a collision proxy.
+		outMin = { -tc->sizeX * 0.5f, -tc->heightScale, -tc->sizeZ * 0.5f };
+		outMax = {  tc->sizeX * 0.5f,  tc->heightScale,  tc->sizeZ * 0.5f };
+		return true;
+	}
+	if (col.shape != ColliderShape::Mesh && col.shape != ColliderShape::ConvexHull)
+		return false;
+	if (!content) return false;
+
+	HE::UUID meshId{};
+	if (const auto* mc = reg.try_get<MeshComponent>(e))
+		meshId = mc->meshAssetId;
+	if (const auto* lod = reg.try_get<LODComponent>(e); lod && !lod->levels.empty())
+		meshId = lod->levels.front().meshId;
+	const HE::AABB* b = previewMeshBounds(*content, meshId);
+	if (!b) return false;
+	outMin = b->min;
+	outMax = b->max;
+	return true;
+}
+
+void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
+                       const std::string& focus,
+                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize,
+                       ContentManager* content)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -1703,6 +1772,15 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 		const ImU32 c = highlighted(e, "Collider") ? kSelected
 		                                          : (oneInFocus ? kIdle : kCollider);
 		const auto at = [&](float x, float y, float z){ return glm::vec3(m * glm::vec4(x, y, z, 1.0f)); };
+		const auto wireBox = [&](const glm::vec3& lo, const glm::vec3& hi)
+		{
+			const glm::vec3 v[8] = {
+				at(lo.x,lo.y,lo.z), at(hi.x,lo.y,lo.z), at(hi.x,hi.y,lo.z), at(lo.x,hi.y,lo.z),
+				at(lo.x,lo.y,hi.z), at(hi.x,lo.y,hi.z), at(hi.x,hi.y,hi.z), at(lo.x,hi.y,hi.z) };
+			constexpr int edges[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+			                               {0,4},{1,5},{2,6},{3,7} };
+			for (const auto& ed : edges) line(v[ed[0]], v[ed[1]], c);
+		};
 
 		if (col.shape == ColliderShape::Capsule || col.shape == ColliderShape::Sphere)
 		{
@@ -1730,15 +1808,23 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 				}
 			}
 		}
-		else   // Box
+		else
 		{
-			const glm::vec3 h = glm::max(col.halfExtents, glm::vec3(0.01f));
-			const glm::vec3 v[8] = {
-				at(-h.x,-h.y,-h.z), at( h.x,-h.y,-h.z), at( h.x, h.y,-h.z), at(-h.x, h.y,-h.z),
-				at(-h.x,-h.y, h.z), at( h.x,-h.y, h.z), at( h.x, h.y, h.z), at(-h.x, h.y, h.z) };
-			constexpr int edges[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
-			                               {0,4},{1,5},{2,6},{3,7} };
-			for (const auto& ed : edges) line(v[ed[0]], v[ed[1]], c);
+			// Box, and the three entity-sourced shapes. `else` used to mean Box
+			// alone, so a Mesh, Convex Hull or Height Field collider — all three
+			// pickable in the Details panel since the runtime-shape work — was
+			// outlined with half extents it does not read.
+			glm::vec3 lo, hi;
+			if (!colliderSourceBounds(reg, e, col, content, lo, hi))
+			{
+				// Box, and the honest answer for a mesh shape whose asset is not
+				// loaded or a Height Field on an entity with no terrain: physics
+				// builds authoredBox() from these very numbers in exactly those
+				// cases, so the outline still shows what would collide.
+				hi = glm::max(col.halfExtents, glm::vec3(0.01f));
+				lo = -hi;
+			}
+			wireBox(lo, hi);
 		}
 	}
 
@@ -1830,7 +1916,8 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	// problem.
 	st.previewHovered  = ImGui::IsItemHovered();
 	st.previewViewProj = viewProj;
-	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
+	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av,
+	                  ctx.contentManager);
 	return true;
 }
 
@@ -1967,12 +2054,16 @@ HE::AABB previewPickBox(AppContext& ctx, entt::registry& reg, Entity e)
 	}
 	if (const auto* col = reg.try_get<ColliderComponent>(e))
 	{
-		if (col->shape == ColliderShape::Box)
+		glm::vec3 lo, hi;
+		if (colliderSourceBounds(reg, e, *col, ctx.contentManager, lo, hi))
 		{
-			const glm::vec3 h = glm::max(col->halfExtents, glm::vec3(0.01f));
-			box.expand(-h); box.expand(h);
+			// Mesh / Convex Hull / Height Field: the geometry is the entity's,
+			// so the click box is the source's. This branch used to fall through
+			// to the sphere case below and hand a whole landscape a box of
+			// `radius` — a field none of the three shapes reads.
+			box.expand(lo); box.expand(hi);
 		}
-		else
+		else if (col->shape == ColliderShape::Sphere || col->shape == ColliderShape::Capsule)
 		{
 			// Same convention as the overlay: a capsule's `height` is the total
 			// one, hemispheres included.
@@ -1980,6 +2071,13 @@ HE::AABB previewPickBox(AppContext& ctx, entt::registry& reg, Entity e)
 			const float hy = col->shape == ColliderShape::Capsule
 			                 ? std::max(r, col->height * 0.5f) : r;
 			box.expand(glm::vec3(-r, -hy, -r)); box.expand(glm::vec3(r, hy, r));
+		}
+		else
+		{
+			// Box — and a mesh shape with no measurable source, which physics
+			// builds from these same half extents.
+			const glm::vec3 h = glm::max(col->halfExtents, glm::vec3(0.01f));
+			box.expand(-h); box.expand(h);
 		}
 	}
 	if (!box.isValid())
@@ -2149,7 +2247,8 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 			// its camera sits. Only when the renderer reported its framing — drawing
 			// gizmos against a guessed matrix would be worse than drawing none.
 			if (haveViewProj)
-				drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
+				drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av,
+				                  ctx.contentManager);
 		}
 		else
 			ImGui::TextDisabled("(preview unavailable on this backend)");

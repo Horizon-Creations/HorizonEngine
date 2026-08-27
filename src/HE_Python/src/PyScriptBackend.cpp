@@ -67,10 +67,24 @@ PyObject* py_setVec(PyObject* args, void (*fn)(HorizonWorld&, uint32_t, const gl
 	fn(*g_world, (uint32_t)id, {x, y, z});
 	Py_RETURN_NONE;
 }
+// The transform WRITES take the HE::api route instead, which turns a write on an
+// entity with a body or a character into a teleport. Straight to ScriptApi the
+// physics step overwrote the transform in the same frame, so horizon.setPosition
+// and horizon.setRotation were silent no-ops on exactly the entities a script
+// moves most — a Python respawn never arrived. Same signature to the script; the
+// Ctx is built exactly as _engineCall builds it.
+PyObject* py_setVecApi(PyObject* args, void (*fn)(HE::api::Ctx&, uint32_t, const glm::vec3&))
+{
+	long id; float x, y, z;
+	if (!PyArg_ParseTuple(args, "lfff", &id, &x, &y, &z)) return nullptr;
+	HE::api::Ctx c{ g_world, g_physics, g_content };
+	fn(c, (uint32_t)id, {x, y, z});
+	Py_RETURN_NONE;
+}
 PyObject* py_getPosition(PyObject*, PyObject* a) { return py_getVec(a, ScriptApi::getPosition); }
-PyObject* py_setPosition(PyObject*, PyObject* a) { return py_setVec(a, ScriptApi::setPosition); }
+PyObject* py_setPosition(PyObject*, PyObject* a) { return py_setVecApi(a, HE::api::transform::setPosition); }
 PyObject* py_getRotation(PyObject*, PyObject* a) { return py_getVec(a, ScriptApi::getRotation); }
-PyObject* py_setRotation(PyObject*, PyObject* a) { return py_setVec(a, ScriptApi::setRotation); }
+PyObject* py_setRotation(PyObject*, PyObject* a) { return py_setVecApi(a, HE::api::transform::setRotation); }
 PyObject* py_getScale(PyObject*, PyObject* a)    { return py_getVec(a, ScriptApi::getScale); }
 PyObject* py_setScale(PyObject*, PyObject* a)    { return py_setVec(a, ScriptApi::setScale); }
 
