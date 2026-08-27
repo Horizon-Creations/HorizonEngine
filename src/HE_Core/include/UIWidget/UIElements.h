@@ -85,8 +85,20 @@ public:
     // the authored width is the wrap column and only the height adapts). This is
     // why bumping FontSize used to clip the text — the box stayed 200×30.
     bool        autoSize = true;
-    // Horizontal alignment inside the element rect: 0 left, 1 centre.
-    int         align = 0;
+    // ── Where the text sits inside its own rect ──────────────────────────────
+    // 0/1/2 = left/centre/right and top/middle/bottom, the two together being
+    // the nine positions of a 3×3 grid — the editor offers it as exactly that,
+    // next to the anchor grid it looks like.
+    //
+    // This is NOT the anchor: the anchor says where the element hangs in its
+    // PARENT, this says where the glyphs sit in the element. A label stretched
+    // across a button needs the second one, which is why a caption used to be
+    // stuck wherever the text happened to start.
+    //
+    // alignV starts at MIDDLE because text was always centred vertically before
+    // there was a choice; Top would move every existing label.
+    int         alignH = 0;
+    int         alignV = 1;
 
     UIText() { sizeX = 200.0f; sizeY = 30.0f; }
     UIWidgetType type() const override { return UIWidgetType::Text; }

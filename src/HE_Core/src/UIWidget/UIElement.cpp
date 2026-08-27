@@ -195,10 +195,12 @@ const UIPropTable& UIText::propTable() const
         uiprop::slot<&UIText::color>   ({ "Color", UIPropType::Color }),
         uiprop::slot<&UIText::wordWrap>({ "WordWrap", UIPropType::Bool }),
         uiprop::slot<&UIText::autoSize>({ "AutoSize", UIPropType::Bool }),
-        // Not a plain field: the bool the user sees is the 0/1 `align` index.
-        uiprop::custom({ "Center", UIPropType::Bool },
-            [](const UIElement& e) { return UIPropValue::ofBool(static_cast<const UIText&>(e).align == 1); },
-            [](UIElement& e, const UIPropValue& v) { static_cast<UIText&>(e).align = v.b ? 1 : 0; }),
+        // 0/1/2 each. The details panel draws these two as ONE 3×3 grid (see
+        // UIEditorPanel) rather than as two number fields — the first attribute
+        // that needed a hand-built editor, because "which of nine positions" is
+        // not a number anybody wants to type.
+        uiprop::slot<&UIText::alignH>({ "Align H", UIPropType::Int, 0.0f, 2.0f }),
+        uiprop::slot<&UIText::alignV>({ "Align V", UIPropType::Int, 0.0f, 2.0f }),
     };
     return t;
 }
@@ -521,7 +523,7 @@ static void emitText(const UIElement& e, const std::string& text, const glm::vec
                      const glm::vec2& size, float sizePx, const glm::vec4& color,
                      bool centerH, std::vector<UIRenderObject>& out)
 {
-    HE::UITextLayout opts; opts.centerH = centerH;
+    HE::UITextLayout opts; opts.alignH = centerH ? 1 : 0;
     emitTextL(e, text, pos, size, sizePx, color, opts, out);
 }
 
@@ -593,7 +595,8 @@ void UIText::applyAutoSize(float resolvedWidth)
 {
     if (!autoSize) return;
     HE::UITextLayout opts;
-    opts.centerH = align == 1;
+    opts.alignH = alignH;
+    opts.alignV = alignV;
     opts.wrap    = wordWrap;
     // The wrap column is the width the element ACTUALLY has: on a stretched
     // axis sizeX is the difference to the anchored span (often negative), so it
@@ -615,8 +618,9 @@ void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
                     const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
     HE::UITextLayout opts;
-    opts.centerH = align == 1;
-    opts.wrap    = wordWrap;
+    opts.alignH = alignH;
+    opts.alignV = alignV;
+    opts.wrap   = wordWrap;
     emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
               color, opts, out);
 }
@@ -968,7 +972,10 @@ void UIImage::readJson(const nlohmann::json& j)
 
 void UIText::writeJson(nlohmann::json& j) const
 { j["text"] = text; j["fontSize"] = fontSize; j["color"] = colJson(color);
-  j["wordWrap"] = wordWrap; j["autoSize"] = autoSize; j["align"] = align; }
+  j["wordWrap"] = wordWrap; j["autoSize"] = autoSize;
+  // "align" keeps its name and meaning (the horizontal one), so a widget saved
+  // before there was a vertical alignment still loads with its text where it was.
+  j["align"] = alignH; j["alignV"] = alignV; }
 void UIText::readJson(const nlohmann::json& j)
 { text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
   color = colFrom(j.value("color", nlohmann::json()), color);
@@ -976,7 +983,9 @@ void UIText::readJson(const nlohmann::json& j)
   // Widgets authored before auto-size keep their hand-set box: defaulting them
   // to true would resize every existing label on load.
   autoSize = j.value("autoSize", false);
-  align    = j.value("align", align); }
+  alignH   = j.value("align", alignH);
+  // Absent = middle, which is where text always sat before this existed.
+  alignV   = j.value("alignV", alignV); }
 
 void UIButton::writeJson(nlohmann::json& j) const
 {

@@ -1362,6 +1362,12 @@ namespace
 	  "own camera takes over. Stopping restores the scene exactly as it was — "
 	  "changes made while playing are not kept.",
 	  "", "editor#play-mode" },
+	{ "uiwidget.textAlign", "Align",
+	  "Where the text sits inside its own box: the nine cells are left/centre/right "
+	  "across and top/middle/bottom down. This is not the anchor — the anchor places "
+	  "the element in its parent, this places the letters in the element. A caption "
+	  "stretched across a button needs this one.",
+	  "", "editor#ui-designer" },
 	{ "viewport.restartPreview", "Restart Live Preview",
 	  "An application has no play mode: its interface is already running in the "
 	  "panel. This builds it again from the saved assets — the same thing a save "

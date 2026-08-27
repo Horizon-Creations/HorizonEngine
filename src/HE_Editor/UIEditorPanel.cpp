@@ -488,6 +488,60 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	}
 }
 
+// ── Text alignment: nine positions, drawn as nine ───────────────────────────
+// The first property that could not be a generic UIPropDesc row. "Align H" and
+// "Align V" are two ints, but what the author is choosing is ONE thing: where in
+// its box the text sits. Two number fields would make them type 0..2 twice and
+// work out in their head which is which, so they get the same 3×3 grid the
+// anchor picker uses — deliberately, because it is the same kind of question one
+// level further in (the anchor places the ELEMENT in its parent, this places the
+// GLYPHS in the element).
+void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
+{
+	const int curH = e.getProp("Align H").i;
+	const int curV = e.getProp("Align V").i;
+
+	ImGui::TextUnformatted("Align");
+	ImGui::SameLine(80.0f);
+	ImGui::BeginGroup();
+	{
+		const float cell = 22.0f;
+		ImDrawList* dl   = ImGui::GetWindowDrawList();
+		for (int row = 0; row < 3; ++row)
+		{
+			for (int col = 0; col < 3; ++col)
+			{
+				if (col > 0) ImGui::SameLine();
+				const bool active = curH == col && curV == row;
+				if (active) ImGui::PushStyleColor(ImGuiCol_Button,
+					ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				char id[16]; std::snprintf(id, sizeof id, "##ta%d", row * 3 + col);
+				if (ImGui::Button(id, ImVec2(cell, cell)))
+				{
+					e.setProp("Align H", UIPropValue::ofInt(col));
+					e.setProp("Align V", UIPropValue::ofInt(row));
+					edit = committed = true;
+				}
+				if (active) ImGui::PopStyleColor();
+
+				// The marker says what the cell does: a short bar lying where the
+				// text would sit in that ninth of the box.
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				const float pad = 5.0f;
+				const ImVec2 in0(mn.x + pad, mn.y + pad), in1(mx.x - pad, mx.y - pad);
+				const float w = in1.x - in0.x, h = in1.y - in0.y;
+				const float barW = w * 0.62f;
+				const float x = in0.x + (col == 0 ? 0.0f : col == 1 ? (w - barW) * 0.5f : w - barW);
+				const float y = in0.y + (row == 0 ? 0.0f : row == 1 ? h * 0.5f : h);
+				const ImU32 markCol = IM_COL32(255, 170, 40, active ? 255 : 190);
+				dl->AddLine(ImVec2(x, y), ImVec2(x + barW, y), markCol, 2.0f);
+			}
+		}
+	}
+	ImGui::EndGroup();
+	EditorWidgets::helpForKey("uiwidget.textAlign");
+}
+
 // ── Generic property editor ─────────────────────────────────────────────────────
 // Draws one editable widget for a UIPropDesc; reads via getProp, writes via
 // setProp. `edit` set on any change this frame (live view), `committed` when an
@@ -869,7 +923,14 @@ void drawDetails(State& st, AppContext& ctx)
 	{
 		ImGui::SeparatorText("Properties");
 		for (const UIPropDesc& pd : props)
+		{
+			// "Align H"/"Align V" are one control, not two number fields: which
+			// of nine positions the text sits in is a thing you point at. Drawn
+			// once, at the H row, and the V row is skipped.
+			if (pd.name == "Align V") continue;
+			if (pd.name == "Align H") { drawTextAlignGrid(*n, edit, committed); continue; }
 			drawPropertyWidget(*n, pd, edit, committed);
+		}
 	}
 
 	// Material slot (only types that expose one — text runs have no quad).
@@ -1123,8 +1184,19 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		const float fs = propFloatOr(n, "FontSize", 22.0f) * s;
 		const std::string txt = propStringOr(n, "Text", "");
-		dl->AddText(nullptr, fs, mn, C(propColorOr(n, "Color", { 1,1,1,1 })),
-		            txt.empty() ? "(empty)" : txt.c_str());
+		const char* shown = txt.empty() ? "(empty)" : txt.c_str();
+		// Honour Align H/Align V. This used to draw at the rect's top-left
+		// corner unconditionally, which made every label look pinned there and
+		// disagree with what the engine actually drew — the designer's whole job
+		// is to show what you will get.
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, shown);
+		const int aH = static_cast<int>(propFloatOr(n, "Align H", 0.0f));
+		const int aV = static_cast<int>(propFloatOr(n, "Align V", 1.0f));
+		const float slackX = std::max(0.0f, (mx.x - mn.x) - ts.x);
+		const float slackY = std::max(0.0f, (mx.y - mn.y) - ts.y);
+		const ImVec2 at(mn.x + (aH == 1 ? slackX * 0.5f : aH == 2 ? slackX : 0.0f),
+		                mn.y + (aV == 1 ? slackY * 0.5f : aV == 2 ? slackY : 0.0f));
+		dl->AddText(nullptr, fs, at, C(propColorOr(n, "Color", { 1,1,1,1 })), shown);
 		break;
 	}
 	case UIWidgetType::Button:
@@ -1135,15 +1207,9 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		else
 			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
 		dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
-		const std::string txt = propStringOr(n, "Text", "");
-		if (!txt.empty())
-		{
-			const float fs = propFloatOr(n, "FontSize", 20.0f) * s;
-			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, txt.c_str());
-			dl->AddText(nullptr, fs,
-				ImVec2((mn.x + mx.x - ts.x) * 0.5f, (mn.y + mx.y - ts.y) * 0.5f),
-				C(propColorOr(n, "Text Color", { 1,1,1,1 })), txt.c_str());
-		}
+		// No caption drawn here any more: a Button is a surface, and what sits on
+		// it is a CHILD element that this same function draws in its own turn.
+		// Drawing a caption here as well would show a label the engine does not.
 		break;
 	}
 	case UIWidgetType::CheckBox:

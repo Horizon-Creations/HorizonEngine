@@ -135,7 +135,8 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Color", UIPropType::Color },
             { "WordWrap", UIPropType::Bool },
             { "AutoSize", UIPropType::Bool },
-            { "Center", UIPropType::Bool } } },
+            { "Align H", UIPropType::Int },
+            { "Align V", UIPropType::Int } } },
         // Three state colours and nothing else: a Button is a surface, and its
         // caption is a child element (Text/FontSize/Text Color went with it).
         { UIWidgetType::Button, {
@@ -1109,7 +1110,7 @@ TEST_CASE("UIText auto-size with WordWrap keeps the authored width")
 TEST_CASE("UIText multi-line properties round-trip through JSON")
 {
     HE::UIText t;
-    t.text = "a\nb"; t.wordWrap = true; t.autoSize = true; t.align = 1;
+    t.text = "a\nb"; t.wordWrap = true; t.autoSize = true; t.alignH = 1;
     nlohmann::json j;
     t.writeJson(j);
     HE::UIText r;
@@ -1117,7 +1118,7 @@ TEST_CASE("UIText multi-line properties round-trip through JSON")
     CHECK(r.text == "a\nb");
     CHECK(r.wordWrap);
     CHECK(r.autoSize);
-    CHECK(r.align == 1);
+    CHECK(r.alignH == 1);
 
     // Pre-auto-size widgets keep their hand-set box (autoSize defaults off).
     nlohmann::json legacy = { { "text", "x" }, { "fontSize", 22.0f } };

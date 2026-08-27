@@ -211,11 +211,15 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
     const std::vector<std::string> lines =
         layoutUITextLines(font, text, sizePx, rectSize.x, opts.wrap);
 
-    // The block is centred vertically in the rect; line i sits `step` below i-1.
-    // For a single line this collapses to the original formula exactly (the
-    // block centre IS the rect centre), so existing widgets don't shift.
-    const float step       = sizePx * opts.lineSpacing;
-    const float blockCentre = rectPos.y + rectSize.y * 0.5f;
+    // Where the whole block of lines sits vertically. Middle is the historic
+    // behaviour and the default; Top and Bottom put the block's own height
+    // against the matching edge. Line i sits `step` below i-1 either way.
+    const float step        = sizePx * opts.lineSpacing;
+    const float blockHeight = static_cast<float>(lines.size() - 1) * step + sizePx;
+    float blockCentre = rectPos.y + rectSize.y * 0.5f;              // 1 = middle
+    if (opts.alignV == 0) blockCentre = rectPos.y + blockHeight * 0.5f;
+    else if (opts.alignV == 2)
+        blockCentre = rectPos.y + rectSize.y - blockHeight * 0.5f;
     const float firstCentre = blockCentre - static_cast<float>(lines.size() - 1) * step * 0.5f;
 
     const float invW = 1.0f / (float)font.atlasW;
@@ -227,8 +231,12 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
         if (line.empty()) continue;                    // blank line still advances
 
         const float runW = lineWidth(font, line, scale);
-        const float x = rectPos.x
-            + (opts.centerH ? std::max(0.0f, (rectSize.x - runW) * 0.5f) : 0.0f);
+        // Per LINE, not per block: centring a paragraph centres each of its
+        // lines, which is what centring text means.
+        const float slack = std::max(0.0f, rectSize.x - runW);
+        const float x = rectPos.x + (opts.alignH == 1 ? slack * 0.5f
+                                   : opts.alignH == 2 ? slack
+                                                      : 0.0f);
         // Baseline: line centre shifted down by half the ascent (as before).
         const float baseline = firstCentre + static_cast<float>(li) * step
                              + (font.ascent * scale) * 0.5f - sizePx * 0.08f;
@@ -259,7 +267,7 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
                       const glm::vec4& color, int layer, bool centerH,
                       std::vector<UIRenderObject>& out)
 {
-    UITextLayout opts; opts.centerH = centerH;   // no wrapping unless asked for
+    UITextLayout opts; opts.alignH = centerH ? 1 : 0;   // no wrapping unless asked for
     emitUITextGlyphs(font, atlasKey, text, rectPos, rectSize, sizePx, color, layer, opts, out);
 }
 

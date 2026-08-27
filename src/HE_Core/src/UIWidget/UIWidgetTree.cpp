@@ -871,7 +871,9 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
             txt->text     = lc.text;
             txt->fontSize = lc.fontSize;
             txt->color    = lc.color;
-            txt->align    = 1;      // centred, the way the built-in caption was
+            // Centred both ways — exactly where the built-in caption was drawn.
+            txt->alignH   = 1;
+            txt->alignV   = 1;
             // Auto-size would shrink the label to its own text and undo the
             // stretch that centres it in the button.
             txt->autoSize = false;

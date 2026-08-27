@@ -68,7 +68,12 @@ namespace UIFontCache
 // lays out byte-identically to the original single-line path.
 struct UITextLayout
 {
-    bool  centerH     = false;  // horizontally centre each line inside the rect
+    // Where the text sits inside its rect. 0/1/2 = left/centre/right and
+    // top/middle/bottom. `alignV` starts at MIDDLE because that is what every
+    // text drew before there was a choice — the block was always centred
+    // vertically, and a default of Top would move every existing label.
+    int   alignH      = 0;
+    int   alignV      = 1;
     bool  wrap        = false;  // word-wrap at the rect width
     float lineSpacing = 1.15f;  // baseline-to-baseline distance, in units of sizePx
 };
