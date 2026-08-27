@@ -856,6 +856,32 @@ nötig, der Editor ist generisch über `UIPropDesc`. Sechs Testfälle mussten an
 weil sie auf der alten Button-Beschriftung standen — genau dafür ist die angepinnte
 Eigenschaftsliste da.
 
+**Nachtrag: drei Dinge, die der Umbau erst sichtbar gemacht hat.**
+
+**1. Der Designer ließ nur Panels Kinder aufnehmen.** Ein hartes
+`type() == UIWidgetType::Panel` an sieben Stellen (Hierarchie-Drop, Palette-Drop auf die
+Leinwand, Klick in der Palette, jeweils für neue Elemente und für WidgetRefs). Der Baum selbst
+hat Verschachtelung nie eingeschränkt, das war reine Designer-Regel — und sie hat genau das
+verhindert, was der Button-Umbau möglich machen sollte. Jetzt entscheidet
+`UIElement::acceptsChildren()`: Panel, **Button** und die drei Layout-Boxen. Die Boxen konnten
+vorher übrigens auch keinen Drop annehmen, obwohl sie für nichts anderes existieren.
+
+**2. Der Zeiger nahm nicht das oberste Widget.** `processPointer` verwarf jedes Element, das
+nicht *reagiert* (`!isInteractive && hoverCursor == Default`) — ein Panel über einem Button war
+also ein Panel, durch das man hindurchklickt, obwohl `hitTestable` seit jeher „undurchlässig für
+den Zeiger" behauptet. Die Regel ist jetzt die, die der Kommentar immer beschrieb: **oberstes
+`hitTestable`-Element gewinnt**, und von dort **blubbert das Ereignis nach oben** zum ersten
+Vorfahren, der reagiert. Beides zusammen ist nötig — ohne das Blubbern wäre eine Beschriftung
+auf einem Button ein Loch im Button, ohne das Blockieren bliebe der Durchklick. Zwei Tests
+halten die beiden Hälften fest.
+
+**3. Zwei identische 3×3-Raster in einem Panel.** Das Anker-Raster (4×4, bernstein) und das
+neue Text-Ausrichtungsraster (3×3, bernstein) sahen gleich aus, und im Testprojekt des Users
+hatte das Label prompt einen Anker statt einer Ausrichtung bekommen (nachgerechnet an der
+gespeicherten `.hasset`: `pos [90,0] size [180,48]` ist exakt das Ergebnis von
+`uiReanchorKeepingRect` auf Mitte-links). Das Ausrichtungsraster heißt jetzt **„Text Align"**
+und zeichnet zwei gestapelte Textzeilen in kühlem Grau statt Punkte und Balken in Bernstein.
+
 **Als Nächstes in Schicht 0:** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier
 Zeilen, ein „vier Radien"-Feld wäre Handarbeit). Danach Block G (`RendererSoftware`), der

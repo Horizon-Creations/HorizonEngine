@@ -23,6 +23,7 @@ public:
     bool hasMaterialSlot() const override { return true; }
     bool hasTextureSlot()  const override { return true; }
     bool hasSurfaceStyle() const override { return true; }
+    bool acceptsChildren() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { auto p = std::make_unique<UIPanel>(*this); return p; }
 
@@ -144,6 +145,8 @@ public:
     bool hasTextureSlot()  const override { return true; }
     bool hasSurfaceStyle() const override { return true; }
     bool interactive() const override { return true; }
+    // The caption, an icon, a badge: everything on a button is a child of it.
+    bool acceptsChildren() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIButton>(*this); }
 
@@ -483,6 +486,7 @@ public:
     float minSizeX = 0.0f, minSizeY = 0.0f;
 
     bool laysOutChildren() const override { return true; }
+    bool acceptsChildren() const override { return true; }
     const UIPropTable& propTable() const override;
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override {}

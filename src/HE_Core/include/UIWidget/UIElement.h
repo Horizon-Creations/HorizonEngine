@@ -336,6 +336,19 @@ public:
     // layout containers, which draw nothing at all.
     virtual bool hasSurfaceStyle() const { return false; }
 
+    // ── May things be put INSIDE this element? ──────────────────────────────
+    // The designer's containment rule, and nothing else: dropping onto such an
+    // element parents the newcomer to it, dropping onto any other one makes a
+    // sibling. Nesting itself is never forbidden by the tree — every element
+    // has a parentId and the layout resolves it — so this is purely about what
+    // the drop lands on.
+    //
+    // True for the Panel (the plain container), for the layout boxes (which
+    // exist for nothing else), and for the Button: a Button is a SURFACE now,
+    // and its caption, its icon and everything else on it are children. Saying
+    // no here was what made it impossible to put a second thing on a button.
+    virtual bool acceptsChildren() const { return false; }
+
     // A layout container PLACES its direct children: they ignore their own
     // anchors and position, and take the slot the box hands them. Returning
     // true here is what switches uiElementRect over for every child.

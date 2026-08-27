@@ -660,6 +660,136 @@ TEST_CASE("WidgetManager button click fires OnClicked -> SetProperty")
     CHECK(countGlyphs(out) == 2); // "OK"
 }
 
+// A Button is a surface and its caption is a child ON it. Clicking the caption
+// is clicking the button — the pointer goes to the topmost element, and from
+// there the event bubbles UP to the first thing that reacts. Without that, a
+// button with a label is a button with a hole in it.
+TEST_CASE("A click on a button's child is a click on the button")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::uiSetAnchorPreset(*t.find(btn), 0);
+    t.find(btn)->pivotX = 0; t.find(btn)->pivotY = 0;
+    t.find(btn)->posX = 0;   t.find(btn)->posY = 0;
+    t.find(btn)->sizeX = 200; t.find(btn)->sizeY = 50;
+    // The caption, stretched across the whole button and hit-testable — so it
+    // really is the element the pointer lands on.
+    const int cap = t.add(HE::UIWidgetType::Text);
+    t.find(cap)->parentId = btn;
+    HE::uiSetAnchorPreset(*t.find(cap), 15);
+    t.find(cap)->posX = t.find(cap)->posY = 0.0f;
+    t.find(cap)->sizeX = t.find(cap)->sizeY = 0.0f;
+    t.find(cap)->hitTestable = true;
+    t.find(cap)->setProp("Text", HE::UIPropValue::ofString(""));
+    t.find(cap)->setProp("AutoSize", HE::UIPropValue::ofBool(false));
+
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OK";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = cap;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+
+    // Dead centre of the button, which is dead centre of the caption too.
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, true,  true));
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 2); // "OK" — the button fired
+}
+
+// The other half of the same rule: topmost wins, so something drawn OVER a
+// button takes the pointer even when it does nothing with it. A menu that
+// covers the screen must not be a menu you can click straight through.
+TEST_CASE("An element drawn over a button swallows the click")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    const int txt = t.add(HE::UIWidgetType::Text);
+    t.find(txt)->setProp("Text", HE::UIPropValue::ofString(""));
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::uiSetAnchorPreset(*t.find(btn), 0);
+    t.find(btn)->pivotX = 0; t.find(btn)->pivotY = 0;
+    t.find(btn)->posX = 0;   t.find(btn)->posY = 0;
+    t.find(btn)->sizeX = 200; t.find(btn)->sizeY = 50;
+    // A sibling added AFTER the button: same depth, so it paints on top of it.
+    const int cover = t.add(HE::UIWidgetType::Panel);
+    HE::uiSetAnchorPreset(*t.find(cover), 0);
+    t.find(cover)->pivotX = 0; t.find(cover)->pivotY = 0;
+    t.find(cover)->posX = 0;   t.find(cover)->posY = 0;
+    t.find(cover)->sizeX = 200; t.find(cover)->sizeY = 50;
+
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OK";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = txt;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+
+    // The pointer IS over the UI (the panel took it) …
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, true,  true));
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+    // … and the button underneath never heard about it.
+    std::vector<UIRenderObject> out;
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 0);
+
+    // Turn the cover transparent to the pointer and the button is reachable
+    // again — that is what the flag is for.
+    wm.clear();
+    t.find(cover)->hitTestable = false;
+    registerWidget(cm, t, &g);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, true,  true));
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+    out.clear();
+    wm.extract(1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 2);
+}
+
+// The designer's containment rule. A Button says yes here, which is what lets a
+// caption, an icon and a badge live on the same button.
+TEST_CASE("Exactly the container types accept children")
+{
+    const std::vector<HE::UIWidgetType> containers = {
+        HE::UIWidgetType::Panel, HE::UIWidgetType::Button,
+        HE::UIWidgetType::VerticalBox, HE::UIWidgetType::HorizontalBox,
+        HE::UIWidgetType::ScrollBox };
+    for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
+    {
+        auto e = HE::makeUIElement(ty);
+        REQUIRE(e);
+        const bool want = std::find(containers.begin(), containers.end(), ty)
+                          != containers.end();
+        INFO("type ", e->typeName());
+        CHECK(e->acceptsChildren() == want);
+        // Anything that PLACES its children must obviously also take them.
+        if (e->laysOutChildren()) CHECK(e->acceptsChildren());
+    }
+}
+
 TEST_CASE("WidgetManager checkbox click toggles its checked visual")
 {
     TempWidgetDir dir;

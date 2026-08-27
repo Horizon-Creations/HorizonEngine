@@ -433,9 +433,11 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
 		{
 			const int dragged = *static_cast<const int*>(p->Data);
-			// Only Panels may contain children.
+			// Containers take children (see UIElement::acceptsChildren) — a
+			// Panel, a layout box, and a Button, whose caption and icon ARE
+			// children.
 			if (dragged != nodeId && !st.tree.isDescendantOf(nodeId, dragged) &&
-			    n->type() == UIWidgetType::Panel)
+			    n->acceptsChildren())
 			{
 				if (UIElement* d = st.tree.find(dragged))
 				{
@@ -447,15 +449,16 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 		{
 			const int t = *static_cast<const int*>(p->Data);
-			// New elements nest under Panels; otherwise share the target's parent.
-			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
+			// New elements nest inside a container; otherwise share the
+			// target's parent.
+			const int parent = n->acceptsChildren() ? nodeId : n->parentId;
 			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, nullptr);
 			structureEdit = true;
 		}
 		// …and one of the project's own widgets, embedded as a WidgetRef.
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
 		{
-			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
+			const int parent = n->acceptsChildren() ? nodeId : n->parentId;
 			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), parent, nullptr);
 			structureEdit = true;
 		}
@@ -496,12 +499,17 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 // anchor picker uses — deliberately, because it is the same kind of question one
 // level further in (the anchor places the ELEMENT in its parent, this places the
 // GLYPHS in the element).
+//
+// And because the two ARE that similar, they must not LOOK alike: the anchor
+// grid is 4×4 amber dots and bars, this one is 3×3 and draws stacked text lines
+// in a cool grey. Two identical grids in one panel is a control the author
+// reaches for by position and gets wrong — which is exactly what happened.
 void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 {
 	const int curH = e.getProp("Align H").i;
 	const int curV = e.getProp("Align V").i;
 
-	ImGui::TextUnformatted("Align");
+	ImGui::TextUnformatted("Text Align");
 	ImGui::SameLine(80.0f);
 	ImGui::BeginGroup();
 	{
@@ -524,22 +532,30 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 				}
 				if (active) ImGui::PopStyleColor();
 
-				// The marker says what the cell does: a short bar lying where the
-				// text would sit in that ninth of the box.
+				// The marker says what the cell does: two stacked lines — a
+				// paragraph seen from far away — ragged on the side the text
+				// hangs off, sitting in that third of the box.
 				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
 				const float pad = 5.0f;
 				const ImVec2 in0(mn.x + pad, mn.y + pad), in1(mx.x - pad, mx.y - pad);
 				const float w = in1.x - in0.x, h = in1.y - in0.y;
-				const float barW = w * 0.62f;
-				const float x = in0.x + (col == 0 ? 0.0f : col == 1 ? (w - barW) * 0.5f : w - barW);
-				const float y = in0.y + (row == 0 ? 0.0f : row == 1 ? h * 0.5f : h);
-				const ImU32 markCol = IM_COL32(255, 170, 40, active ? 255 : 190);
-				dl->AddLine(ImVec2(x, y), ImVec2(x + barW, y), markCol, 2.0f);
+				const float gap = 3.0f;
+				// Block of two lines, placed top / middle / bottom.
+				const float top = in0.y + (row == 0 ? 0.0f : row == 1 ? (h - gap) * 0.5f : h - gap);
+				const ImU32 markCol = IM_COL32(205, 210, 225, active ? 255 : 150);
+				const float len[2] = { w, w * 0.62f };   // long line, short line
+				for (int i = 0; i < 2; ++i)
+				{
+					const float slack = w - len[i];
+					const float x = in0.x + (col == 0 ? 0.0f : col == 1 ? slack * 0.5f : slack);
+					const float y = top + static_cast<float>(i) * gap;
+					dl->AddLine(ImVec2(x, y), ImVec2(x + len[i], y), markCol, 1.6f);
+				}
 			}
 		}
 	}
 	ImGui::EndGroup();
-	EditorWidgets::helpForKey("uiwidget.textAlign");
+	EditorWidgets::helpForLabel("Text Align");
 }
 
 // ── Generic property editor ─────────────────────────────────────────────────────
@@ -1654,12 +1670,24 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	}
 
 	// ── Mouse interaction ─────────────────────────────────────────────────────
+	// `items` is in paint order, so walking it backwards is walking the stack
+	// from the top down — the first rect the point falls into is the element
+	// that is drawn over all the others there.
 	auto topmostAt = [&](const ImVec2& canvasPt) -> int
 	{
 		for (auto it = items.rbegin(); it != items.rend(); ++it)
-			if (canvasPt.x >= it->r.mn.x && canvasPt.x <= it->r.mx.x &&
-			    canvasPt.y >= it->r.mn.y && canvasPt.y <= it->r.mx.y)
-				return it->n->id;
+		{
+			if (canvasPt.x < it->r.mn.x || canvasPt.x > it->r.mx.x ||
+			    canvasPt.y < it->r.mn.y || canvasPt.y > it->r.mx.y) continue;
+			// The part of an element a clipping ancestor cuts away is not on
+			// screen, so it cannot be clicked here either — same rule the
+			// runtime hit test follows.
+			HE::UIWidgetRect clip{};
+			if (HE::uiElementClipRect(st.tree, *it->n, clip, layoutCanvas))
+				if (canvasPt.x < clip.x || canvasPt.x > clip.x + clip.w ||
+				    canvasPt.y < clip.y || canvasPt.y > clip.y + clip.h) continue;
+			return it->n->id;
+		}
 		return 0;
 	};
 
@@ -1739,34 +1767,34 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		st.resizeHandle = -1;
 	}
 
-	// ── Palette drop onto the canvas (new element; nested when over a panel) ──
+	// ── Palette drop onto the canvas (new element; nested when over a container) ──
+	// Where a drop LANDS: the topmost container under the cursor, 0 = the canvas
+	// itself. Same painter order as the pick, so what you see on top is what
+	// takes the drop.
+	auto containerAt = [&](const ImVec2& canvasPt) -> int
+	{
+		for (auto it = items.rbegin(); it != items.rend(); ++it)
+			if (it->n->acceptsChildren() &&
+			    canvasPt.x >= it->r.mn.x && canvasPt.x <= it->r.mx.x &&
+			    canvasPt.y >= it->r.mn.y && canvasPt.y <= it->r.mx.y)
+				return it->n->id;
+		return 0;
+	};
 	if (ImGui::BeginDragDropTarget())
 	{
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 		{
 			const int t = *static_cast<const int*>(p->Data);
 			const ImVec2 cpt = toCanvas(mouse);
-			// Drop into the topmost PANEL under the cursor (containers nest).
-			int parent = 0;
-			for (auto it = items.rbegin(); it != items.rend(); ++it)
-				if (it->n->type() == UIWidgetType::Panel &&
-				    cpt.x >= it->r.mn.x && cpt.x <= it->r.mx.x &&
-				    cpt.y >= it->r.mn.y && cpt.y <= it->r.mx.y)
-					{ parent = it->n->id; break; }
-			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, &cpt);
+			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), containerAt(cpt), &cpt);
 			commitEdit(st, ctx);
 		}
 		// One of the project's own widgets, dropped where the cursor is.
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
 		{
 			const ImVec2 cpt = toCanvas(mouse);
-			int parent = 0;
-			for (auto it = items.rbegin(); it != items.rend(); ++it)
-				if (it->n->type() == UIWidgetType::Panel &&
-				    cpt.x >= it->r.mn.x && cpt.x <= it->r.mx.x &&
-				    cpt.y >= it->r.mn.y && cpt.y <= it->r.mx.y)
-					{ parent = it->n->id; break; }
-			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), parent, &cpt);
+			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data),
+			                             containerAt(cpt), &cpt);
 			commitEdit(st, ctx);
 		}
 		ImGui::EndDragDropTarget();
@@ -2791,7 +2819,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				{
 					int parent = 0;
 					if (const UIElement* selN = st.tree.find(st.selected))
-						parent = selN->type() == UIWidgetType::Panel ? selN->id : selN->parentId;
+						parent = selN->acceptsChildren() ? selN->id : selN->parentId;
 					st.selected = addElementAt(st, t, parent, nullptr);
 					commitEdit(st, ctx);
 				}
@@ -2833,7 +2861,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					{
 						int parent = 0;
 						if (const UIElement* selN = st.tree.find(st.selected))
-							parent = selN->type() == UIWidgetType::Panel ? selN->id : selN->parentId;
+							parent = selN->acceptsChildren() ? selN->id : selN->parentId;
 						st.selected = addWidgetRefAt(st, a.path, parent, nullptr);
 						commitEdit(st, ctx);
 					}

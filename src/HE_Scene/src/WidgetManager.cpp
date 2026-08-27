@@ -446,11 +446,20 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
                                    float mouseX, float mouseY,
                                    bool primaryDown, bool valid)
 {
-	// Topmost interactive element under the pointer, across all visible
-	// widgets: highest (widget zOrder, element sort key) wins.
+	// Topmost hit-testable element under the pointer, across all visible
+	// widgets: highest (widget zOrder, element sort key) wins — the same order
+	// the draw paints in, so what you SEE on top is what the pointer meets.
+	//
+	// "Topmost" is the whole rule, and it is not "topmost among the ones that
+	// react": an element that is hit-testable takes the pointer even when it
+	// does nothing with it, and what lies under it stays untouched. Anything
+	// else means a panel drawn over a button is a panel you can click straight
+	// through. Decoration opts out by being hitTestable = false, which is what
+	// that flag has always claimed to mean.
 	Instance* topW = nullptr;
 	int  topElem = 0;
 	long topKey  = 0;
+	bool topActs = false;      // does the winner actually take events?
 	HE::UICursor topCursor = HE::UICursor::Default;
 	if (valid)
 	{
@@ -466,9 +475,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			{
 				const HE::UIElement& e = *ep;
 				if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
-				// hitTestable false = transparent to the pointer. Otherwise an
-				// element is a hit candidate if it's interactive OR carries a custom
-				// hover cursor (so decorative elements can drive the cursor too).
+				// hitTestable false = transparent to the pointer: the only way
+				// out of the stack.
 				if (!e.hitTestable) continue;
 				// Disabled is inert, all the way down: a greyed-out button that
 				// still hovers and clicks is the classic UI lie.
@@ -476,7 +484,6 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// Faded to nothing means gone — a menu at opacity 0 must not
 				// keep swallowing the clicks meant for what is behind it.
 				if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) continue;
-				if (!isInteractive(w, e) && e.hoverCursor == HE::UICursor::Default) continue;
 				HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
 				// Rotated? Then the pointer is turned back into the element's
 				// own unrotated space and the test stays a plain rectangle —
@@ -506,6 +513,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (!topW || key >= topKey)
 				{
 					topW = &w; topElem = e.id; topKey = key; topCursor = e.hoverCursor;
+					topActs = isInteractive(w, e);
 					// A text field asks for the I-beam by BEING a text field.
 					// Only when the author picked nothing else: an explicit
 					// hoverCursor is a decision and stays one.
@@ -514,6 +522,31 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						topCursor = HE::UICursor::Text;
 				}
 			}
+		}
+	}
+	// The winner blocks either way. Who RECEIVES the hover, the press and the
+	// focus is decided from there — and it bubbles UP, never down: a click on a
+	// button's caption is a click on the button, and so is one on the icon next
+	// to it. That is what makes a button out of several children behave like one
+	// thing. Only when nothing on the way up reacts does the pointer stop dead,
+	// which is the blocking half of the rule.
+	if (!topActs && topW)
+	{
+		const HE::UIElement* hit = topW->tree.find(topElem);
+		topElem = 0;
+		for (int guard = 0; hit && hit->parentId != 0 && guard < 256; ++guard)
+		{
+			const HE::UIElement* p = topW->tree.find(hit->parentId);
+			if (!p) break;
+			if (isInteractive(*topW, *p))
+			{
+				topElem = p->id;
+				// The cursor comes with the element that took the pointer,
+				// unless the thing under it named one of its own.
+				if (topCursor == HE::UICursor::Default) topCursor = p->hoverCursor;
+				break;
+			}
+			hit = p;
 		}
 	}
 	m_hoverCursor = topCursor; // app maps this to a system cursor
