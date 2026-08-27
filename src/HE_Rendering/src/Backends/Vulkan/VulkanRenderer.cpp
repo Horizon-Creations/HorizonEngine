@@ -5060,6 +5060,14 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     in.cameraPos      = m_renderWorld.camera.position;
     in.time           = m_wallTime;
     in.hasMoonTexture = (m_moonImage != VK_NULL_HANDLE);
+    // skyIn.lowResClouds bleibt bewusst false -- und das ist seit P3b eine
+    // Aussage, keine Auslassung mehr: das Feld landet in star2.z und wird
+    // jetzt tatsaechlich uebertragen. Es ist NICHT env.lowResClouds, sondern
+    // "der Viertelaufloesungs-Vorpass hat gerechnet und sein Ziel liegt
+    // bereit" -- den Pass gibt es hier nicht (P3e), also ist false richtig.
+    // Wer ihn baut, muss diese Zeile setzen, sonst kompositiert der Shader
+    // nie, egal was der Renderer tut. Metal macht es an zwei Stellen vor
+    // (MetalRenderer.mm: Vorpass immer true, Haupt-Pass an drei Bedingungen).
     const HE::SkyFrameParams p = HE::BuildSkyFrameParams(m_environment, in);
 
     // Cloud drift kommt als HE::CloudWindVector mit. Dieses Backend liess die

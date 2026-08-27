@@ -49,6 +49,15 @@ namespace HE::hlsl
 // deshalb ist die kanonische Form aus float4 gebaut und nicht aus float3+float
 // -- die alte Form war korrekt, aber jede Erweiterung war eine Zitterpartie.
 //
+// NUR FUER DEN HIMMELSPASS. Die #defines unten sind Praeprozessor-Makros, keine
+// Feldnamen -- und zwei davon heissen genauso wie Member des Scene-cbuffers
+// PerFrame: uCameraPos und uSunDir (D3D11 :374ff, D3D12 :401ff, beide float4).
+// Wer diesen Block einer Scene-Uebersetzungseinheit voranstellt, laesst den
+// Praeprozessor aus `float4 uCameraPos;` ein `float4 skyCameraPos.xyz;` machen.
+// Das ist ein Syntaxfehler, faellt also auf -- aber die Meldung zeigt auf eine
+// voellig andere Zeile als die Ursache. P3c wird uMoonPhase im Scene-Shader
+// wollen; dann den cbuffer OHNE die Aliase voranstellen, nicht den ganzen Block.
+//
 // Der Rumpf der Sky-Shader redet weiter von uSunDir/uTimeOfDay: die #defines
 // darunter halten die Lesbarkeit, die Packung bleibt eine Layout-Frage. Die
 // Namen sind dieselben wie in shaders/sky.frag und in GLs kSkyFS, damit sich

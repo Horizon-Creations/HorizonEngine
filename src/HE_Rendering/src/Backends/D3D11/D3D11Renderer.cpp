@@ -3580,6 +3580,14 @@ struct D3D11RendererImpl
         skyIn.cameraPos      = m_renderWorld.camera.position;
         skyIn.time           = m_wallTime;
         skyIn.hasMoonTexture = moonSRV ? true : false; // ComPtr → contextual bool
+        // skyIn.lowResClouds bleibt bewusst false -- und das ist seit P3b eine
+        // Aussage, keine Auslassung mehr: das Feld landet in star2.z und wird
+        // jetzt tatsaechlich uebertragen. Es ist NICHT env.lowResClouds, sondern
+        // "der Viertelaufloesungs-Vorpass hat gerechnet und sein Ziel liegt
+        // bereit" -- den Pass gibt es hier nicht (P3e), also ist false richtig.
+        // Wer ihn baut, muss diese Zeile setzen, sonst kompositiert der Shader
+        // nie, egal was der Renderer tut. Metal macht es an zwei Stellen vor
+        // (MetalRenderer.mm: Vorpass immer true, Haupt-Pass an drei Bedingungen).
         const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
         static_assert(sizeof(HE::SkyFrameParams) == 336,
                       "SkyFrameParams ist nicht mehr 336 Bytes — kSkyParamsHLSL, sky.frag "
