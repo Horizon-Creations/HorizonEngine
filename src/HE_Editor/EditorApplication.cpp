@@ -6251,6 +6251,14 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			m_editorWorld->widgets().inputText(event.text.text);
 			return true;
 		}
+		// The in-progress composition of an input method — see the packaged
+		// game's twin for what it is and why an empty string ends it.
+		if (event.type == SDL_EVENT_TEXT_EDITING)
+		{
+			m_editorWorld->widgets().inputComposition(event.edit.text ? event.edit.text : "",
+			                                          event.edit.start);
+			return true;
+		}
 		if (event.type == SDL_EVENT_KEY_DOWN)
 		{
 			// The same editing grammar the packaged game routes (see

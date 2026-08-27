@@ -284,6 +284,18 @@ public:
     // because they belong to the field, and a widget holds its own live copy.
     size_t      caret = 0;
     size_t      selAnchor = 0;
+    // ── IME composition (runtime, never serialized) ──────────────────────────
+    // What the input method is currently building but has not committed yet:
+    // typing "nihao" on a Chinese IME shows that as preedit text until a
+    // candidate is chosen, at which point the OS sends the finished 你好 as
+    // ordinary text input. It is NOT part of `text` — committing it is the input
+    // method's decision, not ours — so it is held here and drawn at the caret.
+    //
+    // `compositionCursor` is a byte offset into `composition` (where the IME puts
+    // its own caret); -1 = unspecified, draw it at the end.
+    std::string composition;
+    int         compositionCursor = -1;
+
     // How far the text is scrolled sideways under the field, in the same pixels
     // the glyphs are measured in. Kept so a caret past the right edge stays
     // visible instead of typing itself out of the box. Mutable because render()

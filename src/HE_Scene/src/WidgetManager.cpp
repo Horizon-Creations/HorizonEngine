@@ -690,6 +690,12 @@ void WidgetManager::inputText(const std::string& utf8)
 	// takes nothing in.
 	if (!ti->editable) return;
 
+	// Committed text ends the composition that produced it: the input method has
+	// handed over the finished characters, and leaving the preedit run up would
+	// draw them twice.
+	ti->composition.clear();
+	ti->compositionCursor = -1;
+
 	// Typing over a selection replaces it — the thing every text field does and
 	// this one could not, because it only ever appended.
 	ti->deleteSelection();
@@ -742,6 +748,40 @@ void WidgetManager::inputText(const std::string& utf8)
 	ti->selAnchor = ti->caret;
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
 	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+}
+
+void WidgetManager::inputComposition(const std::string& utf8, int cursorByte)
+{
+	m_visualDirty = true;   // the preedit run is drawn, so it changes the picture
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	if (!ti) return;
+	// A read-only field takes no composition either — otherwise it would show
+	// preedit text that can never land in it.
+	if (!ti->editable) { ti->composition.clear(); return; }
+	ti->composition       = utf8;
+	ti->compositionCursor = cursorByte;
+}
+
+bool WidgetManager::hasComposition() const
+{
+	const Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return false;
+	const auto* ti = dynamic_cast<const HE::UITextInput*>(w->tree.find(w->focusedElem));
+	return ti && !ti->composition.empty();
+}
+
+bool WidgetManager::focusedFieldRect(float vpWidth, float vpHeight, HE::UIWidgetRect& out) const
+{
+	const Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return false;
+	const HE::UIElement* e = w->tree.find(w->focusedElem);
+	if (!e) return false;
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *e, &canvas);
+	out.x = r.x * canvas.scaleX; out.y = r.y * canvas.scaleY;
+	out.w = r.w * canvas.scaleX; out.h = r.h * canvas.scaleY;
+	return true;
 }
 
 void WidgetManager::inputBackspace()

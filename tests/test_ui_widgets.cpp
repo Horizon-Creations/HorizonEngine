@@ -2584,6 +2584,43 @@ TEST_CASE("Text field: the input filter judges each character in context")
     }
 }
 
+TEST_CASE("Text field: an input method's unfinished text is held apart from the value")
+{
+    // The fixture clicks past the right edge, so the caret already sits at the
+    // end of this short text — no need to move it there.
+    TextFieldFixture f("ab");
+    REQUIRE(f.caret() == 2);
+
+    // While composing, the preedit run is NOT part of the field's value — it is
+    // the input method's, and only it decides when it becomes text.
+    f.wm.inputComposition("nihao", 5);
+    CHECK(f.wm.hasComposition());
+    CHECK(f.text() == "ab");
+
+    // It IS drawn, though, or the user types into a field that shows nothing:
+    // the composing frame emits more glyphs than the quiet one.
+    std::vector<UIRenderObject> quiet, composing;
+    f.wm.extract(400.0f, 200.0f, composing);
+    f.wm.inputComposition("", -1);
+    CHECK_FALSE(f.wm.hasComposition());
+    f.wm.extract(400.0f, 200.0f, quiet);
+    CHECK(countGlyphs(composing) > countGlyphs(quiet));
+
+    // Committing: the OS sends the finished characters as ordinary input, and
+    // that has to end the composition or they would be drawn twice.
+    f.wm.inputComposition("nihao", 5);
+    REQUIRE(f.wm.hasComposition());
+    f.wm.inputText("\xE4\xBD\xA0\xE5\xA5\xBD");   // 你好
+    CHECK_FALSE(f.wm.hasComposition());
+    CHECK(f.text() == "ab\xE4\xBD\xA0\xE5\xA5\xBD");
+
+    // A read-only field refuses a composition too — preedit text that could
+    // never land is worse than none.
+    TextFieldFixture ro("locked", 0, /*editable=*/false);
+    ro.wm.inputComposition("nihao", 5);
+    CHECK_FALSE(ro.wm.hasComposition());
+}
+
 TEST_CASE("Creating a widget does not show it")
 {
     TempWidgetDir dir;

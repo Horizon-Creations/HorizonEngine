@@ -1000,6 +1000,27 @@ void GameApplication::updateUIInput()
 		                                  mx * sx, my * sy,
 		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
 
+	// Tell the OS where the focused field is, so an input method opens its
+	// candidate list beside it instead of in the corner of the screen. Pushed
+	// every frame a field is focused: the field can move (a scrolled list, a
+	// resized window), and SDL only remembers what it was last told.
+	if (SDL_Window* win = window() ? window()->GetNativeWindow() : nullptr)
+	{
+		HE::UIWidgetRect fieldRect{};
+		if (m_world->widgets().focusedFieldRect(static_cast<float>(pw),
+		                                        static_cast<float>(ph), fieldRect))
+		{
+			// Back to window points: SDL wants the rect in the same space it
+			// reports the mouse in, and the UI works in drawable pixels.
+			const SDL_Rect area{
+				static_cast<int>(fieldRect.x / (sx > 0.0f ? sx : 1.0f)),
+				static_cast<int>(fieldRect.y / (sy > 0.0f ? sy : 1.0f)),
+				static_cast<int>(fieldRect.w / (sx > 0.0f ? sx : 1.0f)),
+				static_cast<int>(fieldRect.h / (sy > 0.0f ? sy : 1.0f)) };
+			SDL_SetTextInputArea(win, &area, 0);
+		}
+	}
+
 	// A double-click selects the word under it, a triple-click the whole line.
 	// Consumed here rather than in OnEvent so it reuses the pointer arithmetic
 	// above instead of a second, drifting copy of it. The press that came with
@@ -1182,6 +1203,15 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		if (event.type == SDL_EVENT_TEXT_INPUT)
 		{
 			m_world->widgets().inputText(event.text.text);
+			return true;
+		}
+		// What an input method is still building. Sent repeatedly while the user
+		// types on a CJK keyboard, and finally as an empty string when the
+		// composition is committed or cancelled — which is exactly what clears it.
+		if (event.type == SDL_EVENT_TEXT_EDITING)
+		{
+			m_world->widgets().inputComposition(event.edit.text ? event.edit.text : "",
+			                                    event.edit.start);
 			return true;
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)

@@ -746,13 +746,51 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
     emitText(*this, shownFor(text), sp, ts, sizePx, textColor, false, out);
 
+    // ── The IME's unfinished text ────────────────────────────────────────────
+    // Drawn AT the caret and pushed in front of whatever follows it, because
+    // that is where it will land when the input method commits. Underlined
+    // rather than coloured differently: an underline is what every platform's
+    // preedit looks like, and it survives a theme that made the text any colour.
+    float compositionWidth = 0.0f;
+    if (st.focused && !composition.empty())
+    {
+        const float caretX = widthTo(caret);
+        const glm::vec2 cp{ sp.x + caretX, sp.y };
+        // Measured the same way the field measures everything else.
+        HE::UITextLayout copts;
+        compositionWidth = (f ? HE::measureUIText(*f, composition, sizePx, 0.0f, copts)
+                              : HE::measureUIText(composition, sizePx, 0.0f, copts)).x;
+
+        emitText(*this, composition, cp, ts, sizePx, textColor, false, out);
+        // The underline: one thin quad under the run, at the text's own colour.
+        const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
+        const float baseY = px.y + (px.h - h) * 0.5f + h;
+        quad(out, cp.x, baseY - std::max(1.0f, sizePx * 0.06f),
+             std::max(1.0f, compositionWidth), std::max(1.0f, sizePx * 0.06f), textColor);
+    }
+
     // The caret: a thin bar at its offset, not a "|" glued to the end of the
     // string — that could only ever be at the end, which is why the field had
-    // no way to edit anywhere else.
+    // no way to edit anywhere else. While an IME is composing it sits inside the
+    // composition, where that input method put it.
     if (st.focused)
     {
         const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
-        quad(out, sp.x + widthTo(caret), px.y + (px.h - h) * 0.5f,
+        float caretX = widthTo(caret);
+        if (!composition.empty())
+        {
+            // -1 = the IME did not say; the end of its own text is the sane place.
+            const size_t upTo = compositionCursor < 0
+                ? composition.size()
+                : std::min(static_cast<size_t>(compositionCursor), composition.size());
+            HE::UITextLayout copts;
+            const std::string run = composition.substr(0, upTo);
+            const float inner = run.empty() ? 0.0f
+                : (f ? HE::measureUIText(*f, run, sizePx, 0.0f, copts)
+                     : HE::measureUIText(run, sizePx, 0.0f, copts)).x;
+            caretX += inner;
+        }
+        quad(out, sp.x + caretX, px.y + (px.h - h) * 0.5f,
              std::max(1.0f, sizePx * 0.08f), h, textColor);
     }
 }

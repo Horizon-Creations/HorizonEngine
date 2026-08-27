@@ -99,6 +99,24 @@ public:
     void inputBackspace();                    // delete the selection, else the character before
     void inputSubmit();                       // fire OnTextCommitted
 
+    // ── Input methods (IME) ──────────────────────────────────────────────────
+    // What the OS input method is building but has not committed: the preedit
+    // run, plus where it put its own caret inside it (-1 = unspecified). Typing
+    // on a Chinese, Japanese or Korean keyboard produces a stream of these
+    // before a single finished character arrives as ordinary text input, and a
+    // field that ignores them shows nothing at all while the user types.
+    //
+    // An empty string ends the composition — which is also what the OS sends
+    // when it is cancelled.
+    void inputComposition(const std::string& utf8, int cursorByte);
+    // True while the focused field is holding preedit text.
+    bool hasComposition() const;
+    // Where the focused field sits on screen, in render-target pixels. The app
+    // hands this to SDL_SetTextInputArea so the candidate window opens next to
+    // the field instead of in the corner of the screen. False when nothing is
+    // focused.
+    bool focusedFieldRect(float vpWidth, float vpHeight, HE::UIWidgetRect& out) const;
+
     // ── Caret + selection ────────────────────────────────────────────────────
     // The one field that is really EDITED rather than pressed: it needs a caret
     // you can move, a selection you can extend and a way to get text in and out
