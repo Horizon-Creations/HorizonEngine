@@ -499,17 +499,61 @@ ausblendet. Die eigentliche Liste ist die oben.
   betroffenen Materialien auf, wofür `findReferrers` schon da ist, und die referenzierenden
   Widgets zeichnen danach Schicht 0 plus Farbton.
 
-**E2 App-Modus im Editor.** Viewport, Outliner, Details, Terrain, Landschaft, Physik und
-Rendering-Einstellungen sind in einem App-Projekt Lärm. Panels ausblenden, Layout auf
-Designer plus Logik plus Assets plus Vorschau umstellen.
+**E2/E3/E4 zusammengelegt: die Live-Vorschau.** Entscheidung des Users vom 27.08.2026, und sie
+ersetzt drei getrennte Punkte durch einen. Ein App-Projekt zeigt **keinen Viewport**. An
+derselben Stelle steht die laufende App als 2D-Bild, bedienbar, mit Hot-Reload, und **ohne
+dedizierten Play-Modus**: was du an einem UI- oder HorizonCode-Asset änderst, ist sofort
+sichtbar und anklickbar, und die Vorschau **behält ihren Zustand über den Reload hinweg**.
 
-**E3 Designer-Vorschau, die die Wahrheit zeigt.** Heute zeichnet der Designer eine
-ImGui-Nachbildung (`drawElementPreview`). Bei einem Spiel-HUD verzeiht man die Abweichung,
-bei einer App nicht. `RenderWidgetThumbnail` zeigt, dass echtes Engine-Rendering in ein Panel
-möglich ist. Das ist die Entscheidung aus Abschnitt 9.
+Dahinter liegt ein **Root-Widget** und eine **GameInstance**, deren `OnInit` genau dieses
+Widget erzeugt. Das ist auch die Struktur, die der gepackte Build fährt, also übt die Vorschau
+nicht etwas anderes ein als das Produkt.
 
-**E4 Vorschau starten ohne Vollstart.** Aktuelles Widget in einem echten Fenster laufen
-lassen, mit Skript, ohne Export. Idealerweise mit Hot-Reload beim Speichern.
+*Warum das billiger ist als es klingt:* fast alles existiert und ist bereits verdrahtet. Der
+Editor hat einen vollständigen Widget-Runtime (`m_editorWorld->widgets()`), der Zeiger- und
+Tastaturweg ist schon über Viewport-Größe und Zeigerposition parametrisiert, und
+`RenderExtractor::extractUI` ruft `widgets().extract` **ungegated** — die Widgets zeichnen
+also bereits in die Viewport-Textur, ganz ohne Play-Modus. Was am Play-Modus hängt, sind nur
+`widgets().tick`, `processPointer`/`processWheel`, die Tastaturzeilen und der
+HorizonCode-Runtime-Tick.
+
+**Stufe 1, mit vorhandener Mechanik (billig).** In einem App-Projekt: keine Welt in die
+Viewport-Textur rendern, Widget-Tick und Eingabe **ohne** `simulating` laufen lassen, das
+Panel „Live Preview" nennen, Fly-Kamera, Gizmo und Entity-UI-Interaktion abschalten. Dazu der
+Startinhalt (Root-Widget + GameInstance), ohne den es nichts vorzuschauen gibt.
+
+**Stufe 2, echte Arbeit, aber begrenzt.** Hot-Reload beim Speichern: ein geändertes
+Widget-Asset erzeugt die Instanzen aus dem neuen Baum neu, ein geänderter Graph lädt neu. Für
+den Graphen gibt es schon Maschinerie (`HcGraphHost`, `reloadFromDisk`) — die zuerst lesen,
+nicht neu bauen.
+
+**Stufe 3, der tiefe Teil: den Zustand behalten.** Hier liegen die Kanten, deshalb ist der
+Umfang von v1 ausdrücklich klein:
+- **Pro Element, über die Element-Id zugeordnet:** Text und Cursor eines TextInput, der Haken
+  einer CheckBox, der Wert eines Sliders, der Versatz einer ScrollBox, die Auswahl einer
+  ComboBox, der Fokus.
+- **Pro HorizonCode-Instanz, über Name und Typ zugeordnet:** die Variablen.
+- Alles, was sich nicht zuordnen lässt, bekommt den neuen Standardwert.
+
+Zwei Vorbilder im Haus, die vorher zu lesen sind: `LinkRemapSnapshot` (die Falle mit dem
+fromJson-Snapshot steht in den HC-Review-Funden) und die typisierte Feldzuordnung des
+Save-Systems.
+
+**Was ausdrücklich NICHT überlebt**, und das gehört in die Oberfläche, nicht nur hierher:
+laufende Delay-Fortsetzungen, und der Zustand von allem, was **umbenannt** wurde. Ein
+umbenanntes Element oder eine umbenannte Variable ist für die Zuordnung ein neues Ding, und
+stillschweigend verlorener Zustand ist genau die Sorte Verhalten, über die man eine Stunde
+rätselt.
+
+**Eine Entscheidung, die der User noch treffen muss:** wenn die Vorschau immer läuft, sind
+Gestalten und Benutzen dann dieselbe Fläche oder zwei? Mein Vorschlag: **zwei Ansichten auf
+dieselben Assets.** Der Designer-Tab ist zum Bauen, die Live-Vorschau zum Bedienen. Sonst ist
+jeder Klick beim Gestalten auch ein Klick in der App, und das Verschieben eines Knopfes drückt
+ihn gleichzeitig.
+
+*E3 ist damit erledigt, bevor es gebaut wurde:* die Live-Vorschau IST das echte
+Engine-Rendering von Widgets, nur in einem anderen Panel. Für Spielprojekte bleibt die
+ImGui-Nachbildung im Designer, bis jemand sie ablöst.
 
 **E5 Export-Voreinstellung „App".** Kein Startszenen-Feld, dafür Icon, Version,
 Bundle-Identifier, Copyright, Fenstergröße, Theme-Standard. Auf macOS ein `.app`, auf Windows
@@ -714,6 +758,7 @@ Invalidierung, damit der 100-ms-Herzschlag hoch kann, IME und Eingabefilter am T
   nur als Skript-Gruppe)
 - B1 TextInput-Restarbeiten (Ziehen zum Auswählen, Wortsprünge, Scrollen, Undo, I-Beam)
 - E1 App-Projekttyp plus eine Vorlage, **E1b Advanced-Schalter im `.heproj` + Editor-Sperren**
+- E2 Live-Vorschau Stufe 1 (kein Viewport, ungegateter Widget-Tick, Startinhalt)
 - E5 Export-Voreinstellung „App"
 - Abnahme: Todo-App, exportiert als `.app`, speichert nach `~`, unter 2 % CPU im Leerlauf
 
@@ -731,7 +776,7 @@ Invalidierung, damit der 100-ms-Herzschlag hoch kann, IME und Eingabefilter am T
 - D2 erste zwölf Komponenten
 - B2 ListView, B3 Grid, B4 Dialoge/Kontextmenü/Tooltip
 - C: `fs` entsperrt mit Dialog-Erteilung, `datetime`, `process`
-- E3 echte Designer-Vorschau
+- E2/E3/E4 Live-Vorschau, Stufe 2 (Hot-Reload) und Stufe 3 (Zustand über den Reload)
 
 **Welle 3, konkurrenzfähig**
 - A6 Menüleiste, A7 Icon und Dateitypen
