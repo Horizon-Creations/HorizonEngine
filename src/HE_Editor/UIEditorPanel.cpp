@@ -1,4 +1,5 @@
 #include "UIEditorPanel.h"
+#include <imgui_internal.h>   // ShadeVertsLinearColorGradientKeepAlpha — see drawSurfacePreview
 #include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
 
@@ -92,6 +93,10 @@ struct State
 	// this is what it would have selected.
 	int    pendingPick = 0;
 	bool   hasPendingPick = false;
+	// Details panel: is the corner radius shown as one number or as four? A
+	// display mode, not a value — an element whose corners already differ is
+	// always shown as four whatever this says.
+	bool   cornerPerSide = false;
 
 	// Graph canvas — the shared GraphEditor component owns pan/zoom/selection/
 	// drag; these are the host-side bits it can't own.
@@ -576,6 +581,91 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 	EditorWidgets::helpForLabel("Text Align");
 }
 
+// ── Surface style ("Schicht 0", docs/he-apps-plan.md D5) ─────────────────────
+// Rounding, border and gradient live on the BASE, not in any type's property
+// table, so the generic loop below never saw them and until now they could only
+// be set from a graph. This is their editor.
+//
+// The four radii are the reason this is handwritten. One number is what almost
+// every element wants, four is what a tab or a chat bubble needs, and two
+// separate controls for one idea is how an author ends up with a rounding they
+// cannot explain. So: one field while the corners agree, a 2×2 grid laid out
+// like the box itself once they do not, and one checkbox between the two.
+void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
+{
+	// Its own scope, though the only caller already pushes the same one: a
+	// helper that names its scope is a helper the audit can place, and one that
+	// borrows the caller's is filed under whichever function happens to sit
+	// above it in this file.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	ImGui::SeparatorText("Surface");
+
+	// Expanded either because the author asked, or because the values ALREADY
+	// differ — collapsing that into one field would silently throw three of
+	// them away.
+	const bool differ = !n.uniformCornerRadius();
+	bool perCorner = differ || st.cornerPerSide;
+	if (EditorWidgets::checkbox("Per corner", &perCorner))
+	{
+		st.cornerPerSide = perCorner;
+		// Folding back up keeps the top-left corner and gives it to the other
+		// three, which is the only answer that does not need a rule nobody can
+		// remember.
+		if (!perCorner) { n.cornerRadius = glm::vec4(n.cornerRadius.x); committed = true; }
+	}
+	if (!perCorner)
+	{
+		float r = n.cornerRadius.x;
+		if (ImGui::DragFloat("Corner Radius", &r, 0.5f, 0.0f, 10000.0f))
+		{ n.cornerRadius = glm::vec4(std::max(0.0f, r)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Corner Radius");
+	}
+	else
+	{
+		// Laid out where the corners ARE: top row top-left/top-right, bottom row
+		// bottom-left/bottom-right. Reading the grid is reading the box.
+		const float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x)
+		                * 0.5f;
+		float* const cell[4] = { &n.cornerRadius.x, &n.cornerRadius.y,      // TL, TR
+		                         &n.cornerRadius.w, &n.cornerRadius.z };    // BL, BR
+		static const char* kId[4] = { "##crTL", "##crTR", "##crBL", "##crBR" };
+		for (int i = 0; i < 4; ++i)
+		{
+			if (i % 2) ImGui::SameLine();
+			ImGui::SetNextItemWidth(w);
+			if (ImGui::DragFloat(kId[i], cell[i], 0.5f, 0.0f, 10000.0f))
+			{ *cell[i] = std::max(0.0f, *cell[i]); edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		ImGui::TextDisabled("Corners: top-left / top-right, then bottom.");
+		EditorWidgets::helpForLabel("Per corner");
+	}
+
+	if (ImGui::DragFloat("Border Width", &n.borderWidth, 0.25f, 0.0f, 1000.0f))
+	{ n.borderWidth = std::max(0.0f, n.borderWidth); edit = true; }
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Border Width");
+	if (n.borderWidth > 0.0f)
+	{
+		edit |= ImGui::ColorEdit4("Border Color", &n.borderColor.r);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Border Color");
+	}
+
+	if (EditorWidgets::checkbox("Gradient", &n.gradient)) committed = true;
+	if (n.gradient)
+	{
+		edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Gradient Color");
+		edit |= ImGui::DragFloat("Gradient Angle", &n.gradientAngle, 1.0f,
+		                         -360.0f, 360.0f, "%.0f\xc2\xb0");
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Gradient Angle");
+	}
+}
+
 // ── Generic property editor ─────────────────────────────────────────────────────
 // Draws one editable widget for a UIPropDesc; reads via getProp, writes via
 // setProp. `edit` set on any change this frame (live view), `committed` when an
@@ -967,6 +1057,12 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 	}
 
+	// "Schicht 0": the style of the element's own surface. Only where there IS
+	// one — the same question the material slot asks, and the reason a Text
+	// label is not offered a border that would outline nothing.
+	if (n->hasSurfaceStyle())
+		drawSurfaceStyle(st, *n, edit, committed);
+
 	// Material slot (only types that expose one — text runs have no quad).
 	if (n->hasMaterialSlot())
 	{
@@ -1107,6 +1203,87 @@ void handleDelta(int handle, const ImVec2& d, ImVec2& dMin, ImVec2& dMax)
 	}
 }
 
+// One rounded rectangle with four independent radii, as an ImDrawList path.
+// ImGui's own AddRectFilled takes ONE rounding and a set of corner flags, which
+// cannot express "8 at the top, square at the bottom" — the shape a tab is. A
+// radius of 0 makes PathArcTo emit the centre point alone, so a square corner
+// falls out of the same four calls.
+void pathRoundedRect(ImDrawList* dl, const ImVec2& a, const ImVec2& b, const glm::vec4& r)
+{
+	constexpr float kPi = 3.14159265358979323846f;   // IM_PI is imgui_internal
+	const float lim = 0.5f * std::min(b.x - a.x, b.y - a.y);
+	const float tl = std::clamp(r.x, 0.0f, lim), tr = std::clamp(r.y, 0.0f, lim);
+	const float br = std::clamp(r.z, 0.0f, lim), bl = std::clamp(r.w, 0.0f, lim);
+	dl->PathArcTo(ImVec2(a.x + tl, a.y + tl), tl, kPi,          kPi * 1.5f);
+	dl->PathArcTo(ImVec2(b.x - tr, a.y + tr), tr, kPi * 1.5f,   kPi * 2.0f);
+	dl->PathArcTo(ImVec2(b.x - br, b.y - br), br, 0.0f,         kPi * 0.5f);
+	dl->PathArcTo(ImVec2(a.x + bl, b.y - bl), bl, kPi * 0.5f,   kPi);
+}
+
+// The element's own surface, exactly as "Schicht 0" describes it: the authored
+// rounding, the fill (flat or faded), and the border drawn INSIDE the shape.
+//
+// Drawn here once for every type that HAS a surface, instead of six types each
+// hard-coding a rounding of 3 or 4 and ignoring what the author set. The
+// designer's whole job is to show what the engine will draw, and until this it
+// showed a rounding nobody had asked for and no border or gradient at all.
+void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
+                        const ImVec2& mx, float s, const glm::vec4& fill,
+                        float alpha, float dim, void* texHandle, bool drawFill)
+{
+	const auto C = [&](const glm::vec4& c)
+	{
+		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
+	};
+	const glm::vec4 radii = n.cornerRadius * s;
+	// A picture on the surface is the surface: the texture is drawn square (a
+	// rounded image needs a clip ImDrawList cannot express along a path), and
+	// the border still follows the authored shape on top of it.
+	if (!drawFill)
+	{
+		// The caller drew its own picture; only the outline is left to add.
+	}
+	else if (texHandle)
+		dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx,
+		             ImVec2(0, 0), ImVec2(1, 1), C(fill));
+	else
+	{
+		const int vtx0 = dl->VtxBuffer.Size;
+		pathRoundedRect(dl, mn, mx, radii);
+		dl->PathFillConvex(C(fill));
+		if (n.gradient)
+		{
+			// The same rule the shaders use: an angle clockwise from "down",
+			// projected onto the box. Shading the vertices the fill just wrote
+			// is how a path gets a gradient at all — AddRectFilledMultiColor is
+			// axis-aligned and square.
+			const float rad = n.gradientAngle * 0.017453292f;
+			const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+			const ImVec2 d(std::sin(rad), std::cos(rad));
+			const float  half = 0.5f * (std::abs(d.x) * (mx.x - mn.x) +
+			                            std::abs(d.y) * (mx.y - mn.y));
+			ImGui::ShadeVertsLinearColorGradientKeepAlpha(
+				dl, vtx0, dl->VtxBuffer.Size,
+				ImVec2(c.x - d.x * half, c.y - d.y * half),
+				ImVec2(c.x + d.x * half, c.y + d.y * half),
+				C(fill), C(n.gradientColor));
+		}
+	}
+	if (n.borderWidth > 0.0f)
+	{
+		// Inside the shape, like the shaders draw it: the stroke is centred on
+		// the path, so the path moves in by half the width.
+		const float bw = std::max(1.0f, n.borderWidth * s);
+		const ImVec2 im(mn.x + bw * 0.5f, mn.y + bw * 0.5f);
+		const ImVec2 ix(mx.x - bw * 0.5f, mx.y - bw * 0.5f);
+		if (ix.x > im.x && ix.y > im.y)
+		{
+			pathRoundedRect(dl, im, ix, radii - bw * 0.5f);
+			dl->PathStroke(C(n.borderColor), ImDrawFlags_Closed, bw);
+		}
+	}
+}
+
 // Draw a simplified WYSIWYG preview of one element from its generic properties.
 void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
                         const ImVec2& mx, float s, void* texHandle = nullptr,
@@ -1119,17 +1296,31 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
 	};
+	// The authored surface first, for every type that has one — the same rule
+	// WidgetManager stamps onto the first quad. What follows in each case is
+	// only what is drawn ON that surface.
+	// An Image is left out here and gets its outline AFTER the switch: its
+	// surface is the picture, which it draws itself (nine pieces when sliced),
+	// and a tinted rectangle under it would be a colour nobody authored.
+	if (n.hasSurfaceStyle() && n.type() != UIWidgetType::Image)
+	{
+		// Which of its colours IS the surface. Every one of these types names it
+		// differently, and that name is the only thing they disagree about.
+		const char* key =
+			n.type() == UIWidgetType::Panel  ? "Color" :
+			n.type() == UIWidgetType::Button ? "Normal Color" : "Back Color";
+		const glm::vec4 fallback =
+			n.type() == UIWidgetType::Panel       ? glm::vec4{ 0.12f, 0.12f, 0.14f, 0.85f } :
+			n.type() == UIWidgetType::Button      ? glm::vec4{ 0.20f, 0.20f, 0.20f, 1 } :
+			n.type() == UIWidgetType::TextInput   ? glm::vec4{ 0.10f, 0.10f, 0.10f, 1 }
+			                                      : glm::vec4{ 0.15f, 0.15f, 0.15f, 1 };
+		drawSurfacePreview(dl, n, mn, mx, s, propColorOr(n, key, fallback),
+		                   alpha, dim, texHandle, /*drawFill=*/true);
+	}
 	switch (n.type())
 	{
 	case UIWidgetType::Panel:
-	{
-		if (texHandle)
-			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             C(propColorOr(n, "Color", { 1,1,1,1 })));
-		else
-			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
-		break;
-	}
+		break;   // nothing but its surface
 	case UIWidgetType::Image:
 	{
 		if (texHandle)
@@ -1263,15 +1454,12 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::Button:
 	{
-		if (texHandle)
-			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             C(propColorOr(n, "Normal Color", { 1,1,1,1 })));
-		else
-			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
-		dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
-		// No caption drawn here any more: a Button is a surface, and what sits on
-		// it is a CHILD element that this same function draws in its own turn.
-		// Drawing a caption here as well would show a label the engine does not.
+		// Nothing but its surface, which is drawn above from the AUTHORED
+		// rounding, border and gradient — this used to hard-code a rounding of 4
+		// and an outline the engine never drew.
+		//
+		// No caption either: a Button is a surface, and what sits on it is a
+		// CHILD element that this same function draws in its own turn.
 		break;
 	}
 	case UIWidgetType::CheckBox:
@@ -1319,17 +1507,18 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::ProgressBar:
 	{
+		// The track is the surface (drawn above); only the fill on top of it
+		// belongs here.
 		float val = propFloatOr(n, "Value", 0.5f);
 		val = val < 0.0f ? 0.0f : (val > 1.0f ? 1.0f : val);
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
 		dl->AddRectFilled(mn, ImVec2(mn.x + val * (mx.x - mn.x), mx.y),
-			C(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })), 3.0f * s);
+			C(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })),
+			std::min(n.cornerRadius.x, n.cornerRadius.w) * s);
 		break;
 	}
 	case UIWidgetType::TextInput:
 	{
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.10f,0.10f,0.10f,1 })), 3.0f * s);
-		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
+		// Background and outline are the surface, drawn above.
 		const std::string txt = propStringOr(n, "Text", "");
 		const bool placeholder = txt.empty();
 		std::string shown = placeholder ? propStringOr(n, "Placeholder", "") : txt;
@@ -1353,8 +1542,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::ComboBox:
 	{
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
-		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
+		// Background and outline are the surface, drawn above.
 		// Current option = Options[Selected Index].
 		std::string shown;
 		const UIPropValue opts = n.getProp("Options");
@@ -1374,6 +1562,12 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	default: break;
 	}
+
+	// The Image's outline last, over the picture it just drew — the one type
+	// whose surface is not a colour, so the fill half of this is skipped.
+	if (n.type() == UIWidgetType::Image && n.borderWidth > 0.0f)
+		drawSurfacePreview(dl, n, mn, mx, s, glm::vec4(0.0f), alpha, dim,
+		                   nullptr, /*drawFill=*/false);
 }
 
 // ── Embedded widgets in the designer ─────────────────────────────────────────

@@ -706,9 +706,18 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     // non-zero radius would add a `cornerRadius: 6` to every Button ever saved,
     // for a value that is already the default — the same "only once set" rule
     // every other optional field above follows.
+    //
+    // Three shapes, in order of how ordinary they are: unchanged writes nothing,
+    // one number for all four corners keeps the ORIGINAL scalar key (so a widget
+    // that only ever had one rounding still saves and loads exactly as it did),
+    // and only genuinely different corners cost the four-element array.
     if (const std::unique_ptr<UIElement> proto = makeUIElement(e.type());
         !proto || e.cornerRadius != proto->cornerRadius)
-        o["cornerRadius"] = e.cornerRadius;
+    {
+        if (e.uniformCornerRadius()) o["cornerRadius"] = e.cornerRadius.x;
+        else o["cornerRadii"] = { e.cornerRadius.x, e.cornerRadius.y,
+                                  e.cornerRadius.z, e.cornerRadius.w };
+    }
     if (e.borderWidth > 0.0f)
     {
         o["borderWidth"] = e.borderWidth;
@@ -765,7 +774,16 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     // Absent = keep the TYPE's default (a Button's 6, a ComboBox's 4), not zero:
     // every widget authored before the radius was a property must still look the
     // way it looked. The element was constructed with its default just above.
-    e->cornerRadius = o.value("cornerRadius", e->cornerRadius);
+    // The scalar key is the one every widget saved so far carries, and it means
+    // all four corners — which is why it is still READ first and still written
+    // whenever the four agree. The array is the newer, rarer shape and wins when
+    // both are somehow present.
+    if (const auto cr = o.find("cornerRadius"); cr != o.end() && cr->is_number())
+        e->cornerRadius = glm::vec4(cr->get<float>());
+    if (const auto cs = o.find("cornerRadii");
+        cs != o.end() && cs->is_array() && cs->size() == 4)
+        e->cornerRadius = { (*cs)[0].get<float>(), (*cs)[1].get<float>(),
+                            (*cs)[2].get<float>(), (*cs)[3].get<float>() };
     e->borderWidth = o.value("borderWidth", 0.0f);
     if (const auto bc = o.find("borderColor");
         bc != o.end() && bc->is_array() && bc->size() == 4)

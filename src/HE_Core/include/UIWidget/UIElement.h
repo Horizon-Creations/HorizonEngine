@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <Renderer/UIRenderObject.h>
 #include <Types/UUID.h>
@@ -241,7 +242,25 @@ public:
     //
     // The types that HAVE a surface set their own default in their constructor,
     // so every widget authored before this existed still draws exactly as it did.
-    float     cornerRadius = 0.0f;
+    //
+    // One per corner, in CSS order: x = top-left, y = top-right, z =
+    // bottom-right, w = bottom-left. A tab, a chat bubble and the top of a card
+    // each round some corners and not others, and a single number could author
+    // none of them. Authoring all four to the same value is still the common
+    // case, and the editor and the on-disk form both keep it a one-liner.
+    glm::vec4 cornerRadius{ 0.0f, 0.0f, 0.0f, 0.0f };
+    // True when the four are the same number — the question the writer, the
+    // editor's link toggle and every "is this plain?" check all ask.
+    bool uniformCornerRadius() const
+    {
+        return cornerRadius.x == cornerRadius.y && cornerRadius.y == cornerRadius.z &&
+               cornerRadius.z == cornerRadius.w;
+    }
+    float maxCornerRadius() const
+    {
+        return std::max(std::max(cornerRadius.x, cornerRadius.y),
+                        std::max(cornerRadius.z, cornerRadius.w));
+    }
     float     borderWidth = 0.0f;
     glm::vec4 borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
     // A linear fade across the same surface: off, the element is its own colour

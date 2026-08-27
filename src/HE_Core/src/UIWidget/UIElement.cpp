@@ -385,7 +385,15 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
     if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
-    if (n == "Corner Radius"){ out = UIPropValue::ofFloat(e.cornerRadius);      return true; }
+    // "Corner Radius" is the whole rounding as ONE number, which is what it has
+    // always been and what nearly every element wants. Reading it back gives the
+    // top-left corner, so a graph that set it reads its own value; the four
+    // named rows below are for the elements that round their corners differently.
+    if (n == "Corner Radius"){ out = UIPropValue::ofFloat(e.cornerRadius.x);    return true; }
+    if (n == "Corner TL")    { out = UIPropValue::ofFloat(e.cornerRadius.x);    return true; }
+    if (n == "Corner TR")    { out = UIPropValue::ofFloat(e.cornerRadius.y);    return true; }
+    if (n == "Corner BR")    { out = UIPropValue::ofFloat(e.cornerRadius.z);    return true; }
+    if (n == "Corner BL")    { out = UIPropValue::ofFloat(e.cornerRadius.w);    return true; }
     if (n == "Border Width") { out = UIPropValue::ofFloat(e.borderWidth);       return true; }
     if (n == "Border Color") { out = UIPropValue::ofColor(e.borderColor);       return true; }
     if (n == "Gradient")     { out = UIPropValue::ofBool(e.gradient);           return true; }
@@ -418,7 +426,13 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // runtime re-resolves it when this changes (WidgetManager watches both).
     if (n == "Texture")      { e.texture = v.s; return true; }
     if (n == "Font")         { e.font = v.s; return true; }
-    if (n == "Corner Radius"){ e.cornerRadius = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // Writing the single name rounds ALL FOUR corners — the property a script or
+    // a theme sets when it means "round this thing".
+    if (n == "Corner Radius"){ e.cornerRadius = glm::vec4(std::max(0.0f, v.f)); return true; }
+    if (n == "Corner TL")    { e.cornerRadius.x = std::max(0.0f, v.f); return true; }
+    if (n == "Corner TR")    { e.cornerRadius.y = std::max(0.0f, v.f); return true; }
+    if (n == "Corner BR")    { e.cornerRadius.z = std::max(0.0f, v.f); return true; }
+    if (n == "Corner BL")    { e.cornerRadius.w = std::max(0.0f, v.f); return true; }
     if (n == "Border Width") { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; return true; }
     if (n == "Border Color") { e.borderColor = v.col; return true; }
     if (n == "Gradient")     { e.gradient = v.b; return true; }
@@ -448,6 +462,13 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     if (hasSurfaceStyle())
     {
         out.push_back({ "Corner Radius", UIPropType::Float });
+        // The four on top of the one: "Corner Radius" is all of them at once,
+        // these address a single corner. Both are real properties a graph can
+        // set, which is why they are listed and not just editor state.
+        out.push_back({ "Corner TL", UIPropType::Float });
+        out.push_back({ "Corner TR", UIPropType::Float });
+        out.push_back({ "Corner BR", UIPropType::Float });
+        out.push_back({ "Corner BL", UIPropType::Float });
         out.push_back({ "Border Width", UIPropType::Float });
         out.push_back({ "Border Color", UIPropType::Color });
         // Split into three plain properties rather than one gradient object:
@@ -502,7 +523,10 @@ namespace
         ro.materialAssetId = mat;
         ro.textureAssetId  = tex;
         ro.type     = 0;
-        ro.cornerRadius = cornerRadius;
+        // The helper's callers (a slider handle, a checkbox box) want ONE
+        // rounding on all four corners; the four-corner story belongs to the
+        // authored surface, which the manager stamps on afterwards.
+        ro.cornerRadius = glm::vec4(cornerRadius);
         ro.uvMin    = uv0;
         ro.uvMax    = uv1;
         out.push_back(std::move(ro));

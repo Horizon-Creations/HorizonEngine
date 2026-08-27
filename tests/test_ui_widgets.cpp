@@ -2876,6 +2876,21 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         CAPTURE(e->typeName());
         CHECK(e->hasSurfaceStyle() == expected);
 
+        // The rows that ride on a surface, pinned by name. They appear together
+        // and nowhere else, so a new "Schicht 0" property has to be added here
+        // on purpose rather than quietly showing up on a Text label.
+        static const std::vector<std::string> kSurfaceRows = {
+            "Corner Radius", "Corner TL", "Corner TR", "Corner BR", "Corner BL",
+            "Border Width", "Border Color",
+            "Gradient", "Gradient Color", "Gradient Angle" };
+        const std::vector<UIPropDesc> all = e->allProperties();
+        for (const std::string& row : kSurfaceRows)
+        {
+            CAPTURE(row);
+            CHECK(std::any_of(all.begin(), all.end(),
+                              [&](const UIPropDesc& d){ return d.name == row; }) == expected);
+        }
+
         // …and the claim has to be TRUE: whatever says it has a surface must
         // actually draw one that covers its whole rect, or the stamp misses it.
         std::vector<UIRenderObject> out;
@@ -3048,12 +3063,21 @@ TEST_CASE("The corner radius is authored, and old widgets keep their look")
 {
     // The types that used to hard-code one keep it as their default, so a widget
     // saved before the radius was a property renders unchanged.
-    CHECK(HE::UIButton().cornerRadius      == doctest::Approx(6.0f));
-    CHECK(HE::UITextInput().cornerRadius   == doctest::Approx(4.0f));
-    CHECK(HE::UIComboBox().cornerRadius    == doctest::Approx(4.0f));
-    CHECK(HE::UIProgressBar().cornerRadius == doctest::Approx(4.0f));
+    // Every corner, because the default is one number on all four.
+    auto allFour = [](const HE::UIElement& e, float v)
+    {
+        CHECK(e.cornerRadius.x == doctest::Approx(v));
+        CHECK(e.cornerRadius.y == doctest::Approx(v));
+        CHECK(e.cornerRadius.z == doctest::Approx(v));
+        CHECK(e.cornerRadius.w == doctest::Approx(v));
+        CHECK(e.uniformCornerRadius());
+    };
+    allFour(HE::UIButton(),      6.0f);
+    allFour(HE::UITextInput(),   4.0f);
+    allFour(HE::UIComboBox(),    4.0f);
+    allFour(HE::UIProgressBar(), 4.0f);
     // A Panel could not be rounded at all before; it starts square.
-    CHECK(HE::UIPanel().cornerRadius == doctest::Approx(0.0f));
+    allFour(HE::UIPanel(), 0.0f);
 
     // An element whose JSON predates the property must not read back as 0 —
     // absent means "the type's default", not "square".
@@ -3063,13 +3087,63 @@ TEST_CASE("The corner radius is authored, and old widgets keep their look")
     CHECK(json.find("cornerRadius") == std::string::npos);  // 6 is the default, not written
     HE::UIWidgetTree loaded;
     REQUIRE(HE::uiWidgetTreeFromJson(json, loaded));
-    CHECK(loaded.find(b)->cornerRadius == doctest::Approx(6.0f));
+    allFour(*loaded.find(b), 6.0f);
 
-    // …and an authored one round-trips.
-    t.find(b)->cornerRadius = 12.0f;
+    // …and an authored one round-trips, still through the ORIGINAL scalar key:
+    // one rounding on all four corners is what nearly every widget has, and it
+    // must not start costing a four-element array on disk.
+    t.find(b)->cornerRadius = glm::vec4(12.0f);
+    const std::string uniform = HE::uiWidgetTreeToJson(t);
+    CHECK(uniform.find("\"cornerRadius\"") != std::string::npos);
+    CHECK(uniform.find("cornerRadii")      == std::string::npos);
     HE::UIWidgetTree loaded2;
-    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), loaded2));
-    CHECK(loaded2.find(b)->cornerRadius == doctest::Approx(12.0f));
+    REQUIRE(HE::uiWidgetTreeFromJson(uniform, loaded2));
+    allFour(*loaded2.find(b), 12.0f);
+}
+
+TEST_CASE("Corners round one at a time")
+{
+    HE::UIWidgetTree t;
+    const int b = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(b);
+
+    // The single name is all four at once — what a script or a theme means when
+    // it says "round this" — and reads back as the corner it would have set.
+    e.setPropAny("Corner Radius", HE::UIPropValue::ofFloat(9.0f));
+    CHECK(e.uniformCornerRadius());
+    CHECK(e.getPropAny("Corner Radius").f == doctest::Approx(9.0f));
+
+    // The four named rows address one corner each, in CSS order.
+    e.setPropAny("Corner TR", HE::UIPropValue::ofFloat(0.0f));
+    e.setPropAny("Corner BR", HE::UIPropValue::ofFloat(0.0f));
+    CHECK(e.cornerRadius.x == doctest::Approx(9.0f));   // TL
+    CHECK(e.cornerRadius.y == doctest::Approx(0.0f));   // TR
+    CHECK(e.cornerRadius.z == doctest::Approx(0.0f));   // BR
+    CHECK(e.cornerRadius.w == doctest::Approx(9.0f));   // BL
+    CHECK_FALSE(e.uniformCornerRadius());
+    CHECK(e.maxCornerRadius() == doctest::Approx(9.0f));
+
+    // Four different corners are the one case that costs the array, and it
+    // round-trips.
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    CHECK(json.find("cornerRadii") != std::string::npos);
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, loaded));
+    const HE::UIElement& r = *loaded.find(b);
+    CHECK(r.cornerRadius.x == doctest::Approx(9.0f));
+    CHECK(r.cornerRadius.y == doctest::Approx(0.0f));
+    CHECK(r.cornerRadius.z == doctest::Approx(0.0f));
+    CHECK(r.cornerRadius.w == doctest::Approx(9.0f));
+
+    // A widget written before the array existed carries the scalar key, and it
+    // still means all four corners.
+    HE::UIWidgetTree old;
+    REQUIRE(HE::uiWidgetTreeFromJson(
+        R"({"canvasWidth":100,"canvasHeight":100,"nextId":2,"elements":[
+            {"id":1,"parent":0,"type":"Panel","cornerRadius":7.0}]})", old));
+    const HE::UIElement& o = *old.find(1);
+    CHECK(o.uniformCornerRadius());
+    CHECK(o.cornerRadius.x == doctest::Approx(7.0f));
 }
 
 TEST_CASE("The corner radius reaches the quad exactly once")
@@ -3084,7 +3158,7 @@ TEST_CASE("The corner radius reaches the quad exactly once")
         HE::UIElement* e = authored.find(btn);
         HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
         e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 60.0f;
-        e->cornerRadius = 10.0f;
+        e->cornerRadius = glm::vec4(10.0f);
     }
     registerWidget(cm, authored);
 
@@ -3102,7 +3176,8 @@ TEST_CASE("The corner radius reaches the quad exactly once")
             o.size.y == doctest::Approx(60.0f))
         {
             sawSurface = true;
-            CHECK(o.cornerRadius == doctest::Approx(10.0f));
+            CHECK(o.cornerRadius.x == doctest::Approx(10.0f));
+            CHECK(o.cornerRadius.z == doctest::Approx(10.0f));
         }
     CHECK(sawSurface);
 }

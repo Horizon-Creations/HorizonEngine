@@ -4679,7 +4679,7 @@ in vec2 vLocal;
 uniform vec4 uColor;
 uniform float uMode;
 uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
-uniform float uCornerRadius; // px; min(w,h)/2 → circle
+uniform vec4  uCornerRadius; // px per corner: TL, TR, BR, BL; all at min(w,h)/2 → circle
 uniform float uBorderWidth;  // px, drawn INSIDE the quad; 0 = none
 uniform vec4  uBorderColor;
 uniform float uGradient;      // 0 = solid, 1 = linear fade to uGradientColor
@@ -4687,6 +4687,23 @@ uniform vec4  uGradientColor;
 uniform float uGradientAngle; // degrees, clockwise from "down"
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
+// One rounded box, four radii. `p` is relative to the box's centre (y down),
+// `radii` is TL, TR, BR, BL: the quadrant `p` falls in picks its corner and the
+// rest is the ordinary rounded-box distance. Mirrors heRoundedBoxSDF in the
+// Metal path exactly — one rule, two languages. All four equal gives the
+// formula that stood here before, unchanged.
+float heRoundedBoxSDF(vec2 p, vec2 halfSz, vec4 radii)
+{
+    float r = (p.x > 0.0) ? ((p.y > 0.0) ? radii.z : radii.y)
+                          : ((p.y > 0.0) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    vec2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float heMaxRadius(vec4 radii)
+{
+    return max(max(radii.x, radii.y), max(radii.z, radii.w));
+}
 // uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
 // quad (RGBA, tinted by uColor). Modes 1 and 2 share the sampler: a glyph run
 // binds the atlas on unit 0, an image its own texture.
@@ -4702,13 +4719,9 @@ void main()
     {
         vec4 t = texture(uFontAtlas, vUV);
         vec4 c = vec4(uColor.rgb * t.rgb, uColor.a * t.a);
-        if (uCornerRadius <= 0.0) { FragColor = c; return; }
+        if (heMaxRadius(uCornerRadius) <= 0.0) { FragColor = c; return; }
         // A rounded image is the solid path's SDF applied to the sampled alpha.
-        vec2 hs = uRect.zw * 0.5;
-        float rr = min(uCornerRadius, min(hs.x, hs.y));
-        vec2 pp = (vLocal - 0.5) * uRect.zw;
-        vec2 qq = abs(pp) - (hs - rr);
-        float dd = length(max(qq, 0.0)) + min(max(qq.x, qq.y), 0.0) - rr;
+        float dd = heRoundedBoxSDF((vLocal - 0.5) * uRect.zw, uRect.zw * 0.5, uCornerRadius);
         FragColor = vec4(c.rgb, c.a * clamp(0.5 - dd, 0.0, 1.0));
         return;
     }
@@ -4724,13 +4737,9 @@ void main()
         fill = mix(uColor, uGradientColor, t);
     }
     // Square AND borderless needs no distance field at all — the crisp fast path.
-    if (uCornerRadius <= 0.0 && uBorderWidth <= 0.0) { FragColor = fill; return; }
+    if (heMaxRadius(uCornerRadius) <= 0.0 && uBorderWidth <= 0.0) { FragColor = fill; return; }
     // Solid quad with rounded corners.
-    vec2 halfsz = uRect.zw * 0.5;
-    float r = min(uCornerRadius, min(halfsz.x, halfsz.y));
-    vec2 p = (vLocal - 0.5) * uRect.zw;
-    vec2 q = abs(p) - (halfsz - r);
-    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    float d = heRoundedBoxSDF((vLocal - 0.5) * uRect.zw, uRect.zw * 0.5, uCornerRadius);
     float cov = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d in pixels)
     if (uBorderWidth <= 0.0) { FragColor = vec4(fill.rgb, fill.a * cov); return; }
     // The ring between the shape and itself shrunk by the border width: `d` is a
@@ -7490,7 +7499,8 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
 		glUniform4f(m_uUIRotation, obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
-		glUniform1f(m_uUICornerRadius, obj.cornerRadius);
+		glUniform4f(m_uUICornerRadius, obj.cornerRadius.x, obj.cornerRadius.y,
+		            obj.cornerRadius.z, obj.cornerRadius.w);
 		glUniform1f(m_uUIBorderWidth, obj.borderWidth);
 		glUniform4f(m_uUIBorderColor, obj.borderColor.r, obj.borderColor.g,
 		            obj.borderColor.b, obj.borderColor.a);

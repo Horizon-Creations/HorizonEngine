@@ -1285,6 +1285,14 @@ namespace
 	  "", "editor#play-mode" },
 
 	// ── Project Hub and the reader itself ────────────────────────────────────
+	{ "Project Hub/Advanced Shader Effects", "",
+	  "Whether this application may author MATERIALS — shader graphs of its own. "
+	  "Off, the editor offers none and the packaged build ships the small renderer: "
+	  "widgets are still styled with rounded corners, borders, gradients and "
+	  "shadows, which is what an interface actually uses. On, everything a game "
+	  "has is available and the build carries a GPU renderer. Offered for "
+	  "applications only, and it cannot be changed afterwards.",
+	  "", "editor#project-hub" },
 	{ "Project Hub/Remove from list", "",
 	  "Takes the project off this list. The project itself is untouched on disk "
 	  "— this is the list of what you have opened, not of what exists.",
@@ -1894,6 +1902,42 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	{ "UI Widget/Corner Radius", "",
+	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
+	  "number for all four; at half the shorter side the shape becomes a capsule, "
+	  "and no further. Text and the layout boxes do not have it, because they have "
+	  "no surface to round.",
+	  "", "ui#elements" },
+	{ "UI Widget/Per corner", "",
+	  "Rounds each corner on its own: the four fields are laid out where the "
+	  "corners are, top row first. A tab, a chat bubble and the head of a card are "
+	  "all one rounded and one square pair. Switching back off keeps the top-left "
+	  "value and gives it to the other three.",
+	  "", "ui#elements" },
+	{ "UI Widget/Border Width", "",
+	  "An outline drawn INSIDE the surface, following its rounding. Inside rather "
+	  "than around it, so a thicker line never overlaps the neighbours: the "
+	  "element's rectangle is what the layout gave it and does not grow.",
+	  "", "ui#elements" },
+	{ "UI Widget/Border Color", "",
+	  "The outline's colour. Its own alpha, so a faint hairline over a dark "
+	  "surface needs no second element.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient", "",
+	  "Fades the surface from its own colour to a second one instead of filling it "
+	  "flat. It is a property, not a shader: it costs no material, shows in the "
+	  "designer straight away, and works in every backend.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient Color", "",
+	  "The colour the surface fades TO. It starts at the element's own colour, so "
+	  "a gradient is two colours and an angle and nothing else.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient Angle", "",
+	  "Which way the fade runs, clockwise from straight down: 0 fades top to "
+	  "bottom, 90 left to right. Down at zero because a vertical fade is what a "
+	  "button or a header almost always wants, and the common case should need no "
+	  "number typed into it.",
+	  "", "ui#elements" },
 	{ "UI Widget/Text Align", "",
 	  "Where the text sits inside its own box: the nine cells are left/centre/right "
 	  "across and top/middle/bottom down. This is not the anchor — the anchor places "

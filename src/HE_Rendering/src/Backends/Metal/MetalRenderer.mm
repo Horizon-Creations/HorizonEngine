@@ -1224,7 +1224,22 @@ vertex UIVert uiVertex(uint vid [[vertex_id]],
     o.luv = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     return o;
 }
-// shape = { mode, cornerRadius(px), rectW(px), rectH(px) }.
+// One rounded box, four radii. `p` is the point relative to the box's centre
+// (y down), `radii` is { top-left, top-right, bottom-right, bottom-left }: the
+// quadrant `p` falls in picks its own corner, and the rest is the ordinary
+// rounded-box distance. With all four equal it is exactly the formula that
+// stood here before, so nothing that used one radius changes by a pixel.
+static float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
+{
+    float r = (p.x > 0.0) ? ((p.y > 0.0) ? radii.z : radii.y)
+                          : ((p.y > 0.0) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+// shape = { mode, maxCornerRadius(px), rectW(px), rectH(px) }; the four radii
+// themselves ride in `radii` (buffer 6). shape.y is only the "is this rounded at
+// all" question the fast path asks.
 // mode 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
 // quad (RGBA from texture(0), tinted by colour). Modes 1 and 2 share the slot:
 // a glyph run binds the atlas there, an image its own texture.
@@ -1240,6 +1255,7 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& borderA [[buffer(3)]],
                            constant float4& grad [[buffer(4)]],
                            constant float4& gradP [[buffer(5)]],
+                           constant float4& radii [[buffer(6)]],
                            texture2d<float> atlas [[texture(0)]])
 {
     if (shape.x > 0.5 && shape.x < 1.5) {
@@ -1254,11 +1270,7 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
         if (shape.y <= 0.0) return c;
         // A rounded image is the same SDF the solid path uses, applied to the
         // sampled alpha — that is what makes a rounded avatar possible at all.
-        float2 halfSzT = shape.zw * 0.5;
-        float  rT      = min(shape.y, min(halfSzT.x, halfSzT.y));
-        float2 pT      = (in.luv - 0.5) * shape.zw;
-        float2 qT      = abs(pT) - (halfSzT - rT);
-        float  dT      = length(max(qT, 0.0)) + min(max(qT.x, qT.y), 0.0) - rT;
+        float dT = heRoundedBoxSDF((in.luv - 0.5) * shape.zw, shape.zw * 0.5, radii);
         return float4(c.rgb, c.a * clamp(0.5 - dT, 0.0, 1.0));
     }
     // The surface colour, before any shape is cut out of it: a linear fade from
@@ -1275,13 +1287,9 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
     // Square AND borderless is the one case that needs no distance field at all,
     // so it stays the crisp fast path it always was.
     if (shape.y <= 0.0 && border.x <= 0.0) return fill;
-    // Solid quad with rounded corners (radius = min(w,h)/2 → circle).
-    float2 halfSz = shape.zw * 0.5;
-    float  r      = min(shape.y, min(halfSz.x, halfSz.y));
-    float2 p      = (in.luv - 0.5) * shape.zw;
-    float2 q      = abs(p) - (halfSz - r);
-    float  d      = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-    float  cov  = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d is in pixels)
+    // Solid quad with rounded corners (all four at min(w,h)/2 → circle).
+    float d    = heRoundedBoxSDF((in.luv - 0.5) * shape.zw, shape.zw * 0.5, radii);
+    float cov  = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d is in pixels)
     if (border.x <= 0.0) return float4(fill.rgb, fill.a * cov);
     // The border is the ring between the shape's edge and the same shape shrunk
     // by its width: `d` is a signed distance in pixels, so the inner edge is
@@ -11169,9 +11177,15 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
 		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };
 		const simd::float4 uvr   = { obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y };
-		// shape = { mode, cornerRadius, rectW, rectH } (see uiFragment).
+		// shape = { mode, maxCornerRadius, rectW, rectH } (see uiFragment): the
+		// maximum is what the "is this rounded at all" fast path asks, the four
+		// radii themselves go in their own slot.
 		const float mode = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
-		const simd::float4 shape = { mode, obj.cornerRadius, obj.size.x, obj.size.y };
+		const float maxR = std::max(std::max(obj.cornerRadius.x, obj.cornerRadius.y),
+		                            std::max(obj.cornerRadius.z, obj.cornerRadius.w));
+		const simd::float4 shape = { mode, maxR, obj.size.x, obj.size.y };
+		const simd::float4 radii = { obj.cornerRadius.x, obj.cornerRadius.y,
+		                             obj.cornerRadius.z, obj.cornerRadius.w };
 		const simd::float4 rot = { obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f };
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
 		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
@@ -11191,6 +11205,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setFragmentBytes:&borderA length:sizeof(borderA) atIndex:3];
 		[enc setFragmentBytes:&grad    length:sizeof(grad)    atIndex:4];
 		[enc setFragmentBytes:&gradP   length:sizeof(gradP)   atIndex:5];
+		[enc setFragmentBytes:&radii   length:sizeof(radii)   atIndex:6];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	}
 	// Hand the encoder back in the state it was given in: the scissor is

@@ -21,9 +21,15 @@ struct UIRenderObject {
     int         layer     = 0;
     glm::vec2   uvMin     = {0.0f, 0.0f}; // glyph quads: atlas UV rect
     glm::vec2   uvMax     = {0.0f, 0.0f};
-    // Corner radius in pixels for solid quads (type 0); 0 = square. A value of
-    // min(w,h)/2 yields a circle — used for the slider handle. Ignored by glyphs.
-    float       cornerRadius = 0.0f;
+    // Corner radii in pixels for solid quads (type 0), one per corner in CSS
+    // order: x = top-left, y = top-right, z = bottom-right, w = bottom-left.
+    // 0 = square. All four at min(w,h)/2 yields a circle — used for the slider
+    // handle. Ignored by glyphs.
+    //
+    // Four rather than one because a tab, a chat bubble and the top half of a
+    // card all round some corners and not others, and every one of those was
+    // impossible to author with a single number.
+    glm::vec4   cornerRadius{ 0.0f, 0.0f, 0.0f, 0.0f };
     // ── Border ("Schicht 0", docs/he-apps-plan.md D5) ────────────────────────
     // An outline drawn INSIDE the quad, following the corner radius, in pixels.
     // 0 = none, which is what every quad carried before borders existed.

@@ -2017,6 +2017,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {
             ImGui::PopStyleVar(2);
+            // This form is the Project Hub's create form in a modal — the same
+            // controls, so the same help scope. Without it the rows here are
+            // filed under whatever scope happens to precede them in this file,
+            // which is the Help MENU.
+            HE::Ed::Help::Scope helpScope("Project Hub");
 
             if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
             ImGui::TextUnformatted("New Project");
