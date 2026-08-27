@@ -295,6 +295,78 @@ namespace
 	  "Shows a native message box and waits until the user dismisses it. Kind is "
 	  "0 for information, 1 for a warning, 2 for an error. Blocking on purpose: "
 	  "it is for what must be read before anything else happens." },
+	// ── JSON ─────────────────────────────────────────────────────────────────
+	{ "json.getString",
+	  "Reads a text value out of JSON. The path is dotted, with [i] for array "
+	  "elements: \"user.name\", \"items[2].id\". Missing, wrong type or unparsable "
+	  "text all give you the fallback." },
+	{ "json.getNumber",
+	  "Reads a number out of JSON at a dotted path. Missing, wrong type or "
+	  "unparsable text all give you the fallback rather than an error." },
+	{ "json.getBool",
+	  "Reads a true/false value out of JSON at a dotted path. Falls back to the "
+	  "given value when the path is missing or holds something else." },
+	{ "json.has",
+	  "True when the dotted path exists in the JSON text. Says nothing about what "
+	  "type the value has, only that something is there." },
+	{ "json.count",
+	  "How many elements the array at this path has, or zero when the path is not "
+	  "an array. Use it to walk items[0], items[1] without guessing the end." },
+	{ "json.setString",
+	  "Writes a text value into JSON and returns the whole document as new text. "
+	  "Missing objects along the path are created; an empty input starts a new "
+	  "document." },
+	{ "json.setNumber",
+	  "Writes a number into JSON at a dotted path and returns the whole document "
+	  "as new text. Missing objects along the path are created." },
+	{ "json.setBool",
+	  "Writes a true/false value into JSON at a dotted path and returns the whole "
+	  "document as new text. Missing objects along the path are created." },
+
+	// ── Preferences ──────────────────────────────────────────────────────────
+	{ "prefs.getString",
+	  "Reads a saved setting as text, or the fallback when it was never set. "
+	  "Preferences are small scraps like a last folder — not the save system, "
+	  "which is shaped by a template and belongs to a game's progress." },
+	{ "prefs.getNumber",
+	  "Reads a saved setting as a number, or the fallback when it was never set "
+	  "or holds something else." },
+	{ "prefs.getBool",
+	  "Reads a saved setting as true/false, or the fallback when it was never set. "
+	  "The natural home for \"don't show this again\"." },
+	{ "prefs.setString",
+	  "Saves a text setting under a key. Written to disk immediately, so a crash "
+	  "cannot cost more than the last change." },
+	{ "prefs.setNumber",
+	  "Saves a numeric setting under a key. Written to disk immediately." },
+	{ "prefs.setBool",
+	  "Saves a true/false setting under a key. Written to disk immediately." },
+	{ "prefs.has",
+	  "True when this key has ever been set. Lets a first run be told apart from "
+	  "one where the user deliberately chose the default." },
+	{ "prefs.remove",
+	  "Forgets one setting, so the next read gets its fallback again. False when "
+	  "there was nothing under that key." },
+	{ "prefs.clear",
+	  "Forgets every setting at once — what a \"reset to defaults\" button does." },
+
+	// ── Date and time ────────────────────────────────────────────────────────
+	{ "datetime.now",
+	  "The current wall-clock time as seconds since 1970. This is the clock the "
+	  "operating system shows, not the game clock: pausing does not stop it." },
+	{ "datetime.format",
+	  "Turns a time into text using a strftime pattern, in local time. "
+	  "\"%Y-%m-%d %H:%M\" gives you 2026-08-27 14:32." },
+	{ "datetime.year",   "The year of that time, in local time, as a full number like 2026." },
+	{ "datetime.month",  "The month of that time in local time, 1 for January through 12." },
+	{ "datetime.day",    "The day of the month of that time, in local time, from 1 to 31." },
+	{ "datetime.hour",   "The hour of that time in local time, from 0 to 23." },
+	{ "datetime.minute", "The minute of that time in local time, from 0 to 59." },
+	{ "datetime.second", "The second of that time in local time, 0 to 60 (leap seconds)." },
+	{ "datetime.weekday",
+	  "The day of the week of that time in local time, with 0 for Sunday through "
+	  "6 for Saturday." },
+
 	{ "dialog.confirm",
 	  "Asks a yes/no question in a native dialog and returns true for the first "
 	  "button. Both labels are yours, so it can ask \"Save\" against \"Discard\" "

@@ -423,6 +423,14 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		fs::create_directories(root / "Content" / "Source");
 		fs::create_directories(root / "Content" / "UI");
 		break;
+	// An application is UI and the things UI draws with. No Models, no Scenes,
+	// no Materials — the last of those only when Advanced Shader Effects are on,
+	// and even then a folder can be made when the first one is.
+	case ProjectPreset::Application:
+		fs::create_directories(root / "Content" / "UI");
+		fs::create_directories(root / "Content" / "Textures");
+		fs::create_directories(root / "Content" / "Fonts");
+		break;
 	case ProjectPreset::Empty:
 	default:
 		break;
@@ -435,10 +443,18 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		fs::create_directories(root / "Content" / "Scripts");
 
 	// ── Write .heproj manifest ─────────────────────────────────────────────────
-	// Default startup scene: Content/StartupScene.hescene
-	fs::path scenePath = root / "Content" / "StartupScene.hescene";
+	// Choosing the Application preset IS the decision that this is an app, so the
+	// caller's flag and the preset are merged here rather than left able to
+	// disagree.
+	const bool isApp = appProject || preset == ProjectPreset::Application;
 
+	// Default startup scene: Content/StartupScene.hescene — except for an
+	// application, which has no world to load one into. Its startupScene stays
+	// empty, and the runtime's app mode never looks for one.
+	fs::path scenePath;
+	if (!isApp)
 	{
+		scenePath = root / "Content" / "StartupScene.hescene";
 		std::ofstream sceneOut(scenePath);
 		if (sceneOut.is_open())
 			sceneOut << startupSceneJson(preset).dump(4);
@@ -449,9 +465,9 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["id"]             = newProjectId();
 	j["version"]        = "1.0";
 	j["preset"]         = static_cast<int>(preset);
-	j["startupScene"]   = "Content/StartupScene.hescene";
+	j["startupScene"]   = isApp ? std::string() : std::string("Content/StartupScene.hescene");
 	j["scriptLanguage"] = HE::tools::toString(scriptLanguage);
-	j["appProject"]            = appProject;
+	j["appProject"]            = isApp;
 	j["advancedShaderEffects"] = advancedShaderEffects;
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
@@ -482,11 +498,11 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 
 	m_currentProject.name                = projectName;
 	m_currentProject.path                = heprojPath.string();
-	m_currentProject.startupScene        = scenePath.string();
+	m_currentProject.startupScene        = scenePath.string();   // empty for an application
 	m_currentProject.exportProfiles      = profiles;
 	m_currentProject.activeExportProfile = profiles.front().name;
 	m_currentProject.scriptLanguage      = scriptLanguage;
-	m_currentProject.appProject            = appProject;
+	m_currentProject.appProject            = isApp;
 	m_currentProject.advancedShaderEffects = advancedShaderEffects;
 	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
 	                    "%zu export profile(s), startup scene '%s', kind %s, "
@@ -495,7 +511,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	            HE::tools::toString(m_currentProject.scriptLanguage),
 	            static_cast<int>(preset), m_currentProject.exportProfiles.size(),
 	            m_currentProject.startupScene.c_str(),
-	            appProject ? "application" : "game",
+	            isApp ? "application" : "game",
 	            advancedShaderEffects ? "on" : "off");
 
 	if (m_onProjectLoaded)

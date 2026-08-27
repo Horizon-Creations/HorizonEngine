@@ -502,6 +502,72 @@ namespace fs {
     bool        remove(const std::string& rel);               // files only
     bool        makeDir(const std::string& rel);
 }
+
+// ── JSON ─────────────────────────────────────────────────────────────────────
+// Reading and writing JSON text, addressed by a dotted PATH: "user.name",
+// "items[2].id", "" for the document itself. Text in, text out, because that is
+// what a typed-pin graph can carry — an in-memory document type would need a
+// handle, a lifetime and a way to leak one.
+//
+// Every getter takes the value to return when the path is missing, the type is
+// wrong or the text does not parse. None of them throw and none of them log:
+// asking a document whether it has something is a normal thing to do.
+namespace json {
+    std::string getString(Ctx&, const std::string& text, const std::string& path,
+                          const std::string& fallback);
+    double      getNumber(Ctx&, const std::string& text, const std::string& path, double fallback);
+    bool        getBool  (Ctx&, const std::string& text, const std::string& path, bool fallback);
+    bool        has      (Ctx&, const std::string& text, const std::string& path);
+    // Elements at `path` when it names an array, else 0. Lets a graph walk
+    // "items[0]", "items[1]", … without guessing where to stop.
+    int         count    (Ctx&, const std::string& text, const std::string& path);
+    // Setters return the WHOLE document as new text. Missing intermediate
+    // objects are created; a path through something that is not an object (or
+    // text that does not parse) returns the input unchanged.
+    std::string setString(Ctx&, const std::string& text, const std::string& path,
+                          const std::string& value);
+    std::string setNumber(Ctx&, const std::string& text, const std::string& path, double value);
+    std::string setBool  (Ctx&, const std::string& text, const std::string& path, bool value);
+}
+
+// ── Preferences ──────────────────────────────────────────────────────────────
+// Small persistent settings: window position, last folder, "don't show this
+// again". Deliberately NOT the save system — that one is shaped by a
+// SaveGameTemplate asset and belongs to a game's progress, while these are
+// key/value scraps an application accumulates. Stored as one JSON file inside
+// the same sandbox the fs group uses, written on every change so a crash cannot
+// lose more than the last setting.
+namespace prefs {
+    std::string getString(Ctx&, const std::string& key, const std::string& fallback);
+    double      getNumber(Ctx&, const std::string& key, double fallback);
+    bool        getBool  (Ctx&, const std::string& key, bool fallback);
+    void        setString(Ctx&, const std::string& key, const std::string& value);
+    void        setNumber(Ctx&, const std::string& key, double value);
+    void        setBool  (Ctx&, const std::string& key, bool value);
+    bool        has      (Ctx&, const std::string& key);
+    bool        remove   (Ctx&, const std::string& key);
+    void        clear    (Ctx&);
+}
+
+// ── Date and time ────────────────────────────────────────────────────────────
+// The WALL clock, unlike the time group, which is the game's. An application
+// showing "last saved 14:32" needs the one that keeps running when the game is
+// paused and matches what the operating system says.
+namespace datetime {
+    // Seconds since the Unix epoch, as a double so it survives a Float pin.
+    double      now(Ctx&);
+    // strftime format ("%Y-%m-%d %H:%M:%S" and friends), in LOCAL time.
+    std::string format(Ctx&, double epochSeconds, const std::string& fmt);
+    // Individual fields of the local time, since a graph pulling one number out
+    // of a formatted string is a parser nobody wanted to write.
+    int         year  (Ctx&, double epochSeconds);
+    int         month (Ctx&, double epochSeconds);   // 1..12
+    int         day   (Ctx&, double epochSeconds);   // 1..31
+    int         hour  (Ctx&, double epochSeconds);   // 0..23
+    int         minute(Ctx&, double epochSeconds);   // 0..59
+    int         second(Ctx&, double epochSeconds);   // 0..60 (leap second)
+    int         weekday(Ctx&, double epochSeconds);  // 0 = Sunday
+}
 // ── Savegames: one ACTIVE, template-shaped save document ─────────────────────
 // A save is { id, templateRef, fields, entities }: its fields are declared by a
 // SaveGameTemplate asset (typed, with defaults — so scripts never have to

@@ -13,6 +13,12 @@ enum class ProjectPreset
 	Simulation,  // Assets, Scenes, Data sub-folders
 	Tool,        // Assets, Source sub-folders
 	Tutorial,    // Game skeleton + a furnished sandbox scene for the guided tour
+	// An APPLICATION rather than a game (docs/he-apps-plan.md E1): UI, textures
+	// and fonts, and deliberately NO startup scene — there is no world to put one
+	// in. Choosing it is what sets ProjectData::appProject, so the two can never
+	// disagree. Appended last: the value is written into the .heproj as a plain
+	// int, so the order above is on-disk format.
+	Application,
 };
 
 // The gameplay scripting language a project is authored in, chosen at creation

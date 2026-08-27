@@ -1956,3 +1956,130 @@ TEST_CASE("possession is one controller per character, both ways round")
     CHECK(player::controller() == 0u);
     CHECK(player::character() == 0u);
 }
+
+// ─── JSON ─────────────────────────────────────────────────────────────────────
+// The path walker is the whole risk here: dotted keys, [i] indices, and a
+// refusal to invent values where a step is missing or the wrong kind.
+
+TEST_CASE("json: reading by dotted path")
+{
+    Ctx c;
+    const std::string doc =
+        R"({"user":{"name":"Ada","age":36,"admin":true},)"
+        R"("items":[{"id":10},{"id":20},{"id":30}],"empty":[]})";
+
+    using namespace HE::api;
+    CHECK(json::getString(c, doc, "user.name", "?") == "Ada");
+    CHECK(json::getNumber(c, doc, "user.age", -1.0) == doctest::Approx(36.0));
+    CHECK(json::getBool(c, doc, "user.admin", false) == true);
+    CHECK(json::getNumber(c, doc, "items[1].id", -1.0) == doctest::Approx(20.0));
+
+    // Missing, wrong type, and unparsable text all take the fallback — none of
+    // them are errors a graph should have to guard against.
+    CHECK(json::getString(c, doc, "user.nope", "fallback") == "fallback");
+    CHECK(json::getString(c, doc, "user.age", "fallback") == "fallback");   // wrong type
+    CHECK(json::getNumber(c, "not json at all", "a.b", 5.0) == doctest::Approx(5.0));
+    CHECK(json::getNumber(c, doc, "items[9].id", 5.0) == doctest::Approx(5.0)); // out of range
+
+    // A non-numeric index must NOT quietly read element 0.
+    CHECK(json::getNumber(c, doc, "items[x].id", -7.0) == doctest::Approx(-7.0));
+
+    CHECK(json::has(c, doc, "user.name"));
+    CHECK_FALSE(json::has(c, doc, "user.middleName"));
+    CHECK(json::count(c, doc, "items") == 3);
+    CHECK(json::count(c, doc, "empty") == 0);
+    CHECK(json::count(c, doc, "user") == 0);   // not an array
+}
+
+TEST_CASE("json: writing returns the whole document")
+{
+    Ctx c;
+    using namespace HE::api;
+
+    // Missing objects along the path are created.
+    const std::string built = json::setString(c, "", "window.title", "Notes");
+    CHECK(json::getString(c, built, "window.title", "?") == "Notes");
+
+    const std::string withNum = json::setNumber(c, built, "window.width", 640.0);
+    CHECK(json::getNumber(c, withNum, "window.width", -1.0) == doctest::Approx(640.0));
+    CHECK(json::getString(c, withNum, "window.title", "?") == "Notes"); // untouched
+
+    const std::string withBool = json::setBool(c, withNum, "window.maximized", true);
+    CHECK(json::getBool(c, withBool, "window.maximized", false) == true);
+
+    // Text that is neither empty nor valid JSON comes back unchanged: a setter
+    // must not silently discard whatever the caller was holding.
+    const std::string junk = "{ this is not json";
+    CHECK(json::setString(c, junk, "a", "b") == junk);
+}
+
+// ─── DateTime ────────────────────────────────────────────────────────────────
+
+TEST_CASE("datetime: fields and formatting agree with each other")
+{
+    Ctx c;
+    using namespace HE::api;
+
+    const double t = datetime::now(c);
+    CHECK(t > 1.6e9);   // any real clock is past 2020
+
+    // The parts and the formatted string are two views of the same instant, so
+    // they have to agree — which is what catches a UTC/local mix-up.
+    const std::string ymd = datetime::format(c, t, "%Y-%m-%d");
+    REQUIRE(ymd.size() == 10);
+    CHECK(std::stoi(ymd.substr(0, 4)) == datetime::year(c, t));
+    CHECK(std::stoi(ymd.substr(5, 2)) == datetime::month(c, t));
+    CHECK(std::stoi(ymd.substr(8, 2)) == datetime::day(c, t));
+
+    CHECK(datetime::month(c, t)   >= 1);
+    CHECK(datetime::month(c, t)   <= 12);
+    CHECK(datetime::hour(c, t)    <= 23);
+    CHECK(datetime::minute(c, t)  <= 59);
+    CHECK(datetime::weekday(c, t) <= 6);
+
+    // An empty format is not a reason to guess.
+    CHECK(datetime::format(c, t, "").empty());
+}
+
+// ─── Preferences ─────────────────────────────────────────────────────────────
+
+TEST_CASE("prefs: typed round-trip inside the fs sandbox")
+{
+    Ctx c;
+    using namespace HE::api;
+
+    const auto sandbox = std::filesystem::temp_directory_path() / "he_test_prefs";
+    std::filesystem::remove_all(sandbox);
+    fs::setSandboxRoot(sandbox.string());
+
+    // Start from a known state: the store is a process-wide singleton, so a
+    // previous test's keys would otherwise leak in.
+    prefs::clear(c);
+
+    CHECK_FALSE(prefs::has(c, "lastFolder"));
+    CHECK(prefs::getString(c, "lastFolder", "~") == "~");
+
+    prefs::setString(c, "lastFolder", "/tmp/work");
+    prefs::setNumber(c, "windowWidth", 1024.0);
+    prefs::setBool(c, "showTips", false);
+
+    CHECK(prefs::has(c, "lastFolder"));
+    CHECK(prefs::getString(c, "lastFolder", "~") == "/tmp/work");
+    CHECK(prefs::getNumber(c, "windowWidth", -1.0) == doctest::Approx(1024.0));
+    CHECK(prefs::getBool(c, "showTips", true) == false);
+
+    // Wrong type asked for → the fallback, not a coerced value.
+    CHECK(prefs::getNumber(c, "lastFolder", -1.0) == doctest::Approx(-1.0));
+
+    // Every set writes through, so the file is on disk by now.
+    CHECK(std::filesystem::exists(sandbox / "Prefs.json"));
+
+    CHECK(prefs::remove(c, "showTips"));
+    CHECK_FALSE(prefs::remove(c, "showTips"));   // already gone
+    CHECK(prefs::getBool(c, "showTips", true) == true);
+
+    prefs::clear(c);
+    CHECK_FALSE(prefs::has(c, "lastFolder"));
+
+    std::filesystem::remove_all(sandbox);
+}

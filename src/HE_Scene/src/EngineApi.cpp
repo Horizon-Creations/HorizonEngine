@@ -36,6 +36,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>   // datetime::now
+#include <ctime>    // datetime: strftime + localtime_r/localtime_s
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -877,6 +879,260 @@ bool makeDir(const std::string& rel)
                           std::filesystem::is_directory(p, ec));
 }
 } // namespace fs
+
+// ── JSON ─────────────────────────────────────────────────────────────────────
+namespace json {
+namespace {
+// Walk a dotted path with optional [i] indices. Returns nullptr when any step is
+// missing or the wrong kind. An empty path is the document itself, which is what
+// makes count(text, "") work on a top-level array.
+const nlohmann::json* walk(const nlohmann::json& doc, const std::string& path)
+{
+    const nlohmann::json* cur = &doc;
+    size_t i = 0;
+    while (i < path.size() && cur)
+    {
+        if (path[i] == '.') { ++i; continue; }
+        if (path[i] == '[')
+        {
+            const size_t close = path.find(']', i);
+            if (close == std::string::npos || !cur->is_array()) return nullptr;
+            const std::string num = path.substr(i + 1, close - i - 1);
+            // Reject anything that is not a plain non-negative integer: "[x]"
+            // silently becoming index 0 would be a bug that reads like data.
+            if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos)
+                return nullptr;
+            const size_t idx = static_cast<size_t>(std::stoull(num));
+            if (idx >= cur->size()) return nullptr;
+            cur = &(*cur)[idx];
+            i = close + 1;
+            continue;
+        }
+        const size_t next = path.find_first_of(".[", i);
+        const std::string key = path.substr(i, next == std::string::npos ? std::string::npos : next - i);
+        if (!cur->is_object()) return nullptr;
+        const auto it = cur->find(key);
+        if (it == cur->end()) return nullptr;
+        cur = &(*it);
+        i = (next == std::string::npos) ? path.size() : next;
+    }
+    return cur;
+}
+
+// The setter twin: creates missing OBJECT steps on the way down (an array index
+// is never created — growing an array by writing past its end is a different
+// operation and one nobody asked for). Null when the path runs through a
+// non-object.
+nlohmann::json* walkCreate(nlohmann::json& doc, const std::string& path)
+{
+    nlohmann::json* cur = &doc;
+    size_t i = 0;
+    while (i < path.size() && cur)
+    {
+        if (path[i] == '.') { ++i; continue; }
+        if (path[i] == '[')
+        {
+            const size_t close = path.find(']', i);
+            if (close == std::string::npos || !cur->is_array()) return nullptr;
+            const std::string num = path.substr(i + 1, close - i - 1);
+            if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos)
+                return nullptr;
+            const size_t idx = static_cast<size_t>(std::stoull(num));
+            if (idx >= cur->size()) return nullptr;
+            cur = &(*cur)[idx];
+            i = close + 1;
+            continue;
+        }
+        const size_t next = path.find_first_of(".[", i);
+        const std::string key = path.substr(i, next == std::string::npos ? std::string::npos : next - i);
+        if (cur->is_null()) *cur = nlohmann::json::object();
+        if (!cur->is_object()) return nullptr;
+        cur = &(*cur)[key];
+        i = (next == std::string::npos) ? path.size() : next;
+    }
+    return cur;
+}
+
+nlohmann::json parse(const std::string& text)
+{
+    return nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+}
+
+// Shared tail of the three setters: parse, walk, assign, re-serialise. Returns
+// the input untouched on every failure, which is the documented contract.
+template <typename T>
+std::string setAt(const std::string& text, const std::string& path, T&& value)
+{
+    nlohmann::json doc = parse(text);
+    if (doc.is_discarded())
+    {
+        // An empty (or blank) document is not a parse failure worth refusing —
+        // building one up from nothing is the normal way to write JSON here.
+        if (text.find_first_not_of(" \t\r\n") != std::string::npos) return text;
+        doc = nlohmann::json::object();
+    }
+    nlohmann::json* slot = walkCreate(doc, path);
+    if (!slot) return text;
+    *slot = std::forward<T>(value);
+    return doc.dump();
+}
+} // namespace
+
+std::string getString(Ctx&, const std::string& text, const std::string& path,
+                      const std::string& fallback)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return fallback;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_string()) ? v->get<std::string>() : fallback;
+}
+
+double getNumber(Ctx&, const std::string& text, const std::string& path, double fallback)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return fallback;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_number()) ? v->get<double>() : fallback;
+}
+
+bool getBool(Ctx&, const std::string& text, const std::string& path, bool fallback)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return fallback;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_boolean()) ? v->get<bool>() : fallback;
+}
+
+bool has(Ctx&, const std::string& text, const std::string& path)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return false;
+    return walk(doc, path) != nullptr;
+}
+
+int count(Ctx&, const std::string& text, const std::string& path)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return 0;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_array()) ? static_cast<int>(v->size()) : 0;
+}
+
+std::string setString(Ctx&, const std::string& text, const std::string& path,
+                      const std::string& value) { return setAt(text, path, value); }
+std::string setNumber(Ctx&, const std::string& text, const std::string& path, double value)
+{ return setAt(text, path, value); }
+std::string setBool(Ctx&, const std::string& text, const std::string& path, bool value)
+{ return setAt(text, path, value); }
+} // namespace json
+
+// ── Preferences ──────────────────────────────────────────────────────────────
+namespace prefs {
+namespace {
+constexpr const char* kFile = "Prefs.json";
+
+nlohmann::json& doc()
+{
+    static nlohmann::json d = nlohmann::json::object();
+    static bool loaded = false;
+    if (!loaded)
+    {
+        loaded = true;   // set FIRST: a failed read must not retry on every call
+        const std::string text = fs::readText(kFile);
+        if (!text.empty())
+        {
+            nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+            if (parsed.is_object()) d = std::move(parsed);
+            else
+                HE_LOG_WARN(Script, "%s", "prefs: Prefs.json is not a JSON object — starting empty");
+        }
+    }
+    return d;
+}
+
+void store()
+{
+    // Every set writes. These are a handful of keys, and the alternative is
+    // losing the user's settings to a crash for the sake of an fwrite.
+    if (!fs::writeText(kFile, doc().dump(2)))
+        HE_LOG_WARN(Script, "%s", "prefs: could not write Prefs.json — settings will not persist");
+}
+} // namespace
+
+std::string getString(Ctx&, const std::string& key, const std::string& fallback)
+{
+    const auto it = doc().find(key);
+    return (it != doc().end() && it->is_string()) ? it->get<std::string>() : fallback;
+}
+double getNumber(Ctx&, const std::string& key, double fallback)
+{
+    const auto it = doc().find(key);
+    return (it != doc().end() && it->is_number()) ? it->get<double>() : fallback;
+}
+bool getBool(Ctx&, const std::string& key, bool fallback)
+{
+    const auto it = doc().find(key);
+    return (it != doc().end() && it->is_boolean()) ? it->get<bool>() : fallback;
+}
+void setString(Ctx&, const std::string& key, const std::string& value)
+{ doc()[key] = value; store(); }
+void setNumber(Ctx&, const std::string& key, double value) { doc()[key] = value; store(); }
+void setBool  (Ctx&, const std::string& key, bool value)   { doc()[key] = value; store(); }
+bool has      (Ctx&, const std::string& key) { return doc().contains(key); }
+bool remove   (Ctx&, const std::string& key)
+{
+    if (!doc().contains(key)) return false;
+    doc().erase(key);
+    store();
+    return true;
+}
+void clear(Ctx&) { doc() = nlohmann::json::object(); store(); }
+} // namespace prefs
+
+// ── Date and time ────────────────────────────────────────────────────────────
+namespace datetime {
+namespace {
+// localtime_r/localtime_s rather than localtime: this is called from script
+// threads and the shared static buffer is exactly the kind of race that shows up
+// once a month as a wrong timestamp.
+std::tm localParts(double epochSeconds)
+{
+    const std::time_t t = static_cast<std::time_t>(epochSeconds);
+    std::tm out{};
+#ifdef _WIN32
+    localtime_s(&out, &t);
+#else
+    localtime_r(&t, &out);
+#endif
+    return out;
+}
+} // namespace
+
+double now(Ctx&)
+{
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+std::string format(Ctx&, double epochSeconds, const std::string& fmt)
+{
+    if (fmt.empty()) return {};
+    const std::tm parts = localParts(epochSeconds);
+    // 512 is generous for a timestamp; a format that still overruns it gets an
+    // empty string rather than a truncated half-date pretending to be one.
+    char buf[512];
+    const size_t n = std::strftime(buf, sizeof(buf), fmt.c_str(), &parts);
+    return n > 0 ? std::string(buf, n) : std::string();
+}
+
+int year   (Ctx&, double s) { return localParts(s).tm_year + 1900; }
+int month  (Ctx&, double s) { return localParts(s).tm_mon + 1; }
+int day    (Ctx&, double s) { return localParts(s).tm_mday; }
+int hour   (Ctx&, double s) { return localParts(s).tm_hour; }
+int minute (Ctx&, double s) { return localParts(s).tm_min; }
+int second (Ctx&, double s) { return localParts(s).tm_sec; }
+int weekday(Ctx&, double s) { return localParts(s).tm_wday; }
+} // namespace datetime
 
 namespace save {
 namespace {
@@ -2010,6 +2266,96 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){
                 return VV{ Value::ofBool(dialog::confirm(c, aS(a, 0), aS(a, 1), aS(a, 2), aS(a, 3))) }; } });
 
+        // JSON — text in, text out, addressed by a dotted path. Numbers cross as
+        // Float, which is what every numeric pin in a graph already is.
+        t.push_back({ "json.getString", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"fallback", P::String}},
+            {{"value", P::String}}, "HE::api::json::getString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::getString(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "json.getNumber", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"fallback", P::Float}},
+            {{"value", P::Float}}, "HE::api::json::getNumber",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat((float)json::getNumber(c, aS(a, 0), aS(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "json.getBool", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"fallback", P::Bool}},
+            {{"value", P::Bool}}, "HE::api::json::getBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(json::getBool(c, aS(a, 0), aS(a, 1), aB(a, 2))) }; } });
+        t.push_back({ "json.has", "JSON", false,
+            {{"text", P::String}, {"path", P::String}}, {{"present", P::Bool}}, "HE::api::json::has",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(json::has(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "json.count", "JSON", false,
+            {{"text", P::String}, {"path", P::String}}, {{"count", P::Int}}, "HE::api::json::count",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(json::count(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "json.setString", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"value", P::String}},
+            {{"result", P::String}}, "HE::api::json::setString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::setString(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "json.setNumber", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"value", P::Float}},
+            {{"result", P::String}}, "HE::api::json::setNumber",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::setNumber(c, aS(a, 0), aS(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "json.setBool", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"value", P::Bool}},
+            {{"result", P::String}}, "HE::api::json::setBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::setBool(c, aS(a, 0), aS(a, 1), aB(a, 2))) }; } });
+
+        // Preferences — small persistent settings, separate from the save system.
+        t.push_back({ "prefs.getString", "Prefs", false,
+            {{"key", P::String}, {"fallback", P::String}}, {{"value", P::String}},
+            "HE::api::prefs::getString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(prefs::getString(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "prefs.getNumber", "Prefs", false,
+            {{"key", P::String}, {"fallback", P::Float}}, {{"value", P::Float}},
+            "HE::api::prefs::getNumber",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat((float)prefs::getNumber(c, aS(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "prefs.getBool", "Prefs", false,
+            {{"key", P::String}, {"fallback", P::Bool}}, {{"value", P::Bool}},
+            "HE::api::prefs::getBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::getBool(c, aS(a, 0), aB(a, 1))) }; } });
+        t.push_back({ "prefs.setString", "Prefs", true,
+            {{"key", P::String}, {"value", P::String}}, {}, "HE::api::prefs::setString",
+            [](Ctx& c, const VV& a){ prefs::setString(c, aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "prefs.setNumber", "Prefs", true,
+            {{"key", P::String}, {"value", P::Float}}, {}, "HE::api::prefs::setNumber",
+            [](Ctx& c, const VV& a){ prefs::setNumber(c, aS(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "prefs.setBool", "Prefs", true,
+            {{"key", P::String}, {"value", P::Bool}}, {}, "HE::api::prefs::setBool",
+            [](Ctx& c, const VV& a){ prefs::setBool(c, aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "prefs.has", "Prefs", false,
+            {{"key", P::String}}, {{"present", P::Bool}}, "HE::api::prefs::has",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::has(c, aS(a, 0))) }; } });
+        t.push_back({ "prefs.remove", "Prefs", true,
+            {{"key", P::String}}, {{"removed", P::Bool}}, "HE::api::prefs::remove",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::remove(c, aS(a, 0))) }; } });
+        t.push_back({ "prefs.clear", "Prefs", true, {}, {}, "HE::api::prefs::clear",
+            [](Ctx& c, const VV&){ prefs::clear(c); return VV{}; } });
+
+        // Date and time — the WALL clock, unlike the time group.
+        t.push_back({ "datetime.now", "DateTime", false, {}, {{"epochSeconds", P::Float}},
+            "HE::api::datetime::now",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat((float)datetime::now(c)) }; } });
+        t.push_back({ "datetime.format", "DateTime", false,
+            {{"epochSeconds", P::Float}, {"format", P::String}}, {{"text", P::String}},
+            "HE::api::datetime::format",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(datetime::format(c, aF(a, 0), aS(a, 1))) }; } });
+        {
+            // One row per field, all the same shape.
+            struct Part { const char* id; const char* cpp; int (*fn)(Ctx&, double); };
+            static const Part kParts[] = {
+                { "datetime.year",    "HE::api::datetime::year",    &datetime::year    },
+                { "datetime.month",   "HE::api::datetime::month",   &datetime::month   },
+                { "datetime.day",     "HE::api::datetime::day",     &datetime::day     },
+                { "datetime.hour",    "HE::api::datetime::hour",    &datetime::hour    },
+                { "datetime.minute",  "HE::api::datetime::minute",  &datetime::minute  },
+                { "datetime.second",  "HE::api::datetime::second",  &datetime::second  },
+                { "datetime.weekday", "HE::api::datetime::weekday", &datetime::weekday },
+            };
+            for (const Part& p : kParts)
+                t.push_back({ p.id, "DateTime", false, {{"epochSeconds", P::Float}},
+                    {{"value", P::Int}}, p.cpp,
+                    [fn = p.fn](Ctx& c, const VV& a){ return VV{ Value::ofInt(fn(c, aF(a, 0))) }; } });
+        }
+
         // Math (pure)
         auto unary  = [&](const char* id, const char* cpp, float(*fn)(float)) {
             t.push_back({ id, "Math", false, {{"x", P::Float}}, {{"result", P::Float}}, cpp,
@@ -2431,6 +2777,20 @@ const std::vector<ApiFn>& registry()
             { "clipboard.hasText", "Has Clipboard Text" },
             { "dialog.message", "Show Message Dialog" },
             { "dialog.confirm", "Show Confirm Dialog" },
+            { "json.getString", "JSON Get String" }, { "json.getNumber", "JSON Get Number" },
+            { "json.getBool", "JSON Get Bool" },     { "json.has", "JSON Has" },
+            { "json.count", "JSON Array Count" },
+            { "json.setString", "JSON Set String" }, { "json.setNumber", "JSON Set Number" },
+            { "json.setBool", "JSON Set Bool" },
+            { "prefs.getString", "Get Pref String" }, { "prefs.getNumber", "Get Pref Number" },
+            { "prefs.getBool", "Get Pref Bool" },     { "prefs.setString", "Set Pref String" },
+            { "prefs.setNumber", "Set Pref Number" }, { "prefs.setBool", "Set Pref Bool" },
+            { "prefs.has", "Has Pref" }, { "prefs.remove", "Remove Pref" },
+            { "prefs.clear", "Clear Prefs" },
+            { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
+            { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
+            { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },
+            { "datetime.second", "Second" }, { "datetime.weekday", "Weekday" },
             { "math.sin", "Sine" },   { "math.cos", "Cosine" }, { "math.tan", "Tangent" },
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },
