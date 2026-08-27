@@ -43,6 +43,10 @@ public:
     bool isVisible(int id) const;
     int  zOrder(int id) const;
     size_t count() const { return m_instances.size(); }
+    // Ids of every live widget, in creation order. The editor's outliner shows
+    // an application's widget hierarchy instead of a world it does not have
+    // (docs/he-apps-plan.md E2), and `tree(id)` alone cannot say WHICH ids exist.
+    std::vector<int> liveIds() const;
 
     // Route a script call to a HorizonCode function. False when the widget or
     // the function is missing — or the function is not public (access modifier).

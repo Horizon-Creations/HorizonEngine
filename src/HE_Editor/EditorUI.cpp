@@ -2876,7 +2876,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // create/rename/delete menus — all in OutlinerPanel.cpp.
     OutlinerPanel::render(ctx);
 
-    InspectorPanel::render(ctx);
+    // The Details panel edits the selected ENTITY's components. An application
+    // has no entities, and its widgets are edited in the UI designer tab, so the
+    // panel would be permanently empty (docs/he-apps-plan.md E2).
+    if (!ctx.appLivePreview)
+        InspectorPanel::render(ctx);
 
     // Level Script + Game Instance now render as editor tabs (see the tab dispatch).
 

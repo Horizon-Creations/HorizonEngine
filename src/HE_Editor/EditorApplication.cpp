@@ -5473,6 +5473,18 @@ void EditorApplication::setPlayMode(bool play)
 	if (play == m_isPlaying || !m_editorWorld)
 		return;
 
+	// An application project has no play mode at all (docs/he-apps-plan.md E2):
+	// its interface is already running in the panel, and there is no world to
+	// snapshot, wipe and restore. Refused HERE rather than only hidden in the
+	// toolbar, because a shortcut, a menu item or a script reaching this would
+	// otherwise tear the live preview's widgets down with the world.
+	if (m_projectManager.currentProject().appProject)
+	{
+		HE_LOG_INFO(Editor, "%s", "Application project: no play mode — the live preview "
+		                          "is already running (restart it instead)");
+		return;
+	}
+
 	// Either direction lands unpaused: a pause is play-session state, and a
 	// session that started frozen would look exactly like an editor that hung.
 	m_isPaused  = false;

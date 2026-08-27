@@ -2969,6 +2969,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::EndChild();
 	}
 
+	// ── Application projects: save as you design ─────────────────────────────
+	// The live preview rebuilds itself when an asset is SAVED, so an unsaved
+	// change is an invisible one — and "why is nothing happening" is a bad first
+	// experience of a live preview (docs/he-apps-plan.md E2).
+	//
+	// Held back until the mouse is up and no field is being typed into: saving on
+	// every frame of a drag would rebuild the preview dozens of times across one
+	// gesture, and each rebuild throws the app's state away.
+	if (ctx.appLivePreview && st.dirty &&
+	    !ImGui::IsAnyMouseDown() && !ImGui::IsAnyItemActive())
+		saveState(st, ctx);
+
 	ImGui::End();
 }
 

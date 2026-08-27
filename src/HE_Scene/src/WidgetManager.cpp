@@ -897,6 +897,14 @@ bool WidgetManager::selectWordAtPointer(float vpWidth, float vpHeight, float mou
 	return true;
 }
 
+std::vector<int> WidgetManager::liveIds() const
+{
+	std::vector<int> ids;
+	ids.reserve(m_instances.size());
+	for (const Instance& w : m_instances) ids.push_back(w.id);
+	return ids;
+}
+
 bool WidgetManager::selectAllFocused()
 {
 	return editFocusedText(TextEdit::SelectAll, false);

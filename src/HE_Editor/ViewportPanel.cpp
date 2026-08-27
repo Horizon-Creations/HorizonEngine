@@ -347,7 +347,13 @@ void render(AppContext& ctx, float dt)
 		// ── Toolbar (always at top of Scene, works docked or floating) ────────
 		// Zones, wells and the centred transport live in ViewportToolbar; it
 		// leaves the cursor on the first row below the strip.
-		ViewportToolbar::render(ctx, s_tb);
+		//
+		// An application project has none of what the bar edits: no gizmo, no
+		// snapping, no camera speed, no play transport (docs/he-apps-plan.md E2).
+		// The whole strip goes rather than being greyed out — a row of disabled
+		// controls is a promise that they mean something here.
+		if (!ctx.appLivePreview)
+			ViewportToolbar::render(ctx, s_tb);
 
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 
