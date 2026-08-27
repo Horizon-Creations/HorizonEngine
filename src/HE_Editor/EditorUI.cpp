@@ -2096,8 +2096,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::Spacing();
             ImGui::Text("Template");
             ImGui::SetNextItemWidth(-1);
+            // All of them, not the first five — see the Project Hub's twin.
             ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
-                ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount, 5);
+                ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount,
+                ProjectHubPanel::kPresetCount);
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
             ImGui::PopStyleColor();
@@ -2113,15 +2115,24 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::PopStyleColor();
 
             // Advanced Shader Effects: whether this project may author materials
-            // (docs/he-apps-plan.md A0). Unlike the language above this one CAN be
-            // changed later, in the project settings — turning it off then asks
-            // about the materials that already exist.
-            ImGui::Spacing();
-            ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
-            ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
-                ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
-                : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
-                  "Smaller build, no GPU required.");
+            // (docs/he-apps-plan.md A0). Only for APPLICATIONS — a game without
+            // materials is not a thing anyone wants, and offering the switch
+            // everywhere is how an Empty project ended up with materials
+            // disabled by a checkbox its author read as harmless.
+            //
+            // Forced back on for every other template, so leaving it unticked and
+            // then picking Game cannot carry the setting across.
+            if (ctx.hubSelectedPreset == static_cast<int>(ProjectPreset::Application))
+            {
+                ImGui::Spacing();
+                ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
+                ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
+                    ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
+                    : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
+                      "Smaller build, no GPU required.");
+            }
+            else
+                ctx.hubAdvancedShaderFx = true;
 
             ImGui::Spacing();
             if (!ctx.hubCreateError.empty())

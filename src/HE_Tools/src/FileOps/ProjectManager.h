@@ -19,6 +19,10 @@ enum class ProjectPreset
 	// disagree. Appended last: the value is written into the .heproj as a plain
 	// int, so the order above is on-disk format.
 	Application,
+	// Not a template: the number of them. The editor's picker is an array of
+	// names indexed by this enum, and the two drifting apart is how choosing
+	// "Application" silently created an Empty project.
+	COUNT,
 };
 
 // The gameplay scripting language a project is authored in, chosen at creation

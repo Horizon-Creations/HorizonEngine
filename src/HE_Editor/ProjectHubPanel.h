@@ -1,4 +1,5 @@
 #pragma once
+#include "ProjectManager.h"   // ProjectPreset — the enum this file's names index
 
 struct AppContext;
 
@@ -36,4 +37,10 @@ namespace ProjectHubPanel
 		static_cast<int>(sizeof(kPresetNames) / sizeof(kPresetNames[0]));
 	static_assert(sizeof(kPresetNames) == sizeof(kPresetDescs),
 		"every project template needs a name and a description");
+	// The picker hands its INDEX straight to createNewProject as a ProjectPreset,
+	// so a name added here without a value there (or the other way round) makes
+	// the wrong template. That failed silently once — a sixth template the list
+	// never showed — hence a compile error instead.
+	static_assert(kPresetCount == static_cast<int>(ProjectPreset::COUNT),
+		"kPresetNames and ProjectPreset must list the same templates, in the same order");
 }
