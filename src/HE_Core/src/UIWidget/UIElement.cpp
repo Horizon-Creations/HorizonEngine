@@ -671,16 +671,36 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
                   : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
     };
 
+    // ── Sideways scroll ──────────────────────────────────────────────────────
+    // Keep the caret inside the visible strip. Without this a field you can type
+    // more into than it is wide grows a caret that walks off the right edge and
+    // takes the text you are typing with it. Unfocused fields snap back to the
+    // start, because that is the half a reader wants to see.
+    const float inner = std::max(1.0f, ts.x);
+    if (!st.focused) scrollPx = 0.0f;
+    else
+    {
+        const float caretX = widthTo(caret);
+        if (caretX - scrollPx > inner) scrollPx = caretX - inner;
+        if (caretX - scrollPx < 0.0f)  scrollPx = caretX;
+        // Never leave empty space on the right while text hangs off the left —
+        // what happens when the field grows or the text shrinks.
+        const float total = widthTo(text.size());
+        if (total - scrollPx < inner) scrollPx = std::max(0.0f, total - inner);
+        if (scrollPx < 0.0f) scrollPx = 0.0f;
+    }
+    const glm::vec2 sp{ tp.x - scrollPx, tp.y };
+
     // Selection behind the text, so the glyphs stay readable on top of it.
     if (st.focused && selectable && hasSelection())
     {
         const float x0 = widthTo(selMin()), x1 = widthTo(selMax());
         const float h  = std::min(px.h - 4.0f, sizePx * 1.25f);
-        quad(out, tp.x + x0, px.y + (px.h - h) * 0.5f, std::max(1.0f, x1 - x0), h,
+        quad(out, sp.x + x0, px.y + (px.h - h) * 0.5f, std::max(1.0f, x1 - x0), h,
              selectionColor);
     }
 
-    emitText(*this, shownFor(text), tp, ts, sizePx, textColor, false, out);
+    emitText(*this, shownFor(text), sp, ts, sizePx, textColor, false, out);
 
     // The caret: a thin bar at its offset, not a "|" glued to the end of the
     // string — that could only ever be at the end, which is why the field had
@@ -688,7 +708,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     if (st.focused)
     {
         const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
-        quad(out, tp.x + widthTo(caret), px.y + (px.h - h) * 0.5f,
+        quad(out, sp.x + widthTo(caret), px.y + (px.h - h) * 0.5f,
              std::max(1.0f, sizePx * 0.08f), h, textColor);
     }
 }
@@ -713,6 +733,10 @@ size_t UITextInput::caretAtX(float localX, float pxScaleY) const
         return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
                   : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
     };
+    // The click arrives relative to the field's text area; the text inside it may
+    // be scrolled, so undo that first or every click past the scroll point lands
+    // on the wrong character.
+    localX += scrollPx;
     if (localX <= 0.0f) return 0;
     // Walk the boundaries and take the one whose midpoint the click passed —
     // clicking the left half of a character puts the caret before it.

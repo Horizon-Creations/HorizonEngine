@@ -494,6 +494,12 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (!topW || key >= topKey)
 				{
 					topW = &w; topElem = e.id; topKey = key; topCursor = e.hoverCursor;
+					// A text field asks for the I-beam by BEING a text field.
+					// Only when the author picked nothing else: an explicit
+					// hoverCursor is a decision and stays one.
+					if (topCursor == HE::UICursor::Default &&
+					    e.type() == HE::UIWidgetType::TextInput)
+						topCursor = HE::UICursor::Text;
 				}
 			}
 		}

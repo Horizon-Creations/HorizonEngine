@@ -471,6 +471,15 @@ bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
 {
     bool any = false;
     UIWidgetRect acc{};
+    // A text field clips its OWN content, without anyone having to tick a box:
+    // text longer than the field scrolls sideways under the caret, and glyphs
+    // that scrolled out have to stop at the edge instead of spilling across
+    // whatever sits next to the field.
+    if (e.type() == UIWidgetType::TextInput)
+    {
+        acc = uiElementRect(tree, e, canvas);
+        any = true;
+    }
     // Walk up. The chain is short (a UI tree is shallow) and bounded by the
     // element count, so a cycle in a hand-edited file cannot hang this.
     int guard = 0;

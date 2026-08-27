@@ -253,6 +253,12 @@ public:
     // because they belong to the field, and a widget holds its own live copy.
     size_t      caret = 0;
     size_t      selAnchor = 0;
+    // How far the text is scrolled sideways under the field, in the same pixels
+    // the glyphs are measured in. Kept so a caret past the right edge stays
+    // visible instead of typing itself out of the box. Mutable because render()
+    // is the only place that can work it out — it is the one that knows the
+    // field's pixel width — and render() is const for every other element.
+    mutable float scrollPx = 0.0f;
 
     bool   hasSelection() const { return caret != selAnchor; }
     size_t selMin() const { return caret < selAnchor ? caret : selAnchor; }

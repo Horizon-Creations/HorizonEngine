@@ -2351,6 +2351,7 @@ namespace
         }
         std::string text() const { const auto* f = field(); return f ? f->text : std::string(); }
         size_t caret() const     { const auto* f = field(); return f ? f->caret : 0; }
+        float  scrollPx() const  { const auto* f = field(); return f ? f->scrollPx : 0.0f; }
     };
 }
 
@@ -2517,6 +2518,46 @@ TEST_CASE("Text field: dragging selects, double-click takes a word")
     // …and the triple-click path takes everything.
     CHECK(f.wm.selectAllFocused());
     CHECK(f.wm.focusedSelection() == "hello world");
+}
+
+TEST_CASE("Text field: long text scrolls under the caret and clicks still land")
+{
+    // A field far narrower than its text: 400 px of canvas, and enough text that
+    // the end of it cannot be on screen at the same time as the start.
+    // ~740 px of Roboto at the field's 18 px against 388 px of visible strip:
+    // comfortably past the edge, so the scroll cannot be an accident of rounding.
+    TextFieldFixture f("the quick brown fox jumps over the lazy dog again and again, "
+                       "and once more for good measure, and then a little further");
+    using TE = WidgetManager::TextEdit;
+    std::vector<UIRenderObject> out;
+    // The fixture's click landed wherever 395 px into the text is, which for a
+    // string this long is the middle — so the caret is asked to the END first.
+    // That is the position the field cannot show without scrolling.
+    CHECK(f.wm.editFocusedText(TE::End, false));
+    f.wm.extract(400.0f, 200.0f, out);
+    CHECK(f.scrollPx() > 0.0f);
+
+    // Every glyph the field emits is clipped to the field, so nothing spills out
+    // sideways over whatever sits next to it.
+    bool sawClippedGlyph = false;
+    for (const UIRenderObject& o : out)
+        if (o.type == 2 && o.clipRect.z > 0.0f) sawClippedGlyph = true;
+    CHECK(sawClippedGlyph);
+
+    // Home brings it back to the start on the next draw.
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    out.clear();
+    f.wm.extract(400.0f, 200.0f, out);
+    CHECK(f.scrollPx() == doctest::Approx(0.0f));
+
+    // Back to the end, then click near the right edge: the caret must land in
+    // the LAST word, not where that pixel would be in unscrolled text.
+    CHECK(f.wm.editFocusedText(TE::End, false));
+    out.clear();
+    f.wm.extract(400.0f, 200.0f, out);
+    REQUIRE(f.scrollPx() > 0.0f);
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 390.0f));
+    CHECK(f.caret() > 40);
 }
 
 TEST_CASE("Text field: multi-byte characters move and delete as one")
