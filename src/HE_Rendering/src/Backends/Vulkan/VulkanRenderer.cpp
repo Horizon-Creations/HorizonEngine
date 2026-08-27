@@ -63,17 +63,21 @@ namespace
         glm::vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
     };
 
-    // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
-    struct SkyUBOData
-    {
-        glm::mat4  invViewProj;                          // offset   0, 64 bytes
-        glm::vec3  sunDir;       float timeOfDay;        // offset  64, 16 bytes
-        glm::vec3  sunColor;     float cloudCoverage;    // offset  80, 16 bytes
-        glm::vec3  wind;         float time;             // offset  96, 16 bytes
-        glm::vec3  auroraColor;  float aurora;           // offset 112, 16 bytes
-        float      milkyWay;     float flash;  int hasMoonTex;  float nebula; // offset 128, 16 bytes
-        glm::vec3  nebulaColor;  float _pad2;            // offset 144, 16 bytes
-    }; // 160 bytes
+    // Sky pass UBO (set=0 binding=0 in sky.frag).
+    //
+    // Hier stand eine eigene, kleinere und anders sortierte Struktur: 160 Bytes,
+    // timeOfDay bei Offset 76 statt in params.x, und die Haelfte von
+    // HE::SkyFrameParams fehlte ganz (der komplette Sternblock, Mondphase,
+    // Wolkenparameter, Nebel 2/3, God-Rays, Meteore). drawSky musste deshalb 15
+    // Felder von Hand umtragen -- und was dort nicht stand, kam im Shader nie an.
+    // Genau daran hingen HE_DUMP_STARDENS und Geschwister: auf Vulkan wirkungslos,
+    // ohne dass irgendetwas gemeldet haette.
+    //
+    // Jetzt IST der UBO die kanonische Struktur. Der std140-Block in sky.frag ist
+    // offset-gleich (mat4 + 17 vec4 = 336 Bytes), also wird sie unveraendert
+    // memcpy't. Geprueft an den Offsets im kompilierten SPIR-V, nicht durch
+    // Nachrechnen: scripts/check_sky_ubo_layout.py.
+    using SkyUBOData = HE::SkyFrameParams;
 
     // Debug line pass constant buffer (set=0 binding=0 in debug_line.vert).
     struct DebugUBOData
@@ -5046,9 +5050,10 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     const glm::mat4 vp = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
     // The one shared EnvironmentSettings → sky-constants translation. sky.frag's
-    // UBO is a REDUCED copy of HE::SkyFrameParams (see the header block in
-    // shaders/sky.frag), so the fields are read out by name instead of memcpy'd —
-    // a blanket copy would misalign every offset past invViewProj.
+    // UBO IST inzwischen HE::SkyFrameParams, Feld fuer Feld offset-gleich, also
+    // geht die Struktur unveraendert hinueber. Der Satz hier lautete frueher, ein
+    // pauschales Kopieren wuerde "jeden Offset hinter invViewProj verschieben" --
+    // das galt fuer den alten 160-Byte-Block und gilt seit P3b nicht mehr.
     HE::SkyFrameInputs in;
     in.invViewProj    = glm::inverse(vp);
     in.sunDir         = glm::normalize(m_renderWorld.sunDirection);
@@ -5057,28 +5062,16 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     in.hasMoonTexture = (m_moonImage != VK_NULL_HANDLE);
     const HE::SkyFrameParams p = HE::BuildSkyFrameParams(m_environment, in);
 
-    SkyUBOData sky{};
-    sky.invViewProj   = p.invViewProj;
-    sky.sunDir        = glm::vec3(p.sunDir);
-    sky.timeOfDay     = p.params.x;
-    sky.sunColor      = glm::vec3(p.sunColor);
-    sky.cloudCoverage = p.params.y;
-    // Cloud drift: world-units/sec, now HE::CloudWindVector. This backend used to
-    // drop the negation on Z (vec3(sin, 0, cos)), drifting the clouds 180° away
-    // from GL/Metal; the shared vector is the GL/Metal form.
-    sky.wind          = glm::vec3(p.wind);
-    sky.time          = p.params.z;
-    sky.auroraColor   = glm::vec3(p.auroraColor);
-    sky.aurora        = p.params.w;
-    sky.milkyWay      = p.auroraColor.w;
-    sky.flash         = p.wind.w;
-    sky.hasMoonTex    = (p.sunDir.w != 0.0f) ? 1 : 0;
-    sky.nebula        = p.nebulaColor.w;
-    sky.nebulaColor   = glm::vec3(p.nebulaColor);
-    // sky._pad2 is left zeroed by the SkyUBOData{} value-initialisation above.
-
+    // Cloud drift kommt als HE::CloudWindVector mit. Dieses Backend liess die
+    // Negation auf Z frueher weg (vec3(sin, 0, cos)) und trieb die Wolken 180°
+    // von GL/Metal weg; der gemeinsame Vektor ist die GL/Metal-Form.
+    static_assert(sizeof(HE::SkyFrameParams) == 336,
+                  "SkyFrameParams ist nicht mehr 336 Bytes — sky.frags std140-Block "
+                  "und die Metal-Kopie muessen mitziehen, sonst kommen im Shader "
+                  "verschobene Werte an. scripts/check_sky_ubo_layout.py prueft die "
+                  "Shader-Seite.");
     if (m_skyUBO[m_currentFrame].mapped)
-        std::memcpy(m_skyUBO[m_currentFrame].mapped, &sky, sizeof(sky));
+        std::memcpy(m_skyUBO[m_currentFrame].mapped, &p, sizeof(p));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,

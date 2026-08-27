@@ -8,27 +8,44 @@
 // its own sky constant buffer by hand — five hand-maintained mappings that could
 // (and did) drift; D3D11/D3D12 both had the cloud wind's Z sign inverted. The
 // layout mirrors the MSL SkyParams struct (mat4 + 17 float4) because that is the
-// richest of the five; backends whose sky shader takes a smaller constant buffer
-// read the named fields they need out of this instead of memcpy'ing the whole
-// thing (Vulkan, D3D11 and D3D12 all do that — their UBO/CB is a subset).
+// richest of the five. Seit P3b ist es nicht mehr nur das reichste, sondern das
+// EINZIGE: Vulkan, D3D11 und D3D12 hatten bis dahin jeder einen eigenen, kleineren
+// Ausschnitt und lasen benannte Felder daraus statt zu kopieren -- weshalb elf bis
+// zwoelf der siebzehn float4 dort schlicht nicht ankamen.
 //
-// STATE OF THE MIGRATION — 4 of 5 backends translate through this. ONLY Metal
-// copies the struct wholesale; do not assume the others do:
-//   Metal   memcpy of the whole struct (the layout IS the MSL SkyParams).
-//   Vulkan  reads 15 named fields into its own 160-byte SkyUBOData and memcpies
-//           THAT. A blanket copy of this 336-byte struct would misalign every
-//           offset past invViewProj (VulkanRenderer.cpp, the sky UBO fill).
-//   D3D11   reads the 12 named fields its smaller SkyCB has (D3D11Renderer.cpp,
-//           D3D11RendererImpl::drawSky).
-//   D3D12   the same 12 plus the nebula pair its shader has and D3D11's lacks
-//           (D3D12Renderer.cpp, D3D12RendererImpl::drawSky).
-//   OpenGL  DOES NOT. Its sky program uses loose uniforms, not a UBO, so there is
-//           no POD to memcpy into — each field must be pushed with its own
-//           glUniform* call against a cached location. It therefore still maps
-//           its ~54 sky uniforms by hand, in the
-//           `if (m_skyProgram && GetEnvironment().skyEnabled)` block of
-//           OpenGLRenderer::DrawScene. A NEW FIELD MUST BE ADDED THERE TOO or it
-//           silently has no effect on OpenGL.
+// STAND SEIT P3b — VIER von fuenf Backends nehmen die Struktur AM STUECK.
+// Hier stand bis P3b das Gegenteil: "ONLY Metal copies the struct wholesale; do
+// not assume the others do", mit dem Zusatz, ein pauschales Kopieren wuerde auf
+// Vulkan "jeden Offset hinter invViewProj verschieben". Das galt fuer die alten,
+// kleineren Puffer (Vulkan 160, D3D11 144, D3D12 160 Bytes) und ist ueberholt --
+// wer es noch liest, baut das falsche Kopiermodell nach.
+//
+//   Metal   memcpy der ganzen Struktur (das Layout IST die MSL SkyParams).
+//           Drei Fuellstellen: Wolken-Vorpass, Wolkenschatten, Haupt-Himmel.
+//   Vulkan  memcpy. Der std140-Block in shaders/sky.frag ist Member fuer Member
+//           offset-gleich; ein eigener SkyUBOData existiert nicht mehr.
+//   D3D11   memcpy. cbuffer aus kSkyParamsHLSL (D3D_Shared/HlslSources.h).
+//   D3D12   memcpy, derselbe geteilte cbuffer.
+//   OpenGL  NICHT. Sein Himmelsprogramm benutzt lose Uniforms statt eines UBO,
+//           es gibt also kein POD zum Kopieren -- jedes Feld wird einzeln per
+//           glUniform* gegen eine gecachte Location geschoben. GL bildet seine
+//           ~54 Sky-Uniformen weiterhin von Hand ab, im Block
+//           `if (m_skyProgram && GetEnvironment().skyEnabled)` in
+//           OpenGLRenderer::DrawScene. EIN NEUES FELD MUSS DORT MIT REIN, sonst
+//           hat es auf OpenGL still keine Wirkung -- und OpenGL ist die Referenz.
+//
+// ERWEITERN: NUR float4 ANHAENGEN, nie einschieben, nie einen anderen Typ.
+// 336 ist ein 16er-Vielfaches, und jedes der 17 float4 fuellt genau ein Register
+// -- in std140, in HLSL und in MSL gleichermassen. Ein eingeschobenes Member
+// verschiebt alles dahinter; ein glm::vec3 (12 Bytes in C++, 16 in std140)
+// verschiebt es sogar je Backend verschieden. Der static_assert unten sichert nur
+// die GESAMTGROESSE, keinen einzelnen Offset -- ein getauschtes Paar faellt ihm
+// nicht auf. Die Offsets prueft scripts/check_sky_ubo_layout.py an den
+// KOMPILIERTEN Shadern (spirv-dis auf sky.frag.spv, fxc /Fc auf kSkyParamsHLSL);
+// der Build ruft sie als Ziel HeCheckSkyLayout auf.
+//
+// Die Reihenfolge unten ist zugleich die von BuildSkyFrameParams in
+// SkyFrameParams.cpp — beide zusammen aendern oder keins von beiden.
 namespace HE
 {
 

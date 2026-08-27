@@ -373,6 +373,25 @@ if(HE_VALIDATE_SHADERS AND Python3_Interpreter_FOUND)
         COMMENT "Validating runtime-compiled shader strings (fxc / glslangValidator)"
         VERBATIM)
     message(STATUS "HorizonRendering: embedded-shader validation enabled")
+
+    # Dass ein Shader UEBERSETZT, sagt nichts darueber, ob er die richtigen Bytes
+    # bekommt. Der Sky-Konstantenpuffer wird als HE::SkyFrameParams am Stueck
+    # hinuebergeschoben (336 Bytes, mat4 + 17 float4); stimmt auch nur ein Offset
+    # im std140-Block oder im HLSL-cbuffer nicht, liest der Shader still verschobene
+    # Werte -- und genau das faellt keinem Compiler auf. Deshalb hier eine Pruefung
+    # der Offsets im KOMPILIERTEN Ergebnis (spirv-dis bzw. fxc /Fc), nicht im Text.
+    #
+    # Haengt an den .spv, damit die Pruefung den frisch uebersetzten Shader sieht
+    # und nicht den vom letzten Build.
+    add_custom_target(HeCheckSkyLayout ALL
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_SOURCE_DIR}/scripts/check_sky_ubo_layout.py"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Pruefe Sky-Konstantenpuffer gegen HE::SkyFrameParams (Offsets)"
+        VERBATIM)
+    if(TARGET VulkanShaders)
+        add_dependencies(HeCheckSkyLayout VulkanShaders)
+    endif()
 elseif(HE_VALIDATE_SHADERS)
     message(STATUS "HorizonRendering: no Python3 interpreter — embedded-shader validation skipped")
 endif()

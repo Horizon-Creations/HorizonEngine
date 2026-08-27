@@ -1195,3 +1195,79 @@ der Himmelspass. Vulkans `scene.frag` hat aus demselben Grund noch seine eigene
 `skyColor`-Kopie (`:177`, 3 Aufrufstellen) — dort ist der bessere Weg aber nicht der
 eingebundene Kern, sondern GLs gebackene `uSkyEnv`-Cubemap (`SkyEnvBake.h`), die die
 60 Samples pro Aufruf ganz erspart. Das gehört zu P4.
+
+---
+
+## STATUS P3b — die Sky-Konstantenpuffer sind offset-gleich, und das wird geprüft
+
+**Der Befund war schlimmer als die Plannotiz.** P3b nannte `SkyFrameParams` 336 Bytes gegen
+Vulkans 160. Gemessen (`offsetof` gegen das echte glm des Builds, nicht gerechnet):
+
+| Puffer | Bytes | float4 von 17 | fehlt |
+|---|---|---|---|
+| `HE::SkyFrameParams` (kanonisch, = MSL) | 336 | 17 | — |
+| Vulkan `SkyUBOData` | 160 | 6 | 11 |
+| D3D11 `SkyCB` | 144 | 5 | 12 |
+| D3D12 `SkyCB` | 160 | 6 | 11 |
+
+Es fehlten also auf allen drei Backends der komplette Sternblock, Mondphase, sämtliche
+Wolkenparameter, Nebel 2/3, God-Rays und Meteore. Wer einen dieser Regler drehte, sah
+nichts — und nichts meldete das.
+
+**Umgebaut.** Alle drei Puffer *sind* jetzt `HE::SkyFrameParams`; die Struktur geht
+unverändert per `memcpy` hinüber, 15 bzw. 12 und 14 Handzuweisungen sind entfallen. Der
+HLSL-`cbuffer` liegt einmal in `HlslSources.h` (`kSkyParamsHLSL`) statt zweimal verschieden
+groß in D3D11 und D3D12. Die Shader-Rümpfe reden weiter von `uSunDir` und `uTimeOfDay`:
+`#define`-Aliase halten die Lesbarkeit, die Packung bleibt eine Layout-Frage.
+
+**Geprüft wird das Kompilat, nicht der Quelltext.** `scripts/check_sky_ubo_layout.py` liest
+die Offsets aus `sky.frag.spv` (`spirv-dis`) und aus `kSkyParamsHLSL` (`fxc /Fc`) und
+vergleicht sie gegen die kanonische Reihenfolge. Der Build ruft es als Ziel
+`HeCheckSkyLayout` bei jedem Durchlauf auf. Das ist nötig, weil die vier `static_assert` nur
+die **Gesamtgröße** sichern: ein vertauschtes Paar fällt ihnen nicht auf, und ein
+eingeschobenes `glm::vec3` verschiebt in C++ um 12 und in std140 um 16 Bytes.
+
+**Abnahme — kommt ein gesetztes Feld im Shader an?** Zwei verschiedene Slots, TOD 0.02:
+
+| | `STARDENS` 0 vs 1 | `STARGLOW` 0.2 vs 2.0 |
+|---|---|---|
+| OpenGL (Referenz) | 35,99 % / maxdiff 222 | 16,73 % / maxdiff 102 |
+| Vulkan | 0,52 % / maxdiff 197 | 0,33 % / maxdiff 127 |
+| D3D11 | 0,52 % / maxdiff 198 | 0,32 % / maxdiff 122 |
+| D3D12 | 0,53 % / maxdiff 199 | 0,33 % / maxdiff 127 |
+
+Vor P3b stand in allen drei Zeilen 0,00 %. Dass GL viel stärker reagiert, ist der
+Algorithmus, nicht der Transport: GLs Sternfeld ist weitergezogen (3×3×3-Splat, AA-Boden,
+Great-Rift, `cdir*105` statt `*70`). Der Abgleich gehört zu P3c.
+
+Nebenbei ist damit der Rest aus Scheibe 1 erledigt: der Nacht-Abstand Vulkan→GL war 0,52 %
+mit 2698 Pixeln, auf denen Vulkan heller war — Sterne, die sich nicht abschalten ließen. Bei
+Dichte 0 stimmen die beiden jetzt auf **48 Bytes bei maxdiff 1** überein.
+
+**OpenGL unverändert:** 0 Bytes bei TOD 0.02 und 0.50. Testlauf 1739/1739.
+
+**Drei Stellen, die etwas Falsches behaupteten, sind mitkorrigiert:**
+
+1. `SkyFrameParams.h:15-31` — "ONLY Metal copies the struct wholesale; do not assume the
+   others do" und "a blanket copy would misalign every offset past invViewProj". Das ist
+   genau die Datei, die man beim Erweitern zuerst öffnet, und sie übergab damit aktiv das
+   falsche Kopiermodell. Jetzt steht dort der Stand plus die Regel: **nur `float4` anhängen,
+   nie einschieben**.
+2. `HlslSources.h` — der Sky-PS sei "NOT shared … needs the C++ constant buffer widened
+   too". Der Pixel-Shader bleibt ungeteilt, die Konstanten sind es nicht mehr.
+3. D3D11/D3D12 `drawSky` — "NOT a memcpy: the layouts differ".
+
+**Vorbedingung, die niemand versehentlich kippen darf.**
+`GLM_FORCE_DEFAULT_ALIGNED_GENTYPES` ist nirgends im Projekt gesetzt (die einzigen Treffer
+liegen in glms eigener Doku). Wäre es gesetzt, würde `glm::vec3` 16 statt 12 Bytes und jeder
+Offset ab 64 verschöbe sich — ohne Compilerfehler, ohne Laufzeitwarnung.
+`alignof(SkyFrameParams)` ist 4, nicht 16: das Layout hält, weil jedes Member zufällig auf
+einem 16er-Vielfachen liegt, nicht weil das Typsystem es garantiert.
+
+**Offen.** Die Felder werden jetzt transportiert; gelesen werden bisher nur die sieben
+Sternregler (sie greifen an Stellen, die es in der vorhandenen `starField` schon gab). Mond
+(`sunColor.w`), Nebel 2/3, Wolkenparameter, God-Rays und Meteore brauchen die Algorithmen
+aus P3c/P3d — der Transport steht ihnen nicht mehr im Weg. Und: eine Erweiterung von
+`SkyFrameParams` erreicht **OpenGL nicht automatisch**, weil GL lose Uniforms statt eines
+UBO benutzt; dort muss jedes neue Feld von Hand nachgetragen werden. Da OpenGL die Referenz
+ist, ist das die gefährlichste Richtung — steht jetzt im Header.

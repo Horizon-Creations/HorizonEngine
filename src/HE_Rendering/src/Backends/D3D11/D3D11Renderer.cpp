@@ -66,15 +66,6 @@ using namespace HE::hlsl;
 // PSSky: reconstruct world ray from inv(viewProj), evaluate sky + effects.
 // Prepend kSkyFuncHLSL when compiling so skyColor() is in scope.
 static const char* kSkyPSHLSL = R"HLSL(
-cbuffer SkyEnv : register(b0)
-{
-    float4x4 uInvViewProj;
-    float3   uSunDir;       float  uTimeOfDay;
-    float3   uSunColor;     float  uCloudCoverage;
-    float3   uWind;         float  uTime;
-    float3   uAuroraColor;  float  uAurora;
-    float    uMilkyWay;     float  uFlash; int uHasMoonTex; float _skyPad;
-};
 Texture2D    uMoonTex   : register(t0);
 SamplerState uSkyLinear : register(s0);
 Texture3D    uNoise      : register(t1);
@@ -135,29 +126,44 @@ float galacticBand(float3 cd)
 }
 
 // ── Star field ────────────────────────────────────────────────────────────────
+// Die sieben Sternregler sind hier angeschlossen. Bis P3b lagen sie gar nicht im
+// cbuffer -- HE_DUMP_STARDENS und Geschwister waren auf D3D wirkungslos, ohne
+// dass etwas gemeldet haette. Die Stellen, an die sie greifen, gab es alle
+// schon: Schwelle, Radius, Halo, Flimmern, Toenung, Helligkeit standen nur auf
+// Konstanten. Der Algorithmenabgleich mit GLs weitergezogener Fassung (3x3x3-
+// Splat, AA-Boden, Great-Rift) ist P3c, nicht das hier.
 float3 starField(float3 dir, float3 cdir, float3 sunDir, float t, float mw)
 {
     float night=1.0f-smoothstep(-0.10f,0.10f,clamp(sunDir.y,-0.2f,1.0f));
     if(night<=0.0f||dir.y<=0.0f) return (float3)0;
     float band=galacticBand(cdir), mwc=clamp(mw,0.0f,1.0f);
-    float thresh=lerp(0.92f,lerp(0.86f,0.72f,mwc),band);
+    // Dichte setzt die BASISSCHWELLE fuer die ganze Kuppel, wie in GL: bei 0 liegt
+    // sie ueber 1.0, und weil starHash nie 1.0 erreicht, qualifiziert sich keine
+    // Zelle -- also wirklich null Sterne. Die Bandabsenkung wird mitskaliert,
+    // sonst bliebe bei Dichte 0 die Milchstrassenspur stehen.
+    float dens=clamp(uStarDensity,0.0f,1.0f);
+    float baseTh=lerp(1.001f,0.79f,dens);
+    float thresh=baseTh-band*lerp(0.07f,0.20f,mwc)*dens;
     float3 p=cdir*70.0f, cell=floor(p);
     float present=starHash(cell);
     if(present<thresh) return (float3)0;
     float3 sp=float3(starHash(cell+1.7f),starHash(cell+4.3f),starHash(cell+8.9f));
     float d=length(frac(p)-sp);
-    float sizeH=starHash(cell+5.7f), big=sizeH*sizeH*sizeH;
-    float radius=lerp(0.05f,0.17f,big);
+    // Groessenstreuung: bei 0 alle Sterne gleich gross, bei 1 die volle Spreizung.
+    float sizeH=starHash(cell+5.7f);
+    float big=lerp(0.125f,sizeH*sizeH*sizeH,clamp(uStarSizeVar,0.0f,1.0f));
+    float radius=lerp(0.05f,0.17f,big)*max(uStarSize,0.0f);
     float core=smoothstep(radius,0.0f,d); core*=core;
-    float halo=smoothstep(radius*3.0f,radius,d)*(big*big)*0.35f;
+    float halo=smoothstep(radius*3.0f,radius,d)*(big*big)*0.35f*max(uStarGlow,0.0f);
     float shape=core+halo;
     float mag=(0.4f+0.6f*smoothstep(thresh,1.0f,present))*lerp(0.7f,2.7f,big);
     float twPhase=starHash(cell+23.5f)*6.2831f, twFreq=2.0f+4.0f*starHash(cell+47.1f);
-    float tw=0.7f+0.3f*sin(t*twFreq+twPhase);
+    float twAmp=0.3f*clamp(uStarTwinkle,0.0f,1.0f);
+    float tw=(1.0f-twAmp)+twAmp*sin(t*twFreq+twPhase);
     float horizon=smoothstep(0.0f,0.15f,dir.y);
     float3 tint=lerp(float3(0.80f,0.88f,1.0f),float3(1.0f,0.93f,0.82f),starHash(cell+12.1f));
     float bandDim=lerp(1.6f,lerp(0.9f,1.5f,mwc),band);
-    return tint*(shape*mag*tw*horizon*night*bandDim);
+    return tint*uStarColor*(shape*mag*tw*horizon*night*bandDim*uStarBright);
 }
 
 // ── Aurora ────────────────────────────────────────────────────────────────────
@@ -1067,14 +1073,6 @@ namespace
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
     };
 
-    struct SkyCB {
-        glm::mat4 invViewProj;
-        glm::vec3 sunDir;    float timeOfDay;
-        glm::vec3 sunColor;  float cloudCoverage;
-        glm::vec3 wind;      float time;
-        glm::vec3 auroraColor; float aurora;
-        float milkyWay;      float flash; int hasMoonTex; float _pad;
-    };
 }
 
 struct D3D11RendererImpl
@@ -3466,13 +3464,13 @@ struct D3D11RendererImpl
             return true;
         };
         ComPtr<ID3DBlob> vsB, psB;
-        const std::string skyPS_src = std::string(kSkyFuncHLSL) + kSkyPSHLSL;
+        const std::string skyPS_src = std::string(kSkyParamsHLSL) + kSkyFuncHLSL + kSkyPSHLSL;
         if (!compile(kSkyVSHLSL, std::strlen(kSkyVSHLSL), "VSSky", "vs_5_0", vsB)) return false;
         if (!compile(skyPS_src.c_str(), skyPS_src.size(), "PSSky", "ps_5_0", psB)) return false;
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &skyVS);
         device->CreatePixelShader (psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &skyPS);
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = (sizeof(SkyCB) + 15u) & ~15u;
+        bd.ByteWidth = (sizeof(HE::SkyFrameParams) + 15u) & ~15u;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3569,25 +3567,27 @@ struct D3D11RendererImpl
         // Translate the environment through the SHARED sky-constants builder
         // instead of hand-assigning fields (which is how D3D11 previously ended up
         // with +cos where GL/Metal have -cos, drifting the clouds 180° the wrong
-        // way). SkyCB is a small subset of SkyFrameParams, so read the named
-        // fields out — NOT a memcpy: the layouts differ.
+        // way). Der cbuffer IST seit P3b HE::SkyFrameParams, Feld fuer Feld
+        // offset-gleich (kSkyParamsHLSL in HlslSources.h), also geht die Struktur
+        // unveraendert hinueber. Hier stand frueher "NOT a memcpy: the layouts
+        // differ" -- das galt fuer den alten 144-Byte-Puffer, dem 12 der 17 float4
+        // fehlten.
         HE::SkyFrameInputs skyIn;
         skyIn.invViewProj    = invVP;
         skyIn.sunDir         = sunDir;
+        // cameraPos traegt der Puffer seit P3b mit (skyCameraPos.xyz). Der
+        // Wolken-Raymarch braucht sie; bis dahin ist sie schlicht korrekt statt 0.
+        skyIn.cameraPos      = m_renderWorld.camera.position;
         skyIn.time           = m_wallTime;
         skyIn.hasMoonTexture = moonSRV ? true : false; // ComPtr → contextual bool
         const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
-        SkyCB cb{};
-        cb.invViewProj = sp.invViewProj;
-        cb.sunDir      = glm::vec3(sp.sunDir);   cb.timeOfDay     = sp.params.x;
-        cb.sunColor    = glm::vec3(sp.sunColor); cb.cloudCoverage = sp.params.y;
-        cb.wind        = glm::vec3(sp.wind);     cb.time          = sp.params.z;
-        cb.auroraColor = glm::vec3(sp.auroraColor); cb.aurora     = sp.params.w;
-        cb.milkyWay    = sp.auroraColor.w;       cb.flash         = sp.wind.w;
-        cb.hasMoonTex  = sp.sunDir.w > 0.5f ? 1 : 0;   // sunDir.w is the 0/1 has-moon flag
+        static_assert(sizeof(HE::SkyFrameParams) == 336,
+                      "SkyFrameParams ist nicht mehr 336 Bytes — kSkyParamsHLSL, sky.frag "
+                      "und die Metal-Kopie muessen mitziehen, sonst kommen im Shader "
+                      "verschobene Werte an.");
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(skyCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
-        { std::memcpy(m.pData, &cb, sizeof(cb)); ctx->Unmap(skyCB.Get(), 0); }
+        { std::memcpy(m.pData, &sp, sizeof(sp)); ctx->Unmap(skyCB.Get(), 0); }
         ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(skyVS.Get(), nullptr, 0);

@@ -32,6 +32,74 @@
 namespace HE::hlsl
 {
 
+// ─── Sky-Konstanten: kanonischer cbuffer, geteilt von D3D11 und D3D12 ────────
+// Beide Backends hatten hier ihren eigenen, verschieden grossen cbuffer: D3D11
+// 144 Bytes / 13 Member, D3D12 160 / 15 (das Nebel-Paar mehr). HE::SkyFrameParams
+// ist 336 -- es fehlten also 12 bzw. 11 der 17 float4 komplett, darunter der
+// ganze Sternblock, Mondphase, alle Wolkenparameter, God-Rays und Meteore. Wer
+// einen dieser Regler drehte, sah auf D3D nichts; gemeldet hat das nichts.
+//
+// Jetzt spiegelt der Block HE::SkyFrameParams Feld fuer Feld, also memcpy't der
+// Renderer die Struktur unveraendert. Die Reihenfolge ist die von
+// BuildSkyFrameParams (SkyFrameParams.cpp) -- REIHENFOLGE NICHT AENDERN, ohne
+// SkyFrameParams.h, sky.frag und die Metal-Kopie mitzuziehen.
+//
+// HLSL-Packung ist hier unkritisch: 17 aufeinanderfolgende float4 fuellen je ein
+// Register c1..c17 vollstaendig, es kann nichts ueber eine Grenze rutschen. Genau
+// deshalb ist die kanonische Form aus float4 gebaut und nicht aus float3+float
+// -- die alte Form war korrekt, aber jede Erweiterung war eine Zitterpartie.
+//
+// Der Rumpf der Sky-Shader redet weiter von uSunDir/uTimeOfDay: die #defines
+// darunter halten die Lesbarkeit, die Packung bleibt eine Layout-Frage. Die
+// Namen sind dieselben wie in shaders/sky.frag und in GLs kSkyFS, damit sich
+// die drei Shader Zeile fuer Zeile vergleichen lassen.
+inline constexpr const char* kSkyParamsHLSL = R"HLSL(
+cbuffer SkyEnv : register(b0)
+{
+    float4x4 uInvViewProj;
+    float4 skySunDir;         // xyz Richtung ZUR Sonne, w hasMoonTexture (1/0)
+    float4 skySunColor;       // xyz Sonnenfarbe,        w moonPhase
+    float4 skyParams;         // timeOfDay, cloudCoverage, time, auroraIntensity
+    float4 skyNebulaColor;    // xyz,                    w nebulaIntensity
+    float4 skyAuroraColor;    // xyz,                    w milkyWayIntensity
+    float4 skyWind;           // xyz Wolkendrift,        w flash
+    float4 skyCameraPos;      // xyz,                    w cloudMode
+    float4 skyCloud;          // cloudHeight, cloudDensity, cloudFluffiness, contrailAmount
+    float4 skyCloudTint;      // xyz,                    w cirrusAmount
+    float4 skyCirrus;         // cirrusSeed, auroraHeight, auroraFragmentation, nebulaSeed
+    float4 skyNebulaColor2;   // xyz,                    w nebulaQuality
+    float4 skyNebulaColor3;   // xyz,                    w godRays
+    float4 skyAuroraColorTop; // xyz,                    w shootingStars
+    float4 skyStarColor;      // xyz,                    w starBrightness
+    float4 skyStar;           // starSize, starSizeVariation, starDensity, starGlow
+    float4 skyStar2;          // starTwinkle, cloudQuality, lowResClouds, rainAmount
+    float4 skyNeb2;           // nebulaCoverage, cloudStyle, cloudInterShadows, cloudEvolution
+};
+#define uSunDir         skySunDir.xyz
+#define uHasMoonTex     (skySunDir.w != 0.0f)
+#define uSunColor       skySunColor.xyz
+#define uMoonPhase      skySunColor.w
+#define uTimeOfDay      skyParams.x
+#define uCloudCoverage  skyParams.y
+#define uTime           skyParams.z
+#define uAurora         skyParams.w
+#define uNebulaColor    skyNebulaColor.xyz
+#define uNebula         skyNebulaColor.w
+#define uAuroraColor    skyAuroraColor.xyz
+#define uMilkyWay       skyAuroraColor.w
+#define uWind           skyWind.xyz
+#define uFlash          skyWind.w
+#define uCameraPos      skyCameraPos.xyz
+#define uCloudMode      skyCameraPos.w
+#define uStarColor      skyStarColor.xyz
+#define uStarBright     skyStarColor.w
+#define uStarSize       skyStar.x
+#define uStarSizeVar    skyStar.y
+#define uStarDensity    skyStar.z
+#define uStarGlow       skyStar.w
+#define uStarTwinkle    skyStar2.x
+)HLSL";
+
 // ─── Shared sky colour function ─────────────────────────────────────────────
 // ACHTUNG, der Satz hier hiess bis zuletzt "Mirrors kSkyFuncGLSL in
 // OpenGLRenderer.cpp exactly" — das stimmte seit langem nicht mehr. Was hier

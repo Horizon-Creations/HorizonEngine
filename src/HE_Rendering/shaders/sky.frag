@@ -61,15 +61,73 @@
 layout(location = 0) in vec2 vNDC;
 layout(location = 0) out vec4 FragColor;
 
+// ── Sky-Konstanten: exakte Spiegelung von HE::SkyFrameParams ─────────────────
+// Bis hierher war dieser Block eine REDUZIERTE und anders sortierte Fassung der
+// kanonischen Struktur: 160 statt 336 Bytes, timeOfDay bei Offset 76 statt in
+// params.x, und die halbe Struktur fehlte ganz. Der Renderer musste deshalb 15
+// Felder von Hand umkopieren, und jeder neue Sky-Parameter war eine Stelle, die
+// man an drei Orten nachziehen muss -- C++-Struktur, dieser Block, Kopiercode.
+// Wird einer vergessen, kommt still der falsche Wert an und kein Test faellt um.
+//
+// Jetzt steht hier mat4 + 17 vec4 in genau der Reihenfolge von
+// BuildSkyFrameParams (SkyFrameParams.cpp), also 336 Bytes offset-gleich. Der
+// Renderer memcpy't die Struktur unveraendert. Geprueft wird das nicht per
+// Nachrechnen, sondern an den Offsets im kompilierten SPIR-V:
+// scripts/check_sky_ubo_layout.py.
+//
+// REIHENFOLGE NICHT AENDERN, ohne SkyFrameParams.h und die Metal-Kopie
+// mitzuziehen -- ein verschobenes vec4 verschiebt alles dahinter.
 layout(set = 0, binding = 0) uniform SkyEnv {
-    mat4  invViewProj;
-    vec3  sunDir;    float timeOfDay;
-    vec3  sunColor;  float cloudCoverage;
-    vec3  wind;      float time;
-    vec3  auroraColor; float aurora;
-    float milkyWay;  float flash; int hasMoonTex; float nebula;
-    vec3  nebulaColor; float _pad2;
+    mat4 invViewProj;
+    vec4 sunDir;         // xyz Richtung ZUR Sonne, w hasMoonTexture (1/0)
+    vec4 sunColor;       // xyz Sonnenfarbe,        w moonPhase
+    vec4 params;         // timeOfDay, cloudCoverage, time, auroraIntensity
+    vec4 nebulaColor;    // xyz,                    w nebulaIntensity
+    vec4 auroraColor;    // xyz,                    w milkyWayIntensity
+    vec4 wind;           // xyz Wolkendrift,        w flash
+    vec4 cameraPos;      // xyz,                    w cloudMode
+    vec4 cloud;          // cloudHeight, cloudDensity, cloudFluffiness, contrailAmount
+    vec4 cloudTint;      // xyz,                    w cirrusAmount
+    vec4 cirrus;         // cirrusSeed, auroraHeight, auroraFragmentation, nebulaSeed
+    vec4 nebulaColor2;   // xyz,                    w nebulaQuality
+    vec4 nebulaColor3;   // xyz,                    w godRays
+    vec4 auroraColorTop; // xyz,                    w shootingStars
+    vec4 starColor;      // xyz,                    w starBrightness
+    vec4 star;           // starSize, starSizeVariation, starDensity, starGlow
+    vec4 star2;          // starTwinkle, cloudQuality, lowResClouds, rainAmount
+    vec4 neb2;           // nebulaCoverage, cloudStyle, cloudInterShadows, cloudEvolution
 } sky;
+
+// Lesbare Namen fuer die gepackten Slots. Der Rumpf unten soll weiter von
+// uSunDir statt sky.sunDir.xyz reden; die Packung ist eine Layout-Frage, keine
+// Frage der Lesbarkeit. Die Namen sind bewusst die der GL-Uniformen
+// (OpenGLRenderer kSkyFS), damit ein Vergleich der beiden Shader Zeile fuer
+// Zeile moeglich bleibt.
+#define uSunDir         sky.sunDir.xyz
+#define uHasMoonTex     (sky.sunDir.w != 0.0)
+#define uSunColor       sky.sunColor.xyz
+#define uMoonPhase      sky.sunColor.w
+#define uTimeOfDay      sky.params.x
+#define uCloudCoverage  sky.params.y
+#define uTime           sky.params.z
+#define uAurora         sky.params.w
+#define uNebulaColor    sky.nebulaColor.xyz
+#define uNebula         sky.nebulaColor.w
+#define uAuroraColor    sky.auroraColor.xyz
+#define uMilkyWay       sky.auroraColor.w
+#define uWind           sky.wind.xyz
+#define uFlash          sky.wind.w
+// Der Sternblock. Bis P3b lag er gar nicht im UBO -- die sieben Regler waren
+// auf Vulkan wirkungslos, HE_DUMP_STARDENS=0 zeichnete weiter Sterne. Das war
+// der gemessene Rest im Nacht-Vergleich gegen GL: 2698 Pixel, auf denen Vulkan
+// heller ist als die Referenz.
+#define uStarColor      sky.starColor.xyz
+#define uStarBright     sky.starColor.w
+#define uStarSize       sky.star.x
+#define uStarSizeVar    sky.star.y
+#define uStarDensity    sky.star.z
+#define uStarGlow       sky.star.w
+#define uStarTwinkle    sky.star2.x
 
 layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
 layout(set = 0, binding = 2) uniform sampler3D uNoise;
@@ -140,29 +198,45 @@ float galacticBand(vec3 cd)
     float d=dot(normalize(cd),gN); return exp(-d*d*7.0);
 }
 
+// Die sieben Sternregler sind hier angeschlossen -- an DIESE Funktion, nicht an
+// GLs deutlich weitergezogene Fassung (3x3x3-Splat, AA-Boden, Great-Rift). Der
+// Algorithmenabgleich ist P3c; hier geht es darum, dass die Werte ueberhaupt
+// ankommen. Die Stellen, an die sie greifen, gab es bereits alle -- Schwelle,
+// Radius, Halo, Flimmern, Toenung, Helligkeit -- sie standen nur auf Konstanten.
 vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float t, float mw)
 {
     float night=1.0-smoothstep(-0.10,0.10,clamp(sunDir.y,-0.2,1.0));
     if(night<=0.0||dir.y<=0.0) return vec3(0.0);
     float band=galacticBand(cdir), mwc=clamp(mw,0.0,1.0);
-    float thresh=mix(0.92,mix(0.86,0.72,mwc),band);
+    // Dichte setzt die BASISSCHWELLE fuer die ganze Kuppel, wie in GL: bei 0 liegt
+    // sie ueber 1.0, und weil starHash nie 1.0 erreicht, qualifiziert sich keine
+    // Zelle -- also wirklich null Sterne, nicht nur wenige. Die Bandabsenkung wird
+    // mitskaliert, sonst bliebe bei Dichte 0 die Milchstrassenspur stehen.
+    float dens=clamp(uStarDensity,0.0,1.0);
+    float baseTh=mix(1.001,0.79,dens);
+    float thresh=baseTh-band*mix(0.07,0.20,mwc)*dens;
     vec3 p=cdir*70.0, cell=floor(p);
     float present=starHash(cell);
     if(present<thresh) return vec3(0.0);
     vec3 sp=vec3(starHash(cell+1.7),starHash(cell+4.3),starHash(cell+8.9));
     float d=length(fract(p)-sp);
-    float sizeH=starHash(cell+5.7), big=sizeH*sizeH*sizeH;
-    float radius=mix(0.05,0.17,big);
+    // Groessenstreuung: bei uStarSizeVar 0 bekommt jeder Stern dieselbe mittlere
+    // Groesse, bei 1 die volle kubische Spreizung von vorher.
+    float sizeH=starHash(cell+5.7);
+    float big=mix(0.125,sizeH*sizeH*sizeH,clamp(uStarSizeVar,0.0,1.0));
+    float radius=mix(0.05,0.17,big)*max(uStarSize,0.0);
     float core=smoothstep(radius,0.0,d); core*=core;
-    float halo=smoothstep(radius*3.0,radius,d)*(big*big)*0.35;
+    float halo=smoothstep(radius*3.0,radius,d)*(big*big)*0.35*max(uStarGlow,0.0);
     float shape=core+halo;
     float mag=(0.4+0.6*smoothstep(thresh,1.0,present))*mix(0.7,2.7,big);
     float twPhase=starHash(cell+23.5)*6.2831, twFreq=2.0+4.0*starHash(cell+47.1);
-    float tw=0.7+0.3*sin(t*twFreq+twPhase);
+    // Flimmern: uStarTwinkle 0 haelt den Stern ruhig, 1 ist der bisherige Hub.
+    float twAmp=0.3*clamp(uStarTwinkle,0.0,1.0);
+    float tw=(1.0-twAmp)+twAmp*sin(t*twFreq+twPhase);
     float horizon=smoothstep(0.0,0.15,dir.y);
     vec3 tint=mix(vec3(0.80,0.88,1.0),vec3(1.0,0.93,0.82),starHash(cell+12.1));
     float bandDim=mix(1.6,mix(0.9,1.5,mwc),band);
-    return tint*(shape*mag*tw*horizon*night*bandDim);
+    return tint*uStarColor*(shape*mag*tw*horizon*night*bandDim*uStarBright);
 }
 
 vec3 aurora(vec3 dir, vec3 sunDir, float t, float intensity, vec3 auroraCol)
@@ -196,7 +270,7 @@ vec3 moonDisk(vec3 dir, vec3 sunDir)
     const float kR=0.030;
     vec2 q=vec2(dot(dir,right),dot(dir,up))/kR;
     float r=length(q); if(r>1.0) return vec3(0.0);
-    float tex=sky.hasMoonTex!=0?texture(uMoonTex,q*0.5+0.5).r:1.0;
+    float tex=uHasMoonTex?texture(uMoonTex,q*0.5+0.5).r:1.0;
     float limb=sqrt(max(1.0-r*r,0.0)), edge=smoothstep(1.0,0.90,r);
     return vec3(0.92,0.94,1.00)*(tex*limb*edge*3.0*night);
 }
@@ -390,16 +464,16 @@ void main()
     // coordinates where the hash loses float precision → stars flicker/vanish on rotate.
     vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 
-    vec3 col = skyColor(dir, sky.sunDir);
-    float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(sky.sunDir).y, -0.2, 1.0));
+    vec3 col = skyColor(dir, uSunDir);
+    float nightF = 1.0 - smoothstep(-0.10, 0.10, clamp(normalize(uSunDir).y, -0.2, 1.0));
     if (nightF > 0.0) {
-        vec3 cdir = celestialDir(dir, sky.timeOfDay);
-        col += starField(dir, cdir, sky.sunDir, sky.time, sky.milkyWay);
-        col += nebula(dir, cdir, sky.sunDir, sky.nebula, sky.nebulaColor);
-        col += aurora(dir, sky.sunDir, sky.time, sky.aurora, sky.auroraColor);
-        col += moonDisk(dir, sky.sunDir);
+        vec3 cdir = celestialDir(dir, uTimeOfDay);
+        col += starField(dir, cdir, uSunDir, uTime, uMilkyWay);
+        col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
+        col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
+        col += moonDisk(dir, uSunDir);
     }
-    col = applyClouds(col, dir, sky.sunDir, sky.time, sky.cloudCoverage, sky.sunColor, sky.wind);
-    col += sky.flash * vec3(0.85, 0.90, 1.0);
+    col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);
+    col += uFlash * vec3(0.85, 0.90, 1.0);
     FragColor = vec4(col, 1.0);
 }

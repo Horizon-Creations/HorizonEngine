@@ -61,7 +61,8 @@ GLSL_SKY_CORE = REPO / "src" / "HE_Rendering" / "shaders" / "sky_core.glsl"
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own.
-PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLSL"}
+PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kSkyParamsHLSL",
+            "kGiTraversalGLSL", "kSkyFuncGLSL"}
 
 # What each call site prepends before compiling. Mirrors the C++ verbatim:
 #   D3D11Renderer.cpp:2309  std::string(kSkyFuncHLSL) + kSceneHLSL
@@ -69,12 +70,16 @@ PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLS
 #   D3D11Renderer.cpp:1677  std::string(kGiTraversalHLSL) + kGiShadowCSHLSL
 #   D3D11Renderer.cpp:1679  std::string(kGiTraversalHLSL) + kGiProbeCSHLSL
 #   OpenGLRenderer.cpp:5607 "#version 430 core\n" + kGiTraversalGLSL + kGiShadowCS
+# Werte sind LISTEN, in der Reihenfolge, in der das C++ sie aneinanderhaengt. Der
+# Sky-PS braucht seit P3b zwei: den kanonischen cbuffer (kSkyParamsHLSL) UND die
+# skyColor-Funktion. Mit nur einer Praeambel schlug er hier mit "undeclared
+# identifier 'uHasMoonTex'" fehl — genau der Fall, fuer den dieser Schritt da ist.
 HLSL_PRELUDE_OF = {
-    "kGiShadowCSHLSL": "kGiTraversalHLSL",
-    "kGiProbeCSHLSL": "kGiTraversalHLSL",
-    "kSkyPSHLSL": "kSkyFuncHLSL",
-    "kSkyPSHLSL12": "kSkyFuncHLSL",  # D3D12Renderer.cpp:1564 — D3D12's own sky PS copy
-    "kSceneHLSL": "kSkyFuncHLSL",
+    "kGiShadowCSHLSL": ["kGiTraversalHLSL"],
+    "kGiProbeCSHLSL": ["kGiTraversalHLSL"],
+    "kSkyPSHLSL": ["kSkyParamsHLSL", "kSkyFuncHLSL"],
+    "kSkyPSHLSL12": ["kSkyParamsHLSL", "kSkyFuncHLSL"],  # D3D12s eigene Sky-PS-Kopie
+    "kSceneHLSL": ["kSkyFuncHLSL"],
 }
 GLSL_PRELUDE_OF = {
     "kGiShadowCS": "kGiTraversalGLSL",
@@ -165,14 +170,16 @@ def check_hlsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
         if name in PRELUDES:
             covered.add(key)
             continue
-        pre_name = HLSL_PRELUDE_OF.get(name)
-        pre = ""
-        if pre_name:
+        pre, missing = "", None
+        for pre_name in HLSL_PRELUDE_OF.get(name, []):
             match = [v for k, v in strings.items() if origin[k] == pre_name]
             if not match:
-                failures.append(f"{key}: prelude {pre_name} not found")
-                continue
-            pre = match[0]
+                missing = pre_name
+                break
+            pre += match[0]
+        if missing:
+            failures.append(f"{key}: prelude {missing} not found")
+            continue
         f = tmp / (key.replace(":", "__").replace(".", "_") + ".hlsl")
         f.write_text(pre + body, encoding="utf-8")
         for entry, profile in HLSL_ENTRY_PROFILE.items():
