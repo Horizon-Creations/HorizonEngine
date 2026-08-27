@@ -264,6 +264,42 @@ namespace
 	{ "app.quit",
 	  "Ends the game. In the editor it stops play mode instead, so a quit button "
 	  "can be tested without closing the editor." },
+	{ "app.setTitle",
+	  "Sets the text in the window's title bar. Only an application owns its "
+	  "window outright — in the editor this is ignored rather than renaming the "
+	  "editor itself." },
+	{ "app.setSize",
+	  "Resizes the window, in logical points. Both sides must be positive; a zero "
+	  "or negative size is refused rather than passed on to the platform." },
+	{ "app.size",
+	  "The window's current size in logical points, as X and Y. On a high-DPI "
+	  "display this is the points size, not the pixel count behind it." },
+	{ "app.requestRedraw",
+	  "Draws one more frame. An application sleeps until something happens, so "
+	  "anything that changes the screen without an input event behind it — a "
+	  "timer, a finished load — has to say so here." },
+
+	// ── Clipboard ────────────────────────────────────────────────────────────
+	{ "clipboard.getText",
+	  "The text currently on the system clipboard, or an empty string when there "
+	  "is none. The same clipboard Ctrl+C and Ctrl+V use in a text field." },
+	{ "clipboard.setText",
+	  "Puts text on the system clipboard, replacing whatever was there. Every "
+	  "other application on the machine can then paste it." },
+	{ "clipboard.hasText",
+	  "True when the system clipboard currently holds text. Use it to grey out a "
+	  "Paste button instead of pasting nothing." },
+
+	// ── Dialogs ──────────────────────────────────────────────────────────────
+	{ "dialog.message",
+	  "Shows a native message box and waits until the user dismisses it. Kind is "
+	  "0 for information, 1 for a warning, 2 for an error. Blocking on purpose: "
+	  "it is for what must be read before anything else happens." },
+	{ "dialog.confirm",
+	  "Asks a yes/no question in a native dialog and returns true for the first "
+	  "button. Both labels are yours, so it can ask \"Save\" against \"Discard\" "
+	  "rather than only ever Yes and No. Return takes the first button, Escape "
+	  "the second." },
 
 	// ── Math ─────────────────────────────────────────────────────────────────
 	// The trigonometry and rounding rows are registered through a helper rather

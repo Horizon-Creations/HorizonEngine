@@ -161,8 +161,9 @@ TEST_CASE("Add menu: engine-call categories are listed once, filtered, and hide 
 	// and two entries for one thing is what the hidden list exists to stop. The
 	// row itself stays — Lua and Python call it as horizon.log — so this can only
 	// be checked through the menu, which is what makes the assertion worth having.
-	// Nothing else in the registry answers to "log", so an empty result IS the
-	// proof; if the hiding regressed, "Debug" would show up here.
-	CHECK(HcEditorUtil::engineApiCategories("log").empty());
+	// The proof is that "Debug" does not appear. It used to be "the result is
+	// empty", which stopped being true the day a Dialog group arrived: "dialog"
+	// contains "log", and matching it is correct behaviour, not a regression.
+	CHECK_FALSE(has(HcEditorUtil::engineApiCategories("log"), "Debug"));
 	CHECK_FALSE(HcEditorUtil::engineApiCategories("physics").empty());
 }
