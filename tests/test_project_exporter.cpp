@@ -3,11 +3,13 @@
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/HpakReader.h>
+#include <Hpak/HpakWriter.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/UUID.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -44,6 +46,39 @@ static std::vector<uint8_t> makeMinimalMaterialBlob(const HE::UUID& id,
     w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
     w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
     return w.toBytes(typeVal);
+}
+
+// A minimal .hasset for any of the JSON-payload asset types: META (uint16 type,
+// hi, lo, name, path) plus the single chunk the loader reads for that type. The
+// HEADER type handed to toBytes is the one HpakWriter records in packedTypes()
+// and the one discoverAssets compares against, so it has to be the real thing.
+static std::vector<uint8_t> makeJsonAssetBlob(HE::AssetType type, uint32_t chunkId,
+                                              const HE::UUID& id, const std::string& name,
+                                              const std::string& json)
+{
+    std::vector<uint8_t> meta;
+    const uint16_t typeVal = static_cast<uint16_t>(type);
+    HAsset::Writer::appendPOD(meta, typeVal);
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, name);
+    HAsset::Writer::appendString(meta, "mem://" + name);
+
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(chunkId, json.data(), json.size());
+    return w.toBytes(typeVal);
+}
+
+static bool listed(const std::vector<HE::UUID>& ids, const HE::UUID& id)
+{
+    return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
+
+static void writeBlob(const std::filesystem::path& p, const std::vector<uint8_t>& b)
+{
+    std::ofstream f(p, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(b.data()), b.size());
 }
 
 // ─── ProjectConfigLoader ──────────────────────────────────────────────────────
@@ -210,6 +245,159 @@ TEST_CASE("Lazy-mounted pak resolves loadAsset by content path via the asset ind
     CHECK(cm.loadAsset("UI/menu_mat.hasset") == matId);
     // An unknown path still fails cleanly (no index entry, no loose file).
     CHECK(cm.loadAsset("UI/nope.hasset") == HE::UUID{});
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+// The three asset types PlayerHost::begin looks for at startup, with the chunk
+// each one's loader reads. Shared by the B5 tests below.
+static const HE::UUID kB5ClassId {0x1122334455667788ULL, 0x00FFEEDDCCBBAA99ULL};
+static const HE::UUID kB5ActionId{0x00000000DEADBEEFULL, 0xFEEDFACE00000001ULL};
+static const HE::UUID kB5MapId   {0x7FFFFFFFFFFFFFFFULL, 0x8000000000000001ULL};
+
+static void writeB5StartupAssets(const std::filesystem::path& contentDir)
+{
+    std::filesystem::create_directories(contentDir / "Input");
+    writeBlob(contentDir / "PlayerController.hasset",
+              makeJsonAssetBlob(HE::AssetType::HorizonCodeClass, HAsset::CHUNK_HCGR,
+                                kB5ClassId, "PlayerController", R"({"nodes":[]})"));
+    writeBlob(contentDir / "Input" / "IA_Jump.hasset",
+              makeJsonAssetBlob(HE::AssetType::InputAction, HAsset::CHUNK_IACT,
+                                kB5ActionId, "IA_Jump", R"({"valueType":"bool"})"));
+    writeBlob(contentDir / "Input" / "IMC_Default.hasset",
+              makeJsonAssetBlob(HE::AssetType::InputMappingContext, HAsset::CHUNK_IMAP,
+                                kB5MapId, "IMC_Default", R"({"mappings":[]})"));
+}
+
+TEST_CASE("Packaged game discovers its startup assets from the pak's asset type index")
+{
+    // BLOCKER B5, end to end. A shipped game LAZY-mounts its pak, and mounting
+    // used to contribute residency (UUID→mount) and paths only — no types. The
+    // ContentManager learned an asset's type solely by LOADING it, so in a
+    // packaged build both halves of discoverAssets came back empty: the type
+    // index knew nothing, and the loose-content walk had no content directory to
+    // walk. PlayerHost::begin therefore found no HorizonCodeClass to instantiate
+    // as a PlayerController, no Construct and no BeginPlay ran, and the game
+    // booted into a world with the scenery but no player. Everything worked in
+    // the editor, where the content walk carries the whole thing.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_b5_types_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_b5_types_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    writeB5StartupAssets(contentDir);
+
+    ExportSettings settings;
+    settings.compress = true;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "B5Game", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 3);
+
+    // ── The game-runtime sequence: hcfg → mountPak, nothing else ──
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    const uint8_t* key = cfg.encrypted ? cfg.encKey : nullptr;
+
+    ContentManager cm;                       // fresh, like GameApplication's
+    REQUIRE(cm.contentRoot().empty());       // a shipped game has NO content dir
+    REQUIRE(cm.mountPak((outputDir / cfg.hpakFilename).string(), key));
+
+    // Nothing is loaded yet — this is the state PlayerHost::begin asks in.
+    CHECK(cm.getHorizonCodeClass(kB5ClassId)    == nullptr);
+    CHECK(cm.getInputAction(kB5ActionId)        == nullptr);
+    CHECK(cm.getInputMappingContext(kB5MapId)   == nullptr);
+
+    // 1) Discovery must NAME the assets (the type index half) …
+    const auto classes = cm.discoverAssets(HE::AssetType::HorizonCodeClass);
+    const auto actions = cm.discoverAssets(HE::AssetType::InputAction);
+    const auto maps    = cm.discoverAssets(HE::AssetType::InputMappingContext);
+    CHECK(listed(classes, kB5ClassId));
+    CHECK(listed(actions, kB5ActionId));
+    CHECK(listed(maps,    kB5MapId));
+
+    // 2) … and the ids it names must be REDEEMABLE. An index that hands back
+    // UUIDs whose accessors all read null has moved B5, not fixed it: PlayerHost
+    // would still have no class body to instantiate.
+    const auto* cls = cm.getHorizonCodeClass(kB5ClassId);
+    REQUIRE(cls != nullptr);
+    CHECK(cls->name == "PlayerController");
+    CHECK(cls->graphJson == R"({"nodes":[]})");
+    const auto* act = cm.getInputAction(kB5ActionId);
+    REQUIRE(act != nullptr);
+    CHECK(act->name == "IA_Jump");
+    const auto* imc = cm.getInputMappingContext(kB5MapId);
+    REQUIRE(imc != nullptr);
+    CHECK(imc->name == "IMC_Default");
+
+    // The type is answerable without a load having preceded it either way.
+    CHECK(cm.assetType(kB5ClassId) == HE::AssetType::HorizonCodeClass);
+
+    // A type nothing in the pak has stays empty — the index is not a wildcard.
+    CHECK(!listed(cm.discoverAssets(HE::AssetType::AnimatorStateMachine), kB5ClassId));
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+TEST_CASE("A pak without an asset type index mounts cleanly and contributes no types")
+{
+    // Best effort, exactly like the path index next door: every pak built before
+    // __asset_types__ existed — and every mod pak a HpakWriter user assembles by
+    // hand — has no such entry. Mounting one must succeed and simply teach the
+    // manager nothing, never fail the mount or throw on the missing entry.
+    // Built through HpakWriter directly because the exporter always writes the
+    // entry now; there is no way to un-write it.
+    const HE::UUID oldId{0x0BD0, 0x1};
+    HpakWriter p;
+    p.addEntry(oldId, makeMinimalMaterialBlob(oldId, "legacy_mat"), {Hpak::Codec::Store});
+    const auto pak = std::filesystem::temp_directory_path() / "he_b5_legacy.hpak";
+    he_test::removeQuiet(pak);
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));                  // no entry → still mounts
+    CHECK(!listed(cm.discoverAssets(HE::AssetType::Material), oldId));
+    CHECK(cm.assetType(oldId) == HE::AssetType::Unknown);
+    // The asset itself is still reachable the old way — only the TYPE is unknown,
+    // so this is a narrower manager, not a broken one.
+    CHECK(cm.ensureResident(oldId));
+    CHECK(cm.getMaterial(oldId) != nullptr);
+
+    he_test::removeQuiet(pak);
+}
+
+TEST_CASE("Unloading a pak asset does not take the pak's type information with it")
+{
+    // The type index has two origins, and unloadAsset used to erase both. A pak
+    // asset's type belongs to the ARCHIVE, not to the load: drop it on unload and
+    // discoverAssets stops listing the asset, so nothing ever asks for it to come
+    // back — undiscoverable for the rest of the process. Unload → discover →
+    // reload has to be a loop, because that is how a game frees a level's classes
+    // and picks them up again.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_b5_unload_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_b5_unload_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    writeB5StartupAssets(contentDir);
+
+    ExportSettings settings;
+    settings.compress = false;
+    REQUIRE(ProjectExporter::exportProject(contentDir, "UnloadGame", "", outputDir, settings).success);
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / "UnloadGame.hpak").string()));
+    REQUIRE(listed(cm.discoverAssets(HE::AssetType::HorizonCodeClass), kB5ClassId));
+    REQUIRE(cm.getHorizonCodeClass(kB5ClassId) != nullptr);
+
+    REQUIRE(cm.unloadAsset(kB5ClassId));
+    CHECK(cm.getHorizonCodeClass(kB5ClassId) == nullptr);   // the payload really went
+    CHECK(!cm.isLoaded(kB5ClassId));
+    CHECK(cm.assetType(kB5ClassId) == HE::AssetType::HorizonCodeClass); // the type stayed
+
+    // Second time round: still found, and still redeemable.
+    CHECK(listed(cm.discoverAssets(HE::AssetType::HorizonCodeClass), kB5ClassId));
+    CHECK(cm.getHorizonCodeClass(kB5ClassId) != nullptr);
 
     he_test::removeAllQuiet(contentDir);
     he_test::removeAllQuiet(outputDir);

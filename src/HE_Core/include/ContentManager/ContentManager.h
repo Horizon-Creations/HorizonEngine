@@ -240,8 +240,12 @@ public:
 	// UUID→entry residency index is built, so assets load lazily on first access
 	// (acquireXxx / ensureResident) instead of all up front. Mounting is an overlay
 	// stack — a later mount SHADOWS an earlier one for the same UUID (patch/DLC/mod
-	// semantics) and contributes new UUIDs as additions. Pass a 32-byte key for an
-	// encrypted pak. Returns true when the archive opened.
+	// semantics) and contributes new UUIDs as additions. The pak's two reserved
+	// index entries are read here as well, so that path → UUID (loadAsset by path)
+	// and UUID → AssetType (enumerateIds/discoverAssets) answer for pak content
+	// before any of it is loaded; both are best-effort and an older pak without
+	// them just contributes less. Pass a 32-byte key for an encrypted pak.
+	// Returns true when the archive opened.
 	bool mountPak(const std::string& path, const uint8_t key[32] = nullptr);
 
 	// Mount every .hpak in `dir` as an overlay (mods/patches/DLC) on top of the
@@ -428,15 +432,21 @@ public:
 	// ── Asset enumeration ──────────────────────────────────────────────────
 	// Returns the UUIDs of all currently loaded/registered assets.
 	std::vector<HE::UUID> enumerateIds() const;
-	// Returns only UUIDs of assets of the given type.
+	// Returns only UUIDs of assets of the given type — including assets that are
+	// merely MOUNTED (a pak's asset type index names their type before they load),
+	// which do not answer to any getXxx() accessor yet. Use discoverAssets() when
+	// the assets themselves are wanted, not just their identities.
 	std::vector<HE::UUID> enumerateIds(HE::AssetType type) const;
 	// enumerateIds(type) plus a loose-content walk (header sniff → loadAsset):
-	// every asset of `type` the manager can currently discover. The walk covers
-	// the editor and dev builds; pak-only assets are found once registered.
+	// every asset of `type` the manager can currently discover, each one made
+	// resident. The walk covers the editor and dev builds; in a packaged build the
+	// assets come from the mounted pak's asset type index and are loaded here, so
+	// what a caller gets back is usable through the getXxx() accessors.
 	std::vector<HE::UUID> discoverAssets(HE::AssetType type);
 	// Total number of loaded/registered assets (all types).
 	size_t assetCount() const { return m_handleToUUID.size(); }
-	// Returns the AssetType for a loaded/registered UUID, or Unknown if not found.
+	// Returns the AssetType for a loaded, registered or mounted UUID, or Unknown
+	// if none of those knows it.
 	HE::AssetType assetType(HE::UUID id) const;
 
 private:
@@ -579,7 +589,13 @@ private:
 	std::unordered_map<std::string, HE::UUID>     m_pakPathIndex;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
-	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex; // mirrors m_handleToUUID with type info
+	// UUID → type. Two origins: loading an asset adds its type, and mounting a pak
+	// adds the type of everything the pak's __asset_types__ names — so this map is
+	// a superset of m_handleToUUID, and an entry here does NOT imply the asset is
+	// loaded. That is the point: discoverAssets has to find a packaged game's
+	// startup classes BEFORE anything is loaded. unloadAsset only drops entries
+	// that came from a load (see the m_pakResidency guard there).
+	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex;
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
 	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset

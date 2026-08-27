@@ -4,12 +4,12 @@
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Hpak/HpakReader.h"
-#include "Hpak/ProjectExporter.h"        // sceneUuidForPath + kAssetPathIndexEntry
+#include "Hpak/ProjectExporter.h"        // sceneUuidForPath + the reserved pak entry names
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/GlobalState.h" // engineContentCacheDir() — the third "Engine/" resolution tier
-#include <nlohmann/json.hpp>             // parse the pak's __asset_index__
+#include <nlohmann/json.hpp>             // parse the pak's __asset_index__ / __asset_types__
 #include <Types/TypeRegistry.h>          // struct/enum defs mirror into the registry on load
 #include <algorithm>
 #include <cmath>
@@ -1232,20 +1232,27 @@ bool ContentManager::forgetDiskAsset(HE::UUID id)
 // ─── streamMountedAssets ──────────────────────────────────────────────────────
 size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& exclude)
 {
-	// Reserved pak entries are NOT streamable assets: the asset path index and the
-	// scene index are JSON metadata blobs read directly by their known UUID (via
-	// readMountedEntry), never parsed as .hasset. Streaming them would burn an
-	// async job on a guaranteed parse failure. (Both names live in ProjectExporter.h;
-	// kSceneIndexEntry mirrors HE::api::scene::kSceneIndexEntry.)
+	// Reserved pak entries are NOT streamable assets: the asset path index, the
+	// asset TYPE index, the scene index and the user-type index are JSON metadata
+	// blobs read directly by their known UUID (via readMountedEntry), never parsed
+	// as .hasset — as is the packed GameInstance graph. Streaming any of them would
+	// burn an async job on a guaranteed parse failure. EVERY reserved name from
+	// ProjectExporter.h belongs in this list; kTypeIndexEntry was missing and only
+	// went unnoticed because the exporter omits it for a project without any
+	// Struct/Enum/SaveGameTemplate asset. (kSceneIndexEntry mirrors
+	// HE::api::scene::kSceneIndexEntry.)
 	const HE::UUID assetIdx = sceneUuidForPath(kAssetPathIndexEntry);
+	const HE::UUID typeIdx  = sceneUuidForPath(kAssetTypeIndexEntry);
 	const HE::UUID sceneIdx = sceneUuidForPath(kSceneIndexEntry);
+	const HE::UUID userTypes = sceneUuidForPath(kTypeIndexEntry);
 	const HE::UUID giIdx    = sceneUuidForPath(kGameInstanceEntry);
 	size_t submitted = 0;
 	for (const auto& [id, mountIdx] : m_pakResidency)
 	{
 		(void)mountIdx;
 		if (isLoaded(id) || exclude.count(id) ||
-		    id == assetIdx || id == sceneIdx || id == giIdx) continue;
+		    id == assetIdx || id == typeIdx || id == sceneIdx ||
+		    id == userTypes || id == giIdx) continue;
 		loadAssetAsync(id);
 		++submitted;
 	}
@@ -1882,7 +1889,16 @@ bool ContentManager::unloadAsset(HE::UUID id)
 	for (auto pit = m_pathToUUID.begin(); pit != m_pathToUUID.end(); ++pit)
 		if (pit->second == id) { m_pathMtime.erase(pit->first); m_pathToUUID.erase(pit); break; }
 	m_handleToUUID.erase(id);
-	m_assetTypeIndex.erase(id);
+	// The type index has TWO origins: loading an asset (this entry dies with the
+	// load) and mounting a pak that ships an asset type index (that entry belongs
+	// to the archive, not to the load). m_pakResidency is exactly the question
+	// "can a mounted pak supply this UUID again?" — so it is the discriminator.
+	// Dropping a pak asset's type here would make it undiscoverable forever:
+	// discoverAssets would stop listing it, so nothing would ever ask
+	// ensureResident to bring it back. Unload → discover → reload must be a loop.
+	// A loose-content asset keeps the old behaviour; the content walk re-sniffs it.
+	if (!m_pakResidency.count(id))
+		m_assetTypeIndex.erase(id);
 	return true;
 }
 
@@ -1920,6 +1936,19 @@ std::vector<HE::UUID> ContentManager::discoverAssets(HE::AssetType type)
 {
 	std::vector<HE::UUID>        out = enumerateIds(type);
 	std::unordered_set<HE::UUID> seen(out.begin(), out.end());
+
+	// The ids above may be pak entries that are known (mountPak read the pak's
+	// asset type index) but NOT loaded. Every getXxx(id) accessor is a pure cache
+	// lookup — it does not load — so handing those ids back unloaded would give
+	// the caller a list of UUIDs whose assets all read as null, which is what
+	// PlayerHost saw. Discovery therefore delivers usable assets, exactly like the
+	// loose-content walk below, which has always ended in loadAsset(). Best-effort:
+	// an id whose payload fails to load stays in the list (every caller null-checks
+	// the accessor) rather than silently disappearing from the enumeration.
+	// Safe against iterator invalidation: enumerateIds already returned a copy,
+	// while ensureResident writes into m_assetTypeIndex.
+	for (const HE::UUID& id : out)
+		ensureResident(id);
 
 	const std::string root = contentRoot();
 	std::error_code ec;
@@ -2238,6 +2267,49 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 							id.lo = std::stoull(v.substr(colon + 1));
 						} catch (...) { continue; }
 						m_pakPathIndex[it.key()] = id;
+					}
+			}
+		}
+	}
+
+	// Merge this pak's asset TYPE index ("hi:lo" → HE::AssetType) so the manager
+	// knows what a pak asset IS before anything loads it. Mounting used to
+	// contribute residency and paths only, and a type was learned on load — so
+	// enumerateIds(type)/discoverAssets(type) came back empty in a packaged game,
+	// PlayerHost found no PlayerController class to instantiate, no BeginPlay ran
+	// and the game booted into an empty world. Later mounts overwrite (overlay
+	// priority), matching the residency rule above. Best-effort like the path
+	// index: an older pak (or a mod pak) without the entry contributes nothing.
+	{
+		const HE::UUID idxId = sceneUuidForPath(kAssetTypeIndexEntry);
+		if (reader->hasEntry(idxId))
+		{
+			const auto bytes = reader->readEntry(idxId, key);
+			if (!bytes.empty())
+			{
+				const auto j = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+				if (j.is_object())
+					for (auto it = j.begin(); it != j.end(); ++it)
+					{
+						// Mirror image of the path index: here the "hi:lo" is the KEY
+						// and the value is the AssetType as a number.
+						if (!it.value().is_number_unsigned()) continue;
+						const std::string& idKey = it.key();
+						const auto colon = idKey.find(':');
+						if (colon == std::string::npos) continue;
+						HE::UUID id{};
+						try {
+							id.hi = std::stoull(idKey.substr(0, colon));
+							id.lo = std::stoull(idKey.substr(colon + 1));
+						} catch (...) { continue; }
+						const auto t = static_cast<HE::AssetType>(it.value().get<uint32_t>());
+						// Unknown says nothing a missing entry does not already say
+						// (assetType() reports Unknown either way). A value from a
+						// NEWER exporter that this build has no enumerator for is
+						// kept as-is and simply never equals any type a caller asks
+						// for — no range check needed to make that safe.
+						if (t == HE::AssetType::Unknown) continue;
+						m_assetTypeIndex[id] = t;
 					}
 			}
 		}

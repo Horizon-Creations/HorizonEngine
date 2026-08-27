@@ -173,6 +173,20 @@ HE_API HE::UUID sceneUuidForPath(const std::string& projectRelPath);
 // the scene's UUID reference closure never reaches). "__asset_index__".
 inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
 
+// Well-known name (→ sceneUuidForPath UUID) of the pak's asset TYPE index: a JSON
+// object mapping "hi:lo" → HE::AssetType as a number, for EVERY packed asset.
+// Without it a shipped game only learns an asset's type once the asset is loaded
+// (ContentManager fills its type index on load, and mounting a pak contributes
+// residency + paths but no types) — and discoverAssets, which finds a game's
+// startup PlayerController classes, asks BEFORE anything is loaded. It then found
+// nothing, no controller was instantiated, no BeginPlay ran, and the packaged game
+// booted into an empty world. "__asset_types__".
+//
+// NOT to be confused with kTypeIndexEntry below: that one lists the paths of
+// user-DEFINED type assets (Struct/Enum/SaveGameTemplate) to preload; this one
+// carries the HE::AssetType of every asset in the pak.
+inline constexpr const char* kAssetTypeIndexEntry = "__asset_types__";
+
 // Well-known name (→ sceneUuidForPath UUID) of the pak's SCENE index: a JSON
 // array of every packed scene's project-relative path, so scene.available() can
 // enumerate scenes in a shipped build (pak entries are UUID-keyed — the paths
@@ -181,12 +195,15 @@ inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
 // the game looks up a UUID the exporter never wrote. "__scene_index__".
 inline constexpr const char* kSceneIndexEntry = "__scene_index__";
 
-// Well-known name (→ sceneUuidForPath UUID) of the pak's TYPE index: a JSON
-// array of every packed Struct/Enum definition asset's project-relative path.
-// The game loads these eagerly at startup — BEFORE the script backends
-// bootstrap — so horizon.enums/horizon.structs and every graph's type pins
-// resolve without waiting for on-demand streaming to happen to touch them.
-// "__type_index__".
+// Well-known name (→ sceneUuidForPath UUID) of the pak's USER-TYPE index: a JSON
+// array of the project-relative paths of every packed type DEFINITION asset —
+// Struct, Enum and SaveGameTemplate. The game loads these eagerly at startup —
+// BEFORE the script backends bootstrap — so horizon.enums/horizon.structs and
+// every graph's type pins resolve without waiting for on-demand streaming to
+// happen to touch them. "__type_index__".
+//
+// NOT to be confused with kAssetTypeIndexEntry above, which maps every packed
+// asset to its HE::AssetType. This one names a handful of assets to preload.
 inline constexpr const char* kTypeIndexEntry = "__type_index__";
 
 // Well-known name (→ sceneUuidForPath UUID) of the packed app-wide GameInstance

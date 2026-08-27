@@ -89,6 +89,14 @@ public:
     // so the game can resolve loadAsset("<path>") to a mounted-pak UUID (pak
     // entries are UUID-keyed — the path is otherwise unrecoverable at runtime).
     const std::unordered_map<std::string, HE::UUID>& packedPaths() const { return m_packedPaths; }
+    // After addDirectory: baked asset UUID → HAsset header asset type for every
+    // scanned .hasset, read from the SAME open Reader that extracts the UUID —
+    // the type is free here and costs a second open of every asset in the project
+    // anywhere else. The exporter serializes this as the pak's __asset_types__ so
+    // a shipped game knows an asset's type BEFORE loading it (ContentManager only
+    // learns the type of an asset it has already loaded, which is too late for
+    // discoverAssets — the call that finds a game's startup classes).
+    const std::unordered_map<HE::UUID, uint16_t>& packedTypes() const { return m_packedTypes; }
 
 private:
     struct PendingEntry {
@@ -103,5 +111,6 @@ private:
     std::vector<PendingEntry> m_entries;
     std::vector<std::pair<HE::UUID, uint64_t>> m_srcHashes; // filled by addDirectory
     std::unordered_map<std::string, HE::UUID>  m_packedPaths; // filled by addDirectory
+    std::unordered_map<HE::UUID, uint16_t>     m_packedTypes; // filled by addDirectory
     int m_reused = 0;
 };

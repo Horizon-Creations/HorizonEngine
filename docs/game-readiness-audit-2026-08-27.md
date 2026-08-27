@@ -22,7 +22,7 @@ bewusst nur dort, wo ein Fund seither präziser oder schlimmer geworden ist.
 | B2 keine Kollisionsgeometrie ausser Box, Kugel, Kapsel | **erledigt** (`eb32fe27`), Mesh, Convex Hull und Height Field; die Landschaft trägt jetzt Kollision |
 | B3 zur Laufzeit nur eine leere Entity erzeugbar | **erledigt**, `entity.spawnClass` über den bestehenden Create-Object-Dienst, erreichbar aus allen vier Frontends |
 | B4 Navigation aus keiner Sprache steuerbar | offen |
-| B5 gepacktes Spiel entdeckt keine PlayerController-Klasse | offen |
+| B5 gepacktes Spiel entdeckt keine PlayerController-Klasse | **erledigt**, `__asset_types__` in der Pak; bestehende Exporte müssen einmal neu gebaut werden |
 | B6 kein Partikel-Burst | offen |
 
 Bei B1 und B2 hat sich eine Regel herausgeschält, die über die beiden Blocker hinaus gilt und
