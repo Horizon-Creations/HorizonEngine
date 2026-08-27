@@ -742,9 +742,28 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 App-Projekt zum Starten, und der Leerlaufverbrauch ist damit gemessen worden: gar nicht. Genau
 dafür steht der headless-Starttest in der Risikoliste.
 
-**Als Nächstes in Welle 1:** Startinhalt für die App-Vorlage (ein Widget plus GameInstance, die
-zusammen ein Fenster füllen — bisher legt die Vorlage nur Ordner an), die feinkörnige
-Invalidierung, damit der 100-ms-Herzschlag hoch kann, IME und Eingabefilter am Textfeld.
+**Dritter Durchgang (1980 Tests):**
+- **E2 Stufe 1, die Live-Vorschau.** `uiLive = simulating || appProject`; Play-Modus wird in
+  `setPlayMode` selbst abgelehnt (nicht nur versteckt, sonst reißt ein Kürzel die Widgets mit
+  der Welt ab); Viewport-Leiste und Details-Panel weg; der Outliner zeigt die
+  **Widget-Hierarchie** (`WidgetManager::liveIds`) und sagt bei leerer Liste, was das bedeutet;
+  kein Mausfang; Designer speichert automatisch (zurückgehalten bis Maus los und kein Feld
+  aktiv, sonst speichert jeder Frame eines Ziehens); Neustart der Vorschau von Hand über den
+  Transportknopf und automatisch beim Speichern von Widget-, HC-Klassen- und Script-Assets.
+- **Startinhalt** in der App-Vorlage: `RootWidget.hasset` plus `GameInstance.hcode` mit
+  OnInit → Create Widget, als `HorizonCode::Graph` gebaut statt als JSON-Literal.
+- **Feinkörnige Invalidierung.** `WidgetManager::consumeVisualDirty()` wird von allem gesetzt,
+  was das Bild ändert (Property-Setter aus Skripten, Texteingabe, Fokus, Hover-/Press-Wechsel,
+  Scrollen, Sichtbarkeit, Lebenszyklus), und **nicht** von bloßer Zeigerbewegung — das ist der
+  Teil, den der Test festnagelt. Dazu wurde die Schleife in **zwei** Entscheidungen geteilt:
+  *laufen* (Herzschlag, damit die Uhr nicht stehenbleibt) und *zeigen* (`WantsPresent()` nach
+  `OnRender`, weil erst danach feststeht, ob sich etwas geändert hat). Ein Herzschlag ohne
+  Änderung tickt die App also weiter, ohne die GPU anzufassen und ohne Swap.
+
+**Als Nächstes in Welle 1:** IME und Eingabefilter am Textfeld, und die `timer`-Gruppe — für
+die ist noch zu klären, ob sie überhaupt gebraucht wird, denn Widgets bekommen ein Tick-Event
+und Lua/Python ein `onUpdate`, und ein Timer, der einen Callback feuert, braucht Runtime-Arbeit,
+die diese beiden schon leisten.
 
 ---
 
