@@ -205,13 +205,13 @@ const UIPropTable& UIText::propTable() const
 
 const UIPropTable& UIButton::propTable() const
 {
+    // Three state colours and nothing else of its own: the caption is a child
+    // now (see UIButton), and the rest of a button's look — corner radius,
+    // border, gradient — are the shared surface properties every surface has.
     static const UIPropTable t = {
-        uiprop::slot<&UIButton::text>        ({ "Text", UIPropType::String }),
-        uiprop::slot<&UIButton::fontSize>    ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
         uiprop::slot<&UIButton::color>       ({ "Normal Color", UIPropType::Color }),
         uiprop::slot<&UIButton::hoveredColor>({ "Hovered Color", UIPropType::Color }),
         uiprop::slot<&UIButton::pressedColor>({ "Pressed Color", UIPropType::Color }),
-        uiprop::slot<&UIButton::textColor>   ({ "Text Color", UIPropType::Color }),
     };
     return t;
 }
@@ -629,13 +629,11 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
     glm::vec4 c = color;
     if (st.hovered) c = hoveredColor;
     if (st.pressed) c = pressedColor;
-    // No radius here any more: it is an authored property now, stamped onto this
-    // quad by the manager (see WidgetManager's surface stamp). Passing it here as
-    // well would apply it twice, once unscaled.
+    // The surface, and only the surface. No radius here either: it is an
+    // authored property now, stamped onto this quad by the manager. Whatever is
+    // ON the button is made of children, drawn by the same loop that draws every
+    // other element.
     quad(out, px.x, px.y, px.w, px.h, c, mat, 0.0f, textureAssetId);
-    if (!text.empty())
-        emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
-                 textColor, /*centerH=*/true, out);
 }
 
 // ── CheckBox ─────────────────────────────────────────────────────────────────
@@ -982,17 +980,20 @@ void UIText::readJson(const nlohmann::json& j)
 
 void UIButton::writeJson(nlohmann::json& j) const
 {
-    j["text"] = text; j["fontSize"] = fontSize;
+    // "text"/"fontSize"/"textColor" are deliberately NOT written any more: they
+    // are the legacy caption, and their absence is what tells the loader that
+    // this button has already been migrated to a Text child.
     j["color"] = colJson(color); j["hoveredColor"] = colJson(hoveredColor);
-    j["pressedColor"] = colJson(pressedColor); j["textColor"] = colJson(textColor);
+    j["pressedColor"] = colJson(pressedColor);
 }
 void UIButton::readJson(const nlohmann::json& j)
 {
-    text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
     color = colFrom(j.value("color", nlohmann::json()), color);
     hoveredColor = colFrom(j.value("hoveredColor", nlohmann::json()), hoveredColor);
     pressedColor = colFrom(j.value("pressedColor", nlohmann::json()), pressedColor);
-    textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    // The legacy caption is NOT read into this element — it has nowhere to live
+    // here any more. uiWidgetTreeFromJson turns it into a Text child, which it
+    // can do and this cannot: an element only ever sees its own object.
 }
 
 void UICheckBox::writeJson(nlohmann::json& j) const

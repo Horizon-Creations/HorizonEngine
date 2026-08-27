@@ -69,13 +69,13 @@ TEST_CASE("makeUIElement produces the right subclass for every type")
 
 TEST_CASE("clone() is a deep, independent copy")
 {
-    HE::UIButton b;
+    HE::UIText b;
     b.setProp("Text", HE::UIPropValue::ofString("original"));
     auto c = b.clone();
     c->setProp("Text", HE::UIPropValue::ofString("changed"));
     CHECK(b.getProp("Text").s == "original");
     CHECK(c->getProp("Text").s == "changed");
-    CHECK(c->type() == HE::UIWidgetType::Button);
+    CHECK(c->type() == HE::UIWidgetType::Text);
 }
 
 TEST_CASE("getProp/setProp round-trip per type")
@@ -136,13 +136,12 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "WordWrap", UIPropType::Bool },
             { "AutoSize", UIPropType::Bool },
             { "Center", UIPropType::Bool } } },
+        // Three state colours and nothing else: a Button is a surface, and its
+        // caption is a child element (Text/FontSize/Text Color went with it).
         { UIWidgetType::Button, {
-            { "Text", UIPropType::String },
-            { "FontSize", UIPropType::Float },
             { "Normal Color", UIPropType::Color },
             { "Hovered Color", UIPropType::Color },
-            { "Pressed Color", UIPropType::Color },
-            { "Text Color", UIPropType::Color } } },
+            { "Pressed Color", UIPropType::Color } } },
         { UIWidgetType::CheckBox, {
             { "Checked", UIPropType::Bool },
             { "Label", UIPropType::String },
@@ -342,7 +341,7 @@ TEST_CASE("UIWidgetTree add / hierarchy / removeSubtree")
 TEST_CASE("UIWidgetTree deep copy is independent")
 {
     HE::UIWidgetTree a;
-    const int b = a.add(HE::UIWidgetType::Button);
+    const int b = a.add(HE::UIWidgetType::Text);
     a.find(b)->setProp("Text", HE::UIPropValue::ofString("A"));
 
     HE::UIWidgetTree copy = a;
@@ -358,7 +357,7 @@ TEST_CASE("UIWidgetTree JSON round-trip preserves type-specific fields")
 
     const int b = t.add(HE::UIWidgetType::Button);
     t.find(b)->name = "Play";
-    t.find(b)->setProp("Text", HE::UIPropValue::ofString("PLAY"));
+    t.find(b)->setProp("Normal Color", HE::UIPropValue::ofColor({ 0.9f, 0.1f, 0.2f, 1.0f }));
     t.find(b)->material = "Materials/Glow.hasset";
 
     const int cb = t.add(HE::UIWidgetType::CheckBox);
@@ -377,7 +376,7 @@ TEST_CASE("UIWidgetTree JSON round-trip preserves type-specific fields")
     CHECK(r.canvasWidth == doctest::Approx(1280.0f));
     REQUIRE(r.elements.size() == 4);
     CHECK(r.find(b)->type() == HE::UIWidgetType::Button);
-    CHECK(r.find(b)->getProp("Text").s == "PLAY");
+    CHECK(r.find(b)->getProp("Normal Color").col.r == doctest::Approx(0.9f));
     CHECK(r.find(b)->material == "Materials/Glow.hasset");
     CHECK(r.find(cb)->parentId == b);
     CHECK(r.find(cb)->getProp("Checked").b);
@@ -976,7 +975,7 @@ TEST_CASE("base properties are gettable and settable on every element type")
 TEST_CASE("Material/Font base properties round-trip as strings")
 {
     using namespace HE;
-    auto e = makeUIElement(UIWidgetType::Button); // has material slot + text
+    auto e = makeUIElement(UIWidgetType::Image);   // has a material slot
     e->setPropAny("Material", UIPropValue::ofString("Content/M.hasset"));
     CHECK(e->getPropAny("Material").s == "Content/M.hasset");
     CHECK(e->material == "Content/M.hasset");
@@ -984,13 +983,15 @@ TEST_CASE("Material/Font base properties round-trip as strings")
     CHECK(e->getPropAny("Font").s == "Content/F.hasset");
     CHECK(e->font == "Content/F.hasset");
 
-    // Font is enumerated only for text-bearing types
+    // Font is enumerated only for text-bearing types. A Button is no longer one
+    // of them: its caption is a child element, and that child carries the font.
     auto hasFont = [](const UIElement& el) {
         for (const auto& pd : el.allProperties()) if (pd.name == "Font") return true;
         return false;
     };
-    CHECK(hasFont(*e));
+    CHECK(hasFont(*makeUIElement(UIWidgetType::Text)));
     CHECK(!hasFont(*makeUIElement(UIWidgetType::Panel)));
+    CHECK(!hasFont(*makeUIElement(UIWidgetType::Button)));
 }
 
 // ── Multi-line text ───────────────────────────────────────────────────────────
@@ -2726,6 +2727,102 @@ TEST_CASE("A border lands on the element's surface and nowhere else")
     // Glyph quads never carry one — an outlined letter is not a border.
     for (const UIRenderObject& o : out)
         if (o.type == 2) CHECK(o.borderWidth == doctest::Approx(0.0f));
+}
+
+// ─── A button is a surface with children ─────────────────────────────────────
+
+TEST_CASE("A button's old caption becomes a Text child, once")
+{
+    // A widget authored under the old rule: the caption lives on the Button.
+    const std::string legacy = R"({
+        "canvasWidth": 400, "canvasHeight": 200, "scaleMode": 5, "nextId": 2,
+        "elements": [ { "id": 1, "type": "Button", "x": 0, "y": 0, "w": 200, "h": 60,
+                        "text": "PLAY", "fontSize": 24,
+                        "textColor": [1.0, 0.5, 0.25, 1.0] } ]
+    })";
+
+    HE::UIWidgetTree t;
+    REQUIRE(HE::uiWidgetTreeFromJson(legacy, t));
+    REQUIRE(t.elements.size() == 2);           // the button, plus its new label
+
+    const HE::UIElement* label = nullptr;
+    for (const auto& e : t.elements)
+        if (e->type() == HE::UIWidgetType::Text) label = e.get();
+    REQUIRE(label);
+    CHECK(label->parentId == 1);               // a child OF the button
+    CHECK_FALSE(label->hitTestable);           // and never steals its click
+    const auto* txt = dynamic_cast<const HE::UIText*>(label);
+    REQUIRE(txt);
+    CHECK(txt->text == "PLAY");
+    CHECK(txt->fontSize == doctest::Approx(24.0f));
+    CHECK(txt->color.g == doctest::Approx(0.5f));
+
+    // Saving drops the legacy keys, so loading the result again must NOT add a
+    // second label. Running twice is the classic migration bug.
+    const std::string resaved = HE::uiWidgetTreeToJson(t);
+    HE::UIWidgetTree again;
+    REQUIRE(HE::uiWidgetTreeFromJson(resaved, again));
+    int labels = 0;
+    for (const auto& e : again.elements)
+        if (e->type() == HE::UIWidgetType::Text) ++labels;
+    CHECK(labels == 1);
+}
+
+TEST_CASE("A button draws only its surface, and its children draw on it")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+
+    const int btn = authored.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement* e = authored.find(btn);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 60.0f;
+    }
+    // Two children, anchored inside the button — an icon left, a caption filling
+    // the rest. This is the layout a built-in centred string could never do.
+    const int icon = authored.add(HE::UIWidgetType::Image);
+    {
+        HE::UIElement* e = authored.find(icon);
+        e->parentId = btn;
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 8.0f; e->posY = 14.0f; e->sizeX = 32.0f; e->sizeY = 32.0f;
+    }
+    const int label = authored.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement* e = authored.find(label);
+        e->parentId = btn;
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 48.0f; e->posY = 18.0f; e->sizeX = 140.0f; e->sizeY = 24.0f;
+        if (auto* t = dynamic_cast<HE::UIText*>(e)) { t->text = "Go"; t->autoSize = false; }
+    }
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+
+    // The icon is positioned RELATIVE to the button, not to the canvas.
+    bool sawIcon = false;
+    for (const UIRenderObject& o : out)
+        if (o.type == 0 && o.size.x == doctest::Approx(32.0f) &&
+            o.size.y == doctest::Approx(32.0f))
+        {
+            sawIcon = true;
+            CHECK(o.position.x == doctest::Approx(8.0f));
+            CHECK(o.position.y == doctest::Approx(14.0f));
+        }
+    CHECK(sawIcon);
+    // …and the caption's glyphs are there, drawn by the Text child.
+    CHECK(countGlyphs(out) == 2);   // "Go"
+
+    // The click still belongs to the button: a Text child is not interactive, so
+    // it is transparent to the pointer.
+    CHECK(wm.processPointer(400.0f, 200.0f, 100.0f, 30.0f, false, true));
 }
 
 TEST_CASE("The corner radius is authored, and old widgets keep their look")

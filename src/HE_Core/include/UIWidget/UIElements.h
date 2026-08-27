@@ -110,12 +110,18 @@ public:
 class HE_API UIButton final : public UIElement
 {
 public:
-    std::string text = "Button";
-    float       fontSize = 20.0f;
+    // ── A button is a SURFACE, not a label with a box around it ──────────────
+    // It draws its three states and nothing else. What is on it — a caption, an
+    // icon, both side by side — is made of CHILD elements, anchored inside the
+    // button's rect like children of any other parent. That is what makes an
+    // icon button, or a button with the label pushed to the left, possible at
+    // all; a built-in centred string could only ever be one layout.
+    //
+    // A Button loaded from a widget authored before this carries its old caption
+    // into a Text child (see uiWidgetTreeFromJson) — nobody's label disappears.
     glm::vec4   color{ 0.20f, 0.20f, 0.20f, 1.0f };   // normal
     glm::vec4   hoveredColor{ 0.30f, 0.30f, 0.30f, 1.0f };
     glm::vec4   pressedColor{ 0.15f, 0.15f, 0.15f, 1.0f };
-    glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 
     // 6 px was hard-coded in render() until the radius became an authored
     // property; kept as the default so existing buttons look unchanged.

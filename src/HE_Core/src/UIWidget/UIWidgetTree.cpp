@@ -814,11 +814,69 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
     }
     t.nextId       = j.value("nextId", 1);
 
+    // ── Migration: a Button's caption becomes a Text child ───────────────────
+    // A Button used to draw its own centred string. It is a surface now, and
+    // what sits on it is made of children — so a caption authored under the old
+    // rule is turned into one here rather than being dropped.
+    //
+    // Collected first and added after the loop: appending to t.elements while
+    // iterating the JSON is fine, but the new children need ids from t.nextId,
+    // which is only final once every stored id has been seen.
+    struct LegacyCaption
+    {
+        int         buttonId;
+        std::string text;
+        float       fontSize;
+        glm::vec4   color;
+    };
+    std::vector<LegacyCaption> captions;
+
     for (const auto& o : j.value("elements", nlohmann::json::array()))
     {
         std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
         HE::graph::bumpNextId(t.nextId, e->id);
+        // Keyed on the legacy JSON KEY, not on any field: once this widget has
+        // been saved again the key is gone and the migration is inert, which is
+        // what stops it from running twice and stacking up labels.
+        if (e->type() == UIWidgetType::Button)
+            if (const auto txt = o.find("text");
+                txt != o.end() && txt->is_string() && !txt->get<std::string>().empty())
+            {
+                glm::vec4 tc{ 1.0f, 1.0f, 1.0f, 1.0f };
+                if (const auto c = o.find("textColor");
+                    c != o.end() && c->is_array() && c->size() == 4)
+                    tc = { (*c)[0].get<float>(), (*c)[1].get<float>(),
+                           (*c)[2].get<float>(), (*c)[3].get<float>() };
+                captions.push_back({ e->id, txt->get<std::string>(),
+                                     o.value("fontSize", 20.0f), tc });
+            }
         t.elements.push_back(std::move(e));
+    }
+
+    for (const LegacyCaption& lc : captions)
+    {
+        auto label = makeUIElement(UIWidgetType::Text);
+        label->id       = t.nextId++;
+        label->parentId = lc.buttonId;
+        label->name     = "Label";
+        // Centred and stretched across the button, which is exactly where the
+        // built-in caption used to be drawn.
+        uiSetAnchorPreset(*label, 15);
+        label->posX = label->posY = 0.0f;
+        label->sizeX = label->sizeY = 0.0f;
+        // A caption must never swallow the click meant for the button under it.
+        label->hitTestable = false;
+        if (auto* txt = dynamic_cast<UIText*>(label.get()))
+        {
+            txt->text     = lc.text;
+            txt->fontSize = lc.fontSize;
+            txt->color    = lc.color;
+            txt->align    = 1;      // centred, the way the built-in caption was
+            // Auto-size would shrink the label to its own text and undo the
+            // stretch that centres it in the button.
+            txt->autoSize = false;
+        }
+        t.elements.push_back(std::move(label));
     }
 
     out = std::move(t);
