@@ -589,18 +589,33 @@ void render(AppContext& ctx)
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputText("##exportDir", &s_exportOutputDir);
 
-            ImGui::Text("Startup Scene:");
-            ImGui::SetNextItemWidth(-1.0f);
-            const char* scenePreview = s_exportStartupScene.empty()
-                ? "(currently open scene)" : s_exportStartupScene.c_str();
-            if (ImGui::BeginCombo("##exportScene", scenePreview))
+            // An application has no scene to start in — its GameInstance builds
+            // the UI and that is the whole picture (docs/he-apps-plan.md E5). The
+            // field is hidden rather than shown empty, and the value cleared, so a
+            // scene picked before the project was switched cannot ride along.
+            const bool exportingApp = ctx.projectManager &&
+                                      ctx.projectManager->currentProject().appProject;
+            if (exportingApp)
             {
-                if (EditorWidgets::selectable("(currently open scene)", s_exportStartupScene.empty()))
-                    s_exportStartupScene.clear();
-                for (const auto& sc : s_exportSceneChoices)
-                    if (ImGui::Selectable(sc.c_str(), sc == s_exportStartupScene))
-                        s_exportStartupScene = sc;
-                ImGui::EndCombo();
+                s_exportStartupScene.clear();
+                ImGui::TextDisabled("Application: no startup scene — the UI comes up from the "
+                                    "Game Instance.");
+            }
+            else
+            {
+                ImGui::Text("Startup Scene:");
+                ImGui::SetNextItemWidth(-1.0f);
+                const char* scenePreview = s_exportStartupScene.empty()
+                    ? "(currently open scene)" : s_exportStartupScene.c_str();
+                if (ImGui::BeginCombo("##exportScene", scenePreview))
+                {
+                    if (EditorWidgets::selectable("(currently open scene)", s_exportStartupScene.empty()))
+                        s_exportStartupScene.clear();
+                    for (const auto& sc : s_exportSceneChoices)
+                        if (ImGui::Selectable(sc.c_str(), sc == s_exportStartupScene))
+                            s_exportStartupScene = sc;
+                    ImGui::EndCombo();
+                }
             }
 
             ImGui::Text("Target Platform:");
@@ -888,7 +903,11 @@ void startExport(AppContext& ctx)
 
                 // Resolve the startup scene: the profile's project-relative choice,
                 // or the scene currently open in the editor.
-                std::string scenePath = ctx.currentScenePath;
+                // An application exports with NO scene at all. Without this the
+                // scene that happens to be open in the editor would be packed
+                // into it and the runtime would refuse to load it in app mode.
+                std::string scenePath =
+                    pm->currentProject().appProject ? std::string() : ctx.currentScenePath;
                 if (!s_exportStartupScene.empty() && !projectRoot.empty())
                     scenePath = (projectRoot / s_exportStartupScene).string();
                 std::string sceneName;

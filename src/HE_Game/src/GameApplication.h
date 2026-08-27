@@ -139,6 +139,10 @@ private:
     // so a click on a menu button is not also a shot — the mirror image of the
     // keyboard swallow in OnEvent while a text field has focus.
     bool m_uiWantsPointer = false;
+    // SDL's click count from the last left press this frame (2 = double,
+    // 3 = triple). Latched in OnEvent, consumed by updateUIInput, which is where
+    // the pointer arithmetic lives. Zero means "no multi-click this frame".
+    int  m_uiClickCount = 0;
     // Startup window + backend, settled once by applyShippedConfig. The values
     // here are the ones a game shipped with before the config could carry them,
     // so an export without those keys behaves exactly as it always did.

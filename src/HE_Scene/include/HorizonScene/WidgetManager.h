@@ -78,9 +78,21 @@ public:
     // you can move, a selection you can extend and a way to get text in and out
     // of the system clipboard. The clipboard itself stays with the app (SDL
     // owns it) — this side hands over the selected text and takes a paste.
-    enum class TextEdit { Left, Right, Home, End, Delete, SelectAll };
+    // WordLeft/WordRight move across whole words (Ctrl+Arrow, Alt+Arrow on a
+    // Mac); DeleteWordLeft is Ctrl/Alt+Backspace. Appended, not inserted — the
+    // enum is used positionally by the apps' key tables.
+    enum class TextEdit { Left, Right, Home, End, Delete, SelectAll,
+                          WordLeft, WordRight, DeleteWordLeft };
     // True when something changed (and OnTextChanged fired where it applies).
     bool editFocusedText(TextEdit op, bool extendSelection);
+    // Extend the selection to where the pointer is, without moving the anchor —
+    // the drag half of click-and-drag selection. `mouseX` is in render-target
+    // pixels like every other pointer coordinate here. False when nothing moved.
+    bool dragCaretFromPointer(float vpWidth, float vpHeight, float mouseX);
+    // Select the word (or the whole line) under the pointer: double- and
+    // triple-click. Both leave the caret at the end of what they selected.
+    bool selectWordAtPointer(float vpWidth, float vpHeight, float mouseX);
+    bool selectAllFocused();
     // What is selected in the focused field, for a copy or a cut.
     std::string focusedSelection() const;
     // Drop it (the second half of a cut). False when nothing was selected.
@@ -154,6 +166,10 @@ private:
         // keyboard/gamepad navigation last landed on.
         int focusedElem   = 0;
         int draggingSlider = 0;    // slider being dragged
+        // TextInput whose selection is being dragged out with the mouse held
+        // down. Its own field rather than a flag on draggingSlider, because the
+        // two do entirely different things with the same pointer stream.
+        int draggingText   = 0;
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
 
@@ -205,6 +221,10 @@ private:
     // script may have rewritten the text since the last keystroke and left the
     // caret pointing past the end of it. Every editing entry point starts here.
     HE::UITextInput* focusedTextField(Instance*& outWidget);
+    // Byte offset in the focused field under a pointer at `mouseX`. The single
+    // home of the canvas/rect/padding arithmetic that click, drag and
+    // double-click all need — three copies of it would drift.
+    bool caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX, size_t& outOffset);
 
     // ── Embedded-widget translation ──────────────────────────────────────────
     // Which script owns an element, and what that script calls it. For anything

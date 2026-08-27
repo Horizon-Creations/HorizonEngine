@@ -6151,12 +6151,22 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			using TE = WidgetManager::TextEdit;
 			const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
 			const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+			const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
 			switch (event.key.key)
 			{
-			case SDLK_BACKSPACE: wm.inputBackspace(); return true;
+			// Word-wise variants first: Ctrl (Cmd on a Mac) and Alt both mean
+			// "by word" for the arrows and Backspace, which is what the two
+			// platform conventions expect and neither is wrong here.
+			case SDLK_BACKSPACE:
+				if (ctrl || alt) { wm.editFocusedText(TE::DeleteWordLeft, false); return true; }
+				wm.inputBackspace(); return true;
 			case SDLK_DELETE:    wm.editFocusedText(TE::Delete, false); return true;
-			case SDLK_LEFT:      wm.editFocusedText(TE::Left,  shift);  return true;
-			case SDLK_RIGHT:     wm.editFocusedText(TE::Right, shift);  return true;
+			case SDLK_LEFT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);
+				return true;
+			case SDLK_RIGHT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift);
+				return true;
 			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
 			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
 			case SDLK_RETURN:

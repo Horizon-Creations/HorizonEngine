@@ -2460,6 +2460,65 @@ TEST_CASE("Text field: selecting, replacing, and the clipboard's half of it")
     CHECK_FALSE(f.wm.deleteFocusedSelection());
 }
 
+TEST_CASE("Text field: word-wise movement and deletion")
+{
+    TextFieldFixture f("the quick brown fox");
+    using TE = WidgetManager::TextEdit;
+    REQUIRE(f.caret() == 19);
+
+    // Ctrl+Left walks back over whole words, including the separator it starts in.
+    CHECK(f.wm.editFocusedText(TE::WordLeft, false));
+    CHECK(f.caret() == 16);                       // start of "fox"
+    CHECK(f.wm.editFocusedText(TE::WordLeft, false));
+    CHECK(f.caret() == 10);                       // start of "brown"
+
+    // …and Ctrl+Right forward to the END of a word, not to the next start —
+    // that is the difference nobody notices until the caret lands wrong.
+    CHECK(f.wm.editFocusedText(TE::WordRight, false));
+    CHECK(f.caret() == 15);                       // end of "brown"
+
+    // With shift it drags a selection along instead of collapsing it.
+    CHECK(f.wm.editFocusedText(TE::WordRight, true));
+    CHECK(f.wm.focusedSelection() == " fox");
+
+    // The edges say "nothing happened" rather than pretending.
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    CHECK_FALSE(f.wm.editFocusedText(TE::WordLeft, false));
+    CHECK(f.wm.editFocusedText(TE::End, false));
+    CHECK_FALSE(f.wm.editFocusedText(TE::WordRight, false));
+
+    // Ctrl+Backspace takes the word before the caret.
+    CHECK(f.wm.editFocusedText(TE::DeleteWordLeft, false));
+    CHECK(f.text() == "the quick brown ");
+    CHECK(f.caret() == 16);
+    CHECK(f.wm.editFocusedText(TE::DeleteWordLeft, false));
+    CHECK(f.text() == "the quick ");
+}
+
+TEST_CASE("Text field: dragging selects, double-click takes a word")
+{
+    TextFieldFixture f("hello world");
+    // The fixture's click left the caret at the end. Press near the left edge to
+    // put the anchor there, then drag right without releasing.
+    REQUIRE(f.wm.processPointer(400.0f, 200.0f, 8.0f, 20.0f, true, true));
+    const std::string dragged = [&] {
+        // A held pointer that moves extends the selection; the anchor stays put.
+        f.wm.processPointer(400.0f, 200.0f, 60.0f, 20.0f, true, true);
+        return f.wm.focusedSelection();
+    }();
+    CHECK_FALSE(dragged.empty());
+    CHECK(std::string("hello world").rfind(dragged, 0) == 0);   // a prefix of the text
+    f.wm.processPointer(400.0f, 200.0f, 60.0f, 20.0f, false, true);
+
+    // A double-click selects the word under it rather than a run of pixels.
+    REQUIRE(f.wm.selectWordAtPointer(400.0f, 200.0f, 8.0f));
+    CHECK(f.wm.focusedSelection() == "hello");
+
+    // …and the triple-click path takes everything.
+    CHECK(f.wm.selectAllFocused());
+    CHECK(f.wm.focusedSelection() == "hello world");
+}
+
 TEST_CASE("Text field: multi-byte characters move and delete as one")
 {
     TextFieldFixture f("aäb");

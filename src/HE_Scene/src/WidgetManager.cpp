@@ -559,6 +559,9 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						fireP(&HorizonCode::Runtime::fireOnFocused, hot);
 					}
 					setCaretFromPointer(vpWidth, vpHeight, mouseX);
+					// From here until the button comes up, pointer movement
+					// extends the selection instead of moving the caret.
+					w.draggingText = hot;
 				}
 				else if (w.focusedElem != 0)
 				{
@@ -597,6 +600,15 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			}
 		}
 
+		// ── Text selection drag ──────────────────────────────────────────────
+		// Held down after a press inside a field: the anchor stays put and the
+		// caret follows the pointer, which is what selecting with the mouse is.
+		// No hit test — dragging past the edge of the field must keep extending,
+		// exactly like it does everywhere else.
+		if (w.draggingText != 0 && primaryDown && m_focusWidget == w.id &&
+		    w.focusedElem == w.draggingText)
+			dragCaretFromPointer(vpWidth, vpHeight, mouseX);
+
 		// ── Release ──────────────────────────────────────────────────────────
 		if (releaseEdge)
 		{
@@ -604,6 +616,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				activateElement(w, hot);
 			w.pressedElem    = 0;
 			w.draggingSlider = 0;
+			w.draggingText   = 0;
 		}
 	}
 
@@ -678,6 +691,48 @@ void WidgetManager::inputBackspace()
 	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 }
 
+namespace
+{
+// ── Word boundaries ──────────────────────────────────────────────────────────
+// "Word" here is the editor convention every text field uses: runs of
+// letters/digits/underscore are words, everything else is a separator, and a
+// jump first skips the separators it is standing in. Byte-based on purpose —
+// the callers only ever hand in offsets that are already on UTF-8 boundaries,
+// and a multi-byte character is never one of the ASCII separators below, so it
+// falls on the "word" side and the offsets stay valid.
+bool isWordByte(unsigned char ch)
+{
+	return std::isalnum(ch) != 0 || ch == '_' || ch >= 0x80;
+}
+
+size_t wordStartBefore(const std::string& s, size_t pos)
+{
+	while (pos > 0 && !isWordByte(static_cast<unsigned char>(s[pos - 1]))) --pos;
+	while (pos > 0 &&  isWordByte(static_cast<unsigned char>(s[pos - 1]))) --pos;
+	return pos;
+}
+
+size_t wordEndAfter(const std::string& s, size_t pos)
+{
+	while (pos < s.size() && !isWordByte(static_cast<unsigned char>(s[pos]))) ++pos;
+	while (pos < s.size() &&  isWordByte(static_cast<unsigned char>(s[pos]))) ++pos;
+	return pos;
+}
+
+// The word AROUND a position, for a double-click. Standing on a separator
+// selects that run of separators instead of silently jumping to a neighbour.
+void wordAround(const std::string& s, size_t pos, size_t& from, size_t& to)
+{
+	if (s.empty()) { from = to = 0; return; }
+	if (pos >= s.size()) pos = s.size() - 1;
+	const bool word = isWordByte(static_cast<unsigned char>(s[pos]));
+	from = pos;
+	while (from > 0 && isWordByte(static_cast<unsigned char>(s[from - 1])) == word) --from;
+	to = pos;
+	while (to < s.size() && isWordByte(static_cast<unsigned char>(s[to])) == word) ++to;
+}
+} // namespace
+
 bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 {
 	Instance* w = nullptr;
@@ -708,10 +763,28 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 		ti->selAnchor = 0;
 		ti->caret     = ti->text.size();
 		return true;
+	case TextEdit::DeleteWordLeft:
+	{
+		if (!ti->editable) return false;
+		// A selection wins: Ctrl+Backspace over a selection deletes exactly the
+		// selection, like every other destructive key here.
+		if (!ti->deleteSelection())
+		{
+			if (ti->caret == 0) return false;
+			const size_t from = wordStartBefore(ti->text, ti->caret);
+			if (from == ti->caret) return false;
+			ti->text.erase(from, ti->caret - from);
+			ti->caret = ti->selAnchor = from;
+		}
+		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+		return true;
+	}
 	case TextEdit::Left:
 	case TextEdit::Right:
 	case TextEdit::Home:
 	case TextEdit::End:
+	case TextEdit::WordLeft:
+	case TextEdit::WordRight:
 	{
 		const size_t before = ti->caret;
 		// Without shift, a plain arrow COLLAPSES a selection to its near end
@@ -725,10 +798,12 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 		}
 		switch (op)
 		{
-		case TextEdit::Left:  ti->caret = HE::uiUtf8Prev(ti->text, ti->caret); break;
-		case TextEdit::Right: ti->caret = HE::uiUtf8Next(ti->text, ti->caret); break;
-		case TextEdit::Home:  ti->caret = 0; break;
-		case TextEdit::End:   ti->caret = ti->text.size(); break;
+		case TextEdit::Left:      ti->caret = HE::uiUtf8Prev(ti->text, ti->caret); break;
+		case TextEdit::Right:     ti->caret = HE::uiUtf8Next(ti->text, ti->caret); break;
+		case TextEdit::Home:      ti->caret = 0; break;
+		case TextEdit::End:       ti->caret = ti->text.size(); break;
+		case TextEdit::WordLeft:  ti->caret = wordStartBefore(ti->text, ti->caret); break;
+		case TextEdit::WordRight: ti->caret = wordEndAfter(ti->text, ti->caret); break;
 		default: break;
 		}
 		if (!extend) ti->selAnchor = ti->caret;
@@ -756,7 +831,12 @@ bool WidgetManager::deleteFocusedSelection()
 	return true;
 }
 
-bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight, float mouseX)
+// Byte offset in the focused field that a pointer at `mouseX` points at. The
+// one place the canvas/rect/padding arithmetic lives, so click, drag and
+// double-click cannot drift apart the way image and hit-area would if extract
+// and processPointer used different canvases.
+bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX,
+                                         size_t& outOffset)
 {
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
@@ -768,9 +848,52 @@ bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight, float mou
 	// Same 6-unit padding the field draws its text with, in pixels.
 	constexpr float kPad = 6.0f;
 	const float localX = mouseX - (r.x * canvas.scaleX + kPad);
-	ti->caret = ti->caretAtX(localX, canvas.scaleY * vs);
-	ti->selAnchor = ti->caret;
+	outOffset = ti->caretAtX(localX, canvas.scaleY * vs);
 	return true;
+}
+
+bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight, float mouseX)
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	size_t at = 0;
+	if (!ti || !caretOffsetAtPointer(vpWidth, vpHeight, mouseX, at)) return false;
+	ti->caret = ti->selAnchor = at;
+	return true;
+}
+
+bool WidgetManager::dragCaretFromPointer(float vpWidth, float vpHeight, float mouseX)
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	size_t at = 0;
+	if (!ti || !ti->selectable) return false;
+	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, at)) return false;
+	if (at == ti->caret) return false;
+	// The ANCHOR stays where the press put it — that is what makes this a drag
+	// rather than a second click.
+	ti->caret = at;
+	return true;
+}
+
+bool WidgetManager::selectWordAtPointer(float vpWidth, float vpHeight, float mouseX)
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	size_t at = 0;
+	if (!ti || !ti->selectable || ti->text.empty()) return false;
+	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, at)) return false;
+	size_t from = 0, to = 0;
+	wordAround(ti->text, at, from, to);
+	if (from == to) return false;
+	ti->selAnchor = from;
+	ti->caret     = to;
+	return true;
+}
+
+bool WidgetManager::selectAllFocused()
+{
+	return editFocusedText(TextEdit::SelectAll, false);
 }
 
 void WidgetManager::inputSubmit()

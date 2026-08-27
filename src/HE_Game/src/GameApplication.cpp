@@ -1000,6 +1000,20 @@ void GameApplication::updateUIInput()
 		                                  mx * sx, my * sy,
 		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
 
+	// A double-click selects the word under it, a triple-click the whole line.
+	// Consumed here rather than in OnEvent so it reuses the pointer arithmetic
+	// above instead of a second, drifting copy of it. The press that came with
+	// the same click already focused the field and put the caret there.
+	if (pointerValid && m_uiClickCount >= 2)
+	{
+		if (m_uiClickCount == 2)
+			m_world->widgets().selectWordAtPointer(static_cast<float>(pw),
+			                                       static_cast<float>(ph), mx * sx);
+		else
+			m_world->widgets().selectAllFocused();
+	}
+	m_uiClickCount = 0;
+
 	// The wheel goes to a scroll box under the cursor first; what it does not
 	// consume stays available to whatever else reads the wheel this frame.
 	if (pointerValid)
@@ -1146,6 +1160,13 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
+	// A double- or triple-click on a text field selects a word or the line.
+	// Only the COUNT is taken here; where the pointer was is worked out in
+	// updateUIInput, which already does that arithmetic once.
+	if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT &&
+	    event.button.clicks >= 2)
+		m_uiClickCount = event.button.clicks;
+
 	// OS window focus → GameInstance OnWindowFocusChanged (while running).
 	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
 	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
@@ -1172,12 +1193,22 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 			using TE = WidgetManager::TextEdit;
 			const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
 			const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+			const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
 			switch (event.key.key)
 			{
-			case SDLK_BACKSPACE: wm.inputBackspace(); return true;
+			// Word-wise variants first: Ctrl (Cmd on a Mac) and Alt both mean
+			// "by word" for the arrows and Backspace, which is what the two
+			// platform conventions expect and neither is wrong here.
+			case SDLK_BACKSPACE:
+				if (ctrl || alt) { wm.editFocusedText(TE::DeleteWordLeft, false); return true; }
+				wm.inputBackspace(); return true;
 			case SDLK_DELETE:    wm.editFocusedText(TE::Delete, false); return true;
-			case SDLK_LEFT:      wm.editFocusedText(TE::Left,  shift);  return true;
-			case SDLK_RIGHT:     wm.editFocusedText(TE::Right, shift);  return true;
+			case SDLK_LEFT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);
+				return true;
+			case SDLK_RIGHT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift);
+				return true;
 			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
 			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
 			case SDLK_RETURN:
