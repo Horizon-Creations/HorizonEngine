@@ -117,7 +117,9 @@ public:
     glm::vec4   pressedColor{ 0.15f, 0.15f, 0.15f, 1.0f };
     glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
 
-    UIButton() { sizeX = 180.0f; sizeY = 48.0f; }
+    // 6 px was hard-coded in render() until the radius became an authored
+    // property; kept as the default so existing buttons look unchanged.
+    UIButton() { sizeX = 180.0f; sizeY = 48.0f; cornerRadius = 6.0f; }
     UIWidgetType type() const override { return UIWidgetType::Button; }
     const char*  typeName() const override { return "Button"; }
     bool hasMaterialSlot() const override { return true; }
@@ -210,7 +212,7 @@ public:
     glm::vec4 backColor{ 0.15f, 0.15f, 0.15f, 1.0f };
     glm::vec4 fillColor{ 0.30f, 0.70f, 0.40f, 1.0f };
 
-    UIProgressBar() { sizeX = 240.0f; sizeY = 20.0f; }
+    UIProgressBar() { sizeX = 240.0f; sizeY = 20.0f; cornerRadius = 4.0f; }
     // The TRACK is the surface; the fill drawn on top of it keeps its own colour.
     bool hasSurfaceStyle() const override { return true; }
     UIWidgetType type() const override { return UIWidgetType::ProgressBar; }
@@ -342,7 +344,7 @@ public:
         return n;
     }
 
-    UITextInput() { sizeX = 240.0f; sizeY = 32.0f; }
+    UITextInput() { sizeX = 240.0f; sizeY = 32.0f; cornerRadius = 4.0f; }
     // A bordered text field is the standard look for one, so this is arguably
     // the type that needed it most.
     bool hasSurfaceStyle() const override { return true; }
@@ -375,7 +377,7 @@ public:
     glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
     glm::vec4   highlightColor{ 0.25f, 0.35f, 0.50f, 1.0f };
 
-    UIComboBox() { sizeX = 220.0f; sizeY = 32.0f; }
+    UIComboBox() { sizeX = 220.0f; sizeY = 32.0f; cornerRadius = 4.0f; }
     // The closed box is the surface; the open list draws over it.
     bool hasSurfaceStyle() const override { return true; }
     UIWidgetType type() const override { return UIWidgetType::ComboBox; }

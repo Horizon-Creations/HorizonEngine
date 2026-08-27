@@ -375,6 +375,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
     if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
+    if (n == "Corner Radius"){ out = UIPropValue::ofFloat(e.cornerRadius);      return true; }
     if (n == "Border Width") { out = UIPropValue::ofFloat(e.borderWidth);       return true; }
     if (n == "Border Color") { out = UIPropValue::ofColor(e.borderColor);       return true; }
     if (n == "Gradient")     { out = UIPropValue::ofBool(e.gradient);           return true; }
@@ -407,6 +408,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // runtime re-resolves it when this changes (WidgetManager watches both).
     if (n == "Texture")      { e.texture = v.s; return true; }
     if (n == "Font")         { e.font = v.s; return true; }
+    if (n == "Corner Radius"){ e.cornerRadius = v.f < 0.0f ? 0.0f : v.f; return true; }
     if (n == "Border Width") { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; return true; }
     if (n == "Border Color") { e.borderColor = v.col; return true; }
     if (n == "Gradient")     { e.gradient = v.b; return true; }
@@ -435,6 +437,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     // Text label does not grow a border property that outlines nothing.
     if (hasSurfaceStyle())
     {
+        out.push_back({ "Corner Radius", UIPropType::Float });
         out.push_back({ "Border Width", UIPropType::Float });
         out.push_back({ "Border Color", UIPropType::Color });
         // Split into three plain properties rather than one gradient object:
@@ -626,7 +629,10 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
     glm::vec4 c = color;
     if (st.hovered) c = hoveredColor;
     if (st.pressed) c = pressedColor;
-    quad(out, px.x, px.y, px.w, px.h, c, mat, roundedR(px.w, px.h, 6.0f), textureAssetId);
+    // No radius here any more: it is an authored property now, stamped onto this
+    // quad by the manager (see WidgetManager's surface stamp). Passing it here as
+    // well would apply it twice, once unscaled.
+    quad(out, px.x, px.y, px.w, px.h, c, mat, 0.0f, textureAssetId);
     if (!text.empty())
         emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
                  textColor, /*centerH=*/true, out);
@@ -684,7 +690,9 @@ void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState&,
                            const HE::UUID&, float, std::vector<UIRenderObject>& out) const
 {
     const float t = std::clamp(value, 0.0f, 1.0f);
-    quad(out, px.x, px.y, px.w,     px.h, backColor, {}, roundedR(px.w, px.h, 4.0f));
+    // The track's radius is stamped (authored property); the FILL keeps its own,
+    // because it is a part drawn on the surface rather than the surface itself.
+    quad(out, px.x, px.y, px.w,     px.h, backColor, {}, 0.0f);
     quad(out, px.x, px.y, px.w * t, px.h, fillColor, {}, roundedR(px.w * t, px.h, 4.0f));
 }
 
@@ -695,7 +703,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
 {
     glm::vec4 bg = backColor;
     if (st.focused) bg = glm::vec4(glm::min(glm::vec3(backColor) + 0.06f, glm::vec3(1.0f)), backColor.a);
-    quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
+    quad(out, px.x, px.y, px.w, px.h, bg, {}, 0.0f);   // radius is stamped (authored)
     // Thin focus border (four edge quads).
     if (st.focused)
     {
@@ -864,7 +872,7 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
     glm::vec4 bg = st.hovered ? highlightColor : backColor;
-    quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
+    quad(out, px.x, px.y, px.w, px.h, bg, {}, 0.0f);   // radius is stamped (authored)
     const float pad = 6.0f;
     emitText(*this, currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
              fontSize * pxScaleY, textColor, false, out);

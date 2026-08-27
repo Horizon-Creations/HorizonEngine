@@ -1369,7 +1369,8 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// its groove; testing the rect is what tells a background apart from
 			// a part drawn on top of one, without any widget type knowing that
 			// borders exist.
-			if ((e.borderWidth > 0.0f || e.gradient) && out.size() > firstQuad)
+			if ((e.cornerRadius > 0.0f || e.borderWidth > 0.0f || e.gradient) &&
+			    out.size() > firstQuad)
 			{
 				UIRenderObject& first = out[firstQuad];
 				const bool coversRect =
@@ -1380,6 +1381,11 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 					std::abs(first.size.y - px.h)     < 0.5f;
 				if (coversRect)
 				{
+					// A length, so it scales with the canvas — and clamped the
+					// way the shaders clamp it, so a radius larger than the box
+					// is a capsule rather than a mistake.
+					if (e.cornerRadius > 0.0f)
+						first.cornerRadius = e.cornerRadius * sy * evs;
 					if (e.borderWidth > 0.0f)
 					{
 						// In pixels like every other length here, so a scaled

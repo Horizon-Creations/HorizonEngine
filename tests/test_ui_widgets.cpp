@@ -2728,6 +2728,69 @@ TEST_CASE("A border lands on the element's surface and nowhere else")
         if (o.type == 2) CHECK(o.borderWidth == doctest::Approx(0.0f));
 }
 
+TEST_CASE("The corner radius is authored, and old widgets keep their look")
+{
+    // The types that used to hard-code one keep it as their default, so a widget
+    // saved before the radius was a property renders unchanged.
+    CHECK(HE::UIButton().cornerRadius      == doctest::Approx(6.0f));
+    CHECK(HE::UITextInput().cornerRadius   == doctest::Approx(4.0f));
+    CHECK(HE::UIComboBox().cornerRadius    == doctest::Approx(4.0f));
+    CHECK(HE::UIProgressBar().cornerRadius == doctest::Approx(4.0f));
+    // A Panel could not be rounded at all before; it starts square.
+    CHECK(HE::UIPanel().cornerRadius == doctest::Approx(0.0f));
+
+    // An element whose JSON predates the property must not read back as 0 —
+    // absent means "the type's default", not "square".
+    HE::UIWidgetTree t;
+    const int b = t.add(HE::UIWidgetType::Button);
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    CHECK(json.find("cornerRadius") == std::string::npos);  // 6 is the default, not written
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, loaded));
+    CHECK(loaded.find(b)->cornerRadius == doctest::Approx(6.0f));
+
+    // …and an authored one round-trips.
+    t.find(b)->cornerRadius = 12.0f;
+    HE::UIWidgetTree loaded2;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), loaded2));
+    CHECK(loaded2.find(b)->cornerRadius == doctest::Approx(12.0f));
+}
+
+TEST_CASE("The corner radius reaches the quad exactly once")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = authored.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement* e = authored.find(btn);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 60.0f;
+        e->cornerRadius = 10.0f;
+    }
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+
+    // The background carries the authored radius — the element's render() no
+    // longer passes one of its own, so this cannot be a doubled value.
+    REQUIRE_FALSE(out.empty());
+    bool sawSurface = false;
+    for (const UIRenderObject& o : out)
+        if (o.type == 0 && o.size.x == doctest::Approx(200.0f) &&
+            o.size.y == doctest::Approx(60.0f))
+        {
+            sawSurface = true;
+            CHECK(o.cornerRadius == doctest::Approx(10.0f));
+        }
+    CHECK(sawSurface);
+}
+
 TEST_CASE("A gradient rides on the same surface as the border")
 {
     TempWidgetDir dir;

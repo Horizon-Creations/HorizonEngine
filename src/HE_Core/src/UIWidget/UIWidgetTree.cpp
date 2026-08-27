@@ -702,6 +702,13 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
     // Only once set, like every optional field above, so an element authored
     // before borders existed saves byte-identically.
+    // Only when it differs from what this TYPE starts with. Writing every
+    // non-zero radius would add a `cornerRadius: 6` to every Button ever saved,
+    // for a value that is already the default — the same "only once set" rule
+    // every other optional field above follows.
+    if (const std::unique_ptr<UIElement> proto = makeUIElement(e.type());
+        !proto || e.cornerRadius != proto->cornerRadius)
+        o["cornerRadius"] = e.cornerRadius;
     if (e.borderWidth > 0.0f)
     {
         o["borderWidth"] = e.borderWidth;
@@ -755,6 +762,10 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->rotation      = o.value("rotation", 0.0f);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
+    // Absent = keep the TYPE's default (a Button's 6, a ComboBox's 4), not zero:
+    // every widget authored before the radius was a property must still look the
+    // way it looked. The element was constructed with its default just above.
+    e->cornerRadius = o.value("cornerRadius", e->cornerRadius);
     e->borderWidth = o.value("borderWidth", 0.0f);
     if (const auto bc = o.find("borderColor");
         bc != o.end() && bc->is_array() && bc->size() == 4)

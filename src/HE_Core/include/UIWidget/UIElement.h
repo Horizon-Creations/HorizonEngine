@@ -228,6 +228,14 @@ public:
     // On the base rather than per type, because it is one authored idea: a
     // Panel, an Image and a Button that all carry a 1 px line should carry the
     // same property, not three that have to be kept in step.
+    // Rounded corners on the element's own surface, in pixels; 0 = square, and
+    // min(w,h)/2 is a circle. Authored rather than baked into each type's
+    // render(): a Button used to hard-code 6 and a Panel could not be rounded at
+    // all, which is a style decision the engine was making for its user.
+    //
+    // The types that HAVE a surface set their own default in their constructor,
+    // so every widget authored before this existed still draws exactly as it did.
+    float     cornerRadius = 0.0f;
     float     borderWidth = 0.0f;
     glm::vec4 borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
     // A linear fade across the same surface: off, the element is its own colour
@@ -381,6 +389,7 @@ protected:
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
         dst.clipChildren = clipChildren;
+        dst.cornerRadius = cornerRadius;
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;
         dst.gradient = gradient; dst.gradientColor = gradientColor;
         dst.gradientAngle = gradientAngle;
