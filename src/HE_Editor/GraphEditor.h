@@ -118,6 +118,16 @@ struct State
     // whole group drags; a click with no drag collapses to just this node on
     // release. 0 = the press started a fresh single selection.
     int    selectClickNode = 0;
+    // Draw order on top of the graph's own: ids that have been touched, oldest
+    // first, drawn AFTER everyone else. Grabbing a node has to bring it to the
+    // front — dragging one along BEHIND its neighbours looks like the canvas is
+    // fighting you, and it is the one moment where the reader's attention is on
+    // exactly this node.
+    //
+    // Ids only, resolved against what the graph is showing every frame: the same
+    // small integer means a different node in another sub-graph, the same trap
+    // the selection above had to be taught about.
+    std::vector<int> raised;
     int    linkSrcNode = 0, linkSrcPin = 0;
     bool   linkSrcInput = false;
     bool   linkGrab = false;         // this drag detached an existing link (removal)

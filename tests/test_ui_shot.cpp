@@ -870,6 +870,107 @@ TEST_CASE("Graph canvas: clicking an overlap selects the node in front")
 	CHECK(st.dragNode == 2);
 }
 
+// ── Grabbing a node brings it to the front ──────────────────────────────────
+// Reported as a feel problem, which is the right way to read it: dragging a node
+// along BEHIND its neighbours looks like the canvas is fighting you, and the
+// grabbed node is the one moment where the reader's attention is on exactly this
+// node.
+//
+// Two halves are checked, because only having both is worth anything. The
+// PICTURE has to change in the overlap — a raise nobody can see is not a raise —
+// and the HIT TEST has to follow it, or the node would look raised while a click
+// in the overlap still picks the other one.
+TEST_CASE("Graph canvas: grabbing a node raises it above the one in front")
+{
+	constexpr int W = 320, H = 240;
+	Harness harness(W, H);
+
+	GraphEditor::Model m;
+	GraphEditor::State st;
+	st.pan  = ImVec2(0.0f, 0.0f);
+	st.zoom = 1.0f;
+
+	// Same geometry as the test above: node 2 is listed second, so the graph's
+	// own order draws it in front of node 1, and they overlap.
+	m.nodeIds = []{ return std::vector<int>{ 1, 2 }; };
+	m.getPos  = [](int id, float& x, float& y)
+	{ x = (id == 1) ? 40.0f : 90.0f; y = (id == 1) ? 40.0f : 60.0f; };
+	m.setPos  = [](int, float, float){};
+	m.title   = [](int id){ return id == 1 ? std::string("Back") : std::string("Front"); };
+	// Distinct headers, so the two nodes cannot rasterise to the same pixels and
+	// make the comparison below pass for the wrong reason.
+	m.headerColor = [](int id){ return id == 1 ? IM_COL32(200, 60, 60, 255)
+	                                           : IM_COL32(60, 60, 200, 255); };
+	m.pins    = [](int){ return std::vector<GraphEditor::Pin>{}; };
+	m.links   = []{ return std::vector<std::array<int, 4>>{}; };
+	m.connect = [](int, int, int, int){ return false; };
+	m.nodeBodyHeight = [](int){ return 60.0f; };
+
+	ImGuiIO& io = ImGui::GetIO();
+	// Inside node 1 only: left of node 2's left edge, which sits near x=98.
+	const ImVec2 inNodeOneOnly(60.0f, 55.0f);
+	const ImVec2 inOverlap(150.0f, 100.0f);
+
+	he_ui::Image shot;
+	auto frame = [&](const ImVec2& at, bool mouseDown)
+	{
+		io.MousePos = at;
+		io.MouseDown[0] = mouseDown;
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##canvas", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		GraphEditor::draw("##ge", m, st, ImVec2((float)W, (float)H));
+		ImGui::End();
+		ImGui::Render();
+		shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+	};
+
+	// Two settling frames: ImGui resolves hover from the PREVIOUS frame.
+	frame(inNodeOneOnly, false);
+	frame(inNodeOneOnly, false);
+	const he_ui::Image before = shot;
+	REQUIRE(before.valid());
+
+	frame(inNodeOneOnly, true);   // grab node 1, where nothing else covers it
+	CHECK(st.dragNode == 1);
+	// The raise is recorded on the PRESS, not on the first movement: there must be
+	// no frame in which the grabbed node is still behind.
+	REQUIRE(st.raised.size() == 1);
+	CHECK(st.raised[0] == 1);
+
+	frame(inNodeOneOnly, false);  // release
+	frame(inNodeOneOnly, false);  // and draw with the new order
+	const he_ui::Image after = shot;
+	REQUIRE(after.valid());
+
+	// The overlap has to look different now. Counted over the region where the
+	// two boxes cross, so a stray pixel elsewhere cannot carry the assertion.
+	REQUIRE(before.width == after.width);
+	int differing = 0;
+	for (int y = 70; y < 130; ++y)
+		for (int x = 100; x < 220; ++x)
+		{
+			std::uint8_t r1, g1, b1, a1, r2, g2, b2, a2;
+			before.pixel(x, y, r1, g1, b1, a1);
+			after.pixel(x, y, r2, g2, b2, a2);
+			if (r1 != r2 || g1 != g2 || b1 != b2) ++differing;
+		}
+	CHECK(differing > 0);
+
+	// And the hit test agrees with what is drawn: a press in the overlap now
+	// takes node 1, which before the raise went to node 2 (the test above pins
+	// that direction). Without this, a raised node would look in front while
+	// clicks kept falling through to the other one.
+	frame(inOverlap, false);
+	frame(inOverlap, false);
+	frame(inOverlap, true);
+	CHECK(st.dragNode == 1);
+	CHECK(st.selected == 1);
+}
+
 // ── The hover tooltip must describe a Map as a Map ──────────────────────────
 // Reported from a screenshot: hovering a Get Variable node for a Map showed the
 // output as an array of the VALUE type. The node itself drew the right pin all
