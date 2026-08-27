@@ -790,6 +790,33 @@ Runtime-Arbeit, die diese beiden schon leisten. Was übrig bliebe, kann `datetim
 User nichts zeigt. IME ist zudem **nicht real geprüft** — dafür braucht es eine echte
 Eingabemethode, headless testbar ist nur die Zustandsmaschine.
 
+**Zwischenfall bei der Projekterzeugung (behoben):** „Application" war die sechste Vorlage in
+einer Liste, die mit `height_in_items = 5` gezeichnet wurde — sie stand unterhalb des
+sichtbaren Bereichs, also legte jeder ein Empty-Projekt an und bekam folgerichtig keinen
+Startinhalt, kein kurzes Add-Menü und keine Vorschau. Beide Formulare zeigen jetzt alle
+Vorlagen, und `ProjectPreset::COUNT` plus ein `static_assert` im Header machen aus dem
+nächsten Auseinanderdriften einen Compile-Fehler statt einer stillen Fehlbedienung. Der
+Advanced-Haken erscheint außerdem nur noch beim Application-Template.
+
+---
+
+### Welle 2, angefangen
+
+**D5 Schicht 0, Teil 1: Rahmen.** `UIRenderObject` trägt `borderWidth` und `borderColor`,
+`UIElement` die authored Eigenschaften (auf der Basis, angeboten nur wo es eine Fläche gibt).
+Der WidgetManager **stempelt** sie nach `render()` auf die Fläche — das erste Quad des
+Elements, und nur wenn es dessen ganzes Rechteck bedeckt. Genau dieser Test unterscheidet
+einen Hintergrund von etwas, das darauf liegt: die Füllung eines Fortschrittsbalkens bekommt
+so keinen eigenen Rahmen, ohne dass irgendein Widget-Typ von Rahmen wissen muss.
+
+Die Mathematik ist in beiden Sprachen dieselbe: `d` ist eine vorzeichenbehaftete Distanz in
+Pixeln, die Innenkante also `d + width`, und ein `mix` zwischen Rahmen- und Füllfarbe ist auf
+beiden Seiten kantengeglättet. MSL mit `xcrun metal` und GLSL mit `glslangValidator` offline
+übersetzt; **optisch nicht verifiziert**.
+
+**Als Nächstes in Schicht 0:** Eckenradius pro Ecke, Verläufe, Schatten. Danach Block G
+(`RendererSoftware`), der Schicht 0 ebenfalls tragen muss — deshalb kommt sie zuerst.
+
 ---
 
 **Welle 1, das Fundament**
