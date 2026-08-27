@@ -152,6 +152,14 @@ public:
     // for tests, and for game code that wants to ask before pushing.
     bool hasPhysics(uint32_t entityId) const;
 
+    // Specifically a CHARACTER CONTROLLER, which hasPhysics above cannot answer:
+    // it is an OR, and a PlayerCharacter carries both a controller and a
+    // kinematic proxy body. An entity whose character failed to build but whose
+    // body did passes hasPhysics and then finds setCharacterVelocity a silent
+    // no-op — which is the difference between "this NPC will not move" and "this
+    // NPC will not move and nothing will say so".
+    bool hasCharacter(uint32_t entityId) const;
+
     // "No entity" for the ignore parameters below. A real entity id can be 0,
     // so the sentinel has to be a value the allocator never hands out.
     static constexpr uint32_t kNoEntity = 0xFFFFFFFFu;
@@ -240,6 +248,41 @@ public:
 
     // Returns true if the character's feet are on solid ground.
     bool isCharacterGrounded(uint32_t entityId) const;
+
+    // Jump: replace the character's vertical velocity with an upward one, once.
+    // The first takes the speed from CharacterControllerComponent::jumpSpeed,
+    // the second overrides it (a charged jump, a low hop through a gap). Returns
+    // whether the character actually left the ground, so `if (jump()) playSound()`
+    // does the obvious thing.
+    //
+    // Takes no HorizonWorld for the same reason setPosition() does not: a jump is
+    // written from game code that knows an entity id and nothing else. The world
+    // remembered by initialize()/step() is used to reach the component.
+    //
+    // WHEN IT IS ALLOWED: on the ground — the same answer movement.isGrounded
+    // gives, read from the same field, so a script that gates its own jump on
+    // that line can never disagree with this one — OR within a short COYOTE
+    // WINDOW after walking off a ledge (see CharacterControllerComponent::
+    // airTime). The window is an engine constant rather than an authored field:
+    // it is a feel-fix for the frames between the last step and the player's
+    // thumb, not a design knob, and a per-character value would have to be
+    // serialised and surfaced before anyone could set it. A jump SPENDS the
+    // credit, so holding the button cannot turn the grace into a second jump.
+    //
+    // Refusing mid-air is a normal answer and stays silent. Only a call that
+    // found nothing to act on — no character controller, or a speed of zero —
+    // logs, like the rest of the write half above.
+    //
+    // WHY IT WRITES THE COMPONENT TOO: the character's velocity lives in Jolt,
+    // but MovementSystem rebuilds it every tick as (planar.x, cc.velocity.y,
+    // planar.z) — it must, or walking would erase the fall. If the jump only
+    // reached Jolt, the next Movement tick would hand back the pre-jump Y and
+    // the jump would vanish before it was ever stepped. That happens in the
+    // editor (scripts run after the step, Movement before the next one) and in
+    // the game on any frame where the fixed-step accumulator owes no step at
+    // all. So both halves are written here and stay in agreement.
+    bool jumpCharacter(uint32_t entityId);
+    bool jumpCharacter(uint32_t entityId, float speed);
 
     // World gravity in m/s², default (0, -9.81, 0). Rigid bodies only: a
     // character controller falls by its own CharacterControllerComponent::

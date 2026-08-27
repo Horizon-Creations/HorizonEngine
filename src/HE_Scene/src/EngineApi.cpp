@@ -16,6 +16,8 @@
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/Components/NavAgentComponent.h"
+#include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
 #include "HorizonScene/EntityHost.h"
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
@@ -722,7 +724,119 @@ void look(Ctx& c, Entity e, float yawDegrees, float pitchDegrees)
 }
 void setMaxSpeed(Ctx& c, Entity e, float v)          { if (auto* mv = mvOf(c, e)) mv->maxSpeed = v; }
 void setOrientToMovement(Ctx& c, Entity e, bool on)  { if (auto* mv = mvOf(c, e)) mv->orientToMovement = on; }
+// Both jumps are PhysicsWorld::jumpCharacter — the grounded/coyote test, the
+// velocity write and the write-back into the component that stops MovementSystem
+// eating the jump all live there, at the one place that owns the character. What
+// is added here is the null-Ctx half: without a PhysicsWorld nobody is
+// simulating, and a jump that reported nothing would read as a broken jump.
+bool jump(Ctx& c, Entity e)
+{
+    if (!c.physics)
+    {
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "locomotion.jump: no physics world — entity %u cannot jump",
+                        static_cast<uint32_t>(e));
+        return false;
+    }
+    return c.physics->jumpCharacter(static_cast<uint32_t>(e));
+}
+bool jumpWith(Ctx& c, Entity e, float v)
+{
+    if (!c.physics)
+    {
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "locomotion.jumpWith: no physics world — entity %u cannot jump",
+                        static_cast<uint32_t>(e));
+        return false;
+    }
+    return c.physics->jumpCharacter(static_cast<uint32_t>(e), v);
+}
 } // namespace locomotion
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+namespace nav {
+namespace {
+// The agent, or a log line saying why there is none. One throttle site for all
+// six rows on purpose: it is one diagnostic ("that entity is not an agent"), and
+// `who` names the row that asked, so a shared five-second budget still tells the
+// author which call it was.
+NavAgentComponent* agentOf(Ctx& c, Entity e, const char* who)
+{
+    NavAgentComponent* agent = nullptr;
+    if (c.world)
+    {
+        auto&      reg = c.world->registry();
+        const auto id  = static_cast<entt::entity>(e);
+        if (reg.valid(id)) agent = reg.try_get<NavAgentComponent>(id);
+    }
+    if (!agent)
+        HE_LOG_THROTTLE(Nav, Warning, 5.0,
+                        "%s: entity %u has no NavAgentComponent (add one, or check the id)",
+                        who, static_cast<uint32_t>(e));
+    return agent;
+}
+} // namespace
+
+// x/y/z are a WORLD point — the nav block in EngineApi.h says why this group
+// breaks the local-unless-World rule rather than carrying the suffix.
+//
+// Straight through to NavigationSystem, which searches the route on the spot
+// rather than on the next tick — that is what makes the bool a real answer
+// instead of an optimistic one, and it owns the waypoint bookkeeping (which
+// index is next, which target the path was planned for) that a second writer
+// here would drift away from.
+bool moveTo(Ctx& c, Entity e, float x, float y, float z)
+{
+    // Asked first only for the log line: the row that failed should name itself,
+    // and NavigationSystem can only say which ENTITY had no agent.
+    if (!agentOf(c, e, "nav.moveTo")) return false;
+    return NavigationSystem::moveTo(*c.world, static_cast<entt::entity>(e),
+                                    glm::vec3(x, y, z));
+}
+
+void stop(Ctx& c, Entity e)
+{
+    auto* agent = agentOf(c, e, "nav.stop");
+    if (!agent) return;
+    agent->moving  = false;
+    agent->hasPath = false;
+    agent->path.clear();
+    agent->pathIdx = 0;
+    // `drivingCharacter` is left alone on purpose: NavigationSystem uses the tick
+    // it goes false to write the character's velocity back to zero, and clearing
+    // it here would skip that step and leave the agent gliding on the last value
+    // Jolt was given.
+}
+
+bool isMoving(Ctx& c, Entity e)
+{
+    const auto* agent = agentOf(c, e, "nav.isMoving");
+    return agent && agent->moving;
+}
+
+bool hasPath(Ctx& c, Entity e)
+{
+    const auto* agent = agentOf(c, e, "nav.hasPath");
+    return agent && agent->hasPath;
+}
+
+float remainingDistance(Ctx& c, Entity e)
+{
+    // NavigationSystem measures it — along the path's corners, not through the
+    // walls between them. Asked here only for the log line, as in moveTo.
+    if (!agentOf(c, e, "nav.remainingDistance")) return -1.0f;
+    return NavigationSystem::remainingDistance(*c.world, static_cast<entt::entity>(e));
+}
+
+void setSpeed(Ctx& c, Entity e, float v)
+{
+    auto* agent = agentOf(c, e, "nav.setSpeed");
+    if (!agent) return;
+    // A negative speed would walk the agent backwards along its own path, past
+    // the waypoint it came from, with no waypoint left to arrive at.
+    agent->speed = std::max(0.0f, v);
+}
+} // namespace nav
 
 // ── Entity UI ────────────────────────────────────────────────────────────────
 namespace ui {
@@ -2170,6 +2284,36 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ locomotion::setMaxSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
         t.push_back({ "locomotion.setOrientToMovement", "Locomotion", true, {{"entity", P::Int}, {"on", P::Bool}}, {}, "HE::api::locomotion::setOrientToMovement",
             [](Ctx& c, const VV& a){ locomotion::setOrientToMovement(c, (Entity)aI(a, 0), aB(a, 1)); return VV{}; } });
+        // Jumping. Two rows rather than one with an optional speed: "the jump this
+        // character was tuned for" and "this speed, now" are different requests,
+        // and a defaulted 0 could not tell them apart (it would also be a jump of
+        // zero, which is a real value). Both return whether the character left the
+        // ground — the exec node still has an output pin worth wiring.
+        t.push_back({ "locomotion.jump", "Locomotion", true, {{"entity", P::Int}}, {{"jumped", P::Bool}}, "HE::api::locomotion::jump",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(locomotion::jump(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "locomotion.jumpWith", "Locomotion", true, {{"entity", P::Int}, {"speed", P::Float}}, {{"jumped", P::Bool}}, "HE::api::locomotion::jumpWith",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(locomotion::jumpWith(c, (Entity)aI(a, 0), aF(a, 1))) }; } });
+
+        // Navigation — the pathfinder's whole script surface. Three loose floats
+        // for the destination rather than one Vec3 pin, for entity.spawnClass's
+        // reason: the call has to read as moveTo(agent, x, y, z) in a text script,
+        // where a packed value arrives spread over arguments anyway. The point is
+        // in WORLD space — the nav block in EngineApi.h says why.
+        t.push_back({ "nav.moveTo", "Navigation", true,
+            {{"entity", P::Int}, {"x", P::Float}, {"y", P::Float}, {"z", P::Float}},
+            {{"started", P::Bool}}, "HE::api::nav::moveTo",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(nav::moveTo(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), aF(a, 3))) }; } });
+        t.push_back({ "nav.stop", "Navigation", true, {{"entity", P::Int}}, {}, "HE::api::nav::stop",
+            [](Ctx& c, const VV& a){ nav::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "nav.isMoving", "Navigation", false, {{"entity", P::Int}}, {{"moving", P::Bool}}, "HE::api::nav::isMoving",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(nav::isMoving(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "nav.hasPath", "Navigation", false, {{"entity", P::Int}}, {{"hasPath", P::Bool}}, "HE::api::nav::hasPath",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(nav::hasPath(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "nav.remainingDistance", "Navigation", false, {{"entity", P::Int}}, {{"distance", P::Float}}, "HE::api::nav::remainingDistance",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(nav::remainingDistance(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "nav.setSpeed", "Navigation", true, {{"entity", P::Int}, {"speed", P::Float}}, {}, "HE::api::nav::setSpeed",
+            [](Ctx& c, const VV& a){ nav::setSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
 
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
@@ -2620,6 +2764,16 @@ const std::vector<ApiFn>& registry()
             { "locomotion.move", "Move" }, { "locomotion.look", "Look" },
             { "locomotion.setMaxSpeed", "Set Max Speed" },
             { "locomotion.setOrientToMovement", "Set Orient To Movement" },
+            { "locomotion.jump", "Jump" }, { "locomotion.jumpWith", "Jump With Speed" },
+            { "nav.moveTo", "Move To" },
+            // Not a bare "Stop" — Audio already spells its own "Stop Sound", and
+            // the drag-off menu lists the registry flat, where an unqualified
+            // "Stop" next to it is a coin toss.
+            { "nav.stop", "Stop Moving" },
+            { "nav.isMoving", "Is Moving" }, { "nav.hasPath", "Has Path" },
+            { "nav.remainingDistance", "Remaining Distance" },
+            // Locomotion owns "Set Max Speed"; this one is the agent's pace.
+            { "nav.setSpeed", "Set Agent Speed" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             { "physics.isGrounded", "Is Grounded" },
             { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
@@ -2756,6 +2910,13 @@ bool isScriptGroup(std::string_view group)
                                                     "string", "camera", "env", "entity", "audio",
                                                     "debug", "fs", "save", "scene", "player",
                                                     "animator", "movement", "locomotion",
+                                                    // "nav" has no flat hand-written
+                                                    // twin at all: leaving it off this
+                                                    // list would mean the pathfinder
+                                                    // stays unreachable from Lua and
+                                                    // Python, which is the state B4
+                                                    // exists to end.
+                                                    "nav",
                                                     // "physics" carries the whole force/overlap
                                                     // surface, and the flat bindings only ever
                                                     // got raycast/setVelocity/isGrounded — so

@@ -398,6 +398,88 @@ namespace locomotion {
     void look(Ctx&, Entity e, float yawDegrees, float pitchDegrees);
     void setMaxSpeed(Ctx&, Entity e, float metresPerSecond);
     void setOrientToMovement(Ctx&, Entity e, bool on);
+    // Leave the ground. The grounded test and the jump both read the character
+    // controller's own state, so `if movement.isGrounded then locomotion.jump()`
+    // can never disagree with the engine — which is why there is no second
+    // "canJump" row: the one that already exists IS the answer.
+    //
+    // Returns whether the character actually left the ground, so
+    // `if (jump()) playSound()` does the obvious thing. False mid-air is an
+    // ORDINARY answer and stays silent: a player holds the button, and a warning
+    // per frame would bury the log. Only a call with nothing to act on — no
+    // character controller on the entity — says so.
+    //
+    // jump() takes the speed the author tuned on the component
+    // (CharacterControllerComponent::jumpSpeed); jumpWith() overrides it for the
+    // one call, which is what a charged jump or a low hop through a gap needs.
+    bool jump(Ctx&, Entity e);
+    bool jumpWith(Ctx&, Entity e, float metresPerSecond);
+}
+
+// ── Navigation: sending an agent across the NavMesh ──────────────────────────
+// The whole script surface of the pathfinder. Until these rows existed, an
+// author could bake a NavMesh in the editor and then had exactly two ImGui
+// buttons to start an agent with — nothing in Lua, Python or HorizonCode, and
+// so no reactive AI of any kind and nothing moving at all in a packaged game.
+//
+// Every row addresses the entity's NavAgentComponent; NavigationSystem does the
+// walking, and it steers a character controller rather than writing the
+// transform, so an agent collides and falls like the player does.
+//
+// SPACE — decided here, once, for the whole group: a nav target is a WORLD
+// position. That is a NAMED EXCEPTION to this API's otherwise universal rule
+// that a position paired with an ENTITY is local unless the name says World, and
+// it is deliberate: the NavMesh is baked in world space and hands its waypoints
+// back in world space, so a point on it has nothing whatever to do with the
+// agent's parent. Rebasing a destination onto whatever the agent happens to be
+// parented to would send it somewhere nobody asked for, and every source a
+// destination realistically comes from — another entity's world position, a
+// raycast hit, a patrol marker — is already world. (entity.spawnClass carries
+// the same exception for the same kind of reason.) The row is `moveTo` and not
+// `moveToWorld` because the suffix exists to separate a world row from a LOCAL
+// twin, and this group has none to be confused with: there is exactly one way to
+// name a nav destination. This paragraph is what the suffix would have said.
+//
+// Nothing here is silent about a missing service: no agent component, no baked
+// NavMesh, no route — each says which, throttled, because these are polled every
+// frame and the failure that reads as "navigation is broken" is the one that
+// said nothing.
+namespace nav {
+    // Plan a route to a WORLD point and start walking it. The search happens in
+    // this call, not on the next tick, so the answer is a real one: false (and a
+    // log line saying which) when the entity has no NavAgentComponent, when the
+    // scene has no baked NavMesh, when either end is off it, or when no route
+    // connects them. An author branches on that and barks instead of watching an
+    // NPC stand still wondering why.
+    //
+    // A false answer leaves the agent STOPPED, and its targetPos set to the place
+    // it could not reach — an NPC told to go somewhere new must not keep walking
+    // to the old place as if nothing had been said, and the destination on record
+    // is what the Inspector then shows the author.
+    bool  moveTo(Ctx&, Entity e, float x, float y, float z);   // x/y/z are WORLD
+    // Give up the current route. The agent stops where it stands; whatever
+    // velocity NavigationSystem was writing is unwound by NavigationSystem on its
+    // next tick, so a stopped agent does not glide on.
+    void  stop(Ctx&, Entity e);
+    bool  isMoving(Ctx&, Entity e);
+    // Is there a route to follow? NOT the same question as isMoving, and the pair
+    // is how "walking" is told apart from "was sent somewhere it cannot reach":
+    // isMoving is the order that was given, this is whether there turned out to
+    // be a way.
+    bool  hasPath(Ctx&, Entity e);
+    // Metres left along the remaining waypoints (not the straight line to the
+    // target — a route around a wall is longer than the crow flies). -1 when
+    // there is no path to measure, which is a different answer from 0: 0 is
+    // arrival.
+    float remainingDistance(Ctx&, Entity e);
+    // Walking speed in m/s. Per agent, so a fleeing NPC and a patrolling one
+    // share a class and not a pace. Negative is clamped to 0.
+    void  setSpeed(Ctx&, Entity e, float metresPerSecond);
+    // Deliberately NOT here yet: a random reachable point in a radius, which is
+    // what a patrol or a wander behaviour actually wants ("go somewhere near
+    // here, forever"). It needs a Detour query of its own on NavigationSystem
+    // (dtNavMeshQuery::findRandomPointAroundCircle) rather than a rearrangement
+    // of these rows, so it is named as the next step instead of guessed at here.
 }
 
 // ── Materials (node-graph param by name) ─────────────────────────────────────

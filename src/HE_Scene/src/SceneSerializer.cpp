@@ -328,12 +328,18 @@ namespace
 		}
 		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
 		{
+			// Authored fields only. velocity/isGrounded/airTime are runtime state
+			// written by the physics step and are meaningless in a scene file.
+			// `jumpSpeed` belongs here with gravity: it is the other half of the
+			// jump the author tuned, and without it every packaged game would
+			// jump at the 5 m/s default no matter what the Details panel showed.
 			comps["characterController"] = {
 				{ "slopeLimit", cc->slopeLimit },
 				{ "stepHeight", cc->stepHeight },
 				{ "skinWidth",  cc->skinWidth  },
 				{ "mass",       cc->mass       },
 				{ "gravity",    cc->gravity    },
+				{ "jumpSpeed",  cc->jumpSpeed  },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -516,10 +522,18 @@ namespace
 		}
 		if (auto* na = registry.try_get<NavAgentComponent>(entity))
 		{
+			// Authored fields only. path/pathIdx/hasPath/moving are runtime state
+			// and are rebuilt every session — writing `moving` out would freeze
+			// whatever the agent happened to be doing when the scene was saved
+			// into the scene file. `autoStart` is the authored half of it, and
+			// the reason an agent moves at all in a packaged game: the "Go"
+			// button that used to be the only writer of `moving` is an editor
+			// control and does not exist there.
 			comps["navagent"] = {
 				{ "targetPos",    vec3ToJson(na->targetPos) },
 				{ "speed",        na->speed },
 				{ "stoppingDist", na->stoppingDist },
+				{ "autoStart",    na->autoStart },
 			};
 		}
 		if (auto* sm = registry.try_get<AnimatorStateMachineComponent>(entity))
@@ -867,6 +881,10 @@ namespace
 			cc.skinWidth  = c.value("skinWidth",  cc.skinWidth);
 			cc.mass       = c.value("mass",       cc.mass);
 			cc.gravity    = c.value("gravity",    cc.gravity);
+			// Defaulted from the fresh component, so a scene written before this
+			// field existed loads with the 5 m/s default rather than a zero that
+			// would silently refuse every jump.
+			cc.jumpSpeed  = c.value("jumpSpeed",  cc.jumpSpeed);
 			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
 		}
 		if (comps.contains("saveState"))
@@ -1118,6 +1136,12 @@ namespace
 			na.targetPos    = jsonToVec3(c.value("targetPos", json()), na.targetPos);
 			na.speed        = c.value("speed",        na.speed);
 			na.stoppingDist = c.value("stoppingDist", na.stoppingDist);
+			na.autoStart    = c.value("autoStart",    na.autoStart);
+			// `moving` deliberately stays false here. Loading a scene is not
+			// starting one — the editor loads for editing, and an agent that
+			// began walking on load would rewrite its authored position before
+			// anyone pressed Play. NavigationSystem turns autoStart into moving
+			// once the simulation is running, in both applications.
 			registry.emplace_or_replace<NavAgentComponent>(entity, na);
 		}
 		if (comps.contains("foliage"))

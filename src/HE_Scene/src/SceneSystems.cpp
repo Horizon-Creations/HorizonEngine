@@ -107,9 +107,17 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // animation phase reads the result.
     { HE_PROFILE_SCOPE_N("Movement");              MovementSystem::update(world,
         const_cast<PhysicsWorld*>(physics), dt); }
-    // Navigation moves transforms, so it belongs on the gameplay side of the
-    // frame — ahead of the animation phase, like physics and scripts.
-    { HE_PROFILE_SCOPE_N("Navigation");            NavigationSystem::update(world, dt); }
+    // Navigation steers characters, so it belongs on the gameplay side of the
+    // frame — ahead of the animation phase, like physics and scripts, and after
+    // Movement, which means navigation wins on an entity that carries both.
+    //
+    // The PhysicsWorld is not optional here even though the parameter has a
+    // default: without it every agent falls back to writing its transform, which
+    // leaves its collider at the spawn point, and NavAgentComponent::autoStart
+    // never fires — the two halves of the "nothing moves in a packaged game"
+    // report. const_cast for the same reason Terrain and Movement need one above.
+    { HE_PROFILE_SCOPE_N("Navigation");            NavigationSystem::update(world, dt,
+        const_cast<PhysicsWorld*>(physics)); }
     { HE_PROFILE_SCOPE_N("Weather");               WeatherSystem::update(world, dt, cameraPos, physics, gpuParticles); } // env clouds/fog/wind + precip
     if (renderer)
     {

@@ -1287,3 +1287,244 @@ TEST_CASE("PhysicsWorld: an additively loaded zone gets its colliders where its 
     CHECK_FALSE(phys.raycast({ 4.0f, 50.0f, 0.0f }, down, 100.0f).hit);
     CHECK_FALSE(phys.raycast({ -4.0f, 50.0f, 6.0f }, down, 100.0f).hit);
 }
+
+// ─── Jumping ──────────────────────────────────────────────────────────────────
+
+namespace
+{
+    // A character standing on solid ground, settled. Everything about a jump is
+    // a question about the frame it is asked in, so every case below needs the
+    // same starting point: feet down, vertical velocity gone, isGrounded true.
+    struct StandingCharacter
+    {
+        Entity floor;
+        Entity character;
+        uint32_t id;
+    };
+
+    StandingCharacter makeStandingCharacter(HorizonWorld& world, PhysicsWorld& phys)
+    {
+        Entity floor = world.createEntity("Floor");
+        {
+            TransformComponent t;
+            t.position = { 0.0f, 0.0f, 0.0f };
+            t.scale    = { 40.0f, 0.5f, 40.0f };
+            world.addComponent(floor, t);
+            RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+            world.addComponent(floor, rb);
+        }
+
+        // The PlayerCharacter shape as EntityHost::defaultComponents builds it:
+        // the CharacterVirtual that walks, plus the kinematic body everything
+        // else collides with.
+        Entity character = world.createEntity("Jumper");
+        {
+            TransformComponent t;
+            t.position = { 0.0f, 4.0f, 0.0f };
+            t.scale    = { 1.0f, 1.0f, 1.0f };
+            world.addComponent(character, t);
+            world.addComponent(character, CharacterControllerComponent{});
+            RigidBodyComponent rb; rb.type = RigidBodyType::Kinematic;
+            world.addComponent(character, rb);
+        }
+
+        phys.initialize(world);
+        // Long enough to fall the four metres and for the ground contact to
+        // settle — a character that is still resolving its landing has a
+        // non-zero downward velocity and would make the rise below ambiguous.
+        for (int i = 0; i < kSteps2s; ++i)
+            phys.step(world, kDt);
+
+        return { floor, character, static_cast<uint32_t>(character) };
+    }
+}
+
+// MUTATION: in PhysicsWorld::jumpCharacter, invert the ground gate to
+// `if (cc->isGrounded && cc->airTime < kCoyoteWindow) return false;` — the
+// grounded jump is refused and the CHECK on the rise fails.
+TEST_CASE("PhysicsWorld: a character on the ground rises after a jump")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    const auto c = makeStandingCharacter(world, phys);
+
+    const auto& cc = world.registry().get<CharacterControllerComponent>(c.character);
+    REQUIRE(cc.isGrounded);
+    REQUIRE(cc.airTime == doctest::Approx(0.0f));
+
+    const float restY = world.registry().get<TransformComponent>(c.character).position.y;
+
+    // The return value is the whole point of the row: a script writes
+    // `if (jump()) playSound()`, so a jump that happened must say so.
+    CHECK(phys.jumpCharacter(c.id));
+
+    // Rise for a quarter second — well short of the apex of a 5 m/s jump, so
+    // this is unambiguously the way up.
+    for (int i = 0; i < 15; ++i)
+        phys.step(world, kDt);
+
+    const float peakY = world.registry().get<TransformComponent>(c.character).position.y;
+    CHECK(peakY > restY + 0.3f);
+
+    // And it comes back down: a jump that left the character floating would
+    // pass the check above just as well.
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+    const auto& landed = world.registry().get<CharacterControllerComponent>(c.character);
+    CHECK(landed.isGrounded);
+    CHECK(landed.airTime == doctest::Approx(0.0f));
+    CHECK(world.registry().get<TransformComponent>(c.character).position.y
+          == doctest::Approx(restY).epsilon(0.05));
+}
+
+// MUTATION: in PhysicsWorld::jumpCharacter, drop the airborne gate entirely
+// (`if (false) return false;`) — the second jump is granted and both the
+// CHECK_FALSE and the "no second rise" check fail.
+TEST_CASE("PhysicsWorld: a character in the air is refused a jump, and says so")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    const auto c = makeStandingCharacter(world, phys);
+
+    REQUIRE(phys.jumpCharacter(c.id));
+
+    // Immediately: the jump spent the coyote credit, so holding the button
+    // cannot turn the grace period into a second jump.
+    CHECK_FALSE(phys.jumpCharacter(c.id));
+
+    // And properly airborne, a good way into the arc.
+    for (int i = 0; i < 15; ++i)
+        phys.step(world, kDt);
+    const auto& cc = world.registry().get<CharacterControllerComponent>(c.character);
+    REQUIRE_FALSE(cc.isGrounded);
+    REQUIRE(cc.airTime > 0.12f);
+
+    const float beforeY = world.registry().get<TransformComponent>(c.character).position.y;
+    const float beforeVy = cc.velocity.y;
+    CHECK_FALSE(phys.jumpCharacter(c.id));
+    // A refusal is not a partial jump: nothing was written.
+    CHECK(world.registry().get<CharacterControllerComponent>(c.character).velocity.y
+          == doctest::Approx(beforeVy));
+    CHECK(world.registry().get<TransformComponent>(c.character).position.y
+          == doctest::Approx(beforeY));
+}
+
+// MUTATION: set kCoyoteWindow to 0.0f — the grace vanishes and the jump below is
+// refused. Without this case the constant could be zeroed and every other test
+// would stay green: the three cases around it only ever prove that a jump is
+// REFUSED, so they pass with the grace switched off.
+//
+// The scene is the one the grace exists for, built without any level geometry:
+// the ground is taken away, so the character is airborne having never jumped —
+// exactly the state of someone who has just walked off a ledge. One step at
+// 1/60 s puts airTime well inside the 0.12 s window.
+TEST_CASE("PhysicsWorld: a character just off the ground still gets its jump")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    const auto c = makeStandingCharacter(world, phys);
+    REQUIRE(world.registry().get<CharacterControllerComponent>(c.character).isGrounded);
+
+    // The ledge, removed rather than walked off: same resulting state, no level
+    // geometry to build. (removeEntity is what B1 added; before it there was no
+    // way to take a body out of a running world at all.)
+    phys.removeEntity(static_cast<uint32_t>(c.floor));
+    phys.step(world, kDt);
+
+    const auto& cc = world.registry().get<CharacterControllerComponent>(c.character);
+    REQUIRE_FALSE(cc.isGrounded);          // genuinely in the air …
+    REQUIRE(cc.airTime > 0.0f);            // … having never jumped …
+    REQUIRE(cc.airTime < 0.12f);           // … and still inside the window.
+
+    const float beforeVy = cc.velocity.y;
+    CHECK(phys.jumpCharacter(c.id));       // the grace: granted.
+    CHECK(world.registry().get<CharacterControllerComponent>(c.character).velocity.y
+          > beforeVy);
+
+    // And it is spent, not standing: the same grace cannot pay for a second jump.
+    CHECK_FALSE(phys.jumpCharacter(c.id));
+}
+
+// MUTATION: in PhysicsWorld::jumpCharacter, delete the `cc->velocity = {...}`
+// mirror write — Jolt still gets the upward velocity, but the MovementSystem
+// rebuild below hands back the stale pre-jump Y and erases it before it is ever
+// stepped. The rise check fails.
+//
+// This is the case the jump would quietly lose without the mirror, and it is not
+// exotic: MovementSystem rebuilds the character's velocity as
+// (planar.x, cc.velocity.y, planar.z) on EVERY tick, which is what the two lines
+// marked "as MovementSystem does" reproduce.
+TEST_CASE("PhysicsWorld: a jump survives the next physics step")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    const auto c = makeStandingCharacter(world, phys);
+
+    auto& cc = world.registry().get<CharacterControllerComponent>(c.character);
+    REQUIRE(cc.isGrounded);
+    const float restY = world.registry().get<TransformComponent>(c.character).position.y;
+
+    REQUIRE(phys.jumpCharacter(c.id));
+
+    // The component half of the jump, which is the half MovementSystem reads.
+    CHECK(cc.velocity.y > 0.0f);
+    // isGrounded goes false in the same call, so a state machine reading it this
+    // frame already sees the jump rather than a frame of "standing".
+    CHECK_FALSE(cc.isGrounded);
+
+    // …as MovementSystem does, before the very next step: walking must not erase
+    // the fall, so it rebuilds the velocity from the component's Y every tick.
+    phys.setCharacterVelocity(c.id, glm::vec3(0.0f, cc.velocity.y, 0.0f));
+    phys.step(world, kDt);
+
+    CHECK(world.registry().get<TransformComponent>(c.character).position.y > restY + 0.02f);
+
+    // Ten more ticks of the same round trip: the jump keeps climbing rather than
+    // being flattened by the rebuild.
+    for (int i = 0; i < 10; ++i)
+    {
+        const auto& live = world.registry().get<CharacterControllerComponent>(c.character);
+        phys.setCharacterVelocity(c.id, glm::vec3(0.0f, live.velocity.y, 0.0f));
+        phys.step(world, kDt);
+    }
+    CHECK(world.registry().get<TransformComponent>(c.character).position.y > restY + 0.3f);
+}
+
+// MUTATION: in PhysicsWorld::jumpCharacter(uint32_t, float), remove the
+// `if (!(speed > 0.0f))` guard — a zero-speed jump reports success.
+TEST_CASE("PhysicsWorld: jumpWith overrides the authored speed, and refuses a useless one")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    const auto c = makeStandingCharacter(world, phys);
+
+    const float restY = world.registry().get<TransformComponent>(c.character).position.y;
+
+    // A speed of zero is not a jump, and reporting success for it would send a
+    // script off playing a jump sound for a character that never left the floor.
+    CHECK_FALSE(phys.jumpCharacter(c.id, 0.0f));
+    CHECK_FALSE(phys.jumpCharacter(c.id, -3.0f));
+    CHECK(world.registry().get<CharacterControllerComponent>(c.character).isGrounded);
+
+    // A low hop through a gap: the component says 5 m/s, this call says 2, and
+    // the arc has to be visibly shorter than the authored one.
+    auto peakAfter = [&](float speed) {
+        REQUIRE(phys.jumpCharacter(c.id, speed));
+        float peak = restY;
+        for (int i = 0; i < 60; ++i)
+        {
+            phys.step(world, kDt);
+            peak = std::max(peak, world.registry().get<TransformComponent>(c.character).position.y);
+        }
+        // Back to standing before the next measurement.
+        for (int i = 0; i < kSteps2s; ++i)
+            phys.step(world, kDt);
+        REQUIRE(world.registry().get<CharacterControllerComponent>(c.character).isGrounded);
+        return peak - restY;
+    };
+
+    const float lowHop  = peakAfter(2.0f);
+    const float highHop = peakAfter(8.0f);
+    CHECK(lowHop  > 0.05f);
+    CHECK(highHop > lowHop + 0.5f);
+}

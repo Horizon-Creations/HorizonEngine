@@ -6,6 +6,11 @@
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/NavigationSystem.h>
+#include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/Components/NavMeshComponent.h>
+#include <HorizonScene/Components/NavAgentComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SaveStateComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -2356,4 +2361,214 @@ TEST_CASE("possession is one controller per character, both ways round")
     player::clear();
     CHECK(player::controller() == 0u);
     CHECK(player::character() == 0u);
+}
+
+// ═══ Jumping and navigation, from a script's side of the wall ═════════════════
+
+namespace
+{
+    // Flat 20×20 nav mesh floor at Y=0, matching the physics slab below it.
+    NavMeshGeometry flatNavFloor(float half = 10.0f)
+    {
+        NavMeshGeometry geo;
+        geo.verts = { -half, 0.0f,  half,   half, 0.0f,  half,
+                       half, 0.0f, -half,  -half, 0.0f, -half };
+        geo.tris  = { 0, 1, 2,  0, 2, 3 };
+        return geo;
+    }
+
+    void addPhysicsFloor(HorizonWorld& world)
+    {
+        auto floor = world.createEntity("Floor");
+        TransformComponent t;
+        t.position = { 0.0f, -0.25f, 0.0f };   // half-extents are scale/2 → top at 0
+        t.scale    = { 40.0f, 0.5f, 40.0f };
+        world.registry().emplace<TransformComponent>(floor, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        world.registry().emplace<RigidBodyComponent>(floor, rb);
+    }
+
+    // A character standing on that floor: the controller that walks plus the
+    // kinematic proxy everything else collides with.
+    entt::entity addCharacter(HorizonWorld& world, const glm::vec3& pos)
+    {
+        auto e = world.createEntity("Character");
+        TransformComponent t; t.position = pos; t.scale = glm::vec3(1.0f);
+        world.registry().emplace<TransformComponent>(e, t);
+        world.registry().emplace<CharacterControllerComponent>(e);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Kinematic;
+        world.registry().emplace<RigidBodyComponent>(e, rb);
+        return e;
+    }
+}
+
+// MUTATION: remove the `"nav",` entry from isScriptGroup's list in
+// EngineApi.cpp — every nav row disappears from Lua, Python and HorizonCode, and
+// the group check below fails while find() still resolves the rows. That is
+// exactly the state B4 describes: the pathfinder exists and no language can
+// reach it.
+TEST_CASE("EngineApi: the nav group exists and reaches every scripting frontend")
+{
+    // Before B4 there was no nav-, agent- or path-anything in the registry.
+    for (const char* id : { "nav.moveTo", "nav.stop", "nav.isMoving",
+                            "nav.hasPath", "nav.remainingDistance", "nav.setSpeed" })
+    {
+        INFO("row: " << id);
+        CHECK(HE::api::find(id) != nullptr);
+    }
+    CHECK(HE::api::find("locomotion.jump")     != nullptr);
+    CHECK(HE::api::find("locomotion.jumpWith") != nullptr);
+
+    // Reaching the frontends is a separate fact from existing in the registry.
+    CHECK(HE::api::isScriptGroup("nav"));
+    CHECK(HE::api::isScriptGroup("locomotion"));
+
+    // The two that answer a question rather than doing something are readable
+    // from a pure-expression context; the four that act are not.
+    CHECK(HE::api::find("nav.isMoving")->isExec  == false);
+    CHECK(HE::api::find("nav.hasPath")->isExec   == false);
+    CHECK(HE::api::find("nav.remainingDistance")->isExec == false);
+    CHECK(HE::api::find("nav.moveTo")->isExec    == true);
+    CHECK(HE::api::find("nav.stop")->isExec      == true);
+
+    // moveTo's answer is the reason it is a call and not a field write.
+    REQUIRE(HE::api::find("nav.moveTo")->results.size() == 1);
+    CHECK(HE::api::find("nav.moveTo")->results[0].type == P::Bool);
+    REQUIRE(HE::api::find("locomotion.jump")->results.size() == 1);
+    CHECK(HE::api::find("locomotion.jump")->results[0].type == P::Bool);
+}
+
+// MUTATION: in HE::api::nav::moveTo, return `false` without delegating to
+// NavigationSystem — the row reports failure and both the REQUIRE on the call
+// and the movement check fail. (Delegating but dropping `agent->moving = true`
+// inside NavigationSystem::moveTo shows the same test catching the silent
+// variant: the call says yes and nothing walks.)
+TEST_CASE("EngineApi: nav.moveTo walks an agent, nav.stop halts it")
+{
+    HorizonWorld world;
+    addPhysicsFloor(world);
+
+    auto navE = world.createEntity("NavMesh");
+    {
+        NavMeshComponent nmc;
+        nmc.geometry = flatNavFloor();
+        REQUIRE(NavigationSystem::bake(nmc));
+        world.registry().emplace<NavMeshComponent>(navE, nmc);
+    }
+
+    const auto agent = addCharacter(world, { -6.0f, 1.0f, 0.0f });
+    {
+        NavAgentComponent na; na.speed = 3.0f; na.stoppingDist = 0.3f;
+        world.registry().emplace<NavAgentComponent>(agent, na);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 90; ++i) phys.step(world, 1.0f / 60.0f);   // settle
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(agent));
+    auto flatX = [&]{ return HE::worldPositionOf(world, agent).x; };
+
+    CHECK_FALSE(call("nav.isMoving", { id })[0].b);
+    CHECK_FALSE(call("nav.hasPath",  { id })[0].b);
+    CHECK(call("nav.remainingDistance", { id })[0].f == doctest::Approx(-1.0f));
+
+    // The destination is a WORLD point — the named exception this group carries.
+    CHECK(call("nav.moveTo", { id, Value::ofFloat(6.0f), Value::ofFloat(0.0f),
+                                   Value::ofFloat(0.0f) })[0].b);
+    CHECK(call("nav.isMoving", { id })[0].b);
+    CHECK(call("nav.hasPath",  { id })[0].b);
+
+    const float startX = flatX();
+    const float startRemaining = call("nav.remainingDistance", { id })[0].f;
+    CHECK(startRemaining > 10.0f);
+
+    for (int i = 0; i < 60; ++i)
+    {
+        NavigationSystem::update(world, 1.0f / 60.0f, &phys);
+        phys.step(world, 1.0f / 60.0f);
+    }
+
+    CHECK(flatX() > startX + 2.0f);
+    // Shrinking as it walks, which is what a "close enough to attack yet" check
+    // is polling.
+    const float midRemaining = call("nav.remainingDistance", { id })[0].f;
+    CHECK(midRemaining < startRemaining - 2.0f);
+    CHECK(midRemaining > 0.0f);
+
+    // Halt. The order is dropped here; the zero velocity is written by the
+    // system on its next tick, which is why the loop below is what proves it.
+    call("nav.stop", { id });
+    CHECK_FALSE(call("nav.isMoving", { id })[0].b);
+    CHECK_FALSE(call("nav.hasPath",  { id })[0].b);
+
+    const float stoppedX = flatX();
+    for (int i = 0; i < 120; ++i)
+    {
+        NavigationSystem::update(world, 1.0f / 60.0f, &phys);
+        phys.step(world, 1.0f / 60.0f);
+    }
+    // Two seconds of not being steered. Without the release write it would have
+    // coasted six more metres on the last velocity Jolt was handed.
+    CHECK(std::abs(flatX() - stoppedX) < 0.15f);
+
+    // setSpeed reaches the component, and a negative pace is clamped rather than
+    // walking the agent backwards past the waypoint it came from.
+    call("nav.setSpeed", { id, Value::ofFloat(7.5f) });
+    CHECK(world.registry().get<NavAgentComponent>(agent).speed == doctest::Approx(7.5f));
+    call("nav.setSpeed", { id, Value::ofFloat(-4.0f) });
+    CHECK(world.registry().get<NavAgentComponent>(agent).speed == doctest::Approx(0.0f));
+}
+
+// MUTATION: in PhysicsWorld::jumpCharacter, invert the ground gate to
+// `if (cc->isGrounded && cc->airTime < kCoyoteWindow) return false;` — the
+// grounded call returns false and the rise never happens.
+TEST_CASE("EngineApi: locomotion.jump lifts a grounded character and refuses an airborne one")
+{
+    HorizonWorld world;
+    addPhysicsFloor(world);
+    const auto character = addCharacter(world, { 0.0f, 4.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 120; ++i) phys.step(world, 1.0f / 60.0f);   // land and settle
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(character));
+
+    REQUIRE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
+    const float restY = world.registry().get<TransformComponent>(character).position.y;
+
+    // The bool is the row's whole point: a script writes `if jump() then …`.
+    CHECK(call("locomotion.jump", { id })[0].b);
+    for (int i = 0; i < 15; ++i) phys.step(world, 1.0f / 60.0f);
+    CHECK(world.registry().get<TransformComponent>(character).position.y > restY + 0.3f);
+
+    // Mid-air the answer is a plain no — an ordinary answer, not an error.
+    REQUIRE_FALSE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
+    CHECK_FALSE(call("locomotion.jump",     { id })[0].b);
+    CHECK_FALSE(call("locomotion.jumpWith", { id, Value::ofFloat(9.0f) })[0].b);
+}
+
+// Would have been green before the change only in the sense that the rows did
+// not exist to crash: this is the null-Ctx tolerance every group in this file is
+// held to, extended to the two new ones.
+TEST_CASE("EngineApi: nav and jump rows are safe with no world and no physics")
+{
+    Ctx c{};   // nothing wired up at all
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(1);
+
+    CHECK_FALSE(call("locomotion.jump",     { id })[0].b);
+    CHECK_FALSE(call("locomotion.jumpWith", { id, Value::ofFloat(5.0f) })[0].b);
+    CHECK_FALSE(call("nav.moveTo", { id, Value::ofFloat(0.0f), Value::ofFloat(0.0f),
+                                         Value::ofFloat(0.0f) })[0].b);
+    CHECK_FALSE(call("nav.isMoving", { id })[0].b);
+    CHECK_FALSE(call("nav.hasPath",  { id })[0].b);
+    CHECK(call("nav.remainingDistance", { id })[0].f == doctest::Approx(-1.0f));
+    call("nav.stop",     { id });                        // must not crash
+    call("nav.setSpeed", { id, Value::ofFloat(2.0f) });  // must not crash
 }

@@ -234,6 +234,60 @@ namespace
 	  "Whether the character turns to face the way it walks. Switch it off while "
 	  "something else owns the facing — a camera rig with coupled rotation, an "
 	  "aim mode." },
+	{ "locomotion.jump",
+	  "Throws the character upward at the Jump Speed its Character Controller was "
+	  "authored with. Unlike Move this is a single event, not an intent held per "
+	  "frame: call it once when the button goes down. It returns whether the "
+	  "character actually left the ground, and refuses in mid-air — which is what "
+	  "stops a held button from flying. So when a jump never fires, look at Is "
+	  "Grounded before you look at the speed. It is not quite that strict: a jump "
+	  "asked for within a tenth of a second of walking off a ledge is still "
+	  "granted, because a player who presses a frame late means to jump." },
+	{ "locomotion.jumpWith",
+	  "A jump at the upward speed given here in metres per second, instead of the "
+	  "authored one. For the jumps one number cannot cover: a charge that grows "
+	  "while the button is held, a low hop out of a crouch, a launch pad that "
+	  "throws whoever steps on it. The ground rule is the same, and a speed of "
+	  "zero or less is refused rather than treated as a jump." },
+
+	// ── Navigation ───────────────────────────────────────────────────────────
+	{ "nav.moveTo",
+	  "Sends a Nav Agent walking to a world position: the route across the baked "
+	  "nav mesh is searched right here, and then followed over the next frames "
+	  "without anything else being called. The one node an enemy needs in order to "
+	  "come after the player. It answers whether the walk started, and the answer "
+	  "is worth branching on, because a false means the agent will not move at "
+	  "all: no nav mesh has been baked, the destination is off the walkable "
+	  "surface, or the two ends sit on parts of the level that do not connect. A "
+	  "refused call also leaves the agent walking wherever it already was. For a "
+	  "target that keeps moving, simply call it again — each call replans from "
+	  "where the agent stands." },
+	{ "nav.stop",
+	  "Halts the agent where it stands and throws its route away. The way to break "
+	  "off a chase or hold a patrol still during a conversation. It leaves the "
+	  "destination as it was, so Move To starts a fresh walk afterwards." },
+	{ "nav.isMoving",
+	  "Is this agent walking a route right now? It falls to false by itself the "
+	  "moment the agent arrives, which is how a patrol knows it is time to hand "
+	  "out the next waypoint." },
+	{ "nav.hasPath",
+	  "Whether the agent is holding a route it can still follow. Is Moving is the "
+	  "order that was given; this is whether there turned out to be a way. Telling "
+	  "the two apart is how \"walking\" is distinguished from \"was sent somewhere "
+	  "it cannot reach\"." },
+	{ "nav.remainingDistance",
+	  "How far the agent still has to walk, measured in metres along the route's "
+	  "corners rather than straight through the walls between. Good for slowing an "
+	  "NPC down near its goal, or for deciding that a chaser is close enough to "
+	  "strike. It is -1, never 0, whenever there is no route to measure — an agent "
+	  "standing still, or one that has just arrived — so compare against 0 only "
+	  "after Has Path says there is something to compare." },
+	{ "nav.setSpeed",
+	  "The speed in metres per second at which the agent walks its route from now "
+	  "on. The current route is kept and only the pace changes, so this is how one "
+	  "guard strolls a patrol and then charges. It is the Nav Agent's own speed, "
+	  "not the character's Max Speed, which belongs to input-driven movement; a "
+	  "negative value is taken as standing still." },
 
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "ui.getText",

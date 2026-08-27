@@ -778,6 +778,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat3("Target##na",     glm::value_ptr(na->targetPos), 0.1f); trackEdit();
 			Row::dragFloat("Speed##na",       &na->speed,        0.1f, 0.0f, 20.0f, "%.1f m/s"); trackEdit();
 			Row::dragFloat("Stop Dist##na",   &na->stoppingDist, 0.01f,0.0f, 2.0f,  "%.2f m"); trackEdit();
+			// Authored, unlike everything below the separator: the packaged game
+			// has no Go button, so this is what starts an agent there.
+			EditorWidgets::checkbox("Auto Start##na", &na->autoStart); trackEdit();
 			ImGui::Separator();
 			ImGui::Text("Path: %zu pts  idx=%zu  %s",
 				na->path.size(), na->pathIdx,
@@ -1330,9 +1333,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Skin Width (m)",    &cc->skinWidth,  0.001f, 0.001f, 0.5f); trackEdit();
 			Row::dragFloat("Mass (kg)",          &cc->mass,       0.5f, 1.0f, 500.0f); trackEdit();
 			Row::dragFloat("Gravity (m/s²)",     &cc->gravity,    0.1f, 0.0f, 30.0f); trackEdit();
+			// Jump height is not authored directly: it falls out of this against
+			// Gravity above, so the two rows sit next to each other.
+			Row::dragFloat("Jump Speed (m/s)",   &cc->jumpSpeed,  0.1f, 0.0f, 30.0f); trackEdit();
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
+			// The other half of "why did that jump not fire": the jump is still
+			// granted for a moment after the feet leave the ground, and this is
+			// the number that decides it.
+			float airTime = cc->airTime;
+			Row::dragFloat("Air Time (s)", &airTime, 0.0f);
 			float v[3] = { cc->velocity.x, cc->velocity.y, cc->velocity.z };
 			Row::dragFloat3("Velocity", v, 0.0f);
 			ImGui::EndDisabled();

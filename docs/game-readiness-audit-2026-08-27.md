@@ -21,7 +21,7 @@ bewusst nur dort, wo ein Fund seither präziser oder schlimmer geworden ist.
 | B1 Physikwelt nach dem Szenenstart eingefroren | **erledigt** (`eb32fe27`), `addEntity`/`removeEntity`/`setPosition`, dazu ein Reap in `step()` und `purgeEntity` im Kontakt-Listener |
 | B2 keine Kollisionsgeometrie ausser Box, Kugel, Kapsel | **erledigt** (`eb32fe27`), Mesh, Convex Hull und Height Field; die Landschaft trägt jetzt Kollision |
 | B3 zur Laufzeit nur eine leere Entity erzeugbar | **erledigt**, `entity.spawnClass` über den bestehenden Create-Object-Dienst, erreichbar aus allen vier Frontends |
-| B4 Navigation aus keiner Sprache steuerbar | offen |
+| B4 Navigation aus keiner Sprache steuerbar | **erledigt**, Gruppe `nav` (sechs Zeilen) in der Registry, Agenten laufen über `setCharacterVelocity` statt über `tc.position`, `autoStart` serialisiert, ein Zielwechsel plant neu. Siehe die Korrektur unten |
 | B5 gepacktes Spiel entdeckt keine PlayerController-Klasse | **erledigt**, `__asset_types__` in der Pak; bestehende Exporte müssen einmal neu gebaut werden |
 | B6 kein Partikel-Burst | offen |
 
@@ -229,6 +229,22 @@ neu setzt. Und der Agent dreht sich nicht (`rotation` kommt in der Datei nicht v
 Animationsparameter und weicht nicht aus, es gibt kein `dtCrowd` und kein RVO.
 
 **Aufwand: M** für die API plus die Velocity-Route, **L**, wenn Ausweichen dazu soll.
+
+**Nachtrag (erledigt) und eine Präzisierung.** Die Überschrift „läuft im gepackten Spiel nie an"
+liest sich, als würde `NavigationSystem` dort gar nicht getickt. Das war nie der Fall: beide
+Anwendungen ticken es längst, das Spiel über `GameApplication.cpp` (`tickWorld`) und der Editor über
+`EditorApplication.cpp`. Die Ursache war ausschliesslich die im Absatz darüber richtig benannte:
+`moving` startet als `false` und `update` überspringt den Agenten in der ersten Zeile. Gebaut wurde
+jetzt: die Registry-Gruppe `nav` (`moveTo`, `stop`, `isMoving`, `hasPath`, `remainingDistance`,
+`setSpeed`, alle in Weltkoordinaten und in allen vier Frontends), ein serialisiertes,
+im Inspector setzbares `NavAgentComponent::autoStart` als der Starter, den ein gepacktes Spiel
+ohne Details-Panel braucht, die Bewegung über `PhysicsWorld::setCharacterVelocity` für jeden
+Agenten mit Character Controller, und ein `pathTarget`, mit dem ein Zielwechsel endlich die
+Neuplanung auslöst, die `NavAgentComponent.h` immer schon behauptet hat. Was der Absatz oben an
+Ausgängen aufzählt, bleibt für Agenten **ohne** Character Controller wahr — mit einem physikalischen
+Körper, aber ohne Controller sagt das System das jetzt im Log, statt den Collider stumm stehen zu
+lassen. Nicht gebaut und weiterhin offen: `randomPointInRadius` für Streifzüge, Drehen in
+Laufrichtung, Animationsparameter, Ausweichen (`dtCrowd`/RVO).
 
 ### B5. Im gepackten Spiel entdeckt `discoverAssets` nichts, und damit entsteht kein PlayerController
 

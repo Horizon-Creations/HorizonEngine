@@ -851,6 +851,29 @@ constexpr const char* kNoPhysicsReason =
     "RigidBodyComponent (or a CharacterControllerComponent) to give it one, or "
     "use transform.setPosition to move something that has no physics at all";
 
+// Why a jump found nothing to jump with. Same audience as the line above.
+constexpr const char* kNoCharacterReason =
+    "it has no character controller — a jump moves a CharacterControllerComponent, "
+    "so add one to the entity, or launch a rigid body with physics.addImpulse instead";
+
+// The authoring component behind a character, or null. In one place because the
+// jump reads it (jumpSpeed), gates on it (isGrounded, airTime) and mirrors back
+// into it — three lookups that must not be able to disagree about validity.
+CharacterControllerComponent* characterComponentOf(HorizonWorld* world, uint32_t entityId)
+{
+    if (!world) return nullptr;
+    auto&        reg    = world->registry();
+    const Entity entity = static_cast<Entity>(entityId);
+    return reg.valid(entity) ? reg.try_get<CharacterControllerComponent>(entity) : nullptr;
+}
+
+// Coyote time: how long after walking off a ledge a jump is still granted.
+// 0.12 s is about seven fixed steps — long enough to cover a player who pressed
+// the button one frame late, short enough that nobody can read it as a second
+// jump. See PhysicsWorld::jumpCharacter for why this is a constant and not an
+// authored field.
+constexpr float kCoyoteWindow = 0.12f;
+
 // The four filters every CharacterVirtual query takes. Bundled because
 // ExtendedUpdate in step() and RefreshContacts after a teleport must use the
 // SAME ones — a character refreshed against a different filter set would resolve
@@ -1294,6 +1317,13 @@ bool PhysicsWorld::hasPhysics(uint32_t entityId) const
            m_impl->entityToCharacter.count(entityId) != 0;
 }
 
+bool PhysicsWorld::hasCharacter(uint32_t entityId) const
+{
+    if (!m_impl)
+        return false;
+    return m_impl->entityToCharacter.count(entityId) != 0;
+}
+
 void PhysicsWorld::destroyBodyFor(uint32_t entityId)
 {
     const auto it = m_impl->entityToBody.find(entityId);
@@ -1368,6 +1398,7 @@ bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, boo
         auto&        reg    = m_impl->world->registry();
         const Entity entity = static_cast<Entity>(entityId);
         if (reg.valid(entity))
+        {
             if (auto* transform = reg.try_get<TransformComponent>(entity))
             {
                 // `position` is a WORLD position — that is the only kind Jolt
@@ -1379,6 +1410,14 @@ bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, boo
                     HE::localPositionForWorld(*m_impl->world, entity, position);
                 transform->dirty = true;
             }
+            // Spend the coyote credit: a teleport is not a step off a ledge, and
+            // the ground the character was standing on is not under it any more.
+            // Without this, a player respawned into mid-air could still jump off
+            // nothing for the length of the window. The next step re-earns it if
+            // they arrived on solid ground.
+            if (auto* cc = reg.try_get<CharacterControllerComponent>(entity))
+                cc->airTime = kCoyoteWindow;
+        }
     }
 
     return true;
@@ -1448,8 +1487,14 @@ bool PhysicsWorld::setTransform(uint32_t entityId, const glm::vec3& position,
         auto&        reg    = m_impl->world->registry();
         const Entity entity = static_cast<Entity>(entityId);
         if (reg.valid(entity))
+        {
             if (auto* transform = reg.try_get<TransformComponent>(entity))
                 writeBackWorldPose(*m_impl->world, entity, *transform, position, rotation);
+            // Spend the coyote credit — see setPosition for why a teleport ends
+            // the grace period rather than carrying it to the new place.
+            if (auto* cc = reg.try_get<CharacterControllerComponent>(entity))
+                cc->airTime = kCoyoteWindow;
+        }
     }
 
     return true;
@@ -1635,6 +1680,10 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         JPH::Vec3 newVel = character->GetLinearVelocity();
         cc->velocity   = { newVel.GetX(), newVel.GetY(), newVel.GetZ() };
         cc->isGrounded = (character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround);
+
+        // The coyote credit, in SIMULATED time: it accrues per fixed step, so it
+        // measures the same grace whatever the frame rate. Landing restores it.
+        cc->airTime = cc->isGrounded ? 0.0f : cc->airTime + dt;
 
         // ── Drag the collision proxy along ───────────────────────────────────
         // A character usually carries BOTH a CharacterVirtual (what moves) and a
@@ -2031,6 +2080,101 @@ bool PhysicsWorld::isCharacterGrounded(uint32_t entityId) const
     auto it = m_impl->entityToCharacter.find(entityId);
     if (it == m_impl->entityToCharacter.end()) return false;
     return it->second->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
+bool PhysicsWorld::jumpCharacter(uint32_t entityId)
+{
+    if (!m_impl)
+        return false;
+
+    // The authored speed, read at the moment of the jump: retuning jumpSpeed
+    // during play then lands on the next jump instead of on the next scene load.
+    const CharacterControllerComponent* cc = characterComponentOf(m_impl->world, entityId);
+    if (!cc)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                        "locomotion.jump on entity %u did nothing: %s",
+                        entityId, kNoCharacterReason);
+        return false;
+    }
+    return jumpCharacter(entityId, cc->jumpSpeed);
+}
+
+bool PhysicsWorld::jumpCharacter(uint32_t entityId, float speed)
+{
+    if (!m_impl)
+        return false;
+
+    const auto characterIt = m_impl->entityToCharacter.find(entityId);
+    if (characterIt == m_impl->entityToCharacter.end())
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                        "locomotion.jump on entity %u did nothing: %s",
+                        entityId, kNoCharacterReason);
+        return false;
+    }
+
+    // The component is where the ground answer and the velocity mirror live, so
+    // without it there is no jump to speak of — see the header.
+    CharacterControllerComponent* cc = characterComponentOf(m_impl->world, entityId);
+    if (!cc)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                        "locomotion.jump on entity %u did nothing: %s",
+                        entityId, kNoCharacterReason);
+        return false;
+    }
+
+    // Written as !(> 0) so a NaN speed is refused here rather than poisoning the
+    // character's velocity for the rest of the session.
+    if (!(speed > 0.0f))
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                        "locomotion.jump on entity %u did nothing: a jump speed of %.2f m/s "
+                        "is not upward — give CharacterControllerComponent::jumpSpeed (or "
+                        "the speed passed to locomotion.jumpWith) a positive value",
+                        entityId, static_cast<double>(speed));
+        return false;
+    }
+
+    // The gate, from the component rather than from Jolt's live ground state, so
+    // that the answer a script gets from movement.isGrounded is literally the one
+    // used here. Plus the coyote grace, which is only reachable while airborne.
+    //
+    // A refusal in mid-air is NOT logged: it is the normal answer to a jump
+    // button pressed while falling, and a held button would ask sixty times a
+    // second.
+    if (!cc->isGrounded && cc->airTime >= kCoyoteWindow)
+        return false;
+
+    // REPLACE the vertical velocity, never add to it: a jump has one height, and
+    // adding would make it depend on whether the character happened to be rising
+    // off a ramp or already sinking. Horizontal motion is untouched, so a running
+    // jump keeps its run.
+    //
+    // Nothing here undoes the jump before it is simulated: step() only subtracts
+    // gravity from a character that is NOT supported, and this one still is, so
+    // the first step gets the full speed. Jolt's ExtendedUpdate leaves the
+    // velocity alone (it moves a copy) and its stick-to-floor pass is guarded by
+    // "not moving up", so it will not pull the character back down either.
+    JPH::CharacterVirtual& character = *characterIt->second;
+    JPH::Vec3              vel       = character.GetLinearVelocity();
+    vel.SetY(speed);
+    character.SetLinearVelocity(vel);
+
+    // The mirror, and the credit. isGrounded goes false a step early on purpose:
+    // it is about to be true anyway, it lets the same frame's animation react,
+    // and it closes the double-fire a frame that owes no physics step would
+    // otherwise open (jump twice, hear the sound twice, rise once). The one cost
+    // is a frame of "airborne" for a jump into a low ceiling, which the next step
+    // corrects.
+    cc->velocity   = { vel.GetX(), vel.GetY(), vel.GetZ() };
+    cc->isGrounded = false;
+    cc->airTime    = kCoyoteWindow;
+
+    // The kinematic collision proxy needs nothing from here: step() drags it to
+    // wherever the character ends up, so it follows the jump by construction.
+    return true;
 }
 
 void PhysicsWorld::setGravity(const glm::vec3& gravity)

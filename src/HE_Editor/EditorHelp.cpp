@@ -95,7 +95,10 @@ namespace
 	  "only path where a nav mesh has been baked.",
 	  "", "systems#navigation" },
 	{ "Component/Nav Agent", "Nav Agent",
-	  "Moves the entity along a path on the nav mesh toward a target position.",
+	  "Walks the entity along a path across the baked nav mesh — what makes an "
+	  "enemy come after the player or a villager keep a patrol. Scripts drive it "
+	  "with the Nav calls; give it a Character Controller as well and it walks "
+	  "through the world the way the player does, colliding instead of gliding.",
 	  "", "systems#navigation" },
 	{ "Component/Audio Source", "Audio Source",
 	  "Plays an audio asset from this entity. Switch on Spatial and it is heard "
@@ -298,13 +301,29 @@ namespace
 	  "Downward acceleration for this character alone. Lower it for a floaty jump, "
 	  "raise it for a heavy one.",
 	  "", "systems#physics" },
+	{ "Character Controller/Jump Speed (m/s)", "",
+	  "How fast the character is thrown upward by a jump. It is a speed, not a "
+	  "height: how high that carries depends on Gravity above, so raising one "
+	  "means revisiting the other. Jump uses this; Jump With ignores it and takes "
+	  "the speed it is given.",
+	  "", "systems#physics" },
 	{ "Character Controller/Velocity", "",
-	  "The character's current speed, written by the physics step. Editable here "
-	  "for testing — normally gameplay code sets it.",
+	  "The character's current speed, written by the physics step every tick. "
+	  "Shown read-only, because a value typed here would be overwritten before it "
+	  "could do anything — gameplay code is what sets it.",
+	  "", "systems#physics" },
+	{ "Character Controller/Air Time (s)", "",
+	  "How long the character has been off the ground, written by the physics "
+	  "step. It doubles as the grace a late jump spends: a jump asked for within "
+	  "the first tenth of a second after walking off a ledge is still granted, so "
+	  "a player who presses a frame too late gets the jump they meant. Landing "
+	  "puts it back to zero.",
 	  "", "systems#physics" },
 	{ "Character Controller/Is Grounded", "",
 	  "Whether the controller is standing on something right now. Read-only "
-	  "state, shown so a jump that never fires can be diagnosed.",
+	  "state, shown so a jump that never fires can be diagnosed: Jump refuses "
+	  "once this has been off for longer than the brief grace after leaving the "
+	  "ground, and Air Time below is that clock.",
 	  "", "systems#physics" },
 
 	// ── Movement / Camera / Camera Rig ───────────────────────────────────────
@@ -497,13 +516,25 @@ namespace
 	  "appears in the game.",
 	  "", "systems#navigation" },
 	{ "Nav Agent/Target", "",
-	  "Where the agent is walking to. Set it and a path is found on the next tick.",
+	  "Where the agent walks to. Moving it drops the path it was on and searches a "
+	  "new one from where the agent stands, so a pursuer can simply keep writing "
+	  "the player's position here. Setting it does not start the walk on its own: "
+	  "press Go below, or call Move To from a script.",
 	  "", "systems#navigation" },
-	{ "Nav Agent/Speed", "", "How fast the agent follows its path, in metres per second.",
+	{ "Nav Agent/Speed", "",
+	  "How fast the agent follows its path, in metres per second. Scripts change "
+	  "it with Set Speed — the same guard strolling a patrol and then charging.",
 	  "", "systems#navigation" },
 	{ "Nav Agent/Stop Dist", "",
 	  "How close to the target counts as arrived. Too small and the agent circles "
 	  "its destination forever.",
+	  "", "systems#navigation" },
+	{ "Nav Agent/Auto Start", "",
+	  "Walk to the target as soon as the game starts, without a script saying so. "
+	  "This is what an agent in a packaged game needs: the Go button below belongs "
+	  "to the editor and does not exist there, so an agent that is never sent off "
+	  "by a script and does not start itself simply stands still. It fires once "
+	  "per play session, so stopping the agent afterwards does not restart it.",
 	  "", "systems#navigation" },
 
 	// ── Audio ────────────────────────────────────────────────────────────────
@@ -913,7 +944,9 @@ namespace
 	  "", "systems#navigation" },
 	{ "Nav Agent/Go", "",
 	  "Sends the agent to the target position now, from the editor — the way to "
-	  "check a nav mesh without entering play mode.",
+	  "check a nav mesh without entering play mode. It is a test button and "
+	  "nothing more: the packaged game has no Details panel, so what sends an "
+	  "agent off there is Auto Start above, or Move To from a script.",
 	  "", "systems#navigation" },
 	{ "Nav Agent/Stop", "",
 	  "Drops the current path and leaves the agent where it is.",
