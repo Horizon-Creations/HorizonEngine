@@ -151,6 +151,13 @@ void render(AppContext& ctx)
     // which is exactly the question an empty preview raises.
     if (ctx.appLivePreview && ctx.world)
     {
+        // The wrap guard gets its OWN scope, closing before ImGui::End() below.
+        // Sharing a scope with the End() means the pop runs after it — on
+        // whatever window is current by then, which for a top-level panel is
+        // ImGui's Debug window, and ImGui says so with "Calling PopTextWrapPos()
+        // too many times!". The entity branch below documents the same trap; this
+        // branch has an early return, which is what made it easy to walk into.
+        {
         EditorWidgets::WrapText wrap;
         const WidgetManager& wm = ctx.world->widgets();
         const std::vector<int> ids = wm.liveIds();
@@ -205,6 +212,7 @@ void render(AppContext& ctx)
                 ImGui::TreePop();
             }
         }
+        }   // wrap guard pops HERE, while this panel is still the current window
         ImGui::End();
         return;
     }
