@@ -84,6 +84,14 @@ struct State
 	float  dragStartPos[2]  = {};
 	float  dragStartSize[2] = {};
 	bool   dragDidEdit = false;      // push one undo snapshot per completed drag
+	// A press inside the current selection keeps that selection so it can be
+	// DRAGGED — otherwise an element something else lies over could be selected
+	// and then never moved, because the press that starts the drag re-picks the
+	// thing on top of it. The pick is not thrown away though, only deferred: if
+	// the button comes up without the mouse having travelled, it was a click and
+	// this is what it would have selected.
+	int    pendingPick = 0;
+	bool   hasPendingPick = false;
 
 	// Graph canvas — the shared GraphEditor component owns pan/zoom/selection/
 	// drag; these are the host-side bits it can't own.
@@ -1693,6 +1701,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 
 	if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 	{
+		st.hasPendingPick = false;
 		if (sel && hoveredHandle >= 0)
 		{
 			st.dragMode = 2;
@@ -1704,22 +1713,51 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		}
 		else
 		{
-			const int hit = topmostAt(toCanvas(mouse));
-			st.selected = hit;
-			if (hit != 0)
+			// Elements that place themselves are the only draggable ones: inside
+			// a layout box the position is computed, so a drag would move a
+			// number nothing reads. Re-ordering there is the hierarchy's job.
+			auto draggable = [&](const UIElement* n2)
 			{
-				UIElement* n2 = st.tree.find(hit);
-				// Only elements that place themselves can be dragged: inside a
-				// layout box the position is computed, so a drag would move a
-				// number nothing reads. Re-ordering there is the hierarchy's job.
+				if (!n2) return false;
 				const UIElement* par = n2->parentId != 0 ? st.tree.find(n2->parentId) : nullptr;
-				if (!par || !par->laysOutChildren())
-				{
-					st.dragMode = 1;
-					st.dragStartMouse = mouse;
-					st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
-					st.dragDidEdit = false;
-				}
+				return !par || !par->laysOutChildren();
+			};
+			const ImVec2 cpt = toCanvas(mouse);
+			const int top = topmostAt(cpt);
+
+			// A press inside the CURRENT selection grabs that selection, even
+			// when something else lies over it — otherwise an element under
+			// another one could be selected from the hierarchy and then never
+			// moved, because the very press that starts the drag re-picks the
+			// thing on top.
+			//
+			// The pick is only deferred, not lost: a press that comes up again
+			// without the mouse having travelled was a click, and a click still
+			// selects what is on top. So the selection is sticky for DRAGGING
+			// and never sticky for LOOKING — which is what keeps a full-screen
+			// panel from becoming a selection one can no longer get out of.
+			bool grabSelection = false;
+			if (sel && sel->id != top && draggable(sel))
+			{
+				const Rect sr = elementCanvasRect(st.tree, *sel, layoutCanvas);
+				grabSelection = cpt.x >= sr.mn.x && cpt.x <= sr.mx.x &&
+				                cpt.y >= sr.mn.y && cpt.y <= sr.mx.y;
+			}
+			if (grabSelection)
+			{
+				st.pendingPick    = top;
+				st.hasPendingPick = true;
+			}
+			else
+			{
+				st.selected = top;
+			}
+			if (UIElement* n2 = st.tree.find(st.selected); n2 && draggable(n2))
+			{
+				st.dragMode = 1;
+				st.dragStartMouse = mouse;
+				st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
+				st.dragDidEdit = false;
 			}
 		}
 	}
@@ -1727,11 +1765,18 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.dragMode != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
 	{
 		UIElement* n2 = st.tree.find(st.selected);
+		// Nothing moves until the mouse has actually travelled. A few pixels of
+		// slack is what separates a click from a drag — without it every click
+		// nudges what it selects by a pixel and pushes an undo step for it, and
+		// the deferred pick above would never fire.
+		const float travel = std::max(std::abs(mouse.x - st.dragStartMouse.x),
+		                              std::abs(mouse.y - st.dragStartMouse.y));
+		if (!st.dragDidEdit && travel < 4.0f) n2 = nullptr;
 		if (n2)
 		{
 			const ImVec2 d((mouse.x - st.dragStartMouse.x) / s,
 			               (mouse.y - st.dragStartMouse.y) / s);
-			if (std::abs(d.x) > 0.01f || std::abs(d.y) > 0.01f) st.dragDidEdit = true;
+			st.dragDidEdit = true;
 			if (st.dragMode == 1)
 			{
 				n2->posX = st.dragStartPos[0] + d.x;
@@ -1763,6 +1808,10 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.dragMode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 	{
 		if (st.dragDidEdit) commitEdit(st, ctx);
+		// It never became a drag, so it was a click after all: the pick the
+		// press held back happens now.
+		else if (st.hasPendingPick) st.selected = st.pendingPick;
+		st.hasPendingPick = false;
 		st.dragMode = 0;
 		st.resizeHandle = -1;
 	}
