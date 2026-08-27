@@ -674,13 +674,33 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
   „Material Function" und „Create Material Instance" gesperrt, der Material-Editor zeigt
   stattdessen den Grund. Der Exporter schreibt beide Flags nach `project.hcfg`.
 
-**Noch nicht verifiziert:** A1 und A2 sind nie gelaufen. Es gibt noch kein App-Projekt zum
-Starten, und der Leerlaufverbrauch ist damit gemessen worden: gar nicht. Genau dafür steht der
-headless-Starttest in der Risikoliste.
+**Zweiter Durchgang, ebenfalls gebaut und getestet (1978/1978):**
+- **E1 App-Projekttyp.** `ProjectPreset::Application` (angehängt, der Wert steht als int im
+  `.heproj`), legt `Content/UI`, `Textures` und `Fonts` an, schreibt **keine** Startszene und
+  setzt `appProject`. Die Preset-Wahl und das Flag können nicht mehr auseinanderlaufen: der
+  Manager verodert beides zu einem `isApp`.
+- **E5 Export.** Für ein App-Projekt blendet der Dialog das Startszenen-Feld aus, leert die
+  Auswahl und packt **keine** Szene — sonst wäre die im Editor offene Szene mitgereist und der
+  Runtime hätte sie im App-Modus abgelehnt.
+- **`json`** (getString/getNumber/getBool/has/count/setString/setNumber/setBool) mit dotted
+  Pfaden und `[i]`-Indizes, **`prefs`** (typisiert, als eine JSON-Datei in derselben Sandbox
+  wie `fs`, Schreiben bei jeder Änderung) und **`datetime`** (now/format plus sieben Felder,
+  lokale Zeit, `localtime_r`/`localtime_s` statt des geteilten Puffers).
+- **B1-Rest, bis auf IME und Eingabefilter:** Wortsprünge (Ctrl **und** Alt, für beide
+  Plattform-Konventionen), Ctrl+Backspace löscht ein Wort, **Ziehen wählt aus** (eigener
+  `draggingText`-Zustand, der Anker bleibt am Druckpunkt), Doppelklick nimmt das Wort,
+  Dreifachklick alles, **waagerechtes Scrollen** unter dem Cursor mit passendem Rückweg im
+  Klick-Treffer, und der **I-Beam** über einem Textfeld, ohne dass jemand ihn setzt.
+  Ein Textfeld **klippt jetzt seine eigenen Glyphen** (in `uiElementClipRect`), sonst liefe
+  der herausgescrollte Text über seine Nachbarn.
 
-**Als Nächstes in Welle 1:** E1 (App-Projekttyp mit Vorlage, der `appProject` überhaupt setzt),
-E5 (Export-Voreinstellung), `json`/`prefs`/`timer`, B1-Rest, und die feinkörnige
-Invalidierung, damit der Herzschlag von 100 ms hochgesetzt werden kann.
+**Noch nicht verifiziert:** A1 und A2 sind nie gelaufen. Es gibt noch kein lauffähiges
+App-Projekt zum Starten, und der Leerlaufverbrauch ist damit gemessen worden: gar nicht. Genau
+dafür steht der headless-Starttest in der Risikoliste.
+
+**Als Nächstes in Welle 1:** Startinhalt für die App-Vorlage (ein Widget plus GameInstance, die
+zusammen ein Fenster füllen — bisher legt die Vorlage nur Ordner an), die feinkörnige
+Invalidierung, damit der 100-ms-Herzschlag hoch kann, IME und Eingabefilter am Textfeld.
 
 ---
 
