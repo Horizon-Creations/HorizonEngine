@@ -648,6 +648,42 @@ Apps ist die Vorschau das Produkt.
 Leitgedanke: der erste Meilenstein ist eine **exportierbare Taschenrechner- oder Todo-App**,
 die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt später.
 
+### Umsetzungsstand (27.08.2026, Branch `claude/he-apps-ui-framework-83b5f7`)
+
+**Gebaut und getestet (1971/1971 Tests grün, HorizonGame und HorizonEditor bauen sauber):**
+- **A0 Versionsleiter.** `Window.cpp`: `kGlVersions` 4.6 → 4.5 → 4.3 → 4.1 (macOS nur 4.1,
+  forward-compatible), `setGlAttributes` einmal vor der Fenstererzeugung und einmal pro
+  Versuch, jede Stufe außer der letzten warnt statt zu sterben.
+- **A1 Weltloser Modus.** `ProjectConfig::appMode` + `advancedShaderEffects` in den
+  vorhandenen Flags-Wörtern (kein Formatsprung; `advancedShaderEffects` **negiert**
+  gespeichert, damit jede ältere Datei als „Spiel mit Materialien" zurückliest, mit Test).
+  `GameApplication` überspringt Szenenladen, Physik, Entity-/Player-/Animator-Hosts,
+  Asset-Streaming, Kamerasteuerung und den ECS-Systemtick; Maus-Capture wird zurückgenommen.
+  Welt und Standardkamera bleiben, weil die Widget-API über `HorizonWorld::widgets` läuft und
+  der Renderpfad eine Kamera braucht.
+- **A2 Ereignisgetriebenes Zeichnen.** `Application::setEventDriven` / `requestRedraw` /
+  `setIdleHeartbeatMs` (Standard 100 ms), `Window::WaitForEvent` und `EventsLastPoll`. Ohne
+  Ereignis, ohne Redraw-Wunsch und vor dem Herzschlag entfallen `OnRender`, `Render` und der
+  Swap komplett. Für Spiele aus.
+- **A4 `app`-Gruppe:** `setTitle`, `setSize`, `size`, `requestRedraw` (dazu das vorhandene
+  `quit`), über neue `Ctx`-Callbacks, im Spiel-Runtime ans Fenster gebunden.
+- **`clipboard`** (`getText`, `setText`, `hasText`) und **`dialog`** (`message`, `confirm`)
+  über SDL3, blockierend und nativ.
+- **E1b Advanced-Schalter:** `ProjectData::appProject` / `advancedShaderEffects`, im `.heproj`
+  persistiert, Häkchen in der Anlegen-Maske, im Content Browser die Ersteller „Material",
+  „Material Function" und „Create Material Instance" gesperrt, der Material-Editor zeigt
+  stattdessen den Grund. Der Exporter schreibt beide Flags nach `project.hcfg`.
+
+**Noch nicht verifiziert:** A1 und A2 sind nie gelaufen. Es gibt noch kein App-Projekt zum
+Starten, und der Leerlaufverbrauch ist damit gemessen worden: gar nicht. Genau dafür steht der
+headless-Starttest in der Risikoliste.
+
+**Als Nächstes in Welle 1:** E1 (App-Projekttyp mit Vorlage, der `appProject` überhaupt setzt),
+E5 (Export-Voreinstellung), `json`/`prefs`/`timer`, B1-Rest, und die feinkörnige
+Invalidierung, damit der Herzschlag von 100 ms hochgesetzt werden kann.
+
+---
+
 **Welle 1, das Fundament**
 - A0 Baseline festschreiben, plus die GL-Versionsleiter 4.6 → 4.5 → 4.3 → 4.1 statt des
   harten 4.6 ohne Rückfall
