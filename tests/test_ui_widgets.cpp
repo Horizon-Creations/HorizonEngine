@@ -2627,6 +2627,49 @@ TEST_CASE("Text field: an input method's unfinished text is held apart from the 
 // which quad counts as the surface — a progress bar's fill must not be outlined
 // along with its track.
 
+TEST_CASE("Surface styling is offered exactly where it would land")
+{
+    using namespace HE;
+    // The pinned list. Adding a type here without giving it a real background
+    // (or the other way round) is the bug this test exists to catch: the
+    // properties would be offered and quietly do nothing, or an element with a
+    // perfectly good surface would never be offered them.
+    const std::vector<UIWidgetType> kSurfaces = {
+        UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Button,
+        UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
+    };
+
+    for (int t = 0; t < static_cast<int>(UIWidgetType::COUNT); ++t)
+    {
+        UIWidgetTree tree;
+        tree.canvasWidth = 400.0f; tree.canvasHeight = 200.0f;
+        tree.scaleMode = UICanvasScaleMode::ConstantPixel;
+        const int id = tree.add(static_cast<UIWidgetType>(t));
+        UIElement* e = tree.find(id);
+        REQUIRE(e);
+        uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 60.0f;
+
+        const bool expected =
+            std::find(kSurfaces.begin(), kSurfaces.end(),
+                      static_cast<UIWidgetType>(t)) != kSurfaces.end();
+        CAPTURE(e->typeName());
+        CHECK(e->hasSurfaceStyle() == expected);
+
+        // …and the claim has to be TRUE: whatever says it has a surface must
+        // actually draw one that covers its whole rect, or the stamp misses it.
+        std::vector<UIRenderObject> out;
+        UIElementRenderState st;
+        UIWidgetRect px{ 0.0f, 0.0f, 200.0f, 60.0f };
+        e->render(px, st, UUID{}, 1.0f, out);
+        if (!e->hasSurfaceStyle()) continue;
+        REQUIRE_FALSE(out.empty());
+        CHECK(out[0].type == 0);
+        CHECK(out[0].size.x == doctest::Approx(px.w));
+        CHECK(out[0].size.y == doctest::Approx(px.h));
+    }
+}
+
 TEST_CASE("A border lands on the element's surface and nowhere else")
 {
     TempWidgetDir dir;

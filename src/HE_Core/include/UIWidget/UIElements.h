@@ -22,6 +22,7 @@ public:
     const char*  typeName() const override { return "Panel"; }
     bool hasMaterialSlot() const override { return true; }
     bool hasTextureSlot()  const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { auto p = std::make_unique<UIPanel>(*this); return p; }
 
@@ -54,6 +55,7 @@ public:
     const char*  typeName() const override { return "Image"; }
     bool hasMaterialSlot() const override { return true; }
     bool hasTextureSlot()  const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIImage>(*this); }
 
@@ -120,6 +122,7 @@ public:
     const char*  typeName() const override { return "Button"; }
     bool hasMaterialSlot() const override { return true; }
     bool hasTextureSlot()  const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
     bool interactive() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIButton>(*this); }
@@ -208,6 +211,8 @@ public:
     glm::vec4 fillColor{ 0.30f, 0.70f, 0.40f, 1.0f };
 
     UIProgressBar() { sizeX = 240.0f; sizeY = 20.0f; }
+    // The TRACK is the surface; the fill drawn on top of it keeps its own colour.
+    bool hasSurfaceStyle() const override { return true; }
     UIWidgetType type() const override { return UIWidgetType::ProgressBar; }
     const char*  typeName() const override { return "ProgressBar"; }
     std::unique_ptr<UIElement> clone() const override
@@ -338,6 +343,9 @@ public:
     }
 
     UITextInput() { sizeX = 240.0f; sizeY = 32.0f; }
+    // A bordered text field is the standard look for one, so this is arguably
+    // the type that needed it most.
+    bool hasSurfaceStyle() const override { return true; }
     UIWidgetType type() const override { return UIWidgetType::TextInput; }
     const char*  typeName() const override { return "TextInput"; }
     bool interactive() const override { return true; }
@@ -368,6 +376,8 @@ public:
     glm::vec4   highlightColor{ 0.25f, 0.35f, 0.50f, 1.0f };
 
     UIComboBox() { sizeX = 220.0f; sizeY = 32.0f; }
+    // The closed box is the surface; the open list draws over it.
+    bool hasSurfaceStyle() const override { return true; }
     UIWidgetType type() const override { return UIWidgetType::ComboBox; }
     const char*  typeName() const override { return "ComboBox"; }
     bool interactive() const override { return true; }

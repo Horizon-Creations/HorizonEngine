@@ -311,6 +311,23 @@ public:
     // Types that draw a quad the user may want a picture on.
     virtual bool hasTextureSlot() const { return false; }
 
+    // ── Does this type have a SURFACE to style? ──────────────────────────────
+    // True for the types whose FIRST quad covers their whole rect — a
+    // background, in other words. That is what the border, the gradient and
+    // anything else in "Schicht 0" (docs/he-apps-plan.md D5) are applied to.
+    //
+    // Its own question, deliberately not `hasMaterialSlot()`: that one answers
+    // "may a custom shader be put here", and the two sets are NOT the same.
+    // A ProgressBar, a TextInput and a ComboBox all draw a proper background and
+    // take no material; gating the style properties on the material slot offered
+    // them to three types and quietly withheld them from three others that would
+    // have worked. Two filters that can disagree is one filter too many.
+    //
+    // False for Text (glyphs, no surface), CheckBox and Slider (their first quad
+    // is a PART — the box, the groove — not the element's rect), and for the
+    // layout containers, which draw nothing at all.
+    virtual bool hasSurfaceStyle() const { return false; }
+
     // A layout container PLACES its direct children: they ignore their own
     // anchors and position, and take the slot the box hands them. Returning
     // true here is what switches uiElementRect over for every child.

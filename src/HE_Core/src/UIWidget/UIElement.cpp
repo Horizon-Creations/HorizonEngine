@@ -433,7 +433,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     // Border ("Schicht 0"): a style on the element's own surface. Offered only
     // where there IS a surface — the same test the material slot uses — so a
     // Text label does not grow a border property that outlines nothing.
-    if (hasMaterialSlot())
+    if (hasSurfaceStyle())
     {
         out.push_back({ "Border Width", UIPropType::Float });
         out.push_back({ "Border Color", UIPropType::Color });
