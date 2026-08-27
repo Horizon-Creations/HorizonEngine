@@ -187,6 +187,16 @@ bool propBoolOr(const UIElement& e, const char* name, bool fb)
 	const UIPropValue v = e.getProp(name);
 	return v.type == UIPropType::Bool ? v.b : fb;
 }
+// Its own reader, because these guards are typed and an Int read through
+// propFloatOr silently comes back as the FALLBACK — the value lives in `.i`,
+// `.f` is zero, and the type check sends it to the default. That is what made
+// the designer draw every label left-middle no matter which of the nine cells
+// was picked, while the engine drew it correctly.
+int propIntOr(const UIElement& e, const char* name, int fb)
+{
+	const UIPropValue v = e.getProp(name);
+	return v.type == UIPropType::Int ? v.i : fb;
+}
 
 // ── Undo (combined tree + graph snapshot; '\x1f' = ASCII Unit Separator) ──────
 std::string makeSnapshot(const State& st)
@@ -1214,8 +1224,8 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		// disagree with what the engine actually drew — the designer's whole job
 		// is to show what you will get.
 		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, shown);
-		const int aH = static_cast<int>(propFloatOr(n, "Align H", 0.0f));
-		const int aV = static_cast<int>(propFloatOr(n, "Align V", 1.0f));
+		const int aH = propIntOr(n, "Align H", 0);
+		const int aV = propIntOr(n, "Align V", 1);
 		const float slackX = std::max(0.0f, (mx.x - mn.x) - ts.x);
 		const float slackY = std::max(0.0f, (mx.y - mn.y) - ts.y);
 		const ImVec2 at(mn.x + (aH == 1 ? slackX * 0.5f : aH == 2 ? slackX : 0.0f),
