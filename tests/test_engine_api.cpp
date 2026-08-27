@@ -435,7 +435,11 @@ TEST_CASE("UI: pointerOverUI answers the last widget hit test")
 
     HorizonWorld world;
     Ctx c{ &world, nullptr, &cm };
-    REQUIRE(HE::api::widget::create(c, "mem://api_pointer.hasset") != 0);
+    // Create makes the instance; show puts it on screen. A hidden widget is not
+    // hit-tested, so the pointer rows below need both halves.
+    const int pointerWidget = HE::api::widget::create(c, "mem://api_pointer.hasset");
+    REQUIRE(pointerWidget != 0);
+    HE::api::widget::show(c, pointerWidget);
 
     const auto* row = HE::api::find("ui.pointerOverUI");
     REQUIRE(row != nullptr);

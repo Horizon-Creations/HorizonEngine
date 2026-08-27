@@ -17,6 +17,18 @@
 
 namespace
 {
+    // Create a widget AND put it on screen. Creating one no longer shows it —
+    // Create Widget instantiates the class, Show Widget is what makes it appear,
+    // the way every UI framework splits those two. Nearly every test below is
+    // about what gets DRAWN or CLICKED, so they want both halves; the handful
+    // that test visibility itself call the two steps apart on purpose.
+    int createShown(WidgetManager& wm, ContentManager& cm, const char* path)
+    {
+        const int id = wm.createWidget(cm, path);
+        if (id) wm.showWidget(id);
+        return id;
+    }
+
     struct TempWidgetDir
     {
         std::filesystem::path path;
@@ -159,7 +171,9 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Max Length", UIPropType::Int },
             { "Password", UIPropType::Bool },
             { "Editable", UIPropType::Bool },
-            { "Selectable", UIPropType::Bool } } },
+            { "Selectable", UIPropType::Bool },
+            { "Input Filter", UIPropType::Int },
+            { "Allowed Characters", UIPropType::String } } },
         { UIWidgetType::ComboBox, {
             { "Options", UIPropType::StringList },
             { "Selected Index", UIPropType::Int },
@@ -531,7 +545,7 @@ TEST_CASE("WidgetManager lifecycle and z-order")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    const int id = wm.createWidget(cm, "mem://w.hasset");
+    const int id = createShown(wm, cm, "mem://w.hasset");
     REQUIRE(id != 0);
     CHECK(wm.isAlive(id));
     CHECK(wm.isVisible(id));
@@ -598,7 +612,7 @@ TEST_CASE("WidgetManager renders every element type")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> out;
     wm.extract(1920.0f, 1080.0f, out);
     CHECK(countQuads(out) > 0);
@@ -632,7 +646,7 @@ TEST_CASE("WidgetManager button click fires OnClicked -> SetProperty")
     registerWidget(cm, t, &g);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     std::vector<UIRenderObject> out;
     wm.extract(1920.0f, 1080.0f, out);
@@ -659,7 +673,7 @@ TEST_CASE("WidgetManager checkbox click toggles its checked visual")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     std::vector<UIRenderObject> out;
     wm.extract(1920.0f, 1080.0f, out);
@@ -694,7 +708,7 @@ TEST_CASE("WidgetManager routes public function calls only")
     registerWidget(cm, t, &g);
 
     WidgetManager wm;
-    const int id = wm.createWidget(cm, "mem://w.hasset");
+    const int id = createShown(wm, cm, "mem://w.hasset");
     REQUIRE(id != 0);
     CHECK(!wm.callFunction(id, "Hidden"));
     CHECK(!wm.callFunction(id, "Nope"));
@@ -732,6 +746,8 @@ TEST_CASE("Lua creates, drives and destroys a widget; world.clear() cleans up")
 local M = {}
 function M.onStart(self)
     w = horizon.createWidget("mem://hud.hasset")
+    -- Creating instantiates; showing is the second step (see createShown above).
+    horizon.showWidget(w)
     horizon.setWidgetZOrder(w, 3)
     okPub  = horizon.callWidgetFunction(w, "Go")
     okNone = horizon.callWidgetFunction(w, "Missing")
@@ -889,7 +905,7 @@ TEST_CASE("WidgetManager variables persist across separate function calls")
 
     registerWidget(cm, t, &g);
     WidgetManager wm;
-    const int id = wm.createWidget(cm, "mem://w.hasset");
+    const int id = createShown(wm, cm, "mem://w.hasset");
     REQUIRE(id != 0);
 
     std::vector<UIRenderObject> out;
@@ -1605,7 +1621,7 @@ TEST_CASE("WidgetManager: the hit test follows the canvas scale mode")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     // On a 21:9 screen the uniform factor is 1.0, so the button covers exactly
     // its authored 200x100 pixels — a per-axis stretch would have made it 266
@@ -1680,7 +1696,7 @@ TEST_CASE("WidgetManager: an element's texture path is resolved for the draw")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> out;
     wm.extract(100.0f, 100.0f, out);
     REQUIRE(out.size() >= 1);
@@ -1991,7 +2007,7 @@ TEST_CASE("WidgetManager: a box lays its children out at runtime too")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     // The second button sits at y 100..200 — that is where the click lands,
     // and nowhere near the (999, -999) its own position claims.
     CHECK(wm.processPointer(200.0f, 400.0f, 100.0f, 150.0f, true, true));
@@ -2052,7 +2068,7 @@ TEST_CASE("WidgetRef: the embedded tree is grafted in and laid out in its slot")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    const int id = wm.createWidget(cm, "mem://w.hasset");
+    const int id = createShown(wm, cm, "mem://w.hasset");
     REQUIRE(id != 0);
 
     // The button came in and fills the ref element's rect — not the canvas of
@@ -2099,7 +2115,7 @@ TEST_CASE("WidgetRef: the slot is the embedded widget's screen")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     // Scaled by 200/1000: the button lands at (160, 160), 20x20 — inside the
     // 200x200 slot, where it belongs.
@@ -2128,7 +2144,7 @@ TEST_CASE("WidgetRef: the slot is the embedded widget's screen")
     page.find(ref)->sizeY = 400.0f;
     registerWidget(cm, page);
     WidgetManager wide;
-    REQUIRE(wide.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wide, cm, "mem://w.hasset") != 0);
     out.clear();
     wide.extract(400.0f, 400.0f, out);
     found = false;
@@ -2168,7 +2184,7 @@ TEST_CASE("WidgetRef: an embedded widget's own scale mode decides")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> out;
     wm.extract(400.0f, 400.0f, out);
     REQUIRE_FALSE(out.empty());
@@ -2185,7 +2201,7 @@ TEST_CASE("WidgetRef: an embedded widget's own scale mode decides")
     page.find(ref)->sizeX = 380.0f;
     registerWidget(cm, page);
     WidgetManager wider;
-    REQUIRE(wider.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wider, cm, "mem://w.hasset") != 0);
     out.clear();
     wider.extract(400.0f, 400.0f, out);
     found = false;
@@ -2225,7 +2241,7 @@ TEST_CASE("WidgetRef: the slot is measured in canvas units, not in pixels")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> out;
     wm.extract(2000.0f, 2000.0f, out);       // page scale = 2000/1000 = 2
     REQUIRE_FALSE(out.empty());
@@ -2242,7 +2258,7 @@ TEST_CASE("WidgetRef: the slot is measured in canvas units, not in pixels")
     registerWidgetAs(cm, "mem://sub.hasset", sub);
     registerWidget(cm, page);
     WidgetManager fitted;
-    REQUIRE(fitted.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(fitted, cm, "mem://w.hasset") != 0);
     out.clear();
     fitted.extract(2000.0f, 2000.0f, out);
     found = false;
@@ -2277,7 +2293,7 @@ TEST_CASE("WidgetRef: text inside an embedded widget scales with it")
     direct.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
     registerWidget(cm, direct);
     WidgetManager plain;
-    REQUIRE(plain.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(plain, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> a;
     plain.extract(1000.0f, 1000.0f, a);
     float glyphH = 0.0f;
@@ -2295,7 +2311,7 @@ TEST_CASE("WidgetRef: text inside an embedded widget scales with it")
       e.setProp("Widget", HE::UIPropValue::ofString("mem://sub.hasset")); }
     registerWidget(cm, page);
     WidgetManager embedded;
-    REQUIRE(embedded.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(embedded, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> b;
     embedded.extract(1000.0f, 1000.0f, b);
     float embeddedGlyphH = 0.0f;
@@ -2336,7 +2352,7 @@ namespace
             HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
             e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 400.0f; e->sizeY = 40.0f;
             registerWidget(cm, authored);
-            widget = wm.createWidget(cm, "mem://w.hasset");
+            widget = createShown(wm, cm, "mem://w.hasset");
             REQUIRE(widget != 0);
             // Click it to take the focus, at the far right so the caret lands
             // at the end of the text.
@@ -2498,6 +2514,108 @@ TEST_CASE("Widgets report what changed the picture, and only that")
     // A wheel notch that no scroll box takes is not a change either.
     f.wm.processWheel(400.0f, 200.0f, 100.0f, 20.0f, 0.0f);
     CHECK_FALSE(f.wm.consumeVisualDirty());
+}
+
+TEST_CASE("Text field: the input filter judges each character in context")
+{
+    SUBCASE("whole numbers")
+    {
+        TextFieldFixture f;
+        auto* ti = const_cast<HE::UITextInput*>(f.field());
+        REQUIRE(ti);
+        ti->inputFilter = HE::UITextInput::FilterInteger;
+
+        f.wm.inputText("12a3");            // letters simply do not arrive
+        CHECK(f.text() == "123");
+
+        // A minus is a sign, not a character: only in front, and only one.
+        CHECK(f.wm.editFocusedText(WidgetManager::TextEdit::Home, false));
+        f.wm.inputText("-");
+        CHECK(f.text() == "-123");
+        f.wm.inputText("-");
+        CHECK(f.text() == "-123");         // a second one is refused
+        CHECK(f.wm.editFocusedText(WidgetManager::TextEdit::End, false));
+        f.wm.inputText("-");
+        CHECK(f.text() == "-123");         // and never in the middle or the end
+
+        f.wm.inputText(".5");              // no decimal point in a whole number
+        CHECK(f.text() == "-1235");
+    }
+
+    SUBCASE("decimals take exactly one point")
+    {
+        TextFieldFixture f;
+        auto* ti = const_cast<HE::UITextInput*>(f.field());
+        REQUIRE(ti);
+        ti->inputFilter = HE::UITextInput::FilterDecimal;
+
+        f.wm.inputText("3.14");
+        CHECK(f.text() == "3.14");
+        f.wm.inputText(".");
+        CHECK(f.text() == "3.14");         // the second point is refused
+    }
+
+    SUBCASE("a paste keeps what fits instead of being refused whole")
+    {
+        TextFieldFixture f;
+        auto* ti = const_cast<HE::UITextInput*>(f.field());
+        REQUIRE(ti);
+        ti->inputFilter = HE::UITextInput::FilterInteger;
+        // One call, the way a paste arrives — and the judgement is made per
+        // character against the text as it grows, so the second '-' is refused
+        // even though it is in the same paste as the first.
+        f.wm.inputText("-12-34");
+        CHECK(f.text() == "-1234");
+    }
+
+    SUBCASE("a custom list, and an empty one means no rule")
+    {
+        TextFieldFixture f;
+        auto* ti = const_cast<HE::UITextInput*>(f.field());
+        REQUIRE(ti);
+        ti->inputFilter  = HE::UITextInput::FilterCustom;
+        ti->allowedChars = "ABCDEF0123456789";
+        f.wm.inputText("CAFEbabe99");
+        CHECK(f.text() == "CAFE99");
+
+        ti->allowedChars.clear();          // no list = nothing to enforce
+        f.wm.inputText("xyz");
+        CHECK(f.text() == "CAFE99xyz");
+    }
+}
+
+TEST_CASE("Creating a widget does not show it")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = authored.add(HE::UIWidgetType::Panel);
+    HE::uiSetAnchorPreset(*authored.find(panel), 0);
+    authored.find(panel)->posX = authored.find(panel)->posY = 0.0f;
+    authored.find(panel)->sizeX = authored.find(panel)->sizeY = 100.0f;
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // It exists…
+    CHECK(wm.count() == 1);
+    CHECK(wm.isAlive(id));
+    // …and it is NOT on screen, which is the whole point: Create Widget makes an
+    // instance of the class, Show Widget is what puts it up.
+    CHECK_FALSE(wm.isVisible(id));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+    CHECK(out.empty());
+
+    wm.showWidget(id);
+    CHECK(wm.isVisible(id));
+    out.clear();
+    wm.extract(400.0f, 200.0f, out);
+    CHECK_FALSE(out.empty());
 }
 
 TEST_CASE("Text field: word-wise movement and deletion")
@@ -2758,7 +2876,7 @@ TEST_CASE("WidgetRef: a same-size slot draws exactly what the widget draws alone
     // …as a page of its own.
     registerWidget(cm, sub);
     WidgetManager alone;
-    REQUIRE(alone.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(alone, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> a;
     alone.extract(1000.0f, 600.0f, a);
     REQUIRE_FALSE(a.empty());
@@ -2774,7 +2892,7 @@ TEST_CASE("WidgetRef: a same-size slot draws exactly what the widget draws alone
       e.setProp("Widget", HE::UIPropValue::ofString("mem://sub.hasset")); }
     registerWidget(cm, page);
     WidgetManager embedded;
-    REQUIRE(embedded.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(embedded, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> b;
     embedded.extract(2000.0f, 1000.0f, b);
 
@@ -2810,7 +2928,7 @@ TEST_CASE("WidgetRef: two copies of one widget do not share element ids")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     // Both rows exist and answer at their own place — if the ids had collided,
     // the second graft would have overwritten the first.
@@ -2847,7 +2965,7 @@ TEST_CASE("WidgetRef: nesting works and a circle is refused")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     // The button three levels down arrived and fills the outermost slot.
     CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 50.0f, true, true));
 
@@ -2879,7 +2997,7 @@ TEST_CASE("WidgetRef: a missing or empty reference is survivable")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    CHECK(wm.createWidget(cm, "mem://w.hasset") != 0);
+    CHECK(createShown(wm, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> out;
     wm.extract(400.0f, 400.0f, out);
     CHECK(out.empty());
@@ -2933,7 +3051,7 @@ TEST_CASE("WidgetRef: each copy's logic runs on its own copy")
     registerWidget(cm, page);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     std::vector<UIRenderObject> out;
     wm.extract(400.0f, 400.0f, out);
@@ -3014,7 +3132,7 @@ TEST_CASE("Navigation: the focus goes where the direction points")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     using Nav = WidgetManager::NavDir;
 
     // Nothing focused yet: the first press takes the top-left one.
@@ -3050,7 +3168,7 @@ TEST_CASE("Navigation: disabled, hidden and clipped-away elements are skipped")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     using Nav = WidgetManager::NavDir;
 
     REQUIRE(wm.navigate(Nav::Down, 400.0f, 400.0f));
@@ -3080,7 +3198,7 @@ TEST_CASE("Navigation: activating does what a click does")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     // Nothing focused → nothing happens.
     CHECK_FALSE(wm.activateFocused());
@@ -3112,7 +3230,7 @@ TEST_CASE("Navigation: left and right step a focused slider instead of leaving i
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     using Nav = WidgetManager::NavDir;
     REQUIRE(wm.navigate(Nav::Down, 400.0f, 400.0f));
     REQUIRE(wm.focusedElement() == sl);
@@ -3137,7 +3255,7 @@ TEST_CASE("Navigation: the focused element gets a ring drawn around it")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     std::vector<UIRenderObject> before;
     wm.extract(400.0f, 400.0f, before);
@@ -3318,7 +3436,7 @@ TEST_CASE("WidgetManager: the wheel scrolls the box under the cursor")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     // The second button covers y 100..200 before scrolling…
     CHECK(wm.processPointer(400.0f, 400.0f, 50.0f, 150.0f, true, true));
@@ -3413,7 +3531,7 @@ TEST_CASE("WidgetManager: opacity fades the quads, disabled dims and deadens the
     registerWidget(cm, t);
 
     WidgetManager wm;
-    const int id = wm.createWidget(cm, "mem://w.hasset");
+    const int id = createShown(wm, cm, "mem://w.hasset");
     REQUIRE(id != 0);
 
     std::vector<UIRenderObject> out;
@@ -3431,7 +3549,7 @@ TEST_CASE("WidgetManager: opacity fades the quads, disabled dims and deadens the
     t.find(root)->renderOpacity = 0.5f;
     registerWidget(cm, t);
     WidgetManager faded;
-    REQUIRE(faded.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(faded, cm, "mem://w.hasset") != 0);
     out.clear();
     faded.extract(200.0f, 200.0f, out);
     REQUIRE(out.size() >= 2);
@@ -3446,7 +3564,7 @@ TEST_CASE("WidgetManager: opacity fades the quads, disabled dims and deadens the
     t.find(root)->renderOpacity = 0.0f;
     registerWidget(cm, t);
     WidgetManager gone;
-    REQUIRE(gone.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(gone, cm, "mem://w.hasset") != 0);
     CHECK_FALSE(gone.processPointer(200.0f, 200.0f, 50.0f, 50.0f, true, true));
 
     // Disabled on the root: dimmed instead of faded, and inert all the way down.
@@ -3454,7 +3572,7 @@ TEST_CASE("WidgetManager: opacity fades the quads, disabled dims and deadens the
     t.find(root)->enabled = false;
     registerWidget(cm, t);
     WidgetManager off;
-    REQUIRE(off.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(off, cm, "mem://w.hasset") != 0);
     out.clear();
     off.extract(200.0f, 200.0f, out);
     REQUIRE(out.size() >= 2);
@@ -3598,7 +3716,7 @@ TEST_CASE("WidgetManager: rotation reaches the quads and the pointer follows it"
     registerWidget(cm, t);
 
     WidgetManager upright;
-    REQUIRE(upright.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(upright, cm, "mem://w.hasset") != 0);
     std::vector<UIRenderObject> out;
     upright.extract(400.0f, 400.0f, out);
     REQUIRE_FALSE(out.empty());
@@ -3613,7 +3731,7 @@ TEST_CASE("WidgetManager: rotation reaches the quads and the pointer follows it"
     e.rotation = 90.0f;
     registerWidget(cm, t);
     WidgetManager turned;
-    REQUIRE(turned.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(turned, cm, "mem://w.hasset") != 0);
     out.clear();
     turned.extract(400.0f, 400.0f, out);
     REQUIRE_FALSE(out.empty());
@@ -3865,7 +3983,7 @@ TEST_CASE("WidgetManager: clipped quads carry the scissor, clipped pixels are de
 
     registerWidget(cm, t);
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
 
     std::vector<UIRenderObject> out;
     wm.extract(1000.0f, 1000.0f, out);
@@ -3970,7 +4088,7 @@ TEST_CASE("WidgetManager: a filled element is hit across the whole viewport")
     registerWidget(cm, t);
 
     WidgetManager wm;
-    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     // The far corner of the viewport is inside it, which for the old
     // point-anchored 120×32 default it never was.
     CHECK(wm.processPointer(1920.0f, 1080.0f, 1900.0f, 1050.0f, true, true));

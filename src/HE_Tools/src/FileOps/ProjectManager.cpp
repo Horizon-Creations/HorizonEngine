@@ -92,31 +92,76 @@ bool writeRootWidgetAsset(const fs::path& root, const std::string& projectName)
 	               static_cast<uint16_t>(HE::AssetType::Widget));
 }
 
-// The GameInstance: OnInit → Create Widget(RootWidget). Built as a Graph and
-// serialised with the engine's own toJson rather than hand-written JSON — the
-// node/link format is internal and would drift out from under a literal.
+// The GameInstance: OnInit → Create Widget(RootWidget) → Show Widget. Built as a
+// Graph and serialised with the engine's own toJson rather than hand-written
+// JSON — the node/link format is internal and would drift out from under a
+// literal.
+//
+// Three nodes, not two: Create Widget makes an INSTANCE of the widget class and
+// leaves it hidden; Show Widget is what puts it on screen.
 bool writeAppGameInstance(const fs::path& root)
 {
 	HorizonCode::Graph g;
+
+	// Laid out left to right along one row. Positions are not decoration: nodes
+	// all default to (0, 0), and a graph written without them opens as a single
+	// pile in which only the last node drawn is visible.
+	constexpr float kY      = 0.0f;
+	constexpr float kColGap = 260.0f;
 
 	HorizonCode::Node ev;
 	ev.id   = g.nextId++;
 	ev.type = HorizonCode::NodeType::Event;
 	ev.s    = "OnInit";
+	ev.x    = 0.0f;  ev.y = kY;
 	g.nodes.push_back(ev);
 
 	HorizonCode::Node create;
 	create.id   = g.nextId++;
 	create.type = HorizonCode::NodeType::CreateWidget;
 	create.s    = kRootWidgetRel;
+	create.x    = kColGap;  create.y = kY;
 	g.nodes.push_back(create);
 
-	// Exec out of the event into exec in of the create — pin 0 on both, which is
-	// the only exec pin either of them has.
-	HorizonCode::Link l;
-	l.srcNode = ev.id;     l.srcPin = 0;
-	l.dstNode = create.id; l.dstPin = 0;
-	g.links.push_back(l);
+	HorizonCode::Node show;
+	show.id   = g.nextId++;
+	show.type = HorizonCode::NodeType::ShowWidget;
+	show.x    = kColGap * 2.0f;  show.y = kY;
+	g.nodes.push_back(show);
+
+	// A node's pins live in ONE flat index space, in the order exec-in, exec-out,
+	// data-in, data-out. Computed from the signature rather than written as
+	// literals: the numbers depend on how many pins each node type happens to
+	// have, and a literal would be silently wrong the day one of them gains an
+	// input.
+	auto execOutPin = [](const HorizonCode::Node& n, int k)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		return static_cast<int>(s.execIns.size()) + k;
+	};
+	auto execInPin  = [](const HorizonCode::Node&, int k) { return k; };
+	auto dataOutPin = [](const HorizonCode::Node& n, int k)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		return static_cast<int>(s.execIns.size() + s.execOuts.size() + s.dataIns.size()) + k;
+	};
+	auto dataInPin  = [](const HorizonCode::Node& n, int k)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		return static_cast<int>(s.execIns.size() + s.execOuts.size()) + k;
+	};
+
+	// Exec: event → create → show. Data: the widget id Create Widget hands out
+	// goes into Show Widget's input. connect() validates, so a refused link is a
+	// bug in this function and says so instead of shipping a graph that does
+	// nothing.
+	const bool wired =
+		g.connect(ev.id,     execOutPin(ev, 0),     create.id, execInPin(create, 0)) &&
+		g.connect(create.id, execOutPin(create, 0), show.id,   execInPin(show, 0))   &&
+		g.connect(create.id, dataOutPin(create, 0), show.id,   dataInPin(show, 0));
+	if (!wired)
+		HE_LOG_WARN(Config, "%s", "Application template: could not wire the GameInstance graph "
+		                          "— the preview will start empty");
 
 	std::ofstream out(root / "GameInstance.hcode", std::ios::trunc);
 	if (!out.is_open()) return false;

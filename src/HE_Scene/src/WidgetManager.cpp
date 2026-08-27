@@ -695,6 +695,37 @@ void WidgetManager::inputText(const std::string& utf8)
 	ti->deleteSelection();
 
 	std::string add = utf8;
+
+	// The input filter, applied character by character BEFORE the length limit.
+	// Per character rather than per call, so a paste keeps what fits instead of
+	// being refused whole — and judged against the text as it grows, because
+	// whether a '-' or a '.' is allowed depends on what is already there.
+	if (ti->inputFilter != HE::UITextInput::FilterAny)
+	{
+		std::string kept;
+		kept.reserve(add.size());
+		for (size_t i = 0; i < add.size(); )
+		{
+			const size_t next = HE::uiUtf8Next(add, i);
+			const std::string ch = add.substr(i, next - i);
+			// Where this character would land: the caret, plus what we have
+			// already accepted from this same paste.
+			if (ti->acceptsCharacter(ch, ti->caret + kept.size()))
+			{
+				// Appended to the field's own text as we go, so the NEXT character
+				// is judged against a field that already contains this one — that
+				// is what stops "1-2" and "1.2.3" from slipping through a paste.
+				ti->text.insert(ti->caret + kept.size(), ch);
+				kept += ch;
+			}
+			i = next;
+		}
+		// Put the text back the way it was; the insert below is the real one.
+		ti->text.erase(ti->caret, kept.size());
+		add.swap(kept);
+		if (add.empty()) return;
+	}
+
 	if (ti->maxLength > 0)
 	{
 		// Counted in CHARACTERS: a limit of 8 that lets through two accented

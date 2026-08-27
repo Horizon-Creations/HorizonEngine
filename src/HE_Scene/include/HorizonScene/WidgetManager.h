@@ -26,6 +26,10 @@ public:
     // Instantiate a widget asset (content-relative path). Resolves per-element
     // material references, fires the "Construct" event, returns the widget id
     // (0 = asset missing or invalid tree).
+    // The instance is created HIDDEN — creating and showing are two steps, the
+    // way they are in every UI framework: a menu is usually built long before it
+    // is put up, and building it visible makes it flash. Call showWidget() when
+    // it should appear.
     int createWidget(ContentManager& content, const std::string& assetPath);
 
     void destroyWidget(int id);
@@ -180,7 +184,11 @@ private:
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;
-        bool visible = true;       // ShowSelf/HideSelf nodes flip this
+        // Created HIDDEN. Create Widget makes an instance of the widget class —
+        // it does not put it on screen; Show Widget does that, the way every UI
+        // framework separates the two. Flipped by showWidget/hideWidget and by
+        // the ShowSelf/HideSelf nodes.
+        bool visible = false;
         // Transient interaction state (element ids; 0 = none).
         int hoveredElem   = 0;
         int pressedElem   = 0;

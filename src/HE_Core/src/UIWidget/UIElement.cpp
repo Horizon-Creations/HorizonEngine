@@ -267,8 +267,52 @@ const UIPropTable& UITextInput::propTable() const
         uiprop::slot<&UITextInput::password>   ({ "Password", UIPropType::Bool }),
         uiprop::slot<&UITextInput::editable>   ({ "Editable", UIPropType::Bool }),
         uiprop::slot<&UITextInput::selectable> ({ "Selectable", UIPropType::Bool }),
+        // 0 anything, 1 whole numbers, 2 decimals, 3 the characters in Allowed
+        // Characters. See UITextInput::Filter.
+        uiprop::slot<&UITextInput::inputFilter>({ "Input Filter", UIPropType::Int, 0.0f, 3.0f }),
+        uiprop::slot<&UITextInput::allowedChars>({ "Allowed Characters", UIPropType::String }),
     };
     return t;
+}
+
+// One character at a time, judged against what the field already holds: "-" is
+// only a minus sign in front, and a second "." is not a decimal point.
+bool UITextInput::acceptsCharacter(const std::string& ch, size_t atByte) const
+{
+    if (ch.empty()) return false;
+    switch (inputFilter)
+    {
+    case FilterCustom:
+        // No list = no rule (see allowedChars).
+        if (allowedChars.empty()) return true;
+        return allowedChars.find(ch) != std::string::npos;
+
+    case FilterInteger:
+    case FilterDecimal:
+    {
+        // Multi-byte characters are never digits or signs.
+        if (ch.size() != 1) return false;
+        const char c = ch[0];
+        if (c >= '0' && c <= '9') return true;
+        if (c == '-')
+        {
+            // Only as the very first character, and only once. `atByte` is where
+            // it would land, so this also refuses a minus typed into the middle.
+            return atByte == 0 && text.find('-') == std::string::npos;
+        }
+        if (c == '.' && inputFilter == FilterDecimal)
+        {
+            // One point, and never before the sign.
+            if (text.find('.') != std::string::npos) return false;
+            return !(atByte == 0 && !text.empty() && text[0] == '-');
+        }
+        return false;
+    }
+
+    case FilterAny:
+    default:
+        return true;
+    }
 }
 
 const UIPropTable& UIComboBox::propTable() const
@@ -933,6 +977,10 @@ void UITextInput::writeJson(nlohmann::json& j) const
     if (!selectable)   j["selectable"] = false;
     if (selectionColor != glm::vec4(0.25f, 0.45f, 0.80f, 0.75f))
         j["selectionColor"] = colJson(selectionColor);
+    // Same rule: written only when set, so every field authored before the
+    // filter existed still saves byte-identically.
+    if (inputFilter != FilterAny)  j["inputFilter"] = inputFilter;
+    if (!allowedChars.empty())     j["allowedChars"] = allowedChars;
 }
 void UITextInput::readJson(const nlohmann::json& j)
 {
@@ -945,6 +993,8 @@ void UITextInput::readJson(const nlohmann::json& j)
     password   = j.value("password", false);
     editable   = j.value("editable", true);
     selectable = j.value("selectable", true);
+    inputFilter  = j.value("inputFilter", static_cast<int>(FilterAny));
+    allowedChars = j.value("allowedChars", std::string());
     // The authored text decides where the caret starts, not a stale offset.
     caret = selAnchor = text.size();
 }

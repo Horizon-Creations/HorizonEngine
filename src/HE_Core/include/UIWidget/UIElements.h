@@ -246,6 +246,37 @@ public:
     // Select All and shift-arrows simply do nothing.
     bool        selectable = true;
 
+    // ── What may be typed into it ────────────────────────────────────────────
+    // A field that asks for a number should not accept letters, and finding that
+    // out when the value is parsed is one round trip too late. Filtering happens
+    // where text ENTERS the field, so it covers a paste as well as a keystroke —
+    // and a pasted "12ab" arrives as "12" rather than being refused whole,
+    // because dropping everything over one bad character is the more annoying of
+    // the two behaviours.
+    //
+    // A plain int rather than an enum type: the property system carries Float,
+    // Int, Bool, String, Color, Vec2 and StringList, and an Int the designer
+    // shows as a number is the honest fit until it grows an enum kind.
+    enum Filter : int
+    {
+        FilterAny     = 0,   // anything — the default, and what every field did before
+        FilterInteger = 1,   // digits, and a '-' only in front
+        FilterDecimal = 2,   // digits, one '.', and a '-' only in front
+        FilterCustom  = 3,   // exactly the characters listed in allowedChars
+    };
+    int         inputFilter = FilterAny;
+    // Only for FilterCustom: the characters that may be typed, listed plainly
+    // ("0123456789ABCDEF"). Empty while FilterCustom is set would reject
+    // everything — a read-only field said in a confusing way — so it is treated
+    // as Any instead.
+    std::string allowedChars;
+
+    // Would this one UTF-8 character be accepted, given what the field already
+    // holds and where it would land? Lives on the element because the runtime and
+    // its tests need the same answer, and because "-" and "." are only valid
+    // relative to the rest of the text.
+    bool acceptsCharacter(const std::string& ch, size_t atByte) const;
+
     // ── Editing state (runtime, never serialized) ────────────────────────────
     // Byte offsets into `text`, always on character boundaries. caret is where
     // typing lands; selAnchor is the other end of the selection, equal to caret
