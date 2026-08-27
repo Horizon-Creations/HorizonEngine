@@ -219,6 +219,18 @@ public:
     // would come apart into a tilted background with upright text on it.
     float   rotation = 0.0f;
 
+    // ── Border ("Schicht 0", docs/he-apps-plan.md D5) ────────────────────────
+    // An outline on the element's own surface, in pixels, drawn INSIDE the rect
+    // and following the corner radius. 0 = none. Only the types that HAVE a
+    // surface read it (the same test the material slot uses) — outlining a text
+    // label would outline nothing.
+    //
+    // On the base rather than per type, because it is one authored idea: a
+    // Panel, an Image and a Button that all carry a 1 px line should carry the
+    // same property, not three that have to be kept in step.
+    float     borderWidth = 0.0f;
+    glm::vec4 borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
+
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
     // between the filling children in proportion. Ignored everywhere else, and
@@ -345,6 +357,7 @@ protected:
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
         dst.clipChildren = clipChildren;
+        dst.borderWidth = borderWidth; dst.borderColor = borderColor;
     }
 };
 

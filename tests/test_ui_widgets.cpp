@@ -2621,6 +2621,93 @@ TEST_CASE("Text field: an input method's unfinished text is held apart from the 
     CHECK_FALSE(ro.wm.hasComposition());
 }
 
+// ─── Schicht 0: borders ──────────────────────────────────────────────────────
+// A border is an element-level style, so no widget type knows about it: the
+// manager stamps it onto the SURFACE the element drew. The interesting half is
+// which quad counts as the surface — a progress bar's fill must not be outlined
+// along with its track.
+
+TEST_CASE("A border lands on the element's surface and nowhere else")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+
+    const int panel = authored.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement* e = authored.find(panel);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 100.0f;
+        e->borderWidth = 2.0f;
+        e->borderColor = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+    }
+    // A progress bar draws a track AND a fill on top of it. Only the track is
+    // the surface; outlining the fill would draw a box around a moving bar.
+    const int bar = authored.add(HE::UIWidgetType::ProgressBar);
+    {
+        HE::UIElement* e = authored.find(bar);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 120.0f; e->sizeX = 200.0f; e->sizeY = 20.0f;
+        e->borderWidth = 3.0f;
+        if (auto* pb = dynamic_cast<HE::UIProgressBar*>(e)) pb->value = 0.5f;
+    }
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+
+    int bordered = 0;
+    for (const UIRenderObject& o : out)
+        if (o.borderWidth > 0.0f) ++bordered;
+    // One per element, not one per quad: the panel's background and the bar's
+    // track. The fill drawn on top of the track is NOT the surface.
+    CHECK(bordered == 2);
+
+    // The panel's own quad carries the authored width and colour.
+    bool sawPanel = false;
+    for (const UIRenderObject& o : out)
+        if (o.borderWidth > 0.0f && o.size.x == doctest::Approx(200.0f) &&
+            o.size.y == doctest::Approx(100.0f))
+        {
+            sawPanel = true;
+            CHECK(o.borderWidth == doctest::Approx(2.0f));
+            CHECK(o.borderColor.r == doctest::Approx(1.0f));
+            CHECK(o.borderColor.g == doctest::Approx(0.0f));
+        }
+    CHECK(sawPanel);
+
+    // Glyph quads never carry one — an outlined letter is not a border.
+    for (const UIRenderObject& o : out)
+        if (o.type == 2) CHECK(o.borderWidth == doctest::Approx(0.0f));
+}
+
+TEST_CASE("A border survives a save and a load")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::Panel);
+    t.find(id)->borderWidth = 4.0f;
+    t.find(id)->borderColor = glm::vec4(0.2f, 0.4f, 0.6f, 0.8f);
+
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), loaded));
+    const HE::UIElement* e = loaded.find(id);
+    REQUIRE(e);
+    CHECK(e->borderWidth == doctest::Approx(4.0f));
+    CHECK(e->borderColor.b == doctest::Approx(0.6f));
+    CHECK(e->borderColor.a == doctest::Approx(0.8f));
+
+    // An element without one writes nothing, so a widget authored before
+    // borders existed saves byte-identically.
+    HE::UIWidgetTree plainTree;
+    plainTree.add(HE::UIWidgetType::Panel);
+    const std::string json = HE::uiWidgetTreeToJson(plainTree);
+    CHECK(json.find("borderWidth") == std::string::npos);
+}
+
 TEST_CASE("Creating a widget does not show it")
 {
     TempWidgetDir dir;

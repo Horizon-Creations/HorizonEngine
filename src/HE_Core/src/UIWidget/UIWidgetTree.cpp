@@ -700,6 +700,14 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.rotation != 0.0f)  o["rotation"] = e.rotation;
     if (e.hoverCursor != HE::UICursor::Default)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
+    // Only once set, like every optional field above, so an element authored
+    // before borders existed saves byte-identically.
+    if (e.borderWidth > 0.0f)
+    {
+        o["borderWidth"] = e.borderWidth;
+        o["borderColor"] = { e.borderColor.r, e.borderColor.g,
+                             e.borderColor.b, e.borderColor.a };
+    }
     e.writeJson(o); // type-specific fields
     return o;
 }
@@ -740,6 +748,11 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->rotation      = o.value("rotation", 0.0f);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
+    e->borderWidth = o.value("borderWidth", 0.0f);
+    if (const auto bc = o.find("borderColor");
+        bc != o.end() && bc->is_array() && bc->size() == 4)
+        e->borderColor = { (*bc)[0].get<float>(), (*bc)[1].get<float>(),
+                           (*bc)[2].get<float>(), (*bc)[3].get<float>() };
     e->readJson(o); // type-specific fields
     return e;
 }

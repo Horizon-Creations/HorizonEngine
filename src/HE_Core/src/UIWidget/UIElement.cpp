@@ -375,6 +375,8 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
     if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
+    if (n == "Border Width") { out = UIPropValue::ofFloat(e.borderWidth);       return true; }
+    if (n == "Border Color") { out = UIPropValue::ofColor(e.borderColor);       return true; }
     return false;
 }
 
@@ -402,6 +404,8 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // runtime re-resolves it when this changes (WidgetManager watches both).
     if (n == "Texture")      { e.texture = v.s; return true; }
     if (n == "Font")         { e.font = v.s; return true; }
+    if (n == "Border Width") { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; return true; }
+    if (n == "Border Color") { e.borderColor = v.col; return true; }
     return false;
 }
 } // namespace
@@ -420,6 +424,14 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Size",         UIPropType::Vec2 });
     out.push_back({ "Layer",        UIPropType::Int });
     out.push_back({ "Hover Cursor", UIPropType::Int });
+    // Border ("Schicht 0"): a style on the element's own surface. Offered only
+    // where there IS a surface — the same test the material slot uses — so a
+    // Text label does not grow a border property that outlines nothing.
+    if (hasMaterialSlot())
+    {
+        out.push_back({ "Border Width", UIPropType::Float });
+        out.push_back({ "Border Color", UIPropType::Color });
+    }
     // Asset slots only where the editor exposes them: Material behind
     // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic
     // the details panel uses).

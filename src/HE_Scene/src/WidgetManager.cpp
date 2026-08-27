@@ -6,6 +6,7 @@
 #include <Renderer/UIFont.h>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
+#include <cmath>      // std::abs — the border stamp compares rects
 
 namespace
 {
@@ -1359,6 +1360,32 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			HE::uiElementUnitScale(w.tree, e, eus, evs, &canvas);
 			const size_t firstQuad = out.size();
 			e.render(px, st, matId, sy * evs, out);
+
+			// ── The border, stamped onto the element's SURFACE ────────────────
+			// Only the FIRST quad an element emits, and only when it covers the
+			// element's whole rect. That is the background — the surface the
+			// border belongs to. Stamping every quad would outline a progress
+			// bar's fill as well as its track, and a slider's handle as well as
+			// its groove; testing the rect is what tells a background apart from
+			// a part drawn on top of one, without any widget type knowing that
+			// borders exist.
+			if (e.borderWidth > 0.0f && out.size() > firstQuad)
+			{
+				UIRenderObject& first = out[firstQuad];
+				const bool coversRect =
+					first.type == 0 &&
+					std::abs(first.position.x - px.x) < 0.5f &&
+					std::abs(first.position.y - px.y) < 0.5f &&
+					std::abs(first.size.x - px.w)     < 0.5f &&
+					std::abs(first.size.y - px.h)     < 0.5f;
+				if (coversRect)
+				{
+					// In pixels like every other length here, so a scaled canvas
+					// scales the line with the box it outlines.
+					first.borderWidth = e.borderWidth * sy * evs;
+					first.borderColor = e.borderColor;
+				}
+			}
 
 			// Inherited opacity and the disabled dim, applied to whatever the
 			// element emitted — same reason as the clip below: a widget type

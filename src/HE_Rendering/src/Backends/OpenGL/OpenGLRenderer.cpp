@@ -4680,6 +4680,8 @@ uniform vec4 uColor;
 uniform float uMode;
 uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
 uniform float uCornerRadius; // px; min(w,h)/2 → circle
+uniform float uBorderWidth;  // px, drawn INSIDE the quad; 0 = none
+uniform vec4  uBorderColor;
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 // uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
@@ -4707,7 +4709,8 @@ void main()
         FragColor = vec4(c.rgb, c.a * clamp(0.5 - dd, 0.0, 1.0));
         return;
     }
-    if (uCornerRadius <= 0.0) { FragColor = uColor; return; } // square → crisp
+    // Square AND borderless needs no distance field at all — the crisp fast path.
+    if (uCornerRadius <= 0.0 && uBorderWidth <= 0.0) { FragColor = uColor; return; }
     // Solid quad with rounded corners.
     vec2 halfsz = uRect.zw * 0.5;
     float r = min(uCornerRadius, min(halfsz.x, halfsz.y));
@@ -4715,7 +4718,14 @@ void main()
     vec2 q = abs(p) - (halfsz - r);
     float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float cov = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d in pixels)
-    FragColor = vec4(uColor.rgb, uColor.a * cov);
+    if (uBorderWidth <= 0.0) { FragColor = vec4(uColor.rgb, uColor.a * cov); return; }
+    // The ring between the shape and itself shrunk by the border width: `d` is a
+    // signed distance in pixels, so the inner edge is d + width. Mirrors the
+    // Metal path exactly (uiFragment) — one rule, two languages.
+    float inner = clamp(0.5 - (d + uBorderWidth), 0.0, 1.0);
+    vec3  rgb   = mix(uBorderColor.rgb, uColor.rgb, inner);
+    float a     = mix(uBorderColor.a, uColor.a, inner);
+    FragColor = vec4(rgb, a * cov);
 }
 )GLSL";
 
@@ -5743,6 +5753,8 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIRotation = glGetUniformLocation(m_uiProgram, "uRotation");
 		m_uUIMode     = glGetUniformLocation(m_uiProgram, "uMode");
 		m_uUICornerRadius = glGetUniformLocation(m_uiProgram, "uCornerRadius");
+		m_uUIBorderWidth  = glGetUniformLocation(m_uiProgram, "uBorderWidth");
+		m_uUIBorderColor  = glGetUniformLocation(m_uiProgram, "uBorderColor");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
@@ -7461,6 +7473,9 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIRotation, obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
 		glUniform1f(m_uUICornerRadius, obj.cornerRadius);
+		glUniform1f(m_uUIBorderWidth, obj.borderWidth);
+		glUniform4f(m_uUIBorderColor, obj.borderColor.r, obj.borderColor.g,
+		            obj.borderColor.b, obj.borderColor.a);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 

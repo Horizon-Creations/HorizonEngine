@@ -1228,9 +1228,14 @@ vertex UIVert uiVertex(uint vid [[vertex_id]],
 // mode 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
 // quad (RGBA from texture(0), tinted by colour). Modes 1 and 2 share the slot:
 // a glyph run binds the atlas there, an image its own texture.
+// border = { widthPx, r, g, b } and borderA carries its alpha in .x — the border
+// needs five numbers and a float4 holds four. Width 0 = no border, which is what
+// every quad drew before borders existed.
 fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& color [[buffer(0)]],
                            constant float4& shape [[buffer(1)]],
+                           constant float4& border [[buffer(2)]],
+                           constant float4& borderA [[buffer(3)]],
                            texture2d<float> atlas [[texture(0)]])
 {
     if (shape.x > 0.5 && shape.x < 1.5) {
@@ -1252,7 +1257,9 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
         float  dT      = length(max(qT, 0.0)) + min(max(qT.x, qT.y), 0.0) - rT;
         return float4(c.rgb, c.a * clamp(0.5 - dT, 0.0, 1.0));
     }
-    if (shape.y <= 0.0) return color; // square quad → crisp, no SDF/AA
+    // Square AND borderless is the one case that needs no distance field at all,
+    // so it stays the crisp fast path it always was.
+    if (shape.y <= 0.0 && border.x <= 0.0) return color;
     // Solid quad with rounded corners (radius = min(w,h)/2 → circle).
     float2 halfSz = shape.zw * 0.5;
     float  r      = min(shape.y, min(halfSz.x, halfSz.y));
@@ -1260,7 +1267,15 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
     float2 q      = abs(p) - (halfSz - r);
     float  d      = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float  cov  = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d is in pixels)
-    return float4(color.rgb, color.a * cov);
+    if (border.x <= 0.0) return float4(color.rgb, color.a * cov);
+    // The border is the ring between the shape's edge and the same shape shrunk
+    // by its width: `d` is a signed distance in pixels, so the inner edge is
+    // simply d + width. One mix, antialiased on both sides by the same rule the
+    // outline already uses.
+    float  inner = clamp(0.5 - (d + border.x), 0.0, 1.0);
+    float3 rgb   = mix(border.yzw, color.rgb, inner);
+    float  a     = mix(borderA.x, color.a, inner);
+    return float4(rgb, a * cov);
 }
 )MSL";
 
@@ -11145,8 +11160,15 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
 		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
 		[enc setVertexBytes:&rot   length:sizeof(rot)   atIndex:3];
-		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];
-		[enc setFragmentBytes:&shape length:sizeof(shape) atIndex:1];
+		// border = { widthPx, r, g, b }, its alpha alone in the next slot — five
+		// numbers, four components (see uiFragment).
+		const simd::float4 border  = { obj.borderWidth, obj.borderColor.r,
+		                               obj.borderColor.g, obj.borderColor.b };
+		const simd::float4 borderA = { obj.borderColor.a, 0.0f, 0.0f, 0.0f };
+		[enc setFragmentBytes:&color   length:sizeof(color)   atIndex:0];
+		[enc setFragmentBytes:&shape   length:sizeof(shape)   atIndex:1];
+		[enc setFragmentBytes:&border  length:sizeof(border)  atIndex:2];
+		[enc setFragmentBytes:&borderA length:sizeof(borderA) atIndex:3];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	}
 	// Hand the encoder back in the state it was given in: the scissor is

@@ -24,6 +24,15 @@ struct UIRenderObject {
     // Corner radius in pixels for solid quads (type 0); 0 = square. A value of
     // min(w,h)/2 yields a circle — used for the slider handle. Ignored by glyphs.
     float       cornerRadius = 0.0f;
+    // ── Border ("Schicht 0", docs/he-apps-plan.md D5) ────────────────────────
+    // An outline drawn INSIDE the quad, following the corner radius, in pixels.
+    // 0 = none, which is what every quad carried before borders existed.
+    //
+    // Inside rather than centred on the edge: an element's rect is what the
+    // layout gave it, and a border that grew outwards would overlap its
+    // neighbours and change with its own width.
+    float       borderWidth = 0.0f;
+    glm::vec4   borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
     // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
     // font; other keys index UIFontCache (an imported Font asset).
     uint32_t    fontAtlasKey = 0;
