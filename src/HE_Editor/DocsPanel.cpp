@@ -65,6 +65,14 @@ namespace
 	// ── State ────────────────────────────────────────────────────────────────
 	bool  s_open        = false;
 	bool  s_loadTried   = false;
+	// Pages [0, s_bundlePageCount) came from the website bundle; everything at or
+	// after it was generated in-repo. See where it is set for what the split is
+	// for. 0 means "show everything", which is also the state a test target that
+	// never installs the generated parts is in.
+	int   s_bundlePageCount = 0;
+	// Is this page one the reader offers on its own? The bundle's chapters are
+	// reachable by link but not by browsing or searching.
+	bool  ownPage(int idx) { return idx >= s_bundlePageCount; }
 	int   s_page        = 0;
 	int   s_section     = -1;
 	int   s_scrollTo    = -1;    // section to scroll to on the next draw
@@ -189,6 +197,19 @@ namespace
 		docs::Library& lib = docs::library();
 		if (!lib.load(docs::bundlePath(base ? base : "")))
 			HE_LOG_WARN(Editor, "%s", ("DocsPanel: " + lib.error()).c_str());
+		// Everything the BUNDLE brought, counted before a generated part adds a
+		// page. The three installs below only ever append — their ids
+		// ("guides-…", "editor-…", the node page) collide with nothing the
+		// website ships — so this index is the exact line between the two kinds.
+		//
+		// What it is for: the bundle's chapters explain how the ENGINE works,
+		// and this reader is meant to answer "how do I do this in the editor".
+		// They are HIDDEN rather than deleted, because a few hundred help entries
+		// carry a `topic` link into them; dropping the pages would leave every one
+		// of those dangling. Hidden, they still resolve when something links to
+		// them, they are just not browsable or searchable on their own. Set this
+		// to 0 to bring the chapters back.
+		s_bundlePageCount = static_cast<int>(lib.pages().size());
 		// The node reference is not written, it is built — from the engine's own
 		// registries, so it can neither miss a call nor list one that is gone.
 		// It takes the page id the website's hand-written version had, which is
@@ -898,7 +919,12 @@ namespace
 	void drawResults(const char* query)
 	{
 		const docs::Library& lib = docs::library();
-		const std::vector<docs::Hit> hits = lib.search(query);
+		std::vector<docs::Hit> hits = lib.search(query);
+		// Same rule the navigation follows: a chapter the reader does not offer
+		// must not turn up in its search either. Offering a hit that leads
+		// somewhere unbrowsable is the worse half of hiding it.
+		hits.erase(std::remove_if(hits.begin(), hits.end(),
+			[](const docs::Hit& h){ return !ownPage(h.page); }), hits.end());
 
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
 		if (hits.empty()) ImGui::Text("Nothing in the manual matches \"%s\".", query);
@@ -1063,6 +1089,7 @@ namespace
 			{
 				if (std::find(guideIdx.begin(), guideIdx.end(), idx) != guideIdx.end())
 					continue;   // already listed above, under its own heading
+				if (!ownPage(idx)) continue;   // a bundle chapter — see ownPage
 				ng.pages.push_back(idx);
 			}
 			if (!ng.pages.empty()) out.push_back(std::move(ng));
