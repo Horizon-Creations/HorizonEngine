@@ -827,8 +827,39 @@ bekommt sein Bedienelement damit umsonst — deshalb sind „Gradient" (Bool), �
 (Color) und „Gradient Angle" (Float) drei Eigenschaften statt eines Verlaufs-Objekts. Wo das
 nicht geht, ist die Handarbeit fällig, die der User angemahnt hat.
 
-**Als Nächstes in Schicht 0:** Schatten, dann Eckenradius pro Ecke. Danach Block G
-(`RendererSoftware`), der Schicht 0 ebenfalls tragen muss — deshalb kommt sie zuerst.
+**D5 Schicht 0, Teil 3: Eckenradius als gestaltete Eigenschaft.** Vorher buk ihn jeder Typ in
+seinen `render()` ein — der Button 6, ComboBox und ProgressBar 4, das Panel gar keinen. Jetzt
+liegt er auf der Basis, wird wie Rahmen und Verlauf gestempelt, und die Typen setzen ihren
+alten Wert im Konstruktor als Standard, damit nichts anders aussieht. Zwei Fallen dabei: der
+`render()` darf ihn **nicht mehr mitgeben** (sonst doppelt, einmal unskaliert), und der
+Schreiber legt ihn nur ab, wenn er vom Typ-Standard **abweicht** — sonst bekäme jeder je
+gespeicherte Button ein `cornerRadius: 6` für einen Wert, der ohnehin der Standard ist.
+
+**Der Button ist eine Fläche geworden (BREAKING, mit Migration).** Er zeichnet seine drei
+Zustände und sonst nichts; was auf ihm steht, sind **Kinder**, die in seinem Rechteck ankern
+wie die Kinder jedes anderen Elternteils. Das ist es, was einen Icon-Button oder eine nach
+links gerückte Beschriftung überhaupt möglich macht — eine eingebaute zentrierte Zeichenkette
+konnte immer nur ein Layout.
+
+Seine Eigenschaften sind damit **Normal/Hovered/Pressed Color**, dazu die geteilten
+Flächen-Eigenschaften (Eckenradius, Rahmen, Verlauf) und die Basis-Eigenschaften. Text,
+FontSize und Text Color sind weg.
+
+**Migration:** `uiWidgetTreeFromJson` verwandelt die alte Beschriftung in ein Text-Kind
+(zentriert, über die ganze Fläche gespannt, `hitTestable` aus, damit es den Klick nicht
+klaut). Ausgelöst wird sie vom **alten JSON-Schlüssel**, nicht von einem Feld — nach einmal
+Speichern ist der Schlüssel fort und die Migration wirkungslos, was das doppelte Anlegen
+verhindert. Ein Test fährt genau diesen Weg zweimal.
+
+**Zur Erinnerung des Users an die Property-Editoren:** für diese Runde war keine Handarbeit
+nötig, der Editor ist generisch über `UIPropDesc`. Sechs Testfälle mussten angepasst werden,
+weil sie auf der alten Button-Beschriftung standen — genau dafür ist die angepinnte
+Eigenschaftsliste da.
+
+**Als Nächstes in Schicht 0:** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
+sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier
+Zeilen, ein „vier Radien"-Feld wäre Handarbeit). Danach Block G (`RendererSoftware`), der
+Schicht 0 ebenfalls tragen muss.
 
 ---
 
