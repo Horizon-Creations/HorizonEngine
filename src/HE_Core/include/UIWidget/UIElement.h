@@ -230,6 +230,13 @@ public:
     // same property, not three that have to be kept in step.
     float     borderWidth = 0.0f;
     glm::vec4 borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
+    // A linear fade across the same surface: off, the element is its own colour
+    // throughout. The angle is clockwise from "down" — 0 fades top to bottom,
+    // 90 left to right — because a vertical fade is what a button or a header
+    // almost always wants.
+    bool      gradient = false;
+    glm::vec4 gradientColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    float     gradientAngle = 0.0f;   // degrees
 
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
@@ -358,6 +365,8 @@ protected:
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
         dst.clipChildren = clipChildren;
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;
+        dst.gradient = gradient; dst.gradientColor = gradientColor;
+        dst.gradientAngle = gradientAngle;
     }
 };
 

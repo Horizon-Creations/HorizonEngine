@@ -377,6 +377,9 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
     if (n == "Border Width") { out = UIPropValue::ofFloat(e.borderWidth);       return true; }
     if (n == "Border Color") { out = UIPropValue::ofColor(e.borderColor);       return true; }
+    if (n == "Gradient")     { out = UIPropValue::ofBool(e.gradient);           return true; }
+    if (n == "Gradient Color"){out = UIPropValue::ofColor(e.gradientColor);     return true; }
+    if (n == "Gradient Angle"){out = UIPropValue::ofFloat(e.gradientAngle);     return true; }
     return false;
 }
 
@@ -406,6 +409,9 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Font")         { e.font = v.s; return true; }
     if (n == "Border Width") { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; return true; }
     if (n == "Border Color") { e.borderColor = v.col; return true; }
+    if (n == "Gradient")     { e.gradient = v.b; return true; }
+    if (n == "Gradient Color"){ e.gradientColor = v.col; return true; }
+    if (n == "Gradient Angle"){ e.gradientAngle = v.f; return true; }
     return false;
 }
 } // namespace
@@ -431,6 +437,12 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     {
         out.push_back({ "Border Width", UIPropType::Float });
         out.push_back({ "Border Color", UIPropType::Color });
+        // Split into three plain properties rather than one gradient object:
+        // the designer's property editor is generic over UIPropType, so anything
+        // expressed in the existing kinds gets its editor for free.
+        out.push_back({ "Gradient",       UIPropType::Bool });
+        out.push_back({ "Gradient Color", UIPropType::Color });
+        out.push_back({ "Gradient Angle", UIPropType::Float, 0.0f, 360.0f });
     }
     // Asset slots only where the editor exposes them: Material behind
     // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic

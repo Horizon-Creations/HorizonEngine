@@ -4682,6 +4682,9 @@ uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
 uniform float uCornerRadius; // px; min(w,h)/2 → circle
 uniform float uBorderWidth;  // px, drawn INSIDE the quad; 0 = none
 uniform vec4  uBorderColor;
+uniform float uGradient;      // 0 = solid, 1 = linear fade to uGradientColor
+uniform vec4  uGradientColor;
+uniform float uGradientAngle; // degrees, clockwise from "down"
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 // uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
@@ -4709,8 +4712,19 @@ void main()
         FragColor = vec4(c.rgb, c.a * clamp(0.5 - dd, 0.0, 1.0));
         return;
     }
+    // The surface colour before any shape is cut out of it. Same rule as the
+    // Metal path (uiFragment): a fade along an angle clockwise from "down",
+    // projected onto the quad's own 0..1 space so it follows the box.
+    vec4 fill = uColor;
+    if (uGradient > 0.5)
+    {
+        float a = uGradientAngle * 0.017453292;
+        vec2  dir = vec2(sin(a), cos(a));
+        float t = clamp(dot(vLocal - 0.5, dir) + 0.5, 0.0, 1.0);
+        fill = mix(uColor, uGradientColor, t);
+    }
     // Square AND borderless needs no distance field at all — the crisp fast path.
-    if (uCornerRadius <= 0.0 && uBorderWidth <= 0.0) { FragColor = uColor; return; }
+    if (uCornerRadius <= 0.0 && uBorderWidth <= 0.0) { FragColor = fill; return; }
     // Solid quad with rounded corners.
     vec2 halfsz = uRect.zw * 0.5;
     float r = min(uCornerRadius, min(halfsz.x, halfsz.y));
@@ -4718,13 +4732,14 @@ void main()
     vec2 q = abs(p) - (halfsz - r);
     float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     float cov = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d in pixels)
-    if (uBorderWidth <= 0.0) { FragColor = vec4(uColor.rgb, uColor.a * cov); return; }
+    if (uBorderWidth <= 0.0) { FragColor = vec4(fill.rgb, fill.a * cov); return; }
     // The ring between the shape and itself shrunk by the border width: `d` is a
     // signed distance in pixels, so the inner edge is d + width. Mirrors the
-    // Metal path exactly (uiFragment) — one rule, two languages.
+    // Metal path exactly (uiFragment) — one rule, two languages. The gradient is
+    // the fill's, not the outline's.
     float inner = clamp(0.5 - (d + uBorderWidth), 0.0, 1.0);
-    vec3  rgb   = mix(uBorderColor.rgb, uColor.rgb, inner);
-    float a     = mix(uBorderColor.a, uColor.a, inner);
+    vec3  rgb   = mix(uBorderColor.rgb, fill.rgb, inner);
+    float a     = mix(uBorderColor.a, fill.a, inner);
     FragColor = vec4(rgb, a * cov);
 }
 )GLSL";
@@ -5755,6 +5770,9 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUICornerRadius = glGetUniformLocation(m_uiProgram, "uCornerRadius");
 		m_uUIBorderWidth  = glGetUniformLocation(m_uiProgram, "uBorderWidth");
 		m_uUIBorderColor  = glGetUniformLocation(m_uiProgram, "uBorderColor");
+		m_uUIGradient      = glGetUniformLocation(m_uiProgram, "uGradient");
+		m_uUIGradientColor = glGetUniformLocation(m_uiProgram, "uGradientColor");
+		m_uUIGradientAngle = glGetUniformLocation(m_uiProgram, "uGradientAngle");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
@@ -7476,6 +7494,10 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform1f(m_uUIBorderWidth, obj.borderWidth);
 		glUniform4f(m_uUIBorderColor, obj.borderColor.r, obj.borderColor.g,
 		            obj.borderColor.b, obj.borderColor.a);
+		glUniform1f(m_uUIGradient, obj.gradient ? 1.0f : 0.0f);
+		glUniform4f(m_uUIGradientColor, obj.gradientColor.r, obj.gradientColor.g,
+		            obj.gradientColor.b, obj.gradientColor.a);
+		glUniform1f(m_uUIGradientAngle, obj.gradientAngleDeg);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 

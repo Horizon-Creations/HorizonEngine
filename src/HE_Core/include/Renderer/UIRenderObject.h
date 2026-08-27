@@ -33,6 +33,17 @@ struct UIRenderObject {
     // neighbours and change with its own width.
     float       borderWidth = 0.0f;
     glm::vec4   borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
+    // ── Linear gradient ("Schicht 0") ────────────────────────────────────────
+    // Off = the quad is `color` throughout, which is what every quad was before.
+    // On = `color` fades to `gradientColor` along `gradientAngleDeg`, measured
+    // clockwise from "down": 0 = top to bottom, 90 = left to right.
+    //
+    // Down at zero rather than right, because a vertical fade is what almost
+    // every button and header wants, and the common case should be the one that
+    // needs no number typed into it.
+    bool        gradient = false;
+    glm::vec4   gradientColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    float       gradientAngleDeg = 0.0f;
     // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
     // font; other keys index UIFontCache (an imported Font asset).
     uint32_t    fontAtlasKey = 0;

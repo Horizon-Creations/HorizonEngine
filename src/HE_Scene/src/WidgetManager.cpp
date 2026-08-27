@@ -1369,7 +1369,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// its groove; testing the rect is what tells a background apart from
 			// a part drawn on top of one, without any widget type knowing that
 			// borders exist.
-			if (e.borderWidth > 0.0f && out.size() > firstQuad)
+			if ((e.borderWidth > 0.0f || e.gradient) && out.size() > firstQuad)
 			{
 				UIRenderObject& first = out[firstQuad];
 				const bool coversRect =
@@ -1380,10 +1380,20 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 					std::abs(first.size.y - px.h)     < 0.5f;
 				if (coversRect)
 				{
-					// In pixels like every other length here, so a scaled canvas
-					// scales the line with the box it outlines.
-					first.borderWidth = e.borderWidth * sy * evs;
-					first.borderColor = e.borderColor;
+					if (e.borderWidth > 0.0f)
+					{
+						// In pixels like every other length here, so a scaled
+						// canvas scales the line with the box it outlines.
+						first.borderWidth = e.borderWidth * sy * evs;
+						first.borderColor = e.borderColor;
+					}
+					if (e.gradient)
+					{
+						// The angle is not a length, so it does NOT scale.
+						first.gradient         = true;
+						first.gradientColor    = e.gradientColor;
+						first.gradientAngleDeg = e.gradientAngle;
+					}
 				}
 			}
 

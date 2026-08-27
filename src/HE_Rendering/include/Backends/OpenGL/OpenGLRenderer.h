@@ -720,6 +720,9 @@ private:
 	int          m_uUICornerRadius = -1; // px; min(w,h)/2 → circle (rounded rects)
 	int          m_uUIBorderWidth = -1;  // px, inside the quad; 0 = no border
 	int          m_uUIBorderColor = -1;
+	int          m_uUIGradient      = -1; // 0 = solid, 1 = linear fade
+	int          m_uUIGradientColor = -1;
+	int          m_uUIGradientAngle = -1; // degrees, clockwise from "down"
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;

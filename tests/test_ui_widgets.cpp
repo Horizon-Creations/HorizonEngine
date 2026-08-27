@@ -2685,6 +2685,42 @@ TEST_CASE("A border lands on the element's surface and nowhere else")
         if (o.type == 2) CHECK(o.borderWidth == doctest::Approx(0.0f));
 }
 
+TEST_CASE("A gradient rides on the same surface as the border")
+{
+    TempWidgetDir dir;
+    ContentManager cm{ dir.path.string() };
+    HE::UIWidgetTree authored;
+    authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+    authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+
+    const int panel = authored.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement* e = authored.find(panel);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 200.0f; e->sizeY = 100.0f;
+        e->gradient      = true;
+        e->gradientColor = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+        e->gradientAngle = 90.0f;
+    }
+    registerWidget(cm, authored);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 200.0f, out);
+
+    int gradients = 0;
+    for (const UIRenderObject& o : out)
+        if (o.gradient)
+        {
+            ++gradients;
+            CHECK(o.gradientColor.g == doctest::Approx(1.0f));
+            // The angle is not a length: a scaled canvas must not turn it.
+            CHECK(o.gradientAngleDeg == doctest::Approx(90.0f));
+        }
+    CHECK(gradients == 1);
+}
+
 TEST_CASE("A border survives a save and a load")
 {
     HE::UIWidgetTree t;
@@ -2700,12 +2736,26 @@ TEST_CASE("A border survives a save and a load")
     CHECK(e->borderColor.b == doctest::Approx(0.6f));
     CHECK(e->borderColor.a == doctest::Approx(0.8f));
 
-    // An element without one writes nothing, so a widget authored before
-    // borders existed saves byte-identically.
+    // A gradient round-trips the same way.
+    HE::UIWidgetTree g;
+    const int gid = g.add(HE::UIWidgetType::Panel);
+    g.find(gid)->gradient      = true;
+    g.find(gid)->gradientColor = glm::vec4(0.1f, 0.2f, 0.3f, 0.4f);
+    g.find(gid)->gradientAngle = 45.0f;
+    HE::UIWidgetTree gLoaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(g), gLoaded));
+    REQUIRE(gLoaded.find(gid));
+    CHECK(gLoaded.find(gid)->gradient);
+    CHECK(gLoaded.find(gid)->gradientAngle == doctest::Approx(45.0f));
+    CHECK(gLoaded.find(gid)->gradientColor.b == doctest::Approx(0.3f));
+
+    // An element without either writes nothing, so a widget authored before
+    // these existed saves byte-identically.
     HE::UIWidgetTree plainTree;
     plainTree.add(HE::UIWidgetType::Panel);
     const std::string json = HE::uiWidgetTreeToJson(plainTree);
     CHECK(json.find("borderWidth") == std::string::npos);
+    CHECK(json.find("gradient") == std::string::npos);
 }
 
 TEST_CASE("Creating a widget does not show it")

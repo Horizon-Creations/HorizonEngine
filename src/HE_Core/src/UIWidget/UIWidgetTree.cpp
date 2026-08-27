@@ -708,6 +708,13 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         o["borderColor"] = { e.borderColor.r, e.borderColor.g,
                              e.borderColor.b, e.borderColor.a };
     }
+    if (e.gradient)
+    {
+        o["gradient"]      = true;
+        o["gradientColor"] = { e.gradientColor.r, e.gradientColor.g,
+                               e.gradientColor.b, e.gradientColor.a };
+        o["gradientAngle"] = e.gradientAngle;
+    }
     e.writeJson(o); // type-specific fields
     return o;
 }
@@ -753,6 +760,12 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
         bc != o.end() && bc->is_array() && bc->size() == 4)
         e->borderColor = { (*bc)[0].get<float>(), (*bc)[1].get<float>(),
                            (*bc)[2].get<float>(), (*bc)[3].get<float>() };
+    e->gradient      = o.value("gradient", false);
+    e->gradientAngle = o.value("gradientAngle", 0.0f);
+    if (const auto gc = o.find("gradientColor");
+        gc != o.end() && gc->is_array() && gc->size() == 4)
+        e->gradientColor = { (*gc)[0].get<float>(), (*gc)[1].get<float>(),
+                             (*gc)[2].get<float>(), (*gc)[3].get<float>() };
     e->readJson(o); // type-specific fields
     return e;
 }
