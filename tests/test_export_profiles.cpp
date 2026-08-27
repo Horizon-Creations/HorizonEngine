@@ -9,6 +9,9 @@
 #include <Types/Enums.h>
 #include <Types/UUID.h>
 #include "ProjectManager.h"
+#include <UIWidget/UIWidgetTree.h>
+#include <HorizonCode/HorizonCode.h>
+#include <fstream>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -1325,5 +1328,72 @@ TEST_CASE("project.hcfg: defaultSaveTemplate round-trips as v3, empty stays v2-c
     ProjectConfig back2;
     REQUIRE(ProjectConfigLoader::load(dir, back2));
     CHECK(back2.defaultSaveTemplate.empty());
+    he_test::removeAllQuiet(dir);
+}
+
+// ─── Application template ────────────────────────────────────────────────────
+// An app project that opens with an empty preview is indistinguishable from a
+// broken one, so the template has to lay down BOTH halves: the root widget, and
+// the GameInstance that creates it. Checked together, because either alone
+// still leaves a black window.
+
+TEST_CASE("Application template ships a root widget and a GameInstance that creates it")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_appproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "AppProj", ProjectPreset::Application));
+
+    // The manifest says what it is, and has no scene to start in.
+    CHECK(pm.currentProject().appProject);
+    CHECK(pm.currentProject().startupScene.empty());
+
+    // The root widget is a real .hasset: readable, typed, and carrying a tree
+    // with something on it.
+    const auto widgetPath = dir / "Content" / "UI" / "RootWidget.hasset";
+    REQUIRE(std::filesystem::exists(widgetPath));
+    {
+        HAsset::Reader r;
+        REQUIRE(r.open(widgetPath.string()));
+        const auto* tree = r.findChunk(HAsset::CHUNK_UIWT);
+        REQUIRE(tree != nullptr);
+        HE::UIWidgetTree parsed;
+        REQUIRE(HE::uiWidgetTreeFromJson(
+            std::string(reinterpret_cast<const char*>(tree->data.data()), tree->data.size()),
+            parsed));
+        CHECK(parsed.elements.size() >= 2);   // a panel and a label on it
+    }
+
+    // …and the GameInstance is a parseable graph whose OnInit reaches a Create
+    // Widget pointing at exactly that path. A graph with the two nodes but no
+    // link between them would draw nothing, so the LINK is the assertion.
+    const auto gi = dir / "GameInstance.hcode";
+    REQUIRE(std::filesystem::exists(gi));
+    {
+        std::ifstream f(gi);
+        const std::string text((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+        HorizonCode::Graph g;
+        REQUIRE(HorizonCode::fromJson(text, g));
+
+        int evId = 0, createId = 0;
+        for (const auto& n : g.nodes)
+        {
+            if (n.type == HorizonCode::NodeType::Event && n.s == "OnInit") evId = n.id;
+            if (n.type == HorizonCode::NodeType::CreateWidget)
+            {
+                createId = n.id;
+                CHECK(n.s == "UI/RootWidget.hasset");
+            }
+        }
+        REQUIRE(evId != 0);
+        REQUIRE(createId != 0);
+        bool linked = false;
+        for (const auto& l : g.links)
+            if (l.srcNode == evId && l.dstNode == createId) linked = true;
+        CHECK(linked);
+    }
+
     he_test::removeAllQuiet(dir);
 }
