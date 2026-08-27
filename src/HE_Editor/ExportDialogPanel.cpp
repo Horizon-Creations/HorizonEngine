@@ -687,11 +687,7 @@ void render(AppContext& ctx)
             // WRITTEN (config.json carries defaults either way) — they are just
             // not asked about, and app mode pins them to a sane window.
             if (exportingApp)
-            {
                 s_exportWindowMode = "Windowed";
-                ImGui::TextDisabled("Opens as a %d x %d window. The user takes it from there.",
-                                    s_exportWindowWidth, s_exportWindowHeight);
-            }
             else
             {
                 ImGui::Text("Game Window:");
@@ -718,31 +714,48 @@ void render(AppContext& ctx)
                 EditorWidgets::checkbox("VSync", &s_exportGameVSync);
             }
 
-            ImGui::Text("Graphics Backend:");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(140.0f);
-            if (ImGui::BeginCombo("##gameBackend",
-                                  s_exportBackend.empty() ? "(platform default)"
-                                                          : s_exportBackend.c_str()))
+            // An application does not pick a backend: it takes the platform's
+            // (Metal on macOS, OpenGL elsewhere — docs/he-apps-plan.md A0), and
+            // with Advanced Shader Effects off the choice would be between two
+            // renderers that draw the same rectangles.
+            if (!exportingApp)
             {
-                if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
-                    s_exportBackend.clear();
-                for (const char* name : exportBackendChoices(s_exportPlatform))
-                    if (ImGui::Selectable(name, s_exportBackend == name))
-                        s_exportBackend = name;
-                ImGui::EndCombo();
+                ImGui::Text("Graphics Backend:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(140.0f);
+                if (ImGui::BeginCombo("##gameBackend",
+                                      s_exportBackend.empty() ? "(platform default)"
+                                                              : s_exportBackend.c_str()))
+                {
+                    if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
+                        s_exportBackend.clear();
+                    for (const char* name : exportBackendChoices(s_exportPlatform))
+                        if (ImGui::Selectable(name, s_exportBackend == name))
+                            s_exportBackend = name;
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
+                                    "the target runtime lacks falls back to its default.");
             }
-            ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
-                                "the target runtime lacks falls back to its default.");
+            else
+                s_exportBackend.clear();   // the platform default, always
 
             ImGui::Spacing();
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
             EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
-            EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
-            if (s_exportModSupport)
-                ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+            // Mods are a game's idea: a .hpak dropped next to the executable that
+            // replaces content. An application is not modded from outside, and a
+            // switch nobody should touch is worse than no switch.
+            if (!exportingApp)
+            {
+                EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
+                if (s_exportModSupport)
+                    ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+            }
+            else
+                s_exportModSupport = false;
             // The "(?)" marker and its tooltip are gone from the next three: the
             // sentence is the help entry now, the whole checkbox is the hover
             // target instead of a two-character mark beside it, and F1 opens it.
@@ -757,6 +770,15 @@ void render(AppContext& ctx)
                 (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
             if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
             EditorWidgets::checkbox("Compile HorizonCode",   &s_exportCompileHC);
+            // Kept in application projects, but said out loud that it is not the
+            // default answer there: an app's graphs run on events — a click, a
+            // typed character — where a few dozen interpreted nodes cost nothing
+            // anyone can measure. It earns its keep on per-frame work (a Tick that
+            // does real arithmetic, a list of thousands of rows), and it costs a
+            // toolchain at export plus a shipped library.
+            if (exportingApp && !s_exportCompileHC)
+                ImGui::TextDisabled("Not needed for most apps: interface logic runs on events, "
+                                    "where the interpreter is fast enough.");
             // What an untranslatable graph means. The default keeps compiling an
             // optimization; the other makes "everything is native" a build
             // guarantee — which is also what lets calls between compiled classes
@@ -803,6 +825,16 @@ void render(AppContext& ctx)
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
 
             // ── Precompiled material shaders ──────────────────────────────────
+            // Nothing to precompile without materials, and a project with Advanced
+            // Shader Effects off has none by construction — the editor never let it
+            // make one (docs/he-apps-plan.md E1b). An app WITH them keeps the
+            // choice: it has graphs, and shipping them precompiled is the same win
+            // there as anywhere.
+            const bool offerShaderPrecompile =
+                !exportingApp ||
+                (ctx.projectManager && ctx.projectManager->currentProject().advancedShaderEffects);
+            if (offerShaderPrecompile)
+            {
             ImGui::Spacing();
             ImGui::Text("Precompiled Material Shaders:");
             ImGui::SameLine();
@@ -835,6 +867,9 @@ void render(AppContext& ctx)
                     else           col = 0;
                 }
             }
+            }
+            else
+                s_exportShaderBackends = 0;   // nothing to cook
 
             if (running) ImGui::EndDisabled();
 
