@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>                // the host services a Ctx carries (see g_host)
 #include <unordered_set>
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -50,6 +51,51 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The host half of every HE::api::Ctx this file builds ─────────────────────
+// Everything a Ctx carries that belongs to the APPLICATION rather than to the
+// current scene: it is filled once in OnInit and outlives every world, physics
+// world and script context. The scene-scoped handles (world, physics, content)
+// stay per-call, because a scene switch replaces them.
+//
+// It exists so that exactly ONE place builds a Ctx here. Assembling one per call
+// site is how the half-filled Ctx got everywhere: leave out `audio` and eleven
+// audio rows silently return their neutral default, with nothing to see in the
+// log. Fill this, and every row works from every call site by construction.
+struct HostCtxParts
+{
+	AudioEngine*          audio    = nullptr;
+	HorizonCode::Runtime* runtime  = nullptr;
+	EntityHost*           entities = nullptr;
+	// "Create/destroy an object of this class" as the host means it — the very
+	// lambdas the HorizonCode services get, so a spawn from Lua, from Python and
+	// from a Create Object node are the same operation and not three.
+	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
+	std::function<void(uint32_t)> destroyObject;
+	std::function<void()>         quit;
+};
+// One application per process; cleared in OnShutdown so nothing here outlives
+// the object its lambdas capture.
+HostCtxParts g_host;
+
+// The only Ctx factory in this file. `self` is the calling HorizonCode instance
+// (0 for everything that is not a graph — the scene-request pump, Lua, Python).
+HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* content,
+                    uint32_t self = 0)
+{
+	HE::api::Ctx c;
+	c.world         = world;
+	c.physics       = physics;
+	c.content       = content;
+	c.audio         = g_host.audio;
+	c.runtime       = g_host.runtime;
+	c.self          = self;
+	c.entities      = g_host.entities;
+	c.createObject  = g_host.createObject;
+	c.destroyObject = g_host.destroyObject;
+	c.requestQuit   = g_host.quit;
+	return c;
+}
+
 // What this platform ran on before the config could name a backend, and what an
 // unusable choice falls back to.
 constexpr HE::RendererBackend kDefaultBackend =
@@ -405,7 +451,16 @@ void GameApplication::OnInit()
 		svc.showWidget    = [this](int id){ m_widgets.showWidget(id); };
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
-		svc.createObject  = [this](const std::string& p, const float* pos,
+		// The app-level half of every Ctx, published once, here: this is where the
+		// object services are written, and a second copy of them somewhere else is
+		// how the two paths drift apart.
+		g_host.audio    = &m_audioEngine;
+		g_host.runtime  = &m_gameInstance.runtime();
+		g_host.entities = &m_entityHost;
+		// The shipped game IS the application, so app.quit leaves the loop for
+		// real (the editor binds the same hook to stopping play mode instead).
+		g_host.quit     = [this]{ Quit(); };
+		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one — before the compiled shortcut below, because it needs that
@@ -461,7 +516,7 @@ void GameApplication::OnInit()
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};
-		svc.destroyObject = [this](uint32_t ref){
+		g_host.destroyObject = [this](uint32_t ref){
 			auto& rt = m_gameInstance.runtime();
 			if (ref == 0 || ref == rt.gameInstance()) return;
 			// An Entity class owns a body; destroying the object takes it too, or
@@ -482,6 +537,11 @@ void GameApplication::OnInit()
 				m_world->destroyEntity(static_cast<Entity>(owned));
 			}
 		};
+		// HorizonCode reaches the two through its services; the registry rows that
+		// Lua and Python call reach the SAME lambdas through the Ctx apiCtx()
+		// builds. Copies of one std::function, not a second implementation.
+		svc.createObject  = g_host.createObject;
+		svc.destroyObject = g_host.destroyObject;
 		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
 		// world, physics and content — all resolved at CALL time, which is what
 		// lets this be bound before OnInit has built any of them, and what makes a
@@ -498,14 +558,11 @@ void GameApplication::OnInit()
 				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
 				return {};
 			}
-			// The caller travels along — see the editor's twin. So does what
-			// "quit" means here: the shipped game IS the application, so app.quit
-			// leaves the loop for real (the editor binds the same hook to
-			// stopping play mode instead). A main menu's Exit button has nothing
-			// else to call.
-			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine,
-			                &m_gameInstance.runtime(), self, &m_entityHost,
-			                [this]{ Quit(); } };
+			// The caller travels along — see the editor's twin — and so does the
+			// whole app-level half of the Ctx (audio, runtime, entity host, the
+			// object services, quit): apiCtx() is the one place that fills it.
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(),
+			                        &contentManager(), self);
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -818,7 +875,7 @@ void GameApplication::executeSceneRequests()
 			if (info.root == 0 && !created.empty()) info.root = (uint32_t)created.front();
 			HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
 
-			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine };
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
 			// Placement: move the zone's root to the requested position (zero =
 			// as authored; the merge root is a fresh identity entity).
 			if (r.pos != glm::vec3(0.0f))
@@ -856,7 +913,7 @@ void GameApplication::executeSceneRequests()
 		case Kind::ZoneVisible: // show/hide a zone (queued so it orders after a load)
 		{
 			if (!m_world) break;
-			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine };
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
 			HE::api::scene::setZoneVisible(c, r.zone, r.flag);
 			break;
 		}
@@ -869,7 +926,7 @@ void GameApplication::executeSceneRequests()
 			// the root AND rebuilds every zone entity that already has physics,
 			// at the place it now stands. With a null here that rebuild is
 			// skipped and the zone would keep colliding where it was authored.
-			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine };
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
 			HE::api::scene::setZonePosition(c, r.zone, r.pos);
 			break;
 		}
@@ -953,6 +1010,21 @@ void GameApplication::startScripts()
 	// shipped game IS the application, so horizon.app.quit leaves the loop for
 	// real. Bound BEFORE the scripts start — an onStart may already call it.
 	m_scriptContext->setQuitHandler([this]{ Quit(); });
+	// What a text script cannot reach on its own. Lua and Python build their own
+	// HE::api::Ctx from world/physics/content alone, so without this the rows
+	// behind audio.*, the runtime and the entity host answer with their neutral
+	// default and say nothing — and entity.spawnClass would be dead in exactly
+	// the two languages it was added for. Bound BEFORE the scripts start, like
+	// the quit hook: an onStart may already spawn.
+	{
+		ScriptContext::HostServices hs;
+		hs.audio         = &m_audioEngine;
+		hs.entities      = &m_entityHost;
+		hs.runtime       = &m_gameInstance.runtime();
+		hs.createObject  = g_host.createObject;   // the same lambdas HorizonCode uses
+		hs.destroyObject = g_host.destroyObject;
+		m_scriptContext->setHostServices(std::move(hs));
+	}
 
 	const int started = m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 	if (started > 0)
@@ -1563,6 +1635,14 @@ void GameApplication::OnShutdown()
 	m_widgets.clear();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).
+	// The host services go FIRST, and while the context that published them still
+	// exists: the copy ScriptContext hands to the Python backend is process-wide
+	// and outlives this object, and every lambda in it captures `this`. AFTER
+	// fireShutdown above, though — a GameInstance's OnShutdown graph still runs,
+	// and it would be the one place where Create Object worked and
+	// entity.spawnClass did not.
+	if (m_scriptContext) m_scriptContext->setHostServices({});
+	g_host = {};
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
 

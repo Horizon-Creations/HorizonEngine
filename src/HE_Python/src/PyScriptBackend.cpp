@@ -41,6 +41,40 @@ HorizonWorld*   g_world   = nullptr;
 PhysicsWorld*   g_physics = nullptr;
 ContentManager* g_content = nullptr;
 
+// THE one place in this backend that builds a Ctx. Every Python call goes
+// through it, because the alternative is what this file used to do: each call
+// site assembled its own from the three file-statics above, and everything else
+// — audio, the entity host, the HorizonCode runtime — silently stayed null. The
+// HE::api rows reading those then returned their neutral default, so
+// horizon.audio.* was a no-op in every Python script ever written. One builder
+// means the next row added to HE::api works from Python on the day it lands.
+//
+// The services are NOT file-statics here: this plugin has no channel through
+// which the host could hand it any (IScriptBackend carries the world/physics/
+// content pointers, nothing else). They are read from the engine module
+// instead, which is the same set the Lua side gets — see ScriptContext.
+HE::api::Ctx apiCtx()
+{
+	const ScriptContext::HostServices& hs = ScriptContext::hostServices();
+	// Assigned member by member rather than built as an aggregate: Ctx grows,
+	// and a positional list silently mis-assigns when a field is inserted.
+	HE::api::Ctx c{};
+	c.world    = g_world;
+	c.physics  = g_physics;
+	c.content  = g_content;
+	c.audio    = hs.audio;
+	c.entities = hs.entities;
+	c.runtime  = hs.runtime;
+	// `self` stays 0, and that is the answer, not an omission: a Python script
+	// is not a HorizonCode instance, so there is no object id to name. The rows
+	// that ask (entity.self, entity.selfObject) correctly report "no object".
+	c.self          = 0;
+	c.createObject  = hs.createObject;
+	c.destroyObject = hs.destroyObject;
+	c.requestQuit   = ScriptContext::hostQuitHandler();
+	return c;
+}
+
 // ── horizon.* native functions (thin shims over ScriptApi) ──────────────────
 PyObject* py_log(PyObject*, PyObject* args)
 {
@@ -72,12 +106,12 @@ PyObject* py_setVec(PyObject* args, void (*fn)(HorizonWorld&, uint32_t, const gl
 // physics step overwrote the transform in the same frame, so horizon.setPosition
 // and horizon.setRotation were silent no-ops on exactly the entities a script
 // moves most — a Python respawn never arrived. Same signature to the script; the
-// Ctx is built exactly as _engineCall builds it.
+// Ctx comes from the shared builder, so it is the one _engineCall uses.
 PyObject* py_setVecApi(PyObject* args, void (*fn)(HE::api::Ctx&, uint32_t, const glm::vec3&))
 {
 	long id; float x, y, z;
 	if (!PyArg_ParseTuple(args, "lfff", &id, &x, &y, &z)) return nullptr;
-	HE::api::Ctx c{ g_world, g_physics, g_content };
+	HE::api::Ctx c = apiCtx();
 	fn(c, (uint32_t)id, {x, y, z});
 	Py_RETURN_NONE;
 }
@@ -670,12 +704,7 @@ PyObject* py_engineCall(PyObject*, PyObject* args)
 	const HE::api::ApiFn* fn = id ? HE::api::find(id) : nullptr;
 	if (!fn) { PyErr_Format(PyExc_KeyError, "unknown engine function '%s'", id ? id : "?"); return nullptr; }
 
-	HE::api::Ctx c{ g_world, g_physics, g_content };
-	// The quit hook is NOT a file-static here: this plugin has no channel through
-	// which the host could hand it one (IScriptBackend carries the world/physics/
-	// content pointers, nothing else). It is read from the engine module instead,
-	// which is the same handler the Lua side gets — see ScriptContext.
-	c.requestQuit = ScriptContext::hostQuitHandler();
+	HE::api::Ctx c = apiCtx();
 	std::vector<HorizonCode::Value> in; in.reserve(fn->params.size());
 	Py_ssize_t idx = 1;                                   // arg 0 is the id
 	for (const auto& p : fn->params) in.push_back(pyReadValue(args, idx, p.type));

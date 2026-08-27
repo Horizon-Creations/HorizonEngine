@@ -202,6 +202,97 @@ namespace entity {
 std::string getName(Ctx& c, Entity e)                          { return c.world ? ScriptApi::getName(*c.world, e) : std::string(); }
 Entity      spawn(Ctx& c, Entity parent, const std::string& n) { return c.world ? ScriptApi::spawn(*c.world, parent, n) : 0u; }
 void        destroy(Ctx& c, Entity e)                          { if (c.world) ScriptApi::destroy(*c.world, e); }
+
+// ── Spawning a class (the furnished entity) ──────────────────────────────────
+namespace {
+// The shared body of the two spawnClass rows. Split from them because the two
+// differ only in what they hand the host as a rotation, and because the cppCall
+// invariant wants one distinct C++ callee per registry row — not one function
+// with an argument that tells the rows apart.
+Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
+                      const float* position, const float* rotationEuler)
+{
+    // Every failure below is LOUD. A script author who gets a 0 back reads it as
+    // "spawning is broken"; the log is the only place that can say which of the
+    // four quite different reasons it was.
+    if (!c.createObject)
+    {
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no Create Object service bound by the host — '" +
+            classPath + "' not spawned").c_str());
+        return 0u;
+    }
+    const uint32_t ref = c.createObject(classPath, position, rotationEuler);
+    if (ref == 0u)
+    {
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": class '" + classPath +
+            "' could not be created (unknown or unreadable class asset)").c_str());
+        return 0u;
+    }
+    if (!c.runtime)
+    {
+        // The object exists; nothing here can say which entity it landed on,
+        // because the entity is recorded on the runtime (EntityHost::bind →
+        // setOwnedEntity). Left alive rather than destroyed — it may well be
+        // ticking correctly, and throwing away a working spawn to tidy up a
+        // half-built Ctx would be the worse of the two failures.
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no HorizonCode runtime in the Ctx, so the "
+            "entity of '" + classPath + "' cannot be looked up — the object was created and is "
+            "still running").c_str());
+        return 0u;
+    }
+    const Entity e = c.runtime->ownedEntity(ref);
+    if (e == 0u)
+    {
+        // Created, but bodiless: the class is not an Entity class. The caller
+        // asked for an entity and there is none, and the reference that could
+        // still reach the object is not what this function returns — so leaving
+        // it alive would strand an instance nothing can name, tick after tick.
+        // Undo it, the way EntityHost::spawn undoes its entity when the logic
+        // fails to bind.
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": '" + classPath + "' is not an Entity class, "
+            "so it has no entity — use the Create Object node for plain objects").c_str());
+        if (c.destroyObject) c.destroyObject(ref);
+        return 0u;
+    }
+    return e;
+}
+} // namespace
+
+Entity spawnClass(Ctx& c, const std::string& classPath, float x, float y, float z)
+{
+    // The position is always stated (a call has no unwired pin to leave empty),
+    // the rotation is not: nullptr means "as the class authored it", which a
+    // zeroed triple would silently overwrite.
+    const float pos[3] = { x, y, z };
+    return spawnClassImpl("entity.spawnClass", c, classPath, pos, nullptr);
+}
+
+Entity spawnClassRotated(Ctx& c, const std::string& classPath,
+                         float x, float y, float z, float rx, float ry, float rz)
+{
+    const float pos[3] = { x, y, z };
+    const float rot[3] = { rx, ry, rz };   // Euler degrees
+    return spawnClassImpl("entity.spawnClassRotated", c, classPath, pos, rot);
+}
+
+void destroyObject(Ctx& c, uint32_t objectRef)
+{
+    if (!c.destroyObject)
+    {
+        HE_LOG_ERROR(Script, "%s", "entity.destroyObject: no Destroy Object service bound by the host — ignored");
+        return;
+    }
+    if (objectRef == 0u)
+    {
+        // Not the host's business: both applications drop a 0 ref silently, so
+        // without this the mistake (an unset variable, a spawn that failed and
+        // was never checked) leaves no trace at all.
+        HE_LOG_WARN(Script, "%s", "entity.destroyObject: empty object reference — nothing to destroy");
+        return;
+    }
+    c.destroyObject(objectRef);
+}
+
 float       distance(Ctx& c, Entity a, Entity b)
 {
     if (!c.world) return -1.0f;
@@ -1938,6 +2029,29 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawn(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
         t.push_back({ "entity.destroy", "Entity", true, {{"entity", P::Int}}, {}, "HE::api::entity::destroy",
             [](Ctx& c, const VV& a){ entity::destroy(c, (Entity)aI(a, 0)); return VV{}; } });
+        // Spawning a CLASS — components, placement, physics and logic, through
+        // the host's Create Object service. Until these rows existed, the only
+        // door to it was the built-in Create Object node, so Lua, Python and
+        // generated C++ could create nothing but a bare entity. Three loose
+        // floats rather than one Vec3 pin: the same call has to read naturally
+        // as spawn(path, x, y, z) in a text script, where a packed value would
+        // arrive spread over several arguments anyway.
+        t.push_back({ "entity.spawnClass", "Entity", true,
+            {{"class", P::String}, {"x", P::Float}, {"y", P::Float}, {"z", P::Float}},
+            {{"entity", P::Int}}, "HE::api::entity::spawnClass",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawnClass(
+                c, aS(a, 0), aF(a, 1), aF(a, 2), aF(a, 3))) }; } });
+        t.push_back({ "entity.spawnClassRotated", "Entity", true,
+            {{"class", P::String}, {"x", P::Float}, {"y", P::Float}, {"z", P::Float},
+             {"rx", P::Float}, {"ry", P::Float}, {"rz", P::Float}},
+            {{"entity", P::Int}}, "HE::api::entity::spawnClassRotated",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawnClassRotated(
+                c, aS(a, 0), aF(a, 1), aF(a, 2), aF(a, 3), aF(a, 4), aF(a, 5), aF(a, 6))) }; } });
+        // The counterpart, by object reference. A Ref pin, like entity.owned's —
+        // an object reference read as an Int comes through as 0.
+        t.push_back({ "entity.destroyObject", "Entity", true, {{"object", P::Ref}}, {},
+            "HE::api::entity::destroyObject",
+            [](Ctx& c, const VV& a){ entity::destroyObject(c, aR(a, 0)); return VV{}; } });
         // Pure: which entity an Entity-class object sits on. `self` takes no
         // argument because the caller's identity travels in the Ctx.
         t.push_back({ "entity.self", "Entity", false, {}, {{"entity", P::Int}}, "HE::api::entity::self",
@@ -2482,6 +2596,13 @@ const std::vector<ApiFn>& registry()
             { "log", "Log" },
             { "entity.getName", "Get Name" },       { "entity.spawn", "Spawn Entity" },
             { "entity.destroy", "Destroy Entity" }, { "entity.distance", "Distance Between" },
+            { "entity.spawnClass", "Spawn Class" },
+            { "entity.spawnClassRotated", "Spawn Class Rotated" },
+            // NOT plain "Destroy Object": that name already belongs to the
+            // built-in node (HcGraphHost's Reference section), and both feed the
+            // same add-menu. The "(Ref)" suffix is that menu's own spelling for
+            // "takes an object reference" — Call Function (Ref), Get (Ref).
+            { "entity.destroyObject", "Destroy Object (Ref)" },
             { "entity.self", "Get Owning Entity" }, { "entity.owned", "Get Entity Of" },
             { "entity.instance", "Get Object On Entity" },
             { "entity.selfObject", "Get Owning Object" },

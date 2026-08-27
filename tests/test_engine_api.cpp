@@ -1469,6 +1469,131 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     CHECK(envRows == 2 * (39 + 6 + 4 + 9));   // float + bool + int + colour fields
 }
 
+// ═══ Spawning a class: the host service contract ══════════════════════════════
+// entity.spawnClass is the row that made "spawn something furnished" reachable
+// from Lua, Python and generated C++ at all — before it, ScriptApi::spawn's bare
+// entity was the only door. What it can NOT do is reach EntityHost itself: the
+// hosts wrap that call in a service that resolves the class's engine base and
+// registers a PlayerCharacter with the PlayerHost, and a row going round that
+// would hand back the half-built object those steps exist to prevent. So the
+// contract tested here is the one with the HOST — that the row asks the service,
+// asks it the right thing, and survives every way the service can say no. The
+// furnished entity itself is driven end to end in test_entity_host.cpp.
+
+TEST_CASE("Spawn class: an unbound host service is a logged 0, never a crash")
+{
+    // The state a Ctx is in wherever no session is running: the editor outside
+    // play mode, a tool, this test. Every field null is an ORDINARY state in this
+    // API (see the tolerance note in EngineApi.h), so the answer has to be a 0
+    // and a log line — calling straight through the empty std::function would
+    // throw std::bad_function_call out of a script call instead.
+    Ctx none{};
+    CHECK(HE::api::entity::spawnClass(none, "Classes/Bullet.hasset", 1.0f, 2.0f, 3.0f) == 0u);
+    CHECK(HE::api::entity::spawnClassRotated(none, "Classes/Bullet.hasset",
+                                             1.0f, 2.0f, 3.0f, 0.0f, 90.0f, 0.0f) == 0u);
+    CHECK_NOTHROW(HE::api::entity::destroyObject(none, 7u));
+    CHECK_NOTHROW(HE::api::entity::destroyObject(none, 0u));
+
+    // …and through the registry dispatch, which is the path a script takes.
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(none, a); };
+    CHECK(call("entity.spawnClass", { Value::ofString("Classes/Bullet.hasset"),
+                                      Value::ofFloat(1.0f), Value::ofFloat(2.0f),
+                                      Value::ofFloat(3.0f) })[0].i == 0);
+    CHECK_NOTHROW(call("entity.destroyObject", { Value::ofRef(5u) }));
+}
+
+TEST_CASE("Spawn class: the position is always stated, the rotation only when asked")
+{
+    // The distinction the two rows exist for. "Leave the rotation the class
+    // authored" and "face zero degrees" are different requests, and the only
+    // thing carrying that difference to the host is a null pointer — a defaulted
+    // 0,0,0 would silently re-aim every spawn that never asked for a facing.
+    // Recorded here at the boundary, because by the time EntityHost has applied
+    // it the two are indistinguishable.
+    struct Seen { std::string path; bool hadPos = false, hadRot = false;
+                  float pos[3]{}, rot[3]{}; int calls = 0; } seen;
+
+    Ctx c{};
+    c.createObject = [&](const std::string& p, const float* pos, const float* rot) -> uint32_t
+    {
+        ++seen.calls;
+        seen.path   = p;
+        seen.hadPos = pos != nullptr;
+        seen.hadRot = rot != nullptr;
+        if (pos) { seen.pos[0] = pos[0]; seen.pos[1] = pos[1]; seen.pos[2] = pos[2]; }
+        if (rot) { seen.rot[0] = rot[0]; seen.rot[1] = rot[1]; seen.rot[2] = rot[2]; }
+        return 0u;   // "unknown class" — the lookup is not what this test is about
+    };
+
+    HE::api::entity::spawnClass(c, "Classes/Crate.hasset", 4.0f, 5.0f, 6.0f);
+    CHECK(seen.calls == 1);
+    CHECK(seen.path == "Classes/Crate.hasset");
+    CHECK(seen.hadPos);
+    CHECK(seen.pos[0] == doctest::Approx(4.0f));
+    CHECK(seen.pos[1] == doctest::Approx(5.0f));
+    CHECK(seen.pos[2] == doctest::Approx(6.0f));
+    CHECK_FALSE(seen.hadRot);            // as authored, NOT (0,0,0)
+
+    HE::api::entity::spawnClassRotated(c, "Classes/Crate.hasset",
+                                       4.0f, 5.0f, 6.0f, 0.0f, 0.0f, 0.0f);
+    CHECK(seen.calls == 2);
+    CHECK(seen.hadRot);                  // zero degrees, stated on purpose
+    CHECK(seen.rot[1] == doctest::Approx(0.0f));
+
+    HE::api::entity::spawnClassRotated(c, "Classes/Crate.hasset",
+                                       0.0f, 0.0f, 0.0f, 10.0f, 90.0f, -20.0f);
+    CHECK(seen.rot[0] == doctest::Approx(10.0f));
+    CHECK(seen.rot[1] == doctest::Approx(90.0f));
+    CHECK(seen.rot[2] == doctest::Approx(-20.0f));
+}
+
+TEST_CASE("Spawn class: a class with no entity is undone, not left running")
+{
+    // A class that is not an Entity class HAS no entity, so the caller gets 0 —
+    // but the object was created, and this row returns entities, so nothing the
+    // caller holds could ever name it again. An instance nobody can name still
+    // ticks, still answers a Cast and never ends. It is therefore destroyed
+    // again, the way EntityHost::spawn undoes its entity when the binding fails.
+    HorizonCode::Runtime rt;   // empty: ownedEntity() of anything is 0
+
+    uint32_t destroyed = 0;
+    int      destroyCalls = 0;
+    Ctx c{};
+    c.runtime       = &rt;
+    c.createObject  = [](const std::string&, const float*, const float*) -> uint32_t { return 4242u; };
+    c.destroyObject = [&](uint32_t ref){ destroyed = ref; ++destroyCalls; };
+
+    CHECK(HE::api::entity::spawnClass(c, "Classes/GameRules.hasset", 0.0f, 0.0f, 0.0f) == 0u);
+    CHECK(destroyCalls == 1);
+    CHECK(destroyed == 4242u);           // the SAME object, cleaned up
+
+    // The other half of the pair: a ref the caller does hold goes through
+    // untouched, and an empty one is refused before it reaches the host (both
+    // applications drop a 0 silently, so this row is the only place it is seen).
+    destroyed = 0; destroyCalls = 0;
+    HE::api::entity::destroyObject(c, 77u);
+    CHECK(destroyCalls == 1);
+    CHECK(destroyed == 77u);
+    HE::api::entity::destroyObject(c, 0u);
+    CHECK(destroyCalls == 1);            // unchanged: nothing was forwarded
+}
+
+TEST_CASE("Spawn class: without a runtime the entity cannot be named, and the object stays")
+{
+    // The half-built Ctx, which is what this whole change is about. The object
+    // is created and may well be ticking correctly; what is missing is the only
+    // record of which entity it landed on. Throwing away a working spawn to tidy
+    // that up would be the worse of the two failures, so it is left alive and
+    // the caller is told 0 — loudly, in the log.
+    int destroyCalls = 0;
+    Ctx c{};                              // no runtime
+    c.createObject  = [](const std::string&, const float*, const float*) -> uint32_t { return 9u; };
+    c.destroyObject = [&](uint32_t){ ++destroyCalls; };
+
+    CHECK(HE::api::entity::spawnClass(c, "Classes/Bullet.hasset", 1.0f, 0.0f, 0.0f) == 0u);
+    CHECK(destroyCalls == 0);
+}
+
 TEST_CASE("Entity query: findByName + exists through the registry")
 {
     HorizonWorld world;

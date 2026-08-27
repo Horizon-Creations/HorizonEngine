@@ -64,6 +64,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <functional>               // the host services a Ctx carries (see g_host)
 #include <filesystem>
 #include <string>
 #include <array>
@@ -151,6 +152,56 @@ struct D3D12DescriptorHeapAllocator
 // leaked `fs` into every consumer of that header. Must stay outside the
 // backend #ifdefs — the non-Metal builds use it too.
 namespace fs = std::filesystem;
+
+namespace
+{
+// ── The host half of every HE::api::Ctx this file builds ─────────────────────
+// The editor's twin of the block in GameApplication.cpp, and deliberately the
+// same shape: what a Ctx carries that belongs to the APPLICATION rather than to
+// the current scene or play session. Filled once in OnInit; the scene-scoped
+// handles (world, physics, content) stay per-call, because entering and leaving
+// play mode replaces the physics world.
+//
+// One place builds a Ctx here, which is the whole point: a call site that
+// assembles its own leaves fields out, and a left-out field is not an error but
+// a silent neutral return — eleven audio rows behaved that way for as long as
+// nobody filled `audio`.
+struct HostCtxParts
+{
+	AudioEngine*          audio    = nullptr;
+	HorizonCode::Runtime* runtime  = nullptr;
+	EntityHost*           entities = nullptr;
+	// "Create/destroy an object of this class" as this host means it — the very
+	// lambdas the HorizonCode services get, so a spawn from a Create Object
+	// node, from Lua and from Python is one operation and not three.
+	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
+	std::function<void(uint32_t)> destroyObject;
+	std::function<void()>         quit;
+};
+// One editor per process; cleared in OnShutdown so nothing here outlives the
+// object its lambdas capture.
+HostCtxParts g_host;
+
+// The only Ctx factory in this file. `self` is the calling HorizonCode instance
+// (0 for everything that is not a graph — the PIE scene-request pump, Lua,
+// Python).
+HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* content,
+                    uint32_t self = 0)
+{
+	HE::api::Ctx c;
+	c.world         = world;
+	c.physics       = physics;
+	c.content       = content;
+	c.audio         = g_host.audio;
+	c.runtime       = g_host.runtime;
+	c.self          = self;
+	c.entities      = g_host.entities;
+	c.createObject  = g_host.createObject;
+	c.destroyObject = g_host.destroyObject;
+	c.requestQuit   = g_host.quit;
+	return c;
+}
+} // namespace
 
 std::string getRHIName(HE::RendererBackend backend)
 {
@@ -1207,7 +1258,19 @@ void EditorApplication::OnInit()
 		svc.showWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
 		svc.hideWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
 		svc.destroyWidget = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
-		svc.createObject  = [this](const std::string& p, const float* pos,
+		// The app-level half of every Ctx, published once, here — the same wiring
+		// the packaged game does in GameApplication::OnInit, because a preview
+		// that spawns differently from the build is not a preview. The three
+		// pointers outlive a play session (they are members of this object); what
+		// they point AT knows whether a session is running.
+		g_host.audio    = &m_audioEngine;
+		g_host.runtime  = &m_gameInstance.runtime();
+		g_host.entities = &m_entityHost;
+		// In the editor "quit" is not closing the editor: a game played in a
+		// viewport is a preview, so its Exit button ends the preview. Parked
+		// rather than run — see m_playStopRequested.
+		g_host.quit     = [this]{ m_playStopRequested = true; };
+		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
@@ -1252,7 +1315,7 @@ void EditorApplication::OnInit()
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};
-		svc.destroyObject = [this](uint32_t ref){
+		g_host.destroyObject = [this](uint32_t ref){
 			auto& rt = m_gameInstance.runtime();
 			if (ref == 0 || ref == rt.gameInstance()) return;
 			// An Entity class owns a body, and destroying the object has to take
@@ -1277,6 +1340,11 @@ void EditorApplication::OnInit()
 				m_editorWorld->destroyEntity(static_cast<Entity>(owned));
 			}
 		};
+		// HorizonCode reaches the two through its services; the registry rows Lua
+		// and Python call reach the SAME lambdas through the Ctx apiCtx() builds.
+		// Copies of one std::function, not a second implementation.
+		svc.createObject  = g_host.createObject;
+		svc.destroyObject = g_host.destroyObject;
 		// EngineCall nodes dispatch through the HE::api registry against the editor
 		// world, physics and content — resolved at CALL time, so PIE entering and
 		// leaving play (which creates and destroys the physics world) needs no
@@ -1306,14 +1374,11 @@ void EditorApplication::OnInit()
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
-			//
-			// So does what "quit" means here, and in the editor it is NOT closing
-			// the editor: a game being played in a viewport is a preview, and its
-			// main menu's Exit button must end the preview, not the tool. Parked
-			// rather than run — see m_playStopRequested.
-			HE::api::Ctx c{ m_editorWorld.get(), m_physicsWorld.get(), &contentManager(),
-			                &m_audioEngine, &m_gameInstance.runtime(), self, &m_entityHost,
-			                [this]{ m_playStopRequested = true; } };
+			// So does the rest of the app-level half (audio, runtime, entity
+			// host, the object services and what "quit" means in this host):
+			// apiCtx() is the one place that fills it.
+			HE::api::Ctx c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(),
+			                        &contentManager(), self);
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -1879,8 +1944,8 @@ void EditorApplication::OnRender(float dt)
 			// setZonePosition is one) must find the running simulation, not a
 			// null that turns it into a silent no-op. Null outside play mode is
 			// the honest answer — nothing is simulating then.
-			HE::api::Ctx c{ m_editorWorld.get(), m_physicsWorld.get(), &contentManager(),
-			                &m_audioEngine };
+			HE::api::Ctx c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(),
+			                        &contentManager());
 			if (r.kindOf() == Kind::Additive && m_editorWorld) // additive zone
 			{
 				const std::filesystem::path projRoot =
@@ -5993,6 +6058,23 @@ void EditorApplication::setPlayMode(bool play)
 		// running script and setPlayMode tears that script's context down.
 		// Bound BEFORE the scripts start: an onStart may already call it.
 		m_scriptContext->setQuitHandler([this]{ m_playStopRequested = true; });
+		// What a text script cannot reach on its own, the same set the packaged
+		// game binds in GameApplication::startScripts. Without it a Lua or Python
+		// call lands in HE::api with audio, runtime and entity host null, which
+		// is not an error there but a neutral no-op — audio.* would be silent and
+		// entity.spawnClass dead in exactly the two languages it exists for.
+		// The entity host is handed over BEFORE begin() below, which is safe: it
+		// is a member of this object, and it is the host itself that knows
+		// whether a session is running.
+		{
+			ScriptContext::HostServices hs;
+			hs.audio         = &m_audioEngine;
+			hs.entities      = &m_entityHost;
+			hs.runtime       = &m_gameInstance.runtime();
+			hs.createObject  = g_host.createObject;  // the same lambdas HorizonCode uses
+			hs.destroyObject = g_host.destroyObject;
+			m_scriptContext->setHostServices(std::move(hs));
+		}
 
 		// Player controller classes + input events, mirroring the packaged game:
 		// spawn after the level is up (Construct + BeginPlay), pump Tick/Input.*
@@ -6119,7 +6201,22 @@ void EditorApplication::setPlayMode(bool play)
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
 
-		// Tear down scripts
+		// Tear down scripts. The host services are withdrawn FIRST, and while the
+		// context that published them is still alive — the setter is a member,
+		// and the copy ScriptContext publishes for the CPython plugin is
+		// process-wide and outlives every play session. This is the sharp edge of
+		// PIE: the editor keeps running after the preview ends, so a service left
+		// standing here would still answer. entity.spawnClass would then create
+		// objects in EDIT mode — the entity host is no longer running, so the
+		// spawn falls through to the bodiless branch and leaks an instance into
+		// the runtime with nothing to tick it. Withdrawn, the same call returns 0,
+		// which is the honest answer: there is no session to spawn into.
+		//
+		// g_host stays as it is: its pointers are members of this object, its
+		// lambdas resolve the world and the physics world at CALL time, and the
+		// HorizonCode services (Runtime::Services) hold their own copies anyway —
+		// clearing it here would break Create Object for the next play session.
+		if (m_scriptContext) m_scriptContext->setHostServices({});
 		m_scriptContext.reset();
 		m_scriptInstances.clear();
 		m_uiInputState = {};
@@ -6509,6 +6606,16 @@ void EditorApplication::OnShutdown()
 	// Same rule, same reason, same moment: after the joins, so a worker's last
 	// words still land, and before the ImGui teardown below.
 	ConsolePanel::detachFromEngineLog();
+
+	// The host half of every Ctx, withdrawn while this object is still alive.
+	// Every lambda in it captures `this`, and the copy ScriptContext publishes
+	// for the CPython plugin is process-wide, so both would outlive the editor.
+	// Quitting DURING play is the case that makes this necessary: this function
+	// never leaves play mode, so the play-stop withdrawal above does not run and
+	// m_scriptContext is still holding a published set. Ahead of the ImGui block
+	// below, which returns early in a headless build.
+	if (m_scriptContext) m_scriptContext->setHostServices({});
+	g_host = {};
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;

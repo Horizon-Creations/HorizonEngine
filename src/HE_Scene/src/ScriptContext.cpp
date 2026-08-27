@@ -68,6 +68,41 @@ static const std::function<void()>* getQuit(lua_State* L)
     return q;
 }
 
+// THE one place in this backend that builds a Ctx. Every Lua call goes through
+// it, because the alternative is what this file used to do: each call site
+// assembled its own, and each one filled in the three handles the Lua registry
+// happens to hold. Everything else — audio, the entity host, the HorizonCode
+// runtime — silently stayed null, so those HE::api rows returned their neutral
+// default and horizon.audio.* was a no-op in every Lua script ever written. One
+// builder means the next row added to HE::api works from Lua on the day it
+// lands, instead of the day someone notices.
+static HE::api::Ctx apiCtx(lua_State* L)
+{
+    const ScriptContext::HostServices& hs = ScriptContext::hostServices();
+    // Assigned member by member rather than built as an aggregate: Ctx grows,
+    // and a positional list silently mis-assigns when a field is inserted.
+    HE::api::Ctx c{};
+    c.world    = getWorld(L);
+    c.physics  = getPhysics(L);
+    c.content  = getContent(L);
+    c.audio    = hs.audio;
+    c.entities = hs.entities;
+    c.runtime  = hs.runtime;
+    // `self` stays 0, and that is the answer, not an omission: a Lua script is
+    // not a HorizonCode instance, so there is no object id to name. The rows
+    // that ask (entity.self, entity.selfObject) correctly report "no object".
+    c.self          = 0;
+    c.createObject  = hs.createObject;
+    c.destroyObject = hs.destroyObject;
+    // What "quit" means, as the host bound it — horizon.app.quit is a logged
+    // no-op without it, so a Lua-only project could not close its own game. Read
+    // from the registry rather than from HostServices: the quit hook predates
+    // that holder and points AT the owning context's member, so a later
+    // setQuitHandler is visible without re-registering anything.
+    if (const std::function<void()>* quit = getQuit(L)) c.requestQuit = *quit;
+    return c;
+}
+
 // ─── Lua C functions ─────────────────────────────────────────────────────────
 // Thin marshalling shims: all behavior lives in the language-neutral ScriptApi
 // (shared 1:1 with the Python backend).
@@ -102,7 +137,7 @@ static int lua_horizon_getPosition(lua_State* L)
 static int lua_horizon_setPosition(lua_State* L)
 {
     const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
-    HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
+    HE::api::Ctx c = apiCtx(L);
     HE::api::transform::setPosition(c, id,
         { static_cast<float>(luaL_checknumber(L, 2)),
           static_cast<float>(luaL_checknumber(L, 3)),
@@ -121,7 +156,7 @@ static int lua_horizon_getRotation(lua_State* L)
 static int lua_horizon_setRotation(lua_State* L)
 {
     const auto id = static_cast<uint32_t>(luaL_checkinteger(L, 1));
-    HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
+    HE::api::Ctx c = apiCtx(L);
     HE::api::transform::setRotation(c, id,
         { static_cast<float>(luaL_checknumber(L, 2)),
           static_cast<float>(luaL_checknumber(L, 3)),
@@ -781,10 +816,7 @@ static int lua_engine_dispatch(lua_State* L)
 {
     const auto* fn = static_cast<const HE::api::ApiFn*>(lua_touserdata(L, lua_upvalueindex(1)));
     if (!fn) return 0;
-    HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
-    // What "quit" means, as the host bound it — horizon.app.quit is a logged
-    // no-op without it, so a Lua-only project could not close its own game.
-    if (const std::function<void()>* quit = getQuit(L)) c.requestQuit = *quit;
+    HE::api::Ctx c = apiCtx(L);
     std::vector<HorizonCode::Value> args; args.reserve(fn->params.size());
     int idx = 1;
     for (const auto& p : fn->params) args.push_back(luaReadValue(L, idx, p.type));
@@ -1169,6 +1201,19 @@ static const ScriptContext* s_quitPublisher = nullptr;
 
 const std::function<void()>& ScriptContext::hostQuitHandler() { return s_hostQuitHandler; }
 
+// The active context's host services, published for the same reason and in the
+// same shape as the quit handler above: the reader is in ANOTHER module — the
+// CPython plugin, which has no ScriptContext to ask — and the Lua side reads it
+// here too, so both languages get one source instead of one of them going
+// without. Everything in it is a raw pointer into the HOST, which is why the
+// publisher is tracked and withdrawn (see the destructor): these outlive a
+// context only until its session ends, and a pointer to a destroyed EntityHost
+// is worse than a null one.
+static ScriptContext::HostServices s_hostServices;
+static const ScriptContext*        s_servicesPublisher = nullptr;
+
+const ScriptContext::HostServices& ScriptContext::hostServices() { return s_hostServices; }
+
 ScriptContext::~ScriptContext()
 {
     if (s_quitPublisher == this)
@@ -1176,6 +1221,24 @@ ScriptContext::~ScriptContext()
         s_hostQuitHandler = nullptr;
         s_quitPublisher   = nullptr;
     }
+    // Same withdrawal, same reason: a context that dies clears only its OWN
+    // publication and never a newer context's. This is what keeps a scene switch
+    // or a play stop from leaving audio/entity-host/runtime pointers aimed at
+    // freed hosts. It also runs BEFORE m_py is destroyed (destructor body, then
+    // members), so a Python finalizer firing during that teardown builds a Ctx
+    // with those services already null — the same protection ~PyScriptBackend
+    // gives itself by nulling g_physics.
+    if (s_servicesPublisher == this)
+    {
+        s_hostServices      = {};
+        s_servicesPublisher = nullptr;
+    }
+}
+
+void ScriptContext::setHostServices(HostServices s)
+{
+    s_hostServices      = std::move(s);
+    s_servicesPublisher = this;
 }
 
 void ScriptContext::setQuitHandler(std::function<void()> fn)

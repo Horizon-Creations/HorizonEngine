@@ -76,6 +76,36 @@ struct Ctx
     // an ordinary state, like every null handle above — app::quit then says so
     // and does nothing.
     std::function<void()> requestQuit;
+    // How the host makes an OBJECT of a HorizonCode class — the same service the
+    // built-in Create Object / Destroy Object nodes go through
+    // (HorizonCode::Runtime::Services), so the text languages reach exactly what
+    // a graph reaches. A callback rather than a handle for requestQuit's reason
+    // (HE_Scene has no Application to ask) and, more importantly, because the
+    // host does MORE than EntityHost::spawn: it resolves the class's engine base
+    // (a class deriving from an Entity class is one), sends only Entity classes
+    // through EntityHost, and registers a PlayerCharacter with the PlayerHost —
+    // the only point at which the PlayerHost can learn a character exists, and
+    // without it a project with no controller loses its input. Reaching past
+    // this callback into EntityHost would skip all three.
+    //
+    // position/rotationEuler are 3 floats each, or nullptr for "place it as the
+    // class authored it". A zero vector is NOT the same thing — that distinction
+    // is what keeps every graph with an unwired Location pin spawning where it
+    // always did (see HorizonCode::Context::createObject). Rotation is Euler
+    // DEGREES.
+    //
+    // Unset is an ordinary state, like requestQuit above: entity::spawnClass
+    // then logs and returns 0.
+    //
+    // New members still go at the END: the two applications build their Ctx by
+    // positional aggregate init. The script frontends no longer do — they assign
+    // member by member through one apiCtx() builder each, which is what stopped
+    // them shipping a Ctx with half its fields defaulted (eleven audio rows and
+    // every runtime row were silently dead from Lua and Python because five call
+    // sites each filled in the first three members and left the rest).
+    std::function<uint32_t(const std::string& classPath, const float* position,
+                           const float* rotationEuler)> createObject;
+    std::function<void(uint32_t objectId)> destroyObject;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -89,6 +119,64 @@ namespace entity {
     float       distance(Ctx&, Entity a, Entity b);                   // -1 if either invalid
     Entity      findByName(Ctx&, const std::string& name);            // first match, 0 if none
     bool        exists(Ctx&, Entity e);
+    // ── Spawning a CLASS: the furnished entity ───────────────────────────────
+    // spawn() above makes a BARE entity — a name and a transform, nothing else.
+    // These make what a game actually spawns: a projectile that arrives with
+    // its mesh, its collider, its rigid body and its logic already running,
+    // because an author furnished the class in the editor. They instantiate a
+    // HorizonCode class through the host's Create Object service
+    // (Ctx::createObject — see there for why it is not EntityHost directly).
+    // Components, placement, physics and the logic binding all happen BEFORE
+    // the class's Construct and BeginPlay run; EntityHost::spawn documents why
+    // that order is not negotiable.
+    //
+    // They return the ENTITY, because that is what every other row here takes:
+    // a spawn can be moved, pushed and read in the next statement. The way back
+    // to the HorizonCode OBJECT — for Call Function, Bind Event or a Cast — is
+    // entity.instance.
+    //
+    // SPACE: x/y/z is where the entity ends up, full stop. Both hosts spawn a
+    // class UNPARENTED, so the pose written into its transform is a world pose
+    // and there is no parent for "local" to be relative to. (The rule the rest
+    // of this API obeys — a position paired with an ENTITY is local unless the
+    // name says World — is about entities that already sit somewhere in a
+    // hierarchy. A spawn does not yet.) Rotation is Euler DEGREES.
+    // spawnClass leaves the rotation the class authored, spawnClassRotated
+    // states both — which is also why there are two functions rather than one
+    // with optional arguments: "as authored" and "zero degrees" are different
+    // requests, and a defaulted 0,0,0 could not tell them apart.
+    //
+    // 0 = nothing spawned, and every way of getting there is logged: no host
+    // service bound, an unknown class, or a class that is not an Entity class
+    // (a plain Object has no entity to hand back — Create Object is the node
+    // for those, and one created that way here is destroyed again rather than
+    // left alive with nothing able to name it).
+    Entity spawnClass(Ctx&, const std::string& classPath, float x, float y, float z);
+    Entity spawnClassRotated(Ctx&, const std::string& classPath,
+                             float x, float y, float z,
+                             float rx, float ry, float rz);
+    // Destroy a spawned OBJECT by its reference: the class instance, the entity
+    // under it and that entity's physics bodies (the host's destroyObject owns
+    // that teardown — see EditorApplication/GameApplication). The built-in
+    // Destroy Object node calls the same service; this row is how Lua, Python
+    // and generated C++ reach it.
+    //
+    // entity.destroy is the other half of the pair and NOT a synonym: it takes
+    // an entity and removes it, after which EntityHost reaps the orphaned
+    // instance on its next tick. Destroying the object is the direct route when
+    // a reference is what you are holding.
+    void destroyObject(Ctx&, uint32_t objectRef);
+    // Deliberately NOT here: a general entity.addComponent. It reads like the
+    // obvious companion to spawn(), and the game-readiness audit asks for it, so
+    // this says why it is absent rather than overlooked. It needs two things
+    // this API has no place for yet: a component TYPE registry (name → emplace,
+    // for every component type the engine has), and a per-type way to hand over
+    // parameters — a mesh component needs its asset, a rigid body its mass and
+    // motion type, a light its colour and range. That is a project of its own,
+    // with the component reflection the editor's Details panel already wants.
+    // Meanwhile the case it would serve ("spawn a projectile that has a mesh
+    // and a body") is what spawnClass covers, from a class an author furnished
+    // once instead of a call site assembling it piece by piece every time.
     // ── which entity a HorizonCode object sits on ────────────────────────────
     // An Entity-class instance is BOUND to a scene entity by EntityHost; these
     // are how a graph gets from itself (or from another object reference) to

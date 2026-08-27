@@ -628,3 +628,171 @@ TEST_CASE("EntityHost::spawn gives the whole spawned subtree its physics, at the
 	// Nothing was left behind at the coordinates the prefab was authored around.
 	CHECK_FALSE(phys.raycast({ 0.0f, 60.0f, 0.0f }, down, 200.0f).hit);
 }
+
+// ── entity.spawnClass: the same spawn, reached from a text script ────────────
+// Everything above drives EntityHost::spawn directly, which is what the Create
+// Object node reaches. Lua, Python and generated C++ had no route to it at all:
+// their entity.spawn is ScriptApi::spawn, a bare entity with a name and a
+// transform and nothing else — no mesh, no collider, no body, no logic. These
+// go through HE::api::entity::spawnClass, the row that closed that gap, with
+// the host service wired exactly as both applications wire it.
+
+TEST_CASE("entity.spawnClass hands a script the furnished entity, not a bare one")
+{
+	TempDir dir("he_test_api_spawnclass");
+	ContentManager cm(dir.path.string());
+
+	// A projectile as an author would furnish it: a transform, a collider to hit
+	// something with, a body to be hit. Authored around a non-zero origin so a
+	// spawn that ignored the placement and left it where it was authored is
+	// visible rather than accidentally right.
+	std::vector<uint8_t> blob;
+	{
+		HorizonWorld scratch;
+		const Entity root = scratch.createEntity("Bullet");
+		TransformComponent t;
+		t.position = { 7.0f, 7.0f, 7.0f };
+		t.rotation = { 0.0f, 45.0f, 0.0f };     // the AUTHORED facing
+		t.scale    = { 1.0f, 1.0f, 1.0f };
+		scratch.addComponent(root, t);
+		ColliderComponent col; col.radius = 2.5f;
+		scratch.addComponent(root, col);
+		RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+		scratch.addComponent(root, rb);
+
+		SceneSerializer ser;
+		blob = ser.serializeSubtree(scratch, root);
+	}
+	REQUIRE_FALSE(blob.empty());
+
+	// A graph that writes down where it stands the moment BeginPlay fires. That
+	// is the assertion that cannot be made from outside: reading the transform
+	// after the spawn returns proves only that the entity ended up there, and
+	// the whole point of placing before the lifecycle is that the class's FIRST
+	// line of logic already sees it. A projectile whose BeginPlay ray-casts
+	// forward from the origin of the level is the bug this rules out.
+	Graph g;
+	{
+		Variable v; v.name = "spawnPos"; v.type = PinType::Vec3;
+		g.variables.push_back(v);
+
+		Node ev; ev.type = NodeType::Event; ev.s = "BeginPlay";
+		const int e = g.addNode(std::move(ev));
+
+		auto engineCall = [&g](const char* id)
+		{
+			const HE::api::ApiFn* fn = HE::api::find(id);
+			REQUIRE(fn != nullptr);
+			Node n; n.type = NodeType::EngineCall; n.s = fn->id; n.hasArg = fn->isExec;
+			for (const auto& p : fn->params)  n.params.push_back({ p.name, p.type, p.isArray });
+			for (const auto& r : fn->results) n.results.push_back({ r.name, r.type, r.isArray });
+			return g.addNode(std::move(n));
+		};
+		const int self = engineCall("entity.self");         // pure: pin 0 is its result
+		const int pos  = engineCall("transform.getPosition"); // pure: in 0, out 1
+
+		Node set; set.type = NodeType::SetVariable; set.s = "spawnPos"; set.propType = PinType::Vec3;
+		const int s = g.addNode(std::move(set));
+
+		REQUIRE(g.connect(self, 0, pos, 0));
+		REQUIRE(g.connect(e,    0, s,   0));   // BeginPlay exec → SetVariable exec
+		REQUIRE(g.connect(pos,  1, s,   2));   // position → SetVariable's data in
+	}
+	const std::string cls = writeClass(cm, "Bullet", "Entity", g, blob);
+
+	HorizonWorld world;
+	Runtime      rt;
+	EntityHost   host;
+	PhysicsWorld phys;
+	phys.initialize(world);          // empty world: only the spawn can add bodies
+	host.setPhysicsWorld(&phys);
+
+	// The engine-call service, as both applications bind it — without it the
+	// BeginPlay graph above reaches nothing and the placement claim is untested.
+	// Set together with the object services below: one Services, one setServices.
+	Runtime::Services svc;
+	svc.callApi = [&](InstanceId self, const std::string& id,
+	                  const std::vector<HorizonCode::Value>& args) -> std::vector<HorizonCode::Value>
+	{
+		const HE::api::ApiFn* fn = HE::api::find(id);
+		if (!fn) return {};
+		HE::api::Ctx c;
+		c.world = &world; c.physics = &phys; c.content = &cm; c.runtime = &rt;
+		c.self = self; c.entities = &host;
+		return fn->invoke(c, args);
+	};
+	svc.createObject = [&](const std::string& p, const float* pos, const float* rot) -> uint32_t
+	{ return host.spawn(p, entt::null, pos, rot).instance; };
+	svc.destroyObject = [&](uint32_t ref)
+	{
+		const uint32_t owned = rt.ownedEntity(ref);
+		rt.destroy(ref);
+		if (owned != 0) world.destroyEntity(static_cast<Entity>(owned));
+	};
+	rt.setServices(svc);
+	host.begin(rt, world, cm);
+
+	// The Ctx a script call arrives in, assembled member by member — the same
+	// two services the runtime got, so a Create Object node and this row are one
+	// operation rather than two implementations that can drift.
+	HE::api::Ctx c;
+	c.world = &world; c.physics = &phys; c.content = &cm; c.runtime = &rt; c.entities = &host;
+	c.createObject  = svc.createObject;
+	c.destroyObject = svc.destroyObject;
+
+	const HE::api::Entity spawned = HE::api::entity::spawnClass(c, cls, 50.0f, 12.0f, -25.0f);
+	REQUIRE(spawned != 0u);
+	const Entity ent = static_cast<Entity>(spawned);
+	REQUIRE(world.registry().valid(ent));
+
+	auto& reg = world.registry();
+	// FURNISHED — the sentence B3 is about. entity.spawn would give all three of
+	// these the other answer: a transform, and nothing else on the entity at all.
+	REQUIRE(reg.all_of<TransformComponent>(ent));
+	REQUIRE(reg.all_of<ColliderComponent>(ent));
+	CHECK(reg.get<ColliderComponent>(ent).radius == doctest::Approx(2.5f));
+	REQUIRE(reg.all_of<RigidBodyComponent>(ent));
+	// …and RUNNING: the class's graph is bound to it, so it is a bullet and not
+	// a bullet-shaped prop.
+	const InstanceId inst = host.instanceOf(ent);
+	REQUIRE(inst != 0);
+	CHECK(rt.ownedEntity(inst) == static_cast<uint32_t>(ent));
+
+	// PLACED, and placed BEFORE the lifecycle ran — the variable was written by
+	// BeginPlay, which had already finished by the time spawnClass returned.
+	CHECK(reg.get<TransformComponent>(ent).position.x == doctest::Approx(50.0f));
+	CHECK(reg.get<TransformComponent>(ent).position.y == doctest::Approx(12.0f));
+	CHECK(reg.get<TransformComponent>(ent).position.z == doctest::Approx(-25.0f));
+	const HorizonCode::Value seen = rt.getVariable(inst, "spawnPos");
+	CHECK(seen.v3.x == doctest::Approx(50.0f));
+	CHECK(seen.v3.y == doctest::Approx(12.0f));
+	CHECK(seen.v3.z == doctest::Approx(-25.0f));
+
+	// PHYSICAL. The link to the runtime-composition work: a projectile with no
+	// body passes through everything it was fired at. Checked rather than
+	// required, so a spawn that lost its placement still reports both claims.
+	CHECK(phys.hasPhysics(static_cast<uint32_t>(ent)));
+	const auto hit = phys.raycast({ 50.0f, 60.0f, -25.0f }, { 0.0f, -1.0f, 0.0f }, 200.0f);
+	CHECK(hit.hit);
+	CHECK(hit.entityId == static_cast<uint32_t>(ent));
+	// Nothing was left standing where the class was authored.
+	CHECK_FALSE(phys.raycast({ 7.0f, 60.0f, 7.0f }, { 0.0f, -1.0f, 0.0f }, 200.0f).hit);
+
+	// The rotation the class authored is still there: spawnClass states a
+	// position and deliberately says nothing about facing.
+	CHECK(reg.get<TransformComponent>(ent).rotation.y == doctest::Approx(45.0f));
+
+	// spawnClassRotated is the other request, and it is a different one — a
+	// defaulted 0,0,0 could not tell "as authored" from "face north".
+	const HE::api::Entity aimed =
+		HE::api::entity::spawnClassRotated(c, cls, 0.0f, 30.0f, 0.0f, 0.0f, 90.0f, 0.0f);
+	REQUIRE(aimed != 0u);
+	CHECK(reg.get<TransformComponent>(static_cast<Entity>(aimed)).rotation.y == doctest::Approx(90.0f));
+
+	// And the counterpart: destroying the OBJECT takes its entity with it.
+	const InstanceId aimedInst = host.instanceOf(static_cast<Entity>(aimed));
+	REQUIRE(aimedInst != 0);
+	HE::api::entity::destroyObject(c, static_cast<uint32_t>(aimedInst));
+	CHECK_FALSE(reg.valid(static_cast<Entity>(aimed)));
+	CHECK_FALSE(rt.alive(aimedInst));
+}

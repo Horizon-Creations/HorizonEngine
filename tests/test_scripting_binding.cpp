@@ -9,6 +9,14 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+// The host services a text script cannot reach on its own: what they are
+// pointers TO, and what a spawn from Lua has to arrive carrying.
+#include <HorizonScene/AudioEngine.h>
+#include <HorizonScene/EntityHost.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonCode/HorizonCode.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 #include <filesystem>   // the save-backed container round trips need a sandbox root
 #include <system_error>
 
@@ -654,5 +662,113 @@ TEST_CASE("ScriptContext: a Lua map table with no __keys still crosses determini
     save::close();
     save::setDefaultTemplate("");
     reg.removeType(kBag);
+    std::filesystem::remove_all(root, ec);
+}
+
+// ═══ The host half of the Lua Ctx ═════════════════════════════════════════════
+// A Lua call lands in HE::api through a Ctx, and this backend used to build that
+// Ctx out of the only three handles it holds itself — world, physics, content.
+// Every row reading Ctx::audio, ::entities or ::runtime therefore got a nullptr
+// and returned its neutral default: eleven audio rows were dead in Lua and in
+// Python, and nobody noticed, because a no-op and a silent sound are the same
+// thing to look at. The tests below are the ones that would have noticed.
+
+TEST_CASE("ScriptContext: an audio call from Lua reaches the host's engine")
+{
+    // audio.setBusVolume is the audio row that can be checked without a sound
+    // card: it creates the bus if it is missing and sets its volume, and the
+    // engine answers getBusVolume from its own table. Headless mode (init(true))
+    // is required, not incidental — the row early-outs on !isInitialized(), so a
+    // default-constructed engine would answer 1.0 whether the Ctx carried it or
+    // not, and the test would prove nothing.
+    HorizonWorld world;
+    AudioEngine  audio;
+    REQUIRE(audio.init(/*noDevice=*/true));
+    CHECK(audio.getBusVolume("SFX") == doctest::Approx(1.0f));   // nothing there yet
+
+    {
+        ScriptContext ctx(world);
+        ScriptContext::HostServices hs;
+        hs.audio = &audio;
+        ctx.setHostServices(std::move(hs));
+
+        REQUIRE(ctx.engine().exec("horizon.audio.setBusVolume('SFX', 0.25)\n"
+                                  "horizon.audio.stopAll()\n"));
+        // BEFORE THE CHANGE: the Lua dispatcher's Ctx had audio == nullptr, the
+        // row returned without touching anything, and this was still 1.0.
+        CHECK(audio.hasBus("SFX"));
+        CHECK(audio.getBusVolume("SFX") == doctest::Approx(0.25f));
+    }
+    // The publication is process-wide (the CPython plugin reads it across a
+    // module boundary), so the context withdraws it on the way out — otherwise
+    // the next session, or the editor after play stops, would hold a pointer
+    // into a destroyed host.
+    CHECK(ScriptContext::hostServices().audio == nullptr);
+    audio.shutdown();
+}
+
+TEST_CASE("ScriptContext: horizon.entity.spawnClass spawns a furnished entity (Lua)")
+{
+    // B3 itself, from the language it was missing in. horizon.entity.spawn is
+    // ScriptApi::spawn — a name and a transform, nothing else. This is the row
+    // that gives a Lua script what the Create Object node always had.
+    const auto root = std::filesystem::temp_directory_path() / "he_lua_spawnclass";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root);
+    ContentManager cm(root.string());
+
+    // A class an author furnished with a collider — the one component whose
+    // presence separates "a bullet" from "an empty entity called Bullet".
+    std::vector<uint8_t> blob;
+    {
+        HorizonWorld scratch;
+        const Entity e = scratch.createEntity("Bullet");
+        TransformComponent t; t.scale = { 1.0f, 1.0f, 1.0f };
+        scratch.addComponent(e, t);
+        ColliderComponent col; col.radius = 3.5f;
+        scratch.addComponent(e, col);
+        SceneSerializer ser;
+        blob = ser.serializeSubtree(scratch, e);
+    }
+    REQUIRE_FALSE(blob.empty());
+
+    HorizonCodeClassAsset a;
+    a.type          = HE::AssetType::HorizonCodeClass;
+    a.name          = "Bullet";
+    a.path          = "Bullet.hasset";
+    a.baseClass     = "Entity";
+    a.graphJson     = HorizonCode::toJson(HorizonCode::Graph{});
+    a.componentBlob = blob;
+    REQUIRE(cm.saveAsset(a));
+
+    HorizonWorld         world;
+    HorizonCode::Runtime rt;
+    EntityHost           host;
+    host.begin(rt, world, cm);
+
+    ScriptContext ctx(world);
+    ScriptContext::HostServices hs;
+    hs.entities = &host;
+    hs.runtime  = &rt;      // without it spawnClass cannot name the entity it made
+    // The host service, in the shape both applications publish it.
+    hs.createObject = [&](const std::string& p, const float* pos, const float* rot) -> uint32_t
+    { return host.spawn(p, entt::null, pos, rot).instance; };
+    ctx.setHostServices(std::move(hs));
+
+    REQUIRE(ctx.engine().exec("_G._e = horizon.entity.spawnClass('Bullet.hasset', 5, 0, -8)\n"));
+    const auto spawned = static_cast<uint32_t>(ctx.engine().getGlobalNumber("_e"));
+    // BEFORE THE CHANGE: no such row existed, and once it did the Lua Ctx had no
+    // createObject in it, so this was 0.
+    REQUIRE(spawned != 0u);
+    const Entity ent = static_cast<Entity>(spawned);
+    REQUIRE(world.registry().valid(ent));
+    REQUIRE(world.registry().all_of<ColliderComponent>(ent));
+    CHECK(world.registry().get<ColliderComponent>(ent).radius == doctest::Approx(3.5f));
+    CHECK(world.registry().get<TransformComponent>(ent).position.x == doctest::Approx(5.0f));
+    CHECK(world.registry().get<TransformComponent>(ent).position.z == doctest::Approx(-8.0f));
+    CHECK(host.instanceOf(ent) != 0);   // …and its logic is bound and running
+
+    host.end();
     std::filesystem::remove_all(root, ec);
 }

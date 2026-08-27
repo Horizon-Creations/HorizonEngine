@@ -14,6 +14,30 @@ bewusst nur dort, wo ein Fund seither präziser oder schlimmer geworden ist.
 
 ---
 
+## Umsetzungsstand
+
+| Blocker | Stand |
+|---|---|
+| B1 Physikwelt nach dem Szenenstart eingefroren | **erledigt** (`eb32fe27`), `addEntity`/`removeEntity`/`setPosition`, dazu ein Reap in `step()` und `purgeEntity` im Kontakt-Listener |
+| B2 keine Kollisionsgeometrie ausser Box, Kugel, Kapsel | **erledigt** (`eb32fe27`), Mesh, Convex Hull und Height Field; die Landschaft trägt jetzt Kollision |
+| B3 zur Laufzeit nur eine leere Entity erzeugbar | **erledigt**, `entity.spawnClass` über den bestehenden Create-Object-Dienst, erreichbar aus allen vier Frontends |
+| B4 Navigation aus keiner Sprache steuerbar | offen |
+| B5 gepacktes Spiel entdeckt keine PlayerController-Klasse | offen |
+| B6 kein Partikel-Burst | offen |
+
+Bei B1 und B2 hat sich eine Regel herausgeschält, die über die beiden Blocker hinaus gilt und
+dreimal hintereinander übersehen wurde: **`PhysicsWorld` tauscht ausschliesslich Weltposen aus, die
+Skript-Transform-API arbeitet lokal, und umgerechnet wird in `EngineApi`.** Wer eine Pose zwischen
+den beiden bewegt, muss die Richtung nennen.
+
+B3 hat einen zweiten Befund freigelegt, der grösser war als der Blocker selbst: die
+Textsprachen-Frontends bauten ihren `Ctx` an fünf Stellen selbst und liessen dabei `audio`,
+`entities` und `runtime` weg. Elf Audio-Zeilen und jede Runtime-Zeile waren aus Lua und Python
+stumm, ohne dass es je aufgefallen wäre, weil ein neutraler Rückgabewert wie ein Ergebnis aussieht.
+Seither baut genau eine Stelle pro Frontend den `Ctx`.
+
+---
+
 ## 1. Wo die Engine steht
 
 Die Autorenseite und die Weltseite sind reif, die Laufzeitseite ist es nicht. Ein Autor kann heute

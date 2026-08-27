@@ -39,8 +39,26 @@ namespace
 	  "does not exist." },
 	{ "entity.spawn",
 	  "Creates an empty entity at run time and returns it. It has a transform and "
-	  "nothing else — add what it needs with the other calls, or spawn a class "
-	  "with Create Object instead, which comes furnished." },
+	  "nothing else — add what it needs with the other calls, or use Spawn Class, "
+	  "which brings the mesh, the collider, the body and the logic an author gave "
+	  "the class." },
+	{ "entity.spawnClass",
+	  "Creates an instance of a HorizonCode class at this position and returns its "
+	  "entity. Unlike Spawn Entity it arrives furnished: the components the class "
+	  "carries, its physics body and its graph are all in place before Construct "
+	  "and Begin Play run, so its first frame already knows where it stands. "
+	  "Rotation stays as the class authored it. Returns 0 and logs why if the "
+	  "class is unknown or is not an Entity class." },
+	{ "entity.spawnClassRotated",
+	  "Spawn Class with the rotation stated as well, in Euler degrees. The two are "
+	  "separate calls because \"leave the rotation the class authored\" and \"face "
+	  "zero degrees\" are different requests, and a defaulted 0,0,0 could not tell "
+	  "them apart." },
+	{ "entity.destroyObject",
+	  "Destroys a spawned object by its reference: the class instance, the entity "
+	  "under it and that entity's physics bodies. The counterpart to Spawn Class — "
+	  "reach the reference with Get Object On Entity. Destroy Entity is the other "
+	  "half of the pair and takes an entity instead." },
 	{ "entity.destroy",
 	  "Removes the entity and everything parented under it. Any id still held "
 	  "elsewhere becomes invalid; check with Exists before using one you kept." },

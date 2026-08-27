@@ -14,6 +14,7 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/AudioEngine.h>   // a host service the plugin can only read across the module boundary
 #include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -414,6 +415,53 @@ TEST_CASE("ScriptContext: registry-driven horizon.random.* (Python)")
     CHECK(t.position.x == doctest::Approx(1.0f));   // chance(1.0)
     CHECK(t.position.y == doctest::Approx(2.0f));   // range(2, 2)
     CHECK(t.position.z == doctest::Approx(7.0f));   // rangeInt(7, 7)
+}
+
+// Behavior that turns a mixer bus down. Nothing about it is observable from
+// inside Python — the point is entirely on the C++ side of the boundary.
+static const char* kPyAudio = R"py(
+import horizon
+
+class BusUser(horizon.Behavior):
+    def on_start(self):
+        horizon.audio.setBusVolume("SFX", 0.25)
+)py";
+
+TEST_CASE("PyScriptBackend: an audio call from Python reaches the host's engine")
+{
+    // The audio rows read Ctx::audio, and this plugin's Ctx used to be built out
+    // of the three file-statics the backend is handed (world, physics, content) —
+    // so every one of them was a no-op in Python, silently. It now reads the
+    // host's services from the engine module, which is what makes this test
+    // worth more than its Lua twin: ScriptContext::hostServices() is resolved
+    // ACROSS THE MODULE BOUNDARY, out of a dylib loaded at run time, exactly as
+    // hostQuitHandler() already was. A missing export would not fail the build.
+    //
+    // Headless mode is required, not incidental: setBusVolume early-outs on
+    // !isInitialized(), so an uninitialised engine answers 1.0 either way.
+    HorizonWorld world;
+    AudioEngine  audio;
+    REQUIRE(audio.init(/*noDevice=*/true));
+
+    {
+        ScriptContext ctx(world);
+        ScriptContext::HostServices hs;
+        hs.audio = &audio;
+        ctx.setHostServices(std::move(hs));
+
+        REQUIRE(ctx.loadScript("pyaudio", kPyAudio, HE::ScriptLanguage::Python));
+        auto e  = makeEntity(world, "BusHero");
+        auto id = ctx.createInstance("pyaudio", e);
+        REQUIRE(id != ScriptEngine::kInvalidInstance);
+        REQUIRE(ctx.callOnStart(id));
+
+        // BEFORE THE CHANGE: the plugin's Ctx had audio == nullptr and this was
+        // still 1.0 — a Python game with a full soundtrack and no sound.
+        CHECK(audio.hasBus("SFX"));
+        CHECK(audio.getBusVolume("SFX") == doctest::Approx(0.25f));
+    }
+    CHECK(ScriptContext::hostServices().audio == nullptr);   // withdrawn with the context
+    audio.shutdown();
 }
 
 // Behavior that reads the time + input snapshot into its entity's position.
