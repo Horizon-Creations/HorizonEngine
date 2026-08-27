@@ -814,7 +814,20 @@ Pixeln, die Innenkante also `d + width`, und ein `mix` zwischen Rahmen- und Fül
 beiden Seiten kantengeglättet. MSL mit `xcrun metal` und GLSL mit `glslangValidator` offline
 übersetzt; **optisch nicht verifiziert**.
 
-**Als Nächstes in Schicht 0:** Eckenradius pro Ecke, Verläufe, Schatten. Danach Block G
+**D5 Schicht 0, Teil 2: Verläufe.** `gradient` / `gradientColor` / `gradientAngleDeg` am
+Quad, drei gestaltete Eigenschaften am Element. Der Winkel läuft im Uhrzeigersinn von „unten",
+also blendet 0 von oben nach unten und 90 von links nach rechts — die senkrechte Blende ist
+das, was ein Knopf oder eine Kopfzeile fast immer will, und der Normalfall soll der sein, für
+den man nichts eintippen muss. Berechnet im 0..1-Raum des Quads, damit die Blende der Box
+folgt und nicht dem Bildschirm. Der Verlauf gehört der **Füllung**, nicht dem Rahmen.
+
+**Wichtig für den Editor-Umbau:** der Designer hat einen **generischen** Property-Editor über
+`UIPropDesc`. Jedes Attribut, das sich in vorhandene `UIPropType`-Kinder zerlegen lässt,
+bekommt sein Bedienelement damit umsonst — deshalb sind „Gradient" (Bool), „Gradient Color"
+(Color) und „Gradient Angle" (Float) drei Eigenschaften statt eines Verlaufs-Objekts. Wo das
+nicht geht, ist die Handarbeit fällig, die der User angemahnt hat.
+
+**Als Nächstes in Schicht 0:** Schatten, dann Eckenradius pro Ecke. Danach Block G
 (`RendererSoftware`), der Schicht 0 ebenfalls tragen muss — deshalb kommt sie zuerst.
 
 ---
