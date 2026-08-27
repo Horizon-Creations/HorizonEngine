@@ -2461,6 +2461,45 @@ TEST_CASE("Text field: selecting, replacing, and the clipboard's half of it")
     CHECK_FALSE(f.wm.deleteFocusedSelection());
 }
 
+// ─── Visual invalidation ─────────────────────────────────────────────────────
+// What an event-driven application sleeps on. The interesting half is the
+// NEGATIVE case: if this flag were raised unconditionally the app would redraw
+// every frame and the whole mechanism would be decoration.
+
+TEST_CASE("Widgets report what changed the picture, and only that")
+{
+    TextFieldFixture f("hello");
+    using TE = WidgetManager::TextEdit;
+
+    // Creation and the first frame are a change by definition.
+    CHECK(f.wm.consumeVisualDirty());
+    CHECK_FALSE(f.wm.consumeVisualDirty());   // consuming clears
+
+    // Typing changes the glyphs.
+    f.wm.inputText("!");
+    CHECK(f.wm.consumeVisualDirty());
+
+    // So does moving the caret — the bar is drawn.
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    CHECK(f.wm.consumeVisualDirty());
+
+    // Pointer motion that changes NO drawn state must not ask for a frame. Two
+    // moves inside the same element: the first settles the hover, the second
+    // finds everything already where it was.
+    f.wm.processPointer(400.0f, 200.0f, 100.0f, 20.0f, false, true);
+    f.wm.consumeVisualDirty();
+    f.wm.processPointer(400.0f, 200.0f, 104.0f, 20.0f, false, true);
+    CHECK_FALSE(f.wm.consumeVisualDirty());
+
+    // Hiding the widget obviously changes it.
+    f.wm.hideWidget(f.widget);
+    CHECK(f.wm.consumeVisualDirty());
+
+    // A wheel notch that no scroll box takes is not a change either.
+    f.wm.processWheel(400.0f, 200.0f, 100.0f, 20.0f, 0.0f);
+    CHECK_FALSE(f.wm.consumeVisualDirty());
+}
+
 TEST_CASE("Text field: word-wise movement and deletion")
 {
     TextFieldFixture f("the quick brown fox");

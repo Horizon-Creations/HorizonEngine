@@ -48,6 +48,24 @@ public:
     // (docs/he-apps-plan.md E2), and `tree(id)` alone cannot say WHICH ids exist.
     std::vector<int> liveIds() const;
 
+    // ── Did anything change what is on screen? ───────────────────────────────
+    // An application draws when something CHANGED, not sixty times a second
+    // (docs/he-apps-plan.md A2), and the widget layer is where almost all of
+    // that change happens: a script writing a label, a hover, a caret moving, a
+    // widget appearing. Everything here that touches the picture raises this.
+    //
+    // Deliberately COARSE: one flag for the whole manager, not a dirty rect and
+    // not per widget. The consumer only has to answer "redraw or sleep", and a
+    // finer signal would be more code with no more answer in it.
+    //
+    // Consume, don't peek: whoever asks is the one drawing the frame that
+    // settles it, and two consumers would mean the second one sleeps through a
+    // change the first one already cleared.
+    bool consumeVisualDirty() { const bool d = m_visualDirty; m_visualDirty = false; return d; }
+    // Raise it from outside — for the paths that change the picture without
+    // going through this class (an asset finishing its load, say).
+    void markVisualDirty() { m_visualDirty = true; }
+
     // Route a script call to a HorizonCode function. False when the widget or
     // the function is missing — or the function is not public (access modifier).
     bool callFunction(int id, const std::string& name);
@@ -262,6 +280,9 @@ private:
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
     bool m_wasDown = false;
     bool m_pointerOverUI = false;  // last processPointer verdict (see pointerOverUI)
+    // Starts true: the first frame after anything is created has never been
+    // drawn, so "nothing changed since the last draw" is false by construction.
+    bool m_visualDirty = true;     // see consumeVisualDirty
     int  m_focusWidget = 0;        // widget id owning the focused TextInput
     HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants
 };

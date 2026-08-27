@@ -273,12 +273,16 @@ namespace HE
 			// screen without announcing it.
 			const bool heartbeatDue =
 				(nowTick - lastDrawTick) >= static_cast<Uint64>(m_idleHeartbeatMs) * 1000000ull;
-			const bool drawThisFrame = !m_eventDriven
-			                        || m_window->EventsLastPoll() > 0
-			                        || m_redrawRequested
-			                        || heartbeatDue;
+			// Two decisions, not one. RUNNING a frame is cheap and has to happen
+			// on the heartbeat regardless, or the clock stops: a script's Delay,
+			// a timer, an animation all live in OnRender and would never fire.
+			// PRESENTING it is the expensive half, and is settled after OnRender
+			// by WantsPresent() — so a heartbeat that finds nothing changed ticks
+			// the app forward without touching the GPU at all.
+			const bool inputHappened = m_window->EventsLastPoll() > 0 || m_redrawRequested;
+			const bool runThisFrame  = !m_eventDriven || inputHappened || heartbeatDue;
 			m_redrawRequested = false;
-			if (!drawThisFrame)
+			if (!runThisFrame)
 			{
 				// Nothing happened. No OnRender, no Render, no swap — and the
 				// input frame still has to end, or the next real frame would
@@ -287,8 +291,11 @@ namespace HE
 				HE_PROFILE_FRAME();
 				continue;
 			}
-			lastDrawTick = nowTick;
 
+			// Settled inside the try (after OnRender) and read again by the swap
+			// below, which sits outside it. True by default so a frame that threw
+			// on its way through still ends cleanly the way it always did.
+			bool present = true;
 			try
 				{
 					// OnRender first: builds ImGui frame and calls ImGui::Render()
@@ -297,7 +304,15 @@ namespace HE
 						HE_PROFILE_SCOPE_N("OnRender");
 						OnRender(dt);
 					}
-					if (m_renderer)
+					// Now that the frame's logic has run, ask whether it is worth
+					// showing. Always yes outside event-driven mode; inside it,
+					// yes when input arrived and otherwise only when the app says
+					// something changed. WantsPresent() is CONSUMING, so it is
+					// called exactly once per frame and never inside a short-circuit.
+					const bool appChanged = WantsPresent();
+					present = !m_eventDriven || inputHappened || appChanged;
+					if (present) lastDrawTick = nowTick;
+					if (m_renderer && present)
 					{
 						HE_PROFILE_SCOPE_N("Render");
 						m_renderer->Render();
@@ -329,6 +344,11 @@ namespace HE
 				m_loop.tick(*m_world, m_logicLoader.logic(), dt);
 			}
 
+			// No swap for a frame that was only ticked: presenting an unchanged
+			// image still costs a full buffer flip and, with VSync on, blocks
+			// until the next refresh — which is exactly the cost this is here to
+			// avoid.
+			if (present)
 			{
 				HE_PROFILE_SCOPE_N("SwapBuffers");
 				m_window->SwapBuffers();

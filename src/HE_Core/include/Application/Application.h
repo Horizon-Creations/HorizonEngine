@@ -75,6 +75,18 @@ namespace HE
 		// Called every frame between PollEvents() and SwapBuffers().
 		virtual void OnRender(float deltaTime) { (void)deltaTime; }
 
+		// Event-driven mode only (setEventDriven): asked right AFTER OnRender, to
+		// decide whether this frame is worth putting on screen. It runs after
+		// OnRender rather than before, because whether anything changed is only
+		// known once the frame's logic has run — a script's Delay expiring and
+		// rewriting a label is exactly the case that has no input event behind it.
+		//
+		// The default is true: a subclass that does not answer keeps the old
+		// behaviour of drawing every frame it runs. An application answers with
+		// "did the UI change", which is what turns a woken-up heartbeat into a
+		// tick that costs no GPU at all.
+		virtual bool WantsPresent() { return true; }
+
 		// Called once after the loop exits, before the window is destroyed.
 		virtual void OnShutdown() {}
 
@@ -184,10 +196,11 @@ namespace HE
 		float                      m_maxFps       = 0.0f;  // VSync-off frame cap (0 = unlimited)
 		bool                       m_eventDriven     = false; // see setEventDriven
 		bool                       m_redrawRequested = false; // see requestRedraw
-		// 100 ms = ten frames a second while idle. Low enough that a sleeping app
-		// costs nothing, high enough that a HorizonCode Delay or a widget
-		// animation still moves before requestRedraw() is wired into every
-		// setter that changes the screen.
+		// The app's CLOCK resolution, not its redraw rate — those became two
+		// different things once WantsPresent() existed. A heartbeat frame runs the
+		// logic (a Delay expiring, a timer, an animation step) and then draws only
+		// if that logic changed something, so 100 ms buys a responsive clock while
+		// an idle app still presents nothing at all.
 		int                        m_idleHeartbeatMs = 100;   // see setIdleHeartbeatMs
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;

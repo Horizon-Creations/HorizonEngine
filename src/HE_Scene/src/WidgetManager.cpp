@@ -92,6 +92,11 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		HE::UIElement* e = w ? w->tree.find(elem + off) : nullptr;
 		if (!e) return;
 		e->setPropAny(prop, HE::uiHcValueToProp(v, e->getPropAny(prop).type));
+		// Every property here is something the element draws with — text, colour,
+		// position, visibility. This is the single busiest route by which a
+		// script changes the picture, so it is the one that matters most for the
+		// event-driven loop (see consumeVisualDirty).
+		m_visualDirty = true;
 		// Asset-path properties change what the element draws with — re-resolve
 		// immediately so the set is visible this frame, not on the next reload.
 		if (prop == "Material" || prop == "Font")
@@ -104,6 +109,7 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		int off = 0;
 		Instance* w = resolveScriptOwner(id, off);
 		if (!w) return;
+		m_visualDirty = true;
 		if (off == 0) { w->visible = vis; return; }
 		for (const Instance::Embed& em : w->embeds)
 			if (em.scriptId == id)
@@ -309,11 +315,13 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// spoken to once the widget holding it has run its own Construct.
 	for (const Instance::Embed& em : stored.embeds)
 		rt().fireConstruct(em.scriptId);
+	m_visualDirty = true;
 	return stored.id;
 }
 
 void WidgetManager::destroyWidget(int id)
 {
+	m_visualDirty = true;
 	if (m_focusWidget == id) m_focusWidget = 0;
 	if (Instance* w = find(id))
 	{
@@ -334,6 +342,7 @@ void WidgetManager::destroyWidget(int id)
 
 void WidgetManager::clear()
 {
+	m_visualDirty = true;
 	// Fire each widget's "Destruct" and unregister it from the shared runtime
 	// (which may also host the level script / GameInstance — so tear down
 	// per-instance, don't wipe). Snapshot the ids first: a Destruct handler may
@@ -356,9 +365,11 @@ void WidgetManager::clear()
 	m_pointerOverUI = false;
 }
 
-void WidgetManager::showWidget(int id)  { if (Instance* w = find(id)) w->visible = true; }
-void WidgetManager::hideWidget(int id)  { if (Instance* w = find(id)) w->visible = false; }
-void WidgetManager::setZOrder(int id, int z) { if (Instance* w = find(id)) w->zOrder = z; }
+// Each of these changes what the next frame would look like, so each raises the
+// visual-dirty flag an event-driven app sleeps on (see consumeVisualDirty).
+void WidgetManager::showWidget(int id)  { if (Instance* w = find(id)) { w->visible = true;  m_visualDirty = true; } }
+void WidgetManager::hideWidget(int id)  { if (Instance* w = find(id)) { w->visible = false; m_visualDirty = true; } }
+void WidgetManager::setZOrder(int id, int z) { if (Instance* w = find(id)) { w->zOrder = z; m_visualDirty = true; } }
 
 const HE::UIWidgetTree* WidgetManager::tree(int widgetId) const
 {
@@ -513,6 +524,22 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	{
 		const bool isTop = topW == &w;
 		const int  hot   = isTop ? topElem : 0;
+		// Hover, press and focus are DRAWN states (a button lights up, a field
+		// takes the ring), so a change in any of them is a reason to redraw —
+		// and mere pointer movement that changes none of them is not. Sampled
+		// before this widget's block runs, compared after it.
+		const int wasHovered = w.hoveredElem, wasPressed = w.pressedElem,
+		          wasFocused = w.focusedElem;
+		struct DirtyOnStateChange
+		{
+			WidgetManager& m; const Instance& w;
+			int h, p, f;
+			~DirtyOnStateChange()
+			{
+				if (w.hoveredElem != h || w.pressedElem != p || w.focusedElem != f)
+					m.m_visualDirty = true;
+			}
+		} dirtyGuard{ *this, w, wasHovered, wasPressed, wasFocused };
 		// Typed entry points: the compiled side takes a method, the interpreted
 		// one the same named path as before, and both still reach everyone bound
 		// to this widget's script.
@@ -651,6 +678,11 @@ HE::UITextInput* WidgetManager::focusedTextField(Instance*& outWidget)
 
 void WidgetManager::inputText(const std::string& utf8)
 {
+	// Typing, deleting, moving the caret and selecting all change the picture —
+	// the glyphs, the caret bar, the selection quad. Raised up front rather than
+	// on each success path: these are keystrokes, and a frame drawn for one that
+	// turned out to be a no-op costs nothing anybody can measure.
+	m_visualDirty = true;
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti || utf8.empty()) return;
@@ -683,6 +715,7 @@ void WidgetManager::inputText(const std::string& utf8)
 
 void WidgetManager::inputBackspace()
 {
+	m_visualDirty = true;   // see inputText
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti || !ti->editable) return;
@@ -741,6 +774,7 @@ void wordAround(const std::string& s, size_t pos, size_t& from, size_t& to)
 
 bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 {
+	m_visualDirty = true;   // see inputText
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti) return false;
@@ -829,6 +863,7 @@ std::string WidgetManager::focusedSelection() const
 
 bool WidgetManager::deleteFocusedSelection()
 {
+	m_visualDirty = true;   // see inputText
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti || !ti->editable || !ti->deleteSelection()) return false;
@@ -986,6 +1021,9 @@ int WidgetManager::focusedElement() const
 
 bool WidgetManager::setFocus(int widgetId, int elementId)
 {
+	// The focus ring is four quads in the frame, so moving it is a visual change
+	// even when nothing else about the element is.
+	m_visualDirty = true;
 	Instance* w = find(widgetId);
 	if (!w) return false;
 	// Focus events go to whichever script owns the element (see scriptTargetFor).
@@ -1014,6 +1052,7 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 
 bool WidgetManager::activateFocused()
 {
+	m_visualDirty = true;   // a press changes the element's drawn state
 	Instance* w = find(m_focusWidget);
 	if (!w || w->focusedElem == 0) return false;
 	// A focused element that has since been disabled or hidden does nothing —
@@ -1027,6 +1066,7 @@ bool WidgetManager::activateFocused()
 
 bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 {
+	m_visualDirty = true;   // the focus ring moves
 	// The widget the focus is in, else the topmost visible one that has
 	// anything focusable at all.
 	Instance* w = find(m_focusWidget);
@@ -1118,6 +1158,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
                                  float mouseX, float mouseY, float wheel)
 {
 	if (wheel == 0.0f) return false;
+	m_visualDirty = true;   // a scrolled box moves everything inside it
 	// One notch moves this many canvas units — the same order as a text line,
 	// so a list of buttons steps rather than jumps.
 	constexpr float kUnitsPerNotch = 48.0f;

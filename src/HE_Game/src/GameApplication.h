@@ -33,6 +33,11 @@ protected:
     void            OnInit()               override;
     bool            OnEvent(const SDL_Event& event) override;
     void            OnRender(float dt)     override;
+    // Event-driven mode (application builds): "did anything change what is on
+    // screen since the last frame we showed?" A game never gets here — it is not
+    // event-driven — so this answers for the app case only, and it answers with
+    // the widget layer, which is where an app's picture lives.
+    bool            WantsPresent()         override;
     void            OnShutdown()           override;
 
     std::unique_ptr<IRenderer> CreateRenderer()      override;

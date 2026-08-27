@@ -1270,6 +1270,17 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 	return false;
 }
 
+bool GameApplication::WantsPresent()
+{
+	// Outside application mode this is never consulted (the loop only asks in
+	// event-driven mode), but answering true keeps the contract honest if that
+	// ever changes: a game's world moves every frame whether the UI did or not.
+	if (!m_appMode || !m_world) return true;
+	// Consuming, once per frame — see WidgetManager::consumeVisualDirty for why
+	// asking must also clear.
+	return m_world->widgets().consumeVisualDirty();
+}
+
 void GameApplication::OnRender(float deltaTime)
 {
 	// The base Application tolerates a null renderer ("running without graphics"),
