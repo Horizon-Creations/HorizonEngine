@@ -52,6 +52,12 @@ enum class UIWidgetType : uint8_t
     // which is what lets a health bar or a settings row be authored once and
     // used everywhere instead of copied.
     WidgetRef,
+    // Nothing, with a size. It draws no pixel and takes no click; all it does
+    // is occupy its slot, which in a layout box is what pushes the elements
+    // after it along — down in a vertical box, right in a horizontal one. With
+    // Slot Fill above 0 it eats the space left over instead, which is how one
+    // pins something to the far end of a row.
+    Spacer,
     COUNT
 };
 

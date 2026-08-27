@@ -1214,6 +1214,34 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			            IM_COL32(120, 190, 255, 50));
 		break;
 	}
+	case UIWidgetType::Spacer:
+	{
+		// Invisible at runtime, and therefore drawn HERE — a gap you cannot see
+		// in the designer is a gap you cannot grab, resize or even find again.
+		// Dashes plus a double-headed arrow along the axis it pushes on.
+		dl->AddRect(mn, mx, IM_COL32(150, 150, 165, 80));
+		const float w = mx.x - mn.x, h = mx.y - mn.y;
+		const ImU32 arrow = IM_COL32(150, 150, 165, 120);
+		const float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+		const float tip = std::min(6.0f, std::min(w, h) * 0.3f);
+		if (h >= w)   // taller than wide: it pushes downwards
+		{
+			dl->AddLine(ImVec2(cx, mn.y + 2), ImVec2(cx, mx.y - 2), arrow);
+			dl->AddTriangleFilled(ImVec2(cx, mn.y + 1), ImVec2(cx - tip * 0.5f, mn.y + 1 + tip),
+			                      ImVec2(cx + tip * 0.5f, mn.y + 1 + tip), arrow);
+			dl->AddTriangleFilled(ImVec2(cx, mx.y - 1), ImVec2(cx - tip * 0.5f, mx.y - 1 - tip),
+			                      ImVec2(cx + tip * 0.5f, mx.y - 1 - tip), arrow);
+		}
+		else
+		{
+			dl->AddLine(ImVec2(mn.x + 2, cy), ImVec2(mx.x - 2, cy), arrow);
+			dl->AddTriangleFilled(ImVec2(mn.x + 1, cy), ImVec2(mn.x + 1 + tip, cy - tip * 0.5f),
+			                      ImVec2(mn.x + 1 + tip, cy + tip * 0.5f), arrow);
+			dl->AddTriangleFilled(ImVec2(mx.x - 1, cy), ImVec2(mx.x - 1 - tip, cy - tip * 0.5f),
+			                      ImVec2(mx.x - 1 - tip, cy + tip * 0.5f), arrow);
+		}
+		break;
+	}
 	case UIWidgetType::Text:
 	{
 		const float fs = propFloatOr(n, "FontSize", 22.0f) * s;

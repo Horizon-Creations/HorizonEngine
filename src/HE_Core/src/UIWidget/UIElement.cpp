@@ -24,6 +24,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::HorizontalBox: return std::make_unique<UIHorizontalBox>();
         case UIWidgetType::ScrollBox:     return std::make_unique<UIScrollBox>();
         case UIWidgetType::WidgetRef:     return std::make_unique<UIWidgetRef>();
+        case UIWidgetType::Spacer:        return std::make_unique<UISpacer>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -35,7 +36,7 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
-        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef };
+        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer };
     return kAll;
 }
 
@@ -50,7 +51,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
     static constexpr const char* kNames[] = {
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
-        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef" };
+        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -145,6 +146,13 @@ const UIPropTable& UIWidgetRef::propTable() const
 
 void UIWidgetRef::writeJson(nlohmann::json& j) const { j["widget"] = widgetPath; }
 void UIWidgetRef::readJson(const nlohmann::json& j)  { widgetPath = j.value("widget", widgetPath); }
+
+// Nothing of its own — a Spacer is its rect and nothing else.
+const UIPropTable& UISpacer::propTable() const
+{
+    static const UIPropTable t = {};
+    return t;
+}
 
 const UIPropTable& UIBoxBase::propTable() const
 {

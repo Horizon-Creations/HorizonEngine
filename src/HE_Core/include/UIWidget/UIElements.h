@@ -556,4 +556,31 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── Spacer ────────────────────────────────────────────────────────────────────
+// A gap that is an element. It draws nothing and takes no click; the only thing
+// it does is take up its slot, and in a layout box that is exactly what moves
+// everything after it along — its Height in a vertical box, its Width in a
+// horizontal one. Given a Slot Fill above 0 it swallows the space left over
+// instead, which is how one thing goes to the left of a row and another to the
+// far right without a single hand-computed offset.
+//
+// It has no properties of its own on purpose: everything it needs — the size on
+// the box's axis and Slot Fill — is on the base and is already in the panel,
+// under the right name for the box it sits in.
+class HE_API UISpacer final : public UIElement
+{
+public:
+    UISpacer() { sizeX = 40.0f; sizeY = 40.0f; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::Spacer; }
+    const char*  typeName() const override { return "Spacer"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UISpacer>(*this); }
+
+    const UIPropTable& propTable() const override;
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override {}
+    void writeJson(nlohmann::json&) const override {}
+    void readJson(const nlohmann::json&) override {}
+};
+
 } // namespace HE

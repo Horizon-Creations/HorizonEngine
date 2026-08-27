@@ -882,6 +882,21 @@ gespeicherten `.hasset`: `pos [90,0] size [180,48]` ist exakt das Ergebnis von
 `uiReanchorKeepingRect` auf Mitte-links). Das Ausrichtungsraster heißt jetzt **„Text Align"**
 und zeichnet zwei gestapelte Textzeilen in kühlem Grau statt Punkte und Balken in Bernstein.
 
+**Nachtrag 2: der Spacer.** Vierzehnter Elementtyp, und der erste, der nichts zeichnet und
+nichts anfasst. Sein ganzer Zweck ist sein Rechteck: in einer Vertical Box ist das seine Höhe,
+in einer Horizontal Box seine Breite, und mit `Slot Fill` über 0 frisst er stattdessen den Rest
+und schiebt damit alles Folgende ans andere Ende. Eigene Eigenschaften hat er **keine** — die
+Größe auf der Achse und Slot Fill stehen längst in der Basis, und das Details-Panel benennt sie
+für Box-Kinder schon achsenrichtig („Height" bzw. „Width"). Gezeichnet wird er nur im Designer
+(gestricheltes Rechteck plus Doppelpfeil), weil eine Lücke, die man nicht sieht, eine Lücke ist,
+die man nicht anfassen kann.
+
+**Und ein Fehler, der nur die Vorschau betraf:** `propFloatOr` ist typgeprüft und gibt für ein
+**Int** den Standardwert zurück. „Align H"/„Align V" sind Int, also hat die Designer-Vorschau
+jede Beschriftung links-mittig gezeichnet, egal welche der neun Zellen gewählt war — während die
+Engine es richtig machte. Jetzt gibt es `propIntOr` daneben. Die Lehre: **jeder typgeprüfte
+Leser braucht seine Variante, sonst ist ein Typfehler kein Fehler, sondern ein Standardwert.**
+
 **Als Nächstes in Schicht 0:** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier
 Zeilen, ein „vier Radien"-Feld wäre Handarbeit). Danach Block G (`RendererSoftware`), der

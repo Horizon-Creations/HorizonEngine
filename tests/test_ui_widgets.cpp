@@ -206,6 +206,9 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Bar Color", UIPropType::Color } } },
         { UIWidgetType::WidgetRef, {
             { "Widget", UIPropType::String } } },
+        // A Spacer is its rect and nothing else: the size on the box's axis and
+        // Slot Fill are base properties, and it has no others by design.
+        { UIWidgetType::Spacer, {} },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -1949,6 +1952,50 @@ TEST_CASE("HorizontalBox: the same, along the other axis")
     CHECK(a.w == doctest::Approx(40.0f));
     CHECK(a.h == doctest::Approx(400.0f));   // spans the box across the axis
     CHECK(b.x == doctest::Approx(50.0f));    // 40 + spacing
+}
+
+// A Spacer is a gap that is an element: nothing on screen, nothing to click,
+// and its whole effect is on where its siblings end up.
+TEST_CASE("Spacer: it pushes its siblings along and draws nothing")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 2, 50.0f,
+                                    /*padding=*/0.0f, /*spacing=*/0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    REQUIRE(kids.size() == 2);
+    CHECK(HE::uiElementRect(t, *t.find(kids[1])).y == doctest::Approx(50.0f));
+
+    // Slide a 30-unit spacer in between them.
+    const int sp = t.add(HE::UIWidgetType::Spacer);
+    { HE::UIElement& e = *t.find(sp);
+      e.parentId = box; e.sizeX = e.sizeY = 30.0f; }
+    // It is added last, so it lands after both — the second child does not move.
+    CHECK(HE::uiElementRect(t, *t.find(kids[1])).y == doctest::Approx(50.0f));
+    CHECK(HE::uiElementRect(t, *t.find(sp)).y == doctest::Approx(100.0f));
+    CHECK(HE::uiElementRect(t, *t.find(sp)).h == doctest::Approx(30.0f));
+
+    // In a horizontal box the very same element pushes along x instead — the
+    // box's axis decides, which is what makes one Spacer type enough.
+    t.find(box)->setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+    HE::UIWidgetTree h;
+    const int hbox = boxWithChildren(h, HE::UIWidgetType::HorizontalBox, 1, 50.0f, 0.0f, 0.0f);
+    const int hsp  = h.add(HE::UIWidgetType::Spacer);
+    { HE::UIElement& e = *h.find(hsp); e.parentId = hbox; e.sizeX = e.sizeY = 30.0f; }
+    const int after = h.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *h.find(after); e.parentId = hbox; e.sizeX = e.sizeY = 20.0f; }
+    CHECK(HE::uiElementRect(h, *h.find(hsp)).x   == doctest::Approx(50.0f));
+    CHECK(HE::uiElementRect(h, *h.find(after)).x == doctest::Approx(80.0f));
+
+    // Nothing of it reaches the screen, and nothing of it takes a click.
+    auto e = HE::makeUIElement(HE::UIWidgetType::Spacer);
+    REQUIRE(e);
+    CHECK_FALSE(e->hitTestable);
+    CHECK_FALSE(e->interactive());
+    CHECK_FALSE(e->hasMaterialSlot());
+    CHECK_FALSE(e->hasSurfaceStyle());
+    std::vector<UIRenderObject> out;
+    e->render({ 0.0f, 0.0f, 40.0f, 40.0f }, HE::UIElementRenderState{}, HE::UUID{}, 1.0f, out);
+    CHECK(out.empty());
 }
 
 TEST_CASE("Layout box: filling slots share what is left over")
