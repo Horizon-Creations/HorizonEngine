@@ -680,28 +680,43 @@ void render(AppContext& ctx)
             // they stay editable after the fact — and so the graphics settings
             // this editor is set to reach the shipped build at all.
             ImGui::Spacing();
-            ImGui::Text("Game Window:");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(70.0f);
-            if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
-                s_exportWindowWidth = std::max(320, s_exportWindowWidth);
-            ImGui::SameLine();
-            ImGui::TextUnformatted("x");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(70.0f);
-            if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
-                s_exportWindowHeight = std::max(240, s_exportWindowHeight);
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
+            // An application does not choose a resolution and a display mode at
+            // export time. It opens as a window the way every other application
+            // does, and the user maximises it or drags it about; a fixed pixel
+            // size baked into the build is a game's idea. The values are still
+            // WRITTEN (config.json carries defaults either way) — they are just
+            // not asked about, and app mode pins them to a sane window.
+            if (exportingApp)
             {
-                for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
-                    if (ImGui::Selectable(mode, s_exportWindowMode == mode))
-                        s_exportWindowMode = mode;
-                ImGui::EndCombo();
+                s_exportWindowMode = "Windowed";
+                ImGui::TextDisabled("Opens as a %d x %d window. The user takes it from there.",
+                                    s_exportWindowWidth, s_exportWindowHeight);
             }
-            ImGui::SameLine();
-            EditorWidgets::checkbox("VSync", &s_exportGameVSync);
+            else
+            {
+                ImGui::Text("Game Window:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.0f);
+                if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
+                    s_exportWindowWidth = std::max(320, s_exportWindowWidth);
+                ImGui::SameLine();
+                ImGui::TextUnformatted("x");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.0f);
+                if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
+                    s_exportWindowHeight = std::max(240, s_exportWindowHeight);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(120.0f);
+                if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
+                {
+                    for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
+                        if (ImGui::Selectable(mode, s_exportWindowMode == mode))
+                            s_exportWindowMode = mode;
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                EditorWidgets::checkbox("VSync", &s_exportGameVSync);
+            }
 
             ImGui::Text("Graphics Backend:");
             ImGui::SameLine();

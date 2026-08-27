@@ -2237,6 +2237,62 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			};
 
+			// ── Application projects: a short, flat list ──────────────────────────
+			// Scenes, input mappings, particles, animator machines and savegame
+			// templates are all gameplay furniture. An app authors an interface and
+			// the logic behind it, so it is offered exactly that — grouping four
+			// entries into submenus would be filing for its own sake.
+			if (ctx.projectManager && ctx.projectManager->currentProject().appProject)
+			{
+				if (EditorWidgets::menuItem("UI Widget"))
+					tryCreate("NewWidget", ".hasset", HE::AssetType::Widget);
+
+				// The logic asset of whatever language the project was created in.
+				// Only the PLAIN class: Entity, Player Controller and Player
+				// Character are the character/gameplay rows of the taxonomy and
+				// have nothing to sit on here.
+				switch (ctx.projectManager->currentProject().scriptLanguage)
+				{
+				case ProjectScriptLanguage::HorizonCode:
+					if (EditorWidgets::menuItem("HorizonCode Class"))
+						tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
+					break;
+				case ProjectScriptLanguage::Lua:
+					if (EditorWidgets::menuItem("Script"))
+						tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
+					break;
+				case ProjectScriptLanguage::Python:
+					if (EditorWidgets::menuItem("Script"))
+						tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
+					break;
+				case ProjectScriptLanguage::Cpp:
+					if (EditorWidgets::menuItem("C++ Class"))
+					{
+						std::strncpy(s_cppClassName, "AppClass", sizeof(s_cppClassName) - 1);
+						s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
+						s_openCppClassPopup = true;
+						ImGui::CloseCurrentPopup();
+					}
+					break;
+				}
+
+				// Only with Advanced Shader Effects — the same gate as everywhere else.
+				if (cbAllowMaterials)
+				{
+					if (EditorWidgets::menuItem("Material"))
+						tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+					if (EditorWidgets::menuItem("Material Function"))
+						tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+				}
+
+				ImGui::Separator();
+				if (EditorWidgets::menuItem("Folder")) createFolderIn(targetFolder);
+				// Plain return: this is drawCreateAssetItems, and the popup or menu
+				// around it belongs to whoever called — ending it here would close
+				// someone else's.
+				return;
+			}
+
 			// ── Grouped, because a flat list of sixteen is a list you read every
 			// time instead of aiming at. The two that stay loose are the ones you
 			// make most and open as documents in their own right; everything else

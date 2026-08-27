@@ -1268,6 +1268,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	if (nativeMenu)
 	{
 		MacMenuBar::setProjectLoaded(ctx.projectLoaded);
+		// …and hide the rows that only mean something in a game. Both calls are
+		// per-frame and both no-op unless the answer changed.
+		MacMenuBar::setAppProject(ctx.projectManager &&
+		                          ctx.projectManager->currentProject().appProject);
 		using MC = MacMenuBar::Cmd;
 		// The ImGui menu row shows these as ticked MenuItems; the native bar has
 		// to be told. Without it the menu most users see cannot say whether a
@@ -1355,14 +1359,23 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (EditorWidgets::menuItem("Close Project", "Ctrl+W"))
 			requestGuarded(GuardedAction::CloseProject);
         ImGui::Separator();
-        if (EditorWidgets::menuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
-        if (EditorWidgets::menuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
-        if (EditorWidgets::menuItem("Add Scene Additive...")) triggerAddSceneAdditive();
+        // Scenes are a game's unit of content. An application has none — its
+        // interface comes up from the GameInstance — so the four scene rows are
+        // hidden rather than offered and then refused (docs/he-apps-plan.md E2).
+        const bool appProj = ctx.projectManager &&
+                             ctx.projectManager->currentProject().appProject;
+        if (!appProj)
+        {
+            if (EditorWidgets::menuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
+            if (EditorWidgets::menuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
+            if (EditorWidgets::menuItem("Add Scene Additive...")) triggerAddSceneAdditive();
+        }
         // Keep these three in step with MacMenuBar.mm's File block — a Mac user
         // never sees this row (see MacMenuBar.h).
         if (EditorWidgets::menuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
         if (EditorWidgets::menuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
-        if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S"))    triggerSaveSceneAs();
+        if (!appProj)
+            if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S")) triggerSaveSceneAs();
         ImGui::Separator();
         if (EditorWidgets::menuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
@@ -1442,12 +1455,19 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showConsole, "Console");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
-        // look for it the first time.
-        if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
-                            ctx.projectLoaded))
-            ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
-        if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
-            openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+        // look for it the first time. Both are gone in an application: there is
+        // no ground to grid and no level to script — the Game Instance below is
+        // the one an app really does own, and stays.
+        const bool appProjView = ctx.projectManager &&
+                                 ctx.projectManager->currentProject().appProject;
+        if (!appProjView)
+        {
+            if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
+                                ctx.projectLoaded))
+                ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
+            if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
+                openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+        }
         if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
         ImGui::EndMenu();
