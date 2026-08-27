@@ -10,9 +10,120 @@
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <Diagnostics/Log.h>
+#include <ContentManager/HAsset.h>        // application starter content (root widget)
+#include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/UIElements.h>
+#include <HorizonCode/HorizonCode.h>      // …and the GameInstance graph that shows it
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
+
+// ─── Application starter content ──────────────────────────────────────────────
+// An application project with empty folders has nothing to show: no world, no
+// scene, and therefore a black panel where its UI should be. So the template
+// lays down the two things that make it an app — a ROOT WIDGET, and a
+// GameInstance whose OnInit creates it. That is also exactly the structure the
+// packaged build runs, so the preview practises the product rather than a
+// stand-in for it. See docs/he-apps-plan.md E1/E2.
+namespace
+{
+// Content-relative path of the widget the template writes, and the name the
+// GameInstance node refers to it by. One constant, because a mismatch between
+// the file and the reference is a silently empty window.
+constexpr const char* kRootWidgetRel = "UI/RootWidget.hasset";
+
+// A root widget: a panel filling the canvas, with the project's name on it. Not
+// empty — an empty canvas looks exactly like a broken one, and the first thing
+// anybody does is change this text, which teaches where the text lives.
+std::string rootWidgetTreeJson(const std::string& projectName)
+{
+	HE::UIWidgetTree tree;
+	tree.canvasWidth  = 1280.0f;
+	tree.canvasHeight = 720.0f;
+
+	const int panelId = tree.add(HE::UIWidgetType::Panel);
+	if (auto* panel = tree.find(panelId))
+	{
+		panel->name = "Root";
+		HE::uiSetAnchorPreset(*panel, 15);   // stretched to all four edges
+		panel->posX = panel->posY = 0.0f;
+		panel->sizeX = panel->sizeY = 0.0f;  // on a stretched axis these are insets
+		if (auto* p = dynamic_cast<HE::UIPanel*>(panel))
+			p->color = glm::vec4(0.12f, 0.12f, 0.14f, 1.0f);
+	}
+
+	const int labelId = tree.add(HE::UIWidgetType::Text);
+	if (auto* label = tree.find(labelId))
+	{
+		label->name     = "Title";
+		label->parentId = panelId;
+		HE::uiSetAnchorPreset(*label, 5);    // centred
+		label->posX = label->posY = 0.0f;
+		label->sizeX = 600.0f; label->sizeY = 60.0f;
+		if (auto* t = dynamic_cast<HE::UIText*>(label))
+		{
+			t->text     = projectName;
+			t->fontSize = 32.0f;
+		}
+	}
+	return HE::uiWidgetTreeToJson(tree);
+}
+
+// Write the root widget as a real .hasset: META (so the content browser and every
+// picker can see what it is) plus the tree chunk. Same shape the editor's own
+// "New UI Widget" writes, because a template asset that differs from a
+// hand-made one is a second format nobody maintains.
+bool writeRootWidgetAsset(const fs::path& root, const std::string& projectName)
+{
+	HAsset::Writer w;
+	const HE::UUID assetId = HE::UUID::generate();
+	std::vector<uint8_t> meta;
+	HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Widget));
+	HAsset::Writer::appendPOD(meta, assetId.hi);
+	HAsset::Writer::appendPOD(meta, assetId.lo);
+	HAsset::Writer::appendString(meta, std::string("RootWidget"));
+	HAsset::Writer::appendString(meta, std::string(kRootWidgetRel));
+	w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+
+	const std::string treeJson = rootWidgetTreeJson(projectName);
+	w.addChunk(HAsset::CHUNK_UIWT, treeJson.data(), treeJson.size());
+
+	return w.write((root / "Content" / kRootWidgetRel).string(),
+	               static_cast<uint16_t>(HE::AssetType::Widget));
+}
+
+// The GameInstance: OnInit → Create Widget(RootWidget). Built as a Graph and
+// serialised with the engine's own toJson rather than hand-written JSON — the
+// node/link format is internal and would drift out from under a literal.
+bool writeAppGameInstance(const fs::path& root)
+{
+	HorizonCode::Graph g;
+
+	HorizonCode::Node ev;
+	ev.id   = g.nextId++;
+	ev.type = HorizonCode::NodeType::Event;
+	ev.s    = "OnInit";
+	g.nodes.push_back(ev);
+
+	HorizonCode::Node create;
+	create.id   = g.nextId++;
+	create.type = HorizonCode::NodeType::CreateWidget;
+	create.s    = kRootWidgetRel;
+	g.nodes.push_back(create);
+
+	// Exec out of the event into exec in of the create — pin 0 on both, which is
+	// the only exec pin either of them has.
+	HorizonCode::Link l;
+	l.srcNode = ev.id;     l.srcPin = 0;
+	l.dstNode = create.id; l.dstPin = 0;
+	g.links.push_back(l);
+
+	std::ofstream out(root / "GameInstance.hcode", std::ios::trunc);
+	if (!out.is_open()) return false;
+	out << HorizonCode::toJson(g);
+	return out.good();
+}
+} // namespace
 
 // ─── Export profiles ──────────────────────────────────────────────────────────
 
@@ -495,6 +606,20 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// reason to fail a project that is otherwise complete on disk.
 	if (preset == ProjectPreset::Tutorial)
 		scaffoldTutorialProject(root.string(), projectName);
+
+	// An application's starter content, on the same terms: a project that opens
+	// with an empty preview is worse than one that opens with a label on a panel,
+	// but neither is a reason to refuse a project whose folders and manifest are
+	// already on disk.
+	if (isApp)
+	{
+		if (!writeRootWidgetAsset(root, projectName))
+			HE_LOG_WARN(Config, "%s", "Application template: could not write the root widget "
+			                          "asset — the preview will start empty");
+		if (!writeAppGameInstance(root))
+			HE_LOG_WARN(Config, "%s", "Application template: could not write GameInstance.hcode "
+			                          "— nothing will create the root widget");
+	}
 
 	m_currentProject.name                = projectName;
 	m_currentProject.path                = heprojPath.string();

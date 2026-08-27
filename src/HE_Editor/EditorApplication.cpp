@@ -1792,6 +1792,31 @@ void EditorApplication::OnRender(float dt)
 	m_stepFrame           = false;
 	const bool simulating = m_isPlaying && (!m_isPaused || stepping);
 
+	// ── Application projects have no play mode ───────────────────────────────
+	// Their UI is not something you start, it is something that is running: the
+	// viewport panel shows the app itself, and clicking a button in it has to do
+	// what that button does (docs/he-apps-plan.md E2). So everything that makes
+	// widgets LIVE — the tick, the pointer, the keyboard, the HorizonCode
+	// runtime — is gated on this instead of on `simulating`.
+	//
+	// Deliberately not "simulating || app": for a game nothing changes at all,
+	// and for an app there is no second state that could disagree with this one.
+	const bool uiLive = simulating || m_projectManager.currentProject().appProject;
+
+	// Start an application's UI once per project. The packaged runtime does this
+	// in OnInit; here there is no "start", so the first frame that finds an app
+	// project whose UI has not been started yet fires the GameInstance's OnInit —
+	// which is what creates the root widget. Keyed by project path so opening a
+	// different project starts that one instead of assuming one ever runs.
+	if (m_editorWorld && m_projectManager.currentProject().appProject &&
+	    m_appUiStartedFor != m_projectManager.currentProject().path)
+	{
+		m_appUiStartedFor = m_projectManager.currentProject().path;
+		HE_LOG_INFO(Editor, "%s", "Application project: starting the live preview "
+		                          "(GameInstance OnInit)");
+		m_gameInstance.fireInit();
+	}
+
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
 	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
 	if (m_isPlaying)
@@ -2302,7 +2327,11 @@ void EditorApplication::OnRender(float dt)
 		// drive the menu doing the unpausing; the editor's transport has its own
 		// button for that, and a widget graph is script code — letting it free-run
 		// between steps would make "one step = one frame of world" a lie.
-		if (simulating && m_editorWorld)
+		// uiLive, not simulating: in an application project the widgets are the
+		// product and run without anyone pressing play (see uiLive above). The
+		// gameplay hosts below stay on `simulating` — an app has no players and
+		// no entity classes to tick.
+		if (uiLive && m_editorWorld)
 		{
 			// Raw dt — see the gameDt note above: the pause menu keeps ticking.
 			m_editorWorld->widgets().tick(dt);
@@ -2319,10 +2348,13 @@ void EditorApplication::OnRender(float dt)
 			// axis as well would turn every drag across the viewport into player
 			// input. Esc toggles the capture, so this is also how the author
 			// gets the cursor back without the game turning with it.
-			m_playerHost.tick(input(), gameDt,
-			                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
-			// Entity classes: Tick, plus reaping the ones whose entity is gone.
-			m_entityHost.tick(gameDt);
+			if (simulating)
+			{
+				m_playerHost.tick(input(), gameDt,
+				                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
+				// Entity classes: Tick, plus reaping the ones whose entity is gone.
+				m_entityHost.tick(gameDt);
+			}
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -2359,7 +2391,7 @@ void EditorApplication::OnRender(float dt)
 		// mouse capture is engaged there is no cursor, so the pointer is invalid.
 		// Frozen with the rest of the session: this ends in callOnUIEvent, and a
 		// click that runs script code while the world stands still is not a pause.
-		if (simulating && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
+		if (uiLive && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
 		{
 			// Widget pointer input first — widgets draw on top of entity UI. The
 			// answer is kept, not dropped: a click that landed on a widget must
@@ -5086,6 +5118,7 @@ AppContext EditorApplication::makeContext()
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
+		.appLivePreview      = m_projectManager.currentProject().appProject,
 		.isPaused            = m_isPaused,
 		.playLog             = &m_playLog,
 		.playLogMutex        = &m_playLogMutex,

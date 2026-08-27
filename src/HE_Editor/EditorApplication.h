@@ -288,6 +288,11 @@ struct AppContext
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
+	// An APPLICATION project has no play mode: its UI runs permanently and the
+	// viewport panel is the app itself (docs/he-apps-plan.md E2). Panels that ask
+	// "are we playing?" to decide whether the in-game UI owns the pointer must
+	// ask this as well, or the preview would be a picture you cannot click.
+	bool appLivePreview = false;
 	// Transport pause. Meaningful only while playing, and always false outside it.
 	bool isPaused  = false;
 	// Post-PIE report: the warnings/errors captured during the last play session
@@ -713,6 +718,12 @@ private:
 
 	// Play-in-editor
 	bool m_isPlaying = false;
+	// Which project's application UI has already been started (its .heproj path),
+	// so the GameInstance's OnInit fires ONCE per project instead of every frame.
+	// A path rather than a bool: opening another project has to start that one's
+	// UI, and comparing paths says so without a second "project changed" signal
+	// to keep in sync. Empty = nothing started.
+	std::string m_appUiStartedFor;
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight

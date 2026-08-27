@@ -426,7 +426,9 @@ void render(AppContext& ctx, float dt)
 				// position, landing it exactly where the look-drag began). Shared with the
 				// tab-switch safety release (releaseViewportLookCapture, file scope).
 				auto endLookCapture = [&]() { releaseViewportLookCapture(sdlWin); };
-				if (ctx.editorCamera && ctx.isPlaying)
+				// An application's preview is always live, so its pointer is fed
+				// every frame rather than only during play (ctx.appLivePreview).
+				if (ctx.editorCamera && (ctx.isPlaying || ctx.appLivePreview))
 				{
 					endLookCapture();
 					ctx.renderer->SetEditorCamera(EditorCameraOverride{}); // active=false
