@@ -1472,7 +1472,33 @@ void GameApplication::OnRender(float deltaTime)
 		// keys the editor's Preferences write, so a shipped game looks like the
 		// editor preview it was authored in. Capability-gated where a backend can
 		// be unable to do it at all.
-		if (r)
+		// ── An application draws quads, not a world ──────────────────────────
+		// Everything below is a WORLD effect: bloom over emissive surfaces, ambient
+		// occlusion between them, anti-aliasing of their edges, global illumination
+		// bouncing off them, screen-space reflections in them. An app has none, and
+		// leaving them on means paying for a full post-processing chain over an
+		// empty scene every frame — which is exactly what made an exported app feel
+		// slow next to a running editor, both of them on one GPU.
+		//
+		// Pushed as OFF rather than skipped: the renderer keeps whatever it was
+		// last told, so saying nothing would leave its own defaults (bloom and SSAO
+		// are on by default) running.
+		if (r && m_appMode)
+		{
+			r->SetBloomSettings(IRenderer::BloomSettings{ false, 1.0f, 0.6f });
+			r->SetSSAOSettings(IRenderer::SSAOSettings{ false, 0.5f, 1.0f, 0 });
+			// GI and SSR default to disabled, so their default-constructed form IS
+			// the "off" push.
+			r->SetGISettings(IRenderer::GISettings{});
+			r->SetSSRSettings(IRenderer::SSRSettings{});
+			IRenderer::AntiAliasingSettings aaOff;
+			aaOff.method = static_cast<int>(HE::AAMethod::Off);
+			r->SetAntiAliasingSettings(aaOff);
+			// Forward: the deferred path builds a G-buffer and runs a fullscreen
+			// lighting resolve, for surfaces that do not exist here.
+			r->SetRenderPath(HE::RenderPath::Forward);
+		}
+		else if (r)
 		{
 			// Bloom + AO. The packaged game pushed neither for a long time, which
 			// meant a shipped build ran on the renderer's built-in defaults no
