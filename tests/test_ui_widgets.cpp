@@ -769,6 +769,47 @@ TEST_CASE("An element drawn over a button swallows the click")
     CHECK(countGlyphs(out) == 2);
 }
 
+// A drag belongs to whatever the press landed on, all the way to the release.
+// Now that every hit-testable element blocks the pointer, one lying across the
+// track would otherwise take it away mid-drag and the handle would stop dead
+// under the cursor.
+TEST_CASE("A drag is not stolen by something the pointer crosses")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int sl = t.add(HE::UIWidgetType::Slider);
+    { HE::UIElement& e = *t.find(sl);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 30.0f;
+      e.setProp("Value", HE::UIPropValue::ofFloat(0.0f)); }
+    // A label lying across the right half of the track, added after the slider
+    // so it paints — and hit-tests — on top of it.
+    const int over = t.add(HE::UIWidgetType::Text);
+    { HE::UIElement& e = *t.find(over);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 100.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 30.0f;
+      e.hitTestable = true;
+      e.setProp("AutoSize", HE::UIPropValue::ofBool(false)); }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int wid = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(wid != 0);
+
+    // Press on the left half (the slider is the topmost there) …
+    wm.processPointer(400.0f, 400.0f, 20.0f, 15.0f, true, true);
+    // … then drag right, under the label, without letting go.
+    wm.processPointer(400.0f, 400.0f, 150.0f, 15.0f, true, true);
+    const HE::UIWidgetTree* live = wm.tree(wid);
+    REQUIRE(live != nullptr);
+    CHECK(live->find(sl)->getProp("Value").f == doctest::Approx(0.75f));
+    wm.processPointer(400.0f, 400.0f, 150.0f, 15.0f, false, true);
+}
+
 // The designer's containment rule. A Button says yes here, which is what lets a
 // caption, an icon and a badge live on the same button.
 TEST_CASE("Exactly the container types accept children")
