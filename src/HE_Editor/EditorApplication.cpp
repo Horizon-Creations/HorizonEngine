@@ -1,4 +1,5 @@
 #include "EditorApplication.h"
+#include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
@@ -370,6 +371,23 @@ void EditorApplication::OnInit()
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
+			// An application's preview shows the saved assets, so a save is the
+			// signal to rebuild it. Only for the kinds that change what the
+			// preview DOES — a texture or a font swaps itself in through the
+			// content manager, and restarting for one would throw away the app's
+			// state for nothing.
+			if (!m_projectManager.currentProject().appProject) return;
+			uint16_t type = 0;
+			if (!HAsset::readAssetTypeFromFile(fullPath, type)) return;
+			switch (static_cast<HE::AssetType>(type))
+			{
+			case HE::AssetType::Widget:
+			case HE::AssetType::HorizonCodeClass:
+			case HE::AssetType::Script:
+				m_appPreviewRestartPending = true;
+				break;
+			default: break;
+			}
 		});
 
 	m_collab.onAssetLockDenied([this](const std::string& relPath) {
@@ -1815,6 +1833,19 @@ void EditorApplication::OnRender(float dt)
 		HE_LOG_INFO(Editor, "%s", "Application project: starting the live preview "
 		                          "(GameInstance OnInit)");
 		m_gameInstance.fireInit();
+		m_appPreviewRestartPending = false;   // it just started; nothing to redo
+		// Say what came of it. "Nothing is previewed" has three possible causes —
+		// no graph, a graph that creates nothing, a widget that fails to load —
+		// and this line tells them apart without a debugger.
+		HE_LOG_INFO(Editor, "Application project: preview holds %zu widget(s) after OnInit "
+		                    "(GameInstance graph: %zu node(s))",
+		            m_editorWorld->widgets().count(), m_gameInstanceGraph.nodes.size());
+	}
+	// An edit landed since the last frame — rebuild the preview on it.
+	if (m_appPreviewRestartPending)
+	{
+		m_appPreviewRestartPending = false;
+		restartAppPreview();
 	}
 
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
@@ -4824,6 +4855,10 @@ void EditorApplication::applyRemoteDocDeltas(
 	{
 		m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 		saveGameInstanceGraph();
+		// A collaborator's GameInstance edit rebuilds the preview here for the
+		// same reason our own does — see commitGameInstance.
+		if (m_projectManager.currentProject().appProject)
+			m_appPreviewRestartPending = true;
 	}
 	// Deliberately NOT marked dirty. The holder's whole-file autosave is what
 	// writes this into our project a moment later; flagging the tab here would
@@ -5113,12 +5148,18 @@ AppContext EditorApplication::makeContext()
 		.commitGameInstance  = [this]{
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 			saveGameInstanceGraph();
+			// The GameInstance is what BUILDS an application's UI, so editing it
+			// and not rebuilding the preview would leave the old widgets on
+			// screen with the new graph behind them.
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
 		.appLivePreview      = m_projectManager.currentProject().appProject,
+		.restartAppPreview   = [this]{ m_appPreviewRestartPending = true; },
 		.isPaused            = m_isPaused,
 		.playLog             = &m_playLog,
 		.playLogMutex        = &m_playLogMutex,
@@ -5579,7 +5620,11 @@ void EditorApplication::setPlayMode(bool play)
 		ScriptApi::setCursorHook([this](bool show){ setPlayMouseCaptured(!show); });
 
 		// Capture the mouse so PIE plays like the packaged game (Esc toggles it).
-		setPlayMouseCaptured(true);
+		// Not in an application project: there is nothing to look around in, and
+		// swallowing the cursor is the opposite of what an app wants — its whole
+		// interface is things you point at.
+		if (!m_projectManager.currentProject().appProject)
+			setPlayMouseCaptured(true);
 
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: entering play mode");
 	}
@@ -5641,6 +5686,24 @@ void EditorApplication::setPlayMode(bool play)
 }
 
 // ─── Game Instance (app-wide HorizonCode script) ────────────────────────────────
+void EditorApplication::restartAppPreview()
+{
+	if (!m_editorWorld || !m_projectManager.currentProject().appProject) return;
+
+	// Down in the reverse order it came up. fireShutdown before the widgets go,
+	// so a graph's OnShutdown still finds the things it is about to let go of.
+	m_gameInstance.fireShutdown();
+	m_editorWorld->widgets().clear();
+
+	// Re-register the graph rather than assuming the host still holds the right
+	// one: the edit that triggered this restart may BE a GameInstance edit, and
+	// setGraph is also what resets its variables to their authored defaults.
+	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+	m_gameInstance.fireInit();
+	HE_LOG_INFO(Editor, "Application project: live preview restarted — %zu widget(s)",
+	            m_editorWorld->widgets().count());
+}
+
 std::string EditorApplication::gameInstancePath()
 {
 	std::filesystem::path p = m_projectManager.currentProject().path;

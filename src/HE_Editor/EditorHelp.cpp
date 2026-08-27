@@ -1362,6 +1362,12 @@ namespace
 	  "own camera takes over. Stopping restores the scene exactly as it was — "
 	  "changes made while playing are not kept.",
 	  "", "editor#play-mode" },
+	{ "viewport.restartPreview", "Restart Live Preview",
+	  "An application has no play mode: its interface is already running in the "
+	  "panel. This builds it again from the saved assets — the same thing a save "
+	  "does automatically, for when the preview has been driven into a state you "
+	  "want out of. Whatever it was holding (typed text, scroll positions) is gone.",
+	  "", "editor#play-mode" },
 	{ "viewport.pause", "Pause",
 	  "Freezes a running session without ending it. Everything stays where it is, "
 	  "so the frame can be inspected in the Details panel.",

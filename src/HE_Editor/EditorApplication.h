@@ -293,6 +293,9 @@ struct AppContext
 	// "are we playing?" to decide whether the in-game UI owns the pointer must
 	// ask this as well, or the preview would be a picture you cannot click.
 	bool appLivePreview = false;
+	// Rebuild that preview from the saved assets. Bound only in an application
+	// project; the viewport toolbar's transport calls it instead of play/stop.
+	std::function<void()> restartAppPreview;
 	// Transport pause. Meaningful only while playing, and always false outside it.
 	bool isPaused  = false;
 	// Post-PIE report: the warnings/errors captured during the last play session
@@ -724,6 +727,20 @@ private:
 	// UI, and comparing paths says so without a second "project changed" signal
 	// to keep in sync. Empty = nothing started.
 	std::string m_appUiStartedFor;
+	// An application's live preview has to pick up edits. Until the state-preserving
+	// hot reload exists (docs/he-apps-plan.md E2 Stufe 3), "picking up an edit" means
+	// tearing the preview down and building it again — correct by construction, at
+	// the cost of the state it was holding.
+	//
+	// Set from the asset-saved hook and from the GameInstance commit, CONSUMED at
+	// the frame boundary: both of those fire from inside a save, and destroying the
+	// widget tree while the thing that triggered the save is still walking it is a
+	// crash waiting for a big enough project.
+	bool m_appPreviewRestartPending = false;
+	// Tear the application preview down and start it again: OnShutdown, drop every
+	// widget, re-register the current GameInstance graph, OnInit. No-op outside an
+	// application project.
+	void restartAppPreview();
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight
