@@ -106,7 +106,8 @@ namespace HE
         AnimatorStateMachine, // authored states/transitions graph, referenced by AnimatorStateMachineComponent
         StructType,       // user-defined struct (named typed fields) — see HE::TypeRegistry
         EnumType,         // user-defined enum (named int-backed entries) — see HE::TypeRegistry
-        SaveGameTemplate  // savegame field schema (typed fields + defaults), consumed by HE::api::save
+        SaveGameTemplate, // savegame field schema (typed fields + defaults), consumed by HE::api::save
+        Theme             // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
     };
 
     // Does this kind of asset travel over a collaboration session?
@@ -142,6 +143,10 @@ namespace HE
             case AssetType::StructType:
             case AssetType::EnumType:
             case AssetType::SaveGameTemplate:
+            // Authored, small, and the one asset a whole team looks at while it
+            // is being changed — a theme edit is exactly what two people want to
+            // see land live.
+            case AssetType::Theme:
                 return true;
 
             case AssetType::StaticMesh:

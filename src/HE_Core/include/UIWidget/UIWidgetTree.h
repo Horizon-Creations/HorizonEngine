@@ -1,5 +1,6 @@
 #pragma once
 #include <UIWidget/UIElement.h>
+#include <UIWidget/UITheme.h>
 #include <Types/Defines.h>
 #include <memory>
 #include <string>
@@ -224,6 +225,23 @@ HE_API bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
 // uiElementRect so the rects already reflect the new sizes; cheap enough to run
 // each frame (only text elements with AutoSize on do any work).
 HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = nullptr);
+
+// ── Resolve theme roles into ordinary colours ────────────────────────────────
+// Every property an element bound to a role (see UIElement::themeRoles) is
+// ASSIGNED the role's colour for `mode`. Called when a widget is created, when
+// the theme changes and when light/dark flips — and nowhere per frame.
+//
+// Assignment rather than lookup-at-draw is the whole design: after this the
+// runtime, the designer's preview, the asset thumbnails and the software
+// rasterizer all see themed colours through the plain field reads they already
+// do, and none of them needs to know a theme exists. Resolving inside the
+// extractor instead would theme the runtime and leave the designer showing
+// something else — the exact split that has bitten this panel twice.
+//
+// Returns how many properties were written, which is what a caller uses to
+// decide whether anything needs redrawing.
+HE_API int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode);
+HE_API int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode);
 
 // Measure every scroll box's content and clamp its offset to what there is to
 // scroll. Run once per frame after auto-size and before the rects are used —

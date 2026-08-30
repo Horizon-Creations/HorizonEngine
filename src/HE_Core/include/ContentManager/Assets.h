@@ -366,6 +366,15 @@ struct SaveGameTemplateAsset : public RuntimeAsset
 	std::string json;
 };
 
+// What an application looks like: colour roles in light and dark, size steps,
+// shadows. JSON in the same shape HE::uiThemeToJson writes (docs/he-apps-plan.md
+// D1) — stored as text like every other authored graph, so a merge conflict in
+// it is readable.
+struct ThemeAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;

@@ -404,6 +404,35 @@ void uiSetAnchorInsetsY(UIElement& e, float top, float bottom)
     e.posY  = top + e.pivotY * e.sizeY;
 }
 
+int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode)
+{
+    int written = 0;
+    for (const auto& [prop, roleName] : e.themeRoles)
+    {
+        const UIThemeRole role = uiThemeRoleFromName(roleName);
+        // A role that no longer exists leaves the property alone rather than
+        // painting it white: an element bound to a renamed role keeps the last
+        // colour it had, which is visible and fixable, instead of vanishing.
+        if (role == UIThemeRole::COUNT) continue;
+        // Only where the property really is a colour — a binding on a Float
+        // would otherwise write a colour into a number through the generic
+        // setter and produce a size nobody typed.
+        const UIPropValue cur = e.getPropAny(prop);
+        if (cur.type != UIPropType::Color) continue;
+        e.setPropAny(prop, UIPropValue::ofColor(theme.colorFor(role, mode)));
+        ++written;
+    }
+    return written;
+}
+
+int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode)
+{
+    int written = 0;
+    for (auto& ep : tree.elements)
+        if (ep) written += uiApplyTheme(*ep, theme, mode);
+    return written;
+}
+
 void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
 {
     // The width handed over is the one the anchor already decides. Where the
@@ -744,6 +773,14 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         o["shadowBlur"]    = e.shadowBlur;
         o["shadowOffset"]  = { e.shadowOffsetX, e.shadowOffsetY };
     }
+    // Only when something IS bound, like every optional field here — an element
+    // that decided its own colours saves byte-identically to before themes.
+    if (!e.themeRoles.empty())
+    {
+        nlohmann::json roles = nlohmann::json::object();
+        for (const auto& [prop, role] : e.themeRoles) roles[prop] = role;
+        o["themeRoles"] = std::move(roles);
+    }
     if (e.innerShadow)
     {
         o["innerShadow"]      = true;
@@ -821,6 +858,10 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     if (const auto so = o.find("shadowOffset");
         so != o.end() && so->is_array() && so->size() == 2)
     { e->shadowOffsetX = (*so)[0].get<float>(); e->shadowOffsetY = (*so)[1].get<float>(); }
+    if (const auto roles = o.find("themeRoles"); roles != o.end() && roles->is_object())
+        for (auto it = roles->begin(); it != roles->end(); ++it)
+            if (it.value().is_string())
+                e->setThemeRole(it.key(), it.value().get<std::string>());
     e->innerShadow     = o.value("innerShadow", false);
     e->innerShadowBlur = o.value("innerShadowBlur", e->innerShadowBlur);
     if (const auto ic = o.find("innerShadowColor");

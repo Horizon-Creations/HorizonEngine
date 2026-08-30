@@ -291,6 +291,43 @@ public:
     glm::vec4 innerShadowColor{ 0.0f, 0.0f, 0.0f, 0.45f };
     float     innerShadowBlur = 6.0f;
 
+    // ── Bound to the theme ───────────────────────────────────────────────────
+    // Property name → theme role name, for the properties whose value should
+    // come from the theme rather than from a literal ("Color" → "Surface",
+    // "Text Color" → "MutedText"). Empty for every element authored before
+    // themes existed, and empty is what "I decided this colour myself" means.
+    //
+    // A generic map rather than a companion field per colour, because the
+    // surface colour is called something different on every type ("Color",
+    // "Tint", "Normal Color", "Back Color"): a per-field member would mean
+    // touching all six types and would still miss the seventh.
+    //
+    // Resolved by ASSIGNMENT, not per frame: uiApplyTheme writes the role's
+    // colour into the ordinary property, so the runtime, the designer preview,
+    // the thumbnails and the software renderer all get themed colours through
+    // the field reads they already do. One consequence worth knowing: a script
+    // that writes a literal into a bound property is overwritten the next time
+    // the theme or the mode changes.
+    std::vector<std::pair<std::string, std::string>> themeRoles;
+    // What the map says for `prop`, or an empty string.
+    const std::string& themeRoleFor(const std::string& prop) const
+    {
+        static const std::string none;
+        for (const auto& [p, r] : themeRoles) if (p == prop) return r;
+        return none;
+    }
+    // Bind (role non-empty) or unbind (role empty).
+    void setThemeRole(const std::string& prop, const std::string& role)
+    {
+        for (auto it = themeRoles.begin(); it != themeRoles.end(); ++it)
+            if (it->first == prop)
+            {
+                if (role.empty()) themeRoles.erase(it); else it->second = role;
+                return;
+            }
+        if (!role.empty()) themeRoles.emplace_back(prop, role);
+    }
+
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
     // between the filling children in proportion. Ignored everywhere else, and
@@ -452,6 +489,7 @@ protected:
         dst.gradient = gradient; dst.gradientColor = gradientColor;
         dst.gradientAngle = gradientAngle;
         dst.gradientShape = gradientShape;
+        dst.themeRoles = themeRoles;
         dst.shadow = shadow; dst.shadowColor = shadowColor;
         dst.shadowBlur = shadowBlur;
         dst.shadowOffsetX = shadowOffsetX; dst.shadowOffsetY = shadowOffsetY;

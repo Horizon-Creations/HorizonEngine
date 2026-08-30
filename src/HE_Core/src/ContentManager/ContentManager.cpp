@@ -443,6 +443,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_saveTemplateAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::Theme:
+	{
+		ThemeAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_THEM))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_themeAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -1536,6 +1543,13 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			w.addChunk(HAsset::CHUNK_SGTP, a.json.data(), a.json.size());
 		break;
 	}
+	case HE::AssetType::Theme:
+	{
+		auto& a = static_cast<ThemeAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_THEM, a.json.data(), a.json.size());
+		break;
+	}
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
@@ -1717,6 +1731,8 @@ const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { 
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
+const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
+ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const SaveGameTemplateAsset* ContentManager::getSaveGameTemplate(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_saveTemplateAssets, id); }
 SaveGameTemplateAsset*       ContentManager::getSaveGameTemplateMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_saveTemplateAssets, id); }
 const StructTypeAsset*    ContentManager::getStructType(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_structTypeAssets, id); }
@@ -1814,6 +1830,7 @@ HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       {
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 HE::UUID ContentManager::registerStructType(StructTypeAsset asset) { return registerRuntimeAsset(m_structTypeAssets, std::move(asset), HE::AssetType::StructType); }
 HE::UUID ContentManager::registerSaveGameTemplate(SaveGameTemplateAsset asset) { return registerRuntimeAsset(m_saveTemplateAssets, std::move(asset), HE::AssetType::SaveGameTemplate); }
+HE::UUID ContentManager::registerTheme(ThemeAsset asset) { return registerRuntimeAsset(m_themeAssets, std::move(asset), HE::AssetType::Theme); }
 HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }

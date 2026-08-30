@@ -31,6 +31,7 @@ add_library(HorizonCore SHARED
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
+	src/UIWidget/UITheme.cpp
 	src/UIWidget/UIWidgetBinding.cpp
 	src/HorizonCode/HorizonCode.cpp
 	src/HorizonCode/HorizonCodeRuntime.cpp
