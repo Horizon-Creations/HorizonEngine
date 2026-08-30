@@ -25,7 +25,8 @@
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
 #include <HorizonRendering/PreviewFraming.h>  // shared thumbnail/preview camera + framing constants
 #include <material/PreviewMesh.h>             // procedural sphere/cube/plane for material tiles
-#include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
+#include "Backends/D3D_Shared/HlslSources.h"
+#include "Backends/D3D_Shared/SkyCoreHlsl.h"  // Himmelskern aus shaders/sky_core.glsl, nach HLSL uebersetzt
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -1961,7 +1962,11 @@ struct D3D12RendererImpl
             return true;
         };
         ComPtr<ID3DBlob> vsB, psB;
-        const std::string skyPS = std::string(kSkyParamsHLSL) + kSkyFuncHLSL + kSkyPSHLSL12;
+        // Wie in D3D11: der Himmelspass bekommt den uebersetzten Kern aus
+        // shaders/sky_core.glsl, der Szenenpass behaelt kSkyFuncHLSL (drei
+        // skyColor-Aufrufe pro Fragment, 558 statt 190 Slots).
+        const std::string skyPS =
+            std::string(kSkyParamsHLSL) + SkyCoreHLSL() + kSkyPSHLSL12;
         if (!compile(kSkyVSHLSL, "VSSky", "vs_5_0", vsB)) return false;
         if (!compile(skyPS, "PSSky", "ps_5_0", psB)) return false;
 

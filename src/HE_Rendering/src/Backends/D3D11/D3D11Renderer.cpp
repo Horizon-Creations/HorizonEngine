@@ -27,7 +27,8 @@
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include <HorizonRendering/PreviewFraming.h>  // shared thumbnail/preview camera + framing constants
 #include <material/PreviewMesh.h>             // procedural sphere/cube/plane for material tiles
-#include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
+#include "Backends/D3D_Shared/HlslSources.h"
+#include "Backends/D3D_Shared/SkyCoreHlsl.h"  // Himmelskern aus shaders/sky_core.glsl, nach HLSL uebersetzt
 #include <SDL3/SDL.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -3464,7 +3465,16 @@ struct D3D11RendererImpl
             return true;
         };
         ComPtr<ID3DBlob> vsB, psB;
-        const std::string skyPS_src = std::string(kSkyParamsHLSL) + kSkyFuncHLSL + kSkyPSHLSL;
+        // Der Himmelspass bekommt den KERN aus shaders/sky_core.glsl, nach HLSL
+        // uebersetzt (SkyCoreHlsl.cpp) -- dieselbe Quelle, aus der GL sein Literal
+        // und Vulkan seinen #include zieht. Der Szenenpass unten behaelt vorerst
+        // kSkyFuncHLSL: er ruft skyColor DREIMAL pro Fragment fuer den IBL-Anteil,
+        // und der Kern kostet 12 Sichtstrahl-Schritte mit je 5 Sonnenschritten.
+        // Gemessen mit fxc /T ps_5_0: Himmelspass 241 statt 98 Slots (1 Aufruf),
+        // Szene 558 statt 190 (3 Aufrufe). Der richtige Weg dort ist nicht der
+        // eingebundene Kern, sondern GLs gebackene Himmels-Cubemap (SkyEnvBake.h).
+        const std::string skyPS_src =
+            std::string(kSkyParamsHLSL) + SkyCoreHLSL() + kSkyPSHLSL;
         if (!compile(kSkyVSHLSL, std::strlen(kSkyVSHLSL), "VSSky", "vs_5_0", vsB)) return false;
         if (!compile(skyPS_src.c_str(), skyPS_src.size(), "PSSky", "ps_5_0", psB)) return false;
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &skyVS);

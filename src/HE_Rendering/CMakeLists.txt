@@ -217,6 +217,8 @@ endif()
 if(WIN32)
     add_library(RendererD3D11 STATIC
         src/Backends/D3D11/D3D11Renderer.cpp
+        src/Backends/D3D_Shared/SkyCoreHlsl.cpp
+        src/Backends/D3D_Shared/SkyCoreHlsl.h
         src/Backends/D3D11/D3D11ShaderManager.cpp
         include/Backends/D3D11/D3D11ShaderManager.h)
     target_include_directories(RendererD3D11 PUBLIC
@@ -226,6 +228,11 @@ if(WIN32)
         # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+    # sky_core_glsl.h (erzeugt aus shaders/sky_core.glsl) — SkyCoreHlsl.cpp
+    # uebersetzt denselben Text nach HLSL, damit D3D nicht den dritten
+    # handgepflegten Himmel bekommt.
+    target_include_directories(RendererD3D11 PRIVATE ${HE_SKY_CORE_GEN_DIR})
+    add_dependencies(RendererD3D11 SkyCoreHeader)
     target_link_libraries(RendererD3D11 PRIVATE d3d11 dxgi d3dcompiler glm::glm HorizonCore)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
     # D3D11 backend can build per-material VS/PS from node-graph materials. Propagates
@@ -240,6 +247,8 @@ endif()
 if(WIN32)
     add_library(RendererD3D12 STATIC
         src/Backends/D3D12/D3D12Renderer.cpp
+        src/Backends/D3D_Shared/SkyCoreHlsl.cpp
+        src/Backends/D3D_Shared/SkyCoreHlsl.h
         src/Backends/D3D12/D3D12ShaderManager.cpp
         include/Backends/D3D12/D3D12ShaderManager.h)
     target_include_directories(RendererD3D12 PUBLIC
@@ -249,6 +258,11 @@ if(WIN32)
         # the HLSL they share verbatim. PRIVATE: nothing outside the backend needs it.
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+    # sky_core_glsl.h (erzeugt aus shaders/sky_core.glsl) — SkyCoreHlsl.cpp
+    # uebersetzt denselben Text nach HLSL, damit D3D nicht den dritten
+    # handgepflegten Himmel bekommt.
+    target_include_directories(RendererD3D12 PRIVATE ${HE_SKY_CORE_GEN_DIR})
+    add_dependencies(RendererD3D12 SkyCoreHeader)
     target_link_libraries(RendererD3D12 PRIVATE d3d12 dxgi d3dcompiler glm::glm HorizonCore)
     # A4: shared material-graph shader layer (GLSL→HLSL via glslang/SPIRV-Cross) so the
     # D3D12 backend can build per-material PSOs from node-graph materials. Propagates

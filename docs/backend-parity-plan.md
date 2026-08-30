@@ -1271,3 +1271,68 @@ aus P3c/P3d — der Transport steht ihnen nicht mehr im Weg. Und: eine Erweiteru
 `SkyFrameParams` erreicht **OpenGL nicht automatisch**, weil GL lose Uniforms statt eines
 UBO benutzt; dort muss jedes neue Feld von Hand nachgetragen werden. Da OpenGL die Referenz
 ist, ist das die gefährlichste Richtung — steht jetzt im Header.
+
+---
+
+## STATUS P3a — der analytische Himmel läuft jetzt auf allen fünf Backends
+
+Scheibe 1 hatte den Kern nach `shaders/sky_core.glsl` gezogen und Vulkan daraus gespeist;
+D3D11 und D3D12 zeichneten weiter den alten handgestimmten Gradienten. Das war laut Plan
+„der größte optische Einzelunterschied", und er ist damit geschlossen.
+
+**Warum übersetzt statt gespiegelt.** Genau ein Handspiegel war `kSkyFuncHLSL` — und er ist
+stehengeblieben: 43 Zeilen alter Gradient gegen 173 Zeilen Rayleigh/Mie/Ozon, während der
+Kommentar darüber bis zuletzt behauptete, er spiegele GL „exactly". D3D bekommt den Kern
+jetzt aus derselben Datei wie GL und Vulkan, nur über einen Umweg: GLSL → SPIR-V (glslang)
+→ HLSL SM5.0 (SPIRV-Cross), einmal beim Anlegen des Renderers, danach gecacht
+(`D3D_Shared/SkyCoreHlsl.cpp`).
+
+**Zwei Nachbehandlungen, beide gemessen, nicht vermutet.** SPIRV-Cross emittiert
+`skyColor(inout float3 dir, inout float3 sunDir)`, weil der GLSL-Rumpf seine Parameter
+zuweist. In GLSL sind Parameter per Wert; in HLSL bindet `inout` nur an lvalues, und der
+Szenen-Aufruf übergibt `ray/dist` — einen rvalue. Das `inout` wird gestrichen. Und um die
+drei Funktionen herum steht Gerüst (cbuffer, Ein-/Ausgabestrukturen, Entry-Point), das nur
+existiert, damit überhaupt etwas übersetzt wird; herausgeschnitten wird der Bereich von der
+ersten Funktion bis vor `frag_main()`. Schlägt eines von beidem fehl, fällt die Funktion auf
+`kSkyFuncHLSL` zurück — also auf genau das, was D3D vorher ohnehin zeichnete.
+
+**Kosten, mit fxc `/T ps_5_0` am vollständigen Himmelspass gemessen:**
+
+| | alter Gradient | generierter Kern | |
+|---|---|---|---|
+| D3D11 `PSSky` | 1163 Slots | 1318 Slots | +13 % |
+| D3D12 `PSSky` | 1440 Slots | 1580 Slots | +10 % |
+
+Deutlich milder als die frühere Einzelmessung (241 gegen 98) vermuten ließ: der Himmelspass
+leistet ohnehin genug anderes, dass der Kern relativ wenig ausmacht. Weit unter dem
+ps_5_0-Limit von 4096.
+
+**Abnahme — Kern isoliert, Abstand zu OpenGL:**
+
+| TOD | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| 0.02 Nacht | **0,00 %** / maxdiff 0 | **0,00 %** / maxdiff 0 | 0,00 % / maxdiff 1 |
+| 0.22 Dämmerung | **0,00 %** / maxdiff 1 | **0,00 %** / maxdiff 1 | 0,01 % / maxdiff 1 |
+| 0.25 Aufgang | **0,00 %** / maxdiff 1 | **0,00 %** / maxdiff 1 | 0,05 % / maxdiff 1 |
+| 0.35 Vormittag | 29,76 % / maxdiff 4 | 29,76 % / maxdiff 4 | 29,77 % / maxdiff 4 |
+| 0.50 Mittag | 29,47 % / maxdiff 2 | 29,47 % / maxdiff 2 | 29,48 % / maxdiff 2 |
+
+Die Tageswerte lesen sich mit 29 % hoch und sind es nicht: `maxdiff` 2–4 heißt, der ganze
+Himmel stimmt bis auf ein bis zwei Stufen von 255 — dieselbe Rundungssignatur, die Vulkan
+seit Scheibe 1 zeigt. Bemerkenswert ist, dass D3D den Referenzwert bei Nacht und Dämmerung
+sogar **exakter** trifft als Vulkan.
+
+**Der Validator prüft den generierten Text, nicht eine Attrappe.**
+`validate_embedded_shaders.py` baut denselben Weg mit den CLI-Werkzeugen des Vulkan-SDK nach
+(`glslangValidator` + `spirv-cross`), inklusive Ausschnitt und `inout`-Streichung, und
+übersetzt damit den echten Himmelspass. Weicht das Emissionsformat von SPIRV-Cross ab,
+fällt es dort auf statt im Bild. Ohne Vulkan-SDK fällt die Prüfung auf `kSkyFuncHLSL`
+zurück — dieselbe Entscheidung, die der Renderer trifft.
+
+**Bewusst nicht mitgemacht: der Szenenpass.** `kSceneHLSL` behält `kSkyFuncHLSL`. Er ruft
+`skyColor` dreimal pro Fragment für den IBL-Anteil (ambDiff/ambSpec/fogCol), und der Kern
+kostet 12 Sichtstrahl-Schritte mit je 5 Sonnenschritten. Damit gilt für D3D dieselbe innere
+Schieflage, die auf Vulkan seit Scheibe 1 dokumentiert ist: Himmel integriert,
+Umgebungslicht nicht. Der richtige Ausweg ist auf beiden nicht der eingebundene Kern,
+sondern GLs gebackene `uSkyEnv`-Cubemap (`SkyEnvBake.h`) — sie erspart die 60 Samples pro
+Aufruf ganz. Das gehört zu P4.

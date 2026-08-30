@@ -77,8 +77,8 @@ PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kSkyParamsHLSL",
 HLSL_PRELUDE_OF = {
     "kGiShadowCSHLSL": ["kGiTraversalHLSL"],
     "kGiProbeCSHLSL": ["kGiTraversalHLSL"],
-    "kSkyPSHLSL": ["kSkyParamsHLSL", "kSkyFuncHLSL"],
-    "kSkyPSHLSL12": ["kSkyParamsHLSL", "kSkyFuncHLSL"],  # D3D12s eigene Sky-PS-Kopie
+    "kSkyPSHLSL": ["kSkyParamsHLSL", "@skycore"],
+    "kSkyPSHLSL12": ["kSkyParamsHLSL", "@skycore"],  # D3D12s eigene Sky-PS-Kopie
     "kSceneHLSL": ["kSkyFuncHLSL"],
 }
 GLSL_PRELUDE_OF = {
@@ -145,6 +145,63 @@ def run(cmd: list[str]) -> tuple[bool, str]:
     return r.returncode == 0, out
 
 
+# ── Erzeugte Praeambel: der Himmelskern ──────────────────────────────────────
+# Der D3D-Himmelspass bekommt seinen skyColor() nicht mehr aus einem
+# Stringliteral, sondern uebersetzt aus shaders/sky_core.glsl (SkyCoreHlsl.cpp,
+# zur Laufzeit ueber he::shaderc). extract() findet dafuer nichts, und ohne
+# Ersatz faellt der Shader hier mit "undeclared identifier 'skyColor'" um --
+# also baut die Pruefung denselben Weg mit den CLI-Werkzeugen des Vulkan SDK
+# nach: glslangValidator (GLSL->SPIR-V) und spirv-cross (SPIR-V->HLSL SM5.0).
+#
+# Das ist mehr als eine Attrappe: geprueft wird damit genau der Text, den der
+# Renderer erzeugt, samt der beiden Nachbehandlungen (Ausschnitt zwischen der
+# ersten Funktion und frag_main, und das Streichen von `inout`). Weicht das
+# Emissionsformat von SPIRV-Cross ab, faellt es hier auf statt im Bild.
+SKY_CORE_GLSL = REPO / "src" / "HE_Rendering" / "shaders" / "sky_core.glsl"
+
+
+def build_sky_core_hlsl(tmp: Path) -> str | None:
+    """Spiegelt HE::hlsl::SkyCoreHLSL(). None, wenn die Werkzeuge fehlen."""
+    if not SKY_CORE_GLSL.exists():
+        return None
+    gv = find_tool("GLSLANG_VALIDATOR", ["glslangValidator.exe", "glslangValidator"],
+                   [r"%VULKAN_SDK%\Bin", r"%VULKAN_SDK%\bin", r"C:\VulkanSDK"])
+    sc = find_tool("SPIRV_CROSS", ["spirv-cross.exe", "spirv-cross"],
+                   [r"%VULKAN_SDK%\Bin", r"%VULKAN_SDK%\bin", r"C:\VulkanSDK"])
+    if not gv or not sc:
+        return None
+    wrap = tmp / "skycore_wrap.frag"
+    wrap.write_text(
+        "#version 450\n"
+        "layout(location = 0) in vec2 vNDC;\n"
+        "layout(location = 0) out vec4 FragColor;\n"
+        "layout(set = 0, binding = 0) uniform SkyEnv "
+        "{ mat4 invViewProj; vec3 sunDir; float pad0; } sky;\n"
+        + SKY_CORE_GLSL.read_text(encoding="utf-8", errors="replace")
+        + "\nvoid main()\n{\n"
+          "\tvec4 wp = sky.invViewProj * vec4(vNDC, 1.0, 1.0);\n"
+          "\tFragColor = vec4(skyColor(normalize(wp.xyz / wp.w), sky.sunDir), 1.0);\n"
+          "}\n",
+        encoding="utf-8")
+    spv = tmp / "skycore.spv"
+    if subprocess.run([gv, "-V", str(wrap), "-o", str(spv)],
+                      capture_output=True).returncode != 0:
+        return None
+    out = tmp / "skycore.hlsl"
+    if subprocess.run([sc, str(spv), "--hlsl", "--shader-model", "50",
+                       "--output", str(out)], capture_output=True).returncode != 0:
+        return None
+    h = out.read_text(encoding="utf-8", errors="replace")
+    b = h.find("float2 atmoRaySphere(")
+    e = h.find("\nvoid frag_main(", b) if b >= 0 else -1
+    if b < 0 or e < 0:
+        return None
+    core = h[b:e].replace("inout float3 dir", "float3 dir") \
+                 .replace("inout float3 sunDir", "float3 sunDir")
+    if "inout" in core or "skyColor(" not in core:
+        return None
+    return core
+
 def check_hlsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
     fxc = find_tool("FXC", ["fxc.exe", "fxc"],
                     [r"%ProgramFiles(x86)%\Windows Kits\10\bin", r"%ProgramFiles%\Windows Kits\10\bin"])
@@ -172,6 +229,20 @@ def check_hlsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             continue
         pre, missing = "", None
         for pre_name in HLSL_PRELUDE_OF.get(name, []):
+            # "@skycore" ist keine Stringliteral-Praeambel, sondern der zur Laufzeit
+            # uebersetzte Himmelskern (SkyCoreHlsl.cpp). Ohne Vulkan-SDK laesst er
+            # sich hier nicht nachbauen -- dann wird auf kSkyFuncHLSL zurueckgefallen,
+            # genau wie der Renderer es tut, statt den Shader ungeprueft zu lassen.
+            if pre_name == "@skycore":
+                core = build_sky_core_hlsl(tmp)
+                if core is None:
+                    core = next((v for k, v in strings.items()
+                                 if origin[k] == "kSkyFuncHLSL"), None)
+                    if core is None:
+                        missing = "@skycore (und kein kSkyFuncHLSL als Rueckfall)"
+                        break
+                pre += core
+                continue
             match = [v for k, v in strings.items() if origin[k] == pre_name]
             if not match:
                 missing = pre_name
