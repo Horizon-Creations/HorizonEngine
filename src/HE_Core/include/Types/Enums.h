@@ -28,7 +28,13 @@ namespace HE
         Vulkan,  // 1
         D3D11,   // 2
         D3D12,   // 3
-        Metal,   // 4 — appended last
+        Metal,   // 4
+        // 5 — appended last. Not a GPU backend at all: a CPU rasterizer that
+        // draws NOTHING BUT UI (docs/he-apps-plan.md Block G). It is what an
+        // application with "Advanced Shader Effects" switched off ships with,
+        // so that it needs no GPU, no driver and no shader translation. Every
+        // 3D feature it is asked about, it says no to.
+        Software,
     };
 
     enum class ShaderType : uint8_t

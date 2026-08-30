@@ -100,6 +100,15 @@ namespace
         case RendererBackend::D3D12:
             // Plain window — D3D creates its own swap chain via HWND
             break;
+        case RendererBackend::Software:
+            // A plain window and nothing else: no context, no drawable, no
+            // driver. The software backend blits into the window's own SDL
+            // surface, which is exactly what a window without a graphics API
+            // already has. Deliberately NOT high-density: the surface a CPU
+            // rasterizer fills is the logical one, and asking for four times
+            // the pixels would quadruple the work for a blit that is then
+            // downscaled again.
+            break;
         }
 
         m_window = SDL_CreateWindow(

@@ -49,6 +49,28 @@ if(TARGET he_materialshader)
 endif()
 target_compile_definitions(RendererOpenGL PRIVATE HE_RENDERING_BUILD_DLL)
 
+# ─── Software Backend (UI only, no GPU) ────────────────────────────────────────
+# docs/he-apps-plan.md Block G: the renderer an application with "Advanced Shader
+# Effects" switched off ships with. No glad, no OpenGL::GL, no shader compiler —
+# that absence IS the feature, and it is why this is its own library rather than
+# a mode of another one.
+#
+# Split in two: SoftwareRaster is quads-in-pixels-out with no SDL and no
+# IRenderer, so it is unit-testable; SoftwareRenderer is the shell that gets the
+# quads and puts them in a window.
+add_library(RendererSoftware STATIC
+    src/Backends/Software/SoftwareRaster.cpp
+    src/Backends/Software/SoftwareRenderer.cpp
+    include/Backends/Software/SoftwareRaster.h
+    include/Backends/Software/SoftwareRenderer.h)
+target_include_directories(RendererSoftware PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${HE_CORE_INCLUDE}
+)
+target_link_libraries(RendererSoftware PUBLIC HorizonCore PRIVATE glm::glm SDL3::SDL3)
+target_compile_features(RendererSoftware PUBLIC cxx_std_20)
+target_compile_definitions(RendererSoftware PRIVATE HE_RENDERING_BUILD_DLL)
+
 # ─── Vulkan Backend ────────────────────────────────────────────────────────────
 # CACHE INTERNAL so the resolved value is visible to sibling subdirectories
 # (notably src/HE_Editor, which links RendererVulkan and compiles the ImGui
@@ -295,7 +317,7 @@ target_include_directories(HorizonRendering
             ${CMAKE_CURRENT_SOURCE_DIR}/glad/include
 )
 
-set(HR_BACKENDS RendererOpenGL)
+set(HR_BACKENDS RendererOpenGL RendererSoftware)
 if(HE_VULKAN_ENABLED)
     list(APPEND HR_BACKENDS RendererVulkan)
 endif()

@@ -69,6 +69,7 @@ bool backendFromName(const std::string& name, HE::RendererBackend& out)
 	if (name == "D3D11")  { out = HE::RendererBackend::D3D11;  return true; }
 	if (name == "D3D12")  { out = HE::RendererBackend::D3D12;  return true; }
 	if (name == "Metal")  { out = HE::RendererBackend::Metal;  return true; }
+	if (name == "Software") { out = HE::RendererBackend::Software; return true; }
 	return false;
 }
 
@@ -81,6 +82,10 @@ bool backendAvailable(HE::RendererBackend backend)
 	switch (backend)
 	{
 	case HE::RendererBackend::OpenGL: return true;
+	// A CPU rasterizer needs nothing to be present, so it is available wherever
+	// the runtime is — which is what makes it the safe fallback as well as the
+	// deliberate choice.
+	case HE::RendererBackend::Software: return true;
 #ifdef HE_VULKAN_ENABLED
 	case HE::RendererBackend::Vulkan: return true;
 #endif

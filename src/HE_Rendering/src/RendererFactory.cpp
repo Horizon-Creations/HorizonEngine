@@ -1,5 +1,6 @@
 #include <Renderer/RendererFactory.h>
 #include "../include/Backends/OpenGL/OpenGLRenderer.h"
+#include "../include/Backends/Software/SoftwareRenderer.h"
 #ifdef HE_VULKAN_ENABLED
 #include "../include/Backends/Vulkan/VulkanRenderer.h"
 #endif
@@ -17,6 +18,9 @@ std::unique_ptr<IRenderer> RendererFactory::Create(HE::RendererBackend backend)
     switch (backend)
     {
         case HE::RendererBackend::OpenGL: return std::make_unique<OpenGLRenderer>();
+        // No #ifdef: a CPU rasterizer is available on every platform, which is
+        // the whole point of it.
+        case HE::RendererBackend::Software: return std::make_unique<SoftwareRenderer>();
 #ifdef HE_VULKAN_ENABLED
         case HE::RendererBackend::Vulkan: return std::make_unique<VulkanRenderer>();
 #endif

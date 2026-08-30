@@ -19,6 +19,7 @@ const char* rhiName(HE::RendererBackend api)
 		case HE::RendererBackend::D3D11:  return "D3D11";
 		case HE::RendererBackend::D3D12:  return "D3D12";
 		case HE::RendererBackend::Vulkan: return "Vulkan";
+		case HE::RendererBackend::Software: return "Software";
 		default:                          return "unknown";
 	}
 }

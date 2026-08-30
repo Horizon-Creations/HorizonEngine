@@ -161,6 +161,7 @@ std::string getRHIName(HE::RendererBackend backend)
 	case HE::RendererBackend::D3D12: return "D3D12";
 	case HE::RendererBackend::Vulkan: return "Vulkan";
 	case HE::RendererBackend::Metal: return "Metal";
+	case HE::RendererBackend::Software: return "Software";
 	default: return "Unknown";
 	}
 }

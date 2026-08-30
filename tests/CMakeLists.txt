@@ -72,6 +72,7 @@ add_executable(he_tests
     test_particles.cpp
     test_ui.cpp
     test_ui_widgets.cpp
+    test_software_raster.cpp
     test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp
@@ -122,6 +123,11 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
+    # The software UI rasterizer, compiled in for the same reason as the culler:
+    # it is quads-in-pixels-out with no SDL, no window and no IRenderer, so what
+    # the UI style vocabulary ACTUALLY draws is answerable headless — the one
+    # thing about "Schicht 0" that used to need a GPU and a pair of eyes.
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRaster.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
