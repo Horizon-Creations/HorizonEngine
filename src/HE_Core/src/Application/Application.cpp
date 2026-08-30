@@ -243,6 +243,31 @@ namespace HE
 			// message can be lined up against a profiler capture or a video.
 			HE::Log::setFrameNumber(++m_frameIndex);
 
+			// ── HE_EXIT_AFTER_FRAMES: boot, draw, leave ─────────────────────
+			// The one thing no unit test in this repository covers is STARTING:
+			// the window, the renderer, the pak, the GameInstance's OnInit. A
+			// null pointer there is a crash before anything a test can assert
+			// on, and it stayed hidden until somebody launched the app by hand —
+			// which is exactly how it was found, once.
+			//
+			// With this set, the application runs that many frames and then asks
+			// to quit, so "does it boot" becomes an exit code a test can read.
+			// Read once and cached: getenv per frame is a syscall for a value
+			// that cannot change.
+			{
+				static const unsigned long long kExitAfter = []() -> unsigned long long
+				{
+					const char* v = std::getenv("HE_EXIT_AFTER_FRAMES");
+					return (v && *v) ? std::strtoull(v, nullptr, 10) : 0ull;
+				}();
+				if (kExitAfter != 0 && m_frameIndex >= kExitAfter)
+				{
+					HE_LOG_INFO(Core, "HE_EXIT_AFTER_FRAMES=%llu reached — leaving cleanly",
+					            kExitAfter);
+					m_running = false;
+				}
+			}
+
 			// Hitch detector. A frame this long is always worth knowing about — it is
 			// usually a synchronous asset load, a shader compile or a GC-like stall in
 			// a script. Throttled so a systematically slow scene logs once a second

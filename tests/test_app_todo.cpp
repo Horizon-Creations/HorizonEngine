@@ -7,7 +7,11 @@
 #include <Hpak/ProjectExporter.h>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <thread>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -311,18 +315,20 @@ TEST_CASE("Todo app: rows appear, carry their text, and delete themselves")
 // It leaves the export behind on purpose: the idle-CPU half of the acceptance
 // needs a running binary and a clock, which is not a unit test's job. The path
 // is printed so it can be launched by hand or by a script.
-TEST_CASE("Todo app: it exports as a software build with no scene")
+// Export the same little application in one of its two flavours. Both go through
+// the SAME code, because "the second one rots" is exactly what the plan's risk
+// list warns about and two copies of this would be how it happens.
+//
+// Returns the export directory, or an empty path when there is no deployed
+// runtime to package (a configure without the deploy step).
+static std::filesystem::path exportTodoApp(bool advancedShaderEffects)
 {
     const std::filesystem::path runtimeDir = HE_TEST_GAME_RUNTIME_DIR;
-    if (!std::filesystem::is_directory(runtimeDir))
-    {
-        MESSAGE("no deployed game runtime at " << runtimeDir.string()
-                << " — the packaging half of this test is skipped");
-        return;
-    }
+    if (!std::filesystem::is_directory(runtimeDir)) return {};
 
-    const auto proj = std::filesystem::temp_directory_path() / "he_todo_project";
-    const auto out  = std::filesystem::temp_directory_path() / "he_todo_export";
+    const std::string tag = advancedShaderEffects ? "advanced" : "software";
+    const auto proj = std::filesystem::temp_directory_path() / ("he_todo_project_" + tag);
+    const auto out  = std::filesystem::temp_directory_path() / ("he_todo_export_" + tag);
     std::filesystem::remove_all(proj);
     std::filesystem::remove_all(out);
     std::filesystem::create_directories(proj / "UI");
@@ -359,16 +365,21 @@ TEST_CASE("Todo app: it exports as a software build with no scene")
         REQUIRE(gi.connect(createId, 2, showId, 2));
     }
 
-    // What the export dialog would have put in for an application with Advanced
-    // Shader Effects switched off. Driving the exporter directly means this test
-    // covers the exporter, NOT the dialog's own handoff — that stays the
-    // dialog's business.
-    nlohmann::json cfg;
-    cfg["CustomConfig"] = nlohmann::json::array({
-        nlohmann::json{ { "Key", "GameBackend" }, { "Value", "Software" } },
+    // What the export dialog would have put in. Advanced OFF ships the software
+    // renderer by name; Advanced ON says nothing about the backend and takes the
+    // platform's own — which is the whole difference between the two flavours,
+    // and the reason both have to be launched.
+    //
+    // Driving the exporter directly means this covers the EXPORTER, not the
+    // dialog's own handoff; that stays the dialog's business.
+    nlohmann::json entries = nlohmann::json::array({
         nlohmann::json{ { "Key", "GameWindowWidth" }, { "Value", "640" } },
         nlohmann::json{ { "Key", "GameWindowHeight" }, { "Value", "480" } },
     });
+    if (!advancedShaderEffects)
+        entries.push_back(nlohmann::json{ { "Key", "GameBackend" }, { "Value", "Software" } });
+    nlohmann::json cfg;
+    cfg["CustomConfig"] = std::move(entries);
 
     ExportSettings settings;
     // The two flags that make the shipped build an APPLICATION rather than a
@@ -377,7 +388,7 @@ TEST_CASE("Todo app: it exports as a software build with no scene")
     // first thing this test caught: the exported app started Jolt and added a
     // free-fly camera to a world it does not have.
     settings.appProject           = true;
-    settings.advancedShaderEffects = false;
+    settings.advancedShaderEffects = advancedShaderEffects;
     settings.gameRuntimeDir = runtimeDir;
     settings.bundlePython   = false;      // a HorizonCode app carries no interpreter
     settings.compress       = true;
@@ -388,8 +399,15 @@ TEST_CASE("Todo app: it exports as a software build with no scene")
         /*startupSceneBinary=*/{}, /*extraScenes=*/{},
         /*gameInstanceJson=*/HorizonCode::toJson(gi));
     REQUIRE_MESSAGE(res.success, res.errorMessage);
-    CHECK(res.assetsPacked >= 1);
-    CHECK(res.binaryFilesCopied > 0);
+    REQUIRE(res.assetsPacked >= 1);
+    REQUIRE(res.binaryFilesCopied > 0);
+    return out;
+}
+
+TEST_CASE("Todo app: it exports as a software build with no scene")
+{
+    const auto out = exportTodoApp(/*advancedShaderEffects=*/false);
+    if (out.empty()) { MESSAGE("no deployed game runtime — skipped"); return; }
 
     // The shipped configuration says Software, so the packaged app needs no GPU
     // — the line that makes the checkbox at project creation mean something.
@@ -416,10 +434,30 @@ TEST_CASE("Todo app: it exports as a software build with no scene")
         CHECK(n.find("python") == std::string::npos);
         CHECK(n.find("Python") == std::string::npos);
     }
+    MESSAGE("software build left at " << out.string());
+}
 
-    MESSAGE("exported app left at " << out.string()
-            << (res.executablePath.empty() ? std::string()
-                                           : ("  (run " + res.executablePath.string() + ")")));
+TEST_CASE("Todo app: the other flavour ships the platform's own renderer")
+{
+    const auto out = exportTodoApp(/*advancedShaderEffects=*/true);
+    if (out.empty()) { MESSAGE("no deployed game runtime — skipped"); return; }
+
+    // With Advanced Shader Effects ON the config names NO backend, which is how
+    // "take the platform's own" is said — Metal on macOS, OpenGL elsewhere. An
+    // absent key is a different answer from a named one, and this is the pair of
+    // lines that keeps the two flavours apart.
+    bool foundConfig = false;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(out))
+    {
+        if (!entry.is_regular_file() || entry.path().filename() != "config.json") continue;
+        foundConfig = true;
+        std::ifstream in(entry.path());
+        nlohmann::json j; in >> j;
+        for (const auto& kv : j.at("CustomConfig"))
+            CHECK(kv.at("Key") != "GameBackend");
+    }
+    CHECK(foundConfig);
+    MESSAGE("advanced build left at " << out.string());
 }
 
 // ── What the acceptance found ────────────────────────────────────────────────
@@ -464,4 +502,85 @@ TEST_CASE("A long frame does not leave a backlog that grows forever")
     logic.n = &after;
     quiet.tick(world, &logic, 1.0f / 60.0f);
     CHECK(after == 1);           // no backlog was silently kept for later
+}
+
+// ── The start test the risk list has been asking for ─────────────────────────
+// docs/he-apps-plan.md's risk list: "ab Tag eins ein Test, der eine
+// App-Konfiguration headless hochfährt, und ab Welle 2 muss er BEIDE
+// App-Ausprägungen fahren, sonst verrottet eine davon."
+//
+// It did not exist, and the gap was not theoretical: a theme change put a null
+// dereference in OnInit, every unit test stayed green, the build was clean, and
+// both exported applications crashed before their first frame. Nothing in this
+// suite touches STARTING — the window, the renderer, the pak, the GameInstance's
+// OnInit — because all of it happens before there is anything to assert on.
+//
+// So the assertion is the exit code. HE_EXIT_AFTER_FRAMES makes the application
+// draw a few frames and leave; a crash on the way is a signal instead, and the
+// wait below is what turns "it hung" into a failure rather than a stuck suite.
+namespace
+{
+    // Run `exe` in its own directory with a frame budget. Returns the exit code,
+    // -1 when it could not be started, -2 when it outlived the deadline.
+    int bootOnce(const std::filesystem::path& exe, int frames, int timeoutSeconds)
+    {
+        const std::string dir = exe.parent_path().string();
+        // Redirected to a log beside the binary, so a failure leaves something to
+        // read rather than a bare number.
+        const std::string log = (exe.parent_path() / "boot.log").string();
+        const std::string cmd =
+            "cd " + dir + " && HE_EXIT_AFTER_FRAMES=" + std::to_string(frames) +
+            " ./" + exe.filename().string() + " > " + log + " 2>&1 & echo $!";
+        std::string pid;
+        if (FILE* p = popen(cmd.c_str(), "r"))
+        {
+            char buf[64] = {};
+            if (std::fgets(buf, sizeof buf, p)) pid = buf;
+            pclose(p);
+        }
+        while (!pid.empty() && (pid.back() == '\n' || pid.back() == ' ')) pid.pop_back();
+        if (pid.empty()) return -1;
+
+        // Poll rather than wait(): the shell above is not our child, so waitpid
+        // has nothing to wait on. kill(pid, 0) answers "is it still there".
+        for (int i = 0; i < timeoutSeconds * 10; ++i)
+        {
+            if (std::system(("kill -0 " + pid + " 2>/dev/null").c_str()) != 0)
+            {
+                // Gone. Its own last line says whether it left on purpose.
+                std::ifstream in(log);
+                const std::string text((std::istreambuf_iterator<char>(in)),
+                                       std::istreambuf_iterator<char>());
+                return text.find("leaving cleanly") != std::string::npos ? 0 : 1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::system(("kill -9 " + pid + " 2>/dev/null").c_str());
+        return -2;
+    }
+}
+
+TEST_CASE("Both app flavours actually start")
+{
+    for (const bool advanced : { false, true })
+    {
+        CAPTURE(advanced);
+        const auto out = exportTodoApp(advanced);
+        if (out.empty()) { MESSAGE("no deployed game runtime — skipped"); return; }
+        const auto exe = out / "HorizonGame";
+        if (!std::filesystem::exists(exe))
+        {
+            MESSAGE("no runnable binary for this platform — skipped");
+            return;
+        }
+
+        // Thirty frames is past everything that happens once: the window, the
+        // renderer, the pak mount, the theme, OnInit and the first widget.
+        const int code = bootOnce(exe, /*frames=*/30, /*timeoutSeconds=*/40);
+        if (code == -1) { MESSAGE("could not launch — skipped"); return; }
+        INFO("read " << (out / "boot.log").string());
+        CHECK_MESSAGE(code != -2, "the application never finished 30 frames");
+        CHECK_MESSAGE(code == 0, "the application did not reach a clean exit — it "
+                                 "crashed or quit early during startup");
+    }
 }
