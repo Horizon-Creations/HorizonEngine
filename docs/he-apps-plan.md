@@ -1143,7 +1143,38 @@ und gehört zu D2.
 
 **Als Nächstes:** der Rest von D1, dann D2 (Komponentenbibliothek) oder A3b.
 
-**Weiterhin offen, aus der Risikoliste:** die Abnahme für die Ausprägung Advanced **an**.
+### Der Starttest, und was er sofort gefunden hat (27.08.2026)
+
+Die Risikoliste fordert seit Tag eins einen Test, der eine App-Konfiguration hochfährt, ab Welle 2
+**beide** Ausprägungen. Es gab ihn nicht, und die Lücke war nicht theoretisch: eine Theme-Änderung
+setzte eine Null-Dereferenzierung in `OnInit` (`m_world->widgets()`, bevor es die Welt gibt), alle
+Unittests blieben grün, der Build war sauber, und **beide** exportierten Anwendungen stürzten vor
+dem ersten Frame ab. Nichts in dieser Suite fasst das **Starten** an, weil alles davon passiert,
+bevor es etwas zum Prüfen gibt.
+
+Zwei Schalter machen es prüfbar: `HE_EXIT_AFTER_FRAMES` lässt die Anwendung n Frames zeichnen und
+sauber gehen — „startet sie" wird zu einem Exit-Code —, und `HE_CAPTURE_FRAME`/`HE_CAPTURE_PATH`
+schreibt einen Frame als PPM heraus. Der Test exportiert beide Ausprägungen durch **dieselbe**
+Funktion (zwei Kopien wären genau, wie eine verrottet), startet jede mit Deadline und prüft
+Exit-Code **und** Pixel.
+
+**Der Fund, den er sofort erbrachte.** Der Zweig, der im App-Modus Bloom, SSAO, GI, SSR, AA, den
+Forward-Pfad und den Himmel abschaltet, stand **innerhalb** von `if (m_world && !m_appMode)` — eine
+Bedingung, verschachtelt in ihrer eigenen Verneinung. Kein Compiler warnt, kein Test schlug fehl,
+und die Wirkung war: eine Anwendung sagte dem Renderer **nie etwas**, behielt dessen Vorgaben und
+zeichnete Himmel, Wolken und Boden hinter ihrer Oberfläche — samt der vollen Nachbearbeitungskette
+über eine leere Welt, also genau dem, was vor Tagen als „exportierte App lagt" gemeldet und
+angeblich behoben wurde. Behoben war nur der Text.
+
+**Und eine Lehre über das Prüfen selbst.** Die erste Aufnahme zeigte vor und nach dem Fix
+dasselbe Bild — weil die Testseite jeden Pixel bedeckte und damit über das, was dahinter liegt,
+nichts sagen konnte. Der Starttest exportiert deshalb eine Variante, deren Hintergrund einen Rand
+frei lässt: **„ist da etwas hinter der Oberfläche" ist von einem Screenshot, der alles bedeckt,
+nicht zu beantworten.** Gegengeprüft, beide Male: Fix raus → Eckpixel 114,127,152, Test rot; Fix
+rein → schwarz, Test grün.
+
+**Weiterhin offen, aus der Risikoliste:** die Ausprägung Advanced **an** hat jetzt Start und
+Pixelprüfung, aber kein Widget mit einem UI-**Material** — der einzige Grund, warum es sie gibt.
 
 **Frühere Notiz (erledigt):** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier

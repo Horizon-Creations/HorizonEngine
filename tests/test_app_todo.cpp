@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -321,12 +322,19 @@ TEST_CASE("Todo app: rows appear, carry their text, and delete themselves")
 //
 // Returns the export directory, or an empty path when there is no deployed
 // runtime to package (a configure without the deploy step).
-static std::filesystem::path exportTodoApp(bool advancedShaderEffects)
+// `fullBleed` false insets the background so the window's own clear colour is
+// visible at the edges. That is not decoration: with a page that covers every
+// pixel, "is something being drawn BEHIND the interface" is unanswerable from a
+// screenshot — which is exactly how a sky went unnoticed twice, once by the user
+// and once by me capturing a frame that could not show it.
+static std::filesystem::path exportTodoApp(bool advancedShaderEffects,
+                                           bool fullBleed = true)
 {
     const std::filesystem::path runtimeDir = HE_TEST_GAME_RUNTIME_DIR;
     if (!std::filesystem::is_directory(runtimeDir)) return {};
 
-    const std::string tag = advancedShaderEffects ? "advanced" : "software";
+    const std::string tag = std::string(advancedShaderEffects ? "advanced" : "software")
+                          + (fullBleed ? "" : "_probe");
     const auto proj = std::filesystem::temp_directory_path() / ("he_todo_project_" + tag);
     const auto out  = std::filesystem::temp_directory_path() / ("he_todo_export_" + tag);
     std::filesystem::remove_all(proj);
@@ -347,8 +355,10 @@ static std::filesystem::path exportTodoApp(bool advancedShaderEffects)
         const int bg = page.add(HE::UIWidgetType::Panel);
         HE::UIElement& e = *page.find(bg);
         e.name = "Background";
-        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);   // the whole window, always
-        e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 0.0f;
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);   // the whole window…
+        e.posX = e.posY = 0.0f;
+        // …unless the caller wants a border of untouched pixels to look at.
+        e.sizeX = e.sizeY = fullBleed ? 0.0f : -120.0f;
         e.setThemeRole("Color", "Background");
     }
     {
@@ -559,8 +569,16 @@ namespace
         // Redirected to a log beside the binary, so a failure leaves something to
         // read rather than a bare number.
         const std::string log = (exe.parent_path() / "boot.log").string();
+        // …and a captured frame beside it, so the test can ask what was DRAWN
+        // and not only whether the process survived. That distinction is not
+        // academic: an app-mode branch nested inside its own negation left every
+        // post-processing setting and the sky untouched, the application started
+        // perfectly, and it rendered an atmosphere behind its interface.
+        const std::string shot = (exe.parent_path() / "boot.ppm").string();
         const std::string cmd =
             "cd " + dir + " && HE_EXIT_AFTER_FRAMES=" + std::to_string(frames) +
+            " HE_CAPTURE_FRAME=" + std::to_string(frames > 4 ? frames - 4 : 1) +
+            " HE_CAPTURE_PATH=" + shot +
             " ./" + exe.filename().string() + " > " + log + " 2>&1 & echo $!";
         std::string pid;
         if (FILE* p = popen(cmd.c_str(), "r"))
@@ -591,12 +609,34 @@ namespace
     }
 }
 
+namespace
+{
+    // One pixel out of a captured PPM. Enough for the questions worth asking of
+    // a frame in a test: what is in the corner, what is in the middle.
+    struct Rgb { int r = -1, g = -1, b = -1; };
+    Rgb pixelAt(const std::filesystem::path& ppm, int x, int y)
+    {
+        std::ifstream in(ppm, std::ios::binary);
+        if (!in) return {};
+        std::string magic; int w = 0, h = 0, maxv = 0;
+        in >> magic >> w >> h >> maxv;
+        if (magic != "P6" || w <= 0 || h <= 0) return {};
+        in.get();                              // the single whitespace before the data
+        if (x < 0 || y < 0 || x >= w || y >= h) return {};
+        in.seekg(static_cast<std::streamoff>(y) * w * 3 + static_cast<std::streamoff>(x) * 3,
+                 std::ios::cur);
+        unsigned char px[3] = {};
+        in.read(reinterpret_cast<char*>(px), 3);
+        return { px[0], px[1], px[2] };
+    }
+}
+
 TEST_CASE("Both app flavours actually start")
 {
     for (const bool advanced : { false, true })
     {
         CAPTURE(advanced);
-        const auto out = exportTodoApp(advanced);
+        const auto out = exportTodoApp(advanced, /*fullBleed=*/false);
         if (out.empty()) { MESSAGE("no deployed game runtime — skipped"); return; }
         const auto exe = out / "HorizonGame";
         if (!std::filesystem::exists(exe))
@@ -613,5 +653,25 @@ TEST_CASE("Both app flavours actually start")
         CHECK_MESSAGE(code != -2, "the application never finished 30 frames");
         CHECK_MESSAGE(code == 0, "the application did not reach a clean exit — it "
                                  "crashed or quit early during startup");
+
+        // ── …and it drew the application, not a landscape ────────────────────
+        // This page leaves a border of pixels the interface does not cover, so a
+        // corner shows what is BEHIND it. An application draws quads; there
+        // should be nothing back there but the clear. A sky reads as a blue-grey
+        // around (113, 125, 151) — bright, and blue rather than grey.
+        const auto shot = out / "boot.ppm";
+        if (!std::filesystem::exists(shot))
+        {
+            MESSAGE("no frame captured — the pixel check is skipped");
+            continue;
+        }
+        const Rgb corner = pixelAt(shot, 20, 20);
+        INFO("corner pixel " << corner.r << "," << corner.g << "," << corner.b
+             << "  (" << shot.string() << ")");
+        REQUIRE(corner.r >= 0);
+        CHECK_MESSAGE(corner.r < 80, "there is something bright behind the interface "
+                                     "— an application should have nothing there. A sky?");
+        CHECK(std::abs(corner.r - corner.b) < 24);   // grey-ish, not blue
+        CHECK(std::abs(corner.g - corner.b) < 24);
     }
 }
