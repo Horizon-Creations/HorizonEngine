@@ -52,6 +52,12 @@ struct HE_API ExportSettings {
     // events. See docs/he-apps-plan.md A0/A1/A2.
     bool appProject = false;
     bool advancedShaderEffects = true;
+    // The Theme asset the shipped application boots with (content-relative;
+    // empty = the engine's built-in default) and the mode it was asked for
+    // ("System"/"Light"/"Dark"). Both ride in project.hcfg, not config.json —
+    // config.json is settings a player may edit, this is what the project IS.
+    std::string theme;
+    std::string themeMode;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.

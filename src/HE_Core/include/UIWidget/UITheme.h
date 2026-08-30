@@ -45,6 +45,15 @@ enum class UIThemeRole : uint8_t
 
 enum class UIThemeMode : uint8_t { Light = 0, Dark, COUNT };
 
+// What an application was ASKED for, which is not the same as what it resolves
+// to. "System" is the default and the reason this is a separate enum: an
+// application that follows the desktop has no fixed mode, it has a rule — and
+// storing the resolved value instead would make a project that was authored on
+// a dark machine ship as dark for everyone.
+enum class UIThemePreference : uint8_t { System = 0, Light, Dark, COUNT };
+HE_API const char*        uiThemePreferenceName(UIThemePreference p);
+HE_API UIThemePreference  uiThemePreferenceFromName(const std::string& s);
+
 HE_API const char* uiThemeRoleName(UIThemeRole r);
 // Unknown name → COUNT, which every caller reads as "not bound".
 HE_API UIThemeRole uiThemeRoleFromName(const std::string& s);

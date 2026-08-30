@@ -48,6 +48,17 @@ struct HE_API ProjectConfig {
     // flags bit stores the NEGATION: a config written before this existed has
     // the bit clear and must read back as enabled.
     bool         advancedShaderEffects = true;
+
+    // ── The theme the application boots with (docs/he-apps-plan.md D1) ───────
+    // Content-relative path of a Theme asset; empty = the engine's built-in
+    // default. It travels HERE and not in config.json, for the same reason
+    // appMode does: config.json is settings a PLAYER may edit, this is what the
+    // project IS.
+    std::string  theme;
+    // "System", "Light" or "Dark" — what was ASKED for, not what it resolved to.
+    // Empty reads as System. Storing the resolved value would ship whatever mode
+    // the author's machine happened to be in as everyone's fixed mode.
+    std::string  themeMode;
 };
 
 class HE_API ProjectConfigLoader {

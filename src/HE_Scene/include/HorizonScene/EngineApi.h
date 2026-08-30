@@ -317,8 +317,9 @@ namespace widget {
 // reload.
 namespace theme {
     bool        set(Ctx&, const std::string& assetPath);   // false = not found / unreadable
-    void        setMode(Ctx&, const std::string& mode);    // "Light" or "Dark"
-    std::string mode(Ctx&);
+    void        setMode(Ctx&, const std::string& mode);    // "Light", "Dark" or "System"
+    std::string mode(Ctx&);        // what it RESOLVED to: "Light" or "Dark"
+    std::string preference(Ctx&);  // what was ASKED for: + "System"
 }
 
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────

@@ -103,12 +103,13 @@ namespace ScriptApi
 	int  clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& parentName);
 
 	// ── Theme (what the whole application looks like) ───────────────────────
-	// setThemeMode takes "Light"/"Dark" and re-resolves every live widget;
-	// setTheme loads a Theme asset by content-relative path (false = no such
-	// asset or unreadable). getThemeMode answers with the same two words.
+	// setThemeMode takes "Light", "Dark" or "System" — the last is a RULE, not a
+	// colour, and is the default. setTheme loads a Theme asset by
+	// content-relative path (false = no such asset or unreadable).
 	bool setTheme(HorizonWorld& world, ContentManager* content, const std::string& path);
 	void setThemeMode(HorizonWorld& world, const std::string& mode);
-	std::string themeMode(HorizonWorld& world);
+	std::string themeMode(HorizonWorld& world);       // resolved: "Light" or "Dark"
+	std::string themePreference(HorizonWorld& world); // asked for: + "System"
 	// Is the pointer currently over an interactive widget element? The verdict
 	// of the last WidgetManager::processPointer — what gameplay needs to skip a
 	// click that belongs to the menu it just landed in.

@@ -322,16 +322,29 @@ bool setTheme(HorizonWorld& world, ContentManager* content, const std::string& p
 void setThemeMode(HorizonWorld& world, const std::string& mode)
 {
 	// By NAME, like the backend in config.json: "Dark" survives a renumbering of
-	// the enum and reads in a save file, a 1 does neither.
-	if (mode == "Light")      world.widgets().setThemeMode(HE::UIThemeMode::Light);
-	else if (mode == "Dark")  world.widgets().setThemeMode(HE::UIThemeMode::Dark);
-	else HE_LOG_WARN(Script, "theme.setMode: '%s' is neither Light nor Dark — ignored",
-	                 mode.c_str());
+	// the enum and reads in a save file, a 1 does neither. Three words, not two:
+	// "System" is a RULE and not a colour, and an application that follows the
+	// desktop has to be able to say so.
+	if (mode != "Light" && mode != "Dark" && mode != "System")
+	{
+		HE_LOG_WARN(Script, "theme.setMode: '%s' is not Light, Dark or System — ignored",
+		            mode.c_str());
+		return;
+	}
+	world.widgets().setThemePreference(HE::uiThemePreferenceFromName(mode));
 }
 
 std::string themeMode(HorizonWorld& world)
 {
+	// What it RESOLVED to, not what was asked for: a Preferences screen shows
+	// the preference it wrote, and everything else wants to know which of the
+	// two colours is actually on screen.
 	return HE::uiThemeModeName(world.widgets().themeMode());
+}
+
+std::string themePreference(HorizonWorld& world)
+{
+	return HE::uiThemePreferenceName(world.widgets().themePreference());
 }
 
 bool pointerOverUI(HorizonWorld& world) { return world.widgets().pointerOverUI(); }

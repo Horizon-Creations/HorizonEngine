@@ -363,6 +363,40 @@ void GameApplication::OnInit()
 				"HorizonCodeGen library is missing or was rejected — running interpreted");
 	}
 
+	// ── The theme, before anything is on screen ─────────────────────────────
+	// Both halves BEFORE the GameInstance runs: OnInit is where the first widget
+	// is created, and a widget created against the default theme and re-themed a
+	// frame later is a flash of the wrong colours.
+	//
+	// The desktop's own light/dark is asked for here and again on
+	// SDL_EVENT_SYSTEM_THEME_CHANGED, so an application set to "System" follows
+	// it while it runs. Unknown (a platform SDL cannot ask) keeps the dark
+	// default rather than guessing light.
+	{
+		WidgetManager& wm = m_world->widgets();
+		const SDL_SystemTheme sys = SDL_GetSystemTheme();
+		if (sys == SDL_SYSTEM_THEME_LIGHT)     wm.setSystemThemeMode(HE::UIThemeMode::Light);
+		else if (sys == SDL_SYSTEM_THEME_DARK) wm.setSystemThemeMode(HE::UIThemeMode::Dark);
+		wm.setThemePreference(HE::uiThemePreferenceFromName(m_config.themeMode));
+		if (!m_config.theme.empty())
+		{
+			if (const HE::UUID id = contentManager().loadAsset(m_config.theme); id != HE::UUID{})
+				if (const ThemeAsset* a = contentManager().getTheme(id))
+				{
+					HE::UITheme t;
+					if (HE::uiThemeFromJson(a->json, t)) wm.setTheme(t);
+					else HE_LOG_WARN(Core, "GameApplication: theme '%s' is unreadable — "
+					                       "using the built-in default",
+					                 m_config.theme.c_str());
+				}
+			if (wm.theme().name == HE::uiDefaultTheme().name && !m_config.theme.empty())
+				HE_LOG_INFO(Core, "GameApplication: theme '%s'", m_config.theme.c_str());
+		}
+		HE_LOG_INFO(Core, "GameApplication: theme mode %s (asked for %s)",
+		            HE::uiThemeModeName(wm.themeMode()),
+		            HE::uiThemePreferenceName(wm.themePreference()));
+	}
+
 	// App-wide GameInstance: load its graph. Preferred source: packed into the
 	// .hpak (ships with the same codec/encryption/bundle layout); fallback: a loose
 	// GameInstance.hcode next to the exe (dev runs on loose content). Empty → an
@@ -1217,6 +1251,19 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		{
 			m_world->widgets().inputComposition(event.edit.text ? event.edit.text : "",
 			                                    event.edit.start);
+			return true;
+		}
+		// The desktop switched between light and dark while we were running. An
+		// application set to "System" follows it now rather than at the next
+		// start — that is the entire difference between the setting and a
+		// once-at-boot reading.
+		if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED)
+		{
+			const SDL_SystemTheme sys = SDL_GetSystemTheme();
+			if (sys == SDL_SYSTEM_THEME_LIGHT)
+				m_world->widgets().setSystemThemeMode(HE::UIThemeMode::Light);
+			else if (sys == SDL_SYSTEM_THEME_DARK)
+				m_world->widgets().setSystemThemeMode(HE::UIThemeMode::Dark);
 			return true;
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)

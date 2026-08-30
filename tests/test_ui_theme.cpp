@@ -3,11 +3,14 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/WidgetManager.h>
+#include <Hpak/ProjectConfig.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UITheme.h>
 #include <UIWidget/UIWidgetTree.h>
 
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -223,10 +226,10 @@ TEST_CASE("Theme: switching the mode changes what gets drawn")
     const HE::UITheme& t = HE::uiDefaultTheme();
     // Creating it already resolved the role — the magenta literal never reached
     // the screen.
-    wm.setThemeMode(HE::UIThemeMode::Light);
+    wm.setThemePreference(HE::UIThemePreference::Light);
     CHECK(surfaceColor() == t.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Light));
 
-    wm.setThemeMode(HE::UIThemeMode::Dark);
+    wm.setThemePreference(HE::UIThemePreference::Dark);
     CHECK(surfaceColor() == t.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Dark));
 
     // Another theme, same roles: the application looks different without a
@@ -239,6 +242,82 @@ TEST_CASE("Theme: switching the mode changes what gets drawn")
     // event-driven application would otherwise keep showing the old colours
     // until the mouse happened to move.
     wm.consumeVisualDirty();
-    wm.setThemeMode(HE::UIThemeMode::Light);
+    wm.setThemePreference(HE::UIThemePreference::Light);
     CHECK(wm.consumeVisualDirty());
+}
+
+TEST_CASE("Theme: \"follow the system\" is a rule, not a colour")
+{
+    WidgetManager wm;
+    // Default: follow the desktop. Dark until the host says otherwise — a tool
+    // that flashes white on a dark desktop for one frame is the thing this
+    // setting exists to avoid.
+    CHECK(wm.themePreference() == HE::UIThemePreference::System);
+    CHECK(wm.themeMode() == HE::UIThemeMode::Dark);
+
+    wm.setSystemThemeMode(HE::UIThemeMode::Light);
+    CHECK(wm.themeMode() == HE::UIThemeMode::Light);   // followed
+
+    // A fixed preference overrides the desktop, and keeps overriding it.
+    wm.setThemePreference(HE::UIThemePreference::Dark);
+    CHECK(wm.themeMode() == HE::UIThemeMode::Dark);
+    wm.setSystemThemeMode(HE::UIThemeMode::Light);
+    CHECK(wm.themeMode() == HE::UIThemeMode::Dark);
+    // …and what was ASKED for is still what is remembered, so a Preferences
+    // screen shows the choice rather than today's weather.
+    CHECK(wm.themePreference() == HE::UIThemePreference::Dark);
+
+    // Back to following, and it picks the desktop up again straight away.
+    wm.setThemePreference(HE::UIThemePreference::System);
+    CHECK(wm.themeMode() == HE::UIThemeMode::Light);
+
+    // A desktop change that the preference hides is not a reason to redraw: an
+    // event-driven application must not wake up for a colour nobody sees.
+    wm.setThemePreference(HE::UIThemePreference::Dark);
+    wm.consumeVisualDirty();
+    wm.setSystemThemeMode(HE::UIThemeMode::Light);
+    CHECK_FALSE(wm.consumeVisualDirty());
+
+    // Names, both ways, including the ones that are not words we know.
+    CHECK(std::string(HE::uiThemePreferenceName(HE::UIThemePreference::System)) == "System");
+    CHECK(HE::uiThemePreferenceFromName("Light") == HE::UIThemePreference::Light);
+    CHECK(HE::uiThemePreferenceFromName("")      == HE::UIThemePreference::System);
+    CHECK(HE::uiThemePreferenceFromName("Sepia") == HE::UIThemePreference::System);
+}
+
+TEST_CASE("Theme: the project's choice survives project.hcfg")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_theme_hcfg";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    ProjectConfig cfg;
+    cfg.projectName = "Themed";
+    cfg.theme       = "UI/Night.hasset";
+    cfg.themeMode   = "Light";
+    REQUIRE(ProjectConfigLoader::save(dir, cfg));
+    ProjectConfig back;
+    REQUIRE(ProjectConfigLoader::load(dir, back));
+    CHECK(back.theme     == "UI/Night.hasset");
+    CHECK(back.themeMode == "Light");
+
+    // A project that chose nothing keeps emitting the OLD format, so a
+    // user-dropped prebuilt runtime that predates themes still reads it.
+    ProjectConfig plain;
+    plain.projectName = "Plain";
+    REQUIRE(ProjectConfigLoader::save(dir, plain));
+    ProjectConfig plainBack;
+    REQUIRE(ProjectConfigLoader::load(dir, plainBack));
+    CHECK(plainBack.theme.empty());
+    CHECK(plainBack.themeMode.empty());
+    {
+        std::ifstream f(dir / "project.hcfg", std::ios::binary);
+        std::vector<char> bytes((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+        REQUIRE(bytes.size() > 6);
+        uint16_t version = 0;
+        std::memcpy(&version, bytes.data() + 4, sizeof(version));
+        CHECK(version == 2);        // still the version every runtime knows
+    }
+    std::filesystem::remove_all(dir);
 }

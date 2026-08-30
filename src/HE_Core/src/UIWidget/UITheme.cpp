@@ -54,6 +54,25 @@ const char* uiThemeModeName(UIThemeMode m)
     return (i >= 0 && i < kModes) ? kModeNames[i] : "";
 }
 
+const char* uiThemePreferenceName(UIThemePreference p)
+{
+    switch (p)
+    {
+    case UIThemePreference::Light: return "Light";
+    case UIThemePreference::Dark:  return "Dark";
+    default:                       return "System";
+    }
+}
+
+UIThemePreference uiThemePreferenceFromName(const std::string& s)
+{
+    if (s == "Light") return UIThemePreference::Light;
+    if (s == "Dark")  return UIThemePreference::Dark;
+    // Anything else — absent, misspelt, a value from a newer build — is
+    // "follow the desktop", which is the answer that is never wrong.
+    return UIThemePreference::System;
+}
+
 const char* uiThemeSizeName(UIThemeSize s)
 {
     const int i = static_cast<int>(s);

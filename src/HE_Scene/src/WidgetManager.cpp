@@ -285,7 +285,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// Whatever this widget bound to a theme role takes the theme's colour now,
 	// before anything looks at it. Assignment, not lookup-at-draw: from here on
 	// the runtime, the designer and the thumbnails all read plain fields.
-	HE::uiApplyTheme(w.tree, m_theme, m_themeMode);
+	HE::uiApplyTheme(w.tree, m_theme, themeMode());
 
 	// Resolve per-element material references once (paths → UUIDs) and bake each
 	// element's Font asset → a stable atlas key its text emits with (0 = the
@@ -329,15 +329,30 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 void WidgetManager::setTheme(const HE::UITheme& theme)
 {
     m_theme = theme;
-    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, m_themeMode);
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, themeMode());
     m_visualDirty = true;
 }
 
-void WidgetManager::setThemeMode(HE::UIThemeMode mode)
+void WidgetManager::setThemePreference(HE::UIThemePreference pref)
 {
-    if (mode >= HE::UIThemeMode::COUNT || mode == m_themeMode) return;
-    m_themeMode = mode;
-    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, m_themeMode);
+    if (pref >= HE::UIThemePreference::COUNT) return;
+    const HE::UIThemeMode before = themeMode();
+    m_themePref = pref;
+    // Only redraw when the RESULT changed: asking for Dark on a dark desktop
+    // that was already following the system changes nothing on screen, and an
+    // event-driven application should not wake up for it.
+    if (themeMode() == before) return;
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, themeMode());
+    m_visualDirty = true;
+}
+
+void WidgetManager::setSystemThemeMode(HE::UIThemeMode mode)
+{
+    if (mode >= HE::UIThemeMode::COUNT || mode == m_systemMode) return;
+    const HE::UIThemeMode before = themeMode();
+    m_systemMode = mode;
+    if (themeMode() == before) return;   // the preference overrides it anyway
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, themeMode());
     m_visualDirty = true;
 }
 
@@ -420,7 +435,7 @@ HorizonCode::InstanceId WidgetManager::addChild(ContentManager& content, int wid
 
 	// The theme, then materials and fonts, for what just arrived — a row grafted
 	// in at run time is themed like one that was there from the start.
-	HE::uiApplyTheme(w->tree, m_theme, m_themeMode);
+	HE::uiApplyTheme(w->tree, m_theme, themeMode());
 	for (const auto& e : w->tree.elements)
 		if (e && e->id > 0) refreshElementAssets(*w, *e);
 

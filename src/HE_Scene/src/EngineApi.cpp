@@ -458,6 +458,8 @@ void setMode(Ctx& c, const std::string& m)
 { if (c.world) ScriptApi::setThemeMode(*c.world, m); }
 std::string mode(Ctx& c)
 { return c.world ? ScriptApi::themeMode(*c.world) : std::string("Dark"); }
+std::string preference(Ctx& c)
+{ return c.world ? ScriptApi::themePreference(*c.world) : std::string("System"); }
 } // namespace theme
 
 // ── Cursor ───────────────────────────────────────────────────────────────────
@@ -2267,6 +2269,9 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "theme.getMode", "Theme", false, {}, {{"mode", P::String}},
             "HE::api::theme::mode",
             [](Ctx& c, const VV&){ return VV{ Value::ofString(theme::mode(c)) }; } });
+        t.push_back({ "theme.getPreference", "Theme", false, {}, {{"preference", P::String}},
+            "HE::api::theme::preference",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(theme::preference(c)) }; } });
 
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
@@ -2818,6 +2823,7 @@ const std::vector<ApiFn>& registry()
             { "widget.clearChildren", "Clear Widget Children" },
             { "theme.set", "Set Theme" }, { "theme.setMode", "Set Theme Mode" },
             { "theme.getMode", "Get Theme Mode" },
+            { "theme.getPreference", "Get Theme Preference" },
             { "cursor.setVisible", "Set Cursor Visible" },
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },

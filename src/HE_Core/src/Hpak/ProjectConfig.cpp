@@ -6,7 +6,8 @@
 
 static constexpr char     k_magic[4] = {'H','C','F','G'};
 // v3: appends defaultSaveTemplate (string) after startupSceneUuid.
-static constexpr uint16_t k_version  = 3;
+// v4: appends theme + themeMode (two strings) after that.
+static constexpr uint16_t k_version  = 4;
 
 bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectConfig& cfg)
 {
@@ -20,7 +21,11 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     // version it doesn't know and boots pak-less. So the v3 tail is only
     // written when it actually carries something — a project without a default
     // save template keeps emitting plain v2, which every runtime reads.
-    const uint16_t version = cfg.defaultSaveTemplate.empty() ? 2 : k_version;
+    // Each tail is written only when it CARRIES something, so a project that
+    // uses none of it keeps emitting the plain v2 every runtime can read.
+    const bool hasTheme = !cfg.theme.empty() || !cfg.themeMode.empty();
+    const uint16_t version = hasTheme ? 4
+                           : cfg.defaultSaveTemplate.empty() ? 2 : 3;
     HAsset::Writer::appendPOD(buf, version);
     const uint16_t reserved = 0;
     HAsset::Writer::appendPOD(buf, reserved);
@@ -43,6 +48,11 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
     if (version >= 3)
         HAsset::Writer::appendString(buf, cfg.defaultSaveTemplate);
+    if (version >= 4)
+    {
+        HAsset::Writer::appendString(buf, cfg.theme);
+        HAsset::Writer::appendString(buf, cfg.themeMode);
+    }
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
@@ -64,7 +74,9 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     uint16_t version = 0, reserved = 0;
     if (!HAsset::Reader::readPOD(buf, off, version))  return false;
     if (!HAsset::Reader::readPOD(buf, off, reserved)) return false;
-    if (version != 2 && version != k_version) return false;   // v2 = no template tail
+    // Every version this build knows. Each adds a tail; an older one simply has
+    // fewer, and the reader stops where that version stopped.
+    if (version != 2 && version != 3 && version != 4) return false;
 
     if (!HAsset::Reader::readString(buf, off, out.projectName))   return false;
     if (!HAsset::Reader::readString(buf, off, out.hpakFilename))  return false;
@@ -89,5 +101,12 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     out.defaultSaveTemplate.clear();
     if (version >= 3 && !HAsset::Reader::readString(buf, off, out.defaultSaveTemplate))
         return false;
+    out.theme.clear();
+    out.themeMode.clear();
+    if (version >= 4)
+    {
+        if (!HAsset::Reader::readString(buf, off, out.theme))     return false;
+        if (!HAsset::Reader::readString(buf, off, out.themeMode)) return false;
+    }
     return true;
 }

@@ -46,9 +46,26 @@ public:
     // There is always a theme: absent, it is HE::uiDefaultTheme(). Nothing has
     // to answer "what if none is set".
     void setTheme(const HE::UITheme& theme);
-    void setThemeMode(HE::UIThemeMode mode);
     const HE::UITheme& theme() const { return m_theme; }
-    HE::UIThemeMode    themeMode() const { return m_themeMode; }
+
+    // What was ASKED for, which is not the same as what it resolves to. The
+    // default is "follow the desktop", and the desktop's answer arrives from the
+    // host through setSystemThemeMode — this class links no SDL and must not
+    // learn to.
+    void setThemePreference(HE::UIThemePreference pref);
+    HE::UIThemePreference themePreference() const { return m_themePref; }
+    // The host's reading of the desktop (SDL_GetSystemTheme, and again on
+    // SDL_EVENT_SYSTEM_THEME_CHANGED). Only changes the picture while the
+    // preference is System.
+    void setSystemThemeMode(HE::UIThemeMode mode);
+    // What the two above actually come out as — the mode every bound colour is
+    // resolved against.
+    HE::UIThemeMode themeMode() const
+    {
+        return m_themePref == HE::UIThemePreference::Light  ? HE::UIThemeMode::Light
+             : m_themePref == HE::UIThemePreference::Dark   ? HE::UIThemeMode::Dark
+                                                            : m_systemMode;
+    }
 
     // ── Building the interface while it runs ─────────────────────────────────
     // A list of things — todos, search results, files, messages — is the most
@@ -353,8 +370,12 @@ private:
     // What roles resolve to. A copy rather than a pointer: a theme asset can be
     // reloaded or deleted under a running application, and a dangling theme is
     // an application that draws in whatever was in that memory.
-    HE::UITheme     m_theme = HE::uiDefaultTheme();
-    HE::UIThemeMode m_themeMode = HE::UIThemeMode::Dark;
+    HE::UITheme           m_theme = HE::uiDefaultTheme();
+    HE::UIThemePreference m_themePref = HE::UIThemePreference::System;
+    // What the desktop last said. Dark until the host says otherwise: a tool
+    // that flashes white on a dark desktop for one frame is the thing "follow
+    // the system" exists to avoid.
+    HE::UIThemeMode       m_systemMode = HE::UIThemeMode::Dark;
     bool m_visualDirty = true;     // see consumeVisualDirty
     int  m_focusWidget = 0;        // widget id owning the focused TextInput
     HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants

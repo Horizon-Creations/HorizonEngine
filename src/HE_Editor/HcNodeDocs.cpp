@@ -278,12 +278,18 @@ namespace
 	  "to a colour role takes the new colour at once — that is what a role is for. "
 	  "Ok is false when there is no such asset or it cannot be read." },
 	{ "theme.setMode",
-	  "\"Light\" or \"Dark\". Both live in the SAME theme, so this is a switch and "
-	  "not a second set of widgets: every bound colour re-resolves immediately. "
-	  "Anything other than those two words is ignored." },
+	  "\"Light\", \"Dark\" or \"System\". Both colours live in the SAME theme, so "
+	  "this is a switch and not a second set of widgets: every bound colour "
+	  "re-resolves immediately. System is the default and follows the desktop, "
+	  "including while the application runs. Anything else is ignored." },
 	{ "theme.getMode",
-	  "Which of the two the application is in right now, as the same word Set "
-	  "Theme Mode takes — so a Preferences screen can show it and write it back." },
+	  "Which of the two colours is on screen right now — Light or Dark, never "
+	  "System. This is what to ask when the answer decides something else, like "
+	  "which icon to show." },
+	{ "theme.getPreference",
+	  "What was ASKED for: Light, Dark or System. This is what a Preferences "
+	  "screen shows and writes back, because System is a rule and not a colour — "
+	  "storing what it resolved to today would stop it following tomorrow." },
 
 	// ── Cursor / App ─────────────────────────────────────────────────────────
 	{ "cursor.setVisible",
