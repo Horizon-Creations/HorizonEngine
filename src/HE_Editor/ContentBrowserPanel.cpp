@@ -16,6 +16,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "TypeAssetPanel.h"
+#include "ThemeAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -1236,6 +1237,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      HorizonCodeClassPanel::isClassAsset(fullPath) ||
 			      InputAssetPanel::isInputAsset(fullPath) ||
 			      TypeAssetPanel::isTypeAsset(fullPath) ||
+			      ThemeAssetPanel::isThemeAsset(fullPath) ||
 			      SkeletalMeshEditorPanel::isSkeletalMeshAsset(fullPath) ||
 			      StaticMeshEditorPanel::isStaticMeshAsset(fullPath) ||
 			      ParticleGraphEditorPanel::isParticleAsset(fullPath) ||

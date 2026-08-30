@@ -1910,6 +1910,15 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	{ "Theme Editor/Blur", "",
+	  "How far this shadow fades out past the shape, in canvas pixels. Raised is "
+	  "a card lying on the page, Overlay is a dialog floating well above it.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Offset", "",
+	  "How far the shadow is pushed from the shape, x then y. It is where the "
+	  "light is, and one offset for the whole application is what makes a screen "
+	  "look lit rather than assembled.",
+	  "", "ui#elements" },
 	{ "UI Widget/Literal (type it here)", "",
 	  "Where this colour comes from. \"Literal\" means you typed it and it is "
 	  "yours; picking one of the nine theme ROLES instead means the theme decides "
@@ -3381,6 +3390,7 @@ namespace
 		{ "Node Parameter/",             "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
 		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },
+		{ "Theme Editor/",               "editor-ui", "UI Designer", "Theme" },
 		{ "terrain.",             "editor-landscape", "Landscape Tools", "Terrain brush" },
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },

@@ -1076,8 +1076,53 @@ gefahren; und dies ist die Ausprägung **Advanced aus**. Die Ausprägung Advance
 Material-Graphen — hat weiterhin keinen Abnahmelauf, und das bleibt der offene Posten aus der
 Risikoliste („der headless-Starttest muss beide App-Ausprägungen fahren").
 
-**Als Nächstes:** A3b (ein einziger gelinkter Renderer, `WidgetManager` aus `HE_Scene` heraus,
-shaderc-freier Build) oder Welle 2 der Widget-Arbeit — Container, Navigation, Theme.
+### D1 Theme-System, erste Fassung (27.08.2026)
+
+**Zwei Entscheidungen tragen den ganzen Block.**
+
+*Wie eine Rolle am Element hängt:* eine generische Abbildung `Eigenschaftsname → Rollenname` auf
+der **Basis**, kein Begleitfeld pro Farbe. Die Flächenfarbe heißt bei jedem Typ anders („Color",
+„Tint", „Normal Color", „Back Color"); ein Feld pro Farbe hieße, alle sechs Typen anzufassen und
+den siebten trotzdem zu verpassen. Serialisiert wird sie als **ein** optionales JSON-Objekt —
+ist nichts gebunden, steht nichts in der Datei, und ein Widget von vorgestern speichert
+byte-identisch.
+
+*Wo aufgelöst wird:* **beim Zuweisen, nicht pro Frame.** `uiApplyTheme` schreibt die Farbe der
+Rolle in die gewöhnliche Eigenschaft — beim Erzeugen eines Widgets, beim Theme-Wechsel, beim
+Moduswechsel und für jede zur Laufzeit eingehängte Zeile. Danach sehen Laufzeit,
+**Designer-Vorschau**, Thumbnails und **Software-Renderer** die Theme-Farbe durch dieselben
+Feldzugriffe, die sie ohnehin machen, und keiner von ihnen muss wissen, dass es Themes gibt. Im
+Extractor aufzulösen hätte die Laufzeit eingefärbt und den Designer etwas anderes zeigen lassen —
+genau die Spaltung, die dieses Panel schon zweimal gebissen hat (fest einkodierte Rundungen, der
+Int-durch-Float-Leser). Ein Preis, der dokumentiert gehört: ein Skript, das ein Literal in eine
+gebundene Eigenschaft schreibt, wird beim nächsten Wechsel überschrieben.
+
+**Was steht:** neun Farbrollen × hell/dunkel, drei Größenstufen für Radius und Abstand, fünf
+Textgrößen, zwei Schattenstufen; JSON-Round-Trip, bei dem eine **fehlende Rolle** auf den
+Standard zurückfällt statt auf Schwarz; zwei mitgelieferte Themes (Default und Amber);
+`AssetType::Theme` mit Chunk, Editor-Anlegen (auch im App-Modus, der Themes am nötigsten hat) und
+einem Theme-Editor-Tab, der Hell und Dunkel **nebeneinander** zeigt — ein Editor, der einen Modus
+zur Zeit zeigt, ist einer, in dem der andere vergessen wird. Am Widget hat jede Farbzeile einen
+Knopf „Literal / Rolle"; ist sie gebunden, wird das Farbfeld schreibgeschützt, weil ein Wert, der
+beim nächsten Moduswechsel überschrieben wird, schlimmer ist als einer, den man nicht tippen
+kann. Skripte bekommen `theme.set`, `theme.setMode`, `theme.getMode`.
+
+**Optisch belegt:** derselbe Baum, zweimal gerendert, hell gegen dunkel (im CPU-Rasterizer, als
+ctest) — ein Theme, das nur über Feld-Asserts geprüft ist, könnte in ein Widget auflösen, das
+niemand zeichnet.
+
+**Ein Fund am Werkzeug:** `scripts/editor_help_audit.py` hat eine **feste Dateiliste**. Ein neues
+Panel ist für den Audit unsichtbar, bis es dort steht — die Deckungsgarantie hätte still ein Loch
+bekommen. `ThemeAssetPanel.cpp` ist eingetragen.
+
+**Offen aus D1:** das aktive Theme als Projekteinstellung in `project.hcfg` (damit eine
+exportierte App damit startet), „folge dem System" über SDL, das Amber-Theme als ausgeliefertes
+Asset statt nur als eingebaute Belegung, und Typografie-Stufen sind bisher nur **Größen** — eine
+zweite Schriftart (Mono) ist eigene Arbeit und gehört zu D2.
+
+**Als Nächstes:** der Rest von D1, dann D2 (Komponentenbibliothek) oder A3b.
+
+**Weiterhin offen, aus der Risikoliste:** die Abnahme für die Ausprägung Advanced **an**.
 
 **Frühere Notiz (erledigt):** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier

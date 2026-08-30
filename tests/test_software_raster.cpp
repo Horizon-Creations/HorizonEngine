@@ -461,3 +461,71 @@ TEST_CASE("Software raster: the Schicht 0 witness sheet draws")
         MESSAGE("witness sheet written to " << out.string());
     }
 }
+
+// ── Light against dark, in pixels ────────────────────────────────────────────
+// A theme verified only by field asserts is a theme that could be resolving into
+// a widget nobody draws. This renders the SAME tree twice, in the two modes, and
+// asks the images whether they differ — and in which direction.
+TEST_CASE("Theme: the same widgets come out light or dark")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 640.0f; t.canvasHeight = 200.0f;
+    // A page, a card on it, and a line of text — the three roles every screen
+    // uses, and nothing else.
+    auto tile = [&](HE::UIWidgetType type, const char* role, float x, float y,
+                    float w, float h)
+    {
+        const int id = t.add(type);
+        HE::UIElement& e = *t.find(id);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+        e.setThemeRole("Color", role);
+        return id;
+    };
+    tile(HE::UIWidgetType::Panel, "Background", 0.0f, 0.0f, 640.0f, 200.0f);
+    tile(HE::UIWidgetType::Panel, "Surface",   40.0f, 40.0f, 260.0f, 120.0f);
+    tile(HE::UIWidgetType::Panel, "Accent",   340.0f, 40.0f, 260.0f, 120.0f);
+
+    auto shoot = [&](HE::UIThemeMode mode)
+    {
+        HE::uiApplyTheme(t, HE::uiDefaultTheme(), mode);
+        std::vector<UIRenderObject> quads;
+        for (const auto& ep : t.elements)
+        {
+            const HE::UIWidgetRect r = HE::uiElementRect(t, *ep, nullptr);
+            const std::size_t first = quads.size();
+            ep->render(r, HE::UIElementRenderState{}, HE::UUID{}, 1.0f, quads);
+            if (quads.size() > first) quads[first].cornerRadius = ep->cornerRadius;
+        }
+        Image img = canvas(640, 200);
+        HE::sw::draw(img, quads);
+        return img;
+    };
+
+    const Image light = shoot(HE::UIThemeMode::Light);
+    const Image dark  = shoot(HE::UIThemeMode::Dark);
+
+    // The two are not the same picture…
+    CHECK(light.rgba != dark.rgba);
+    // …and they are the way round they say they are: the page is bright in one
+    // and near-black in the other, which is the one thing a swapped light/dark
+    // table would get wrong while every field assert still passed.
+    CHECK(at(light, 320, 10).r > 200);
+    CHECK(at(dark,  320, 10).r < 60);
+    // The card sits on the page in both, and is distinguishable from it.
+    CHECK(at(light, 100, 100).r != at(light, 320, 10).r);
+    CHECK(at(dark,  100, 100).r != at(dark,  320, 10).r);
+
+    const std::filesystem::path out =
+        std::filesystem::temp_directory_path() / "he_theme_light_dark.ppm";
+    if (FILE* f = std::fopen(out.string().c_str(), "wb"))
+    {
+        // The two side by side, so one look answers "does this read".
+        std::fprintf(f, "P6\n%d %d\n255\n", light.width, light.height * 2);
+        for (const Image* img : { &light, &dark })
+            for (std::size_t i = 0; i + 3 < img->rgba.size(); i += 4)
+                std::fwrite(&img->rgba[i], 1, 3, f);
+        std::fclose(f);
+        MESSAGE("light/dark sheet written to " << out.string());
+    }
+}

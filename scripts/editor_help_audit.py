@@ -100,7 +100,7 @@ AREAS: dict[str, list[str]] = {
     "components": ["InspectorPanel.cpp"],
     "settings": ["EditorSettingsPanel.cpp", "ToolchainDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],
-    "ui": ["UIEditorPanel.cpp"],
+    "ui": ["UIEditorPanel.cpp", "ThemeAssetPanel.cpp"],
     "horizoncode": ["LevelScriptPanel.cpp", "HcGraphHost.cpp", "HcEditorUtil.cpp",
                     "TypeAssetPanel.cpp"],
     "input": ["InputAssetPanel.cpp"],
