@@ -171,13 +171,41 @@ erreichbar über shaderc raus (~4,5), crypto optional (4,6), Jolt und Recast aus
 Release-Artefakt** — dass ein falscher Baum die erste Tabelle ruiniert hat, ist genau der
 Grund, warum die Messstelle mit in die Schwelle gehört.
 
-**A3a Diät zur Linkzeit, billig.** Nichts davon ist Umbau, nur Weglassen:
-- Python: schon erledigt, ein Nicht-Python-Projekt trägt die 52,9 MB nicht.
-- Backends: die Renderer sind bereits **eigene statische Bibliotheken** (`RendererOpenGL`,
-  `RendererMetal`, `RendererVulkan`, `RendererD3D11/12`). Was eine App nicht anzielt, wird
-  nicht gelinkt. Kein Code muss dafür angefasst werden.
-- `libHorizonNet` und `libcrypto` nur, wenn Netzwerk beziehungsweise Pak-Verschlüsselung
-  wirklich benutzt werden (`HE_PREFER_MBEDTLS` existiert als Schalter).
+**A3a Diät zur Linkzeit, billig.** *Diese Liste stand zuerst optimistischer da. Am Code
+nachgemessen (`otool -L` am Deploy-Baum) hält die Hälfte nicht, und das ist wichtiger als eine
+schöne Aufzählung:*
+- **Python: erledigt.** Ein Nicht-Python-Projekt trägt die 54,7 MB nicht. Das ging nur, weil
+  vorher die strukturelle Arbeit gemacht wurde — der Interpreter war eine **Ladezeit**-Kante von
+  HorizonScene und ist jetzt ein zur Laufzeit geladenes Plugin. Der Exporter überspringt ihn
+  danach namensbasiert.
+- **Backends: strukturell wahr, praktisch noch nicht.** Die Renderer sind eigene statische
+  Bibliotheken, aber `HorizonRendering` linkt sie **alle** und die Factory nennt sie alle. „Was
+  eine App nicht anzielt, wird nicht gelinkt" ist damit erst wahr, wenn der Advanced-Schalter
+  entscheidet, welcher einzige gelinkt wird — und das ist **A3b**, nicht A3a.
+- **`libcrypto`: über mbedTLS erledigt, nicht übers Weglassen.** Es ist eine Ladezeit-Kante von
+  `libHorizonCore` (`otool -L` zeigt sie), ein Überspringen beim Kopieren ergäbe also ein Spiel,
+  das vor `main` im dyld stirbt. Der richtige Weg war schon gebaut: `HE_PREFER_MBEDTLS=ON` linkt
+  mbedcrypto **statisch** hinein, dann gibt es die 4,8 MB gar nicht erst. Linux und Windows
+  fuhren das in der CI längst, **macOS als einziges nicht** — eine Zeile.
+- **`libHorizonNet`: geht so nicht.** Ladezeit-Kante von der Spiel-Exe, von HorizonScene **und**
+  von HorizonRendering. 0,7 MB, und der Weg dahin wäre dieselbe Plugin-Behandlung wie bei
+  Python. Das gehört zu A3b und steht dort.
+
+**Die Zahl ist jetzt eine Schwelle, kein Absatz.** `scripts/runtime_size.py` läuft als ctest
+`runtime_size` über den Deploy-Baum, gruppiert nach **Namensmustern** (nie nach einer festen
+Liste — was kein Muster trifft, landet sichtbar in „unaccounted" und zählt trotzdem mit) und
+prüft zwei Grenzen: mit Python und ohne. Die Messstelle wird bei jedem Lauf gedruckt und in
+jeder Fehlermeldung genannt, weil genau ihr Fehlen die erste Tabelle ruiniert hat. Fehlt der
+Baum, ist das ein **SKIP** (Exit 2) und kein roter Lauf.
+
+Die Grenzen stehen bewusst auf dem heute **gemessenen** Stand plus Luft (90 MB / 32 MB), nicht
+auf den angestrebten 15: die sind das Ziel **nach** A3b, und eine Schwelle, die am Tag ihrer
+Entstehung reißt, lernt jeder zu ignorieren. Sie ist da, um eine Regression zu fangen, und um
+mit jedem Stück A3b eine Stufe zu sinken.
+
+**Und sie misst heute genau eine Ausprägung**, den Spiel-Runtime, weil es nur die gibt. Die
+beiden App-Ausprägungen aus der Tabelle weiter unten bekommen ihre eigenen Grenzen, wenn A3b
+sie erzeugt.
 
 **A3b Der strukturelle Teil, die eigentliche Arbeit.** Der User hat den Punkt gemacht: wer nur
 UI zeichnet, soll nicht den ganzen GL- oder Metal-Renderer mitschleppen. Richtig, und der Weg
@@ -204,9 +232,16 @@ OpenGL in der Binärgröße zu sparen". Nachgemessen an den Objektdateien:
 Der Feature-Kram im Renderer kostet also **eine halbe Megabyte**. Was der volle Renderer
 wirklich kostet, ist nicht sein Code, sondern seine **Abhängigkeitskante** zum
 Shader-Übersetzer. Und die kappt man ohne einen dritten Renderer: mit den vorkompilierten
-Varianten (beide Hälften weiter unten) und `HE_ENABLE_SHADERC=OFF`. Geprüft: beide Renderer
-haben dafür schon Wächter, `HE_HAVE_SHADERC` kommt in `OpenGLRenderer.cpp` 15 mal und in
-`MetalRenderer.mm` 18 mal vor, ein shaderc-freier Build ist also vorgesehen und nicht neu.
+Varianten (beide Hälften weiter unten) und `HE_ENABLE_SHADERC=OFF`.
+
+> **Nachtrag, ausprobiert statt gezählt (27.08.2026):** die Behauptung „ein shaderc-freier
+> Build ist vorgesehen und nicht neu" stammte daher, dass `HE_HAVE_SHADERC` in
+> `OpenGLRenderer.cpp` 15 mal und in `MetalRenderer.mm` 18 mal vorkommt. Ein
+> `-DHE_ENABLE_SHADERC=OFF`-Build **bricht trotzdem ab**: `MetalRenderer.mm` benutzt an
+> mindestens zehn Stellen (7917, 7923, 7929, 7956, 8219, 10996, 12028, 12117 …)
+> `ResolveMaterialShader`, `GetOrBuildMaterialPipeline` und `matLight` **außerhalb** ihrer
+> Wächter. Die Wächter zu zählen war die falsche Prüfung; die richtige war, es zu bauen.
+> Das ist echte A3b-Arbeit und keine Konfigurationszeile.
 
 **Empfehlung deshalb: für Advanced-an den vorhandenen Forward-Pfad nehmen, ohne
 Shader-Übersetzer gebaut, und keinen zweiten Renderer schreiben.** Was von der Intuition

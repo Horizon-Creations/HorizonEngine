@@ -473,6 +473,24 @@ if(Python3_Interpreter_FOUND)
                      "${CMAKE_SOURCE_DIR}/scripts/editor_help_audit.py" --check)
 endif()
 
+# ── "How heavy is what we actually ship?" ────────────────────────────────────
+# docs/he-apps-plan.md A3 wrote a size table into the plan and got it wrong,
+# because the numbers came from a tree that was not a Release build. That is why
+# this is a test with a threshold rather than a paragraph: the MEASURING POINT is
+# part of the claim, and it is printed with every run.
+#
+# It measures the deploy tree the exporter copies verbatim into a packaged build.
+# Absent (a configure without the deploy step, a fresh checkout) is a SKIP, not a
+# failure — exit code 2, declared below — or every such build would go red for
+# having nothing to weigh.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME runtime_size
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
+                     "${DEPLOY_GAME}" --check)
+    set_tests_properties(runtime_size PROPERTIES SKIP_RETURN_CODE 2)
+endif()
+
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP
 # multicast) and hand sessions between two live endpoints. Letting two of them
 # run at the same instant makes a failure depend on the scheduler, which is the
