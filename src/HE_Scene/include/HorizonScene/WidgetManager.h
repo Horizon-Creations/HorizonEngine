@@ -37,6 +37,19 @@ public:
     void hideWidget(int id);
     void setZOrder(int id, int z);
 
+    // ── What the application looks like ──────────────────────────────────────
+    // The theme every widget's bound properties resolve against (see
+    // UIElement::themeRoles and uiApplyTheme). Setting either of these
+    // re-resolves EVERY live widget straight away — which is what makes light
+    // and dark one switch instead of a reload.
+    //
+    // There is always a theme: absent, it is HE::uiDefaultTheme(). Nothing has
+    // to answer "what if none is set".
+    void setTheme(const HE::UITheme& theme);
+    void setThemeMode(HE::UIThemeMode mode);
+    const HE::UITheme& theme() const { return m_theme; }
+    HE::UIThemeMode    themeMode() const { return m_themeMode; }
+
     // ── Building the interface while it runs ─────────────────────────────────
     // A list of things — todos, search results, files, messages — is the most
     // ordinary thing an application shows, and until this existed it was the one
@@ -337,6 +350,11 @@ private:
     bool m_pointerOverUI = false;  // last processPointer verdict (see pointerOverUI)
     // Starts true: the first frame after anything is created has never been
     // drawn, so "nothing changed since the last draw" is false by construction.
+    // What roles resolve to. A copy rather than a pointer: a theme asset can be
+    // reloaded or deleted under a running application, and a dangling theme is
+    // an application that draws in whatever was in that memory.
+    HE::UITheme     m_theme = HE::uiDefaultTheme();
+    HE::UIThemeMode m_themeMode = HE::UIThemeMode::Dark;
     bool m_visualDirty = true;     // see consumeVisualDirty
     int  m_focusWidget = 0;        // widget id owning the focused TextInput
     HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants

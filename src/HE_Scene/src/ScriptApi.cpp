@@ -299,6 +299,41 @@ int clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& pa
 	return world.widgets().clearChildren(widgetId, parentName);
 }
 
+bool setTheme(HorizonWorld& world, ContentManager* content, const std::string& path)
+{
+	if (!content || path.empty()) return false;
+	const HE::UUID id = content->loadAsset(path);
+	const ThemeAsset* a = id == HE::UUID{} ? nullptr : content->getTheme(id);
+	if (!a)
+	{
+		HE_LOG_WARN(Script, "theme.set: no theme asset at '%s'", path.c_str());
+		return false;
+	}
+	HE::UITheme t;
+	if (!HE::uiThemeFromJson(a->json, t))
+	{
+		HE_LOG_WARN(Script, "theme.set: '%s' is not a readable theme", path.c_str());
+		return false;
+	}
+	world.widgets().setTheme(t);
+	return true;
+}
+
+void setThemeMode(HorizonWorld& world, const std::string& mode)
+{
+	// By NAME, like the backend in config.json: "Dark" survives a renumbering of
+	// the enum and reads in a save file, a 1 does neither.
+	if (mode == "Light")      world.widgets().setThemeMode(HE::UIThemeMode::Light);
+	else if (mode == "Dark")  world.widgets().setThemeMode(HE::UIThemeMode::Dark);
+	else HE_LOG_WARN(Script, "theme.setMode: '%s' is neither Light nor Dark — ignored",
+	                 mode.c_str());
+}
+
+std::string themeMode(HorizonWorld& world)
+{
+	return HE::uiThemeModeName(world.widgets().themeMode());
+}
+
 bool pointerOverUI(HorizonWorld& world) { return world.widgets().pointerOverUI(); }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────

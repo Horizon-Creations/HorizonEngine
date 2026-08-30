@@ -310,6 +310,17 @@ namespace widget {
     int  clearChildren(Ctx&, int id, const std::string& parentName);
 }
 
+// ── Theme (docs/he-apps-plan.md D1) ──────────────────────────────────────────
+// What the whole application looks like, in one place. Every element bound to a
+// colour ROLE re-resolves the moment either of these is called, which is what
+// makes "follow the system" or a Preferences switch one line instead of a
+// reload.
+namespace theme {
+    bool        set(Ctx&, const std::string& assetPath);   // false = not found / unreadable
+    void        setMode(Ctx&, const std::string& mode);    // "Light" or "Dark"
+    std::string mode(Ctx&);
+}
+
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────
 namespace cursor {
     void setVisible(Ctx&, bool show);

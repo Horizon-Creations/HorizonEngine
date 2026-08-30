@@ -1,9 +1,13 @@
 #include "doctest.h"
 
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <HorizonScene/WidgetManager.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UITheme.h>
 #include <UIWidget/UIWidgetTree.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -13,6 +17,24 @@
 // times later. What this file guards is the two things that make a theme worth
 // having: the role NAMES are stable (they are an on-disk format, stored by every
 // element bound to one), and binding actually changes what gets drawn.
+
+
+namespace
+{
+    // Same shape as the other widget tests: a scratch content root that goes
+    // away with the test.
+    struct TempWidgetDir
+    {
+        std::filesystem::path path;
+        TempWidgetDir()
+        {
+            path = std::filesystem::temp_directory_path() / "he_test_uitheme";
+            std::filesystem::remove_all(path);
+            std::filesystem::create_directories(path);
+        }
+        ~TempWidgetDir() { std::filesystem::remove_all(path); }
+    };
+}
 
 TEST_CASE("Theme: the role names are pinned")
 {
@@ -157,4 +179,66 @@ TEST_CASE("Theme: bindings survive a save, and an unbound widget saves as before
     loaded.find(panel)->setThemeRole("Color", "");
     CHECK(loaded.find(panel)->themeRoleFor("Color").empty());
     CHECK(loaded.find(panel)->themeRoles.size() == 1);
+}
+
+// ── Through the runtime, end to end ──────────────────────────────────────────
+// A theme that only changes fields is a theme that could be drawing nothing.
+// This one asks what comes out of the extractor, which is what the backends get.
+TEST_CASE("Theme: switching the mode changes what gets drawn")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 200.0f; tree.canvasHeight = 100.0f;
+    tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = tree.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *tree.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+        e.setThemeRole("Color", "Surface");
+        // A deliberately wrong literal: if the theme is not applied, THIS is what
+        // the test would see, so the assertion cannot pass by accident.
+        e.setProp("Color", HE::UIPropValue::ofColor({ 1.0f, 0.0f, 1.0f, 1.0f }));
+    }
+    UIWidgetAsset a;
+    a.treeJson = HE::uiWidgetTreeToJson(tree);
+    a.path     = "mem://themed.hasset";
+    cm.registerWidget(std::move(a));
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://themed.hasset");
+    REQUIRE(id != 0);
+    wm.showWidget(id);
+
+    auto surfaceColor = [&]
+    {
+        std::vector<UIRenderObject> out;
+        wm.extract(200.0f, 100.0f, out);
+        REQUIRE_FALSE(out.empty());
+        return out[0].color;
+    };
+
+    const HE::UITheme& t = HE::uiDefaultTheme();
+    // Creating it already resolved the role — the magenta literal never reached
+    // the screen.
+    wm.setThemeMode(HE::UIThemeMode::Light);
+    CHECK(surfaceColor() == t.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Light));
+
+    wm.setThemeMode(HE::UIThemeMode::Dark);
+    CHECK(surfaceColor() == t.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Dark));
+
+    // Another theme, same roles: the application looks different without a
+    // single widget being edited.
+    wm.setTheme(HE::uiAmberTheme());
+    CHECK(surfaceColor() == HE::uiAmberTheme().colorFor(HE::UIThemeRole::Surface,
+                                                        HE::UIThemeMode::Dark));
+
+    // Switching is a change to the picture, so it has to ask for a redraw — an
+    // event-driven application would otherwise keep showing the old colours
+    // until the mouse happened to move.
+    wm.consumeVisualDirty();
+    wm.setThemeMode(HE::UIThemeMode::Light);
+    CHECK(wm.consumeVisualDirty());
 }

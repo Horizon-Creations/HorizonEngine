@@ -272,6 +272,19 @@ namespace
 	  "many went. The short way to rebuild a list from scratch instead of "
 	  "tracking every row you added." },
 
+	// ── Theme ────────────────────────────────────────────────────────────────
+	{ "theme.set",
+	  "Switches the whole application to another Theme asset. Every element bound "
+	  "to a colour role takes the new colour at once — that is what a role is for. "
+	  "Ok is false when there is no such asset or it cannot be read." },
+	{ "theme.setMode",
+	  "\"Light\" or \"Dark\". Both live in the SAME theme, so this is a switch and "
+	  "not a second set of widgets: every bound colour re-resolves immediately. "
+	  "Anything other than those two words is ignored." },
+	{ "theme.getMode",
+	  "Which of the two the application is in right now, as the same word Set "
+	  "Theme Mode takes — so a Preferences screen can show it and write it back." },
+
 	// ── Cursor / App ─────────────────────────────────────────────────────────
 	{ "cursor.setVisible",
 	  "Shows or hides the mouse cursor. A first-person game hides it while "

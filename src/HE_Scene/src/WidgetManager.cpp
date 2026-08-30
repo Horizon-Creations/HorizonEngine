@@ -282,6 +282,11 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		embedWidgetRefs(w, content, chain, 0);
 	}
 
+	// Whatever this widget bound to a theme role takes the theme's colour now,
+	// before anything looks at it. Assignment, not lookup-at-draw: from here on
+	// the runtime, the designer and the thumbnails all read plain fields.
+	HE::uiApplyTheme(w.tree, m_theme, m_themeMode);
+
 	// Resolve per-element material references once (paths → UUIDs) and bake each
 	// element's Font asset → a stable atlas key its text emits with (0 = the
 	// shared default font). Exactly the resolution refreshElementAssets does for
@@ -319,6 +324,21 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		rt().fireConstruct(em.scriptId);
 	m_visualDirty = true;
 	return stored.id;
+}
+
+void WidgetManager::setTheme(const HE::UITheme& theme)
+{
+    m_theme = theme;
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, m_themeMode);
+    m_visualDirty = true;
+}
+
+void WidgetManager::setThemeMode(HE::UIThemeMode mode)
+{
+    if (mode >= HE::UIThemeMode::COUNT || mode == m_themeMode) return;
+    m_themeMode = mode;
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, m_themeMode);
+    m_visualDirty = true;
 }
 
 HorizonCode::InstanceId WidgetManager::addChild(ContentManager& content, int widgetId,
@@ -398,7 +418,9 @@ HorizonCode::InstanceId WidgetManager::addChild(ContentManager& content, int wid
 		placed->sizeY = placed->contentH;
 	}
 
-	// Materials and fonts for what just arrived, and only for that.
+	// The theme, then materials and fonts, for what just arrived — a row grafted
+	// in at run time is themed like one that was there from the start.
+	HE::uiApplyTheme(w->tree, m_theme, m_themeMode);
 	for (const auto& e : w->tree.elements)
 		if (e && e->id > 0) refreshElementAssets(*w, *e);
 

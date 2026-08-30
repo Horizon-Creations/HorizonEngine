@@ -450,6 +450,16 @@ int  clearChildren(Ctx& c, int id, const std::string& parent)
 { return c.world ? ScriptApi::clearWidgetChildren(*c.world, id, parent) : 0; }
 } // namespace widget
 
+// ── Theme ────────────────────────────────────────────────────────────────────
+namespace theme {
+bool set(Ctx& c, const std::string& p)
+{ return c.world ? ScriptApi::setTheme(*c.world, c.content, p) : false; }
+void setMode(Ctx& c, const std::string& m)
+{ if (c.world) ScriptApi::setThemeMode(*c.world, m); }
+std::string mode(Ctx& c)
+{ return c.world ? ScriptApi::themeMode(*c.world) : std::string("Dark"); }
+} // namespace theme
+
 // ── Cursor ───────────────────────────────────────────────────────────────────
 namespace cursor {
 void setVisible(Ctx&, bool show) { ScriptApi::setCursorVisible(show); }
@@ -2247,6 +2257,17 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
                 widget::clearChildren(c, (int)aR(a, 0), aS(a, 1))) }; } });
 
+        // Theme — one place decides what the whole application looks like.
+        t.push_back({ "theme.set", "Theme", true, {{"themeAsset", P::String}}, {{"ok", P::Bool}},
+            "HE::api::theme::set",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(theme::set(c, aS(a, 0))) }; } });
+        t.push_back({ "theme.setMode", "Theme", true, {{"mode", P::String}}, {},
+            "HE::api::theme::setMode",
+            [](Ctx& c, const VV& a){ theme::setMode(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "theme.getMode", "Theme", false, {}, {{"mode", P::String}},
+            "HE::api::theme::mode",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(theme::mode(c)) }; } });
+
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
             [](Ctx& c, const VV& a){ cursor::setVisible(c, aB(a, 0)); return VV{}; } });
@@ -2795,6 +2816,8 @@ const std::vector<ApiFn>& registry()
             { "widget.addChild", "Add Widget Child" },
             { "widget.removeChild", "Remove Widget Child" },
             { "widget.clearChildren", "Clear Widget Children" },
+            { "theme.set", "Set Theme" }, { "theme.setMode", "Set Theme Mode" },
+            { "theme.getMode", "Get Theme Mode" },
             { "cursor.setVisible", "Set Cursor Visible" },
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },
