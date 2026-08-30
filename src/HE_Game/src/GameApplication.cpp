@@ -177,6 +177,23 @@ void GameApplication::applyShippedConfig()
 		HE_LOG_INFO(Core, "GameApplication: applied %zu shipped setting(s) from config.json",
 		            applied);
 
+	// ── An application opens in a WINDOW ─────────────────────────────────────
+	// The member's default is Fullscreen, which is right for a game and wrong
+	// for a tool: nobody ships a todo list that takes over the display, and
+	// docs/he-apps-plan.md says so ("eine App startet standardmäßig als
+	// windowed, man kann sie ja dann maximieren").
+	//
+	// Which it is lives in project.hcfg, and that is read in OnInit — far too
+	// late, the window exists by then. So it is peeked at here, into a LOCAL
+	// config: this is only the default, and an explicit GameWindowMode below
+	// still wins.
+	if (baseRaw)
+	{
+		ProjectConfig peek;
+		if (ProjectConfigLoader::load(fs::path(baseRaw), peek) && peek.appMode)
+			m_windowMode = HE::WindowMode::Windowed;
+	}
+
 	// An absent key keeps what the member already holds, which is what a game
 	// shipped before any of this existed: 1280x720 fullscreen, VSync on, on the
 	// platform's built-in backend. Existing exports therefore boot unchanged.
@@ -1583,6 +1600,12 @@ void GameApplication::OnRender(float deltaTime)
 			// Forward: the deferred path builds a G-buffer and runs a fullscreen
 			// lighting resolve, for surfaces that do not exist here.
 			r->SetRenderPath(HE::RenderPath::Forward);
+			// …and no SKY. Same trap as the effects above, and it was left open:
+			// the environment is pushed in the OTHER branch only, so an
+			// application never said anything about it and the renderer kept its
+			// own default — which draws one. An atmosphere behind a settings
+			// dialog is not a subtle bug, and it cost a sky pass per frame.
+			r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
 		}
 		else if (r)
 		{

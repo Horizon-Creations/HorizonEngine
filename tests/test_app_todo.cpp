@@ -335,13 +335,44 @@ static std::filesystem::path exportTodoApp(bool advancedShaderEffects)
 
     ContentManager cm(proj.string());
 
-    // A page with one label, saved as a real asset file. Small on purpose: what
-    // is being measured here is the EXPORT, and the vocabulary is proven above.
+    // A page that fills its window: a background, a card on it, a centred title.
+    // It was one unplaced label at first, which is a legitimate thing for a test
+    // to build and a MISLEADING thing to launch — it lands in the top-left
+    // corner because that is where an element with no anchor and no position
+    // belongs, and it reads on screen as "the UI is broken". A page that is laid
+    // out says what it means, and it doubles as somewhere the theme is visible.
     HE::UIWidgetTree page;
     page.canvasWidth = 640.0f; page.canvasHeight = 480.0f;
+    {
+        const int bg = page.add(HE::UIWidgetType::Panel);
+        HE::UIElement& e = *page.find(bg);
+        e.name = "Background";
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);   // the whole window, always
+        e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 0.0f;
+        e.setThemeRole("Color", "Background");
+    }
+    {
+        const int card = page.add(HE::UIWidgetType::Panel);
+        HE::UIElement& e = *page.find(card);
+        e.name = "Card";
+        HE::uiSetAnchorPreset(e, 5);                   // middle-centre
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 420.0f; e.sizeY = 220.0f;
+        e.cornerRadius = glm::vec4(16.0f);
+        e.setThemeRole("Color", "Surface");
+        e.shadow = true; e.shadowBlur = 18.0f; e.shadowOffsetY = 6.0f;
+    }
     const int hello = page.add(HE::UIWidgetType::Text);
-    page.find(hello)->name = "Hello";
-    page.find(hello)->setProp("Text", HE::UIPropValue::ofString("Todo"));
+    {
+        HE::UIElement& e = *page.find(hello);
+        e.name = "Hello";
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 0.0f;
+        e.setProp("Text", HE::UIPropValue::ofString("Todo"));
+        e.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+        e.setProp("Align H", HE::UIPropValue::ofInt(1));   // centred both ways
+        e.setProp("Align V", HE::UIPropValue::ofInt(1));
+        e.setThemeRole("Color", "Text");
+    }
 
     UIWidgetAsset asset;
     asset.type      = HE::AssetType::Widget;
