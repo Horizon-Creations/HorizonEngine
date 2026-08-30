@@ -81,6 +81,9 @@ std::string buildSkyCore()
 		return kSkyFuncHLSL;
 	}
 	s_generated = true;
+	HE_LOG_INFO(RHI, "Himmelskern: %zu Zeichen HLSL aus shaders/sky_core.glsl uebersetzt "
+	                 "(GLSL->SPIR-V->HLSL SM5.0). D3D zeichnet damit denselben Himmel wie "
+	                 "GL/Metal/Vulkan.", core.size());
 	return core;
 #else
 	// Ohne Cross-Compiler bleibt es beim Handspiegel. Kein Fehler, aber D3D
@@ -94,8 +97,12 @@ std::string buildSkyCore()
 
 const std::string& SkyCoreHLSL()
 {
-	// Einmal pro Prozess. Beide D3D-Backends teilen sich das Ergebnis; wer zuerst
-	// einen Renderer anlegt, zahlt die Uebersetzung.
+	// Einmal pro Prozess, bewusst NICHT pro Renderer. Ein Lauf kann beide D3D-
+	// Backends gleichzeitig anlegen (Mehrfenster aus P1d, HE_DUMP_SECONDWINDOW),
+	// und beide wollen denselben Text: das Ziel ist HLSL SM5.0, und das ist es
+	// fuer D3D11 wie fuer D3D12. Wer hier je nach Backend verschiedene Shader-
+	// Modelle braeuchte, darf diesen Cache nicht weiterbenutzen -- der zweite
+	// Aufrufer bekaeme still das Ergebnis des ersten.
 	static const std::string s_core = buildSkyCore();
 	return s_core;
 }

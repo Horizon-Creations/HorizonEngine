@@ -1317,6 +1317,17 @@ ps_5_0-Limit von 4096.
 | 0.35 Vormittag | 29,76 % / maxdiff 4 | 29,76 % / maxdiff 4 | 29,77 % / maxdiff 4 |
 | 0.50 Mittag | 29,47 % / maxdiff 2 | 29,47 % / maxdiff 2 | 29,48 % / maxdiff 2 |
 
+Zur Herkunft der Vorher-Zahl: die 64,34 % / 64,33 % bei Nacht stammen aus den Aufnahmen der
+P3b-Runde (`p3b/gl_d0` gegen `p3b/d11_d0`), nicht aus einem A/B desselben Builds. Die
+Bedingungen sind gleich (TOD 0.02, Sterne aus, gepinnte Uhr, gleiche Kamera), die Zahl ist
+also belastbar — aber wer sie nachstellen will, baut den alten Pfad zurück (`kSkyFuncHLSL`
+statt `SkyCoreHLSL()` an den zwei Compile-Stellen) und misst neu.
+
+Dass der übersetzte Kern wirklich läuft, sagt der Renderer selbst und nicht nur das Bild:
+`Himmelskern: 7794 Zeichen HLSL aus shaders/sky_core.glsl uebersetzt` steht in beiden
+D3D-Logs. Das belegt zugleich den in-process-Weg über `he::shaderc` — die grüne Ampel des
+Validators kommt aus den CLI-Werkzeugen und ist ein anderer Pfad.
+
 Die Tageswerte lesen sich mit 29 % hoch und sind es nicht: `maxdiff` 2–4 heißt, der ganze
 Himmel stimmt bis auf ein bis zwei Stufen von 255 — dieselbe Rundungssignatur, die Vulkan
 seit Scheibe 1 zeigt. Bemerkenswert ist, dass D3D den Referenzwert bei Nacht und Dämmerung
