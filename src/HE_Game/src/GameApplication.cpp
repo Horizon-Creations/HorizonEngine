@@ -1561,8 +1561,9 @@ void GameApplication::OnRender(float deltaTime)
 		}
 		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&
 		                          r && r->GetCapabilities().supportsGpuParticles;
-		// Unbraced on purpose: the scope reaches to the end of this `if (m_world)`
-		// block, so the GI + environment pushes below are timed with it (as before).
+		// Unbraced on purpose: the scope reaches to the end of this block, which is
+		// now the world-systems tick alone — the renderer pushes moved out from
+		// under it when the app-mode branch turned out to be unreachable there.
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
@@ -1570,7 +1571,17 @@ void GameApplication::OnRender(float deltaTime)
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
+	}
 
+	// ── Renderer settings, in BOTH modes ─────────────────────────────────────
+	// This used to sit INSIDE the `if (m_world && !m_appMode)` block above, which
+	// made the `if (r && m_appMode)` branch below unreachable: a condition nested
+	// inside its own negation. Nothing warned, nothing failed, and the effect was
+	// that an application never turned any of this off — it kept the renderer's
+	// defaults and drew a sky, clouds and a ground behind its interface, paying
+	// for the whole chain over an empty world. Found by capturing a frame and
+	// asking why the fix that was supposedly already there had changed nothing.
+	{
 		// Post-process + lighting settings, all read from the same config.json
 		// keys the editor's Preferences write, so a shipped game looks like the
 		// editor preview it was authored in. Capability-gated where a backend can
@@ -1607,7 +1618,7 @@ void GameApplication::OnRender(float deltaTime)
 			// dialog is not a subtle bug, and it cost a sky pass per frame.
 			r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
 		}
-		else if (r)
+		else if (r && m_world)
 		{
 			// Bloom + AO. The packaged game pushed neither for a long time, which
 			// meant a shipped build ran on the renderer's built-in defaults no

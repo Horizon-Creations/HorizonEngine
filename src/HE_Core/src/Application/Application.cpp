@@ -268,6 +268,52 @@ namespace HE
 				}
 			}
 
+			// ── HE_CAPTURE_FRAME / HE_CAPTURE_PATH: what it actually drew ────
+			// The companion to the frame budget above. "Does it start" is an exit
+			// code; "does it LOOK right" is not, and a shipped application has no
+			// editor to take a screenshot from. One frame, written as a plain
+			// PPM (three lines of code, no encoder to link) for a human or a
+			// script to look at.
+			//
+			// The capture happens BEFORE this frame is drawn, so it holds the
+			// frame before it — which is why the default is well past the first.
+			{
+				static const unsigned long long kCaptureAt = []() -> unsigned long long
+				{
+					const char* v = std::getenv("HE_CAPTURE_FRAME");
+					return (v && *v) ? std::strtoull(v, nullptr, 10) : 0ull;
+				}();
+				// CaptureViewport reads the OFFSCREEN target — the one the editor
+				// shows in its viewport pane. A game renders straight to the
+				// window and never allocates it, so a capture run has to ask for
+				// it, once, before the frame it wants.
+				if (kCaptureAt != 0 && m_frameIndex == 1 && m_renderer && m_window)
+					m_renderer->SetViewportSize(m_window->GetWidth(), m_window->GetHeight());
+				if (kCaptureAt != 0 && m_frameIndex == kCaptureAt && m_renderer)
+				{
+					std::vector<uint8_t> rgba;
+					uint32_t cw = 0, ch = 0;
+					const char* path = std::getenv("HE_CAPTURE_PATH");
+					const std::string out = (path && *path) ? path : "capture.ppm";
+					if (m_renderer->CaptureViewport(rgba, cw, ch) && cw > 0 && ch > 0)
+					{
+						if (std::FILE* f = std::fopen(out.c_str(), "wb"))
+						{
+							std::fprintf(f, "P6\n%u %u\n255\n", cw, ch);
+							for (std::size_t i = 0; i + 3 < rgba.size(); i += 4)
+								std::fwrite(&rgba[i], 1, 3, f);
+							std::fclose(f);
+							HE_LOG_INFO(Core, "Captured frame %llu (%ux%u) to %s",
+							            kCaptureAt, cw, ch, out.c_str());
+						}
+						else
+							HE_LOG_ERROR(Core, "Could not write the capture to %s", out.c_str());
+					}
+					else
+						HE_LOG_ERROR(Core, "%s", "The renderer produced no frame to capture");
+				}
+			}
+
 			// Hitch detector. A frame this long is always worth knowing about — it is
 			// usually a synchronous asset load, a shader compile or a GC-like stall in
 			// a script. Throttled so a systematically slow scene logs once a second
