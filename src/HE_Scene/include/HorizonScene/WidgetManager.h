@@ -37,6 +37,31 @@ public:
     void hideWidget(int id);
     void setZOrder(int id, int z);
 
+    // ── Building the interface while it runs ─────────────────────────────────
+    // A list of things — todos, search results, files, messages — is the most
+    // ordinary thing an application shows, and until this existed it was the one
+    // thing the widget system could not do: every element had to be authored in
+    // the designer, so a list was N pre-made rows with a hard ceiling.
+    //
+    // `addChild` grafts a widget ASSET under the element named `parentName`,
+    // which is the same machinery a WidgetRef uses — one row is its own widget,
+    // authored once, with its own logic running as its own script instance. Put
+    // the parent in a Vertical Box and the rows stack themselves.
+    //
+    // Returns that instance's id, so the caller can reach the new row the way it
+    // reaches any other object: Set External on a public variable, Call External
+    // on a public function, Bind Event on what it emits. 0 = the widget, the
+    // parent or the asset was not found.
+    HorizonCode::InstanceId addChild(ContentManager& content, int widgetId,
+                                     const std::string& parentName,
+                                     const std::string& assetPath);
+    // Take one back out, addressed by the instance id addChild returned. Its
+    // elements and its script instance both go.
+    bool removeChild(int widgetId, HorizonCode::InstanceId child);
+    // …or all of them under one parent. Returns how many were removed, which is
+    // what "rebuild the list from scratch" is written with.
+    int  clearChildren(int widgetId, const std::string& parentName);
+
     // Read-only view of a live widget's element tree (nullptr = no such
     // widget). The manager owns a deep copy per widget; this is how a caller
     // looks at the live state — the caret in a text field, what a script last
@@ -198,6 +223,10 @@ private:
     {
         int id = 0;
         int zOrder = 0;
+        // The asset this instance came from. Kept because a graft has to know
+        // it: addChild grafting THIS widget into itself is a circle, and the
+        // guard that catches it works on the chain of paths already visited.
+        std::string assetPath;
         HE::UIWidgetTree  tree;    // live deep copy (scripts mutate it)
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.

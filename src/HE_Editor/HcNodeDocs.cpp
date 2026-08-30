@@ -255,6 +255,22 @@ namespace
 	  "Calls a public function on the widget's own graph by name — the way the "
 	  "outside talks to a screen. Ok is false when the widget or the function is "
 	  "not there." },
+	{ "widget.addChild",
+	  "Puts another widget INSIDE this one, while it runs: the asset is grafted "
+	  "under the element you name, so a Vertical Box called \"List\" stacks a row "
+	  "per call. That is how a list of unknown length is built — a todo list, "
+	  "search results, a chat. The Child that comes back is a live object: Set "
+	  "External writes its public variables, Call External runs its functions, "
+	  "Bind Event listens to what it emits. 0 when the widget, the element or the "
+	  "asset is not there." },
+	{ "widget.removeChild",
+	  "Takes one of those rows out again, by the Child the Add gave you. Its "
+	  "elements and its logic both go. Ok is false when that child is not in this "
+	  "widget (already removed, or it belongs to another one)." },
+	{ "widget.clearChildren",
+	  "Empties one element of everything Add Widget Child put in it, and says how "
+	  "many went. The short way to rebuild a list from scratch instead of "
+	  "tracking every row you added." },
 
 	// ── Cursor / App ─────────────────────────────────────────────────────────
 	{ "cursor.setVisible",

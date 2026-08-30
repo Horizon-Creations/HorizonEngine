@@ -93,6 +93,14 @@ namespace ScriptApi
 	// Call a PUBLIC graph function on the widget (the engine routes the call;
 	// private functions and unknown names return false).
 	bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn);
+	// Build the interface while it runs: graft a widget asset under the element
+	// named `parentName` and get the new instance back, take one out again by
+	// that id, or empty the parent. See WidgetManager::addChild — this is what
+	// makes a list of arbitrary length possible at all.
+	int  addWidgetChild(HorizonWorld& world, ContentManager* content, int widgetId,
+	                    const std::string& parentName, const std::string& assetPath);
+	bool removeWidgetChild(HorizonWorld& world, int widgetId, int childId);
+	int  clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& parentName);
 	// Is the pointer currently over an interactive widget element? The verdict
 	// of the last WidgetManager::processPointer — what gameplay needs to skip a
 	// click that belongs to the menu it just landed in.

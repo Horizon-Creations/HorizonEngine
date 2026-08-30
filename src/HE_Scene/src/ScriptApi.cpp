@@ -277,6 +277,28 @@ bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn
 	return world.widgets().callFunction(widgetId, fn);
 }
 
+int addWidgetChild(HorizonWorld& world, ContentManager* content, int widgetId,
+                   const std::string& parentName, const std::string& assetPath)
+{
+	if (!content) return 0;
+	// Instance ids are 64-bit in the runtime and 32-bit across the script
+	// boundary, like every other widget handle here (a widget id IS its script
+	// id, see createWidget). Narrowed in one place rather than at each call.
+	return static_cast<int>(
+		world.widgets().addChild(*content, widgetId, parentName, assetPath));
+}
+
+bool removeWidgetChild(HorizonWorld& world, int widgetId, int childId)
+{
+	return world.widgets().removeChild(
+		widgetId, static_cast<HorizonCode::InstanceId>(childId));
+}
+
+int clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& parentName)
+{
+	return world.widgets().clearChildren(widgetId, parentName);
+}
+
 bool pointerOverUI(HorizonWorld& world) { return world.widgets().pointerOverUI(); }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────

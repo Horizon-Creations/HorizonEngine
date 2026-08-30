@@ -300,6 +300,14 @@ namespace widget {
     void setZOrder(Ctx&, int id, int z);
     bool isVisible(Ctx&, int id);
     bool callFunction(Ctx&, int id, const std::string& fn);   // PUBLIC fns only
+    // Build the interface while it runs. addChild grafts a widget asset under a
+    // NAMED element and returns the new instance (0 = not found), which is the
+    // handle Set External / Call External / Bind Event take — a row is an object
+    // like any other. Without these three a list of arbitrary length cannot be
+    // written at all: every element would have to exist in the designer first.
+    int  addChild(Ctx&, int id, const std::string& parentName, const std::string& assetPath);
+    bool removeChild(Ctx&, int id, int childId);
+    int  clearChildren(Ctx&, int id, const std::string& parentName);
 }
 
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────

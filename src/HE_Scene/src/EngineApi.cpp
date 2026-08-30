@@ -442,6 +442,12 @@ void hide(Ctx& c, int id)                           { if (c.world) ScriptApi::hi
 void setZOrder(Ctx& c, int id, int z)               { if (c.world) ScriptApi::setWidgetZOrder(*c.world, id, z); }
 bool isVisible(Ctx& c, int id)                      { return c.world ? ScriptApi::isWidgetVisible(*c.world, id) : false; }
 bool callFunction(Ctx& c, int id, const std::string& fn) { return c.world ? ScriptApi::callWidgetFunction(*c.world, id, fn) : false; }
+int  addChild(Ctx& c, int id, const std::string& parent, const std::string& asset)
+{ return c.world ? ScriptApi::addWidgetChild(*c.world, c.content, id, parent, asset) : 0; }
+bool removeChild(Ctx& c, int id, int childId)
+{ return c.world ? ScriptApi::removeWidgetChild(*c.world, id, childId) : false; }
+int  clearChildren(Ctx& c, int id, const std::string& parent)
+{ return c.world ? ScriptApi::clearWidgetChildren(*c.world, id, parent) : 0; }
 } // namespace widget
 
 // ── Cursor ───────────────────────────────────────────────────────────────────
@@ -2222,6 +2228,24 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::isVisible(c, (int)aR(a, 0))) }; } });
         t.push_back({ "widget.callFunction", "Widget", true, {{"widget", P::Ref}, {"function", P::String}}, {{"ok", P::Bool}}, "HE::api::widget::callFunction",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::callFunction(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        // Building the interface while it runs. The child comes back as a Ref
+        // for the same reason the widget goes in as one: it IS a live object,
+        // and Set External / Call External / Bind Event are how one talks to it.
+        t.push_back({ "widget.addChild", "Widget", true,
+            {{"widget", P::Ref}, {"parent", P::String}, {"widgetAsset", P::String}},
+            {{"child", P::Ref}}, "HE::api::widget::addChild",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
+                (uint64_t)widget::addChild(c, (int)aR(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "widget.removeChild", "Widget", true,
+            {{"widget", P::Ref}, {"child", P::Ref}}, {{"ok", P::Bool}},
+            "HE::api::widget::removeChild",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::removeChild(c, (int)aR(a, 0), (int)aR(a, 1))) }; } });
+        t.push_back({ "widget.clearChildren", "Widget", true,
+            {{"widget", P::Ref}, {"parent", P::String}}, {{"removed", P::Int}},
+            "HE::api::widget::clearChildren",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::clearChildren(c, (int)aR(a, 0), aS(a, 1))) }; } });
 
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
@@ -2768,6 +2792,9 @@ const std::vector<ApiFn>& registry()
             { "ui.pointerOverUI", "Is Pointer Over UI" },
             { "widget.setZOrder", "Set Widget Z-Order" }, { "widget.isVisible", "Is Widget Visible" },
             { "widget.callFunction", "Call Widget Function" },
+            { "widget.addChild", "Add Widget Child" },
+            { "widget.removeChild", "Remove Widget Child" },
+            { "widget.clearChildren", "Clear Widget Children" },
             { "cursor.setVisible", "Set Cursor Visible" },
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },

@@ -261,6 +261,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	}
 
 	Instance w;
+	w.assetPath = assetPath;
 	if (!HE::uiWidgetTreeFromJson(asset->treeJson, w.tree))
 	{
 		HE_LOG_ERROR(Widget, "%s",
@@ -318,6 +319,173 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		rt().fireConstruct(em.scriptId);
 	m_visualDirty = true;
 	return stored.id;
+}
+
+HorizonCode::InstanceId WidgetManager::addChild(ContentManager& content, int widgetId,
+                                                const std::string& parentName,
+                                                const std::string& assetPath)
+{
+	m_content = &content;
+	Instance* w = find(widgetId);
+	if (!w)
+	{
+		HE_LOG_WARN(Widget, "addChild: no widget with id %d", widgetId);
+		return 0;
+	}
+	// By NAME, not by element id: the name is what the designer shows and what
+	// the author can type into a graph. An id is a number nobody can look up.
+	const HE::UIElement* parent = nullptr;
+	for (const auto& ep : w->tree.elements)
+		if (ep && ep->name == parentName) { parent = ep.get(); break; }
+	if (!parent)
+	{
+		HE_LOG_WARN(Widget, "addChild: widget %d has no element named '%s'",
+		            widgetId, parentName.c_str());
+		return 0;
+	}
+	if (assetPath.empty())
+	{
+		HE_LOG_WARN(Widget, "%s", "addChild: no widget asset given");
+		return 0;
+	}
+
+	// The new row is a WidgetRef under that parent, and then the ordinary graft
+	// path does the rest — the same code an authored WidgetRef goes through, so
+	// a runtime row and an authored one are the same thing by construction.
+	auto ref = std::make_unique<HE::UIWidgetRef>();
+	const int refId = w->tree.nextId++;
+	ref->id       = refId;
+	ref->parentId = parent->id;
+	ref->name     = "Child";
+	ref->widgetPath = assetPath;
+	// Inside a layout box only the size along the axis is read, and it is the
+	// row's own height that should decide it. Filled in from the embedded
+	// asset's canvas below, once it is known; until then the type's default.
+	w->tree.elements.push_back(std::move(ref));
+
+	const std::size_t embedsBefore = w->embeds.size();
+	{
+		// Seeded with THIS widget's own asset, exactly as createWidget seeds it:
+		// grafting a widget into itself is the circle the guard exists for, and
+		// an empty chain would let it through and expand until the depth cap.
+		std::vector<std::string> chain{ w->assetPath };
+		embedWidgetRefs(*w, content, chain, 0);
+	}
+	if (w->embeds.size() == embedsBefore)
+	{
+		// The graft refused (missing asset, unreadable tree, a circle). Leave no
+		// empty slot behind: a row that is not there must not take up space.
+		w->tree.elements.erase(
+			std::remove_if(w->tree.elements.begin(), w->tree.elements.end(),
+				[refId](const std::unique_ptr<HE::UIElement>& e){ return e && e->id == refId; }),
+			w->tree.elements.end());
+		return 0;
+	}
+
+	// The embed the graft just made for THIS ref (a row may itself embed more,
+	// which appended further entries — the one with rootElem == refId is ours).
+	HorizonCode::InstanceId child = 0;
+	for (std::size_t i = embedsBefore; i < w->embeds.size(); ++i)
+		if (w->embeds[i].rootElem == refId) { child = w->embeds[i].scriptId; break; }
+	if (child == 0) child = w->embeds[embedsBefore].scriptId;
+
+	if (auto* placed = dynamic_cast<HE::UIWidgetRef*>(w->tree.find(refId));
+	    placed && placed->contentW > 0.0f && placed->contentH > 0.0f)
+	{
+		// The slot is as big as the row was authored — a row drawn for 400x48
+		// takes 48 units in a vertical box rather than the ref type's 200.
+		placed->sizeX = placed->contentW;
+		placed->sizeY = placed->contentH;
+	}
+
+	// Materials and fonts for what just arrived, and only for that.
+	for (const auto& e : w->tree.elements)
+		if (e && e->id > 0) refreshElementAssets(*w, *e);
+
+	// Construct last, like createWidget does: the row is fully in the tree
+	// before its own logic can look at it.
+	for (std::size_t i = embedsBefore; i < w->embeds.size(); ++i)
+		rt().fireConstruct(w->embeds[i].scriptId);
+	m_visualDirty = true;
+	HE_LOG_DEBUG(Widget, "addChild: '%s' under '%s' of widget %d (instance %llu)",
+	             assetPath.c_str(), parentName.c_str(), widgetId,
+	             static_cast<unsigned long long>(child));
+	return child;
+}
+
+bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
+{
+	Instance* w = find(widgetId);
+	if (!w || child == 0) return false;
+	const auto it = std::find_if(w->embeds.begin(), w->embeds.end(),
+		[child](const Instance::Embed& em){ return em.scriptId == child; });
+	if (it == w->embeds.end())
+	{
+		HE_LOG_WARN(Widget, "removeChild: widget %d has no child instance %llu",
+		            widgetId, static_cast<unsigned long long>(child));
+		return false;
+	}
+
+	// Everything that came in with it: the ref element it hangs under, and the
+	// id RANGE the graft renumbered into this tree. Nested embeds live inside
+	// that range too, so they are caught by the same test.
+	const int rootElem = it->rootElem;
+	const int lo = it->idOffset, hi = it->idMax;
+	std::vector<HorizonCode::InstanceId> dying{ child };
+	for (const Instance::Embed& em : w->embeds)
+		if (em.scriptId != child && em.idOffset >= lo && em.idMax <= hi)
+			dying.push_back(em.scriptId);
+
+	w->tree.elements.erase(
+		std::remove_if(w->tree.elements.begin(), w->tree.elements.end(),
+			[&](const std::unique_ptr<HE::UIElement>& e)
+			{
+				if (!e) return true;
+				return e->id == rootElem || (e->id > lo && e->id <= hi);
+			}),
+		w->tree.elements.end());
+	w->embeds.erase(std::remove_if(w->embeds.begin(), w->embeds.end(),
+		[&](const Instance::Embed& em)
+		{
+			return std::find(dying.begin(), dying.end(), em.scriptId) != dying.end();
+		}), w->embeds.end());
+
+	// Innermost first, so a nested row's script never outlives the tree it acts
+	// on — the same order destroyWidget uses.
+	for (auto d = dying.rbegin(); d != dying.rend(); ++d) rt().destroy(*d);
+
+	// A destroyed row must not keep the hover, the press or the focus. Nothing
+	// says which element they were on any more, and a stale id would light up
+	// whatever gets that number next.
+	auto forget = [&](int& elem){ if (elem == rootElem || (elem > lo && elem <= hi)) elem = 0; };
+	forget(w->hoveredElem); forget(w->pressedElem); forget(w->focusedElem);
+	forget(w->draggingSlider); forget(w->draggingText);
+	if (w->focusedElem == 0 && m_focusWidget == w->id) m_focusWidget = 0;
+
+	m_visualDirty = true;
+	return true;
+}
+
+int WidgetManager::clearChildren(int widgetId, const std::string& parentName)
+{
+	Instance* w = find(widgetId);
+	if (!w) return 0;
+	int parentId = 0;
+	for (const auto& ep : w->tree.elements)
+		if (ep && ep->name == parentName) { parentId = ep->id; break; }
+	if (parentId == 0) return 0;
+
+	// Collected first, removed after: removeChild rewrites both vectors, so
+	// walking them while erasing would skip half the rows.
+	std::vector<HorizonCode::InstanceId> mine;
+	for (const Instance::Embed& em : w->embeds)
+		if (const HE::UIElement* root = w->tree.find(em.rootElem);
+		    root && root->parentId == parentId)
+			mine.push_back(em.scriptId);
+	int removed = 0;
+	for (const HorizonCode::InstanceId id : mine)
+		if (removeChild(widgetId, id)) ++removed;
+	return removed;
 }
 
 void WidgetManager::destroyWidget(int id)

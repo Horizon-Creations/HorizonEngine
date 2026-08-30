@@ -813,6 +813,104 @@ TEST_CASE("A drag is not stolen by something the pointer crosses")
     wm.processPointer(400.0f, 400.0f, 150.0f, 15.0f, false, true);
 }
 
+// ── Building the interface while it runs ─────────────────────────────────────
+// The one thing the widget system could not do: every element had to exist in
+// the designer, so a list of unknown length was N pre-made rows with a ceiling.
+TEST_CASE("A widget can be grafted into a running one, and taken out again")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The row, its own asset with its own label — authored once, used N times.
+    HE::UIWidgetTree row;
+    row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+    const int label = row.add(HE::UIWidgetType::Text);
+    row.find(label)->name = "Label";
+    row.find(label)->setProp("Text", HE::UIPropValue::ofString("row"));
+    registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+    // The page: a vertical box named "List" and nothing else.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 600.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = page.add(HE::UIWidgetType::VerticalBox);
+    {
+        HE::UIElement& e = *page.find(box);
+        e.name = "List";
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 600.0f;
+    }
+    registerWidget(cm, page, nullptr, "mem://page.hasset");
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    const std::size_t bare = wm.tree(id)->elements.size();
+
+    // Three rows, added one at a time.
+    std::vector<int> rows;
+    for (int i = 0; i < 3; ++i)
+    {
+        const int child = (int)wm.addChild(cm, id, "List", "mem://row.hasset");
+        CHECK(child != 0);
+        rows.push_back(child);
+    }
+    // Each brought its own elements in: the ref it hangs under plus the row.
+    CHECK(wm.tree(id)->elements.size() > bare + 3);
+    // …and every one of them is its own instance, not three names for one.
+    CHECK(rows[0] != rows[1]);
+    CHECK(rows[1] != rows[2]);
+
+    // The box stacks them: three rows, three different y positions, in order.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 600.0f, out);
+    const int glyphs = countGlyphs(out);
+    CHECK(glyphs > 0);          // "row" three times over
+
+    // Out again, by the id the add returned.
+    CHECK(wm.removeChild(id, rows[1]));
+    CHECK_FALSE(wm.removeChild(id, rows[1]));   // …and only once
+    const std::size_t afterOne = wm.tree(id)->elements.size();
+
+    out.clear();
+    wm.extract(400.0f, 600.0f, out);
+    CHECK(countGlyphs(out) < glyphs);           // one row's text is gone
+
+    // The rest at once.
+    CHECK(wm.clearChildren(id, "List") == 2);
+    CHECK(wm.tree(id)->elements.size() == bare);
+    CHECK(afterOne > bare);
+    out.clear();
+    wm.extract(400.0f, 600.0f, out);
+    CHECK(countGlyphs(out) == 0);
+}
+
+TEST_CASE("Grafting refuses what it cannot do, and leaves nothing behind")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree page;
+    const int box = page.add(HE::UIWidgetType::VerticalBox);
+    page.find(box)->name = "List";
+    registerWidget(cm, page, nullptr, "mem://page.hasset");
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    const std::size_t bare = wm.tree(id)->elements.size();
+
+    // No such asset, no such element, no such widget — all three answer 0, and
+    // none of them may leave an empty slot taking up space in the box.
+    CHECK(wm.addChild(cm, id, "List", "mem://missing.hasset") == 0);
+    CHECK(wm.addChild(cm, id, "Nope", "mem://page.hasset") == 0);
+    CHECK(wm.addChild(cm, 999, "List", "mem://page.hasset") == 0);
+    CHECK(wm.tree(id)->elements.size() == bare);
+
+    // A widget that grafts ITSELF is a circle, and the graft guard catches it.
+    CHECK(wm.addChild(cm, id, "List", "mem://page.hasset") == 0);
+    CHECK(wm.tree(id)->elements.size() == bare);
+}
+
 // The designer's containment rule. A Button says yes here, which is what lets a
 // caption, an icon and a badge live on the same button.
 TEST_CASE("Exactly the container types accept children")
