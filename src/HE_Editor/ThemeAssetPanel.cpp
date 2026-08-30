@@ -8,6 +8,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+
 #include <Types/Enums.h>
 #include <UIWidget/UITheme.h>
 
@@ -149,6 +150,49 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGui::TextDisabled("Nine roles, each in a light and a dark value. Widgets point at a");
 		ImGui::TextDisabled("role instead of carrying a colour, so one edit here changes all of");
 		ImGui::TextDisabled("them — and switching mode is a switch, not a second set of widgets.");
+	}
+
+	// ── Which theme the PROJECT uses ─────────────────────────────────────────
+	// Here rather than in a settings window, for the same reason the savegame
+	// template's "set as default" is on the template: the answer belongs to the
+	// thing you are looking at, and a project setting three menus away is one
+	// nobody finds.
+	if (ctx.projectManager)
+	{
+		ProjectData& proj = ctx.projectManager->currentProject();
+		const bool isProjectTheme = proj.theme == st.relPath;
+		ImGui::Spacing();
+		if (isProjectTheme)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 210, 140, 255));
+			ImGui::TextUnformatted("This project's theme — the exported application boots with it.");
+			ImGui::PopStyleColor();
+		}
+		else if (EditorWidgets::button("Use for this Project", ImVec2(200.0f, 0.0f)))
+		{
+			proj.theme = st.relPath;
+			ctx.projectManager->saveProject(proj.path);
+		}
+
+		// The mode is the PROJECT's, not this asset's: both belong to the same
+		// theme, and which of them an application starts in is a decision about
+		// the application.
+		const HE::UIThemePreference pref = HE::uiThemePreferenceFromName(proj.themeMode);
+		ImGui::SetNextItemWidth(160.0f);
+		if (ImGui::BeginCombo("Starts in", HE::uiThemePreferenceName(pref)))
+		{
+			for (int i = 0; i < static_cast<int>(HE::UIThemePreference::COUNT); ++i)
+			{
+				const auto p = static_cast<HE::UIThemePreference>(i);
+				if (ImGui::Selectable(HE::uiThemePreferenceName(p), p == pref))
+				{
+					proj.themeMode = HE::uiThemePreferenceName(p);
+					ctx.projectManager->saveProject(proj.path);
+				}
+			}
+			ImGui::EndCombo();
+		}
+		else EditorWidgets::helpForLabel("Starts in");
 	}
 	ImGui::Spacing();
 

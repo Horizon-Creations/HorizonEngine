@@ -1115,10 +1115,31 @@ niemand zeichnet.
 Panel ist für den Audit unsichtbar, bis es dort steht — die Deckungsgarantie hätte still ein Loch
 bekommen. `ThemeAssetPanel.cpp` ist eingetragen.
 
-**Offen aus D1:** das aktive Theme als Projekteinstellung in `project.hcfg` (damit eine
-exportierte App damit startet), „folge dem System" über SDL, das Amber-Theme als ausgeliefertes
-Asset statt nur als eingebaute Belegung, und Typografie-Stufen sind bisher nur **Größen** — eine
-zweite Schriftart (Mono) ist eigene Arbeit und gehört zu D2.
+**Zweiter Durchgang: „folge dem System" und die Projektwahl.**
+
+`UIThemePreference` ist ein eigener Aufzählungstyp neben `UIThemeMode`, und das ist der Kern:
+gespeichert wird die **Frage**, nicht die Antwort. „System" ist eine Regel, keine Farbe — würde
+man den aufgelösten Wert ablegen, ginge ein Projekt, das auf einem dunklen Rechner gebaut wurde,
+für alle als dunkel raus. Der WidgetManager kennt deshalb beides: die Präferenz und die letzte
+Meldung des Schreibtischs (`setSystemThemeMode`), und `themeMode()` ist die Ableitung. SDL wird
+nicht dort gefragt — die Klasse linkt kein SDL und soll es nicht lernen —, sondern im Host:
+`SDL_GetSystemTheme()` beim Start und `SDL_EVENT_SYSTEM_THEME_CHANGED` im laufenden Betrieb, beides
+in SDL 3.2.14 vorhanden (nachgesehen, nicht angenommen). Ändert eine Meldung nichts am Ergebnis,
+weil die Präferenz sie überstimmt, wird auch **nicht neu gezeichnet** — eine ereignisgetriebene
+App darf dafür nicht aufwachen.
+
+Die Projektwahl steht im Theme-Editor selbst („Use for this Project" plus „Starts in"), aus
+demselben Grund, aus dem „als Projekt-Standard setzen" bei der Savegame-Vorlage steht: die
+Antwort gehört zu dem, was man gerade ansieht, und eine Einstellung drei Menüs weiter findet
+niemand. Sie reist über `.heproj` → `ExportSettings` → `project.hcfg` v4, und **jedes Anhängsel
+wird nur geschrieben, wenn es etwas trägt** — ein Projekt ohne Theme gibt weiterhin die v2 aus,
+die jeder ältere Runtime lesen kann. Der Game-Runtime lädt beides **vor** OnInit, weil dort das
+erste Widget entsteht und ein eine Frame später umgefärbtes Widget ein Aufblitzen der falschen
+Farben ist.
+
+**Offen aus D1:** das Amber-Theme als ausgeliefertes Asset statt nur als eingebaute Belegung, und
+die Typografie-Stufen sind bisher nur **Größen** — eine zweite Schriftart (Mono) ist eigene Arbeit
+und gehört zu D2.
 
 **Als Nächstes:** der Rest von D1, dann D2 (Komponentenbibliothek) oder A3b.
 

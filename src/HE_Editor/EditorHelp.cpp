@@ -1910,6 +1910,18 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	{ "Theme Editor/Use for this Project", "",
+	  "Makes this the theme the project's interface resolves against, and the one "
+	  "an exported application boots with. It is stored in the project, not in "
+	  "this asset — a project has one theme, a folder may hold several.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Starts in", "",
+	  "Which of the two the application opens in. \"System\" follows the desktop "
+	  "and keeps following it while the application runs, which is why what is "
+	  "stored is the QUESTION and not today's answer — writing down \"Dark\" "
+	  "because the machine that built it was dark would ship as dark for "
+	  "everybody. A script can still change it later with Set Theme Mode.",
+	  "", "ui#elements" },
 	{ "Theme Editor/Blur", "",
 	  "How far this shadow fades out past the shape, in canvas pixels. Raised is "
 	  "a card lying on the page, Overlay is a dialog floating well above it.",

@@ -1214,6 +1214,11 @@ void startExport(AppContext& ctx)
                 if (ctx.projectManager)
                 {
                     es.defaultSaveTemplate = ctx.projectManager->currentProject().defaultSaveTemplate;
+                    // What the application looks like travels with it — without
+                    // these two a shipped app boots on the built-in default and
+                    // the theme the author picked is simply not there.
+                    es.theme     = ctx.projectManager->currentProject().theme;
+                    es.themeMode = ctx.projectManager->currentProject().themeMode;
                     // What KIND of thing is being exported. The runtime reads
                     // both out of project.hcfg: appProject decides whether it
                     // builds a world and draws on events, advancedShaderEffects

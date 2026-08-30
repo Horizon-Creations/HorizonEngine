@@ -752,6 +752,8 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.scriptLanguage =
 		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
 	m_currentProject.defaultSaveTemplate = jsonString(j, "defaultSaveTemplate");
+	m_currentProject.theme     = jsonString(j, "theme");
+	m_currentProject.themeMode = jsonString(j, "themeMode");
 	// Absent keys mean a project written before applications existed: a game,
 	// with materials. Both defaults therefore have to be the game's answer.
 	m_currentProject.appProject            = jsonBool(j, "appProject", false);
@@ -820,6 +822,10 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
 	j["scriptLanguage"]      = HE::tools::toString(m_currentProject.scriptLanguage);
 	j["defaultSaveTemplate"] = m_currentProject.defaultSaveTemplate;
+	// Only once chosen, like every other optional key here: a project that never
+	// touched a theme keeps a .heproj that looks exactly as it did.
+	if (!m_currentProject.theme.empty())     j["theme"]     = m_currentProject.theme;
+	if (!m_currentProject.themeMode.empty()) j["themeMode"] = m_currentProject.themeMode;
 	// Application flags. Written unconditionally so the file always states what
 	// it is, rather than a missing key having to mean "game" forever.
 	j["appProject"]            = m_currentProject.appProject;

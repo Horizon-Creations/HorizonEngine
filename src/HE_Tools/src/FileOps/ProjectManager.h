@@ -176,6 +176,14 @@ struct ProjectData
 	// if exactly one exists, else create() fails loud.
 	std::string defaultSaveTemplate;
 
+	// ── The theme this project's interface uses (docs/he-apps-plan.md D1) ────
+	// Content-relative path of a Theme asset (empty = the engine's built-in
+	// default) and the mode that was ASKED for ("System"/"Light"/"Dark"; empty
+	// reads as System). Both travel into project.hcfg on export, so a shipped
+	// application boots looking the way it was authored.
+	std::string theme;
+	std::string themeMode;
+
 	// ── Application projects (docs/he-apps-plan.md A0/A1/E1b) ────────────────
 	// appProject: this is an APPLICATION, not a game. No scene, no world, no
 	// physics; the packaged build gets ProjectConfig::appMode and draws only when
