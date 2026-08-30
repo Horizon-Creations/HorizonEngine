@@ -18,6 +18,7 @@
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <MaterialGraph/MaterialGraph.h>        // MatDomain (widget materials are UI-domain)
 #include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/UITheme.h>
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
@@ -581,6 +582,48 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 	EditorWidgets::helpForLabel("Text Align");
 }
 
+// ── "Where does this colour come from?" ──────────────────────────────────────
+// A small button after every colour row: unbound it says "Literal", bound it
+// names the theme role, and the swatch beside it goes read-only because the
+// theme owns that value now (docs/he-apps-plan.md D1).
+//
+// Drawn HERE, next to every colour, rather than as a separate list of bindings
+// somewhere else: the question "is this colour mine or the theme's" is about
+// THIS row, and an author who has to look in a second place to answer it will
+// not use the theme at all.
+void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed)
+{
+	// Its own scope — a helper that borrows the caller's is filed under whichever
+	// function happens to sit above it in this file. Same lesson as
+	// drawSurfaceStyle.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	const std::string bound = e.themeRoleFor(prop);
+	ImGui::SameLine();
+	ImGui::PushID((prop + "##role").c_str());
+	const char* label = bound.empty() ? "Literal" : bound.c_str();
+	if (ImGui::SmallButton(label)) ImGui::OpenPopup("##rolepick");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(bound.empty()
+			? "This colour is typed in here. Pick a theme role instead and every\n"
+			  "element with that role changes together — including light/dark."
+			: "This colour comes from the theme. Editing the swatch would be\n"
+			  "overwritten the next time the theme or the mode changes.");
+	if (ImGui::BeginPopup("##rolepick"))
+	{
+		if (ImGui::Selectable("Literal (type it here)", bound.empty()))
+		{ e.setThemeRole(prop, ""); committed = true; }
+		ImGui::Separator();
+		for (int i = 0; i < static_cast<int>(HE::UIThemeRole::COUNT); ++i)
+		{
+			const char* name = HE::uiThemeRoleName(static_cast<HE::UIThemeRole>(i));
+			if (ImGui::Selectable(name, bound == name))
+			{ e.setThemeRole(prop, name); committed = true; }
+		}
+		ImGui::EndPopup();
+	}
+	ImGui::PopID();
+}
+
 // ── Surface style ("Schicht 0", docs/he-apps-plan.md D5) ─────────────────────
 // Rounding, border and gradient live on the BASE, not in any type's property
 // table, so the generic loop below never saw them and until now they could only
@@ -648,16 +691,28 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	EditorWidgets::helpForLabel("Border Width");
 	if (n.borderWidth > 0.0f)
 	{
-		edit |= ImGui::ColorEdit4("Border Color", &n.borderColor.r);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		{
+			const bool bound = !n.themeRoleFor("Border Color").empty();
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Border Color", &n.borderColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Border Color", committed);
+		}
 		EditorWidgets::helpForLabel("Border Color");
 	}
 
 	if (EditorWidgets::checkbox("Gradient", &n.gradient)) committed = true;
 	if (n.gradient)
 	{
-		edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		{
+			const bool bound = !n.themeRoleFor("Gradient Color").empty();
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Gradient Color", committed);
+		}
 		EditorWidgets::helpForLabel("Gradient Color");
 		static const char* kShapes[] = { "Linear", "Radial" };
 		const bool shapeOpen = ImGui::BeginCombo("Gradient Shape",
@@ -684,8 +739,14 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	if (EditorWidgets::checkbox("Shadow", &n.shadow)) committed = true;
 	if (n.shadow)
 	{
-		edit |= ImGui::ColorEdit4("Shadow Color", &n.shadowColor.r);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		{
+			const bool bound = !n.themeRoleFor("Shadow Color").empty();
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Shadow Color", &n.shadowColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Shadow Color", committed);
+		}
 		EditorWidgets::helpForLabel("Shadow Color");
 		if (ImGui::DragFloat("Shadow Blur", &n.shadowBlur, 0.5f, 0.0f, 500.0f))
 		{ n.shadowBlur = std::max(0.0f, n.shadowBlur); edit = true; }
@@ -701,8 +762,14 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	if (EditorWidgets::checkbox("Inner Shadow", &n.innerShadow)) committed = true;
 	if (n.innerShadow)
 	{
-		edit |= ImGui::ColorEdit4("Inner Shadow Color", &n.innerShadowColor.r);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		{
+			const bool bound = !n.themeRoleFor("Inner Shadow Color").empty();
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Inner Shadow Color", &n.innerShadowColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Inner Shadow Color", committed);
+		}
 		EditorWidgets::helpForLabel("Inner Shadow Color");
 		if (ImGui::DragFloat("Inner Shadow Blur", &n.innerShadowBlur, 0.5f, 0.0f, 500.0f))
 		{ n.innerShadowBlur = std::max(0.0f, n.innerShadowBlur); edit = true; }
@@ -762,10 +829,17 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	}
 	case UIPropType::Color:
 	{
+		// A bound colour is the theme's, so the swatch is shown and not edited:
+		// a value that is overwritten on the next mode switch is worse than one
+		// that cannot be typed.
+		const bool bound = !e.themeRoleFor(pd.name).empty();
 		glm::vec4 v = e.getProp(pd.name).col;
+		ImGui::BeginDisabled(bound);
 		if (ImGui::ColorEdit4((pd.name + id).c_str(), &v.x))
 			{ e.setProp(pd.name, UIPropValue::ofColor(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		drawThemeRoleButton(e, pd.name, committed);
 		break;
 	}
 	case UIPropType::Vec2:

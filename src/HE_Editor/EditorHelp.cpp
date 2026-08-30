@@ -1177,6 +1177,14 @@ namespace
 	  "A screen — HUD, menu, dialog — laid out in the widget designer, with its "
 	  "own graph for what its buttons do.",
 	  "", "ui#designer" },
+	{ "New Asset/Theme", "",
+	  "What the whole application looks like: nine colour ROLES — background, "
+	  "surface, border, text, muted text, accent, warning, error, success — each "
+	  "in a light and a dark value, plus the size steps and the shadows. Elements "
+	  "point at a role instead of carrying a colour, so one edit here changes "
+	  "every one of them, and light/dark becomes a switch instead of a second set "
+	  "of widgets. A new theme starts as a copy of the shipped default.",
+	  "", "ui#elements" },
 	{ "New Asset/HorizonCode Class", "",
 	  "A visual-scripting class: variables, functions and events, instantiated "
 	  "at run time or put on an entity.",
@@ -1902,6 +1910,13 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	{ "UI Widget/Literal (type it here)", "",
+	  "Where this colour comes from. \"Literal\" means you typed it and it is "
+	  "yours; picking one of the nine theme ROLES instead means the theme decides "
+	  "it, every element with that role changes together, and light/dark switches "
+	  "it for you. A bound colour's swatch is read-only, because editing it would "
+	  "be overwritten the next time the theme or the mode changes.",
+	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
 	  "number for all four; at half the shorter side the shape becomes a capsule, "
