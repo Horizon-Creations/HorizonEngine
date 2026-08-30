@@ -64,18 +64,23 @@ std::vector<Docs::Page> firstStepsPages()
 			     "holding the pad, the CHARACTER is the body in the world. Splitting "
 			     "them is what lets one player take over a different body later."),
 			steps({
-				{ "In the Content Browser, right-click -> Player Controller",
-				  "Creates a HorizonCode class that already derives from "
-				  "PlayerController. Do not build it from a plain HorizonCode Class "
-				  "and set the base yourself; this entry gets it right." },
-				{ "Right-click -> Player Character",
+				{ "In the Content Browser, right-click -> Gameplay -> Player Controller",
+				  "Under Gameplay, not at the top level. It creates a HorizonCode "
+				  "class that already derives from PlayerController — do not build one "
+				  "from a plain HorizonCode Class and set the base yourself." },
+				{ "Right-click -> Gameplay -> Player Character",
 				  "The same, deriving from PlayerCharacter." },
 			}),
-			note("Both entries appear in a HorizonCode project", {
-				para("In a Lua, Python or C++ project the Content Browser offers "
-				     "Script or C++ Class instead. The two classes still exist as "
-				     "concepts — you write them in your language — but the ready-made "
-				     "entries are HorizonCode's."),
+			warn("The Gameplay menu only offers these in a HorizonCode project", {
+				para("The project's language is chosen in the New Project wizard and "
+				     "decides what this menu contains. A Lua, Python or C++ project "
+				     "gets Script or C++ Class there and NOTHING ELSE — no Player "
+				     "Controller, no Player Character."),
+				para("This is not cosmetic. The engine looks for player controllers "
+				     "among HorizonCode classes only, so a project in another language "
+				     "cannot have one at all today, and the whole of step 3 below is "
+				     "out of reach. If you want a player, the project has to be a "
+				     "HorizonCode project."),
 			}),
 			para("A Player Character arrives furnished. The engine gives it a Character "
 			     "Controller, a capsule Collider, a kinematic Rigid Body, a Movement "

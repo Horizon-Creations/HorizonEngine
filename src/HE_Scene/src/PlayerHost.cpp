@@ -123,6 +123,21 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 		HE_LOG_INFO(Input, "%s",
 			(std::to_string(characterClasses) + " PlayerCharacter classes found, none spawned "
 			 "automatically - spawn one from your PlayerController with Create Object").c_str());
+	// Neither a controller nor a character class anywhere: the session starts
+	// with no player in it and, until this line existed, said nothing at all.
+	// Everything a beginner does next depends on there being one, so the silence
+	// was the single most expensive one in the engine — you press Play, nothing
+	// moves, and the log is empty.
+	//
+	// A menu or cutscene scene legitimately has no player, which is why this
+	// says what is missing rather than claiming something is broken. It fires
+	// once per play session.
+	if (m_controllers.empty() && characterClasses == 0)
+		HE_LOG_WARN(Input, "%s",
+			"PlayerHost: no PlayerController and no PlayerCharacter class in this project - "
+			"nothing will respond to input. Create them in the Content Browser under "
+			"Gameplay (a HorizonCode project only), then spawn the character from the "
+			"controller's Begin Play with Create Object and take it over with Possess");
 }
 
 void PlayerHost::addCharacter(HorizonCode::InstanceId instance)
