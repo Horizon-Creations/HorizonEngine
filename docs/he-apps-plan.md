@@ -1024,7 +1024,60 @@ heruntergerechnet wird, wäre reine Arbeit), und die Aufnahme hat deshalb Fenste
 **Offen aus diesem Block:** A3a, die Diät zur Linkzeit — heute wird die Bibliothek neben den anderen
 gelinkt und per Konfiguration gewählt. Das ist ein eigener Punkt und bleibt es.
 
-**Als Nächstes:** A3a, dann die Abnahme von Welle 1.
+### Welle 1 ist abgenommen (27.08.2026)
+
+**Erst fehlte eine Fähigkeit.** Beim Prüfen des Vokabulars gegen eine Todo-App fiel auf: das
+Widget-System konnte zur **Laufzeit keine Elemente erzeugen**. `CreateWidget` macht eine
+eigenständige Instanz, aber es gab keinen Weg, einer Vertical Box ein Kind hinzuzufügen — eine
+Liste unbekannter Länge war damit nicht ausdrückbar, und das ist die gewöhnlichste Sache, die
+eine Anwendung zeigt. Der User hat entschieden, das zuerst zu bauen.
+
+`widget.addChild(widget, parentName, widgetAsset) → child` greift dafür auf die **vorhandene**
+Graft-Maschinerie zurück, die ein WidgetRef benutzt: eine Zeile ist ein eigenes Widget-Asset,
+einmal gezeichnet, mit **eigener Logik als eigene Skript-Instanz**. Der Rückgabewert ist eine
+Ref, also ein Objekt wie jedes andere — Set External schreibt seine öffentlichen Variablen, Call
+External ruft seine Funktionen, Bind Event hört auf das, was es sendet. Dazu `removeChild` (eine
+Zeile wieder heraus, mit ihren Elementen und ihrer Logik) und `clearChildren`. Adressiert wird
+über den **Namen** des Elternteils, weil das der Designer anzeigt und der Autor tippen kann.
+
+**Dann die App.** `tests/test_app_todo.cpp` baut sie so, wie ein Autor sie bauen würde — ein
+Asset für die Seite, eines für die Zeile, HorizonCode-Graphen für beide — tippt echten Text,
+klickt echte Knöpfe und fragt, was auf dem Bildschirm steht: zwei Zeilen mit **je ihrem eigenen**
+Text, im Kasten gestapelt, und eine Zeile, die sich durch ihren eigenen Löschknopf selbst aus der
+Liste nimmt. Der erste Lauf fand gleich einen Fehler in der App: ohne Leeren des Eingabefelds
+liest das nächste Hinzufügen, was noch dasteht.
+
+**Und exportiert.** Der zweite Testfall exportiert dieselbe Sache über `ProjectExporter` und
+prüft die ausgelieferte `config.json` auf `GameBackend = Software` und den Baum auf die Abwesenheit
+von Python. Das gestartete Ergebnis:
+
+| | |
+|---|---|
+| Start | `backend=Software`, „application mode — no world, no physics, no scene" |
+| Größe | **26,6 MB** (ohne Python), unter der 32-MB-Schwelle |
+| **CPU im Leerlauf** | **0,1–0,2 %** — die Abnahmemarke ist 2 % |
+| Speicher | 104 MB RSS |
+
+**Zwei Funde, beide echt.** Der erste: `appProject`/`advancedShaderEffects` reisen in
+`project.hcfg`, **nicht** in `config.json` — ohne sie startete die exportierte App Jolt und stellte
+eine Fly-Kamera in eine Welt, die sie nicht hat. Der zweite: die exportierte App warnte alle zwei
+Sekunden „Fixed update is falling behind", mit einer Zahl, die **wuchs** (1332 ms nach 15 s). Eine
+ereignisgetriebene Anwendung reißt die Fixed-Step-Deckelung **bauartbedingt**: ein Frame im
+Leerlauf ist ein Zehntel Sekunde lang, also sechs Schritte bei einer Deckelung von fünf, jeden
+Frame, für immer. Zwei Zeilen in `GameLoop::tick`: der Rückstand wird **verworfen** statt
+mitgeschleppt (die Todesspirale, und die richtige Antwort auch für Spiele), und ohne
+Game-Logic-Modul läuft die Fixed-Schleife gar nicht erst — es gibt nichts, dem man hinterherhinken
+könnte. Danach: null Warnungen.
+
+**Was die Abnahme nicht abdeckt, ausdrücklich:** die App wurde als flaches Verzeichnis exportiert,
+nicht als signiertes `.app`; das Klicken in der laufenden exportierten App ist ungetestet (der
+Testfall oben treibt den WidgetManager im Prozess); Persistenz über einen Neustart ist nicht
+gefahren; und dies ist die Ausprägung **Advanced aus**. Die Ausprägung Advanced **an** — GPU-Pfad,
+Material-Graphen — hat weiterhin keinen Abnahmelauf, und das bleibt der offene Posten aus der
+Risikoliste („der headless-Starttest muss beide App-Ausprägungen fahren").
+
+**Als Nächstes:** A3b (ein einziger gelinkter Renderer, `WidgetManager` aus `HE_Scene` heraus,
+shaderc-freier Build) oder Welle 2 der Widget-Arbeit — Container, Navigation, Theme.
 
 **Frühere Notiz (erledigt):** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier

@@ -73,6 +73,7 @@ add_executable(he_tests
     test_ui.cpp
     test_ui_widgets.cpp
     test_software_raster.cpp
+    test_app_todo.cpp
     test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp
@@ -249,6 +250,12 @@ target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
 # runner and a packaged test binary.
 target_compile_definitions(he_tests PRIVATE
     HE_DOCS_BUNDLE_PATH="${CMAKE_SOURCE_DIR}/EditorDeps/Docs/he-docs.json")
+# The deployed game runtime the export half of the Wave-1 acceptance copies into
+# its packaged build (docs/he-apps-plan.md). Handed over as a path, like the docs
+# bundle above: a configure without the deploy step simply has none, and the test
+# says so and skips rather than failing.
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_GAME_RUNTIME_DIR="${DEPLOY_GAME}")
 # The editor's own font, for the UI screenshots (test_ui_shot.cpp). Without it
 # they still render, in ImGui's default font — but half of what a UI shot shows
 # is line height and spacing, and those belong to the font.
