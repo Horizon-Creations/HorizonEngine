@@ -48,7 +48,18 @@ add_custom_command(OUTPUT "${HE_SKY_CORE_HEADER}"
     DEPENDS "${HE_SKY_CORE_GLSL}" "${CMAKE_SOURCE_DIR}/cmake/embed_glsl.cmake"
     COMMENT "Erzeuge sky_core_glsl.h aus shaders/sky_core.glsl"
     VERBATIM)
-add_custom_target(SkyCoreHeader DEPENDS "${HE_SKY_CORE_HEADER}")
+set(HE_SKY_AURORA_GLSL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky_aurora.glsl")
+set(HE_SKY_AURORA_HEADER "${HE_SKY_CORE_GEN_DIR}/sky_aurora_glsl.h")
+add_custom_command(OUTPUT "${HE_SKY_AURORA_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+            -DIN=${HE_SKY_AURORA_GLSL}
+            -DOUT=${HE_SKY_AURORA_HEADER}
+            -DVAR=kSkyAuroraGLSL
+            -P "${CMAKE_SOURCE_DIR}/cmake/embed_glsl.cmake"
+    DEPENDS "${HE_SKY_AURORA_GLSL}" "${CMAKE_SOURCE_DIR}/cmake/embed_glsl.cmake"
+    COMMENT "Erzeuge sky_aurora_glsl.h aus shaders/sky_aurora.glsl"
+    VERBATIM)
+add_custom_target(SkyCoreHeader DEPENDS "${HE_SKY_CORE_HEADER}" "${HE_SKY_AURORA_HEADER}")
 
 # ─── OpenGL Backend ────────────────────────────────────────────────────────────
 find_package(OpenGL REQUIRED)

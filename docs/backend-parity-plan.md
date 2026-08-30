@@ -1347,3 +1347,77 @@ Schieflage, die auf Vulkan seit Scheibe 1 dokumentiert ist: Himmel integriert,
 Umgebungslicht nicht. Der richtige Ausweg ist auf beiden nicht der eingebundene Kern,
 sondern GLs gebackene `uSkyEnv`-Cubemap (`SkyEnvBake.h`) — sie erspart die 60 Samples pro
 Aufruf ganz. Das gehört zu P4.
+
+---
+
+## STATUS P3c/1 — die 3D-Aurora, und ein Build-Fehler, der jede Shader-Messung entwertete
+
+**Zuerst gemessen, dann entschieden.** Statt P3c oder P3d nach Gefühl zu wählen, ist der
+Restabstand effektweise aufgeschlüsselt worden (Basis: alles aus, dann je ein Effekt an):
+
+| Effekt | D3D11 | Vulkan | |
+|---|---|---|---|
+| **Aurora** | 63,9 % | 63,9 % | P3c |
+| **Wolken (volumetrisch)** | 63,8 % | 63,8 % | P3d |
+| Nebel | 23,3 % | 65,0 % | P3c |
+| Sterne | 20,5 % | 20,5 % | P3c |
+| Milchstraße | 15,1 % | 15,1 % | P3c |
+
+Die Nebel-Asymmetrie ist erklärt: D3D hat gar keine `nebula()` und zeichnet nichts, Vulkan
+zeichnet die alte einfarbige Fassung — nichts zu zeichnen liegt näher an GL als das Falsche.
+
+**Vier Zeilen der Messung sind unbrauchbar und werden nicht als Erfolg gezählt:** Meteore,
+Cirrus, Kondensstreifen und Regen kamen auf 0,00 %. Diese Effekte fehlen laut
+Funktionsinventar auf *beiden* Backends — sie waren bei den gewählten Einstellungen nur auch
+auf GL nicht sichtbar. Das sind Messlücken.
+
+**Warum extrahiert statt portiert.** Das Inventar zählt 28–29 Funktionen, die GLs Himmel
+mehr hat als Vulkan bzw. D3D. Von Hand portiert wären das 56 neue Kopien — genau der Fehler,
+den dieses Repo mit `kSkyFuncHLSL` schon einmal gemacht hat. Beide Gruppen sind dafür
+günstig: **null Sampler-Bezüge**, und alle gelesenen Uniformen liegen seit P3b kanonisch vor.
+
+**Umgebaut.** `shaders/sky_aurora.glsl` (295 Zeilen: `skyIgn`, `auroraRnd`, `auroraWeb`,
+`auroraSlab`, `applyAurora3D`) ist die einzige Quelle. OpenGL spleißt sie am neuen Marker
+`//#SKYAURORA#`, Vulkan bindet sie per `#include` ein. Eine Anpassung war nötig:
+`applyAurora3D` nimmt die Fragmentkoordinate jetzt als **Parameter** statt `gl_FragCoord`
+im Rumpf zu lesen — HLSL kennt das Builtin nicht, und SPIRV-Cross macht daraus eine
+dateiglobale Static, die beim Herausschneiden verlorenginge.
+
+**Ergebnis:**
+
+| | vorher | nachher |
+|---|---|---|
+| Aurora, Vulkan vs GL | 63,91 % / maxdiff 209 | **38,89 % / maxdiff 44** |
+| OpenGL | — | **0 Bytes** (Aurora an wie aus) |
+
+**Der Rest ist charakterisiert, nicht weggeredet.** Drei Hypothesen wurden geprüft und zwei
+davon *widerlegt*:
+
+* *Dither-Phase?* Nein. Der Jitter steht in der gemeinsamen Datei; auf Konstante gesetzt
+  ändert sich der Abstand nicht (38,84 % statt 38,89 %).
+* *Zeitversatz?* Nein. Vulkan über `HE_DUMP_SKYTIME` 6.0/6.9/7.0/7.1/8.0 gegen GL bei 7.0
+  ergibt ein sauberes Minimum **exakt bei 7.0** (51,2 / 42,1 / 38,8 / 41,3 / 52,0 %).
+* *Falscher Parameter?* Unwahrscheinlich: der isolierte Aurora-Beitrag hat auf beiden
+  Backends dieselbe Gesamtenergie (Verhältnis 1,0080), nur andere räumliche Verteilung.
+
+Was bleibt, korreliert mit dem lokalen Bildkontrast: bei flachem Inhalt weicht es im Mittel
+um 1,5 ab, an Strukturkanten um 4,4–5,3. Das ist die Signatur eines strukturverstärkten
+Sub-LSB-Unterschieds im Sichtstrahl — derselbe, der beim glatten Himmelskern nur maxdiff 1–4
+erzeugt, schlägt bei dünnen, kontrastreichen Vorhängen um ein Vielfaches stärker durch.
+
+**Nebenbefund, der über diese Phase hinausgeht.** Der Deploy der Vulkan-`.spv` hing als
+`POST_BUILD` am Ziel `HorizonEditor` — und das läuft nur, wenn der Editor tatsächlich neu
+gelinkt wird. Eine **reine** Shader-Änderung wurde also nie ausgeliefert: 76 KB im
+Build-Ordner, 56 KB daneben im Deploy, und das erste Aurora-A/B zeigte exakt null Änderung.
+Verdeckt wird das immer dann, wenn im selben Zug C++ mitgeändert wird — betroffen sind
+gerade die reinen Shader-Slices, also alles, was ab hier folgt. Der Kopierschritt ist jetzt
+ein eigenes `ALL`-Ziel (`HeDeployShaders`).
+
+**D3D-Aurora: Rezeptur validiert, noch nicht eingebaut.** Offline durchgespielt, mit drei
+Unterschieden zum Himmelskern, die alle gemessen sind: (1) der Wrapper braucht den
+kanonischen Block **ohne Instanznamen**, sonst präfixt SPIRV-Cross zu `sky_…`; ohne
+Instanznamen wird `_19_…` daraus, was danach entfernt wird. (2) Extrahiert wird
+**namentlich**, weil SPIRV-Cross auch die Helfer emittiert, die der Sky-PS schon hat.
+(3) `inout` darf **nicht** pauschal gestrichen werden — `auroraSlab` hat mit `t0`/`t1` echte
+Ausgabeparameter; nur die von SPIRV-Cross hinzugefügten dürfen weg, und welche das sind,
+steht in der GLSL-Quelle. `fxc /T ps_5_0`: 0,3 s, 745 Slots.

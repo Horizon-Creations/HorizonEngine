@@ -58,6 +58,9 @@ GLSL_SOURCE = RENDER / "OpenGL" / "OpenGLRenderer.cpp"
 # faellt mit "no matching overloaded function" um — was beim Umbau auch
 # genau so passiert ist.
 GLSL_SKY_CORE = REPO / "src" / "HE_Rendering" / "shaders" / "sky_core.glsl"
+# Zweiter Marker, gleiche Mechanik: die 3D-Aurora. Ohne Aufloesung faellt kSkyFS
+# mit "undeclared identifier 'applyAurora3D'" um.
+GLSL_SKY_AURORA = REPO / "src" / "HE_Rendering" / "shaders" / "sky_aurora.glsl"
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own.
@@ -304,7 +307,10 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             failures.append(f"{name}: not covered — no VS/FS/CS suffix, extend GLSL_STAGE_BY_SUFFIX")
             continue
         src = strings.get(GLSL_PRELUDE_OF[name], "") + body if name in GLSL_PRELUDE_OF else body
-        src = src.replace("//#SKYFUNC#", skyfunc)          # injectSkyFunc (OpenGLRenderer.cpp:4095)
+        src = src.replace("//#SKYFUNC#", skyfunc)
+        if GLSL_SKY_AURORA.exists():
+            src = src.replace("//#SKYAURORA#", "\n" + GLSL_SKY_AURORA.read_text(
+                encoding="utf-8", errors="replace"))
         if "#version" not in src:
             src = "#version 430 core\n" + src               # the compute call sites' header
         f = tmp / f"gl__{name}.{stage}"

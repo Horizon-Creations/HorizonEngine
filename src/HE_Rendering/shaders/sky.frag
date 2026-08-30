@@ -128,6 +128,13 @@ layout(set = 0, binding = 0) uniform SkyEnv {
 #define uStarDensity    sky.star.z
 #define uStarGlow       sky.star.w
 #define uStarTwinkle    sky.star2.x
+// Fuer die 3D-Aurora aus shaders/sky_aurora.glsl. Bis P3b lagen auroraColorTop,
+// auroraHeight und auroraFragmentation gar nicht im UBO -- die Regler waren
+// wirkungslos, und die Funktion waere ohne sie nicht portierbar gewesen.
+#define uAuroraColorTop sky.auroraColorTop.xyz
+#define uAuroraHeight   sky.cirrus.y
+#define uAuroraFragment sky.cirrus.z
+#define uCameraPos      sky.cameraPos.xyz
 
 layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
 layout(set = 0, binding = 2) uniform sampler3D uNoise;
@@ -239,26 +246,18 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float t, float mw)
     return tint*uStarColor*(shape*mag*tw*horizon*night*bandDim*uStarBright);
 }
 
-vec3 aurora(vec3 dir, vec3 sunDir, float t, float intensity, vec3 auroraCol)
-{
-    if(intensity<=0.0) return vec3(0.0);
-    float night=1.0-smoothstep(-0.10,0.10,clamp(sunDir.y,-0.2,1.0));
-    if(night<=0.0||dir.y<=0.04) return vec3(0.0);
-    vec2 P=dir.xz/(dir.y+0.45);
-    float along=P.x, across=P.y;
-    float wave=0.40*sin(along*0.7+t*0.15)+0.30*cloudFbm(vec2(along*0.35-t*0.04,3.0));
-    float phase=across*0.30+wave;
-    float f=abs(fract(phase)-0.5);
-    float ribbon=smoothstep(0.10,0.45,f);
-    float stri=cloudFbm(vec2(along*6.0+t*0.25,across*1.2));
-    float curtain=ribbon*(0.45+0.55*smoothstep(0.30,0.80,stri));
-    float patches=0.65+0.35*smoothstep(0.25,0.85,cloudFbm(vec2(along*0.45+t*0.03,across*0.4+9.0)));
-    float hcol=smoothstep(0.05,0.60,dir.y);
-    vec3 bCol=auroraCol*vec3(0.60,0.15,0.90), tCol=auroraCol*vec3(0.30,0.90,0.70);
-    vec3 col=mix(mix(bCol,auroraCol,smoothstep(0.0,0.5,hcol)),tCol,smoothstep(0.5,1.0,hcol));
-    float fade=smoothstep(0.03,0.16,dir.y)*(1.0-smoothstep(0.78,1.0,dir.y));
-    return col*(curtain*patches*fade*intensity*night*5.0);
-}
+// ── 3D-Aurora: gemeinsame Quelle ────────────────────────────────────────────
+// Hier stand eine eigene, flache aurora(): 20 Zeilen, die die Vorhaenge als
+// zwei uebereinandergelegte Rauschbaender ueber einer projizierten Ebene
+// zeichneten. GL hat laengst unabhaengige endliche Baender, die sich zu einem
+// Netz kreuzen (auroraSlab/auroraWeb, 270 Zeilen). Gemessen war das die
+// groesste belegte Einzelluecke im Himmel: 63,9 % der Bytes gegen GL.
+//
+// Jetzt kommt der Text aus shaders/sky_aurora.glsl -- derselben Datei, aus der
+// GL sein Literal erzeugt und D3D sein HLSL uebersetzt. Die Funktion heisst
+// applyAurora3D und nimmt zusaetzlich Kameraposition, Deckfarbe und die
+// Fragmentkoordinate; alles davon liegt seit P3b im Konstantenpuffer.
+#include "sky_aurora.glsl"
 
 vec3 moonDisk(vec3 dir, vec3 sunDir)
 {
@@ -470,7 +469,8 @@ void main()
         vec3 cdir = celestialDir(dir, uTimeOfDay);
         col += starField(dir, cdir, uSunDir, uTime, uMilkyWay);
         col += nebula(dir, cdir, uSunDir, uNebula, uNebulaColor);
-        col += aurora(dir, uSunDir, uTime, uAurora, uAuroraColor);
+        col += applyAurora3D(dir, uCameraPos, uTime, uAurora, uAuroraColor, uAuroraColorTop,
+                             gl_FragCoord.xy);
         col += moonDisk(dir, uSunDir);
     }
     col = applyClouds(col, dir, uSunDir, uTime, uCloudCoverage, uSunColor, uWind);

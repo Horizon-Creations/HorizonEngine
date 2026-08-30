@@ -347,7 +347,17 @@ file(GENERATE
 # Without this copy the Vulkan RHI falls over ("shader not found") and D3D12
 # silently stays on software GI. Deploy next to the exe and into DEPLOY_EDITOR.
 if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
-	add_custom_command(TARGET HorizonEditor POST_BUILD
+	# EIGENES Ziel, nicht POST_BUILD am Editor. POST_BUILD laeuft nur, wenn der
+	# Editor tatsaechlich neu gelinkt wird -- und eine reine Shader-Aenderung tut
+	# das nicht. Die .spv wurde dann zwar neu uebersetzt, aber die ausgelieferte
+	# Kopie blieb alt, und jede Messung lief still gegen den Shader von vorgestern.
+	# Genau das ist beim Umzug der Aurora passiert: 76 KB im Build-Ordner, 56 KB
+	# daneben im Deploy, und das A/B zeigte exakt null Aenderung.
+	#
+	# Das Ziel laeuft bei jedem Build. Ein Verzeichnis-Copy von ~30 kleinen
+	# Dateien kostet nichts, und "immer richtig" ist hier mehr wert als "selten
+	# uebersprungen".
+	add_custom_target(HeDeployShaders ALL
 		COMMAND ${CMAKE_COMMAND} -E copy_directory
 			"${CMAKE_BINARY_DIR}/Shaders"
 			"$<TARGET_FILE_DIR:HorizonEditor>/Shaders"
@@ -357,6 +367,10 @@ if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
 		COMMENT "Deploying Vulkan SPIR-V shaders to the editor"
 		VERBATIM
 	)
+	add_dependencies(HeDeployShaders HorizonEditor)
+	if(TARGET VulkanShaders)
+		add_dependencies(HeDeployShaders VulkanShaders)
+	endif()
 endif()
 
 # ── macOS DMG packaging ────────────────────────────────────────────────────────
