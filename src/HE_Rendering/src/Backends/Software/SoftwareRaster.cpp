@@ -75,6 +75,21 @@ void Image::clear(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a
     { rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = a; }
 }
 
+void Image::clearRect(const glm::vec4& rect, std::uint8_t r, std::uint8_t g,
+                      std::uint8_t b, std::uint8_t a)
+{
+    const int x0 = std::max(0, static_cast<int>(std::floor(rect.x)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(rect.y)));
+    const int x1 = std::min(width,  static_cast<int>(std::ceil(rect.x + rect.z)));
+    const int y1 = std::min(height, static_cast<int>(std::ceil(rect.y + rect.w)));
+    for (int y = y0; y < y1; ++y)
+    {
+        std::uint8_t* p = rgba.data() + (static_cast<std::size_t>(y) * width + x0) * 4;
+        for (int x = x0; x < x1; ++x, p += 4)
+        { p[0] = r; p[1] = g; p[2] = b; p[3] = a; }
+    }
+}
+
 void Image::pixel(int x, int y, std::uint8_t& r, std::uint8_t& g,
                   std::uint8_t& b, std::uint8_t& a) const
 {
@@ -93,6 +108,129 @@ float roundedBoxSDF(float px, float py, float halfW, float halfH, const glm::vec
     const float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) +
                                    std::max(qy, 0.0f) * std::max(qy, 0.0f));
     return outside + std::min(std::max(qx, qy), 0.0f) - r;
+}
+
+glm::vec4 quadBounds(const UIRenderObject& o)
+{
+    float x0 = o.position.x, y0 = o.position.y;
+    float x1 = o.position.x + o.size.x, y1 = o.position.y + o.size.y;
+    if (o.rotation != 0.0f)
+    {
+        const float cs = std::cos(o.rotation), sn = std::sin(o.rotation);
+        const float cx[4] = { x0, x1, x0, x1 };
+        const float cy[4] = { y0, y0, y1, y1 };
+        float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
+        for (int i = 0; i < 4; ++i)
+        {
+            const float dx = cx[i] - o.rotationPivot.x, dy = cy[i] - o.rotationPivot.y;
+            const float rx = o.rotationPivot.x + dx * cs - dy * sn;
+            const float ry = o.rotationPivot.y + dx * sn + dy * cs;
+            mnx = std::min(mnx, rx); mxx = std::max(mxx, rx);
+            mny = std::min(mny, ry); mxy = std::max(mxy, ry);
+        }
+        x0 = mnx; y0 = mny; x1 = mxx; y1 = mxy;
+    }
+    // A scissor can only ever make the touched area SMALLER, so it belongs here
+    // too: a list row scrolled out of its box changes nothing on screen.
+    if (o.clipRect.z > 0.0f && o.clipRect.w > 0.0f)
+    {
+        x0 = std::max(x0, o.clipRect.x);
+        y0 = std::max(y0, o.clipRect.y);
+        x1 = std::min(x1, o.clipRect.x + o.clipRect.z);
+        y1 = std::min(y1, o.clipRect.y + o.clipRect.w);
+    }
+    // One pixel of slack on each side for the antialiased edge.
+    if (x1 <= x0 || y1 <= y0) return glm::vec4(0.0f);
+    return { x0 - 1.0f, y0 - 1.0f, (x1 - x0) + 2.0f, (y1 - y0) + 2.0f };
+}
+
+namespace
+{
+    // Does this quad put the same pixels down as that one? Every field the
+    // fragment reads, and nothing else — `layer` and the ids that only decide
+    // ORDER are compared too, because a reordering changes what covers what.
+    bool sameQuad(const UIRenderObject& a, const UIRenderObject& b)
+    {
+        return a.position == b.position && a.size == b.size && a.color == b.color &&
+               a.materialAssetId == b.materialAssetId &&
+               a.textureAssetId == b.textureAssetId &&
+               a.type == b.type && a.layer == b.layer &&
+               a.uvMin == b.uvMin && a.uvMax == b.uvMax &&
+               a.cornerRadius == b.cornerRadius &&
+               a.borderWidth == b.borderWidth && a.borderColor == b.borderColor &&
+               a.gradient == b.gradient && a.gradientColor == b.gradientColor &&
+               a.gradientAngleDeg == b.gradientAngleDeg &&
+               a.gradientShape == b.gradientShape &&
+               a.blur == b.blur && a.innerShadowBlur == b.innerShadowBlur &&
+               a.innerShadowColor == b.innerShadowColor &&
+               a.fontAtlasKey == b.fontAtlasKey && a.clipRect == b.clipRect &&
+               a.rotation == b.rotation && a.rotationPivot == b.rotationPivot;
+    }
+
+    glm::vec4 unite(const glm::vec4& a, const glm::vec4& b)
+    {
+        if (a.z <= 0.0f) return b;
+        if (b.z <= 0.0f) return a;
+        const float x0 = std::min(a.x, b.x), y0 = std::min(a.y, b.y);
+        const float x1 = std::max(a.x + a.z, b.x + b.z);
+        const float y1 = std::max(a.y + a.w, b.y + b.w);
+        return { x0, y0, x1 - x0, y1 - y0 };
+    }
+
+    bool overlaps(const glm::vec4& a, const glm::vec4& b)
+    {
+        return !(a.x + a.z <= b.x || b.x + b.z <= a.x ||
+                 a.y + a.w <= b.y || b.y + b.w <= a.y);
+    }
+}
+
+bool dirtyRects(const std::vector<UIRenderObject>& prev,
+                const std::vector<UIRenderObject>& cur,
+                int width, int height, std::vector<glm::vec4>& out)
+{
+    out.clear();
+    if (width <= 0 || height <= 0) return false;
+    // Nothing to compare against yet.
+    if (prev.empty() && cur.empty()) return true;   // …and nothing changed, either
+
+    const std::size_t n = std::max(prev.size(), cur.size());
+    const float area = static_cast<float>(width) * static_cast<float>(height);
+    float dirtyArea = 0.0f;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const bool hasA = i < prev.size(), hasB = i < cur.size();
+        if (hasA && hasB && sameQuad(prev[i], cur[i])) continue;
+        // BOTH boxes: where it was has to be repainted as much as where it is.
+        glm::vec4 r(0.0f);
+        if (hasA) r = unite(r, quadBounds(prev[i]));
+        if (hasB) r = unite(r, quadBounds(cur[i]));
+        if (r.z <= 0.0f || r.w <= 0.0f) continue;
+        out.push_back(r);
+        dirtyArea += r.z * r.w;
+        // Past half the window the bookkeeping costs more than the repaint, and
+        // past a few dozen rectangles the per-rect overhead does. Either way the
+        // caller is better off painting everything.
+        if (dirtyArea > area * 0.5f || out.size() > 32) { out.clear(); return false; }
+    }
+
+    // Merge whatever overlaps: two rectangles that cross each other would have
+    // their shared pixels drawn twice, and drawing twice with "over" blending is
+    // not the same picture as drawing once.
+    bool merged = true;
+    while (merged)
+    {
+        merged = false;
+        for (std::size_t i = 0; i < out.size() && !merged; ++i)
+            for (std::size_t j = i + 1; j < out.size(); ++j)
+                if (overlaps(out[i], out[j]))
+                {
+                    out[i] = unite(out[i], out[j]);
+                    out.erase(out.begin() + static_cast<std::ptrdiff_t>(j));
+                    merged = true;
+                    break;
+                }
+    }
+    return true;
 }
 
 void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::vec4& clip,
@@ -142,29 +280,14 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
         }
         if (ox1 <= ox0 || oy1 <= oy0) continue;
 
-        // The quad's own axis-aligned bounds. A rotated quad's corners swing out
-        // past its rectangle, so the box that has to be walked is the one around
-        // the FOUR TURNED CORNERS — anything smaller clips the quad's own points
+        // Every pixel this quad can touch — turned corners included (see
+        // quadBounds). Walking anything smaller cuts a rotated quad's own points
         // off, which is the classic rotation bug.
         const float rot = o.rotation;
         const float cs = std::cos(rot), sn = std::sin(rot);
-        float bx0 = o.position.x, by0 = o.position.y;
-        float bx1 = o.position.x + o.size.x, by1 = o.position.y + o.size.y;
-        if (rot != 0.0f)
-        {
-            const float cx[4] = { bx0, bx1, bx0, bx1 };
-            const float cy[4] = { by0, by0, by1, by1 };
-            float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
-            for (int i = 0; i < 4; ++i)
-            {
-                const float dx = cx[i] - o.rotationPivot.x, dy = cy[i] - o.rotationPivot.y;
-                const float rx = o.rotationPivot.x + dx * cs - dy * sn;
-                const float ry = o.rotationPivot.y + dx * sn + dy * cs;
-                mnx = std::min(mnx, rx); mxx = std::max(mxx, rx);
-                mny = std::min(mny, ry); mxy = std::max(mxy, ry);
-            }
-            bx0 = mnx; by0 = mny; bx1 = mxx; by1 = mxy;
-        }
+        const glm::vec4 bounds = quadBounds(o);
+        const float bx0 = bounds.x, by0 = bounds.y;
+        const float bx1 = bounds.x + bounds.z, by1 = bounds.y + bounds.w;
         const int px0 = std::max(ox0, static_cast<int>(std::floor(bx0)));
         const int py0 = std::max(oy0, static_cast<int>(std::floor(by0)));
         const int px1 = std::min(ox1, static_cast<int>(std::ceil(bx1)) + 1);

@@ -45,6 +45,9 @@ struct Image
     }
     void resize(int w, int h);
     void clear(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a);
+    // The same, limited to one rectangle — what a partial redraw starts with.
+    void clearRect(const glm::vec4& rect,
+                   std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a);
     // Straight pixel read for the assertions that ask about colour rather than
     // about layout ("is the corner empty", "did the border land on the rim").
     void pixel(int x, int y, std::uint8_t& r, std::uint8_t& g,
@@ -85,5 +88,32 @@ using TextureResolver = TextureView (*)(const HE::UUID& id, void* user);
 void draw(Image& target, const std::vector<UIRenderObject>& objects,
           const glm::vec4& clip = glm::vec4(0.0f),
           TextureResolver tex = nullptr, void* texUser = nullptr);
+
+// Every pixel a quad can possibly touch, as {x, y, w, h}. Wider than the quad's
+// own rectangle by design: a rotated quad's corners swing out past it, and a
+// drop shadow's falloff reaches beyond the shape. Both the rasterizer's inner
+// loop and the dirty-rectangle diff below have to agree on this number, so they
+// ask the same function.
+glm::vec4 quadBounds(const UIRenderObject& o);
+
+// ── What actually changed since last frame ───────────────────────────────────
+// A CPU rasterizer that repaints a whole 4K window when one hover state flips
+// is unusable; a full frame is 8.3 million pixels. Event-driven drawing (A2)
+// covers the idle case, but not dragging a slider or resizing a window, which is
+// where this comes in.
+//
+// The comparison is per POSITION in the list, not per element identity: UI quads
+// arrive in painter order, so quad 7 being different from last frame's quad 7 is
+// exactly the question. Anything that shifts the list (a widget appearing) makes
+// everything from there on differ, and that IS the honest answer — everything
+// after it moved.
+//
+// Returns false when tracking is not worth it: the first frame, a size change,
+// or a diff so large that the bookkeeping costs more than the repaint. The
+// caller then redraws in full. `out` is only meaningful when it returns true.
+bool dirtyRects(const std::vector<UIRenderObject>& prev,
+                const std::vector<UIRenderObject>& cur,
+                int width, int height,
+                std::vector<glm::vec4>& out);
 
 } // namespace HE::sw

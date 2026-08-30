@@ -941,7 +941,55 @@ Abschnitt „Surface" im Details-Panel, in dem die Eigenschaften überhaupt zum 
 sind. Vier Radien kann `AddRectFilled` nicht, also läuft das über einen eigenen Pfad aus vier
 `PathArcTo`.
 
-**Als Nächstes:** Block G (`RendererSoftware`), der Schicht 0 ebenfalls tragen muss.
+### Block G ist gebaut (27.08.2026)
+
+**Die Entscheidung, die den Block trägt: der Rasterizer ist von der Backend-Schale getrennt.**
+`HE::sw` (`SoftwareRaster.h/.cpp`) ist Quads rein, Pixel raus — kein SDL, kein Fenster, kein
+`IRenderer`. Damit ist Schicht 0 **zum ersten Mal in ctest überprüfbar**: der Metal-Zeuge brauchte
+eine Maschine mit Display, der CPU-Zeuge ist ein Unittest, der dieselben zwölf Kacheln zeichnet und
+hinterher Pixel abfragt. `SoftwareRenderer` ist die dünne Hülle darum (Extractor fragen, blitten).
+
+**Das Fragment-Modell ist wörtlich portiert**, nicht nachempfunden: dieselben Zweige in derselben
+Reihenfolge wie `uiFragment` und `kUIFS`, inklusive `roundedBoxSDF` mit Quadrantenwahl, `blur` per
+`smoothstep`, Innenschatten, Rahmenring, Source-over. Die SDF hat einen eigenen Test gegen genau
+die Zahlen aus der Offline-Simulation — das ist das Band, das die **drei** Kopien zusammenhält.
+
+**Dirty Rectangles.** `HE::sw::dirtyRects` vergleicht die Quad-Liste **positionsweise** mit der des
+Vorframes (UI-Quads kommen in Malerreihenfolge, „Quad 7 ist anders als letztes Quad 7" ist also
+genau die Frage) und liefert die Vereinigung aus **alter und neuer** Hülle je Unterschied — nur das
+neue Rechteck zu übermalen ließe das alte stehen. `quadBounds` ist bewusst weiter als das Rechteck
+des Quads: gedrehte Ecken schwingen aus, ein Schatten reicht über die Form hinaus, ein Scissor
+schneidet zu. Überlappende Rechtecke werden verschmolzen, weil zweimal „over" nicht dasselbe Bild
+ist wie einmal. Über der halben Fensterfläche oder über 32 Rechtecken gibt die Funktion auf und
+sagt „male alles" — das ist billiger als die Buchführung. Der wichtigste Test ist der, der prüft,
+dass ein Teil-Neuzeichnen **pixelgleich** zum Vollbild ist.
+
+Drei Gründe erzwingen trotzdem ein Vollbild, und alle drei heißen „wir können dem nicht trauen, was
+schon da steht": Größenwechsel, erster Frame, und **eine andere Surface von SDL** — dann hält deren
+unberührter Teil ein anderes Bild und ein Teilupdate zeigte zwei Frames auf einmal.
+
+**Ändert sich gar nichts, wird keine einzige Zeile geschrieben** und die Surface nicht angefasst.
+Das ist der Fall, den A2 erreichen soll.
+
+**Zwei Grenzen, ausgesprochen statt versteckt:** ein Quad mit **Material** zeichnet Schicht 0 plus
+Farbton (der D5-Rückfallvertrag), und **blockkomprimierte Texturen** werden nicht dekodiert, sondern
+einmal gemeldet — das Export-Profil backt UI-Texturen als RGBA8.
+
+**Verdrahtet:** der Export-Dialog schreibt für ein App-Projekt mit Advanced **aus** jetzt
+`GameBackend = "Software"` in die ausgelieferte `config.json`. Erst das macht den Haken beim
+Anlegen zu dem, was A0 verspricht.
+
+**Verifiziert:** `scripts/he_shot.py OUT.png UITEST=1 RHI=Software` fährt den echten
+`SoftwareRenderer` im echten Editor-Prozess und liefert dasselbe Musterblatt wie Metal. Zwei
+Beobachtungen dabei: `SDL_GetWindowSurface` gibt auf macOS die **logische** Größe (das Fenster wird
+ohne `HIGH_PIXEL_DENSITY` erzeugt, absichtlich — viermal so viele Pixel für einen Blit, der wieder
+heruntergerechnet wird, wäre reine Arbeit), und die Aufnahme hat deshalb Fenstergröße statt der
+1280×720, die der GPU-Pfad in ein Offscreen-Ziel rendert.
+
+**Offen aus diesem Block:** A3a, die Diät zur Linkzeit — heute wird die Bibliothek neben den anderen
+gelinkt und per Konfiguration gewählt. Das ist ein eigener Punkt und bleibt es.
+
+**Als Nächstes:** A3a, dann die Abnahme von Welle 1.
 
 **Frühere Notiz (erledigt):** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier

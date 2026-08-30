@@ -716,8 +716,11 @@ void render(AppContext& ctx)
 
             // An application does not pick a backend: it takes the platform's
             // (Metal on macOS, OpenGL elsewhere — docs/he-apps-plan.md A0), and
-            // with Advanced Shader Effects off the choice would be between two
-            // renderers that draw the same rectangles.
+            // with Advanced Shader Effects OFF it takes the software renderer,
+            // which is what that switch has meant all along (Block G). This is
+            // the line that makes the checkbox at project creation mean
+            // something in the shipped build: no GPU, no driver, no shader
+            // translation, just the CPU drawing rectangles.
             if (!exportingApp)
             {
                 ImGui::Text("Graphics Backend:");
@@ -738,7 +741,14 @@ void render(AppContext& ctx)
                                     "the target runtime lacks falls back to its default.");
             }
             else
-                s_exportBackend.clear();   // the platform default, always
+            {
+                const bool advanced =
+                    ctx.projectManager->currentProject().advancedShaderEffects;
+                s_exportBackend = advanced ? std::string() : std::string("Software");
+                if (!advanced)
+                    ImGui::TextDisabled("Advanced Shader Effects are off: this application "
+                                        "ships the software renderer and needs no GPU.");
+            }
 
             ImGui::Spacing();
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);

@@ -42,8 +42,18 @@ private:
     RenderExtractor m_extractor;
     RenderWorld     m_renderWorld;
     HE::sw::Image   m_frame;
+    // Last frame's quads, kept to diff against — the whole dirty-rectangle idea
+    // in one member. Copied rather than referenced: the extractor rebuilds its
+    // list every frame, so a reference would compare the list against itself.
+    std::vector<UIRenderObject> m_prevObjects;
+    std::vector<glm::vec4>      m_dirty;
+    // The surface SDL last handed over. If it hands over a DIFFERENT one, its
+    // untouched regions hold something else entirely and a partial update would
+    // show two frames at once — so a changed surface forces a full repaint.
+    void*           m_lastSurface = nullptr;
+    bool            m_haveFrame   = false;
     // What the last frame cost, in quads and in pixels actually written — the
-    // only two numbers that mean anything for a CPU rasterizer, and the ones the
-    // dirty-rectangle work will be measured against.
-    uint32_t        m_lastQuads = 0;
+    // only two numbers that mean anything for a CPU rasterizer.
+    uint32_t        m_lastQuads  = 0;
+    uint64_t        m_lastPixels = 0;
 };

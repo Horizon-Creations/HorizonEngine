@@ -188,6 +188,9 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 		else if (s == "Vulkan")              cfg.backend = HE::RendererBackend::Vulkan;
 		else if (s == "D3D11")               cfg.backend = HE::RendererBackend::D3D11;
 		else if (s == "D3D12")               cfg.backend = HE::RendererBackend::D3D12;
+		// The CPU rasterizer, so a dump can witness what an application without a
+		// GPU actually draws — the whole point of being able to force a backend.
+		else if (s == "Software" || s == "SW") cfg.backend = HE::RendererBackend::Software;
 	}
 
 	// ── Startup splash ──────────────────────────────────────────────────────

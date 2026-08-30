@@ -253,6 +253,99 @@ TEST_CASE("Software raster: text draws through the shared font atlas")
     CHECK(inked > 100);
 }
 
+// ── Dirty rectangles ─────────────────────────────────────────────────────────
+// A full 4K frame is 8.3 million pixels. Event-driven drawing keeps the idle
+// case free, but dragging a slider repaints sixty times a second, and repainting
+// a whole window each time is the difference between smooth and treacle.
+TEST_CASE("Dirty rects: an unchanged frame is no work at all")
+{
+    std::vector<UIRenderObject> a{
+        solid(10.0f, 10.0f, 40.0f, 20.0f, { 1.0f, 0.0f, 0.0f, 1.0f }),
+        solid(80.0f, 60.0f, 30.0f, 30.0f, { 0.0f, 1.0f, 0.0f, 1.0f }) };
+    std::vector<glm::vec4> rects;
+    CHECK(HE::sw::dirtyRects(a, a, 200, 200, rects));
+    CHECK(rects.empty());        // nothing to repaint, not even one pixel
+}
+
+TEST_CASE("Dirty rects: only what moved, and where it moved FROM")
+{
+    std::vector<UIRenderObject> before{
+        solid(10.0f, 10.0f, 20.0f, 20.0f, { 1.0f, 0.0f, 0.0f, 1.0f }),
+        solid(150.0f, 150.0f, 20.0f, 20.0f, { 0.0f, 1.0f, 0.0f, 1.0f }) };
+    std::vector<UIRenderObject> after = before;
+    after[0].position = { 40.0f, 10.0f };     // the first one slid right
+
+    std::vector<glm::vec4> rects;
+    REQUIRE(HE::sw::dirtyRects(before, after, 200, 200, rects));
+    REQUIRE(rects.size() == 1);
+    // The union of where it WAS and where it IS — repainting only the new spot
+    // would leave the old one standing on screen.
+    CHECK(rects[0].x <= 10.0f);
+    CHECK(rects[0].y <= 10.0f);
+    CHECK(rects[0].x + rects[0].z >= 60.0f);
+    // …and the untouched quad down at (150,150) is not in it.
+    CHECK(rects[0].y + rects[0].w < 150.0f);
+}
+
+TEST_CASE("Dirty rects: a shadow's falloff counts as touched")
+{
+    // The bounds a shadow quad occupies are wider than the shape it belongs to,
+    // because the producer grows the rect by the blur. Missing that leaves a
+    // ghost rim behind when the shadow moves.
+    UIRenderObject sh = solid(50.0f, 50.0f, 40.0f, 40.0f, { 0.0f, 0.0f, 0.0f, 0.5f });
+    sh.blur = 12.0f;
+    const glm::vec4 b = HE::sw::quadBounds(sh);
+    CHECK(b.z >= 40.0f);
+    CHECK(b.w >= 40.0f);
+
+    // Rotation, likewise: a turned quad's corners swing out past its rectangle.
+    UIRenderObject rotated = solid(40.0f, 48.0f, 40.0f, 4.0f, { 1.0f, 1.0f, 1.0f, 1.0f });
+    rotated.rotation = 3.14159265f * 0.25f;
+    rotated.rotationPivot = { 60.0f, 50.0f };
+    const glm::vec4 rb = HE::sw::quadBounds(rotated);
+    CHECK(rb.w > 20.0f);          // it is much taller than its own 4 px now
+}
+
+TEST_CASE("Dirty rects: a big enough change gives up and says so")
+{
+    // Past half the window the bookkeeping costs more than the repaint, and the
+    // caller is told to paint everything rather than handed forty rectangles.
+    std::vector<UIRenderObject> before{ solid(0.0f, 0.0f, 10.0f, 10.0f, glm::vec4(1.0f)) };
+    std::vector<UIRenderObject> after{ solid(0.0f, 0.0f, 200.0f, 200.0f, glm::vec4(1.0f)) };
+    std::vector<glm::vec4> rects;
+    CHECK_FALSE(HE::sw::dirtyRects(before, after, 200, 200, rects));
+    CHECK(rects.empty());
+}
+
+TEST_CASE("Dirty rects: repainting only them gives the same picture")
+{
+    // The one that matters: a partial redraw has to be indistinguishable from a
+    // full one, or the optimisation is a bug generator.
+    std::vector<UIRenderObject> before{
+        solid(10.0f, 10.0f, 30.0f, 30.0f, { 1.0f, 0.0f, 0.0f, 1.0f }),
+        solid(70.0f, 70.0f, 30.0f, 30.0f, { 0.0f, 0.0f, 1.0f, 1.0f }) };
+    std::vector<UIRenderObject> after = before;
+    after[0].color = { 0.0f, 1.0f, 0.0f, 1.0f };
+    after[0].cornerRadius = glm::vec4(8.0f);
+
+    Image full = canvas(128, 128);
+    HE::sw::draw(full, after);
+
+    // Start from the OLD picture, repaint only the dirty region, and the two
+    // must agree pixel for pixel.
+    Image incremental = canvas(128, 128);
+    HE::sw::draw(incremental, before);
+    std::vector<glm::vec4> rects;
+    REQUIRE(HE::sw::dirtyRects(before, after, 128, 128, rects));
+    REQUIRE_FALSE(rects.empty());
+    for (const glm::vec4& r : rects)
+    {
+        incremental.clearRect(r, 0, 0, 0, 255);
+        HE::sw::draw(incremental, after, r);
+    }
+    CHECK(incremental.rgba == full.rgba);
+}
+
 // ── The witness sheet ────────────────────────────────────────────────────────
 // The same twelve tiles HE_DUMP_UITEST puts on a real GPU, drawn on the CPU and
 // written next to the test binary. It is a test in the sense that it must not

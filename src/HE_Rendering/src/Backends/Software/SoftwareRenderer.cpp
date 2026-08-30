@@ -78,11 +78,14 @@ IRenderer::Capabilities SoftwareRenderer::GetCapabilities() const
 IRenderer::FrameGpuStats SoftwareRenderer::GetFrameGpuStats() const
 {
     FrameGpuStats s;
-    // There is no GPU to time. The quad count is the number that means something
-    // here, so it goes where the profiler already looks for draw calls.
+    // There is no GPU to time. The two numbers that mean something for a CPU
+    // rasterizer are how many quads it was given and how many pixels it actually
+    // wrote — the second is the dirty-rectangle payoff, and it goes where the
+    // profiler already looks for triangles.
     s.gpuFrameMs   = -1.0f;
     s.drawCalls    = m_lastQuads;
     s.totalObjects = m_lastQuads;
+    s.triangles    = static_cast<uint32_t>(std::min<uint64_t>(m_lastPixels, 0xFFFFFFFFull));
     return s;
 }
 
@@ -108,11 +111,8 @@ void SoftwareRenderer::Render()
     const int pw = surf->w, ph = surf->h;
     if (pw <= 0 || ph <= 0) return;
 
-    if (m_frame.width != pw || m_frame.height != ph) m_frame.resize(pw, ph);
-    m_frame.clear(kClear[0], kClear[1], kClear[2], kClear[3]);
-
-    // The same extraction the GPU backends do, and the same one — a widget tree
-    // arrives here already turned into quads.
+    // The same extraction the GPU backends do — a widget tree arrives here
+    // already turned into quads.
     if (m_world)
     {
         m_extractor.setContentManager(m_contentManager);
@@ -121,29 +121,76 @@ void SoftwareRenderer::Render()
     }
     else
         m_renderWorld.uiObjects.clear();
-
-    HE::sw::draw(m_frame, m_renderWorld.uiObjects, glm::vec4(0.0f),
-                 &resolveTexture, m_contentManager);
     m_lastQuads = static_cast<uint32_t>(m_renderWorld.uiObjects.size());
 
-    // Blit into the surface. SDL surfaces are BGRA/ARGB on the common desktop
-    // formats, so the channels are placed through the surface's own format
-    // rather than memcpy'd — the one place where "it looked blue" would come
-    // from.
+    // ── Full frame, or only what changed? ────────────────────────────────────
+    // The reasons for a full one are all "we cannot trust what is already
+    // there": a resize, the first frame, a surface SDL swapped under us, or a
+    // diff so big that tracking it costs more than repainting.
+    const bool sizeChanged = (m_frame.width != pw || m_frame.height != ph);
+    if (sizeChanged) m_frame.resize(pw, ph);
+    const bool surfaceChanged = (surf != m_lastSurface);
+    m_lastSurface = surf;
+
+    bool partial = !sizeChanged && !surfaceChanged && m_haveFrame &&
+                   HE::sw::dirtyRects(m_prevObjects, m_renderWorld.uiObjects, pw, ph, m_dirty);
+    if (partial && m_dirty.empty())
+    {
+        // Nothing at all changed. Not one pixel is written and the surface is
+        // not even touched — this is the case event-driven drawing (A2) is meant
+        // to reach, and the one where a CPU rasterizer costs nothing.
+        m_lastPixels = 0;
+        m_prevObjects = m_renderWorld.uiObjects;
+        return;
+    }
+    if (!partial)
+    {
+        m_dirty.assign(1, glm::vec4(0.0f, 0.0f, static_cast<float>(pw),
+                                    static_cast<float>(ph)));
+    }
+
+    m_lastPixels = 0;
+    for (const glm::vec4& r : m_dirty)
+    {
+        m_frame.clearRect(r, kClear[0], kClear[1], kClear[2], kClear[3]);
+        HE::sw::draw(m_frame, m_renderWorld.uiObjects, r, &resolveTexture, m_contentManager);
+        m_lastPixels += static_cast<uint64_t>(std::max(0.0f, r.z) * std::max(0.0f, r.w));
+    }
+    m_prevObjects = m_renderWorld.uiObjects;
+    m_haveFrame = true;
+
+    // Blit the same regions into the surface. SDL surfaces are BGRA/ARGB on the
+    // common desktop formats, so the channels are placed through the surface's
+    // own format rather than memcpy'd — the one place where "it looked blue"
+    // would come from.
+    std::vector<SDL_Rect> present;
+    present.reserve(m_dirty.size());
     if (SDL_LockSurface(surf))
     {
         const SDL_PixelFormatDetails* fmt = SDL_GetPixelFormatDetails(surf->format);
         auto* rows = static_cast<std::uint8_t*>(surf->pixels);
-        for (int y = 0; y < ph; ++y)
+        for (const glm::vec4& r : m_dirty)
         {
-            auto* dst = reinterpret_cast<std::uint32_t*>(rows + static_cast<std::size_t>(y) * surf->pitch);
-            const std::uint8_t* src = m_frame.rgba.data() + static_cast<std::size_t>(y) * pw * 4;
-            for (int x = 0; x < pw; ++x, src += 4)
-                dst[x] = SDL_MapRGBA(fmt, nullptr, src[0], src[1], src[2], 255);
+            const int x0 = std::max(0, static_cast<int>(std::floor(r.x)));
+            const int y0 = std::max(0, static_cast<int>(std::floor(r.y)));
+            const int x1 = std::min(pw, static_cast<int>(std::ceil(r.x + r.z)));
+            const int y1 = std::min(ph, static_cast<int>(std::ceil(r.y + r.w)));
+            if (x1 <= x0 || y1 <= y0) continue;
+            for (int y = y0; y < y1; ++y)
+            {
+                auto* dst = reinterpret_cast<std::uint32_t*>(
+                    rows + static_cast<std::size_t>(y) * surf->pitch);
+                const std::uint8_t* src =
+                    m_frame.rgba.data() + (static_cast<std::size_t>(y) * pw + x0) * 4;
+                for (int x = x0; x < x1; ++x, src += 4)
+                    dst[x] = SDL_MapRGBA(fmt, nullptr, src[0], src[1], src[2], 255);
+            }
+            present.push_back(SDL_Rect{ x0, y0, x1 - x0, y1 - y0 });
         }
         SDL_UnlockSurface(surf);
     }
-    SDL_UpdateWindowSurface(sdl);
+    if (!present.empty())
+        SDL_UpdateWindowSurfaceRects(sdl, present.data(), static_cast<int>(present.size()));
 }
 
 bool SoftwareRenderer::CaptureViewport(std::vector<uint8_t>& rgba,
