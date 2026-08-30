@@ -373,7 +373,11 @@ void GameApplication::OnInit()
 	// it while it runs. Unknown (a platform SDL cannot ask) keeps the dark
 	// default rather than guessing light.
 	{
-		WidgetManager& wm = m_world->widgets();
+		// m_widgets, NOT m_world->widgets(): the world is built further down and
+		// does not exist yet here. It BORROWS this manager when it is
+		// (setWidgetManager), so the two are the same object from then on — but
+		// only one of them can be reached this early.
+		WidgetManager& wm = m_widgets;
 		const SDL_SystemTheme sys = SDL_GetSystemTheme();
 		if (sys == SDL_SYSTEM_THEME_LIGHT)     wm.setSystemThemeMode(HE::UIThemeMode::Light);
 		else if (sys == SDL_SYSTEM_THEME_DARK) wm.setSystemThemeMode(HE::UIThemeMode::Dark);
@@ -1261,9 +1265,9 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		{
 			const SDL_SystemTheme sys = SDL_GetSystemTheme();
 			if (sys == SDL_SYSTEM_THEME_LIGHT)
-				m_world->widgets().setSystemThemeMode(HE::UIThemeMode::Light);
+				m_widgets.setSystemThemeMode(HE::UIThemeMode::Light);
 			else if (sys == SDL_SYSTEM_THEME_DARK)
-				m_world->widgets().setSystemThemeMode(HE::UIThemeMode::Dark);
+				m_widgets.setSystemThemeMode(HE::UIThemeMode::Dark);
 			return true;
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)
