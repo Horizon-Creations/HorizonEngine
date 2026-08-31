@@ -8,6 +8,7 @@
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
@@ -72,7 +73,14 @@ int EntityHost::bindFor(const std::vector<Entity>& entities)
 	return bound;
 }
 
-HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& classPath)
+// BY VALUE, not by const reference, and that is load-bearing. Two of this
+// function's own callers pass `a->path` — a string owned by an asset in the
+// content manager's pool — and the first thing done with it is a load that can
+// insert into that pool. The pool is a dense vector, so an insert moves every
+// asset in it and the argument would be pointing at freed memory inside the very
+// call that was handed it. One copy per bind is nothing; the alternative is a
+// use-after-free that only fires when the class happens not to be loaded yet.
+HorizonCode::InstanceId EntityHost::bind(Entity entity, std::string classPath)
 {
 	if (!m_runtime || !m_content || !m_world) return 0;
 	if (!m_world->registry().valid(entity)) return 0;
@@ -86,15 +94,18 @@ HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& class
 		             static_cast<uint32_t>(entity), classPath.c_str());
 		return 0;
 	}
+	// Same reason again, one level in: resolveClassAsset below loads every
+	// ancestor of this class, and `a` does not survive that.
+	const std::string assetPath = a->path;
 
 	// Resolve the inheritance chain and flatten it: the graph that runs is this
 	// class's own PLUS everything it inherits, with its overrides in place.
 	// The identity carries the ancestry so a Cast to a parent class can be
 	// answered without the runtime ever reading an asset.
-	HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(*m_content, a->path);
-	const HorizonCode::ClassIdentity cls{ a->path, rc.engineBase, rc.chain };
+	HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(*m_content, assetPath);
+	const HorizonCode::ClassIdentity cls{ assetPath, rc.engineBase, rc.chain };
 	HorizonCode::InstanceId inst = 0;
-	if (auto compiled = HorizonCode::compiledClasses().create(a->path))
+	if (auto compiled = HorizonCode::compiledClasses().create(assetPath))
 		inst = m_runtime->addCompiled(std::move(compiled), {}, cls);
 	else
 		inst = m_runtime->addLevels(std::move(rc.levels), {}, cls);
@@ -120,6 +131,15 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 	const HorizonCodeClassAsset* a = m_content->getHorizonCodeClass(id);
 	if (!a) return out;
 
+	// Everything this function still needs from the asset, taken NOW. Asset
+	// pointers live in a dense vector, so the next load of anything not yet
+	// registered moves them — and the very next line loads this class's whole
+	// ancestor chain. `a` must be treated as dead from here on.
+	const std::string assetPath = a->path;
+	// Whether the body below is this class's OWN or something it inherits. Only
+	// meaningful before the first load, like everything else read off `a`.
+	const bool ownComponents = !a->componentBlob.empty();
+
 	// The entity the class brings with it: its component list, which is stored in
 	// the prefab payload format precisely so this is one call rather than a
 	// second deserializer. INHERITED, not just its own — a class whose Components
@@ -132,13 +152,23 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 	{
 		SceneSerializer ser;
 		out.entity = ser.instantiatePrefab(*m_world, comps, parent);
+		// An inherited body carries the NAME of whoever authored it — the
+		// ancestor class, or the engine base ("Entity", "PlayerCharacter"). That
+		// name is about the wrong thing: a spawned Goblin would stand in the
+		// outliner as "Entity". The class's own file stem is the answer, and it
+		// is the same one the bare-entity path below already gives.
+		if (!ownComponents && out.entity != entt::null)
+			if (auto* nc = m_world->registry().try_get<NameComponent>(out.entity))
+				if (const std::string stem = std::filesystem::path(assetPath).stem().string();
+				    !stem.empty())
+					nc->name = stem;
 	}
 	if (out.entity == entt::null)
 	{
 		// The file stem, not the asset's stored `name` — that one is the META
 		// chunk's, written once at creation and never rewritten by a rename, so
 		// every spawned Goblin would stand in the outliner as "NewClass".
-		const std::string stem = std::filesystem::path(a->path).stem().string();
+		const std::string stem = std::filesystem::path(assetPath).stem().string();
 		out.entity = m_world->createEntity(stem.empty() ? "Entity" : stem);
 		if (parent != entt::null && m_world->registry().valid(parent))
 			m_world->reparentEntity(out.entity, parent);
@@ -277,12 +307,20 @@ std::vector<uint8_t> EntityHost::inheritedComponents(ContentManager& content,
 {
 	if (!asset.componentBlob.empty()) return asset.componentBlob;
 
+	// COPIED before the first resolve, and this is not tidiness. ContentManager
+	// hands out pointers into a dense vector (SlotMap), so loading an asset that
+	// is not registered yet reallocates it and moves every outstanding pointer —
+	// including `asset` itself, and including the string this call is reading
+	// from. resolveClassAsset loads every ancestor it walks, so the reference
+	// would be dead inside the call that was given it.
+	const std::string path = asset.path;
+
 	// The chain, nearest ancestor first. Walked to the END rather than stopping
 	// at the immediate parent: if a Goblin derives from an Enemy that itself
 	// never opened its Components tab, the body it means to inherit is the one
 	// further up, and stopping early would silently hand it the bare engine
 	// default instead.
-	HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(content, asset.path);
+	HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(content, path);
 	for (const std::string& ancestor : rc.chain)
 		if (const HorizonCodeClassAsset* parent =
 		        content.getHorizonCodeClass(content.loadAsset(ancestor)))

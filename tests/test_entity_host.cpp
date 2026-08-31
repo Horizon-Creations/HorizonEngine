@@ -490,6 +490,66 @@ TEST_CASE("inherited components come from the nearest ancestor that HAS any")
 	CHECK(reg.get<ColliderComponent>(s.entity).radius == doctest::Approx(7.5f));
 }
 
+// A use-after-free, not a wrong answer, so what it does depends on the weather:
+// clean on a lucky allocation, a wrong class name on an unlucky one, a crash
+// under a sanitizer. Assets live in a SlotMap backed by a dense vector, so
+// registering one moves every asset already in it — and binding or spawning a
+// class LOADS its whole ancestor chain while still holding a pointer to the
+// class it started from.
+//
+// This test forces the condition rather than hoping for it: the ancestors are
+// written to disk and never loaded, so resolving the leaf is guaranteed to
+// register three more assets and reallocate the pool underneath. Run it under
+// ASan and the unfixed version aborts; without one it is the assertions below
+// that catch it, since the name and the identity are read through the pointer
+// that just moved.
+//
+// MUTATION: in EntityHost::bind, take classPath by const reference again and use
+// `a->path` in place of `assetPath`.
+TEST_CASE("spawning a class does not read the asset it was handed after loading its ancestors")
+{
+	TempDir dir("he_test_entityhost_dangle");
+	ContentManager cm(dir.path.string());
+
+	// A four-deep chain, so resolving the leaf registers three more assets.
+	const std::string a1 = writeClass(cm, "Base",  "Entity",      lifecycleGraph());
+	const std::string a2 = writeClass(cm, "Mid",   a1.c_str(),    lifecycleGraph());
+	const std::string a3 = writeClass(cm, "Near",  a2.c_str(),    lifecycleGraph());
+	const std::string a4 = writeClass(cm, "Leaf",  a3.c_str(),    lifecycleGraph());
+
+	// A FRESH manager: nothing is registered, so every resolve below really does
+	// insert. Reusing the one that wrote them would have them all cached, and the
+	// pool would never grow — which is exactly why this bug survived so long.
+	ContentManager fresh(dir.path.string());
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, fresh);
+
+	const EntityHost::Spawned s = host.spawn(a4);
+	REQUIRE(s.instance != 0);
+	REQUIRE((s.entity != entt::null));
+	// The name comes from the asset's path, read AFTER the chain was loaded.
+	CHECK(world.registry().get<NameComponent>(s.entity).name == "Leaf");
+	// …and the identity the runtime recorded, from the same string.
+	CHECK(rt.classKeyOf(s.instance) == a4);
+
+	// The same again through bind(), whose caller hands it a string owned by an
+	// asset — the shape that made taking it by value worth the copy.
+	const Entity placed = world.createEntity("Placed");
+	world.addComponent(placed, TransformComponent{});
+	ContentManager fresh2(dir.path.string());
+	HorizonWorld world2;
+	Runtime rt2;
+	EntityHost host2;
+	host2.begin(rt2, world2, fresh2);
+	const Entity target = world2.createEntity("Target");
+	world2.addComponent(target, TransformComponent{});
+	const HorizonCode::InstanceId inst = host2.bind(target, a4);
+	REQUIRE(inst != 0);
+	CHECK(rt2.classKeyOf(inst) == a4);
+}
+
 TEST_CASE("destroying an Entity-class object takes its body with it")
 {
 	// The other direction of the lifetime rule. The reaper covers "entity gone →

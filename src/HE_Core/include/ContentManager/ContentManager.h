@@ -50,6 +50,23 @@ public:
 
 	// Typed lookup of a loaded asset. Returns nullptr when the UUID is unknown
 	// or refers to an asset of a different type.
+	//
+	// ── THE POINTER IS ONLY GOOD UNTIL THE NEXT LOAD ─────────────────────────
+	// Assets live in a SlotMap, whose storage is a dense std::vector: registering
+	// one (loadAsset of something not yet known, discoverAssets, importing,
+	// saving a NEW asset, mounting a pak) can reallocate the pool and move every
+	// asset in it, and unloading one swap-and-pops a DIFFERENT asset into the
+	// freed slot. Every pointer these getters ever returned is invalid
+	// afterwards — and so is any std::string, blob or json owned by the asset,
+	// which is the half that gets missed: passing `a->path` as a const reference
+	// into a function that loads leaves that reference dangling inside the call
+	// it was handed to.
+	//
+	// So: copy what you need out of the asset before doing anything else, or
+	// re-fetch by UUID after. Do not hold one of these across a call unless you
+	// have checked that the callee cannot touch the content manager — several of
+	// them do so several layers down (resolveClassAsset loads a class's whole
+	// ancestor chain).
 	const StaticMeshAsset*     getStaticMesh(HE::UUID id) const;
 	const SkeletalMeshAsset*   getSkeletalMesh(HE::UUID id) const;
 	const TextureAsset*        getTexture(HE::UUID id) const;

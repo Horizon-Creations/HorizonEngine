@@ -57,7 +57,11 @@ public:
     // Bind ONE already-existing entity to a class. Used by begin() and by
     // anything that adds a scripted entity mid-session. Returns 0 on failure
     // (no such asset, no graph). Fires Construct + BeginPlay.
-    HorizonCode::InstanceId bind(Entity entity, const std::string& classPath);
+    //
+    // classPath BY VALUE on purpose — see the note at the definition. Callers
+    // pass strings owned by content-manager assets, and binding loads assets,
+    // which moves them.
+    HorizonCode::InstanceId bind(Entity entity, std::string classPath);
 
     // Spawn a class that brings its OWN entity: instantiates the class asset's
     // component list (CHUNK_HCCP, a prefab-shaped subtree) into the world and
