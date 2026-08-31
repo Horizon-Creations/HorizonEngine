@@ -2553,6 +2553,106 @@ TEST_CASE("EngineApi: locomotion.jump lifts a grounded character and refuses an 
     CHECK_FALSE(call("locomotion.jumpWith", { id, Value::ofFloat(9.0f) })[0].b);
 }
 
+// MUTATION: in EngineApi.cpp's self-default post-pass, delete the two lines that
+// build `withSelf` and return `inner(c, a)` unchanged instead — the jump is then
+// asked of the world root, the character never leaves the floor, and the row
+// answers false.
+TEST_CASE("EngineApi: an empty Entity means the object that made the call")
+{
+    HorizonWorld world;
+    addPhysicsFloor(world);
+    const auto character = addCharacter(world, { 0.0f, 4.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 120; ++i) phys.step(world, 1.0f / 60.0f);   // land and settle
+
+    // One instance owning the character: what a PlayerCharacter class IS at run
+    // time. The graph itself is empty because nothing here runs graph code — the
+    // rows are called directly, exactly as the interpreter calls them.
+    HorizonCode::Runtime rt;
+    const HorizonCode::InstanceId inst = rt.add(HorizonCode::Graph{});
+    rt.setOwnedEntity(inst, static_cast<uint32_t>(character));
+
+    Ctx c{ &world, &phys, nullptr };
+    c.runtime = &rt;
+    c.self    = inst;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto none = Value::ofInt(0);   // the pin an author never wired
+
+    REQUIRE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
+    const float restY = world.registry().get<TransformComponent>(character).position.y;
+
+    CHECK(call("locomotion.jump", { none })[0].b);
+    for (int i = 0; i < 15; ++i) phys.step(world, 1.0f / 60.0f);
+    CHECK(world.registry().get<TransformComponent>(character).position.y > restY + 0.3f);
+
+    // Readers answer about the same character, so a graph can ask how fast IT is
+    // going without naming itself either.
+    CHECK(call("movement.verticalSpeed", { none })[0].f > 0.5f);
+
+    // An explicitly wired entity is untouched by any of this: the pin still wins
+    // over the caller, which is the half that would make the change a regression
+    // if it broke.
+    const auto other = addCharacter(world, { 6.0f, 4.0f, 0.0f });
+    CHECK(call("transform.getPosition", { Value::ofInt(static_cast<int>(other)) })[0].v3.x
+          == doctest::Approx(6.0f));
+}
+
+// The two halves of the same guarantee: without a caller nothing is invented,
+// and the rows that must not self-resolve do not.
+TEST_CASE("EngineApi: the Entity self-default is off where it would lie")
+{
+    HorizonWorld world;
+    const auto e = world.createEntity("Crate");
+    world.registry().emplace<TransformComponent>(e, TransformComponent{});
+
+    // No runtime, no caller — a Lua or Python script, or an unbound class.
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Nothing is substituted, so the row behaves exactly as it did before: the
+    // world root has no transform, so this reads as the neutral answer.
+    CHECK(call("transform.getPosition", { Value::ofInt(0) })[0].f == doctest::Approx(0.0f));
+
+    // Entity Exists must answer about the entity it was ASKED about. 0 is what
+    // Find By Name returns when it finds nothing, and the root — always valid —
+    // is what it used to be checked against, so the miss read as a hit.
+    CHECK_FALSE(call("entity.exists", { Value::ofInt(0) })[0].b);
+    CHECK(call("entity.exists", { Value::ofInt(static_cast<int>(e)) })[0].b);
+
+    // Destroy Self stays something an author has to mean.
+    CHECK_FALSE(HE::api::find("entity.destroy")->params[0].selfDefault);
+    CHECK_FALSE(HE::api::find("entity.exists")->params[0].selfDefault);
+}
+
+// The convention is only worth anything if it holds everywhere without being
+// remembered per row — so it is asserted over the whole table, not over a list.
+TEST_CASE("EngineApi: every row that acts on an entity carries the self-default")
+{
+    size_t flagged = 0;
+    for (const HE::api::ApiFn& fn : HE::api::registry())
+    {
+        const bool leads = !fn.params.empty() && std::strcmp(fn.params[0].name, "entity") == 0;
+        const bool excluded = std::strcmp(fn.id, "entity.exists")  == 0 ||
+                              std::strcmp(fn.id, "entity.destroy") == 0;
+        if (leads && !excluded)
+        {
+            CHECK_MESSAGE(fn.params[0].selfDefault,
+                          std::string("row without the self-default: ").append(fn.id).c_str());
+            ++flagged;
+        }
+        // Never on anything else — not on a later parameter, not on a row whose
+        // first argument happens to be an int meaning something quite different
+        // (a widget id, a zone handle, a parent).
+        for (size_t i = 0; i < fn.params.size(); ++i)
+            if (i > 0 || !leads || excluded)
+                CHECK_MESSAGE(!fn.params[i].selfDefault,
+                              std::string("unexpected self-default on ").append(fn.id).c_str());
+    }
+    CHECK(flagged > 40);   // it is a convention, not a handful of exceptions
+}
+
 // Would have been green before the change only in the sense that the rows did
 // not exist to crash: this is the null-Ctx tolerance every group in this file is
 // held to, extended to the two new ones.

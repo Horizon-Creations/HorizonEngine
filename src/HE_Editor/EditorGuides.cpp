@@ -412,8 +412,8 @@ namespace
 				{ "Break Vector 3",
 				  "Move To wants three separate floats, not a vector." },
 				{ "Move To",
-				  "Its entity pin comes from Get Owning Entity — the NPC itself, not "
-				  "the player. x, y and z come from Break Vector 3." },
+				  "Leave its Entity pin empty: that means the NPC itself, which is who "
+				  "is walking. x, y and z come from Break Vector 3." },
 			}),
 			warn("Get Position instead of Get World Position", {
 				rich({ run("Move To wants a "), run("world", Docs::Style::Bold),

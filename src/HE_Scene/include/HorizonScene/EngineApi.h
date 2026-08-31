@@ -1072,7 +1072,21 @@ namespace input {
 // codegen emits the generic `hc::callApi(ctx, "<id>", …)` thunk, which lands on
 // the same `invoke`. This is the single source of truth.
 
-struct ApiParam { const char* name; PinType type; bool isArray = false; };
+struct ApiParam
+{
+    const char* name;
+    PinType     type;
+    bool        isArray = false;
+    // "Left at 0, this parameter means the caller itself." True for the leading
+    // `entity` of every row that acts ON an entity — set in a post-pass when the
+    // table is built (see registry()), never by hand at a row, so the rule cannot
+    // be true for one character verb and forgotten at the next.
+    //
+    // Two readers besides the dispatcher: the graph editor draws such a pin as
+    // "Self" instead of a zero, and the generated node reference says so in
+    // words. Both ask this flag rather than keeping their own list.
+    bool        selfDefault = false;
+};
 
 struct ApiFn
 {

@@ -310,6 +310,12 @@ Entity findByName(Ctx& c, const std::string& name)
 }
 bool exists(Ctx& c, Entity e)
 {
+    // 0 is "no entity", not an entity that exists. It is the world root — always
+    // valid, because HorizonWorld's constructor creates it first — and it is also
+    // what findByName hands back when it finds nothing. So without this guard the
+    // one idiom the row exists for, `if Entity Exists(Find By Name("Boss"))`,
+    // answered YES for a boss that is not in the level.
+    if (e == 0u) return false;
     return c.world && c.world->registry().valid((entt::entity)e);
 }
 Entity self(Ctx& c)
@@ -2897,6 +2903,83 @@ const std::vector<ApiFn>& registry()
             fn.displayName = fn.id; // fallback: never null, worst case the id shows
             for (const auto& [id, name] : kNames)
                 if (std::strcmp(fn.id, id) == 0) { fn.displayName = name; break; }
+        }
+
+        // ── Second post-pass: the Target pin defaults to the caller ──────────
+        // A character's own graph called Jump on itself and still had to wire Get
+        // Owning Entity into the Entity pin — for Jump, and again for Move, and
+        // again for every read of its own speed. The pin is now optional: left at
+        // 0 it means "the entity of the class that made this call".
+        //
+        // Zero is the right sentinel and needs no new one. HorizonWorld's
+        // constructor creates the world root as its very FIRST entity, so in a
+        // fresh entt registry the root is index 0 version 0 — the raw value 0.
+        // createEntity() therefore never hands 0 to anything, destroyEntity()
+        // already knows it as isBuiltin() and refuses to delete it, and the
+        // scripting surface already uses 0 as "no entity" in both directions:
+        // findByName, spawn, spawnClass, instance, self and owned all return it
+        // on failure.
+        //
+        // Not claimed: that the root is component-free. A scene FILE can put a
+        // transform or a character on it — applyComponents does not exclude the
+        // root, and migrateLegacyRootEnvironment exists because shipped scenes
+        // once did. What is claimed is only that no gameplay entity is ever
+        // numbered 0, which is what makes the substitution unambiguous.
+        //
+        // ONE rule, applied here rather than row by row: a leading parameter
+        // named "entity" is the thing the row acts on. Writing it into each of
+        // the sixty-odd rows by hand is how it would end up true for Jump and
+        // forgotten for Set Max Speed, and the whole value of the convention is
+        // that an author never has to ask which nodes have it.
+        static constexpr const char* kNoSelfDefault[] = {
+            // A validity question must not answer about a different entity than
+            // the one asked about. "Entity Exists" of a lookup that failed has to
+            // stay false, or the check it exists for is worthless.
+            "entity.exists",
+            // Deleting the caller because a Find By Name missed is the one
+            // mistake with no way back. Destroy Self stays explicit: wire Get
+            // Owning Entity and mean it.
+            "entity.destroy",
+        };
+        for (auto& fn : t)
+        {
+            if (fn.params.empty() || std::strcmp(fn.params[0].name, "entity") != 0) continue;
+            bool excluded = false;
+            for (const char* id : kNoSelfDefault)
+                if (std::strcmp(fn.id, id) == 0) { excluded = true; break; }
+            if (excluded) continue;
+
+            fn.params[0].selfDefault = true;
+            // Wrapping the thunk instead of touching the row's lambda keeps the
+            // free C++ functions honest: locomotion::jump(c, 0) still means the
+            // root entity, which is what a direct C++ caller (and the planned
+            // cppCall codegen) reads it as. The substitution belongs to the
+            // SCRIPTING surface, so it lives on the scripting surface's edge —
+            // and there is exactly one, since both applications and both text
+            // languages dispatch through ApiFn::invoke.
+            fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
+                        (Ctx& c, const VV& a) -> VV
+            {
+                if (a.empty() || a[0].i != 0) return inner(c, a);
+                const Entity me = entity::self(c);
+                if (me == 0u)
+                {
+                    // No caller to stand in: a text script (Lua and Python have
+                    // no instance at all), or a class not bound to an entity.
+                    // Loud, because the alternative is the engine's most
+                    // expensive failure mode — a call that does nothing and says
+                    // nothing. Throttled per row, since a Tick would repeat it
+                    // sixty times a second.
+                    HE_LOG_THROTTLE(Script, Warning, 5.0,
+                                    "%s: Entity is empty and there is no calling object to "
+                                    "stand in for it - wire an entity into the pin",
+                                    id);
+                    return inner(c, a);
+                }
+                VV withSelf = a;
+                withSelf[0] = Value::ofInt(static_cast<int>(me));
+                return inner(c, withSelf);
+            };
         }
 
         return t;

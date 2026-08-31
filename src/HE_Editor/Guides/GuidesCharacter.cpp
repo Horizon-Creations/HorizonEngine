@@ -54,6 +54,13 @@ std::vector<Docs::Page> characterPages()
 			}),
 			para("Both answer whether the jump actually happened. Branch on it if a "
 			     "sound or an animation should only play when it did."),
+			note("The Entity pin can stay empty", {
+				para("It reads Self, and that is what it means: the character this graph "
+				     "belongs to. Every node that acts on an entity works this way, so a "
+				     "character doing something to itself wires nothing — Move, Look, Is "
+				     "Grounded, Get Speed, Set Position. Wire an entity in only when you "
+				     "mean a different one."),
+			}),
 			warn("A refused jump is not an error", {
 				para("Jump returns false in mid-air and does nothing else. If you play "
 				     "the sound without checking, the player hears a jump grunt every "
