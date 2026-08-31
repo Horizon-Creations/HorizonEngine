@@ -15,6 +15,7 @@
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/MovementComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
@@ -404,6 +405,89 @@ TEST_CASE("a spawned class brings its authored components, and survives a save/l
 	CHECK(host.entityOf(s.instance) == s.entity);
 	HE::api::Ctx c{ &world, nullptr, &cm, nullptr, &rt, s.instance };
 	CHECK(HE::api::entity::self(c) == static_cast<uint32_t>(s.entity));
+}
+
+// The state a class is in the moment the Content Browser makes one: a graph, a
+// base class, and NO component blob — that chunk is only written once the class
+// editor's Components tab has been opened and saved. Spawning read the blob and
+// nothing else, so the character everybody creates first arrived as a bare
+// transform: no character controller (Jump answers false), no movement component
+// (Move writes nowhere), no camera (nothing to look through). The editor showed
+// it furnished the whole time, because the panel seeded from the chain and spawn
+// did not.
+//
+// MUTATION: in EntityHost::spawn, read `a->componentBlob` again instead of
+// inheritedComponents(...) — the spawned player loses its whole body.
+TEST_CASE("a class that never authored components still spawns with the ones it inherits")
+{
+	TempDir dir("he_test_entityhost_inherited");
+	ContentManager cm(dir.path.string());
+
+	// Exactly what tryCreate writes: empty blob.
+	const std::string cls = writeClass(cm, "Hero", "PlayerCharacter", lifecycleGraph(), {});
+	{
+		ContentManager reload(dir.path.string());
+		const HorizonCodeClassAsset* a = reload.getHorizonCodeClass(reload.loadAsset(cls));
+		REQUIRE(a != nullptr);
+		REQUIRE(a->componentBlob.empty());   // the precondition this test is about
+	}
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+
+	const EntityHost::Spawned s = host.spawn(cls);
+	REQUIRE((s.entity != entt::null));
+	auto& reg = world.registry();
+	CHECK(reg.all_of<TransformComponent>(s.entity));
+	CHECK(reg.all_of<CharacterControllerComponent>(s.entity));   // Jump needs this
+	CHECK(reg.all_of<MovementComponent>(s.entity));              // Move needs this
+	CHECK(reg.all_of<ColliderComponent>(s.entity));
+	// And the camera child, which is what makes the spawned player visible at all.
+	REQUIRE(reg.all_of<HierarchyComponent>(s.entity));
+	bool hasCamera = false;
+	for (Entity child : reg.get<HierarchyComponent>(s.entity).children)
+		if (reg.all_of<CameraComponent>(child)) { hasCamera = true; break; }
+	CHECK(hasCamera);
+}
+
+// The chain is walked to the end, not one step. A Goblin deriving from an Enemy
+// that itself never opened its Components tab means the body it inherits sits
+// further up — stopping at the immediate parent would hand it the bare engine
+// default instead, which is the wrong body, silently.
+//
+// MUTATION: in inheritedComponents, break out of the chain loop after the first
+// ancestor — the grandchild loses the authored radius.
+TEST_CASE("inherited components come from the nearest ancestor that HAS any")
+{
+	TempDir dir("he_test_entityhost_chain");
+	ContentManager cm(dir.path.string());
+
+	std::vector<uint8_t> blob;
+	{
+		HorizonWorld scratch;
+		const Entity r = scratch.createEntity("EnemyBody");
+		scratch.addComponent(r, TransformComponent{});
+		ColliderComponent col; col.shape = ColliderShape::Sphere; col.radius = 7.5f;
+		scratch.addComponent(r, col);
+		SceneSerializer ser;
+		blob = ser.serializeSubtree(scratch, r);
+	}
+	const std::string base   = writeClass(cm, "Enemy",     "Entity",        lifecycleGraph(), blob);
+	const std::string middle = writeClass(cm, "Brute",     base.c_str(),    lifecycleGraph(), {});
+	const std::string leaf   = writeClass(cm, "BruteBoss", middle.c_str(),  lifecycleGraph(), {});
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+
+	const EntityHost::Spawned s = host.spawn(leaf);
+	REQUIRE((s.entity != entt::null));
+	auto& reg = world.registry();
+	REQUIRE(reg.all_of<ColliderComponent>(s.entity));
+	CHECK(reg.get<ColliderComponent>(s.entity).radius == doctest::Approx(7.5f));
 }
 
 TEST_CASE("destroying an Entity-class object takes its body with it")

@@ -120,15 +120,18 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 	const HorizonCodeClassAsset* a = m_content->getHorizonCodeClass(id);
 	if (!a) return out;
 
-	// The entity the class brings with it: its authored component list, which is
-	// stored in the prefab payload format precisely so this is one call rather
-	// than a second deserializer. A class with no components still gets a bare
-	// named entity — it is an Entity class, so it has a place in the world even
-	// before anything has been put on it.
-	if (!a->componentBlob.empty())
+	// The entity the class brings with it: its component list, which is stored in
+	// the prefab payload format precisely so this is one call rather than a
+	// second deserializer. INHERITED, not just its own — a class whose Components
+	// tab was never opened has no blob of its own, and reading only that made a
+	// freshly created Player Character spawn as a bare transform while the editor
+	// showed it furnished. A class with nothing to inherit either still gets a
+	// bare named entity: it is an Entity class, so it has a place in the world
+	// even before anything has been put on it.
+	if (const std::vector<uint8_t> comps = inheritedComponents(*m_content, *a); !comps.empty())
 	{
 		SceneSerializer ser;
-		out.entity = ser.instantiatePrefab(*m_world, a->componentBlob, parent);
+		out.entity = ser.instantiatePrefab(*m_world, comps, parent);
 	}
 	if (out.entity == entt::null)
 	{
@@ -267,6 +270,25 @@ Entity EntityHost::entityOf(HorizonCode::InstanceId instance) const
 {
 	const auto it = m_byInstance.find(instance);
 	return it != m_byInstance.end() ? static_cast<Entity>(it->second) : entt::null;
+}
+
+std::vector<uint8_t> EntityHost::inheritedComponents(ContentManager& content,
+                                                     const HorizonCodeClassAsset& asset)
+{
+	if (!asset.componentBlob.empty()) return asset.componentBlob;
+
+	// The chain, nearest ancestor first. Walked to the END rather than stopping
+	// at the immediate parent: if a Goblin derives from an Enemy that itself
+	// never opened its Components tab, the body it means to inherit is the one
+	// further up, and stopping early would silently hand it the bare engine
+	// default instead.
+	HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(content, asset.path);
+	for (const std::string& ancestor : rc.chain)
+		if (const HorizonCodeClassAsset* parent =
+		        content.getHorizonCodeClass(content.loadAsset(ancestor)))
+			if (!parent->componentBlob.empty()) return parent->componentBlob;
+
+	return defaultComponents(rc.engineBase);
 }
 
 std::vector<uint8_t> EntityHost::defaultComponents(const std::string& baseClass)

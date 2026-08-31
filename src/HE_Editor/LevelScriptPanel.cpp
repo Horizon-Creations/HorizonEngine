@@ -1566,16 +1566,19 @@ void ensureComponentWorld(ClassState& st, const std::vector<uint8_t>& blob)
 	// An empty class seeds from what it INHERITS: its nearest ancestor's body
 	// if it derives from a class, else the engine base's default list. That is
 	// what makes a Goblin start out looking like an Enemy.
+	//
+	// Asked of EntityHost::inheritedComponents rather than worked out here, and
+	// that is the point of the call: this panel and spawn() have to agree about
+	// what a class starts with. They did not — a class whose tab had never been
+	// opened looked furnished here and spawned bare in the game — and two copies
+	// of the rule is how they came to disagree.
 	std::vector<uint8_t> inherited;
-	if (blob.empty())
-	{
-		if (!st.ancestors.empty() && st.contentForSeed)
-			if (const HorizonCodeClassAsset* parent =
-			        st.contentForSeed->getHorizonCodeClass(
-			            st.contentForSeed->loadAsset(st.ancestors.front())))
-				inherited = parent->componentBlob;
-		if (inherited.empty()) inherited = EntityHost::defaultComponents(st.engineBase);
-	}
+	if (blob.empty() && st.contentForSeed)
+		if (const HorizonCodeClassAsset* self =
+		        st.contentForSeed->getHorizonCodeClass(st.assetId))
+			inherited = EntityHost::inheritedComponents(*st.contentForSeed, *self);
+	if (blob.empty() && inherited.empty())
+		inherited = EntityHost::defaultComponents(st.engineBase);
 	const std::vector<uint8_t>& seed = blob.empty() ? inherited : blob;
 	if (!seed.empty())
 		st.compRoot = ser.instantiatePrefab(*st.compWorld, seed);

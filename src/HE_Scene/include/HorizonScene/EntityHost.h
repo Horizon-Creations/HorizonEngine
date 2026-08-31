@@ -7,6 +7,7 @@
 #include <vector>
 
 class ContentManager;
+struct HorizonCodeClassAsset;
 class PhysicsWorld;
 
 // ── EntityHost ───────────────────────────────────────────────────────────────
@@ -121,6 +122,22 @@ public:
     // shows up in the next class created, with no fixture to regenerate. Empty
     // for a base class with no body of its own (Object, PlayerController).
     static std::vector<uint8_t> defaultComponents(const std::string& baseClass);
+
+    // What a class actually spawns with: its OWN component list if it has one,
+    // else the nearest ancestor in its chain that has one, else the engine
+    // base's default list from above.
+    //
+    // One rule, in one place, because two things ask it and they were answering
+    // differently. The editor seeded a class's Components tab from the chain the
+    // first time the tab was opened — so a Player Character LOOKED furnished —
+    // while spawn() read only the stored blob, which stays empty until that tab
+    // has been opened AND saved. A class created in the Content Browser and
+    // spawned straight from a graph therefore arrived as a bare transform: no
+    // character controller, so Jump answered false; no movement component, so
+    // Move wrote nowhere; no camera, so nothing to look through. Nothing failed
+    // loudly enough to be noticed.
+    static std::vector<uint8_t> inheritedComponents(ContentManager& content,
+                                                    const HorizonCodeClassAsset& asset);
 
 private:
     HorizonCode::Runtime* m_runtime = nullptr;
