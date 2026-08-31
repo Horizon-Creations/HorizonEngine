@@ -1509,6 +1509,28 @@ ist dieselbe SDF, durch die ohnehin jedes Quad geht) und macht die Diagonalen ka
 **Nachgesehen statt behauptet:** der Software-Rasterizer aus Block G rendert die Sache in ein
 Bild, das man anschauen kann — geschlossen und offen, in drei Größen. Genau dafür ist er da.
 
+**Und derselbe Blick auf die offene Liste, mit einer stark gerundeten ComboBox.** Gemeldet aus
+einer laufenden App: die Liste sah bei einem runden Knopf falsch aus und der Optionstext lief
+links über die Kurve hinaus. Zwei Symptome, **eine** Annahme — die Liste hat die Rundung des
+Knopfes wörtlich übernommen, und der Textabstand war eine feste Zahl.
+
+Drei Regeln stehen jetzt an einer Stelle:
+
+- **Ein Rechteck gibt seine Ecke um den Radius zurück**, also muss der Inhalt um den Radius
+  hereinrücken statt um eine feste 6 (`contentInset`). Sonst hängen die ersten Buchstaben bei
+  jeder größeren Rundung außerhalb der Form — auf dem geschlossenen Knopf genauso wie in der
+  Liste.
+- **Eine Ecke, die tiefer ist als eine halbe Zeile, ist eine Ecke, die eine Zeile frisst**
+  (`listRadius`). Die Liste ist deshalb nie runder als das, egal was der Knopf verlangt; ein
+  Radius aus einer Theme-Stufe kann das leicht überschreiten.
+- **Die Liste ist eine eigene Karte mit Abstand, kein angeklebter Deckel.** Der Knopf darf eine
+  Kapsel sein, und ein Rechteck unter einer Kapsel lässt links und rechts zwei Kerben stehen, wo
+  ihre unteren Ecken wegkurven. Eine Karte, die absteht, stimmt bei jeder Rundung.
+
+Dazu nehmen **die erste und die letzte Zeile die Ecken der Karte** — jede auf ihrer Seite. Genau
+dafür sind die vier getrennten Radien da: eine gleichmäßig gerundete Zeile ragt oben und unten
+aus der Karte heraus, eine ungerundete lässt eine eckige Schulter in einer runden Form stehen.
+
 ---
 
 ## 11. Risiken und Fallen

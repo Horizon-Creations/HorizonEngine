@@ -1171,10 +1171,16 @@ namespace
 		HE::uiElementUnitScale(tree, cb, us, vs, canvas);
 		const float rowH  = cb.optionHeight() * vs;
 		const float total = rowH * static_cast<float>(cb.options.size());
-		const float below = box.y + box.h;
+		// A CARD with a gap, not a lid glued to the box. The box may be a pill,
+		// and a rectangle glued under a pill leaves two notches of background
+		// where its bottom corners curve away — while a card that stands off it
+		// reads correctly at every rounding, which is what a menu has to do when
+		// the shape it hangs from is the author's to choose.
+		const float gap   = 4.0f * vs;
+		const float below = box.y + box.h + gap;
 		const float space = (canvas ? canvas->height : tree.canvasHeight) - below;
 		HE::UIWidgetRect r{ box.x, below, box.w, total };
-		if (total > space && box.y - total >= 0.0f) r.y = box.y - total;
+		if (total > space && box.y - gap - total >= 0.0f) r.y = box.y - gap - total;
 		return r;
 	}
 
@@ -2668,17 +2674,25 @@ void WidgetManager::drawOpenDropdown(float vpWidth, float vpHeight,
 	const float x = r.x * sx, y = r.y * sy, wid = r.w * sx, hei = r.h * sy;
 	const float rowH = hei / static_cast<float>(cb->options.size());
 
-	// The panel behind the rows, rounded like the box it came out of.
+	// How round the card may be — NOT simply as round as the box. See
+	// UIComboBox::listRadius: a corner deeper than half a row is a corner eating
+	// a row, and the first and last entries lose their outer half to it.
+	const float rad = HE::UIComboBox::listRadius(
+		cb->maxCornerRadius() * (sy * evs), rowH, hei);
+	// …and the inset follows that rounding, so no label crosses the curve.
+	const float pad = HE::UIComboBox::contentInset(rad);
+
 	UIRenderObject bg;
 	bg.position = { x, y };
 	bg.size     = { wid, hei };
 	bg.color    = cb->backColor;
-	bg.cornerRadius = cb->cornerRadius * (sy * evs);
+	bg.cornerRadius = glm::vec4(rad);
 	bg.borderWidth  = std::max(1.0f, cb->borderWidth * sy * evs);
 	bg.borderColor  = cb->borderWidth > 0.0f ? cb->borderColor
 	                                         : glm::vec4(0.0f, 0.0f, 0.0f, 0.5f);
 	out.push_back(bg);
 
+	const std::size_t last = cb->options.size() - 1;
 	for (std::size_t i = 0; i < cb->options.size(); ++i)
 	{
 		const float ry = y + rowH * static_cast<float>(i);
@@ -2689,13 +2703,20 @@ void WidgetManager::drawOpenDropdown(float vpWidth, float vpHeight,
 			UIRenderObject row;
 			row.position = { x, ry };
 			row.size     = { wid, rowH };
+			// The first and last rows take the CARD'S corners, each on its own
+			// side — that is what the four-radius vocabulary is for. A row
+			// rounded uniformly (or not at all) either pokes out of the card at
+			// the top and bottom or leaves a square shoulder inside a round one.
+			row.cornerRadius = glm::vec4(i == 0    ? rad : 0.0f,
+			                             i == 0    ? rad : 0.0f,
+			                             i == last ? rad : 0.0f,
+			                             i == last ? rad : 0.0f);
 			// The one under the pointer is the brighter of the two: it is where
 			// the click would go, and that is the more useful thing to see.
 			row.color    = hot ? cb->highlightColor
 			                   : glm::vec4(glm::vec3(cb->highlightColor), 0.45f);
 			out.push_back(row);
 		}
-		const float pad = 6.0f * sx * eus;
 		HE::UITextLayout opts;
 		opts.alignV = 1;   // centred in its row
 		HE::emitUITextGlyphs(HE::sharedUIFont(), 0, cb->options[i],

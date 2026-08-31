@@ -418,6 +418,31 @@ public:
     // and not in either drawer because BOTH draw it — the engine out of quads,
     // the designer out of an ImGui triangle — and the two have disagreed about
     // a position before. One set of numbers is the only way that stays true.
+    // ── How far in from the edge content has to start ────────────────────────
+    // A rounded rectangle takes its corner back by the radius, so text sitting
+    // at a fixed inset hangs out over the curve as soon as the rounding grows —
+    // which is exactly what a pill-shaped combo looked like: the option's first
+    // letters outside the shape, on both the closed box and the open list.
+    //
+    // 0.8 of the radius rather than all of it: at the vertical middle of a row,
+    // where text actually sits, the curve has already come most of the way back,
+    // so the full radius would push every label needlessly far in.
+    static float contentInset(float radiusPx)
+    { return radiusPx * 0.8f > 6.0f ? radiusPx * 0.8f : 6.0f; }
+
+    // ── How round the OPEN LIST may be ───────────────────────────────────────
+    // Not "as round as the box". A corner deeper than half a row is a corner
+    // eating a row: the first and last entries lose their outer half to the
+    // curve, and no amount of padding puts them back. Clamped against the
+    // list's own height too, so a one-entry list cannot round itself away.
+    static float listRadius(float boxRadiusPx, float rowHeightPx, float listHeightPx)
+    {
+        float r = boxRadiusPx;
+        if (r > rowHeightPx * 0.5f)  r = rowHeightPx * 0.5f;
+        if (r > listHeightPx * 0.5f) r = listHeightPx * 0.5f;
+        return r > 0.0f ? r : 0.0f;
+    }
+
     struct Arrow { float cx = 0.0f, cy = 0.0f, halfW = 0.0f, height = 0.0f; };
     static Arrow arrowIn(const UIWidgetRect& r)
     {

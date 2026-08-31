@@ -1059,7 +1059,9 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
 {
     glm::vec4 bg = st.hovered ? highlightColor : backColor;
     quad(out, px.x, px.y, px.w, px.h, bg, {}, 0.0f);   // radius is stamped (authored)
-    const float pad = 6.0f;
+    // The inset follows the ROUNDING, not a fixed number: on a pill-shaped combo
+    // a fixed 6 puts the first letters out over the curve.
+    const float pad = contentInset(cornerRadius.x * pxScaleY);
     emitText(*this, currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
              fontSize * pxScaleY, textColor, false, out);
     // The indicator. It used to be the LETTER "v" set in the UI font, which is

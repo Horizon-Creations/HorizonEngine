@@ -13,6 +13,8 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/WidgetManager.h>
 #include <HorizonScene/EngineApi.h>
+#include <Backends/Software/SoftwareRaster.h>
+#include <cstdio>
 #include <algorithm>
 #include <filesystem>
 
@@ -6204,5 +6206,85 @@ TEST_CASE("A label's trailing newline does not push it to the top")
         INFO("text := ", text);
         CHECK(top > 10.0f);      // not jammed against the top edge
         CHECK(top < 24.0f);
+    }
+}
+
+// ── The open list at three roundings, looked at ──────────────────────────────
+// Reported from a running app: with a heavily rounded ComboBox the list looked
+// wrong and the option text hung out over the left curve. Two causes, one
+// assumption — the list copied the box's rounding verbatim, and the text inset
+// was a fixed number. This renders the whole thing through the real extract path
+// and rasterizes it, because "does it look right" is a question about an image.
+TEST_CASE("ComboBox: the open list survives a pill-shaped box")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 640.0f; t.canvasHeight = 300.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    // The third asks for MORE rounding than half a row — the case the clamp
+    // exists for, and the one an author reaches by typing a big number or by
+    // binding the radius to a theme's Large step.
+    const float radii[3] = { 4.0f, 12.0f, 40.0f };   // subtle, round, over the top
+    int combo[3] = {};
+    for (int i = 0; i < 3; ++i)
+    {
+        combo[i] = t.add(HE::UIWidgetType::ComboBox);
+        auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(combo[i]));
+        HE::uiSetAnchorPreset(*cb, 0); cb->pivotX = cb->pivotY = 0.0f;
+        cb->posX = 20.0f + 210.0f * i; cb->posY = 20.0f;
+        cb->sizeX = 190.0f; cb->sizeY = 44.0f;
+        cb->cornerRadius = glm::vec4(radii[i]);
+        cb->options = { "Option A", "Option B", "Option C" };
+        // The LAST one is picked and the FIRST is hovered below, so the sheet
+        // shows both ends of the card — where a row's corners have to follow the
+        // card's or it pokes out of it.
+        cb->selectedIndex = 2;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(640.0f, 300.0f, out);
+    // Open the pill-shaped one and hover its middle row.
+    clickAt(wm, 20.0f + 420.0f + 90.0f, 40.0f);
+    {
+        const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo[2]));
+        REQUIRE(cb->open);
+    }
+    wm.processPointer(640.0f, 300.0f, 20.0f + 420.0f + 90.0f, 20.0f + 44.0f + 4.0f + 22.0f,
+                      false, true);
+
+    out.clear();
+    wm.extract(640.0f, 300.0f, out);
+
+    // The two claims that are not a matter of taste.
+    const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo[2]));
+    REQUIRE(cb);
+    // 1. The card is never rounder than half a row, whatever the box asked for.
+    const float rowH = cb->optionHeight();
+    const float rad  = HE::UIComboBox::listRadius(cb->maxCornerRadius(), rowH, rowH * 3.0f);
+    CHECK(rad == doctest::Approx(rowH * 0.5f));
+    CHECK(rad < cb->maxCornerRadius());          // it really was cut down
+    // 2. The text starts clear of that curve rather than at a fixed inset.
+    CHECK(HE::UIComboBox::contentInset(rad) > 6.0f);
+    CHECK(HE::UIComboBox::contentInset(0.0f) == doctest::Approx(6.0f));
+
+    HE::sw::Image img;
+    img.resize(640, 300);
+    img.clear(24, 26, 32, 255);
+    HE::sw::draw(img, out);
+    const std::filesystem::path shot =
+        std::filesystem::temp_directory_path() / "he_combo_rounding.ppm";
+    if (FILE* f = std::fopen(shot.string().c_str(), "wb"))
+    {
+        std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height);
+        for (std::size_t i = 0; i + 3 < img.rgba.size(); i += 4)
+            std::fwrite(&img.rgba[i], 1, 3, f);
+        std::fclose(f);
+        MESSAGE("rounding sheet written to " << shot.string());
     }
 }
