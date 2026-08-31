@@ -529,3 +529,70 @@ TEST_CASE("Theme: the same widgets come out light or dark")
         MESSAGE("light/dark sheet written to " << out.string());
     }
 }
+
+// ── The dropdown indicator, looked at rather than asserted about ─────────────
+// It was the LETTER "v" set in the UI font, which is exactly what it looked
+// like. This renders the closed and the open box at three sizes so the shape can
+// be judged the only way a shape can be — by looking — and pins the two things
+// about it that are not a matter of taste: it is a triangle (wide at the base,
+// a point at the tip) and it turns over when the list is down.
+TEST_CASE("ComboBox: the indicator is a triangle, and it turns over when open")
+{
+    using HE::UIComboBox;
+    using HE::UIWidgetRect;
+    using HE::UIElementRenderState;
+    std::vector<UIRenderObject> quads;
+
+    const float sizes[3] = { 24.0f, 32.0f, 48.0f };
+    for (int i = 0; i < 3; ++i)
+        for (int openIdx = 0; openIdx < 2; ++openIdx)
+        {
+            UIComboBox cb;
+            cb.options = { "Option A", "Option B" };
+            cb.selectedIndex = 0;
+            cb.sizeX = 220.0f; cb.sizeY = sizes[i];
+            cb.open = (openIdx == 1);
+            const UIWidgetRect px{ 40.0f + 260.0f * openIdx, 40.0f + 90.0f * i,
+                                   220.0f, sizes[i] };
+            UIElementRenderState st;
+            cb.render(px, st, HE::UUID{}, 1.0f, quads);
+        }
+
+    Image img = canvas(600, 320);
+    img.clear(24, 26, 32, 255);
+    HE::sw::draw(img, quads);
+
+    // The 48-unit closed box: its arrow is centred at (40+220-24, 40+180+24).
+    {
+        const UIComboBox::Arrow a = UIComboBox::arrowIn({ 40.0f, 220.0f, 220.0f, 48.0f });
+        const int cx = static_cast<int>(a.cx);
+        const int top = static_cast<int>(a.cy - a.height * 0.5f) + 1;
+        const int bot = static_cast<int>(a.cy + a.height * 0.5f) - 1;
+        // Wide at the top, a point at the bottom: ink at the base's far edge,
+        // none at the tip's.
+        CHECK(at(img, cx - static_cast<int>(a.halfW) + 1, top).r > 60);
+        CHECK(at(img, cx - static_cast<int>(a.halfW) + 1, bot).r < 60);
+        CHECK(at(img, cx, bot).r > 60);                    // …but the tip itself is there
+    }
+    // The open one, 260 px to the right, is the same triangle upside down.
+    {
+        const UIComboBox::Arrow a = UIComboBox::arrowIn({ 300.0f, 220.0f, 220.0f, 48.0f });
+        const int cx = static_cast<int>(a.cx);
+        const int top = static_cast<int>(a.cy - a.height * 0.5f) + 1;
+        const int bot = static_cast<int>(a.cy + a.height * 0.5f) - 1;
+        CHECK(at(img, cx - static_cast<int>(a.halfW) + 1, bot).r > 60);
+        CHECK(at(img, cx - static_cast<int>(a.halfW) + 1, top).r < 60);
+        CHECK(at(img, cx, top).r > 60);
+    }
+
+    const std::filesystem::path out =
+        std::filesystem::temp_directory_path() / "he_combo_arrow.ppm";
+    if (FILE* f = std::fopen(out.string().c_str(), "wb"))
+    {
+        std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height);
+        for (std::size_t i = 0; i + 3 < img.rgba.size(); i += 4)
+            std::fwrite(&img.rgba[i], 1, 3, f);
+        std::fclose(f);
+        MESSAGE("arrow sheet written to " << out.string());
+    }
+}

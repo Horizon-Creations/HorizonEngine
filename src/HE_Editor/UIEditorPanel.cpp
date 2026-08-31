@@ -1852,11 +1852,19 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		if (!shown.empty())
 			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
 				C(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
-		// Dropdown arrow.
-		const float ax = mx.x - (mx.y - mn.y) * 0.5f, ay = (mn.y + mx.y) * 0.5f;
-		const float ar = std::max(2.0f, (mx.y - mn.y) * 0.14f);
-		dl->AddTriangleFilled(ImVec2(ax - ar, ay - ar * 0.6f), ImVec2(ax + ar, ay - ar * 0.6f),
-			ImVec2(ax, ay + ar * 0.6f), IM_COL32(200,200,210,180));
+		// The dropdown triangle, from the ELEMENT'S own geometry rather than from
+		// numbers typed twice — this used to sit slightly higher and slightly
+		// smaller here than the engine drew it, and its colour was a hard-coded
+		// grey instead of the combo's own text colour.
+		{
+			const HE::UIComboBox::Arrow a = HE::UIComboBox::arrowIn(
+				{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y });
+			glm::vec4 ac = propColorOr(n, "Text Color", { 1, 1, 1, 1 });
+			ac.a *= 0.8f;
+			dl->AddTriangleFilled(ImVec2(a.cx - a.halfW, a.cy - a.height * 0.5f),
+			                      ImVec2(a.cx + a.halfW, a.cy - a.height * 0.5f),
+			                      ImVec2(a.cx,           a.cy + a.height * 0.5f), C(ac));
+		}
 		break;
 	}
 	default: break;

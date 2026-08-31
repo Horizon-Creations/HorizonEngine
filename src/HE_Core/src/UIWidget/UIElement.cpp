@@ -649,6 +649,43 @@ namespace
     // Corner radius that matches the editor preview: a small rounding clamped to
     // never exceed half the smaller side.
     float roundedR(float w, float h, float r) { return std::min(r, 0.5f * std::min(w, h)); }
+
+    // ── A solid triangle, out of the only shape this system has ──────────────
+    // Rows of decreasing width, each one an ordinary quad. Built this way rather
+    // than as two turned bars (the modern chevron) for a reason that is not
+    // taste: WidgetManager::extract folds the whole rotation chain onto EVERY
+    // quad an element emits, overwriting whatever the element set — so inside a
+    // rotated panel a chevron's two bars would both take the panel's angle and
+    // come out parallel. A triangle made of upright rows has no angle to lose.
+    //
+    // The rows overlap by a hair so no seam shows between them, and there are
+    // as many as there are pixels of height, so the staircase is one pixel per
+    // step at any size.
+    void triangle(std::vector<UIRenderObject>& out, const HE::UIComboBox::Arrow& a,
+                  const glm::vec4& color, bool pointUp)
+    {
+        if (a.halfW <= 0.0f || a.height <= 0.0f) return;
+        const int rows = std::clamp(static_cast<int>(std::ceil(a.height)), 3, 32);
+        const float step = a.height / static_cast<float>(rows);
+        const float top  = a.cy - a.height * 0.5f;
+        for (int i = 0; i < rows; ++i)
+        {
+            // How far along the triangle this row is, measured from its BASE:
+            // full width at the base, a sliver at the point.
+            const float t = pointUp ? (static_cast<float>(i) + 1.0f) / rows
+                                    : 1.0f - static_cast<float>(i) / rows;
+            const float w = 2.0f * a.halfW * t;
+            if (w <= 0.0f) continue;
+            // Each row is a CAPSULE, not a rectangle. The rounding costs nothing
+            // (it is the same SDF every quad already goes through) and it is
+            // antialiased, so the two diagonal edges come out soft instead of as
+            // a hard staircase — which is the whole difference between "a
+            // triangle" and "a triangle somebody drew out of blocks".
+            const float rh = step + 0.5f;
+            quad(out, a.cx - w * 0.5f, top + step * static_cast<float>(i),
+                 w, rh, color, HE::UUID{}, roundedR(w, rh, rh * 0.5f));
+        }
+    }
 }
 
 // Text emit that honors the element's Font asset (fontAtlasKey) when set, else
@@ -1025,9 +1062,11 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float pad = 6.0f;
     emitText(*this, currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
              fontSize * pxScaleY, textColor, false, out);
-    // Dropdown indicator ("v") in the right box.
-    emitText(*this, "v", { px.x + px.w - px.h, px.y }, { px.h, px.h },
-             fontSize * pxScaleY, textColor, true, out);
+    // The indicator. It used to be the LETTER "v" set in the UI font, which is
+    // what it looked like: a letter. Now it is the same triangle the designer
+    // draws, from the same numbers, and it turns over while the list is down —
+    // the one piece of state a combo has that its own rectangle cannot show.
+    triangle(out, arrowIn(px), glm::vec4(glm::vec3(textColor), textColor.a * 0.8f), open);
 }
 
 // ── JSON (type-specific fields; base fields handled by the tree serializer) ───

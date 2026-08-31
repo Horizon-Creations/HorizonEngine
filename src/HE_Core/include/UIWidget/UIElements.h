@@ -413,6 +413,24 @@ public:
     // box so a taller combo gets taller rows instead of a cramped list.
     float optionHeight() const { return sizeY > 0.0f ? sizeY : 24.0f; }
 
+    // ── The little triangle on the right ─────────────────────────────────────
+    // Its geometry, in whatever units the rect handed in is in. It lives here
+    // and not in either drawer because BOTH draw it — the engine out of quads,
+    // the designer out of an ImGui triangle — and the two have disagreed about
+    // a position before. One set of numbers is the only way that stays true.
+    struct Arrow { float cx = 0.0f, cy = 0.0f, halfW = 0.0f, height = 0.0f; };
+    static Arrow arrowIn(const UIWidgetRect& r)
+    {
+        Arrow a;
+        // Centred in a square box at the right end, so it sits where the eye
+        // looks for it whatever the combo's width.
+        a.cx     = r.x + r.w - r.h * 0.5f;
+        a.cy     = r.y + r.h * 0.5f;
+        a.halfW  = std::max(2.0f, r.h * 0.17f);
+        a.height = a.halfW * 1.15f;      // a wide, shallow triangle, not a spike
+        return a;
+    }
+
     UIComboBox() { sizeX = 220.0f; sizeY = 32.0f; cornerRadius = glm::vec4(4.0f); }
     // The closed box is the surface; the open list draws over it.
     bool hasSurfaceStyle() const override { return true; }

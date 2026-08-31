@@ -1492,6 +1492,23 @@ leerer Text bleibt eine (leere) Zeile, und ein versehentliches Enter kostet nich
 Die Lehre ist dieselbe wie beim Align-Vorfall davor: **wenn Designer und Viewport sich
 widersprechen, ist die Frage nicht, wer recht hat, sondern warum es zwei Antworten gibt.**
 
+**Und dieselbe Frage nochmal, am Dropdown-Pfeil.** Die Engine zeichnete dort den **Buchstaben
+„v"** aus der UI-Schrift — was man ihm ansah —, der Designer ein richtiges Dreieck, an einer
+leicht anderen Stelle, in einer fest eingetippten grauen Farbe. Jetzt kommt die Geometrie aus
+**einer** Funktion (`UIComboBox::arrowIn`), beide zeichnen daraus, und die Farbe ist die
+Textfarbe des Elements. Der Pfeil dreht sich um, solange die Liste unten ist — der einzige
+Zustand, den eine ComboBox hat und den ihr eigenes Rechteck nicht zeigen kann.
+
+Gebaut ist er aus **Zeilen von Kapseln**, nicht aus zwei gedrehten Balken (dem modernen
+Chevron), und das ist keine Geschmacksfrage: `extract` faltet die Drehkette auf **jedes** Quad,
+das ein Element ausgibt, und überschreibt dabei, was das Element selbst gesetzt hat — in einem
+gedrehten Panel bekämen beide Chevron-Balken denselben Winkel und lägen parallel. Ein Dreieck
+aus aufrechten Zeilen hat keinen Winkel zu verlieren. Die Rundung pro Zeile kostet nichts (es
+ist dieselbe SDF, durch die ohnehin jedes Quad geht) und macht die Diagonalen kantengeglättet.
+
+**Nachgesehen statt behauptet:** der Software-Rasterizer aus Block G rendert die Sache in ein
+Bild, das man anschauen kann — geschlossen und offen, in drei Größen. Genau dafür ist er da.
+
 ---
 
 ## 11. Risiken und Fallen
