@@ -1338,6 +1338,19 @@ void drawDetails(State& st, AppContext& ctx)
 			{ n->hoverCursor = (HE::UICursor)c; committed = true; }
 		ImGui::EndCombo();
 	}
+	// What the element says about itself after the pointer has rested on it.
+	// Here rather than among the type's own properties because every element can
+	// have one — a tooltip is a sentence about a control, not a kind of control.
+	{
+		char buf[512];
+		const std::size_t n2 = std::min(n->tooltip.size(), sizeof(buf) - 1);
+		std::memcpy(buf, n->tooltip.c_str(), n2);
+		buf[n2] = '\0';
+		if (ImGui::InputText("Tooltip", buf, sizeof(buf)))
+		{ n->tooltip = buf; edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Tooltip");
+	}
 
 	if (edit) st.dirty = true;
 	if (committed) commitEdit(st, ctx);

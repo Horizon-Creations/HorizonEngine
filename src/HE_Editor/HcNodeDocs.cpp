@@ -302,6 +302,28 @@ namespace
 	{ "widget.listSelected",
 	  "The picked item's index, or -1 when nothing is picked. With Multiple "
 	  "selection this is the lowest of them." },
+	{ "widget.showModal",
+	  "Puts this widget up as a DIALOG: the screen behind it dims, nothing under "
+	  "it can be clicked, scrolled or reached with the keyboard, and the focus "
+	  "starts inside it. It is raised above every other widget, so it cannot end "
+	  "up blocking input while drawing behind something. It stays until Close Top "
+	  "Layer, Escape or the Back button — that is what makes it modal." },
+	{ "widget.openPopup",
+	  "Puts the widget up at a point on screen — in render-target pixels — and "
+	  "lets a click anywhere else dismiss it. Its root elements are moved there "
+	  "and pushed back inside the screen, whatever anchors they were drawn with, "
+	  "so a menu near the bottom edge opens upwards instead of off the screen. No "
+	  "dimming: a popup is left by looking elsewhere, a dialog has to be answered." },
+	{ "widget.openPopupAtPointer",
+	  "The same, at the mouse. This is the context menu: answer On Right Clicked "
+	  "with it and the menu appears where the click was. The engine remembers "
+	  "where the pointer last was, so the graph does not have to." },
+	{ "widget.closeTopLayer",
+	  "Closes the topmost dialog, popup or open dropdown and says whether there "
+	  "was one. Exactly what Escape and the gamepad's Back button do — so a "
+	  "\"Cancel\" button is this node and nothing else. The widget that closes gets "
+	  "On Dismissed, and the keyboard focus goes back where it was before it "
+	  "opened." },
 	{ "widget.scrollListToItem",
 	  "Scrolls just far enough for that item to be fully visible, and does nothing "
 	  "when it already is — so stepping through a list does not re-centre it on "

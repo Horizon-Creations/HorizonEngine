@@ -1058,7 +1058,8 @@ void GameApplication::updateUIInput()
 	m_uiWantsPointer =
 		m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
 		                                  mx * sx, my * sy,
-		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
+		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
+		                                  (buttons & SDL_BUTTON_RMASK) != 0);
 
 	// Tell the OS where the focused field is, so an input method opens its
 	// candidate list beside it instead of in the corner of the screen. Pushed
@@ -1148,6 +1149,12 @@ void GameApplication::updateUIInput()
 				break;
 			}
 		if (edges & (1u << 4)) m_world->widgets().activateFocused();
+		// East/B is Back everywhere a gamepad is used: the same call Escape makes.
+		{
+			const bool back = in.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
+			if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
+			m_uiBackPrev = back;
+		}
 	}
 
 	std::vector<UIInputSystem::PointerEvent> events;
@@ -1369,9 +1376,13 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 			return true;
 		}
 #endif
-		// Esc: release/re-grab the mouse.
+		// Esc closes the topmost dialog, popup or menu FIRST, and only when
+		// there is none does it mean what it always meant here. The order is the
+		// whole point: a pause dialog that Escape cannot dismiss because Escape
+		// is already spoken for is a dialog nobody can leave.
 		if (event.key.key == SDLK_ESCAPE)
 		{
+			if (m_world && m_world->widgets().closeTopLayer()) return true;
 			setMouseCaptured(!m_mouseCaptured);
 			return true;
 		}

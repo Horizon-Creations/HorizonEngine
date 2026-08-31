@@ -127,6 +127,9 @@ public:
     { fireEvent("OnRowBind", elem, Value::ofInt(index)); }
     virtual void onRowActivated(int elem, int index)
     { fireEvent("OnRowActivated", elem, Value::ofInt(index)); }
+    virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
+    // Layers: this widget was closed (Escape, a click outside, a script).
+    virtual void onDismissed() { fireEvent("OnDismissed", 0, Value{}); }
     // GameInstance lifecycle.
     virtual void onInit()     { fireEvent("OnInit", 0, Value{}); }
     virtual void onShutdown() { fireEvent("OnShutdown", 0, Value{}); }

@@ -1944,6 +1944,13 @@ namespace
 	  "it for you. A bound colour's swatch is read-only, because editing it would "
 	  "be overwritten the next time the theme or the mode changes.",
 	  "", "ui#elements" },
+	{ "UI Widget/Tooltip", "",
+	  "What this element says about itself when the pointer rests on it for half a "
+	  "second. Empty means nothing to say, which is most elements. The DELAY is the "
+	  "point: a hint that appears the instant you cross a button is a hint in the "
+	  "way of using it. The nearest element upwards that has one wins, so putting "
+	  "it on a button covers the caption sitting on that button too.",
+	  "", "ui#elements" },
 	{ "UI Widget/Row Widget", "",
 	  "The widget one row of this list is made of — authored once, in this same "
 	  "designer, and repeated. The list keeps no items: the running application "

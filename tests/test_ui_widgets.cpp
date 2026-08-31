@@ -5551,3 +5551,460 @@ TEST_CASE("ListView: a row is placed by the item it shows, not by stacking")
     }
     CHECK(checked >= 10);
 }
+
+// ═══ Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ════════════════
+// Three things that look different and are one thing: while a layer is up, the
+// input belongs to it. Most of what follows therefore counts arrivals that must
+// NOT happen — the click that does not reach the page behind the dialog, the
+// wheel that does not scroll it, the focus that does not walk out of it.
+
+namespace
+{
+    // A page with one full-width button called "Btn" whose click writes "HIT"
+    // into a label. Reading that label afterwards is how these tests ask
+    // "did the click arrive?" without needing to see anything drawn.
+    void buildClickPage(ContentManager& cm, const char* path, int& outLabel,
+                        float bx = 0.0f, float by = 0.0f,
+                        float bw = 400.0f, float bh = 400.0f,
+                        bool withScroll = false)
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int label = t.add(HE::UIWidgetType::Text);
+        t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+        t.find(label)->hitTestable = false;
+        const int btn = t.add(HE::UIWidgetType::Button);
+        {
+            HE::UIElement& e = *t.find(btn);
+            e.name = "Btn";
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = bx; e.posY = by; e.sizeX = bw; e.sizeY = bh;
+        }
+        // A scroll box with more in it than fits, for the tests that ask whether
+        // the WHEEL got through as well as the click. Without content taller
+        // than the box, uiScrollBy refuses on its own and the question is never
+        // really asked.
+        if (withScroll)
+        {
+            const int sb = t.add(HE::UIWidgetType::ScrollBox);
+            {
+                HE::UIElement& e = *t.find(sb);
+                HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+                e.posX = 200.0f; e.posY = 200.0f; e.sizeX = 180.0f; e.sizeY = 180.0f;
+            }
+            for (int i = 0; i < 12; ++i)
+            {
+                const int row = t.add(HE::UIWidgetType::Panel);
+                t.find(row)->parentId = sb;
+                t.find(row)->sizeY = 40.0f;
+            }
+        }
+
+        HorizonCode::Graph g;
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+        const int evId = g.addNode(ev);
+        HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "HIT";
+        const int litId = g.addNode(lit);
+        HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+        set.s = "Text"; set.propType = PinType::String;
+        const int setId = g.addNode(set);
+        g.connect(evId, 0, setId, 0);
+        g.connect(litId, 0, setId, 2);
+        registerWidget(cm, t, &g, path);
+        outLabel = label;
+    }
+
+    void clickAt(WidgetManager& wm, float x, float y)
+    {
+        wm.processPointer(400.0f, 400.0f, x, y, true,  true);
+        wm.processPointer(400.0f, 400.0f, x, y, false, true);
+    }
+}
+
+TEST_CASE("Modal: nothing underneath is reachable, by any route in")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int pageLabel = 0, dlgLabel = 0;
+    buildClickPage(cm, "mem://page.hasset", pageLabel,
+                   0.0f, 0.0f, 400.0f, 400.0f, /*withScroll=*/true);
+    // The dialog is SMALL and in the corner. That is the whole design of this
+    // test: if it covered the screen it would take every click by being on top,
+    // and the test would pass without the input trap existing at all.
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int page = createShown(wm, cm, "mem://page.hasset");
+    const int dlg  = wm.createWidget(cm, "mem://dialog.hasset");
+    REQUIRE(page != 0);
+    REQUIRE(dlg  != 0);
+
+    // Without a dialog the page takes its click AND its wheel, which is the
+    // baseline the rest of this test is measured against.
+    // The click lands on the button clear of the scroll box; the wheel lands
+    // inside the box. Two different points, because they are two questions.
+    clickAt(wm, 300.0f, 100.0f);
+    CHECK(wm.tree(page)->find(pageLabel)->getProp("Text").s == "HIT");
+    CHECK(wm.processWheel(400.0f, 400.0f, 300.0f, 300.0f, -1.0f));
+
+    wm.showModal(dlg);
+    CHECK(wm.hasModal());
+    // Showing it also PUT IT UP: a dialog that blocks the input while drawing
+    // behind something is the worst of both.
+    CHECK(wm.isVisible(dlg));
+    CHECK(wm.zOrder(dlg) > wm.zOrder(page));
+
+    // A click INSIDE the dialog reaches it.
+    clickAt(wm, 40.0f, 40.0f);
+    CHECK(wm.tree(dlg)->find(dlgLabel)->getProp("Text").s == "HIT");
+
+    // …and a click OUTSIDE it, where the page's own button plainly is, reaches
+    // nothing at all. Reset first so this cannot pass on the baseline's "HIT".
+    {
+        HE::UIWidgetTree* live = const_cast<HE::UIWidgetTree*>(wm.tree(page));
+        live->find(pageLabel)->setProp("Text", HE::UIPropValue::ofString(""));
+    }
+    clickAt(wm, 300.0f, 100.0f);
+    CHECK(wm.tree(page)->find(pageLabel)->getProp("Text").s.empty());
+
+    // The dim covers the whole screen and is drawn by the manager, so there is
+    // no element under that click — and something still has to say it belonged
+    // to the UI, or it fires into the game behind the dialog.
+    CHECK(wm.pointerOverUI());
+
+    // The wheel is the same question asked a different way: the page's scroll
+    // box is under the pointer and must not move.
+    CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 300.0f, 300.0f, 1.0f));
+
+    // And it draws the scrim: a full-screen quad, before the dialog's own.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    bool scrim = false;
+    for (const UIRenderObject& ro : out)
+        if (ro.size.x >= 400.0f && ro.size.y >= 400.0f && ro.color.a > 0.1f &&
+            ro.color.r < 0.1f && ro.color.g < 0.1f)
+            { scrim = true; break; }
+    CHECK(scrim);
+}
+
+TEST_CASE("Layers: Escape closes one, and the focus goes back where it was")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int a = 0, b = 0, c = 0;
+    buildClickPage(cm, "mem://page.hasset", a);
+    buildClickPage(cm, "mem://one.hasset", b);
+    buildClickPage(cm, "mem://two.hasset", c);
+
+    WidgetManager wm;
+    const int page = createShown(wm, cm, "mem://page.hasset");
+    const int one  = wm.createWidget(cm, "mem://one.hasset");
+    const int two  = wm.createWidget(cm, "mem://two.hasset");
+    REQUIRE(page != 0);
+    REQUIRE(one  != 0);
+    REQUIRE(two  != 0);
+
+    // The focus is somewhere on the page before any of this.
+    const int pageBtn = wm.tree(page)->elements.back()->id;
+    REQUIRE(wm.setFocus(page, pageBtn));
+    CHECK(wm.focusedElement() == pageBtn);
+
+    wm.showModal(one);
+    wm.showModal(two);            // a confirmation over a settings dialog
+    CHECK(wm.hasLayer());
+
+    // One at a time, top first. A stack that closed wholesale would take the
+    // settings dialog away with the confirmation that was asked about it.
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.isVisible(two));
+    CHECK(wm.isVisible(one));
+    CHECK(wm.hasLayer());
+
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.isVisible(one));
+    CHECK_FALSE(wm.hasLayer());
+    // Back where it started, rather than nowhere.
+    CHECK(wm.focusedElement() == pageBtn);
+
+    // Nothing open: the key belongs to whoever asked, which is what lets a game
+    // keep Escape for its own pause menu.
+    CHECK_FALSE(wm.closeTopLayer());
+}
+
+TEST_CASE("Popup: placed at a point, kept on screen, dismissed by looking away")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int pageLabel = 0;
+    buildClickPage(cm, "mem://page.hasset", pageLabel);
+
+    // The menu: one small panel, deliberately anchored in the MIDDLE and
+    // stretched, so the placement cannot be passing by accident of authoring.
+    HE::UIWidgetTree menu;
+    menu.canvasWidth = 400.0f; menu.canvasHeight = 400.0f;
+    menu.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int root = menu.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *menu.find(root);
+        HE::uiSetAnchorPreset(e, 5);              // centre
+        e.pivotX = e.pivotY = 0.5f;
+        e.sizeX = 120.0f; e.sizeY = 80.0f;
+    }
+    // …and a label on it, so its own graph has something to answer with.
+    const int tag = menu.add(HE::UIWidgetType::Text);
+    menu.find(tag)->parentId = root;
+    menu.find(tag)->setProp("Text", HE::UIPropValue::ofString(""));
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnDismissed";
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "GONE";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = tag;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, menu, &g, "mem://menu.hasset");
+
+    WidgetManager wm;
+    const int page = createShown(wm, cm, "mem://page.hasset");
+    const int pop  = wm.createWidget(cm, "mem://menu.hasset");
+    REQUIRE(page != 0);
+    REQUIRE(pop  != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);           // so the manager knows the viewport
+
+    // Opened at a point: the root lands THERE, whatever it was anchored to.
+    wm.openPopupAt(pop, 40.0f, 60.0f);
+    CHECK(wm.isVisible(pop));
+    {
+        const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*wm.tree(pop), 400.0f, 400.0f);
+        const HE::UIWidgetRect r =
+            HE::uiElementRect(*wm.tree(pop), *wm.tree(pop)->find(root), &canvas);
+        CHECK(r.x == doctest::Approx(40.0f));
+        CHECK(r.y == doctest::Approx(60.0f));
+    }
+    CHECK(wm.closeTopLayer());
+
+    // Opened in the bottom-right corner: pushed back so all of it is on screen.
+    // A menu that opens off the edge is a menu with no last entry.
+    wm.openPopupAt(pop, 395.0f, 395.0f);
+    {
+        const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*wm.tree(pop), 400.0f, 400.0f);
+        const HE::UIWidgetRect r =
+            HE::uiElementRect(*wm.tree(pop), *wm.tree(pop)->find(root), &canvas);
+        CHECK(r.x + r.w <= doctest::Approx(400.0f));
+        CHECK(r.y + r.h <= doctest::Approx(400.0f));
+        CHECK(r.x >= 0.0f);
+        CHECK(r.y >= 0.0f);
+    }
+
+    // A click on the menu does NOT dismiss it…
+    {
+        const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*wm.tree(pop), 400.0f, 400.0f);
+        const HE::UIWidgetRect r =
+            HE::uiElementRect(*wm.tree(pop), *wm.tree(pop)->find(root), &canvas);
+        clickAt(wm, (r.x + r.w * 0.5f) * canvas.scaleX, (r.y + r.h * 0.5f) * canvas.scaleY);
+    }
+    CHECK(wm.hasLayer());
+
+    // …and a click anywhere else does, exactly once, and tells its own graph.
+    clickAt(wm, 5.0f, 5.0f);
+    CHECK_FALSE(wm.hasLayer());
+    CHECK_FALSE(wm.isVisible(pop));
+    CHECK(wm.tree(pop)->find(tag)->getProp("Text").s == "GONE");
+    // …and the click that dismissed it did not also press the page underneath.
+    CHECK(wm.tree(page)->find(pageLabel)->getProp("Text").s.empty());
+}
+
+TEST_CASE("ComboBox: it opens a list and you pick an entry, instead of cycling")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 800.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int combo = t.add(HE::UIWidgetType::ComboBox);
+    {
+        auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(combo));
+        HE::uiSetAnchorPreset(*cb, 0); cb->pivotX = cb->pivotY = 0.0f;
+        cb->posX = 0.0f; cb->posY = 0.0f; cb->sizeX = 200.0f; cb->sizeY = 20.0f;
+        cb->options.clear();
+        for (int i = 0; i < 20; ++i) cb->options.push_back("Option " + std::to_string(i));
+        cb->selectedIndex = 0;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 800.0f, out);
+    const std::size_t closedQuads = out.size();
+
+    // Click the box: it OPENS. It used to advance to option 1, which is the
+    // counter-baseline for this whole test — with twenty entries, cycling means
+    // fifteen clicks to reach the fifteenth, and no way back.
+    clickAt(wm, 100.0f, 10.0f);
+    {
+        const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo));
+        REQUIRE(cb);
+        CHECK(cb->open);
+        CHECK(cb->selectedIndex == 0);      // opening picks nothing
+    }
+    // The list is drawn, and it is drawn by the MANAGER: it hangs below the
+    // element's own rect, where no element could put it.
+    out.clear();
+    wm.extract(400.0f, 800.0f, out);
+    CHECK(out.size() > closedQuads);
+
+    // Row 15 sits at y = box bottom + 15 rows, each as tall as the box.
+    clickAt(wm, 100.0f, 20.0f + 15.0f * 20.0f + 10.0f);
+    {
+        const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo));
+        REQUIRE(cb);
+        CHECK(cb->selectedIndex == 15);
+        CHECK_FALSE(cb->open);              // picking closes it
+    }
+
+    // Open again and click somewhere else: closed, and nothing picked.
+    clickAt(wm, 100.0f, 10.0f);
+    CHECK(dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo))->open);
+    clickAt(wm, 350.0f, 700.0f);
+    {
+        const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo));
+        CHECK_FALSE(cb->open);
+        CHECK(cb->selectedIndex == 15);
+    }
+}
+
+TEST_CASE("Tooltip: the wait is the feature, and waiting is a redraw")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 60.0f;
+        e.tooltip = "Saves the document";
+    }
+    // A caption ON the button, hit-testable, so the walk upwards is exercised:
+    // the pointer lands on the label and the tooltip belongs to the button.
+    const int cap = t.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *t.find(cap);
+        e.parentId = btn;
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+        e.setProp("Text", HE::UIPropValue::ofString("Save"));
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    auto glyphsNow = [&]
+    {
+        std::vector<UIRenderObject> out;
+        wm.extract(400.0f, 400.0f, out);
+        return countGlyphs(out);
+    };
+
+    // Hover the caption. Nothing yet: a hint that appears the moment the pointer
+    // crosses a button is a hint in the way of using it.
+    wm.processPointer(400.0f, 400.0f, 100.0f, 30.0f, false, true);
+    const int bare = glyphsNow();
+    wm.tick(0.2f);
+    CHECK(glyphsNow() == bare);
+
+    // Past the delay it appears — and the frame it appears in must be a frame
+    // the application knows to draw. An event-driven app redraws on CHANGE, and
+    // the change here is time passing, which nothing but the tick reports.
+    wm.consumeVisualDirty();
+    wm.tick(0.4f);
+    CHECK(wm.consumeVisualDirty());
+    CHECK(glyphsNow() > bare);
+
+    // Still hovering, nothing moving: nothing to redraw.
+    wm.processPointer(400.0f, 400.0f, 100.0f, 30.0f, false, true);
+    wm.consumeVisualDirty();
+    wm.tick(0.4f);
+    CHECK_FALSE(wm.consumeVisualDirty());
+
+    // Off the button: gone again, and that too is a change.
+    wm.processPointer(400.0f, 400.0f, 350.0f, 350.0f, false, true);
+    CHECK(wm.consumeVisualDirty());
+    wm.tick(1.0f);
+    CHECK(glyphsNow() == bare);
+}
+
+TEST_CASE("Right-click is its own event, and reaches the element that listens")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    t.find(label)->hitTestable = false;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 400.0f;
+    }
+    // Something ON the panel that takes the hit, so the walk upwards matters.
+    const int inner = t.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *t.find(inner);
+        e.parentId = panel;
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+        e.setProp("Text", HE::UIPropValue::ofString("x"));
+    }
+
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnRightClicked"; ev.elem = panel;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "MENU";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // A LEFT click is not a right click, however many of them there are.
+    clickAt(wm, 200.0f, 200.0f);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+
+    // The right button, landing on the inner text and bubbling to the panel that
+    // listens for it.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true, /*secondary=*/true);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s == "MENU");
+
+    // Held, not pressed again: one menu per press, not one per frame.
+    {
+        HE::UIWidgetTree* live = const_cast<HE::UIWidgetTree*>(wm.tree(id));
+        live->find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    }
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true, true);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+}

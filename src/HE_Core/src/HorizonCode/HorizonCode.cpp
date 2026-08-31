@@ -2143,6 +2143,13 @@ const std::vector<EngineEventDesc>& engineEvents()
         // Enter). Separate from the selection because "which one" and "go" are
         // two different answers in every list that has ever existed.
         { "OnRowActivated",       "onRowActivated",       P::Int,    true  },
+        // The other mouse button, on an element. Its own event rather than a
+        // flag on OnClicked, because a right-click means something different
+        // everywhere it means anything: it opens a menu, it never presses.
+        { "OnRightClicked",       "onRightClicked",       P::Exec,   true  },
+        // A dialog, popup or menu closing. Fired on the widget's OWN graph and
+        // not addressed to an element, because what closed is the whole thing.
+        { "OnDismissed",          "onDismissed",          P::Exec,   false },
         { "OnInit",               "onInit",               P::Exec,   false },
         { "OnShutdown",           "onShutdown",           P::Exec,   false },
         { "OnWindowFocusChanged", "onWindowFocusChanged", P::Bool,   false },

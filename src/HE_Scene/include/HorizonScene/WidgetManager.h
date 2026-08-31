@@ -118,6 +118,38 @@ public:
     int  listSelected(int widgetId, const std::string& listName) const;   // -1 = none
     bool scrollListToItem(int widgetId, const std::string& listName, int index);
 
+    // ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ────────────
+    // Three things that look different and ARE the same thing: while one of
+    // them is up, input belongs to it and to nothing underneath. A modal dims
+    // what is behind it and only leaves on command; a popup dismisses itself
+    // the moment you click somewhere else; an open dropdown is a popup that
+    // happens to be drawn by the element that owns it.
+    //
+    // They stack, because a confirmation over a settings dialog is the ordinary
+    // case and a single slot would silently drop one of them.
+    //
+    // A modal is put ON TOP when it opens (its z-order is raised above every
+    // other widget), because a dialog that blocks input while drawing behind
+    // something is the worst of both.
+    void showModal(int widgetId);
+    // Put the widget at a point on screen — in render-target pixels, the same
+    // space every other coordinate here is in — and let a click anywhere else
+    // dismiss it. The widget's ROOT elements are moved there and clamped so the
+    // whole thing stays on screen, whatever anchors they were authored with.
+    void openPopupAt(int widgetId, float x, float y);
+    // …at the pointer, which is where a context menu goes. The manager knows
+    // where the pointer last was, so a graph does not have to.
+    void openPopupAtPointer(int widgetId);
+    // Close the topmost layer: what Escape does, and the Back button. The closed
+    // widget is hidden and its own graph gets OnDismissed. False = nothing was
+    // open, and the key belongs to whoever asked (a game's pause menu, say).
+    bool closeTopLayer();
+    // Is anything holding the input, and is any of it a modal? The second one is
+    // what makes the whole screen count as "the pointer is on the UI" — the dim
+    // is drawn by this class and is not an element, so nothing else could say so.
+    bool hasLayer() const { return !m_grabs.empty(); }
+    bool hasModal() const;
+
     // Read-only view of a live widget's element tree (nullptr = no such
     // widget). The manager owns a deep copy per widget; this is how a caller
     // looks at the live state — the caret in a text field, what a script last
@@ -164,9 +196,14 @@ public:
     // HorizonCode events. `valid` false (mouse captured / off-viewport) clears
     // hover. Returns true when the pointer is over an interactive element
     // (callers may swallow the click).
+    // `secondaryDown` is the right button. It is the LAST parameter and it has a
+    // default because every caller that does not care about it should not have
+    // to say so — a right-click is one feature (the context menu), not a change
+    // to how pointing works.
     bool processPointer(float vpWidth, float vpHeight,
                         float mouseX, float mouseY,
-                        bool primaryDown, bool valid);
+                        bool primaryDown, bool valid,
+                        bool secondaryDown = false);
 
     // What the last processPointer answered. Both apps drop that return value,
     // so this is how anyone else — gameplay code and scripts, through
@@ -421,6 +458,54 @@ private:
     // keyboard, so the two cannot drift.
     void selectListRow(Instance& w, HE::UIListView& lv, int item);
 
+    // ── One question, asked by every input entry point ───────────────────────
+    // While a layer is up, everything under it is inert — and "everything" has
+    // to mean every route in, not just the pointer scan. The wheel, the
+    // keyboard navigation, the caret and the double-click all ask this, because
+    // the one that does not ask is the one through which a dialog leaks.
+    bool takesInput(int widgetId) const;
+    struct Grab
+    {
+        enum class Kind : uint8_t { Modal, Popup, Dropdown };
+        Kind kind = Kind::Popup;
+        int  widget = 0;   // the widget that holds the input
+        int  elem   = 0;   // Dropdown only: the ComboBox that is open
+        // Put back when it closes. A dialog that leaves the focus wherever it
+        // happened to end up is the classic dialog bug.
+        int  prevFocusWidget = 0, prevFocusElem = 0;
+        int  prevZOrder = 0;   // Modal only: it was raised to the top
+    };
+    std::vector<Grab> m_grabs;
+    // Close the top layer WITHOUT firing OnDismissed — for the paths where the
+    // widget is going away anyway (destroyed, cleared).
+    void popGrab(bool notify);
+    // Where the pointer last was, in render-target pixels. Kept because two
+    // features need it long after the call that reported it: a context menu
+    // opens at it, and a tooltip is drawn beside it.
+    float m_pointerX = 0.0f, m_pointerY = 0.0f;
+    // …and how big the render target last was. A popup is placed by a call that
+    // gets no viewport (a graph says "open this menu here"), and placing needs
+    // the canvas, which needs the viewport. Remembered from the last frame, like
+    // the pointer position above: both are answers to "where", and "where" is
+    // only ever known during a frame.
+    float m_lastViewportW = 1920.0f, m_lastViewportH = 1080.0f;
+
+    // ── Tooltips ─────────────────────────────────────────────────────────────
+    // The element whose tooltip is being waited out, how long it has been
+    // hovered, and whether the wait is over. The timer runs in tick(), which is
+    // also where it has to raise the dirty flag: an application that only
+    // redraws on change would otherwise show the tooltip when the mouse next
+    // moves, which is exactly when a tooltip is no longer wanted.
+    // Both hang outside the element they belong to and both have to be over
+    // every widget, not just their own — so the manager draws them, the way it
+    // already draws the focus ring and the modal scrim.
+    void drawOpenDropdown(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
+    void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
+
+    int   m_tooltipWidget = 0, m_tooltipElem = 0;
+    float m_tooltipHeld = 0.0f;
+    bool  m_tooltipUp = false;
+
     // Re-resolve one element's Material/Font path to its runtime state (material
     // UUID in w.materials, baked fontAtlasKey) — the same resolution createWidget
     // does for the whole tree. Called when a graph SETS those properties so the
@@ -435,6 +520,7 @@ private:
     HorizonCode::Runtime  m_ownRuntime;        // fallback when none is injected
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
     bool m_wasDown = false;
+    bool m_wasSecondaryDown = false;   // the right button, for its own edge
     bool m_pointerOverUI = false;  // last processPointer verdict (see pointerOverUI)
     // Starts true: the first frame after anything is created has never been
     // drawn, so "nothing changed since the last draw" is false by construction.

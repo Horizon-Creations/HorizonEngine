@@ -606,6 +606,7 @@ HE_HC_POINTER_EVENT(fireOnMouseEnter, "OnMouseEnter", onMouseEnter)
 HE_HC_POINTER_EVENT(fireOnMouseLeave, "OnMouseLeave", onMouseLeave)
 HE_HC_POINTER_EVENT(fireOnFocused,    "OnFocused",    onFocused)
 HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
+HE_HC_POINTER_EVENT(fireOnRightClicked, "OnRightClicked", onRightClicked)
 #undef HE_HC_POINTER_EVENT
 
 // The no-payload lifecycle events — their hooks take nothing, so they cannot
@@ -627,6 +628,7 @@ HE_HC_PLAIN_EVENT(fireOnInit,          "OnInit",          onInit)
 HE_HC_PLAIN_EVENT(fireOnShutdown,      "OnShutdown",      onShutdown)
 HE_HC_PLAIN_EVENT(fireOnLevelLoaded,   "OnLevelLoaded",   onLevelLoaded)
 HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
+HE_HC_PLAIN_EVENT(fireOnDismissed,     "OnDismissed",     onDismissed)
 #undef HE_HC_PLAIN_EVENT
 
 // The value-carrying ones: same order, own signatures.

@@ -398,6 +398,21 @@ public:
     glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
     glm::vec4   highlightColor{ 0.25f, 0.35f, 0.50f, 1.0f };
 
+    // ── The open list (docs/he-apps-plan.md B4) ──────────────────────────────
+    // Runtime state, like a slider's value while it is being dragged: which of
+    // the options the pointer is over, and whether the list is down at all. The
+    // list itself is drawn by the WIDGET MANAGER rather than by render(), for
+    // one reason that decides everything: it reaches OUTSIDE this element's
+    // rect, and every rect in this system — the hit test, the clip, the draw
+    // order — is the element's own. A thing that hangs out of its own frame has
+    // to be owned by the layer that owns the screen.
+    bool open = false;
+    int  hoverIndex = -1;
+
+    // How tall one row of the open list is, in canvas units. Tied to the closed
+    // box so a taller combo gets taller rows instead of a cramped list.
+    float optionHeight() const { return sizeY > 0.0f ? sizeY : 24.0f; }
+
     UIComboBox() { sizeX = 220.0f; sizeY = 32.0f; cornerRadius = glm::vec4(4.0f); }
     // The closed box is the surface; the open list draws over it.
     bool hasSurfaceStyle() const override { return true; }

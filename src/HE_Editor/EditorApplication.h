@@ -315,7 +315,8 @@ struct AppContext
 	// outside/captured. The wheel rides along because a scroll box under the
 	// cursor has to get it before the editor camera's dolly does.
 	std::function<void(float mx, float my, float vpW, float vpH,
-	                   bool down, bool valid, float wheel)> reportPlayUIPointer;
+	                   bool down, bool valid, float wheel,
+	                   bool rightDown, bool doubleClick)> reportPlayUIPointer;
 
 	// ── Scene file management ──────────────────────────────────────────────
 	// currentScenePath is empty for an unsaved/new scene. sceneDirty reflects
@@ -713,10 +714,17 @@ private:
 	float m_uiPointerX = 0.0f, m_uiPointerY = 0.0f;
 	float m_uiViewportW = 0.0f, m_uiViewportH = 0.0f;
 	bool  m_uiPointerDown = false, m_uiPointerValid = false;
+	// The right button opens context menus, and a double-click opens a list row.
+	// Both are fed from the viewport panel like the left button is; without them
+	// the live preview is a preview of an application you cannot fully use.
+	bool  m_uiPointerRight = false, m_uiPointerDouble = false;
 	float m_uiWheel = 0.0f;   // this frame's notches, consumed by the widget pass
 	// Last frame's UI-navigation buttons (bits: up/down/left/right/activate) —
 	// the input layer reports held state, and holding Down must step one entry.
 	std::uint8_t m_uiNavPrev = 0;
+	// Gamepad East ("Back"): its own edge, because it means "close the top
+	// layer" and a held button must not close a whole stack of dialogs.
+	bool m_uiBackPrev = false;
 	bool  m_widgetTextInputActive = false; // SDL text input toggled for a focused widget field
 
 	// Play-in-editor

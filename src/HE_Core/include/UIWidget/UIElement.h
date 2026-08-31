@@ -365,6 +365,17 @@ public:
     // hovered/clicked, pointer passes through). hoverCursor = the cursor the app
     // shows while this element is hovered (Default = unchanged).
     bool        hitTestable = true;
+
+    // ── Tooltip (docs/he-apps-plan.md B4) ────────────────────────────────────
+    // What this element says about itself when the pointer rests on it. Empty =
+    // nothing to say, which is the case for almost every element, so it is a
+    // string on the base rather than a type of its own: a tooltip is a sentence
+    // about a control, not a control.
+    //
+    // The DELAY is the whole feature — a hint that appears instantly is a hint
+    // that gets in the way — and it belongs to the manager, which is the only
+    // thing that knows how long the pointer has been still.
+    std::string tooltip;
     UICursor    hoverCursor = UICursor::Default;
 
     // Cut this element's descendants off at its own rect — pixels outside are
@@ -498,6 +509,7 @@ protected:
         dst.textureW = textureW; dst.textureH = textureH;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
+        dst.tooltip = tooltip;
         dst.clipChildren = clipChildren;
         dst.cornerRadius = cornerRadius;
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;

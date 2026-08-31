@@ -214,6 +214,9 @@ public:
     // List rows: fill this one in, and open this one. Both carry the ITEM index.
     void fireOnRowBind(InstanceId id, int elem, int index);
     void fireOnRowActivated(InstanceId id, int elem, int index);
+    void fireOnRightClicked(InstanceId id, int elem);
+    // A dialog, popup or menu closing — the whole widget, so no element.
+    void fireOnDismissed(InstanceId id);
     void fireConstruct(InstanceId id);
     void fireDestruct(InstanceId id);
     void fireBeginPlay(InstanceId id);

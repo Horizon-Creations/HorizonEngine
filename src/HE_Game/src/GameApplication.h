@@ -138,6 +138,9 @@ private:
     // The input layer reports held state, and a held Down must step one entry
     // rather than run through the whole menu — so the edges are kept here.
     uint8_t m_uiNavPrev = 0;
+    // Gamepad East ("Back"): its own edge, because it means "close the top
+    // layer" and a held button must not close a whole stack of dialogs.
+    bool m_uiBackPrev = false;
     // True while the pointer sits on an interactive UI element (the return value
     // of WidgetManager::processPointer, kept from the last updateUIInput). The
     // mouse BUTTONS are masked out of everything gameplay reads while it holds,

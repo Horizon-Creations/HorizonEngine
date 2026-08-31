@@ -323,6 +323,17 @@ namespace widget {
     bool setListSelected(Ctx&, int id, const std::string& listName, int index, bool selected);
     int  listSelected(Ctx&, int id, const std::string& listName);   // -1 = none
     bool scrollListToItem(Ctx&, int id, const std::string& listName, int index);
+
+    // ── Layers (docs/he-apps-plan.md B4) ────────────────────────────────────
+    // A dialog, a menu, a context menu. All three are "input belongs to this
+    // until it lets go"; they differ in whether the screen behind is dimmed and
+    // in what makes them leave.
+    void showModal(Ctx&, int id);
+    // In render-target pixels, the space every coordinate here is in. The
+    // pointer variant is the one a context menu wants and needs no numbers.
+    void openPopup(Ctx&, int id, float x, float y);
+    void openPopupAtPointer(Ctx&, int id);
+    bool closeTopLayer(Ctx&);          // false = nothing was open
 }
 
 // ── Theme (docs/he-apps-plan.md D1) ──────────────────────────────────────────

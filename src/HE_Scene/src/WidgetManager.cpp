@@ -552,6 +552,142 @@ int WidgetManager::clearChildren(int widgetId, const std::string& parentName)
 	return removed;
 }
 
+// ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ─────────────────
+
+bool WidgetManager::takesInput(int widgetId) const
+{
+	// Nothing is up: everybody hears everything, which is how it was before
+	// layers existed and is still the overwhelmingly common case.
+	if (m_grabs.empty()) return true;
+	// Otherwise exactly one widget does. Not "the modal and everything above
+	// it": a popup opened from a dialog pushes its own grab, so the top of the
+	// stack is always the right answer, and a widget that is merely drawn on top
+	// without having asked for the input does not get it.
+	return widgetId == m_grabs.back().widget;
+}
+
+bool WidgetManager::hasModal() const
+{
+	for (const Grab& g : m_grabs) if (g.kind == Grab::Kind::Modal) return true;
+	return false;
+}
+
+void WidgetManager::popGrab(bool notify)
+{
+	if (m_grabs.empty()) return;
+	const Grab g = m_grabs.back();
+	m_grabs.pop_back();
+	m_visualDirty = true;
+
+	if (g.kind == Grab::Kind::Dropdown)
+	{
+		if (Instance* w = find(g.widget))
+			if (auto* cb = dynamic_cast<HE::UIComboBox*>(w->tree.find(g.elem)))
+			{ cb->open = false; cb->hoverIndex = -1; }
+		return;
+	}
+
+	Instance* w = find(g.widget);
+	if (w)
+	{
+		w->visible = false;
+		if (g.kind == Grab::Kind::Modal) w->zOrder = g.prevZOrder;
+	}
+	// The focus goes back where it was. A dialog that leaves it wherever it
+	// happened to end up is the classic dialog bug: the page behind reappears
+	// with nothing selected, and the next arrow key starts from scratch.
+	m_focusWidget = g.prevFocusWidget;
+	if (Instance* prev = find(g.prevFocusWidget)) prev->focusedElem = g.prevFocusElem;
+	// Last, because a graph that reacts to it may open the next dialog — and it
+	// must land on a stack this one has already left.
+	if (notify && w) rt().fireOnDismissed(w->scriptId);
+}
+
+void WidgetManager::showModal(int widgetId)
+{
+	Instance* w = find(widgetId);
+	if (!w) { HE_LOG_WARN(Widget, "showModal: no widget with id %d", widgetId); return; }
+
+	Grab g;
+	g.kind = Grab::Kind::Modal;
+	g.widget = widgetId;
+	g.prevFocusWidget = m_focusWidget;
+	if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
+	g.prevZOrder = w->zOrder;
+
+	// On TOP, always. A dialog that blocks the input while drawing behind
+	// something is the worst of both, and it is exactly what happens when an
+	// author sets a z-order once and forgets about it.
+	int top = w->zOrder;
+	for (const Instance& other : m_instances) top = std::max(top, other.zOrder);
+	w->zOrder = top + 1;
+	w->visible = true;
+	// The focus belongs to the dialog from here on — the trap is that
+	// takesInput() refuses everything else, and this is the other half: the
+	// keyboard has to START inside it, not wherever it was.
+	m_focusWidget = widgetId;
+	w->focusedElem = 0;
+	m_grabs.push_back(g);
+	m_visualDirty = true;
+}
+
+void WidgetManager::openPopupAt(int widgetId, float x, float y)
+{
+	Instance* w = find(widgetId);
+	if (!w) { HE_LOG_WARN(Widget, "openPopup: no widget with id %d", widgetId); return; }
+
+	Grab g;
+	g.kind = Grab::Kind::Popup;
+	g.widget = widgetId;
+	g.prevFocusWidget = m_focusWidget;
+	if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
+	g.prevZOrder = w->zOrder;
+
+	// Where it goes is decided HERE, not by how the asset was authored. A
+	// convention ("anchor your root top-left") is a convention the first user
+	// breaks; re-anchoring the roots makes the placement the same for every
+	// popup that was ever drawn.
+	const HE::UIWidgetCanvas canvas =
+		HE::uiResolveCanvas(w->tree, m_lastViewportW, m_lastViewportH);
+	const float sx = canvas.scaleX > 0.0f ? canvas.scaleX : 1.0f;
+	const float sy = canvas.scaleY > 0.0f ? canvas.scaleY : 1.0f;
+	for (auto& ep : w->tree.elements)
+	{
+		if (!ep || ep->parentId != 0) continue;
+		HE::UIElement& e = *ep;
+		e.anchorMinX = e.anchorMaxX = 0.0f;
+		e.anchorMinY = e.anchorMaxY = 0.0f;
+		e.pivotX = e.pivotY = 0.0f;
+		// Clamped so the whole thing stays on screen: a context menu opened near
+		// the bottom right must come UP from the pointer, not off the edge.
+		const float maxX = std::max(0.0f, canvas.width  - e.sizeX);
+		const float maxY = std::max(0.0f, canvas.height - e.sizeY);
+		e.posX = std::clamp(x / sx, 0.0f, maxX);
+		e.posY = std::clamp(y / sy, 0.0f, maxY);
+	}
+
+	int top = w->zOrder;
+	for (const Instance& other : m_instances) top = std::max(top, other.zOrder);
+	w->zOrder = top + 1;
+	w->visible = true;
+	m_focusWidget = widgetId;
+	w->focusedElem = 0;
+	m_grabs.push_back(g);
+	m_visualDirty = true;
+}
+
+void WidgetManager::openPopupAtPointer(int widgetId)
+{
+	openPopupAt(widgetId, m_pointerX, m_pointerY);
+}
+
+bool WidgetManager::closeTopLayer()
+{
+	if (m_grabs.empty()) return false;
+	popGrab(/*notify=*/true);
+	return true;
+}
+
 // ── Lists (docs/he-apps-plan.md B2) ──────────────────────────────────────────
 
 HE::UIListView* WidgetManager::findList(int widgetId, const std::string& listName)
@@ -830,6 +966,18 @@ void WidgetManager::destroyWidget(int id)
 {
 	m_visualDirty = true;
 	if (m_focusWidget == id) m_focusWidget = 0;
+	// A dialog that is destroyed rather than closed still has to let go of the
+	// input — otherwise takesInput answers for a widget that no longer exists
+	// and the whole application is inert with nothing on screen to blame.
+	// Silently: OnDismissed goes to a graph that is being torn down.
+	while (!m_grabs.empty() && m_grabs.back().widget == id) popGrab(/*notify=*/false);
+	m_grabs.erase(std::remove_if(m_grabs.begin(), m_grabs.end(),
+		[id](const Grab& g){ return g.widget == id; }), m_grabs.end());
+	if (m_tooltipWidget == id)
+	{
+		m_tooltipWidget = m_tooltipElem = 0;
+		m_tooltipHeld = 0.0f; m_tooltipUp = false;
+	}
 	if (Instance* w = find(id))
 	{
 		HE_LOG_DEBUG(Widget, "Destroying widget id %d", id);
@@ -850,6 +998,10 @@ void WidgetManager::destroyWidget(int id)
 void WidgetManager::clear()
 {
 	m_visualDirty = true;
+	// Nothing is holding the input any more, because nothing is left to hold it.
+	m_grabs.clear();
+	m_tooltipWidget = m_tooltipElem = 0;
+	m_tooltipHeld = 0.0f; m_tooltipUp = false;
 	// Fire each widget's "Destruct" and unregister it from the shared runtime
 	// (which may also host the level script / GameInstance — so tear down
 	// per-instance, don't wipe). Snapshot the ids first: a Destruct handler may
@@ -917,6 +1069,22 @@ bool WidgetManager::callFunction(int id, const std::string& name)
 
 void WidgetManager::tick(float dt)
 {
+	// ── The tooltip's wait ───────────────────────────────────────────────────
+	// The delay IS the feature: a hint that appears the moment the pointer
+	// crosses a button is a hint that gets in the way of using it.
+	//
+	// And this is the one place that has to raise the dirty flag itself. An
+	// application draws when something CHANGED; the change here is time passing,
+	// which nothing else reports — without this line the tooltip would appear
+	// the next time the mouse moves, which is exactly when it is no longer
+	// wanted (docs/he-apps-plan.md A2, and the risk list's "forgotten flag").
+	if (m_tooltipElem != 0 && !m_tooltipUp)
+	{
+		constexpr float kTooltipDelay = 0.5f;   // seconds
+		m_tooltipHeld += dt > 0.0f ? dt : 0.0f;
+		if (m_tooltipHeld >= kTooltipDelay) { m_tooltipUp = true; m_visualDirty = true; }
+	}
+
 	for (auto& w : m_instances)
 	{
 		if (!w.visible) continue;
@@ -943,6 +1111,47 @@ namespace
 		HE::uiElementUnitScale(tree, lv, us, vs, &canvas);
 		if (vs <= 0.0f) return -1;
 		return lv.rowAt((mouseY / canvas.scaleY - r.y) / vs);
+	}
+
+	// What a modal dims the rest of the screen with. A plain constant and not a
+	// theme role: a scrim is not a colour anybody designs, it is the absence of
+	// one, and it has to work on a light page and a dark one alike.
+	constexpr glm::vec4 kModalScrim{ 0.0f, 0.0f, 0.0f, 0.45f };
+
+	// ── The open list of a ComboBox ──────────────────────────────────────────
+	// Where the dropdown hangs, in the combo's own canvas units. It is computed
+	// in ONE place because two things need it and they must not drift: the draw
+	// puts the rows there, and the pointer decides which row it is over from the
+	// same numbers. Below the box normally, above it when there is no room — a
+	// menu that opens off the bottom of the screen is a menu with no last entry.
+	HE::UIWidgetRect comboListRect(const HE::UIWidgetTree& tree, const HE::UIComboBox& cb,
+	                               const HE::UIWidgetCanvas* canvas)
+	{
+		const HE::UIWidgetRect box = HE::uiElementRect(tree, cb, canvas);
+		float us = 1.0f, vs = 1.0f;
+		HE::uiElementUnitScale(tree, cb, us, vs, canvas);
+		const float rowH  = cb.optionHeight() * vs;
+		const float total = rowH * static_cast<float>(cb.options.size());
+		const float below = box.y + box.h;
+		const float space = (canvas ? canvas->height : tree.canvasHeight) - below;
+		HE::UIWidgetRect r{ box.x, below, box.w, total };
+		if (total > space && box.y - total >= 0.0f) r.y = box.y - total;
+		return r;
+	}
+
+	// Which option the pointer is over, or -1 for "not on the list at all" —
+	// which is the click that closes it without picking anything.
+	int comboOptionAtPointer(const HE::UIWidgetTree& tree, const HE::UIComboBox& cb,
+	                         const HE::UIWidgetCanvas& canvas, float mouseX, float mouseY)
+	{
+		if (cb.options.empty() || canvas.scaleX <= 0.0f || canvas.scaleY <= 0.0f) return -1;
+		const HE::UIWidgetRect r = comboListRect(tree, cb, &canvas);
+		const float cx = mouseX / canvas.scaleX, cy = mouseY / canvas.scaleY;
+		if (cx < r.x || cx > r.x + r.w || cy < r.y || cy > r.y + r.h) return -1;
+		const float rowH = r.h / static_cast<float>(cb.options.size());
+		if (rowH <= 0.0f) return -1;
+		const int i = static_cast<int>((cy - r.y) / rowH);
+		return (i >= 0 && i < static_cast<int>(cb.options.size())) ? i : -1;
 	}
 
 	// Is `elemId` inside `ancestorId` (or is it that element)? What "the pointer
@@ -984,8 +1193,50 @@ bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) con
 
 bool WidgetManager::processPointer(float vpWidth, float vpHeight,
                                    float mouseX, float mouseY,
-                                   bool primaryDown, bool valid)
+                                   bool primaryDown, bool valid,
+                                   bool secondaryDown)
 {
+	// Remembered for the calls that get no frame with them: a context menu opens
+	// at the pointer, a tooltip is drawn beside it, and a popup is placed in a
+	// canvas that needs the viewport.
+	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
+	if (valid) { m_pointerX = mouseX; m_pointerY = mouseY; }
+
+	// ── An open dropdown owns the pointer ────────────────────────────────────
+	// Its list hangs OUTSIDE the combo's own rectangle, and every rectangle the
+	// scan below knows is an element's own — so the scan cannot see it, and
+	// nothing short of owning the pointer outright would work. A press on a row
+	// picks it, a press anywhere else closes the list without picking, and
+	// nothing underneath hears either.
+	if (!m_grabs.empty() && m_grabs.back().kind == Grab::Kind::Dropdown)
+	{
+		const Grab g = m_grabs.back();
+		Instance* w = find(g.widget);
+		auto* cb = w ? dynamic_cast<HE::UIComboBox*>(w->tree.find(g.elem)) : nullptr;
+		if (!w || !cb) popGrab(/*notify=*/false);   // it went away under us
+		else
+		{
+			const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+			const int over = valid
+				? comboOptionAtPointer(w->tree, *cb, canvas, mouseX, mouseY) : -1;
+			if (cb->hoverIndex != over) { cb->hoverIndex = over; m_visualDirty = true; }
+			m_hoverCursor = HE::UICursor::Default;
+			if (primaryDown && !m_wasDown)
+			{
+				if (over >= 0 && cb->selectedIndex != over)
+				{
+					cb->selectedIndex = over;
+					const ScriptTarget t = scriptTargetFor(*w, cb->id);
+					rt().fireOnSelectionChanged(t.scriptId, t.elem, over);
+				}
+				popGrab(/*notify=*/false);
+			}
+			m_wasDown = primaryDown;
+			m_pointerOverUI = true;
+			return true;
+		}
+	}
+
 	// Topmost hit-testable element under the pointer, across all visible
 	// widgets: highest (widget zOrder, element sort key) wins — the same order
 	// the draw paints in, so what you SEE on top is what the pointer meets.
@@ -1017,6 +1268,9 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		for (auto& w : m_instances)
 		{
 			if (!w.visible) continue;
+			// A layer is up and this is not it: inert, all the way down. The
+			// same question every other way in asks (takesInput).
+			if (!takesInput(w.id)) continue;
 			// Same resolution the draw uses (see extract) — a hit test on a
 			// differently-scaled canvas is a button that is not where it looks.
 			const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
@@ -1103,8 +1357,75 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	}
 	m_hoverCursor = topCursor; // app maps this to a system cursor
 
+	// ── Which tooltip is being waited out ────────────────────────────────────
+	// The nearest thing under the pointer that has something to say. A caption
+	// on a button carries no tooltip and the button does — and the pointer being
+	// on the caption is still the pointer being on the button, which is why this
+	// walks up from the RAW hit rather than from whatever took the click.
+	{
+		int tipW = 0, tipE = 0;
+		if (topW && topHit != 0)
+		{
+			int guard = 0;
+			for (const HE::UIElement* e = topW->tree.find(topHit);
+			     e && guard++ < static_cast<int>(topW->tree.elements.size()) + 1; )
+			{
+				if (!e->tooltip.empty()) { tipW = topW->id; tipE = e->id; break; }
+				if (e->parentId == 0) break;
+				e = topW->tree.find(e->parentId);
+			}
+		}
+		if (tipW != m_tooltipWidget || tipE != m_tooltipElem)
+		{
+			// One that was already showing has to be taken off the screen, and
+			// that is a change even though nothing was drawn yet this frame.
+			if (m_tooltipUp) m_visualDirty = true;
+			m_tooltipWidget = tipW; m_tooltipElem = tipE;
+			m_tooltipHeld = 0.0f; m_tooltipUp = false;
+		}
+	}
+
 	const bool pressEdge   = primaryDown && !m_wasDown;
 	const bool releaseEdge = !primaryDown && m_wasDown;
+	const bool secondEdge  = secondaryDown && !m_wasSecondaryDown;
+	m_wasSecondaryDown = secondaryDown;
+
+	// ── A press on nothing closes a popup ────────────────────────────────────
+	// That IS the difference between a popup and a modal: one is dismissed by
+	// looking somewhere else, the other has to be answered. `topW` can only be
+	// the popup itself here — everything else was already refused by
+	// takesInput — so "nothing was hit" means "nothing of the popup was hit".
+	if ((pressEdge || secondEdge) && topW == nullptr && !m_grabs.empty() &&
+	    m_grabs.back().kind == Grab::Kind::Popup)
+	{
+		closeTopLayer();
+		m_wasDown = primaryDown;
+		// The click belonged to the UI: it dismissed the menu, and it must not
+		// also fire into the world behind it.
+		m_pointerOverUI = true;
+		return true;
+	}
+
+	// ── The other button ─────────────────────────────────────────────────────
+	// Fired at the nearest element above the hit that is actually listening for
+	// it, so a right-click on a row's label reaches the row. Its own event and
+	// not a flag on OnClicked: a right-click opens things, it never presses one.
+	if (secondEdge && topW && topHit != 0)
+	{
+		int guard = 0;
+		for (const HE::UIElement* e = topW->tree.find(topHit);
+		     e && guard++ < static_cast<int>(topW->tree.elements.size()) + 1; )
+		{
+			const ScriptTarget t = scriptTargetFor(*topW, e->id);
+			bool listens = false;
+			for (const auto& b : rt().eventBindingsOf(t.scriptId))
+				if (b.name == "OnRightClicked" && (b.elem == 0 || b.elem == t.elem))
+				{ listens = true; break; }
+			if (listens) { rt().fireOnRightClicked(t.scriptId, t.elem); break; }
+			if (e->parentId == 0) break;
+			e = topW->tree.find(e->parentId);
+		}
+	}
 
 	for (auto& w : m_instances)
 	{
@@ -1275,7 +1596,10 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	m_wasDown = primaryDown;
 	// Remembered, not just returned: both apps discard the return value, and a
 	// script asking "is the pointer on the UI?" runs long after this call.
-	m_pointerOverUI = topW != nullptr;
+	// A modal's dim covers the whole screen and is drawn by THIS class, not by
+	// any element — so nothing but this line can say that a click on it belongs
+	// to the UI. Without it, clicking beside a pause dialog fires into the game.
+	m_pointerOverUI = topW != nullptr || hasModal();
 	return m_pointerOverUI;
 }
 
@@ -1672,12 +1996,23 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 		}
 		break;
 	case HE::UIWidgetType::ComboBox:
+		// It OPENS. It used to advance to the next option, which was usable with
+		// three entries, unusable with twenty, and is not what a dropdown means
+		// anywhere else in computing. The open list belongs to the manager (see
+		// the Dropdown grab) because it hangs outside this element's rect.
 		if (auto* combo = dynamic_cast<HE::UIComboBox*>(e))
-			if (!combo->options.empty())
+			if (!combo->options.empty() && !combo->open)
 			{
-				combo->selectedIndex =
-					(combo->selectedIndex + 1) % (int)combo->options.size();
-				rt().fireOnSelectionChanged(target.scriptId, target.elem, combo->selectedIndex);
+				combo->open = true;
+				combo->hoverIndex = combo->selectedIndex;
+				Grab g;
+				g.kind = Grab::Kind::Dropdown;
+				g.widget = w.id;
+				g.elem   = elemId;
+				g.prevFocusWidget = m_focusWidget;
+				if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
+				m_grabs.push_back(g);
+				m_visualDirty = true;
 			}
 		break;
 	default:
@@ -1777,6 +2112,7 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
 	for (Instance* wp : sorted)
 	{
 		Instance& w = *wp;
+		if (!takesInput(w.id)) continue;
 		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
 		for (auto& ep : w.tree.elements)
 		{
@@ -1804,14 +2140,21 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 	// The widget the focus is in, else the topmost visible one that has
 	// anything focusable at all.
 	Instance* w = find(m_focusWidget);
-	if (!w || !w->visible)
+	if (!w || !w->visible || !takesInput(w->id))
 	{
-		std::vector<Instance*> sorted;
-		for (auto& inst : m_instances) if (inst.visible) sorted.push_back(&inst);
-		std::stable_sort(sorted.begin(), sorted.end(),
-			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
-		w = sorted.empty() ? nullptr : sorted.front();
-		if (!w) return false;
+		// With a layer up there is exactly one candidate, and it is the layer.
+		// This is the focus TRAP: without it, Tab and the arrows walk out of an
+		// open dialog into the page it is covering.
+		if (!m_grabs.empty()) { w = find(m_grabs.back().widget); if (!w) return false; }
+		else
+		{
+			std::vector<Instance*> sorted;
+			for (auto& inst : m_instances) if (inst.visible) sorted.push_back(&inst);
+			std::stable_sort(sorted.begin(), sorted.end(),
+				[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+			w = sorted.empty() ? nullptr : sorted.front();
+			if (!w) return false;
+		}
 	}
 	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
 
@@ -1934,6 +2277,9 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 	for (Instance* wp : sorted)
 	{
 		Instance& w = *wp;
+		// Same question the pointer asks: while a dialog is up, the list behind
+		// it does not scroll either.
+		if (!takesInput(w.id)) continue;
 		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
 		HE::uiUpdateScrollExtents(w.tree);
 
@@ -1970,6 +2316,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 
 void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)
 {
+	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
 	// Every list's rows, for the size the view has NOW: a window that just grew
 	// shows more rows in the frame it grew in, not in the one after it.
 	syncLists();
@@ -1982,8 +2329,27 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 	std::stable_sort(sorted.begin(), sorted.end(),
 		[](const Instance* a, const Instance* b){ return a->zOrder < b->zOrder; });
 
+	// Which widget the scrim goes under: the LOWEST modal, so a dialog over a
+	// dialog dims the world once rather than twice as dark. It is emitted by
+	// this class and not by any element, because it belongs to no widget — it is
+	// what everything else is behind. Which is also why pointerOverUI has to
+	// answer for it by hand: there is no element there to be hit.
+	int lowestModal = 0;
+	for (const Grab& g : m_grabs)
+		if (g.kind == Grab::Kind::Modal) { lowestModal = g.widget; break; }
+
 	for (Instance* wp : sorted)
 	{
+		// Appended immediately before the widget that asked for it, so whatever
+		// was drawn earlier is behind the dim and the dialog is in front of it.
+		if (lowestModal != 0 && wp->id == lowestModal)
+		{
+			UIRenderObject dim;
+			dim.position = { 0.0f, 0.0f };
+			dim.size     = { vpWidth, vpHeight };
+			dim.color    = kModalScrim;
+			out.push_back(dim);
+		}
 		Instance& w = *wp;
 		// The widget's scale mode decides how the authored canvas meets this
 		// viewport — and how many canvas units the screen is worth. Everything
@@ -2222,4 +2588,111 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			}
 		}
 	}
+
+	// ── The two things that are drawn OVER everything ────────────────────────
+	// An open dropdown and a tooltip both hang outside the element they belong
+	// to, and both have to be on top of every widget rather than of their own.
+	// That makes them the manager's to draw, exactly like the scrim and the
+	// focus ring — appended after the loop, so they land last.
+	drawOpenDropdown(vpWidth, vpHeight, out);
+	drawTooltip(vpWidth, vpHeight, out);
+}
+
+// The list a ComboBox drops down. Its rows come from `comboListRect`, the same
+// arithmetic the pointer uses to decide which one it is over — one source, or
+// the picture and the click disagree by exactly one row and nobody can say why.
+void WidgetManager::drawOpenDropdown(float vpWidth, float vpHeight,
+                                     std::vector<UIRenderObject>& out)
+{
+	if (m_grabs.empty() || m_grabs.back().kind != Grab::Kind::Dropdown) return;
+	const Grab g = m_grabs.back();
+	Instance* w = find(g.widget);
+	auto* cb = w ? dynamic_cast<HE::UIComboBox*>(w->tree.find(g.elem)) : nullptr;
+	if (!w || !cb || cb->options.empty()) return;
+
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetRect r = comboListRect(w->tree, *cb, &canvas);
+	const float sx = canvas.scaleX, sy = canvas.scaleY;
+	float eus = 1.0f, evs = 1.0f;
+	HE::uiElementUnitScale(w->tree, *cb, eus, evs, &canvas);
+
+	const float x = r.x * sx, y = r.y * sy, wid = r.w * sx, hei = r.h * sy;
+	const float rowH = hei / static_cast<float>(cb->options.size());
+
+	// The panel behind the rows, rounded like the box it came out of.
+	UIRenderObject bg;
+	bg.position = { x, y };
+	bg.size     = { wid, hei };
+	bg.color    = cb->backColor;
+	bg.cornerRadius = cb->cornerRadius * (sy * evs);
+	bg.borderWidth  = std::max(1.0f, cb->borderWidth * sy * evs);
+	bg.borderColor  = cb->borderWidth > 0.0f ? cb->borderColor
+	                                         : glm::vec4(0.0f, 0.0f, 0.0f, 0.5f);
+	out.push_back(bg);
+
+	for (std::size_t i = 0; i < cb->options.size(); ++i)
+	{
+		const float ry = y + rowH * static_cast<float>(i);
+		const bool  hot = static_cast<int>(i) == cb->hoverIndex;
+		const bool  sel = static_cast<int>(i) == cb->selectedIndex;
+		if (hot || sel)
+		{
+			UIRenderObject row;
+			row.position = { x, ry };
+			row.size     = { wid, rowH };
+			// The one under the pointer is the brighter of the two: it is where
+			// the click would go, and that is the more useful thing to see.
+			row.color    = hot ? cb->highlightColor
+			                   : glm::vec4(glm::vec3(cb->highlightColor), 0.45f);
+			out.push_back(row);
+		}
+		const float pad = 6.0f * sx * eus;
+		HE::UITextLayout opts;
+		opts.alignV = 1;   // centred in its row
+		HE::emitUITextGlyphs(HE::sharedUIFont(), 0, cb->options[i],
+		                     { x + pad, ry }, { wid - 2.0f * pad, rowH },
+		                     cb->fontSize * sy * evs, cb->textColor, 0, opts, out);
+	}
+}
+
+// What the element under the pointer says about itself, after the wait. Placed
+// beside the pointer and pushed back inside the screen — a hint that runs off
+// the edge is the one case where it was needed most.
+void WidgetManager::drawTooltip(float vpWidth, float vpHeight,
+                                std::vector<UIRenderObject>& out)
+{
+	if (!m_tooltipUp || m_tooltipElem == 0) return;
+	const Instance* w = find(m_tooltipWidget);
+	const HE::UIElement* e = w ? w->tree.find(m_tooltipElem) : nullptr;
+	if (!e || e->tooltip.empty()) return;
+	// A tooltip belongs to something you can still see and still use.
+	if (!HE::uiElementEffectiveVisible(w->tree, *e)) return;
+
+	constexpr float kFontPx = 14.0f;
+	constexpr float kPad    = 6.0f;
+	const glm::vec2 text = HE::measureUIText(HE::sharedUIFont(), e->tooltip, kFontPx,
+	                                         0.0f, HE::UITextLayout{});
+	const float bw = text.x + 2.0f * kPad;
+	const float bh = text.y + 2.0f * kPad;
+	// Below and to the right of the pointer, which is where it does not sit
+	// under the cursor itself; flipped when that would leave the screen.
+	float bx = m_pointerX + 14.0f;
+	float by = m_pointerY + 18.0f;
+	if (bx + bw > vpWidth)  bx = std::max(0.0f, m_pointerX - bw - 6.0f);
+	if (by + bh > vpHeight) by = std::max(0.0f, m_pointerY - bh - 6.0f);
+
+	UIRenderObject bg;
+	bg.position = { bx, by };
+	bg.size     = { bw, bh };
+	bg.color    = { 0.08f, 0.08f, 0.10f, 0.96f };
+	bg.cornerRadius = glm::vec4(4.0f);
+	bg.borderWidth  = 1.0f;
+	bg.borderColor  = { 0.45f, 0.45f, 0.52f, 0.9f };
+	out.push_back(bg);
+
+	HE::UITextLayout opts;
+	opts.alignV = 1;
+	HE::emitUITextGlyphs(HE::sharedUIFont(), 0, e->tooltip,
+	                     { bx + kPad, by }, { bw - 2.0f * kPad, bh },
+	                     kFontPx, glm::vec4(0.95f, 0.95f, 0.97f, 1.0f), 0, opts, out);
 }

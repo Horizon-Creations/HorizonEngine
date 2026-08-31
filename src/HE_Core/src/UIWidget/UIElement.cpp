@@ -472,6 +472,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
     if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
+    if (n == "Tooltip")      { out = UIPropValue::ofString(e.tooltip);          return true; }
     // "Corner Radius" is the whole rounding as ONE number, which is what it has
     // always been and what nearly every element wants. Reading it back gives the
     // top-left corner, so a graph that set it reads its own value; the four
@@ -522,6 +523,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // runtime re-resolves it when this changes (WidgetManager watches both).
     if (n == "Texture")      { e.texture = v.s; return true; }
     if (n == "Font")         { e.font = v.s; return true; }
+    if (n == "Tooltip")      { e.tooltip = v.s; return true; }
     // Writing the single name rounds ALL FOUR corners — the property a script or
     // a theme sets when it means "round this thing".
     if (n == "Corner Radius"){ e.cornerRadius = glm::vec4(std::max(0.0f, v.f)); return true; }
@@ -560,6 +562,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Size",         UIPropType::Vec2 });
     out.push_back({ "Layer",        UIPropType::Int });
     out.push_back({ "Hover Cursor", UIPropType::Int });
+    out.push_back({ "Tooltip",      UIPropType::String });
     // Border ("Schicht 0"): a style on the element's own surface. Offered only
     // where there IS a surface — the same test the material slot uses — so a
     // Text label does not grow a border property that outlines nothing.

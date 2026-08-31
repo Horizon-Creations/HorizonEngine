@@ -1360,6 +1360,86 @@ Zeile ist nur im Spiel-Runtime verdrahtet, in der Live-Vorschau des Editors noch
 
 ---
 
+### B4 Dialoge, Popups, Menüs (31.08.2026)
+
+Vier Dinge im Plan, **ein** Begriff im Code: der **Grab-Stapel**. Ein modaler Dialog, ein
+Kontextmenü und eine offene Auswahlliste unterscheiden sich nur darin, ob der Hintergrund
+abgedunkelt wird und was sie wieder schließt. Was sie gemeinsam haben, ist der ganze Punkt:
+*solange einer oben liegt, gehört die Eingabe ihm und nichts darunter hört mit.*
+
+Sie stapeln sich, weil eine Rückfrage über einem Einstellungsdialog der Normalfall ist und ein
+einzelner Platz still einen davon verschluckt hätte.
+
+**Die eigentliche Arbeit war nicht der Stapel, sondern die Liste der Eingänge.** Es gibt neun
+Wege in den WidgetManager hinein, und der eine, den man vergisst, ist das Loch im Dialog. Sie
+fragen jetzt alle dieselbe Funktion: `takesInput(widgetId)`. Dieselbe Lehre wie bei
+`scrollOffsetPtr()` in B2, an einer Stelle, wo sie mehr kostet.
+
+**Fünf Entscheidungen, die vorher fallen mussten statt hinterher aufzufallen:**
+
+**1. `showModal` hebt den Z-Order.** Ein Dialog, der die Eingabe blockiert und dabei *hinter*
+etwas zeichnet, ist das Schlechteste aus beidem, und genau das passiert, wenn jemand einmal
+einen Z-Order gesetzt und ihn vergessen hat.
+
+**2. `pointerOverUI` muss bei einem Modal für den ganzen Bildschirm wahr sein.** Die Abdunklung
+wird vom Manager gezeichnet und ist kein Element, also findet der Trefferlauf dort nichts —
+und ohne diese eine Zeile feuert ein Klick neben den Pausendialog ins Spiel dahinter. Man
+sieht das erst, wenn jemand einen Pausendialog ausliefert.
+
+**3. Der Fokus wird gemerkt und zurückgegeben.** Sonst kommt die Seite dahinter ohne Auswahl
+wieder und der nächste Pfeiltastendruck fängt von vorn an.
+
+**4. Ein Popup wird beim Öffnen normalisiert, nicht per Konvention platziert.** „Verankere
+deine Wurzel oben links" ist eine Konvention, die der erste Nutzer bricht. `openPopupAt`
+setzt die Anker der Wurzelelemente selbst, rechnet den Bildschirmpunkt in Canvas-Einheiten um
+und klemmt gegen die Größe — ein Menü unten rechts klappt nach oben auf, statt aus dem Bild zu
+laufen. Der Preis ist, dass ein Popup-Asset seine Anker verliert; das ist bei etwas, dessen
+Position von außen kommt, ohnehin die richtige Antwort.
+
+**5. Die ComboBox öffnet jetzt eine Liste, statt durchzuschalten.** Das war mit drei Einträgen
+benutzbar und mit zwanzig nicht mehr (fünfzehn Klicks bis zum fünfzehnten Eintrag, kein Weg
+zurück), und es ist nirgends sonst, was ein Dropdown bedeutet. Die offene Liste zeichnet der
+**Manager**, nicht `render()`: sie hängt außerhalb des Element-Rechtecks, und jedes Rechteck in
+diesem System — Treffer, Clip, Zeichenreihenfolge — ist das Element selbst. Was aus dem eigenen
+Rahmen ragt, muss der Schicht gehören, der der Bildschirm gehört.
+
+**Der Tooltip ist eine Zeichenkette auf der Basis, und die Verzögerung ist das Feature.** Ein
+Hinweis, der beim Überfahren sofort erscheint, steht im Weg. Der Zähler läuft in `tick()` — und
+**dort muss er selbst das Dirty-Flag setzen**: eine ereignisgetriebene Anwendung zeichnet bei
+*Änderung*, die Änderung ist hier vergehende Zeit, und ohne diese Zeile erschiene der Tooltip
+erst bei der nächsten Mausbewegung, also genau dann, wenn er nicht mehr gewollt ist. Das ist
+die „vergessenes Dirty-Flag"-Falle aus der Risikoliste, im Konkreten.
+
+**Zwei neue Ereignisse:** `OnRightClicked` (am Element, blubbert nach oben zum ersten, der
+zuhört) und `OnDismissed` (am Widget selbst). Ein Kontextmenü ist damit zwei Knoten:
+On Right Clicked → Open Popup At Pointer.
+
+**Escape ist in BEIDEN Anwendungen verdrahtet**, plus Gamepad-East, und zwar *vor* der
+bisherigen Bedeutung — ein Pausendialog, den Escape nicht schließen kann, weil Escape schon
+vergeben ist, ist ein Dialog, aus dem niemand herauskommt. Bei der Gelegenheit ist auch der
+Doppelklick aus B2 in der Live-Vorschau des Editors nachgezogen: die Vorschau einer Anwendung,
+die man nicht vollständig bedienen kann, ist keine.
+
+**Was der Gegenbeweis diesmal gelehrt hat, ist dasselbe wie bei B2 und es hat wieder zugebissen.**
+Alle sechs Testfälle waren beim ersten Lauf grün. Der Modal-Test bestand allerdings **aus dem
+falschen Grund**: mein Dialog deckte den ganzen Bildschirm, also nahm er jeden Klick schon
+deshalb, weil er obenauf lag — die Eingabesperre wurde nie gefragt. Erst mit einem *kleinen*
+Dialog in der Ecke, einem Klick daneben und einer Scroll-Box unter dem Rad wird der Test rot,
+wenn man `takesInput` entfernt. Ebenso der Tooltip: ohne das Dirty-Flag in `tick` fällt genau
+die eine Zeile um, die es prüft.
+
+**Nicht gebaut, mit Begründung:** ein eingebautes **Menü-Widget**. „Dropdown-Menü" aus dem Plan
+ist jetzt *baubar* — ein Popup mit einer ListView oder ein paar Knöpfen darin — statt ein
+eigener Typ zu sein; das eingebaute, das repariert wurde, ist die ComboBox. Ein Menü mit
+Untermenüs, Trennern und Tastenkürzeln gehört zu D2, wo es als Komponente aus vorhandenen
+Teilen entsteht.
+
+**Offen an dieser Ecke:** die Tastaturbedienung der offenen Liste (Pfeile durch die Optionen),
+Untermenüs, und der Rechtsklick ist im Editor-Viewport nur in der Live-Vorschau nutzbar (im
+Spielmodus gehört er der Kamera).
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

@@ -120,6 +120,15 @@ namespace ScriptApi
 	bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& listName,
 	                      int index);
 
+	// ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ────────────
+	// While one of these is up, input belongs to it and to nothing underneath.
+	// A modal dims the screen and has to be answered; a popup dismisses itself
+	// on a click somewhere else. closeTopLayer is what Escape does.
+	void showModalWidget(HorizonWorld& world, int widgetId);
+	void openWidgetPopup(HorizonWorld& world, int widgetId, float x, float y);
+	void openWidgetPopupAtPointer(HorizonWorld& world, int widgetId);
+	bool closeTopLayer(HorizonWorld& world);
+
 	// ── Theme (what the whole application looks like) ───────────────────────
 	// setThemeMode takes "Light", "Dark" or "System" — the last is a RULE, not a
 	// colour, and is the default. setTheme loads a Theme asset by

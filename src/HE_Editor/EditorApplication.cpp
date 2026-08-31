@@ -2441,7 +2441,20 @@ void EditorApplication::OnRender(float dt)
 			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured && uiTakesInput;
 			const bool uiWantsPointer = m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
-				m_uiPointerDown, uiPointerLive);
+				m_uiPointerDown, uiPointerLive, m_uiPointerRight && uiPointerLive);
+
+			// A double-click means "open this": the word under it in a text
+			// field, and otherwise the list row under it. The same order the
+			// packaged game uses, so the preview and the build agree.
+			if (m_uiPointerDouble)
+			{
+				m_uiPointerDouble = false;
+				if (uiPointerLive &&
+				    !m_editorWorld->widgets().selectWordAtPointer(
+				        m_uiViewportW, m_uiViewportH, m_uiPointerX))
+					m_editorWorld->widgets().activateAtPointer(
+						m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY);
+			}
 
 			// …and this frame's wheel, so a scroll box under the cursor gets it.
 			if (uiPointerLive && m_uiWheel != 0.0f)
@@ -2479,6 +2492,14 @@ void EditorApplication::OnRender(float dt)
 						break;
 					}
 				if (edges & (1u << 4)) m_editorWorld->widgets().activateFocused();
+				// Escape and gamepad East close the topmost dialog, popup or
+				// menu. Wired HERE as well as in the packaged game: a dialog the
+				// designer cannot dismiss while previewing is worse than one
+				// that never opened.
+				const bool back = input().IsKeyDown(SDL_SCANCODE_ESCAPE) ||
+				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
+				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
+				m_uiBackPrev = back;
 			}
 
 			// Reflect the hovered element's cursor in the PIE viewport. ImGui owns
@@ -5250,12 +5271,17 @@ AppContext EditorApplication::makeContext()
 			m_stepFrame = true;
 		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
-		                              bool down, bool valid, float wheel)
+		                              bool down, bool valid, float wheel,
+		                              bool rightDown, bool doubleClick)
 		{
 			m_uiPointerX = mx; m_uiPointerY = my;
 			m_uiViewportW = vpW; m_uiViewportH = vpH;
 			m_uiPointerDown = down; m_uiPointerValid = valid;
 			m_uiWheel = wheel;
+			m_uiPointerRight = rightDown;
+			// Sticky until consumed below: the panel reports it on the one frame
+			// ImGui saw it, and this block may run before or after that.
+			m_uiPointerDouble = m_uiPointerDouble || doubleClick;
 		},
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,

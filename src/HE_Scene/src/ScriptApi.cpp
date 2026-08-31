@@ -331,6 +331,15 @@ bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& list
 	return world.widgets().scrollListToItem(widgetId, listName, index);
 }
 
+void showModalWidget(HorizonWorld& world, int widgetId)
+{ world.widgets().showModal(widgetId); }
+void openWidgetPopup(HorizonWorld& world, int widgetId, float x, float y)
+{ world.widgets().openPopupAt(widgetId, x, y); }
+void openWidgetPopupAtPointer(HorizonWorld& world, int widgetId)
+{ world.widgets().openPopupAtPointer(widgetId); }
+bool closeTopLayer(HorizonWorld& world)
+{ return world.widgets().closeTopLayer(); }
+
 bool setTheme(HorizonWorld& world, ContentManager* content, const std::string& path)
 {
 	if (!content || path.empty()) return false;

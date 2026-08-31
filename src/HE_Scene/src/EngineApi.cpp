@@ -462,6 +462,14 @@ int  listSelected(Ctx& c, int id, const std::string& list)
 { return c.world ? ScriptApi::listSelected(*c.world, id, list) : -1; }
 bool scrollListToItem(Ctx& c, int id, const std::string& list, int index)
 { return c.world ? ScriptApi::scrollListToItem(*c.world, id, list, index) : false; }
+void showModal(Ctx& c, int id)
+{ if (c.world) ScriptApi::showModalWidget(*c.world, id); }
+void openPopup(Ctx& c, int id, float x, float y)
+{ if (c.world) ScriptApi::openWidgetPopup(*c.world, id, x, y); }
+void openPopupAtPointer(Ctx& c, int id)
+{ if (c.world) ScriptApi::openWidgetPopupAtPointer(*c.world, id); }
+bool closeTopLayer(Ctx& c)
+{ return c.world ? ScriptApi::closeTopLayer(*c.world) : false; }
 } // namespace widget
 
 // ── Theme ────────────────────────────────────────────────────────────────────
@@ -2313,6 +2321,22 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
                 widget::scrollListToItem(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
 
+        // Layers. A dialog and a menu are the same thing to the engine: input
+        // belongs to them until they let go. Only the leaving differs.
+        t.push_back({ "widget.showModal", "Widget", true,
+            {{"widget", P::Ref}}, {}, "HE::api::widget::showModal",
+            [](Ctx& c, const VV& a){ widget::showModal(c, (int)aR(a, 0)); return VV{}; } });
+        t.push_back({ "widget.openPopup", "Widget", true,
+            {{"widget", P::Ref}, {"x", P::Float}, {"y", P::Float}}, {},
+            "HE::api::widget::openPopup",
+            [](Ctx& c, const VV& a){ widget::openPopup(c, (int)aR(a, 0), aF(a, 1), aF(a, 2)); return VV{}; } });
+        t.push_back({ "widget.openPopupAtPointer", "Widget", true,
+            {{"widget", P::Ref}}, {}, "HE::api::widget::openPopupAtPointer",
+            [](Ctx& c, const VV& a){ widget::openPopupAtPointer(c, (int)aR(a, 0)); return VV{}; } });
+        t.push_back({ "widget.closeTopLayer", "Widget", true,
+            {}, {{"closed", P::Bool}}, "HE::api::widget::closeTopLayer",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(widget::closeTopLayer(c)) }; } });
+
         // Theme — one place decides what the whole application looks like.
         t.push_back({ "theme.set", "Theme", true, {{"themeAsset", P::String}}, {{"ok", P::Bool}},
             "HE::api::theme::set",
@@ -2882,6 +2906,10 @@ const std::vector<ApiFn>& registry()
             { "widget.setListSelected", "Set List Selected" },
             { "widget.listSelected", "Get List Selected" },
             { "widget.scrollListToItem", "Scroll List To Item" },
+            { "widget.showModal", "Show Modal Widget" },
+            { "widget.openPopup", "Open Popup" },
+            { "widget.openPopupAtPointer", "Open Popup At Pointer" },
+            { "widget.closeTopLayer", "Close Top Layer" },
             { "theme.set", "Set Theme" }, { "theme.setMode", "Set Theme Mode" },
             { "theme.getMode", "Get Theme Mode" },
             { "theme.getPreference", "Get Theme Preference" },

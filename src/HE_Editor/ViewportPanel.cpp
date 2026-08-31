@@ -451,7 +451,10 @@ void render(AppContext& ctx, float dt)
 							static_cast<float>(s_viewportPxH),
 							ImGui::IsMouseDown(ImGuiMouseButton_Left),
 							viewportHovered,
-							viewportHovered ? io.MouseWheel : 0.0f);
+							viewportHovered ? io.MouseWheel : 0.0f,
+							ImGui::IsMouseDown(ImGuiMouseButton_Right),
+							viewportHovered &&
+								ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
 					}
 				}
 				else if (ctx.editorCamera)
