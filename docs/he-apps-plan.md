@@ -1463,6 +1463,35 @@ frischer Druck und öffnet ein Kontextmenü, das niemand wollte.
 Untermenüs, und der Rechtsklick ist im Editor-Viewport nur in der Live-Vorschau nutzbar (im
 Spielmodus gehört er der Kamera).
 
+### Ein Byte, eine halbe Höhe (31.08.2026)
+
+Meldung aus einem echten Projekt: zwei Knöpfe in einer Vertical Box, jeder mit einem Text und
+einem Bild als Kind, im Designer beide richtig — im Viewport klebt der Text des **zweiten**
+oben im Knopf, obwohl der Anker mitte-links steht.
+
+Ich habe die gespeicherte `AppTest/RootWidget.hasset` ausgelesen und die beiden Label
+verglichen. Sie sind **identisch**: gleicher Anker `[0, 0.5]–[1, 0.5]`, gleiches `pos [5,0]`,
+gleiches `size [-10,48]`, gleiches `alignV: 1`. Der einzige Unterschied ist der Text selbst:
+`"Option 1"` gegen `"Option 2\n"`.
+
+Eine leere letzte Zeile ist die **halbe Höhe** eines zweizeiligen Blocks. Zentriert man den,
+landet die sichtbare Zeile in der oberen Hälfte — gemessen: Oberkante bei 2,5 statt bei 14 in
+einem 48 Einheiten hohen Knopf. Genau das, was gemeldet wurde, und die Engine hat dabei nichts
+falsch gemacht: sie hat die Daten gezeichnet, die sie bekam.
+
+**Wie man an diese Daten kommt:** die Text-Eigenschaft ist mehrzeilig (für absichtliche
+Zweizeiler), und Enter heißt dort „neue Zeile", während man es als „fertig" tippt.
+
+**Warum der Designer trotzdem richtig aussah, und warum das der eigentliche Fehler ist:** ImGuis
+`CalcTextSizeA` zählt einen abschließenden Umbruch **nicht** als Zeile, `layoutUITextLines` schon.
+Zwei Textmaße, die sich um eine Zeile unterscheiden — und ein Designer, der etwas anderes zeigt
+als die Engine zeichnet, ist schlimmer, als wenn einer von beiden falsch wäre. Jetzt lassen beide
+genau **einen** abschließenden Umbruch fallen: `"a\n\n"` behält seine gewollte Leerzeile, ein
+leerer Text bleibt eine (leere) Zeile, und ein versehentliches Enter kostet nichts mehr.
+
+Die Lehre ist dieselbe wie beim Align-Vorfall davor: **wenn Designer und Viewport sich
+widersprechen, ist die Frage nicht, wer recht hat, sondern warum es zwei Antworten gibt.**
+
 ---
 
 ## 11. Risiken und Fallen

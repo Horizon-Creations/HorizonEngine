@@ -127,6 +127,19 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
         else if (c != '\r') cur.push_back(c);
     }
     lines.push_back(cur);
+    // ── A trailing break does not start a line ───────────────────────────────
+    // "Option 2\n" is one line, not one line and an empty one. It matters far
+    // more than it looks: an empty last line is half the block's height, so a
+    // vertically centred label with a stray newline is drawn hard against the
+    // top of its rect — which is exactly what an author gets by pressing Enter
+    // in the Text box to mean "done". ImGui's own CalcTextSizeA drops it too,
+    // which is why the designer showed such a label correctly while the engine
+    // did not, and a designer that disagrees with the engine is worse than
+    // either being wrong.
+    //
+    // Exactly ONE is dropped, so a deliberate blank line ("a\n\n") still leaves
+    // one, and an empty string is still one (empty) line rather than none.
+    if (lines.size() > 1 && lines.back().empty()) lines.pop_back();
 
     if (!wrap || wrapWidth <= 0.0f) return lines;
 

@@ -5983,6 +5983,58 @@ TEST_CASE("ComboBox: it opens a list and you pick an entry, instead of cycling")
     }
 }
 
+// The real project this was reported from authors on a 1280x720 canvas with
+// Fit Inside, so nothing is at scale 1 and the list geometry has to survive
+// going through the canvas twice: once to place the rows, once to decide which
+// row the pointer is over. Those are two call sites of the same arithmetic, and
+// two call sites are where a scale factor gets applied once or three times.
+TEST_CASE("ComboBox: the open list still picks the right row on a scaled canvas")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+    t.scaleMode = HE::UICanvasScaleMode::FitInside;
+    const int combo = t.add(HE::UIWidgetType::ComboBox);
+    {
+        auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(combo));
+        HE::uiSetAnchorPreset(*cb, 0); cb->pivotX = cb->pivotY = 0.0f;
+        cb->posX = 100.0f; cb->posY = 100.0f; cb->sizeX = 220.0f; cb->sizeY = 32.0f;
+        cb->options.clear();
+        for (int i = 0; i < 8; ++i) cb->options.push_back("Option " + std::to_string(i));
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Half size: every canvas unit is half a pixel, so anything that forgot the
+    // factor lands one whole list away from where it looks.
+    const float vpW = 640.0f, vpH = 360.0f;
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*wm.tree(id), vpW, vpH);
+    REQUIRE(canvas.scaleX == doctest::Approx(0.5f));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(vpW, vpH, out);
+    // Open it: press and release on the closed box, in PIXELS.
+    wm.processPointer(vpW, vpH, 150.0f * 0.5f, 110.0f * 0.5f, true,  true);
+    wm.processPointer(vpW, vpH, 150.0f * 0.5f, 110.0f * 0.5f, false, true);
+    REQUIRE(dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo))->open);
+
+    // Row 5 sits five rows below the box's bottom edge, in canvas units, then
+    // halved into pixels.
+    const float rowY = (100.0f + 32.0f) + 5.0f * 32.0f + 16.0f;
+    wm.processPointer(vpW, vpH, 150.0f * 0.5f, rowY * 0.5f, true,  true);
+    wm.processPointer(vpW, vpH, 150.0f * 0.5f, rowY * 0.5f, false, true);
+    {
+        const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo));
+        CHECK(cb->selectedIndex == 5);
+        CHECK_FALSE(cb->open);
+    }
+}
+
 TEST_CASE("Tooltip: the wait is the feature, and waiting is a redraw")
 {
     TempWidgetDir dir;
@@ -6110,4 +6162,47 @@ TEST_CASE("Right-click is its own event, and reaches the element that listens")
     }
     wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true, true);
     CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+}
+
+// From a real project (AppTest/RootWidget.hasset): two buttons in a vertical
+// box, each with a Text child anchored middle-left, authored identically — and
+// the second one drawn hard against the top of its button. The two labels
+// differed in exactly one byte: the second ended in a newline.
+//
+// An empty last line is half a two-line block's height, so centring puts the
+// visible line in the upper half. Pressing Enter in the Text box to mean "done"
+// is how one gets there — and the designer showed it correctly because ImGui
+// drops a trailing break, which made the designer disagree with the engine.
+TEST_CASE("A label's trailing newline does not push it to the top")
+{
+    HE::UITextLayout opts; opts.alignV = 1;
+    const glm::vec2 plain = HE::measureUIText("Option 2",   20.0f, 0.0f, opts);
+    const glm::vec2 tail  = HE::measureUIText("Option 2\n", 20.0f, 0.0f, opts);
+    CHECK(tail.y == doctest::Approx(plain.y));
+    CHECK(tail.x == doctest::Approx(plain.x));
+
+    // …and a deliberate blank line still counts, so this is not "newlines are
+    // ignored" — exactly one trailing one is.
+    const glm::vec2 two = HE::measureUIText("a\nb", 20.0f, 0.0f, opts);
+    CHECK(two.y > plain.y);
+    const glm::vec2 gap = HE::measureUIText("a\n\n", 20.0f, 0.0f, opts);
+    CHECK(gap.y == doctest::Approx(two.y));
+    // An empty label is still one (empty) line, not none.
+    CHECK(HE::measureUIText("", 20.0f, 0.0f, opts).y == doctest::Approx(plain.y));
+
+    // The whole point, in the terms the bug was reported in: the same label with
+    // and without the stray break lands in the same place inside a 48-unit
+    // button, and that place is the middle.
+    for (const char* text : { "Option 2", "Option 2\n" })
+    {
+        std::vector<UIRenderObject> out;
+        HE::emitUITextGlyphs(HE::sharedUIFont(), 0, text, { 0.0f, 0.0f }, { 180.0f, 48.0f },
+                             20.0f, glm::vec4(1.0f), 0, opts, out);
+        REQUIRE_FALSE(out.empty());
+        float top = 1e9f;
+        for (const UIRenderObject& ro : out) top = std::min(top, ro.position.y);
+        INFO("text := ", text);
+        CHECK(top > 10.0f);      // not jammed against the top edge
+        CHECK(top < 24.0f);
+    }
 }
