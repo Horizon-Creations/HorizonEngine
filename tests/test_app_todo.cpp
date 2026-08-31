@@ -17,6 +17,7 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/WidgetManager.h>
+#include <MaterialGraph/MaterialGraph.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>
 
@@ -371,6 +372,51 @@ static std::filesystem::path exportTodoApp(bool advancedShaderEffects,
         e.setThemeRole("Color", "Surface");
         e.shadow = true; e.shadowBlur = 18.0f; e.shadowOffsetY = 6.0f;
     }
+    // ── The one thing Advanced Shader Effects exists FOR ─────────────────────
+    // A widget with a UI MATERIAL — "Schicht 1" from docs/he-apps-plan.md D5, the
+    // half the software renderer cannot do by contract. Only in that flavour, so
+    // the other one is not asked to ship an asset it may not even author.
+    //
+    // The material paints flat green; the element's own tint is red. That is the
+    // discriminator: a material that failed to compile, resolve or bind falls
+    // back to "Schicht 0 plus tint" and the swatch comes out RED. Green means
+    // the graph really ran.
+    if (advancedShaderEffects)
+    {
+        HE::MaterialGraph g;
+        const int out   = g.addNode(HE::MatNodeType::Output);
+        g.findNode(out)->p[0] = 0.0f;   // unlit
+        g.findNode(out)->p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+        const int green = g.addNode(HE::MatNodeType::ConstColor);
+        g.findNode(green)->p[0] = 0.0f;
+        g.findNode(green)->p[1] = 1.0f;
+        g.findNode(green)->p[2] = 0.0f;
+        REQUIRE(g.connect(green, 0, out, 0));   // → BaseColor
+
+        const HE::MatShaderGen gen = HE::generateFragment(g);
+        REQUIRE_FALSE(gen.glsl.empty());
+        REQUIRE(gen.domain == static_cast<uint8_t>(HE::MatDomain::UserInterface));
+
+        MaterialAsset mat;
+        mat.type                  = HE::AssetType::Material;
+        mat.name                  = "Swatch";
+        mat.path                  = "UI/Swatch.hasset";
+        mat.nodeGraphJson         = HE::materialGraphToJson(g);
+        mat.customShaderFragGlsl  = gen.glsl;
+        mat.customShaderGBufGlsl  = gen.glslGBuffer;
+        mat.blendMode             = gen.blendMode;
+        mat.domain                = gen.domain;
+        REQUIRE(cm.saveAsset(mat));
+
+        const int swatch = page.add(HE::UIWidgetType::Image);
+        HE::UIElement& e = *page.find(swatch);
+        e.name = "Swatch";
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 40.0f; e.posY = 40.0f; e.sizeX = 120.0f; e.sizeY = 60.0f;
+        e.material = "UI/Swatch.hasset";
+        e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 0.0f, 0.0f, 1.0f }));
+    }
+
     const int hello = page.add(HE::UIWidgetType::Text);
     {
         HE::UIElement& e = *page.find(hello);
@@ -669,6 +715,28 @@ TEST_CASE("Both app flavours actually start")
         INFO("corner pixel " << corner.r << "," << corner.g << "," << corner.b
              << "  (" << shot.string() << ")");
         REQUIRE(corner.r >= 0);
+
+        // ── Schicht 1, end to end, for the flavour that has it ───────────────
+        // The Advanced page carries an Image with a UI material that paints flat
+        // green over a RED tint. Green proves the graph was translated, built and
+        // bound; red is what "Schicht 0 plus tint" looks like, which is the
+        // documented fallback and here means the material never ran. Until now
+        // nothing checked that the one feature this flavour exists for works at
+        // all — a shipped build could have drawn every material as its tint and
+        // the whole suite would have stayed green.
+        //
+        // The canvas is 640x480 stretched onto 1280x720, so the swatch authored
+        // at (40,40)-(160,100) lands at (80,60)-(320,150).
+        if (advanced)
+        {
+            const Rgb swatch = pixelAt(shot, 200, 105);
+            INFO("swatch pixel " << swatch.r << "," << swatch.g << "," << swatch.b);
+            REQUIRE(swatch.r >= 0);
+            CHECK_MESSAGE(swatch.g > 200, "the UI material did not paint — the quad "
+                                          "fell back to Schicht 0 plus its tint");
+            CHECK_MESSAGE(swatch.r < 60, "the swatch is showing its RED tint, which is "
+                                         "exactly the material fallback");
+        }
         CHECK_MESSAGE(corner.r < 80, "there is something bright behind the interface "
                                      "— an application should have nothing there. A sky?");
         CHECK(std::abs(corner.r - corner.b) < 24);   // grey-ish, not blue

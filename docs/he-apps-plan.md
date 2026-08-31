@@ -1173,8 +1173,20 @@ frei lässt: **„ist da etwas hinter der Oberfläche" ist von einem Screenshot,
 nicht zu beantworten.** Gegengeprüft, beide Male: Fix raus → Eckpixel 114,127,152, Test rot; Fix
 rein → schwarz, Test grün.
 
-**Weiterhin offen, aus der Risikoliste:** die Ausprägung Advanced **an** hat jetzt Start und
-Pixelprüfung, aber kein Widget mit einem UI-**Material** — der einzige Grund, warum es sie gibt.
+**Und Schicht 1, zum ersten Mal end-to-end.** Die Advanced-Seite trägt jetzt ein Image mit einem
+UI-**Material**: ein Graph, der flach grün malt, auf einem **roten** Farbton. Das ist der
+Unterscheider und nicht Dekoration — ein Material, das nicht übersetzt, nicht gefunden oder nicht
+gebunden wird, fällt laut D5-Vertrag auf „Schicht 0 plus Farbton" zurück, und der Fleck käme
+**rot** heraus. Gemessen: innen exakt `(0,255,0)`, außen der Theme-Hintergrund. Gegengeprüft mit
+einem absichtlich falschen Materialpfad: `swatch pixel 255,0,0`, Test rot mit „showing its RED
+tint, which is exactly the material fallback".
+
+Damit ist der Weg Graph → Codegen → Cross-Compile → Pipeline → Pixel in einer **ausgelieferten**
+Anwendung belegt. Vorher prüfte das niemand: ein Build hätte jedes Material als seinen Farbton
+zeichnen können und die ganze Suite wäre grün geblieben.
+
+**Die Risikoliste ist damit abgearbeitet** — beide App-Ausprägungen starten, zeichnen und werden
+gemessen, jede mit dem, was nur sie kann.
 
 **Frühere Notiz (erledigt):** Schatten, dann Eckenradius pro Ecke (das erste Attribut, das
 sich nicht sauber in vorhandene `UIPropType`-Kinder zerlegen lässt — vier Zahlen sind vier
