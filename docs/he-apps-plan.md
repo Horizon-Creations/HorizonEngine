@@ -1550,6 +1550,45 @@ durch Bewegen. Zurückgedreht auf die Druck-Flanke wird er rot.
 
 ---
 
+### B3, erste Hälfte: die WrapBox (31.08.2026)
+
+Sechzehnter Elementtyp und der einfachere der beiden Container aus B3: eine waagerechte Box,
+die umbricht, wenn der Platz ausgeht. Schlagworte, Chips, eine Knopfleiste, die ein schmales
+Fenster überleben muss — alles, was eine Zeile ist, **bis es keine mehr sein kann**.
+
+Der Lauf ist bewusst genauso zustandslos wie der der Boxen (`wrapSlotRect`): keine
+zwischengespeicherte Zeilentabelle, die ungültig werden kann, und die Listen sind kurz. Die
+Gesamthöhe fällt als Nebenprodukt desselben Laufs ab, damit „an Inhalt anpassen" nicht eine
+zweite, driftende Kopie derselben Arithmetik braucht.
+
+**Drei Entscheidungen, die vorher fallen mussten:**
+
+**1. Zwei Abstände, nicht einer.** `Spacing` ist die Lücke zwischen zwei Elementen **einer**
+Zeile, `Line Spacing` die zwischen zwei Zeilen. Eine Reihe Chips will seitlich fast immer
+enger sitzen als untereinander, und eine Zahl für beides erzwingt einen Kompromiss, den
+niemand will.
+
+**2. `Slot Fill` wird ignoriert.** Ein Kind, das den Rest frisst, nähme die ganze erste Zeile,
+und es gäbe nie eine zweite — Füllen und Umbrechen widersprechen sich. Das Details-Panel zeigt
+einem WrapBox-Kind deshalb **beide** Größen und kein Slot Fill, also genau umgekehrt zu einem
+Box-Kind.
+
+**3. `Size To Content` misst nur die HÖHE.** Die Breite ist das, wogegen umgebrochen wird — sie
+aus den Kindern zu messen wäre die Frage, die sich selbst beantwortet. Die Höhe, also wie viele
+Zeilen sie gebraucht haben, ist die nützliche Hälfte.
+
+Dazu die Regel, die eine Zeile hoch macht: **so hoch wie ihr eigenes höchstes Kind**, nicht wie
+das höchste im ganzen Kasten. Ein einzelnes großes Element darf nicht alle anderen Zeilen
+mit auseinanderschieben.
+
+**Beim ersten Testlauf lag ich falsch, nicht die Engine:** ich hatte drei Kinder à 100 mit
+10 Lücke in 300 Breite gerechnet und drei erwartet — es sind 320. Die Erwartung war die
+Rechnung, nicht das Verhalten. Gegengeprüft ist die Weiche selbst: nimmt man die
+`UIWrapBox`-Zeile aus `uiElementRect` heraus, fallen die Kinder auf den Box-Lauf zurück und
+elf Zusicherungen werden rot.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

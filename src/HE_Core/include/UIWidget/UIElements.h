@@ -587,6 +587,40 @@ public:
     { return std::make_unique<UIHorizontalBox>(*this); }
 };
 
+// ── WrapBox (docs/he-apps-plan.md B3) ─────────────────────────────────────────
+// A horizontal box that runs out of room and starts a new line. Tags, chips, a
+// row of buttons that has to survive a narrow window — everything that is a row
+// until it cannot be one.
+//
+// Two things it deliberately does NOT do, both because wrapping contradicts
+// them:
+//   • Slot Fill is ignored. A child that eats the leftover space would take the
+//     whole first line and there would never be a second one.
+//   • Size To Content sizes the HEIGHT only. The width is what the children are
+//     wrapped against, so measuring it from them is the question answering
+//     itself; the height, the number of lines they needed, is the useful half.
+class HE_API UIWrapBox final : public UIBoxBase
+{
+public:
+    // The gap BETWEEN lines. `spacing` is the gap between two items on a line —
+    // two different numbers because a row of chips usually wants tighter
+    // horizontal spacing than vertical.
+    float lineSpacing = 4.0f;
+
+    UIWrapBox() { sizeX = 400.0f; sizeY = 200.0f; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::WrapBox; }
+    const char*  typeName() const override { return "WrapBox"; }
+    // It runs along X and breaks along Y. The flag exists for the boxes' single
+    // axis and is answered honestly here: a wrap box's MAIN axis is horizontal.
+    bool stacksVertically() const override { return false; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIWrapBox>(*this); }
+
+    const UIPropTable& propTable() const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 // ── ScrollBox ─────────────────────────────────────────────────────────────────
 // A vertical box whose content is allowed to be taller than the box: it clips
 // (that is what clipChildren is for) and shifts its children up by the current

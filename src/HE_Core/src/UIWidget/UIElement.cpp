@@ -26,6 +26,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::WidgetRef:     return std::make_unique<UIWidgetRef>();
         case UIWidgetType::Spacer:        return std::make_unique<UISpacer>();
         case UIWidgetType::ListView:      return std::make_unique<UIListView>();
+        case UIWidgetType::WrapBox:       return std::make_unique<UIWrapBox>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -38,7 +39,7 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
         UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
-        UIWidgetType::ListView };
+        UIWidgetType::ListView, UIWidgetType::WrapBox };
     return kAll;
 }
 
@@ -54,7 +55,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
         "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
-        "ListView" };
+        "ListView", "WrapBox" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -249,6 +250,21 @@ const UIPropTable& UIBoxBase::propTable() const
         uiprop::slot<&UIBoxBase::sizeToContent>({ "Size To Content", UIPropType::Bool }),
         uiprop::slot<&UIBoxBase::minSizeX>({ "Min Width",  UIPropType::Float }),
         uiprop::slot<&UIBoxBase::minSizeY>({ "Min Height", UIPropType::Float }),
+    };
+    return t;
+}
+
+const UIPropTable& UIWrapBox::propTable() const
+{
+    // Padding and Spacing keep the container names; Line Spacing is the one
+    // number a wrapping row has that a straight one does not.
+    static const UIPropTable t = {
+        uiprop::slot<&UIWrapBox::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIWrapBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIWrapBox::lineSpacing>({ "Line Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIWrapBox::sizeToContent>({ "Size To Content", UIPropType::Bool }),
+        uiprop::slot<&UIWrapBox::minSizeX>({ "Min Width",  UIPropType::Float }),
+        uiprop::slot<&UIWrapBox::minSizeY>({ "Min Height", UIPropType::Float }),
     };
     return t;
 }
@@ -1101,6 +1117,11 @@ void UIBoxBase::readJson(const nlohmann::json& j)
     if (const auto& m = j.value("minSize", nlohmann::json::array()); m.size() >= 2)
     { minSizeX = m[0].get<float>(); minSizeY = m[1].get<float>(); }
 }
+
+void UIWrapBox::writeJson(nlohmann::json& j) const
+{ UIBoxBase::writeJson(j); j["lineSpacing"] = lineSpacing; }
+void UIWrapBox::readJson(const nlohmann::json& j)
+{ UIBoxBase::readJson(j); lineSpacing = j.value("lineSpacing", lineSpacing); }
 
 // The offset and the measured content extent are runtime state: a menu that
 // reopens where it was last scrolled to is a bug, not a feature.

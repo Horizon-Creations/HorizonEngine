@@ -64,6 +64,10 @@ enum class UIWidgetType : uint8_t
     // view can show, and asks its owner to fill each one. That is what lets a
     // list of ten thousand be ten elements instead of ten thousand.
     ListView,
+    // A horizontal box that runs out of room and starts a new line. Tags,
+    // chips, a toolbar that has to survive a narrow window — everything that is
+    // a row until it cannot be one. Appended, never inserted.
+    WrapBox,
     COUNT
 };
 

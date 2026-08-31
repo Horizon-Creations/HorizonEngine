@@ -324,6 +324,64 @@ namespace
         return out;
     }
 
+    // The slot a WrapBox hands one of its children.
+    //
+    // A row until it cannot be one: children run along X and break to a new line
+    // when the next one would not fit. Line height is the tallest child ON THAT
+    // LINE, so a row of chips with one tall entry does not push every other line
+    // apart as well.
+    //
+    // Stateless like the box's walk, and for the same reason: no cached line
+    // table to invalidate, and the lists are short. `outLines` is an optional
+    // by-product for the caller that wants the total height (size-to-content)
+    // rather than one child's rect.
+    UIWidgetRect wrapSlotRect(const UIWidgetTree& tree, const UIWrapBox& box,
+                              const UIElement* child, const UIWidgetCanvas* canvas,
+                              float* outContentHeight = nullptr)
+    {
+        const UIWidgetRect b = uiElementRect(tree, box, canvas);
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, box, us, vs, canvas);
+
+        const float pad  = std::max(0.0f, box.padding);
+        const float gapX = std::max(0.0f, box.spacing)     * us;
+        const float gapY = std::max(0.0f, box.lineSpacing) * vs;
+        const float padX = pad * us, padY = pad * vs;
+        const UIWidgetRect inner{ b.x + padX, b.y + padY,
+                                  std::max(0.0f, b.w - 2.0f * padX),
+                                  std::max(0.0f, b.h - 2.0f * padY) };
+
+        float x = inner.x, y = inner.y, lineH = 0.0f;
+        UIWidgetRect found{ inner.x, inner.y, 0.0f, 0.0f };
+        bool got = false;
+        for (const auto& sp : tree.elements)
+        {
+            if (!sp || sp->parentId != box.id || !sp->visible) continue;
+            const float w = sp->sizeX * us;
+            const float h = sp->sizeY * vs;
+            // A break only when something is already on this line: a child wider
+            // than the whole box still gets its own line rather than an empty
+            // one above it.
+            if (x > inner.x + 0.001f && x + w > inner.x + inner.w + 0.001f)
+            {
+                x = inner.x;
+                y += lineH + gapY;
+                lineH = 0.0f;
+            }
+            if (child && sp->id == child->id)
+            {
+                found = { x, y, w, h };
+                got = true;
+                if (!outContentHeight) break;   // nothing left to measure
+            }
+            x += w + gapX;
+            lineH = std::max(lineH, h);
+        }
+        if (outContentHeight) *outContentHeight = (y + lineH) - inner.y;
+        if (!got && child) found.h = 0.0f;      // not a child of this box
+        return found;
+    }
+
     // The slot a ListView hands one of its rows.
     //
     // Deliberately NOT the walk above. A box finds a child's place by adding up
@@ -394,10 +452,13 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
     if (e.parentId != 0)
         if (const UIElement* p = tree.find(e.parentId); p && p->laysOutChildren())
         {
-            // A list places by item index, a box by stacking; see listSlotRect
-            // for why the two cannot be the same walk.
+            // Three walks, because they are three different questions. A box
+            // stacks along one axis; a list places by ITEM INDEX (the rows
+            // before this one do not exist); a wrap box runs and breaks.
             if (const auto* lv = dynamic_cast<const UIListView*>(p))
                 return listSlotRect(tree, *lv, e, canvas);
+            if (const auto* wb = dynamic_cast<const UIWrapBox*>(p))
+                return wrapSlotRect(tree, *wb, &e, canvas);
             return boxSlotRect(tree, *p, e, canvas);
         }
 
@@ -537,6 +598,20 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
 
     for (auto& [depth, box] : boxes)
     {
+        // A wrap box is measured by WRAPPING, not by stacking — and only on the
+        // height. Its width is what the children are wrapped against, so
+        // measuring that from them would be the question answering itself.
+        if (auto* wb = dynamic_cast<UIWrapBox*>(box))
+        {
+            float content = 0.0f;
+            wrapSlotRect(tree, *wb, nullptr, canvas, &content);
+            float wus = 1.0f, wvs = 1.0f;
+            uiElementUnitScale(tree, *wb, wus, wvs, canvas);
+            const float pad = std::max(0.0f, wb->padding);
+            wb->sizeY = std::max(wb->minSizeY,
+                                 content / std::max(1e-4f, wvs) + 2.0f * pad);
+            continue;
+        }
         const bool  vert = box->stacksVertically();
         const float pad  = std::max(0.0f, box->padding);
         const float gap  = std::max(0.0f, box->spacing);

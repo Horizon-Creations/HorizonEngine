@@ -1016,6 +1016,24 @@ void drawDetails(State& st, AppContext& ctx)
 	{
 		const bool vert = layoutParent->stacksVertically();
 		ImGui::TextDisabled("Placed by the %s above it.", layoutParent->typeName());
+		// A wrap box gives every child its OWN size on both axes and ignores
+		// Slot Fill — a child that ate the leftover space would take the whole
+		// first line and there would never be a second one. So it gets the two
+		// size fields and not the fill, which is the opposite of a plain box.
+		if (layoutParent->type() == UIWidgetType::WrapBox)
+		{
+			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Width");
+			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Height");
+			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			// The shared helpForLabel("Pivot") below covers both branches — it
+			// attaches to the last item drawn, which is this one.
+		}
+		else {
 		edit |= ImGui::DragFloat("Slot Fill", &n->slotFill, 0.05f, 0.0f, 100.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		if (n->slotFill < 0.0f) n->slotFill = 0.0f;
@@ -1034,6 +1052,7 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		} // end of the stacked-box branch
 		EditorWidgets::helpForLabel("Pivot");
 	}
 	else
@@ -1664,6 +1683,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		dl->AddRect(mn, mx, IM_COL32(150, 210, 160, 110));
 		break;
 	}
+	case UIWidgetType::WrapBox:
 	case UIWidgetType::VerticalBox:
 	case UIWidgetType::HorizontalBox:
 	{

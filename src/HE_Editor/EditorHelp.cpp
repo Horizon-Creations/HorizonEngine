@@ -1944,6 +1944,12 @@ namespace
 	  "it for you. A bound colour's swatch is read-only, because editing it would "
 	  "be overwritten the next time the theme or the mode changes.",
 	  "", "ui#elements" },
+	{ "UI Widget/Line Spacing", "",
+	  "The gap between two LINES of a Wrap Box. Its own number beside Spacing, "
+	  "which is the gap between two items on the same line — a row of chips almost "
+	  "always wants to sit tighter sideways than it does downwards, and one number "
+	  "for both would force a compromise nobody wants.",
+	  "", "ui#elements" },
 	{ "UI Widget/Tooltip", "",
 	  "What this element says about itself when the pointer rests on it for half a "
 	  "second. Empty means nothing to say, which is most elements. The DELAY is the "

@@ -227,6 +227,15 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color },
             { "Item Count", UIPropType::Int } } },
+        // A WrapBox is a box plus the one number a wrapping row has that a
+        // straight one does not: the gap between LINES.
+        { UIWidgetType::WrapBox, {
+            { "Padding", UIPropType::Float },
+            { "Spacing", UIPropType::Float },
+            { "Line Spacing", UIPropType::Float },
+            { "Size To Content", UIPropType::Bool },
+            { "Min Width",  UIPropType::Float },
+            { "Min Height", UIPropType::Float } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -936,7 +945,7 @@ TEST_CASE("Exactly the container types accept children")
     const std::vector<HE::UIWidgetType> containers = {
         HE::UIWidgetType::Panel, HE::UIWidgetType::Button,
         HE::UIWidgetType::VerticalBox, HE::UIWidgetType::HorizontalBox,
-        HE::UIWidgetType::ScrollBox };
+        HE::UIWidgetType::ScrollBox, HE::UIWidgetType::WrapBox };
     for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
     {
         auto e = HE::makeUIElement(ty);
@@ -6304,4 +6313,150 @@ TEST_CASE("ComboBox: the open list survives a pill-shaped box")
         std::fclose(f);
         MESSAGE("rounding sheet written to " << shot.string());
     }
+}
+
+// ═══ WrapBox (docs/he-apps-plan.md B3) ═══════════════════════════════════════
+// A row until it cannot be one. The assertions are all about the BREAK: where it
+// happens, what it costs in height, and what it does when a child disappears.
+
+namespace
+{
+    // A wrap box `w` wide with `n` children of the given size, in a canvas that
+    // does not scale. Returns the tree plus the child ids in order.
+    struct WrapCase { HE::UIWidgetTree t; int box = 0; std::vector<int> kids; };
+    WrapCase makeWrap(float boxW, float boxH, int n, float kidW, float kidH,
+                      float spacing = 10.0f, float lineSpacing = 20.0f,
+                      float padding = 0.0f)
+    {
+        WrapCase c;
+        c.t.canvasWidth = 800.0f; c.t.canvasHeight = 600.0f;
+        c.t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        c.box = c.t.add(HE::UIWidgetType::WrapBox);
+        {
+            auto* wb = dynamic_cast<HE::UIWrapBox*>(c.t.find(c.box));
+            HE::uiSetAnchorPreset(*wb, 0); wb->pivotX = wb->pivotY = 0.0f;
+            wb->posX = 0.0f; wb->posY = 0.0f; wb->sizeX = boxW; wb->sizeY = boxH;
+            wb->spacing = spacing; wb->lineSpacing = lineSpacing; wb->padding = padding;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            const int k = c.t.add(HE::UIWidgetType::Panel);
+            c.t.find(k)->parentId = c.box;
+            c.t.find(k)->sizeX = kidW; c.t.find(k)->sizeY = kidH;
+            c.kids.push_back(k);
+        }
+        return c;
+    }
+}
+
+TEST_CASE("WrapBox: it breaks when the next child would not fit")
+{
+    // 320 wide, children 100 wide with a 10 gap: they sit at 0, 110 and 220,
+    // the third ending exactly on the edge. The fourth would end at 330 and
+    // goes to the next line.
+    WrapCase c = makeWrap(320.0f, 400.0f, 5, 100.0f, 40.0f);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+
+    CHECK(rect(0).x == doctest::Approx(0.0f));
+    CHECK(rect(1).x == doctest::Approx(110.0f));
+    CHECK(rect(2).x == doctest::Approx(220.0f));
+    // All three on the first line…
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    CHECK(rect(2).y == doctest::Approx(0.0f));
+    // …and the fourth starts a new one, at the line's height plus the LINE gap
+    // (20), not the item gap (10). Two numbers because a row of chips wants
+    // tighter spacing sideways than downwards.
+    CHECK(rect(3).x == doctest::Approx(0.0f));
+    CHECK(rect(3).y == doctest::Approx(60.0f));
+    CHECK(rect(4).x == doctest::Approx(110.0f));
+    CHECK(rect(4).y == doctest::Approx(60.0f));
+    // Every child keeps its own size on BOTH axes — that is the difference to a
+    // stacked box, where the cross axis belongs to the box.
+    CHECK(rect(0).w == doctest::Approx(100.0f));
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+}
+
+TEST_CASE("WrapBox: a line is as tall as its own tallest child")
+{
+    WrapCase c = makeWrap(300.0f, 400.0f, 4, 100.0f, 40.0f);
+    // One tall child on the FIRST line only.
+    c.t.find(c.kids[1])->sizeY = 90.0f;
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    // The fourth child drops below the tall one, not below a 40-tall line.
+    CHECK(rect(3).y == doctest::Approx(110.0f));
+
+    // Move the tall one to the second line instead: the first line is short
+    // again, so the break comes earlier. A single tall child must not push every
+    // other line apart as well — that is what "as tall as ITS OWN line" means.
+    c.t.find(c.kids[1])->sizeY = 40.0f;
+    c.t.find(c.kids[3])->sizeY = 90.0f;
+    CHECK(rect(3).y == doctest::Approx(60.0f));
+}
+
+TEST_CASE("WrapBox: a hidden child closes the gap, like everywhere else")
+{
+    WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    REQUIRE(rect(3).y == doctest::Approx(60.0f));   // on the second line
+
+    // Hide the first: everything moves up one slot and the fourth comes back
+    // onto the first line. The box invariant, and the reason it is tested here
+    // too: a wrap walk that counted invisible children would leave a hole.
+    c.t.find(c.kids[0])->visible = false;
+    CHECK(rect(1).x == doctest::Approx(0.0f));
+    CHECK(rect(3).x == doctest::Approx(220.0f));
+    CHECK(rect(3).y == doctest::Approx(0.0f));
+}
+
+TEST_CASE("WrapBox: a child wider than the box gets its own line, not an empty one")
+{
+    WrapCase c = makeWrap(300.0f, 400.0f, 3, 100.0f, 40.0f);
+    c.t.find(c.kids[1])->sizeX = 500.0f;   // wider than the whole box
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    // It breaks once (something was already on the line) and then does NOT break
+    // again on itself — otherwise it would sit under an empty line.
+    CHECK(rect(1).x == doctest::Approx(0.0f));
+    CHECK(rect(1).y == doctest::Approx(60.0f));
+    CHECK(rect(2).y == doctest::Approx(120.0f));
+}
+
+TEST_CASE("WrapBox: Size To Content measures the HEIGHT, never the width")
+{
+    WrapCase c = makeWrap(300.0f, 400.0f, 5, 100.0f, 40.0f, 10.0f, 20.0f, /*padding=*/8.0f);
+    auto* wb = dynamic_cast<HE::UIWrapBox*>(c.t.find(c.box));
+    REQUIRE(wb);
+    wb->sizeToContent = true;
+
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(c.t, 800.0f, 600.0f);
+    HE::uiApplyAutoSize(c.t, &canvas);
+
+    // 300 wide minus 8 padding on each side = 284 of room: two children per line
+    // (100, 110, and 220 would exceed 284), so three lines for five children.
+    // Height = 3*40 + 2*20 line gaps + 2*8 padding.
+    CHECK(wb->sizeY == doctest::Approx(3 * 40.0f + 2 * 20.0f + 2 * 8.0f));
+    // The width is what the children were wrapped AGAINST, so measuring it from
+    // them would be the question answering itself. It stays as authored.
+    CHECK(wb->sizeX == doctest::Approx(300.0f));
+}
+
+TEST_CASE("WrapBox: it round-trips, and an old asset is untouched")
+{
+    HE::UIWidgetTree t;
+    const int box = t.add(HE::UIWidgetType::WrapBox);
+    auto* wb = dynamic_cast<HE::UIWrapBox*>(t.find(box));
+    REQUIRE(wb);
+    wb->padding = 7.0f; wb->spacing = 3.0f; wb->lineSpacing = 11.0f;
+    wb->sizeToContent = true; wb->minSizeY = 40.0f;
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    const auto* rb = dynamic_cast<const HE::UIWrapBox*>(r.find(box));
+    REQUIRE(rb);
+    CHECK(rb->padding == doctest::Approx(7.0f));
+    CHECK(rb->spacing == doctest::Approx(3.0f));
+    CHECK(rb->lineSpacing == doctest::Approx(11.0f));
+    CHECK(rb->sizeToContent);
+    CHECK(rb->minSizeY == doctest::Approx(40.0f));
+    CHECK(rb->type() == HE::UIWidgetType::WrapBox);
 }
