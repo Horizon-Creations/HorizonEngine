@@ -398,6 +398,19 @@ private:
     // instead of being hooked to each thing that could invalidate it.
     void syncLists();
     void syncLists(Instance& w);
+    // ── Why a latch ──────────────────────────────────────────────────────────
+    // OnRowBind runs the owner's graph, and an ordinary thing for that graph to
+    // do is change the list: "bound the last row → there are fifty more"
+    // (endless scrolling), or a filter that shrinks the count. Both land back in
+    // setListCount, which syncs — and a nested sync GRAFTS AND REMOVES rows
+    // while the outer one is walking them. Removing destroys elements, so that
+    // is a use-after-free reachable from a graph anybody could author.
+    //
+    // The latch turns it into what it should be: the change is recorded, the
+    // picture is marked dirty, and the next sync — one is run before every frame
+    // and before every pointer event — acts on it. One frame later at the very
+    // worst, which is exactly what event-driven drawing is built to survive.
+    bool m_syncingLists = false;
     // Elements of a list, in tree order. Nullable entries are never returned.
     std::vector<HE::UIWidgetRef*> listRowsOf(Instance& w, int listId);
     // Find a named ListView in a widget (nullptr = no widget, no such name, or

@@ -1307,10 +1307,40 @@ gezeichnet) oder gar nicht mehr.
 nicht, und der Modus wurde vom Autor gerade deshalb gewählt, weil mehr als eine Zeile gemeint ist.
 Eine Liste, in der die zweite Zeile nur mit Strg erreichbar wäre, ist schlechter als eine ohne.
 
-**Die Tests sind entsprechend Zählungen von Dingen, die nicht passieren dürfen**, und beide
+**5. `OnRowBind` läuft fremden Code mitten im Lauf.** Das Naheliegendste, was ein Graph darin tut,
+ist die Liste ändern: ein Filter macht sie kürzer, „die letzte Zeile ist dran, also lade fünfzig
+mehr" macht sie länger. Beides landet wieder in `setListCount`, das synchronisiert — **während** die
+Synchronisation, die den Bind ausgelöst hat, noch über ihre Zeilen läuft. Zwei getrennte Vorkehrungen,
+weil es zwei getrennte Fehler sind:
+
+- Die Bind-Schleife hält **keine Zeiger** mehr über den Aufruf hinweg, sondern Element-IDs, und sucht
+  vor jedem Feuern neu. Ein Handler darf die Zeile entfernen, die er gerade bekommen hat — das
+  löscht Elemente, und ein vorher genommener Zeiger wäre für den Rest der Schleife tot.
+- Ein **Riegel** (`m_syncingLists`) schließt die Tür für die Dauer des Laufs. Ohne ihn ist
+  `OnRowBind → refreshList` eine Endlosschleife: jeder Refresh bindet, jeder Bind refresht. Gemessen
+  2211 Aufrufe statt elf, bevor die Notbremse im Test greift.
+
+Der Preis ist ein Frame Verzögerung, und der ist bei ereignisgetriebenem Zeichnen genau der Preis,
+den man dafür bezahlen will.
+
+**Die Tests sind entsprechend Zählungen von Dingen, die nicht passieren dürfen**, und alle drei
 tragenden habe ich gegengeprüft, indem ich den Mechanismus absichtlich kaputtgemacht habe: ohne den
-`rowBound`-Vergleich wird „eine Liste, die sich nicht bewegt, zeichnet nicht neu" rot, und wenn die
-Zeilen jedes Mal neu gegraftet werden, wird „Scrollen richtet die vorhandenen Zeilen neu aus" rot.
+`rowBound`-Vergleich wird „eine Liste, die sich nicht bewegt, zeichnet nicht neu" rot, wenn die
+Zeilen jedes Mal neu gegraftet werden, wird „Scrollen richtet die vorhandenen Zeilen neu aus" rot,
+und ohne den Riegel wird „ein Bind, der die Liste ändert, frisst nicht die Zeilen, über die er
+läuft" rot. Der dritte hat mich zusätzlich etwas gelehrt: mein **erster** Versuch dieses Tests
+(`OnRowBind → setListCount`) blieb auch ohne Riegel grün, weil der Schnappschuss ihn schon trägt.
+Ein Gegenbeweis, der nicht rot wird, prüft nicht das, was man glaubt.
+
+**Der Eckfall daneben:** „Item Count" ist eine Eigenschaft **und** ein API-Aufruf, also gab es zwei
+Schreibwege mit unterschiedlich viel Aufräumen dahinter. Beide landen jetzt auf
+`UIListView::setItemCount` — sonst hinterlässt ein `Set Property`-Knoten eine Auswahl, die hinter das
+Ende zeigt, und Enter feuert `OnRowActivated` für einen Eintrag, den es nicht gibt.
+
+**Und eines, das der Bauart innewohnt:** die Auswahl ist **indexbasiert**. Nach einem Sortieren zeigt
+sie auf das, was jetzt an diesen Positionen steht, nicht auf dieselben Einträge. Das steht in der
+Node-Dokumentation von `Refresh List`, weil es der Preis dafür ist, dass die Liste die Daten nicht
+kennt.
 
 **Zwei Funde nebenbei, beide von diesem Durchgang aufgedeckt und beide behoben:**
 

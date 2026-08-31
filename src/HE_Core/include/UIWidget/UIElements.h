@@ -708,6 +708,13 @@ public:
         return (y - i * step) <= rowHeight ? i : -1;
     }
 
+    // How many items there are, with everything that follows from it: a
+    // selection past the new end is DROPPED (not clamped — clamping would move
+    // the highlight onto a row nobody picked) and the offset is pulled back into
+    // range. The one place the count changes, so the property setter and the
+    // script call cannot end up doing different amounts of housekeeping.
+    void setItemCount(int n);
+
     // ── Selection ────────────────────────────────────────────────────────────
     bool isSelected(int item) const
     {

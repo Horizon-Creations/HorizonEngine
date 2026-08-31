@@ -589,15 +589,12 @@ bool WidgetManager::setListCount(int widgetId, const std::string& listName, int 
 	if (!lv) return false;
 	const int n = count > 0 ? count : 0;
 	if (lv->itemCount == n) return true;
-	lv->itemCount = n;
-	// A selection that points past the end is a selection of nothing. Dropped
-	// silently rather than clamped: clamping would move the highlight onto a row
-	// the user never picked.
-	lv->selection.erase(std::remove_if(lv->selection.begin(), lv->selection.end(),
-		[n](int i){ return i >= n; }), lv->selection.end());
-	lv->scrollOffset = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
+	// The count and everything that follows from it live on the element, so a
+	// Set Property node does exactly this much housekeeping too.
+	lv->setItemCount(n);
 	m_visualDirty = true;
-	if (m_content) if (Instance* w = find(widgetId)) syncLists(*w);
+	if (m_content && !m_syncingLists)
+		if (Instance* w = find(widgetId)) syncLists(*w);
 	return true;
 }
 
@@ -630,7 +627,7 @@ bool WidgetManager::refreshList(int widgetId, const std::string& listName)
 	// from all of them.
 	for (HE::UIWidgetRef* r : listRowsOf(*w, lv->id)) r->rowBound = -1;
 	m_visualDirty = true;
-	if (m_content) syncLists(*w);
+	if (m_content && !m_syncingLists) syncLists(*w);
 	return true;
 }
 
@@ -661,7 +658,7 @@ bool WidgetManager::scrollListToItem(int widgetId, const std::string& listName, 
 	if (!w || !lv) return false;
 	if (!lv->scrollToItem(index)) return true;   // already in view: nothing to do
 	m_visualDirty = true;
-	if (m_content) syncLists(*w);
+	if (m_content && !m_syncingLists) syncLists(*w);
 	return true;
 }
 
@@ -690,7 +687,17 @@ void WidgetManager::syncLists()
 
 void WidgetManager::syncLists(Instance& w)
 {
-	if (!m_content) return;
+	if (!m_content || m_syncingLists) return;
+	// Everything below grafts rows, removes rows and runs the owner's graph. All
+	// three can come back in here (see m_syncingLists), so the door is shut for
+	// the duration and whatever they ask for is picked up by the next sync.
+	struct Latch
+	{
+		bool& f;
+		explicit Latch(bool& b) : f(b) { f = true; }
+		~Latch() { f = false; }
+	} latch{ m_syncingLists };
+
 	// Ids first: realizing a row appends to tree.elements, and iterating it while
 	// that happens walks off the end of the vector it is holding.
 	std::vector<int> listIds;
@@ -705,7 +712,7 @@ void WidgetManager::syncLists(Instance& w)
 
 	for (const int listId : listIds)
 	{
-		auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(listId));
+		HE::UIListView* lv = dynamic_cast<HE::UIListView*>(w.tree.find(listId));
 		if (!lv) continue;
 
 		// ── Which items can be seen ──────────────────────────────────────────
@@ -726,12 +733,17 @@ void WidgetManager::syncLists(Instance& w)
 			count = std::min(count, lv->itemCount - first);
 		}
 		// ── Exactly that many rows, no more ──────────────────────────────────
+		// A COPY of the template path: grafting fires the new row's Construct,
+		// which is the owner's code and could take this very list out of the
+		// tree. Everything below is written so that nothing reaches back through
+		// `lv` after a graft or a removal without finding it again.
+		const std::string rowAsset = lv->rowWidget;
 		std::vector<HE::UIWidgetRef*> rows = listRowsOf(w, listId);
 		// Rows whose template no longer matches are not recyclable — they are the
 		// wrong widget entirely — so they go before anything is counted.
 		std::vector<HorizonCode::InstanceId> doomed;
 		for (HE::UIWidgetRef* r : rows)
-			if (r->widgetPath != lv->rowWidget)
+			if (r->widgetPath != rowAsset)
 				if (const HorizonCode::InstanceId id = instanceOfChild(w, r->id)) doomed.push_back(id);
 		for (const HorizonCode::InstanceId id : doomed) removeChild(w.id, id);
 		if (!doomed.empty()) rows = listRowsOf(w, listId);
@@ -748,14 +760,19 @@ void WidgetManager::syncLists(Instance& w)
 		{
 			// Grafted at the item it will show, so it is placed correctly on the
 			// very first frame rather than at row 0 for one of them.
-			if (graftChildRef(w, *m_content, listId, lv->rowWidget, first + i) == 0)
+			if (graftChildRef(w, *m_content, listId, rowAsset, first + i) == 0)
 			{
 				// The template is missing or circular; the graft already said so.
 				// Stop asking for it this frame instead of failing once per row.
 				count = i;
 				break;
 			}
+			// A row's Construct could have taken the list away. Nothing below
+			// this line is meaningful if it did.
+			if (!w.tree.find(listId)) break;
 		}
+		lv = dynamic_cast<HE::UIListView*>(w.tree.find(listId));
+		if (!lv) continue;
 		rows = listRowsOf(w, listId);
 		if (rows.empty()) continue;
 		count = std::min(count, static_cast<int>(rows.size()));
@@ -785,13 +802,26 @@ void WidgetManager::syncLists(Instance& w)
 		}
 
 		// ── …and tell the owner about the ones that moved ────────────────────
-		const ScriptTarget t = scriptTargetFor(w, listId);
+		// By ELEMENT ID, not by pointer, and re-found before every fire. The
+		// handler is the owner's graph and it may legitimately remove a row it
+		// was just handed (widget.removeChild on the Ref from Get List Row) —
+		// that erases elements, and a pointer taken before the call would be
+		// dangling for the rest of the loop. The latch above stops the list from
+		// being resized underneath us; this stops one row from taking the others
+		// with it.
+		std::vector<std::pair<int, int>> pending;   // (ref element, item)
 		for (HE::UIWidgetRef* r : rows)
+			if (r->rowIndex >= 0 && r->rowBound != r->rowIndex)
+			{
+				r->rowBound = r->rowIndex;
+				pending.emplace_back(r->id, r->rowIndex);
+			}
+		if (!pending.empty()) m_visualDirty = true;
+		const ScriptTarget t = scriptTargetFor(w, listId);
+		for (const auto& [refElem, item] : pending)
 		{
-			if (r->rowIndex < 0 || r->rowBound == r->rowIndex) continue;
-			r->rowBound = r->rowIndex;
-			m_visualDirty = true;
-			rt().fireOnRowBind(t.scriptId, t.elem, r->rowIndex);
+			if (!w.tree.find(refElem)) continue;   // a previous bind took it out
+			rt().fireOnRowBind(t.scriptId, t.elem, item);
 		}
 	}
 }

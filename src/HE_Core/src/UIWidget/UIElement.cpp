@@ -176,9 +176,27 @@ const UIPropTable& UIListView::propTable() const
         // The item count is RUNTIME state and still belongs here: it is what a
         // graph sets to fill the list, and a Set Property node reaches it by
         // name like every other property. It is simply never serialized.
-        uiprop::slot<&UIListView::itemCount>({ "Item Count", UIPropType::Int, 0.0f, 1.0e9f }),
+        //
+        // Not a plain field slot: writing the number alone would leave a
+        // selection pointing past the end and an offset beyond the new bottom,
+        // so Set Property and Set List Count would do different amounts of work
+        // for the same sentence. Both land on setItemCount instead.
+        uiprop::custom({ "Item Count", UIPropType::Int, 0.0f, 1.0e9f },
+            [](const UIElement& e) -> UIPropValue
+            { return UIPropValue::ofInt(static_cast<const UIListView&>(e).itemCount); },
+            [](UIElement& e, const UIPropValue& v)
+            { static_cast<UIListView&>(e).setItemCount(v.i); }),
     };
     return t;
+}
+
+void UIListView::setItemCount(int n)
+{
+    itemCount = n > 0 ? n : 0;
+    selection.erase(std::remove_if(selection.begin(), selection.end(),
+        [this](int i){ return i >= itemCount; }), selection.end());
+    if (hoveredRow >= itemCount) hoveredRow = -1;
+    scrollOffset = std::clamp(scrollOffset, 0.0f, maxScroll());
 }
 
 bool UIListView::setSelected(int item, bool on)

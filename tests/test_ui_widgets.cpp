@@ -12,6 +12,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/WidgetManager.h>
+#include <HorizonScene/EngineApi.h>
 #include <algorithm>
 #include <filesystem>
 
@@ -5393,6 +5394,122 @@ TEST_CASE("ListView: the owner is asked to fill in each row it puts up")
     CHECK(wm.refreshList(id, "List"));
     CHECK(wm.consumeVisualDirty());
     CHECK(wm.listRow(id, "List", 0) != 0);
+}
+
+// OnRowBind runs the OWNER'S GRAPH, and the most ordinary thing for that graph
+// to do is change the list: a filter that shrinks the count, or "the last row
+// was bound, so load fifty more". Both land back in setListCount — which syncs —
+// while the sync that fired the bind is still walking its rows. Removing a row
+// destroys elements, so without a latch this is a use-after-free anybody could
+// author by accident.
+TEST_CASE("ListView: a bind that changes the list does not eat the rows it is walking")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree row;
+    row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+    row.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    row.add(HE::UIWidgetType::Text);
+    registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int list = page.add(HE::UIWidgetType::ListView);
+    {
+        auto* lv = dynamic_cast<HE::UIListView*>(page.find(list));
+        lv->name = "List";
+        HE::uiSetAnchorPreset(*lv, 0); lv->pivotX = lv->pivotY = 0.0f;
+        lv->posX = 0.0f; lv->posY = 0.0f; lv->sizeX = 400.0f; lv->sizeY = 400.0f;
+        lv->rowWidget = "mem://row.hasset";
+        lv->rowHeight = 40.0f; lv->spacing = 0.0f; lv->padding = 0.0f;
+    }
+
+    // On Row Bind → Refresh List(self, "List"). A refresh asks every row to be
+    // filled in again — from inside the very walk that is filling them in. It is
+    // the graph a filter or a sort is written with, and without a latch it is
+    // also the graph that never returns: each refresh binds, each bind refreshes.
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnRowBind"; ev.elem = list;
+    ev.hasArg = true; ev.propType = PinType::Int;
+    const int evId = g.addNode(std::move(ev));
+
+    const HE::api::ApiFn* fn = HE::api::find("widget.refreshList");
+    REQUIRE(fn != nullptr);
+    HorizonCode::Node call; call.type = NodeType::EngineCall; call.s = fn->id;
+    call.hasArg = fn->isExec;
+    for (const auto& p : fn->params)  call.params.push_back({ p.name, p.type, p.isArray });
+    for (const auto& r : fn->results) call.results.push_back({ r.name, r.type, r.isArray });
+    const int callId = g.addNode(std::move(call));
+    {
+        // Inline pin values are keyed by PARAMETER index (0 = widget, wired
+        // below), while a LINK names the absolute pin. The two numberings differ
+        // by the exec pins, and mixing them up hands the call a string where it
+        // wanted a number — silently, as a zero.
+        HorizonCode::Node* n = g.findNode(callId);
+        n->pinDefaults[1] = HorizonCode::Value::ofString("List");
+    }
+    HorizonCode::Node self; self.type = NodeType::GetSelf;
+    const int selfId = g.addNode(std::move(self));
+    REQUIRE(g.connect(evId, 0, callId, 0));     // exec
+    // An exec call's pins run exec-in, exec-out, then the data inputs — so the
+    // first parameter is pin 2, while pinDefaults above are indexed by parameter.
+    REQUIRE(g.connect(selfId, 0, callId, 2));   // the widget this graph runs on
+    registerWidget(cm, page, &g, "mem://page.hasset");
+
+    WidgetManager wm;
+    int id = 0;
+    // The dispatch an application installs, standing in for the world the
+    // registry row would otherwise need: an Engine Call node lands on the same
+    // WidgetManager method HE::api::widget::setListCount lands on. That is the
+    // whole point of the test — the call arrives from INSIDE a bind.
+    HorizonCode::Runtime rt;
+    int calls = 0;
+    {
+        HorizonCode::Runtime::Services svc;
+        svc.callApi = [&](HorizonCode::InstanceId, const std::string& apiId,
+                          const std::vector<HorizonCode::Value>& args)
+            -> std::vector<HorizonCode::Value>
+        {
+            if (apiId != "widget.refreshList" || args.size() < 2) return {};
+            // A runaway must fail the test, not hang the suite.
+            if (++calls > 200) return {};
+            return { HorizonCode::Value::ofBool(wm.refreshList(id, args[1].s)) };
+        };
+        rt.setServices(std::move(svc));
+    }
+    wm.setRuntime(&rt);
+
+    id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+
+    // Two hundred items: ten rows go up, and the first of them asks the list to
+    // start over while the sync that put it there is still walking its rows.
+    REQUIRE(wm.setListCount(id, "List", 200));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    CHECK(calls > 0);            // the bind really did run
+    // THE assertion. The refresh is recorded and acted on by the NEXT sync, so
+    // this frame binds each row it put up once. Without the latch the first
+    // bind's refresh re-enters, that sync binds every row again, each of those
+    // refreshes again, and it does not stop — the number runs straight into the
+    // guard above.
+    CHECK(calls < 100);
+
+    // Two more frames, and it is still a list rather than a recursion.
+    out.clear(); wm.extract(400.0f, 400.0f, out);
+    out.clear(); wm.extract(400.0f, 400.0f, out);
+    CHECK(calls < 100);
+    CHECK(wm.listCount(id, "List") == 200);
+    CHECK(wm.listRow(id, "List", 0) != 0);
+    CHECK(wm.listRow(id, "List", 2) != 0);
+
+    // …and it still takes instructions from outside afterwards, rather than
+    // being a heap full of holes.
+    CHECK(wm.setListSelected(id, "List", 1, true));
+    CHECK(wm.listSelected(id, "List") == 1);
 }
 
 TEST_CASE("ListView: a row is placed by the item it shows, not by stacking")

@@ -276,7 +276,9 @@ namespace
 	  "it works out which of them fit on screen, puts up only those rows, and asks "
 	  "you to fill each one in through On Row Bind. That is why ten thousand items "
 	  "cost ten rows instead of ten thousand elements. Name the list by the name "
-	  "its element has in the designer." },
+	  "its element has in the designer. Safe to call from inside On Row Bind — an "
+	  "endless list that loads more when its last row appears is written exactly "
+	  "that way; the new count takes effect on the next frame." },
 	{ "widget.listCount",
 	  "How many items the list was last told it has. Not how many rows are on "
 	  "screen — that is the list's own business." },
@@ -288,7 +290,11 @@ namespace
 	{ "widget.refreshList",
 	  "Asks every row on screen to be filled in again, without moving anything. "
 	  "What you call after sorting, filtering or editing your data: the list never "
-	  "saw it, so it cannot notice that it changed." },
+	  "saw it, so it cannot notice that it changed. The selection is by INDEX, so "
+	  "after a sort it points at whichever items now sit at those positions — "
+	  "remap it yourself if it has to follow the same rows. Calling this from "
+	  "inside On Row Bind is allowed: it takes effect on the next frame rather "
+	  "than looping back into the bind that asked for it." },
 	{ "widget.setListSelected",
 	  "Picks or unpicks one item. An index of -1 clears the selection. Does nothing "
 	  "when the list's Selection is None; in Single mode picking one drops the "
