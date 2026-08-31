@@ -48,6 +48,10 @@ struct State
 	HE::ParticleEmitterConfig previewConfig;
 	std::vector<Particle>     previewParticles;
 	float                     previewEmitAccumulator = 0.0f;
+	// How many this preview run has emitted — the same counter the game keeps,
+	// because a non-looping graph stops after maxParticles and the preview has to
+	// stop at the same moment or it stops predicting the game.
+	int                       previewEmitted = 0;
 	std::mt19937              previewRng{ 1337 };
 	bool                      previewPlaying = true;
 	float previewYaw = 0.6f, previewPitch = 0.2f, previewDist = 1.6f;
@@ -242,11 +246,24 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			st.lastEvaluatedJson      = curJson;
 			st.previewParticles.clear();
 			st.previewEmitAccumulator = 0.0f;
+			st.previewEmitted         = 0;
 		}
 
 		if (st.previewPlaying)
-			ParticleSystem::stepPool(st.previewParticles, st.previewEmitAccumulator, st.previewRng,
-			                         st.previewConfig, glm::vec3(0.0f), ImGui::GetIO().DeltaTime);
+		{
+			const bool finished = ParticleSystem::stepPool(
+				{ st.previewParticles, st.previewEmitAccumulator, st.previewEmitted, st.previewRng },
+				st.previewConfig, glm::vec3(0.0f), ImGui::GetIO().DeltaTime);
+			// A one-shot really does end now, and an authoring preview that ends
+			// on an empty pane is useless — you would have to toggle Play to see
+			// your effect a second time. So it loops the whole one-shot instead:
+			// what the game does once, the preview does over and over.
+			if (finished)
+			{
+				st.previewEmitted         = 0;
+				st.previewEmitAccumulator = 0.0f;
+			}
+		}
 
 		ImGui::BeginChild("##ptPreview", ImVec2(0, 240), ImGuiChildFlags_Borders);
 		{

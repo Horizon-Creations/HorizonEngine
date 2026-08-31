@@ -452,9 +452,10 @@ namespace
 		if (auto* ps = registry.try_get<ParticleSystemComponent>(entity))
 		{
 			comps["particlesystem"] = {
-				{ "particleAsset", uuidToJson(ps->particleAssetId) },
-				{ "visible",       ps->visible },
-				{ "playing",       ps->playing },
+				{ "particleAsset",       uuidToJson(ps->particleAssetId) },
+				{ "visible",             ps->visible },
+				{ "playing",             ps->playing },
+				{ "destroyWhenFinished", ps->destroyWhenFinished },
 			};
 		}
 		if (auto* sk = registry.try_get<SkeletalMeshComponent>(entity))
@@ -1015,6 +1016,10 @@ namespace
 			ParticleSystemComponent ps;
 			ps.visible = c.value("visible", ps.visible);
 			ps.playing = c.value("playing", ps.playing);
+			// Absent in every scene saved before one-shot effects existed, and
+			// the default (false) is what those scenes meant: an emitter that has
+			// always been scenery must not start deleting itself.
+			ps.destroyWhenFinished = c.value("destroyWhenFinished", ps.destroyWhenFinished);
 			if (c.contains("particleAsset"))
 			{
 				// Current format: the emitter config lives in a ParticleGraphAsset.

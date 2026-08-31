@@ -904,6 +904,14 @@ namespace
 	  "Emits in the editor, so an effect can be judged without entering play "
 	  "mode.",
 	  "", "systems#particles" },
+	{ "Particle System/Destroy When Finished", "",
+	  "The entity goes away with the effect: once a one-shot emitter has made its "
+	  "particles and the last one has died, it deletes itself. This is what makes "
+	  "a hit effect spawnable — a graph creates one at the impact point and never "
+	  "has to think about it again. Leave it off for anything that belongs to the "
+	  "scene, like a torch, and note that a looping emitter never finishes and so "
+	  "is never cleaned up unless something stops it.",
+	  "", "systems#particles" },
 	{ "Decal/Color", "",
 	  "Tints the projected texture; the alpha channel fades the whole decal.",
 	  "", "rendering#postfx" },

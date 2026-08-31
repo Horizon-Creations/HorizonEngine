@@ -199,6 +199,31 @@ namespace
 	  "The name of the state playing right now, as the animator asset spells it. "
 	  "Empty when there is no state machine." },
 
+	// ── Particles ────────────────────────────────────────────────────────────
+	{ "particle.burst",
+	  "Emits a number of particles at once from an entity's Particle System, "
+	  "ignoring its emit rate entirely. This is what a hit, a muzzle flash or a "
+	  "footstep is: so many at a moment, which a rate cannot express — an emit "
+	  "rate high enough to look instant depends on the frame rate. It answers how "
+	  "many were actually made, which can be fewer than asked for when the "
+	  "emitter's Max Particles is already reached." },
+	{ "particle.play",
+	  "Starts the emitter, or starts it again from the beginning. A one-shot that "
+	  "has already run needs this to run a second time: it resets the burst it has "
+	  "emitted, so firing the same effect twice fires it twice. Particles still in "
+	  "the air are left alone, which is what lets a fast repeat overlap its own "
+	  "tail." },
+	{ "particle.stop",
+	  "Stops the emitter producing anything more, while the particles already out "
+	  "live out their lifetime and fade normally. Deliberately not the same as "
+	  "hiding the entity, which leaves it simulating unseen, nor the same as a "
+	  "pause, which would freeze a cloud of smoke in mid-air." },
+	{ "particle.isPlaying",
+	  "Whether the effect is still running — either still emitting, or with "
+	  "particles still alive. It goes false the moment a one-shot has completely "
+	  "finished, which is how a graph waits for an effect instead of guessing a "
+	  "duration." },
+
 	// ── Movement ─────────────────────────────────────────────────────────────
 	{ "movement.speed",
 	  "How fast the character is moving across the ground, in metres per second, "

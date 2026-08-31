@@ -368,6 +368,35 @@ namespace animator {
     std::string getState(Ctx&, Entity e);                            // "" when none
 }
 
+// ── Particles: firing an effect ──────────────────────────────────────────────
+// A Particle System component used to have one control, an inspector checkbox
+// that could turn it OFF. Nothing could turn one on, nothing could fire one, and
+// a non-looping emitter shut itself down before its first particle existed — so
+// there was no muzzle flash, no impact dust and no explosion in the engine, only
+// scenery that had been running since the scene loaded.
+//
+// The intended shape of a hit effect is a spawned one: a class carrying a
+// non-looping emitter with `destroyWhenFinished`, created at the impact point
+// with Spawn Class. It plays and then takes its own entity with it, so a graph
+// firing a hundred of them leaks nothing and counts nothing down by hand.
+namespace particle {
+    // Fire (or re-fire) the emitter from the start. A one-shot that has already
+    // run needs this to run again — it is a restart, not a resume.
+    void play(Ctx&, Entity e);
+    // Emit nothing more; the particles already out live their lifetime. NOT the
+    // same as hiding it (which keeps it simulating) or clearing `playing` (which
+    // would freeze the cloud where it is).
+    void stop(Ctx&, Entity e);
+    // Whether the emitter is still running — either still emitting, or with
+    // particles still alive. False once a one-shot has completely finished.
+    bool isPlaying(Ctx&, Entity e);
+    // `count` particles at once, ignoring the emit rate. Answers how many were
+    // actually made: the emitter's maxParticles is a real cap, and a burst that
+    // silently produced eight of the thirty asked for would be unexplainable
+    // from the graph.
+    int  burst(Ctx&, Entity e, int count);
+}
+
 // ── Movement: what a character is doing ──────────────────────────────────────
 // READS only, and that is the whole design. These are the questions an animator
 // asks — how fast, on the ground, which way relative to where I face — and the

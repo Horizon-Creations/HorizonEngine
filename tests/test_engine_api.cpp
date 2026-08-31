@@ -23,6 +23,7 @@
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/ParticleSystem.h>
 #include <HorizonCode/HorizonCode.h>
 #include <UIWidget/UIWidgetTree.h>
 #include <DebugDraw/DebugDraw.h>
@@ -2551,6 +2552,82 @@ TEST_CASE("EngineApi: locomotion.jump lifts a grounded character and refuses an 
     REQUIRE_FALSE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
     CHECK_FALSE(call("locomotion.jump",     { id })[0].b);
     CHECK_FALSE(call("locomotion.jumpWith", { id, Value::ofFloat(9.0f) })[0].b);
+}
+
+// The group that did not exist: before it, an emitter could be turned off by an
+// inspector checkbox and by nothing else, so no graph could fire an effect.
+//
+// MUTATION: in particle::burst, drop the ParticleSystem::burst call — the row
+// answers 0 and no particle appears, which is what "there is no burst" looked
+// like before this group existed.
+TEST_CASE("EngineApi: the particle group fires, stops and restarts an effect")
+{
+    ContentManager cm;
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    const auto e = world.createEntity("smoke");
+    TransformComponent t;
+    t.position = { 5.0f, 0.0f, 0.0f };
+    reg.emplace<TransformComponent>(e, t);
+    reg.emplace<ParticleSystemComponent>(e, ParticleSystemComponent{});
+
+    Ctx c{ &world, nullptr, &cm };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(e));
+
+    // A burst is N at a moment, with no time passing at all — the thing the
+    // rate-driven loop could never express.
+    CHECK(call("particle.burst", { id, Value::ofInt(12) })[0].i == 12);
+    REQUIRE(reg.get<ParticleSystemComponent>(e).particles.size() == 12);
+    // At the emitter, not at the origin: this emitter's worldMatrix has never
+    // been propagated, exactly like an effect spawned this frame.
+    CHECK(reg.get<ParticleSystemComponent>(e).particles[0].position.x == doctest::Approx(5.0f));
+
+    // Max Particles is a real cap, and the answer says so rather than pretending.
+    const int cap = reg.get<ParticleSystemComponent>(e).resolvedConfig.maxParticles;
+    const int room = cap - 12;
+    CHECK(call("particle.burst", { id, Value::ofInt(room + 50) })[0].i == room);
+
+    CHECK(call("particle.isPlaying", { id })[0].b);
+
+    // Stop is soft: nothing more is emitted, what is out stays out. The hard
+    // alternative would freeze a cloud of smoke in mid-air.
+    call("particle.stop", { id });
+    CHECK(reg.get<ParticleSystemComponent>(e).stopping);
+    CHECK(reg.get<ParticleSystemComponent>(e).particles.size() == static_cast<size_t>(cap));
+    ParticleSystem::update(world, cm, 0.1f);
+    CHECK(reg.get<ParticleSystemComponent>(e).particles.size() == static_cast<size_t>(cap));
+
+    // Play is a restart, which is the half a one-shot needs to fire twice.
+    reg.get<ParticleSystemComponent>(e).emitted = 999;
+    call("particle.play", { id });
+    CHECK(reg.get<ParticleSystemComponent>(e).emitted == 0);
+    CHECK_FALSE(reg.get<ParticleSystemComponent>(e).stopping);
+    CHECK(reg.get<ParticleSystemComponent>(e).playing);
+}
+
+// The self-default convention reaches the new group too — which is the point of
+// making it a rule instead of a list.
+TEST_CASE("EngineApi: particle rows are safe on an entity with no emitter, and default to self")
+{
+    HorizonWorld world;
+    const auto bare = world.createEntity("no emitter");
+    world.registry().emplace<TransformComponent>(bare, TransformComponent{});
+
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(bare));
+
+    CHECK(call("particle.burst", { id, Value::ofInt(5) })[0].i == 0);
+    CHECK_FALSE(call("particle.isPlaying", { id })[0].b);
+    call("particle.play", { id });   // must not crash
+    call("particle.stop", { id });   // must not crash
+
+    for (const char* row : { "particle.play", "particle.stop", "particle.burst",
+                             "particle.isPlaying" })
+        CHECK(HE::api::find(row)->params[0].selfDefault);
+    CHECK(HE::api::isScriptGroup("particle"));
 }
 
 // MUTATION: in EngineApi.cpp's self-default post-pass, delete the two lines that

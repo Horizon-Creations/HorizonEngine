@@ -1590,6 +1590,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ParticleSystem::markConfigDirty(*ps);
 
 			EditorWidgets::checkbox("Playing##ps", &ps->playing); trackEdit();
+			EditorWidgets::checkbox("Destroy When Finished##ps", &ps->destroyWhenFinished); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }

@@ -22,6 +22,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/ParticleSystem.h"        // the particle group drives the same pool
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/EntityIdComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
@@ -656,6 +657,90 @@ std::string getState(Ctx& c, Entity e)
     return sm ? sm->currentStateName : std::string();
 }
 } // namespace animator
+
+// ── Particles ────────────────────────────────────────────────────────────────
+// The group that turns an emitter from scenery into an effect. Before this there
+// was no way to fire one at all: `playing` was a checkbox with an off-switch and
+// no on-switch, and the only shape an emitter had was "runs forever".
+namespace {
+ParticleSystemComponent* psOf(Ctx& c, Entity e, const char* who)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    ParticleSystemComponent* ps = reg.valid(id) ? reg.try_get<ParticleSystemComponent>(id) : nullptr;
+    if (!ps)
+    {
+        // One throttle site for the whole group: it is one diagnostic — "that
+        // entity has no emitter on it" — and it is the answer to the only way
+        // these four rows can quietly do nothing.
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "%s: entity %u has no Particle System component",
+                        who, static_cast<uint32_t>(e));
+        return nullptr;
+    }
+    // Anything acting on an emitter may be the FIRST thing to touch it — a Burst
+    // from a Begin Play runs before the particle system's own tick — and an
+    // unresolved config is the authored effect replaced by the default one.
+    if (c.content) ParticleSystem::resolveConfig(*ps, *c.content);
+    return ps;
+}
+} // namespace
+
+namespace particle {
+void play(Ctx& c, Entity e)
+{
+    ParticleSystemComponent* ps = psOf(c, e, "particle.play");
+    if (!ps) return;
+    // A restart, not a resume: the counter and the accumulator are this run's,
+    // and leaving them would make the second firing of a one-shot emit nothing
+    // (it has already made its maxParticles) and the first frame after it look
+    // like a resumed pause. The live particles stay — a re-triggered effect
+    // overlapping its own tail is what a machine gun looks like.
+    ps->emitted         = 0;
+    ps->emitAccumulator = 0.0f;
+    ps->stopping        = false;
+    ps->playing         = true;
+}
+void stop(Ctx& c, Entity e)
+{
+    // Soft: emit no more, but let what is already in the air live out its
+    // lifetime. Clearing `playing` here instead would freeze a smoke cloud
+    // mid-frame, and setting `visible` would only hide it while it kept
+    // simulating and allocating.
+    if (ParticleSystemComponent* ps = psOf(c, e, "particle.stop")) ps->stopping = true;
+}
+bool isPlaying(Ctx& c, Entity e)
+{
+    if (!c.world) return false;
+    const auto id = (entt::entity)e;
+    auto& reg = c.world->registry();
+    const ParticleSystemComponent* ps =
+        reg.valid(id) ? reg.try_get<ParticleSystemComponent>(id) : nullptr;
+    // Deliberately silent, unlike its four siblings: this is the row a graph asks
+    // BEFORE deciding whether to act, so "there is no emitter" is an answer here,
+    // not a mistake.
+    return ps && ps->playing;
+}
+int burst(Ctx& c, Entity e, int count)
+{
+    ParticleSystemComponent* ps = psOf(c, e, "particle.burst");
+    if (!ps || count <= 0) return 0;
+    const size_t before = ps->particles.size();
+    // The emitter's own place in the world, composed rather than read out of the
+    // cached matrix — a burst fired on the frame the effect was spawned would
+    // otherwise land at the world origin. Same reason as ParticleSystem::update.
+    const glm::vec3 at = c.world ? glm::vec3(HE::worldMatrixOf(*c.world, (entt::entity)e)[3])
+                                 : glm::vec3(0.0f);
+    ParticleSystem::burst({ ps->particles, ps->emitAccumulator, ps->emitted, ps->rng, ps->stopping },
+                          ps->resolvedConfig, at, count);
+    // A burst on a stopped emitter is a firing, so it un-stops it — otherwise the
+    // particles would appear and the pool would be declared finished around them.
+    ps->playing  = true;
+    ps->stopping = false;
+    return static_cast<int>(ps->particles.size() - before);
+}
+} // namespace particle
 
 // ── Movement / Locomotion ────────────────────────────────────────────────────
 namespace {
@@ -2258,6 +2343,19 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "material.setParam", "Material", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Color}}, {{"ok", P::Bool}}, "HE::api::material::setParam",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(material::setParam(c, (Entity)aI(a, 0), aS(a, 1), aV4(a, 2))) }; } });
 
+        // Particles — the four rows that make an emitter an effect rather than
+        // scenery. Burst is the one the others exist around: a hit, a muzzle
+        // flash and a footstep are all N particles at a moment, and a rate could
+        // never say "at a moment".
+        t.push_back({ "particle.play", "Particles", true, {{"entity", P::Int}}, {}, "HE::api::particle::play",
+            [](Ctx& c, const VV& a){ particle::play(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "particle.stop", "Particles", true, {{"entity", P::Int}}, {}, "HE::api::particle::stop",
+            [](Ctx& c, const VV& a){ particle::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "particle.burst", "Particles", true, {{"entity", P::Int}, {"count", P::Int}}, {{"emitted", P::Int}}, "HE::api::particle::burst",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(particle::burst(c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "particle.isPlaying", "Particles", false, {{"entity", P::Int}}, {{"playing", P::Bool}}, "HE::api::particle::isPlaying",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(particle::isPlaying(c, (Entity)aI(a, 0))) }; } });
+
         // Animator — the state machine's parameters, and the only way to steer it
         t.push_back({ "animator.setParam", "Animator", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Float}}, {}, "HE::api::animator::setParam",
             [](Ctx& c, const VV& a){ animator::setParam(c, (Entity)aI(a, 0), aS(a, 1), aF(a, 2)); return VV{}; } });
@@ -2761,6 +2859,9 @@ const std::vector<ApiFn>& registry()
             { "transform.setWorldPosition", "Set World Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
+            { "particle.play", "Play Effect" },   { "particle.stop", "Stop Effect" },
+            { "particle.burst", "Burst Particles" },
+            { "particle.isPlaying", "Is Effect Playing" },
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
             { "animator.getState", "Get Animator State" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
@@ -2993,6 +3094,12 @@ bool isScriptGroup(std::string_view group)
                                                     "string", "camera", "env", "entity", "audio",
                                                     "debug", "fs", "save", "scene", "player",
                                                     "animator", "movement", "locomotion",
+                                                    // "particle" has no flat twin either:
+                                                    // without it on this list a text script
+                                                    // can spawn an effect entity but never
+                                                    // fire it, which is the state B6 exists
+                                                    // to end.
+                                                    "particle",
                                                     // "nav" has no flat hand-written
                                                     // twin at all: leaving it off this
                                                     // list would mean the pathfinder

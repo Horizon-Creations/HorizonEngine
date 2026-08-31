@@ -181,7 +181,16 @@ TEST_CASE("ParticleSystem::update removes dead particles")
     CHECK(reg.get<ParticleSystemComponent>(e).particles.empty());
 }
 
-TEST_CASE("ParticleSystem::update stops when not looping and exhausted")
+// This test used to pass BECAUSE the emitter was broken. It asserted only
+// `!playing`, and a non-looping emitter used to declare itself finished on its
+// very first step — before a single particle existed — whenever its emit
+// interval was longer than a frame, which at emitRate 1 it was by a factor of
+// ten. Zero particles, test green. So it now asserts the half that was missing:
+// that something came out at all, and that maxParticles is how many.
+//
+// MUTATION: in ParticleSystem::stepPool, drop `state.emitted < config.maxParticles`
+// from mayEmit() — the one-shot then runs forever and never finishes.
+TEST_CASE("ParticleSystem::update: a one-shot emits its burst and then finishes")
 {
     ContentManager cm;
     HorizonWorld world;
@@ -194,14 +203,108 @@ TEST_CASE("ParticleSystem::update stops when not looping and exhausted")
     reg.emplace<TransformComponent>(e, t);
 
     ParticleSystemComponent ps;
-    ps.particleAssetId = makeConfiguredParticleAsset(cm, /*emitRate*/1.0f, /*ltMin*/0.05f, /*ltMax*/0.05f,
+    // One per 0.1 s, five of them, each alive half a second.
+    ps.particleAssetId = makeConfiguredParticleAsset(cm, /*emitRate*/10.0f, /*ltMin*/0.5f, /*ltMax*/0.5f,
         /*maxP*/5, /*vel*/{0,2,0}, /*spread*/0.5f, /*gravity*/{0,-2,0}, /*looping*/false);
     reg.emplace<ParticleSystemComponent>(e, ps);
 
-    for (int i = 0; i < 20; ++i)
-        ParticleSystem::update(world, cm, 0.1f);
+    // Half a second in: emitting, and visibly so.
+    for (int i = 0; i < 5; ++i) ParticleSystem::update(world, cm, 0.1f);
+    CHECK(reg.get<ParticleSystemComponent>(e).particles.size() >= 4);
+    CHECK(reg.get<ParticleSystemComponent>(e).emitted == 5);
+    CHECK(reg.get<ParticleSystemComponent>(e).playing);   // its last particles are still in the air
 
+    // Long enough for the burst to be spent and the last particle to die.
+    for (int i = 0; i < 20; ++i) ParticleSystem::update(world, cm, 0.1f);
     CHECK(!reg.get<ParticleSystemComponent>(e).playing);
+    CHECK(reg.get<ParticleSystemComponent>(e).particles.empty());
+    // The count did not keep climbing after the burst was spent.
+    CHECK(reg.get<ParticleSystemComponent>(e).emitted == 5);
+}
+
+// The other direction of the same old bug: an emit interval SHORTER than a frame
+// used to mean the pool never emptied, so the emitter never finished and ran for
+// the rest of the session.
+//
+// MUTATION: same as above — without the emitted cap this never stops.
+TEST_CASE("ParticleSystem::update: a one-shot faster than the frame rate still ends")
+{
+    ContentManager cm;
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto e = world.createEntity("emitter");
+    TransformComponent t;
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+
+    ParticleSystemComponent ps;
+    // 1000 per second at 60 Hz — the burst shape: everything out in two frames.
+    ps.particleAssetId = makeConfiguredParticleAsset(cm, /*emitRate*/1000.0f, /*ltMin*/0.1f, /*ltMax*/0.1f,
+        /*maxP*/12, /*vel*/{0,2,0}, /*spread*/0.5f, /*gravity*/{0,-2,0}, /*looping*/false);
+    reg.emplace<ParticleSystemComponent>(e, ps);
+
+    ParticleSystem::update(world, cm, 1.0f / 60.0f);
+    CHECK(reg.get<ParticleSystemComponent>(e).emitted == 12);
+
+    for (int i = 0; i < 30; ++i) ParticleSystem::update(world, cm, 1.0f / 60.0f);
+    CHECK(!reg.get<ParticleSystemComponent>(e).playing);
+}
+
+// MUTATION: in ParticleSystem::update, use `tc.worldMatrix[3]` again instead of
+// worldMatrixOf — every particle of a just-spawned effect appears at the origin.
+TEST_CASE("ParticleSystem::update: a freshly placed emitter emits where it stands")
+{
+    ContentManager cm;
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto e = world.createEntity("effect");
+    TransformComponent t;
+    t.position = { 30.0f, 4.0f, -12.0f };
+    // worldMatrix left at its default IDENTITY on purpose: that is the state an
+    // entity spawned this frame is in, because transform propagation has not run
+    // yet. The emitter must not believe it.
+    reg.emplace<TransformComponent>(e, t);
+
+    ParticleSystemComponent ps;
+    ps.particleAssetId = makeConfiguredParticleAsset(cm, /*emitRate*/100.0f, /*ltMin*/5.0f, /*ltMax*/5.0f,
+        /*maxP*/20);
+    reg.emplace<ParticleSystemComponent>(e, ps);
+
+    ParticleSystem::update(world, cm, 0.1f);
+    const auto& psc = reg.get<ParticleSystemComponent>(e);
+    REQUIRE(!psc.particles.empty());
+    CHECK(psc.particles[0].position.x == doctest::Approx(30.0f));
+    CHECK(psc.particles[0].position.z == doctest::Approx(-12.0f));
+}
+
+// MUTATION: in ParticleSystem::update, drop the finishedAndDone loop — the spent
+// effect entity stays in the world for the rest of the session.
+TEST_CASE("ParticleSystem::update: a one-shot that asked to be cleaned up takes its entity with it")
+{
+    ContentManager cm;
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto e = world.createEntity("hit effect");
+    TransformComponent t;
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+
+    ParticleSystemComponent ps;
+    ps.destroyWhenFinished = true;
+    ps.particleAssetId = makeConfiguredParticleAsset(cm, /*emitRate*/60.0f, /*ltMin*/0.1f, /*ltMax*/0.1f,
+        /*maxP*/6, /*vel*/{0,2,0}, /*spread*/0.5f, /*gravity*/{0,-2,0}, /*looping*/false);
+    reg.emplace<ParticleSystemComponent>(e, ps);
+
+    // It survives while it is still playing — an effect deleted mid-puff would be
+    // worse than one that lingers.
+    ParticleSystem::update(world, cm, 1.0f / 60.0f);
+    CHECK(reg.valid(e));
+
+    for (int i = 0; i < 60; ++i) ParticleSystem::update(world, cm, 1.0f / 60.0f);
+    CHECK(!reg.valid(e));
 }
 
 TEST_CASE("ParticleSystem::update paused when playing=false")
@@ -387,7 +490,8 @@ TEST_CASE("ParticleSystem::stepPool: killOnCollision removes the particle on hit
 
     float acc = 0.0f;
     std::mt19937 rng{ 1 };
-    ParticleSystem::stepPool(particles, acc, rng, config, glm::vec3(0.0f), 1.0f, &phys);
+    int emitted = 0;
+    ParticleSystem::stepPool({ particles, acc, emitted, rng }, config, glm::vec3(0.0f), 1.0f, &phys);
 
     CHECK(particles.empty());
 }
@@ -413,7 +517,8 @@ TEST_CASE("ParticleSystem::stepPool: bounces and scales velocity by restitution 
 
     float acc = 0.0f;
     std::mt19937 rng{ 1 };
-    ParticleSystem::stepPool(particles, acc, rng, config, glm::vec3(0.0f), 1.0f, &phys);
+    int emitted = 0;
+    ParticleSystem::stepPool({ particles, acc, emitted, rng }, config, glm::vec3(0.0f), 1.0f, &phys);
 
     REQUIRE(particles.size() == 1);
     // Reflected off the upward-facing floor normal → velocity.y flips positive,
@@ -443,7 +548,8 @@ TEST_CASE("ParticleSystem::stepPool: collisionEnabled=false ignores the physics 
 
     float acc = 0.0f;
     std::mt19937 rng{ 1 };
-    ParticleSystem::stepPool(particles, acc, rng, config, glm::vec3(0.0f), 1.0f, &phys);
+    int emitted = 0;
+    ParticleSystem::stepPool({ particles, acc, emitted, rng }, config, glm::vec3(0.0f), 1.0f, &phys);
 
     REQUIRE(particles.size() == 1);
     // Passed straight through the floor — no collision check performed.

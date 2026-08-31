@@ -224,6 +224,87 @@ std::vector<Docs::Page> characterPages()
 		                   std::move(secs)));
 	}
 
+	// ── Hit effects ──────────────────────────────────────────────────────────
+	{
+		std::vector<Docs::Section> secs;
+
+		secs.push_back(section("what-you-get", "Guide", "What you end up with", {
+			lead("A puff of dust where the shot landed, which appears, plays and "
+			     "disappears without anything counting it down."),
+		}));
+
+		secs.push_back(section("effect-class", "Step 1", "Build the effect once", {
+			steps({
+				{ "Content Browser -> right-click -> Gameplay -> Entity Class",
+				  "The effect is a thing that can be spawned, so it is a class." },
+				{ "Add Component -> Particle System",
+				  "Drop a particle system asset into its Asset slot, or make one "
+				  "with Content Browser -> Particle System." },
+				{ "In the particle asset, turn Looping off",
+				  "This is what makes it an effect rather than scenery. A non-looping "
+				  "emitter produces Max Particles and then it is done — so Max "
+				  "Particles is the size of the puff, and Emit Rate is how quickly "
+				  "they leave." },
+				{ "Tick Destroy When Finished",
+				  "The entity goes away with the last particle. Without it every shot "
+				  "leaves a spent emitter in the scene forever." },
+			}),
+		}));
+
+		secs.push_back(section("fire", "Step 2", "Fire it where the hit was", {
+			lead("One node, on whatever already knows where the impact happened."),
+			para("Spawn Class takes the class and a position. A Raycast gives you "
+			     "that position; so does a collision event. Nothing else is needed — "
+			     "the effect plays itself and cleans itself up."),
+			tip("It emits at the impact point on the FIRST frame", {
+				para("Worth knowing because it used to be the classic bug in engines "
+				     "that compose transforms late: the effect appears at the world "
+				     "origin for one frame and then jumps. This one asks the "
+				     "hierarchy where it is rather than reading a matrix that has not "
+				     "been refreshed yet."),
+			}),
+		}));
+
+		secs.push_back(section("existing", "The other way", "An emitter that is already there", {
+			lead("For a torch, a chimney, a wound that smokes while a character "
+			     "lives: the emitter sits on the entity and a graph switches it."),
+			table({ "Node", "What it does" }, {
+				{ "Burst Particles", "So many at once, ignoring the emit rate. A muzzle flash, a footstep, a shower of sparks" },
+				{ "Play Effect", "Starts it, or starts a spent one-shot over. Firing the same effect twice really does fire it twice" },
+				{ "Stop Effect", "Emits no more; what is already in the air fades out normally" },
+				{ "Is Effect Playing", "Still emitting, or still has particles alive. How you wait for an effect instead of guessing a duration" },
+			}),
+			note("Stop is not the same as hiding", {
+				para("Hiding the entity leaves the emitter simulating unseen, and "
+				     "clearing Playing in the inspector freezes the cloud where it "
+				     "is. Stop Effect is the one that looks right."),
+			}),
+			warn("Burst can make fewer than you asked for", {
+				para("Max Particles is a real cap. Burst answers how many it actually "
+				     "made, so a shower that comes out thin is telling you the cap is "
+				     "the reason rather than leaving you to guess."),
+			}),
+		}));
+
+		secs.push_back(section("limits", "Honestly", "What to watch", {
+			bullets({
+				"Particles draw on Metal and OpenGL. The Direct3D and Vulkan "
+				"backends have no particle path at all yet, so an effect that looks "
+				"right on this machine may be missing in a Windows build that "
+				"selected D3D.",
+				"Looping and Max Particles live on the particle ASSET, not on the "
+				"entity. Two effects that differ only in burst size are two assets.",
+				"A looping emitter never finishes, so Destroy When Finished never "
+				"fires on one unless something calls Stop Effect first.",
+			}),
+		}));
+
+		out.push_back(page("guides-effects", "Hit effects and muzzle flashes",
+		                   "A puff of dust that spawns at the impact, plays, and "
+		                   "removes itself.",
+		                   std::move(secs)));
+	}
+
 	return out;
 }
 

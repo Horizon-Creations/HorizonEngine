@@ -357,10 +357,22 @@ namespace
 		// short-lived burst die out again.
 		std::vector<Particle> pool;
 		float emitAccumulator = 0.0f;
+		int   emitted         = 0;
 		constexpr float kDt = 1.0f / 60.0f;
 		constexpr int   kWarmupSteps = 72;
 		for (int i = 0; i < kWarmupSteps; ++i)
-			ParticleSystem::stepPool(pool, emitAccumulator, rng, config, glm::vec3(0.0f), kDt);
+		{
+			// A one-shot now really does finish, and a thumbnail of an emitter
+			// that has finished is an empty picture. Re-arm it and keep warming,
+			// so a burst asset gets a portrait of its burst rather than of the
+			// silence after it.
+			if (ParticleSystem::stepPool({ pool, emitAccumulator, emitted, rng },
+			                             config, glm::vec3(0.0f), kDt))
+			{
+				emitted         = 0;
+				emitAccumulator = 0.0f;
+			}
+		}
 		if (pool.empty()) return false;
 
 		// Resolve size/colour/alpha over each particle's life, exactly as the

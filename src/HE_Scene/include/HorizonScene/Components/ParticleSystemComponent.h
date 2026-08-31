@@ -15,12 +15,29 @@ struct Particle {
 struct ParticleSystemComponent {
     bool     visible = true;    // extractor skips invisible (zone hiding)
     bool     playing = true;
+    // A one-shot that takes its entity with it when the last particle dies.
+    // What makes a hit effect spawnable: the graph creates the class at the
+    // impact point and then forgets about it, instead of having to guess how
+    // long to wait before destroying it by hand. Ignored while looping — an
+    // emitter that never finishes would never be cleaned up either.
+    bool     destroyWhenFinished = false;
     HE::UUID particleAssetId;   // references a ParticleGraphAsset authored in the
                                  // Particle Graph Editor — {} plays HE::ParticleGraph's
                                  // defaults (same values the old inline fields used).
 
     // ── Runtime state (never serialized) ────────────────────────────────────────
     float                 emitAccumulator = 0.0f;
+    // How many this run has emitted. A one-shot's whole stopping condition:
+    // `maxParticles` is both the pool cap and, for a non-looping emitter, the
+    // size of the burst — so a puff of thirty is thirty, however fast they leave
+    // and however quickly they die. Counting live particles instead cannot say
+    // it: with a short lifetime the pool never fills, and the emitter would run
+    // forever.
+    int                   emitted         = 0;
+    // Soft stop: emit nothing more, but keep the ones already out alive until
+    // they die on their own. What "stop the smoke" means — the alternative,
+    // clearing playing, freezes a cloud in mid-air.
+    bool                  stopping        = false;
     std::vector<Particle> particles;
     std::mt19937          rng { 42 };
 
