@@ -10,11 +10,17 @@ meisten freischaltet, was wovon abhängt und was billig viel wegräumt.
 
 ## Wo wir stehen
 
+> **Nachtrag 31.08.2026:** Welle 1 ist zu. B6 ist erledigt (`16986159`), damit ist **kein Blocker
+> mehr offen**. Ebenfalls neu: der Entity-Pin ist optional geworden (`bc6820ee`) — leer heisst „ich
+> selbst", was ein Charakter-Graph in fast jedem Knoten meint. Die nächste Zeile in der kürzesten
+> Reihenfolge unten ist damit die **Projektvorlage**, und die ist inzwischen der Punkt, an dem der
+> Rest hängt: der Durchlauf von Welle 0 scheiterte daran, dass kein Spieler zustande kam.
+
 | | |
 |---|---|
-| Erledigt | B1 Physik zur Laufzeit, B2 Kollisionsformen und Terrain, B3 Spawnen mit Inhalt, B4 Navigation, B5 Typindex in der Pak |
-| Offen | B6 Partikel, plus die schmerzhafte Liste |
-| Neu dazu | Sprung mit Coyote-Zeit, fünfzehn Anleitungen im Handbuch |
+| Erledigt | B1 Physik zur Laufzeit, B2 Kollisionsformen und Terrain, B3 Spawnen mit Inhalt, B4 Navigation, B5 Typindex in der Pak, B6 Partikel |
+| Offen | kein Blocker mehr, nur noch die schmerzhafte Liste |
+| Neu dazu | Sprung mit Coyote-Zeit, fünfzehn Anleitungen im Handbuch, Selbstbezug am Entity-Pin, Treffereffekte |
 
 Damit ist die Engine von „damit kann man kein Spiel bauen" auf „damit kann man ein
 Erkundungsspiel bauen und ausliefern" gekommen. Was zwischen Erkundung und Kampf steht, ist

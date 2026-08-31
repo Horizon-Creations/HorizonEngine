@@ -23,7 +23,18 @@ bewusst nur dort, wo ein Fund seither präziser oder schlimmer geworden ist.
 | B3 zur Laufzeit nur eine leere Entity erzeugbar | **erledigt**, `entity.spawnClass` über den bestehenden Create-Object-Dienst, erreichbar aus allen vier Frontends |
 | B4 Navigation aus keiner Sprache steuerbar | **erledigt**, Gruppe `nav` (sechs Zeilen) in der Registry, Agenten laufen über `setCharacterVelocity` statt über `tc.position`, `autoStart` serialisiert, ein Zielwechsel plant neu. Siehe die Korrektur unten |
 | B5 gepacktes Spiel entdeckt keine PlayerController-Klasse | **erledigt**, `__asset_types__` in der Pak; bestehende Exporte müssen einmal neu gebaut werden |
-| B6 kein Partikel-Burst | offen |
+| B6 kein Partikel-Burst | **erledigt** (`16986159`), Gruppe `particle` (Burst, Play, Stop, Is Playing) plus richtig ausgewertetes `looping`: ein Einmal-Emitter ist jetzt ein Stoss von `maxParticles`, über die Zeit verteilt durch die Emissionsrate. Dazu `destroyWhenFinished`, womit ein Treffereffekt spawnbar ist |
+
+**Damit ist kein Blocker mehr offen.** Zwei Befunde kamen bei B6 hinzu, die im Audit nicht standen:
+ein frisch gespawnter Effekt emittierte sein erstes Bild im Weltursprung (`tc.worldMatrix` ist beim
+Spawn noch Identität — dieselbe Falle wie beim Physik-Umbau), und `entity.exists(0)` gab `true`
+zurück, weil 0 die immer gültige Wurzel ist und zugleich das, was `findByName` bei einem Fehlschlag
+liefert. Die eine Redewendung, für die die Zeile existiert, meldete also einen Treffer für einen
+Gegner, der nicht im Level ist.
+
+Ebenfalls seither: der Entity-Pin aller Zeilen, die auf eine Entity wirken, ist optional geworden
+(`bc6820ee`). Leer gelassen heisst er „die Entity der aufrufenden Klasse", was ein Charakter-Graph
+in fast jedem Knoten meint.
 
 Bei B1 und B2 hat sich eine Regel herausgeschält, die über die beiden Blocker hinaus gilt und
 dreimal hintereinander übersehen wurde: **`PhysicsWorld` tauscht ausschliesslich Weltposen aus, die
