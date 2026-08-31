@@ -1531,6 +1531,23 @@ Dazu nehmen **die erste und die letzte Zeile die Ecken der Karte** — jede auf 
 dafür sind die vier getrennten Radien da: eine gleichmäßig gerundete Zeile ragt oben und unten
 aus der Karte heraus, eine ungerundete lässt eine eckige Schulter in einer runden Form stehen.
 
+**Und die Auswahl fällt beim Loslassen, nicht beim Drücken.** Gemeldet als „fühlt sich komisch
+an", und das ist genau richtig: Drücken **zielt**, Loslassen **entscheidet**, und bis man
+loslässt darf man es sich durch Bewegen noch anders überlegen. Eine Liste, die die Zeile nimmt,
+sobald die Taste unten ist, nimmt die Entscheidung eine halbe Geste zu früh ab. Dasselbe gilt für
+das Schließen ohne Auswahl — es ist dieselbe Entscheidung, andersherum getroffen, und passiert
+deshalb im selben Moment.
+
+Ganz nebenbei fällt damit **Drücken-Ziehen-Loslassen** heraus: Taste halten, die Liste
+hinunterfahren, auf dem gewünschten Eintrag loslassen. So funktionieren Menüs, seit es Menüs
+gibt, und es ist kein zweiter Codepfad, sondern die Folge davon, dass die Entscheidung an der
+Loslass-Flanke hängt.
+
+**Der alte Test hat den Unterschied nicht sehen können**, weil sein Klick-Helfer Drücken und
+Loslassen in einem Rutsch schickte — beides ergibt dieselbe Auswahl. Er fährt die beiden Schritte
+jetzt einzeln und prüft dazwischen, dass noch nichts entschieden ist, plus das Umentscheiden
+durch Bewegen. Zurückgedreht auf die Druck-Flanke wird er rot.
+
 ---
 
 ## 11. Risiken und Fallen

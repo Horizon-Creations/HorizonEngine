@@ -1250,9 +1250,20 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// ── An open dropdown owns the pointer ────────────────────────────────────
 	// Its list hangs OUTSIDE the combo's own rectangle, and every rectangle the
 	// scan below knows is an element's own — so the scan cannot see it, and
-	// nothing short of owning the pointer outright would work. A press on a row
-	// picks it, a press anywhere else closes the list without picking, and
-	// nothing underneath hears either.
+	// nothing short of owning the pointer outright would work. Nothing
+	// underneath hears any of it.
+	//
+	// ── Everything here commits on RELEASE, never on the press ───────────────
+	// Which is what a choice IS: pressing aims, letting go decides, and until
+	// you let go you may still change your mind by moving. A dropdown that
+	// picks the row the moment the button goes down takes the decision away
+	// half a gesture early, and it feels exactly as wrong as it is — that was
+	// the report this comes from.
+	//
+	// It also gets press-drag-release for nothing: hold the button, run down
+	// the list, let go on the entry you want. That is how a menu has worked
+	// since menus existed, and it falls out of committing on the release rather
+	// than being a second code path.
 	if (!m_grabs.empty() && m_grabs.back().kind == Grab::Kind::Dropdown)
 	{
 		const Grab g = m_grabs.back();
@@ -1266,7 +1277,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				? comboOptionAtPointer(w->tree, *cb, canvas, mouseX, mouseY) : -1;
 			if (cb->hoverIndex != over) { cb->hoverIndex = over; m_visualDirty = true; }
 			m_hoverCursor = HE::UICursor::Default;
-			if (primaryDown && !m_wasDown)
+			// The row under the pointer when the button comes UP is the one
+			// that is chosen — and a release with nothing under it closes the
+			// list without choosing, which is the same decision made the other
+			// way and therefore happens at the same moment.
+			if (!primaryDown && m_wasDown)
 			{
 				if (over >= 0 && cb->selectedIndex != over)
 				{
@@ -1276,10 +1291,10 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				}
 				popGrab(/*notify=*/false);
 			}
-			// Right-click closes it too. A menu that one button dismisses and
-			// the other does not is a menu that behaves differently depending
-			// on which finger you used.
-			if (secondaryDown && !m_wasSecondaryDown && !m_grabs.empty() &&
+			// Right-click closes it too — on ITS release, for the same reason.
+			// A menu that one button dismisses and the other does not is a menu
+			// that behaves differently depending on which finger you used.
+			if (!secondaryDown && m_wasSecondaryDown && !m_grabs.empty() &&
 			    m_grabs.back().kind == Grab::Kind::Dropdown)
 				popGrab(/*notify=*/false);
 			m_wasDown = primaryDown;

@@ -5965,14 +5965,31 @@ TEST_CASE("ComboBox: it opens a list and you pick an entry, instead of cycling")
     wm.extract(400.0f, 800.0f, out);
     CHECK(out.size() > closedQuads);
 
-    // Row 15 sits at y = box bottom + 15 rows, each as tall as the box.
-    clickAt(wm, 100.0f, 20.0f + 15.0f * 20.0f + 10.0f);
+    // Row 15 sits at y = box bottom + the 4-unit gap + 15 rows, each as tall as
+    // the box. Pressed and released as two separate steps, because THAT is the
+    // thing under test: pressing aims, letting go decides.
+    const float row15 = 20.0f + 4.0f + 15.0f * 20.0f + 10.0f;
+    wm.processPointer(400.0f, 800.0f, 100.0f, row15, true, true);
+    {
+        const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo));
+        // Still open, still nothing chosen: the button is down, not lifted.
+        CHECK(cb->open);
+        CHECK(cb->selectedIndex == 0);
+    }
+    // …and moving before letting go changes the mind, which is the whole reason
+    // a choice belongs on the release.
+    wm.processPointer(400.0f, 800.0f, 100.0f, row15 - 20.0f, true, true);
+    wm.processPointer(400.0f, 800.0f, 100.0f, row15 - 20.0f, false, true);
     {
         const auto* cb = dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo));
         REQUIRE(cb);
-        CHECK(cb->selectedIndex == 15);
+        CHECK(cb->selectedIndex == 14);
         CHECK_FALSE(cb->open);              // picking closes it
     }
+    // Put it back on 15 with a plain click, for what follows.
+    clickAt(wm, 100.0f, 10.0f);
+    clickAt(wm, 100.0f, row15);
+    CHECK(dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo))->selectedIndex == 15);
 
     // Open again and click somewhere else: closed, and nothing picked.
     clickAt(wm, 100.0f, 10.0f);
