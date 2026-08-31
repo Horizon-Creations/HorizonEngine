@@ -323,6 +323,38 @@ namespace
         }
         return out;
     }
+
+    // The slot a ListView hands one of its rows.
+    //
+    // Deliberately NOT the walk above. A box finds a child's place by adding up
+    // everything before it, which is exactly what a virtualized list cannot do:
+    // the rows before this one do not exist. A row's place comes from the ITEM
+    // it shows — index times step — so ten realized rows can stand anywhere in
+    // ten thousand, and scrolling is one subtraction.
+    UIWidgetRect listSlotRect(const UIWidgetTree& tree, const UIListView& list,
+                              const UIElement& child, const UIWidgetCanvas* canvas)
+    {
+        const UIWidgetRect b = uiElementRect(tree, list, canvas);
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, list, us, vs, canvas);
+
+        const float padX = std::max(0.0f, list.padding) * us;
+        const float padY = std::max(0.0f, list.padding) * vs;
+        UIWidgetRect out{ b.x + padX, b.y + padY,
+                          std::max(0.0f, b.w - 2.0f * padX),
+                          std::max(0.0f, b.h - 2.0f * padY) };
+
+        const auto* ref = dynamic_cast<const UIWidgetRef*>(&child);
+        const int   idx = ref ? ref->rowIndex : -1;
+        // Anything that is not a realized row gets a zero-height slot at the top
+        // rather than the whole inner rect: an element that ended up in here by
+        // hand should be invisible, not a full-size sheet over the list.
+        if (idx < 0) { out.h = 0.0f; return out; }
+
+        out.y += (idx * list.rowStep() - list.scrollOffset) * vs;
+        out.h  = list.rowHeight * vs;
+        return out;
+    }
 }
 
 void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
@@ -361,7 +393,13 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
     // the child's own anchors and position are not consulted at all.
     if (e.parentId != 0)
         if (const UIElement* p = tree.find(e.parentId); p && p->laysOutChildren())
+        {
+            // A list places by item index, a box by stacking; see listSlotRect
+            // for why the two cannot be the same walk.
+            if (const auto* lv = dynamic_cast<const UIListView*>(p))
+                return listSlotRect(tree, *lv, e, canvas);
             return boxSlotRect(tree, *p, e, canvas);
+        }
 
     const UIWidgetRect parent = parentRectOf(tree, e, canvas);
     const float lox = parent.x + e.anchorMinX * parent.w;
@@ -573,6 +611,15 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
 {
     for (auto& bp : tree.elements)
     {
+        // A list measures itself from its item COUNT, not from its children —
+        // the whole point is that most of them are not there. Its clamp is the
+        // scroll box's, though, so both end up at the same last line.
+        if (auto* lv = dynamic_cast<UIListView*>(bp.get()))
+        {
+            lv->contentExtent = lv->measuredExtent();
+            lv->scrollOffset  = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
+            continue;
+        }
         auto* sb = dynamic_cast<UIScrollBox*>(bp.get());
         if (!sb) continue;
         // The stacked height of the visible children, in the same terms the
@@ -593,16 +640,20 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
     }
 }
 
+// Any element that says it scrolls — the scroll box and the list view today.
+// Asking the element rather than testing its type is what keeps the wheel, the
+// clamp and the layout from each growing their own list of the types that move.
 bool uiScrollBy(UIWidgetTree& tree, int id, float delta)
 {
-    auto* sb = dynamic_cast<UIScrollBox*>(tree.find(id));
-    if (!sb) return false;
-    const float maxOff = sb->maxScroll();
+    UIElement* e = tree.find(id);
+    float* off = e ? e->scrollOffsetPtr() : nullptr;
+    if (!off) return false;
+    const float maxOff = e->maxScrollAmount();
     if (maxOff <= 0.0f) return false;
-    const float before = sb->scrollOffset;
-    sb->scrollOffset = std::clamp(before + delta, 0.0f, maxOff);
+    const float before = *off;
+    *off = std::clamp(before + delta, 0.0f, maxOff);
     // At either end the wheel belongs to whatever is behind this box.
-    return sb->scrollOffset != before;
+    return *off != before;
 }
 
 float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e)

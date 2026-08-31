@@ -102,6 +102,24 @@ namespace ScriptApi
 	bool removeWidgetChild(HorizonWorld& world, int widgetId, int childId);
 	int  clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& parentName);
 
+	// ── Lists (docs/he-apps-plan.md B2) ─────────────────────────────────────
+	// A ListView holds a COUNT and a row template, never the items. Say how many
+	// there are and fill in the rows it asks about (OnRowBind) — that is the
+	// whole contract, and it is what makes ten thousand items cost ten rows.
+	bool setListCount(HorizonWorld& world, int widgetId, const std::string& listName, int count);
+	int  listCount(HorizonWorld& world, int widgetId, const std::string& listName);
+	// The instance showing item `index` (0 = not realized right now), which is
+	// what an OnRowBind handler writes into.
+	int  listRow(HorizonWorld& world, int widgetId, const std::string& listName, int index);
+	// Ask every realized row again — what a sort, a filter or an edit is written
+	// with, since the list never saw the data in the first place.
+	bool refreshList(HorizonWorld& world, int widgetId, const std::string& listName);
+	bool setListSelected(HorizonWorld& world, int widgetId, const std::string& listName,
+	                     int index, bool selected);
+	int  listSelected(HorizonWorld& world, int widgetId, const std::string& listName);
+	bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& listName,
+	                      int index);
+
 	// ── Theme (what the whole application looks like) ───────────────────────
 	// setThemeMode takes "Light", "Dark" or "System" — the last is a RULE, not a
 	// colour, and is the default. setTheme loads a Theme asset by

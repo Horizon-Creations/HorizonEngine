@@ -1088,8 +1088,14 @@ void GameApplication::updateUIInput()
 	if (pointerValid && m_uiClickCount >= 2)
 	{
 		if (m_uiClickCount == 2)
-			m_world->widgets().selectWordAtPointer(static_cast<float>(pw),
-			                                       static_cast<float>(ph), mx * sx);
+		{
+			// Text first, then the things for which a double-click means "open
+			// this": a list row. One gesture, one meaning per thing it lands on.
+			if (!m_world->widgets().selectWordAtPointer(static_cast<float>(pw),
+			                                            static_cast<float>(ph), mx * sx))
+				m_world->widgets().activateAtPointer(static_cast<float>(pw),
+				                                     static_cast<float>(ph), mx * sx, my * sy);
+		}
 		else
 			m_world->widgets().selectAllFocused();
 	}

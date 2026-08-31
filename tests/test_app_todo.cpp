@@ -693,7 +693,20 @@ TEST_CASE("Both app flavours actually start")
 
         // Thirty frames is past everything that happens once: the window, the
         // renderer, the pak mount, the theme, OnInit and the first widget.
-        const int code = bootOnce(exe, /*frames=*/30, /*timeoutSeconds=*/40);
+        //
+        // The deadline is not one number, because the thing it is waiting for is
+        // not one duration. Almost all of it is the backend compiling its
+        // pipelines on first run, and a Debug build does that several times
+        // slower — measured at ~176 s for the Metal flavour on an M5, against a
+        // handful of seconds in Release. A 40 s budget therefore failed a build
+        // that was working perfectly and said "never finished 30 frames", which
+        // is the worst kind of red: true, and about the wrong thing.
+#ifdef NDEBUG
+        constexpr int kDeadline = 60;
+#else
+        constexpr int kDeadline = 420;
+#endif
+        const int code = bootOnce(exe, /*frames=*/30, kDeadline);
         if (code == -1) { MESSAGE("could not launch — skipped"); return; }
         INFO("read " << (out / "boot.log").string());
         CHECK_MESSAGE(code != -2, "the application never finished 30 frames");

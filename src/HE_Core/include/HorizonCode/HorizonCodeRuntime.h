@@ -211,6 +211,9 @@ public:
     void fireOnValueChanged(InstanceId id, int elem, float value);
     void fireOnCheckChanged(InstanceId id, int elem, bool checked);
     void fireOnSelectionChanged(InstanceId id, int elem, int index);
+    // List rows: fill this one in, and open this one. Both carry the ITEM index.
+    void fireOnRowBind(InstanceId id, int elem, int index);
+    void fireOnRowActivated(InstanceId id, int elem, int index);
     void fireConstruct(InstanceId id);
     void fireDestruct(InstanceId id);
     void fireBeginPlay(InstanceId id);

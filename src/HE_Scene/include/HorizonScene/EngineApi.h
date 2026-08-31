@@ -308,6 +308,21 @@ namespace widget {
     int  addChild(Ctx&, int id, const std::string& parentName, const std::string& assetPath);
     bool removeChild(Ctx&, int id, int childId);
     int  clearChildren(Ctx&, int id, const std::string& parentName);
+
+    // ── Lists (docs/he-apps-plan.md B2) ─────────────────────────────────────
+    // The one thing addChild cannot do well: ten thousand rows. A ListView is
+    // given a COUNT and a row template and realizes only what fits on screen, so
+    // this group is deliberately thin — say how many items there are, answer
+    // OnRowBind for the rows it puts up, and reach a row when you need to.
+    bool setListCount(Ctx&, int id, const std::string& listName, int count);
+    int  listCount(Ctx&, int id, const std::string& listName);
+    // The live row instance showing that item — 0 when it is scrolled out. The
+    // handle Set External / Call External take, exactly like addChild's.
+    int  listRow(Ctx&, int id, const std::string& listName, int index);
+    bool refreshList(Ctx&, int id, const std::string& listName);
+    bool setListSelected(Ctx&, int id, const std::string& listName, int index, bool selected);
+    int  listSelected(Ctx&, int id, const std::string& listName);   // -1 = none
+    bool scrollListToItem(Ctx&, int id, const std::string& listName, int index);
 }
 
 // ── Theme (docs/he-apps-plan.md D1) ──────────────────────────────────────────

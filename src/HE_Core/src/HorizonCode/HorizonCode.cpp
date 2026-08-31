@@ -2135,6 +2135,14 @@ const std::vector<EngineEventDesc>& engineEvents()
         { "OnValueChanged",       "onValueChanged",       P::Float,  true  },
         { "OnCheckChanged",       "onCheckChanged",       P::Bool,   true  },
         { "OnSelectionChanged",   "onSelectionChanged",   P::Int,    true  },
+        // A ListView asking to have one row filled in. The argument is the ITEM
+        // index, not the row: the list holds no data, so this is the only
+        // question it can ask and the answer is whatever the owner keeps.
+        { "OnRowBind",            "onRowBind",            P::Int,    true  },
+        // …and a row being opened rather than merely picked (double-click,
+        // Enter). Separate from the selection because "which one" and "go" are
+        // two different answers in every list that has ever existed.
+        { "OnRowActivated",       "onRowActivated",       P::Int,    true  },
         { "OnInit",               "onInit",               P::Exec,   false },
         { "OnShutdown",           "onShutdown",           P::Exec,   false },
         { "OnWindowFocusChanged", "onWindowFocusChanged", P::Bool,   false },

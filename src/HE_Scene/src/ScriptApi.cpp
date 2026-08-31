@@ -299,6 +299,38 @@ int clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& pa
 	return world.widgets().clearChildren(widgetId, parentName);
 }
 
+bool setListCount(HorizonWorld& world, int widgetId, const std::string& listName, int count)
+{
+	return world.widgets().setListCount(widgetId, listName, count);
+}
+int listCount(HorizonWorld& world, int widgetId, const std::string& listName)
+{
+	return world.widgets().listCount(widgetId, listName);
+}
+int listRow(HorizonWorld& world, int widgetId, const std::string& listName, int index)
+{
+	// Narrowed here for the same reason addWidgetChild narrows: instance ids are
+	// 64-bit in the runtime and 32-bit across the script boundary.
+	return static_cast<int>(world.widgets().listRow(widgetId, listName, index));
+}
+bool refreshList(HorizonWorld& world, int widgetId, const std::string& listName)
+{
+	return world.widgets().refreshList(widgetId, listName);
+}
+bool setListSelected(HorizonWorld& world, int widgetId, const std::string& listName,
+                     int index, bool selected)
+{
+	return world.widgets().setListSelected(widgetId, listName, index, selected);
+}
+int listSelected(HorizonWorld& world, int widgetId, const std::string& listName)
+{
+	return world.widgets().listSelected(widgetId, listName);
+}
+bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& listName, int index)
+{
+	return world.widgets().scrollListToItem(widgetId, listName, index);
+}
+
 bool setTheme(HorizonWorld& world, ContentManager* content, const std::string& path)
 {
 	if (!content || path.empty()) return false;

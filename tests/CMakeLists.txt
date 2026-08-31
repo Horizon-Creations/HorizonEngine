@@ -491,11 +491,16 @@ endif()
 # Absent (a configure without the deploy step, a fresh checkout) is a SKIP, not a
 # failure — exit code 2, declared below — or every such build would go red for
 # having nothing to weigh.
+#
+# The build type is handed over for the same reason the path is printed: the
+# thresholds were measured on a RELEASE tree and mean nothing on a Debug one,
+# which is several times the size. Anything else reports and skips.
 if(Python3_Interpreter_FOUND)
     add_test(NAME runtime_size
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
-                     "${DEPLOY_GAME}" --check)
+                     "${DEPLOY_GAME}" --check
+                     "--build-type=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,${CMAKE_BUILD_TYPE}>")
     set_tests_properties(runtime_size PROPERTIES SKIP_RETURN_CODE 2)
 endif()
 

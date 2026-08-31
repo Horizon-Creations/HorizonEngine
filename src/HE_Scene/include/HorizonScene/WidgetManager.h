@@ -92,6 +92,32 @@ public:
     // what "rebuild the list from scratch" is written with.
     int  clearChildren(int widgetId, const std::string& parentName);
 
+    // ── Lists (docs/he-apps-plan.md B2) ──────────────────────────────────────
+    // A ListView holds no items — it holds a COUNT and a row template — so this
+    // is the whole of "here is my data": say how many there are, and answer
+    // OnRowBind for the rows that end up on screen. Ten thousand items cost the
+    // rows the window can show, not ten thousand elements.
+    //
+    // False = no such widget, or no element of that name, or it is not a list.
+    bool setListCount(int widgetId, const std::string& listName, int count);
+    int  listCount(int widgetId, const std::string& listName) const;
+    // The live instance showing item `index`, or 0 when that item is not
+    // currently realized (scrolled out, or past the end). This is what an
+    // OnRowBind handler reaches the row with — Set External on a public
+    // variable, Call External on a public function, exactly like addChild's
+    // return value.
+    HorizonCode::InstanceId listRow(int widgetId, const std::string& listName,
+                                    int index) const;
+    // Bind every realized row again, without moving anything. What a sort, a
+    // filter or an edit of the underlying data is written with: the list never
+    // saw the items, so it cannot notice they changed.
+    bool refreshList(int widgetId, const std::string& listName);
+    // Selection, by item index. Setting fires OnSelectionChanged when the set
+    // actually changes; -1 to select means "clear".
+    bool setListSelected(int widgetId, const std::string& listName, int index, bool on);
+    int  listSelected(int widgetId, const std::string& listName) const;   // -1 = none
+    bool scrollListToItem(int widgetId, const std::string& listName, int index);
+
     // Read-only view of a live widget's element tree (nullptr = no such
     // widget). The manager owns a deep copy per widget; this is how a caller
     // looks at the live state — the caret in a text field, what a script last
@@ -191,6 +217,11 @@ public:
     // Select the word (or the whole line) under the pointer: double- and
     // triple-click. Both leave the caret at the end of what they selected.
     bool selectWordAtPointer(float vpWidth, float vpHeight, float mouseX);
+    // What a DOUBLE-click means where it is not text: the row under the pointer
+    // is activated (OnRowActivated). The app tries the text field first and
+    // falls through to here, so one gesture keeps one meaning per thing it lands
+    // on. False = nothing under the pointer had an "open me".
+    bool activateAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY);
     bool selectAllFocused();
     // What is selected in the focused field, for a copy or a cut.
     std::string focusedSelection() const;
@@ -349,6 +380,33 @@ private:
     // itself (directly or in a circle) is refused rather than expanded forever.
     void embedWidgetRefs(Instance& w, ContentManager& content,
                          std::vector<std::string>& chain, int depth);
+    // Put one widget asset in as a child of `parentElem` and give it its own
+    // script instance: the whole of what addChild does once the parent is found,
+    // and what a list realizes each of its rows with. `rowIndex` >= 0 marks the
+    // new element as a list row (see UIWidgetRef::rowIndex). 0 = refused.
+    HorizonCode::InstanceId graftChildRef(Instance& w, ContentManager& content,
+                                          int parentElem, const std::string& assetPath,
+                                          int rowIndex);
+    // The script instance a grafted child element belongs to (0 = none).
+    HorizonCode::InstanceId instanceOfChild(const Instance& w, int refElemId) const;
+
+    // ── Realizing list rows ──────────────────────────────────────────────────
+    // Work out which items each ListView can currently show, make sure exactly
+    // that many rows exist, point them at the right items and bind the ones
+    // whose item changed. Idempotent and cheap when nothing moved, which is why
+    // it can simply run before every frame and before every pointer event
+    // instead of being hooked to each thing that could invalidate it.
+    void syncLists();
+    void syncLists(Instance& w);
+    // Elements of a list, in tree order. Nullable entries are never returned.
+    std::vector<HE::UIWidgetRef*> listRowsOf(Instance& w, int listId);
+    // Find a named ListView in a widget (nullptr = no widget, no such name, or
+    // the name belongs to something that is not a list).
+    HE::UIListView* findList(int widgetId, const std::string& listName);
+    const HE::UIListView* findList(int widgetId, const std::string& listName) const;
+    // Pick one row and fire what that means. Shared by the press and by the
+    // keyboard, so the two cannot drift.
+    void selectListRow(Instance& w, HE::UIListView& lv, int item);
 
     // Re-resolve one element's Material/Font path to its runtime state (material
     // UUID in w.materials, baked fontAtlasKey) — the same resolution createWidget

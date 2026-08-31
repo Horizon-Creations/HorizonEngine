@@ -1200,8 +1200,53 @@ void drawDetails(State& st, AppContext& ctx)
 			// once, at the H row, and the V row is skipped.
 			if (pd.name == "Align V") continue;
 			if (pd.name == "Align H") { drawTextAlignGrid(*n, edit, committed); continue; }
+			// A list's row template is an ASSET, drawn with the picker below —
+			// a path one has to type correctly is the reason the list would be
+			// empty at run time with nothing to say why.
+			if (pd.name == "Row Widget") continue;
+			// …and its item count is runtime state. It is a property because a
+			// graph SETS it by name; it is not a field here because a number
+			// typed into the designer is thrown away the moment the list runs.
+			if (pd.name == "Item Count") continue;
+			// Three named modes, not the numbers 0, 1 and 2.
+			if (pd.name == "Selection" && n->type() == UIWidgetType::ListView)
+			{
+				static const char* kModes[] = { "None", "Single", "Multiple" };
+				int mode = std::clamp(n->getProp("Selection").i, 0, 2);
+				if (ImGui::Combo("Selection", &mode, kModes, 3))
+				{
+					n->setProp("Selection", HE::UIPropValue::ofInt(mode));
+					edit = committed = true;
+				}
+				EditorWidgets::helpForLabel("Selection");
+				continue;
+			}
 			drawPropertyWidget(*n, pd, edit, committed);
 		}
+	}
+
+	// The row a ListView repeats. Picked like any other asset, and never the
+	// widget being edited — a list whose row is the page it sits on is the same
+	// circle a self-embedding WidgetRef is, and the runtime refuses it.
+	if (n->type() == UIWidgetType::ListView)
+	{
+		ImGui::SeparatorText("Rows");
+		std::string path = n->getProp("Row Widget").s;
+		if (assetSlot(ctx, "Row Widget", path, HE::AssetType::Widget, "lvrow"))
+		{
+			if (path == st.relPath)
+				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+					"A list cannot use the widget it sits in as its row.");
+			else
+			{
+				n->setProp("Row Widget", HE::UIPropValue::ofString(path));
+				committed = true;
+			}
+		}
+		EditorWidgets::helpForLabel("Row Widget");
+		ImGui::TextDisabled("How many rows there are comes from the running\n"
+		                    "application (Set List Count); the list then asks\n"
+		                    "On Row Bind to fill in each one it puts up.");
 	}
 
 	// "Schicht 0": the style of the element's own surface. Only where there IS
@@ -1617,6 +1662,33 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		if (pad > 0.5f)
 			dl->AddRect(ImVec2(mn.x + pad, mn.y + pad), ImVec2(mx.x - pad, mx.y - pad),
 			            IM_COL32(120, 190, 255, 50));
+		break;
+	}
+	case UIWidgetType::ListView:
+	{
+		// Its surface is drawn above. What is drawn here is what the designer
+		// CANNOT have: the rows, which only exist while the application runs.
+		// Ghost rows at the authored height, so the row size and the padding are
+		// something you can see and aim at instead of two numbers in a panel.
+		const float pad  = propFloatOr(n, "Padding", 4.0f) * s;
+		const float rowH = std::max(2.0f, propFloatOr(n, "Row Height", 40.0f) * s);
+		const float gap  = propFloatOr(n, "Spacing", 2.0f) * s;
+		const std::string tpl = propStringOr(n, "Row Widget", "");
+		const ImU32 ghost = tpl.empty() ? IM_COL32(200, 120, 120, 70)
+		                                : IM_COL32(150, 210, 160, 70);
+		float y = mn.y + pad;
+		for (int i = 0; i < 64 && y + rowH <= mx.y - pad; ++i)
+		{
+			dl->AddRect(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + rowH), ghost);
+			y += rowH + gap;
+		}
+		// A list without a template can never show anything, and that is the
+		// single most likely reason one looks empty when it runs.
+		if (tpl.empty())
+			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+				ImVec2(mn.x + pad + 4, mn.y + pad + 2),
+				IM_COL32(230, 170, 170, 200), "no Row Widget");
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
 		break;
 	}
 	case UIWidgetType::Spacer:

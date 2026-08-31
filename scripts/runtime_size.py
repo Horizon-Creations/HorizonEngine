@@ -18,12 +18,19 @@ project (settings.bundlePython): the full tree, and the tree a non-Python projec
 actually ships.
 
 Usage:
-    scripts/runtime_size.py [RUNTIME_DIR] [--check]
+    scripts/runtime_size.py [RUNTIME_DIR] [--check] [--build-type=TYPE]
 
     --check exits non-zero when a threshold is exceeded. Without it the script
     only reports, which is what one wants while cutting.
 
-Exit codes: 0 fine (or reporting), 1 over threshold, 2 nothing to measure.
+    --build-type is what the tree was built as. The thresholds below were
+    measured on a RELEASE tree and mean nothing anywhere else — a Debug build of
+    the same code is several times the size, and failing on that would be the
+    check crying wolf at the one thing it is not measuring. Anything that is not
+    a release configuration therefore REPORTS and skips.
+
+Exit codes: 0 fine (or reporting), 1 over threshold, 2 nothing to measure or
+nothing this may judge.
 """
 import os
 import sys
@@ -84,6 +91,10 @@ def measure(root):
 def main(argv):
     args = [a for a in argv[1:] if not a.startswith("-")]
     check = "--check" in argv[1:]
+    build_type = ""
+    for a in argv[1:]:
+        if a.startswith("--build-type="):
+            build_type = a.split("=", 1)[1]
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = args[0] if args else os.path.join(repo, "out", "deploy", "Game")
 
@@ -97,7 +108,8 @@ def main(argv):
     total = sum(sizes.values())
     without_py = total - sizes.get("python", 0)
 
-    print(f"Runtime measured at: {root}")
+    print(f"Runtime measured at: {root}"
+          + (f"  ({build_type} build)" if build_type else ""))
     print()
     print(f"{'component':<14}{'MB':>10}")
     print("-" * 24)
@@ -115,6 +127,16 @@ def main(argv):
 
     if not check:
         return 0
+
+    # The thresholds are a RELEASE claim. Judging a Debug tree by them would be
+    # a red test that says nothing about what ships — the numbers above are still
+    # printed, because knowing what a debug build weighs is occasionally useful.
+    if build_type and build_type.lower() not in ("release", "relwithdebinfo",
+                                                 "minsizerel"):
+        print()
+        print(f"runtime_size: {build_type} build — the thresholds are measured on a "
+              "Release tree, so this run only reports (skipped)")
+        return 2
 
     failed = []
     if total / 1e6 > LIMIT_TOTAL_MB:

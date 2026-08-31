@@ -448,6 +448,20 @@ bool removeChild(Ctx& c, int id, int childId)
 { return c.world ? ScriptApi::removeWidgetChild(*c.world, id, childId) : false; }
 int  clearChildren(Ctx& c, int id, const std::string& parent)
 { return c.world ? ScriptApi::clearWidgetChildren(*c.world, id, parent) : 0; }
+bool setListCount(Ctx& c, int id, const std::string& list, int count)
+{ return c.world ? ScriptApi::setListCount(*c.world, id, list, count) : false; }
+int  listCount(Ctx& c, int id, const std::string& list)
+{ return c.world ? ScriptApi::listCount(*c.world, id, list) : 0; }
+int  listRow(Ctx& c, int id, const std::string& list, int index)
+{ return c.world ? ScriptApi::listRow(*c.world, id, list, index) : 0; }
+bool refreshList(Ctx& c, int id, const std::string& list)
+{ return c.world ? ScriptApi::refreshList(*c.world, id, list) : false; }
+bool setListSelected(Ctx& c, int id, const std::string& list, int index, bool sel)
+{ return c.world ? ScriptApi::setListSelected(*c.world, id, list, index, sel) : false; }
+int  listSelected(Ctx& c, int id, const std::string& list)
+{ return c.world ? ScriptApi::listSelected(*c.world, id, list) : -1; }
+bool scrollListToItem(Ctx& c, int id, const std::string& list, int index)
+{ return c.world ? ScriptApi::scrollListToItem(*c.world, id, list, index) : false; }
 } // namespace widget
 
 // ── Theme ────────────────────────────────────────────────────────────────────
@@ -2259,6 +2273,46 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
                 widget::clearChildren(c, (int)aR(a, 0), aS(a, 1))) }; } });
 
+        // Lists. The list is addressed by the NAME of its element, the way
+        // addChild addresses a parent — an id is a number nobody can look up.
+        // No row travels through these except as a Ref: the list holds a count
+        // and a template, and the items stay where they already are.
+        t.push_back({ "widget.setListCount", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}, {"count", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::widget::setListCount",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::setListCount(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "widget.listCount", "Widget", false,
+            {{"widget", P::Ref}, {"list", P::String}}, {{"count", P::Int}},
+            "HE::api::widget::listCount",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::listCount(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.listRow", "Widget", false,
+            {{"widget", P::Ref}, {"list", P::String}, {"index", P::Int}}, {{"row", P::Ref}},
+            "HE::api::widget::listRow",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
+                (uint64_t)widget::listRow(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "widget.refreshList", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}}, {{"ok", P::Bool}},
+            "HE::api::widget::refreshList",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::refreshList(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.setListSelected", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}, {"index", P::Int}, {"selected", P::Bool}},
+            {{"ok", P::Bool}}, "HE::api::widget::setListSelected",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::setListSelected(c, (int)aR(a, 0), aS(a, 1), aI(a, 2), aB(a, 3))) }; } });
+        t.push_back({ "widget.listSelected", "Widget", false,
+            {{"widget", P::Ref}, {"list", P::String}}, {{"index", P::Int}},
+            "HE::api::widget::listSelected",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::listSelected(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.scrollListToItem", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}, {"index", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::widget::scrollListToItem",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::scrollListToItem(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+
         // Theme — one place decides what the whole application looks like.
         t.push_back({ "theme.set", "Theme", true, {{"themeAsset", P::String}}, {{"ok", P::Bool}},
             "HE::api::theme::set",
@@ -2821,6 +2875,13 @@ const std::vector<ApiFn>& registry()
             { "widget.addChild", "Add Widget Child" },
             { "widget.removeChild", "Remove Widget Child" },
             { "widget.clearChildren", "Clear Widget Children" },
+            { "widget.setListCount", "Set List Count" },
+            { "widget.listCount", "Get List Count" },
+            { "widget.listRow", "Get List Row" },
+            { "widget.refreshList", "Refresh List" },
+            { "widget.setListSelected", "Set List Selected" },
+            { "widget.listSelected", "Get List Selected" },
+            { "widget.scrollListToItem", "Scroll List To Item" },
             { "theme.set", "Set Theme" }, { "theme.setMode", "Set Theme Mode" },
             { "theme.getMode", "Get Theme Mode" },
             { "theme.getPreference", "Get Theme Preference" },

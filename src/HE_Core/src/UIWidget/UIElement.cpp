@@ -25,6 +25,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::ScrollBox:     return std::make_unique<UIScrollBox>();
         case UIWidgetType::WidgetRef:     return std::make_unique<UIWidgetRef>();
         case UIWidgetType::Spacer:        return std::make_unique<UISpacer>();
+        case UIWidgetType::ListView:      return std::make_unique<UIListView>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -36,7 +37,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
-        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer };
+        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
+        UIWidgetType::ListView };
     return kAll;
 }
 
@@ -51,7 +53,8 @@ const char* uiWidgetTypeName(UIWidgetType t)
     static constexpr const char* kNames[] = {
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
-        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer" };
+        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
+        "ListView" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -152,6 +155,72 @@ const UIPropTable& UISpacer::propTable() const
 {
     static const UIPropTable t = {};
     return t;
+}
+
+const UIPropTable& UIListView::propTable() const
+{
+    // "Padding" and "Spacing" keep the names every other container uses: a list
+    // is inset and gapped the same way a box is, and a second vocabulary for the
+    // same two numbers would be one an author has to learn twice.
+    static const UIPropTable t = {
+        uiprop::slot<&UIListView::rowWidget>({ "Row Widget", UIPropType::String }),
+        uiprop::slot<&UIListView::rowHeight>({ "Row Height", UIPropType::Float, 1.0f, 2000.0f }),
+        uiprop::slot<&UIListView::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIListView::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIListView::backColor>({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::rowHoverColor>({ "Row Hover Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::rowSelectedColor>({ "Row Selected Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::selectionMode>({ "Selection", UIPropType::Int, 0.0f, 2.0f }),
+        uiprop::slot<&UIListView::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIListView::barColor>({ "Bar Color", UIPropType::Color }),
+        // The item count is RUNTIME state and still belongs here: it is what a
+        // graph sets to fill the list, and a Set Property node reaches it by
+        // name like every other property. It is simply never serialized.
+        uiprop::slot<&UIListView::itemCount>({ "Item Count", UIPropType::Int, 0.0f, 1.0e9f }),
+    };
+    return t;
+}
+
+bool UIListView::setSelected(int item, bool on)
+{
+    if (selectionMode == 0) return false;
+    if (item < 0 || item >= itemCount) return false;
+    const bool had = isSelected(item);
+    if (had == on) return false;
+    if (!on)
+    {
+        selection.erase(std::remove(selection.begin(), selection.end(), item),
+                        selection.end());
+        return true;
+    }
+    // Single mode is not "multiple, but please only pick one": picking replaces
+    // what was there, which is the whole difference between the two modes.
+    if (selectionMode == 1) selection.clear();
+    selection.push_back(item);
+    std::sort(selection.begin(), selection.end());
+    return true;
+}
+
+bool UIListView::clearSelection()
+{
+    if (selection.empty()) return false;
+    selection.clear();
+    return true;
+}
+
+bool UIListView::scrollToItem(int item)
+{
+    if (item < 0 || item >= itemCount) return false;
+    const float top    = item * rowStep();
+    const float bottom = top + rowHeight;
+    const float before = scrollOffset;
+    // Above the view: put its top at the top. Below it: put its bottom at the
+    // bottom. Already inside: leave it exactly where it is, because a list that
+    // re-centres on every keystroke is a list nobody can read while stepping.
+    if (top < scrollOffset)                        scrollOffset = top;
+    else if (bottom > scrollOffset + innerHeight()) scrollOffset = bottom - innerHeight();
+    scrollOffset = std::clamp(scrollOffset, 0.0f, maxScroll());
+    return scrollOffset != before;
 }
 
 const UIPropTable& UIBoxBase::propTable() const
@@ -1003,6 +1072,91 @@ void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
     const float y = px.y + padding * scaleY + t * (trackPx - thumbPx);
     quad(out, x, y, barWidth * scaleX, thumbPx, barColor, HE::UUID{},
          barWidth * scaleX * 0.5f);
+}
+
+// ── ListView ─────────────────────────────────────────────────────────────────
+// Three things, in this order: the surface (so the border, the rounding and the
+// gradient have a first quad to be stamped onto), the two row states the rows
+// themselves cannot know about, and the scrollbar.
+//
+// The row CONTENT is not drawn here at all — every row is a real widget grafted
+// under this element, and the ordinary element loop draws it after this one.
+void UIListView::render(const UIWidgetRect& px, const UIElementRenderState&,
+                        const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
+{
+    // Always emitted, even fully transparent: it is the element's own rectangle
+    // and therefore the quad the surface style is applied to. Without it a list
+    // could not have a border.
+    quad(out, px.x, px.y, px.w, px.h, backColor, mat, 0.0f, textureAssetId);
+
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float scaleY = px.h / std::max(1.0f, sizeY);
+    const float innerY = px.y + padding * scaleY;
+    const float innerH = innerHeight() * scaleY;
+    const float rowX   = px.x + padding * scaleX;
+    const float rowW   = std::max(0.0f, px.w - 2.0f * padding * scaleX);
+
+    // One row's highlight, clipped to the inner rect BY HAND. The element's own
+    // quads are not covered by its clipChildren (that governs its children), so
+    // a half-scrolled row would otherwise paint over the border.
+    auto rowQuad = [&](int item, const glm::vec4& c)
+    {
+        if (c.a <= 0.001f || item < 0 || item >= itemCount) return;
+        const float top = innerY + (item * rowStep() - scrollOffset) * scaleY;
+        const float y0  = std::max(top, innerY);
+        const float y1  = std::min(top + rowHeight * scaleY, innerY + innerH);
+        if (y1 <= y0 || rowW <= 0.0f) return;
+        quad(out, rowX, y0, rowW, y1 - y0, c, HE::UUID{},
+             roundedR(rowW, y1 - y0, 3.0f));
+    };
+    for (const int s : selection) rowQuad(s, rowSelectedColor);
+    // Hover under selection would be invisible on the picked row, so it goes on
+    // top — and is skipped there, because a lighter version of the same row is
+    // noise rather than feedback.
+    if (hoveredRow >= 0 && !isSelected(hoveredRow)) rowQuad(hoveredRow, rowHoverColor);
+
+    const float maxOff = maxScroll();
+    if (barWidth > 0.0f && maxOff > 0.0f && measuredExtent() > 0.0f)
+    {
+        const float visibleFrac = std::min(1.0f, innerHeight() / measuredExtent());
+        const float trackPx = innerH;
+        const float thumbPx = std::max(12.0f, trackPx * visibleFrac);
+        const float t = scrollOffset / maxOff;
+        quad(out, px.x + px.w - (barWidth + padding) * scaleX,
+             innerY + t * (trackPx - thumbPx),
+             barWidth * scaleX, thumbPx, barColor, HE::UUID{},
+             barWidth * scaleX * 0.5f);
+    }
+}
+
+// The item count, the offset and the selection are all runtime state: a list
+// that reopened pre-scrolled to row 400 of data nobody has loaded yet would be
+// showing a picture of the last run.
+void UIListView::writeJson(nlohmann::json& j) const
+{
+    j["rowWidget"] = rowWidget;
+    j["rowHeight"] = rowHeight;
+    j["padding"] = padding;
+    j["spacing"] = spacing;
+    j["backColor"] = colJson(backColor);
+    j["rowHoverColor"] = colJson(rowHoverColor);
+    j["rowSelectedColor"] = colJson(rowSelectedColor);
+    j["selectionMode"] = selectionMode;
+    j["barWidth"] = barWidth;
+    j["barColor"] = colJson(barColor);
+}
+void UIListView::readJson(const nlohmann::json& j)
+{
+    rowWidget = j.value("rowWidget", rowWidget);
+    rowHeight = j.value("rowHeight", rowHeight);
+    padding   = j.value("padding", padding);
+    spacing   = j.value("spacing", spacing);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
+    rowHoverColor = colFrom(j.value("rowHoverColor", nlohmann::json()), rowHoverColor);
+    rowSelectedColor = colFrom(j.value("rowSelectedColor", nlohmann::json()), rowSelectedColor);
+    selectionMode = j.value("selectionMode", selectionMode);
+    barWidth = j.value("barWidth", barWidth);
+    barColor = colFrom(j.value("barColor", nlohmann::json()), barColor);
 }
 
 void UIImage::writeJson(nlohmann::json& j) const

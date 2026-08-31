@@ -448,6 +448,19 @@ public:
     float             contentW = 0.0f, contentH = 0.0f;
     UICanvasScaleMode contentMode = UICanvasScaleMode::Stretch;
 
+    // ── When this ref is a ROW of a ListView ─────────────────────────────────
+    // Which item the row SHOWS (-1 = it is not a list row), and which item it
+    // was last told about. Two numbers rather than one because they answer
+    // different questions: the first places the row, the second decides whether
+    // it still needs to be filled in. Scrolling moves one row's index and
+    // leaves the other's alone — that is precisely how a pool of ten rows shows
+    // ten thousand items without ever being rebuilt.
+    //
+    // Both transient: a list is realized from its item count every frame and is
+    // never loaded from the asset.
+    int rowIndex = -1;
+    int rowBound = -1;
+
     UIWidgetRef() { sizeX = 300.0f; sizeY = 200.0f; hitTestable = false; }
     UIWidgetType type() const override { return UIWidgetType::WidgetRef; }
     const char*  typeName() const override { return "WidgetRef"; }
@@ -550,6 +563,8 @@ public:
         const float over  = contentExtent - inner;
         return over > 0.0f ? over : 0.0f;
     }
+    float* scrollOffsetPtr() override { return &scrollOffset; }
+    float  maxScrollAmount() const override { return maxScroll(); }
     void render(const UIWidgetRect& px, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>& out) const override;
     void writeJson(nlohmann::json&) const override;
@@ -581,6 +596,146 @@ public:
                 float, std::vector<UIRenderObject>&) const override {}
     void writeJson(nlohmann::json&) const override {}
     void readJson(const nlohmann::json&) override {}
+};
+
+// ── ListView (docs/he-apps-plan.md B2) ────────────────────────────────────────
+// The one thing the widget system could not do: show a list whose length is not
+// known when it is authored. Every other approach ends in the same place — N
+// pre-made rows with a ceiling, or N real elements and a program that stalls at
+// ten thousand of them.
+//
+// It works because it holds NO DATA. It holds
+//   • a row template — an ordinary UI Widget asset, authored in the same
+//     designer as everything else, which is where a row's look and its logic
+//     live (this is what "Zeilenvorlage als WidgetRef" means: a row is a
+//     widget, not a special case),
+//   • an item COUNT its owner sets, and
+//   • how tall a row is.
+// From those three it works out which rows the view can actually show, realizes
+// only those, and asks its owner to fill each one in (OnRowBind). Scrolling
+// re-points the same handful of rows at different items rather than building new
+// ones, so the cost is the size of the WINDOW and not the size of the list.
+//
+// The consequence to be honest about: a list that holds no items cannot sort
+// them, and cannot answer what is in row 5 either. Both belong to whoever owns
+// the data — it sorts its own array and calls refreshList, which is one call and
+// keeps the single source of truth where it already was.
+class HE_API UIListView final : public UIElement
+{
+public:
+    // ── Authored ─────────────────────────────────────────────────────────────
+    std::string rowWidget;         // content-relative path of the row template
+    float rowHeight = 40.0f;       // every row is this tall (canvas units)
+    float padding   = 4.0f;        // inset on all four sides
+    float spacing   = 2.0f;        // gap between two rows
+    glm::vec4 backColor{ 0.0f, 0.0f, 0.0f, 0.0f };
+    // The two states a row has that its own widget cannot know about, drawn by
+    // the list UNDER the row: which one the pointer is over and which ones are
+    // picked. A row template that wants to look different when selected can
+    // still do so — it is told, and this is the floor rather than the ceiling.
+    glm::vec4 rowHoverColor{ 1.0f, 1.0f, 1.0f, 0.06f };
+    glm::vec4 rowSelectedColor{ 0.20f, 0.42f, 0.74f, 0.55f };
+    // 0 = none (a display list), 1 = single, 2 = multiple. An int rather than an
+    // enum class because that is what UIPropType::Int carries into the panel and
+    // into a graph; the three values are named in the editor's dropdown.
+    int   selectionMode = 1;
+    float barWidth = 6.0f;
+    glm::vec4 barColor{ 0.75f, 0.75f, 0.80f, 0.65f };
+
+    // ── Runtime ──────────────────────────────────────────────────────────────
+    // How many items there are, which the owner sets and nothing here persists:
+    // an application that reopens with the last run's row count would be showing
+    // rows for data it has not loaded yet.
+    int   itemCount = 0;
+    float scrollOffset = 0.0f;
+    float contentExtent = 0.0f;    // itemCount rows plus their gaps
+    std::vector<int> selection;    // item indices, ascending, no duplicates
+    int   hoveredRow = -1;
+
+    UIListView()
+    {
+        sizeX = 320.0f; sizeY = 400.0f;
+        clipChildren = true;      // rows outside the view must stop at its edge
+        cornerRadius = glm::vec4(4.0f);
+    }
+    UIWidgetType type() const override { return UIWidgetType::ListView; }
+    const char*  typeName() const override { return "ListView"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIListView>(*this); }
+
+    // It places its rows itself (from their item index, not from a stack walk),
+    // and it takes the click that picks one.
+    bool laysOutChildren() const override { return true; }
+    bool stacksVertically() const override { return true; }
+    bool interactive() const override { return true; }
+    // A list has a background, a border and a rounding like any other panel.
+    bool hasSurfaceStyle() const override { return true; }
+    // Rows come from the template, so a drop into the designer would create an
+    // element the next frame throws away. Saying no here is what says that.
+    bool acceptsChildren() const override { return false; }
+
+    // ── The three numbers everything else is derived from ────────────────────
+    float rowStep()     const { return rowHeight + spacing; }
+    float innerHeight() const { return sizeY - 2.0f * padding > 0.0f
+                                     ? sizeY - 2.0f * padding : 0.0f; }
+    // Total height of `itemCount` rows with their gaps between them — the gaps
+    // are BETWEEN, so n rows have n-1 of them.
+    float measuredExtent() const
+    {
+        if (itemCount <= 0) return 0.0f;
+        return itemCount * rowHeight + (itemCount - 1) * spacing;
+    }
+    float maxScroll() const
+    {
+        const float over = measuredExtent() - innerHeight();
+        return over > 0.0f ? over : 0.0f;
+    }
+    float* scrollOffsetPtr() override { return &scrollOffset; }
+    float  maxScrollAmount() const override { return maxScroll(); }
+
+    // Which item is under a point `localY` canvas units below the element's TOP
+    // edge; -1 when that is padding, a gap between two rows, or past the end.
+    // A gap is deliberately nothing rather than the nearest row: clicking two
+    // pixels of background must not pick a neighbour.
+    int rowAt(float localY) const
+    {
+        const float step = rowStep();
+        if (step <= 0.0f || itemCount <= 0) return -1;
+        const float y = localY - padding + scrollOffset;
+        if (y < 0.0f) return -1;
+        const int i = static_cast<int>(y / step);
+        if (i < 0 || i >= itemCount) return -1;
+        return (y - i * step) <= rowHeight ? i : -1;
+    }
+
+    // ── Selection ────────────────────────────────────────────────────────────
+    bool isSelected(int item) const
+    {
+        for (const int i : selection) if (i == item) return true;
+        return false;
+    }
+    // -1 when nothing is picked. "The" selection for the common single case,
+    // and the anchor a keyboard step moves from in the multiple case.
+    int firstSelected() const { return selection.empty() ? -1 : selection.front(); }
+    // True when the set actually changed — the caller fires OnSelectionChanged
+    // off that, so re-picking the row that is already picked stays silent.
+    bool setSelected(int item, bool on);
+    bool clearSelection();
+    // Scroll so that `item` is fully inside the view; no-op when it already is.
+    // True when the offset moved.
+    bool scrollToItem(int item);
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    {
+        return { { "OnRowBind", UIPropType::Int, true },
+                 { "OnSelectionChanged", UIPropType::Int, true },
+                 { "OnRowActivated", UIPropType::Int, true } };
+    }
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
 };
 
 } // namespace HE

@@ -209,6 +209,21 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
         // A Spacer is its rect and nothing else: the size on the box's axis and
         // Slot Fill are base properties, and it has no others by design.
         { UIWidgetType::Spacer, {} },
+        // A ListView keeps the container names for Padding and Spacing, and
+        // Item Count is here because a graph SETS it — it is runtime state that
+        // is still a property, and only the serializer knows the difference.
+        { UIWidgetType::ListView, {
+            { "Row Widget", UIPropType::String },
+            { "Row Height", UIPropType::Float },
+            { "Padding", UIPropType::Float },
+            { "Spacing", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Row Hover Color", UIPropType::Color },
+            { "Row Selected Color", UIPropType::Color },
+            { "Selection", UIPropType::Int },
+            { "Bar Width", UIPropType::Float },
+            { "Bar Color", UIPropType::Color },
+            { "Item Count", UIPropType::Int } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -927,8 +942,12 @@ TEST_CASE("Exactly the container types accept children")
                           != containers.end();
         INFO("type ", e->typeName());
         CHECK(e->acceptsChildren() == want);
-        // Anything that PLACES its children must obviously also take them.
-        if (e->laysOutChildren()) CHECK(e->acceptsChildren());
+        // Anything that PLACES its children must obviously also take them —
+        // except a ListView, which places rows it MAKES ITSELF from its template.
+        // Dropping an element into one in the designer would create something
+        // the next sync throws away, so it says no on purpose.
+        if (e->laysOutChildren() && ty != HE::UIWidgetType::ListView)
+            CHECK(e->acceptsChildren());
     }
 }
 
@@ -2955,6 +2974,10 @@ TEST_CASE("Surface styling is offered exactly where it would land")
     const std::vector<UIWidgetType> kSurfaces = {
         UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Button,
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
+        // A list is a panel with rows in it: it draws its own rectangle first
+        // (even fully transparent) so the border and the rounding have something
+        // to land on.
+        UIWidgetType::ListView,
     };
 
     for (int t = 0; t < static_cast<int>(UIWidgetType::COUNT); ++t)
@@ -5020,4 +5043,394 @@ TEST_CASE("WidgetManager: a filled element is hit across the whole viewport")
     // point-anchored 120×32 default it never was.
     CHECK(wm.processPointer(1920.0f, 1080.0f, 1900.0f, 1050.0f, true, true));
     CHECK(wm.processPointer(1920.0f, 1080.0f,   20.0f,   20.0f, true, true));
+}
+
+// ═══ ListView (docs/he-apps-plan.md B2) ══════════════════════════════════════
+// The whole claim of this type is a NEGATIVE one — "ten thousand rows are not
+// ten thousand elements" — so most of what follows counts things that must NOT
+// happen: elements that are not created, rows that are not rebuilt, frames that
+// are not redrawn.
+
+TEST_CASE("ListView: the arithmetic it is all derived from")
+{
+    HE::UIListView lv;
+    lv.sizeY = 200.0f; lv.padding = 0.0f; lv.spacing = 0.0f; lv.rowHeight = 20.0f;
+    lv.itemCount = 100;
+
+    CHECK(lv.rowStep() == doctest::Approx(20.0f));
+    CHECK(lv.innerHeight() == doctest::Approx(200.0f));
+    CHECK(lv.measuredExtent() == doctest::Approx(2000.0f));
+    CHECK(lv.maxScroll() == doctest::Approx(1800.0f));
+
+    // The gaps are BETWEEN: five rows have four of them, not five.
+    lv.spacing = 4.0f;
+    lv.itemCount = 5;
+    CHECK(lv.measuredExtent() == doctest::Approx(5 * 20.0f + 4 * 4.0f));
+    // …and everything fits, so it does not scroll at all.
+    CHECK(lv.maxScroll() == doctest::Approx(0.0f));
+
+    // rowAt: a gap is NOTHING, not the nearest row. Two pixels of background
+    // must not pick a neighbour.
+    lv.itemCount = 100; lv.spacing = 4.0f; lv.scrollOffset = 0.0f;
+    CHECK(lv.rowAt(0.0f) == 0);
+    CHECK(lv.rowAt(19.0f) == 0);
+    CHECK(lv.rowAt(22.0f) == -1);     // in the 4-unit gap after row 0
+    CHECK(lv.rowAt(24.0f) == 1);
+    CHECK(lv.rowAt(-3.0f) == -1);
+    // Scrolled, the same point is a different item — that is what scrolling is.
+    lv.scrollOffset = 24.0f;
+    CHECK(lv.rowAt(0.0f) == 1);
+
+    // scrollToItem moves only when it has to, and to the near edge.
+    lv.scrollOffset = 0.0f;
+    CHECK_FALSE(lv.scrollToItem(2));            // already fully in view
+    CHECK(lv.scrollOffset == doctest::Approx(0.0f));
+    CHECK(lv.scrollToItem(20));
+    // Its bottom lands on the view's bottom edge.
+    CHECK(lv.scrollOffset == doctest::Approx(20 * 24.0f + 20.0f - 200.0f));
+    CHECK(lv.scrollToItem(0));
+    CHECK(lv.scrollOffset == doctest::Approx(0.0f));
+    CHECK_FALSE(lv.scrollToItem(-1));
+    CHECK_FALSE(lv.scrollToItem(100));
+}
+
+TEST_CASE("ListView: what the three selection modes mean")
+{
+    HE::UIListView lv;
+    lv.itemCount = 10;
+
+    lv.selectionMode = 0;                       // none
+    CHECK_FALSE(lv.setSelected(3, true));
+    CHECK(lv.firstSelected() == -1);
+
+    lv.selectionMode = 1;                       // single: picking REPLACES
+    CHECK(lv.setSelected(3, true));
+    CHECK(lv.firstSelected() == 3);
+    CHECK_FALSE(lv.setSelected(3, true));       // already picked: no change
+    CHECK(lv.setSelected(5, true));
+    CHECK(lv.selection.size() == 1);
+    CHECK(lv.firstSelected() == 5);
+
+    lv.selectionMode = 2;                       // multiple: picking ADDS
+    CHECK(lv.setSelected(2, true));
+    CHECK(lv.selection.size() == 2);
+    CHECK(lv.firstSelected() == 2);             // ascending, so the lowest
+    CHECK(lv.setSelected(5, false));
+    CHECK(lv.selection.size() == 1);
+    CHECK(lv.clearSelection());
+    CHECK_FALSE(lv.clearSelection());
+
+    // Out of range is not a selection of anything.
+    CHECK_FALSE(lv.setSelected(-1, true));
+    CHECK_FALSE(lv.setSelected(10, true));
+}
+
+TEST_CASE("ListView: the count, the offset and the selection are runtime state")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::ListView);
+    auto* lv = dynamic_cast<HE::UIListView*>(t.find(id));
+    REQUIRE(lv);
+    lv->rowWidget = "mem://row.hasset";
+    lv->rowHeight = 33.0f;
+    lv->selectionMode = 2;
+    // …and the things a run puts there.
+    lv->itemCount = 5000;
+    lv->scrollOffset = 400.0f;
+    lv->setSelected(12, true);
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    auto* rl = dynamic_cast<HE::UIListView*>(r.find(id));
+    REQUIRE(rl);
+    CHECK(rl->rowWidget == "mem://row.hasset");
+    CHECK(rl->rowHeight == doctest::Approx(33.0f));
+    CHECK(rl->selectionMode == 2);
+    // A list that reopened pre-scrolled to row 400 of data nobody has loaded yet
+    // would be a picture of the last run.
+    CHECK(rl->itemCount == 0);
+    CHECK(rl->scrollOffset == doctest::Approx(0.0f));
+    CHECK(rl->selection.empty());
+}
+
+namespace
+{
+    // A page with one ListView called "List", filling a 400×400 canvas, and a
+    // one-label row asset at mem://row.hasset. Rows are 40 tall with no gap and
+    // no padding, so exactly ten fit and the arithmetic in the tests is legible.
+    void buildListPage(ContentManager& cm)
+    {
+        HE::UIWidgetTree row;
+        row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+        row.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int label = row.add(HE::UIWidgetType::Text);
+        row.find(label)->name = "Label";
+        row.find(label)->setProp("Text", HE::UIPropValue::ofString("x"));
+        registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+        HE::UIWidgetTree page;
+        page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+        page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int list = page.add(HE::UIWidgetType::ListView);
+        {
+            auto* lv = dynamic_cast<HE::UIListView*>(page.find(list));
+            lv->name = "List";
+            HE::uiSetAnchorPreset(*lv, 0); lv->pivotX = lv->pivotY = 0.0f;
+            lv->posX = 0.0f; lv->posY = 0.0f; lv->sizeX = 400.0f; lv->sizeY = 400.0f;
+            lv->rowWidget = "mem://row.hasset";
+            lv->rowHeight = 40.0f; lv->spacing = 0.0f; lv->padding = 0.0f;
+        }
+        registerWidget(cm, page, nullptr, "mem://page.hasset");
+    }
+}
+
+// The sentence the whole type exists for, as an assertion.
+TEST_CASE("ListView: ten thousand items are not ten thousand elements")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildListPage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    const std::size_t bare = wm.tree(id)->elements.size();
+
+    CHECK(wm.setListCount(id, "List", 10000));
+    CHECK(wm.listCount(id, "List") == 10000);
+
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // Ten rows fit, plus the one spare for the sliver at the bottom edge. Each
+    // brings its ref element and the row asset's own elements — a handful, and
+    // nowhere near four figures.
+    const std::size_t elems = wm.tree(id)->elements.size();
+    CHECK(elems > bare);
+    CHECK(elems - bare < 40);
+    // …and it says so about itself: the count is what it was told, not what it
+    // built.
+    CHECK(wm.listCount(id, "List") == 10000);
+
+    // The rows on screen are the ones at the top, and nothing beyond them.
+    CHECK(wm.listRow(id, "List", 0) != 0);
+    CHECK(wm.listRow(id, "List", 9) != 0);
+    CHECK(wm.listRow(id, "List", 500) == 0);
+    CHECK(wm.listRow(id, "List", 9999) == 0);
+}
+
+TEST_CASE("ListView: scrolling re-points the rows it already has")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildListPage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 10000));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // Every row instance that exists right now.
+    std::set<int> before;
+    for (int i = 0; i < 12; ++i)
+        if (const int r = (int)wm.listRow(id, "List", i)) before.insert(r);
+    REQUIRE(before.size() >= 10);
+    const std::size_t elemsBefore = wm.tree(id)->elements.size();
+
+    // Jump a long way down.
+    CHECK(wm.scrollListToItem(id, "List", 400));
+    out.clear();
+    wm.extract(400.0f, 400.0f, out);
+
+    std::set<int> after;
+    for (int i = 380; i < 405; ++i)
+        if (const int r = (int)wm.listRow(id, "List", i)) after.insert(r);
+    CHECK(after.size() >= 10);
+    // THE point: the same handful of live widgets, pointed at different items.
+    // Rebuilding them would allocate new instances and new element ids, and a
+    // list that does that at 60 Hz is a list that stutters while it scrolls.
+    CHECK(after == before);
+    CHECK(wm.tree(id)->elements.size() == elemsBefore);
+    // The top of the list is no longer realized, which is what "virtualized"
+    // means and what a plain vertical box could never do.
+    CHECK(wm.listRow(id, "List", 0) == 0);
+}
+
+TEST_CASE("ListView: a list that is not moving does not redraw")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildListPage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 500));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    wm.consumeVisualDirty();          // settle whatever the setup raised
+
+    // A second frame with nothing happening: no row changed the item it stands
+    // on, so nothing was bound again and there is nothing to draw. This is the
+    // real proof that the sync is idempotent — a rebind raises the flag, so a
+    // false here means it did not happen.
+    out.clear();
+    wm.extract(400.0f, 400.0f, out);
+    CHECK_FALSE(wm.consumeVisualDirty());
+
+    // Scrolling does move rows onto other items, and that IS a redraw.
+    CHECK(wm.processWheel(400.0f, 400.0f, 200.0f, 200.0f, -3.0f));
+    CHECK(wm.consumeVisualDirty());
+}
+
+TEST_CASE("ListView: the click picks the row under the pointer")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildListPage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 100));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    CHECK(wm.listSelected(id, "List") == -1);
+
+    // Rows are 40 tall from the top: y=100 is inside row 2.
+    CHECK(wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, true, true));
+    CHECK(wm.listSelected(id, "List") == 2);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, false, true);
+
+    // Single mode replaces rather than adds.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 220.0f, true, true);
+    CHECK(wm.listSelected(id, "List") == 5);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 220.0f, false, true);
+
+    // Scrolled, the same pixel is a different item — the pick follows what is
+    // DRAWN there, not what index the row happens to be counted at.
+    REQUIRE(wm.scrollListToItem(id, "List", 50));
+    wm.extract(400.0f, 400.0f, out);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, true, true);
+    CHECK(wm.listSelected(id, "List") > 5);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, false, true);
+
+    // …and by hand, which is what a script does.
+    CHECK(wm.setListSelected(id, "List", 7, true));
+    CHECK(wm.listSelected(id, "List") == 7);
+    CHECK(wm.setListSelected(id, "List", -1, true));    // -1 clears
+    CHECK(wm.listSelected(id, "List") == -1);
+}
+
+// The other half of the contract: the list holds no items, so it has to ASK.
+TEST_CASE("ListView: the owner is asked to fill in each row it puts up")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The page's own graph: On Row Bind → write into a label on the page. It
+    // proves the event arrives, addressed by the element the list was authored
+    // as. Built by hand rather than by the helper, because the graph has to name
+    // that element id and a marker label has to exist beside it.
+    HE::UIWidgetTree row;
+    row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+    row.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    row.add(HE::UIWidgetType::Text);
+    registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int list = page.add(HE::UIWidgetType::ListView);
+    {
+        auto* lv = dynamic_cast<HE::UIListView*>(page.find(list));
+        lv->name = "List";
+        HE::uiSetAnchorPreset(*lv, 0); lv->pivotX = lv->pivotY = 0.0f;
+        lv->posX = 0.0f; lv->posY = 0.0f; lv->sizeX = 400.0f; lv->sizeY = 400.0f;
+        lv->rowWidget = "mem://row.hasset";
+        lv->rowHeight = 40.0f; lv->spacing = 0.0f; lv->padding = 0.0f;
+    }
+    // A label OFF the list, so its glyphs cannot be confused with a row's.
+    const int mark = page.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *page.find(mark);
+        e.setProp("Text", HE::UIPropValue::ofString(""));
+        e.hitTestable = false;
+    }
+
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnRowBind"; ev.elem = list;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "BOUND";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = mark;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+    registerWidget(cm, page, &g, "mem://page.hasset");
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    CHECK(wm.tree(id)->find(mark)->getProp("Text").s.empty());
+
+    REQUIRE(wm.setListCount(id, "List", 50));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    // The list asked, and the owner answered.
+    CHECK(wm.tree(id)->find(mark)->getProp("Text").s == "BOUND");
+
+    // And the row it asked about is reachable, which is how the answer is
+    // written into the row in a real application.
+    CHECK(wm.listRow(id, "List", 0) != 0);
+
+    // Refresh asks again for everything on screen without moving anything: the
+    // list never saw the data, so an edit to it is invisible until told.
+    CHECK(wm.refreshList(id, "List"));
+    CHECK(wm.consumeVisualDirty());
+    CHECK(wm.listRow(id, "List", 0) != 0);
+}
+
+TEST_CASE("ListView: a row is placed by the item it shows, not by stacking")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildListPage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 1000));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // Scroll to the middle: the realized rows are somewhere around item 300,
+    // and each one sits at its OWN item's offset — not at the offset it would
+    // have if the rows before it had been stacked, because they do not exist.
+    REQUIRE(wm.scrollListToItem(id, "List", 300));
+    wm.extract(400.0f, 400.0f, out);
+
+    const HE::UIWidgetTree* tree = wm.tree(id);
+    REQUIRE(tree);
+    const HE::UIListView* lv = nullptr;
+    for (const auto& ep : tree->elements)
+        if (ep && ep->name == "List") lv = dynamic_cast<const HE::UIListView*>(ep.get());
+    REQUIRE(lv);
+
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*tree, 400.0f, 400.0f);
+    int checked = 0;
+    for (const auto& ep : tree->elements)
+    {
+        const auto* r = dynamic_cast<const HE::UIWidgetRef*>(ep.get());
+        if (!r || r->parentId != lv->id || r->rowIndex < 0) continue;
+        const HE::UIWidgetRect rect = HE::uiElementRect(*tree, *r, &canvas);
+        CHECK(rect.y == doctest::Approx(r->rowIndex * lv->rowStep() - lv->scrollOffset));
+        CHECK(rect.h == doctest::Approx(lv->rowHeight));
+        ++checked;
+    }
+    CHECK(checked >= 10);
 }

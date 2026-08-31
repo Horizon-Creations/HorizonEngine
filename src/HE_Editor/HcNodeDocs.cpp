@@ -271,6 +271,35 @@ namespace
 	  "Empties one element of everything Add Widget Child put in it, and says how "
 	  "many went. The short way to rebuild a list from scratch instead of "
 	  "tracking every row you added." },
+	{ "widget.setListCount",
+	  "Tells a ListView how many items there are. It keeps no items of its own: "
+	  "it works out which of them fit on screen, puts up only those rows, and asks "
+	  "you to fill each one in through On Row Bind. That is why ten thousand items "
+	  "cost ten rows instead of ten thousand elements. Name the list by the name "
+	  "its element has in the designer." },
+	{ "widget.listCount",
+	  "How many items the list was last told it has. Not how many rows are on "
+	  "screen — that is the list's own business." },
+	{ "widget.listRow",
+	  "The live row showing that item, or 0 when it is scrolled out of sight. This "
+	  "is what an On Row Bind handler writes into: Set External for the row's "
+	  "public variables, Call External for its functions. Do not hold on to it — "
+	  "the same row is pointed at a different item as soon as the list scrolls." },
+	{ "widget.refreshList",
+	  "Asks every row on screen to be filled in again, without moving anything. "
+	  "What you call after sorting, filtering or editing your data: the list never "
+	  "saw it, so it cannot notice that it changed." },
+	{ "widget.setListSelected",
+	  "Picks or unpicks one item. An index of -1 clears the selection. Does nothing "
+	  "when the list's Selection is None; in Single mode picking one drops the "
+	  "other. Fires On Selection Changed when the set really changed." },
+	{ "widget.listSelected",
+	  "The picked item's index, or -1 when nothing is picked. With Multiple "
+	  "selection this is the lowest of them." },
+	{ "widget.scrollListToItem",
+	  "Scrolls just far enough for that item to be fully visible, and does nothing "
+	  "when it already is — so stepping through a list does not re-centre it on "
+	  "every step." },
 
 	// ── Theme ────────────────────────────────────────────────────────────────
 	{ "theme.set",

@@ -650,6 +650,10 @@ HE_HC_VALUE_EVENT(fireOnCheckChanged,  "OnCheckChanged",  bool,
                   onCheckChanged(elem, v),  Value::ofBool(v))
 HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
                   onSelectionChanged(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnRowBind, "OnRowBind", int,
+                  onRowBind(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
+                  onRowActivated(elem, v), Value::ofInt(v))
 #undef HE_HC_VALUE_EVENT
 
 // The physics contacts: one Int argument (the other entity), no element. Same

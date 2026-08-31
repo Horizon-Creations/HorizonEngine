@@ -1944,6 +1944,22 @@ namespace
 	  "it for you. A bound colour's swatch is read-only, because editing it would "
 	  "be overwritten the next time the theme or the mode changes.",
 	  "", "ui#elements" },
+	{ "UI Widget/Row Widget", "",
+	  "The widget one row of this list is made of — authored once, in this same "
+	  "designer, and repeated. The list keeps no items: the running application "
+	  "says how many there are (Set List Count) and the list asks On Row Bind to "
+	  "fill in each row it actually puts on screen. That is why ten thousand items "
+	  "cost the ten rows you can see instead of ten thousand elements. Without a "
+	  "row widget a list can never show anything, which the designer says on the "
+	  "list itself.",
+	  "", "ui#elements" },
+	{ "UI Widget/Selection", "",
+	  "What clicking a row does. \"None\" is a list you only read. \"Single\" picks "
+	  "one and drops the one before it. \"Multiple\" toggles each row you click, so "
+	  "a second one adds rather than replaces — no key held down. Either way the "
+	  "list fires On Selection Changed with the item's index, and Get List Selected "
+	  "answers it later.",
+	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
 	  "number for all four; at half the shorter side the shape becomes a capsule, "

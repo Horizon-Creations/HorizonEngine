@@ -122,6 +122,11 @@ public:
     { fireEvent("OnCheckChanged", elem, Value::ofBool(checked)); }
     virtual void onSelectionChanged(int elem, int index)
     { fireEvent("OnSelectionChanged", elem, Value::ofInt(index)); }
+    // List rows — the argument is the ITEM index in both cases.
+    virtual void onRowBind(int elem, int index)
+    { fireEvent("OnRowBind", elem, Value::ofInt(index)); }
+    virtual void onRowActivated(int elem, int index)
+    { fireEvent("OnRowActivated", elem, Value::ofInt(index)); }
     // GameInstance lifecycle.
     virtual void onInit()     { fireEvent("OnInit", 0, Value{}); }
     virtual void onShutdown() { fireEvent("OnShutdown", 0, Value{}); }

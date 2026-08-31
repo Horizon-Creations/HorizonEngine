@@ -59,6 +59,11 @@ enum class UIWidgetType : uint8_t
     // Slot Fill above 0 it eats the space left over instead, which is how one
     // pins something to the far end of a row.
     Spacer,
+    // A list of arbitrary length, built from ONE authored row. It holds no
+    // items: it holds a COUNT and a row template, realizes only the rows the
+    // view can show, and asks its owner to fill each one. That is what lets a
+    // list of ten thousand be ten elements instead of ten thousand.
+    ListView,
     COUNT
 };
 
@@ -435,6 +440,16 @@ public:
     // anchors and position, and take the slot the box hands them. Returning
     // true here is what switches uiElementRect over for every child.
     virtual bool laysOutChildren() const { return false; }
+
+    // ── Does this element scroll its own content? ────────────────────────────
+    // Non-null means yes, and the float IS the offset (canvas units, 0 = the
+    // top). The wheel, the per-frame clamp and the layout all ask THIS instead
+    // of naming the types that scroll, so the scroll box and the list view are
+    // one code path and a third scrolling container joins it for free.
+    virtual float* scrollOffsetPtr() { return nullptr; }
+    // How far it may be scrolled — 0 when everything already fits, which is
+    // also what says "the wheel belongs to whatever is behind me".
+    virtual float  maxScrollAmount() const { return 0.0f; }
     // Which way a container stacks (only asked when laysOutChildren()).
     virtual bool stacksVertically() const { return true; }
 

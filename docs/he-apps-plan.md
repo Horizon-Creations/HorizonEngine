@@ -1260,6 +1260,76 @@ Schicht 0 ebenfalls tragen muss.
 
 ---
 
+### B2 ListView (31.08.2026)
+
+Fünfzehnter Elementtyp, und der erste, dessen ganze Behauptung eine **Verneinung** ist: zehntausend
+Zeilen sind nicht zehntausend Elemente. Bisher war eine Liste entweder N im Designer vorgebaute
+Zeilen mit einer harten Decke, oder ab `addChild` N echte Elemente — und bei zehntausend steht das
+Programm.
+
+**Sie funktioniert, weil sie keine Daten hält.** Sie hält eine Zeilenvorlage (ein ganz normales
+UI-Widget-Asset, im selben Designer gebaut), eine **Anzahl**, die der Besitzer setzt, und eine
+Zeilenhöhe. Daraus rechnet sie aus, welche Einträge das Sichtfenster überhaupt zeigen kann,
+realisiert nur die, und lässt sich jede einzelne vom Besitzer füllen (`OnRowBind` mit dem
+**Eintrags**-Index). Scrollen richtet dieselbe Handvoll Zeilen auf andere Einträge, statt neue zu
+bauen: die Kosten sind die Größe des Fensters, nicht die der Liste.
+
+**Was daraus folgt, und wofür ich mich entschieden habe, es so zu lassen:** eine Liste, die keine
+Einträge hat, kann sie auch nicht **sortieren**. Der Plan nennt Sortierung und Spaltenbreiten in
+einem Atemzug mit der ListView; ich habe stattdessen `refreshList` gebaut. Sortieren ist eine
+Operation auf dem Array, das der Besitzer ohnehin schon hat (HorizonCode kann das), und danach
+fragt ein Aufruf alle sichtbaren Zeilen neu. Die Alternative wäre, die Daten ein zweites Mal in der
+Liste zu halten, und zwei Quellen für dieselbe Wahrheit sind teurer als der eine Aufruf.
+**Spaltenbreiten** gehören zur Tabelle mit Kopfzeile, und die ist ein eigener Typ (B2b, offen) —
+in der ListView sind „Spalten" das, was die Zeilenvorlage nebeneinander legt.
+
+**Vier Dinge, die dabei nicht so laufen konnten wie beim Rest:**
+
+**1. Die Platzierung ist nicht die der Layout-Boxen.** `boxSlotRect` findet den Platz eines Kindes,
+indem es alles davor aufaddiert — genau das, was eine virtualisierte Liste nicht kann, weil die
+Zeilen davor nicht existieren. Eine Zeile steht deshalb bei `Index × Schritt − Offset`, in
+`listSlotRect`. Der Kommentar in `boxSlotRect` behauptete, ein später hinzukommender Container werde
+„von diesem Code ohne Änderung gelegt": für das Lesen von Padding/Spacing per Namen stimmt das, für
+den Achsenlauf nicht, und für ein Grid wird es auch nicht stimmen.
+
+**2. Scrollen ist jetzt eine Frage, die jedes Element beantwortet.** `uiScrollBy`, der Clamp und das
+Mausrad nannten alle drei den `ScrollBox`-Typ. Statt jeder Stelle eine zweite Zeile zu geben, gibt
+es `UIElement::scrollOffsetPtr()` und `maxScrollAmount()`: nicht null heißt „ich scrolle". Der
+dritte scrollende Container kostet danach keine dieser Stellen mehr.
+
+**3. Zwei Zahlen pro Zeile, nicht eine.** `rowIndex` sagt, **wo** die Zeile steht, `rowBound`, worauf
+sie zuletzt **gefüllt** wurde. Genau diese Trennung ist das Recycling: beim Scrollen um eine Zeile
+ändert sich ein `rowIndex`, neun bleiben, und nur wo die beiden auseinanderlaufen wird `OnRowBind`
+gefeuert. Ein einziger Wert hätte entweder jeden Frame neu gefüllt (und damit jeden Frame neu
+gezeichnet) oder gar nicht mehr.
+
+**4. Mehrfachauswahl schaltet beim einfachen Klick um.** `processPointer` bekommt die Modifiertasten
+nicht, und der Modus wurde vom Autor gerade deshalb gewählt, weil mehr als eine Zeile gemeint ist.
+Eine Liste, in der die zweite Zeile nur mit Strg erreichbar wäre, ist schlechter als eine ohne.
+
+**Die Tests sind entsprechend Zählungen von Dingen, die nicht passieren dürfen**, und beide
+tragenden habe ich gegengeprüft, indem ich den Mechanismus absichtlich kaputtgemacht habe: ohne den
+`rowBound`-Vergleich wird „eine Liste, die sich nicht bewegt, zeichnet nicht neu" rot, und wenn die
+Zeilen jedes Mal neu gegraftet werden, wird „Scrollen richtet die vorhandenen Zeilen neu aus" rot.
+
+**Zwei Funde nebenbei, beide von diesem Durchgang aufgedeckt und beide behoben:**
+
+- **`runtime_size` urteilte über Debug-Bäume.** Die Schwellen (90/32 MB) sind an einem
+  **Release**-Baum gemessen; ein Debug-Deploy wiegt 132 MB und ging folgerichtig rot, obwohl an der
+  ausgelieferten Größe nichts dran ist. Der Build-Typ wandert jetzt aus CMake in das Skript, und
+  alles außer Release berichtet nur. Der Docstring sagte die Lehre schon („der Messpunkt ist Teil
+  der Behauptung"), die Prüfung kannte ihren eigenen Messpunkt nur nicht.
+- **Der Starttest hatte eine Release-Frist.** 40 Sekunden für 30 Frames; ein Debug-Build braucht
+  ~176 s, weil das Backend beim ersten Lauf jede Pipeline übersetzt (auf macOS 27 ohne
+  `MTLBinaryArchive`, siehe Memory). Er meldete „hat nie 30 Frames geschafft" — wahr, und über die
+  falsche Sache. Die Frist hängt jetzt an `NDEBUG`.
+
+**Offen an dieser Ecke:** die Tabelle mit Kopfzeile und ziehbaren Spalten (B2b), variable
+Zeilenhöhen (v1 ist bewusst fest — dort explodiert die Komplexität), und der Doppelklick auf eine
+Zeile ist nur im Spiel-Runtime verdrahtet, in der Live-Vorschau des Editors noch nicht.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

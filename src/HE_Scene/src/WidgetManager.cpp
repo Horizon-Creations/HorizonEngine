@@ -378,76 +378,103 @@ HorizonCode::InstanceId WidgetManager::addChild(ContentManager& content, int wid
 		            widgetId, parentName.c_str());
 		return 0;
 	}
+	const HorizonCode::InstanceId child =
+		graftChildRef(*w, content, parent->id, assetPath, /*rowIndex=*/-1);
+	if (child != 0)
+		HE_LOG_DEBUG(Widget, "addChild: '%s' under '%s' of widget %d (instance %llu)",
+		             assetPath.c_str(), parentName.c_str(), widgetId,
+		             static_cast<unsigned long long>(child));
+	return child;
+}
+
+// The graft itself, with the parent already found. Split out of addChild because
+// a list realizes its rows with exactly this and nothing else — if the two had
+// their own copies, a row grafted by a list and a row grafted by a script would
+// eventually differ in how they are themed, sized or constructed.
+HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager& content,
+                                                     int parentElem,
+                                                     const std::string& assetPath,
+                                                     int rowIndex)
+{
 	if (assetPath.empty())
 	{
 		HE_LOG_WARN(Widget, "%s", "addChild: no widget asset given");
 		return 0;
 	}
 
-	// The new row is a WidgetRef under that parent, and then the ordinary graft
+	// The new child is a WidgetRef under that parent, and then the ordinary graft
 	// path does the rest — the same code an authored WidgetRef goes through, so
 	// a runtime row and an authored one are the same thing by construction.
 	auto ref = std::make_unique<HE::UIWidgetRef>();
-	const int refId = w->tree.nextId++;
+	const int refId = w.tree.nextId++;
 	ref->id       = refId;
-	ref->parentId = parent->id;
-	ref->name     = "Child";
+	ref->parentId = parentElem;
+	ref->name     = rowIndex >= 0 ? "Row" : "Child";
 	ref->widgetPath = assetPath;
+	// A list row is placed by the ITEM it shows, not by stacking (listSlotRect).
+	ref->rowIndex = rowIndex;
+	ref->rowBound = -1;      // never bound yet, whatever index it starts on
 	// Inside a layout box only the size along the axis is read, and it is the
 	// row's own height that should decide it. Filled in from the embedded
 	// asset's canvas below, once it is known; until then the type's default.
-	w->tree.elements.push_back(std::move(ref));
+	w.tree.elements.push_back(std::move(ref));
 
-	const std::size_t embedsBefore = w->embeds.size();
+	const std::size_t embedsBefore = w.embeds.size();
 	{
 		// Seeded with THIS widget's own asset, exactly as createWidget seeds it:
 		// grafting a widget into itself is the circle the guard exists for, and
 		// an empty chain would let it through and expand until the depth cap.
-		std::vector<std::string> chain{ w->assetPath };
-		embedWidgetRefs(*w, content, chain, 0);
+		std::vector<std::string> chain{ w.assetPath };
+		embedWidgetRefs(w, content, chain, 0);
 	}
-	if (w->embeds.size() == embedsBefore)
+	if (w.embeds.size() == embedsBefore)
 	{
 		// The graft refused (missing asset, unreadable tree, a circle). Leave no
 		// empty slot behind: a row that is not there must not take up space.
-		w->tree.elements.erase(
-			std::remove_if(w->tree.elements.begin(), w->tree.elements.end(),
+		w.tree.elements.erase(
+			std::remove_if(w.tree.elements.begin(), w.tree.elements.end(),
 				[refId](const std::unique_ptr<HE::UIElement>& e){ return e && e->id == refId; }),
-			w->tree.elements.end());
+			w.tree.elements.end());
 		return 0;
 	}
 
 	// The embed the graft just made for THIS ref (a row may itself embed more,
 	// which appended further entries — the one with rootElem == refId is ours).
 	HorizonCode::InstanceId child = 0;
-	for (std::size_t i = embedsBefore; i < w->embeds.size(); ++i)
-		if (w->embeds[i].rootElem == refId) { child = w->embeds[i].scriptId; break; }
-	if (child == 0) child = w->embeds[embedsBefore].scriptId;
+	for (std::size_t i = embedsBefore; i < w.embeds.size(); ++i)
+		if (w.embeds[i].rootElem == refId) { child = w.embeds[i].scriptId; break; }
+	if (child == 0) child = w.embeds[embedsBefore].scriptId;
 
-	if (auto* placed = dynamic_cast<HE::UIWidgetRef*>(w->tree.find(refId));
+	if (auto* placed = dynamic_cast<HE::UIWidgetRef*>(w.tree.find(refId));
 	    placed && placed->contentW > 0.0f && placed->contentH > 0.0f)
 	{
 		// The slot is as big as the row was authored — a row drawn for 400x48
-		// takes 48 units in a vertical box rather than the ref type's 200.
+		// takes 48 units in a vertical box rather than the ref type's 200. A LIST
+		// row's height is the list's Row Height instead (listSlotRect), so only
+		// its width is taken from the asset there.
 		placed->sizeX = placed->contentW;
-		placed->sizeY = placed->contentH;
+		if (rowIndex < 0) placed->sizeY = placed->contentH;
 	}
 
 	// The theme, then materials and fonts, for what just arrived — a row grafted
 	// in at run time is themed like one that was there from the start.
-	HE::uiApplyTheme(w->tree, m_theme, themeMode());
-	for (const auto& e : w->tree.elements)
-		if (e && e->id > 0) refreshElementAssets(*w, *e);
+	HE::uiApplyTheme(w.tree, m_theme, themeMode());
+	for (const auto& e : w.tree.elements)
+		if (e && e->id > 0) refreshElementAssets(w, *e);
 
 	// Construct last, like createWidget does: the row is fully in the tree
 	// before its own logic can look at it.
-	for (std::size_t i = embedsBefore; i < w->embeds.size(); ++i)
-		rt().fireConstruct(w->embeds[i].scriptId);
+	for (std::size_t i = embedsBefore; i < w.embeds.size(); ++i)
+		rt().fireConstruct(w.embeds[i].scriptId);
 	m_visualDirty = true;
-	HE_LOG_DEBUG(Widget, "addChild: '%s' under '%s' of widget %d (instance %llu)",
-	             assetPath.c_str(), parentName.c_str(), widgetId,
-	             static_cast<unsigned long long>(child));
 	return child;
+}
+
+HorizonCode::InstanceId WidgetManager::instanceOfChild(const Instance& w, int refElemId) const
+{
+	for (const Instance::Embed& em : w.embeds)
+		if (em.rootElem == refElemId) return em.scriptId;
+	return 0;
 }
 
 bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
@@ -523,6 +550,250 @@ int WidgetManager::clearChildren(int widgetId, const std::string& parentName)
 	for (const HorizonCode::InstanceId id : mine)
 		if (removeChild(widgetId, id)) ++removed;
 	return removed;
+}
+
+// ── Lists (docs/he-apps-plan.md B2) ──────────────────────────────────────────
+
+HE::UIListView* WidgetManager::findList(int widgetId, const std::string& listName)
+{
+	Instance* w = find(widgetId);
+	if (!w) return nullptr;
+	for (const auto& ep : w->tree.elements)
+		if (ep && ep->name == listName)
+			return dynamic_cast<HE::UIListView*>(ep.get());
+	return nullptr;
+}
+const HE::UIListView* WidgetManager::findList(int widgetId, const std::string& listName) const
+{
+	const Instance* w = find(widgetId);
+	if (!w) return nullptr;
+	for (const auto& ep : w->tree.elements)
+		if (ep && ep->name == listName)
+			return dynamic_cast<const HE::UIListView*>(ep.get());
+	return nullptr;
+}
+
+std::vector<HE::UIWidgetRef*> WidgetManager::listRowsOf(Instance& w, int listId)
+{
+	std::vector<HE::UIWidgetRef*> rows;
+	for (auto& ep : w.tree.elements)
+		if (auto* r = dynamic_cast<HE::UIWidgetRef*>(ep.get());
+		    r && r->parentId == listId && r->rowIndex >= 0)
+			rows.push_back(r);
+	return rows;
+}
+
+bool WidgetManager::setListCount(int widgetId, const std::string& listName, int count)
+{
+	HE::UIListView* lv = findList(widgetId, listName);
+	if (!lv) return false;
+	const int n = count > 0 ? count : 0;
+	if (lv->itemCount == n) return true;
+	lv->itemCount = n;
+	// A selection that points past the end is a selection of nothing. Dropped
+	// silently rather than clamped: clamping would move the highlight onto a row
+	// the user never picked.
+	lv->selection.erase(std::remove_if(lv->selection.begin(), lv->selection.end(),
+		[n](int i){ return i >= n; }), lv->selection.end());
+	lv->scrollOffset = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
+	m_visualDirty = true;
+	if (m_content) if (Instance* w = find(widgetId)) syncLists(*w);
+	return true;
+}
+
+int WidgetManager::listCount(int widgetId, const std::string& listName) const
+{
+	const HE::UIListView* lv = findList(widgetId, listName);
+	return lv ? lv->itemCount : 0;
+}
+
+HorizonCode::InstanceId WidgetManager::listRow(int widgetId, const std::string& listName,
+                                               int index) const
+{
+	const Instance* w = find(widgetId);
+	const HE::UIListView* lv = findList(widgetId, listName);
+	if (!w || !lv || index < 0) return 0;
+	for (const auto& ep : w->tree.elements)
+		if (const auto* r = dynamic_cast<const HE::UIWidgetRef*>(ep.get());
+		    r && r->parentId == lv->id && r->rowIndex == index)
+			return instanceOfChild(*w, r->id);
+	return 0;
+}
+
+bool WidgetManager::refreshList(int widgetId, const std::string& listName)
+{
+	Instance* w = find(widgetId);
+	HE::UIListView* lv = findList(widgetId, listName);
+	if (!w || !lv) return false;
+	// "Bound to nothing" is how a rebind is asked for: syncLists fills in every
+	// row whose bound item differs from the one it stands on, and -1 differs
+	// from all of them.
+	for (HE::UIWidgetRef* r : listRowsOf(*w, lv->id)) r->rowBound = -1;
+	m_visualDirty = true;
+	if (m_content) syncLists(*w);
+	return true;
+}
+
+bool WidgetManager::setListSelected(int widgetId, const std::string& listName,
+                                    int index, bool on)
+{
+	Instance* w = find(widgetId);
+	HE::UIListView* lv = findList(widgetId, listName);
+	if (!w || !lv) return false;
+	const bool changed = index < 0 ? lv->clearSelection() : lv->setSelected(index, on);
+	if (!changed) return true;
+	m_visualDirty = true;
+	const ScriptTarget t = scriptTargetFor(*w, lv->id);
+	rt().fireOnSelectionChanged(t.scriptId, t.elem, lv->firstSelected());
+	return true;
+}
+
+int WidgetManager::listSelected(int widgetId, const std::string& listName) const
+{
+	const HE::UIListView* lv = findList(widgetId, listName);
+	return lv ? lv->firstSelected() : -1;
+}
+
+bool WidgetManager::scrollListToItem(int widgetId, const std::string& listName, int index)
+{
+	Instance* w = find(widgetId);
+	HE::UIListView* lv = findList(widgetId, listName);
+	if (!w || !lv) return false;
+	if (!lv->scrollToItem(index)) return true;   // already in view: nothing to do
+	m_visualDirty = true;
+	if (m_content) syncLists(*w);
+	return true;
+}
+
+void WidgetManager::selectListRow(Instance& w, HE::UIListView& lv, int item)
+{
+	if (lv.selectionMode == 0 || item < 0 || item >= lv.itemCount) return;
+	// Multiple mode TOGGLES on a plain press, rather than needing a held Ctrl or
+	// Shift. Two reasons, and the second is the real one: this call is not given
+	// the modifier keys at all, and a list where a second row can only be picked
+	// with a chord is worse than one where it cannot — the mode was chosen by the
+	// author precisely because more than one row is meant to be picked.
+	const bool changed = lv.selectionMode == 2
+		? lv.setSelected(item, !lv.isSelected(item))
+		: lv.setSelected(item, true);
+	if (!changed) return;
+	m_visualDirty = true;
+	const ScriptTarget t = scriptTargetFor(w, lv.id);
+	rt().fireOnSelectionChanged(t.scriptId, t.elem, lv.firstSelected());
+}
+
+void WidgetManager::syncLists()
+{
+	if (!m_content) return;
+	for (Instance& w : m_instances) syncLists(w);
+}
+
+void WidgetManager::syncLists(Instance& w)
+{
+	if (!m_content) return;
+	// Ids first: realizing a row appends to tree.elements, and iterating it while
+	// that happens walks off the end of the vector it is holding.
+	std::vector<int> listIds;
+	for (const auto& ep : w.tree.elements)
+		if (ep && ep->type() == HE::UIWidgetType::ListView) listIds.push_back(ep->id);
+	if (listIds.empty()) return;
+
+	// A guard, not a design: a Row Height of one unit in a tall list would
+	// otherwise ask for thousands of rows and defeat the whole point. Anything
+	// above this is a list whose rows are too small to read anyway.
+	constexpr int kMaxRealizedRows = 256;
+
+	for (const int listId : listIds)
+	{
+		auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(listId));
+		if (!lv) continue;
+
+		// ── Which items can be seen ──────────────────────────────────────────
+		int first = 0, count = 0;
+		const float step = lv->rowStep();
+		if (lv->itemCount > 0 && step > 0.0f && !lv->rowWidget.empty())
+		{
+			lv->scrollOffset = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
+			first = static_cast<int>(std::floor(lv->scrollOffset / step));
+			first = std::clamp(first, 0, lv->itemCount - 1);
+			// Rows the view touches, plus one: while the list is scrolled between
+			// two rows there is a sliver of a further one at the bottom edge, and
+			// a list that realizes it only after the scroll has finished shows a
+			// gap for exactly as long as the finger is down.
+			const float reach = lv->scrollOffset + lv->innerHeight();
+			count = static_cast<int>(std::ceil(reach / step)) - first + 1;
+			count = std::clamp(count, 1, kMaxRealizedRows);
+			count = std::min(count, lv->itemCount - first);
+		}
+		// ── Exactly that many rows, no more ──────────────────────────────────
+		std::vector<HE::UIWidgetRef*> rows = listRowsOf(w, listId);
+		// Rows whose template no longer matches are not recyclable — they are the
+		// wrong widget entirely — so they go before anything is counted.
+		std::vector<HorizonCode::InstanceId> doomed;
+		for (HE::UIWidgetRef* r : rows)
+			if (r->widgetPath != lv->rowWidget)
+				if (const HorizonCode::InstanceId id = instanceOfChild(w, r->id)) doomed.push_back(id);
+		for (const HorizonCode::InstanceId id : doomed) removeChild(w.id, id);
+		if (!doomed.empty()) rows = listRowsOf(w, listId);
+
+		while (static_cast<int>(rows.size()) > count)
+		{
+			const HorizonCode::InstanceId id = instanceOfChild(w, rows.back()->id);
+			if (id == 0 || !removeChild(w.id, id)) break;   // stop rather than spin
+			const std::size_t before = rows.size();
+			rows = listRowsOf(w, listId);
+			if (rows.size() >= before) break;               // nothing went: give up
+		}
+		for (int i = static_cast<int>(rows.size()); i < count; ++i)
+		{
+			// Grafted at the item it will show, so it is placed correctly on the
+			// very first frame rather than at row 0 for one of them.
+			if (graftChildRef(w, *m_content, listId, lv->rowWidget, first + i) == 0)
+			{
+				// The template is missing or circular; the graft already said so.
+				// Stop asking for it this frame instead of failing once per row.
+				count = i;
+				break;
+			}
+		}
+		rows = listRowsOf(w, listId);
+		if (rows.empty()) continue;
+		count = std::min(count, static_cast<int>(rows.size()));
+		const int last = first + count - 1;
+
+		// ── Point them at the right items ────────────────────────────────────
+		// Rows already standing on a wanted item keep it. That is the whole of
+		// the recycling: scrolling by one moves ONE row, and the other nine are
+		// not touched, not rebuilt and not asked again.
+		std::vector<bool> taken(static_cast<std::size_t>(count), false);
+		for (HE::UIWidgetRef* r : rows)
+			if (r->rowIndex >= first && r->rowIndex <= last)
+			{
+				const std::size_t slot = static_cast<std::size_t>(r->rowIndex - first);
+				if (!taken[slot]) taken[slot] = true;
+				else r->rowIndex = -1;    // a duplicate; it will take a free item below
+			}
+			else r->rowIndex = -1;
+		std::size_t next = 0;
+		for (HE::UIWidgetRef* r : rows)
+		{
+			if (r->rowIndex >= 0) continue;
+			while (next < taken.size() && taken[next]) ++next;
+			if (next >= taken.size()) break;   // more rows than items: cannot happen
+			taken[next] = true;
+			r->rowIndex = first + static_cast<int>(next);
+		}
+
+		// ── …and tell the owner about the ones that moved ────────────────────
+		const ScriptTarget t = scriptTargetFor(w, listId);
+		for (HE::UIWidgetRef* r : rows)
+		{
+			if (r->rowIndex < 0 || r->rowBound == r->rowIndex) continue;
+			r->rowBound = r->rowIndex;
+			m_visualDirty = true;
+			rt().fireOnRowBind(t.scriptId, t.elem, r->rowIndex);
+		}
+	}
 }
 
 void WidgetManager::destroyWidget(int id)
@@ -627,6 +898,40 @@ void WidgetManager::tick(float dt)
 	}
 }
 
+namespace
+{
+	// The item under the pointer in a list, or -1 for padding, a gap or past the
+	// end. The list's own numbers (row height, spacing, the offset) are in the
+	// units of the widget it was authored in, so the pointer has to be brought
+	// all the way into THOSE — canvas scale first, then the embed's scale.
+	int listRowAtPointer(const HE::UIWidgetTree& tree, const HE::UIListView& lv,
+	                     const HE::UIWidgetCanvas& canvas, float mouseY)
+	{
+		if (canvas.scaleY <= 0.0f) return -1;
+		const HE::UIWidgetRect r = HE::uiElementRect(tree, lv, &canvas);
+		float us = 1.0f, vs = 1.0f;
+		HE::uiElementUnitScale(tree, lv, us, vs, &canvas);
+		if (vs <= 0.0f) return -1;
+		return lv.rowAt((mouseY / canvas.scaleY - r.y) / vs);
+	}
+
+	// Is `elemId` inside `ancestorId` (or is it that element)? What "the pointer
+	// is still on this list" means when it is really on a button in one of its
+	// rows.
+	bool isSelfOrDescendant(const HE::UIWidgetTree& tree, int ancestorId, int elemId)
+	{
+		int guard = 0;
+		for (const HE::UIElement* e = tree.find(elemId);
+		     e && guard++ < static_cast<int>(tree.elements.size()) + 1;
+		     e = tree.find(e->parentId))
+		{
+			if (e->id == ancestorId) return true;
+			if (e->parentId == 0) break;
+		}
+		return false;
+	}
+}
+
 bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) const
 {
 	if (e.interactive()) return true;
@@ -661,8 +966,19 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// else means a panel drawn over a button is a panel you can click straight
 	// through. Decoration opts out by being hitTestable = false, which is what
 	// that flag has always claimed to mean.
+	// Rows a list can show may have changed since the last frame (the count was
+	// set, it was scrolled, the window resized). Done before the hit test, not
+	// after the draw, so a row that has just appeared is clickable in the same
+	// frame it becomes visible.
+	syncLists();
+
 	Instance* topW = nullptr;
 	int  topElem = 0;
+	// The element the pointer LANDED on, before the bubbling below moves the
+	// event to whoever reacts. A list highlights the row under the pointer even
+	// when what is under it is a button in that row, and only the raw hit can
+	// answer that.
+	int  topHit  = 0;
 	long topKey  = 0;
 	bool topActs = false;      // does the winner actually take events?
 	HE::UICursor topCursor = HE::UICursor::Default;
@@ -717,7 +1033,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 				if (!topW || key >= topKey)
 				{
-					topW = &w; topElem = e.id; topKey = key; topCursor = e.hoverCursor;
+					topW = &w; topElem = e.id; topHit = e.id;
+					topKey = key; topCursor = e.hoverCursor;
 					topActs = isInteractive(w, e);
 					// A text field asks for the I-beam by BEING a text field.
 					// Only when the author picked nothing else: an explicit
@@ -808,6 +1125,26 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			w.hoveredElem = hot;
 		}
 
+		// ── The hovered ROW of every list ────────────────────────────────────
+		// Not part of the hover transition above and it cannot be: the pointer
+		// stays on the same list element while it travels from row to row, so
+		// the element the hover is ON never changes. What changes is the item
+		// under it, which only this arithmetic knows.
+		for (auto& ep : w.tree.elements)
+		{
+			auto* lv = dynamic_cast<HE::UIListView*>(ep.get());
+			if (!lv) continue;
+			const int was = lv->hoveredRow;
+			// Still "on the list" when the pointer is on something INSIDE one of
+			// its rows — a button in a row must not make the row go cold.
+			lv->hoveredRow = (isTop && topHit != 0 &&
+			                  isSelfOrDescendant(w.tree, lv->id, topHit))
+				? listRowAtPointer(w.tree, *lv,
+				                   HE::uiResolveCanvas(w.tree, vpWidth, vpHeight), mouseY)
+				: -1;
+			if (lv->hoveredRow != was) m_visualDirty = true;
+		}
+
 		// ── Press ────────────────────────────────────────────────────────────
 		if (pressEdge)
 		{
@@ -835,12 +1172,25 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					// extends the selection instead of moving the caret.
 					w.draggingText = hot;
 				}
-				else if (w.focusedElem != 0)
+				else
 				{
-					// Pressed something else in this widget → unfocus its field.
-					fireP(&HorizonCode::Runtime::fireOnUnfocused, w.focusedElem);
-					w.focusedElem = 0;
-					if (m_focusWidget == w.id) m_focusWidget = 0;
+					if (w.focusedElem != 0 && w.focusedElem != hot)
+					{
+						// Pressed something else in this widget → unfocus its field.
+						fireP(&HorizonCode::Runtime::fireOnUnfocused, w.focusedElem);
+						w.focusedElem = 0;
+						if (m_focusWidget == w.id) m_focusWidget = 0;
+					}
+					// A press in a list picks the row under it — and takes the
+					// keyboard focus, so the arrows step through the list rather
+					// than hunting for the next button somewhere on the page.
+					if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(hot)))
+					{
+						setFocus(w.id, hot);
+						selectListRow(w, *lv,
+							listRowAtPointer(w.tree, *lv,
+								HE::uiResolveCanvas(w.tree, vpWidth, vpHeight), mouseY));
+					}
 				}
 			}
 			else if (w.focusedElem != 0)
@@ -1370,8 +1720,52 @@ bool WidgetManager::activateFocused()
 	const HE::UIElement* e = w->tree.find(w->focusedElem);
 	if (!e || !HE::uiElementEffectiveEnabled(w->tree, *e) ||
 	    !HE::uiElementEffectiveVisible(w->tree, *e)) return false;
+	// A list opens its picked row rather than clicking itself. Deliberately NOT
+	// in activateElement: that one also runs on every pointer release, and a
+	// list where a single click both picks and opens is a list you cannot browse.
+	if (auto* lv = dynamic_cast<HE::UIListView*>(w->tree.find(w->focusedElem)))
+	{
+		const int item = lv->firstSelected();
+		if (item < 0) return false;
+		const ScriptTarget t = scriptTargetFor(*w, lv->id);
+		rt().fireOnRowActivated(t.scriptId, t.elem, item);
+		return true;
+	}
 	activateElement(*w, w->focusedElem);
 	return true;
+}
+
+bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
+                                      float mouseX, float mouseY)
+{
+	syncLists();
+	std::vector<Instance*> sorted;
+	for (auto& w : m_instances) if (w.visible) sorted.push_back(&w);
+	std::stable_sort(sorted.begin(), sorted.end(),
+		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+
+	for (Instance* wp : sorted)
+	{
+		Instance& w = *wp;
+		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		for (auto& ep : w.tree.elements)
+		{
+			auto* lv = dynamic_cast<HE::UIListView*>(ep.get());
+			if (!lv) continue;
+			if (!HE::uiElementEffectiveVisible(w.tree, *lv)) continue;
+			if (!HE::uiElementEffectiveEnabled(w.tree, *lv)) continue;
+			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *lv, &canvas);
+			if (mouseX < r.x * canvas.scaleX || mouseX > (r.x + r.w) * canvas.scaleX ||
+			    mouseY < r.y * canvas.scaleY || mouseY > (r.y + r.h) * canvas.scaleY)
+				continue;
+			const int item = listRowAtPointer(w.tree, *lv, canvas, mouseY);
+			if (item < 0) continue;
+			const ScriptTarget t = scriptTargetFor(w, lv->id);
+			rt().fireOnRowActivated(t.scriptId, t.elem, item);
+			return true;
+		}
+	}
+	return false;
 }
 
 bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
@@ -1390,6 +1784,32 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 		if (!w) return false;
 	}
 	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+
+	// A focused list takes up/down as a step through its ITEMS. Falling through
+	// at either end is the point: Down on the last row hands the focus to
+	// whatever is below the list, so a list is not a place the keyboard gets
+	// stuck in.
+	if (w->focusedElem != 0 && (dir == NavDir::Up || dir == NavDir::Down))
+		if (auto* lv = dynamic_cast<HE::UIListView*>(w->tree.find(w->focusedElem));
+		    lv && lv->itemCount > 0 && lv->selectionMode != 0)
+		{
+			const int cur  = lv->firstSelected();
+			const int next = cur < 0
+				? (dir == NavDir::Down ? 0 : lv->itemCount - 1)
+				: cur + (dir == NavDir::Down ? 1 : -1);
+			if (next >= 0 && next < lv->itemCount)
+			{
+				lv->clearSelection();
+				lv->setSelected(next, true);
+				const ScriptTarget t = scriptTargetFor(*w, lv->id);
+				rt().fireOnSelectionChanged(t.scriptId, t.elem, next);
+				// The row it just picked has to be on screen, or stepping past
+				// the bottom edge would move a highlight nobody can see.
+				lv->scrollToItem(next);
+				syncLists(*w);
+				return true;
+			}
+		}
 
 	// A focused slider takes left/right as a value step instead of handing the
 	// focus on — that is what those keys mean while a slider has the focus.
@@ -1468,6 +1888,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
                                  float mouseX, float mouseY, float wheel)
 {
 	if (wheel == 0.0f) return false;
+	syncLists();            // a list's rows decide how far it can scroll at all
 	m_visualDirty = true;   // a scrolled box moves everything inside it
 	// One notch moves this many canvas units — the same order as a text line,
 	// so a list of buttons steps rather than jumps.
@@ -1488,10 +1909,12 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 
 		int   best = 0;
 		int   bestDepth = -1;
-		for (const auto& ep : w.tree.elements)
+		for (auto& ep : w.tree.elements)
 		{
-			const HE::UIElement& e = *ep;
-			if (e.type() != HE::UIWidgetType::ScrollBox) continue;
+			HE::UIElement& e = *ep;
+			// Whatever says it scrolls — a scroll box or a list view. Naming the
+			// types here is how the wheel and the layout drift apart.
+			if (!e.scrollOffsetPtr()) continue;
 			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
 			if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
 			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
@@ -1517,6 +1940,10 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 
 void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)
 {
+	// Every list's rows, for the size the view has NOW: a window that just grew
+	// shows more rows in the frame it grew in, not in the one after it.
+	syncLists();
+
 	// Widgets sorted by zOrder (stable: creation order breaks ties).
 	std::vector<Instance*> sorted;
 	sorted.reserve(m_instances.size());
