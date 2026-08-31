@@ -69,6 +69,11 @@ enum class UIThemeTextLevel : uint8_t { Title = 0, Heading, Body, Small, Mono, C
 
 HE_API const char* uiThemeSizeName(UIThemeSize s);
 HE_API const char* uiThemeTextLevelName(UIThemeTextLevel t);
+// Unknown → COUNT, which every caller reads as "not bound". Both vocabularies
+// contain "Small", which is why an element decides which of the two a binding
+// belongs to from the PROPERTY it sits on, never from the name (uiApplyTheme).
+HE_API UIThemeSize      uiThemeSizeFromName(const std::string& s);
+HE_API UIThemeTextLevel uiThemeTextLevelFromName(const std::string& s);
 
 // A drop shadow as the theme hands it out: one step of "how far off the page".
 struct UIThemeShadow

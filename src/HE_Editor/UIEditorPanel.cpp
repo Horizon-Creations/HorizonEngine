@@ -591,7 +591,13 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 // somewhere else: the question "is this colour mine or the theme's" is about
 // THIS row, and an author who has to look in a second place to answer it will
 // not use the theme at all.
-void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed)
+// Which vocabulary a property may bind to. The property decides, never the name:
+// the size steps and the text levels both contain "Small", and only the thing it
+// sits on says which one is meant (see uiApplyTheme).
+enum class ThemeBindKind { Color, TextLevel, SizeStep };
+
+void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
+                         ThemeBindKind kind = ThemeBindKind::Color)
 {
 	// Its own scope — a helper that borrows the caller's is filed under whichever
 	// function happens to sit above it in this file. Same lesson as
@@ -604,18 +610,28 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed)
 	if (ImGui::SmallButton(label)) ImGui::OpenPopup("##rolepick");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip(bound.empty()
-			? "This colour is typed in here. Pick a theme role instead and every\n"
-			  "element with that role changes together — including light/dark."
-			: "This colour comes from the theme. Editing the swatch would be\n"
+			? "This value is typed in here. Pick a theme entry instead and every\n"
+			  "element bound to it changes together — including light/dark."
+			: "This value comes from the theme. Editing it here would be\n"
 			  "overwritten the next time the theme or the mode changes.");
 	if (ImGui::BeginPopup("##rolepick"))
 	{
 		if (ImGui::Selectable("Literal (type it here)", bound.empty()))
 		{ e.setThemeRole(prop, ""); committed = true; }
 		ImGui::Separator();
-		for (int i = 0; i < static_cast<int>(HE::UIThemeRole::COUNT); ++i)
+		const int n = kind == ThemeBindKind::Color
+			? static_cast<int>(HE::UIThemeRole::COUNT)
+			: kind == ThemeBindKind::TextLevel
+				? static_cast<int>(HE::UIThemeTextLevel::COUNT)
+				: static_cast<int>(HE::UIThemeSize::COUNT);
+		for (int i = 0; i < n; ++i)
 		{
-			const char* name = HE::uiThemeRoleName(static_cast<HE::UIThemeRole>(i));
+			const char* name =
+				kind == ThemeBindKind::Color
+					? HE::uiThemeRoleName(static_cast<HE::UIThemeRole>(i))
+					: kind == ThemeBindKind::TextLevel
+						? HE::uiThemeTextLevelName(static_cast<HE::UIThemeTextLevel>(i))
+						: HE::uiThemeSizeName(static_cast<HE::UIThemeSize>(i));
 			if (ImGui::Selectable(name, bound == name))
 			{ e.setThemeRole(prop, name); committed = true; }
 		}
@@ -658,10 +674,14 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	}
 	if (!perCorner)
 	{
+		const bool radiusBound = !n.themeRoleFor("Corner Radius").empty();
 		float r = n.cornerRadius.x;
+		ImGui::BeginDisabled(radiusBound);
 		if (ImGui::DragFloat("Corner Radius", &r, 0.5f, 0.0f, 10000.0f))
 		{ n.cornerRadius = glm::vec4(std::max(0.0f, r)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		drawThemeRoleButton(n, "Corner Radius", committed, ThemeBindKind::SizeStep);
 		EditorWidgets::helpForLabel("Corner Radius");
 	}
 	else
@@ -789,13 +809,21 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	{
 	case UIPropType::Float:
 	{
+		// A font size can come from the theme's typography levels, the same way a
+		// colour comes from a role — that is what makes "every heading on every
+		// screen" one number instead of forty.
+		const bool bindable = pd.name == "FontSize";
+		const bool bound = bindable && !e.themeRoleFor(pd.name).empty();
 		float v = e.getProp(pd.name).f;
 		const bool ranged = pd.minV < pd.maxV;
+		ImGui::BeginDisabled(bound);
 		const bool ch = ranged
 			? ImGui::SliderFloat((pd.name + id).c_str(), &v, pd.minV, pd.maxV)
 			: ImGui::DragFloat((pd.name + id).c_str(), &v, 0.5f);
 		if (ch) { e.setProp(pd.name, UIPropValue::ofFloat(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		if (bindable) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::TextLevel);
 		break;
 	}
 	case UIPropType::Int:

@@ -321,3 +321,48 @@ TEST_CASE("Theme: the project's choice survives project.hcfg")
     }
     std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("Theme: sizes and text levels bind like colours do")
+{
+    HE::UIWidgetTree tree;
+    const int text  = tree.add(HE::UIWidgetType::Text);
+    const int panel = tree.add(HE::UIWidgetType::Panel);
+
+    // One map carries all three kinds. WHAT a binding means is decided by the
+    // property's type — and by the property itself for the two Float
+    // vocabularies, which both contain "Small".
+    tree.find(text)->setThemeRole("FontSize", "Heading");
+    tree.find(panel)->setThemeRole("Corner Radius", "Large");
+
+    HE::UITheme t = HE::uiDefaultTheme();
+    t.textSize[static_cast<int>(HE::UIThemeTextLevel::Heading)] = 26.0f;
+    t.radius[static_cast<int>(HE::UIThemeSize::Large)] = 19.0f;
+
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark) == 2);
+    CHECK(tree.find(text)->getPropAny("FontSize").f == doctest::Approx(26.0f));
+    CHECK(tree.find(panel)->cornerRadius.x == doctest::Approx(19.0f));
+    CHECK(tree.find(panel)->cornerRadius.z == doctest::Approx(19.0f));  // all four
+
+    // The collision that makes "decide by the property" necessary: "Small" is a
+    // size step AND a text level, and each side has to read its own.
+    tree.find(text)->setThemeRole("FontSize", "Small");
+    tree.find(panel)->setThemeRole("Corner Radius", "Small");
+    t.textSize[static_cast<int>(HE::UIThemeTextLevel::Small)] = 11.0f;
+    t.radius[static_cast<int>(HE::UIThemeSize::Small)] = 3.0f;
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark) == 2);
+    CHECK(tree.find(text)->getPropAny("FontSize").f == doctest::Approx(11.0f));
+    CHECK(tree.find(panel)->cornerRadius.x == doctest::Approx(3.0f));
+
+    // A name from the WRONG vocabulary resolves in neither, so the value is left
+    // alone — the same "visible and fixable" rule a renamed colour role gets.
+    const float keptSize = tree.find(text)->getPropAny("FontSize").f;
+    tree.find(text)->setThemeRole("FontSize", "Medium");   // a size step, not a level
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark) == 1);   // only the panel
+    CHECK(tree.find(text)->getPropAny("FontSize").f == doctest::Approx(keptSize));
+
+    // …and all three kinds survive a save together.
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(tree), loaded));
+    CHECK(loaded.find(text)->themeRoleFor("FontSize") == "Medium");
+    CHECK(loaded.find(panel)->themeRoleFor("Corner Radius") == "Small");
+}

@@ -196,6 +196,36 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 	ImGui::Spacing();
 
+	// ── Starting from one of the shipped palettes ────────────────────────────
+	// The two built-in themes are C++ (HE::uiDefaultTheme / uiAmberTheme) rather
+	// than files: EngineContent's real payload is fetched over SFTP and the
+	// repository keeps only its folder structure, so a checked-in theme asset
+	// would be the one thing in there nobody could regenerate. Offering them
+	// HERE is better than shipping a file anyway — an author gets a palette AND
+	// an asset they can edit, in one click.
+	{
+		ImGui::SetNextItemWidth(160.0f);
+		const bool open = ImGui::BeginCombo("Start from", "Shipped palette");
+		if (!open) EditorWidgets::helpForLabel("Start from");
+		if (open)
+		{
+			for (const HE::UITheme* preset : { &HE::uiDefaultTheme(), &HE::uiAmberTheme() })
+				if (ImGui::Selectable(preset->name.c_str()))
+				{
+					// The NAME is the asset's, not the palette's: this replaces
+					// what the theme looks like, not what it is called.
+					const std::string keep = st.theme.name;
+					st.theme = *preset;
+					st.theme.name = keep;
+					st.dirty = true;
+				}
+			ImGui::EndCombo();
+		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("(replaces every value below)");
+	}
+	ImGui::Spacing();
+
 	ImGui::SeparatorText("Colours");
 	ImGui::TextDisabled("Role");
 	ImGui::SameLine(140.0f); ImGui::TextDisabled("Light");

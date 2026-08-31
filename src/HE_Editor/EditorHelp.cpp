@@ -1910,6 +1910,12 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	{ "Theme Editor/Start from", "",
+	  "Replaces every value below with one of the palettes the engine ships: the "
+	  "neutral Default, or Amber, which is the editor's own. They are a starting "
+	  "point and not a link — once taken, the theme is yours and editing it "
+	  "changes nothing else. The asset keeps its own name.",
+	  "", "ui#elements" },
 	{ "Theme Editor/Use for this Project", "",
 	  "Makes this the theme the project's interface resolves against, and the one "
 	  "an exported application boots with. It is stored in the project, not in "

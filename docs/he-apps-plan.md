@@ -1137,9 +1137,27 @@ die jeder ältere Runtime lesen kann. Der Game-Runtime lädt beides **vor** OnIn
 erste Widget entsteht und ein eine Frame später umgefärbtes Widget ein Aufblitzen der falschen
 Farben ist.
 
-**Offen aus D1:** das Amber-Theme als ausgeliefertes Asset statt nur als eingebaute Belegung, und
-die Typografie-Stufen sind bisher nur **Größen** — eine zweite Schriftart (Mono) ist eigene Arbeit
-und gehört zu D2.
+**Dritter Durchgang: D1 ist fertig.**
+
+**Größen und Textstufen binden wie Farben.** Die Textgrößen im Theme las bis dahin niemand — tote
+Daten. Jetzt trägt **dieselbe** Abbildung alle drei Arten, und **die Eigenschaft entscheidet, was
+eine Bindung bedeutet, nie der Name**: eine Color-Eigenschaft liest eine Farbrolle, `FontSize`
+liest die Typografie-Stufen, jede andere Float-Eigenschaft — Eckenradius, `Padding`, `Spacing` —
+liest die Größenstufen. Das ist keine Feinheit: die beiden Zahlen-Vokabulare enthalten **beide**
+ein „Small", und nur das, worauf die Bindung sitzt, sagt welches gemeint ist. Ein Name aus dem
+falschen Vokabular löst in keinem auf und lässt den Wert stehen — dieselbe „sichtbar und
+reparierbar"-Regel wie bei einer umbenannten Farbrolle. Ein Test fährt genau diese Kollision.
+
+**Die mitgelieferten Paletten bleiben C++**, und das ist eine Entscheidung, keine Auslassung:
+`EditorContent/EngineContent` holt seinen echten Inhalt über SFTP, im Repository liegt nur die
+Ordnerstruktur (`Materials/` enthält ein `.gitkeep` und sonst nichts). Ein eingechecktes
+Theme-Asset wäre dort das einzige, das niemand neu erzeugen könnte. Stattdessen bietet der
+Theme-Editor „Start from" an: Default oder Amber übernehmen, den Namen des Assets behalten. Das
+ist ohnehin besser als eine Datei — man bekommt eine Palette **und** ein Asset, das man ändern
+darf, in einem Klick.
+
+**Was ausdrücklich nicht in D1 kommt:** eine zweite Schriftart. „Mono" ist hier eine Größenstufe
+und keine Schriftfamilie; eine mitgelieferte Monospace-Schrift ist eigene Arbeit und gehört zu D2.
 
 **Als Nächstes:** der Rest von D1, dann D2 (Komponentenbibliothek) oder A3b.
 

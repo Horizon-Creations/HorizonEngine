@@ -85,6 +85,20 @@ const char* uiThemeTextLevelName(UIThemeTextLevel t)
     return (i >= 0 && i < kLevels) ? kLevelNames[i] : "";
 }
 
+UIThemeSize uiThemeSizeFromName(const std::string& s)
+{
+    for (int i = 0; i < kSizes; ++i)
+        if (s == kSizeNames[i]) return static_cast<UIThemeSize>(i);
+    return UIThemeSize::COUNT;
+}
+
+UIThemeTextLevel uiThemeTextLevelFromName(const std::string& s)
+{
+    for (int i = 0; i < kLevels; ++i)
+        if (s == kLevelNames[i]) return static_cast<UIThemeTextLevel>(i);
+    return UIThemeTextLevel::COUNT;
+}
+
 const char* uiThemeElevationName(UIThemeElevation e)
 {
     const int i = static_cast<int>(e);

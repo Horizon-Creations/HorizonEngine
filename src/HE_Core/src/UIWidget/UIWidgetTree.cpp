@@ -407,20 +407,46 @@ void uiSetAnchorInsetsY(UIElement& e, float top, float bottom)
 int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode)
 {
     int written = 0;
-    for (const auto& [prop, roleName] : e.themeRoles)
+    for (const auto& [prop, boundName] : e.themeRoles)
     {
-        const UIThemeRole role = uiThemeRoleFromName(roleName);
-        // A role that no longer exists leaves the property alone rather than
-        // painting it white: an element bound to a renamed role keeps the last
-        // colour it had, which is visible and fixable, instead of vanishing.
-        if (role == UIThemeRole::COUNT) continue;
-        // Only where the property really is a colour — a binding on a Float
-        // would otherwise write a colour into a number through the generic
-        // setter and produce a size nobody typed.
+        // WHAT a binding means is decided by the property's TYPE, not by the
+        // stored name. One map carries all of them, so a colour, a text size and
+        // a rounding are bound, saved and edited the same way.
         const UIPropValue cur = e.getPropAny(prop);
-        if (cur.type != UIPropType::Color) continue;
-        e.setPropAny(prop, UIPropValue::ofColor(theme.colorFor(role, mode)));
-        ++written;
+        if (cur.type == UIPropType::Color)
+        {
+            const UIThemeRole role = uiThemeRoleFromName(boundName);
+            // A name that no longer resolves leaves the property alone rather
+            // than painting it white: an element bound to a renamed role keeps
+            // the last value it had, which is visible and fixable, instead of
+            // vanishing.
+            if (role == UIThemeRole::COUNT) continue;
+            e.setPropAny(prop, UIPropValue::ofColor(theme.colorFor(role, mode)));
+            ++written;
+        }
+        else if (cur.type == UIPropType::Float)
+        {
+            // "FontSize" is the one Float that means TEXT, so it reads the
+            // typography levels; every other one — a corner radius, a box's
+            // padding or spacing — reads the size steps. The two vocabularies
+            // both contain "Small", which is exactly why the property decides
+            // and not the name.
+            float value = 0.0f;
+            if (prop == "FontSize")
+            {
+                const UIThemeTextLevel lvl = uiThemeTextLevelFromName(boundName);
+                if (lvl == UIThemeTextLevel::COUNT) continue;
+                value = theme.textSize[static_cast<int>(lvl)];
+            }
+            else
+            {
+                const UIThemeSize step = uiThemeSizeFromName(boundName);
+                if (step == UIThemeSize::COUNT) continue;
+                value = theme.radius[static_cast<int>(step)];
+            }
+            e.setPropAny(prop, UIPropValue::ofFloat(value));
+            ++written;
+        }
     }
     return written;
 }
