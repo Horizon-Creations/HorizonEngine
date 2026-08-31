@@ -1119,6 +1119,18 @@ void GameApplication::updateUIInput()
 	// A menu has to be usable without a mouse. Arrow keys and the pad's D-Pad
 	// move the focus, Enter/Space and the south button activate it. Not routed
 	// while a text field has the keyboard: there the arrows belong to the text.
+	// ── Back, and NOT behind the text-field gate ─────────────────────────────
+	// hasFocusedTextField() is "something has the keyboard", and showModal gives
+	// the keyboard to the dialog by construction — so putting this inside the
+	// block below would switch it off at exactly the moment a dialog is up. It
+	// also has to work WHILE typing: cancelling a dialog from inside its own
+	// input field is what Escape means everywhere.
+	if (uiTakesInput)
+	{
+		const bool back = input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
+		if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
+		m_uiBackPrev = back;
+	}
 	if (uiTakesInput && !m_world->widgets().hasFocusedTextField())
 	{
 		Input& in = input();
@@ -1149,12 +1161,6 @@ void GameApplication::updateUIInput()
 				break;
 			}
 		if (edges & (1u << 4)) m_world->widgets().activateFocused();
-		// East/B is Back everywhere a gamepad is used: the same call Escape makes.
-		{
-			const bool back = in.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
-			if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
-			m_uiBackPrev = back;
-		}
 	}
 
 	std::vector<UIInputSystem::PointerEvent> events;

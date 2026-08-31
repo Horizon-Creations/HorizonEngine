@@ -111,6 +111,10 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		Instance* w = resolveScriptOwner(id, off);
 		if (!w) return;
 		m_visualDirty = true;
+		// Hiding a whole widget from its own graph is hiding it, so it lets go
+		// of any layer it was holding — see hideWidget for what the alternative
+		// costs. An EMBEDDED widget hides only its own slot and holds nothing.
+		if (off == 0 && !vis) releaseGrabsOf(w->id);
 		if (off == 0) { w->visible = vis; return; }
 		for (const Instance::Embed& em : w->embeds)
 			if (em.scriptId == id)
@@ -655,13 +659,19 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 	{
 		if (!ep || ep->parentId != 0) continue;
 		HE::UIElement& e = *ep;
+		// MEASURED first, then re-anchored. On a stretched axis sizeX/sizeY are
+		// not a size at all — they are the difference to the anchored span, and
+		// for the commonest root of all (a panel filling its widget) that is
+		// zero or negative. Reading them here would place a popup 0x0 wide.
+		const HE::UIWidgetRect had = HE::uiElementRect(w->tree, e, &canvas);
 		e.anchorMinX = e.anchorMaxX = 0.0f;
 		e.anchorMinY = e.anchorMaxY = 0.0f;
 		e.pivotX = e.pivotY = 0.0f;
+		e.sizeX = had.w; e.sizeY = had.h;
 		// Clamped so the whole thing stays on screen: a context menu opened near
 		// the bottom right must come UP from the pointer, not off the edge.
-		const float maxX = std::max(0.0f, canvas.width  - e.sizeX);
-		const float maxY = std::max(0.0f, canvas.height - e.sizeY);
+		const float maxX = std::max(0.0f, canvas.width  - had.w);
+		const float maxY = std::max(0.0f, canvas.height - had.h);
 		e.posX = std::clamp(x / sx, 0.0f, maxX);
 		e.posY = std::clamp(y / sy, 0.0f, maxY);
 	}
@@ -1027,7 +1037,36 @@ void WidgetManager::clear()
 // Each of these changes what the next frame would look like, so each raises the
 // visual-dirty flag an event-driven app sleeps on (see consumeVisualDirty).
 void WidgetManager::showWidget(int id)  { if (Instance* w = find(id)) { w->visible = true;  m_visualDirty = true; } }
-void WidgetManager::hideWidget(int id)  { if (Instance* w = find(id)) { w->visible = false; m_visualDirty = true; } }
+void WidgetManager::hideWidget(int id)
+{
+	// Hiding a dialog IS closing it. The natural OK button is
+	// "OnClicked → Hide Widget (Get Self)", and without this line the grab
+	// outlives the picture: takesInput keeps naming a widget the pointer scan
+	// skips for being invisible, so every route in refuses everything with
+	// nothing on screen to blame for it. Only Escape would get the user out.
+	releaseGrabsOf(id);
+	if (Instance* w = find(id)) { w->visible = false; m_visualDirty = true; }
+}
+
+// Every layer this widget was holding, closed the way closeTopLayer closes one:
+// the focus goes back and the widget's own graph hears OnDismissed. Hiding and
+// closing are the same event seen from two sides, so they must not differ in
+// what they leave behind.
+void WidgetManager::releaseGrabsOf(int widgetId)
+{
+	bool any = false;
+	for (const Grab& g : m_grabs) if (g.widget == widgetId) { any = true; break; }
+	if (!any) return;
+	// Top down, so a popup opened FROM this dialog goes before the dialog does.
+	for (int guard = 0; guard < 64 && !m_grabs.empty(); ++guard)
+	{
+		const bool mine = m_grabs.back().widget == widgetId;
+		popGrab(/*notify=*/mine);
+		bool more = false;
+		for (const Grab& g : m_grabs) if (g.widget == widgetId) { more = true; break; }
+		if (!more) break;
+	}
+}
 void WidgetManager::setZOrder(int id, int z) { if (Instance* w = find(id)) { w->zOrder = z; m_visualDirty = true; } }
 
 const HE::UIWidgetTree* WidgetManager::tree(int widgetId) const
@@ -1231,7 +1270,17 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				}
 				popGrab(/*notify=*/false);
 			}
+			// Right-click closes it too. A menu that one button dismisses and
+			// the other does not is a menu that behaves differently depending
+			// on which finger you used.
+			if (secondaryDown && !m_wasSecondaryDown && !m_grabs.empty() &&
+			    m_grabs.back().kind == Grab::Kind::Dropdown)
+				popGrab(/*notify=*/false);
 			m_wasDown = primaryDown;
+			// BOTH edges settle here, not just the left one: a right button held
+			// across the close would otherwise read as a fresh press next frame
+			// and open a context menu nobody asked for.
+			m_wasSecondaryDown = secondaryDown;
 			m_pointerOverUI = true;
 			return true;
 		}

@@ -5688,6 +5688,109 @@ TEST_CASE("Modal: nothing underneath is reachable, by any route in")
     CHECK(scrim);
 }
 
+// The OK button everybody writes is "OnClicked -> Hide Widget (Get Self)".
+// Hiding a dialog is closing it, and if the grab outlived the picture the whole
+// application would be inert with nothing on screen to blame for it.
+TEST_CASE("Modal: hiding it lets go of the input, like closing it does")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int pageLabel = 0, dlgLabel = 0;
+    buildClickPage(cm, "mem://page.hasset", pageLabel);
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int page = createShown(wm, cm, "mem://page.hasset");
+    const int dlg  = wm.createWidget(cm, "mem://dialog.hasset");
+    REQUIRE(page != 0);
+    REQUIRE(dlg  != 0);
+
+    wm.showModal(dlg);
+    clickAt(wm, 300.0f, 300.0f);
+    CHECK(wm.tree(page)->find(pageLabel)->getProp("Text").s.empty());   // blocked
+
+    // Hidden, not closed — the difference the manager must not care about.
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.hasLayer());
+    CHECK_FALSE(wm.hasModal());
+
+    clickAt(wm, 300.0f, 300.0f);
+    CHECK(wm.tree(page)->find(pageLabel)->getProp("Text").s == "HIT");
+}
+
+TEST_CASE("Popup: a root anchored to fill its widget still gets a size")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A root anchored to fill with a 50-unit inset on every side — ordinary
+    // authoring, and the case that breaks a naive placement. On a stretched axis
+    // sizeX/sizeY are not a size at all: they are the DIFFERENCE to the anchored
+    // span, so here they are -100. Re-anchoring to a point makes the span zero,
+    // and a width of "span + size" is then NEGATIVE. It has to be measured
+    // before the anchors are touched.
+    HE::UIWidgetTree menu;
+    menu.canvasWidth = 400.0f; menu.canvasHeight = 400.0f;
+    menu.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int root = menu.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *menu.find(root);
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 50.0f, 50.0f);
+        HE::uiSetAnchorInsetsY(e, 50.0f, 50.0f);
+        CHECK(e.sizeX < 0.0f);          // the thing that makes this test the test
+    }
+    registerWidget(cm, menu, nullptr, "mem://menu.hasset");
+
+    WidgetManager wm;
+    const int pop = wm.createWidget(cm, "mem://menu.hasset");
+    REQUIRE(pop != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    wm.openPopupAt(pop, 30.0f, 40.0f);
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*wm.tree(pop), 400.0f, 400.0f);
+    const HE::UIWidgetRect r =
+        HE::uiElementRect(*wm.tree(pop), *wm.tree(pop)->find(root), &canvas);
+    CHECK(r.w == doctest::Approx(300.0f));
+    CHECK(r.h == doctest::Approx(300.0f));
+    CHECK(r.x == doctest::Approx(30.0f));
+    CHECK(r.y == doctest::Approx(40.0f));
+}
+
+TEST_CASE("Layers: a dialog can be cancelled from inside its own text field")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int pageLabel = 0;
+    buildClickPage(cm, "mem://page.hasset", pageLabel);
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int field = t.add(HE::UIWidgetType::TextInput);
+    {
+        HE::UIElement& e = *t.find(field);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    }
+    registerWidget(cm, t, nullptr, "mem://ask.hasset");
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://page.hasset") != 0);
+    const int dlg = wm.createWidget(cm, "mem://ask.hasset");
+    REQUIRE(dlg != 0);
+
+    wm.showModal(dlg);
+    clickAt(wm, 100.0f, 20.0f);            // into the field
+    CHECK(wm.hasFocusedTextField());
+    // The manager's half of it: Escape has something to close even while a field
+    // holds the keyboard. (The apps' half is that the key is not routed behind
+    // the same "is something typing?" gate — see GameApplication/EditorApplication.)
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.hasLayer());
+}
+
 TEST_CASE("Layers: Escape closes one, and the focus goes back where it was")
 {
     TempWidgetDir dir;

@@ -2466,6 +2466,19 @@ void EditorApplication::OnRender(float dt)
 			// game uses: arrows or D-Pad move the focus, Enter/Space or the
 			// south button activate. Held state only, so the edges live here —
 			// and a focused text field keeps the arrows for its own text.
+			// ── Back, OUTSIDE the text-field gate ────────────────────────
+			// hasFocusedTextField() is "something has the keyboard", and
+			// showModal hands the keyboard to the dialog by construction — so
+			// inside the block below this would be switched off at exactly the
+			// moment a dialog is open, which is the one case it exists for. It
+			// must also work while a field in the dialog is being typed into.
+			if (uiTakesInput)
+			{
+				const bool back = input().IsKeyDown(SDL_SCANCODE_ESCAPE) ||
+				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
+				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
+				m_uiBackPrev = back;
+			}
 			if (uiTakesInput && !m_editorWorld->widgets().hasFocusedTextField())
 			{
 				using Nav = WidgetManager::NavDir;
@@ -2492,14 +2505,6 @@ void EditorApplication::OnRender(float dt)
 						break;
 					}
 				if (edges & (1u << 4)) m_editorWorld->widgets().activateFocused();
-				// Escape and gamepad East close the topmost dialog, popup or
-				// menu. Wired HERE as well as in the packaged game: a dialog the
-				// designer cannot dismiss while previewing is worse than one
-				// that never opened.
-				const bool back = input().IsKeyDown(SDL_SCANCODE_ESCAPE) ||
-				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
-				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
-				m_uiBackPrev = back;
 			}
 
 			// Reflect the hovered element's cursor in the PIE viewport. ImGui owns

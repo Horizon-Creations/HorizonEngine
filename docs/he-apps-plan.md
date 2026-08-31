@@ -1434,6 +1434,31 @@ eigener Typ zu sein; das eingebaute, das repariert wurde, ist die ComboBox. Ein 
 Untermenüs, Trennern und Tastenkürzeln gehört zu D2, wo es als Komponente aus vorhandenen
 Teilen entsteht.
 
+**Nachtrag: zwei Löcher, die beim Gegenlesen auffielen, beide vom ersten Dialog erreichbar.**
+
+**1. Verstecken war ein Deadlock.** Der OK-Knopf, den jeder schreibt, ist
+`OnClicked → Hide Widget (Get Self)`. `hideWidget` setzte nur `visible = false` — der Grab
+überlebte das Bild: `takesInput` nannte weiter ein Widget, das der Trefferlauf als unsichtbar
+überspringt, also lehnte **jeder** Weg hinein alles ab, ohne dass auf dem Bildschirm etwas zu
+sehen war, dem man die Schuld geben könnte. Nur Escape hätte noch herausgeführt. Verstecken und
+Schließen sind dasselbe Ereignis von zwei Seiten und dürfen sich nicht darin unterscheiden, was
+sie hinterlassen: `hideWidget` und `HideSelf` geben jetzt die Ebene frei, inklusive
+`OnDismissed`.
+
+**2. Das Escape im Editor war genau dann tot, wenn ein Dialog offen ist.** Ich hatte es in den
+Block gehängt, der mit `!hasFocusedTextField()` beginnt — und `hasFocusedTextField()` heißt
+„irgendetwas hat die Tastatur", was `showModal` per Konstruktion herstellt. Der Fall, für den
+die Verdrahtung gedacht war, war der einzige, in dem sie nicht lief. Jetzt steht Back **vor**
+diesem Tor, in beiden Anwendungen — und funktioniert damit auch, während man in ein Feld des
+Dialogs tippt, was Escape überall bedeutet.
+
+**Dazu drei kleinere, alle aus derselben Durchsicht:** ein Popup misst seine Wurzel jetzt,
+**bevor** es sie umankert (auf einer gedehnten Achse ist `sizeX` nicht die Größe, sondern die
+Differenz zur Spanne — bei einer füllenden Wurzel negativ, und ein Popup mit Breite −100 ist
+kein Popup); die offene Liste schließt auch auf Rechtsklick; und ihr früher Ausstieg quittiert
+jetzt **beide** Tastenflanken, sonst zählt eine über das Schließen gehaltene rechte Taste als
+frischer Druck und öffnet ein Kontextmenü, das niemand wollte.
+
 **Offen an dieser Ecke:** die Tastaturbedienung der offenen Liste (Pfeile durch die Optionen),
 Untermenüs, und der Rechtsklick ist im Editor-Viewport nur in der Live-Vorschau nutzbar (im
 Spielmodus gehört er der Kamera).

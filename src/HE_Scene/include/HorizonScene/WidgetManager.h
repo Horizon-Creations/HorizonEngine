@@ -479,6 +479,9 @@ private:
     // Close the top layer WITHOUT firing OnDismissed — for the paths where the
     // widget is going away anyway (destroyed, cleared).
     void popGrab(bool notify);
+    // Let go of every layer this widget holds, as if it had been closed. Hiding
+    // a dialog and closing one are the same event from two sides.
+    void releaseGrabsOf(int widgetId);
     // Where the pointer last was, in render-target pixels. Kept because two
     // features need it long after the call that reported it: a context menu
     // opens at it, and a tooltip is drawn beside it.

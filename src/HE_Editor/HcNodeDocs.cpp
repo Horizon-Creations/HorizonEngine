@@ -323,7 +323,11 @@ namespace
 	  "was one. Exactly what Escape and the gamepad's Back button do — so a "
 	  "\"Cancel\" button is this node and nothing else. The widget that closes gets "
 	  "On Dismissed, and the keyboard focus goes back where it was before it "
-	  "opened." },
+	  "opened. Hide Widget on a dialog does the same thing — hiding one IS closing "
+	  "it, so it lets go of the input, the focus and the dimming and fires On "
+	  "Dismissed too. This node is the one to reach for when you do not have the "
+	  "dialog's own id, which is the usual case for a Cancel button." },
+
 	{ "widget.scrollListToItem",
 	  "Scrolls just far enough for that item to be fully visible, and does nothing "
 	  "when it already is — so stepping through a list does not re-centre it on "
