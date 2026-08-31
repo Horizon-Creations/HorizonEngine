@@ -236,6 +236,17 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Size To Content", UIPropType::Bool },
             { "Min Width",  UIPropType::Float },
             { "Min Height", UIPropType::Float } } },
+        // A Grid's two track lists are its whole vocabulary; Row Spacing is the
+        // gap between rows, `Spacing` the one between columns.
+        { UIWidgetType::Grid, {
+            { "Column Sizes", UIPropType::StringList },
+            { "Row Sizes", UIPropType::StringList },
+            { "Padding", UIPropType::Float },
+            { "Spacing", UIPropType::Float },
+            { "Row Spacing", UIPropType::Float },
+            { "Size To Content", UIPropType::Bool },
+            { "Min Width",  UIPropType::Float },
+            { "Min Height", UIPropType::Float } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -249,7 +260,8 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
     // unreachable through the generic accessors).
     const std::vector<std::string> kBaseNames = {
         "Visible", "Hit Testable", "Position", "Size", "Layer",
-        "Hover Cursor", "Material", "Font" };
+        "Hover Cursor", "Material", "Font",
+        "Grid Column", "Grid Row", "Column Span", "Row Span" };
 
     // A value that differs from `cur`, so "did the write land?" is unambiguous.
     auto probe = [](const UIPropValue& cur) {
@@ -945,7 +957,8 @@ TEST_CASE("Exactly the container types accept children")
     const std::vector<HE::UIWidgetType> containers = {
         HE::UIWidgetType::Panel, HE::UIWidgetType::Button,
         HE::UIWidgetType::VerticalBox, HE::UIWidgetType::HorizontalBox,
-        HE::UIWidgetType::ScrollBox, HE::UIWidgetType::WrapBox };
+        HE::UIWidgetType::ScrollBox, HE::UIWidgetType::WrapBox,
+        HE::UIWidgetType::Grid };
     for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
     {
         auto e = HE::makeUIElement(ty);
@@ -6459,4 +6472,236 @@ TEST_CASE("WrapBox: it round-trips, and an old asset is untouched")
     CHECK(rb->sizeToContent);
     CHECK(rb->minSizeY == doctest::Approx(40.0f));
     CHECK(rb->type() == HE::UIWidgetType::WrapBox);
+}
+
+// ═══ Grid (docs/he-apps-plan.md B3) ══════════════════════════════════════════
+// The container a form is made of. Every assertion below is about a CELL: which
+// one a child ends up in, how big it came out, and what happens when the answer
+// is contested — a span in the way, a pinned neighbour, a hidden sibling.
+
+namespace
+{
+    struct GridCase { HE::UIWidgetTree t; int grid = 0; std::vector<int> kids; };
+    GridCase makeGrid(std::vector<std::string> cols, std::vector<std::string> rows,
+                      int n, float w = 400.0f, float h = 300.0f,
+                      float spacing = 0.0f, float rowSpacing = 0.0f)
+    {
+        GridCase c;
+        c.t.canvasWidth = 800.0f; c.t.canvasHeight = 600.0f;
+        c.t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        c.grid = c.t.add(HE::UIWidgetType::Grid);
+        {
+            auto* g = dynamic_cast<HE::UIGrid*>(c.t.find(c.grid));
+            HE::uiSetAnchorPreset(*g, 0); g->pivotX = g->pivotY = 0.0f;
+            g->posX = 0.0f; g->posY = 0.0f; g->sizeX = w; g->sizeY = h;
+            g->padding = 0.0f; g->spacing = spacing; g->rowSpacing = rowSpacing;
+            g->columns = std::move(cols); g->rows = std::move(rows);
+            g->reparse();
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            const int k = c.t.add(HE::UIWidgetType::Panel);
+            c.t.find(k)->parentId = c.grid;
+            c.t.find(k)->sizeX = 50.0f; c.t.find(k)->sizeY = 20.0f;
+            c.kids.push_back(k);
+        }
+        return c;
+    }
+}
+
+// The one that goes red if the dispatch is missing and children fall through to
+// a box-ish path: in a grid the second child sits BESIDE the first, not below.
+TEST_CASE("Grid: the second child is beside the first, not under it")
+{
+    GridCase c = makeGrid({ "*", "*" }, { "*" }, 2);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    CHECK(rect(0).x == doctest::Approx(0.0f));
+    CHECK(rect(1).x == doctest::Approx(200.0f));
+    CHECK(rect(0).y == doctest::Approx(rect(1).y));
+}
+
+TEST_CASE("Grid: the track grammar, including what it does with nonsense")
+{
+    using K = HE::UIGridTrack::Kind;
+    CHECK(HE::uiParseGridTrack("120").kind == K::Fixed);
+    CHECK(HE::uiParseGridTrack("120").value == doctest::Approx(120.0f));
+    CHECK(HE::uiParseGridTrack("*").kind == K::Weight);
+    CHECK(HE::uiParseGridTrack("*").value == doctest::Approx(1.0f));
+    CHECK(HE::uiParseGridTrack("2*").value == doctest::Approx(2.0f));
+    CHECK(HE::uiParseGridTrack("auto").kind == K::Auto);
+    CHECK(HE::uiParseGridTrack("  Auto ").kind == K::Auto);   // trimmed, folded
+
+    // Anything unreadable is ONE SHARE, never nothing. A track you can see and
+    // fix beats one that collapsed and hid the typo — the same rule a theme role
+    // that no longer resolves obeys.
+    for (const char* junk : { "", "12px", "abc", "-5", "1.2.3", "**" })
+    {
+        INFO("token := ", junk);
+        CHECK(HE::uiParseGridTrack(junk).kind == K::Weight);
+        CHECK(HE::uiParseGridTrack(junk).value == doctest::Approx(1.0f));
+    }
+}
+
+TEST_CASE("Grid: fixed, weighted and auto tracks, side by side")
+{
+    // 400 wide: a 100 fixed column, an auto column, and the rest.
+    GridCase c = makeGrid({ "100", "auto", "*" }, { "*" }, 3);
+    c.t.find(c.kids[1])->sizeX = 60.0f;      // the auto column's only occupant
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+
+    CHECK(rect(0).x == doctest::Approx(0.0f));
+    CHECK(rect(0).w == doctest::Approx(100.0f));
+    CHECK(rect(1).x == doctest::Approx(100.0f));
+    CHECK(rect(1).w == doctest::Approx(60.0f));      // as wide as what is in it
+    CHECK(rect(2).x == doctest::Approx(160.0f));
+    CHECK(rect(2).w == doctest::Approx(240.0f));     // whatever is left
+
+    // Two shares against one: the weighted column takes twice as much.
+    auto* g = dynamic_cast<HE::UIGrid*>(c.t.find(c.grid));
+    g->columns = { "*", "2*" }; g->reparse();
+    CHECK(rect(0).w == doctest::Approx(400.0f / 3.0f));
+    CHECK(rect(1).w == doctest::Approx(800.0f / 3.0f));
+}
+
+TEST_CASE("Grid: a span takes the cells it covers, and the gap between them")
+{
+    GridCase c = makeGrid({ "100", "100" }, { "50", "50" }, 3,
+                          400.0f, 300.0f, /*spacing=*/10.0f, /*rowSpacing=*/6.0f);
+    c.t.find(c.kids[0])->gridColumnSpan = 2;
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+
+    // Two 100 columns plus the 10 between them: a span of two is 210, not 200.
+    CHECK(rect(0).w == doctest::Approx(210.0f));
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    // …and the next two children were pushed onto the second row by it.
+    CHECK(rect(1).y == doctest::Approx(56.0f));
+    CHECK(rect(1).x == doctest::Approx(0.0f));
+    CHECK(rect(2).x == doctest::Approx(110.0f));
+    CHECK(rect(2).y == doctest::Approx(56.0f));
+}
+
+TEST_CASE("Grid: a pinned child keeps its cell whoever else wants it")
+{
+    GridCase c = makeGrid({ "100", "100" }, { "50", "50" }, 3);
+    // The LAST child names cell (0,0) — the one the first would otherwise take.
+    c.t.find(c.kids[2])->gridColumn = 0;
+    c.t.find(c.kids[2])->gridRow    = 0;
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+
+    // Pinned children are placed FIRST, whatever their order in the tree.
+    CHECK(rect(2).x == doctest::Approx(0.0f));
+    CHECK(rect(2).y == doctest::Approx(0.0f));
+    // The automatic ones step over the taken cell.
+    CHECK(rect(0).x == doctest::Approx(100.0f));
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    CHECK(rect(1).x == doctest::Approx(0.0f));
+    CHECK(rect(1).y == doctest::Approx(50.0f));
+}
+
+TEST_CASE("Grid: more children than declared rows grows more of the last one")
+{
+    // One declared row of 40. Five children in two columns need three rows, and
+    // the two it did not declare are 40 as well — a settings form with twenty
+    // rows must not have to declare twenty.
+    GridCase c = makeGrid({ "*", "*" }, { "40" }, 5);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    CHECK(rect(2).y == doctest::Approx(40.0f));
+    CHECK(rect(4).y == doctest::Approx(80.0f));
+    CHECK(rect(4).h == doctest::Approx(40.0f));
+}
+
+TEST_CASE("Grid: a hidden child gives its cell back")
+{
+    GridCase c = makeGrid({ "100", "100" }, { "50", "50" }, 3);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    REQUIRE(rect(2).y == doctest::Approx(50.0f));     // third child, second row
+
+    // Hiding the first moves everything up one cell — the box invariant, and it
+    // has to hold here too or a form with an optional field leaves a hole.
+    c.t.find(c.kids[0])->visible = false;
+    CHECK(rect(1).x == doctest::Approx(0.0f));
+    CHECK(rect(1).y == doctest::Approx(0.0f));
+    CHECK(rect(2).x == doctest::Approx(100.0f));
+    CHECK(rect(2).y == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Grid: Size To Content adds up the tracks it can measure")
+{
+    GridCase c = makeGrid({ "100", "auto", "*" }, { "40", "30" }, 2,
+                          400.0f, 300.0f, /*spacing=*/10.0f, /*rowSpacing=*/6.0f);
+    auto* g = dynamic_cast<HE::UIGrid*>(c.t.find(c.grid));
+    g->padding = 5.0f;
+    g->sizeToContent = true;
+    c.t.find(c.kids[1])->sizeX = 60.0f;      // fills the auto column
+
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(c.t, 800.0f, 600.0f);
+    HE::uiApplyAutoSize(c.t, &canvas);
+
+    // 100 + 60 for the two measurable columns, two gaps of 10, padding twice.
+    // The weighted column counts as NOTHING — a share of the leftover is what
+    // this measurement is trying to produce, exactly as with a filling child.
+    CHECK(g->sizeX == doctest::Approx(100.0f + 60.0f + 2 * 10.0f + 2 * 5.0f));
+    CHECK(g->sizeY == doctest::Approx(40.0f + 30.0f + 6.0f + 2 * 5.0f));
+}
+
+TEST_CASE("Grid: it round-trips, and a cell-less element saves nothing extra")
+{
+    HE::UIWidgetTree t;
+    const int grid = t.add(HE::UIWidgetType::Grid);
+    {
+        auto* g = dynamic_cast<HE::UIGrid*>(t.find(grid));
+        g->columns = { "auto", "2*", "80" };
+        g->rows = { "30" };
+        g->rowSpacing = 9.0f;
+        g->reparse();
+    }
+    const int pinned = t.add(HE::UIWidgetType::Panel);
+    t.find(pinned)->parentId = grid;
+    t.find(pinned)->gridColumn = 1; t.find(pinned)->gridRow = 2;
+    t.find(pinned)->gridColumnSpan = 2;
+    const int plain = t.add(HE::UIWidgetType::Panel);
+    t.find(plain)->parentId = grid;
+
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, r));
+    const auto* rg = dynamic_cast<const HE::UIGrid*>(r.find(grid));
+    REQUIRE(rg);
+    CHECK(rg->columns == std::vector<std::string>{ "auto", "2*", "80" });
+    CHECK(rg->rowSpacing == doctest::Approx(9.0f));
+    // The parsed tracks come back with them — a load that forgot to re-parse
+    // would lay the grid out on the DEFAULT columns and look almost right.
+    REQUIRE(rg->colTracks.size() == 3);
+    CHECK(rg->colTracks[0].kind == HE::UIGridTrack::Kind::Auto);
+    CHECK(rg->colTracks[1].value == doctest::Approx(2.0f));
+    CHECK(rg->colTracks[2].kind == HE::UIGridTrack::Kind::Fixed);
+
+    CHECK(r.find(pinned)->gridColumn == 1);
+    CHECK(r.find(pinned)->gridRow == 2);
+    CHECK(r.find(pinned)->gridColumnSpan == 2);
+    CHECK(r.find(plain)->gridColumn == -1);
+    CHECK(r.find(plain)->gridRowSpan == 1);
+    // An element that names no cell writes no cell keys at all, so every widget
+    // authored before grids existed saves byte-identical.
+    CHECK(json.find("gridColSpan") != std::string::npos);   // the pinned one did
+    CHECK(json.find("\"gridRowSpan\"") == std::string::npos);
+}
+
+// A cell IS the slot, exactly as a box's slot is: the child's own anchors and
+// position are not consulted. One placement rule for every container, or an
+// author has to learn which container reads which fields.
+TEST_CASE("Grid: a cell is the slot, and anchors inside it are ignored")
+{
+    GridCase c = makeGrid({ "100", "100" }, { "50" }, 1);
+    HE::UIElement& k = *c.t.find(c.kids[0]);
+    HE::uiSetAnchorPreset(k, 10);          // middle-right, if it were consulted
+    k.posX = 999.0f; k.posY = -999.0f;
+    k.sizeX = 7.0f;  k.sizeY = 7.0f;
+
+    const HE::UIWidgetRect r = HE::uiElementRect(c.t, k);
+    CHECK(r.x == doctest::Approx(0.0f));
+    CHECK(r.y == doctest::Approx(0.0f));
+    CHECK(r.w == doctest::Approx(100.0f));
+    CHECK(r.h == doctest::Approx(50.0f));
 }

@@ -1020,7 +1020,32 @@ void drawDetails(State& st, AppContext& ctx)
 		// Slot Fill — a child that ate the leftover space would take the whole
 		// first line and there would never be a second one. So it gets the two
 		// size fields and not the fill, which is the opposite of a plain box.
-		if (layoutParent->type() == UIWidgetType::WrapBox)
+		if (layoutParent->type() == UIWidgetType::Grid)
+		{
+			// A grid child names its CELL, not a size: the cell is the slot, the
+			// way a box's slot is. -1 means "the next free one", which is what a
+			// form wants — fill it top to bottom and never type a coordinate.
+			int cell[2] = { n->gridColumn, n->gridRow };
+			if (ImGui::DragInt2("Cell (col, row)", cell, 0.1f, -1, 999))
+			{ n->gridColumn = cell[0] < -1 ? -1 : cell[0];
+			  n->gridRow    = cell[1] < -1 ? -1 : cell[1]; edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Cell (col, row)");
+			int span[2] = { n->gridColumnSpan, n->gridRowSpan };
+			if (ImGui::DragInt2("Span (cols, rows)", span, 0.1f, 1, 99))
+			{ n->gridColumnSpan = span[0] < 1 ? 1 : span[0];
+			  n->gridRowSpan    = span[1] < 1 ? 1 : span[1]; edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Span (cols, rows)");
+			// Its own size is only read by an `auto` track — everywhere else the
+			// cell decides — so it stays editable but says so.
+			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::TextDisabled("Only an \"auto\" track reads this size.");
+			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		else if (layoutParent->type() == UIWidgetType::WrapBox)
 		{
 			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1578,7 +1603,8 @@ void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 // Draw a simplified WYSIWYG preview of one element from its generic properties.
 void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
                         const ImVec2& mx, float s, void* texHandle = nullptr,
-                        float alpha = 1.0f, float dim = 1.0f)
+                        float alpha = 1.0f, float dim = 1.0f,
+                        const HE::UIWidgetTree* tree = nullptr)
 {
 	// Every colour of the element itself goes through here: faded by the
 	// inherited opacity and knocked back while it is disabled, exactly as
@@ -1681,6 +1707,47 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		// top of this by the caller, which is also the one that knows whether
 		// the reference resolved (and writes the name when it did not).
 		dl->AddRect(mn, mx, IM_COL32(150, 210, 160, 110));
+		break;
+	}
+	case UIWidgetType::Grid:
+	{
+		// The whole designer value of a grid is SEEING the tracks. An empty one
+		// that draws only its outline is a rectangle you cannot aim into.
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		const float pad = propFloatOr(n, "Padding", 0.0f) * s;
+		const ImVec2 i0(mn.x + pad, mn.y + pad), i1(mx.x - pad, mx.y - pad);
+		if (i1.x > i0.x && i1.y > i0.y)
+		{
+			if (pad > 0.5f) dl->AddRect(i0, i1, IM_COL32(120, 190, 255, 50));
+			// The lines come from the SAME solver the runtime lays out with
+			// (uiGridTracks), so what is drawn here is where a child really
+			// lands — an even split would show an author a grid that does not
+			// exist. Proportions rather than absolutes, because the preview is
+			// at whatever scale the canvas view is.
+			const auto* g = dynamic_cast<const HE::UIGrid*>(&n);
+			if (g && tree)
+			{
+				std::vector<float> cw, rh;
+				HE::uiGridTracks(*tree, *g, nullptr, cw, rh);
+				const ImU32 line = IM_COL32(120, 190, 255, 70);
+				auto ticks = [&](const std::vector<float>& t, float lo, float hi, bool vertical)
+				{
+					float sum = 0.0f;
+					for (float v : t) sum += v;
+					if (sum <= 0.0f || t.size() < 2) return;
+					float at = 0.0f;
+					for (std::size_t i = 0; i + 1 < t.size(); ++i)
+					{
+						at += t[i];
+						const float p = lo + (hi - lo) * (at / sum);
+						if (vertical) dl->AddLine(ImVec2(p, i0.y), ImVec2(p, i1.y), line);
+						else          dl->AddLine(ImVec2(i0.x, p), ImVec2(i1.x, p), line);
+					}
+				};
+				ticks(cw, i0.x, i1.x, true);
+				ticks(rh, i0.y, i1.y, false);
+			}
+		}
 		break;
 	}
 	case UIWidgetType::WrapBox:
@@ -1936,7 +2003,7 @@ void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree
 		texHandle = AssetThumbnailCache::get(ctx.contentManager->contentRoot() + "/" + n.texture);
 	const float alpha = HE::uiElementEffectiveOpacity(tree, n);
 	const float dim   = HE::uiElementEffectiveEnabled(tree, n) ? 1.0f : HE::kUIDisabledDim;
-	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim);
+	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim, &tree);
 }
 
 // Draw `tree` into the rect [mn, mx] — the whole tree, in paint order, with the

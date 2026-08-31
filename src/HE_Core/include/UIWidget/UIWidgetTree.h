@@ -160,6 +160,17 @@ HE_API void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
 // to the canvas). The anchor rectangle is resolved inside the parent's rect;
 // position is the offset from it, pivot shifts the rect so the pivot point
 // lands there, and on a stretched axis the size adds to the anchored span.
+// ── A Grid's resolved tracks (docs/he-apps-plan.md B3) ───────────────────────
+// The column and row extents the layout REALLY used, in the same units a rect
+// comes back in. Exported for one reason: the designer draws a grid's track
+// lines, and drawing them from an even split would show an author a layout the
+// runtime does not produce. One solver, two consumers.
+class UIGrid;
+HE_API void uiGridTracks(const UIWidgetTree& tree, const UIGrid& grid,
+                         const UIWidgetCanvas* canvas,
+                         std::vector<float>& outColumns,
+                         std::vector<float>& outRows);
+
 HE_API UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                                   const UIWidgetCanvas* canvas = nullptr);
 

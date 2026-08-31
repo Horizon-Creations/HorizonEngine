@@ -621,6 +621,72 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── Grid (docs/he-apps-plan.md B3) ────────────────────────────────────────────
+// Rows and columns, with spans — the container a FORM is made of. Two stacked
+// boxes can fake a form only by hand-matching every label's width, and they come
+// apart the moment one label grows.
+//
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  THE TRACK TOKENS ARE AN ON-DISK FORMAT.                                 ║
+// ║                                                                          ║
+// ║  Column Sizes and Row Sizes are lists of them, and a saved widget stores ║
+// ║  the strings verbatim. test_ui_widgets.cpp pins the grammar.             ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+//   "120"   a fixed size in canvas units
+//   "*"     one share of whatever is left over
+//   "2*"    two shares
+//   "auto"  as wide (tall) as the widest (tallest) thing in it
+// Anything else is read as "*", deliberately: a track nobody can read is still a
+// track you can see and fix, whereas collapsing it to nothing hides the typo in
+// a layout that merely looks wrong. Same rule as a theme role that no longer
+// resolves.
+struct UIGridTrack
+{
+    enum class Kind : uint8_t { Fixed, Weight, Auto };
+    Kind  kind  = Kind::Weight;
+    float value = 1.0f;   // units for Fixed, shares for Weight, unused for Auto
+};
+HE_API UIGridTrack uiParseGridTrack(const std::string& token);
+
+class HE_API UIGrid final : public UIBoxBase
+{
+public:
+    // Authored as strings, kept parsed alongside: the parse happens when they
+    // are SET, not when a rect is asked for — a hit test walks every element and
+    // would otherwise re-parse the same words hundreds of times a frame.
+    std::vector<std::string> columns{ "auto", "*" };
+    std::vector<std::string> rows{ "auto" };
+    // The gap between two ROWS. `spacing` is the gap between two columns; two
+    // numbers for the same reason a wrap box has two.
+    float rowSpacing = 4.0f;
+
+    // Transient, rebuilt from the two lists above. Never serialized.
+    std::vector<UIGridTrack> colTracks, rowTracks;
+
+    UIGrid()
+    {
+        sizeX = 400.0f; sizeY = 300.0f; hitTestable = false;
+        reparse();
+    }
+    void reparse()
+    {
+        colTracks.clear(); rowTracks.clear();
+        for (const std::string& t : columns) colTracks.push_back(uiParseGridTrack(t));
+        for (const std::string& t : rows)    rowTracks.push_back(uiParseGridTrack(t));
+        if (colTracks.empty()) colTracks.push_back({});
+        if (rowTracks.empty()) rowTracks.push_back({});
+    }
+
+    UIWidgetType type() const override { return UIWidgetType::Grid; }
+    const char*  typeName() const override { return "Grid"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIGrid>(*this); }
+
+    const UIPropTable& propTable() const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 // ── ScrollBox ─────────────────────────────────────────────────────────────────
 // A vertical box whose content is allowed to be taller than the box: it clips
 // (that is what clipChildren is for) and shifts its children up by the current

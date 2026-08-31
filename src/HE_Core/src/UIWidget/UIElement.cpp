@@ -2,6 +2,8 @@
 #include <Renderer/UIFont.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cctype>
+#include <cstddef>
 
 namespace HE {
 
@@ -27,6 +29,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::Spacer:        return std::make_unique<UISpacer>();
         case UIWidgetType::ListView:      return std::make_unique<UIListView>();
         case UIWidgetType::WrapBox:       return std::make_unique<UIWrapBox>();
+        case UIWidgetType::Grid:          return std::make_unique<UIGrid>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -39,7 +42,7 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
         UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
-        UIWidgetType::ListView, UIWidgetType::WrapBox };
+        UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid };
     return kAll;
 }
 
@@ -55,7 +58,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
         "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
-        "ListView", "WrapBox" };
+        "ListView", "WrapBox", "Grid" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -250,6 +253,67 @@ const UIPropTable& UIBoxBase::propTable() const
         uiprop::slot<&UIBoxBase::sizeToContent>({ "Size To Content", UIPropType::Bool }),
         uiprop::slot<&UIBoxBase::minSizeX>({ "Min Width",  UIPropType::Float }),
         uiprop::slot<&UIBoxBase::minSizeY>({ "Min Height", UIPropType::Float }),
+    };
+    return t;
+}
+
+// ── Track tokens ─────────────────────────────────────────────────────────────
+UIGridTrack uiParseGridTrack(const std::string& token)
+{
+    // Trimmed and lowercased first: "  Auto " is what a human types.
+    std::string t;
+    for (char c : token) if (c != ' ' && c != '\t') t.push_back(static_cast<char>(std::tolower(
+        static_cast<unsigned char>(c))));
+    if (t == "auto") return { UIGridTrack::Kind::Auto, 0.0f };
+    if (!t.empty() && t.back() == '*')
+    {
+        const std::string head = t.substr(0, t.size() - 1);
+        if (head.empty()) return { UIGridTrack::Kind::Weight, 1.0f };
+        try
+        {
+            const float w = std::stof(head);
+            return { UIGridTrack::Kind::Weight, w > 0.0f ? w : 1.0f };
+        }
+        catch (...) { return { UIGridTrack::Kind::Weight, 1.0f }; }
+    }
+    try
+    {
+        std::size_t used = 0;
+        const float v = std::stof(t, &used);
+        // "12px" or "12 nonsense" is not a number anybody meant — fall through
+        // to the visible default rather than silently reading the 12.
+        if (used == t.size() && v >= 0.0f) return { UIGridTrack::Kind::Fixed, v };
+    }
+    catch (...) {}
+    // Unreadable: one share. A track you can SEE and fix beats one that
+    // collapsed to nothing and hid the typo.
+    return { UIGridTrack::Kind::Weight, 1.0f };
+}
+
+const UIPropTable& UIGrid::propTable() const
+{
+    // The two lists are custom slots and not plain fields: writing them has to
+    // re-parse, or a Set Property from a graph would change the words and leave
+    // the layout running on the old ones.
+    static const UIPropTable t = {
+        uiprop::custom({ "Column Sizes", UIPropType::StringList },
+            [](const UIElement& e) -> UIPropValue
+            { UIPropValue v; v.type = UIPropType::StringList;
+              v.list = static_cast<const UIGrid&>(e).columns; return v; },
+            [](UIElement& e, const UIPropValue& v)
+            { auto& g = static_cast<UIGrid&>(e); g.columns = v.list; g.reparse(); }),
+        uiprop::custom({ "Row Sizes", UIPropType::StringList },
+            [](const UIElement& e) -> UIPropValue
+            { UIPropValue v; v.type = UIPropType::StringList;
+              v.list = static_cast<const UIGrid&>(e).rows; return v; },
+            [](UIElement& e, const UIPropValue& v)
+            { auto& g = static_cast<UIGrid&>(e); g.rows = v.list; g.reparse(); }),
+        uiprop::slot<&UIGrid::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIGrid::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIGrid::rowSpacing>({ "Row Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIGrid::sizeToContent>({ "Size To Content", UIPropType::Bool }),
+        uiprop::slot<&UIGrid::minSizeX>({ "Min Width",  UIPropType::Float }),
+        uiprop::slot<&UIGrid::minSizeY>({ "Min Height", UIPropType::Float }),
     };
     return t;
 }
@@ -480,6 +544,10 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
     if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
+    if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
+    if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
+    if (n == "Column Span")  { out = UIPropValue::ofInt(e.gridColumnSpan);      return true; }
+    if (n == "Row Span")     { out = UIPropValue::ofInt(e.gridRowSpan);         return true; }
     if (n == "Rotation")     { out = UIPropValue::ofFloat(e.rotation);          return true; }
     if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
     if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
@@ -523,6 +591,11 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Enabled")      { e.enabled = v.b; return true; }
     if (n == "Render Opacity"){ e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
+    if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
+    if (n == "Grid Row")     { e.gridRow    = v.i < -1 ? -1 : v.i; return true; }
+    if (n == "Column Span")  { e.gridColumnSpan = v.i < 1 ? 1 : v.i; return true; }
+    if (n == "Row Span")     { e.gridRowSpan    = v.i < 1 ? 1 : v.i; return true; }
     if (n == "Rotation")     { e.rotation = v.f; return true; }
     if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
     if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
@@ -573,6 +646,10 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Enabled",      UIPropType::Bool });
     out.push_back({ "Render Opacity", UIPropType::Float, 0.0f, 1.0f });
     out.push_back({ "Slot Fill",    UIPropType::Float });
+    out.push_back({ "Grid Column",  UIPropType::Int });
+    out.push_back({ "Grid Row",     UIPropType::Int });
+    out.push_back({ "Column Span",  UIPropType::Int });
+    out.push_back({ "Row Span",     UIPropType::Int });
     out.push_back({ "Rotation",     UIPropType::Float });
     out.push_back({ "Position",     UIPropType::Vec2 });
     out.push_back({ "Size",         UIPropType::Vec2 });
@@ -1116,6 +1193,24 @@ void UIBoxBase::readJson(const nlohmann::json& j)
     sizeToContent = j.value("sizeToContent", false);
     if (const auto& m = j.value("minSize", nlohmann::json::array()); m.size() >= 2)
     { minSizeX = m[0].get<float>(); minSizeY = m[1].get<float>(); }
+}
+
+void UIGrid::writeJson(nlohmann::json& j) const
+{
+    UIBoxBase::writeJson(j);
+    j["columns"] = columns;
+    j["rows"]    = rows;
+    j["rowSpacing"] = rowSpacing;
+}
+void UIGrid::readJson(const nlohmann::json& j)
+{
+    UIBoxBase::readJson(j);
+    if (const auto c = j.find("columns"); c != j.end() && c->is_array())
+        columns = c->get<std::vector<std::string>>();
+    if (const auto r = j.find("rows"); r != j.end() && r->is_array())
+        rows = r->get<std::vector<std::string>>();
+    rowSpacing = j.value("rowSpacing", rowSpacing);
+    reparse();
 }
 
 void UIWrapBox::writeJson(nlohmann::json& j) const

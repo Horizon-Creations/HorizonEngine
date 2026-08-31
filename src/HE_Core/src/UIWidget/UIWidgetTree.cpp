@@ -324,6 +324,214 @@ namespace
         return out;
     }
 
+    // ── The Grid, solved in one go ───────────────────────────────────────────
+    // Where every child sits, and how wide and tall every track came out. One
+    // function because the two answers depend on each other: an `auto` track is
+    // as big as the children IN it, and which children those are is the
+    // placement. Splitting them would mean placing twice.
+    //
+    // Stateless like every other container's walk — nothing is cached on the
+    // grid, so nothing can be stale. It costs one pass over the siblings per
+    // rect query, which is the same bargain boxSlotRect already makes.
+    struct GridSolved
+    {
+        std::vector<float> colPos, colSize;   // host units, relative to the inner rect
+        std::vector<float> rowPos, rowSize;
+        std::vector<int>   who;               // element id per cell, 0 = empty
+        int cols = 1, rows = 1;
+        // What the fixed and `auto` tracks add up to, gaps included. Weighted
+        // tracks count as nothing here, exactly as a filling child counts as
+        // nothing when a box measures itself.
+        float contentW = 0.0f, contentH = 0.0f;
+        int cellOf(int elemId, int& col, int& row, int& cs, int& rs) const
+        {
+            for (int r = 0; r < rows; ++r)
+                for (int c = 0; c < cols; ++c)
+                    if (who[static_cast<std::size_t>(r) * cols + c] == elemId)
+                    {
+                        col = c; row = r;
+                        // Walk the run to recover the span it was placed with.
+                        cs = 1; while (col + cs < cols &&
+                                       who[static_cast<std::size_t>(r) * cols + col + cs] == elemId) ++cs;
+                        rs = 1; while (row + rs < rows &&
+                                       who[static_cast<std::size_t>(row + rs) * cols + col] == elemId) ++rs;
+                        return 1;
+                    }
+            return 0;
+        }
+    };
+
+    GridSolved solveGrid(const UIWidgetTree& tree, const UIGrid& grid,
+                         const UIWidgetCanvas* canvas)
+    {
+        GridSolved g;
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, grid, us, vs, canvas);
+
+        std::vector<const UIElement*> kids;
+        for (const auto& sp : tree.elements)
+            if (sp && sp->parentId == grid.id && sp->visible) kids.push_back(sp.get());
+
+        g.cols = static_cast<int>(grid.colTracks.size());
+        if (g.cols < 1) g.cols = 1;
+
+        // How many rows there have to be. Declared ones first; if the children
+        // need more, the LAST declared token is repeated — a settings form with
+        // twenty rows should not have to declare twenty of them.
+        int needed = static_cast<int>(grid.rowTracks.size());
+        if (needed < 1) needed = 1;
+        {
+            int cells = 0;
+            for (const UIElement* k : kids)
+            {
+                const int cs = std::clamp(k->gridColumnSpan, 1, g.cols);
+                const int rs = std::max(1, k->gridRowSpan);
+                if (k->gridRow >= 0) needed = std::max(needed, k->gridRow + rs);
+                else                 cells += cs * rs;
+            }
+            const int autoRows = (cells + g.cols - 1) / g.cols;
+            needed = std::max(needed, autoRows > 0 ? autoRows : 1);
+        }
+        g.rows = needed;
+        g.who.assign(static_cast<std::size_t>(g.rows) * g.cols, 0);
+
+        auto fits = [&](int c, int r, int cs, int rs)
+        {
+            if (c < 0 || r < 0 || c + cs > g.cols || r + rs > g.rows) return false;
+            for (int y = r; y < r + rs; ++y)
+                for (int x = c; x < c + cs; ++x)
+                    if (g.who[static_cast<std::size_t>(y) * g.cols + x] != 0) return false;
+            return true;
+        };
+        auto mark = [&](int c, int r, int cs, int rs, int id)
+        {
+            for (int y = r; y < r + rs; ++y)
+                for (int x = c; x < c + cs; ++x)
+                    if (y < g.rows && x < g.cols)
+                        g.who[static_cast<std::size_t>(y) * g.cols + x] = id;
+        };
+
+        // PINNED children first, whatever their order in the tree: an element
+        // that names its cell must get it, and an automatic one that happens to
+        // come earlier must not be able to take it.
+        for (const UIElement* k : kids)
+        {
+            if (k->gridColumn < 0 || k->gridRow < 0) continue;
+            const int cs = std::clamp(k->gridColumnSpan, 1, g.cols);
+            const int rs = std::max(1, k->gridRowSpan);
+            mark(std::min(k->gridColumn, g.cols - 1), std::min(k->gridRow, g.rows - 1),
+                 cs, rs, k->id);
+        }
+        // …then the rest, into the next free cell, reading order.
+        int cursor = 0;
+        for (const UIElement* k : kids)
+        {
+            if (k->gridColumn >= 0 && k->gridRow >= 0) continue;
+            const int cs = std::clamp(k->gridColumnSpan, 1, g.cols);
+            const int rs = std::max(1, k->gridRowSpan);
+            bool placed = false;
+            for (int i = cursor; i < g.rows * g.cols && !placed; ++i)
+            {
+                const int c = i % g.cols, r = i / g.cols;
+                if (!fits(c, r, cs, rs)) continue;
+                mark(c, r, cs, rs, k->id);
+                cursor = i + 1;
+                placed = true;
+            }
+            // No room left: it takes no cell and gets a zero-height slot below,
+            // which is visible and fixable rather than drawn on top of a
+            // neighbour.
+        }
+
+        // ── Track sizes ──────────────────────────────────────────────────────
+        const UIWidgetRect b = uiElementRect(tree, grid, canvas);
+        const float pad  = std::max(0.0f, grid.padding);
+        const float padX = pad * us, padY = pad * vs;
+        const float gapX = std::max(0.0f, grid.spacing)    * us;
+        const float gapY = std::max(0.0f, grid.rowSpacing) * vs;
+        const float innerW = std::max(0.0f, b.w - 2.0f * padX);
+        const float innerH = std::max(0.0f, b.h - 2.0f * padY);
+
+        auto solveAxisTracks = [&](const std::vector<UIGridTrack>& tracks, int count,
+                                   float avail, float gap, float unit, bool horizontal,
+                                   std::vector<float>& size, std::vector<float>& pos,
+                                   float& content)
+        {
+            size.assign(static_cast<std::size_t>(count), 0.0f);
+            float fixedSum = 0.0f, weightSum = 0.0f;
+            for (int i = 0; i < count; ++i)
+            {
+                // Rows past the declared ones repeat the last token.
+                const UIGridTrack& t = tracks[static_cast<std::size_t>(
+                    std::min<int>(i, static_cast<int>(tracks.size()) - 1))];
+                if (t.kind == UIGridTrack::Kind::Fixed)
+                { size[i] = t.value * unit; fixedSum += size[i]; }
+                else if (t.kind == UIGridTrack::Kind::Auto)
+                {
+                    // As big as the biggest thing IN it. Only children that span
+                    // ONE track contribute: a child stretched over three columns
+                    // says nothing about how wide any one of them has to be.
+                    float m = 0.0f;
+                    for (const UIElement* k : kids)
+                    {
+                        int c = 0, r = 0, cs = 1, rs = 1;
+                        if (!g.cellOf(k->id, c, r, cs, rs)) continue;
+                        if (horizontal) { if (c != i || cs != 1) continue; m = std::max(m, k->sizeX * unit); }
+                        else            { if (r != i || rs != 1) continue; m = std::max(m, k->sizeY * unit); }
+                    }
+                    size[i] = m; fixedSum += m;
+                }
+                else weightSum += t.value;
+            }
+            const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
+            content = fixedSum + gaps;
+            const float leftover = std::max(0.0f, avail - fixedSum - gaps);
+            if (weightSum > 0.0f)
+                for (int i = 0; i < count; ++i)
+                {
+                    const UIGridTrack& t = tracks[static_cast<std::size_t>(
+                        std::min<int>(i, static_cast<int>(tracks.size()) - 1))];
+                    if (t.kind == UIGridTrack::Kind::Weight)
+                        size[i] = leftover * (t.value / weightSum);
+                }
+            pos.assign(static_cast<std::size_t>(count), 0.0f);
+            float at = 0.0f;
+            for (int i = 0; i < count; ++i) { pos[i] = at; at += size[i] + gap; }
+        };
+
+        solveAxisTracks(grid.colTracks, g.cols, innerW, gapX, us, true,
+                        g.colSize, g.colPos, g.contentW);
+        solveAxisTracks(grid.rowTracks, g.rows, innerH, gapY, vs, false,
+                        g.rowSize, g.rowPos, g.contentH);
+        return g;
+    }
+
+    UIWidgetRect gridSlotRect(const UIWidgetTree& tree, const UIGrid& grid,
+                              const UIElement& child, const UIWidgetCanvas* canvas)
+    {
+        const UIWidgetRect b = uiElementRect(tree, grid, canvas);
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, grid, us, vs, canvas);
+        const float pad = std::max(0.0f, grid.padding);
+        const UIWidgetRect inner{ b.x + pad * us, b.y + pad * vs, 0.0f, 0.0f };
+
+        const GridSolved g = solveGrid(tree, grid, canvas);
+        int c = 0, r = 0, cs = 1, rs = 1;
+        if (!g.cellOf(child.id, c, r, cs, rs)) return { inner.x, inner.y, 0.0f, 0.0f };
+
+        const float gapX = std::max(0.0f, grid.spacing)    * us;
+        const float gapY = std::max(0.0f, grid.rowSpacing) * vs;
+        float w = 0.0f, h = 0.0f;
+        for (int i = c; i < c + cs && i < g.cols; ++i) w += g.colSize[i];
+        for (int i = r; i < r + rs && i < g.rows; ++i) h += g.rowSize[i];
+        // The gaps a span swallows belong to the span: two columns plus the gap
+        // between them is what "spans two" means.
+        w += gapX * static_cast<float>(std::min(cs, g.cols - c) - 1);
+        h += gapY * static_cast<float>(std::min(rs, g.rows - r) - 1);
+        return { inner.x + g.colPos[c], inner.y + g.rowPos[r],
+                 std::max(0.0f, w), std::max(0.0f, h) };
+    }
+
     // The slot a WrapBox hands one of its children.
     //
     // A row until it cannot be one: children run along X and break to a new line
@@ -444,6 +652,15 @@ void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
     }
 }
 
+void uiGridTracks(const UIWidgetTree& tree, const UIGrid& grid,
+                  const UIWidgetCanvas* canvas,
+                  std::vector<float>& outColumns, std::vector<float>& outRows)
+{
+    const GridSolved g = solveGrid(tree, grid, canvas);
+    outColumns = g.colSize;
+    outRows    = g.rowSize;
+}
+
 UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                            const UIWidgetCanvas* canvas)
 {
@@ -459,6 +676,8 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                 return listSlotRect(tree, *lv, e, canvas);
             if (const auto* wb = dynamic_cast<const UIWrapBox*>(p))
                 return wrapSlotRect(tree, *wb, &e, canvas);
+            if (const auto* gr = dynamic_cast<const UIGrid*>(p))
+                return gridSlotRect(tree, *gr, e, canvas);
             return boxSlotRect(tree, *p, e, canvas);
         }
 
@@ -610,6 +829,22 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
             const float pad = std::max(0.0f, wb->padding);
             wb->sizeY = std::max(wb->minSizeY,
                                  content / std::max(1e-4f, wvs) + 2.0f * pad);
+            continue;
+        }
+        // A grid is measured by its TRACKS. Fixed and `auto` ones add up;
+        // weighted ones count as nothing, exactly as a filling child counts as
+        // nothing when a box measures itself — a share of the leftover is what
+        // this is trying to compute.
+        if (auto* gr = dynamic_cast<UIGrid*>(box))
+        {
+            const GridSolved sg = solveGrid(tree, *gr, canvas);
+            float gus = 1.0f, gvs = 1.0f;
+            uiElementUnitScale(tree, *gr, gus, gvs, canvas);
+            const float pad = std::max(0.0f, gr->padding);
+            gr->sizeX = std::max(gr->minSizeX,
+                                 sg.contentW / std::max(1e-4f, gus) + 2.0f * pad);
+            gr->sizeY = std::max(gr->minSizeY,
+                                 sg.contentH / std::max(1e-4f, gvs) + 2.0f * pad);
             continue;
         }
         const bool  vert = box->stacksVertically();
@@ -881,6 +1116,12 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.renderOpacity < 1.0f) o["renderOpacity"] = e.renderOpacity;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
+    // Written only when the element really sits in a named cell, so every widget
+    // authored before grids existed saves byte-identical.
+    if (e.gridColumn >= 0)     o["gridColumn"] = e.gridColumn;
+    if (e.gridRow >= 0)        o["gridRow"]    = e.gridRow;
+    if (e.gridColumnSpan > 1)  o["gridColSpan"] = e.gridColumnSpan;
+    if (e.gridRowSpan > 1)     o["gridRowSpan"] = e.gridRowSpan;
     if (e.rotation != 0.0f)  o["rotation"] = e.rotation;
     if (e.hoverCursor != HE::UICursor::Default)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
@@ -981,6 +1222,10 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->renderOpacity = o.value("renderOpacity", 1.0f);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
+    e->gridColumn     = o.value("gridColumn", -1);
+    e->gridRow        = o.value("gridRow", -1);
+    e->gridColumnSpan = std::max(1, o.value("gridColSpan", 1));
+    e->gridRowSpan    = std::max(1, o.value("gridRowSpan", 1));
     e->rotation      = o.value("rotation", 0.0f);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));

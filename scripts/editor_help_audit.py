@@ -34,7 +34,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "HE_Editor"
 
 # Widgets that put a label on screen the user can hover.
 VALUE = (r"(?:EditorWidgets::Row::\w+|Row::\w+|EditorWidgets::checkbox|ImGui::Checkbox"
-         r"|ImGui::SliderFloat|ImGui::SliderInt|ImGui::DragFloat\d?|ImGui::DragInt"
+         r"|ImGui::SliderFloat|ImGui::SliderInt|ImGui::DragFloat\d?|ImGui::DragInt\d?"
          r"|ImGui::InputText|ImGui::InputInt|ImGui::InputFloat|ImGui::Combo"
          # BeginCombo is a labelled widget like any other, and leaving it out is
          # how eight pickers in the HorizonCode graphs went eight rounds without

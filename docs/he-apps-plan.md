@@ -1587,6 +1587,55 @@ Rechnung, nicht das Verhalten. Gegengeprüft ist die Weiche selbst: nimmt man di
 `UIWrapBox`-Zeile aus `uiElementRect` heraus, fallen die Kinder auf den Box-Lauf zurück und
 elf Zusicherungen werden rot.
 
+### B3, zweite Hälfte: das Grid (31.08.2026)
+
+Siebzehnter Elementtyp und der Container, an dem D2 hängt: ein **Formular** ist eine
+Beschriftungsspalte, die zu ihren Beschriftungen passt, neben einer Feldspalte, die den Rest
+nimmt. Zwei gestapelte Boxen können das nur nachmachen, indem jemand von Hand jede Breite
+abgleicht, und sie fallen auseinander, sobald eine Beschriftung wächst.
+
+**Die Spurbezeichner sind ein On-Disk-Format** und stehen deshalb als Kasten im Header:
+`120` fest, `*` ein Anteil, `2*` zwei Anteile, `auto` so breit wie das Breiteste darin.
+Alles Unlesbare wird zu `*` — **absichtlich**: eine Spur, die man sieht und reparieren kann,
+ist besser als eine, die auf null zusammenfällt und den Tippfehler versteckt. Dieselbe Regel
+wie bei einer Theme-Rolle, die nicht mehr auflöst.
+
+**Vier Entscheidungen, die vorher fallen mussten:**
+
+**1. Eine Zelle IST der Slot.** Anker und Position des Kindes werden nicht gelesen, genauso wie
+in einer Box. Wer einen kleinen Knopf in einer großen Zelle will, setzt ein Panel hinein — eine
+Platzierungsregel für alle Container, sonst muss ein Autor lernen, welcher Container welche
+Felder liest.
+
+**2. Angeheftete Kinder werden ZUERST platziert**, egal wo sie im Baum stehen. Ein Element, das
+seine Zelle nennt, muss sie bekommen; ein automatisches, das zufällig früher kommt, darf sie ihm
+nicht wegnehmen.
+
+**3. Mehr Kinder als erklärte Zeilen lassen die letzte Zeile sich wiederholen.** Ein
+Einstellungsformular mit zwanzig Zeilen soll nicht zwanzig erklären müssen.
+
+**4. Geparst wird beim SCHREIBEN, nicht beim Fragen.** Ein Treffertest läuft über jedes Element;
+würde `uiElementRect` die Wörter neu zerlegen, geschähe das hundertfach pro Bild. Die Property
+ist deshalb ein `uiprop::custom`-Slot, der beim Setzen neu parst — ein `Set Property` aus einem
+Graphen darf nicht die Wörter ändern und das Layout auf den alten laufen lassen.
+
+`Size To Content` zählt feste und `auto`-Spuren zusammen; gewichtete zählen als **nichts**, weil
+ein Anteil am Rest genau das ist, was diese Messung erst herstellen soll — dieselbe Konvention,
+die `UIBoxBase` für füllende Kinder schon nennt.
+
+**Der Designer zeichnet die Spurlinien**, und zwar aus **demselben Löser**, mit dem der Runtime
+legt (`uiGridTracks`, dafür exportiert). Ein leeres Grid, das nur seinen Umriss zeigt, ist ein
+Rechteck, in das man nicht zielen kann — und ein gleichmäßig geteiltes Raster hätte dem Autor ein
+Layout gezeigt, das es nicht gibt. Ich hatte es zuerst gleichmäßig geteilt und den Kommentar
+daneben geschrieben, der das Gegenteil behauptete; das ist die Sorte Zeile, die später jemand
+glaubt.
+
+**Und der Hilfe-Audit hat meine zwei neuen Bedienelemente nicht gesehen.** Sein Muster kennt
+`ImGui::DragFloat\d?`, aber `ImGui::DragInt` **ohne** Ziffer — jedes `DragInt2` im ganzen Editor
+war für ihn unsichtbar. Nach dem Fix meldete er sofort zwei fehlende Einträge. Zweite Lücke
+derselben Art nach der festen Dateiliste: **ein Deckungswerkzeug, das etwas nicht kennt, meldet
+keine Lücke, sondern Deckung.**
+
 ---
 
 ## 11. Risiken und Fallen

@@ -68,6 +68,10 @@ enum class UIWidgetType : uint8_t
     // chips, a toolbar that has to survive a narrow window — everything that is
     // a row until it cannot be one. Appended, never inserted.
     WrapBox,
+    // Rows and columns, with spans. The container a FORM is made of: a label
+    // column that fits its labels beside a field column that takes the rest.
+    // Two stacked boxes can only fake that, and only by hand-matching sizes.
+    Grid,
     COUNT
 };
 
@@ -344,6 +348,18 @@ public:
     // that has to be kept in step with the element list.
     float   slotFill = 0.0f;
 
+    // ── Which cell of a Grid this element sits in (docs/he-apps-plan.md B3) ──
+    // -1 on either axis means "the next free cell", which is what almost every
+    // child wants: fill a form top to bottom and never type a coordinate.
+    // Setting them PINS the element, and pinned children are placed first, so an
+    // explicitly placed one cannot have its cell taken by an automatic one that
+    // happens to come earlier in the tree.
+    //
+    // The spans are how many cells it covers, at least 1. Ignored outside a
+    // Grid, like slotFill is outside a box.
+    int     gridColumn = -1, gridRow = -1;
+    int     gridColumnSpan = 1, gridRowSpan = 1;
+
     // Optional node-graph material on the quad (empty = solid color). Shared
     // storage; only types with hasMaterialSlot() expose it in the editor.
     std::string material;
@@ -509,6 +525,8 @@ protected:
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.renderOpacity = renderOpacity; dst.enabled = enabled;
         dst.slotFill = slotFill; dst.rotation = rotation;
+        dst.gridColumn = gridColumn; dst.gridRow = gridRow;
+        dst.gridColumnSpan = gridColumnSpan; dst.gridRowSpan = gridRowSpan;
         dst.texture = texture; dst.textureAssetId = textureAssetId;
         dst.textureW = textureW; dst.textureH = textureH;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;

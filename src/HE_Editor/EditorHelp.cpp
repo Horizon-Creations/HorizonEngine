@@ -1944,6 +1944,38 @@ namespace
 	  "it for you. A bound colour's swatch is read-only, because editing it would "
 	  "be overwritten the next time the theme or the mode changes.",
 	  "", "ui#elements" },
+	{ "UI Widget/Cell (col, row)", "",
+	  "Which cell of the Grid this element sits in, counted from 0 at the top "
+	  "left. -1 on either number means \"the next free cell\", which is what almost "
+	  "everything wants: fill a form from the top and never type a coordinate. "
+	  "Naming a cell PINS the element there, and pinned ones are placed first — so "
+	  "an element that asked for a cell cannot have it taken by one that did not "
+	  "care but happened to come earlier.",
+	  "", "ui#elements" },
+	{ "UI Widget/Span (cols, rows)", "",
+	  "How many cells this element covers, at least one of each. A span takes the "
+	  "gaps it crosses with it, so two columns and the space between them are one "
+	  "wide cell — that is how a heading sits over a whole form. Cells under a span "
+	  "are taken: everything placed automatically steps around it.",
+	  "", "ui#elements" },
+	{ "UI Widget/Column Sizes", "",
+	  "One entry per column, in order. \"120\" is a fixed width, \"*\" is one share of "
+	  "whatever is left over, \"2*\" is two shares, and \"auto\" is as wide as the "
+	  "widest thing in that column. A form is usually \"auto\" for the labels and "
+	  "\"*\" for the fields, which is exactly what two stacked boxes cannot do. "
+	  "Anything unreadable is treated as \"*\" — a track you can see and fix beats "
+	  "one that collapsed to nothing and hid the typo.",
+	  "", "ui#elements" },
+	{ "UI Widget/Row Sizes", "",
+	  "The same, downwards. If there are more children than declared rows, the LAST "
+	  "entry is repeated for as many rows as they need — a settings page with twenty "
+	  "rows does not have to declare twenty.",
+	  "", "ui#elements" },
+	{ "UI Widget/Row Spacing", "",
+	  "The gap between two ROWS of a Grid. Spacing is the gap between two columns; "
+	  "two numbers because a form almost always wants its rows further apart than "
+	  "its columns.",
+	  "", "ui#elements" },
 	{ "UI Widget/Line Spacing", "",
 	  "The gap between two LINES of a Wrap Box. Its own number beside Spacing, "
 	  "which is the gap between two items on the same line — a row of chips almost "
