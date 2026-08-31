@@ -83,6 +83,7 @@ add_executable(he_tests
     test_export_profiles.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
+    test_third_person_template.cpp
     test_docs_library.cpp
     test_editor_help.cpp
     test_hc_node_docs.cpp

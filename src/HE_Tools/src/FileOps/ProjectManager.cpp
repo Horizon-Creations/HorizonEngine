@@ -1,6 +1,7 @@
 #include "ProjectManager.h"
 #include "CppScaffoldTemplates.h"
 #include <ContentManager/DefaultAssets.h> // well-known UUIDs seeded into the tutorial scene
+#include <ContentManager/HAsset.h>        // the third-person template writes .hasset containers
 #include <Types/Enums.h>                  // HE::LightType
 #include <Types/UUID.h>                   // stable project identity
 #include <algorithm>
@@ -245,6 +246,190 @@ bool scaffoldTutorialProject(const std::string& projectRoot,
 	return writeTextFileIfAbsent(fs::path(projectRoot) / "TUTORIAL.md", readme);
 }
 
+// ─── Third-person starter ────────────────────────────────────────────────────
+namespace
+{
+// One .hasset container: the META chunk every asset needs to be discoverable,
+// then whatever payload chunks the type carries. Written by hand rather than
+// through ContentManager because HorizonTools is a build-time library and does
+// not link the scene/content runtime — and because a project has to be complete
+// on disk before anything opens it.
+bool writeChunkedAsset(const fs::path& file, const std::string& contentRelative,
+                       const std::string& name, HE::AssetType type,
+                       const std::vector<std::pair<uint32_t, std::string>>& chunks)
+{
+	std::error_code ec;
+	if (fs::exists(file, ec)) return true;   // never clobber
+	fs::create_directories(file.parent_path(), ec);
+
+	HAsset::Writer w;
+	std::vector<uint8_t> meta;
+	HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
+	const HE::UUID id = HE::UUID::generate();
+	HAsset::Writer::appendPOD(meta, id.hi);
+	HAsset::Writer::appendPOD(meta, id.lo);
+	HAsset::Writer::appendString(meta, name);
+	// Relative to <project>/Content, NOT to the project root — that is the path
+	// scheme the content manager and Create Object both speak. (The .heproj
+	// manifest's startupScene uses the other one, which is a trap worth naming.)
+	HAsset::Writer::appendString(meta, contentRelative);
+	w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+	for (const auto& [chunkId, payload] : chunks)
+		w.addChunk(chunkId, payload.data(), payload.size());
+	return w.write(file.string(), static_cast<uint16_t>(type));
+}
+
+// The controller's graph: Begin Play → Create Object(PlayerCharacter) → Possess.
+//
+// Written as JSON text rather than built through the graph API for the same
+// reason the scene above is: HorizonTools does not link HorizonCode. Three
+// things about this format are easy to get wrong and silent when wrong, so they
+// are named here rather than discovered again:
+//
+//  * Node "type" is the DISPLAY NAME, and it is an on-disk key. A misspelling
+//    drops the node AND every link touching it, without an error.
+//  * Link pin indices are ABSOLUTE in the unified pin space
+//    [execIns][execOuts][dataIns][dataOuts]. An exec Engine Call therefore has
+//    execIn 0, execOut 1, and its first argument at 2.
+//  * An exec Engine Call MUST carry "hasArg": true. Without it the node loads
+//    as a pure data node, every pin shifts by two, and the exec chain stops
+//    there in silence.
+//
+// Create Object rather than the row displayed as "Spawn Class": Possess takes
+// object references, Spawn Class answers an entity id, and there is no
+// conversion between the two. The Location pin is wired from a Make Vector 3
+// (rather than given an inline default) because Create Object decides placement
+// by whether the pin is WIRED — an unwired pin means "leave it where the class
+// authored it", so a default alone would be ignored.
+constexpr const char* kControllerGraph = R"JSON({
+  "nextId": 6,
+  "nodes": [
+    { "id": 1, "type": "Event",         "pos": [ -280.0, 0.0 ], "s": "BeginPlay" },
+    { "id": 3, "type": "Make Vector 3", "pos": [ -280.0, 160.0 ],
+      "pinDefaults": [ { "i": 0, "t": 1, "v": 0.0 },
+                       { "i": 1, "t": 1, "v": 1.2 },
+                       { "i": 2, "t": 1, "v": 0.0 } ] },
+    { "id": 2, "type": "Create Object", "pos": [ 20.0, 0.0 ],
+      "s": "Gameplay/PlayerCharacter.hasset" },
+    { "id": 5, "type": "Get Self",      "pos": [ 280.0, 150.0 ] },
+    { "id": 4, "type": "Engine Call",   "pos": [ 460.0, 0.0 ],
+      "s": "player.possess", "hasArg": true,
+      "params": [ { "name": "controller", "type": 7 },
+                  { "name": "character",  "type": 7 } ] }
+  ],
+  "links": [
+    [ 1, 0, 2, 0 ],
+    [ 3, 3, 2, 2 ],
+    [ 2, 1, 4, 0 ],
+    [ 5, 0, 4, 2 ],
+    [ 2, 4, 4, 3 ]
+  ],
+  "variables": []
+})JSON";
+
+// The character's graph: the Move axis drives Move, the Jump button drives Jump.
+//
+// The Entity pins of Move and Jump are deliberately UNWIRED. A leading parameter
+// named "entity" means "the entity of the class making the call" when it is left
+// empty, which is exactly what a character doing something to itself means. That
+// is also the shape a reader should copy, so the template must not model the
+// old, noisier way.
+//
+// Break Vector 2 → Make Vector 3 is mandatory, not decoration: the axis arrives
+// as a Vec2 and Move wants a Vec3, and the graph deliberately refuses to convert
+// between them. X maps to X and Y maps to Z, because the pair is a direction on
+// the GROUND plane; the height component stays unwired at zero.
+constexpr const char* kCharacterGraph = R"JSON({
+  "nextId": 7,
+  "nodes": [
+    { "id": 1, "type": "Input Action",   "pos": [ -360.0, 0.0 ],
+      "s": "Move", "propType": 5, "hasArg": true },
+    { "id": 2, "type": "Break Vector 2", "pos": [ -140.0, 110.0 ] },
+    { "id": 3, "type": "Make Vector 3",  "pos": [ 60.0, 110.0 ] },
+    { "id": 4, "type": "Engine Call",    "pos": [ 280.0, 0.0 ],
+      "s": "locomotion.move", "hasArg": true,
+      "params": [ { "name": "entity",    "type": 3 },
+                  { "name": "direction", "type": 11 } ] },
+    { "id": 5, "type": "Input Action",   "pos": [ -360.0, 300.0 ], "s": "Jump" },
+    { "id": 6, "type": "Engine Call",    "pos": [ 280.0, 300.0 ],
+      "s": "locomotion.jump", "hasArg": true,
+      "params":  [ { "name": "entity", "type": 3 } ],
+      "results": [ { "name": "jumped", "type": 2 } ] }
+  ],
+  "links": [
+    [ 1, 0, 4, 0 ],
+    [ 1, 1, 2, 0 ],
+    [ 2, 1, 3, 0 ],
+    [ 2, 2, 3, 2 ],
+    [ 3, 3, 4, 3 ],
+    [ 5, 0, 6, 0 ]
+  ],
+  "variables": []
+})JSON";
+} // namespace
+
+bool scaffoldThirdPersonProject(const std::string& projectRoot)
+{
+	const fs::path content = fs::path(projectRoot) / "Content";
+	bool ok = true;
+
+	// The two classes. No component chunk on purpose: a class without one
+	// inherits its engine base's list at spawn time, so this character gets its
+	// character controller, collider, movement component and camera child from
+	// whatever those are TODAY rather than from what they were when this
+	// template was written.
+	ok &= writeChunkedAsset(content / "Gameplay" / "PlayerController.hasset",
+	                        "Gameplay/PlayerController.hasset", "PlayerController",
+	                        HE::AssetType::HorizonCodeClass,
+	                        { { HAsset::CHUNK_HCGR, kControllerGraph },
+	                          { HAsset::CHUNK_HCBC, "PlayerController" } });
+	ok &= writeChunkedAsset(content / "Gameplay" / "PlayerCharacter.hasset",
+	                        "Gameplay/PlayerCharacter.hasset", "PlayerCharacter",
+	                        HE::AssetType::HorizonCodeClass,
+	                        { { HAsset::CHUNK_HCGR, kCharacterGraph },
+	                          { HAsset::CHUNK_HCBC, "PlayerCharacter" } });
+
+	// The actions. Their FILE STEM is the logical name a graph binds to, so
+	// renaming one of these files quietly stops the action firing.
+	ok &= writeChunkedAsset(content / "Input" / "Move.hasset", "Input/Move.hasset", "Move",
+	                        HE::AssetType::InputAction,
+	                        { { HAsset::CHUNK_IACT, R"({"valueType":"Axis2D","runWhilePaused":false})" } });
+	ok &= writeChunkedAsset(content / "Input" / "Look.hasset", "Input/Look.hasset", "Look",
+	                        HE::AssetType::InputAction,
+	                        { { HAsset::CHUNK_IACT, R"({"valueType":"Axis2D","runWhilePaused":false})" } });
+	ok &= writeChunkedAsset(content / "Input" / "Jump.hasset", "Input/Jump.hasset", "Jump",
+	                        HE::AssetType::InputAction,
+	                        { { HAsset::CHUNK_IACT, R"({"valueType":"Button","runWhilePaused":false})" } });
+
+	// …and what they are bound to. Keyboard and gamepad both, because "it does
+	// not work with a controller" is otherwise the second thing anyone reports.
+	// A mapping entry names its action by content-relative PATH, unlike the
+	// graph node above, which names it by stem — the one inconsistency in this
+	// file that cannot be papered over here.
+	//
+	// Look is bound but unused by the shipped graphs: the camera rig already
+	// turns with the mouse on its own, and an axis wired to nothing is a smaller
+	// surprise than an action that exists in the mapping list and nowhere else.
+	constexpr const char* kMappings = R"JSON({"entries":[
+ {"action":"Input/Move.hasset",
+  "axesX":[{"source":"Key","positive":"D","negative":"A","scale":1.0},
+           {"source":"GamepadAxis","axis":"leftx","scale":1.0}],
+  "axesY":[{"source":"Key","positive":"W","negative":"S","scale":1.0},
+           {"source":"GamepadAxis","axis":"lefty","scale":-1.0}]},
+ {"action":"Input/Look.hasset",
+  "axesX":[{"source":"MouseDeltaX","scale":1.0},
+           {"source":"GamepadAxis","axis":"rightx","scale":1.0}],
+  "axesY":[{"source":"MouseDeltaY","scale":1.0},
+           {"source":"GamepadAxis","axis":"righty","scale":1.0}]},
+ {"action":"Input/Jump.hasset","keys":["Space"],"gamepadButtons":["a"]}
+]})JSON";
+	ok &= writeChunkedAsset(content / "Input" / "DefaultMappings.hasset",
+	                        "Input/DefaultMappings.hasset", "DefaultMappings",
+	                        HE::AssetType::InputMappingContext,
+	                        { { HAsset::CHUNK_IMAP, kMappings } });
+	return ok;
+}
+
 bool scaffoldCppProject(const std::string& projectRoot,
                         const std::string& projectName,
                         const std::string& startupSceneName)
@@ -282,8 +467,14 @@ static json startupSceneJson(ProjectPreset preset)
 {
 	const bool seedEnvironment = (preset == ProjectPreset::Game ||
 	                              preset == ProjectPreset::Simulation ||
-	                              preset == ProjectPreset::Tutorial);
-	const bool furnish = (preset == ProjectPreset::Tutorial);
+	                              preset == ProjectPreset::Tutorial ||
+	                              preset == ProjectPreset::ThirdPerson);
+	const bool furnish  = (preset == ProjectPreset::Tutorial);
+	// The third-person starter's scene: somewhere to stand and something to see
+	// it by. Deliberately NOT the tutorial's furniture — the tour's cube and its
+	// point light are props for the tour's steps, and a template you build a game
+	// on should start with the floor and nothing to delete.
+	const bool playable = (preset == ProjectPreset::ThirdPerson);
 
 	auto vec3 = [](float x, float y, float z) { return json::array({ x, y, z }); };
 	// Matches SceneSerializer's uuidToJson: [hi, lo].
@@ -336,13 +527,57 @@ static json startupSceneJson(ProjectPreset preset)
 		// tour's "drag the time-of-day slider" step actually move the sun.
 		// Keys are EnvironmentComponent member names (HE_ENV_FIELDS_* /
 		// SceneSerializer); anything left out falls back to the struct default.
-		addChild("Sky", json{ { "environment", furnish
+		addChild("Sky", json{ { "environment", (furnish || playable)
 			? json{ { "dayNightCycle", true  },   // without this timeOfDay is inert
 			        { "timeOfDay",     0.32f },   // mid-morning: raking light, long shadows
 			        { "cloudMode",     1     },   // volumetric clouds rather than the dome
 			        { "cloudCoverage", 0.4f  } }
 			: json::object() } });
 		addChild("Weather", json{ { "weather", json::object() } });
+	}
+
+	if (playable)
+	{
+		// Ground you can actually stand on, which is the difference between this
+		// and the tutorial's floor: a Static rigid body and a box collider, or
+		// the character falls straight through the thing it is standing on and
+		// the template's whole claim is false on the first press of Play.
+		//
+		// A flattened cube rather than a quad — the built-in quad is a 1x1
+		// billboard facing +Z, and there is no ground primitive. The half
+		// extents mirror the scale, because the collider is authored in the
+		// entity's own units and does not read the transform.
+		addChild("Ground", json{
+			{ "transform", transform(vec3(0.0f, -0.25f, 0.0f), vec3(60.0f, 0.5f, 60.0f)) },
+			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
+			{ "material",  json{ { "asset", uuid(HE::kDefaultTerrainMaterialId) } } },
+			{ "rigidbody", json{ { "type", static_cast<uint8_t>(HE::RigidBodyType::Static) } } },
+			{ "collider",  json{ { "shape",  static_cast<uint8_t>(HE::ColliderShape::Box) },
+			                     { "halfEx", vec3(0.5f, 0.5f, 0.5f) } } },
+		});
+		// Two boxes to walk around and jump onto — the smallest thing that makes
+		// movement legible. Without something at a fixed place, a player on an
+		// empty plane cannot tell whether they are moving at all.
+		addChild("Block", json{
+			{ "transform", transform(vec3(4.0f, 0.5f, -3.0f), vec3(2.0f, 1.0f, 2.0f)) },
+			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
+			{ "material",  json{ { "asset", uuid(HE::kDefaultMaterialId) } } },
+			{ "rigidbody", json{ { "type", static_cast<uint8_t>(HE::RigidBodyType::Static) } } },
+			{ "collider",  json{ { "shape",  static_cast<uint8_t>(HE::ColliderShape::Box) },
+			                     { "halfEx", vec3(0.5f, 0.5f, 0.5f) } } },
+		});
+		addChild("Step", json{
+			{ "transform", transform(vec3(-3.5f, 0.25f, -4.5f), vec3(3.0f, 0.5f, 3.0f)) },
+			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
+			{ "material",  json{ { "asset", uuid(HE::kDefaultMaterialId) } } },
+			{ "rigidbody", json{ { "type", static_cast<uint8_t>(HE::RigidBodyType::Static) } } },
+			{ "collider",  json{ { "shape",  static_cast<uint8_t>(HE::ColliderShape::Box) },
+			                     { "halfEx", vec3(0.5f, 0.5f, 0.5f) } } },
+		});
+		// No camera entity here, and that is deliberate: the character class
+		// brings its own camera as a child, aimed by a rig that follows whoever
+		// is possessed. A second main camera in the scene would win or lose the
+		// coin toss depending on iteration order.
 	}
 
 	if (furnish)
@@ -391,6 +626,21 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 			return false;
 	}
 
+	// The third-person starter IS two HorizonCode classes, and PlayerHost only
+	// ever scans HorizonCode class assets for a controller. Handing this template
+	// to a Lua or Python project would produce a project that says "playable" and
+	// has no player — the exact silent hole this template exists to close. So the
+	// language follows the template rather than the picker, and says so.
+	if (preset == ProjectPreset::ThirdPerson &&
+	    scriptLanguage != ProjectScriptLanguage::HorizonCode)
+	{
+		HE_LOG_INFO(Config, "%s",
+			"Third Person template: scripting language set to HorizonCode - the "
+			"controller and character it ships are visual-script classes, and a "
+			"player cannot be discovered in another language yet");
+		scriptLanguage = ProjectScriptLanguage::HorizonCode;
+	}
+
 	// ── Common sub-folders ────────────────────────────────────────────────────
 	fs::create_directories(root / "Content");
 	fs::create_directories(root / "Config");
@@ -402,6 +652,16 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// The tutorial sandbox is a Game project with a furnished scene — the tour
 	// walks through scripts, audio, models, materials, prefabs and UI, so every
 	// folder it mentions has to already be there to put things in.
+	// Named explicitly rather than left to `default:` below — that default
+	// suppresses -Wswitch, so a new preset would compile clean and quietly get
+	// the Empty folder layout.
+	case ProjectPreset::ThirdPerson:
+		// Where the template's own assets go. Gameplay and Input are the two
+		// folders a player is actually made of, and having them already there is
+		// half of what makes the layout readable.
+		fs::create_directories(root / "Content" / "Gameplay");
+		fs::create_directories(root / "Content" / "Input");
+		[[fallthrough]];
 	case ProjectPreset::Tutorial:
 	case ProjectPreset::Game:
 		fs::create_directories(root / "Content" / "Scripts");
@@ -475,6 +735,18 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// reason to fail a project that is otherwise complete on disk.
 	if (preset == ProjectPreset::Tutorial)
 		scaffoldTutorialProject(root.string(), projectName);
+
+	// The third-person starter's six assets. NOT non-fatal like the two above: a
+	// project created from this template and missing its controller opens on a
+	// scene with no player in it, which is indistinguishable from the template
+	// never having worked. Better to fail the creation and say so.
+	if (preset == ProjectPreset::ThirdPerson && !scaffoldThirdPersonProject(root.string()))
+	{
+		HE_LOG_ERROR(Config, "%s",
+			"Third Person template: could not write its gameplay and input assets - "
+			"the project would open without a player");
+		return false;
+	}
 
 	m_currentProject.name                = projectName;
 	m_currentProject.path                = heprojPath.string();

@@ -21,6 +21,7 @@ namespace ProjectHubPanel
 		"Simulation",
 		"Tool",
 		"Tutorial Sandbox",
+		"Third Person",
 	};
 	inline constexpr const char* kPresetDescs[] = {
 		"Only the basic folder skeleton, no extra content.",
@@ -28,6 +29,8 @@ namespace ProjectHubPanel
 		"Assets, Scenes and Data folders.",
 		"Assets and Source folders.",
 		"A furnished scene (sky, ground, cube, light) to follow the interactive tutorial in.",
+		"Playable on the first press of Play: ground, sky, and a character on WASD, "
+		"the mouse and Space. HorizonCode.",
 	};
 	inline constexpr int kPresetCount =
 		static_cast<int>(sizeof(kPresetNames) / sizeof(kPresetNames[0]));
