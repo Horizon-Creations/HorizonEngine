@@ -6705,3 +6705,289 @@ TEST_CASE("Grid: a cell is the slot, and anchors inside it are ignored")
     CHECK(r.w == doctest::Approx(100.0f));
     CHECK(r.h == doctest::Approx(50.0f));
 }
+
+// ═══ Component parameters (D2) ═══════════════════════════════════════════════
+// A WidgetRef grafts another asset in. Until now it grafted it EXACTLY as it was
+// authored, which makes a component library a catalogue of screenshots: a form
+// row with a baked-in label is one form row, not a form row.
+//
+// A parameter names one property of one element inside the component and gives
+// that pair a name of its own. The host stores the NAME — which is the whole
+// point, because it means the component may be rebuilt inside without breaking
+// a single page that uses it.
+
+namespace
+{
+    // A component with one knob: a label whose Text is exposed as "Label".
+    HE::UIWidgetTree labelledRow(const char* authoredText = "Default")
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 200.0f; t.canvasHeight = 40.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int txt = t.add(HE::UIWidgetType::Text);
+        HE::UIElement& e = *t.find(txt);
+        e.name = "Caption";
+        e.setProp("Text", HE::UIPropValue::ofString(authoredText));
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+
+        HE::UIWidgetParam p;
+        p.name = "Label"; p.elementId = txt; p.property = "Text";
+        p.help = "What the row says.";
+        t.params.push_back(p);
+        return t;
+    }
+
+    // How many glyphs were drawn between two heights. The live tree is the
+    // manager's own business (Instance is private, and rightly so), so what a
+    // parameter did is asked of the PICTURE — which is the only place it has to
+    // be true anyway, and it walks the whole path from the stored value through
+    // the graft to the renderer instead of stopping halfway.
+    int glyphsBetween(const std::vector<UIRenderObject>& out, float y0, float y1)
+    {
+        int n = 0;
+        for (const auto& ro : out)
+            if (ro.type == 2 && ro.position.y >= y0 && ro.position.y < y1) ++n;
+        return n;
+    }
+}
+
+// uiBaseProperties() is the same list getBaseProp/setBaseProp spell as an
+// if-chain, written a second time so something can enumerate it. A name added
+// to one and not the other would simply never be offered as a parameter — a
+// gap that looks exactly like "that property does not exist", which is the
+// hardest kind of nothing to notice.
+TEST_CASE("Base properties: the enumerable list and the if-chain agree")
+{
+    HE::UIPanel e;
+    for (const HE::UIPropDesc& d : HE::uiBaseProperties())
+    {
+        // Readable under that name, and answering with the type the list
+        // promises — the type is what decides which editor the panel draws.
+        const HE::UIPropValue v = e.getPropAny(d.name);
+        CHECK_MESSAGE(v.type == d.type, d.name);
+        // …and writable: a knob that reads but does not write is worse than one
+        // that is not offered.
+        e.setPropAny(d.name, v);
+    }
+    // Not in either list, so it falls through to the TYPE's table and misses
+    // there too — which is what the panel reports as "no longer exists".
+    CHECK(HE::uiBaseProperties().size() == 37);
+}
+
+TEST_CASE("Parameters: a declaration writes the property it names")
+{
+    HE::UIWidgetTree t = labelledRow();
+    CHECK(HE::uiApplyWidgetParams(t, { { "Label", HE::UIPropValue::ofString("Name") } }) == 1);
+    CHECK(t.find(1)->getProp("Text").s == "Name");
+}
+
+// The rule that makes a component's insides its own business: what the host
+// stored is a NAME, and a name nobody declares any more is dropped rather than
+// guessed at. Writing it into whatever now sits in that place would be worse
+// than a label that stays as its author left it.
+TEST_CASE("Parameters: a value nobody declares is dropped, not guessed at")
+{
+    HE::UIWidgetTree t = labelledRow("Authored");
+    CHECK(HE::uiApplyWidgetParams(t, { { "Titel", HE::UIPropValue::ofString("x") } }) == 0);
+    CHECK(t.find(1)->getProp("Text").s == "Authored");
+
+    // …and a declaration pointing at an element that is gone writes nothing
+    // instead of reaching into the next one along.
+    t.params[0].elementId = 999;
+    CHECK(HE::uiApplyWidgetParams(t, { { "Label", HE::UIPropValue::ofString("x") } }) == 0);
+    CHECK(t.find(1)->getProp("Text").s == "Authored");
+}
+
+// A parameter that has not been set is not an empty value: it is what the
+// component's author left in the property. That is the ONLY place a default
+// lives, so there is no second one to disagree with it.
+TEST_CASE("Parameters: an unset one keeps what the component was authored with")
+{
+    HE::UIWidgetTree t = labelledRow("As authored");
+    CHECK(HE::uiApplyWidgetParams(t, {}) == 0);
+    CHECK(t.find(1)->getProp("Text").s == "As authored");
+}
+
+// The value on disk carries its own type; the property has one too, and the two
+// can disagree the day a component's author turns a caption into a number. The
+// property's type wins, because it is the one the element actually reads.
+TEST_CASE("Parameters: the property's type wins over the stored one")
+{
+    HE::UIWidgetTree t;
+    const int txt = t.add(HE::UIWidgetType::Text);
+    t.find(txt)->name = "T";
+    { HE::UIWidgetParam p; p.name = "Size"; p.elementId = txt; p.property = "FontSize";
+      t.params.push_back(p); }
+
+    // A string where a float is wanted: read as the number it spells.
+    CHECK(HE::uiApplyWidgetParams(t, { { "Size", HE::UIPropValue::ofString("31") } }) == 1);
+    CHECK(t.find(txt)->getProp("FontSize").f == doctest::Approx(31.0f));
+
+    // …and one that spells nothing at all is that type's zero, not the bytes of
+    // the string reinterpreted as a float.
+    CHECK(HE::uiApplyWidgetParams(t, { { "Size", HE::UIPropValue::ofString("nonsense") } }) == 1);
+    CHECK(t.find(txt)->getProp("FontSize").f == doctest::Approx(0.0f));
+}
+
+// Telling a component what colour to be UN-BINDS that colour from the theme.
+// Without this the two fight: the parameter writes at graft time and the theme
+// pass overwrites it one line later, so a page that sets an accent colour would
+// show the theme's — silently, and only in the runtime, because the designer
+// runs no theme pass at all.
+TEST_CASE("Parameters: setting a themed colour releases it from the theme")
+{
+    HE::UIWidgetTree t;
+    const int p = t.add(HE::UIWidgetType::Panel);
+    t.find(p)->setThemeRole("Color", "Surface");
+    { HE::UIWidgetParam d; d.name = "Tint"; d.elementId = p; d.property = "Color";
+      t.params.push_back(d); }
+    REQUIRE_FALSE(t.find(p)->themeRoleFor("Color").empty());
+
+    const glm::vec4 red{ 1.0f, 0.0f, 0.0f, 1.0f };
+    CHECK(HE::uiApplyWidgetParams(t, { { "Tint", HE::UIPropValue::ofColor(red) } }) == 1);
+    CHECK(t.find(p)->themeRoleFor("Color").empty());
+
+    HE::UITheme theme;
+    HE::uiApplyTheme(t, theme, HE::UIThemeMode::Dark);
+    CHECK(t.find(p)->getProp("Color").col.r == doctest::Approx(1.0f));
+    CHECK(t.find(p)->getProp("Color").col.g == doctest::Approx(0.0f));
+}
+
+// The case the whole feature exists for: one component asset, two copies, two
+// different labels. Before parameters this page showed the same word twice.
+TEST_CASE("Parameters: two copies of one component say different things")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidgetAs(cm, "mem://row.hasset", labelledRow("Default"));
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    // Deliberately different LENGTHS: the picture is what gets asked, and a
+    // glyph count is what a picture can answer.
+    const char* said[2] = { "A", "BBB" };
+    for (int i = 0; i < 2; ++i)
+    {
+        const int ref = page.add(HE::UIWidgetType::WidgetRef);
+        auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(ref));
+        REQUIRE(r);
+        HE::uiSetAnchorPreset(*r, 0); r->pivotX = r->pivotY = 0.0f;
+        r->posX = 0.0f; r->posY = static_cast<float>(i) * 60.0f;
+        r->sizeX = 200.0f; r->sizeY = 40.0f;
+        r->widgetPath = "mem://row.hasset";
+        const HE::UIPropValue v = HE::UIPropValue::ofString(said[i]);
+        r->setParamValue("Label", &v);
+    }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // One glyph in the first row's band and three in the second's. Told nothing,
+    // both would say "Default" and both bands would hold seven — which is why
+    // the two values differ in LENGTH and not just in spelling.
+    CHECK(glyphsBetween(out,  0.0f, 50.0f) == 1);
+    CHECK(glyphsBetween(out, 55.0f, 105.0f) == 3);
+}
+
+// A ref that sets nothing gets the component as authored — the same widget,
+// used as a picture, which is what every WidgetRef written before parameters
+// existed is.
+TEST_CASE("Parameters: a ref that sets nothing still shows the component's own text")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidgetAs(cm, "mem://row.hasset", labelledRow("Authored"));
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(ref));
+      HE::uiSetAnchorPreset(*r, 0); r->pivotX = r->pivotY = 0.0f;
+      r->sizeX = 200.0f; r->sizeY = 40.0f;
+      r->widgetPath = "mem://row.hasset"; }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    CHECK(glyphsBetween(out, 0.0f, 400.0f) == 8);   // "Authored"
+}
+
+TEST_CASE("Parameters: they round-trip, and a page without them saves nothing extra")
+{
+    HE::UIWidgetTree comp = labelledRow("Default");
+    const std::string cjson = HE::uiWidgetTreeToJson(comp);
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(cjson, back));
+    REQUIRE(back.params.size() == 1);
+    CHECK(back.params[0].name == "Label");
+    CHECK(back.params[0].elementId == 1);
+    CHECK(back.params[0].property == "Text");
+    CHECK(back.params[0].help == "What the row says.");
+
+    // The values on the host side, one of each shape that can carry one.
+    HE::UIWidgetTree page;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(ref));
+      r->widgetPath = "mem://row.hasset";
+      const HE::UIPropValue s = HE::UIPropValue::ofString("Hello");
+      const HE::UIPropValue f = HE::UIPropValue::ofFloat(2.5f);
+      const HE::UIPropValue b = HE::UIPropValue::ofBool(true);
+      const HE::UIPropValue c = HE::UIPropValue::ofColor({ 0.25f, 0.5f, 0.75f, 1.0f });
+      r->setParamValue("Label", &s);
+      r->setParamValue("Size",  &f);
+      r->setParamValue("On",    &b);
+      r->setParamValue("Tint",  &c); }
+    const std::string pjson = HE::uiWidgetTreeToJson(page);
+    HE::UIWidgetTree pback;
+    REQUIRE(HE::uiWidgetTreeFromJson(pjson, pback));
+    const auto* rr = dynamic_cast<const HE::UIWidgetRef*>(pback.find(ref));
+    REQUIRE(rr);
+    REQUIRE(rr->paramValues.size() == 4);
+    // The ORDER an author set them in is the order they come back — a JSON
+    // object keyed by name would be free to sort them, and the host's panel
+    // would reshuffle itself on every save.
+    CHECK(rr->paramValues[0].first == "Label");
+    CHECK(rr->paramValues[3].first == "Tint");
+    CHECK(rr->paramValue("Label")->s == "Hello");
+    CHECK(rr->paramValue("Size")->f == doctest::Approx(2.5f));
+    CHECK(rr->paramValue("On")->b);
+    CHECK(rr->paramValue("Tint")->col.b == doctest::Approx(0.75f));
+    CHECK(rr->paramValue("Missing") == nullptr);
+
+    // The type travels as a NAME, so inserting a type into UIPropType instead of
+    // appending one cannot silently turn a colour into a string.
+    CHECK(pjson.find("\"color\"") != std::string::npos);
+
+    // …and a widget that declares nothing and sets nothing writes neither key,
+    // so every widget authored before components existed saves byte-identical.
+    HE::UIWidgetTree plain;
+    plain.add(HE::UIWidgetType::WidgetRef);
+    const std::string plainJson = HE::uiWidgetTreeToJson(plain);
+    CHECK(plainJson.find("params") == std::string::npos);
+}
+
+// A declaration missing either half names nothing. Kept out at LOAD time rather
+// than skipped at apply time, so the host's panel never grows a row that writes
+// into the void.
+TEST_CASE("Parameters: a half-written declaration does not survive loading")
+{
+    HE::UIWidgetTree t = labelledRow();
+    t.params.push_back({ "",     1, "Text", "" });   // no name
+    t.params.push_back({ "Nope", 1, "",     "" });   // no property
+    t.params.push_back({ "Zero", 0, "Text", "" });   // no element
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    REQUIRE(back.params.size() == 1);
+    CHECK(back.params[0].name == "Label");
+}

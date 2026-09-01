@@ -496,6 +496,35 @@ class HE_API UIWidgetRef final : public UIElement
 public:
     std::string widgetPath;        // content-relative path of the widget asset
     bool        embedded = false;  // transient: the runtime grafted it in
+
+    // ── What this copy was told ──────────────────────────────────────────────
+    // One value per parameter the referenced widget DECLARES (see
+    // UIWidgetParam). Stored by the parameter's name rather than by element and
+    // property, so the component may be rebuilt inside without touching a
+    // single page that uses it. Only the ones actually set are here: an unset
+    // parameter is not an empty value, it is the component's own default.
+    //
+    // Written into the embedded copy at graft time and never again — the
+    // component is a starting state, not a live binding. What changes after
+    // that changes through its script, the same way anything else does.
+    std::vector<std::pair<std::string, UIPropValue>> paramValues;
+
+    const UIPropValue* paramValue(const std::string& name) const
+    {
+        for (const auto& [n, v] : paramValues) if (n == name) return &v;
+        return nullptr;
+    }
+    // Set (present) or clear (absent → back to the component's own default).
+    void setParamValue(const std::string& name, const UIPropValue* v)
+    {
+        for (auto it = paramValues.begin(); it != paramValues.end(); ++it)
+            if (it->first == name)
+            {
+                if (v) it->second = *v; else paramValues.erase(it);
+                return;
+            }
+        if (v) paramValues.emplace_back(name, *v);
+    }
     // The canvas the embedded asset was AUTHORED on and the scale mode it was
     // authored with, both filled in when it is grafted. This element's rect is
     // that widget's SCREEN: the same rule that maps a canvas onto a viewport

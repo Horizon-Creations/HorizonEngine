@@ -910,6 +910,237 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	}
 }
 
+// Defined further down with the canvas drawing it serves; the details panel
+// needs it too, to read what the referenced widget declares.
+const HE::UIWidgetTree* embeddedTreeFor(AppContext& ctx, const std::string& path);
+
+// ── Setting a component's parameters, on the page that embeds it ─────────────
+// One row per parameter the referenced widget DECLARES. What is drawn is chosen
+// by the type of the property the parameter points at, so a "Label" is a text
+// box and a "Accent" is a colour swatch without this panel knowing anything
+// about either component.
+//
+// A parameter that has not been set is not an empty value: it is the
+// component's own default, shown here so the author can see what they would be
+// changing, and the row says which of the two it is looking at.
+void drawParamValues(HE::UIWidgetRef& ref, const HE::UIWidgetTree& sub,
+                     bool& edit, bool& committed)
+{
+	// Its own scope, not the caller's: a helper that borrows one is filed under
+	// whichever function happens to sit above it in this file.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	if (sub.params.empty())
+	{
+		ImGui::TextDisabled("This widget declares no parameters.");
+		return;
+	}
+	ImGui::SeparatorText("Parameters");
+
+	for (const HE::UIWidgetParam& p : sub.params)
+	{
+		const UIElement* target = sub.find(p.elementId);
+		if (!target) continue;
+		// The declaration may name a property the element no longer has — the
+		// component was edited after this parameter was declared. Saying so is
+		// the whole point of looking it up here rather than trusting the name.
+		const std::vector<UIPropDesc> props = target->properties();
+		const UIPropDesc* pd = nullptr;
+		for (const UIPropDesc& d : props) if (d.name == p.property) { pd = &d; break; }
+		if (!pd)
+			for (const UIPropDesc& d : HE::uiBaseProperties())
+				if (d.name == p.property) { pd = &d; break; }
+		if (!pd)
+		{
+			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+				"%s: points at a property that no longer exists.", p.name.c_str());
+			continue;
+		}
+
+		ImGui::PushID(p.name.c_str());
+		const HE::UIPropValue* set = ref.paramValue(p.name);
+		// The value on screen: what this copy was told, or — when it was told
+		// nothing — what the component itself holds.
+		HE::UIPropValue v = set ? *set : target->getPropAny(p.property);
+		bool changed = false;
+
+		const std::string label = p.name + "##pv";
+		switch (pd->type)
+		{
+		case UIPropType::Float:
+			changed = pd->minV < pd->maxV
+				? ImGui::SliderFloat(label.c_str(), &v.f, pd->minV, pd->maxV)
+				: ImGui::DragFloat(label.c_str(), &v.f, 0.5f);
+			break;
+		case UIPropType::Int:
+			changed = ImGui::DragInt(label.c_str(), &v.i, 1);
+			break;
+		case UIPropType::Bool:
+			changed = ImGui::Checkbox(label.c_str(), &v.b);
+			if (changed) committed = true;
+			break;
+		case UIPropType::String:
+			changed = pd->multiline
+				? ImGui::InputTextMultiline(label.c_str(), &v.s,
+				                            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f))
+				: ImGui::InputText(label.c_str(), &v.s);
+			break;
+		case UIPropType::Color:
+			changed = ImGui::ColorEdit4(label.c_str(), &v.col.x);
+			break;
+		case UIPropType::Vec2:
+			changed = ImGui::DragFloat2(label.c_str(), &v.v2.x, 0.5f);
+			break;
+		case UIPropType::StringList:
+		{
+			// The same small editor the property panel uses. It earns its place:
+			// a choice row whose OPTIONS cannot be set is a component that shows
+			// somebody else's list, which is no component at all.
+			ImGui::TextUnformatted(p.name.c_str());
+			int removeAt = -1;
+			for (int i = 0; i < static_cast<int>(v.list.size()); ++i)
+			{
+				ImGui::PushID(i);
+				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 28.0f);
+				if (ImGui::InputText("##lrow", &v.list[i])) changed = true;
+				if (ImGui::IsItemDeactivatedAfterEdit()) { changed = true; committed = true; }
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("\xc3\x97"))
+				{ removeAt = i; changed = true; committed = true; }
+				ImGui::PopID();
+			}
+			if (removeAt >= 0) v.list.erase(v.list.begin() + removeAt);
+			if (ImGui::SmallButton("+##ladd"))
+			{ v.list.push_back("Item"); changed = true; committed = true; }
+			EditorWidgets::helpForLabel("+");
+			break;
+		}
+		}
+		if (changed) { v.type = pd->type; ref.setParamValue(p.name, &v); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+
+		if (!p.help.empty() && ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s", p.help.c_str());
+
+		// Only offered once there is something to go back FROM. A "Default"
+		// button on an untouched row would suggest it is currently something
+		// else.
+		if (set)
+		{
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Default"))
+			{ ref.setParamValue(p.name, nullptr); committed = true; }
+			EditorWidgets::helpForLabel("Default");
+		}
+		ImGui::PopID();
+	}
+	EditorWidgets::helpForLabel("Parameters");
+}
+
+// ── What this widget offers whoever embeds it ────────────────────────────────
+// The component author's half of D2. A parameter names one property of one
+// element and gives that pair a name of its own, so a page that embeds this
+// widget stores "Label" and not "element 7's Text" — and this widget stays free
+// to be rebuilt inside without breaking a single page that uses it.
+//
+// It sits on the CANVAS panel, not on the element's, because it is a property
+// of the widget as a whole: the list of knobs a component has is one list, and
+// an author looking for "what does this component offer" must not have to click
+// through every element to assemble it.
+void drawParameterDeclarations(State& st, AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Canvas");
+	ImGui::Spacing();
+	ImGui::TextDisabled("Parameters");
+	ImGui::Separator();
+	ImGui::TextWrapped("What a page that embeds this widget can set. Each one "
+	                   "points at a property of one element; whatever that "
+	                   "property holds here is the default.");
+
+	int removeAt = -1;
+	for (int i = 0; i < static_cast<int>(st.tree.params.size()); ++i)
+	{
+		HE::UIWidgetParam& p = st.tree.params[i];
+		ImGui::PushID(i);
+
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 28.0f);
+		ImGui::InputText("##pname", &p.name);
+		EditorWidgets::helpForLabel("Parameter Name");
+		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+		ImGui::SameLine();
+		if (EditorWidgets::dangerSmallButton("\xc3\x97")) removeAt = i;
+
+		// Which element it writes. Shown by the same name the hierarchy uses, so
+		// what is picked here is findable up there.
+		const UIElement* target = st.tree.find(p.elementId);
+		if (ImGui::BeginCombo("Element", target ? elementName(*target).c_str() : "(none)"))
+		{
+			for (const auto& ep : st.tree.elements)
+			{
+				if (!ep) continue;
+				if (ImGui::Selectable(elementName(*ep).c_str(), ep->id == p.elementId))
+				{
+					p.elementId = ep->id;
+					// The property came from the OLD element's table and may not
+					// exist on this one. Cleared rather than carried over: a row
+					// naming a property its element does not have writes nothing,
+					// silently, which is the failure this panel exists to prevent.
+					p.property.clear();
+					commitEdit(st, ctx);
+				}
+			}
+			ImGui::EndCombo();
+		}
+		EditorWidgets::helpForLabel("Element");
+
+		// …and which of that element's properties. Only the ones it really has,
+		// read from the same table the details panel above is built from.
+		if (target)
+		{
+			if (ImGui::BeginCombo("Property",
+			                      p.property.empty() ? "(none)" : p.property.c_str()))
+			{
+				// The type's own first, because that is what an author came for
+				// — then the ones every element has, of which "Visible" is the
+				// one components reach for constantly (a help line that only the
+				// rows with help show).
+				for (const UIPropDesc& pd : target->properties())
+					if (ImGui::Selectable(pd.name.c_str(), pd.name == p.property))
+					{ p.property = pd.name; commitEdit(st, ctx); }
+				ImGui::Separator();
+				for (const UIPropDesc& pd : HE::uiBaseProperties())
+					if (ImGui::Selectable(pd.name.c_str(), pd.name == p.property))
+					{ p.property = pd.name; commitEdit(st, ctx); }
+				ImGui::EndCombo();
+			}
+			EditorWidgets::helpForLabel("Property");
+		}
+
+		ImGui::InputText("Help", &p.help);
+		EditorWidgets::helpForLabel("Help");
+		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
+		ImGui::PopID();
+		ImGui::Spacing();
+	}
+	if (removeAt >= 0)
+	{
+		st.tree.params.erase(st.tree.params.begin() + removeAt);
+		commitEdit(st, ctx);
+	}
+
+	if (ImGui::Button("Add Parameter"))
+	{
+		// Pre-pointed at whatever is selected, because an author who wants to
+		// expose a property has almost always just been looking at it.
+		HE::UIWidgetParam p;
+		p.name      = "Parameter";
+		p.elementId = st.tree.find(st.selected) ? st.selected : 0;
+		st.tree.params.push_back(std::move(p));
+		commitEdit(st, ctx);
+	}
+	EditorWidgets::helpForLabel("Add Parameter");
+}
+
 // ── Details panel ──────────────────────────────────────────────────────────────
 void drawDetails(State& st, AppContext& ctx)
 {
@@ -947,6 +1178,8 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 		// The paragraph that used to be written out here is the help entry now —
 		// same words, and reachable with F1 instead of only by hovering.
+
+		drawParameterDeclarations(st, ctx);
 
 		ImGui::Spacing();
 		ImGui::TextDisabled("Preview");
@@ -1331,6 +1564,14 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 		ImGui::TextDisabled("Grafted in when the widget is created; the designer\n"
 		                    "shows the slot it will fill.");
+
+		// …and what this copy of it is told. Read from the referenced asset
+		// every frame rather than cached on the ref: the component is edited in
+		// another tab, and a knob that appears only after a reload is a knob
+		// nobody finds.
+		if (auto* wr = dynamic_cast<HE::UIWidgetRef*>(n); wr && !path.empty())
+			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, path))
+				drawParamValues(*wr, *sub, edit, committed);
 	}
 
 	// Texture slot: the plain "put this picture on it" path, tinted by the
@@ -2010,6 +2251,7 @@ void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree
 // same clipping rule the runtime uses. `depth` bounds the recursion so a circle
 // of widgets embedding each other cannot hang the editor.
 void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
+                      const HE::UIWidgetRef* ref,
                       const ImVec2& mn, const ImVec2& mx, float s, int depth)
 {
 	constexpr int kMaxDepth = 4;
@@ -2036,6 +2278,16 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// A copy, because auto-size mutates the tree it measures and the cached one
 	// must stay as the asset wrote it.
 	HE::UIWidgetTree laid = tree;
+	// What this particular copy was told, applied BEFORE it is measured: a
+	// parameter that changes a label changes how wide that label wants to be.
+	//
+	// This is why parameters are element properties and not script variables.
+	// Graphs do not run in the designer, so a knob that only a graph could turn
+	// would leave a page of five form rows showing five identical labels here
+	// and five different ones at runtime — and the designer would be lying
+	// about the one thing it exists to show.
+	if (ref && !ref->paramValues.empty())
+		HE::uiApplyWidgetParams(laid, ref->paramValues);
 	HE::uiApplyAutoSize(laid, &canvas);
 	HE::uiUpdateScrollExtents(laid);
 
@@ -2076,7 +2328,9 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 		if (it.n->type() == UIWidgetType::WidgetRef)
 			if (const HE::UIWidgetTree* sub =
 				embeddedTreeFor(ctx, it.n->getProp("Widget").s))
-				drawEmbeddedTree(dl, ctx, *sub, emn, emx, subY, depth + 1);
+				drawEmbeddedTree(dl, ctx, *sub,
+				                 dynamic_cast<const HE::UIWidgetRef*>(it.n),
+				                 emn, emx, subY, depth + 1);
 		if (clipped) dl->PopClipRect();
 	}
 }
@@ -2207,7 +2461,8 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		{
 			const std::string wp = it.n->getProp("Widget").s;
 			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, wp))
-				drawEmbeddedTree(dl, ctx, *sub, mn, mx, s, 0);
+				drawEmbeddedTree(dl, ctx, *sub,
+				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0);
 			else
 			{
 				const std::string label = wp.empty()

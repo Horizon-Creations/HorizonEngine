@@ -1289,10 +1289,67 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
         j["scaleMode"] = static_cast<int>(tree.scaleMode);
     j["nextId"]       = tree.nextId;
 
+    // The knobs this widget offers its hosts. Only once it declares one, so a
+    // page (which is every widget authored before components existed) saves
+    // byte-identical. An array because the declaration order is the order a
+    // host's details panel shows them in.
+    if (!tree.params.empty())
+    {
+        nlohmann::json jp = nlohmann::json::array();
+        for (const UIWidgetParam& p : tree.params)
+        {
+            nlohmann::json o;
+            o["name"]    = p.name;
+            o["element"] = p.elementId;
+            o["prop"]    = p.property;
+            if (!p.help.empty()) o["help"] = p.help;
+            jp.push_back(std::move(o));
+        }
+        j["params"] = std::move(jp);
+    }
+
     nlohmann::json je = nlohmann::json::array();
     for (const auto& e : tree.elements) je.push_back(uiElementToJsonObj(*e));
     j["elements"] = std::move(je);
     return j.dump(2);
+}
+
+int uiApplyWidgetParams(UIWidgetTree& tree,
+                        const std::vector<std::pair<std::string, UIPropValue>>& values)
+{
+    int written = 0;
+    for (const auto& [name, value] : values)
+    {
+        // Which declaration this value belongs to. Nothing found = the
+        // component's author renamed or dropped that knob; see the header for
+        // why that is a drop and not a guess.
+        const UIWidgetParam* decl = nullptr;
+        for (const UIWidgetParam& p : tree.params)
+            if (p.name == name) { decl = &p; break; }
+        if (!decl) continue;
+
+        UIElement* e = tree.find(decl->elementId);
+        if (!e) continue;
+
+        // Written through the same setPropAny every other writer uses, so a
+        // property with a custom slot (a Grid's track list re-parses on write)
+        // does its work here too — a parameter must not be a second, quieter
+        // way into a field.
+        //
+        // The stored value carries its own type; the property has one too, and
+        // they can disagree once a component's author changes a Text into a
+        // number. The property's type wins, because it is the one the element
+        // actually reads.
+        const UIPropValue cur = e->getPropAny(decl->property);
+        e->setPropAny(decl->property, uiPropValueCoerce(value, cur.type));
+        // A parameter and a theme role would otherwise fight every time the
+        // theme changes, with the role winning silently a frame later. Saying
+        // it once, here, is the whole resolution: telling a component what
+        // colour to be un-binds that colour from the theme.
+        e->setThemeRole(decl->property, std::string());
+        ++written;
+    }
+    return written;
 }
 
 bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
@@ -1309,6 +1366,21 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
             ? static_cast<UICanvasScaleMode>(sm) : UICanvasScaleMode::Stretch;
     }
     t.nextId       = j.value("nextId", 1);
+
+    if (const auto jp = j.find("params"); jp != j.end() && jp->is_array())
+        for (const auto& o : *jp)
+        {
+            if (!o.is_object()) continue;
+            UIWidgetParam p;
+            p.name      = o.value("name", std::string());
+            p.elementId = o.value("element", 0);
+            p.property  = o.value("prop", std::string());
+            p.help      = o.value("help", std::string());
+            // A declaration missing either half names nothing and would be a
+            // row in the host's panel that writes into the void.
+            if (p.name.empty() || p.property.empty() || p.elementId <= 0) continue;
+            t.params.push_back(std::move(p));
+        }
 
     // ── Migration: a Button's caption becomes a Text child ───────────────────
     // A Button used to draw its own centred string. It is a surface now, and

@@ -97,6 +97,27 @@ struct UIPropValue
     static UIPropValue ofVec2(const glm::vec2& v)   { UIPropValue r; r.type = UIPropType::Vec2;   r.v2 = v; return r; }
 };
 
+// ── A property value on disk ─────────────────────────────────────────────────
+// Every widget type serializes its own fields with their own key names, so a
+// UIPropValue never needed a form of its own. Component parameters do need one:
+// what a host stores against a parameter name is a value whose TYPE is only
+// known by looking at the component, so the type has to travel with it.
+//
+// The type is written as its enum NAME, not its number: this is an on-disk
+// format, and a number would silently change meaning the day a type is inserted
+// into UIPropType rather than appended to it.
+HE_API void       uiPropValueToJson(nlohmann::json& out, const UIPropValue& v);
+HE_API UIPropValue uiPropValueFromJson(const nlohmann::json& o);
+
+// The same value as type `want`. Needed where a stored value and the property
+// it is written into can disagree — a component parameter outlives the property
+// it names, and the property's type is the one the element actually reads.
+// Only the conversions that mean something are made (a number is a number
+// whichever slot holds it, a string is what a number prints as); everything
+// else yields that type's zero rather than reinterpreting bytes.
+HE_API UIPropValue uiPropValueCoerce(const UIPropValue& v, UIPropType want);
+
+
 // One editable property (drives the editor detail panel + HorizonCode pins).
 struct UIPropDesc
 {
@@ -107,6 +128,22 @@ struct UIPropDesc
     // multi-line box, so a literal newline can be typed into the value).
     bool        multiline = false;
 };
+
+// ── The properties every element has ─────────────────────────────────────────
+// getPropAny/setPropAny serve two sets of names: the type's own table, and the
+// BASE ones every element shares — "Visible", "Tooltip", "Corner Radius". The
+// base half had no descriptor list because nothing needed to enumerate it: the
+// details panel draws those rows by hand, each in the place it belongs.
+//
+// A component parameter does need one. "Show the help line only on the rows
+// that have help" is the most ordinary thing a component wants, and it is
+// "Visible" on one element — so a list of knobs that stopped at the type's own
+// table would leave that out for no reason an author could see.
+//
+// Kept in step with getBaseProp/setBaseProp by a test, not by discipline: those
+// two are an if-chain, and a name added to them and not here would simply never
+// be offered.
+HE_API const std::vector<UIPropDesc>& uiBaseProperties();
 
 class UIElement;
 

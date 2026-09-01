@@ -1636,6 +1636,57 @@ war für ihn unsichtbar. Nach dem Fix meldete er sofort zwei fehlende Einträge.
 derselben Art nach der festen Dateiliste: **ein Deckungswerkzeug, das etwas nicht kennt, meldet
 keine Lücke, sondern Deckung.**
 
+### D2, erste Hälfte: der Bauteil-Vertrag (01.09.2026)
+
+Eine Komponentenbibliothek scheitert vor der ersten Komponente an einer Frage: **wie sagt man
+einer eingebetteten Kopie, was sie sagen soll?** Ein `WidgetRef` pfropfte den fremden Baum bisher
+exakt so ein, wie er verfasst wurde. Eine Formularzeile mit eingebackener Beschriftung ist
+deshalb *eine* Formularzeile, keine Formularzeile, und eine Bibliothek daraus ist ein Katalog
+von Bildschirmfotos.
+
+**Ein Parameter benennt eine Eigenschaft eines Elements und gibt dem Paar einen eigenen Namen.**
+Die Seite speichert „Label", nicht „die Text-Eigenschaft von Element 7". Diese Zwischenschicht
+IST das Merkmal: der Autor der Komponente darf das innere Element umbenennen, die Eigenschaft
+auf ein anderes verschieben oder die Zeile ganz neu bauen, und jede Seite, die sie benutzt,
+läuft weiter. Adressierte die Seite Element und Eigenschaft direkt, wäre jedes Innendetail Teil
+des Vertrags.
+
+**Drei Entscheidungen, die vorher fallen mussten:**
+
+**1. Parameter sind Element-Eigenschaften, keine Skript-Variablen.** Das war die eine echte
+Weggabelung, und sie entscheidet sich am Designer: **Graphen laufen dort nicht.** Eine Seite mit
+fünf Formularzeilen zeigte fünf identische Beschriftungen im Designer und fünf verschiedene zur
+Laufzeit — und der Designer löge genau über das, wofür es ihn gibt. Eigenschaften werden auf die
+Kopie geschrieben, die die Vorschau ohnehin schon anlegt, also stimmt beides. Nebenbei umgeht es
+die Frage, ob eine *kompilierte* Instanz überhaupt vorbelegte Variablen annimmt.
+
+**2. Ein nicht gesetzter Parameter ist kein leerer Wert**, sondern das, was der Autor der
+Komponente in der Eigenschaft stehen ließ. Der Standard wohnt damit an genau einer Stelle, und
+es gibt keine zweite, die ihm widersprechen könnte.
+
+**3. Ein Wert, den niemand mehr deklariert, wird verworfen, nicht geraten.** Der Autor hat den
+Knopf umbenannt oder entfernt; ihn still in das zu schreiben, was jetzt an der Stelle steht,
+wäre schlimmer als eine Beschriftung, die bleibt, wie sie verfasst wurde. Fällt *jeder* Wert
+weg, sagt es das im Log — Schweigen sähe aus wie eine Komponente, die ignoriert, was man ihr
+sagt, und das ist das am schwersten zu erklärende Nichts.
+
+**Einer Komponente eine Farbe zu nennen, löst diese Farbe vom Theme.** Ohne diese eine Zeile
+kämpfen die beiden: der Parameter schreibt beim Pfropfen, der Theme-Durchgang überschreibt ihn
+eine Zeile später, und zwar nur im Runtime — der Designer fährt gar keinen Theme-Durchgang.
+
+**Und die Basis-Eigenschaften brauchten endlich eine aufzählbare Liste.** `getBaseProp` ist eine
+if-Kette; nichts musste sie je durchgehen, weil das Details-Panel jede Zeile von Hand an ihren
+Platz zeichnet. Ein Parameter muss es: „die Hilfszeile nur bei den Zeilen zeigen, die Hilfe
+haben" ist das Gewöhnlichste, was eine Komponente will, und das ist `Visible`. `uiBaseProperties()`
+ist dieselbe Liste ein zweites Mal, und ein **Test hält sie in Deckung** statt Disziplin —
+ein Name, der nur in der if-Kette steht, würde schlicht nie angeboten, und das sieht aus wie
+„die Eigenschaft gibt es nicht".
+
+Gegengeprüft am Runtime-Pfad: nimmt man das Anwenden aus `embedWidgetRefs` heraus, sagen beide
+Kopien wieder „Default" — sieben Glyphen statt einer und dreier. Geprüft wird am **Bild**, nicht
+am Baum: der lebende Baum gehört dem WidgetManager, und die Frage „steht da, was ich gesetzt
+habe" muss ohnehin nur dort wahr sein, wo man sie sieht.
+
 ---
 
 ## 11. Risiken und Fallen

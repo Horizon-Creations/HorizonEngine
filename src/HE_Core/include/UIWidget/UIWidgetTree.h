@@ -49,6 +49,30 @@ struct UIWidgetCanvas
     float width  = 1920.0f, height = 1080.0f;
 };
 
+// ── A declared parameter ─────────────────────────────────────────────────────
+// What a widget offers to whoever EMBEDS it. A component that cannot be told
+// what to say is a picture: a form row with a baked-in label is one form row,
+// not a component, and a library of them is a catalogue of screenshots.
+//
+// One parameter names one property of one element inside this tree and gives
+// that pair a name of its own — "Label" rather than "element 7's Text". The
+// indirection IS the feature: the host stores the parameter's name, so the
+// component's author may rename the inner element, move the property onto a
+// different one, or rebuild the row from scratch, and every page that uses it
+// keeps working. Let the host address element+property directly and every
+// internal detail becomes part of the contract.
+//
+// A parameter carries no default of its own: what the author left in the
+// property IS the default, visible in the component's own editor, and there is
+// no second place for it to disagree with.
+struct UIWidgetParam
+{
+    std::string name;           // what the host sees, e.g. "Label"
+    int         elementId = 0;  // which element inside THIS tree it writes
+    std::string property;       // that element's property name (see UIPropSlot)
+    std::string help;           // one sentence, shown where the host sets it
+};
+
 struct HE_API UIWidgetTree
 {
     // The AUTHORED canvas: the design surface, and the reference resolution the
@@ -58,6 +82,10 @@ struct HE_API UIWidgetTree
     UICanvasScaleMode scaleMode = UICanvasScaleMode::Stretch;
     int   nextId = 1;
     std::vector<std::unique_ptr<UIElement>> elements; // sibling draw/hierarchy order
+    // The knobs this widget offers its hosts. Empty for every widget authored
+    // before components existed, and empty is what "this is a page, not a
+    // component" means.
+    std::vector<UIWidgetParam> params;
 
     UIWidgetTree() = default;
     UIWidgetTree(const UIWidgetTree& o) { *this = o; }
@@ -66,6 +94,7 @@ struct HE_API UIWidgetTree
         if (this == &o) return *this;
         canvasWidth = o.canvasWidth; canvasHeight = o.canvasHeight;
         scaleMode = o.scaleMode; nextId = o.nextId;
+        params = o.params;
         elements.clear();
         elements.reserve(o.elements.size());
         for (const auto& e : o.elements) elements.push_back(e->clone());
@@ -87,6 +116,22 @@ struct HE_API UIWidgetTree
     // Convenience: create + add a default element of `type`.
     int  add(UIWidgetType type);
 };
+
+// ── Setting a component's parameters ─────────────────────────────────────────
+// Write a host's values into a freshly parsed copy of the component's OWN tree.
+// Called before that tree is renumbered into its host, because the declarations
+// address elements by the ids they carry in their own asset — afterwards those
+// ids mean something else.
+//
+// A value whose name no longer matches a declaration is DROPPED, not guessed
+// at: the component's author renamed or removed that knob, and quietly writing
+// it into whatever now sits at that place would be worse than a label that
+// stays as authored. A declaration nobody set keeps the authored value, which
+// is precisely what a default is. Returns how many values were written, so a
+// caller can notice that none of them were.
+HE_API int uiApplyWidgetParams(
+    UIWidgetTree& tree,
+    const std::vector<std::pair<std::string, UIPropValue>>& values);
 
 // JSON round-trip (schema-evolution friendly). Returns false on parse failure.
 HE_API std::string uiWidgetTreeToJson(const UIWidgetTree& tree);

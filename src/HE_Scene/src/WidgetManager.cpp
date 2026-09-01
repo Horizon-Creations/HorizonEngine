@@ -204,6 +204,20 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 			continue;
 		}
 
+		// What this copy was told, written in BEFORE the renumbering below: the
+		// declarations address elements by the ids they carry in their own
+		// asset, and one line further down those ids mean something else.
+		if (!ref->paramValues.empty() &&
+		    HE::uiApplyWidgetParams(sub, ref->paramValues) == 0)
+			// Every value dropped means the component no longer declares any of
+			// them — it was rebuilt, or this ref was pointed at a different
+			// widget. Silence here looks exactly like a component that ignores
+			// what it is told, which is the hardest kind of nothing to explain.
+			HE_LOG_WARN(Widget, "WidgetRef '%s': none of its %d set parameters are "
+			                    "declared by that widget any more — it will show its "
+			                    "own defaults", ref->widgetPath.c_str(),
+			            (int)ref->paramValues.size());
+
 		// Renumber into this tree. The offset is the host's nextId - 1, so a
 		// local id 1 becomes the host's next free id; two copies of the same
 		// widget therefore never share an element id.

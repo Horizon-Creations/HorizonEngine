@@ -122,6 +122,135 @@ const char* uiCursorName(UICursor c)
     }
 }
 
+// ── A property value on disk ─────────────────────────────────────────────────
+// Written into whatever object the caller hands over, under keys of its own, so
+// a value can share an object with the name it belongs to (see
+// UIWidgetRef::writeJson) instead of needing a wrapper.
+//
+// The type travels as its NAME. A number would be one byte shorter and would
+// change meaning the day somebody inserts a type into UIPropType instead of
+// appending one — the failure being not a parse error but a colour read as a
+// string, which is the kind that surfaces months later in someone's project.
+
+namespace
+{
+    const char* propTypeName(UIPropType t)
+    {
+        switch (t)
+        {
+            case UIPropType::Float:      return "float";
+            case UIPropType::Int:        return "int";
+            case UIPropType::Bool:       return "bool";
+            case UIPropType::String:     return "string";
+            case UIPropType::Color:      return "color";
+            case UIPropType::Vec2:       return "vec2";
+            case UIPropType::StringList: return "stringList";
+        }
+        return "float";
+    }
+}
+
+void uiPropValueToJson(nlohmann::json& out, const UIPropValue& v)
+{
+    out["type"] = propTypeName(v.type);
+    switch (v.type)
+    {
+        case UIPropType::Float:  out["value"] = v.f;   break;
+        case UIPropType::Int:    out["value"] = v.i;   break;
+        case UIPropType::Bool:   out["value"] = v.b;   break;
+        case UIPropType::String: out["value"] = v.s;   break;
+        case UIPropType::Color:  out["value"] = { v.col.r, v.col.g, v.col.b, v.col.a }; break;
+        case UIPropType::Vec2:   out["value"] = { v.v2.x, v.v2.y }; break;
+        case UIPropType::StringList: out["value"] = v.list; break;
+    }
+}
+
+UIPropValue uiPropValueFromJson(const nlohmann::json& o)
+{
+    const std::string t = o.value("type", std::string("float"));
+    const auto it = o.find("value");
+    const bool has = it != o.end();
+    // An unreadable value falls back to the TYPE's zero rather than to nothing:
+    // the parameter still exists and still writes, it just writes a default,
+    // which is visible and fixable. Dropping it would leave the component
+    // showing whatever it was authored with and no sign that anything was lost.
+    if (t == "int")    return UIPropValue::ofInt(has && it->is_number() ? it->get<int>() : 0);
+    if (t == "bool")   return UIPropValue::ofBool(has && it->is_boolean() && it->get<bool>());
+    if (t == "string") return UIPropValue::ofString(has && it->is_string() ? it->get<std::string>()
+                                                                          : std::string());
+    if (t == "color")
+    {
+        glm::vec4 c{ 1.0f };
+        if (has && it->is_array() && it->size() == 4)
+            c = { (*it)[0].get<float>(), (*it)[1].get<float>(),
+                  (*it)[2].get<float>(), (*it)[3].get<float>() };
+        return UIPropValue::ofColor(c);
+    }
+    if (t == "vec2")
+    {
+        glm::vec2 v{ 0.0f };
+        if (has && it->is_array() && it->size() == 2)
+            v = { (*it)[0].get<float>(), (*it)[1].get<float>() };
+        return UIPropValue::ofVec2(v);
+    }
+    if (t == "stringList")
+    {
+        UIPropValue r;
+        r.type = UIPropType::StringList;
+        if (has && it->is_array())
+            for (const auto& s : *it) if (s.is_string()) r.list.push_back(s.get<std::string>());
+        return r;
+    }
+    return UIPropValue::ofFloat(has && it->is_number() ? it->get<float>() : 0.0f);
+}
+
+UIPropValue uiPropValueCoerce(const UIPropValue& v, UIPropType want)
+{
+    if (v.type == want) return v;
+    // What the value is worth as a number, whichever slot it came in through.
+    // A Bool counts as 0/1 and a String as what std::stof can read off its
+    // front — the two conversions a person would expect — and anything else is
+    // 0, which is this type's zero and not a reinterpretation.
+    const auto asNumber = [&]() -> float
+    {
+        switch (v.type)
+        {
+            case UIPropType::Float: return v.f;
+            case UIPropType::Int:   return static_cast<float>(v.i);
+            case UIPropType::Bool:  return v.b ? 1.0f : 0.0f;
+            case UIPropType::String:
+                try { return std::stof(v.s); } catch (...) { return 0.0f; }
+            default: return 0.0f;
+        }
+    };
+    switch (want)
+    {
+        case UIPropType::Float:  return UIPropValue::ofFloat(asNumber());
+        case UIPropType::Int:    return UIPropValue::ofInt(static_cast<int>(asNumber()));
+        case UIPropType::Bool:   return UIPropValue::ofBool(asNumber() != 0.0f);
+        case UIPropType::String:
+        {
+            switch (v.type)
+            {
+                case UIPropType::Float: return UIPropValue::ofString(std::to_string(v.f));
+                case UIPropType::Int:   return UIPropValue::ofString(std::to_string(v.i));
+                case UIPropType::Bool:  return UIPropValue::ofString(v.b ? "true" : "false");
+                default:                return UIPropValue::ofString(std::string());
+            }
+        }
+        case UIPropType::Color:  return UIPropValue::ofColor(glm::vec4(1.0f));
+        case UIPropType::Vec2:   return UIPropValue::ofVec2(glm::vec2(0.0f));
+        case UIPropType::StringList:
+        {
+            UIPropValue r;
+            r.type = UIPropType::StringList;
+            if (v.type == UIPropType::String && !v.s.empty()) r.list.push_back(v.s);
+            return r;
+        }
+    }
+    return v;
+}
+
 // ── Property tables (one per widget type) ────────────────────────────────────
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  THESE NAMES ARE AN ON-DISK FORMAT.                                      ║
@@ -151,8 +280,42 @@ const UIPropTable& UIWidgetRef::propTable() const
     return t;
 }
 
-void UIWidgetRef::writeJson(nlohmann::json& j) const { j["widget"] = widgetPath; }
-void UIWidgetRef::readJson(const nlohmann::json& j)  { widgetPath = j.value("widget", widgetPath); }
+void UIWidgetRef::writeJson(nlohmann::json& j) const
+{
+    j["widget"] = widgetPath;
+    // Only when this copy was actually told something, like every other optional
+    // field: a ref authored before components existed saves byte-identical.
+    //
+    // An ARRAY rather than an object keyed by name, because the order an author
+    // set them in is the order they are shown in, and a JSON object is free to
+    // reorder its keys — the same reason the Map container needed its own key
+    // list (see the container work).
+    if (!paramValues.empty())
+    {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& [name, v] : paramValues)
+        {
+            nlohmann::json e;
+            e["name"] = name;
+            uiPropValueToJson(e, v);
+            arr.push_back(std::move(e));
+        }
+        j["params"] = std::move(arr);
+    }
+}
+void UIWidgetRef::readJson(const nlohmann::json& j)
+{
+    widgetPath = j.value("widget", widgetPath);
+    paramValues.clear();
+    if (const auto it = j.find("params"); it != j.end() && it->is_array())
+        for (const auto& e : *it)
+        {
+            if (!e.is_object()) continue;
+            std::string name = e.value("name", std::string());
+            if (name.empty()) continue;
+            paramValues.emplace_back(std::move(name), uiPropValueFromJson(e));
+        }
+}
 
 // Nothing of its own — a Spacer is its rect and nothing else.
 const UIPropTable& UISpacer::propTable() const
@@ -583,6 +746,56 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     return false;
 }
 
+} // namespace
+
+const std::vector<UIPropDesc>& uiBaseProperties()
+{
+    // Same names, same types, same ORDER as getBaseProp above — read together,
+    // they are one list written twice, and test_ui_widgets pins that.
+    static const std::vector<UIPropDesc> t = {
+        { "Visible",             UIPropType::Bool },
+        { "Hit Testable",        UIPropType::Bool },
+        { "Clip Children",       UIPropType::Bool },
+        { "Enabled",             UIPropType::Bool },
+        { "Render Opacity",      UIPropType::Float, 0.0f, 1.0f },
+        { "Slot Fill",           UIPropType::Float },
+        { "Grid Column",         UIPropType::Int },
+        { "Grid Row",            UIPropType::Int },
+        { "Column Span",         UIPropType::Int },
+        { "Row Span",            UIPropType::Int },
+        { "Rotation",            UIPropType::Float },
+        { "Position",            UIPropType::Vec2 },
+        { "Size",                UIPropType::Vec2 },
+        { "Layer",               UIPropType::Int },
+        { "Hover Cursor",        UIPropType::Int },
+        { "Material",            UIPropType::String },
+        { "Texture",             UIPropType::String },
+        { "Font",                UIPropType::String },
+        { "Tooltip",             UIPropType::String },
+        { "Corner Radius",       UIPropType::Float },
+        { "Corner TL",           UIPropType::Float },
+        { "Corner TR",           UIPropType::Float },
+        { "Corner BR",           UIPropType::Float },
+        { "Corner BL",           UIPropType::Float },
+        { "Border Width",        UIPropType::Float },
+        { "Border Color",        UIPropType::Color },
+        { "Gradient",            UIPropType::Bool },
+        { "Gradient Color",      UIPropType::Color },
+        { "Gradient Angle",      UIPropType::Float },
+        { "Gradient Shape",      UIPropType::Int },
+        { "Shadow",              UIPropType::Bool },
+        { "Shadow Color",        UIPropType::Color },
+        { "Shadow Blur",         UIPropType::Float },
+        { "Shadow Offset",       UIPropType::Vec2 },
+        { "Inner Shadow",        UIPropType::Bool },
+        { "Inner Shadow Color",  UIPropType::Color },
+        { "Inner Shadow Blur",   UIPropType::Float },
+    };
+    return t;
+}
+
+namespace
+{
 bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
 {
     if (n == "Visible")      { e.visible     = v.b; return true; }
