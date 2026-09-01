@@ -80,6 +80,22 @@ struct State
 	int    previewIndex = 0;
 	float  previewW = 0.0f, previewH = 0.0f;
 
+	// ── The timeline (docs/he-apps-plan.md B8) ───────────────────────────────
+	// Which of the widget's clips is open, as an INDEX into tree.animations
+	// (-1 = none). View state: which animation somebody is looking at is not
+	// part of the widget.
+	int    clipIndex = -1;
+	float  playhead  = 0.0f;    // seconds into the open clip
+	bool   clipPlaying = false; // previewing it in the designer, not at runtime
+	bool   clipPreview = true;  // draw the canvas AT the playhead
+	int    trackSel = -1;       // the track new keys go on (-1 = none)
+	bool   keyDragged = false;  // a key moved this drag → one undo on release
+	// Scratch buffers, not the document: an InputText writes on every keystroke,
+	// so typing straight into a clip's name would leave a clip called "F" behind
+	// on the way to "FadeIn".
+	std::string newClipName;
+	float  timelineH = 210.0f;  // the strip's height, dragged by its top edge
+
 	// Which theme the canvas RESOLVES bound colours against (toolbar ▸ theme).
 	// View state as well, and deliberately not the running preview's setting: a
 	// widget is meant to survive the project's own themes, and checking that has
@@ -2017,6 +2033,311 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 // adds (or focuses) the matching event node in the logic graph and jumps to
 // Graph mode (Unreal-style "add event → wire it up in the graph"). Events come
 // from the element type's events() list.
+// ── The timeline (docs/he-apps-plan.md B8) ───────────────────────────────────
+// The strip under the canvas: the widget's clips, their tracks, their keys, and
+// a playhead you can drag. What the animation editor of every engine looks like,
+// with the vocabulary this one already has — a track is an element's property,
+// a key is a value at a time, and the easing sits on the key.
+//
+// The division of labour is worth stating, because it is the thing that
+// surprises people: the DETAILS panel edits the widget's authored values, the
+// TIMELINE records those values as keys. "Move the playhead, change the value,
+// press Key" — the same three steps as everywhere else, and the value you key is
+// the one you just typed, not the one the preview happens to be showing.
+void drawTimeline(State& st, AppContext& ctx, float height)
+{
+	HE::Ed::Help::Scope helpScope("UI Timeline");
+	ImGui::BeginChild("##uiw_timeline", ImVec2(0.0f, height), ImGuiChildFlags_Borders);
+
+	const int clipCount = static_cast<int>(st.tree.animations.size());
+	if (st.clipIndex >= clipCount) { st.clipIndex = clipCount - 1; st.playhead = 0.0f; }
+
+	// ── The bar: which clip, how long, and the transport ─────────────────────
+	ImGui::SetNextItemWidth(180.0f);
+	const std::string shown = st.clipIndex < 0
+		? std::string("(no animation)") : st.tree.animations[st.clipIndex].name;
+	const bool open = ImGui::BeginCombo("##clip", shown.c_str());
+	if (!open) EditorWidgets::helpForLabel("Animation");
+	if (open)
+	{
+		for (int i = 0; i < clipCount; ++i)
+			if (ImGui::Selectable((st.tree.animations[i].name + "##c").c_str(), i == st.clipIndex))
+			{ st.clipIndex = i; st.playhead = 0.0f; st.trackSel = -1; st.clipPlaying = false; }
+		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("New")) ImGui::OpenPopup("##newclip");
+	if (ImGui::BeginPopup("##newclip"))
+	{
+		ImGui::TextDisabled("A name for the animation");
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputText("##newclipname", &st.newClipName,
+		                     ImGuiInputTextFlags_EnterReturnsTrue) &&
+		    !st.newClipName.empty())
+		{
+			HE::UIAnimClip c;
+			c.name = st.newClipName;
+			c.duration = 1.0f;
+			st.tree.animations.push_back(std::move(c));
+			st.clipIndex = static_cast<int>(st.tree.animations.size()) - 1;
+			st.playhead = 0.0f;
+			st.newClipName.clear();
+			commitEdit(st, ctx);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::TextDisabled("(type a name, then Enter)");
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("New");
+
+	if (st.clipIndex < 0)
+	{
+		ImGui::TextDisabled("No animation yet. \"New\" makes one; a track is a property of an");
+		ImGui::TextDisabled("element, and a key is what that property is at a moment.");
+		ImGui::EndChild();
+		return;
+	}
+	HE::UIAnimClip& clip = st.tree.animations[st.clipIndex];
+
+	ImGui::SameLine();
+	if (EditorWidgets::dangerSmallButton("Delete"))
+	{
+		st.tree.animations.erase(st.tree.animations.begin() + st.clipIndex);
+		st.clipIndex = -1; st.trackSel = -1; st.clipPlaying = false;
+		commitEdit(st, ctx);
+		ImGui::EndChild();
+		return;
+	}
+	EditorWidgets::helpForLabel("Delete");
+
+	ImGui::SameLine(); ImGui::SetNextItemWidth(90.0f);
+	if (ImGui::DragFloat("Length", &clip.duration, 0.05f, 0.05f, 600.0f, "%.2f s"))
+	{
+		st.dirty = true;
+		st.playhead = std::clamp(st.playhead, 0.0f, clip.duration);
+	}
+	if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+	EditorWidgets::helpForLabel("Length");
+
+	ImGui::SameLine();
+	if (EditorWidgets::checkbox("Loop", &clip.loop)) commitEdit(st, ctx);
+	ImGui::SameLine();
+	// The preview is what makes the playhead mean anything, and switching it off
+	// is what makes EDITING mean anything: with it on, the canvas shows the clip
+	// and not the values the details panel writes.
+	EditorWidgets::checkbox("Preview", &st.clipPreview);
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton(st.clipPlaying ? "Stop" : "Play"))
+	{
+		st.clipPlaying = !st.clipPlaying;
+		if (st.clipPlaying && st.playhead >= clip.duration) st.playhead = 0.0f;
+	}
+	// By KEY, not by label: the button says Play or Stop depending on what it
+	// would do, and a label-keyed tooltip would exist for one of the two.
+	EditorWidgets::helpForKey("ui.timeline-play");
+	ImGui::SameLine();
+	ImGui::TextDisabled("%.2f s", st.playhead);
+
+	// Playing here is the DESIGNER's own preview — the runtime is not involved,
+	// and the editor draws every frame anyway, so it needs no pump.
+	if (st.clipPlaying)
+	{
+		st.playhead += ImGui::GetIO().DeltaTime;
+		if (st.playhead >= clip.duration)
+		{
+			if (clip.loop) st.playhead = std::fmod(st.playhead, clip.duration);
+			else { st.playhead = clip.duration; st.clipPlaying = false; }
+		}
+	}
+
+	// ── Tracks and keys ──────────────────────────────────────────────────────
+	constexpr float kNameW = 190.0f;
+	constexpr float kRowH  = 22.0f;
+	const ImVec2 area = ImGui::GetContentRegionAvail();
+	const float  laneW = std::max(60.0f, area.x - kNameW - 8.0f);
+	const ImVec2 top   = ImGui::GetCursorScreenPos();
+	ImDrawList*  dl    = ImGui::GetWindowDrawList();
+
+	// Seconds ⇄ pixels, the one conversion everything below shares.
+	auto xOf = [&](float t) { return top.x + kNameW + laneW * (t / clip.duration); };
+	auto tOf = [&](float x) { return std::clamp((x - top.x - kNameW) / laneW, 0.0f, 1.0f)
+	                                 * clip.duration; };
+
+	// The ruler: one label per second while they fit, else every five.
+	const float step = laneW / clip.duration >= 40.0f ? 1.0f
+	                 : laneW / clip.duration >= 12.0f ? 5.0f : 10.0f;
+	dl->AddRectFilled(ImVec2(top.x + kNameW, top.y), ImVec2(top.x + kNameW + laneW, top.y + 18.0f),
+	                  IM_COL32(28, 26, 24, 255));
+	for (float t = 0.0f; t <= clip.duration + 0.001f; t += step)
+	{
+		const float x = xOf(t);
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, top.y + 18.0f), IM_COL32(90, 86, 80, 255));
+		char lbl[16]; std::snprintf(lbl, sizeof(lbl), "%.0f", t);
+		dl->AddText(ImVec2(x + 3.0f, top.y + 2.0f), IM_COL32(150, 145, 138, 255), lbl);
+	}
+
+	// The ruler strip takes clicks and drags: that is the scrub.
+	ImGui::SetCursorScreenPos(ImVec2(top.x + kNameW, top.y));
+	ImGui::InvisibleButton("##ruler", ImVec2(laneW, 18.0f));
+	if (ImGui::IsItemActive())
+	{
+		st.playhead = tOf(ImGui::GetMousePos().x);
+		st.clipPlaying = false;
+	}
+
+	// One row per track, and the keys on it.
+	int removeTrack = -1;
+	for (int i = 0; i < static_cast<int>(clip.tracks.size()); ++i)
+	{
+		HE::UIAnimTrack& tr = clip.tracks[i];
+		const float rowY = top.y + 20.0f + kRowH * static_cast<float>(i);
+		ImGui::PushID(i);
+
+		// The name: the element as the hierarchy shows it, then the property.
+		const UIElement* e = st.tree.find(tr.element);
+		const std::string label = (e ? (e->name.empty() ? std::string(e->typeName()) : e->name)
+		                             : std::string("(gone)")) + "  ·  " + tr.prop;
+		ImGui::SetCursorScreenPos(ImVec2(top.x, rowY + 2.0f));
+		if (ImGui::Selectable((label + "##t").c_str(), st.trackSel == i, 0,
+		                      ImVec2(kNameW - 22.0f, kRowH - 4.0f)))
+			st.trackSel = i;
+		ImGui::SameLine();
+		if (EditorWidgets::dangerSmallButton("x")) removeTrack = i;
+
+		// The lane, and a diamond per key. Dragging one moves it in time, which
+		// is the one edit a timeline has to have.
+		dl->AddRectFilled(ImVec2(top.x + kNameW, rowY), ImVec2(top.x + kNameW + laneW, rowY + kRowH),
+		                  st.trackSel == i ? IM_COL32(46, 42, 38, 255) : IM_COL32(34, 32, 30, 255));
+		for (int k = 0; k < static_cast<int>(tr.keys.size()); ++k)
+		{
+			HE::UIAnimKey& key = tr.keys[k];
+			const float cx = xOf(key.time), cy = rowY + kRowH * 0.5f;
+			ImGui::PushID(k);
+			ImGui::SetCursorScreenPos(ImVec2(cx - 6.0f, cy - 6.0f));
+			ImGui::InvisibleButton("##key", ImVec2(12.0f, 12.0f));
+			const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			{
+				key.time = tOf(ImGui::GetMousePos().x);
+				st.dirty = true;
+				st.trackSel = i;
+				st.keyDragged = true;
+			}
+			// IsItemDeactivatedAfterEdit is no use here: an InvisibleButton never
+			// reports itself as EDITED, so the undo snapshot has to be hung on
+			// "the drag ended and it actually moved something".
+			if (ImGui::IsItemDeactivated() && st.keyDragged)
+			{ st.keyDragged = false; commitEdit(st, ctx); }
+			// A right-click on a key is where its curve and its removal live —
+			// the two things you want on a key and nowhere else to put them.
+			if (ImGui::BeginPopupContextItem("##keymenu"))
+			{
+				ImGui::TextDisabled("Easing into this key");
+				for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+				{
+					const auto ease = static_cast<HE::UIEase>(c);
+					if (ImGui::Selectable(HE::uiEaseName(ease), key.ease == ease))
+					{ key.ease = ease; commitEdit(st, ctx); }
+				}
+				ImGui::Separator();
+				if (EditorWidgets::dangerMenuItem("Delete Key"))
+				{
+					tr.keys.erase(tr.keys.begin() + k);
+					commitEdit(st, ctx);
+					ImGui::EndPopup();
+					ImGui::PopID();
+					break;
+				}
+				ImGui::EndPopup();
+			}
+			const ImU32 col = hot ? IM_COL32(255, 214, 140, 255) : IM_COL32(230, 170, 60, 255);
+			const ImVec2 d[4] = { { cx, cy - 6.0f }, { cx + 6.0f, cy }, { cx, cy + 6.0f }, { cx - 6.0f, cy } };
+			dl->AddConvexPolyFilled(d, 4, col);
+			ImGui::PopID();
+		}
+		ImGui::PopID();
+	}
+	if (removeTrack >= 0)
+	{
+		clip.tracks.erase(clip.tracks.begin() + removeTrack);
+		st.trackSel = -1;
+		commitEdit(st, ctx);
+	}
+
+	// The playhead, over everything.
+	{
+		const float x = xOf(st.playhead);
+		const float bottom = top.y + 20.0f + kRowH * static_cast<float>(clip.tracks.size()) + 4.0f;
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, std::max(bottom, top.y + 40.0f)),
+		            IM_COL32(255, 240, 200, 220), 1.5f);
+	}
+
+	// ── Adding tracks and keys ───────────────────────────────────────────────
+	ImGui::SetCursorScreenPos(ImVec2(top.x, top.y + 24.0f + kRowH *
+		static_cast<float>(clip.tracks.size())));
+	UIElement* sel = st.tree.find(st.selected);
+	ImGui::BeginDisabled(!sel);
+	if (EditorWidgets::smallButton("Add Track")) ImGui::OpenPopup("##addtrack");
+	ImGui::EndDisabled();
+	if (ImGui::BeginPopup("##addtrack"))
+	{
+		ImGui::TextDisabled("A property of the selected element");
+		if (sel)
+			for (const UIPropDesc& pd : sel->allProperties())
+			{
+				// Only what can be interpolated: a string has no halfway, and a
+				// track that snapped at the end would be a duration meaning
+				// nothing (the same rule animate() applies).
+				if (pd.type != UIPropType::Float && pd.type != UIPropType::Color &&
+				    pd.type != UIPropType::Vec2) continue;
+				bool have = false;
+				for (const HE::UIAnimTrack& tr : clip.tracks)
+					if (tr.element == sel->id && tr.prop == pd.name) have = true;
+				if (have || !ImGui::Selectable(pd.name.c_str())) continue;
+				HE::UIAnimTrack tr;
+				tr.element = sel->id;
+				tr.prop    = pd.name;
+				// A track starts with the value the element has now, at the
+				// playhead — an empty track is a row that evaluates to nothing.
+				tr.keys.push_back({ st.playhead, sel->getPropAny(pd.name), HE::UIEase::Linear });
+				clip.tracks.push_back(std::move(tr));
+				st.trackSel = static_cast<int>(clip.tracks.size()) - 1;
+				commitEdit(st, ctx);
+			}
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("Add Track");
+
+	ImGui::SameLine();
+	const bool canKey = st.trackSel >= 0 && st.trackSel < static_cast<int>(clip.tracks.size());
+	ImGui::BeginDisabled(!canKey);
+	if (EditorWidgets::smallButton("Key"))
+	{
+		HE::UIAnimTrack& tr = clip.tracks[st.trackSel];
+		if (const UIElement* e = st.tree.find(tr.element))
+		{
+			const UIPropValue v = e->getPropAny(tr.prop);
+			// A key at this moment already? Replace it. Two keys at one time
+			// evaluate deterministically but mean nothing to a person.
+			bool replaced = false;
+			for (HE::UIAnimKey& k : tr.keys)
+				if (std::fabs(k.time - st.playhead) < 0.001f) { k.value = v; replaced = true; }
+			if (!replaced) tr.keys.push_back({ st.playhead, v, HE::UIEase::Linear });
+			std::stable_sort(tr.keys.begin(), tr.keys.end(),
+				[](const HE::UIAnimKey& a, const HE::UIAnimKey& b){ return a.time < b.time; });
+			commitEdit(st, ctx);
+		}
+	}
+	ImGui::EndDisabled();
+	EditorWidgets::helpForLabel("Key");
+	ImGui::SameLine();
+	ImGui::TextDisabled("%s", canKey
+		? "Records the element's CURRENT value at the playhead."
+		: "Pick a track, then Key records the element's value at the playhead.");
+
+	ImGui::EndChild();
+}
+
 void drawDetailsEvents(State& st, AppContext& ctx)
 {
 	UIElement* n = st.tree.find(st.selected);
@@ -2769,6 +3090,44 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	}
 }
 
+// The open clip's values, in the tree for exactly as long as this object lives.
+// See the comment at its use in drawCanvas for why it is an RAII guard and not
+// a pair of calls.
+struct ScrubPreview
+{
+	HE::UIWidgetTree* tree = nullptr;
+	std::vector<std::pair<std::pair<int, std::string>, UIPropValue>> saved;
+
+	explicit ScrubPreview(State& st)
+	{
+		if (!st.clipPreview || st.clipIndex < 0 ||
+		    st.clipIndex >= static_cast<int>(st.tree.animations.size())) return;
+		std::vector<HE::UIAnimSample> samples;
+		HE::uiAnimEvaluate(st.tree.animations[st.clipIndex], st.playhead, samples);
+		if (samples.empty()) return;
+		tree = &st.tree;
+		for (const HE::UIAnimSample& s : samples)
+		{
+			UIElement* e = tree->find(s.element);
+			if (!e) continue;
+			const UIPropValue cur = e->getPropAny(s.prop);
+			// A track whose property changed type under it is skipped rather
+			// than written — the same check the runtime makes.
+			if (cur.type != s.value.type) continue;
+			saved.push_back({ { s.element, s.prop }, cur });
+			e->setPropAny(s.prop, s.value);
+		}
+	}
+	~ScrubPreview()
+	{
+		if (!tree) return;
+		for (const auto& [where, value] : saved)
+			if (UIElement* e = tree->find(where.first)) e->setPropAny(where.second, value);
+	}
+	ScrubPreview(const ScrubPreview&) = delete;
+	ScrubPreview& operator=(const ScrubPreview&) = delete;
+};
+
 void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
 	// What a bound colour resolves to, for everything this frame draws — taken
@@ -2794,6 +3153,17 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.themeModeOverride != 0)
 		g_previewMode = st.themeModeOverride == 1 ? HE::UIThemeMode::Light
 		                                         : HE::UIThemeMode::Dark;
+
+	// ── The open clip, at the playhead ───────────────────────────────────────
+	// Applied for the length of THIS function and taken back on the way out, so
+	// nothing outside one frame's drawing ever sees a scrubbed value: not the
+	// save, not an undo snapshot, not the collaboration mirror. A preview that
+	// leaks into the document is data loss dressed up as a preview, and the
+	// alternative — restoring at five call sites — is five places to forget.
+	//
+	// Inside the frame it applies to the picking as well as the picture, which
+	// is right: you click what you can see.
+	const ScrubPreview scrub(st);
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 
@@ -4440,11 +4810,22 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 		ImGui::SameLine();
 
+		// The middle column is the canvas with the TIMELINE under it, the way
+		// every animation editor is laid out: what you are looking at above,
+		// when it happens below.
+		const float midW = ImGui::GetContentRegionAvail().x - rightW
+		                 - ImGui::GetStyle().ItemSpacing.x;
+		const float timelineH = std::clamp(st.timelineH, 90.0f,
+			std::max(90.0f, ImGui::GetContentRegionAvail().y - 160.0f));
+		ImGui::BeginChild("##uiw_mid", ImVec2(midW, 0));
 		ImGui::BeginChild("##uiw_canvas",
-			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
+			ImVec2(0, ImGui::GetContentRegionAvail().y - timelineH
+			          - ImGui::GetStyle().ItemSpacing.y),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		drawCanvas(st, ctx, ImGui::GetContentRegionAvail());
+		ImGui::EndChild();
+		drawTimeline(st, ctx, timelineH);
 		ImGui::EndChild();
 
 		ImGui::SameLine();

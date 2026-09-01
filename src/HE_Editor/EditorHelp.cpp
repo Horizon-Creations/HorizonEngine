@@ -2267,6 +2267,58 @@ namespace
 	  "else, and anything locked or bound to a role stays where it is.",
 	  "", "ui#elements" },
 
+	// ── The timeline: animations a widget owns ───────────────────────────────
+	// A track is one property of one element, a key is what that property is at
+	// a moment, and the easing sits on the key. The same three words every
+	// animation editor uses, in the vocabulary this one already had.
+	{ "UI Timeline/Animation", "",
+	  "Which of this widget's animations the timeline below is showing. They "
+	  "belong to the widget and travel with it, so a component brings its own — "
+	  "and a page that embeds it can play them by name.",
+	  "", "ui#elements" },
+	{ "UI Timeline/New", "",
+	  "Makes an animation and names it. The name is the identity: a graph plays "
+	  "it by name, so renaming one later means finding every Play node that used "
+	  "the old name.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Length", "",
+	  "How long the animation is. Keys past the end still exist and still hold "
+	  "their value — shortening the clip hides them rather than throwing them "
+	  "away, so lengthening it again brings them back.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Loop", "",
+	  "Runs it again from the start instead of ending. A looping animation never "
+	  "reports finished — the only way it ends is somebody stopping it — which is "
+	  "what a spinner or a pulse wants.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Preview", "",
+	  "Draws the canvas AT the playhead instead of showing the widget's own "
+	  "values. Switch it off to edit: with it on, what you see is the animation, "
+	  "and the values the Details panel writes are underneath it.",
+	  "", "ui#elements" },
+	{ "ui.timeline-play", "Play",
+	  "Plays the animation in the DESIGNER — the running application is not "
+	  "involved. Drag the ruler to scrub by hand; either way the canvas shows the "
+	  "clip while Preview is on.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Add Track", "",
+	  "Adds a row for one property of the SELECTED element. Only what can be "
+	  "interpolated is offered — a number, a colour, a point — because a string "
+	  "has no halfway and a track that snapped at the end would be a duration "
+	  "that means nothing. The new track starts with a key holding the value the "
+	  "element has right now.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Key", "",
+	  "Records the element's CURRENT value as a key at the playhead, replacing "
+	  "one already there. That is the whole workflow: move the playhead, change "
+	  "the value in Details, press Key. The value that gets recorded is the one "
+	  "you typed, not the one the preview happens to be showing.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Delete Key", "",
+	  "Removes this key. The track keeps the others, and a track with one key "
+	  "left is simply a constant.",
+	  "", "ui#elements" },
+
 	// ── Components: what a widget offers whoever embeds it ───────────────────
 	{ "Canvas/Parameter Name", "",
 	  "What a page that embeds this widget calls this knob — \"Label\", \"Help Text\", "
@@ -3837,6 +3889,7 @@ namespace
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
+		{ "UI Timeline/",    "editor-ui", "UI Designer", "The timeline" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
 		{ "input.",         "editor-input", "Input Reference", "Input assets" },
