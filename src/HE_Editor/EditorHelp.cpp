@@ -2230,6 +2230,15 @@ namespace
 	  "one that does not change.",
 	  "", "ui#designer" },
 
+	{ "Canvas/Follow the Theme", "",
+	  "Switches every element of this widget over to the theme's styles at once. "
+	  "An element read from a file that predates styles follows none — that is "
+	  "what keeps opening an old widget from repainting it — and this is the one "
+	  "button that undoes that decision for the whole widget. Each element still "
+	  "follows the style named after its own TYPE unless you point it somewhere "
+	  "else, and anything locked or bound to a role stays where it is.",
+	  "", "ui#elements" },
+
 	// ── Components: what a widget offers whoever embeds it ───────────────────
 	{ "Canvas/Parameter Name", "",
 	  "What a page that embeds this widget calls this knob — \"Label\", \"Help Text\", "

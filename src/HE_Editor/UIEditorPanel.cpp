@@ -723,7 +723,12 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 // Which vocabulary a property may bind to. The property decides, never the name:
 // the size steps and the text levels both contain "Small", and only the thing it
 // sits on says which one is meant (see uiApplyTheme).
-enum class ThemeBindKind { Color, TextLevel, SizeStep };
+// NoRole is the fourth case and it is not a vocabulary: it is a number a style
+// may decide although nothing in the role vocabularies can name it (a slider's
+// minimum, a box's spacing). Such a row still needs the button — otherwise it is
+// simply greyed out with nothing to click and no way back, which is the "why can
+// I not press this" the help rules exist for.
+enum class ThemeBindKind { Color, TextLevel, SizeStep, NoRole };
 
 void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
                          ThemeBindKind kind = ThemeBindKind::Color)
@@ -766,8 +771,10 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 		{ e.setThemeRole(prop, ""); committed = true; }
 		if (ImGui::Selectable("Locked (keep this value)", locked))
 		{ e.setThemeRole(prop, HE::kUIThemeLiteral); committed = true; }
-		ImGui::Separator();
-		const int n = kind == ThemeBindKind::Color
+		if (kind != ThemeBindKind::NoRole) ImGui::Separator();
+		const int n = kind == ThemeBindKind::NoRole
+			? 0
+			: kind == ThemeBindKind::Color
 			? static_cast<int>(HE::UIThemeRole::COUNT)
 			: kind == ThemeBindKind::TextLevel
 				? static_cast<int>(HE::UIThemeTextLevel::COUNT)
@@ -976,6 +983,10 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		ImGui::EndDisabled();
 		if (bindable) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::TextLevel);
+		// A number the style decided, that no role vocabulary can name: the row
+		// is greyed out, so it needs the button that says why and lets you take
+		// it back.
+		else if (bound) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::NoRole);
 		break;
 	}
 	case UIPropType::Int:
@@ -1349,6 +1360,30 @@ void drawDetails(State& st, AppContext& ctx)
 				"Description", &st.tree.description, ImGui::GetTextLineHeight() * 3.0f))
 			st.dirty = true;
 		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
+		// ── Hand the whole widget to the theme ───────────────────────────────
+		// An element read from a file that predates styles follows none, which is
+		// what keeps opening an old widget from repainting it. That rule is right
+		// and it makes exactly one thing tedious: a widget authored before styles
+		// would have to be switched over element by element, which is the
+		// per-value work styles exist to end.
+		ImGui::Spacing();
+		{
+			// Both counted over the same loop: the element vector is indexed by
+			// id and holds a hole wherever one was deleted, so its size is not
+			// how many elements there are.
+			int following = 0, total = 0;
+			for (const auto& ep : st.tree.elements)
+				if (ep) { ++total; if (ep->themeStyled) ++following; }
+			if (EditorWidgets::button("Follow the Theme", ImVec2(160.0f, 0.0f)))
+			{
+				for (auto& ep : st.tree.elements) if (ep) ep->themeStyled = true;
+				commitEdit(st, ctx);
+			}
+			EditorWidgets::helpForLabel("Follow the Theme");
+			ImGui::SameLine();
+			ImGui::TextDisabled("%d of %d", following, total);
+		}
 
 		drawParameterDeclarations(st, ctx);
 

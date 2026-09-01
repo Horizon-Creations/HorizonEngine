@@ -626,6 +626,7 @@ protected:
         dst.gradientAngle = gradientAngle;
         dst.gradientShape = gradientShape;
         dst.themeRoles = themeRoles;
+        dst.themeStyled = themeStyled; dst.themeStyle = themeStyle;
         dst.shadow = shadow; dst.shadowColor = shadowColor;
         dst.shadowBlur = shadowBlur;
         dst.shadowOffsetX = shadowOffsetX; dst.shadowOffsetY = shadowOffsetY;
