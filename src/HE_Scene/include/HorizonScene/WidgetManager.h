@@ -165,6 +165,72 @@ public:
     // (docs/he-apps-plan.md E2), and `tree(id)` alone cannot say WHICH ids exist.
     std::vector<int> liveIds() const;
 
+    // ── Keeping what the preview holds across a reload (plan E4, Stufe 3) ────
+    // The live preview is rebuilt from the assets every time one is saved, and
+    // that throws away everything the person had typed, scrolled and picked.
+    // Correct for "restart", wrong for "I fixed a label" — which is most saves.
+    //
+    // Two halves, matched by two different keys, because they are two different
+    // questions:
+    //
+    //   ELEMENTS are matched by (asset path, which copy of it, element id). An
+    //   id is handed out once by the designer and never renumbered, so it
+    //   survives every edit that is not a delete — INCLUDING a rename, which is
+    //   why renaming a field does not lose what was typed into it.
+    //
+    //   VARIABLES are matched by name on the widget's script instance. A graph
+    //   has no stable id for a variable; the name IS its identity, so renaming
+    //   one is indistinguishable from deleting it and adding another, and its
+    //   value is gone. That is the one loss worth saying out loud, and the
+    //   editor says it rather than leaving it in a comment.
+    //
+    // Anything unmatched keeps what the asset was authored with, which is what a
+    // fresh widget is. Nothing here restores RUNNING work: a Delay that was
+    // counting down is gone with the instance that was counting it.
+    struct StateSnapshot
+    {
+        // Which live widget a row belongs to: the asset, plus which copy of it
+        // in creation order. Two copies of one widget on a page are ordinary,
+        // and keying on the path alone would give both of them the first one's
+        // state.
+        struct Key
+        {
+            std::string asset;
+            int         copy = 0;
+            bool operator==(const Key& o) const { return asset == o.asset && copy == o.copy; }
+        };
+        struct Element
+        {
+            Key  key;
+            int  elementId = 0;
+            // What the element HOLDS, by the property names its own table uses.
+            // Only what a person can put something into is captured: a label a
+            // script wrote is not state, it is output, and restoring it would
+            // paste yesterday's answer over a freshly computed one.
+            std::vector<std::pair<std::string, HE::UIPropValue>> props;
+            // The two pieces of state that are not properties: a text field's
+            // caret, and how far a scrolling container has been scrolled.
+            // -1 / no value = this element has neither.
+            long long caret  = -1;
+            float     scroll = 0.0f;
+            bool      hasScroll = false;
+        };
+        std::vector<Element> elements;
+        // The focused element per widget (0 = none). Its own list because focus
+        // is a property of the WIDGET, not of the element that happens to hold
+        // it, and there is exactly one per widget.
+        std::vector<std::pair<Key, int>> focus;
+        // The script instance's variables per widget, by name.
+        std::vector<std::pair<Key, std::unordered_map<std::string, HorizonCode::Value>>> vars;
+    };
+
+    StateSnapshot captureState() const;
+    // Write a snapshot back onto whatever is live now. Returns how many pieces
+    // actually landed, so a caller can tell "restored" from "matched nothing"
+    // — the second is what a restructured widget looks like, and it should be
+    // sayable rather than silent.
+    int restoreState(const StateSnapshot& snapshot);
+
     // ── Did anything change what is on screen? ───────────────────────────────
     // An application draws when something CHANGED, not sixty times a second
     // (docs/he-apps-plan.md A2), and the widget layer is where almost all of

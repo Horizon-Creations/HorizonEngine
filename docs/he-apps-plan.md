@@ -1846,6 +1846,61 @@ Später entfernt hätte er jeden Graphen dahinter umverdrahtet; jetzt kostet er 
   sind das rund zwei Minuten Auflösung. Für „wie alt ist diese Datei" reicht das; wer eine
   Änderungserkennung darauf baut, baut auf Sand und sollte die Größe vergleichen.
 
+### E4 Stufe 3: der Zustand über den Reload (01.09.2026)
+
+**Stufe 2 gab es schon**: ein gespeichertes Asset setzt `m_appPreviewRestartPending`, und
+`restartAppPreview` baut die Vorschau neu. Richtig für „neu starten", falsch für „ich habe eine
+Beschriftung geändert" — und das ist der meiste Speichervorgang. Ein halb ausgefülltes Formular
+ging dabei verloren.
+
+**Zwei Hälften, zwei verschiedene Schlüssel, weil es zwei verschiedene Fragen sind:**
+
+**Elemente über (Asset-Pfad, welche Kopie, Element-Id).** Eine Id wird einmal vergeben und nie
+neu nummeriert, überlebt also jede Änderung außer dem Löschen — **auch das Umbenennen**. Ein
+umbenanntes Feld verliert nicht, was darin stand. (Der Plan sagt oben pauschal „Umbenanntes
+überlebt nicht"; für Elemente stimmt das nicht, für Variablen schon, und die Zeile daneben sagt
+es genau so.) „Welche Kopie" muss dabei sein: zwei Kopien eines Widgets auf einer Seite sind
+gewöhnlich, und der Pfad allein gäbe beiden den Zustand der ersten.
+
+**Variablen über den Namen auf der Skript-Instanz.** Ein Graph hat keine stabile Id für eine
+Variable, der Name IST ihre Identität — eine umbenannte Variable ist von einer gelöschten plus
+einer neuen nicht zu unterscheiden, und ihr Wert ist weg.
+
+**Was erhalten wird, ist kurz**, und das ist Absicht: Text und Cursor eines Feldes, der Haken,
+der Wert eines Reglers, die Auswahl einer ComboBox oder Liste, der Versatz beim Scrollen, der
+Fokus. **Eine Beschriftung, die ein Skript geschrieben hat, ist kein Zustand, sondern Ausgabe** —
+sie wiederherzustellen hieße, die Antwort von gestern über eine frisch gerechnete zu kleben. Die
+Tabelle `statePropsOf` ist die einzige Stelle, die das entscheidet; ein neuer Elementtyp trägt
+dort eine Zeile ein oder wird eben nicht übertragen, und das ist die sichere Richtung.
+
+**Nicht passt heißt fallen lassen, nicht raten.** Die Id muss da sein UND die Eigenschaft muss
+noch denselben Typ haben. Gegengeprüft, indem ich die Typprüfung ausgehängt habe: dann landet
+der Text eines TextInput in der Auswahlnummer einer ComboBox, und der Test wird rot.
+
+**Und der Editor sagt es, wenn nichts gepasst hat.** Eine Neuerstellung, die die Widgets
+umgebaut vorfindet, hat weggeworfen, was drin war, und „mein Formular hat sich selbst geleert"
+ist genau die Sorte Sache, über die jemand eine Stunde rätselt. Nur wenn es überhaupt etwas zu
+verlieren gab.
+
+**Dabei hat mich mein eigener Zähler erwischt:** `landed` zählte „nichts war fokussiert" als
+erhaltenen Zustand mit. Damit stand die Zahl bei jedem Widget über null, und die Warnung wäre
+nie erschienen — die Prüfziffer hätte genau das kaputtgemacht, wofür es sie gibt. Der Knopf
+„Restart Live Preview" ist der **einzige** Weg, der den Zustand absichtlich fallen lässt; er
+existiert ja, um aus einem Zustand herauszukommen.
+
+**Und bei den Variablen war der Wächter zuerst der falsche.** Ich hatte auf den Typ geprüft:
+„gibt es die Variable noch und passt sie". Nur antwortet `getVariable` auf einen Namen, den der
+Graph nicht mehr kennt, mit einem default-konstruierten Wert — und dessen Typ ist **Float**. Eine
+umbenannte oder gelöschte **Float**-Variable passte damit auf ihren eigenen Unfall und wurde im
+Instanz-Speicher neu angelegt: ein Wert, den niemand liest, niemand aufräumt und mit dem eine
+spätere Umbenennung kollidieren kann. Richtig ist die **Mitgliedschaft** in dem, was die frisch
+gebaute Instanz deklariert.
+
+**Meine erste Gegenprobe dazu blieb grün**, und das war der eigentliche Fund: ich hatte die
+umbenannte Variable als String angelegt, und ein String passt nicht auf einen Float-Unfall. Erst
+mit einer **Float**-Variablen wurde der Test rot. Zum wiederholten Mal dieselbe Lehre — **eine
+Gegenprobe, die nicht rot wird, prüft nicht, was man denkt.**
+
 ---
 
 ## 11. Risiken und Fallen

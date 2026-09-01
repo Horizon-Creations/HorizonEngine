@@ -2061,6 +2061,175 @@ std::vector<int> WidgetManager::liveIds() const
 	return ids;
 }
 
+// ── Keeping what the preview holds across a reload (plan E4, Stufe 3) ────────
+namespace
+{
+// What a person can put INTO an element, per type. Deliberately short: a label
+// a script wrote is output, not state, and carrying it across a reload would
+// paste the old answer over a freshly computed one.
+//
+// One table rather than a chain of dynamic_casts, because "which properties are
+// state" is a question about the TYPE and this is the only place that answers
+// it — a new widget type adds a row here or is simply not carried, which is the
+// safe direction to be wrong in.
+const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
+{
+	static const std::vector<std::string> kText   = { "Text" };
+	static const std::vector<std::string> kCheck  = { "Checked" };
+	static const std::vector<std::string> kSlider = { "Value" };
+	static const std::vector<std::string> kCombo  = { "Selected Index" };
+	static const std::vector<std::string> kList   = { "Selection" };
+	switch (t)
+	{
+		case HE::UIWidgetType::TextInput:   return &kText;
+		case HE::UIWidgetType::CheckBox:    return &kCheck;
+		case HE::UIWidgetType::Slider:      return &kSlider;
+		case HE::UIWidgetType::ComboBox:    return &kCombo;
+		case HE::UIWidgetType::ListView:    return &kList;
+		default:                            return nullptr;
+	}
+}
+} // namespace
+
+WidgetManager::StateSnapshot WidgetManager::captureState() const
+{
+	StateSnapshot snap;
+	std::unordered_map<std::string, int> seen;   // asset path → copies so far
+
+	for (const Instance& w : m_instances)
+	{
+		StateSnapshot::Key key;
+		key.asset = w.assetPath;
+		key.copy  = seen[w.assetPath]++;
+
+		for (const auto& ep : w.tree.elements)
+		{
+			if (!ep) continue;
+			const HE::UIElement& e = *ep;
+			StateSnapshot::Element row;
+			row.key       = key;
+			row.elementId = e.id;
+
+			if (const std::vector<std::string>* props = statePropsOf(e.type()))
+				for (const std::string& p : *props)
+					row.props.emplace_back(p, e.getPropAny(p));
+
+			if (const auto* ti = dynamic_cast<const HE::UITextInput*>(&e))
+				row.caret = static_cast<long long>(ti->caret);
+			// Asked through the same virtual the scrolling itself goes through,
+			// so a scroll box and a list are one case and a container added
+			// later is carried without touching this.
+			if (const float* off = const_cast<HE::UIElement&>(e).scrollOffsetPtr())
+			{ row.scroll = *off; row.hasScroll = true; }
+
+			if (!row.props.empty() || row.caret >= 0 || row.hasScroll)
+				snap.elements.push_back(std::move(row));
+		}
+
+		snap.focus.emplace_back(key, w.focusedElem);
+		if (w.scriptId != 0)
+			snap.vars.emplace_back(key, rt().variablesSnapshot(w.scriptId));
+	}
+	return snap;
+}
+
+int WidgetManager::restoreState(const StateSnapshot& snapshot)
+{
+	int landed = 0;
+	std::unordered_map<std::string, int> seen;
+	// Which live widget answers to which key. Built once rather than searched
+	// per row: a page with a list of a hundred rows is a hundred widgets, and
+	// the snapshot has an entry for each of them.
+	std::vector<std::pair<StateSnapshot::Key, Instance*>> byKey;
+	for (Instance& w : m_instances)
+		byKey.push_back({ StateSnapshot::Key{ w.assetPath, seen[w.assetPath]++ }, &w });
+
+	auto findWidget = [&](const StateSnapshot::Key& k) -> Instance*
+	{
+		for (auto& [key, w] : byKey) if (key == k) return w;
+		return nullptr;
+	};
+
+	for (const StateSnapshot::Element& row : snapshot.elements)
+	{
+		Instance* w = findWidget(row.key);
+		if (!w) continue;
+		HE::UIElement* e = w->tree.find(row.elementId);
+		// The id is gone, or now belongs to a different KIND of element — the
+		// widget was restructured. Dropped rather than written into whatever is
+		// there now, which is the same rule a component parameter follows.
+		if (!e) continue;
+
+		for (const auto& [prop, value] : row.props)
+		{
+			// The property has to still exist AND still mean the same type. A
+			// CheckBox turned into a Slider keeps neither.
+			const HE::UIPropValue cur = e->getPropAny(prop);
+			if (cur.type != value.type) continue;
+			e->setPropAny(prop, value);
+			++landed;
+		}
+		if (row.caret >= 0)
+			if (auto* ti = dynamic_cast<HE::UITextInput*>(e))
+			{
+				// Clamped to the text that is actually there now, and moved to a
+				// character boundary: the text may have been restored from the
+				// snapshot or may be the asset's own, and a caret in the middle
+				// of a UTF-8 sequence is a crash waiting for the next keypress.
+				const size_t want = static_cast<size_t>(row.caret);
+				ti->caret = HE::uiUtf8Clamp(ti->text, want > ti->text.size() ? ti->text.size() : want);
+				ti->selAnchor = ti->caret;
+				++landed;
+			}
+		if (row.hasScroll)
+			if (float* off = e->scrollOffsetPtr()) { *off = row.scroll; ++landed; }
+	}
+
+	for (const auto& [key, elem] : snapshot.focus)
+		if (Instance* w = findWidget(key))
+			if (elem != 0 && w->tree.find(elem))
+			{
+				// Only a REAL focus counts. Restoring "nothing was focused" onto
+				// a widget that already has nothing focused is not a piece of
+				// state that survived, and counting it would keep `landed` above
+				// zero for every widget — which is exactly the number the editor
+				// uses to decide whether to say the state was lost.
+				w->focusedElem = elem;
+				++landed;
+			}
+
+	for (const auto& [key, values] : snapshot.vars)
+	{
+		Instance* w = findWidget(key);
+		if (!w || w->scriptId == 0) continue;
+		// What the REBUILT instance declares. Taken right after OnInit, this is
+		// the graph's own variable set seeded from its defaults — so membership
+		// in it is the only honest answer to "does this variable still exist".
+		//
+		// Asking getVariable instead does NOT work, and the difference is easy
+		// to miss: an undeclared name reads back as a default-constructed Value,
+		// whose type is Float. A Float variable that was renamed or deleted
+		// therefore type-MATCHES that accidental default and would be recreated
+		// in the store — a value nothing reads, nothing clears, and a later
+		// rename could collide with. The type check below still earns its place
+		// for a variable that stayed but changed type.
+		const auto declared = rt().variablesSnapshot(w->scriptId);
+		for (const auto& [name, value] : values)
+		{
+			const auto it = declared.find(name);
+			if (it == declared.end()) continue;      // renamed or removed
+			if (it->second.type != value.type) continue;
+			rt().setVariable(w->scriptId, name, value);
+			++landed;
+		}
+	}
+
+	// Everything above changed what is on screen, and in an app nothing else
+	// asks for a frame.
+	if (landed > 0) m_visualDirty = true;
+	return landed;
+}
+
 bool WidgetManager::selectAllFocused()
 {
 	return editFocusedText(TextEdit::SelectAll, false);

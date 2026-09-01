@@ -1975,7 +1975,10 @@ void EditorApplication::OnRender(float dt)
 	if (m_appPreviewRestartPending)
 	{
 		m_appPreviewRestartPending = false;
-		restartAppPreview();
+		restartAppPreview(m_appPreviewKeepState);
+		// Back to keeping it: everything except the toolbar button means "an
+		// asset changed", and an asset change should not cost what was typed.
+		m_appPreviewKeepState = true;
 	}
 
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
@@ -5806,7 +5809,10 @@ AppContext EditorApplication::makeContext()
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
 		.appLivePreview      = m_projectManager.currentProject().appProject,
-		.restartAppPreview   = [this]{ m_appPreviewRestartPending = true; },
+		// The toolbar button, and the ONE path that deliberately drops the
+		// state: it exists to get out of one.
+		.restartAppPreview   = [this]{ m_appPreviewRestartPending = true;
+		                               m_appPreviewKeepState = false; },
 		.isPaused            = m_isPaused,
 		.playLog             = &m_playLog,
 		.playLogMutex        = &m_playLogMutex,
@@ -6475,9 +6481,16 @@ void EditorApplication::setPlayMode(bool play)
 }
 
 // ─── Game Instance (app-wide HorizonCode script) ────────────────────────────────
-void EditorApplication::restartAppPreview()
+void EditorApplication::restartAppPreview(bool keepState)
 {
 	if (!m_editorWorld || !m_projectManager.currentProject().appProject) return;
+
+	// What the preview is HOLDING, taken before anything is torn down: the text
+	// somebody typed, where they had scrolled, which field had the caret. A
+	// rebuild after every save is right; losing a half-filled form to a one-word
+	// label fix is not (docs/he-apps-plan.md E4, Stufe 3).
+	WidgetManager::StateSnapshot snapshot;
+	if (keepState) snapshot = m_editorWorld->widgets().captureState();
 
 	// Down in the reverse order it came up. fireShutdown before the widgets go,
 	// so a graph's OnShutdown still finds the things it is about to let go of.
@@ -6489,8 +6502,23 @@ void EditorApplication::restartAppPreview()
 	// setGraph is also what resets its variables to their authored defaults.
 	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 	m_gameInstance.fireInit();
-	HE_LOG_INFO(Editor, "Application project: live preview restarted — %zu widget(s)",
-	            m_editorWorld->widgets().count());
+
+	// …and back on, AFTER OnInit has built the new widgets. Anything the edit
+	// removed or restructured finds no home and keeps the authored value.
+	const int landed = keepState ? m_editorWorld->widgets().restoreState(snapshot) : 0;
+	HE_LOG_INFO(Editor, "Application project: live preview restarted — %zu widget(s)%s",
+	            m_editorWorld->widgets().count(),
+	            keepState ? (landed > 0 ? ", state kept" : ", nothing to keep") : "");
+	// Said out loud rather than left in a log line nobody reads: a rebuild that
+	// found the widgets rearranged has thrown away what was in them, and "my form
+	// emptied itself" is exactly the kind of thing somebody spends an hour on.
+	// Only when there WAS something to lose.
+	if (keepState && landed == 0 && !snapshot.elements.empty())
+		HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+		               "Live preview: none of what it was holding fitted the new layout",
+		               "Text, scroll positions and selections are back to what the assets "
+		               "were authored with. Elements that were deleted or retyped cannot "
+		               "be matched up again.");
 }
 
 std::string EditorApplication::gameInstancePath()

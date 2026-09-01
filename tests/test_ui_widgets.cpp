@@ -6979,6 +6979,234 @@ TEST_CASE("Parameters: they round-trip, and a page without them saves nothing ex
     CHECK(plainJson.find("params") == std::string::npos);
 }
 
+// ═══ Keeping the preview's state across a reload (E4, Stufe 3) ═══════════════
+// The live preview is rebuilt from the assets on every save. Correct for
+// "restart", wrong for "I fixed a label" — which is most saves, and which used
+// to empty a half-filled form.
+
+namespace
+{
+    // A page with the four things a person can put something INTO, plus a
+    // scroll box to scroll.
+    HE::UIWidgetTree statefulPage()
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int ti = t.add(HE::UIWidgetType::TextInput);
+        t.find(ti)->name = "Field";
+        const int cb = t.add(HE::UIWidgetType::CheckBox);
+        t.find(cb)->name = "Tick";
+        const int sl = t.add(HE::UIWidgetType::Slider);
+        t.find(sl)->name = "Dial";
+        const int sb = t.add(HE::UIWidgetType::ScrollBox);
+        t.find(sb)->name = "Scroller";
+        t.find(sb)->sizeX = t.find(sb)->sizeY = 100.0f;
+        return t;
+    }
+}
+
+TEST_CASE("Preview state: what somebody typed survives the widget being rebuilt")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidget(cm, statefulPage());
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Put the widget into a state, the way a person would.
+    {
+        const HE::UIWidgetTree* t = wm.tree(id);
+        REQUIRE(t);
+        // Written through the manager's own copy: this is the live tree.
+        auto* live = const_cast<HE::UIWidgetTree*>(t);
+        auto* ti = dynamic_cast<HE::UITextInput*>(live->find(1));
+        REQUIRE(ti);
+        ti->text = "half a form"; ti->caret = 4;
+        live->find(2)->setPropAny("Checked", HE::UIPropValue::ofBool(true));
+        live->find(3)->setPropAny("Value", HE::UIPropValue::ofFloat(0.7f));
+        *live->find(4)->scrollOffsetPtr() = 42.0f;
+    }
+
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    CHECK(snap.elements.size() >= 4);
+
+    // The rebuild: everything down, everything up again from the asset.
+    wm.clear();
+    const int again = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(again != 0);
+    // Freshly built, so it holds what the ASSET says — nothing.
+    CHECK(wm.tree(again)->find(1)->getPropAny("Text").s.empty());
+
+    CHECK(wm.restoreState(snap) > 0);
+
+    const HE::UIWidgetTree* t = wm.tree(again);
+    REQUIRE(t);
+    const auto* ti = dynamic_cast<const HE::UITextInput*>(t->find(1));
+    REQUIRE(ti);
+    CHECK(ti->text == "half a form");
+    CHECK(ti->caret == 4);
+    CHECK(t->find(2)->getPropAny("Checked").b);
+    CHECK(t->find(3)->getPropAny("Value").f == doctest::Approx(0.7f));
+    CHECK(*const_cast<HE::UIElement*>(t->find(4))->scrollOffsetPtr() == doctest::Approx(42.0f));
+}
+
+// The half that has to be a DROP rather than a guess. A widget whose elements
+// were restructured has ids that now mean something else, and writing yesterday's
+// text into whatever sits at that number is worse than an empty field.
+TEST_CASE("Preview state: a restructured widget keeps nothing rather than the wrong thing")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidget(cm, statefulPage());
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    {
+        auto* live = const_cast<HE::UIWidgetTree*>(wm.tree(id));
+        dynamic_cast<HE::UITextInput*>(live->find(1))->text = "typed";
+        live->find(2)->setPropAny("Checked", HE::UIPropValue::ofBool(true));
+    }
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    wm.clear();
+
+    // The author edited the widget: element 1 is a Button now, and the CheckBox
+    // is gone entirely.
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        t.add(HE::UIWidgetType::Button);      // id 1, was a TextInput
+        registerWidget(cm, t, nullptr, "mem://w2.hasset");
+    }
+    const int again = createShown(wm, cm, "mem://w2.hasset");
+    REQUIRE(again != 0);
+
+    // A different asset path: nothing is even offered a home. This is the
+    // ordinary case for "I pointed the preview at another widget".
+    CHECK(wm.restoreState(snap) == 0);
+    // …and the Button is untouched — no text was pasted into it, and it has no
+    // Text property to paste into in the first place.
+    CHECK(wm.tree(again)->find(1)->type() == HE::UIWidgetType::Button);
+}
+
+// Same asset, same ids, but the TYPE at an id changed — the case that gets past
+// a naive "does this id exist" check and writes a string into a number.
+TEST_CASE("Preview state: a property that changed type is left alone")
+{
+    TempWidgetDir dir;
+    // Two content managers, one path. That is how "the asset on disk changed
+    // under it" is reproduced without registering two assets at one path, which
+    // is a state the editor never produces and the manager never has to answer.
+    ContentManager before(dir.path.string()), after(dir.path.string());
+
+    // Round 1: id 1 is a TextInput holding something.
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        t.add(HE::UIWidgetType::TextInput);
+        registerWidget(before, t);
+    }
+    WidgetManager wm;
+    const int id = createShown(wm, before, "mem://w.hasset");
+    REQUIRE(id != 0);
+    dynamic_cast<HE::UITextInput*>(
+        const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(1))->text = "typed";
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    REQUIRE_FALSE(snap.elements.empty());
+    wm.clear();
+
+    // Round 2: SAME path and SAME id, but a ComboBox — whose state property is
+    // "Selected Index", an Int. The snapshot's "Text" has no counterpart.
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        t.add(HE::UIWidgetType::ComboBox);
+        registerWidget(after, t);
+    }
+    const int again = createShown(wm, after, "mem://w.hasset");
+    REQUIRE(again != 0);
+    // The element matches by id, the property does not match by type, so
+    // nothing lands. Not a crash and not a silently wrong value.
+    CHECK(wm.restoreState(snap) == 0);
+    CHECK(wm.tree(again)->find(1)->getPropAny("Selected Index").i == 0);
+}
+
+// The other half, and the one whose rule is different: a variable is matched by
+// NAME, because a graph has no stable id for one. So a renamed variable is
+// indistinguishable from a deleted one, and its value is gone — which has to be
+// a real drop and not an accidental re-creation.
+TEST_CASE("Preview state: a widget's variables come back, unless the graph dropped them")
+{
+    TempWidgetDir dir;
+    ContentManager before(dir.path.string()), after(dir.path.string());
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    page.add(HE::UIWidgetType::Panel);
+
+    // Round 1: two variables. The one that gets renamed is a FLOAT, deliberately
+    // — a String here would prove nothing. Asking the rebuilt instance for a name
+    // it no longer declares answers with a default-constructed Value, whose type
+    // is Float, so ONLY a float variable exposes the difference between "the type
+    // matches" and "the variable exists".
+    {
+        HorizonCode::Graph g;
+        HorizonCode::Variable score; score.name = "score"; score.type = PinType::Int;
+        HorizonCode::Variable draft; draft.name = "draft"; draft.type = PinType::Float;
+        g.variables.push_back(score);
+        g.variables.push_back(draft);
+        registerWidget(before, page, &g);
+    }
+    // The manager's own runtime is its business; a test that wants to read the
+    // variable store injects one it holds itself, which is exactly what
+    // HorizonWorld does in the real thing.
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, before, "mem://w.hasset");
+    REQUIRE(id != 0);
+    rt.setVariable(static_cast<HorizonCode::InstanceId>(id),
+                   "score", HorizonCode::Value::ofInt(42));
+    rt.setVariable(static_cast<HorizonCode::InstanceId>(id),
+                   "draft", HorizonCode::Value::ofFloat(0.5f));
+
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    REQUIRE(snap.vars.size() == 1);
+    wm.clear();
+
+    // Round 2: the author kept `score` and renamed `draft` to `ratio`.
+    {
+        HorizonCode::Graph g;
+        HorizonCode::Variable score; score.name = "score"; score.type = PinType::Int;
+        HorizonCode::Variable ratio; ratio.name = "ratio"; ratio.type = PinType::Float;
+        g.variables.push_back(score);
+        g.variables.push_back(ratio);
+        registerWidget(after, page, &g);
+    }
+    const int again = createShown(wm, after, "mem://w.hasset");
+    REQUIRE(again != 0);
+    CHECK(wm.restoreState(snap) > 0);
+
+    const auto inst = static_cast<HorizonCode::InstanceId>(again);
+    CHECK(rt.getVariable(inst, "score").i == 42);
+    // The renamed one did NOT follow: `ratio` is a new variable and starts at its
+    // declared default, not at what `draft` was holding.
+    CHECK(rt.getVariable(inst, "ratio").f == doctest::Approx(0.0f));
+    // And the part that actually matters — `draft` was not quietly re-created in
+    // the store under its old name. This is what a type check alone does not
+    // catch, because an undeclared name reads back as a Float and a Float value
+    // matches it.
+    const auto declared = rt.variablesSnapshot(inst);
+    CHECK(declared.find("draft") == declared.end());
+}
+
 // ═══ The shipped component library ═══════════════════════════════════════════
 // EditorDeps/EngineContent/Widgets is generated by widget_gen and COMMITTED, so
 // nothing rebuilds it on the way to this test — which is exactly why it needs

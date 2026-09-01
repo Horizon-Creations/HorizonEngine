@@ -745,10 +745,16 @@ private:
 	// widget tree while the thing that triggered the save is still walking it is a
 	// crash waiting for a big enough project.
 	bool m_appPreviewRestartPending = false;
+	// …and whether that pending restart should carry the preview's state across.
+	// A SAVE should (the point of E4 Stufe 3: a one-word label fix must not empty
+	// a half-filled form); the toolbar's "Restart Live Preview" must not, since
+	// getting OUT of a state is the only reason to press it.
+	bool m_appPreviewKeepState = true;
 	// Tear the application preview down and start it again: OnShutdown, drop every
 	// widget, re-register the current GameInstance graph, OnInit. No-op outside an
-	// application project.
-	void restartAppPreview();
+	// application project. keepState carries what the widgets were holding across
+	// the rebuild (docs/he-apps-plan.md E4, Stufe 3).
+	void restartAppPreview(bool keepState);
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight
