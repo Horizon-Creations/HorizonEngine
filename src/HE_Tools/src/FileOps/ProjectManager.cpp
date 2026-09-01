@@ -539,40 +539,41 @@ static json startupSceneJson(ProjectPreset preset)
 	if (playable)
 	{
 		// Ground you can actually stand on, which is the difference between this
-		// and the tutorial's floor: a Static rigid body and a box collider, or
-		// the character falls straight through the thing it is standing on and
-		// the template's whole claim is false on the first press of Play.
+		// and the tutorial's floor. A flattened cube rather than a quad — the
+		// built-in quad is a 1x1 billboard facing +Z, and there is no ground
+		// primitive.
 		//
-		// A flattened cube rather than a quad — the built-in quad is a 1x1
-		// billboard facing +Z, and there is no ground primitive. The half
-		// extents mirror the scale, because the collider is authored in the
-		// entity's own units and does not read the transform.
+		// A Static rigid body and DELIBERATELY NO ColliderComponent. That is not
+		// an omission, it is the only shape that matches: a Box collider uses its
+		// AUTHORED half extents and ignores the entity's scale entirely (see the
+		// KNOWN LIMITATION note in PhysicsWorld::buildColliderShape — Mesh, Hull
+		// and Height Field scale, the three primitives do not). An authored box
+		// under a 60x0.5x60 floor was therefore a 1 m cube in the middle of it,
+		// and the player walked off it and fell through the world. Left without
+		// one, the fallback builds the box from the composed world scale, and
+		// since the built-in cube spans exactly ±0.5 that box IS the visible
+		// geometry, to the millimetre.
 		addChild("Ground", json{
 			{ "transform", transform(vec3(0.0f, -0.25f, 0.0f), vec3(60.0f, 0.5f, 60.0f)) },
 			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
 			{ "material",  json{ { "asset", uuid(HE::kDefaultTerrainMaterialId) } } },
 			{ "rigidbody", json{ { "type", static_cast<uint8_t>(HE::RigidBodyType::Static) } } },
-			{ "collider",  json{ { "shape",  static_cast<uint8_t>(HE::ColliderShape::Box) },
-			                     { "halfEx", vec3(0.5f, 0.5f, 0.5f) } } },
 		});
 		// Two boxes to walk around and jump onto — the smallest thing that makes
 		// movement legible. Without something at a fixed place, a player on an
-		// empty plane cannot tell whether they are moving at all.
+		// empty plane cannot tell whether they are moving at all. Same reason as
+		// the ground for having no explicit collider.
 		addChild("Block", json{
 			{ "transform", transform(vec3(4.0f, 0.5f, -3.0f), vec3(2.0f, 1.0f, 2.0f)) },
 			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
 			{ "material",  json{ { "asset", uuid(HE::kDefaultMaterialId) } } },
 			{ "rigidbody", json{ { "type", static_cast<uint8_t>(HE::RigidBodyType::Static) } } },
-			{ "collider",  json{ { "shape",  static_cast<uint8_t>(HE::ColliderShape::Box) },
-			                     { "halfEx", vec3(0.5f, 0.5f, 0.5f) } } },
 		});
 		addChild("Step", json{
 			{ "transform", transform(vec3(-3.5f, 0.25f, -4.5f), vec3(3.0f, 0.5f, 3.0f)) },
 			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
 			{ "material",  json{ { "asset", uuid(HE::kDefaultMaterialId) } } },
 			{ "rigidbody", json{ { "type", static_cast<uint8_t>(HE::RigidBodyType::Static) } } },
-			{ "collider",  json{ { "shape",  static_cast<uint8_t>(HE::ColliderShape::Box) },
-			                     { "halfEx", vec3(0.5f, 0.5f, 0.5f) } } },
 		});
 		// No camera entity here, and that is deliberate: the character class
 		// brings its own camera as a child, aimed by a rig that follows whoever

@@ -27,6 +27,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -108,9 +109,12 @@ TEST_CASE("third person: the ground is solid, through the real scene loader")
 
 	REQUIRE(reg.all_of<RigidBodyComponent>(ground));
 	CHECK(reg.get<RigidBodyComponent>(ground).type == RigidBodyType::Static);
-	REQUIRE(reg.all_of<ColliderComponent>(ground));
-	CHECK(reg.get<ColliderComponent>(ground).shape == ColliderShape::Box);
 	CHECK(reg.all_of<MeshComponent>(ground));
+	// And explicitly NO ColliderComponent. An authored Box uses its own half
+	// extents and ignores the entity's scale, so one here would be a 1 m cube in
+	// the middle of a 60 m floor. Without one the fallback builds the box from
+	// the world scale, which is the visible geometry exactly.
+	CHECK_FALSE(reg.all_of<ColliderComponent>(ground));
 
 	// Something at a fixed place to move relative to, and it is solid too — a
 	// block you walk through is worse than no block.
@@ -118,7 +122,7 @@ TEST_CASE("third person: the ground is solid, through the real scene loader")
 	for (auto [e, nc] : reg.view<NameComponent>().each())
 		if (nc.name == "Block") { block = e; break; }
 	REQUIRE((block != entt::null));
-	CHECK(reg.all_of<ColliderComponent>(block));
+	CHECK(reg.all_of<RigidBodyComponent>(block));
 
 	// The sky is seeded with the cycle ON: without it timeOfDay does nothing and
 	// the frame is flat and shadowless.
@@ -327,6 +331,63 @@ TEST_CASE("third person: the shipped character spawns with a body it can be play
 		if (reg.all_of<CameraComponent>(child) && reg.get<CameraComponent>(child).isMain)
 			hasCamera = true;
 	CHECK(hasCamera);
+}
+
+// The assertion the first version of this file did not make, and the one the
+// user's first play session made for me: the character has to STOP falling.
+//
+// Everything around it was already checked — the scene loads, the ground carries
+// a static body, the character spawns with a controller — and the player still
+// went through the floor, because the ground's collider was a 1 m cube in the
+// middle of a 60 m floor. Checking the components is not checking the physics.
+//
+// MUTATION: give Ground an explicit Box ColliderComponent again in
+// ProjectManager.cpp's `playable` block — the character falls forever.
+TEST_CASE("third person: the character lands on the template's ground and stays there")
+{
+	const auto root = makeProject("he_tps_stand", "Starter");
+	ContentManager cm((root / "Content").string());
+
+	HorizonWorld world;
+	SceneSerializer ser;
+	REQUIRE(ser.load(world, root / "Content" / "StartupScene.hescene",
+	                 HE::SerializeFormat::JSON));
+
+	// The character the controller's Begin Play would create, at the same height
+	// that graph spawns it from.
+	HorizonCode::Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+	const float spawn[3] = { 0.0f, 1.2f, 0.0f };
+	const EntityHost::Spawned s = host.spawn("Gameplay/PlayerCharacter.hasset",
+	                                         entt::null, spawn, nullptr);
+	REQUIRE((s.entity != entt::null));
+
+	PhysicsWorld phys;
+	phys.initialize(world);
+	for (int i = 0; i < 180; ++i) phys.step(world, 1.0f / 60.0f);   // three seconds
+
+	auto& reg = world.registry();
+	const float y = reg.get<TransformComponent>(s.entity).position.y;
+	// Standing on a floor whose top face is at y = 0. Falling through shows up as
+	// a large negative number rather than a near miss, so the window is generous
+	// on purpose — this is a "did it stop at all" test, not a precision one.
+	CHECK_MESSAGE(y > -1.0f, ("character fell through the floor, y = " +
+	                          std::to_string(y)).c_str());
+	CHECK(y < 2.0f);
+	// And physics agrees it is standing, which is what Jump and the animator ask.
+	REQUIRE(reg.all_of<CharacterControllerComponent>(s.entity));
+	CHECK(reg.get<CharacterControllerComponent>(s.entity).isGrounded);
+
+	// The far corner of the floor is solid too — the whole 60 m, not a patch in
+	// the middle. This is the half that the 1 m collider passed.
+	const float corner[3] = { 25.0f, 1.2f, 25.0f };
+	const EntityHost::Spawned far = host.spawn("Gameplay/PlayerCharacter.hasset",
+	                                           entt::null, corner, nullptr);
+	REQUIRE((far.entity != entt::null));
+	phys.addEntityTree(world, static_cast<uint32_t>(far.entity));
+	for (int i = 0; i < 180; ++i) phys.step(world, 1.0f / 60.0f);
+	CHECK(reg.get<TransformComponent>(far.entity).position.y > -1.0f);
 }
 
 // The template IS two HorizonCode classes, and PlayerHost only scans HorizonCode

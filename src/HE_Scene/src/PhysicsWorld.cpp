@@ -755,6 +755,30 @@ ColliderBuild buildColliderShape(const entt::registry& reg,
                       std::max(0.01f, col->halfExtents.z))).Create();
     };
 
+    // The limitation above is deliberate; being SILENT about it was not. An
+    // authored primitive on a scaled entity is drawn at one size and collides at
+    // another, and nothing said so — the third-person template shipped a 1 m
+    // collider under a 60 m floor exactly this way, and the first person to press
+    // Play walked off the middle of the world and fell out of it.
+    //
+    // The scaled entity is the only case worth a word: at scale 1 the authored
+    // number IS the size. Throttled, and it names the factor so the fix (multiply
+    // the extents yourself, or delete the collider and let the scaled fallback
+    // build it) is arithmetic rather than a hunt.
+    if (col->shape == ColliderShape::Box || col->shape == ColliderShape::Sphere ||
+        col->shape == ColliderShape::Capsule)
+    {
+        const glm::vec3 s = glm::abs(worldScale);
+        if (std::abs(s.x - 1.0f) > 0.01f || std::abs(s.y - 1.0f) > 0.01f ||
+            std::abs(s.z - 1.0f) > 0.01f)
+            HE_LOG_THROTTLE(Physics, Warning, 10.0,
+                "Entity %u: a Box/Sphere/Capsule collider uses its AUTHORED size and ignores "
+                "the entity's scale (%.2f, %.2f, %.2f) - so it collides at a different size "
+                "than it is drawn. Scale the collider's own numbers by that factor, or remove "
+                "the Collider component and let physics build one from the scale",
+                entityId, s.x, s.y, s.z);
+    }
+
     switch (col->shape)
     {
     case ColliderShape::Sphere:
