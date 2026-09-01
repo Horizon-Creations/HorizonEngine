@@ -355,16 +355,44 @@ public:
     // element in that direction wins, so a grid of buttons navigates the way it
     // looks rather than in tree order. With nothing focused yet, the first
     // direction press takes the topmost candidate.
+    // …except where a LAYER has taken the input. What up and down mean is
+    // decided by what is on top: with a dropdown open they step through its
+    // options, and moving the focus to the button behind it would be answering
+    // a question nobody asked. Same idea as the focus trap in a modal, one
+    // level further in.
     enum class NavDir { Up, Down, Left, Right };
-    // True when the focus moved (or a focused slider took the step) — false
-    // means nothing here wanted the key and the caller may still have it.
+    // True when the focus moved (or a focused slider took the step, or an open
+    // list moved its highlight) — false means nothing here wanted the key and
+    // the caller may still have it.
     bool navigate(NavDir dir, float vpWidth, float vpHeight);
     // Fire what a click would fire on the focused element: a button clicks, a
-    // checkbox toggles, a combo advances. False when nothing is focused.
+    // checkbox toggles, a combo opens — or, with a list already open, the
+    // entry the keys walked to is taken. False when nothing is focused.
     bool activateFocused();
+
+    // ── Tab order ────────────────────────────────────────────────────────────
+    // The other way through a form, and the one people actually use in one:
+    // spatial navigation answers "what is below this", Tab answers "what is
+    // NEXT", and in a form those are different questions. The order is the
+    // HIERARCHY's — depth first, parents before children, exactly the order the
+    // designer's tree shows — because that is the order an author arranges and
+    // the only one they can predict.
+    //
+    // Wraps at both ends, stays inside the widget that owns the input (the
+    // topmost layer), and works while a text field has the keyboard: leaving a
+    // field is what Tab is for.
+    bool focusNext(bool backwards, float vpWidth, float vpHeight);
+
+    // True while a list hangs open. The apps ask because the arrow keys then
+    // belong to it even if a text field holds the focus.
+    bool hasOpenDropdown() const;
     // The focused element of the focused widget (0 = none). The focus ring is
     // drawn around it in extract().
     int  focusedElement() const;
+    // …and which widget it belongs to (0 = none). Element ids are per WIDGET,
+    // so an element id alone does not say where the focus is — two widgets both
+    // have an element 1.
+    int  focusedWidget() const { return m_focusWidget; }
     // Move the focus by hand (0 = clear it), e.g. when a menu opens and wants
     // its first button focused. False when the id is not focusable.
     bool setFocus(int widgetId, int elementId);
@@ -590,6 +618,10 @@ private:
     // every widget, not just their own — so the manager draws them, the way it
     // already draws the focus ring and the modal scrim.
     void drawOpenDropdown(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
+    // The combo whose list is hanging open, or null; `owner` takes its instance
+    // when it is not null. One place, because three keyboard paths ask the same
+    // question and each of them getting the cast slightly wrong is three bugs.
+    HE::UIComboBox* openDropdown(Instance** owner = nullptr);
     void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
     int   m_tooltipWidget = 0, m_tooltipElem = 0;

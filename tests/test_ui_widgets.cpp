@@ -4554,6 +4554,208 @@ TEST_CASE("Navigation: activating does what a click does")
     CHECK(wm.activateFocused());
 }
 
+// The layer decides what the arrows MEAN. With a list hanging open, up and down
+// step through its entries; moving the focus to the next button would be
+// answering a question nobody asked — and that button is not even reachable,
+// because the open list has taken the whole input.
+TEST_CASE("Navigation: an open list takes the arrows, the buttons behind it do not")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 800.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int combo = t.add(HE::UIWidgetType::ComboBox);
+    {
+        auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(combo));
+        HE::uiSetAnchorPreset(*cb, 0); cb->pivotX = cb->pivotY = 0.0f;
+        cb->posX = 0.0f; cb->posY = 0.0f; cb->sizeX = 200.0f; cb->sizeY = 20.0f;
+        cb->options = { "Zero", "One", "Two", "Three" };
+        cb->selectedIndex = 1;
+    }
+    // Something to navigate to, so "the focus did not move" means something.
+    const int below = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(below);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 400.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    using Nav = WidgetManager::NavDir;
+    auto box = [&]{ return dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo)); };
+
+    // Open it with the keyboard, which is the case this is about.
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    CHECK(wm.focusedElement() == combo);
+    CHECK(wm.activateFocused());
+    REQUIRE(box()->open);
+    CHECK(wm.hasOpenDropdown());
+    // Opening highlights what is already selected, so the first arrow steps
+    // from there rather than from the top of the list.
+    CHECK(box()->hoverIndex == 1);
+
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 2);
+    // …and the focus did NOT go to the button below. That is the whole point.
+    CHECK(wm.focusedElement() == combo);
+
+    CHECK(wm.navigate(Nav::Up, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 1);
+    // Left and right belong to nobody here: refused rather than falling through
+    // to the elements underneath the open list.
+    CHECK_FALSE(wm.navigate(Nav::Left, 400.0f, 800.0f));
+    CHECK_FALSE(wm.navigate(Nav::Right, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 1);
+
+    // Clamped at both ends, not wrapped: a highlight that reappears at the other
+    // end is a jump you have to watch to understand.
+    CHECK(wm.navigate(Nav::Up, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 0);
+    CHECK_FALSE(wm.navigate(Nav::Up, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 0);
+
+    // Enter takes the highlighted entry and closes the list — the same thing
+    // letting the button go over it does.
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 1);
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    CHECK(wm.activateFocused());
+    CHECK(box()->selectedIndex == 2);
+    CHECK_FALSE(box()->open);
+    CHECK_FALSE(wm.hasOpenDropdown());
+
+    // With the list shut, the arrows are the focus's again.
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    CHECK(wm.focusedElement() == below);
+}
+
+TEST_CASE("Navigation: Tab walks the form in hierarchy order and wraps")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    // Built so that HIERARCHY order and ID order disagree, which is the whole
+    // claim: the box comes first in the tree but its children are created last,
+    // so walking the element vector would visit the loose button before them.
+    // Ids: box 1, loose 2, first 3, second 4, hidden 5.
+    // Hierarchy: first, second, then loose.  Ids: loose, first, second.
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    {
+        HE::UIElement& e = *t.find(box);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f;
+    }
+    const int loose = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(loose);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 300.0f; e.sizeX = 100.0f; e.sizeY = 40.0f;
+    }
+    const int first  = t.add(HE::UIWidgetType::Button);
+    const int second = t.add(HE::UIWidgetType::CheckBox);
+    const int hidden = t.add(HE::UIWidgetType::Button);
+    for (int c : { first, second, hidden }) t.find(c)->parentId = box;
+    t.find(hidden)->visible = false;   // not reachable, so not in the order
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Nothing focused: the first Tab takes the first element of the TREE, which
+    // is the box's first child — not the loose button, which has the lower id.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == first);
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == second);
+    // Out of the box and on to the next root. The hidden one is skipped.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == loose);
+    // The end wraps round to the beginning: a form is a ring you cycle through.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == first);
+    // Shift+Tab goes back, and wraps the other way.
+    CHECK(wm.focusNext(true, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == loose);
+    CHECK(wm.focusNext(true, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == second);
+    // The box itself is not in the order: a container takes no input, so it is
+    // not a stop on the way through.
+    CHECK(wm.focusedElement() != box);
+}
+
+TEST_CASE("Navigation: Tab shuts an open list, and stays inside a dialog")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The page behind, with a button of its own to escape to.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int pageBtn = page.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *page.find(pageBtn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 40.0f;
+    }
+    registerWidgetAs(cm, "mem://page.hasset", page);
+
+    HE::UIWidgetTree dlg;
+    dlg.canvasWidth = 400.0f; dlg.canvasHeight = 400.0f;
+    dlg.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int combo = dlg.add(HE::UIWidgetType::ComboBox);
+    {
+        auto* cb = dynamic_cast<HE::UIComboBox*>(dlg.find(combo));
+        HE::uiSetAnchorPreset(*cb, 0); cb->pivotX = cb->pivotY = 0.0f;
+        cb->posX = 100.0f; cb->posY = 100.0f; cb->sizeX = 200.0f; cb->sizeY = 20.0f;
+        cb->options = { "A", "B", "C" };
+        cb->selectedIndex = 0;
+    }
+    const int ok = dlg.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *dlg.find(ok);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 100.0f; e.posY = 200.0f; e.sizeX = 100.0f; e.sizeY = 40.0f;
+    }
+    registerWidgetAs(cm, "mem://dlg.hasset", dlg);
+
+    WidgetManager wm;
+    REQUIRE(createShown(wm, cm, "mem://page.hasset") != 0);
+    const int dialog = wm.createWidget(cm, "mem://dlg.hasset");
+    REQUIRE(dialog != 0);
+    wm.showModal(dialog);
+
+    // Tab stays in the dialog — it never reaches the page's button, which is
+    // the focus trap the layer exists for. Asked by WIDGET, not by element id:
+    // ids are per widget, so the page's button and the dialog's combo are both
+    // element 1 and comparing those would prove nothing.
+    for (int i = 0; i < 6; ++i)
+    {
+        CHECK(wm.focusNext(false, 400.0f, 400.0f));
+        CHECK(wm.focusedWidget() == dialog);
+    }
+    (void)pageBtn;
+
+    // Open the list, then Tab: the list shuts and the focus moves on. Tabbing
+    // into the next field with a list still hanging open would type behind it.
+    wm.setFocus(dialog, combo);
+    CHECK(wm.activateFocused());
+    REQUIRE(wm.hasOpenDropdown());
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK_FALSE(wm.hasOpenDropdown());
+    CHECK(wm.focusedElement() == ok);
+    CHECK(dynamic_cast<const HE::UIComboBox*>(wm.tree(dialog)->find(combo))->selectedIndex == 0);
+}
+
 TEST_CASE("Navigation: left and right step a focused slider instead of leaving it")
 {
     TempWidgetDir dir;

@@ -725,6 +725,9 @@ private:
 	// Gamepad East ("Back"): its own edge, because it means "close the top
 	// layer" and a held button must not close a whole stack of dialogs.
 	bool m_uiBackPrev = false;
+	// Tab: its own edge, and read outside the text-field gate because Tab has to
+	// work while typing — leaving the field is what it is for.
+	bool m_uiTabPrev = false;
 	bool  m_widgetTextInputActive = false; // SDL text input toggled for a focused widget field
 
 	// Play-in-editor

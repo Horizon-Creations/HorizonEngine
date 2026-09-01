@@ -141,6 +141,9 @@ private:
     // Gamepad East ("Back"): its own edge, because it means "close the top
     // layer" and a held button must not close a whole stack of dialogs.
     bool m_uiBackPrev = false;
+    // Tab: its own edge for the same reason, and outside the block above
+    // because Tab has to work WHILE typing — leaving a field is what it is for.
+    bool m_uiTabPrev = false;
     // True while the pointer sits on an interactive UI element (the return value
     // of WidgetManager::processPointer, kept from the last updateUIInput). The
     // mouse BUTTONS are masked out of everything gameplay reads while it holds,

@@ -1294,8 +1294,27 @@ void GameApplication::updateUIInput()
 		const bool back = input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
 		if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
 		m_uiBackPrev = back;
+
+		// Tab is the other way through a form, and it belongs OUTSIDE the gate
+		// below for the same reason Escape does: it has to work while a text
+		// field has the keyboard, because leaving that field is exactly what it
+		// is for. Shift+Tab goes back.
+		const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
+		if (tab && !m_uiTabPrev)
+		{
+			const bool back2 = input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
+			                   input().IsKeyDown(SDL_SCANCODE_RSHIFT);
+			m_world->widgets().focusNext(back2, static_cast<float>(pw),
+			                             static_cast<float>(ph));
+		}
+		m_uiTabPrev = tab;
 	}
-	if (uiTakesInput && !m_world->widgets().hasFocusedTextField())
+	// The arrows reach the widgets when no text field has the keyboard — or when
+	// a list hangs open, because then they belong to the list whatever else has
+	// the focus. That second half is what makes a dropdown opened from beside a
+	// text field navigable at all.
+	if (uiTakesInput && (!m_world->widgets().hasFocusedTextField() ||
+	                     m_world->widgets().hasOpenDropdown()))
 	{
 		Input& in = input();
 		using Nav = WidgetManager::NavDir;

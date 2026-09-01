@@ -7,6 +7,7 @@
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <cmath>      // std::abs — the border stamp compares rects
+#include <functional> // std::function — the tab order walks the tree recursively
 
 namespace
 {
@@ -2581,9 +2582,44 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 	return true;
 }
 
+bool WidgetManager::hasOpenDropdown() const
+{
+	return !m_grabs.empty() && m_grabs.back().kind == Grab::Kind::Dropdown;
+}
+
+HE::UIComboBox* WidgetManager::openDropdown(Instance** owner)
+{
+	if (!hasOpenDropdown()) return nullptr;
+	Instance* w = find(m_grabs.back().widget);
+	if (!w) return nullptr;
+	auto* cb = dynamic_cast<HE::UIComboBox*>(w->tree.find(m_grabs.back().elem));
+	if (cb && owner) *owner = w;
+	return cb;
+}
+
 bool WidgetManager::activateFocused()
 {
 	m_visualDirty = true;   // a press changes the element's drawn state
+
+	// With a list open, Enter takes the entry the arrows walked to — the same
+	// thing releasing the button over it does, and the only thing the key can
+	// mean while it hangs there. Before the focus is even looked at: the focus
+	// is on the combo, and activating THAT would try to open a list that is
+	// already open.
+	if (Instance* dw = nullptr; HE::UIComboBox* cb = openDropdown(&dw))
+	{
+		const int pick = cb->hoverIndex;
+		if (pick >= 0 && pick < static_cast<int>(cb->options.size()) &&
+		    cb->selectedIndex != pick)
+		{
+			cb->selectedIndex = pick;
+			const ScriptTarget t = scriptTargetFor(*dw, cb->id);
+			rt().fireOnSelectionChanged(t.scriptId, t.elem, pick);
+		}
+		popGrab(/*notify=*/false);
+		return true;
+	}
+
 	Instance* w = find(m_focusWidget);
 	if (!w || w->focusedElem == 0) return false;
 	// A focused element that has since been disabled or hidden does nothing —
@@ -2643,6 +2679,27 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
 bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 {
 	m_visualDirty = true;   // the focus ring moves
+
+	// ── The layer on top decides what the arrows MEAN ────────────────────────
+	// A dropdown hanging open takes up and down for its own entries. Moving the
+	// focus to the next button instead would be answering a question nobody
+	// asked — and that button is not reachable anyway, since takesInput has
+	// already given the whole input to this widget. Left and right belong to
+	// nobody here, so they are refused rather than falling through to the
+	// spatial walk underneath the open list.
+	if (Instance* dw = nullptr; HE::UIComboBox* cb = openDropdown(&dw))
+	{
+		const int count = static_cast<int>(cb->options.size());
+		if (count == 0 || (dir != NavDir::Up && dir != NavDir::Down)) return false;
+		// Clamped, not wrapped: running off the end of a list and reappearing at
+		// the other one is a jump you have to watch to understand.
+		const int cur = (cb->hoverIndex >= 0 && cb->hoverIndex < count)
+			? std::clamp(cb->hoverIndex + (dir == NavDir::Down ? 1 : -1), 0, count - 1)
+			: std::clamp(cb->selectedIndex, 0, count - 1);
+		if (cur == cb->hoverIndex) return false;   // already at that end
+		cb->hoverIndex = cur;
+		return true;
+	}
 	// The widget the focus is in, else the topmost visible one that has
 	// anything focusable at all.
 	Instance* w = find(m_focusWidget);
@@ -2761,6 +2818,67 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 	}
 	if (best == 0) return false;
 	return setFocus(w->id, best);
+}
+
+bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
+{
+	m_visualDirty = true;
+
+	// An open list swallows Tab as well, and closes on it: leaving a dropdown
+	// without choosing is what Escape does, and Tab means "I am done here" —
+	// both end with the list shut, so the key that moves on has to shut it
+	// first or the next field would be typed into behind an open list.
+	if (hasOpenDropdown()) popGrab(/*notify=*/false);
+
+	// Whose form is being tabbed through: the layer, else the widget that has
+	// the focus, else the topmost visible one. Same three answers navigate()
+	// gives, and for the same reason — a Tab must not walk out of a dialog.
+	Instance* w = nullptr;
+	if (!m_grabs.empty()) w = find(m_grabs.back().widget);
+	if (!w) w = find(m_focusWidget);
+	if (!w || !w->visible || !takesInput(w->id))
+	{
+		std::vector<Instance*> sorted;
+		for (auto& inst : m_instances) if (inst.visible && takesInput(inst.id))
+			sorted.push_back(&inst);
+		std::stable_sort(sorted.begin(), sorted.end(),
+			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		w = sorted.empty() ? nullptr : sorted.front();
+	}
+	if (!w) return false;
+
+	// Depth first through the HIERARCHY, parents before their children — the
+	// order the designer's tree shows, which is the order an author arranges
+	// and the only one they can predict. Not the element vector: that is keyed
+	// by id, so it is creation order, and re-parenting a row would leave the
+	// tab order where the row used to be.
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	std::vector<int> order;
+	const std::function<void(int)> walk = [&](int parent)
+	{
+		for (int child : w->tree.childrenOf(parent))
+		{
+			if (const HE::UIElement* e = w->tree.find(child))
+				if (isFocusable(*w, *e, canvas)) order.push_back(child);
+			walk(child);
+		}
+	};
+	walk(0);
+	if (order.empty()) return false;
+
+	// Where we are now. An element that is no longer focusable (hidden, or
+	// scrolled out of its list) is not in the list, so Tab starts from the
+	// beginning rather than from nowhere.
+	int at = -1;
+	for (int i = 0; i < static_cast<int>(order.size()); ++i)
+		if (order[i] == w->focusedElem) { at = i; break; }
+
+	const int n = static_cast<int>(order.size());
+	// Wrapping is right here where it was wrong in the dropdown: a form is a
+	// ring you cycle through, a list is a range you run along.
+	const int next = at < 0 ? (backwards ? n - 1 : 0)
+	                        : ((at + (backwards ? -1 : 1)) % n + n) % n;
+	return setFocus(w->id, order[next]);
 }
 
 bool WidgetManager::processWheel(float vpWidth, float vpHeight,

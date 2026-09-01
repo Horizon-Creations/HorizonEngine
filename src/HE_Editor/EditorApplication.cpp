@@ -2947,8 +2947,23 @@ void EditorApplication::OnRender(float dt)
 				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
 				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
 				m_uiBackPrev = back;
+
+				// Tab through the form, outside the gate for the same reason:
+				// leaving a text field is exactly what it is for. Shift+Tab
+				// goes back.
+				const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
+				if (tab && !m_uiTabPrev)
+					m_editorWorld->widgets().focusNext(
+						input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
+						input().IsKeyDown(SDL_SCANCODE_RSHIFT),
+						m_uiViewportW, m_uiViewportH);
+				m_uiTabPrev = tab;
 			}
-			if (uiTakesInput && !m_editorWorld->widgets().hasFocusedTextField())
+			// The arrows reach the widgets when no text field has the keyboard —
+			// or when a list hangs open, because then they belong to the list
+			// whatever else has the focus.
+			if (uiTakesInput && (!m_editorWorld->widgets().hasFocusedTextField() ||
+			                     m_editorWorld->widgets().hasOpenDropdown()))
 			{
 				using Nav = WidgetManager::NavDir;
 				const struct { Nav dir; SDL_Scancode key; SDL_GamepadButton pad; } kNav[] = {
