@@ -128,6 +128,12 @@ public:
     virtual void onRowActivated(int elem, int index)
     { fireEvent("OnRowActivated", elem, Value::ofInt(index)); }
     virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
+    // An animation reached its target. The argument is the PROPERTY's name, not
+    // the element's: two animations on one element (fade it and slide it) end
+    // separately, and an event that could not say which one ended would be a
+    // "when it is done" that fires twice for two different things.
+    virtual void onAnimationFinished(int elem, const std::string& prop)
+    { fireEvent("OnAnimationFinished", elem, Value::ofString(prop)); }
     // Layers: this widget was closed (Escape, a click outside, a script).
     virtual void onDismissed() { fireEvent("OnDismissed", 0, Value{}); }
     // GameInstance lifecycle.

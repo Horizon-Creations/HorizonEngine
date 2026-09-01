@@ -299,6 +299,36 @@ int clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& pa
 	return world.widgets().clearChildren(widgetId, parentName);
 }
 
+bool animateNumber(HorizonWorld& world, int widgetId, const std::string& elemName,
+                   const std::string& prop, float to, float seconds,
+                   const std::string& easing)
+{
+	return world.widgets().animateNamed(widgetId, elemName, prop,
+	                                    HE::UIPropValue::ofFloat(to), seconds,
+	                                    HE::uiEaseFromName(easing));
+}
+bool animateColor(HorizonWorld& world, int widgetId, const std::string& elemName,
+                  const std::string& prop, const glm::vec4& to, float seconds,
+                  const std::string& easing)
+{
+	return world.widgets().animateNamed(widgetId, elemName, prop,
+	                                    HE::UIPropValue::ofColor(to), seconds,
+	                                    HE::uiEaseFromName(easing));
+}
+bool animateVec2(HorizonWorld& world, int widgetId, const std::string& elemName,
+                 const std::string& prop, const glm::vec2& to, float seconds,
+                 const std::string& easing)
+{
+	return world.widgets().animateNamed(widgetId, elemName, prop,
+	                                    HE::UIPropValue::ofVec2(to), seconds,
+	                                    HE::uiEaseFromName(easing));
+}
+int stopAnimation(HorizonWorld& world, int widgetId, const std::string& elemName,
+                  const std::string& prop)
+{
+	return world.widgets().stopAnimationsNamed(widgetId, elemName, prop);
+}
+
 bool setListCount(HorizonWorld& world, int widgetId, const std::string& listName, int count)
 {
 	return world.widgets().setListCount(widgetId, listName, count);

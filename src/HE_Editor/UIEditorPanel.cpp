@@ -2021,7 +2021,7 @@ void drawDetailsEvents(State& st, AppContext& ctx)
 {
 	UIElement* n = st.tree.find(st.selected);
 	if (!n) return;
-	const std::vector<UIEventDesc> evs = n->events();
+	const std::vector<UIEventDesc> evs = n->allEvents();
 	if (evs.empty()) return;
 
 	ImGui::SeparatorText("Events");
@@ -3684,7 +3684,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		elementCombo("Element", /*includeAny=*/true);
 		// Event name from the bound element's events() (or free text when Any).
 		const UIElement* tgt = st.tree.find(n->elem);
-		const std::vector<UIEventDesc> evs = tgt ? tgt->events() : std::vector<UIEventDesc>{};
+		const std::vector<UIEventDesc> evs = tgt ? tgt->allEvents() : std::vector<UIEventDesc>{};
 		if (!evs.empty())
 		{
 			if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))

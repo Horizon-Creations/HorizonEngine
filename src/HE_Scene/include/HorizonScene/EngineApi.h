@@ -594,6 +594,25 @@ namespace widget {
     int  listSelected(Ctx&, int id, const std::string& listName);   // -1 = none
     bool scrollListToItem(Ctx&, int id, const std::string& listName, int index);
 
+    // ── Animation (docs/he-apps-plan.md B8) ─────────────────────────────────
+    // Move a property of one element to a value over `seconds`, along a named
+    // curve ("Linear", "Out Quad", "Out Back"… — HE::uiEaseName). Three rows
+    // rather than one: a number, a colour and a point are three different pins
+    // in a graph, and a row taking "some value" would be a pin nobody can wire.
+    //
+    // On a themed element it is a script write stretched over time and follows
+    // the same rule as any other: while it runs it wins, and the theme reclaims
+    // the property at its next apply.
+    bool animate(Ctx&, int id, const std::string& element, const std::string& prop,
+                 float to, float seconds, const std::string& easing);
+    bool animateColor(Ctx&, int id, const std::string& element, const std::string& prop,
+                      const glm::vec4& to, float seconds, const std::string& easing);
+    bool animateVec2(Ctx&, int id, const std::string& element, const std::string& prop,
+                     const glm::vec2& to, float seconds, const std::string& easing);
+    // How many were stopped. Empty `prop` stops everything on that element; the
+    // value stays where it got to, because a stop is not a rewind.
+    int  stopAnimation(Ctx&, int id, const std::string& element, const std::string& prop);
+
     // ── Layers (docs/he-apps-plan.md B4) ────────────────────────────────────
     // A dialog, a menu, a context menu. All three are "input belongs to this
     // until it lets go"; they differ in whether the screen behind is dimmed and

@@ -1744,6 +1744,15 @@ void GameApplication::OnRender(float deltaTime)
 	// cannot animate, count down, or hand the player a way back out.
 	if (m_world) m_world->widgets().tick(deltaTime);
 
+	// An animation is the one thing that changes the picture without anyone
+	// touching the machine, and an event-driven application sleeps until
+	// something happens (see Application::setEventDriven). Asking for the next
+	// frame while one runs is what makes it run at the display's speed instead
+	// of the idle heartbeat's ten frames a second. The last frame of an
+	// animation still asks, and the one after it does not — the value has
+	// arrived by then, so the loop goes back to sleep on its own.
+	if (m_world && m_world->widgets().isAnimating()) requestRedraw();
+
 	// Player instances: Tick + Input.<Action>.* events (mapping ticked against
 	// the app Input state, which ProcessEvent keeps current).
 	// The frame's MOVEMENT goes straight through to the input mapping: capture

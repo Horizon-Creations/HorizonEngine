@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <fstream>
 #include <algorithm>
+#include <array>
 #include <filesystem>
 
 namespace
@@ -371,8 +372,19 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnCheckChanged") { hasCheckChanged = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::Bool); }
     CHECK(hasCheckChanged);
 
+    // Its OWN list is empty — a Text does not click and a bar does not change.
     CHECK(HE::UIText{}.events().empty());
     CHECK(HE::UIProgressBar{}.events().empty());
+    // …but every element has the base list under it, and since animations
+    // exist there is one thing anything can report. This used to say "a Text
+    // has no events" and that stopped being true the day a Text could fade.
+    bool textCanFinish = false;
+    for (const auto& e : HE::UIText{}.allEvents())
+        if (e.name == "OnAnimationFinished")
+        { textCanFinish = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
+    CHECK(textCanFinish);
+    CHECK(HE::UIText{}.allEvents().size() == 1);
+    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 1);
     CHECK(HE::UIButton{}.interactive());
     CHECK(!HE::UIText{}.interactive());
 }
@@ -4552,6 +4564,284 @@ TEST_CASE("Navigation: activating does what a click does")
     // The checkbox toggles, exactly as a click would toggle it.
     CHECK(wm.activateFocused());
     CHECK(wm.activateFocused());
+}
+
+// ═══ Animation ═══════════════════════════════════════════════════════════════
+// docs/he-apps-plan.md B8. An interface without transitions reads as cheap, and
+// not because it is undecorated: a value that JUMPS makes the eye ask what
+// happened, a value that moves answers it on the way.
+
+TEST_CASE("Easing: the curve names are pinned, and every curve starts and ends where it must")
+{
+    // ╔══════════════════════════════════════════════════════════════════════╗
+    // ║  A graph node stores the easing by NAME. Renaming one here turns     ║
+    // ║  every animation that used it into Linear, silently.                 ║
+    // ╚══════════════════════════════════════════════════════════════════════╝
+    const std::array<const char*, 8> kNames = {
+        "Linear", "In Quad", "Out Quad", "In Out Quad",
+        "In Cubic", "Out Cubic", "In Out Cubic", "Out Back",
+    };
+    REQUIRE(static_cast<int>(HE::UIEase::COUNT) == static_cast<int>(kNames.size()));
+    for (int i = 0; i < static_cast<int>(kNames.size()); ++i)
+    {
+        const auto e = static_cast<HE::UIEase>(i);
+        CAPTURE(i);
+        CHECK(std::string(HE::uiEaseName(e)) == kNames[i]);
+        CHECK(HE::uiEaseFromName(kNames[i]) == e);
+        // Both ends are exact, whatever the curve does between them: an
+        // animation that starts at 0.001 of the way there has already jumped.
+        CHECK(HE::uiEaseApply(e, 0.0f) == doctest::Approx(0.0f));
+        CHECK(HE::uiEaseApply(e, 1.0f) == doctest::Approx(1.0f));
+        // Out of range is clamped on the way IN, so a caller cannot drive a
+        // curve past its own end by handing it a t that ran over.
+        CHECK(HE::uiEaseApply(e, -1.0f) == doctest::Approx(0.0f));
+        CHECK(HE::uiEaseApply(e, 2.0f) == doctest::Approx(1.0f));
+    }
+    // A name that no longer resolves is Linear, not nothing: an animation with
+    // a misspelled curve should still play.
+    CHECK(HE::uiEaseFromName("Ease In Out Sine") == HE::UIEase::Linear);
+    CHECK(HE::uiEaseFromName("") == HE::UIEase::Linear);
+
+    // The curves differ where it matters — halfway. An "eased" set that is
+    // eight names for a straight line is the failure this catches.
+    CHECK(HE::uiEaseApply(HE::UIEase::Linear,  0.5f) == doctest::Approx(0.5f));
+    CHECK(HE::uiEaseApply(HE::UIEase::InQuad,  0.5f) == doctest::Approx(0.25f));
+    CHECK(HE::uiEaseApply(HE::UIEase::OutQuad, 0.5f) == doctest::Approx(0.75f));
+    CHECK(HE::uiEaseApply(HE::UIEase::InOutQuad, 0.5f) == doctest::Approx(0.5f));
+    // Out Back overshoots on purpose — that is what makes a dialog LAND.
+    CHECK(HE::uiEaseApply(HE::UIEase::OutBack, 0.7f) > 1.0f);
+}
+
+TEST_CASE("Animation: a property moves along its curve and reports when it lands")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 0.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto opacity = [&]{ return wm.tree(id)->find(panel)->renderOpacity; };
+
+    CHECK_FALSE(wm.isAnimating());
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f),
+                       1.0f, HE::UIEase::Linear));
+    CHECK(wm.isAnimating());
+    // Nothing has moved before the first tick: starting an animation is not
+    // the same as playing one frame of it.
+    CHECK(opacity() == doctest::Approx(0.0f));
+
+    wm.tick(0.25f);
+    CHECK(opacity() == doctest::Approx(0.25f));
+    wm.tick(0.25f);
+    CHECK(opacity() == doctest::Approx(0.5f));
+
+    // …and the whole time it is running, the picture is changing, which an
+    // event-driven application only finds out because the flag says so.
+    wm.consumeVisualDirty();
+    wm.tick(0.1f);
+    CHECK(wm.consumeVisualDirty());
+
+    wm.tick(1.0f);                      // past the end
+    CHECK(opacity() == doctest::Approx(1.0f));
+    CHECK_FALSE(wm.isAnimating());
+    // Ticking after the end does nothing at all — no drift past the target.
+    wm.tick(1.0f);
+    CHECK(opacity() == doctest::Approx(1.0f));
+
+}
+
+TEST_CASE("Animation: colours, positions, and what cannot be animated at all")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    const int text  = t.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.setProp("Color", HE::UIPropValue::ofColor({ 0.0f, 0.0f, 0.0f, 1.0f }));
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // A colour, both ends of it.
+    REQUIRE(wm.animate(id, panel, "Color", HE::UIPropValue::ofColor({1.0f, 0.0f, 0.0f, 1.0f}),
+                       1.0f, HE::UIEase::Linear));
+    wm.tick(0.5f);
+    CHECK(wm.tree(id)->find(panel)->getPropAny("Color").col.r == doctest::Approx(0.5f));
+
+    // A position — a Vec2, which is the type "slide it in" needs and the reason
+    // three kinds are interpolated instead of one.
+    REQUIRE(wm.animate(id, panel, "Position", HE::UIPropValue::ofVec2({ 200.0f, 100.0f }),
+                       1.0f, HE::UIEase::Linear));
+    wm.tick(0.5f);
+    CHECK(wm.tree(id)->find(panel)->posX == doctest::Approx(100.0f));
+    CHECK(wm.tree(id)->find(panel)->posY == doctest::Approx(50.0f));
+
+    // What has no halfway is refused rather than snapped at the end: a string,
+    // a bool, and a property this element does not have at all.
+    CHECK_FALSE(wm.animate(id, text, "Text", HE::UIPropValue::ofString("x"), 1.0f));
+    CHECK_FALSE(wm.animate(id, text, "WordWrap", HE::UIPropValue::ofBool(true), 1.0f));
+    CHECK_FALSE(wm.animate(id, text, "Normal Color",
+                           HE::UIPropValue::ofColor({1,1,1,1}), 1.0f));   // a Button's
+    // A target of the wrong type for a real property is refused too — that is
+    // the same check, and it is what catches "fade the Text" (a String).
+    CHECK_FALSE(wm.animate(id, panel, "Color", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    CHECK_FALSE(wm.animate(id, 999, "Color", HE::UIPropValue::ofColor({1,1,1,1}), 1.0f));
+    CHECK_FALSE(wm.animate(0, panel, "Color", HE::UIPropValue::ofColor({1,1,1,1}), 1.0f));
+}
+
+// "Fade it out, then hide it" is the first thing anybody builds with this, and
+// it needs an end that can be reacted to. The payload is the PROPERTY, because
+// an element being faded AND slid ends twice and a graph has to tell them apart.
+TEST_CASE("Animation: the end fires an event, and a cancelled one does not")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 0.0f;
+    }
+    const int txt = t.add(HE::UIWidgetType::Text);
+    t.find(txt)->setProp("Text", HE::UIPropValue::ofString(""));
+
+    // OnAnimationFinished on the panel writes the property's name into the Text,
+    // so the test can read BOTH that it fired and what it said.
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnAnimationFinished"; ev.elem = panel;
+    // The event carries the property's name, and a node only grows the pin
+    // for it when it says so — the editor sets these from the event table.
+    ev.hasArg = true; ev.propType = PinType::String;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = txt;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));   // exec → exec
+    REQUIRE(g.connect(evId, 1, setId, 2));   // the event's String arg → the value
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto said = [&]{ return wm.tree(id)->find(txt)->getPropAny("Text").s; };
+
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    wm.tick(0.5f);
+    CHECK(said().empty());               // not there yet
+    wm.tick(0.6f);
+    CHECK(said() == "Render Opacity");   // …and it names which one ended
+
+    // A cancelled one reports nothing. Cancelled is not finished, and a graph
+    // that hides the dialog "when the fade ends" must not hide it because
+    // somebody interrupted the fade. Asked by "did anything ELSE arrive": the
+    // Text is written by the event itself and the test cannot clear it, so the
+    // question is whether a SECOND report ever lands.
+    REQUIRE(wm.animate(id, panel, "Color", HE::UIPropValue::ofColor({1,0,0,1}), 1.0f));
+    wm.tick(0.5f);
+    CHECK(wm.stopAnimations(id, panel, "Color") == 1);
+    wm.tick(1.0f);
+    CHECK(said() == "Render Opacity");   // still the FIRST one's name
+
+    // Replacing one mid-flight is a cancel too, and only the REPLACEMENT's end
+    // is announced — once, not twice.
+    REQUIRE(wm.animate(id, panel, "Color", HE::UIPropValue::ofColor({0,1,0,1}), 1.0f));
+    wm.tick(0.5f);
+    REQUIRE(wm.animate(id, panel, "Color", HE::UIPropValue::ofColor({0,0,1,1}), 1.0f));
+    CHECK(said() == "Render Opacity");   // the replaced one said nothing
+    wm.tick(1.5f);
+    CHECK(said() == "Color");            // the replacement did
+
+    // Zero seconds still announces: a duration turned down to nothing is still
+    // an animation that ended, and a graph waiting on it must not hang.
+    REQUIRE(wm.animate(id, panel, "Corner Radius", HE::UIPropValue::ofFloat(8.0f), 0.0f));
+    CHECK(said() == "Corner Radius");
+}
+
+TEST_CASE("Animation: retargeting is smooth, stopping is not a rewind, zero is instant")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 0.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto opacity = [&]{ return wm.tree(id)->find(panel)->renderOpacity; };
+
+    // Halfway to 1, then told to go to 0 instead: the new one starts from 0.5,
+    // where the value actually IS, not from where the first one began.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    wm.tick(0.5f);
+    CHECK(opacity() == doctest::Approx(0.5f));
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(0.0f), 1.0f));
+    // Only ONE is running — asked BEFORE the next tick, because a tick would
+    // retire the stacked leftover and the count would look right either way.
+    // A retarget replaces; it does not stack a second writer on the property.
+    CHECK(wm.stopAnimations(id, panel, "Render Opacity") == 1);
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(0.0f), 1.0f));
+    wm.tick(0.5f);
+    CHECK(opacity() == doctest::Approx(0.25f));   // half of the way from 0.5 to 0
+    CHECK(wm.stopAnimations(id, panel, "Render Opacity") == 1);
+    CHECK_FALSE(wm.isAnimating());
+    // A stop leaves the value where it got to. Rewinding would undo a fade
+    // somebody interrupted on purpose.
+    CHECK(opacity() == doctest::Approx(0.25f));
+
+    // Zero seconds writes at once — a duration is a knob you can turn to zero.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 0.0f));
+    CHECK(opacity() == doctest::Approx(1.0f));
+    CHECK_FALSE(wm.isAnimating());
+
+    // Stopping by element and by widget, not only by property.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(0.0f), 1.0f));
+    REQUIRE(wm.animate(id, panel, "Color", HE::UIPropValue::ofColor({1,0,0,1}), 1.0f));
+    CHECK(wm.stopAnimations(id, panel) == 2);
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(0.0f), 1.0f));
+    CHECK(wm.stopAnimations(id) == 1);
+    CHECK_FALSE(wm.isAnimating());
+
+    // A destroyed widget takes its animations with it — they live on the
+    // instance, so nothing has to remember to sweep.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    CHECK(wm.isAnimating());
+    wm.destroyWidget(id);
+    CHECK_FALSE(wm.isAnimating());
+    wm.tick(1.0f);   // must not touch freed memory
 }
 
 // The layer decides what the arrows MEAN. With a list hanging open, up and down

@@ -1,5 +1,6 @@
 #pragma once
 #include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/UIWidgetAnim.h>   // UIEase — animate() takes one
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
 #include <HorizonCode/HorizonCode.h>
@@ -254,8 +255,55 @@ public:
     // the function is missing — or the function is not public (access modifier).
     bool callFunction(int id, const std::string& name);
 
-    // Fire the "Tick" event (Float arg = dt) on every visible widget.
+    // Fire the "Tick" event (Float arg = dt) on every visible widget, and move
+    // every running animation one step (see animate).
     void tick(float dt);
+
+    // ── Animation ────────────────────────────────────────────────────────────
+    // Move a property from where it is now to `to` over `seconds`, along a
+    // curve. Floats, colours and Vec2s — which is fade (Render Opacity), slide
+    // (Position), grow (Size), and every colour a type has.
+    //
+    // Written through setPropAny each tick, like everything else that changes a
+    // widget, so nothing downstream needs to know an animation exists.
+    //
+    // On a themed element it is a script write stretched over time, and the
+    // existing rule applies unchanged: while it runs it wins, because it
+    // rewrites every tick; once it ends the theme reclaims the property at its
+    // next apply (a mode switch, a graft). Deliberately no side effect on the
+    // element's bindings — an animation that silently locked a property against
+    // the theme would be action at a distance.
+    //
+    // `seconds <= 0` writes `to` at once and reports finished, which is what
+    // makes a duration a knob an author can turn to zero.
+    //
+    // Starting one on a property that is already animating REPLACES it, from
+    // wherever the value has got to — retargeting mid-flight is smooth, and the
+    // replaced animation does NOT report finished. Cancelled is not finished.
+    //
+    // Returns false when the widget, the element or the property is not there,
+    // or the property is of a type that cannot be interpolated.
+    bool animate(int widgetId, int elemId, const std::string& prop,
+                 const HE::UIPropValue& to, float seconds,
+                 HE::UIEase ease = HE::UIEase::Linear);
+    // Stop what is running on one property, or (empty `prop`) on the whole
+    // element, or (elemId 0) in the whole widget. The value stays where it got
+    // to: a stop is not a rewind. Returns how many were stopped.
+    int  stopAnimations(int widgetId, int elemId = 0, const std::string& prop = {});
+    // The same two, addressing the element by the NAME it carries in the
+    // designer — the form a script has, since element ids are the asset's
+    // private business. Nothing found = false / 0, like every other by-name
+    // entry point here.
+    bool animateNamed(int widgetId, const std::string& elemName, const std::string& prop,
+                      const HE::UIPropValue& to, float seconds,
+                      HE::UIEase ease = HE::UIEase::Linear);
+    int  stopAnimationsNamed(int widgetId, const std::string& elemName,
+                             const std::string& prop = {});
+    // Is anything moving? The application asks every frame: an event-driven app
+    // sleeps until something happens, and "the clock advanced" is not an event
+    // it would otherwise hear — without this an animation would run at the idle
+    // heartbeat's ten frames a second.
+    bool isAnimating() const;
 
     // Pointer input in render-target pixels: hit-tests interactive elements
     // (buttons/checkboxes/sliders/combos/text fields + elements bound by
@@ -441,6 +489,19 @@ private:
         // asset share one parse, and because nothing may hold a reference into
         // a theme that a reload could move.
         std::shared_ptr<const HE::UITheme> theme;
+        // What is currently moving in this widget. On the instance rather than
+        // in one list on the manager, so destroying a widget takes its
+        // animations with it and nothing has to remember to sweep.
+        struct Anim
+        {
+            int            elem = 0;
+            std::string    prop;
+            HE::UIPropValue from, to;   // same type, checked when it starts
+            float          t = 0.0f;    // seconds elapsed
+            float          dur = 0.0f;  // > 0 — an instant one never gets here
+            HE::UIEase     ease = HE::UIEase::Linear;
+        };
+        std::vector<Anim> anims;
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;
@@ -630,6 +691,8 @@ private:
     // when it is not null. One place, because three keyboard paths ask the same
     // question and each of them getting the cast slightly wrong is three bugs.
     HE::UIComboBox* openDropdown(Instance** owner = nullptr);
+    // The element of a widget by the name it carries in the designer (0 = none).
+    int elementIdByName(int widgetId, const std::string& name) const;
     void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
     int   m_tooltipWidget = 0, m_tooltipElem = 0;

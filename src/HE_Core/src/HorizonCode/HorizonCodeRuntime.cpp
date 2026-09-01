@@ -654,6 +654,8 @@ HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
                   onSelectionChanged(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnRowBind, "OnRowBind", int,
                   onRowBind(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnAnimationFinished, "OnAnimationFinished", const std::string&,
+                  onAnimationFinished(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
                   onRowActivated(elem, v), Value::ofInt(v))
 #undef HE_HC_VALUE_EVENT

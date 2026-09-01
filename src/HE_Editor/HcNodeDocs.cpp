@@ -441,6 +441,28 @@ namespace
 	  "when it already is — so stepping through a list does not re-centre it on "
 	  "every step." },
 
+	// ── Animation ────────────────────────────────────────────────────────────
+	{ "widget.animate",
+	  "Moves a NUMBER of one element from where it is to where you say, over "
+	  "the given seconds, along an easing curve (\"Linear\", \"Out Quad\", "
+	  "\"Out Back\"…). Opacity, corner radius, rotation, font size. Zero seconds "
+	  "writes it at once. Starting a second one on the same property replaces the "
+	  "first from wherever the value has got to, so a value can be retargeted "
+	  "mid-flight without a jump. OnAnimationFinished says when it lands, and "
+	  "names the property it was." },
+	{ "widget.animateColor",
+	  "The same for a COLOUR — a fade, a flash, a hover that arrives instead of "
+	  "snapping. Every colour an element has can be animated, including a "
+	  "button's hovered and pressed ones." },
+	{ "widget.animateVec2",
+	  "The same for a POINT: Position to slide something in, Size to grow it. "
+	  "\"Out Back\" is the curve that makes a dialog land rather than arrive." },
+	{ "widget.stopAnimation",
+	  "Stops what is running on that property, or on the whole element when the "
+	  "property is left empty. The value stays where it got to — a stop is not a "
+	  "rewind — and a stopped animation reports nothing, because cancelled is not "
+	  "finished." },
+
 	// ── Theme ────────────────────────────────────────────────────────────────
 	{ "theme.set",
 	  "Switches the whole application to another Theme asset. Every element bound "

@@ -507,7 +507,18 @@ public:
     UIPropValue getPropAny(const std::string& name) const;
     void        setPropAny(const std::string& name, const UIPropValue& v);
 
-    // Events this type can fire (Designer "add event" + HorizonCode).
+    // Events this type can fire (Designer "add event" + HorizonCode). A type
+    // adds its OWN — a button's click, a field's text — and the base list
+    // underneath belongs to every element there is.
+    std::vector<UIEventDesc> allEvents() const
+    {
+        std::vector<UIEventDesc> out = events();
+        // Anything can be animated, so anything can report that an animation
+        // ended. It was not in the per-type lists because until animations
+        // existed there was nothing a Panel or a Text could ever fire.
+        out.push_back({ "OnAnimationFinished", UIPropType::String, /*hasArg=*/true });
+        return out;
+    }
     virtual std::vector<UIEventDesc> events() const { return {}; }
     virtual bool hasMaterialSlot() const { return false; }
     // Types that draw a quad the user may want a picture on.

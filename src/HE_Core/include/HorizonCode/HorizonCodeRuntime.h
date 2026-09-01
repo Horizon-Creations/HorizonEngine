@@ -215,6 +215,8 @@ public:
     void fireOnRowBind(InstanceId id, int elem, int index);
     void fireOnRowActivated(InstanceId id, int elem, int index);
     void fireOnRightClicked(InstanceId id, int elem);
+    // An animation reached its target — the payload is the property's name.
+    void fireOnAnimationFinished(InstanceId id, int elem, const std::string& prop);
     // A dialog, popup or menu closing — the whole widget, so no element.
     void fireOnDismissed(InstanceId id);
     void fireConstruct(InstanceId id);

@@ -1205,8 +1205,167 @@ bool WidgetManager::callFunction(int id, const std::string& name)
 	return true;
 }
 
+namespace
+{
+	// Can this kind of value be interpolated at all? A string or a bool has no
+	// halfway, and an animation that "eased" one by snapping at the end would be
+	// a duration that means nothing.
+	bool animatable(HE::UIPropType t)
+	{
+		return t == HE::UIPropType::Float || t == HE::UIPropType::Color
+		    || t == HE::UIPropType::Vec2;
+	}
+
+	// One step along the curve. OutBack leaves [0,1] on purpose, so a colour is
+	// clamped at the write and a number is not: overshooting a position is the
+	// point, overshooting a red channel is a colour nobody chose.
+	HE::UIPropValue animLerp(const HE::UIPropValue& from, const HE::UIPropValue& to, float k)
+	{
+		switch (from.type)
+		{
+		case HE::UIPropType::Float:
+			return HE::UIPropValue::ofFloat(from.f + (to.f - from.f) * k);
+		case HE::UIPropType::Vec2:
+			return HE::UIPropValue::ofVec2(from.v2 + (to.v2 - from.v2) * k);
+		case HE::UIPropType::Color:
+		{
+			glm::vec4 c = from.col + (to.col - from.col) * k;
+			c = glm::clamp(c, glm::vec4(0.0f), glm::vec4(1.0f));
+			return HE::UIPropValue::ofColor(c);
+		}
+		default:
+			return to;
+		}
+	}
+}
+
+bool WidgetManager::animate(int widgetId, int elemId, const std::string& prop,
+                            const HE::UIPropValue& to, float seconds, HE::UIEase ease)
+{
+	Instance* w = find(widgetId);
+	if (!w) return false;
+	HE::UIElement* e = w->tree.find(elemId);
+	if (!e) return false;
+	const HE::UIPropValue cur = e->getPropAny(prop);
+	// A property this element does not have reads back as a default-constructed
+	// Float, which would happily "animate" and write nothing. The target's type
+	// has to match what is actually there, which also catches "fade the Text".
+	if (!animatable(cur.type) || cur.type != to.type) return false;
+
+	// Whatever was running on this property stops here, from wherever it got to
+	// — that is what makes a retarget smooth — and it reports nothing, because a
+	// cancelled animation did not finish.
+	stopAnimations(widgetId, elemId, prop);
+
+	m_visualDirty = true;
+	if (seconds <= 0.0f)
+	{
+		// A duration turned down to zero is still an instruction: write it, and
+		// say it is done, so a graph that waits for the end is not left waiting.
+		e->setPropAny(prop, to);
+		const ScriptTarget t = scriptTargetFor(*w, elemId);
+		rt().fireOnAnimationFinished(t.scriptId, t.elem, prop);
+		return true;
+	}
+	Instance::Anim a;
+	a.elem = elemId; a.prop = prop; a.from = cur; a.to = to;
+	a.dur = seconds; a.ease = ease;
+	w->anims.push_back(std::move(a));
+	return true;
+}
+
+int WidgetManager::stopAnimations(int widgetId, int elemId, const std::string& prop)
+{
+	Instance* w = find(widgetId);
+	if (!w) return 0;
+	const std::size_t before = w->anims.size();
+	w->anims.erase(std::remove_if(w->anims.begin(), w->anims.end(),
+		[&](const Instance::Anim& a)
+		{
+			if (elemId != 0 && a.elem != elemId) return false;
+			if (!prop.empty() && a.prop != prop) return false;
+			return true;
+		}), w->anims.end());
+	const int stopped = static_cast<int>(before - w->anims.size());
+	if (stopped) m_visualDirty = true;
+	return stopped;
+}
+
+// The element of `w` called `name`, or 0. Same lookup findList does, without the
+// type: anything can be animated.
+int WidgetManager::elementIdByName(int widgetId, const std::string& name) const
+{
+	const Instance* w = find(widgetId);
+	if (!w || name.empty()) return 0;
+	for (const auto& ep : w->tree.elements)
+		if (ep && ep->name == name) return ep->id;
+	return 0;
+}
+
+bool WidgetManager::animateNamed(int widgetId, const std::string& elemName,
+                                 const std::string& prop, const HE::UIPropValue& to,
+                                 float seconds, HE::UIEase ease)
+{
+	const int elem = elementIdByName(widgetId, elemName);
+	return elem != 0 && animate(widgetId, elem, prop, to, seconds, ease);
+}
+
+int WidgetManager::stopAnimationsNamed(int widgetId, const std::string& elemName,
+                                       const std::string& prop)
+{
+	const int elem = elementIdByName(widgetId, elemName);
+	return elem == 0 ? 0 : stopAnimations(widgetId, elem, prop);
+}
+
+bool WidgetManager::isAnimating() const
+{
+	for (const Instance& w : m_instances) if (!w.anims.empty()) return true;
+	return false;
+}
+
 void WidgetManager::tick(float dt)
 {
+	// ── Animations ───────────────────────────────────────────────────────────
+	// Before the Tick events, so a graph that reads a property in its Tick reads
+	// the value this frame DRAWS rather than the one before it.
+	//
+	// Hidden widgets animate too, on purpose: "fade it in" is started on the
+	// frame the thing appears, and half of those start while it is still hidden.
+	if (dt > 0.0f)
+		for (auto& w : m_instances)
+		{
+			if (w.anims.empty()) continue;
+			// Finished ones are collected and fired AFTER the loop: a graph
+			// reacting to one may start the next animation on this same widget,
+			// and appending to a vector being iterated is how that ends in a
+			// dangling reference.
+			std::vector<std::pair<int, std::string>> finished;
+			for (auto& a : w.anims)
+			{
+				a.t += dt;
+				const bool done = a.t >= a.dur;
+				HE::UIElement* e = w.tree.find(a.elem);
+				if (!e) { a.t = a.dur; continue; }   // element gone: drop it below
+				// The last write is the target ITSELF rather than the curve's
+				// value at t=1. Belt and braces: every curve here returns
+				// exactly 1 at 1 (a test pins that) and the interpolation then
+				// lands on the target for every value anyone would animate — so
+				// this guards the rounding case nobody has produced, not a bug
+				// that was ever seen. It costs a branch.
+				e->setPropAny(a.prop, done ? a.to
+					: animLerp(a.from, a.to, HE::uiEaseApply(a.ease, a.t / a.dur)));
+				if (done) finished.emplace_back(a.elem, a.prop);
+			}
+			w.anims.erase(std::remove_if(w.anims.begin(), w.anims.end(),
+				[](const Instance::Anim& a){ return a.t >= a.dur; }), w.anims.end());
+			m_visualDirty = true;
+			for (const auto& [elem, prop] : finished)
+			{
+				const ScriptTarget t = scriptTargetFor(w, elem);
+				rt().fireOnAnimationFinished(t.scriptId, t.elem, prop);
+			}
+		}
+
 	// ── The tooltip's wait ───────────────────────────────────────────────────
 	// The delay IS the feature: a hint that appears the moment the pointer
 	// crosses a button is a hint that gets in the way of using it.

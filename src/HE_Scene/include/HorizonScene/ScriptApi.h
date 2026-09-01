@@ -120,6 +120,26 @@ namespace ScriptApi
 	bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& listName,
 	                      int index);
 
+	// ── Animation (docs/he-apps-plan.md B8) ─────────────────────────────────
+	// Move a property to a value over time, along a named curve. Three
+	// entry points rather than one, because a number, a colour and a point are
+	// three different pins in a graph and one row taking "some value" would be a
+	// pin nobody can wire. The element is addressed by its designer NAME, like
+	// every other script reach into a widget.
+	bool animateNumber(HorizonWorld& world, int widgetId, const std::string& elemName,
+	                   const std::string& prop, float to, float seconds,
+	                   const std::string& easing);
+	bool animateColor(HorizonWorld& world, int widgetId, const std::string& elemName,
+	                  const std::string& prop, const glm::vec4& to, float seconds,
+	                  const std::string& easing);
+	bool animateVec2(HorizonWorld& world, int widgetId, const std::string& elemName,
+	                 const std::string& prop, const glm::vec2& to, float seconds,
+	                 const std::string& easing);
+	// Stop what is running on one property, or on the whole element when `prop`
+	// is empty. The value stays where it got to.
+	int  stopAnimation(HorizonWorld& world, int widgetId, const std::string& elemName,
+	                   const std::string& prop);
+
 	// ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ────────────
 	// While one of these is up, input belongs to it and to nothing underneath.
 	// A modal dims the screen and has to be answered; a popup dismisses itself

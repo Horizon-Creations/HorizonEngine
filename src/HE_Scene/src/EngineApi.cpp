@@ -980,6 +980,21 @@ int  listSelected(Ctx& c, int id, const std::string& list)
 { return c.world ? ScriptApi::listSelected(*c.world, id, list) : -1; }
 bool scrollListToItem(Ctx& c, int id, const std::string& list, int index)
 { return c.world ? ScriptApi::scrollListToItem(*c.world, id, list, index) : false; }
+
+bool animate(Ctx& c, int id, const std::string& element, const std::string& prop,
+             float to, float seconds, const std::string& easing)
+{ return c.world ? ScriptApi::animateNumber(*c.world, id, element, prop, to, seconds, easing)
+                 : false; }
+bool animateColor(Ctx& c, int id, const std::string& element, const std::string& prop,
+                  const glm::vec4& to, float seconds, const std::string& easing)
+{ return c.world ? ScriptApi::animateColor(*c.world, id, element, prop, to, seconds, easing)
+                 : false; }
+bool animateVec2(Ctx& c, int id, const std::string& element, const std::string& prop,
+                 const glm::vec2& to, float seconds, const std::string& easing)
+{ return c.world ? ScriptApi::animateVec2(*c.world, id, element, prop, to, seconds, easing)
+                 : false; }
+int stopAnimation(Ctx& c, int id, const std::string& element, const std::string& prop)
+{ return c.world ? ScriptApi::stopAnimation(*c.world, id, element, prop) : 0; }
 void showModal(Ctx& c, int id)
 { if (c.world) ScriptApi::showModalWidget(*c.world, id); }
 void openPopup(Ctx& c, int id, float x, float y)
@@ -3290,6 +3305,37 @@ const std::vector<ApiFn>& registry()
             "HE::api::widget::scrollListToItem",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
                 widget::scrollListToItem(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+
+        // Animation. Three rows for three pin types, not one row that takes
+        // "some value": a graph author wires a pin, and a pin has a type.
+        // `easing` is a NAME so the row survives a curve being added
+        // (HE::uiEaseName); an unknown one plays Linear rather than nothing.
+        t.push_back({ "widget.animate", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String},
+             {"to", P::Float}, {"seconds", P::Float}, {"easing", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::animate",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::animate(c, (int)aR(a, 0), aS(a, 1), aS(a, 2),
+                                aF(a, 3), aF(a, 4), aS(a, 5))) }; } });
+        t.push_back({ "widget.animateColor", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String},
+             {"to", P::Color}, {"seconds", P::Float}, {"easing", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::animateColor",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::animateColor(c, (int)aR(a, 0), aS(a, 1), aS(a, 2),
+                                     aV4(a, 3), aF(a, 4), aS(a, 5))) }; } });
+        t.push_back({ "widget.animateVec2", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String},
+             {"to", P::Vec2}, {"seconds", P::Float}, {"easing", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::animateVec2",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::animateVec2(c, (int)aR(a, 0), aS(a, 1), aS(a, 2),
+                                    aV2(a, 3), aF(a, 4), aS(a, 5))) }; } });
+        t.push_back({ "widget.stopAnimation", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String}},
+            {{"stopped", P::Int}}, "HE::api::widget::stopAnimation",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::stopAnimation(c, (int)aR(a, 0), aS(a, 1), aS(a, 2))) }; } });
 
         // Layers. A dialog and a menu are the same thing to the engine: input
         // belongs to them until they let go. Only the leaving differs.
