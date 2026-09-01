@@ -1256,7 +1256,8 @@ void GameApplication::updateUIInput()
 			// Text first, then the things for which a double-click means "open
 			// this": a list row. One gesture, one meaning per thing it lands on.
 			if (!m_world->widgets().selectWordAtPointer(static_cast<float>(pw),
-			                                            static_cast<float>(ph), mx * sx))
+			                                            static_cast<float>(ph),
+			                                            mx * sx, my * sy))
 				m_world->widgets().activateAtPointer(static_cast<float>(pw),
 				                                     static_cast<float>(ph), mx * sx, my * sy);
 		}
@@ -1496,6 +1497,11 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				return true;
 			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
 			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
+			// Only a multiline field answers these; in a single-line one they do
+			// nothing and the key is still swallowed, because a focused text
+			// field owns the arrow keys either way.
+			case SDLK_UP:        wm.editFocusedText(TE::Up,    shift);  return true;
+			case SDLK_DOWN:      wm.editFocusedText(TE::Down,  shift);  return true;
 			case SDLK_RETURN:
 			case SDLK_KP_ENTER:  wm.inputSubmit(); return true;
 			case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;

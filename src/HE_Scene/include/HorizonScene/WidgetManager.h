@@ -309,17 +309,24 @@ public:
     // WordLeft/WordRight move across whole words (Ctrl+Arrow, Alt+Arrow on a
     // Mac); DeleteWordLeft is Ctrl/Alt+Backspace. Appended, not inserted — the
     // enum is used positionally by the apps' key tables.
+    // Home and End are per LINE, which in a single-line field is the whole
+    // field — so they answer exactly as they always did. Up and Down do nothing
+    // unless the field is multiline (B1b).
     enum class TextEdit { Left, Right, Home, End, Delete, SelectAll,
-                          WordLeft, WordRight, DeleteWordLeft };
+                          WordLeft, WordRight, DeleteWordLeft, Up, Down };
     // True when something changed (and OnTextChanged fired where it applies).
     bool editFocusedText(TextEdit op, bool extendSelection);
     // Extend the selection to where the pointer is, without moving the anchor —
-    // the drag half of click-and-drag selection. `mouseX` is in render-target
-    // pixels like every other pointer coordinate here. False when nothing moved.
-    bool dragCaretFromPointer(float vpWidth, float vpHeight, float mouseX);
+    // the drag half of click-and-drag selection. The pointer is in render-target
+    // pixels like every other coordinate here. False when nothing moved.
+    //
+    // Y matters since fields can hold more than one line (B1b) and is a real
+    // argument rather than a defaulted zero, which would silently mean "line
+    // one" at any call site that had not learned about it.
+    bool dragCaretFromPointer(float vpWidth, float vpHeight, float mouseX, float mouseY);
     // Select the word (or the whole line) under the pointer: double- and
     // triple-click. Both leave the caret at the end of what they selected.
-    bool selectWordAtPointer(float vpWidth, float vpHeight, float mouseX);
+    bool selectWordAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY);
     // What a DOUBLE-click means where it is not text: the row under the pointer
     // is activated (OnRowActivated). The app tries the text field first and
     // falls through to here, so one gesture keeps one meaning per thing it lands
@@ -330,9 +337,9 @@ public:
     std::string focusedSelection() const;
     // Drop it (the second half of a cut). False when nothing was selected.
     bool deleteFocusedSelection();
-    // Put the caret where a click landed. `mouseX` is in render-target pixels,
-    // like every other pointer coordinate here.
-    bool setCaretFromPointer(float vpWidth, float vpHeight, float mouseX);
+    // Put the caret where a click landed, in render-target pixels like every
+    // other pointer coordinate here.
+    bool setCaretFromPointer(float vpWidth, float vpHeight, float mouseX, float mouseY);
     // True while a TextInput has keyboard focus — the apps use it to decide
     // whether to route text/keys here instead of to gameplay/camera.
     bool hasFocusedTextField() const { return m_focusWidget != 0; }
@@ -465,7 +472,8 @@ private:
     // Byte offset in the focused field under a pointer at `mouseX`. The single
     // home of the canvas/rect/padding arithmetic that click, drag and
     // double-click all need — three copies of it would drift.
-    bool caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX, size_t& outOffset);
+    bool caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY,
+                              size_t& outOffset);
 
     // ── Embedded-widget translation ──────────────────────────────────────────
     // Which script owns an element, and what that script calls it. For anything

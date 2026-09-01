@@ -2910,7 +2910,7 @@ void EditorApplication::OnRender(float dt)
 				m_uiPointerDouble = false;
 				if (uiPointerLive &&
 				    !m_editorWorld->widgets().selectWordAtPointer(
-				        m_uiViewportW, m_uiViewportH, m_uiPointerX))
+				        m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY))
 					m_editorWorld->widgets().activateAtPointer(
 						m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY);
 			}
@@ -7117,6 +7117,11 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 				return true;
 			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
 			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
+			// Only a multiline field answers these; in a single-line one they do
+			// nothing and the key is still swallowed, because a focused text
+			// field owns the arrow keys either way.
+			case SDLK_UP:        wm.editFocusedText(TE::Up,    shift);  return true;
+			case SDLK_DOWN:      wm.editFocusedText(TE::Down,  shift);  return true;
 			case SDLK_RETURN:
 			case SDLK_KP_ENTER:  wm.inputSubmit(); return true;
 			case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;

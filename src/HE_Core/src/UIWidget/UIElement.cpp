@@ -607,6 +607,7 @@ const UIPropTable& UITextInput::propTable() const
         uiprop::slot<&UITextInput::password>   ({ "Password", UIPropType::Bool }),
         uiprop::slot<&UITextInput::editable>   ({ "Editable", UIPropType::Bool }),
         uiprop::slot<&UITextInput::selectable> ({ "Selectable", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::multiline>  ({ "Multiline", UIPropType::Bool }),
         // 0 anything, 1 whole numbers, 2 decimals, 3 the characters in Allowed
         // Characters. See UITextInput::Filter.
         uiprop::slot<&UITextInput::inputFilter>({ "Input Filter", UIPropType::Int, 0.0f, 3.0f }),
@@ -1230,14 +1231,121 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // emitted with — this is what puts the caret and the selection where the
     // characters actually are.
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    auto widthTo = [&](size_t byteEnd)
+    auto runWidth = [&](const std::string& shown)
     {
-        const std::string run = shownFor(text.substr(0, std::min(byteEnd, text.size())));
-        if (run.empty()) return 0.0f;
+        if (shown.empty()) return 0.0f;
         HE::UITextLayout opts;
-        return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
-                  : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
+        return (f ? HE::measureUIText(*f, shown, sizePx, 0.0f, opts)
+                  : HE::measureUIText(shown, sizePx, 0.0f, opts)).x;
     };
+    auto widthTo = [&](size_t byteEnd)
+    { return runWidth(shownFor(text.substr(0, std::min(byteEnd, text.size())))); };
+
+    // ── More than one line ───────────────────────────────────────────────────
+    // Its own path rather than a handful of conditionals in the one below: a
+    // multiline field scrolls the other way, aligns to the top, and draws its
+    // selection as several rectangles. Sharing the body would mean a `multiline`
+    // test on nearly every line of it, and every single-line field — which is
+    // every field authored so far — has to keep drawing exactly as it did.
+    if (multiline)
+    {
+        const std::vector<HE::UITextLineRange> lines = HE::uiTextLineRanges(text);
+        HE::UITextLayout lopts;                 // alignH left, alignV TOP
+        lopts.alignV = 0;
+        const float step = sizePx * lopts.lineSpacing;
+
+        contentHeightPx = static_cast<float>(lines.size() - 1) * step + sizePx;
+        viewHeightPx    = std::max(1.0f, ts.y - 2.0f * pad);
+
+        // Keep the caret in view. Only while focused: a reader who scrolled up
+        // to look at something should not be yanked back by a caret they are not
+        // moving.
+        const size_t caretLine = HE::uiLineOfOffset(lines, caret);
+        if (st.focused)
+        {
+            const float top = static_cast<float>(caretLine) * step;
+            if (top < scrollPxY)                      scrollPxY = top;
+            if (top + step > scrollPxY + viewHeightPx) scrollPxY = top + step - viewHeightPx;
+        }
+        // Never leave empty space below while text hangs off the top — what
+        // happens when the field grows or lines are deleted.
+        const float maxScroll = std::max(0.0f, contentHeightPx - viewHeightPx);
+        if (scrollPxY > maxScroll) scrollPxY = maxScroll;
+        if (scrollPxY < 0.0f)      scrollPxY = 0.0f;
+
+        const float x0   = tp.x;
+        const float yTop = px.y + pad - scrollPxY;
+        auto lineY = [&](size_t i) { return yTop + static_cast<float>(i) * step; };
+        auto shownUpTo = [&](const HE::UITextLineRange& ln, size_t byte)
+        {
+            const size_t b = std::min(std::max(byte, ln.begin), ln.end);
+            return runWidth(shownFor(text.substr(ln.begin, b - ln.begin)));
+        };
+
+        // Selection first, behind the glyphs. Three shapes in one loop: the
+        // first line from the anchor to its end, whole lines in between, the
+        // last from its start to the caret.
+        if (st.focused && selectable && hasSelection())
+        {
+            const size_t a = selMin(), b = selMax();
+            for (size_t i = 0; i < lines.size(); ++i)
+            {
+                const HE::UITextLineRange& ln = lines[i];
+                if (ln.end < a || ln.begin > b) continue;
+                const float xa = shownUpTo(ln, a), xb = shownUpTo(ln, b);
+                // A line whose newline is inside the selection gets a small stub
+                // past its last character. Without it a selected blank line is
+                // invisible, and a multi-line selection looks like several
+                // unrelated highlights instead of one run.
+                const float stub = (ln.end < b) ? sizePx * 0.35f : 0.0f;
+                const float y = lineY(i);
+                if (y + sizePx < px.y || y > px.y + px.h) continue;
+                quad(out, x0 + xa, y, std::max(1.0f, xb - xa + stub), sizePx, selectionColor);
+            }
+        }
+
+        // The glyphs, a line at a time, skipping what is scrolled out of sight.
+        // Each line is emitted into its OWN one-line rect: handing the whole
+        // string to the text layer would let it re-split and re-align, and then
+        // two different answers about where line seven is.
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            const float y = lineY(i);
+            if (y + sizePx < px.y || y > px.y + px.h) continue;
+            const HE::UITextLineRange& ln = lines[i];
+            const std::string run = shownFor(text.substr(ln.begin, ln.end - ln.begin));
+            if (run.empty()) continue;
+            emitTextL(*this, run, { x0, y }, { ts.x, sizePx }, sizePx, textColor, lopts, out);
+        }
+
+        // The IME's unfinished text, at the caret, on the caret's line.
+        float compW = 0.0f;
+        const float caretY = lineY(caretLine);
+        const float caretX = shownUpTo(lines[caretLine], caret);
+        if (st.focused && !composition.empty())
+        {
+            HE::UITextLayout copts; copts.alignV = 0;
+            compW = runWidth(composition);
+            emitTextL(*this, composition, { x0 + caretX, caretY }, { ts.x, sizePx },
+                      sizePx, textColor, copts, out);
+            quad(out, x0 + caretX, caretY + sizePx - std::max(1.0f, sizePx * 0.06f),
+                 std::max(1.0f, compW), std::max(1.0f, sizePx * 0.06f), textColor);
+        }
+
+        if (st.focused)
+        {
+            float cx = caretX;
+            if (!composition.empty())
+            {
+                const size_t upTo = compositionCursor < 0
+                    ? composition.size()
+                    : std::min(static_cast<size_t>(compositionCursor), composition.size());
+                cx += runWidth(composition.substr(0, upTo));
+            }
+            quad(out, x0 + cx, caretY, std::max(1.0f, sizePx * 0.08f), sizePx, textColor);
+        }
+        return;
+    }
 
     // ── Sideways scroll ──────────────────────────────────────────────────────
     // Keep the caret inside the visible strip. Without this a field you can type
@@ -1321,14 +1429,13 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
 // Byte offset in `text` nearest to a point `localX` pixels into the field's
 // text area — what a click has to answer to put the caret where it was aimed.
-size_t UITextInput::caretAtX(float localX, float pxScaleY) const
+size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY) const
 {
     const float sizePx = fontSize * pxScaleY;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
     HE::UITextLayout opts;
-    auto widthTo = [&](size_t byteEnd)
+    auto runWidth = [&](std::string run)
     {
-        std::string run = text.substr(0, std::min(byteEnd, text.size()));
         if (password)
         {
             std::string dots;
@@ -1339,18 +1446,42 @@ size_t UITextInput::caretAtX(float localX, float pxScaleY) const
         return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
                   : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
     };
-    // The click arrives relative to the field's text area; the text inside it may
-    // be scrolled, so undo that first or every click past the scroll point lands
-    // on the wrong character.
-    localX += scrollPx;
-    if (localX <= 0.0f) return 0;
+
+    // Which line the click landed on, and where that line starts and ends. A
+    // single-line field is the same walk over one range that covers everything,
+    // so there is one loop below and not two.
+    size_t lo = 0, hi = text.size();
+    if (multiline)
+    {
+        const std::vector<HE::UITextLineRange> lines = HE::uiTextLineRanges(text);
+        const float step = sizePx * opts.lineSpacing;
+        // Undo the vertical scroll and the top padding the same way render() put
+        // them in. A click above the first line lands on it, below the last on
+        // that one — dragging off the top of a field should not deselect.
+        const float rel = localY + scrollPxY;
+        long idx = step > 0.0f ? static_cast<long>(std::floor(rel / step)) : 0;
+        if (idx < 0) idx = 0;
+        if (idx >= static_cast<long>(lines.size())) idx = static_cast<long>(lines.size()) - 1;
+        lo = lines[static_cast<size_t>(idx)].begin;
+        hi = lines[static_cast<size_t>(idx)].end;
+    }
+    else
+    {
+        // The click arrives relative to the field's text area; a single-line
+        // field's text may be scrolled sideways, so undo that first or every
+        // click past the scroll point lands on the wrong character.
+        localX += scrollPx;
+    }
+
+    if (localX <= 0.0f) return lo;
     // Walk the boundaries and take the one whose midpoint the click passed —
     // clicking the left half of a character puts the caret before it.
-    size_t best = 0;
-    for (size_t i = 0; i < text.size(); )
+    size_t best = lo;
+    for (size_t i = lo; i < hi; )
     {
         const size_t next = uiUtf8Next(text, i);
-        const float a = widthTo(i), b = widthTo(next);
+        const float a = runWidth(text.substr(lo, i - lo));
+        const float b = runWidth(text.substr(lo, next - lo));
         if (localX < (a + b) * 0.5f) return i;
         best = next;
         i = next;
@@ -1657,6 +1788,7 @@ void UITextInput::writeJson(nlohmann::json& j) const
     if (password)      j["password"] = true;
     if (!editable)     j["editable"] = false;
     if (!selectable)   j["selectable"] = false;
+    if (multiline)     j["multiline"] = true;
     if (selectionColor != glm::vec4(0.25f, 0.45f, 0.80f, 0.75f))
         j["selectionColor"] = colJson(selectionColor);
     // Same rule: written only when set, so every field authored before the
@@ -1675,6 +1807,7 @@ void UITextInput::readJson(const nlohmann::json& j)
     password   = j.value("password", false);
     editable   = j.value("editable", true);
     selectable = j.value("selectable", true);
+    multiline  = j.value("multiline", false);
     inputFilter  = j.value("inputFilter", static_cast<int>(FilterAny));
     allowedChars = j.value("allowedChars", std::string());
     // The authored text decides where the caret starts, not a stale offset.

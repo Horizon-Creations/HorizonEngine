@@ -85,6 +85,33 @@ HE_API std::vector<std::string> layoutUITextLines(const BakedUIFont& font,
                                                   const std::string& text, float sizePx,
                                                   float wrapWidth, bool wrap);
 
+// ── The same split, as BYTE RANGES — for text that can be EDITED ─────────────
+// A caret is a byte offset, so an editor cannot use the line list above: it
+// hands back strings, and two of the things it does to them lose bytes. Wrapping
+// trims the spaces at a break, and every '\r' is swallowed. For a label that is
+// exactly right (neither is visible); for a field somebody types in, a byte the
+// line model cannot name is a byte the caret cannot reach.
+//
+// So this is hard breaks only, every byte accounted for, `end` never including
+// the '\n' itself. It differs from the list above in one more way, deliberately:
+//
+//   IT KEEPS THE TRAILING EMPTY LINE. layoutUITextLines drops it, and that was a
+//   real fix — a label ending in a stray newline was drawn half a line too high.
+//   In an editor the same rule would mean pressing Enter at the end puts the
+//   caret on a line that does not exist. Both are right for what they serve,
+//   which is why they are two functions and not one with a flag.
+struct UITextLineRange
+{
+    std::size_t begin = 0;   // first byte of the line
+    std::size_t end   = 0;   // one past its last byte, never the '\n'
+};
+// Never empty: an empty string is one empty line, the way an empty field has a
+// place to put the caret.
+HE_API std::vector<UITextLineRange> uiTextLineRanges(const std::string& text);
+// Which line `byte` falls on. A byte past the end answers with the last line,
+// so a caret that outlived an edit still lands somewhere real.
+HE_API std::size_t uiLineOfOffset(const std::vector<UITextLineRange>& lines, std::size_t byte);
+
 // Pixel extent the run occupies at `sizePx`: x = widest line, y = the block
 // height ((lines-1) * lineSpacing * sizePx + sizePx). Lets callers size an
 // element to fit its own text (see UIElement auto-size).

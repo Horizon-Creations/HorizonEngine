@@ -177,6 +177,7 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Password", UIPropType::Bool },
             { "Editable", UIPropType::Bool },
             { "Selectable", UIPropType::Bool },
+            { "Multiline", UIPropType::Bool },
             { "Input Filter", UIPropType::Int },
             { "Allowed Characters", UIPropType::String } } },
         { UIWidgetType::ComboBox, {
@@ -2732,7 +2733,235 @@ namespace
         std::string text() const { const auto* f = field(); return f ? f->text : std::string(); }
         size_t caret() const     { const auto* f = field(); return f ? f->caret : 0; }
         float  scrollPx() const  { const auto* f = field(); return f ? f->scrollPx : 0.0f; }
+
+        // The live field, to switch it to multiline or read its vertical scroll.
+        HE::UITextInput* live()
+        {
+            auto* t = const_cast<HE::UIWidgetTree*>(wm.tree(widget));
+            return t ? dynamic_cast<HE::UITextInput*>(t->find(elem)) : nullptr;
+        }
     };
+}
+
+// ═══ B1b: more than one line ═════════════════════════════════════════════════
+// A field that holds newlines. Everything below is about the two things that
+// makes hard: a caret is a byte offset and has to survive being talked about in
+// lines and columns, and a click has to land on the line it was aimed at.
+
+TEST_CASE("Text lines: the ranges partition the string, and keep the last empty one")
+{
+    // Every byte belongs to exactly one line, and the ranges never include the
+    // '\n' — that is what lets a caret address any position in the text.
+    {
+        const auto ls = HE::uiTextLineRanges("ab\ncd");
+        REQUIRE(ls.size() == 2);
+        CHECK(ls[0].begin == 0); CHECK(ls[0].end == 2);
+        CHECK(ls[1].begin == 3); CHECK(ls[1].end == 5);
+    }
+    // The divergence from the label splitter, and the reason this function
+    // exists: pressing Enter at the end must leave somewhere to put the caret.
+    {
+        const auto ls = HE::uiTextLineRanges("ab\n");
+        REQUIRE(ls.size() == 2);
+        CHECK(ls[1].begin == 3); CHECK(ls[1].end == 3);   // the empty last line
+        // …and layoutUITextLines still drops it, on purpose — a label ending in
+        // a stray newline must not be drawn half a line too high.
+        CHECK(HE::layoutUITextLines(HE::sharedUIFont(), "ab\n", 16.0f, 0.0f, false).size() == 1);
+    }
+    // An empty string is one empty line, the way an empty field still has a
+    // place for the caret.
+    {
+        const auto ls = HE::uiTextLineRanges("");
+        REQUIRE(ls.size() == 1);
+        CHECK(ls[0].begin == 0); CHECK(ls[0].end == 0);
+    }
+    // A blank line in the middle survives as a line of its own.
+    {
+        const auto ls = HE::uiTextLineRanges("a\n\nb");
+        REQUIRE(ls.size() == 3);
+        CHECK(ls[1].begin == ls[1].end);
+    }
+    // CRLF: the '\r' is not part of the line's TEXT but the next line still
+    // starts after the '\n', so the ranges stay a partition.
+    {
+        const auto ls = HE::uiTextLineRanges("ab\r\ncd");
+        REQUIRE(ls.size() == 2);
+        CHECK(ls[0].end == 2);      // without the '\r'
+        CHECK(ls[1].begin == 4);
+    }
+    // A caret at the END of a line belongs to that line, not to the start of
+    // the next — the position it sits in most often.
+    {
+        const auto ls = HE::uiTextLineRanges("ab\ncd");
+        CHECK(HE::uiLineOfOffset(ls, 0) == 0);
+        CHECK(HE::uiLineOfOffset(ls, 2) == 0);
+        CHECK(HE::uiLineOfOffset(ls, 3) == 1);
+        CHECK(HE::uiLineOfOffset(ls, 99) == 1);   // past the end still lands
+    }
+}
+
+TEST_CASE("Multiline: Enter inserts a line instead of committing")
+{
+    TextFieldFixture f("ab");
+    // Single-line first: Enter commits and changes nothing about the text.
+    f.wm.inputSubmit();
+    CHECK(f.text() == "ab");
+
+    f.live()->multiline = true;
+    f.live()->caret = f.live()->selAnchor = 1;
+    f.wm.inputSubmit();
+    CHECK(f.text() == "a\nb");
+    CHECK(f.caret() == 2);
+
+    // The filter still applies. A field that only takes digits must not gain a
+    // newline through the one key that skipped the check.
+    f.live()->text = "12"; f.live()->caret = f.live()->selAnchor = 1;
+    f.live()->inputFilter = HE::UITextInput::FilterInteger;
+    f.wm.inputSubmit();
+    CHECK(f.text() == "12");
+}
+
+TEST_CASE("Multiline: the caret walks up and down, and remembers its column")
+{
+    TextFieldFixture f("long line here\nx\nanother long one");
+    f.live()->multiline = true;
+    // Column 9 on the first line.
+    f.live()->caret = f.live()->selAnchor = 9;
+
+    f.wm.editFocusedText(WidgetManager::TextEdit::Down, false);
+    // The middle line is one character long, so the caret lands at its end.
+    CHECK(f.caret() == 16);
+
+    // …and down again returns to column 9, not to column 1. Without a
+    // remembered goal, three presses of Down would walk the caret to the left
+    // edge and stay there.
+    f.wm.editFocusedText(WidgetManager::TextEdit::Down, false);
+    CHECK(f.caret() == 17 + 9);
+
+    // Any other move forgets the goal.
+    f.wm.editFocusedText(WidgetManager::TextEdit::Home, false);
+    CHECK(f.caret() == 17);
+    f.wm.editFocusedText(WidgetManager::TextEdit::Up, false);
+    CHECK(f.caret() == 15);        // column 0 of the middle line
+}
+
+TEST_CASE("Multiline: Home and End are per line, and single-line is unchanged")
+{
+    TextFieldFixture f("abc\ndefgh");
+    f.live()->multiline = true;
+    f.live()->caret = f.live()->selAnchor = 6;      // inside "defgh"
+    f.wm.editFocusedText(WidgetManager::TextEdit::Home, false);
+    CHECK(f.caret() == 4);
+    f.wm.editFocusedText(WidgetManager::TextEdit::End, false);
+    CHECK(f.caret() == 9);
+
+    // The very same operations on a single-line field still mean the whole
+    // field, because one line IS the whole field.
+    TextFieldFixture g("abcdef");
+    g.wm.editFocusedText(WidgetManager::TextEdit::Home, false);
+    CHECK(g.caret() == 0);
+    g.wm.editFocusedText(WidgetManager::TextEdit::End, false);
+    CHECK(g.caret() == 6);
+    // And Up/Down do nothing at all there.
+    CHECK_FALSE(g.wm.editFocusedText(WidgetManager::TextEdit::Up, false));
+    CHECK(g.caret() == 6);
+}
+
+TEST_CASE("Multiline: a click lands on the line it was aimed at")
+{
+    TextFieldFixture f("first\nsecond\nthird");
+    f.live()->multiline = true;
+    f.live()->sizeY = 120.0f;     // room for three lines
+    f.live()->caret = f.live()->selAnchor = 0;
+
+    // Draw once so the field measures itself (render is what works out the
+    // line step and the scroll).
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+
+    const float step = f.live()->fontSize * 1.15f;
+    // Click near the left edge of the third line. 6 is the field's own padding.
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 8.0f, 6.0f + step * 2.0f + step * 0.5f));
+    const auto ls = HE::uiTextLineRanges(f.text());
+    CHECK(HE::uiLineOfOffset(ls, f.caret()) == 2);
+
+    // …and the first line, to prove the arithmetic is not simply "the last one".
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 8.0f, 6.0f + step * 0.5f));
+    CHECK(HE::uiLineOfOffset(ls, f.caret()) == 0);
+}
+
+TEST_CASE("Multiline: it draws every line, and scrolls to keep the caret in view")
+{
+    TextFieldFixture f("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight");
+    f.live()->multiline = true;
+    f.live()->sizeY = 60.0f;      // shows two or three lines of eight
+    // The fixture focuses by clicking at the far right, which leaves the caret
+    // at the END — and a multiline field then rightly scrolls down to it. Start
+    // from the top, which is what this case is about.
+    f.live()->caret = f.live()->selAnchor = 0;
+
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+    const int shownAtTop = countGlyphs(out);
+    // Not all of it: a field this short cannot be showing thirty-odd characters.
+    CHECK(shownAtTop > 0);
+    CHECK(shownAtTop < 30);
+    CHECK(f.live()->scrollPxY == doctest::Approx(0.0f));
+
+    // Put the caret on the last line and draw again — the field has to scroll
+    // down to it rather than leaving it below the edge.
+    f.live()->caret = f.live()->selAnchor = f.text().size();
+    out.clear();
+    f.wm.extract(400.0f, 200.0f, out);
+    CHECK(f.live()->scrollPxY > 0.0f);
+
+    // A multiline field is a scrolling container as far as the wheel is
+    // concerned — that is what makes the wheel and the preview's state capture
+    // work with no wiring of their own.
+    CHECK(f.live()->scrollOffsetPtr() != nullptr);
+    CHECK(f.live()->maxScrollAmount() > 0.0f);
+    // …and a single-line one is not.
+    TextFieldFixture g("plain");
+    CHECK(g.live()->scrollOffsetPtr() == nullptr);
+}
+
+TEST_CASE("Multiline: a selection across lines is drawn as one run per line")
+{
+    TextFieldFixture f("aaa\nbbb\nccc");
+    f.live()->multiline = true;
+    f.live()->sizeY = 120.0f;
+    f.live()->selAnchor = 1;                  // inside line 0
+    f.live()->caret     = 9;                  // inside line 2
+
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+
+    // Three highlight quads, one per line the selection touches: a partial
+    // first, a whole middle, a partial last. One quad spanning the block would
+    // paint over the margins of the lines it does not actually cover.
+    const glm::vec4 sel = f.live()->selectionColor;
+    int highlights = 0;
+    for (const auto& ro : out)
+        if (ro.type == 0 && ro.color == sel) ++highlights;
+    CHECK(highlights == 3);
+}
+
+TEST_CASE("Multiline: the caret is reachable on the empty line a trailing Enter makes")
+{
+    TextFieldFixture f("ab");
+    f.live()->multiline = true;
+    f.live()->caret = f.live()->selAnchor = 2;
+    f.wm.inputSubmit();                        // Enter at the very end
+    REQUIRE(f.text() == "ab\n");
+    CHECK(f.caret() == 3);
+    // The line the caret sits on has to exist. The label splitter drops exactly
+    // this line, which is why the editor has its own.
+    const auto ls = HE::uiTextLineRanges(f.text());
+    REQUIRE(ls.size() == 2);
+    CHECK(HE::uiLineOfOffset(ls, f.caret()) == 1);
+    // …and typing there lands on the new line rather than on the old one.
+    f.wm.inputText("c");
+    CHECK(f.text() == "ab\nc");
 }
 
 TEST_CASE("uiUtf8: cursor movement never lands inside a character")
@@ -3646,7 +3875,7 @@ TEST_CASE("Text field: dragging selects, double-click takes a word")
     f.wm.processPointer(400.0f, 200.0f, 60.0f, 20.0f, false, true);
 
     // A double-click selects the word under it rather than a run of pixels.
-    REQUIRE(f.wm.selectWordAtPointer(400.0f, 200.0f, 8.0f));
+    REQUIRE(f.wm.selectWordAtPointer(400.0f, 200.0f, 8.0f, 20.0f));
     CHECK(f.wm.focusedSelection() == "hello");
 
     // …and the triple-click path takes everything.
@@ -3690,7 +3919,7 @@ TEST_CASE("Text field: long text scrolls under the caret and clicks still land")
     out.clear();
     f.wm.extract(400.0f, 200.0f, out);
     REQUIRE(f.scrollPx() > 0.0f);
-    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 390.0f));
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 390.0f, 20.0f));
     CHECK(f.caret() > 40);
 }
 

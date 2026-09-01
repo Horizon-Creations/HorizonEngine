@@ -1901,6 +1901,60 @@ umbenannte Variable als String angelegt, und ein String passt nicht auf einen Fl
 mit einer **Float**-Variablen wurde der Test rot. Zum wiederholten Mal dieselbe Lehre — **eine
 Gegenprobe, die nicht rot wird, prüft nicht, was man denkt.**
 
+### B1b: mehr als eine Zeile (01.09.2026)
+
+Erster Punkt aus Welle 3, und der einzige, den die vorhandene kopflose Prüfung ganz abdeckt —
+eine echte Menüleiste auf macOS könnte ich hier gar nicht anfassen.
+
+**Der Kern ist ein Zeilenmodell aus BYTE-BEREICHEN**, weil ein Cursor ein Byte-Versatz ist.
+`layoutUITextLines` kann das nicht liefern, und zwar aus zwei guten Gründen, die für ein Label
+richtig und für einen Editor tödlich sind: der Umbruch **schneidet Leerzeichen weg** und jedes
+`\r` wird verschluckt. Für eine Beschriftung ist beides unsichtbar; in einem Feld, in das jemand
+tippt, ist ein Byte, das das Zeilenmodell nicht benennen kann, ein Byte, das der Cursor nicht
+erreicht. Also `uiTextLineRanges` daneben: harte Umbrüche, jedes Byte verbucht.
+
+**Und es behält die leere letzte Zeile** — genau die, die der Label-Splitter absichtlich
+wegwirft. Das war seinerzeit ein echter Fix (eine Beschriftung mit versehentlichem Zeilenumbruch
+wurde eine halbe Zeile zu hoch gezeichnet). Dieselbe Regel im Editor hieße: Enter am Ende setzt
+den Cursor auf eine Zeile, die es nicht gibt. **Beide Regeln sind richtig für das, was sie
+bedienen, und deshalb sind es zwei Funktionen und kein Schalter.**
+
+**Enter bindet nicht mehr ab.** In einem mehrzeiligen Feld fügt Return einen Umbruch ein, und es
+gibt danach keine Taste mehr, die „fertig" heißen könnte — so ein Feld meldet `OnTextCommitted`
+beim Fokusverlust. Entschieden in `inputSubmit`, der einen Stelle, an der Return ankommt, statt
+jeden Host den Unterschied lernen zu lassen. Der Eingabefilter gilt weiter: ein Feld, das nur
+Ziffern nimmt, darf keinen Umbruch durch die eine Taste bekommen, die die Prüfung überspringt.
+
+**Home und End sind jetzt pro ZEILE**, ohne `multiline`-Abfrage — in einem einzeiligen Feld IST
+die eine Zeile das ganze Feld, also antworten sie dort unverändert.
+
+**Die Zielspalte ist der Teil, den man am leichtesten weglässt.** Ohne sie verliert der Cursor
+beim Abwärtsgehen durch eine kurze Zeile seine Spalte und klebt am Zeilenende: dreimal Runter
+und er steht links. Gegengeprüft, indem ich `preferredCaretX` ausgehängt habe — der Cursor landet
+auf 18 statt auf 26.
+
+**Y ist ein echtes Argument, kein voreingestelltes.** `caretAtPoint`, `setCaretFromPointer`,
+`dragCaretFromPointer` und `selectWordAtPointer` haben es bekommen, und der Compiler hat die
+Aufrufer gesucht. Ein Vorgabewert 0 hätte still „Zeile eins" geheißen, an jeder Stelle, die es
+nicht gelernt hat.
+
+**Das Feld ist beim Scrollen ein Container.** `scrollOffsetPtr`/`maxScrollAmount` melden für ein
+mehrzeiliges Feld seinen senkrechten Versatz, für ein einzeiliges `nullptr` — damit fahren das
+Mausrad (`uiScrollBy`) und die Zustandssicherung der Live-Vorschau (E4) ohne eine einzige neue
+Verdrahtung darüber, und ein Rad über einem gewöhnlichen Feld scrollt weiter die Seite.
+
+**Der Zeichenpfad ist ein eigener Zweig**, kein Dutzend `multiline`-Abfragen im bestehenden: ein
+mehrzeiliges Feld scrollt in die andere Richtung, richtet oben aus und malt seine Auswahl als
+mehrere Rechtecke. Jede Zeile wird in ihr EIGENES Ein-Zeilen-Rechteck ausgegeben, statt die
+ganze Zeichenkette der Textschicht zu geben — die würde neu umbrechen und neu ausrichten, und
+dann gäbe es zwei Antworten darauf, wo Zeile sieben steht.
+
+**Nicht gebaut, und der Plan sagt es statt es zu verschweigen: Wortumbruch IM Eingabefeld.**
+Der Umbruch-Splitter verwirft Bytes (siehe oben), ein Editor braucht aber einen, der jedes
+behält. Das ist ein eigener Splitter, und ihn in den Label-Pfad zu mischen würde jede
+Beschriftung im Baum verändern. Bis dahin bricht ein mehrzeiliges Feld dort um, wo jemand Enter
+gedrückt hat.
+
 ---
 
 ## 11. Risiken und Fallen

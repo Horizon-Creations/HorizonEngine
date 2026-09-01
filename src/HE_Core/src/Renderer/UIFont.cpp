@@ -192,6 +192,39 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
     return wrapped;
 }
 
+std::vector<UITextLineRange> uiTextLineRanges(const std::string& text)
+{
+    std::vector<UITextLineRange> lines;
+    std::size_t begin = 0;
+    for (std::size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] != '\n') continue;
+        std::size_t end = i;
+        // A CRLF's '\r' is not part of the line's text, but it IS part of its
+        // bytes — so it is left OUT of the range's end and the next line starts
+        // after the '\n' regardless. That keeps the ranges a partition of the
+        // string even for text pasted from a Windows editor.
+        if (end > begin && text[end - 1] == '\r') --end;
+        lines.push_back({ begin, end });
+        begin = i + 1;
+    }
+    // The tail, always — this is the trailing empty line the label splitter
+    // drops on purpose and an editor must keep (see the header).
+    lines.push_back({ begin, text.size() });
+    return lines;
+}
+
+std::size_t uiLineOfOffset(const std::vector<UITextLineRange>& lines, std::size_t byte)
+{
+    if (lines.empty()) return 0;
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        // `<= end` and not `< end`: the caret sits at the END of a line as often
+        // as inside it, and that position belongs to THIS line rather than to
+        // the start of the next one.
+        if (byte <= lines[i].end) return i;
+    return lines.size() - 1;
+}
+
 glm::vec2 measureUIText(const BakedUIFont& font, const std::string& text, float sizePx,
                         float wrapWidth, const UITextLayout& opts)
 {

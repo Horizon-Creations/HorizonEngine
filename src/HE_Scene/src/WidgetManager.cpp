@@ -1625,7 +1625,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						m_focusWidget = w.id;
 						fireP(&HorizonCode::Runtime::fireOnFocused, hot);
 					}
-					setCaretFromPointer(vpWidth, vpHeight, mouseX);
+					setCaretFromPointer(vpWidth, vpHeight, mouseX, mouseY);
 					// From here until the button comes up, pointer movement
 					// extends the selection instead of moving the caret.
 					w.draggingText = hot;
@@ -1687,7 +1687,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		// exactly like it does everywhere else.
 		if (w.draggingText != 0 && primaryDown && m_focusWidget == w.id &&
 		    w.focusedElem == w.draggingText)
-			dragCaretFromPointer(vpWidth, vpHeight, mouseX);
+			dragCaretFromPointer(vpWidth, vpHeight, mouseX, mouseY);
 
 		// ── Release ──────────────────────────────────────────────────────────
 		if (releaseEdge)
@@ -1946,6 +1946,8 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 	case TextEdit::End:
 	case TextEdit::WordLeft:
 	case TextEdit::WordRight:
+	case TextEdit::Up:
+	case TextEdit::Down:
 	{
 		const size_t before = ti->caret;
 		// Without shift, a plain arrow COLLAPSES a selection to its near end
@@ -1955,18 +1957,64 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 		{
 			ti->caret = op == TextEdit::Left ? ti->selMin() : ti->selMax();
 			ti->selAnchor = ti->caret;
+			ti->preferredCaretX = -1.0f;
 			return true;
 		}
+		// Where the lines are. Cheap and only asked for by the four operations
+		// below that mean something per line; a single-line field gets one range
+		// covering everything, so Home and End keep their old answers exactly.
+		const std::vector<HE::UITextLineRange> lines = HE::uiTextLineRanges(ti->text);
+		const size_t li = HE::uiLineOfOffset(lines, ti->caret);
+
 		switch (op)
 		{
 		case TextEdit::Left:      ti->caret = HE::uiUtf8Prev(ti->text, ti->caret); break;
 		case TextEdit::Right:     ti->caret = HE::uiUtf8Next(ti->text, ti->caret); break;
-		case TextEdit::Home:      ti->caret = 0; break;
-		case TextEdit::End:       ti->caret = ti->text.size(); break;
+		// Per LINE, not per field. In a single-line field that is the same
+		// thing, which is why there is no `multiline` test here.
+		case TextEdit::Home:      ti->caret = lines[li].begin; break;
+		case TextEdit::End:       ti->caret = lines[li].end;   break;
 		case TextEdit::WordLeft:  ti->caret = wordStartBefore(ti->text, ti->caret); break;
 		case TextEdit::WordRight: ti->caret = wordEndAfter(ti->text, ti->caret); break;
+		case TextEdit::Up:
+		case TextEdit::Down:
+		{
+			if (!ti->multiline) return false;
+			const size_t target = op == TextEdit::Up
+				? (li == 0 ? li : li - 1)
+				: (li + 1 >= lines.size() ? li : li + 1);
+			if (target == li)
+			{
+				// Already at the top or the bottom. Go to that line's very
+				// start or end instead of doing nothing — the same thing every
+				// editor does, and it is how you reach the ends with two keys.
+				ti->caret = op == TextEdit::Up ? lines[li].begin : lines[li].end;
+				break;
+			}
+			// The COLUMN, in characters, remembered across the move: stepping
+			// down through a short line and on again has to come back to where
+			// it started. Counted in characters rather than pixels because that
+			// is what survives a proportional font honestly — the caret lands on
+			// the same character position, which is what a person is aiming at.
+			const size_t col = ti->preferredCaretX >= 0.0f
+				? static_cast<size_t>(ti->preferredCaretX)
+				: [&] {
+					size_t n = 0;
+					for (size_t i = lines[li].begin; i < ti->caret; i = HE::uiUtf8Next(ti->text, i))
+						++n;
+					return n;
+				}();
+			ti->preferredCaretX = static_cast<float>(col);
+			size_t at = lines[target].begin;
+			for (size_t n = 0; n < col && at < lines[target].end; ++n)
+				at = HE::uiUtf8Next(ti->text, at);
+			ti->caret = std::min(at, lines[target].end);
+			break;
+		}
 		default: break;
 		}
+		// Every move except up and down forgets the column those two aim for.
+		if (op != TextEdit::Up && op != TextEdit::Down) ti->preferredCaretX = -1.0f;
 		if (!extend) ti->selAnchor = ti->caret;
 		return ti->caret != before || (!extend && ti->selAnchor != before);
 	}
@@ -1993,12 +2041,12 @@ bool WidgetManager::deleteFocusedSelection()
 	return true;
 }
 
-// Byte offset in the focused field that a pointer at `mouseX` points at. The
-// one place the canvas/rect/padding arithmetic lives, so click, drag and
+// Byte offset in the focused field that a pointer at (mouseX, mouseY) points at.
+// The one place the canvas/rect/padding arithmetic lives, so click, drag and
 // double-click cannot drift apart the way image and hit-area would if extract
 // and processPointer used different canvases.
-bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX,
-                                         size_t& outOffset)
+bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight,
+                                         float mouseX, float mouseY, size_t& outOffset)
 {
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
@@ -2010,41 +2058,51 @@ bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight, float mo
 	// Same 6-unit padding the field draws its text with, in pixels.
 	constexpr float kPad = 6.0f;
 	const float localX = mouseX - (r.x * canvas.scaleX + kPad);
-	outOffset = ti->caretAtX(localX, canvas.scaleY * vs);
+	// Y is measured from the top of the text area, which is where render() puts
+	// the first line. Single-line fields ignore it.
+	const float localY = mouseY - (r.y * canvas.scaleY + kPad);
+	outOffset = ti->caretAtPoint(localX, localY, canvas.scaleY * vs);
 	return true;
 }
 
-bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight, float mouseX)
+bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight,
+                                        float mouseX, float mouseY)
 {
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	size_t at = 0;
-	if (!ti || !caretOffsetAtPointer(vpWidth, vpHeight, mouseX, at)) return false;
+	if (!ti || !caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
 	ti->caret = ti->selAnchor = at;
+	// Any move that is not an up/down arrow forgets the column those arrows were
+	// aiming for — see UITextInput::preferredCaretX.
+	ti->preferredCaretX = -1.0f;
 	return true;
 }
 
-bool WidgetManager::dragCaretFromPointer(float vpWidth, float vpHeight, float mouseX)
+bool WidgetManager::dragCaretFromPointer(float vpWidth, float vpHeight,
+                                         float mouseX, float mouseY)
 {
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	size_t at = 0;
 	if (!ti || !ti->selectable) return false;
-	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, at)) return false;
+	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
 	if (at == ti->caret) return false;
 	// The ANCHOR stays where the press put it — that is what makes this a drag
 	// rather than a second click.
 	ti->caret = at;
+	ti->preferredCaretX = -1.0f;
 	return true;
 }
 
-bool WidgetManager::selectWordAtPointer(float vpWidth, float vpHeight, float mouseX)
+bool WidgetManager::selectWordAtPointer(float vpWidth, float vpHeight,
+                                        float mouseX, float mouseY)
 {
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	size_t at = 0;
 	if (!ti || !ti->selectable || ti->text.empty()) return false;
-	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, at)) return false;
+	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
 	size_t from = 0, to = 0;
 	wordAround(ti->text, at, from, to);
 	if (from == to) return false;
@@ -2243,6 +2301,26 @@ void WidgetManager::inputSubmit()
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+
+	// In a MULTILINE field, Return is a new line and not a commit — decided
+	// here, in the one place Return arrives, rather than by asking every host to
+	// learn the difference. There is no key left to mean "done" once Enter means
+	// "new line"; such a field commits when it loses focus (see UITextInput).
+	if (ti->multiline)
+	{
+		if (!ti->editable) return;
+		ti->deleteSelection();
+		// Through the same filter every other character goes through: a field
+		// that only accepts digits must not gain a newline through the one key
+		// that skipped the check.
+		if (!ti->acceptsCharacter("\n", ti->caret)) return;
+		ti->text.insert(ti->caret, 1, '\n');
+		ti->caret = ti->selAnchor = ti->caret + 1;
+		ti->preferredCaretX = -1.0f;
+		m_visualDirty = true;
+		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+		return;
+	}
 	rt().fireOnTextCommitted(t.scriptId, t.elem, ti->text);
 }
 

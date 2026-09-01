@@ -274,6 +274,24 @@ public:
     // Select All and shift-arrows simply do nothing.
     bool        selectable = true;
 
+    // ── More than one line (docs/he-apps-plan.md B1b) ────────────────────────
+    // On, the field holds newlines and shows them: Enter inserts one instead of
+    // committing, the caret moves up and down, a selection spans lines, and the
+    // text scrolls vertically rather than sideways. Off is every field that ever
+    // existed here and stays byte-identical.
+    //
+    // Two consequences worth stating where somebody will read them:
+    //
+    //   ENTER NO LONGER COMMITS. A multiline field fires OnTextChanged as you
+    //   type and OnTextCommitted only when it loses focus — there is no key left
+    //   to mean "done" once Enter means "new line", and inventing a modifier
+    //   chord for it would be a convention nobody expects from a text box.
+    //
+    //   The text is drawn from the TOP, not centred. One line centred in its box
+    //   is right; ten lines centred means the first one moves every time you add
+    //   an eleventh.
+    bool        multiline = false;
+
     // ── What may be typed into it ────────────────────────────────────────────
     // A field that asks for a number should not accept letters, and finding that
     // out when the value is parsed is one round trip too late. Filtering happens
@@ -330,6 +348,30 @@ public:
     // is the only place that can work it out — it is the one that knows the
     // field's pixel width — and render() is const for every other element.
     mutable float scrollPx = 0.0f;
+    // …and downwards, for a multiline field. Same reasoning, same mutability.
+    // Exposed through scrollOffsetPtr/maxScrollAmount below so the wheel and the
+    // preview's state capture reach it through the machinery they already have
+    // rather than through a second one that knows about text fields.
+    mutable float scrollPxY = 0.0f;
+    mutable float contentHeightPx = 0.0f;   // what render() last measured
+    mutable float viewHeightPx    = 0.0f;
+
+    // ── Which column an up/down arrow is aiming for ──────────────────────────
+    // Moving down through a SHORT line and on again has to come back to the
+    // column you started in — without a remembered goal the caret would stick to
+    // wherever the short line ended, and three presses of Down would walk it to
+    // the left edge. -1 = no goal, take the caret's current column.
+    //
+    // Runtime state like caret itself: never serialized, cleared by any move
+    // that is not an up/down arrow.
+    mutable float preferredCaretX = -1.0f;
+
+    // A multiline field is a scrolling container as far as the wheel is
+    // concerned. Answering nullptr while single-line is what keeps a wheel over
+    // an ordinary field scrolling the PAGE, which is what it did before.
+    float* scrollOffsetPtr() override { return multiline ? &scrollPxY : nullptr; }
+    float  maxScrollAmount() const override
+    { return multiline ? std::max(0.0f, contentHeightPx - viewHeightPx) : 0.0f; }
 
     bool   hasSelection() const { return caret != selAnchor; }
     size_t selMin() const { return caret < selAnchor ? caret : selAnchor; }
@@ -356,7 +398,12 @@ public:
     }
     // Where a click that landed `localX` pixels into the text area puts the
     // caret. Needs the same pixel scale the drawing uses.
-    size_t caretAtX(float localX, float pxScaleY) const;
+    // Byte offset nearest a point INSIDE the field's text area — what a click
+    // has to answer to put the caret where it was aimed. `localY` is measured
+    // from the top of that area and only matters while multiline; it takes a
+    // real argument rather than defaulting to 0 on purpose, because a defaulted
+    // zero would quietly mean "the first line" at every call site that forgot.
+    size_t caretAtPoint(float localX, float localY, float pxScaleY) const;
     // Characters (not bytes) currently in the field — what maxLength counts.
     int    charCount() const
     {
