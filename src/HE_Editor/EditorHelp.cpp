@@ -1990,6 +1990,27 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	// ── The theme's styles ───────────────────────────────────────────────────
+	// A role is one colour; a style is a whole kind of element, and the only
+	// place a hover or a pressed colour can be themed at all.
+	{ "Theme Styles/Add Style", "",
+	  "A style keyed by an element TYPE is followed by every element of that type "
+	  "in the project, without anyone pointing at it. A style with a name of your "
+	  "own (\"Card\", \"Danger\") is followed only by the elements you point at it, "
+	  "which is how a project themes its own components. New values start at the "
+	  "type's defaults, so adding a style changes nothing until you edit one.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Add Value", "",
+	  "Which of the element's properties this style decides. The list is the "
+	  "element's own — whatever a type exposes, a style can answer for, which is "
+	  "why hover and pressed are here and no role vocabulary has them. A property "
+	  "the style does not hold is one the element keeps deciding itself.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Remove Style", "",
+	  "Drops the style. Elements that followed it keep the values they last got "
+	  "rather than turning white — the same rule a renamed role follows, because "
+	  "visible and fixable beats vanished.",
+	  "", "ui#elements" },
 	{ "Theme Editor/Start from", "",
 	  "Replaces every value below with one of the palettes the engine ships: the "
 	  "neutral Default, or Amber, which is the editor's own. They are a starting "
@@ -2016,6 +2037,26 @@ namespace
 	  "How far the shadow is pushed from the shape, x then y. It is where the "
 	  "light is, and one offset for the whole application is what makes a screen "
 	  "look lit rather than assembled.",
+	  "", "ui#elements" },
+	{ "UI Widget/Style", "",
+	  "Which of the theme's styles dresses this element — one decision for its "
+	  "whole look, instead of binding value after value below. The entry named "
+	  "after the element's TYPE is the theme's answer for every element of that "
+	  "type, and it is what a newly placed element follows. A name of your own "
+	  "(\"Card\", \"Danger\") is one you point at deliberately. \"None\" means the "
+	  "theme's styles leave this element alone, which is where every widget "
+	  "authored before styles existed starts.",
+	  "", "ui#elements" },
+	{ "UI Widget/None (this element decides for itself)", "",
+	  "No style. The values below are this element's own and nothing but a role "
+	  "binding will change them.",
+	  "", "ui#elements" },
+	{ "UI Widget/Locked (keep this value)", "",
+	  "Holds this one value against the theme: no role and no style may write it. "
+	  "Different from \"Literal\", which only means nothing is bound — a style "
+	  "answers for properties nobody bound, and this is what keeps it out. It is "
+	  "what a component parameter sets when a page tells a component what colour "
+	  "to be.",
 	  "", "ui#elements" },
 	{ "UI Widget/Literal (type it here)", "",
 	  "Where this colour comes from. \"Literal\" means you typed it and it is "
@@ -3776,6 +3817,7 @@ namespace
 		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
 		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },
 		{ "Theme Editor/",               "editor-ui", "UI Designer", "Theme" },
+		{ "Theme Styles/",               "editor-ui", "UI Designer", "Theme styles" },
 		{ "terrain.",             "editor-landscape", "Landscape Tools", "Terrain brush" },
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },

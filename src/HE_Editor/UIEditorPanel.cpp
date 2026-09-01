@@ -209,22 +209,47 @@ std::string elementName(const UIElement& e)
 const HE::UITheme* g_previewTheme = nullptr;
 HE::UIThemeMode    g_previewMode  = HE::UIThemeMode::Dark;
 
-// A colour the element holds, resolved through the theme when it is bound.
-// Exactly uiApplyTheme's rule for a Color property, asked instead of written.
+// A value the element holds, resolved through the theme when the theme has
+// something to say about it — a role binding, or the element's style.
+//
+// Asked, not written, and asked through the SAME function the runtime writes
+// with (uiThemeValueFor). This used to be a second copy of uiApplyTheme's rule
+// here, which held for exactly as long as there was one rule; a style is a
+// second one, and a designer that knew only the first would show an unthemed
+// button beside a themed preview.
 glm::vec4 themedColor(const UIElement& e, const char* name, const glm::vec4& literal)
 {
-	if (g_previewTheme)
+	HE::UIPropValue v;
+	if (g_previewTheme &&
+	    HE::uiThemeValueFor(e, *g_previewTheme, g_previewMode, name, v) &&
+	    v.type == UIPropType::Color)
+		return v.col;
+	return literal;
+}
+
+// Does the theme decide this property, so that typing a value here would be
+// overwritten the next time the theme or the mode changes? That is the question
+// every read-only field in the details panel is asking, and since styles it is
+// no longer "is a role bound": a style decides properties nobody bound, and a
+// LOCKED property is decided by neither — the lock is what makes it yours.
+bool themeDecides(const UIElement& e, const char* prop)
+{
+	if (!g_previewTheme)
 	{
-		const std::string& role = e.themeRoleFor(name);
-		if (!role.empty())
-		{
-			const HE::UIThemeRole r = HE::uiThemeRoleFromName(role);
-			// A name that no longer resolves leaves the literal alone, the same
-			// way uiApplyTheme does — visible and fixable beats white.
-			if (r != HE::UIThemeRole::COUNT)
-				return g_previewTheme->colorFor(r, g_previewMode);
-		}
+		const std::string& r = e.themeRoleFor(prop);
+		return !r.empty() && r != HE::kUIThemeLiteral;
 	}
+	HE::UIPropValue v;
+	return HE::uiThemeValueFor(e, *g_previewTheme, g_previewMode, prop, v);
+}
+
+float themedFloat(const UIElement& e, const char* name, float literal)
+{
+	HE::UIPropValue v;
+	if (g_previewTheme &&
+	    HE::uiThemeValueFor(e, *g_previewTheme, g_previewMode, name, v) &&
+	    v.type == UIPropType::Float)
+		return v.f;
 	return literal;
 }
 
@@ -290,7 +315,7 @@ std::string propStringOr(const UIElement& e, const char* name, const std::string
 float propFloatOr(const UIElement& e, const char* name, float fb)
 {
 	const UIPropValue v = e.getProp(name);
-	return v.type == UIPropType::Float ? v.f : fb;
+	return themedFloat(e, name, v.type == UIPropType::Float ? v.f : fb);
 }
 bool propBoolOr(const UIElement& e, const char* name, bool fb)
 {
@@ -708,20 +733,39 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 	// drawSurfaceStyle.
 	HE::Ed::Help::Scope helpScope("UI Widget");
 	const std::string bound = e.themeRoleFor(prop);
+	// Is this one of the values the element's STYLE decides? Three states share
+	// the "not bound to a role" case now, and telling them apart is the whole
+	// job of this button: typed here, decided by the style, or locked against
+	// the theme on purpose.
+	const bool locked = bound == HE::kUIThemeLiteral;
+	bool styled = false;
+	if (bound.empty() && g_previewTheme)
+		if (const HE::UIThemeStyle* s = HE::uiThemeStyleFor(e, *g_previewTheme))
+			styled = s->find(prop) != nullptr;
+
 	ImGui::SameLine();
 	ImGui::PushID((prop + "##role").c_str());
-	const char* label = bound.empty() ? "Literal" : bound.c_str();
+	const char* label = locked ? "Locked" : bound.empty() ? (styled ? "Style" : "Literal")
+	                                                      : bound.c_str();
 	if (ImGui::SmallButton(label)) ImGui::OpenPopup("##rolepick");
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip(bound.empty()
-			? "This value is typed in here. Pick a theme entry instead and every\n"
-			  "element bound to it changes together — including light/dark."
-			: "This value comes from the theme. Editing it here would be\n"
-			  "overwritten the next time the theme or the mode changes.");
+		ImGui::SetTooltip(
+			locked ? "This value is held against the theme: no role and no style\n"
+			         "may write it. That is what a component parameter sets."
+			: styled ? "This value comes from the theme's style for this element.\n"
+			           "Editing it here would be overwritten the next time the\n"
+			           "theme or the mode changes."
+			: bound.empty()
+				? "This value is typed in here. Pick a theme entry instead and every\n"
+				  "element bound to it changes together — including light/dark."
+				: "This value comes from the theme. Editing it here would be\n"
+				  "overwritten the next time the theme or the mode changes.");
 	if (ImGui::BeginPopup("##rolepick"))
 	{
 		if (ImGui::Selectable("Literal (type it here)", bound.empty()))
 		{ e.setThemeRole(prop, ""); committed = true; }
+		if (ImGui::Selectable("Locked (keep this value)", locked))
+		{ e.setThemeRole(prop, HE::kUIThemeLiteral); committed = true; }
 		ImGui::Separator();
 		const int n = kind == ThemeBindKind::Color
 			? static_cast<int>(HE::UIThemeRole::COUNT)
@@ -778,7 +822,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	}
 	if (!perCorner)
 	{
-		const bool radiusBound = !n.themeRoleFor("Corner Radius").empty();
+		const bool radiusBound = themeDecides(n, "Corner Radius");
 		float r = n.cornerRadius.x;
 		ImGui::BeginDisabled(radiusBound);
 		if (ImGui::DragFloat("Corner Radius", &r, 0.5f, 0.0f, 10000.0f))
@@ -816,7 +860,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	if (n.borderWidth > 0.0f)
 	{
 		{
-			const bool bound = !n.themeRoleFor("Border Color").empty();
+			const bool bound = themeDecides(n, "Border Color");
 			ImGui::BeginDisabled(bound);
 			edit |= ImGui::ColorEdit4("Border Color", &n.borderColor.r);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -830,7 +874,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	if (n.gradient)
 	{
 		{
-			const bool bound = !n.themeRoleFor("Gradient Color").empty();
+			const bool bound = themeDecides(n, "Gradient Color");
 			ImGui::BeginDisabled(bound);
 			edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -864,7 +908,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	if (n.shadow)
 	{
 		{
-			const bool bound = !n.themeRoleFor("Shadow Color").empty();
+			const bool bound = themeDecides(n, "Shadow Color");
 			ImGui::BeginDisabled(bound);
 			edit |= ImGui::ColorEdit4("Shadow Color", &n.shadowColor.r);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -887,7 +931,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	if (n.innerShadow)
 	{
 		{
-			const bool bound = !n.themeRoleFor("Inner Shadow Color").empty();
+			const bool bound = themeDecides(n, "Inner Shadow Color");
 			ImGui::BeginDisabled(bound);
 			edit |= ImGui::ColorEdit4("Inner Shadow Color", &n.innerShadowColor.r);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -916,9 +960,13 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// A font size can come from the theme's typography levels, the same way a
 		// colour comes from a role — that is what makes "every heading on every
 		// screen" one number instead of forty.
+		// Only a font size can be bound to a ROLE by hand (there is no size step
+		// that means "a slider's minimum"), but any number a STYLE names is
+		// decided by the theme — so the two questions are separate: what may be
+		// bound here, and what is already answered elsewhere.
 		const bool bindable = pd.name == "FontSize";
-		const bool bound = bindable && !e.themeRoleFor(pd.name).empty();
-		float v = e.getProp(pd.name).f;
+		const bool bound = themeDecides(e, pd.name.c_str());
+		float v = themedFloat(e, pd.name.c_str(), e.getProp(pd.name).f);
 		const bool ranged = pd.minV < pd.maxV;
 		ImGui::BeginDisabled(bound);
 		const bool ch = ranged
@@ -964,8 +1012,11 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// A bound colour is the theme's, so the swatch is shown and not edited:
 		// a value that is overwritten on the next mode switch is worse than one
 		// that cannot be typed.
-		const bool bound = !e.themeRoleFor(pd.name).empty();
-		glm::vec4 v = e.getProp(pd.name).col;
+		const bool bound = themeDecides(e, pd.name.c_str());
+		// The swatch shows what the CANVAS shows: the theme's value where the
+		// theme decides, the stored one otherwise. A field that disagrees with
+		// the picture beside it is worse than no field.
+		glm::vec4 v = themedColor(e, pd.name.c_str(), e.getProp(pd.name).col);
 		ImGui::BeginDisabled(bound);
 		if (ImGui::ColorEdit4((pd.name + id).c_str(), &v.x))
 			{ e.setProp(pd.name, UIPropValue::ofColor(v)); edit = true; }
@@ -1596,6 +1647,59 @@ void drawDetails(State& st, AppContext& ctx)
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Opacity");
 
+	// ── Which style of the theme this element follows ────────────────────────
+	// One control for the element's whole look, above the values it decides.
+	// Binding property by property still exists — it is the small button beside
+	// each value — but it is the exception now, not the way you theme a button.
+	ImGui::SeparatorText("Theme");
+	{
+		const std::string typeStyle = n->typeName();
+		const std::string shown = !n->themeStyled ? std::string("None")
+			: n->themeStyle.empty() ? typeStyle : n->themeStyle;
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		const bool open = ImGui::BeginCombo("Style", shown.c_str());
+		if (!open) EditorWidgets::helpForLabel("Style");
+		if (open)
+		{
+			if (ImGui::Selectable("None (this element decides for itself)", !n->themeStyled))
+			{ n->themeStyled = false; committed = true; }
+			// The style named after the element's own TYPE: "dress this like the
+			// project's buttons", and the default for anything newly placed.
+			if (ImGui::Selectable(typeStyle.c_str(),
+			                      n->themeStyled && n->themeStyle.empty()))
+			{ n->themeStyled = true; n->themeStyle.clear(); committed = true; }
+			// Everything the theme calls something else. Their names are the
+			// author's, so the help audit cannot see them — and there is nothing
+			// to explain: the entry is the style's name.
+			if (g_previewTheme)
+			{
+				bool ruled = false;
+				for (const auto& [key, style] : g_previewTheme->styles)
+				{
+					if (key == typeStyle) continue;
+					if (!ruled) { ImGui::Separator(); ruled = true; }
+					if (ImGui::Selectable(key.c_str(),
+					                      n->themeStyled && n->themeStyle == key))
+					{ n->themeStyled = true; n->themeStyle = key; committed = true; }
+				}
+			}
+			ImGui::EndCombo();
+		}
+		const HE::UIThemeStyle* style =
+			g_previewTheme ? HE::uiThemeStyleFor(*n, *g_previewTheme) : nullptr;
+		if (!n->themeStyled)
+			ImGui::TextDisabled("Every value below is this element's own.");
+		else if (style)
+			ImGui::TextDisabled("%d value%s below come%s from the theme.",
+			                    static_cast<int>(style->values.size()),
+			                    style->values.size() == 1 ? "" : "s",
+			                    style->values.size() == 1 ? "s" : "");
+		else
+			// Not an error: pointing an element at a style is half the work, and
+			// the theme editor is where the other half happens.
+			ImGui::TextDisabled("The theme has no style called \"%s\" yet.", shown.c_str());
+	}
+
 	// Type-specific properties (generic, driven by properties()).
 	const std::vector<UIPropDesc> props = n->properties();
 	if (!props.empty())
@@ -1859,7 +1963,12 @@ void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
 	};
-	const glm::vec4 radii = n.cornerRadius * s;
+	// Read through the theme like every colour here: a style may decide the
+	// rounding, and "Corner Radius" is one value for all four corners, which is
+	// what the property means when it is bound (uiApplyTheme writes all four).
+	const float themedR = themedFloat(n, "Corner Radius", n.cornerRadius.x);
+	const glm::vec4 radii =
+		(themedR == n.cornerRadius.x ? n.cornerRadius : glm::vec4(themedR)) * s;
 	// The drop shadow, under everything this element draws. ImDrawList has no
 	// soft edge, so it is approximated by a handful of nested shapes at rising
 	// alpha — the same picture, out of coarser material.

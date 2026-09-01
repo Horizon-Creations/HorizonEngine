@@ -563,6 +563,75 @@ TEST_CASE("Theme: styles round-trip, and a theme without any saves as before")
     CHECK(back.styleFor("Nothing") == nullptr);
 }
 
+// The end-to-end one. Fields changing is not proof: this asks what comes out of
+// the extractor, which is what the backends draw — and it goes through the
+// runtime's own path (createWidget applies the theme, setTheme re-applies it).
+TEST_CASE("Theme: a style reaches the screen, and a second theme redresses it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 200.0f; tree.canvasHeight = 100.0f;
+    tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int button = tree.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *tree.find(button);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+        // Nothing is bound by hand. The element only says "I am a Button".
+        e.themeStyled = true;
+        // A deliberately wrong literal: if the style is not applied, THIS is what
+        // the test would see, so the assertion cannot pass by accident.
+        e.setProp("Normal Color", HE::UIPropValue::ofColor({ 1.0f, 0.0f, 1.0f, 1.0f }));
+    }
+    UIWidgetAsset a;
+    a.treeJson = HE::uiWidgetTreeToJson(tree);
+    a.path     = "mem://styled.hasset";
+    cm.registerWidget(std::move(a));
+
+    const glm::vec4 light{ 0.80f, 0.80f, 0.85f, 1.0f };
+    const glm::vec4 dark { 0.15f, 0.16f, 0.20f, 1.0f };
+    HE::UITheme t;
+    {
+        HE::UIThemeStyleValue v;
+        v.color[static_cast<int>(HE::UIThemeMode::Light)] = light;
+        v.color[static_cast<int>(HE::UIThemeMode::Dark)]  = dark;
+        t.styleMut("Button").set("Normal Color", v);
+    }
+
+    WidgetManager wm;
+    wm.setTheme(t);
+    wm.setThemePreference(HE::UIThemePreference::Light);
+    const int id = wm.createWidget(cm, "mem://styled.hasset");
+    REQUIRE(id != 0);
+    wm.showWidget(id);
+
+    auto surfaceColor = [&]
+    {
+        std::vector<UIRenderObject> out;
+        wm.extract(200.0f, 100.0f, out);
+        REQUIRE_FALSE(out.empty());
+        return out[0].color;
+    };
+    CHECK(surfaceColor() == light);
+    wm.setThemePreference(HE::UIThemePreference::Dark);
+    CHECK(surfaceColor() == dark);
+
+    // A second theme with the same style key: the application looks different
+    // without a single widget being edited, and without anything being bound.
+    const glm::vec4 other{ 0.60f, 0.30f, 0.10f, 1.0f };
+    HE::UITheme t2;
+    {
+        HE::UIThemeStyleValue v;
+        v.color[static_cast<int>(HE::UIThemeMode::Light)] = other;
+        v.color[static_cast<int>(HE::UIThemeMode::Dark)]  = other;
+        t2.styleMut("Button").set("Normal Color", v);
+    }
+    wm.setTheme(t2);
+    CHECK(surfaceColor() == other);
+}
+
 TEST_CASE("Theme: a widget authored before styles keeps the colours somebody typed")
 {
     // The whole compatibility question in one test. An element READ from a file

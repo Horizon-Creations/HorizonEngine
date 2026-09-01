@@ -10,6 +10,7 @@
 #include <ContentManager/Assets.h>
 
 #include <Types/Enums.h>
+#include <UIWidget/UIElement.h>    // makeUIElement, uiBaseProperties — a style's keys
 #include <UIWidget/UITheme.h>
 
 #include <imgui.h>
@@ -30,6 +31,10 @@ struct PanelState
 	HE::UUID    assetId;
 	HE::UITheme theme;
 	std::string lastSaveError;
+	// Scratch buffer for "add a style with a name of my own". Never the theme
+	// itself: an InputText writes on every keystroke, so typing straight into
+	// the style list would leave a style called "C" behind on the way to "Card".
+	std::string newStyleName;
 };
 AssetPanelState<PanelState> s_states;
 
@@ -76,6 +81,198 @@ void roleRow(PanelState& st, HE::UIThemeRole role)
 		st.dirty = true;
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s — Dark", name);
 	ImGui::PopID();
+}
+
+// ── Styles ───────────────────────────────────────────────────────────────────
+// A role is one colour and an element binds to it one value at a time. A style
+// is the answer for a whole KIND of element at once, keyed by the property names
+// the element already has — which is the only way "hover" and "pressed" can be
+// themed at all: there is no role called "the accent, but hovered".
+//
+// Everything below is generated from the element types themselves
+// (makeUIElement + its property table), so a new widget type shows up here with
+// its own knobs and no line of code in this file.
+
+// The colour and number properties of one element type, base ones included. The
+// base list first, because "Corner Radius" and "Border Color" are what most
+// styles are made of and they are the same on every type.
+std::vector<HE::UIPropDesc> styleableProps(HE::UIWidgetType type)
+{
+	std::vector<HE::UIPropDesc> out;
+	auto take = [&out](const std::vector<HE::UIPropDesc>& src)
+	{
+		for (const HE::UIPropDesc& p : src)
+			if (p.type == HE::UIPropType::Color || p.type == HE::UIPropType::Float)
+			{
+				bool seen = false;
+				for (const HE::UIPropDesc& have : out) if (have.name == p.name) seen = true;
+				if (!seen) out.push_back(p);
+			}
+	};
+	take(HE::uiBaseProperties());
+	if (const std::unique_ptr<HE::UIElement> e = HE::makeUIElement(type)) take(e->properties());
+	return out;
+}
+
+// What a property's value is on a freshly made element of that type — what a
+// newly added style entry starts at, so switching a type over to the theme
+// changes nothing until somebody actually edits a value.
+bool defaultValueOf(HE::UIWidgetType type, const std::string& prop, HE::UIPropValue& out)
+{
+	const std::unique_ptr<HE::UIElement> e = HE::makeUIElement(type);
+	if (!e) return false;
+	out = e->getPropAny(prop);
+	return out.type == HE::UIPropType::Color || out.type == HE::UIPropType::Float;
+}
+
+// Is this style key the name of an element type? Type-keyed styles are followed
+// by every element of that type without being asked; free names are pointed at
+// deliberately, and the two are worth telling apart on screen.
+bool isTypeKey(const std::string& key)
+{
+	for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+		if (key == HE::uiWidgetTypeName(t)) return true;
+	return false;
+}
+
+void styleValueRow(PanelState& st, const std::string& key, const std::string& prop,
+                   HE::UIThemeStyleValue& v, std::string& removeProp)
+{
+	ImGui::PushID(prop.c_str());
+	ImGui::TextUnformatted(prop.c_str());
+	ImGui::SameLine(180.0f);
+	if (v.isColor)
+	{
+		constexpr ImGuiColorEditFlags kFlags =
+			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaPreviewHalf |
+			ImGuiColorEditFlags_AlphaBar;
+		if (ImGui::ColorEdit4("##light",
+		        &v.color[static_cast<int>(HE::UIThemeMode::Light)].x, kFlags))
+			st.dirty = true;
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s — Light", prop.c_str());
+		ImGui::SameLine();
+		if (ImGui::ColorEdit4("##dark",
+		        &v.color[static_cast<int>(HE::UIThemeMode::Dark)].x, kFlags))
+			st.dirty = true;
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s — Dark", prop.c_str());
+	}
+	else
+	{
+		// One value, not two: a corner radius is not lighter in light mode.
+		ImGui::SetNextItemWidth(110.0f);
+		if (ImGui::DragFloat("##num", &v.number, 0.5f)) st.dirty = true;
+	}
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("x")) removeProp = prop;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Take this value out of the style.\nThe element keeps whatever it has.");
+	ImGui::PopID();
+	(void)key;
+}
+
+void stylesSection(PanelState& st)
+{
+	HE::Ed::Help::Scope helpScope("Theme Styles");
+	ImGui::Spacing();
+	ImGui::SeparatorText("Styles");
+	ImGui::TextDisabled("What a whole kind of element looks like. An element that follows a");
+	ImGui::TextDisabled("style takes every value here in one decision — hover and pressed");
+	ImGui::TextDisabled("included, which no single role can name.");
+
+	if (EditorWidgets::button("Add Style", ImVec2(120.0f, 0.0f)))
+		ImGui::OpenPopup("##addstyle");
+	if (ImGui::BeginPopup("##addstyle"))
+	{
+		ImGui::TextDisabled("For an element type");
+		for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+		{
+			const char* name = HE::uiWidgetTypeName(t);
+			if (st.theme.styleFor(name)) continue;      // it already has one
+			if (ImGui::Selectable(name))
+			{
+				st.theme.styleMut(name);
+				st.dirty = true;
+			}
+		}
+		ImGui::Separator();
+		ImGui::TextDisabled("Or a name of your own");
+		ImGui::SetNextItemWidth(180.0f);
+		// Its own buffer, not the theme: an InputText writes on every keystroke,
+		// so typing into the style list directly would create a style called "C"
+		// on the way to "Card".
+		if (ImGui::InputText("##newstyle", &st.newStyleName,
+		                     ImGuiInputTextFlags_EnterReturnsTrue) &&
+		    !st.newStyleName.empty())
+		{
+			st.theme.styleMut(st.newStyleName);
+			st.newStyleName.clear();
+			st.dirty = true;
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::TextDisabled("(type a name, then Enter)");
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("Add Style");
+
+	std::string removeStyle;
+	for (auto& [key, style] : st.theme.styles)
+	{
+		ImGui::PushID(key.c_str());
+		const std::string header = isTypeKey(key)
+			? key + "  (every " + key + ")" : key + "  (by name)";
+		if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			std::string removeProp;
+			for (auto& [prop, v] : style.values) styleValueRow(st, key, prop, v, removeProp);
+			if (!removeProp.empty()) { style.erase(removeProp); st.dirty = true; }
+
+			if (EditorWidgets::smallButton("Add Value")) ImGui::OpenPopup("##addval");
+			if (ImGui::BeginPopup("##addval"))
+			{
+				// A type-keyed style is offered its own type's properties. A
+				// named one may dress anything, so it gets one submenu per type
+				// — a flat list of every property in the engine is a list nobody
+				// reads.
+				auto offer = [&](HE::UIWidgetType t)
+				{
+					for (const HE::UIPropDesc& pd : styleableProps(t))
+					{
+						if (style.find(pd.name)) continue;
+						if (!ImGui::Selectable(pd.name.c_str())) continue;
+						HE::UIPropValue def;
+						HE::UIThemeStyleValue v;
+						if (defaultValueOf(t, pd.name, def))
+						{
+							v.isColor = def.type == HE::UIPropType::Color;
+							v.number  = def.f;
+							for (int m = 0; m < static_cast<int>(HE::UIThemeMode::COUNT); ++m)
+								v.color[m] = def.col;
+						}
+						style.set(pd.name, v);
+						st.dirty = true;
+					}
+				};
+				if (isTypeKey(key)) offer(HE::uiWidgetTypeFromName(key));
+				else
+					for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+						if (ImGui::BeginMenu(HE::uiWidgetTypeName(t)))
+						{ offer(t); ImGui::EndMenu(); }
+				ImGui::EndPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::dangerSmallButton("Remove Style")) removeStyle = key;
+		}
+		ImGui::PopID();
+	}
+	if (!removeStyle.empty())
+	{
+		// Elements pointing at it keep the values they last got — the same rule a
+		// renamed role follows. Nothing is repainted white.
+		st.theme.eraseStyle(removeStyle);
+		st.dirty = true;
+	}
+	if (st.theme.styles.empty())
+		ImGui::TextDisabled("(no styles yet — every element decides for itself)");
 }
 
 } // namespace
@@ -282,6 +479,8 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		{ st.theme.shadow[e].offsetX = off[0]; st.theme.shadow[e].offsetY = off[1]; st.dirty = true; }
 		ImGui::PopID();
 	}
+
+	stylesSection(st);
 
 	ImGui::End();
 }
