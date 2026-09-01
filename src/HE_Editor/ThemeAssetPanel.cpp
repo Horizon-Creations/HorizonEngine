@@ -193,12 +193,38 @@ HE::UIThemeStyleValue seedValue(HE::UIWidgetType t, const std::string& prop)
 	return v;
 }
 
-// The values of one style, plus the three things one can do to it. `owner` is
-// the type whose properties are offered — COUNT for a style with a name of its
-// own, which may dress anything and therefore gets one submenu per type.
+// Give every element type a style holding every value it has, at that type's own
+// defaults. Called when a theme is opened and after one is replaced.
+//
+// Eagerly, not on demand: a theme's job is to answer "what does a Button look
+// like" for the whole project, and an editor that starts empty makes an author
+// add a style and then thirteen values before answering anything. Since every
+// value starts where the type itself starts, a freshly seeded theme changes
+// nothing on screen — it is a form to fill in, not an edit.
+//
+// Existing values are left exactly as they are, so this is safe over a theme
+// somebody has already worked on, and it is what makes a NEW element type appear
+// in every theme that was authored before it existed.
+void ensureTypeStyles(HE::UITheme& theme)
+{
+	for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+	{
+		HE::UIThemeStyle& s = theme.styleMut(HE::uiWidgetTypeName(t));
+		for (const HE::UIPropDesc& pd : styleableProps(t))
+			if (!s.find(pd.name)) s.set(pd.name, seedValue(t, pd.name));
+	}
+}
+
+// The values of one style. `owner` is the type whose properties it decides —
+// only meaningful when `ownerIsType`, since a style with a name of its own may
+// dress anything and therefore gets one submenu per type.
+//
+// A type's own style is complete by construction (ensureTypeStyles), so it needs
+// no buttons at all: the list IS the style. A VARIANT is the opposite — it says
+// only what differs — so that one gets Add Value and Remove.
 // Returns true when the caller should delete this style.
 bool styleBody(PanelState& st, const std::string& key, HE::UIThemeStyle& style,
-               HE::UIWidgetType owner, bool ownerIsType)
+               HE::UIWidgetType owner, bool ownerIsType, bool isBase)
 {
 	// Its own scope, though the only caller already pushes the same one: a helper
 	// that names its scope is a helper the coverage audit can place, and one that
@@ -207,11 +233,38 @@ bool styleBody(PanelState& st, const std::string& key, HE::UIThemeStyle& style,
 	bool remove = false;
 	ImGui::PushID(key.c_str());
 
+	// Colours first, as a block with its two columns titled, then the numbers.
+	// The property table's order is the order the ELEMENT wants (its own fields
+	// after the shared ones), which puts a rounding between two colours and makes
+	// the two swatch columns restart every few rows. What an author is doing here
+	// is comparing colours down a column, so the columns have to be columns.
 	std::string removeProp;
-	for (auto& [prop, v] : style.values) styleValueRow(st, key, prop, v, removeProp);
+	bool anyColor = false;
+	for (const auto& [prop, v] : style.values) if (v.isColor) anyColor = true;
+	if (anyColor)
+	{
+		ImGui::TextDisabled("Colour");
+		ImGui::SameLine(180.0f); ImGui::TextDisabled("Light");
+		ImGui::SameLine();       ImGui::TextDisabled("Dark");
+	}
+	for (auto& [prop, v] : style.values)
+		if (v.isColor) styleValueRow(st, key, prop, v, removeProp);
+	bool anyNumber = false;
+	for (const auto& [prop, v] : style.values) if (!v.isColor) anyNumber = true;
+	if (anyNumber)
+	{
+		if (anyColor) ImGui::Spacing();
+		ImGui::TextDisabled("Number");
+	}
+	for (auto& [prop, v] : style.values)
+		if (!v.isColor) styleValueRow(st, key, prop, v, removeProp);
 	if (!removeProp.empty()) { style.erase(removeProp); st.dirty = true; }
 	if (style.values.empty())
-		ImGui::TextDisabled("(decides nothing yet)");
+		ImGui::TextDisabled("(decides nothing yet — Add Value)");
+
+	// A type's own style holds everything that type has, always, so there is
+	// nothing to add and nothing to remove. Only a variant needs the buttons.
+	if (isBase) { ImGui::PopID(); return false; }
 
 	auto offer = [&](HE::UIWidgetType t)
 	{
@@ -238,22 +291,6 @@ bool styleBody(PanelState& st, const std::string& key, HE::UIThemeStyle& style,
 	}
 	else EditorWidgets::helpForLabel("Add Value");
 
-	// Everything at once, for the type this style belongs to. Adding thirteen
-	// values one popup at a time is the per-value work styles exist to end, and
-	// since every entry starts at the type's own default, taking all of them
-	// changes nothing until an author edits one.
-	if (ownerIsType)
-	{
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Add Every Value"))
-		{
-			for (const HE::UIPropDesc& pd : styleableProps(owner))
-				if (!style.find(pd.name)) style.set(pd.name, seedValue(owner, pd.name));
-			st.dirty = true;
-		}
-		EditorWidgets::helpForLabel("Add Every Value");
-	}
-
 	ImGui::SameLine();
 	if (EditorWidgets::dangerSmallButton("Remove Style")) remove = true;
 	EditorWidgets::helpForLabel("Remove Style");
@@ -267,53 +304,46 @@ void stylesSection(PanelState& st)
 	HE::Ed::Help::Scope helpScope("Theme Styles");
 	ImGui::Spacing();
 	ImGui::SeparatorText("Styles");
-	ImGui::TextDisabled("What a whole kind of element looks like. Every element type is here,");
-	ImGui::TextDisabled("each with its own style and as many variants as you want — a variant");
-	ImGui::TextDisabled("is a TAG an element carries, so \"Button.success\" is a button that");
-	ImGui::TextDisabled("takes everything Button says and then the green on top.");
+	ImGui::TextDisabled("What a whole kind of element looks like. Every element type is here");
+	ImGui::TextDisabled("with every value it has — set them once and every element of that");
+	ImGui::TextDisabled("type follows. A VARIANT is a tag an element carries, so");
+	ImGui::TextDisabled("\"Button.success\" is a button that takes everything Button says");
+	ImGui::TextDisabled("and then the green on top.");
 
 	std::string removeStyle;
 
-	// ── Every element type, whether it is styled or not ──────────────────────
-	// Listed in full rather than hidden behind an Add menu: "which types can I
-	// theme" is answered by looking, and a type with no style says so where its
-	// style would be.
+	// ── Every element type, complete ─────────────────────────────────────────
+	// ensureTypeStyles has already given each one every value it has, so this is
+	// a list to edit rather than a list to build. "Which types can I theme" is
+	// answered by looking.
 	for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
 	{
 		const std::string type = HE::uiWidgetTypeName(t);
 		const std::vector<std::string> tags = st.theme.tagsFor(type);
-		HE::UIThemeStyle* base = const_cast<HE::UIThemeStyle*>(st.theme.styleFor(type));
+		HE::UIThemeStyle& base = st.theme.styleMut(type);
 		const int variants = static_cast<int>(tags.size());
 
-		// The header says at a glance what is already decided here, so a folded
-		// list is still readable: "Button (7, 2 variants)".
-		std::string header = type;
-		if (base || variants)
-		{
-			header += "  (";
-			header += base ? std::to_string(base->values.size()) + " values" : "no style";
-			if (variants) header += ", " + std::to_string(variants) + " variant" +
-			                        (variants == 1 ? "" : "s");
-			header += ")";
-		}
+		// The header says at a glance what is here, so a folded list is still
+		// readable — and it ends in "###type" so that the ID does NOT depend on
+		// the numbers in it. ImGui keys a header's open state on its label, so a
+		// count in the label means adding a value folds the section you added it
+		// to, which is exactly what it did.
+		std::string header = type + "  (" + std::to_string(base.values.size()) + " values";
+		if (variants) header += ", " + std::to_string(variants) + " variant" +
+		                        (variants == 1 ? "" : "s");
+		header += ")###" + type;
+
 		ImGui::PushID(type.c_str());
 		if (ImGui::CollapsingHeader(header.c_str()))
 		{
-			if (base) { if (styleBody(st, type, *base, t, true)) removeStyle = type; }
-			else
-			{
-				ImGui::TextDisabled("Every %s decides for itself.", type.c_str());
-				if (EditorWidgets::smallButton("Add Style"))
-				{ st.theme.styleMut(type); st.dirty = true; }
-				EditorWidgets::helpForLabel("Add Style");
-			}
+			styleBody(st, type, base, t, true, /*isBase=*/true);
 
 			for (const std::string& tag : tags)
 			{
 				const std::string key = HE::uiThemeSelector(type, tag);
 				ImGui::SeparatorText(key.c_str());
 				HE::UIThemeStyle* v = const_cast<HE::UIThemeStyle*>(st.theme.styleFor(key));
-				if (v && styleBody(st, key, *v, t, true)) removeStyle = key;
+				if (v && styleBody(st, key, *v, t, true, /*isBase=*/false)) removeStyle = key;
 			}
 
 			ImGui::Spacing();
@@ -353,9 +383,12 @@ void stylesSection(PanelState& st)
 		if (isTypeKey(HE::uiThemeSelectorType(key))) continue;
 		++named;
 		ImGui::PushID(key.c_str());
+		// "###key" for the same reason the type headers have it: the count in the
+		// label must not be part of the ID, or adding a value folds the section.
 		if (ImGui::CollapsingHeader((key + "  (" + std::to_string(style.values.size()) +
-		                             " values)").c_str()))
-			if (styleBody(st, key, style, HE::UIWidgetType::Panel, false)) removeStyle = key;
+		                             " values)###" + key).c_str()))
+			if (styleBody(st, key, style, HE::UIWidgetType::Panel, false, /*isBase=*/false))
+				removeStyle = key;
 		ImGui::PopID();
 	}
 	if (named == 0) ImGui::TextDisabled("(none yet)");
@@ -455,6 +488,12 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		if (const ThemeAsset* a = ctx.contentManager->getTheme(st.assetId))
 			HE::uiThemeFromJson(a->json, st.theme);
 		st.theme.name = std::filesystem::path(assetPath).stem().string();
+		// Every element type gets its full set of values, here rather than in the
+		// format: a theme file written before a type existed is completed on the
+		// way in, and nothing on screen changes because each new value starts at
+		// that type's own default. The theme is only WRITTEN on save, so opening
+		// one and closing it again leaves the file alone.
+		ensureTypeStyles(st.theme);
 		st.loaded = true;
 	}
 
@@ -559,6 +598,10 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					const std::string keep = st.theme.name;
 					st.theme = *preset;
 					st.theme.name = keep;
+					// A palette answers for the types it cares about; the rest are
+					// filled in at their defaults, so the list below stays complete
+					// whichever one is taken.
+					ensureTypeStyles(st.theme);
 					st.dirty = true;
 				}
 			ImGui::EndCombo();
@@ -568,12 +611,35 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 	ImGui::Spacing();
 
-	ImGui::SeparatorText("Colours");
-	ImGui::TextDisabled("Role");
+	// ── Globals ──────────────────────────────────────────────────────────────
+	// What a colour MEANS, rather than what any one control looks like. Since
+	// every element type now carries its own style below, the nine roles are no
+	// longer where an interface is coloured — three of them are still worth
+	// having in one place, because "this went wrong" has to look the same on a
+	// label, a banner and a border, and no per-type style can say that.
+	ImGui::SeparatorText("Globals");
+	ImGui::TextDisabled("Meaning");
 	ImGui::SameLine(140.0f); ImGui::TextDisabled("Light");
 	ImGui::SameLine();       ImGui::TextDisabled("Dark");
-	for (int r = 0; r < static_cast<int>(HE::UIThemeRole::COUNT); ++r)
-		roleRow(st, static_cast<HE::UIThemeRole>(r));
+	roleRow(st, HE::UIThemeRole::Success);
+	roleRow(st, HE::UIThemeRole::Warning);
+	roleRow(st, HE::UIThemeRole::Error);
+	roleRow(st, HE::UIThemeRole::Accent);
+
+	// The remaining five are still a stored format: an element bound to
+	// "Surface" by hand resolves against this and would otherwise hold a value
+	// nobody can reach. Folded away rather than deleted, because a value with no
+	// editor is worse than one out of the way.
+	if (ImGui::CollapsingHeader("Surfaces and text (bound by hand)"))
+	{
+		ImGui::TextDisabled("Only elements bound to one of these by name use them.");
+		ImGui::TextDisabled("What a Panel or a Text looks like is its style, below.");
+		roleRow(st, HE::UIThemeRole::Background);
+		roleRow(st, HE::UIThemeRole::Surface);
+		roleRow(st, HE::UIThemeRole::Border);
+		roleRow(st, HE::UIThemeRole::Text);
+		roleRow(st, HE::UIThemeRole::MutedText);
+	}
 
 	ImGui::Spacing();
 	ImGui::SeparatorText("Sizes");

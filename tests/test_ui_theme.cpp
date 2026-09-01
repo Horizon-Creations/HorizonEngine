@@ -787,6 +787,52 @@ TEST_CASE("Theme: a widget may name its own theme, and the application's does no
     CHECK(HE::uiWidgetTreeToJson(plain).find("themeAsset") == std::string::npos);
 }
 
+// The shipped palette is what an author starts from, so it has to be a worked
+// example of the model and not just nine colours: types dressed, a variant to
+// copy, and all of it surviving a save.
+TEST_CASE("Theme: the shipped Amber palette dresses the element types, variants included")
+{
+    const HE::UITheme& amber = HE::uiAmberTheme();
+    const HE::UIThemeStyle* button = amber.styleFor("Button");
+    REQUIRE(button);
+    CHECK(button->find("Normal Color"));
+    CHECK(button->find("Hovered Color"));
+    CHECK(button->find("Pressed Color"));
+    // A number and a colour in the same style, which is the case the two-kinds
+    // storage exists for.
+    const HE::UIThemeStyleValue* radius = button->find("Corner Radius");
+    REQUIRE(radius);
+    CHECK_FALSE(radius->isColor);
+
+    // The variant an application always ends up needing, shipped so there is
+    // something to copy rather than a mechanism to discover.
+    const HE::UIThemeStyle* primary = amber.styleFor("Button.primary");
+    REQUIRE(primary);
+    CHECK(primary->find("Normal Color"));
+    // It says only what differs: the rounding comes from the base.
+    CHECK_FALSE(primary->find("Corner Radius"));
+    const std::vector<std::string> tags = amber.tagsFor("Button");
+    CHECK(tags.size() >= 2);
+
+    // Light and dark really differ — a palette whose two modes are the same
+    // colour is a palette that was filled in by a loop.
+    const HE::UIThemeStyleValue* normal = button->find("Normal Color");
+    REQUIRE(normal);
+    CHECK(normal->color[static_cast<int>(HE::UIThemeMode::Light)] !=
+          normal->color[static_cast<int>(HE::UIThemeMode::Dark)]);
+
+    HE::UITheme back;
+    REQUIRE(HE::uiThemeFromJson(HE::uiThemeToJson(amber), back));
+    CHECK(back.styles.size() == amber.styles.size());
+    REQUIRE(back.styleFor("Button.primary"));
+    CHECK(back.styleFor("Button.primary")->values.size() == primary->values.size());
+
+    // The default palette stays empty of styles: it is the "nothing decided yet"
+    // starting point, and seeding it would repaint every widget that follows a
+    // type without anybody asking.
+    CHECK(HE::uiDefaultTheme().styles.empty());
+}
+
 TEST_CASE("Theme: a widget authored before styles keeps the colours somebody typed")
 {
     // The whole compatibility question in one test. An element READ from a file

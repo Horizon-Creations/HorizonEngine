@@ -1993,11 +1993,6 @@ namespace
 	// ── The theme's styles ───────────────────────────────────────────────────
 	// A role is one colour; a style is a whole kind of element, and the only
 	// place a hover or a pressed colour can be themed at all.
-	{ "Theme Styles/Add Style", "",
-	  "Gives this element type a style, which every element of that type follows "
-	  "without anyone pointing at it. New values start at the type's own defaults, "
-	  "so adding a style changes nothing until you edit one.",
-	  "", "ui#elements" },
 	{ "Theme Styles/Add Variant", "",
 	  "A named KIND of this type — \"success\", \"danger\", \"ghost\" — that an "
 	  "element opts into with its Tag. It layers ON TOP of the plain type's style: "
@@ -2012,21 +2007,17 @@ namespace
 	  "round a Panel and a Button the same way without either of them stopping "
 	  "being what it is.",
 	  "", "ui#elements" },
-	{ "Theme Styles/Add Every Value", "",
-	  "Takes every colour and number this element type has into the style at once, "
-	  "each at the type's own default. The fast way to start: adding thirteen "
-	  "values through a popup one at a time is the per-value work styles exist to "
-	  "end, and since nothing changes until you edit one, there is no cost to "
-	  "taking them all and deleting what you do not care about.",
-	  "", "ui#elements" },
 	{ "Theme Styles/Add Value", "",
-	  "Which of the element's properties this style decides. The list is the "
-	  "element's own — whatever a type exposes, a style can answer for, which is "
-	  "why hover and pressed are here and no role vocabulary has them. A property "
-	  "the style does not hold is one the element keeps deciding itself.",
+	  "Which further property this VARIANT decides. A variant holds only what is "
+	  "different about it — everything it does not name comes from the plain "
+	  "type's style above, which already holds every value that type has. The "
+	  "list is the element's own: whatever a type exposes, a style can answer "
+	  "for, which is why hover and pressed are here and no role vocabulary has "
+	  "them.",
 	  "", "ui#elements" },
 	{ "Theme Styles/Remove Style", "",
-	  "Drops the style. Elements that followed it keep the values they last got "
+	  "Drops this variant or named style. Elements that followed it keep the "
+	  "values they last got "
 	  "rather than turning white — the same rule a renamed role follows, because "
 	  "visible and fixable beats vanished.",
 	  "", "ui#elements" },

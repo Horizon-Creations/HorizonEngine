@@ -179,6 +179,101 @@ const UITheme& uiAmberTheme()
         set(UIThemeRole::Text,       { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.94f, 0.92f, 0.88f, 1.0f });
         set(UIThemeRole::MutedText,  { 0.47f, 0.44f, 0.38f, 1.0f }, { 0.62f, 0.59f, 0.52f, 1.0f });
         set(UIThemeRole::Accent,     { 0.85f, 0.55f, 0.12f, 1.0f }, { 1.00f, 0.67f, 0.16f, 1.0f });
+
+        // ── …and what each KIND of element looks like in it ──────────────────
+        // The roles above are the palette; these are the answers. A theme that
+        // stops at nine colours leaves every author to decide for the twentieth
+        // time what a hovered button is, and "the surface colour, but lighter"
+        // is not something a role vocabulary can say.
+        //
+        // Written out with property names rather than derived from the element
+        // types, on purpose: those names are an on-disk format either way, and a
+        // palette should read as a list of decisions, not as a program.
+        auto col = [](glm::vec4 light, glm::vec4 dark)
+        {
+            UIThemeStyleValue v;
+            v.color[static_cast<int>(UIThemeMode::Light)] = light;
+            v.color[static_cast<int>(UIThemeMode::Dark)]  = dark;
+            return v;
+        };
+        auto num = [](float f)
+        {
+            UIThemeStyleValue v; v.isColor = false; v.number = f; return v;
+        };
+        const glm::vec4 surfaceL{ 1.00f, 0.99f, 0.96f, 1.0f }, surfaceD{ 0.14f, 0.13f, 0.11f, 1.0f };
+        const glm::vec4 textL   { 0.12f, 0.11f, 0.09f, 1.0f }, textD   { 0.94f, 0.92f, 0.88f, 1.0f };
+        const glm::vec4 mutedL  { 0.47f, 0.44f, 0.38f, 1.0f }, mutedD  { 0.62f, 0.59f, 0.52f, 1.0f };
+        const glm::vec4 accentL { 0.85f, 0.55f, 0.12f, 1.0f }, accentD { 1.00f, 0.67f, 0.16f, 1.0f };
+        const glm::vec4 borderL { 0.78f, 0.73f, 0.64f, 1.0f }, borderD { 0.30f, 0.27f, 0.22f, 1.0f };
+        const glm::vec4 fieldL  { 0.97f, 0.96f, 0.93f, 1.0f }, fieldD  { 0.10f, 0.09f, 0.08f, 1.0f };
+
+        UIThemeStyle& button = d.styleMut("Button");
+        button.set("Normal Color",  col({ 0.91f, 0.88f, 0.83f, 1.0f }, { 0.22f, 0.20f, 0.17f, 1.0f }));
+        button.set("Hovered Color", col({ 0.96f, 0.91f, 0.83f, 1.0f }, { 0.31f, 0.27f, 0.21f, 1.0f }));
+        button.set("Pressed Color", col({ 0.85f, 0.78f, 0.68f, 1.0f }, { 0.40f, 0.30f, 0.16f, 1.0f }));
+        button.set("Border Color",  col(borderL, borderD));
+        button.set("Corner Radius", num(6.0f));
+        button.set("Border Width",  num(1.0f));
+
+        // The variant every application ends up needing, and the reason tags
+        // exist: it says what is DIFFERENT about a primary button and inherits
+        // the rest — rounding, border, the pressed feel — from the base above.
+        UIThemeStyle& primary = d.styleMut(uiThemeSelector("Button", "primary"));
+        primary.set("Normal Color",  col(accentL, accentD));
+        primary.set("Hovered Color", col({ 0.93f, 0.63f, 0.18f, 1.0f }, { 1.00f, 0.75f, 0.30f, 1.0f }));
+        primary.set("Pressed Color", col({ 0.74f, 0.46f, 0.08f, 1.0f }, { 0.86f, 0.56f, 0.10f, 1.0f }));
+
+        UIThemeStyle& danger = d.styleMut(uiThemeSelector("Button", "danger"));
+        danger.set("Normal Color",  col({ 0.82f, 0.25f, 0.22f, 1.0f }, { 0.72f, 0.24f, 0.22f, 1.0f }));
+        danger.set("Hovered Color", col({ 0.90f, 0.33f, 0.29f, 1.0f }, { 0.84f, 0.31f, 0.28f, 1.0f }));
+        danger.set("Pressed Color", col({ 0.68f, 0.18f, 0.16f, 1.0f }, { 0.58f, 0.17f, 0.15f, 1.0f }));
+
+        d.styleMut("Panel").set("Color", col(surfaceL, surfaceD));
+        d.styleMut("Panel").set("Corner Radius", num(8.0f));
+        d.styleMut("Text").set("Color", col(textL, textD));
+        d.styleMut(uiThemeSelector("Text", "muted")).set("Color", col(mutedL, mutedD));
+
+        UIThemeStyle& check = d.styleMut("CheckBox");
+        check.set("Box Color",   col(fieldL, fieldD));
+        check.set("Check Color", col(accentL, accentD));
+        check.set("Text Color",  col(textL, textD));
+
+        UIThemeStyle& slider = d.styleMut("Slider");
+        slider.set("Track Color",  col({ 0.86f, 0.83f, 0.78f, 1.0f }, { 0.22f, 0.20f, 0.17f, 1.0f }));
+        slider.set("Fill Color",   col(accentL, accentD));
+        slider.set("Handle Color", col({ 0.99f, 0.98f, 0.95f, 1.0f }, { 0.86f, 0.83f, 0.78f, 1.0f }));
+
+        UIThemeStyle& bar = d.styleMut("ProgressBar");
+        bar.set("Back Color", col({ 0.86f, 0.83f, 0.78f, 1.0f }, { 0.22f, 0.20f, 0.17f, 1.0f }));
+        bar.set("Fill Color", col(accentL, accentD));
+
+        UIThemeStyle& input = d.styleMut("TextInput");
+        input.set("Back Color",      col(fieldL, fieldD));
+        input.set("Text Color",      col(textL, textD));
+        input.set("Selection Color", col({ 0.95f, 0.78f, 0.45f, 1.0f }, { 0.45f, 0.32f, 0.10f, 1.0f }));
+        input.set("Border Color",    col(borderL, borderD));
+        input.set("Corner Radius",   num(4.0f));
+        input.set("Border Width",    num(1.0f));
+
+        UIThemeStyle& combo = d.styleMut("ComboBox");
+        combo.set("Back Color",      col(fieldL, fieldD));
+        combo.set("Text Color",      col(textL, textD));
+        combo.set("Highlight Color", col(accentL, accentD));
+
+        UIThemeStyle& tabs = d.styleMut("TabBox");
+        tabs.set("Strip Color",      col({ 0.90f, 0.87f, 0.82f, 1.0f }, { 0.11f, 0.10f, 0.09f, 1.0f }));
+        tabs.set("Tab Color",        col({ 0.85f, 0.82f, 0.77f, 1.0f }, { 0.18f, 0.17f, 0.14f, 1.0f }));
+        tabs.set("Active Tab Color", col(surfaceL, surfaceD));
+        tabs.set("Text Color",       col(textL, textD));
+        tabs.set("Page Color",       col(surfaceL, surfaceD));
+
+        UIThemeStyle& list = d.styleMut("ListView");
+        list.set("Back Color",          col(surfaceL, surfaceD));
+        list.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
+        list.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+
+        d.styleMut("ScrollBox").set("Bar Color", col(borderL, borderD));
+        d.styleMut("Splitter").set("Divider Color", col(borderL, borderD));
         return d;
     }();
     return t;
