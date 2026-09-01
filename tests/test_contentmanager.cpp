@@ -646,6 +646,64 @@ TEST_CASE("ContentManager pre-registers the default cube mesh")
 //
 // MUTATION: in ContentManager::syncMaterialInstance, take `inst` before the
 // loadAsset again (move `getMaterialMutable(instanceId)` above the parent load).
+// Opening a SECOND project has to forget the first one, and it did not.
+//
+// The path→UUID map is keyed by the CONTENT-RELATIVE path, and two projects made
+// from the same template share every one of those keys. So after switching roots,
+// loadAsset("mats/m.hasset") found the first project's entry still sitting there,
+// returned its UUID, and handed back its data — with the new project's file right
+// there on disk, unread. The content browser then listed the new project's files
+// and showed the old project's contents, which is what "it stays in the old one"
+// looks like from the outside.
+//
+// setContentRoot was a one-line setter, and scanContentDirectory cleared only the
+// UUID→path index; nothing dropped the loaded assets, the path map, the type
+// index or the mtimes.
+//
+// MUTATION: in ContentManager::setContentRoot, drop the forgetProjectContent()
+// call — the second project reads back as the first.
+TEST_CASE("ContentManager: opening another project does not serve the old one's assets")
+{
+	TempContentDir a("he_test_cm_projA");
+	TempContentDir b("he_test_cm_projB");
+
+	auto writeMaterial = [](const std::string& rootPath, float red)
+	{
+		ContentManager cm(rootPath);
+		MaterialAsset m;
+		m.type = HE::AssetType::Material;
+		m.name = "Shared";
+		m.path = "mats/m.hasset";     // the SAME relative path in both projects
+		m.baseColor[0] = red;
+		REQUIRE(cm.saveAsset(m));
+	};
+	writeMaterial(a.path.string(), 1.0f);   // project A: red
+	writeMaterial(b.path.string(), 0.0f);   // project B: not red
+
+	// ONE manager for the life of the editor, which is how the editor works: the
+	// project changes underneath it.
+	ContentManager cm(a.path.string());
+	cm.scanContentDirectory();
+	const HE::UUID inA = cm.loadAsset("mats/m.hasset");
+	REQUIRE(cm.getMaterial(inA) != nullptr);
+	CHECK(cm.getMaterial(inA)->baseColor[0] == doctest::Approx(1.0f));
+
+	// …and now the other project, exactly as EditorApplication's
+	// onProjectLoaded callback does it.
+	cm.setContentRoot(b.path.string());
+	cm.scanContentDirectory();
+	const HE::UUID inB = cm.loadAsset("mats/m.hasset");
+	REQUIRE(cm.getMaterial(inB) != nullptr);
+	CHECK_MESSAGE(cm.getMaterial(inB)->baseColor[0] == doctest::Approx(0.0f),
+	              "the second project's asset came back with the first project's data");
+
+	// The built-ins survive the switch. They are registered at construction and
+	// nothing on disk backs them, so a reset that forgot them would break every
+	// scene referencing the default cube or material by UUID.
+	CHECK(cm.getStaticMesh(HE::kDefaultCubeMeshId) != nullptr);
+	CHECK(cm.getMaterial(HE::kDefaultMaterialId)   != nullptr);
+}
+
 TEST_CASE("Material instance: syncing survives the parent load that moves the pool")
 {
 	TempContentDir dir("he_test_cm_instance_reload");

@@ -118,8 +118,11 @@ jobs:
           path: HorizonEditor-windows-x64.zip
           if-no-files-found: error
 
+      # -j because the suite waits far more than it computes: real git
+      # subprocesses, child-process kills, socket handshakes, polling sleeps.
+      # Serially that was 442 s here while the test bodies sum to ~31 s.
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -j4
 
       # ── macOS: build the self-contained .app + DMG installer ────────────────────
       # The `dmg` custom target runs scripts/package_macos.sh, which stages
