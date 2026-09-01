@@ -88,8 +88,14 @@ struct State
 	//   2 = the editor's amber, 3 = the theme asset at themeAssetPath.
 	int         themeSource = 0;
 	std::string themeAssetPath;
-	HE::UITheme themeOverride;         // resolved once at pick time, not per frame
+	HE::UITheme themeOverride;         // resolved when it changes, not per frame
 	bool        themeOverrideOk = false;
+	// The JSON the override was parsed from. Kept so the panel can notice that
+	// the asset changed underneath it — somebody saving that theme in its own
+	// editor is exactly the case this control is used for — without parsing it
+	// sixty times a second.
+	std::string themeOverrideJson;
+	std::string themeOverrideFor;      // the path that JSON was read from
 	// 0 = the mode the preview resolved to, 1 = Light, 2 = Dark. Separate from
 	// the theme because "the same theme, in the other mode" is the commoner of
 	// the two questions.
@@ -253,34 +259,53 @@ float themedFloat(const UIElement& e, const char* name, float literal)
 	return literal;
 }
 
-// Resolve the designer's theme override once, at the moment it is picked.
-// Per frame would mean parsing a theme asset's JSON sixty times a second to get
-// the same nine colours back; the popup re-asks when it opens, which is the only
-// moment the file on disk can have changed without the editor noticing.
+// Resolve the designer's theme override — when it is picked, and thereafter
+// whenever the asset it came from has changed. Parsing a theme's JSON sixty
+// times a second to get the same nine colours back would be silly; comparing the
+// string it was parsed FROM is a memcmp of a few kilobytes, and it is what makes
+// an edit in the theme editor show up here at once. Somebody saving that theme
+// next door is the case this control exists for.
 //
 // An asset that cannot be read falls back to following the preview rather than
 // to white: the point of the control is to SEE a theme, and a silent white one
 // looks like a bug in the widget.
 void resolvePreviewTheme(State& st, AppContext& ctx)
 {
-	st.themeOverrideOk = false;
-	if (st.themeSource == 1) { st.themeOverride = HE::uiDefaultTheme(); st.themeOverrideOk = true; }
-	else if (st.themeSource == 2) { st.themeOverride = HE::uiAmberTheme(); st.themeOverrideOk = true; }
-	else if (st.themeSource == 3 && ctx.contentManager && !st.themeAssetPath.empty())
+	if (st.themeSource == 1 || st.themeSource == 2)
 	{
-		const HE::UUID id = ctx.contentManager->loadAsset(st.themeAssetPath);
-		// The getter points into the manager's dense asset vector, so the JSON is
-		// read out here and now — one more loadAsset would move it.
-		if (const ThemeAsset* a = id == HE::UUID{} ? nullptr : ctx.contentManager->getTheme(id))
-			st.themeOverrideOk = HE::uiThemeFromJson(a->json, st.themeOverride);
-		if (!st.themeOverrideOk)
-		{
-			HE_LOG_WARN(Editor, "UI Designer: '%s' is not a readable theme",
-			            st.themeAssetPath.c_str());
-			st.themeSource = 0;
-			st.themeAssetPath.clear();
-		}
+		st.themeOverride   = st.themeSource == 1 ? HE::uiDefaultTheme() : HE::uiAmberTheme();
+		st.themeOverrideOk = true;
+		st.themeOverrideFor.clear();
+		st.themeOverrideJson.clear();
+		return;
 	}
+	// Which asset the canvas should resolve against: the one picked in the
+	// toolbar, or — while the toolbar says "from the preview" — the theme this
+	// WIDGET names for itself, because that is what the runtime would use for it.
+	const std::string path = st.themeSource == 3 ? st.themeAssetPath
+	                       : st.themeSource == 0 ? st.tree.themeAsset : std::string();
+	if (path.empty() || !ctx.contentManager)
+	{
+		st.themeOverrideOk = false;
+		st.themeOverrideFor.clear();
+		st.themeOverrideJson.clear();
+		return;
+	}
+
+	const HE::UUID id = ctx.contentManager->loadAsset(path);
+	// The getter points into the manager's dense asset vector, so the JSON is
+	// read out here and now — one more loadAsset would move it.
+	const ThemeAsset* a = id == HE::UUID{} ? nullptr : ctx.contentManager->getTheme(id);
+	const std::string json = a ? a->json : std::string();
+	// What was last ATTEMPTED, not what last succeeded: an unreadable theme must
+	// be attempted once and then left alone, or the warning below is printed
+	// sixty times a second.
+	if (path == st.themeOverrideFor && json == st.themeOverrideJson) return;
+	st.themeOverrideFor  = path;
+	st.themeOverrideJson = json;
+	st.themeOverrideOk   = a && HE::uiThemeFromJson(json, st.themeOverride);
+	if (!st.themeOverrideOk)
+		HE_LOG_WARN(Editor, "UI Designer: '%s' is not a readable theme", path.c_str());
 }
 
 // What the toolbar cell says it is drawing with. Short by design — it sits in a
@@ -295,7 +320,13 @@ std::string previewThemeLabel(const State& st)
 		case 1:  s = "Default"; break;
 		case 2:  s = "Amber";   break;
 		case 3:  s = std::filesystem::path(st.themeAssetPath).stem().string(); break;
-		default: s = "Preview"; break;
+		// "From the preview" is the widget's OWN theme where it names one — that
+		// is what the runtime would use for it, so it is what the cell should
+		// say rather than a word that hides it.
+		default: s = st.tree.themeAsset.empty()
+			? std::string("Preview")
+			: std::filesystem::path(st.tree.themeAsset).stem().string();
+			break;
 	}
 	if (st.themeModeOverride == 1) s += " / Light";
 	if (st.themeModeOverride == 2) s += " / Dark";
@@ -745,8 +776,8 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 	const bool locked = bound == HE::kUIThemeLiteral;
 	bool styled = false;
 	if (bound.empty() && g_previewTheme)
-		if (const HE::UIThemeStyle* s = HE::uiThemeStyleFor(e, *g_previewTheme))
-			styled = s->find(prop) != nullptr;
+		for (const std::string& p : HE::uiThemeDecidedProps(e, *g_previewTheme))
+			if (p == prop) { styled = true; break; }
 
 	ImGui::SameLine();
 	ImGui::PushID((prop + "##role").c_str());
@@ -1361,6 +1392,26 @@ void drawDetails(State& st, AppContext& ctx)
 			st.dirty = true;
 		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
 
+		// ── This widget's own theme ──────────────────────────────────────────
+		// The project names one theme and everything resolves against it; a
+		// single widget may say otherwise. Empty is the normal answer, and the
+		// slot says so rather than making the project's theme look optional.
+		ImGui::Spacing();
+		{
+			std::string path = st.tree.themeAsset;
+			if (assetSlot(ctx, "Theme", path, HE::AssetType::Theme, "widgettheme"))
+			{
+				st.tree.themeAsset = path;
+				commitEdit(st, ctx);
+			}
+			EditorWidgets::helpForLabel("Theme");
+			if (st.tree.themeAsset.empty())
+				ImGui::TextDisabled("Follows the project's theme.");
+			else
+				ImGui::TextDisabled("Overrides the project's, for this widget and\n"
+				                    "everything embedded in it.");
+		}
+
 		// ── Hand the whole widget to the theme ───────────────────────────────
 		// An element read from a file that predates styles follows none, which is
 		// what keeps opening an old widget from repainting it. That rule is right
@@ -1689,6 +1740,11 @@ void drawDetails(State& st, AppContext& ctx)
 	ImGui::SeparatorText("Theme");
 	{
 		const std::string typeStyle = n->typeName();
+
+		// Whether the theme dresses this element at all, and — when it does not
+		// follow its own type — which style by name it points at instead. The
+		// list is whatever the theme in the toolbar holds right now, so switching
+		// the preview theme switches what can be picked here.
 		const std::string shown = !n->themeStyled ? std::string("None")
 			: n->themeStyle.empty() ? typeStyle : n->themeStyle;
 		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
@@ -1703,15 +1759,17 @@ void drawDetails(State& st, AppContext& ctx)
 			if (ImGui::Selectable(typeStyle.c_str(),
 			                      n->themeStyled && n->themeStyle.empty()))
 			{ n->themeStyled = true; n->themeStyle.clear(); committed = true; }
-			// Everything the theme calls something else. Their names are the
-			// author's, so the help audit cannot see them — and there is nothing
-			// to explain: the entry is the style's name.
+			// Everything the theme calls something else. Variants ("Button.success")
+			// are NOT offered here — they are picked as a Tag below, because a
+			// variant of another type is not a thing this element can be. Their
+			// names are the author's, so the help audit cannot see them, and
+			// there is nothing to explain: the entry is the style's name.
 			if (g_previewTheme)
 			{
 				bool ruled = false;
 				for (const auto& [key, style] : g_previewTheme->styles)
 				{
-					if (key == typeStyle) continue;
+					if (key == typeStyle || !HE::uiThemeSelectorTag(key).empty()) continue;
 					if (!ruled) { ImGui::Separator(); ruled = true; }
 					if (ImGui::Selectable(key.c_str(),
 					                      n->themeStyled && n->themeStyle == key))
@@ -1720,19 +1778,46 @@ void drawDetails(State& st, AppContext& ctx)
 			}
 			ImGui::EndCombo();
 		}
-		const HE::UIThemeStyle* style =
-			g_previewTheme ? HE::uiThemeStyleFor(*n, *g_previewTheme) : nullptr;
+
+		// ── The tag: which KIND of its type this element is ──────────────────
+		// "Button.success". The list is what the theme defines for this type, so
+		// a tag is picked from what exists rather than typed from memory — and an
+		// element that carries one still takes everything its plain type says.
+		const std::vector<std::string> tags =
+			g_previewTheme ? g_previewTheme->tagsFor(typeStyle) : std::vector<std::string>();
+		ImGui::BeginDisabled(!n->themeStyled);
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		const bool tagOpen = ImGui::BeginCombo("Tag",
+			n->themeTag.empty() ? "(none)" : n->themeTag.c_str());
+		if (!tagOpen) EditorWidgets::helpForLabel("Tag");
+		if (tagOpen)
+		{
+			if (ImGui::Selectable("(none)", n->themeTag.empty()))
+			{ n->themeTag.clear(); committed = true; }
+			for (const std::string& tag : tags)
+				if (ImGui::Selectable(tag.c_str(), n->themeTag == tag))
+				{ n->themeTag = tag; committed = true; }
+			// A tag the theme no longer defines stays pickable so it can be SEEN;
+			// dropping it silently is how an element ends up carrying a word
+			// nobody can find.
+			if (!n->themeTag.empty() &&
+			    std::find(tags.begin(), tags.end(), n->themeTag) == tags.end())
+				ImGui::Selectable((n->themeTag + " (not in this theme)").c_str(), true);
+			ImGui::EndCombo();
+		}
+		ImGui::EndDisabled();
+
+		const int decided = n->themeStyled && g_previewTheme
+			? static_cast<int>(HE::uiThemeDecidedProps(*n, *g_previewTheme).size()) : 0;
 		if (!n->themeStyled)
 			ImGui::TextDisabled("Every value below is this element's own.");
-		else if (style)
-			ImGui::TextDisabled("%d value%s below come%s from the theme.",
-			                    static_cast<int>(style->values.size()),
-			                    style->values.size() == 1 ? "" : "s",
-			                    style->values.size() == 1 ? "s" : "");
+		else if (decided > 0)
+			ImGui::TextDisabled("%d value%s below come%s from the theme.", decided,
+			                    decided == 1 ? "" : "s", decided == 1 ? "s" : "");
 		else
 			// Not an error: pointing an element at a style is half the work, and
 			// the theme editor is where the other half happens.
-			ImGui::TextDisabled("The theme has no style called \"%s\" yet.", shown.c_str());
+			ImGui::TextDisabled("The theme decides nothing about this element yet.");
 	}
 
 	// Type-specific properties (generic, driven by properties()).
@@ -2686,6 +2771,11 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		g_previewTheme = &ctx.world->widgets().theme();
 		g_previewMode  = ctx.world->widgets().themeMode();
 	}
+	// The theme asset behind the canvas — the one picked in the toolbar, or the
+	// one this widget names for itself — is re-read when the file changed, so
+	// saving it in its own editor lands here in the same frame. Costs a string
+	// compare when nothing happened.
+	if (st.themeSource != 1 && st.themeSource != 2) resolvePreviewTheme(st, ctx);
 	// …unless this tab is looking at the widget under another theme, or in the
 	// other mode. Two independent overrides on top of the same default, so
 	// "the project's theme, dark" and "the preview's theme, dark" are both

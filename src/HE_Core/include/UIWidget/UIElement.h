@@ -407,8 +407,15 @@ public:
     // must keep the colours somebody typed into it, while everything placed from
     // now on follows the theme without being asked to. A per-property role
     // binding still wins over the style, and kUIThemeLiteral shuts both out.
+    //
+    // themeTag is the CSS class of this: an element of its type, but a
+    // particular KIND of one. A Button with the tag "success" takes "Button"
+    // first and then "Button.success" on top of it, property by property — so a
+    // variant that names one colour still gets the rounding from the base. That
+    // layering is the whole reason a tag beats a second full style.
     bool        themeStyled = true;
     std::string themeStyle;
+    std::string themeTag;
 
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
@@ -627,6 +634,7 @@ protected:
         dst.gradientShape = gradientShape;
         dst.themeRoles = themeRoles;
         dst.themeStyled = themeStyled; dst.themeStyle = themeStyle;
+        dst.themeTag = themeTag;
         dst.shadow = shadow; dst.shadowColor = shadowColor;
         dst.shadowBlur = shadowBlur;
         dst.shadowOffsetX = shadowOffsetX; dst.shadowOffsetY = shadowOffsetY;

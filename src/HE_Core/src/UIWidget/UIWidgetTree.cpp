@@ -771,10 +771,36 @@ void uiSetAnchorInsetsY(UIElement& e, float top, float bottom)
     e.posY  = top + e.pivotY * e.sizeY;
 }
 
-const UIThemeStyle* uiThemeStyleFor(const UIElement& e, const UITheme& theme)
+std::vector<const UIThemeStyle*> uiThemeStylesFor(const UIElement& e, const UITheme& theme)
 {
-    if (!e.themeStyled) return nullptr;
-    return theme.styleFor(e.themeStyle.empty() ? std::string(e.typeName()) : e.themeStyle);
+    std::vector<const UIThemeStyle*> out;
+    if (!e.themeStyled) return out;
+    const std::string type = e.typeName();
+    if (const UIThemeStyle* s = theme.styleFor(type)) out.push_back(s);
+    if (!e.themeTag.empty())
+        if (const UIThemeStyle* s = theme.styleFor(uiThemeSelector(type, e.themeTag)))
+            out.push_back(s);
+    // A style pointed at by name is the most specific thing an element can say,
+    // so it is asked last. It LAYERS like the others: a "Card" that names one
+    // colour leaves the rest to the type's style, which is what "class" means
+    // everywhere it exists. A name that no longer resolves therefore costs the
+    // element nothing — it keeps its type's look instead of falling off a cliff.
+    if (!e.themeStyle.empty())
+        if (const UIThemeStyle* s = theme.styleFor(e.themeStyle)) out.push_back(s);
+    return out;
+}
+
+std::vector<std::string> uiThemeDecidedProps(const UIElement& e, const UITheme& theme)
+{
+    std::vector<std::string> out;
+    for (const UIThemeStyle* s : uiThemeStylesFor(e, theme))
+        for (const auto& [prop, v] : s->values)
+        {
+            bool seen = false;
+            for (const std::string& have : out) if (have == prop) seen = true;
+            if (!seen) out.push_back(prop);
+        }
+    return out;
 }
 
 bool uiThemeValueFor(const UIElement& e, const UITheme& theme, UIThemeMode mode,
@@ -828,9 +854,12 @@ bool uiThemeValueFor(const UIElement& e, const UITheme& theme, UIThemeMode mode,
         return false;
     }
 
-    const UIThemeStyle* style = uiThemeStyleFor(e, theme);
-    if (!style) return false;
-    const UIThemeStyleValue* v = style->find(prop);
+    // The cascade, most specific LAST — so the last style that names this
+    // property is the one that answers, and everything it does not name falls
+    // through to the base underneath it.
+    const UIThemeStyleValue* v = nullptr;
+    for (const UIThemeStyle* s : uiThemeStylesFor(e, theme))
+        if (const UIThemeStyleValue* hit = s->find(prop)) v = hit;
     if (!v) return false;
     // A style may name a property this type does not have — that is what lets
     // one named style cover a Panel and a Button at once. The type has to match
@@ -862,13 +891,13 @@ int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode)
     };
     // Everything the element bound by hand…
     for (const auto& [prop, boundName] : e.themeRoles) write(prop);
-    // …and then everything its style decides that it did not bind itself. The
-    // themeRoleFor check is what keeps a bound property from being written
-    // twice, and it is also why a binding beats the style rather than the other
-    // way round.
-    if (const UIThemeStyle* style = uiThemeStyleFor(e, theme))
-        for (const auto& [prop, v] : style->values)
-            if (e.themeRoleFor(prop).empty()) write(prop);
+    // …and then everything its styles decide that it did not bind itself. Each
+    // property once, however many styles of the cascade named it — write() asks
+    // uiThemeValueFor, which already knows which of them wins. The themeRoleFor
+    // check is what keeps a bound property from being written twice, and it is
+    // also why a binding beats the styles rather than the other way round.
+    for (const std::string& prop : uiThemeDecidedProps(e, theme))
+        if (e.themeRoleFor(prop).empty()) write(prop);
     return written;
 }
 
@@ -1333,6 +1362,7 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     {
         o["themeStyled"] = true;
         if (!e.themeStyle.empty()) o["themeStyle"] = e.themeStyle;
+        if (!e.themeTag.empty())   o["themeTag"]   = e.themeTag;
     }
     if (e.innerShadow)
     {
@@ -1426,6 +1456,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     // read, which is where the true comes from.
     e->themeStyled = o.value("themeStyled", false);
     e->themeStyle  = o.value("themeStyle", std::string());
+    e->themeTag    = o.value("themeTag", std::string());
     e->innerShadow     = o.value("innerShadow", false);
     e->innerShadowBlur = o.value("innerShadowBlur", e->innerShadowBlur);
     if (const auto ic = o.find("innerShadowColor");
@@ -1454,6 +1485,7 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
     // Only once written, so a widget that says nothing about itself saves
     // byte-identical to before descriptions existed.
     if (!tree.description.empty()) j["description"] = tree.description;
+    if (!tree.themeAsset.empty())  j["themeAsset"]  = tree.themeAsset;
 
     // The knobs this widget offers its hosts. Only once it declares one, so a
     // page (which is every widget authored before components existed) saves
@@ -1538,6 +1570,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
     }
     t.nextId       = j.value("nextId", 1);
     t.description  = j.value("description", std::string());
+    t.themeAsset   = j.value("themeAsset", std::string());
 
     if (const auto jp = j.find("params"); jp != j.end() && jp->is_array())
         for (const auto& o : *jp)

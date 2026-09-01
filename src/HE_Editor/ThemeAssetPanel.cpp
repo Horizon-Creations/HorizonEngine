@@ -35,6 +35,7 @@ struct PanelState
 	// itself: an InputText writes on every keystroke, so typing straight into
 	// the style list would leave a style called "C" behind on the way to "Card".
 	std::string newStyleName;
+	std::string newTagName;
 };
 AssetPanelState<PanelState> s_states;
 
@@ -55,6 +56,12 @@ bool saveState(PanelState& st, AppContext& ctx)
 		return false;
 	}
 	st.dirty = false;
+	// If this IS the project's theme, the editor's own widget runtime is now a
+	// version behind. Handing it over here is what makes an edit show up in an
+	// open designer at once, instead of the next time the project is opened.
+	if (ctx.projectManager &&
+	    ctx.projectManager->currentProject().theme == st.relPath)
+		ThemeAssetPanel::applyProjectTheme(ctx);
 	return true;
 }
 
@@ -170,36 +177,192 @@ void styleValueRow(PanelState& st, const std::string& key, const std::string& pr
 	(void)key;
 }
 
+// One entry a style could hold, seeded from a freshly made element of `t`, so
+// adding it changes nothing until somebody edits the value.
+HE::UIThemeStyleValue seedValue(HE::UIWidgetType t, const std::string& prop)
+{
+	HE::UIThemeStyleValue v;
+	HE::UIPropValue def;
+	if (defaultValueOf(t, prop, def))
+	{
+		v.isColor = def.type == HE::UIPropType::Color;
+		v.number  = def.f;
+		for (int m = 0; m < static_cast<int>(HE::UIThemeMode::COUNT); ++m)
+			v.color[m] = def.col;
+	}
+	return v;
+}
+
+// The values of one style, plus the three things one can do to it. `owner` is
+// the type whose properties are offered — COUNT for a style with a name of its
+// own, which may dress anything and therefore gets one submenu per type.
+// Returns true when the caller should delete this style.
+bool styleBody(PanelState& st, const std::string& key, HE::UIThemeStyle& style,
+               HE::UIWidgetType owner, bool ownerIsType)
+{
+	// Its own scope, though the only caller already pushes the same one: a helper
+	// that names its scope is a helper the coverage audit can place, and one that
+	// borrows the caller's is filed under whichever function sits above it.
+	HE::Ed::Help::Scope helpScope("Theme Styles");
+	bool remove = false;
+	ImGui::PushID(key.c_str());
+
+	std::string removeProp;
+	for (auto& [prop, v] : style.values) styleValueRow(st, key, prop, v, removeProp);
+	if (!removeProp.empty()) { style.erase(removeProp); st.dirty = true; }
+	if (style.values.empty())
+		ImGui::TextDisabled("(decides nothing yet)");
+
+	auto offer = [&](HE::UIWidgetType t)
+	{
+		for (const HE::UIPropDesc& pd : styleableProps(t))
+		{
+			if (style.find(pd.name)) continue;
+			if (ImGui::Selectable(pd.name.c_str()))
+			{
+				style.set(pd.name, seedValue(t, pd.name));
+				st.dirty = true;
+			}
+		}
+	};
+
+	if (EditorWidgets::smallButton("Add Value")) ImGui::OpenPopup("##addval");
+	if (ImGui::BeginPopup("##addval"))
+	{
+		if (ownerIsType) offer(owner);
+		else
+			for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+				if (ImGui::BeginMenu(HE::uiWidgetTypeName(t)))
+				{ offer(t); ImGui::EndMenu(); }
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("Add Value");
+
+	// Everything at once, for the type this style belongs to. Adding thirteen
+	// values one popup at a time is the per-value work styles exist to end, and
+	// since every entry starts at the type's own default, taking all of them
+	// changes nothing until an author edits one.
+	if (ownerIsType)
+	{
+		ImGui::SameLine();
+		if (EditorWidgets::smallButton("Add Every Value"))
+		{
+			for (const HE::UIPropDesc& pd : styleableProps(owner))
+				if (!style.find(pd.name)) style.set(pd.name, seedValue(owner, pd.name));
+			st.dirty = true;
+		}
+		EditorWidgets::helpForLabel("Add Every Value");
+	}
+
+	ImGui::SameLine();
+	if (EditorWidgets::dangerSmallButton("Remove Style")) remove = true;
+	EditorWidgets::helpForLabel("Remove Style");
+
+	ImGui::PopID();
+	return remove;
+}
+
 void stylesSection(PanelState& st)
 {
 	HE::Ed::Help::Scope helpScope("Theme Styles");
 	ImGui::Spacing();
 	ImGui::SeparatorText("Styles");
-	ImGui::TextDisabled("What a whole kind of element looks like. An element that follows a");
-	ImGui::TextDisabled("style takes every value here in one decision — hover and pressed");
-	ImGui::TextDisabled("included, which no single role can name.");
+	ImGui::TextDisabled("What a whole kind of element looks like. Every element type is here,");
+	ImGui::TextDisabled("each with its own style and as many variants as you want — a variant");
+	ImGui::TextDisabled("is a TAG an element carries, so \"Button.success\" is a button that");
+	ImGui::TextDisabled("takes everything Button says and then the green on top.");
 
-	if (EditorWidgets::button("Add Style", ImVec2(120.0f, 0.0f)))
-		ImGui::OpenPopup("##addstyle");
-	if (ImGui::BeginPopup("##addstyle"))
+	std::string removeStyle;
+
+	// ── Every element type, whether it is styled or not ──────────────────────
+	// Listed in full rather than hidden behind an Add menu: "which types can I
+	// theme" is answered by looking, and a type with no style says so where its
+	// style would be.
+	for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
 	{
-		ImGui::TextDisabled("For an element type");
-		for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+		const std::string type = HE::uiWidgetTypeName(t);
+		const std::vector<std::string> tags = st.theme.tagsFor(type);
+		HE::UIThemeStyle* base = const_cast<HE::UIThemeStyle*>(st.theme.styleFor(type));
+		const int variants = static_cast<int>(tags.size());
+
+		// The header says at a glance what is already decided here, so a folded
+		// list is still readable: "Button (7, 2 variants)".
+		std::string header = type;
+		if (base || variants)
 		{
-			const char* name = HE::uiWidgetTypeName(t);
-			if (st.theme.styleFor(name)) continue;      // it already has one
-			if (ImGui::Selectable(name))
-			{
-				st.theme.styleMut(name);
-				st.dirty = true;
-			}
+			header += "  (";
+			header += base ? std::to_string(base->values.size()) + " values" : "no style";
+			if (variants) header += ", " + std::to_string(variants) + " variant" +
+			                        (variants == 1 ? "" : "s");
+			header += ")";
 		}
-		ImGui::Separator();
-		ImGui::TextDisabled("Or a name of your own");
+		ImGui::PushID(type.c_str());
+		if (ImGui::CollapsingHeader(header.c_str()))
+		{
+			if (base) { if (styleBody(st, type, *base, t, true)) removeStyle = type; }
+			else
+			{
+				ImGui::TextDisabled("Every %s decides for itself.", type.c_str());
+				if (EditorWidgets::smallButton("Add Style"))
+				{ st.theme.styleMut(type); st.dirty = true; }
+				EditorWidgets::helpForLabel("Add Style");
+			}
+
+			for (const std::string& tag : tags)
+			{
+				const std::string key = HE::uiThemeSelector(type, tag);
+				ImGui::SeparatorText(key.c_str());
+				HE::UIThemeStyle* v = const_cast<HE::UIThemeStyle*>(st.theme.styleFor(key));
+				if (v && styleBody(st, key, *v, t, true)) removeStyle = key;
+			}
+
+			ImGui::Spacing();
+			if (EditorWidgets::smallButton("Add Variant")) ImGui::OpenPopup("##addtag");
+			if (ImGui::BeginPopup("##addtag"))
+			{
+				ImGui::TextDisabled("A tag an element of this type can carry");
+				ImGui::SetNextItemWidth(180.0f);
+				// Its own buffer, not the theme: an InputText writes on every
+				// keystroke, so typing straight into the style list would leave a
+				// "Button.s" behind on the way to "Button.success".
+				if (ImGui::InputText("##newtag", &st.newTagName,
+				                     ImGuiInputTextFlags_EnterReturnsTrue) &&
+				    !st.newTagName.empty())
+				{
+					st.theme.styleMut(HE::uiThemeSelector(type, st.newTagName));
+					st.newTagName.clear();
+					st.dirty = true;
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::TextDisabled("(type a name, then Enter)");
+				ImGui::EndPopup();
+			}
+			else EditorWidgets::helpForLabel("Add Variant");
+		}
+		ImGui::PopID();
+	}
+
+	// ── Styles with a name of their own ──────────────────────────────────────
+	// A look that is not tied to one type: an element points at it by name, and
+	// it layers over whatever its type already said.
+	ImGui::Spacing();
+	ImGui::SeparatorText("By name");
+	int named = 0;
+	for (auto& [key, style] : st.theme.styles)
+	{
+		if (isTypeKey(HE::uiThemeSelectorType(key))) continue;
+		++named;
+		ImGui::PushID(key.c_str());
+		if (ImGui::CollapsingHeader((key + "  (" + std::to_string(style.values.size()) +
+		                             " values)").c_str()))
+			if (styleBody(st, key, style, HE::UIWidgetType::Panel, false)) removeStyle = key;
+		ImGui::PopID();
+	}
+	if (named == 0) ImGui::TextDisabled("(none yet)");
+	if (EditorWidgets::smallButton("Add Named Style")) ImGui::OpenPopup("##addnamed");
+	if (ImGui::BeginPopup("##addnamed"))
+	{
 		ImGui::SetNextItemWidth(180.0f);
-		// Its own buffer, not the theme: an InputText writes on every keystroke,
-		// so typing into the style list directly would create a style called "C"
-		// on the way to "Card".
 		if (ImGui::InputText("##newstyle", &st.newStyleName,
 		                     ImGuiInputTextFlags_EnterReturnsTrue) &&
 		    !st.newStyleName.empty())
@@ -212,58 +375,8 @@ void stylesSection(PanelState& st)
 		ImGui::TextDisabled("(type a name, then Enter)");
 		ImGui::EndPopup();
 	}
-	else EditorWidgets::helpForLabel("Add Style");
+	else EditorWidgets::helpForLabel("Add Named Style");
 
-	std::string removeStyle;
-	for (auto& [key, style] : st.theme.styles)
-	{
-		ImGui::PushID(key.c_str());
-		const std::string header = isTypeKey(key)
-			? key + "  (every " + key + ")" : key + "  (by name)";
-		if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
-		{
-			std::string removeProp;
-			for (auto& [prop, v] : style.values) styleValueRow(st, key, prop, v, removeProp);
-			if (!removeProp.empty()) { style.erase(removeProp); st.dirty = true; }
-
-			if (EditorWidgets::smallButton("Add Value")) ImGui::OpenPopup("##addval");
-			if (ImGui::BeginPopup("##addval"))
-			{
-				// A type-keyed style is offered its own type's properties. A
-				// named one may dress anything, so it gets one submenu per type
-				// — a flat list of every property in the engine is a list nobody
-				// reads.
-				auto offer = [&](HE::UIWidgetType t)
-				{
-					for (const HE::UIPropDesc& pd : styleableProps(t))
-					{
-						if (style.find(pd.name)) continue;
-						if (!ImGui::Selectable(pd.name.c_str())) continue;
-						HE::UIPropValue def;
-						HE::UIThemeStyleValue v;
-						if (defaultValueOf(t, pd.name, def))
-						{
-							v.isColor = def.type == HE::UIPropType::Color;
-							v.number  = def.f;
-							for (int m = 0; m < static_cast<int>(HE::UIThemeMode::COUNT); ++m)
-								v.color[m] = def.col;
-						}
-						style.set(pd.name, v);
-						st.dirty = true;
-					}
-				};
-				if (isTypeKey(key)) offer(HE::uiWidgetTypeFromName(key));
-				else
-					for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
-						if (ImGui::BeginMenu(HE::uiWidgetTypeName(t)))
-						{ offer(t); ImGui::EndMenu(); }
-				ImGui::EndPopup();
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::dangerSmallButton("Remove Style")) removeStyle = key;
-		}
-		ImGui::PopID();
-	}
 	if (!removeStyle.empty())
 	{
 		// Elements pointing at it keep the values they last got — the same rule a
@@ -271,11 +384,38 @@ void stylesSection(PanelState& st)
 		st.theme.eraseStyle(removeStyle);
 		st.dirty = true;
 	}
-	if (st.theme.styles.empty())
-		ImGui::TextDisabled("(no styles yet — every element decides for itself)");
 }
 
 } // namespace
+
+void ThemeAssetPanel::applyProjectTheme(AppContext& ctx)
+{
+	if (!ctx.world || !ctx.contentManager || !ctx.projectManager) return;
+	const ProjectData& proj = ctx.projectManager->currentProject();
+	// The mode first, and whatever the theme turns out to be: "System" is a rule
+	// and a project that names no theme still gets to say which half of the
+	// default it starts in.
+	ctx.world->widgets().setThemePreference(
+		HE::uiThemePreferenceFromName(proj.themeMode.empty() ? "System" : proj.themeMode));
+	if (proj.theme.empty()) return;
+
+	const HE::UUID id = ctx.contentManager->loadAsset(proj.theme);
+	const ThemeAsset* a = id == HE::UUID{} ? nullptr : ctx.contentManager->getTheme(id);
+	if (!a)
+	{
+		HE_LOG_WARN(Editor, "Project theme '%s' could not be loaded", proj.theme.c_str());
+		return;
+	}
+	HE::UITheme t;
+	// Read the JSON out and parse it here: the getter points into the content
+	// manager's dense asset vector, and one more load would move it.
+	if (!HE::uiThemeFromJson(a->json, t))
+	{
+		HE_LOG_WARN(Editor, "Project theme '%s' is not readable", proj.theme.c_str());
+		return;
+	}
+	ctx.world->widgets().setTheme(t);
+}
 
 bool ThemeAssetPanel::isThemeAsset(const std::string& path)
 { return EditorAssetTypeCache::is(path, HE::AssetType::Theme); }
@@ -369,6 +509,10 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		{
 			proj.theme = st.relPath;
 			ctx.projectManager->saveProject(proj.path);
+			// …and take effect here and now. The editor's widget runtime is what
+			// the live preview and the designer both read, so without this the
+			// project theme would be a promise the editor never keeps.
+			ThemeAssetPanel::applyProjectTheme(ctx);
 		}
 
 		// The mode is the PROJECT's, not this asset's: both belong to the same
@@ -385,6 +529,7 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				{
 					proj.themeMode = HE::uiThemePreferenceName(p);
 					ctx.projectManager->saveProject(proj.path);
+					ThemeAssetPanel::applyProjectTheme(ctx);
 				}
 			}
 			ImGui::EndCombo();

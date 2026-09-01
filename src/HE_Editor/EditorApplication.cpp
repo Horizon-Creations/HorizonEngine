@@ -10,6 +10,7 @@
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "HorizonVersion.h"
@@ -1506,6 +1507,15 @@ void EditorApplication::OnInit()
 			// Source/Generated/GameTypes.h (regenerated again on every panel save).
 			if (m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
 				HE::writeCppTypesHeader(projectPath);
+		}
+
+		// The project's theme, in the editor's own widget runtime. A project names
+		// one and the packaged application boots with it; without this the editor
+		// kept the built-in default, so the live preview and the widget designer
+		// both showed a theme the finished application never uses.
+		{
+			AppContext ctx = makeContext();
+			ThemeAssetPanel::applyProjectTheme(ctx);
 		}
 
 		// Script log lines say which language wrote them. Same rule as the type

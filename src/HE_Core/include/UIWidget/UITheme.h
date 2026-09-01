@@ -140,6 +140,29 @@ struct UIThemeStyle
     }
 };
 
+// ── Selectors ────────────────────────────────────────────────────────────────
+// A style's key is a SELECTOR, and the vocabulary is deliberately the smallest
+// one that answers what people actually ask of a theme:
+//
+//   "Button"          every button
+//   "Button.success"  a button whose tag is "success"
+//   "Card"            whatever points at it by name
+//
+// The dot is CSS's, and so is what happens when several match: they LAYER, most
+// specific last, property by property. A "Button.success" that names only a
+// colour still gets the rounding and the border from "Button" — which is the
+// entire reason to write a variant instead of a whole second style.
+//
+// Deliberately not CSS: no descendant combinators, no inheritance down the
+// tree, no bare ".tag" that matches every type. Each of those needs a
+// specificity rule, and a rule an author cannot predict in their head is worse
+// than a vocabulary that cannot express the case.
+HE_API std::string uiThemeSelector(const std::string& type, const std::string& tag);
+// The type half of a selector ("Button.success" → "Button"), and the tag half
+// ("success", empty for a plain type selector).
+HE_API std::string uiThemeSelectorType(const std::string& selector);
+HE_API std::string uiThemeSelectorTag(const std::string& selector);
+
 // The binding that means "the theme decides nothing here". Not a role, and not
 // the same as having no binding at all: no binding lets the element's STYLE
 // answer, this shuts even that out. Written wherever a value was decided
@@ -194,6 +217,20 @@ struct HE_API UITheme
     {
         for (auto it = styles.begin(); it != styles.end(); ++it)
             if (it->first == key) { styles.erase(it); return; }
+    }
+
+    // The variants this theme defines for one element type — the tags of every
+    // "Type.tag" style it holds. What an element's tag dropdown offers, so a tag
+    // is picked from what exists instead of typed from memory.
+    std::vector<std::string> tagsFor(const std::string& type) const
+    {
+        std::vector<std::string> out;
+        for (const auto& [key, s] : styles)
+        {
+            const std::string t = uiThemeSelectorTag(key);
+            if (!t.empty() && uiThemeSelectorType(key) == type) out.push_back(t);
+        }
+        return out;
     }
 };
 

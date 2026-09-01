@@ -328,10 +328,33 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		embedWidgetRefs(w, content, { assetPath });
 	}
 
+	// A widget asset may name its OWN theme, overriding the application's for
+	// this instance and everything grafted into it. Loaded before the theme is
+	// applied, obviously, and left null when the asset names none or the theme
+	// cannot be read — an unreadable override falls back to the application's
+	// rather than to nothing, which would be a widget drawn in white.
+	if (!w.tree.themeAsset.empty())
+	{
+		const HE::UUID themeId = content.loadAsset(w.tree.themeAsset);
+		const ThemeAsset* ta = themeId == HE::UUID{} ? nullptr : content.getTheme(themeId);
+		if (ta)
+		{
+			auto t = std::make_shared<HE::UITheme>();
+			// Parsed from a copy of the JSON, not from the asset's own string: the
+			// getter points into the manager's dense vector and any load below
+			// would move it.
+			const std::string json = ta->json;
+			if (HE::uiThemeFromJson(json, *t)) w.theme = std::move(t);
+		}
+		if (!w.theme)
+			HE_LOG_WARN(UI, "Widget '%s' names theme '%s', which could not be read",
+			            assetPath.c_str(), w.tree.themeAsset.c_str());
+	}
+
 	// Whatever this widget bound to a theme role takes the theme's colour now,
 	// before anything looks at it. Assignment, not lookup-at-draw: from here on
 	// the runtime, the designer and the thumbnails all read plain fields.
-	HE::uiApplyTheme(w.tree, m_theme, themeMode());
+	HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
 
 	// Resolve per-element material references once (paths → UUIDs) and bake each
 	// element's Font asset → a stable atlas key its text emits with (0 = the
@@ -390,7 +413,10 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 void WidgetManager::setTheme(const HE::UITheme& theme)
 {
     m_theme = theme;
-    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, themeMode());
+    // themeFor, not m_theme: an instance whose asset named its own theme keeps
+    // it. The MODE is the application's either way — light and dark is a
+    // decision about the machine, not about one widget.
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
     m_visualDirty = true;
 }
 
@@ -403,7 +429,10 @@ void WidgetManager::setThemePreference(HE::UIThemePreference pref)
     // that was already following the system changes nothing on screen, and an
     // event-driven application should not wake up for it.
     if (themeMode() == before) return;
-    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, themeMode());
+    // themeFor, not m_theme: an instance whose asset named its own theme keeps
+    // it. The MODE is the application's either way — light and dark is a
+    // decision about the machine, not about one widget.
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
     m_visualDirty = true;
 }
 
@@ -413,7 +442,10 @@ void WidgetManager::setSystemThemeMode(HE::UIThemeMode mode)
     const HE::UIThemeMode before = themeMode();
     m_systemMode = mode;
     if (themeMode() == before) return;   // the preference overrides it anyway
-    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, m_theme, themeMode());
+    // themeFor, not m_theme: an instance whose asset named its own theme keeps
+    // it. The MODE is the application's either way — light and dark is a
+    // decision about the machine, not about one widget.
+    for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
     m_visualDirty = true;
 }
 
@@ -517,8 +549,10 @@ HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager
 	}
 
 	// The theme, then materials and fonts, for what just arrived — a row grafted
-	// in at run time is themed like one that was there from the start.
-	HE::uiApplyTheme(w.tree, m_theme, themeMode());
+	// in at run time is themed like one that was there from the start, and by
+	// the HOST widget's theme: what is grafted in becomes part of this instance,
+	// so it wears what the instance wears.
+	HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
 	for (const auto& e : w.tree.elements)
 		if (e && e->id > 0) refreshElementAssets(w, *e);
 

@@ -481,13 +481,93 @@ TEST_CASE("Theme: a named style covers whatever points at it, including a compon
     CHECK(tree.find(panel)->cornerRadius.x == doctest::Approx(14.0f));
     CHECK(tree.find(button)->cornerRadius.x == doctest::Approx(14.0f));
 
-    // A name that no longer resolves — the style was renamed or deleted — leaves
-    // the element alone rather than falling back to its type's style. Same rule
-    // a renamed role gets: visible and fixable beats quietly something else.
-    tree.find(panel)->themeStyle = "Crd";
-    t.styleMut("Panel").set("Color", col(glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)));
+    // A named style LAYERS on the type's, it does not replace it — that is what
+    // "class" means everywhere it exists, and it is why a name that no longer
+    // resolves costs the element nothing: it simply keeps its type's look.
+    const glm::vec4 red{ 1.0f, 0.0f, 0.0f, 1.0f };
+    t.styleMut("Panel").set("Color", col(red));
     HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
-    CHECK(tree.find(panel)->getPropAny("Color").col == card);
+    CHECK(tree.find(panel)->getPropAny("Color").col == card);        // Card wins
+    CHECK(tree.find(panel)->cornerRadius.x == doctest::Approx(14.0f));
+
+    tree.find(panel)->themeStyle = "Crd";                            // renamed away
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    CHECK(tree.find(panel)->getPropAny("Color").col == red);         // the type's
+}
+
+// The user's own example: button.success. A tag is a CSS class — the element is
+// still a Button and takes everything the Button style says, and the variant
+// only says what is DIFFERENT about it.
+TEST_CASE("Theme: a tag is a variant of the type, not a replacement for it")
+{
+    HE::UIWidgetTree tree;
+    const int plain   = tree.add(HE::UIWidgetType::Button);
+    const int success = tree.add(HE::UIWidgetType::Button);
+    tree.find(success)->themeTag = "success";
+
+    const glm::vec4 base { 0.20f, 0.20f, 0.22f, 1.0f };
+    const glm::vec4 green{ 0.10f, 0.60f, 0.25f, 1.0f };
+
+    HE::UITheme t;
+    t.styleMut("Button").set("Normal Color", col(base));
+    t.styleMut("Button").set("Corner Radius", num(6.0f));
+    // The variant names ONE value. Everything else has to come from the base,
+    // or a variant would be a second whole style with a shorter name.
+    t.styleMut(HE::uiThemeSelector("Button", "success")).set("Normal Color", col(green));
+
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    CHECK(tree.find(plain)->getPropAny("Normal Color").col   == base);
+    CHECK(tree.find(success)->getPropAny("Normal Color").col == green);
+    CHECK(tree.find(success)->cornerRadius.x == doctest::Approx(6.0f));   // from Button
+    CHECK(tree.find(plain)->cornerRadius.x   == doctest::Approx(6.0f));
+
+    // A tag nobody defined is not an error: the element is an ordinary one of
+    // its type. Half-authored is the normal state of a theme in progress.
+    tree.find(success)->themeTag = "danger";
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    CHECK(tree.find(success)->getPropAny("Normal Color").col == base);
+
+    // Which variants exist is a question the tag dropdown asks, and it answers
+    // per type — a "Panel.wide" must not show up under Button.
+    t.styleMut(HE::uiThemeSelector("Panel", "wide"));
+    const std::vector<std::string> tags = t.tagsFor("Button");
+    REQUIRE(tags.size() == 1);
+    CHECK(tags[0] == "success");
+    CHECK(HE::uiThemeSelectorType("Button.success") == "Button");
+    CHECK(HE::uiThemeSelectorTag("Button.success")  == "success");
+    CHECK(HE::uiThemeSelectorTag("Button").empty());
+
+    // And it survives a save.
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(tree), loaded));
+    CHECK(loaded.find(success)->themeTag == "danger");
+    CHECK(loaded.find(plain)->themeTag.empty());
+}
+
+TEST_CASE("Theme: three layers, and the most specific one wins per value")
+{
+    HE::UIWidgetTree tree;
+    const int b = tree.add(HE::UIWidgetType::Button);
+    tree.find(b)->themeTag   = "success";
+    tree.find(b)->themeStyle = "Card";
+
+    HE::UITheme t;
+    t.styleMut("Button").set("Normal Color",  col(glm::vec4(0.1f, 0.1f, 0.1f, 1.0f)));
+    t.styleMut("Button").set("Hovered Color", col(glm::vec4(0.2f, 0.2f, 0.2f, 1.0f)));
+    t.styleMut("Button").set("Pressed Color", col(glm::vec4(0.3f, 0.3f, 0.3f, 1.0f)));
+    const glm::vec4 fromTag{ 0.0f, 1.0f, 0.0f, 1.0f };
+    t.styleMut("Button.success").set("Hovered Color", col(fromTag));
+    const glm::vec4 fromName{ 0.0f, 0.0f, 1.0f, 1.0f };
+    t.styleMut("Card").set("Pressed Color", col(fromName));
+
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    const HE::UIElement& e = *tree.find(b);
+    CHECK(e.getPropAny("Normal Color").col.r  == doctest::Approx(0.1f));  // base
+    CHECK(e.getPropAny("Hovered Color").col   == fromTag);
+    CHECK(e.getPropAny("Pressed Color").col   == fromName);
+    // Three styles, three values, each written once — not once per style.
+    CHECK(HE::uiThemeDecidedProps(e, t).size() == 3);
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark) == 3);
 }
 
 TEST_CASE("Theme: a binding beats the style, a lock beats both")
@@ -630,6 +710,76 @@ TEST_CASE("Theme: a style reaches the screen, and a second theme redresses it")
     }
     wm.setTheme(t2);
     CHECK(surfaceColor() == other);
+}
+
+// The project names one theme and everything follows it — except the widget that
+// says otherwise. A launcher, an overlay, a screen that has to look like somebody
+// else's product: one asset, one theme, and the application's switches do not
+// take it back.
+TEST_CASE("Theme: a widget may name its own theme, and the application's does not overrule it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    const glm::vec4 mine{ 0.90f, 0.20f, 0.10f, 1.0f };
+    {
+        HE::UITheme own;
+        own.name = "Loud";
+        own.styleMut("Button").set("Normal Color", col(mine));
+        ThemeAsset ta;
+        ta.json = HE::uiThemeToJson(own);
+        ta.path = "mem://loud.hasset";
+        cm.registerTheme(std::move(ta));
+    }
+
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 200.0f; tree.canvasHeight = 100.0f;
+    tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    tree.themeAsset = "mem://loud.hasset";
+    const int button = tree.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *tree.find(button);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+    }
+    UIWidgetAsset a;
+    a.treeJson = HE::uiWidgetTreeToJson(tree);
+    a.path     = "mem://own.hasset";
+    cm.registerWidget(std::move(a));
+
+    // The application's theme says something else entirely.
+    HE::UITheme app;
+    app.styleMut("Button").set("Normal Color", col(glm::vec4(0.0f, 0.0f, 1.0f, 1.0f)));
+
+    WidgetManager wm;
+    wm.setTheme(app);
+    const int id = wm.createWidget(cm, "mem://own.hasset");
+    REQUIRE(id != 0);
+    wm.showWidget(id);
+
+    auto surfaceColor = [&]
+    {
+        std::vector<UIRenderObject> out;
+        wm.extract(200.0f, 100.0f, out);
+        REQUIRE_FALSE(out.empty());
+        return out[0].color;
+    };
+    CHECK(surfaceColor() == mine);
+
+    // Re-applying the application's theme, and switching the mode, both leave it
+    // alone: the widget's theme is the widget's.
+    wm.setTheme(app);
+    CHECK(surfaceColor() == mine);
+    wm.setThemePreference(HE::UIThemePreference::Light);
+    CHECK(surfaceColor() == mine);
+
+    // The path survives a save, and a widget that names nothing saves as before.
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(tree), back));
+    CHECK(back.themeAsset == "mem://loud.hasset");
+    HE::UIWidgetTree plain;
+    plain.add(HE::UIWidgetType::Panel);
+    CHECK(HE::uiWidgetTreeToJson(plain).find("themeAsset") == std::string::npos);
 }
 
 TEST_CASE("Theme: a widget authored before styles keeps the colours somebody typed")

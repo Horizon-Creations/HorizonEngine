@@ -97,6 +97,17 @@ struct HE_API UIWidgetTree
     // second file that goes out of step.
     std::string description;
 
+    // ── This widget's own theme, overriding the project's ────────────────────
+    // A content-relative path to a Theme asset, or empty for "whatever the
+    // application is using". The project names one theme and everything resolves
+    // against it; a single widget may say otherwise — a launcher, an overlay, a
+    // demo screen that has to look like somebody else's product.
+    //
+    // It covers everything inside the instance, embedded widgets included: one
+    // widget, one theme, no per-element cascade of themes. That is the line
+    // between "a widget can differ" and a hierarchy nobody can predict.
+    std::string themeAsset;
+
     UIWidgetTree() = default;
     UIWidgetTree(const UIWidgetTree& o) { *this = o; }
     UIWidgetTree& operator=(const UIWidgetTree& o)
@@ -105,7 +116,7 @@ struct HE_API UIWidgetTree
         canvasWidth = o.canvasWidth; canvasHeight = o.canvasHeight;
         scaleMode = o.scaleMode; nextId = o.nextId;
         params = o.params;
-        description = o.description;
+        description = o.description; themeAsset = o.themeAsset;
         elements.clear();
         elements.reserve(o.elements.size());
         for (const auto& e : o.elements) elements.push_back(e->clone());
@@ -322,10 +333,22 @@ HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = n
 HE_API int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode);
 HE_API int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode);
 
-// Which style of `theme` this element follows, or null. Empty style name means
-// the one named after the element's TYPE, which is what makes "the theme's
-// buttons" a thing an author sets once instead of per button.
-HE_API const UIThemeStyle* uiThemeStyleFor(const UIElement& e, const UITheme& theme);
+// Every style of `theme` this element follows, LEAST specific first:
+//
+//   "Button"          its type
+//   "Button.success"  its type and its tag
+//   "Card"            the style it points at by name, if it does
+//
+// They layer property by property, later wins — CSS's cascade, with a
+// vocabulary small enough to predict in your head. A variant that names one
+// colour keeps everything else its base decided, which is the entire reason to
+// write a variant instead of a second whole style.
+HE_API std::vector<const UIThemeStyle*> uiThemeStylesFor(const UIElement& e,
+                                                         const UITheme& theme);
+// The names of every property those styles decide between them, each once. What
+// the editor asks to say "this value comes from the theme" without having to
+// know how many styles answered.
+HE_API std::vector<std::string> uiThemeDecidedProps(const UIElement& e, const UITheme& theme);
 
 // What the theme says `prop` should be on this element, or false when it says
 // nothing. THE one place that question is answered: uiApplyTheme writes what

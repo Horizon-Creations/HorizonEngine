@@ -27,4 +27,18 @@ namespace ThemeAssetPanel
 	void appendDirtyPaths(std::vector<std::string>& out);
 	bool save(AppContext& ctx, const std::string& path);
 	void forget(const std::string& path);
+
+	// ── The project's theme, in the editor's own runtime ─────────────────────
+	// A project names one theme asset and one starting mode (ProjectData::theme /
+	// themeMode) and the packaged application boots with them. The EDITOR did
+	// not: its widget runtime kept the built-in default, so the live preview and
+	// the designer both showed a theme the finished application never uses.
+	//
+	// Called on project load, when a theme is made the project's, and when one is
+	// saved — the last of those is what makes an edit in this panel show up in an
+	// open designer without anything being reopened.
+	//
+	// Quietly does nothing when the project names no theme (the built-in default
+	// is then correct) or when the asset cannot be read.
+	void applyProjectTheme(AppContext& ctx);
 }

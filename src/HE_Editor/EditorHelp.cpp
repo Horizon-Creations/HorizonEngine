@@ -1994,11 +1994,30 @@ namespace
 	// A role is one colour; a style is a whole kind of element, and the only
 	// place a hover or a pressed colour can be themed at all.
 	{ "Theme Styles/Add Style", "",
-	  "A style keyed by an element TYPE is followed by every element of that type "
-	  "in the project, without anyone pointing at it. A style with a name of your "
-	  "own (\"Card\", \"Danger\") is followed only by the elements you point at it, "
-	  "which is how a project themes its own components. New values start at the "
-	  "type's defaults, so adding a style changes nothing until you edit one.",
+	  "Gives this element type a style, which every element of that type follows "
+	  "without anyone pointing at it. New values start at the type's own defaults, "
+	  "so adding a style changes nothing until you edit one.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Add Variant", "",
+	  "A named KIND of this type — \"success\", \"danger\", \"ghost\" — that an "
+	  "element opts into with its Tag. It layers ON TOP of the plain type's style: "
+	  "a variant that names one colour keeps the rounding, the border and "
+	  "everything else the base decided, which is the whole reason to write a "
+	  "variant instead of a second style. This is CSS's Button.success, with the "
+	  "same cascade and none of its combinators.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Add Named Style", "",
+	  "A look that is not tied to one element type. An element points at it by "
+	  "name, and it layers over whatever its type already said — so \"Card\" can "
+	  "round a Panel and a Button the same way without either of them stopping "
+	  "being what it is.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Add Every Value", "",
+	  "Takes every colour and number this element type has into the style at once, "
+	  "each at the type's own default. The fast way to start: adding thirteen "
+	  "values through a popup one at a time is the per-value work styles exist to "
+	  "end, and since nothing changes until you edit one, there is no cost to "
+	  "taking them all and deleting what you do not care about.",
 	  "", "ui#elements" },
 	{ "Theme Styles/Add Value", "",
 	  "Which of the element's properties this style decides. The list is the "
@@ -2046,6 +2065,15 @@ namespace
 	  "(\"Card\", \"Danger\") is one you point at deliberately. \"None\" means the "
 	  "theme's styles leave this element alone, which is where every widget "
 	  "authored before styles existed starts.",
+	  "", "ui#elements" },
+	{ "UI Widget/Tag", "",
+	  "Which KIND of its type this element is: a Button with the tag \"success\" "
+	  "takes the theme's Button style and then Button.success on top of it, value "
+	  "by value. That is CSS's class, and the layering is the point — the variant "
+	  "only says what is different, everything else still comes from the plain "
+	  "type. The list is what the theme in the toolbar defines for this type, so a "
+	  "tag is picked from what exists rather than typed from memory; a tag the "
+	  "theme does not define leaves the element an ordinary one of its type.",
 	  "", "ui#elements" },
 	{ "UI Widget/None (this element decides for itself)", "",
 	  "No style. The values below are this element's own and nothing but a role "
@@ -2230,6 +2258,15 @@ namespace
 	  "one that does not change.",
 	  "", "ui#designer" },
 
+	{ "Canvas/Theme", "",
+	  "The theme THIS widget resolves against, overriding the project's. Empty is "
+	  "the normal answer — a project has one theme and everything follows it — and "
+	  "this is for the widget that must not: a launcher, an overlay, a screen that "
+	  "has to look like somebody else's product. It covers everything embedded in "
+	  "this widget too; one widget, one theme, no cascade of themes down the tree. "
+	  "The designer draws with it as soon as it is set, since that is what the "
+	  "running application would do.",
+	  "", "ui#elements" },
 	{ "Canvas/Follow the Theme", "",
 	  "Switches every element of this widget over to the theme's styles at once. "
 	  "An element read from a file that predates styles follows none — that is "

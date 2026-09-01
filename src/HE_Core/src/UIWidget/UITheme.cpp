@@ -105,6 +105,26 @@ const char* uiThemeElevationName(UIThemeElevation e)
     return (i >= 0 && i < kElevations) ? kElevationNames[i] : "";
 }
 
+// ── Selectors ────────────────────────────────────────────────────────────────
+// One dot, and the FIRST one: a tag with a dot in it would otherwise split in
+// the middle and match nothing, which is a bug an author cannot see. A type name
+// never contains one (the registry's names are single words), so the first dot
+// is always the boundary.
+std::string uiThemeSelector(const std::string& type, const std::string& tag)
+{
+    return tag.empty() ? type : type + "." + tag;
+}
+std::string uiThemeSelectorType(const std::string& selector)
+{
+    const size_t dot = selector.find('.');
+    return dot == std::string::npos ? selector : selector.substr(0, dot);
+}
+std::string uiThemeSelectorTag(const std::string& selector)
+{
+    const size_t dot = selector.find('.');
+    return dot == std::string::npos ? std::string() : selector.substr(dot + 1);
+}
+
 // ── The two shipped themes ───────────────────────────────────────────────────
 // Neutral greys with one blue accent, in both modes. Chosen to be boring on
 // purpose: a default theme is the thing an author changes, and a default with a

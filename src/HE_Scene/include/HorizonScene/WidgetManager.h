@@ -6,6 +6,7 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Renderer/UIRenderObject.h>
 #include <Types/UUID.h>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -399,6 +400,11 @@ private:
         // guard that catches it works on the chain of paths already visited.
         std::string assetPath;
         HE::UIWidgetTree  tree;    // live deep copy (scripts mutate it)
+        // This widget's own theme, when its asset named one — null means the
+        // application's. A shared_ptr because several instances of the same
+        // asset share one parse, and because nothing may hold a reference into
+        // a theme that a reload could move.
+        std::shared_ptr<const HE::UITheme> theme;
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;
@@ -613,6 +619,12 @@ private:
     // an application that draws in whatever was in that memory.
     HE::UITheme           m_theme = HE::uiDefaultTheme();
     HE::UIThemePreference m_themePref = HE::UIThemePreference::System;
+    // The theme THIS instance resolves against: its own when the asset named
+    // one (UIWidgetTree::themeAsset), the application's otherwise. Shared and
+    // const, so ten widgets pointing at one theme parse it once and none of them
+    // can be left holding a dangling copy.
+    const HE::UITheme& themeFor(const Instance& w) const
+    { return w.theme ? *w.theme : m_theme; }
     // What the desktop last said. Dark until the host says otherwise: a tool
     // that flashes white on a dark desktop for one frame is the thing "follow
     // the system" exists to avoid.
