@@ -86,6 +86,16 @@ struct HE_API UIWidgetTree
     // before components existed, and empty is what "this is a page, not a
     // component" means.
     std::vector<UIWidgetParam> params;
+    // One or two sentences about what this widget IS, shown wherever somebody
+    // is about to reach for it — the palette, above all. A component whose name
+    // is the only thing said about it is one you have to place to find out what
+    // it does, and the twelve shipped ones are exactly the case where that is
+    // the difference between a library and a list of words.
+    //
+    // On the TREE rather than beside it, because it belongs to the widget the
+    // same way its canvas size does, and a second file to keep in step is a
+    // second file that goes out of step.
+    std::string description;
 
     UIWidgetTree() = default;
     UIWidgetTree(const UIWidgetTree& o) { *this = o; }
@@ -95,6 +105,7 @@ struct HE_API UIWidgetTree
         canvasWidth = o.canvasWidth; canvasHeight = o.canvasHeight;
         scaleMode = o.scaleMode; nextId = o.nextId;
         params = o.params;
+        description = o.description;
         elements.clear();
         elements.reserve(o.elements.size());
         for (const auto& e : o.elements) elements.push_back(e->clone());

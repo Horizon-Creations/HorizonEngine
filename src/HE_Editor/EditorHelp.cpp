@@ -2056,6 +2056,139 @@ namespace
 	  "two numbers because a form almost always wants its rows further apart than "
 	  "its columns.",
 	  "", "ui#elements" },
+	// ── The palette: what each element type IS ───────────────────────────────
+	// One line per widget type, because a palette of nineteen bare nouns is a
+	// list you have to place things from to find out what they are.
+	//
+	// These are keyed by the type's own NAME (uiWidgetTypeName), which is why
+	// the coverage audit cannot see them: the palette draws ImGui::Button with a
+	// computed label, and the scan only reads literals. A runtime test in
+	// test_editor_help.cpp asks the registry instead — every registered type must
+	// have an entry here, and a new widget type fails that test until it does.
+	{ "UI Palette/Panel", "",
+	  "A rectangle of one colour, and the plainest container there is. What you "
+	  "reach for to give a group of things a background, a border or a rounding.",
+	  "", "ui#elements" },
+	{ "UI Palette/Image", "",
+	  "A picture. Point it at a texture; nine-slice settings let a small source "
+	  "stretch into a big frame without the corners smearing.",
+	  "", "ui#elements" },
+	{ "UI Palette/Text", "",
+	  "A run of text. Alignment in nine positions, optional word wrap, and Auto "
+	  "Size to make the element fit what it says.",
+	  "", "ui#elements" },
+	{ "UI Palette/Button", "",
+	  "A surface that reacts to the pointer and fires OnClicked. What is written "
+	  "ON it is a child — a Text, an Image, or both — which is what lets a button "
+	  "carry an icon beside its caption.",
+	  "", "ui#elements" },
+	{ "UI Palette/CheckBox", "",
+	  "A box that is ticked or not, with a label beside it. Fires OnValueChanged "
+	  "when it flips.",
+	  "", "ui#elements" },
+	{ "UI Palette/Slider", "",
+	  "A value between a minimum and a maximum, dragged with the pointer.",
+	  "", "ui#elements" },
+	{ "UI Palette/ProgressBar", "",
+	  "A fill between 0 and 1 that shows how far something got. Read-only: it is "
+	  "told, it does not ask.",
+	  "", "ui#elements" },
+	{ "UI Palette/TextInput", "",
+	  "An editable field. Placeholder, maximum length, password dots, an input "
+	  "filter for numbers-only — and Multiline for a box that holds paragraphs.",
+	  "", "ui#elements" },
+	{ "UI Palette/ComboBox", "",
+	  "A list to pick one entry from, shown as a dropdown. The entries are the "
+	  "Options list; Selected Index is which one it shows.",
+	  "", "ui#elements" },
+	{ "UI Palette/VerticalBox", "",
+	  "Stacks its children top to bottom, spaced and padded. A child in a box "
+	  "does not place itself — the box decides — and Slot Fill lets one of them "
+	  "take the space left over.",
+	  "", "ui#elements" },
+	{ "UI Palette/HorizontalBox", "",
+	  "The same, left to right. A row of buttons with one Spacer set to fill is "
+	  "how you push the last of them to the far end.",
+	  "", "ui#elements" },
+	{ "UI Palette/ScrollBox", "",
+	  "A vertical box whose content may be taller than it is. Scrolls with the "
+	  "wheel and clips what hangs out.",
+	  "", "ui#elements" },
+	{ "UI Palette/Spacer", "",
+	  "Nothing, with a size. It draws no pixel and takes no click; all it does is "
+	  "occupy its slot, which in a box is what pushes everything after it along.",
+	  "", "ui#elements" },
+	{ "UI Palette/ListView", "",
+	  "A list of any length built from ONE authored row. It holds a COUNT and a "
+	  "row widget, not the items — so ten thousand entries cost the rows the "
+	  "window can show, and you answer OnRowBind for the ones on screen.",
+	  "", "ui#elements" },
+	{ "UI Palette/WrapBox", "",
+	  "A row until it cannot be one: children run left to right and break onto a "
+	  "new line when the next will not fit. Tags, chips, a toolbar that has to "
+	  "survive a narrow window.",
+	  "", "ui#elements" },
+	{ "UI Palette/Grid", "",
+	  "Rows and columns, with spans. What a FORM is made of: a label column that "
+	  "fits its labels beside a field column that takes the rest — which two "
+	  "stacked boxes can only fake, and only by hand-matching sizes.",
+	  "", "ui#elements" },
+	{ "UI Palette/TabBox", "",
+	  "Pages behind a strip of tabs, one showing at a time. Its CHILDREN are the "
+	  "pages and each child's NAME is its tab label, so there is no second list "
+	  "to keep in step.",
+	  "", "ui#elements" },
+	{ "UI Palette/Splitter", "",
+	  "Two panes and a divider you can drag. Exactly two: a three-pane layout is "
+	  "a splitter inside a splitter, which says the same thing with the "
+	  "arithmetic already solved.",
+	  "", "ui#elements" },
+	{ "UI Palette/WidgetRef", "",
+	  "Another widget, used here as one element. Not offered in the palette as a "
+	  "bare type — you pick the widget itself from Components or User Defined, "
+	  "which is the same thing without an empty slot to point somewhere first.",
+	  "", "ui#elements" },
+
+	// ── Looking at the widget under another theme ────────────────────────────
+	// The toolbar cell and the six entries of its popup. All of it is a way of
+	// LOOKING: nothing here is stored in the widget, and nothing reaches the
+	// running preview.
+	{ "ui.theme-preview", "Theme",
+	  "Which theme the canvas resolves bound colours against, and in which mode. "
+	  "Only the picture changes — the widget keeps its bindings, the preview keeps "
+	  "its theme, and nothing is written to the asset. What it is for is the "
+	  "question every themed widget raises: does this still read on somebody "
+	  "else's palette?",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/From the preview", "",
+	  "Draw with the theme the running preview uses, which is what the widget "
+	  "will actually look like when the application runs. The default, and where "
+	  "you go back to.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Default", "",
+	  "The engine's built-in theme — the one a project has before it sets one. "
+	  "Worth a look because it is what an element falls back to when a binding "
+	  "no longer resolves.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Amber", "",
+	  "The editor's own palette, shipped as a theme. A second real palette to "
+	  "check against without authoring one first.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Follow the preview", "",
+	  "Light or dark as the preview resolved it — which, when the project follows "
+	  "the desktop, is whatever this machine is set to.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Light", "",
+	  "Force the light half of every role, whatever the preview is in. Each role "
+	  "carries both values, so this is the same theme read the other way, not a "
+	  "second one.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Dark", "",
+	  "Force the dark half. The pair with Light is the cheap way to find the "
+	  "colour somebody typed as a literal instead of binding to a role: it is the "
+	  "one that does not change.",
+	  "", "ui#designer" },
+
 	// ── Components: what a widget offers whoever embeds it ───────────────────
 	{ "Canvas/Parameter Name", "",
 	  "What a page that embeds this widget calls this knob — \"Label\", \"Help Text\", "
@@ -3602,6 +3735,11 @@ namespace
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
+		// The palette's element types get their own section of the UI chapter:
+		// "what can I put on a page" is the first question somebody has, and it
+		// deserves a list rather than being scattered through the designer's
+		// controls.
+		{ "UI Palette/",     "editor-ui", "UI Designer", "The elements" },
 		// The one page on the Preferences tab that edits the PROJECT rather than
 		// the editor, which is why it gets its own section rather than sitting
 		// under "Preferences".
@@ -3620,6 +3758,7 @@ namespace
 		{ "Canvas/",         "editor-ui", "UI Designer", "The canvas" },
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
+		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
 		{ "input.",         "editor-input", "Input Reference", "Input assets" },

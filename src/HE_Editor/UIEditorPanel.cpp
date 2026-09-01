@@ -80,6 +80,21 @@ struct State
 	int    previewIndex = 0;
 	float  previewW = 0.0f, previewH = 0.0f;
 
+	// Which theme the canvas RESOLVES bound colours against (toolbar ▸ theme).
+	// View state as well, and deliberately not the running preview's setting: a
+	// widget is meant to survive the project's own themes, and checking that has
+	// to be possible without switching the whole editor preview over to one.
+	//   0 = whatever the preview runs, 1 = the built-in default,
+	//   2 = the editor's amber, 3 = the theme asset at themeAssetPath.
+	int         themeSource = 0;
+	std::string themeAssetPath;
+	HE::UITheme themeOverride;         // resolved once at pick time, not per frame
+	bool        themeOverrideOk = false;
+	// 0 = the mode the preview resolved to, 1 = Light, 2 = Dark. Separate from
+	// the theme because "the same theme, in the other mode" is the commoner of
+	// the two questions.
+	int         themeModeOverride = 0;
+
 	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element.
 	int    dragMode = 0;
 	int    resizeHandle = -1;        // 0..7: corners+edges (see handleOffsets)
@@ -211,6 +226,55 @@ glm::vec4 themedColor(const UIElement& e, const char* name, const glm::vec4& lit
 		}
 	}
 	return literal;
+}
+
+// Resolve the designer's theme override once, at the moment it is picked.
+// Per frame would mean parsing a theme asset's JSON sixty times a second to get
+// the same nine colours back; the popup re-asks when it opens, which is the only
+// moment the file on disk can have changed without the editor noticing.
+//
+// An asset that cannot be read falls back to following the preview rather than
+// to white: the point of the control is to SEE a theme, and a silent white one
+// looks like a bug in the widget.
+void resolvePreviewTheme(State& st, AppContext& ctx)
+{
+	st.themeOverrideOk = false;
+	if (st.themeSource == 1) { st.themeOverride = HE::uiDefaultTheme(); st.themeOverrideOk = true; }
+	else if (st.themeSource == 2) { st.themeOverride = HE::uiAmberTheme(); st.themeOverrideOk = true; }
+	else if (st.themeSource == 3 && ctx.contentManager && !st.themeAssetPath.empty())
+	{
+		const HE::UUID id = ctx.contentManager->loadAsset(st.themeAssetPath);
+		// The getter points into the manager's dense asset vector, so the JSON is
+		// read out here and now — one more loadAsset would move it.
+		if (const ThemeAsset* a = id == HE::UUID{} ? nullptr : ctx.contentManager->getTheme(id))
+			st.themeOverrideOk = HE::uiThemeFromJson(a->json, st.themeOverride);
+		if (!st.themeOverrideOk)
+		{
+			HE_LOG_WARN(Editor, "UI Designer: '%s' is not a readable theme",
+			            st.themeAssetPath.c_str());
+			st.themeSource = 0;
+			st.themeAssetPath.clear();
+		}
+	}
+}
+
+// What the toolbar cell says it is drawing with. Short by design — it sits in a
+// strip beside four other cells — and it names the MODE only when the mode is
+// being forced, since "Default" already means "and whatever mode the preview is
+// in".
+std::string previewThemeLabel(const State& st)
+{
+	std::string s;
+	switch (st.themeSource)
+	{
+		case 1:  s = "Default"; break;
+		case 2:  s = "Amber";   break;
+		case 3:  s = std::filesystem::path(st.themeAssetPath).stem().string(); break;
+		default: s = "Preview"; break;
+	}
+	if (st.themeModeOverride == 1) s += " / Light";
+	if (st.themeModeOverride == 2) s += " / Dark";
+	return s;
 }
 
 glm::vec4 propColorOr(const UIElement& e, const char* name, const glm::vec4& fb)
@@ -1227,6 +1291,14 @@ void drawDetails(State& st, AppContext& ctx)
 		// The paragraph that used to be written out here is the help entry now —
 		// same words, and reachable with F1 instead of only by hovering.
 
+		// What this widget IS, in a sentence or two — shown wherever somebody is
+		// about to reach for it, the palette above all.
+		ImGui::Spacing();
+		if (EditorWidgets::Row::inputTextMultiline(
+				"Description", &st.tree.description, ImGui::GetTextLineHeight() * 3.0f))
+			st.dirty = true;
+		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
 		drawParameterDeclarations(st, ctx);
 
 		ImGui::Spacing();
@@ -2183,14 +2255,23 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		// corner unconditionally, which made every label look pinned there and
 		// disagree with what the engine actually drew — the designer's whole job
 		// is to show what you will get.
-		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, shown);
+		// WORD WRAP, if the element asks for it. This used to measure and draw
+		// with no wrap column at all, so a wrapping label was one long line here
+		// and several in the engine — and an AUTO-SIZED wrapping label looked
+		// worst of all, because its height came from the engine's wrapped
+		// measurement while the designer drew it as a single line running out of
+		// its own box.
+		const bool wrap = n.getProp("WordWrap").b;
+		const float wrapW = wrap ? std::max(1.0f, mx.x - mn.x) : FLT_MAX;
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrapW, shown);
 		const int aH = propIntOr(n, "Align H", 0);
 		const int aV = propIntOr(n, "Align V", 1);
 		const float slackX = std::max(0.0f, (mx.x - mn.x) - ts.x);
 		const float slackY = std::max(0.0f, (mx.y - mn.y) - ts.y);
 		const ImVec2 at(mn.x + (aH == 1 ? slackX * 0.5f : aH == 2 ? slackX : 0.0f),
 		                mn.y + (aV == 1 ? slackY * 0.5f : aV == 2 ? slackY : 0.0f));
-		dl->AddText(nullptr, fs, at, C(propColorOr(n, "Color", { 1,1,1,1 })), shown);
+		dl->AddText(nullptr, fs, at, C(propColorOr(n, "Color", { 1,1,1,1 })), shown,
+		            nullptr, wrap ? wrapW : 0.0f);
 		break;
 	}
 	case UIWidgetType::Button:
@@ -2461,6 +2542,14 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		g_previewTheme = &ctx.world->widgets().theme();
 		g_previewMode  = ctx.world->widgets().themeMode();
 	}
+	// …unless this tab is looking at the widget under another theme, or in the
+	// other mode. Two independent overrides on top of the same default, so
+	// "the project's theme, dark" and "the preview's theme, dark" are both
+	// reachable — and neither writes anything back into the runtime.
+	if (st.themeSource != 0 && st.themeOverrideOk) g_previewTheme = &st.themeOverride;
+	if (st.themeModeOverride != 0)
+		g_previewMode = st.themeModeOverride == 1 ? HE::UIThemeMode::Light
+		                                         : HE::UIThemeMode::Dark;
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 
@@ -3774,6 +3863,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
 	// ── Toolbar ───────────────────────────────────────────────────────────────
+	bool openThemePopup = false;
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
@@ -3803,7 +3893,79 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		bar.endGroup();
 
+		// Which theme the canvas draws with. In the bar rather than in Details
+		// because it is a way of LOOKING at the widget, like the zoom beside it,
+		// and because it has to be one click away: the whole use of it is
+		// flicking between two themes and watching what moves.
+		if (st.viewMode == 0)
+		{
+			bar.group();
+			if (bar.item("##uitheme", T::iconBrush, previewThemeLabel(st).c_str(),
+			             st.themeSource != 0 || st.themeModeOverride != 0, true,
+			             "Draw the canvas with another theme", "ui.theme-preview"))
+			{
+				// Re-read on every open: a theme asset saved in its own editor a
+				// second ago is exactly the one somebody comes here to look at.
+				resolvePreviewTheme(st, ctx);
+				openThemePopup = true;
+			}
+			bar.endGroup();
+		}
+
 		if (T::saveButton(bar, st.dirty)) saveState(st, ctx);
+	}
+
+	// Outside the bar: a popup has to be opened after the strip's draw channels
+	// are merged, or it is drawn into a channel that no longer exists.
+	if (openThemePopup) ImGui::OpenPopup("##uithemepick");
+	if (ImGui::BeginPopup("##uithemepick"))
+	{
+		HE::Ed::Help::Scope helpScope("UI Theme Preview");
+		const ImGuiSelectableFlags keep = ImGuiSelectableFlags_NoAutoClosePopups;
+		// Every fixed entry is written out with its label as a literal rather
+		// than fed through a lambda, because the help audit reads literals and a
+		// control it cannot see is a control with no entry and nobody noticing.
+		auto choose = [&](int source, const std::string& path)
+		{
+			st.themeSource    = source;
+			st.themeAssetPath = path;
+			resolvePreviewTheme(st, ctx);
+		};
+		ImGui::TextDisabled("Theme");
+		if (ImGui::Selectable("From the preview", st.themeSource == 0, keep))
+			choose(0, std::string());
+		EditorWidgets::helpForLabel("From the preview");
+		if (ImGui::Selectable("Default", st.themeSource == 1, keep))
+			choose(1, std::string());
+		EditorWidgets::helpForLabel("Default");
+		if (ImGui::Selectable("Amber", st.themeSource == 2, keep))
+			choose(2, std::string());
+		EditorWidgets::helpForLabel("Amber");
+		// The project's own themes. Their labels are asset names, so the audit
+		// cannot see them — and there is nothing to explain about one anyway:
+		// the entry IS the asset's name.
+		const std::vector<HcEditorUtil::ClassRef> themes =
+			HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Theme);
+		if (!themes.empty()) ImGui::Separator();
+		for (const HcEditorUtil::ClassRef& a : themes)
+		{
+			const bool on = st.themeSource == 3 && st.themeAssetPath == a.path;
+			if (ImGui::Selectable((a.label + "##" + a.path).c_str(), on, keep))
+				choose(3, a.path);
+		}
+
+		ImGui::Separator();
+		ImGui::TextDisabled("Mode");
+		if (ImGui::Selectable("Follow the preview", st.themeModeOverride == 0, keep))
+			st.themeModeOverride = 0;
+		EditorWidgets::helpForLabel("Follow the preview");
+		if (ImGui::Selectable("Light", st.themeModeOverride == 1, keep))
+			st.themeModeOverride = 1;
+		EditorWidgets::helpForLabel("Light");
+		if (ImGui::Selectable("Dark", st.themeModeOverride == 2, keep))
+			st.themeModeOverride = 2;
+		EditorWidgets::helpForLabel("Dark");
+		ImGui::EndPopup();
 	}
 
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
@@ -3858,6 +4020,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 		// ═══ Designer: palette + hierarchy | canvas | element details ═══
 		ImGui::BeginChild("##uiw_left", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 		{
+			// Its own scope, so every type button below is looked up as
+			// "UI Palette/<TypeName>" without a call site naming a key.
+			HE::Ed::Help::Scope paletteScope("UI Palette");
 			ImGui::TextDisabled("Palette");
 			ImGui::Separator();
 			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
@@ -3871,6 +4036,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// A plain click adds (centered on the canvas or under the selected
 				// panel); dragging the button onto the canvas/hierarchy places it there.
 				const bool clicked = ImGui::Button(typeName(t), ImVec2(-1.0f, 0));
+				// What this element IS. The scan that audits tooltip coverage
+				// only reads literal labels, so it never saw these nineteen
+				// buttons at all — third gap of that kind. A runtime test asks
+				// the registry instead (test_editor_help.cpp).
+				EditorWidgets::helpForLabel(typeName(t));
 				if (ImGui::BeginDragDropSource())
 				{
 					const int ti = static_cast<int>(t);
@@ -3917,9 +4087,21 @@ void render(AppContext& ctx, const std::string& assetPath,
 						ImGui::TextUnformatted(a.label.c_str());
 						ImGui::EndDragDropSource();
 					}
+					// What the widget says about ITSELF, when it says anything.
+					// A name is not a description, and the twelve shipped
+					// components are exactly the case where the difference
+					// decides whether somebody has to place one to find out
+					// what it does.
 					if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-						ImGui::SetTooltip("%s\nEmbedded as a WidgetRef: authored once,\n"
-						                  "used here.", a.path.c_str());
+					{
+						const HE::UIWidgetTree* t = embeddedTreeFor(ctx, a.path);
+						if (t && !t->description.empty())
+							ImGui::SetTooltip("%s\n\n%s", t->description.c_str(),
+							                  a.path.c_str());
+						else
+							ImGui::SetTooltip("%s\nEmbedded as a WidgetRef: authored once,\n"
+							                  "used here.", a.path.c_str());
+					}
 					if (clicked)
 					{
 						int parent = 0;

@@ -1382,6 +1382,9 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
     if (tree.scaleMode != UICanvasScaleMode::Stretch)
         j["scaleMode"] = static_cast<int>(tree.scaleMode);
     j["nextId"]       = tree.nextId;
+    // Only once written, so a widget that says nothing about itself saves
+    // byte-identical to before descriptions existed.
+    if (!tree.description.empty()) j["description"] = tree.description;
 
     // The knobs this widget offers its hosts. Only once it declares one, so a
     // page (which is every widget authored before components existed) saves
@@ -1460,6 +1463,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
             ? static_cast<UICanvasScaleMode>(sm) : UICanvasScaleMode::Stretch;
     }
     t.nextId       = j.value("nextId", 1);
+    t.description  = j.value("description", std::string());
 
     if (const auto jp = j.find("params"); jp != j.end() && jp->is_array())
         for (const auto& o : *jp)
