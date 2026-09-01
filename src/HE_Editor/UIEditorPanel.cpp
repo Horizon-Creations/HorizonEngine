@@ -4018,13 +4018,30 @@ void render(AppContext& ctx, const std::string& assetPath,
 	if (st.viewMode == 0)
 	{
 		// ═══ Designer: palette + hierarchy | canvas | element details ═══
-		ImGui::BeginChild("##uiw_left", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
+		// The left column is TWO scrolling panes, half the height each. One pane
+		// meant that scrolling down to a component pushed the hierarchy off the
+		// bottom, and the hierarchy is what you are dropping the component INTO:
+		// the two lists are used together, so neither may scroll the other away.
+		ImGui::BeginChild("##uiw_left", ImVec2(leftW, 0), ImGuiChildFlags_Borders,
+			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		{
-			// Its own scope, so every type button below is looked up as
-			// "UI Palette/<TypeName>" without a call site naming a key.
-			HE::Ed::Help::Scope paletteScope("UI Palette");
+			// What is left once both headings and their rules are paid for,
+			// halved. Measured rather than guessed, so the split stays even
+			// under Preferences ▸ UI Font Scale.
+			const float chrome = 2.0f * (ImGui::GetTextLineHeightWithSpacing() +
+			                             ImGui::GetStyle().ItemSpacing.y * 2.0f);
+			const float halfH  = std::max(60.0f,
+				(ImGui::GetContentRegionAvail().y - chrome) * 0.5f);
+
 			ImGui::TextDisabled("Palette");
 			ImGui::Separator();
+			ImGui::BeginChild("##uiw_palette", ImVec2(0.0f, halfH));
+
+			// Its own scope, so every type button below is looked up as
+			// "UI Palette/<TypeName>" without a call site naming a key. It stays
+			// open across the hierarchy below, as it did when this was one pane:
+			// the hierarchy pushes its own and that is what decides there.
+			HE::Ed::Help::Scope paletteScope("UI Palette");
 			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
 			{
 				// WidgetRef is not offered as a bare type: every widget of the
@@ -4134,10 +4151,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 				for (const auto& a : widgets)
 					if (a.path != st.relPath && isEngine(a.path)) drawOne(a);
 			}
+			ImGui::EndChild();
 
-			ImGui::Spacing();
 			ImGui::TextDisabled("Hierarchy");
 			ImGui::Separator();
+			ImGui::BeginChild("##uiw_tree", ImVec2(0.0f, 0.0f));
 
 			// Canvas root: select-none target + reparent-to-root drop target.
 			HE::Ed::Help::Scope helpScope("UI Hierarchy");
@@ -4172,6 +4190,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 			for (int rootId : st.tree.childrenOf(0))
 				drawHierarchyNode(st, ctx, rootId, structureEdit);
 			if (structureEdit) commitEdit(st, ctx);
+			ImGui::EndChild();
 		}
 		ImGui::EndChild();
 
