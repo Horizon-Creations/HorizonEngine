@@ -1752,6 +1752,32 @@ namespace
 	  "repository rather than about the last time you looked.",
 	  "", "editor#preferences" },
 
+	// ── Preferences » Project ────────────────────────────────────────────────
+	// The one page on this tab that edits the PROJECT. Everything else here
+	// follows the editor from project to project; these three travel with the
+	// project and into the application it exports.
+	{ "Permissions/Files outside the project", "Files outside the project",
+	  "Off, a script reads and writes only inside the project's Saved folder — an "
+	  "absolute path is simply refused. On, it may name any path on the machine.\n\n"
+	  "This is about what a SCRIPT may name on its own, never about what a PERSON "
+	  "may choose: a file somebody picks in a file dialog is allowed either way, "
+	  "because choosing it IS the permission. Most applications never need this "
+	  "switch — they need the dialog.",
+	  "", "editor#preferences" },
+	{ "Permissions/Run other programs", "Run other programs",
+	  "Whether Run Program and Open URL work. Off, they do nothing and say so in "
+	  "the log.\n\n"
+	  "Find Program is deliberately outside this: asking whether something is "
+	  "installed runs nothing, so a script can still say \"this needs git\" — "
+	  "which is the message somebody needs in order to decide whether to grant "
+	  "the permission at all.",
+	  "", "editor#preferences" },
+	{ "Permissions/Network access", "Network access",
+	  "Reserved. Nothing reads it yet — the `http` group is a later wave. It is "
+	  "here so that a project which has already thought about what it may reach "
+	  "does not have to be asked a second time when that group arrives.",
+	  "", "editor#preferences" },
+
 	// ── Preferences » Tools ──────────────────────────────────────────────────
 	// One table of every external thing the editor leans on. The rows are text;
 	// only these two are controls.
@@ -3576,6 +3602,10 @@ namespace
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
+		// The one page on the Preferences tab that edits the PROJECT rather than
+		// the editor, which is why it gets its own section rather than sitting
+		// under "Preferences".
+		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────

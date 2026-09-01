@@ -186,7 +186,10 @@ schöne Aufzählung:*
   `libHorizonCore` (`otool -L` zeigt sie), ein Überspringen beim Kopieren ergäbe also ein Spiel,
   das vor `main` im dyld stirbt. Der richtige Weg war schon gebaut: `HE_PREFER_MBEDTLS=ON` linkt
   mbedcrypto **statisch** hinein, dann gibt es die 4,8 MB gar nicht erst. Linux und Windows
-  fuhren das in der CI längst, **macOS als einziges nicht** — eine Zeile.
+  fuhren das in der CI längst, macOS zog mit `fb108c5f` (30.08.2026) nach — **damit ist dieser
+  Punkt zu.** Ein lokaler Build ohne den Schalter zeigt weiterhin die Homebrew-`libcrypto`, und
+  das ist Absicht (`CMakeLists.txt`: der Standard nimmt das schnellere System-OpenSSL); gemessen
+  wird das Release-Artefakt, und das fährt den Schalter.
 - **`libHorizonNet`: geht so nicht.** Ladezeit-Kante von der Spiel-Exe, von HorizonScene **und**
   von HorizonRendering. 0,7 MB, und der Weg dahin wäre dieselbe Plugin-Behandlung wie bei
   Python. Das gehört zu A3b und steht dort.
@@ -1021,8 +1024,12 @@ ohne `HIGH_PIXEL_DENSITY` erzeugt, absichtlich — viermal so viele Pixel für e
 heruntergerechnet wird, wäre reine Arbeit), und die Aufnahme hat deshalb Fenstergröße statt der
 1280×720, die der GPU-Pfad in ein Offscreen-Ziel rendert.
 
-**Offen aus diesem Block:** A3a, die Diät zur Linkzeit — heute wird die Bibliothek neben den anderen
-gelinkt und per Konfiguration gewählt. Das ist ein eigener Punkt und bleibt es.
+**Offen aus diesem Block:** die Bibliothek wird heute neben den anderen gelinkt und per
+Konfiguration gewählt. Das stand hier als A3a; die Nachmessung oben hat es **A3b** zugeschlagen,
+und da gehört es hin: „was eine App nicht anzielt, wird nicht gelinkt" wird erst wahr, wenn der
+Advanced-Schalter entscheidet, welcher einzige Renderer gelinkt wird. **A3a selbst ist damit
+abgeschlossen** — Python ist ein Laufzeit-Plugin, `libcrypto` ist über mbedTLS weg, und die
+beiden verbliebenen Punkte (Backends, `libHorizonNet`) sind beide A3b, also Welle 3.
 
 ### Welle 1 ist abgenommen (27.08.2026)
 
@@ -1743,6 +1750,101 @@ hoch, wie die Komponente verfasst wurde — sonst ist der Abzug ein Bild der eig
 **Offen geblieben:** das Handbuch hat noch keinen Abschnitt über Komponenten (die Docs liegen im
 Website-Repository), die neuen Hilfe-Einträge zeigen deshalb auf `ui#widgets` statt auf einen
 Anker, der 404 gäbe.
+
+### Block C: das Berechtigungsmodell, `process` und `fs` entsperrt (01.09.2026)
+
+Die Fallen-Liste unten sagt: **`fs` zu entsperren ist eine Einbahnstraße, das Berechtigungsmodell
+vorher festlegen.** Also zuerst das Modell, und es ist ein Satz:
+
+> **Die Berechtigung sagt, was ein SKRIPT von sich aus benennen darf. Sie sagt nie, was ein
+> MENSCH auswählen darf.** Ein Pfad, den jemand in einem Dateidialog gewählt hat, ist danach
+> frei — das Auswählen IST die Erlaubnis. `allowFiles` ist die Decke darüber, für den Fall, dass
+> ein Skript einen absoluten Pfad nennt, ohne dass jemand ihn gewählt hat.
+
+Drei Türen im `.heproj` (`allowFiles`, `allowProcesses`, `allowNetwork`), alle **zu**, solange
+ein Projekt nichts anderes sagt. Sie reisen in den `project.hcfg` des Exports und stehen im
+Editor unter *Preferences ▸ Project ▸ Permissions*.
+
+**Der Editor hängt an denselben drei Türen wie die ausgelieferte App**, absichtlich. Eine
+Vorschau, die fremde Verzeichnisse löschen darf, während der Export es nicht darf, ist der
+schlechtere der beiden Fehler: der Schaden passiert auf der Maschine des Autors, bevor irgendwas
+ausgeliefert werden konnte.
+
+**`abwesend` heißt hier `zu`**, und nur hier unter den Projekt-Schaltern. `advancedShaderEffects`
+liest ein fehlendes Feld als *an*, weil jedes ältere Projekt Materialien hatte; ein fehlendes
+`allowFiles` als *an* zu lesen, würde jedem Projekt rückwirkend jede Tür öffnen. Im `hcfg`
+stehen die drei deshalb **gerade** und nicht negiert wie das Shader-Bit.
+
+**`resolved()` ist die eine Stelle**, an der aus der Zeichenkette eines Skripts ein echter Pfad
+wird — relativ immer, absolut nur mit Decke oder Erteilung. Genau deshalb konnten die sechs neuen
+Zeilen (`isDir`, `size`, `modified`, `list`, `rename`, `copy`) dazukommen, ohne dass eine davon
+die Prüfung vergessen kann.
+
+**Ein Präfix auf Pfadteilen, nicht auf Zeichen.** Erteilt jemand `/tmp/out`, darf das nicht
+`/tmp/out_private` erteilen, und ein `..` muss **vor** dem Vergleich verrechnet sein, nicht
+danach. Gegengeprüft: ersetzt man den Vergleich durch das naheliegende `rfind(base, 0) == 0`,
+werden beide Zusicherungen rot — die Nachbardatei ist lesbar und der Umweg über `..` auch.
+
+**`process` läuft auf `HE::Proc`**, das es schon gab und das aus gutem Grund kein `popen` ist
+(argv-Vektor statt Shell-Zeile, stdout und stderr getrennt, ehrliche Exit-Codes, Timeout).
+`run` gibt **vier** Werte zurück: wer nur wissen will, ob es geklappt hat, liest `ok`; wer einem
+Menschen erklären muss, warum nicht, braucht Exit-Code und `err`. Ein Exit-Code ungleich null ist
+eine **Antwort**, kein Fehler.
+
+**`which` ist bewusst NICHT gesperrt.** Zu fragen, ob ein Programm installiert ist, führt nichts
+aus — und „dafür brauchst du git" ist genau die Nachricht, die jemand braucht, um zu entscheiden,
+ob er die Berechtigung überhaupt erteilt. Eine Sperre dort hätte den Nutzer im Dunkeln gelassen.
+
+**`fs.list("")` ist die Wurzel**, und nur diese Zeile darf das. `validRel` weist den leeren
+String für jede andere Zeile zu Recht ab (dort benennte er das Wurzel-VERZEICHNIS als Datei);
+„was liegt oben in meinem Sandkasten" ist aber eine gewöhnliche Frage ohne zweite Schreibweise.
+
+**`copy` überschreibt nicht.** Es ist die einzige Zeile hier, die eine Datei zerstören kann, die
+der Aufrufer nicht genannt hat, und ein verlorenes Dokument kostet mehr als ein `false`.
+
+**Und eine Falle für die Testdatei selbst:** die Berechtigungen sind prozessweite Statics. Ein
+Test, der Dateizugriff anlässt, würde die Ausbruchs-Zusicherungen im Sandkasten-Test daneben
+still lizenzieren. Jeder neue Fall stellt den zugesperrten Standard über einen Destruktor wieder
+her.
+
+**Die drei Dateidialoge sind der Erteilungsmechanismus** und deshalb Teil derselben Welle, nicht
+eine spätere Bequemlichkeit: ohne sie gibt es keinen Weg, einem Skript einen Pfad zu geben, ohne
+dass jemand eine Berechtigung tippt. `dialog.openFile/saveFile/pickFolder` reichen ihr Ergebnis
+an `fs::grantPath` weiter, und das ist deren **einziger** Aufrufer — eine Zeile, die ihr eigenes
+Argument erteilt, wäre ein Modell, das alles erlaubt.
+
+**Sie sind synchron, obwohl SDLs es nicht sind.** Ein Graph-Pin kann keine Fortsetzung halten,
+also wird gewartet: `SDL_PumpEvents` in einer Schleife, **pumpen und nie abholen**. Pumpen ist
+das, was die Portal-Picker unter Linux brauchen, und es lässt jedes Ereignis in der Warteschlange
+für die eigene Schleife der Anwendung — abholen hieße, Skriptcode innerhalb eines Skriptaufrufs
+laufen zu lassen, und genau das darf ein Modal nicht. Der Rückruf kommt laut SDL womöglich aus
+einem anderen Thread, also eine kleine gesperrte Box plus ein atomares Flag.
+
+**Der Wartepfad war ein echter Absturz, bevor er einer wurde.** Die Box lag zuerst auf dem
+**Stack**: läuft die Frist ab, kehrt der Aufrufer zurück, sein Rahmen verschwindet — und SDL hält
+den Zeiger weiter, denn der Dialog steht ja noch offen. Ein Klick nach einem langen Telefonat
+schreibt dann in toten Stack, und die Filter-Strings hingen genauso dran (SDLs eigener Header
+sagt, sie müssen den Rückruf überleben). Jetzt liegt die Box auf dem Heap und gehört dem, der
+zuletzt fertig wird: ein Zustand mit drei Werten, jeder Übergang ein CAS, und **wer sein CAS
+verliert, gibt frei**. Auf der Frist wird die Box also übergeben, nicht weggeworfen.
+
+**Kein `title`-Pin.** SDLs Picker nehmen keinen, die Plattform stellt ihren eigenen — und ein
+toter Pin ist hier schlimmer als anderswo, weil ein gespeicherter Graph Pin-INDIZES ablegt.
+Später entfernt hätte er jeden Graphen dahinter umverdrahtet; jetzt kostet er nichts.
+
+**Was hier ehrlich offen bleibt:**
+- Die drei Dialoge selbst sind **nicht getestet**. Sie brauchen einen Desktop, und die Sandbox
+  hier hat keinen. Getestet ist, woran sie hängen — dass `grantPath` die Tür öffnet, dass ein
+  Präfix auf Pfadteilen vergleicht und dass ein `..` vorher verrechnet wird. Der erste echte
+  Klick auf „Datei öffnen" ist die Probe, die noch aussteht.
+- **Der Datei-Watcher aus der `fs`-Zeile ist NICHT gebaut**, und das ist eine bewusste
+  Verschiebung, keine Auslassung. Ein Watcher muss ein Ereignis an ein Skript liefern, und den
+  Weg vom Host in einen laufenden Graphen gibt es für so etwas noch nicht — das ist ein eigenes
+  Stück Arbeit und gehört zu dem, was auch `http` braucht. Bis dahin ist der Behelf `fs.modified`
+  plus eine Delay-Schleife, und genau so macht es der Editor selbst mit seinem 1,5-Sekunden-Takt.
+- **`fs.modified` fährt auf einem 32-Bit-Float-Pin**, wie `datetime.now` auch. Auf Epoch-Größe
+  sind das rund zwei Minuten Auflösung. Für „wie alt ist diese Datei" reicht das; wer eine
+  Änderungserkennung darauf baut, baut auf Sand und sollte die Größe vergleichen.
 
 ---
 

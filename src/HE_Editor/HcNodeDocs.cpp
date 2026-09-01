@@ -576,6 +576,22 @@ namespace
 	  "button. Both labels are yours, so it can ask \"Save\" against \"Discard\" "
 	  "rather than only ever Yes and No. Return takes the first button, Escape "
 	  "the second." },
+	{ "dialog.openFile",
+	  "The system's own file picker. Returns the chosen path, or empty if the "
+	  "person cancelled — cancelling is a normal answer, not a failure.\n\n"
+	  "What comes back is ALLOWED to the file calls from then on, even in a "
+	  "project that permits nothing outside its own folder: somebody choosing a "
+	  "file is the permission. This is how an application opens a document.\n\n"
+	  "Filter is a description and its extensions in one string, "
+	  "\"Text files:txt;md\", or empty for anything." },
+	{ "dialog.saveFile",
+	  "The system's own \"save as\" picker. Same as Open File Dialog in every "
+	  "other way, including that the path it returns becomes writable to the file "
+	  "calls. The file usually does not exist yet — that is the point." },
+	{ "dialog.pickFolder",
+	  "Asks for a directory. Everything INSIDE it becomes reachable to the file "
+	  "calls, not just the folder itself, which is what makes \"choose a workspace "
+	  "folder\" work with no permission set anywhere." },
 
 	// ── Math ─────────────────────────────────────────────────────────────────
 	// The trigonometry and rounding rows are registered through a helper rather
@@ -821,6 +837,51 @@ namespace
 	  "Deletes a file. Ok is false if it was not there." },
 	{ "fs.makeDir",
 	  "Creates a directory, parents included. Ok is true if it already existed." },
+	{ "fs.isDir",
+	  "Is there a DIRECTORY at this path? Exists answers about anything; this one "
+	  "answers about the thing you can list." },
+	{ "fs.size",
+	  "The file's size in bytes, or -1 for anything that is not a readable file — "
+	  "a directory included, since a folder's size is not a number one call can "
+	  "honestly give." },
+	{ "fs.modified",
+	  "When the file was last written, in seconds, on the same clock Now uses. So "
+	  "\"how old is this file\" is Now minus this, and not a second time format to "
+	  "learn. -1 when there is nothing there." },
+	{ "fs.list",
+	  "The names of everything directly inside a directory, sorted. Names only, "
+	  "not full paths — joining stays yours. Empty for a path that is not a "
+	  "directory. Leave the path empty for the top of your own folder." },
+	{ "fs.rename",
+	  "Moves or renames, in one step. Both paths follow the same rules as every "
+	  "other file call." },
+	{ "fs.copy",
+	  "Copies a file. It will NOT overwrite: if something is already at the "
+	  "destination it does nothing and Ok is false. This is the one file call that "
+	  "could destroy something you did not name, so it refuses instead." },
+
+	// ── Process ──────────────────────────────────────────────────────────────
+	// All three need the project's "Run other programs" permission except Find
+	// Program, which runs nothing.
+	{ "process.run",
+	  "Runs another program and WAITS for it. Arguments go in one at a time — this "
+	  "is not a command line, so a path with a space in it needs no quoting and "
+	  "cannot inject anything.\n\n"
+	  "Four answers, because a caller who only wants to know whether it worked "
+	  "reads Ok, and one who has to explain a failure to a person needs the exit "
+	  "code and Err. A non-zero exit code is an ANSWER, not a breakage.\n\n"
+	  "It blocks the frame, so give it a timeout you are willing to wait; left at "
+	  "zero it is thirty seconds. Needs the project's \"Run other programs\" "
+	  "permission." },
+	{ "process.openUrl",
+	  "Hands a web address (or a file) to whatever this desktop opens it with — a "
+	  "browser, the file manager, the mail client. The usual way to show a manual "
+	  "or a release page. Needs the project's \"Run other programs\" permission." },
+	{ "process.which",
+	  "Where the system would find this program, or empty if it would not find it "
+	  "at all. Deliberately needs NO permission: asking whether something is "
+	  "installed runs nothing, and it is how a script tells somebody what it "
+	  "would need before they decide to allow it." },
 
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",

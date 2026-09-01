@@ -178,6 +178,19 @@ struct HostCtxParts
 	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
 	std::function<void(uint32_t)> destroyObject;
 	std::function<void()>         quit;
+	// Two of the four window rows, and deliberately not the other two.
+	//
+	// windowSize and requestRedraw are answerable here: a previewed graph asking
+	// how big its surface is deserves a number rather than a silent zero, and
+	// asking for a frame is what an event-driven app does (A2).
+	//
+	// setWindowTitle and setWindowSize stay UNBOUND on purpose. A graph running
+	// in the preview must not rename or resize the editor — that is not the
+	// window it thinks it is talking to. Unbound is an ordinary state here: the
+	// row logs once and does nothing, which is the honest answer to "this host
+	// will not do that".
+	std::function<glm::vec2()> windowSize;
+	std::function<void()>      requestRedraw;
 };
 // One editor per process; cleared in OnShutdown so nothing here outlives the
 // object its lambdas capture.
@@ -200,6 +213,8 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.createObject  = g_host.createObject;
 	c.destroyObject = g_host.destroyObject;
 	c.requestQuit   = g_host.quit;
+	c.windowSize    = g_host.windowSize;
+	c.requestRedraw = g_host.requestRedraw;
 	return c;
 }
 } // namespace
@@ -1292,6 +1307,16 @@ void EditorApplication::OnInit()
 		// viewport is a preview, so its Exit button ends the preview. Parked
 		// rather than run — see m_playStopRequested.
 		g_host.quit     = [this]{ m_playStopRequested = true; };
+		// The window a previewed graph is actually looking at is the editor's,
+		// which it may ASK about and may not change. See HostCtxParts for why
+		// the other two rows stay unbound.
+		g_host.windowSize = [this] {
+			const HE::Window* w = window();
+			return w ? glm::vec2(static_cast<float>(w->GetWidth()),
+			                     static_cast<float>(w->GetHeight()))
+			         : glm::vec2(0.0f);
+		};
+		g_host.requestRedraw = [this] { requestRedraw(); };
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
@@ -1398,6 +1423,20 @@ void EditorApplication::OnInit()
 			if (!projPath.empty())
 				HE::api::fs::setSandboxRoot(
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
+			// …and what this project permits, refreshed here for the same reason
+			// and at the same cost. The editor is gated by the SAME block as the
+			// shipped app on purpose: a preview that may delete a stranger's
+			// directory while the export may not is the worse of the two, because
+			// the damage lands on the author's own machine before anything could
+			// have been shipped.
+			{
+				const ProjectData& p = m_projectManager.currentProject();
+				HE::api::perm::Grants g;
+				g.files     = p.allowFiles;
+				g.processes = p.allowProcesses;
+				g.network   = p.allowNetwork;
+				HE::api::perm::set(g);
+			}
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
 			// So does the rest of the app-level half (audio, runtime, entity

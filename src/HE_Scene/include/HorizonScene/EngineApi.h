@@ -660,6 +660,32 @@ namespace dialog {
     // only ever "Yes"/"No".
     bool confirm(Ctx&, const std::string& title, const std::string& text,
                  const std::string& affirmative, const std::string& negative);
+
+    // ── Picking a file or a folder ───────────────────────────────────────────
+    // The native pickers, and the ONE mechanism by which a script gets at a path
+    // outside its sandbox: whatever comes back is handed to fs::grantPath, so
+    // the very next fs call on it works with no permission set anywhere. That is
+    // the plan's model — the choosing is the permission.
+    //
+    // Synchronous, like message/confirm above and unlike SDL's own file dialogs,
+    // which answer through a callback on some other thread. A graph pin cannot
+    // hold a continuation, so these wait: they pump SDL's event queue (which is
+    // what the pickers need on Linux) WITHOUT dispatching it, so the app's own
+    // loop still sees every event afterwards and no script re-enters mid-frame.
+    // The frame is blocked meanwhile, which is exactly what a modal is.
+    //
+    // "" means the person cancelled, which is a normal answer and not an error.
+    // `filter` is a description and a semicolon-separated extension list in one
+    // string — "Text files:txt;md" — or empty for "anything". One string because
+    // a graph pin is one value, and a filter nobody can type is a filter nobody
+    // uses.
+    // No title: SDL's pickers do not take one, the platform supplies its own,
+    // and a pin that does nothing is worse here than anywhere else — pin INDICES
+    // are what a saved graph stores, so removing a dead one later would rewire
+    // every graph past it. Cheaper to not have it.
+    std::string openFile(Ctx&, const std::string& filter);
+    std::string saveFile(Ctx&, const std::string& filter);
+    std::string pickFolder(Ctx&);
 }
 
 // ── Camera (the world's main camera: isMain, else the first CameraComponent) ──
@@ -805,18 +831,118 @@ namespace debug {
     void collect(float dt, std::vector<DebugLine>& out);
 }
 
+// ── What a script may reach outside its own project (docs/he-apps-plan.md C) ──
+// Three doors, declared in the .heproj and carried into the packaged build's
+// project.hcfg. All THREE are shut unless a project says otherwise, which is what
+// keeps every project written before them behaving exactly as it did.
+//
+// This is a one-way door in the plan's own risk list, so it is stated once, here:
+//
+//   The permission is about what a SCRIPT may name on its own. It is not about
+//   what a PERSON may choose. A path the user picked in a file dialog is granted
+//   for the rest of the session whatever `files` says — the choosing IS the
+//   permission, and that is the whole model the plan asks for ("der Dialog
+//   ERTEILT den Pfad, dann ist er frei"). `files` is the blanket that lets a
+//   script name an absolute path with nobody having picked it.
+//
+// The editor is gated by the same block as the shipped app rather than by a
+// looser rule of its own. A preview that may delete a stranger's directory while
+// the export may not is the worse of the two failures: the damage happens on the
+// author's machine, to the author's files, before anybody could have shipped it.
+namespace perm {
+    struct Grants
+    {
+        bool files     = false;   // fs beyond the sandbox, without a dialog
+        bool processes = false;   // process.run / process.openUrl
+        bool network    = false;  // reserved for `http` (Welle 3); nothing reads it yet
+    };
+    // App hook, called at project load and at app boot. Replacing the whole
+    // struct rather than setting flags one at a time: a half-applied permission
+    // set is a state nobody should be able to observe.
+    void          set(const Grants& g);
+    const Grants& get();
+    // "May this row run?" — logs once per row name when it may not, because a
+    // script that silently does nothing is the hardest failure to diagnose and
+    // the likeliest one here (the answer is a project setting, not the code).
+    bool allowed(bool granted, const char* row);
+}
+
 // ── Sandboxed file I/O (fs) + save-game store (save) ─────────────────────────
-// All paths are RELATIVE to a per-project sandbox root the app sets (editor: the
+// Paths are RELATIVE to a per-project sandbox root the app sets (editor: the
 // project's Saved/ dir; game: the per-user pref dir). Absolute paths and ".."
-// are rejected — scripts can never leave the sandbox.
+// are rejected there — a script can never walk out of the sandbox by accident.
+//
+// An ABSOLUTE path is a second, deliberate route, open only when the project
+// grants `perm::files` or when the path was GRANTED at runtime by somebody
+// picking it in a dialog (see grantPath). Both are checked in the one place that
+// turns a script's string into a real path, so a row added later cannot forget.
 namespace fs {
     void        setSandboxRoot(const std::string& absDir);  // app hook (created on demand)
     std::string sandboxRoot();
+    // Open an absolute path (or a whole directory) to the scripts for the rest of
+    // this session. Called by the file dialogs with whatever the user picked, and
+    // by nothing else — a row that granted its own argument would be a permission
+    // model that permits everything.
+    void        grantPath(const std::string& absPath);
+    // Every grant so far, for a host that wants to show or persist them. Grants
+    // are session-scoped on purpose: a project that needs a path every time
+    // should ask for `perm::files`, not accumulate a list nobody can audit.
+    const std::vector<std::string>& grantedPaths();
+    void        clearGrants();
     bool        writeText(const std::string& rel, const std::string& text);
     std::string readText(const std::string& rel);            // "" when missing/invalid
     bool        exists(const std::string& rel);
     bool        remove(const std::string& rel);               // files only
     bool        makeDir(const std::string& rel);
+
+    // ── The rest of what an application needs from a filesystem ──────────────
+    // isDir answers about the same path `exists` does, separately, because
+    // "there is something there" and "I may list it" are different questions and
+    // one bool cannot carry both.
+    bool        isDir(const std::string& path);
+    // Bytes, and seconds since the epoch — the same clock `datetime` speaks, so
+    // a file's age is a subtraction and not a second time format to learn.
+    // -1 when the path is unreachable, which no real file can be.
+    double      size(const std::string& path);
+    double      modified(const std::string& path);
+    // The immediate children of a directory, names only, sorted. Names rather
+    // than full paths so joining stays the caller's decision, and sorted because
+    // a directory's own order is the filesystem's business and differs between
+    // two machines showing "the same" list.
+    std::vector<std::string> list(const std::string& dir);
+    bool        rename(const std::string& from, const std::string& to);
+    // Files only, and it does NOT overwrite: a copy that silently replaced the
+    // destination would be the one row here that can destroy data the caller
+    // never named.
+    bool        copy(const std::string& from, const std::string& to);
+}
+
+// ── Running another program (process) ────────────────────────────────────────
+// Straight onto HE::Proc, which is a real subprocess API — argv vector rather
+// than a shell string, stdout and stderr apart, honest exit codes, a timeout.
+// Every row here needs `perm::processes`; without it they log once and return
+// their neutral answer.
+//
+// run() is SYNCHRONOUS and therefore takes a timeout with a real default: a
+// graph node that never returns freezes the frame it was called on, and an
+// application that hangs on a subprocess looks exactly like one that crashed.
+namespace process {
+    struct RunResult
+    {
+        bool        ok = false;      // ran to completion and exited zero
+        int         exitCode = -1;
+        std::string out, err;
+    };
+    RunResult run(Ctx&, const std::string& exe, const std::vector<std::string>& args,
+                  double timeoutSeconds);
+    // Hand a URL (or a file) to whatever the desktop opens it with. The one row
+    // here an ordinary application really wants — "open the manual", "show this
+    // in the file manager" — and the only one that reaches outside without
+    // running anything the caller named.
+    bool        openUrl(Ctx&, const std::string& url);
+    // Where the OS would find `exe`, or "" — so a script can say "you need git"
+    // instead of failing to launch it.
+    std::string which(Ctx&, const std::string& exe);
 }
 
 // ── JSON ─────────────────────────────────────────────────────────────────────

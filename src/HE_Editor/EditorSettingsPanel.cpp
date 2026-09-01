@@ -1186,6 +1186,66 @@ void statusRow(const char* name, StatusLevel level, const std::string& detail,
 	}
 }
 
+// ─── Project ▸ Permissions ───────────────────────────────────────────────────
+// What this project's scripts may reach outside the project (plan, Block C).
+// Three checkboxes, all off until somebody says otherwise, saved into the
+// .heproj and carried into the exported build.
+//
+// They bind the EDITOR too, not just the export. A preview that may delete a
+// stranger's directory while the shipped app may not is the worse of the two
+// failures: it happens on the author's machine, before anything shipped.
+void drawPermissionsPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Permissions");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData& p = ctx.projectManager->currentProject();
+
+	EditorWidgets::hint("These belong to the PROJECT, not to the editor: they are saved in "
+	                    "its .heproj and travel into the application you export. They also "
+	                    "bind scripts you run here, so the preview can never do more than "
+	                    "the shipped app.");
+	ImGui::Spacing();
+
+	bool changed = false;
+	changed |= ImGui::Checkbox("Files outside the project", &p.allowFiles);
+	EditorWidgets::helpForLabel("Files outside the project");
+	ImGui::TextDisabled("Off, a script reads and writes only inside the project's Saved folder.\n"
+	                    "A file the person using the app picks in a dialog is always allowed,\n"
+	                    "whatever this says — choosing it is the permission.");
+	ImGui::Spacing();
+
+	changed |= ImGui::Checkbox("Run other programs", &p.allowProcesses);
+	EditorWidgets::helpForLabel("Run other programs");
+	ImGui::TextDisabled("Covers Run Program and Open URL. Finding out whether a program is\n"
+	                    "installed needs no permission — that is how a script can tell\n"
+	                    "somebody what it would need.");
+	ImGui::Spacing();
+
+	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
+	EditorWidgets::helpForLabel("Network access");
+	ImGui::TextDisabled("Reserved: nothing reads this yet. It is here so a project that\n"
+	                    "already answered the question does not have to answer it again.");
+
+	if (changed)
+	{
+		// Written through immediately rather than on some later Save: a
+		// permission that is on in the panel and off on disk is the state that
+		// makes somebody spend an hour on why their script still cannot read a
+		// file. The runtime picks it up on the next call by itself (the api
+		// dispatch refreshes perm::set from here).
+		if (!ctx.projectManager->saveProject(p.path))
+			// Problem, not Warning: the panel now says one thing and the file
+			// another, and it stays that way until somebody acts.
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's permissions", p.path);
+	}
+}
+
 void drawStatusPage(AppContext& ctx)
 {
 	HE::Ed::Help::Scope helpScope("Tool Status");
@@ -1473,6 +1533,9 @@ constexpr NavItem kSourceControlItems[] = {
 constexpr NavItem kToolsItems[] = {
 	{ Page::Status, "Status" },
 };
+constexpr NavItem kProjectItems[] = {
+	{ Page::Permissions, "Permissions" },
+};
 constexpr NavGroup kNavGroups[] = {
 	{ "General",        kGeneralItems,       IM_ARRAYSIZE(kGeneralItems) },
 	// Right behind General: these are the editor's own tools, so they belong
@@ -1482,6 +1545,10 @@ constexpr NavGroup kNavGroups[] = {
 	{ "Collaboration",  kCollaborationItems, IM_ARRAYSIZE(kCollaborationItems) },
 	{ "Source Control", kSourceControlItems, IM_ARRAYSIZE(kSourceControlItems) },
 	{ "Tools",          kToolsItems,         IM_ARRAYSIZE(kToolsItems) },
+	// Last, and named "Project" rather than folded into one of the groups above:
+	// everything else on this tab follows the EDITOR from project to project,
+	// and this one travels with the project and into its exported build.
+	{ "Project",        kProjectItems,       IM_ARRAYSIZE(kProjectItems) },
 };
 
 // Engine-settings pages map onto one catalog category each; the rest have
@@ -1589,6 +1656,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
 	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
+	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

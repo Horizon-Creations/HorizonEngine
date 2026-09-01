@@ -34,6 +34,11 @@ namespace EditorSettingsPanel
 		Repository,
 		// Tools
 		Status,
+		// Project — the only page here that edits the PROJECT rather than the
+		// editor. It lives in Preferences anyway because there is no project
+		// settings surface yet and a permission nobody can find is a permission
+		// nobody grants; the page says whose settings they are in its first line.
+		Permissions,
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).

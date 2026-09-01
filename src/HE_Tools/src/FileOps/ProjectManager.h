@@ -235,6 +235,27 @@ struct ProjectData
 	// compiler. Default TRUE, because every project that predates the flag has
 	// them and a game always does.
 	bool advancedShaderEffects = true;
+
+	// ── What a script in this project may reach outside it (plan, Block C) ───
+	// Three doors, all shut unless this project opens them, persisted as
+	// ".heproj \"allowFiles\"/\"allowProcesses\"/\"allowNetwork\"" and carried
+	// into the packaged build's project.hcfg.
+	//
+	// The plan calls the permission model a one-way street and says to settle it
+	// before unlocking anything, so it is settled here: the permission is about
+	// what a SCRIPT may name on its own, never about what a PERSON may choose.
+	// A path picked in a file dialog is granted for that session whatever
+	// allowFiles says — the choosing IS the permission. allowFiles is the
+	// blanket that lets a script name an absolute path with nobody having picked
+	// it.
+	//
+	// The EDITOR is gated by the same three as the shipped app, deliberately.
+	// A preview that may delete a stranger's directory while the export may not
+	// is the worse of the two failures: it happens on the author's machine,
+	// before anything could have shipped.
+	bool allowFiles     = false;
+	bool allowProcesses = false;
+	bool allowNetwork   = false;   // reserved for `http` (Welle 3)
 };
 
 class HE_TOOLS_API ProjectManager

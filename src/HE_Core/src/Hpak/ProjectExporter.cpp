@@ -936,6 +936,9 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.defaultSaveTemplate = settings.defaultSaveTemplate;
     cfg.appMode               = settings.appProject;
     cfg.advancedShaderEffects = settings.advancedShaderEffects;
+    cfg.allowFiles            = settings.allowFiles;
+    cfg.allowProcesses        = settings.allowProcesses;
+    cfg.allowNetwork          = settings.allowNetwork;
     cfg.theme                 = settings.theme;
     cfg.themeMode             = settings.themeMode;
     // Key placement: inside the game executable when the patch succeeded (the

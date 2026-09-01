@@ -895,6 +895,12 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["scriptLanguage"] = HE::tools::toString(scriptLanguage);
 	j["appProject"]            = isApp;
 	j["advancedShaderEffects"] = advancedShaderEffects;
+	// A new project reaches nothing outside itself. Written out rather than left
+	// absent so the file states its own answer from the first day: a permission
+	// that only exists once somebody turns it on is one nobody discovers.
+	j["allowFiles"]     = false;
+	j["allowProcesses"] = false;
+	j["allowNetwork"]   = false;
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -1043,6 +1049,12 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// with materials. Both defaults therefore have to be the game's answer.
 	m_currentProject.appProject            = jsonBool(j, "appProject", false);
 	m_currentProject.advancedShaderEffects = jsonBool(j, "advancedShaderEffects", true);
+	// Absent means shut, here and only here among the flags above: a project
+	// written before permissions existed never asked for any of this, and
+	// reading absence as "yes" would open every one of them retroactively.
+	m_currentProject.allowFiles     = jsonBool(j, "allowFiles", false);
+	m_currentProject.allowProcesses = jsonBool(j, "allowProcesses", false);
+	m_currentProject.allowNetwork   = jsonBool(j, "allowNetwork", false);
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -1115,6 +1127,9 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	// it is, rather than a missing key having to mean "game" forever.
 	j["appProject"]            = m_currentProject.appProject;
 	j["advancedShaderEffects"] = m_currentProject.advancedShaderEffects;
+	j["allowFiles"]            = m_currentProject.allowFiles;
+	j["allowProcesses"]        = m_currentProject.allowProcesses;
+	j["allowNetwork"]          = m_currentProject.allowNetwork;
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

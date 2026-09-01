@@ -59,6 +59,19 @@ struct HE_API ProjectConfig {
     // Empty reads as System. Storing the resolved value would ship whatever mode
     // the author's machine happened to be in as everyone's fixed mode.
     std::string  themeMode;
+
+    // ── What a script in this build may reach outside it (plan, Block C) ─────
+    // Three doors, and all three shut unless the project said otherwise. Stored
+    // straight (not negated like advancedShaderEffects above) because "off" is
+    // what every build written before them meant AND what they should default
+    // to: the negated trick is for a flag whose honest default is on.
+    //
+    // allowFiles is about what a SCRIPT may name on its own. A path the person
+    // using the app picked in a file dialog is granted for that session either
+    // way — the choosing is the permission (HE::api::fs::grantPath).
+    bool         allowFiles     = false;
+    bool         allowProcesses = false;
+    bool         allowNetwork   = false;   // reserved for `http` (Welle 3)
 };
 
 class HE_API ProjectConfigLoader {

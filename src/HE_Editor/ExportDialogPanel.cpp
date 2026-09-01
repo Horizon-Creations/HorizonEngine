@@ -1225,6 +1225,9 @@ void startExport(AppContext& ctx)
                     // whether material graphs can appear at all.
                     es.appProject            = ctx.projectManager->currentProject().appProject;
                     es.advancedShaderEffects = ctx.projectManager->currentProject().advancedShaderEffects;
+                    es.allowFiles     = ctx.projectManager->currentProject().allowFiles;
+                    es.allowProcesses = ctx.projectManager->currentProject().allowProcesses;
+                    es.allowNetwork   = ctx.projectManager->currentProject().allowNetwork;
                 }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 // Texture-compression cook target, chosen automatically from the

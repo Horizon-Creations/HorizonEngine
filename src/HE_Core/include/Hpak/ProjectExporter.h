@@ -52,6 +52,14 @@ struct HE_API ExportSettings {
     // events. See docs/he-apps-plan.md A0/A1/A2.
     bool appProject = false;
     bool advancedShaderEffects = true;
+    // What the shipped application may reach outside itself (.heproj
+    // "allowFiles"/"allowProcesses"/"allowNetwork"). All three default shut, so
+    // an export that forgets to copy them across ships an app that can do LESS
+    // than intended rather than more — the only direction a defaulted permission
+    // may fail in.
+    bool allowFiles     = false;
+    bool allowProcesses = false;
+    bool allowNetwork   = false;
     // The Theme asset the shipped application boots with (content-relative;
     // empty = the engine's built-in default) and the mode it was asked for
     // ("System"/"Light"/"Dark"). Both ride in project.hcfg, not config.json —

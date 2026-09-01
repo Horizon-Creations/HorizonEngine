@@ -42,7 +42,15 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
                          | (cfg.hasPackedScene        ? 4u  : 0u)
                          | (cfg.horizonCodeCompiled   ? 8u  : 0u)
                          | (cfg.appMode               ? 16u : 0u)
-                         | (cfg.advancedShaderEffects ? 0u  : 32u);
+                         | (cfg.advancedShaderEffects ? 0u  : 32u)
+                         // Bits 64/128/256 are the permission block. Stored
+                         // STRAIGHT, unlike 32 above: a build written before
+                         // they existed has them clear, and clear is also what
+                         // they should mean — a project that never asked for
+                         // file or process access does not get it.
+                         | (cfg.allowFiles            ? 64u : 0u)
+                         | (cfg.allowProcesses        ? 128u: 0u)
+                         | (cfg.allowNetwork          ? 256u: 0u);
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
@@ -92,6 +100,9 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     out.horizonCodeCompiled   = (flags & 8u) != 0;
     out.appMode               = (flags & 16u) != 0;
     out.advancedShaderEffects = (flags & 32u) == 0;   // stored negated, see save()
+    out.allowFiles            = (flags & 64u) != 0;
+    out.allowProcesses        = (flags & 128u) != 0;
+    out.allowNetwork          = (flags & 256u) != 0;
     if (off + 32 > buf.size()) return false;
     std::memcpy(out.encKey, buf.data() + off, 32);
     off += 32;

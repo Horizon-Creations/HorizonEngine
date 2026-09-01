@@ -32,6 +32,10 @@
 #include <Types/TypeRegistry.h>   // save-template schemas + struct field values
 #include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
 #include <DebugDraw/DebugDraw.h>
+#include <Platform/Process.h>      // the process group runs on HE::Proc
+#include <atomic>                  // the file dialogs answer on another thread
+#include <functional>
+#include <mutex>
 #include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
@@ -1129,6 +1133,148 @@ bool confirm(Ctx&, const std::string& title, const std::string& text,
     }
     return chosen == 1;
 }
+
+// ── Picking a file or a folder ───────────────────────────────────────────────
+namespace {
+// SDL answers a file dialog through a callback, and says outright that it may
+// arrive on another thread. It also does not take the dialog back: once shown,
+// it WILL call back eventually, however long the person leaves it open.
+//
+// So the shared box lives on the HEAP and is owned by whoever finishes last.
+// The stack version of this was a real crash: on the wait's deadline the caller
+// returned, its frame went away, and SDL still held a pointer into it — one
+// click after a long phone call and the callback writes through dead stack. The
+// filter strings had the same lifetime, and SDL's own header says they must
+// outlive the callback.
+//
+// `state` is the handover, and every transition is a CAS so exactly one side
+// frees: 0 = waiting, 1 = the callback answered, 2 = the caller gave up. Whoever
+// loses its CAS knows the other side has left and deletes the box.
+struct PickState
+{
+    std::mutex        m;
+    std::string       path;
+    std::atomic<int>  state{ 0 };
+    // Held here for the same reason: SDL keeps the filter list until it calls
+    // back, so it cannot live in the frame that starts the dialog.
+    std::string                  filterName, filterExt;
+    std::vector<SDL_DialogFileFilter> filters;
+};
+
+void SDLCALL pickCallback(void* userdata, const char* const* filelist, int)
+{
+    auto* st = static_cast<PickState*>(userdata);
+    {
+        std::lock_guard<std::mutex> lock(st->m);
+        // NULL is an error, an empty list is a cancel, and both leave the path
+        // empty — a caller cannot act differently on the two anyway, and SDL has
+        // already logged the error.
+        if (filelist && filelist[0]) st->path = filelist[0];
+    }
+    int expected = 0;
+    if (!st->state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+        delete st;   // the caller gave up; this box is ours to let go of
+}
+
+// "Text files:txt;md" → one SDL filter, stored IN the box (SDL keeps the list
+// until it calls back). Empty spec = no filter at all, because SDL reads a null
+// list as "show everything" and a filter that matches nothing is worse than none.
+void parseFilterInto(PickState& st, const std::string& spec)
+{
+    if (spec.empty()) return;
+    const std::size_t colon = spec.find(':');
+    if (colon == std::string::npos) { st.filterName = spec; st.filterExt = "*"; }
+    else
+    {
+        st.filterName = spec.substr(0, colon);
+        st.filterExt  = spec.substr(colon + 1);
+    }
+    if (st.filterName.empty()) st.filterName = "Files";
+    if (st.filterExt.empty())  st.filterExt  = "*";
+    st.filters.push_back({ st.filterName.c_str(), st.filterExt.c_str() });
+}
+
+// Run one of the three pickers to an answer. `show` does the SDL call; this owns
+// the waiting and the handover, which are the same for all three.
+std::string runPicker(const char* who, const std::string& filter,
+                      const std::function<void(PickState&, SDL_DialogFileCallback, void*)>& show)
+{
+    auto* st = new PickState();
+    parseFilterInto(*st, filter);
+    show(*st, pickCallback, st);
+
+    // A person may take a long time to find a file, so the deadline is generous
+    // and exists only so a picker that never answers cannot hold this call
+    // forever. SDL calls back on cancel and on error too, so reaching it means
+    // something is genuinely wrong.
+    constexpr int kMaxWaitMs = 5 * 60 * 1000;
+    int waited = 0;
+    while (st->state.load(std::memory_order_acquire) == 0 && waited < kMaxWaitMs)
+    {
+        // PUMP, never poll. Pumping is what the portal-based pickers need on
+        // Linux, and it leaves every event in the queue for the application's
+        // own loop — dispatching here would run script code inside a script
+        // call, which is the one thing a modal must not do.
+        SDL_PumpEvents();
+        SDL_Delay(8);
+        waited += 8;
+    }
+
+    if (st->state.load(std::memory_order_acquire) == 0)
+    {
+        // Give up, but only if the callback has not just won the race. The
+        // dialog is still on screen and SDL still holds this pointer, so the box
+        // is handed OVER rather than freed — the callback deletes it whenever
+        // the person finally clicks.
+        int expected = 0;
+        if (st->state.compare_exchange_strong(expected, 2, std::memory_order_acq_rel))
+        {
+            HE_LOG_WARN(Script, "%s: the file dialog is still open after five minutes — "
+                                "giving up on the answer", who);
+            return {};
+        }
+        // Lost the race: the callback answered, so the box is ours after all.
+    }
+
+    std::string path;
+    { std::lock_guard<std::mutex> lock(st->m); path = st->path; }
+    delete st;
+    // The choosing IS the permission: whatever came back is open to the scripts
+    // from here on, with nothing set in the project. This is the ONLY caller of
+    // grantPath — a row that granted its own argument would permit everything.
+    if (!path.empty()) fs::grantPath(path);
+    return path;
+}
+} // namespace
+
+std::string openFile(Ctx&, const std::string& filter)
+{
+    return runPicker("dialog.openFile", filter,
+        [](PickState& st, SDL_DialogFileCallback cb, void* ud) {
+            SDL_ShowOpenFileDialog(cb, ud, nullptr,
+                                   st.filters.empty() ? nullptr : st.filters.data(),
+                                   static_cast<int>(st.filters.size()), nullptr,
+                                   /*allow_many=*/false);
+        });
+}
+
+std::string saveFile(Ctx&, const std::string& filter)
+{
+    return runPicker("dialog.saveFile", filter,
+        [](PickState& st, SDL_DialogFileCallback cb, void* ud) {
+            SDL_ShowSaveFileDialog(cb, ud, nullptr,
+                                   st.filters.empty() ? nullptr : st.filters.data(),
+                                   static_cast<int>(st.filters.size()), nullptr);
+        });
+}
+
+std::string pickFolder(Ctx&)
+{
+    return runPicker("dialog.pickFolder", {},
+        [](PickState&, SDL_DialogFileCallback cb, void* ud) {
+            SDL_ShowOpenFolderDialog(cb, ud, nullptr, nullptr, /*allow_many=*/false);
+        });
+}
 } // namespace dialog
 
 // ── Camera ───────────────────────────────────────────────────────────────────
@@ -1367,10 +1513,31 @@ void collect(float dt, std::vector<DebugLine>& out)
 }
 } // namespace debug
 
+// ── Permissions ──────────────────────────────────────────────────────────────
+namespace perm {
+namespace {
+Grants& state() { static Grants g; return g; }
+} // namespace
+void          set(const Grants& g) { state() = g; }
+const Grants& get() { return state(); }
+bool allowed(bool granted, const char* row)
+{
+    if (granted) return true;
+    // Throttled rather than once-ever: a graph that calls this every tick would
+    // otherwise print one line at startup and then look like it was working.
+    HE_LOG_THROTTLE(Config, Warning, 10.0,
+                    "%s: this project does not permit it. Turn the matching "
+                    "permission on in the project's settings.", row);
+    return false;
+}
+} // namespace perm
+
 // ── Sandboxed fs + save store ────────────────────────────────────────────────
 namespace fs {
 namespace {
 std::string& root() { static std::string r; return r; }
+std::vector<std::string>& grants() { static std::vector<std::string> g; return g; }
+
 // A sandbox-relative path is valid when it has no root and no ".." component.
 bool validRel(const std::string& rel)
 {
@@ -1384,14 +1551,76 @@ bool validRel(const std::string& rel)
         if (part == "..") return false;
     return true;
 }
+
+// Is `p` at or under `base`? Compared on the LEXICALLY NORMAL forms, never as
+// strings: "/home/me/docs" must not grant "/home/me/docs-private", and a "/.."
+// inside the path must be spent before the comparison rather than after it.
+bool under(const std::filesystem::path& p, const std::filesystem::path& base)
+{
+    const auto a = p.lexically_normal();
+    const auto b = base.lexically_normal();
+    auto ai = a.begin(); auto bi = b.begin();
+    for (; bi != b.end(); ++ai, ++bi)
+    {
+        if (ai == a.end()) return false;
+        if (*ai != *bi) return false;
+    }
+    return true;
+}
+
+// Somebody picked this path, or something above it, in a dialog.
+bool isGranted(const std::filesystem::path& p)
+{
+    for (const std::string& g : grants())
+        if (under(p, std::filesystem::path(g))) return true;
+    return false;
+}
+
+// The ONE place a script's string becomes a real path, which is what lets the
+// two routes into the filesystem stay two and not eleven:
+//
+//   relative  → always, under the sandbox root (what every row did before);
+//   absolute  → only when the project granted `perm::files`, or when the user
+//               picked this path (or a directory above it) in a dialog.
+//
+// An empty return means "no", and every row already treats it that way.
 std::filesystem::path resolved(const std::string& rel)
 {
+    const std::filesystem::path p(rel);
+    if (!p.empty() && (p.is_absolute() || p.has_root_name() || p.has_root_directory()))
+    {
+        // A ".." is spent by lexically_normal before `under` compares, so a
+        // granted "/home/me/docs" plus "/home/me/docs/../.ssh" does not resolve.
+        if (perm::get().files || isGranted(p)) return p.lexically_normal();
+        HE_LOG_THROTTLE(Config, Warning, 10.0,
+                        "fs: '%s' is outside the project's sandbox. Either let the "
+                        "user pick it in a file dialog, or turn on file access in "
+                        "the project's settings.", rel.c_str());
+        return {};
+    }
     if (root().empty() || !validRel(rel)) return {};
     return std::filesystem::path(root()) / rel;
 }
 } // namespace
 void setSandboxRoot(const std::string& absDir) { root() = absDir; }
 std::string sandboxRoot() { return root(); }
+void grantPath(const std::string& absPath)
+{
+    if (absPath.empty()) return;
+    const std::filesystem::path p = std::filesystem::path(absPath).lexically_normal();
+    // A file grants its own path; a directory grants everything under it. Which
+    // it is, is asked of the DISK and not of the string: a dialog's "save as"
+    // names a file that does not exist yet, and treating that as a directory
+    // would hand over the whole folder it sits in.
+    std::error_code ec;
+    const std::string s = p.string();
+    for (const std::string& g : grants()) if (g == s) return;
+    grants().push_back(s);
+    HE_LOG_INFO(Config, "fs: granted '%s'%s", s.c_str(),
+                std::filesystem::is_directory(p, ec) ? " (and everything under it)" : "");
+}
+const std::vector<std::string>& grantedPaths() { return grants(); }
+void clearGrants() { grants().clear(); }
 bool writeText(const std::string& rel, const std::string& text)
 {
     const auto p = resolved(rel);
@@ -1432,7 +1661,142 @@ bool makeDir(const std::string& rel)
     return !p.empty() && (std::filesystem::create_directories(p, ec) ||
                           std::filesystem::is_directory(p, ec));
 }
+
+bool isDir(const std::string& path)
+{
+    const auto p = resolved(path);
+    std::error_code ec;
+    return !p.empty() && std::filesystem::is_directory(p, ec);
+}
+
+double size(const std::string& path)
+{
+    const auto p = resolved(path);
+    std::error_code ec;
+    if (p.empty() || !std::filesystem::is_regular_file(p, ec)) return -1.0;
+    const auto n = std::filesystem::file_size(p, ec);
+    return ec ? -1.0 : static_cast<double>(n);
+}
+
+double modified(const std::string& path)
+{
+    const auto p = resolved(path);
+    std::error_code ec;
+    if (p.empty()) return -1.0;
+    const auto ft = std::filesystem::last_write_time(p, ec);
+    if (ec) return -1.0;
+    // Two clocks, converted by reading both at nearly the same instant. The
+    // tidy C++20 route (file_clock::to_sys) is not equally present across the
+    // three standard libraries this ships against, and a header that fails to
+    // compile on the CI I cannot run is a worse trade than a conversion whose
+    // error is the microseconds between these two calls.
+    const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        ft - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+    return std::chrono::duration<double>(sys.time_since_epoch()).count();
+}
+
+std::vector<std::string> list(const std::string& dir)
+{
+    std::vector<std::string> out;
+    // "" is the sandbox root itself. validRel refuses an empty string for every
+    // other row, and rightly — there it would name the root DIRECTORY as a file
+    // to read or delete. But "what is at the top of my sandbox" is an ordinary
+    // question with no other spelling, so this row answers it and only this one.
+    const auto p = dir.empty() ? std::filesystem::path(root()) : resolved(dir);
+    std::error_code ec;
+    if (p.empty() || !std::filesystem::is_directory(p, ec)) return out;
+    // skip_permission_denied so one unreadable child does not turn the whole
+    // listing into nothing — the caller asked what is in the folder, and "most
+    // of it" is a better answer than "an error".
+    for (std::filesystem::directory_iterator it(
+             p, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec))
+        out.push_back(it->path().filename().string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool rename(const std::string& from, const std::string& to)
+{
+    const auto a = resolved(from), b = resolved(to);
+    if (a.empty() || b.empty()) return false;
+    std::error_code ec;
+    std::filesystem::rename(a, b, ec);
+    return !ec;
+}
+
+bool copy(const std::string& from, const std::string& to)
+{
+    const auto a = resolved(from), b = resolved(to);
+    std::error_code ec;
+    if (a.empty() || b.empty() || !std::filesystem::is_regular_file(a, ec)) return false;
+    // Never overwrite. This is the one row here that can destroy a file the
+    // caller did not name, and skip_existing turning that into a plain false is
+    // cheaper to debug than a lost document.
+    if (std::filesystem::exists(b, ec)) return false;
+    std::filesystem::create_directories(b.parent_path(), ec);
+    ec.clear();
+    return std::filesystem::copy_file(
+        a, b, std::filesystem::copy_options::skip_existing, ec) && !ec;
+}
 } // namespace fs
+
+// ── Running another program ──────────────────────────────────────────────────
+namespace process {
+RunResult run(Ctx&, const std::string& exe, const std::vector<std::string>& args,
+              double timeoutSeconds)
+{
+    RunResult r;
+    if (!perm::allowed(perm::get().processes, "process.run")) return r;
+    if (exe.empty()) return r;
+
+    HE::Proc::Options o;
+    o.exe  = exe;
+    o.args = args;
+    // A graph node that never returns freezes the frame it was called on, so a
+    // zero here is NOT "wait forever" the way HE::Proc reads it — it is the
+    // default, thirty seconds. A script that really means forever has no way to
+    // say so, which is the correct thing for a synchronous row on the UI thread.
+    o.timeoutMs = static_cast<std::uint32_t>(
+        (timeoutSeconds > 0.0 ? timeoutSeconds : 30.0) * 1000.0);
+
+    const HE::Proc::Result res = HE::Proc::run(o);
+    r.ok       = res.ok();
+    r.exitCode = res.exitCode;
+    r.out      = res.out;
+    r.err      = res.err;
+    if (res.launchFailed)
+        HE_LOG_WARN(Config, "process.run: could not start '%s' — is it installed and on PATH?",
+                    exe.c_str());
+    else if (res.timedOut)
+        HE_LOG_WARN(Config, "process.run: '%s' was killed after %.0f s", exe.c_str(),
+                    timeoutSeconds > 0.0 ? timeoutSeconds : 30.0);
+    return r;
+}
+
+bool openUrl(Ctx&, const std::string& url)
+{
+    if (!perm::allowed(perm::get().processes, "process.openUrl")) return false;
+    if (url.empty()) return false;
+    // SDL's own opener rather than a shelled-out "open"/"xdg-open"/"start": it is
+    // the one that already knows what this platform does, and it is not a shell,
+    // so a URL with a quote in it is a URL and not an injection.
+    if (SDL_OpenURL(url.c_str())) return true;
+    HE_LOG_WARN(Config, "process.openUrl: %s", SDL_GetError());
+    return false;
+}
+
+std::string which(Ctx&, const std::string& exe)
+{
+    // Deliberately NOT gated: asking whether a tool is installed runs nothing.
+    // A script that has to say "you need git for this" should be able to, in a
+    // project that has not been given permission to run it — that is the message
+    // the person needs in order to decide whether to grant it.
+    if (exe.empty()) return {};
+    const auto p = HE::Proc::which(exe);
+    return p ? p->string() : std::string();
+}
+} // namespace process
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
 namespace json {
@@ -2999,6 +3363,22 @@ const std::vector<ApiFn>& registry()
             {{"confirmed", P::Bool}}, "HE::api::dialog::confirm",
             [](Ctx& c, const VV& a){
                 return VV{ Value::ofBool(dialog::confirm(c, aS(a, 0), aS(a, 1), aS(a, 2), aS(a, 3))) }; } });
+        // The three pickers. What they return is GRANTED to the file rows for
+        // the rest of the session, which is why they belong to the same wave as
+        // unlocking `fs`: without them there is no way to hand a script a path
+        // that nobody had to type a permission for.
+        t.push_back({ "dialog.openFile", "Dialog", true,
+            {{"filter", P::String}}, {{"path", P::String}},
+            "HE::api::dialog::openFile",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(dialog::openFile(c, aS(a, 0))) }; } });
+        t.push_back({ "dialog.saveFile", "Dialog", true,
+            {{"filter", P::String}}, {{"path", P::String}},
+            "HE::api::dialog::saveFile",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(dialog::saveFile(c, aS(a, 0))) }; } });
+        t.push_back({ "dialog.pickFolder", "Dialog", true,
+            {}, {{"path", P::String}},
+            "HE::api::dialog::pickFolder",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(dialog::pickFolder(c)) }; } });
 
         // JSON — text in, text out, addressed by a dotted path. Numbers cross as
         // Float, which is what every numeric pin in a graph already is.
@@ -3346,6 +3726,43 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::remove(aS(a, 0))) }; } });
         t.push_back({ "fs.makeDir", "File", true, {{"path", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::makeDir",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::makeDir(aS(a, 0))) }; } });
+        t.push_back({ "fs.isDir", "File", false, {{"path", P::String}}, {{"isDir", P::Bool}}, "HE::api::fs::isDir",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::isDir(aS(a, 0))) }; } });
+        t.push_back({ "fs.size", "File", false, {{"path", P::String}}, {{"bytes", P::Float}}, "HE::api::fs::size",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::size(aS(a, 0))) }; } });
+        t.push_back({ "fs.modified", "File", false, {{"path", P::String}}, {{"time", P::Float}}, "HE::api::fs::modified",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::modified(aS(a, 0))) }; } });
+        t.push_back({ "fs.list", "File", false, {{"dir", P::String}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::fs::list",
+            [](Ctx&, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& n : fs::list(aS(a, 0))) arr.items.push_back(Value::ofString(std::move(n)));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "fs.rename", "File", true, {{"from", P::String}, {"to", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::rename",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::rename(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "fs.copy", "File", true, {{"from", P::String}, {"to", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::copy",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::copy(aS(a, 0), aS(a, 1))) }; } });
+
+        // ── Running another program ──────────────────────────────────────────
+        // run() returns FOUR values rather than one: a caller that only wanted
+        // to know whether it worked reads `ok`, and one that has to explain a
+        // failure to a person needs the exit code and stderr. Folding them into
+        // a bool would make the second caller shell out a second time to find
+        // out why the first attempt failed.
+        t.push_back({ "process.run", "Process", true,
+            {{"exe", P::String}, {"args", P::String, /*isArray=*/true}, {"timeoutSeconds", P::Float}},
+            {{"ok", P::Bool}, {"exitCode", P::Int}, {"out", P::String}, {"err", P::String}},
+            "HE::api::process::run",
+            [](Ctx& c, const VV& a){
+                std::vector<std::string> args;
+                if (a.size() > 1) for (const Value& v : a[1].items) args.push_back(v.s);
+                const process::RunResult r =
+                    process::run(c, aS(a, 0), args, a.size() > 2 ? (double)a[2].f : 0.0);
+                return VV{ Value::ofBool(r.ok), Value::ofInt(r.exitCode),
+                           Value::ofString(r.out), Value::ofString(r.err) }; } });
+        t.push_back({ "process.openUrl", "Process", true, {{"url", P::String}}, {{"ok", P::Bool}}, "HE::api::process::openUrl",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(process::openUrl(c, aS(a, 0))) }; } });
+        t.push_back({ "process.which", "Process", false, {{"exe", P::String}}, {{"path", P::String}}, "HE::api::process::which",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(process::which(c, aS(a, 0))) }; } });
 
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
@@ -3553,6 +3970,9 @@ const std::vector<ApiFn>& registry()
             { "clipboard.hasText", "Has Clipboard Text" },
             { "dialog.message", "Show Message Dialog" },
             { "dialog.confirm", "Show Confirm Dialog" },
+            { "dialog.openFile", "Open File Dialog" },
+            { "dialog.saveFile", "Save File Dialog" },
+            { "dialog.pickFolder", "Pick Folder Dialog" },
             { "json.getString", "JSON Get String" }, { "json.getNumber", "JSON Get Number" },
             { "json.getBool", "JSON Get Bool" },     { "json.has", "JSON Has" },
             { "json.count", "JSON Array Count" },
@@ -3640,6 +4060,11 @@ const std::vector<ApiFn>& registry()
             { "fs.writeText", "Write Text File" }, { "fs.readText", "Read Text File" },
             { "fs.exists", "File Exists" },        { "fs.remove", "Delete File" },
             { "fs.makeDir", "Make Directory" },
+            { "fs.isDir", "Is Directory" },        { "fs.size", "File Size" },
+            { "fs.modified", "File Modified Time" },{ "fs.list", "List Directory" },
+            { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
+            { "process.run", "Run Program" },      { "process.openUrl", "Open URL" },
+            { "process.which", "Find Program" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },

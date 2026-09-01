@@ -30,6 +30,7 @@
 #include <Hpak/ProjectExporter.h>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <glm/glm.hpp>
 #include <cmath>
 #include <unordered_map>
@@ -1684,6 +1685,166 @@ TEST_CASE("fs: sandboxed I/O works inside the root and rejects escapes")
     CHECK(HE::api::fs::readText("../secret").empty());
 
     std::filesystem::remove_all(root, ec);
+}
+
+// ─── Permissions, and the two routes out of the sandbox ──────────────────────
+// The plan calls this a one-way street. The rule it settles on: the permission
+// is about what a SCRIPT may name on its own, never about what a PERSON may
+// choose. A path somebody picked in a dialog is granted either way.
+//
+// Every case here restores the shut default before it returns. These are
+// process-wide statics, and a test that left file access on would silently
+// license the escape assertions in the case above.
+
+namespace
+{
+    struct PermReset
+    {
+        ~PermReset()
+        {
+            HE::api::perm::set(HE::api::perm::Grants{});
+            HE::api::fs::clearGrants();
+        }
+    };
+}
+
+TEST_CASE("fs: an absolute path needs either a permission or somebody's choice")
+{
+    PermReset restore;
+    const auto root    = std::filesystem::temp_directory_path() / "he_api_perm_root";
+    const auto outside = std::filesystem::temp_directory_path() / "he_api_perm_out";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::create_directories(outside, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    const std::string target = (outside / "doc.txt").string();
+
+    // Shut by default, which is what every project written before permissions
+    // existed means.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    HE::api::fs::clearGrants();
+    CHECK_FALSE(HE::api::fs::writeText(target, "no"));
+    CHECK_FALSE(std::filesystem::exists(target, ec));
+
+    // Route one: the project says its scripts may name absolute paths.
+    { HE::api::perm::Grants g; g.files = true; HE::api::perm::set(g); }
+    CHECK(HE::api::fs::writeText(target, "yes"));
+    CHECK(HE::api::fs::readText(target) == "yes");
+
+    // Route two: nobody granted the blanket, but a person picked the folder.
+    // This is the model the plan asks for — the choosing IS the permission.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK(HE::api::fs::readText(target).empty());
+    HE::api::fs::grantPath(outside.string());
+    CHECK(HE::api::fs::readText(target) == "yes");
+
+    // A grant is a PREFIX of path components, not of characters. A sibling
+    // directory whose name merely starts the same way is a different folder, and
+    // string-prefix matching is exactly how that kind of hole gets made.
+    const auto sibling = std::filesystem::temp_directory_path() / "he_api_perm_out_private";
+    std::filesystem::create_directories(sibling, ec);
+    { std::ofstream f(sibling / "secret.txt"); f << "shh"; }
+    CHECK(HE::api::fs::readText((sibling / "secret.txt").string()).empty());
+
+    // …and a ".." is spent before the comparison, not after it, so a granted
+    // folder cannot be used as a doorway to its neighbour.
+    CHECK(HE::api::fs::readText(
+        (outside / ".." / "he_api_perm_out_private" / "secret.txt").string()).empty());
+
+    // The sandbox itself never depended on any of this.
+    CHECK(HE::api::fs::writeText("inside.txt", "hi"));
+    CHECK(HE::api::fs::readText("inside.txt") == "hi");
+
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::remove_all(sibling, ec);
+}
+
+TEST_CASE("fs: listing, measuring, renaming and copying")
+{
+    PermReset restore;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_fs2_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    REQUIRE(HE::api::fs::writeText("b.txt", "hello"));
+    REQUIRE(HE::api::fs::writeText("a.txt", "hi"));
+    REQUIRE(HE::api::fs::makeDir("sub"));
+
+    // Sorted, and names only: a directory's own order is the filesystem's
+    // business and differs between two machines showing "the same" folder.
+    const std::vector<std::string> names = HE::api::fs::list("");
+    REQUIRE(names.size() == 3);
+    CHECK(names[0] == "a.txt");
+    CHECK(names[1] == "b.txt");
+    CHECK(names[2] == "sub");
+
+    CHECK(HE::api::fs::isDir("sub"));
+    CHECK_FALSE(HE::api::fs::isDir("a.txt"));
+    CHECK(HE::api::fs::size("b.txt") == doctest::Approx(5.0));
+    CHECK(HE::api::fs::size("sub") == doctest::Approx(-1.0));        // not a file
+    CHECK(HE::api::fs::size("nope.txt") == doctest::Approx(-1.0));
+    // The same clock `datetime` speaks, so a file's age is a subtraction.
+    CHECK(HE::api::fs::modified("a.txt") > 1.6e9);
+    CHECK(HE::api::fs::modified("nope.txt") == doctest::Approx(-1.0));
+
+    CHECK(HE::api::fs::rename("a.txt", "sub/renamed.txt"));
+    CHECK_FALSE(HE::api::fs::exists("a.txt"));
+    CHECK(HE::api::fs::readText("sub/renamed.txt") == "hi");
+
+    CHECK(HE::api::fs::copy("b.txt", "sub/copy.txt"));
+    CHECK(HE::api::fs::readText("sub/copy.txt") == "hello");
+    // The one row here that could destroy a file the caller did not name. It
+    // refuses instead, because a lost document costs more than a false.
+    CHECK_FALSE(HE::api::fs::copy("sub/renamed.txt", "sub/copy.txt"));
+    CHECK(HE::api::fs::readText("sub/copy.txt") == "hello");   // untouched
+
+    // And none of the new rows found a way around the sandbox.
+    CHECK(HE::api::fs::list("..").empty());
+    CHECK_FALSE(HE::api::fs::rename("b.txt", "../escaped.txt"));
+    CHECK_FALSE(HE::api::fs::copy("b.txt", "/tmp/he_api_escaped.txt"));
+
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("process: shut by default, and asking is not running")
+{
+    PermReset restore;
+    Ctx c;
+    HE::api::perm::set(HE::api::perm::Grants{});
+
+    // Without the permission it runs nothing and says so in the result rather
+    // than by throwing: a graph has no way to catch anything.
+    const auto denied = HE::api::process::run(c, "echo", { "hello" }, 5.0);
+    CHECK_FALSE(denied.ok);
+    CHECK(denied.out.empty());
+    CHECK_FALSE(HE::api::process::openUrl(c, "https://example.invalid"));
+
+    // which() is deliberately NOT gated: asking whether a tool exists runs
+    // nothing, and "you need git for this" is exactly the message somebody needs
+    // in order to decide whether to grant the permission.
+    CHECK(HE::api::process::which(c, "definitely-not-a-real-program").empty());
+
+    { HE::api::perm::Grants g; g.processes = true; HE::api::perm::set(g); }
+#ifndef _WIN32
+    // A real subprocess, its output, and an honest exit code — the three things
+    // popen could not give (see Platform/Process.h).
+    const auto ran = HE::api::process::run(c, "echo", { "hello" }, 10.0);
+    CHECK(ran.ok);
+    CHECK(ran.exitCode == 0);
+    CHECK(ran.out.rfind("hello", 0) == 0);
+
+    // A non-zero exit is an ANSWER, not an error: `false` succeeds at failing.
+    const auto failed = HE::api::process::run(c, "false", {}, 10.0);
+    CHECK_FALSE(failed.ok);
+    CHECK(failed.exitCode == 1);
+#endif
+    // A program that is not there does not start, and does not pretend to.
+    const auto missing = HE::api::process::run(c, "definitely-not-a-real-program", {}, 5.0);
+    CHECK_FALSE(missing.ok);
 }
 
 // A ContentManager holding one in-memory SaveGameTemplate ("mem://tpl") with

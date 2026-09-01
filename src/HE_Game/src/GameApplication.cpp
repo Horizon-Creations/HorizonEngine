@@ -522,6 +522,17 @@ void GameApplication::OnInit()
 			SDL_free(pref);
 		}
 	}
+	// What this build may reach outside itself, straight off the hcfg. Set even
+	// when everything is false: perm::set replaces the whole struct, and a
+	// process that ran an application with permissions and then one without has
+	// to end up with the second one's answer.
+	{
+		HE::api::perm::Grants g;
+		g.files     = m_config.allowFiles;
+		g.processes = m_config.allowProcesses;
+		g.network   = m_config.allowNetwork;
+		HE::api::perm::set(g);
+	}
 	// Savegames: the shipped game IS play mode, and save.create() resolves the
 	// project's default template from the hcfg.
 	HE::api::save::setDefaultTemplate(m_config.defaultSaveTemplate);
