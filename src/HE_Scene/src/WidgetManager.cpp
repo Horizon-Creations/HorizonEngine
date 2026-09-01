@@ -556,7 +556,7 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 	// whatever gets that number next.
 	auto forget = [&](int& elem){ if (elem == rootElem || (elem > lo && elem <= hi)) elem = 0; };
 	forget(w->hoveredElem); forget(w->pressedElem); forget(w->focusedElem);
-	forget(w->draggingSlider); forget(w->draggingText);
+	forget(w->draggingSlider); forget(w->draggingText); forget(w->draggingSplit);
 	if (w->focusedElem == 0 && m_focusWidget == w->id) m_focusWidget = 0;
 
 	m_visualDirty = true;
@@ -1615,6 +1615,56 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// Slider: start dragging (value updated below).
 				if (e && e->type() == HE::UIWidgetType::Slider)
 					w.draggingSlider = hot;
+				// Splitter: only the DIVIDER starts a drag. A press anywhere
+				// else in the splitter's rect is a press on whatever pane is
+				// there, and grabbing the whole container would make the panes
+				// unclickable.
+				if (const auto* sp = dynamic_cast<const HE::UISplitter*>(e))
+				{
+					const HE::UIWidgetCanvas canvas =
+						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *sp, &canvas);
+					float us = 1.0f, vs = 1.0f;
+					HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
+					const float len = sp->vertical ? r.h : r.w;
+					const float div = std::min(sp->dividerSize * (sp->vertical ? vs : us), len);
+					const float first = sp->clampedRatio(len) * std::max(0.0f, len - div);
+					const float p  = sp->vertical ? mouseY / canvas.scaleY : mouseX / canvas.scaleX;
+					const float lo = (sp->vertical ? r.y : r.x) + first;
+					if (p >= lo && p <= lo + div) w.draggingSplit = hot;
+				}
+				// A Tab Box: the strip switches pages, the rest is the page.
+				if (const auto* tb = dynamic_cast<const HE::UITabBox*>(e))
+				{
+					const HE::UIWidgetCanvas canvas =
+						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *tb, &canvas);
+					float us = 1.0f, vs = 1.0f;
+					HE::uiElementUnitScale(w.tree, *tb, us, vs, &canvas);
+					// The labels come from the TREE, not from the drawing cache:
+					// what a click hits must never depend on whether a frame has
+					// been drawn yet.
+					std::vector<std::string> labels;
+					for (const auto& cp : w.tree.elements)
+						if (cp && cp->parentId == tb->id)
+							labels.push_back(cp->name.empty() ? std::string("Page") : cp->name);
+					// In the element's own pixel space, like everything the
+					// shared layout answers in.
+					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const int hit = HE::UITabBox::tabAtPoint(
+						pxr, tb->fontSize * vs, tb->tabPadding * vs, tb->tabHeight * vs,
+						labels, tb->fontAtlasKey, mouseX, mouseY);
+					if (hit >= 0 && hit != tb->activeTab)
+						if (auto* live = dynamic_cast<HE::UITabBox*>(w.tree.find(hot)))
+						{
+							live->activeTab = hit;
+							m_visualDirty = true;
+							const ScriptTarget t2 = scriptTargetFor(w, hot);
+							rt().fireOnValueChanged(t2.scriptId, t2.elem,
+							                        static_cast<float>(hit));
+						}
+				}
 				// TextInput: focus it, and put the caret where the click was —
 				// a field you can only ever append to is not a field.
 				if (e && e->type() == HE::UIWidgetType::TextInput)
@@ -1680,6 +1730,39 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			}
 		}
 
+		// ── Splitter drag ────────────────────────────────────────────────────
+		// Same shape as the slider above, and the same reason for it: the
+		// pointer is turned into a fraction of the ELEMENT's own rect, in canvas
+		// units, so a nested splitter measures against its own half and not
+		// against the window.
+		if (w.draggingSplit != 0 && primaryDown)
+		{
+			if (auto* sp = dynamic_cast<HE::UISplitter*>(w.tree.find(w.draggingSplit)))
+			{
+				const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *sp, &canvas);
+				float us = 1.0f, vs = 1.0f;
+				HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
+				const float len = sp->vertical ? r.h : r.w;
+				const float div = std::min(sp->dividerSize * (sp->vertical ? vs : us), len);
+				const float usable = std::max(1.0f, len - div);
+				const float p = (sp->vertical ? mouseY / canvas.scaleY - r.y
+				                              : mouseX / canvas.scaleX - r.x) - div * 0.5f;
+				float nv = p / usable;
+				nv = nv < 0.0f ? 0.0f : (nv > 1.0f ? 1.0f : nv);
+				// Stored raw and clamped by the layout, so the minimums are
+				// enforced in ONE place — pushing against a minimum and letting
+				// go must not leave the ratio somewhere the layout would move it.
+				if (nv != sp->ratio)
+				{
+					sp->ratio = nv;
+					m_visualDirty = true;
+					const ScriptTarget t2 = scriptTargetFor(w, w.draggingSplit);
+					rt().fireOnValueChanged(t2.scriptId, t2.elem, sp->clampedRatio(len));
+				}
+			}
+		}
+
 		// ── Text selection drag ──────────────────────────────────────────────
 		// Held down after a press inside a field: the anchor stays put and the
 		// caret follows the pointer, which is what selecting with the mouse is.
@@ -1697,6 +1780,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			w.pressedElem    = 0;
 			w.draggingSlider = 0;
 			w.draggingText   = 0;
+			w.draggingSplit  = 0;
 		}
 	}
 
@@ -2137,8 +2221,15 @@ const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
 	static const std::vector<std::string> kSlider = { "Value" };
 	static const std::vector<std::string> kCombo  = { "Selected Index" };
 	static const std::vector<std::string> kList   = { "Selection" };
+	// Which tab you were on and where you dragged the divider are things a
+	// PERSON put there, so a save must not throw them away — the same rule the
+	// text in a field follows.
+	static const std::vector<std::string> kTab    = { "Active Tab" };
+	static const std::vector<std::string> kSplit  = { "Ratio" };
 	switch (t)
 	{
+		case HE::UIWidgetType::TabBox:      return &kTab;
+		case HE::UIWidgetType::Splitter:    return &kSplit;
 		case HE::UIWidgetType::TextInput:   return &kText;
 		case HE::UIWidgetType::CheckBox:    return &kCheck;
 		case HE::UIWidgetType::Slider:      return &kSlider;

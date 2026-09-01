@@ -117,6 +117,18 @@ struct HE_API UIWidgetTree
     int  add(UIWidgetType type);
 };
 
+// ── Which child is this, among its parent's? ─────────────────────────────────
+// Tree order, counting VISIBLE and hidden children alike — a page you switched
+// away from must not renumber the pages after it, or switching tabs would
+// reshuffle them. -1 when it is not a child of that parent at all.
+//
+// Its own function because two containers ask it (a Tab Box for the active
+// page, a Splitter for its two panes) and because `hidesChild` is called for
+// every element on the visibility walk: one answer, one place to make it fast
+// if it ever needs to be.
+HE_API int uiChildIndexOf(const UIWidgetTree& tree, int parentId, int childId);
+HE_API int uiChildCountOf(const UIWidgetTree& tree, int parentId);
+
 // ── Setting a component's parameters ─────────────────────────────────────────
 // Write a host's values into a freshly parsed copy of the component's OWN tree.
 // Called before that tree is renumbered into its host, because the declarations

@@ -1955,6 +1955,67 @@ behält. Das ist ein eigener Splitter, und ihn in den Label-Pfad zu mischen wür
 Beschriftung im Baum verändern. Bis dahin bricht ein mehrzeiliges Feld dort um, wo jemand Enter
 gedrückt hat.
 
+### B5: Reiter und Splitter (01.09.2026)
+
+Achtzehnter und neunzehnter Elementtyp, und die beiden Hälften desselben Satzes: **ein Tab Box
+sagt WELCHE Seite, ein Splitter sagt WIE VIEL Platz.** Zusammen sind sie das, was eine App mit
+Seitenleiste ausmacht.
+
+**Die Kinder des Tab Box SIND die Seiten, und der Name eines Kindes ist seine Beschriftung.**
+Keine zweite Liste. Ein Array von Titeln neben einer Liste von Kindern sind zwei Dinge, die von
+Hand in Deckung gehalten werden müssen — und beim ersten Umsortieren gehört jede Beschriftung
+zur falschen Seite.
+
+**`hidesChild` ist eine Frage an den ELTERNTEIL**, und `uiElementEffectiveVisible` ist die eine
+Stelle, die sie stellt. Das ist der ganze Punkt: Bild und Zeiger kommen beide dort durch, also
+kann ein Knopf auf einer versteckten Seite keinen Klick an seinen eigenen Koordinaten
+beantworten. Genau diese Sorte Auseinanderdriften steht schon in der Fallen-Liste („Widget-Extract
+und Pointer-Test müssen durch dieselbe Auflösung"), und der Test dazu ist als **Eingabe**
+formuliert und nicht als Geometrie: zwei Seiten mit deckungsgleichen Knöpfen, und nur der auf der
+aktiven Seite darf gedrückt werden. Gegengeprüft — Tor ausgehängt, fünf Zusicherungen rot.
+
+**Es fragt den BAUM statt einen Index zu speichern.** „Das wievielte Kind bin ich" ist Wissen des
+Baumes; eine Zahl auf dem Element wäre eine, die veralten kann, und zwar auf genau dem Pfad, wo
+veraltet „ein Klick erreicht etwas Unsichtbares" heißt. Nur die *Beschriftungen* für den
+Streifen werden zwischengespeichert (`uiApplyAutoSize` füllt sie), und das Schlimmste, was ein
+alter Eintrag dort kostet, ist ein Wort, das ein Bild zu spät stimmt.
+
+**`tabLayout` ist eine Arithmetik mit drei Verbrauchern** — Zeichnen, Treffertest, Designer.
+Dieselbe Lehre wie bei der ComboBox, wo zwei Kopien in dem Moment auseinanderliefen, in dem die
+Ecken rund wurden. Der Treffertest liest die Beschriftungen dabei **aus dem Baum**, nicht aus dem
+Zeichen-Cache: was ein Klick trifft, darf nie davon abhängen, ob schon ein Bild gezeichnet wurde.
+
+**Ein Tab ist so breit wie das, was er sagt.** Gleich breite Tabs sehen aufgeräumt aus, bis eine
+Seite „Einstellungen" heißt und die nächste „A". Überlauf wird **abgeschnitten**, ausdrücklich
+und nicht aus Versehen; ein scrollender Streifen gehört zu B9.
+
+**Der Splitter nimmt GENAU zwei Kinder.** Drei Bereiche hätten zwei Trenner und ein Verhältnis,
+das keine Zahl mehr ist — und ein Splitter im Splitter sagt dasselbe mit bereits gelöster
+Arithmetik. Dafür gibt es einen eigenen Test: die Bereiche des inneren teilen die **rechte Hälfte
+des äußeren**, nicht die Leinwand, und das ist der Fehler, den ein Rechteck-Raum-Ausrutscher
+macht.
+
+**Die Mindestbreiten greifen im LAYOUT, nicht nur beim Ziehen.** Ein verfasstes Verhältnis von
+0,01 mit 100 Pixeln Minimum muss geklemmt liegen, sonst widersprechen sich Designer und Runtime
+in dem Moment, in dem die Datei geladen wird. Das Verhältnis selbst wird roh gespeichert und an
+genau einer Stelle geklemmt (`clampedRatio`) — gegen ein Minimum zu ziehen und loszulassen darf
+nicht einen Wert hinterlassen, den das Layout danach verschiebt.
+
+**Nur der TRENNER startet ein Ziehen**, nicht der ganze Container. Beide neuen Typen sind
+`interactive()` und damit die einzigen Layout-Container, die nicht zeigerdurchlässig sind — die
+Bereiche liegen tiefer und decken alles außer dem Trenner ab, also erreicht ein Druck den
+Splitter genau dort, wo er soll. Das hat mich einen Testlauf gekostet: ohne `interactive()`
+liefert der Manager den Druck gar nicht erst aus.
+
+**Beide gehören zum Vorschau-Zustand** (E4): welcher Reiter offen war und wohin der Trenner
+gezogen wurde, hat ein Mensch dorthin getan. Zwei Zeilen in `statePropsOf`, und es komponiert
+sich von selbst.
+
+**Nicht gebaut: das Akkordeon**, das der Plan in derselben Zeile nennt. Es ist kein Reiter mit
+anderem Aussehen, sondern ein Stapel aus aufklappbaren Abschnitten — näher an einer Liste mit
+Kopfzeilen als an einem Tab Box, und es wird billig, sobald es „aufklappbar" als eigenes Stück
+gibt.
+
 ---
 
 ## 11. Risiken und Fallen

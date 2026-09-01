@@ -12,6 +12,12 @@
 
 namespace HE {
 
+// The container these elements live in. Declared here and defined in
+// UIWidgetTree.h (which includes this file): a container that hides one of its
+// children has to be able to ask which child it is, and that is the tree's
+// knowledge, not the element's.
+struct UIWidgetTree;
+
 // Mouse cursor shown while a UI element is hovered (backend-agnostic; the app
 // maps it to a system cursor). Default = leave the cursor unchanged.
 enum class UICursor : uint8_t
@@ -72,6 +78,13 @@ enum class UIWidgetType : uint8_t
     // column that fits its labels beside a field column that takes the rest.
     // Two stacked boxes can only fake that, and only by hand-matching sizes.
     Grid,
+    // Pages behind a strip of tabs, one visible at a time. Its CHILDREN are the
+    // pages and each child's NAME is its label — there is no second list to keep
+    // in step, which is the way every parallel-list design eventually goes wrong.
+    TabBox,
+    // Two panes and a divider you can drag. The other half of "an app with a
+    // sidebar": a Tab Box says which page, a Splitter says how much room.
+    Splitter,
     COUNT
 };
 
@@ -508,6 +521,24 @@ public:
     // anchors and position, and take the slot the box hands them. Returning
     // true here is what switches uiElementRect over for every child.
     virtual bool laysOutChildren() const { return false; }
+
+    // ── Does this container hide that child of its own accord? ───────────────
+    // A Tab Box shows one page at a time, so nine of its ten children are not
+    // on screen — and "not on screen" has to mean the same thing to the picture
+    // and to the pointer, or a button on a hidden tab answers a click at its
+    // coordinates. That has bitten this codebase before, which is why this is a
+    // question the PARENT answers and `uiElementEffectiveVisible` is the one
+    // place that asks it. Every consumer already goes through that function.
+    //
+    // Distinct from the child's own `visible`: a page you switched away from is
+    // not hidden, it is merely not the one showing, and switching back must not
+    // have to remember what its flag used to be.
+    //
+    // It takes the TREE because the answer is "which child is this among my
+    // children", and that is the tree's knowledge. Caching an index on the
+    // element instead would be a number that can go stale, on the one path
+    // where stale means a click reaching something invisible.
+    virtual bool hidesChild(const UIWidgetTree&, const UIElement&) const { return false; }
 
     // ── Does this element scroll its own content? ────────────────────────────
     // Non-null means yes, and the float IS the offset (canvas units, 0 = the

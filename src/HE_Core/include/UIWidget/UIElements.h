@@ -979,4 +979,143 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── TabBox ───────────────────────────────────────────────────────────────────
+// Pages behind a strip of tabs, one showing at a time (docs/he-apps-plan.md B5).
+//
+// ITS CHILDREN ARE THE PAGES, and each child's NAME is its label. No second
+// list: a parallel array of titles beside a list of children is two things that
+// have to be kept in step by hand, and they never are — the first time somebody
+// reorders the pages, every label belongs to the wrong one.
+//
+// Overflow is CLIPPED in this version: more tabs than fit are cut off at the
+// right edge rather than scrolled or stacked. Said out loud because it is a
+// real limit and not an oversight; a scrolling strip belongs with the rest of
+// B9's polish.
+class HE_API UITabBox final : public UIElement
+{
+public:
+    // Which page shows. Authored (so the designer can work on page three) AND
+    // runtime state (so clicking a tab means something). Out of range shows the
+    // first page rather than none: a Tab Box with nothing in it is a mistake
+    // that should look like one, not like an empty panel.
+    int   activeTab = 0;
+    float tabHeight = 30.0f;
+    float fontSize  = 16.0f;
+    // Room either side of a label inside its tab, which is what makes the tabs
+    // as wide as what they say instead of all the same width.
+    float tabPadding = 14.0f;
+    glm::vec4 stripColor   { 0.12f, 0.12f, 0.14f, 1.0f };
+    glm::vec4 tabColor     { 0.18f, 0.18f, 0.21f, 1.0f };
+    glm::vec4 activeColor  { 0.26f, 0.26f, 0.31f, 1.0f };
+    glm::vec4 textColor    { 0.92f, 0.92f, 0.95f, 1.0f };
+    glm::vec4 pageColor    { 0.0f, 0.0f, 0.0f, 0.0f };   // behind the page, transparent
+
+    UITabBox() { sizeX = 400.0f; sizeY = 300.0f; }
+    UIWidgetType type() const override { return UIWidgetType::TabBox; }
+    const char*  typeName() const override { return "TabBox"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UITabBox>(*this); }
+
+    bool acceptsChildren() const override { return true; }
+    bool laysOutChildren() const override { return true; }
+    // Unlike every other layout container, this one is NOT transparent to the
+    // pointer: its strip is a row of things to click. The pages sit below the
+    // strip and are deeper in the tree, so they still win where they are.
+    bool interactive() const override { return true; }
+    // Every page but the active one. THE reason this is a parent's question:
+    // the picture and the pointer both come through uiElementEffectiveVisible,
+    // so a button on a hidden page cannot answer a click at its coordinates.
+    bool hidesChild(const UIWidgetTree& tree, const UIElement& child) const override;
+
+    // The page names, in order — what the strip says. Filled by the layout pass
+    // each frame (uiApplyAutoSize), because render() has no tree to ask.
+    //
+    // Only the DRAWING depends on this. Which page is shown and which tab a
+    // click hit are both answered from the tree directly, so the one thing a
+    // stale cache could cost is a label that is one frame old.
+    mutable std::vector<std::string> tabLabels;
+
+    // ── One arithmetic, three consumers ──────────────────────────────────────
+    // Where each tab sits in the strip, given the labels and the font. render()
+    // draws with it, the runtime decides which tab a click hit with it, and the
+    // designer previews with it — the same lesson the ComboBox's shared
+    // geometry taught, where two copies drifted the moment the corners rounded.
+    //
+    // `labels` are the page names in order. `outX`/`outW` are filled per tab, in
+    // the same pixels the element's rect is in.
+    static void tabLayout(const UIWidgetRect& px, float sizePx, float padPx,
+                          const std::vector<std::string>& labels,
+                          uint64_t fontAtlasKey,
+                          std::vector<float>& outX, std::vector<float>& outW);
+    // Which tab a point lands on, or -1 for none (below the strip, or past the
+    // last tab). Same inputs, so it cannot disagree with the drawing.
+    static int tabAtPoint(const UIWidgetRect& px, float sizePx, float padPx, float tabH,
+                          const std::vector<std::string>& labels, uint64_t fontAtlasKey,
+                          float x, float y);
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnTabChanged", UIPropType::Int, true } }; }
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
+// ── Splitter ─────────────────────────────────────────────────────────────────
+// Two panes and a divider you can drag (docs/he-apps-plan.md B5).
+//
+// EXACTLY two children are placed; a third and beyond get nothing and are not
+// drawn. Two rather than N because a splitter with three panes has two dividers
+// and a ratio that is no longer one number — and nesting one splitter in
+// another says the same thing with the arithmetic already solved.
+class HE_API UISplitter final : public UIElement
+{
+public:
+    // Which way the panes sit beside each other. Vertical = one above the other
+    // with a horizontal divider, which is what "split vertically" means to
+    // everyone except the axis it is named after — so the FIELD says what the
+    // panes do, not what the divider looks like.
+    bool  vertical = false;
+    // Where the divider is, as a share of the length. Clamped by the minimums
+    // below in the LAYOUT and not only while dragging: an authored 0.01 with a
+    // 100-pixel minimum has to lay out clamped, or the designer and the runtime
+    // disagree the moment the file is loaded.
+    float ratio = 0.5f;
+    float dividerSize = 6.0f;
+    // How small each pane may get, in canvas units. A pane dragged to nothing
+    // is a pane nobody can get back.
+    float minFirst = 40.0f, minSecond = 40.0f;
+    glm::vec4 dividerColor{ 0.28f, 0.28f, 0.33f, 1.0f };
+
+    UISplitter() { sizeX = 400.0f; sizeY = 300.0f; }
+    UIWidgetType type() const override { return UIWidgetType::Splitter; }
+    const char*  typeName() const override { return "Splitter"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UISplitter>(*this); }
+
+    bool acceptsChildren() const override { return true; }
+    bool laysOutChildren() const override { return true; }
+    bool stacksVertically() const override { return vertical; }
+    // Same as the Tab Box: a container you can grab. The panes are deeper and
+    // cover everything except the divider, so a press only reaches this element
+    // where the divider is — which is exactly where it should.
+    bool interactive() const override { return true; }
+    // Everything after the second child.
+    bool hidesChild(const UIWidgetTree& tree, const UIElement& child) const override;
+
+    // The ratio this splitter actually lays out with: what was authored, pulled
+    // inside the minimums for a length of `lengthPx`. One function so the slot
+    // rect, the drag and the designer all get the same number.
+    float clampedRatio(float lengthPx) const;
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnSplitChanged", UIPropType::Float, true } }; }
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 } // namespace HE

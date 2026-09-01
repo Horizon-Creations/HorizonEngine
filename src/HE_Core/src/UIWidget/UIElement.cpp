@@ -30,6 +30,8 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::ListView:      return std::make_unique<UIListView>();
         case UIWidgetType::WrapBox:       return std::make_unique<UIWrapBox>();
         case UIWidgetType::Grid:          return std::make_unique<UIGrid>();
+        case UIWidgetType::TabBox:        return std::make_unique<UITabBox>();
+        case UIWidgetType::Splitter:      return std::make_unique<UISplitter>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -42,7 +44,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
         UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
-        UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid };
+        UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid,
+        UIWidgetType::TabBox, UIWidgetType::Splitter };
     return kAll;
 }
 
@@ -58,7 +61,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
         "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
-        "ListView", "WrapBox", "Grid" };
+        "ListView", "WrapBox", "Grid", "TabBox", "Splitter" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -1829,6 +1832,205 @@ void UIComboBox::readJson(const nlohmann::json& j)
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
     textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
     highlightColor = colFrom(j.value("highlightColor", nlohmann::json()), highlightColor);
+}
+
+// ── TabBox ───────────────────────────────────────────────────────────────────
+
+bool UITabBox::hidesChild(const UIWidgetTree& tree, const UIElement& child) const
+{
+    const int idx = uiChildIndexOf(tree, id, child.id);
+    if (idx < 0) return false;                 // not one of my children
+    // A Tab Box whose activeTab is out of range shows the FIRST page rather
+    // than none: an empty-looking container is a mistake that hides itself,
+    // and a stray Set Property should not be able to blank the window.
+    const int active = activeTab >= 0 && activeTab < uiChildCountOf(tree, id) ? activeTab : 0;
+    return idx != active;
+}
+
+void UITabBox::tabLayout(const UIWidgetRect& px, float sizePx, float padPx,
+                         const std::vector<std::string>& labels, uint64_t fontAtlasKey,
+                         std::vector<float>& outX, std::vector<float>& outW)
+{
+    outX.clear(); outW.clear();
+    outX.reserve(labels.size()); outW.reserve(labels.size());
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout opts;
+    float cursor = px.x;
+    for (const std::string& label : labels)
+    {
+        const float textW = label.empty() ? 0.0f
+            : (f ? HE::measureUIText(*f, label, sizePx, 0.0f, opts)
+                 : HE::measureUIText(label, sizePx, 0.0f, opts)).x;
+        // A tab is as wide as what it says. All-equal widths look tidy until one
+        // page is called "Settings" and another "A", and then the strip is
+        // mostly empty.
+        const float w = textW + 2.0f * padPx;
+        outX.push_back(cursor);
+        outW.push_back(w);
+        cursor += w;
+    }
+}
+
+int UITabBox::tabAtPoint(const UIWidgetRect& px, float sizePx, float padPx, float tabH,
+                         const std::vector<std::string>& labels, uint64_t fontAtlasKey,
+                         float x, float y)
+{
+    if (y < px.y || y > px.y + tabH) return -1;      // below the strip is the page
+    std::vector<float> tx, tw;
+    tabLayout(px, sizePx, padPx, labels, fontAtlasKey, tx, tw);
+    for (size_t i = 0; i < tx.size(); ++i)
+    {
+        // Past the element's own right edge is not a tab, however wide the
+        // labels added up to — the strip is clipped there, so a click there
+        // lands on nothing rather than on a tab nobody can see.
+        if (tx[i] >= px.x + px.w) break;
+        if (x >= tx[i] && x < tx[i] + tw[i]) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+const UIPropTable& UITabBox::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UITabBox::activeTab>  ({ "Active Tab", UIPropType::Int }),
+        uiprop::slot<&UITabBox::tabHeight>  ({ "Tab Height", UIPropType::Float, 12.0f, 200.0f }),
+        uiprop::slot<&UITabBox::fontSize>   ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UITabBox::tabPadding> ({ "Tab Padding", UIPropType::Float, 0.0f, 100.0f }),
+        uiprop::slot<&UITabBox::stripColor> ({ "Strip Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::tabColor>   ({ "Tab Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::activeColor>({ "Active Tab Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::textColor>  ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::pageColor>  ({ "Page Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UITabBox::render(const UIWidgetRect& px, const UIElementRenderState&,
+                      const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
+{
+    const float tabH   = tabHeight * pxScaleY;
+    const float sizePx = fontSize  * pxScaleY;
+    const float padPx  = tabPadding * pxScaleY;
+
+    // The page area first, behind everything the pages themselves draw.
+    if (pageColor.a > 0.0f)
+        quad(out, px.x, px.y + tabH, px.w, std::max(0.0f, px.h - tabH), pageColor);
+    quad(out, px.x, px.y, px.w, tabH, stripColor);
+
+    std::vector<float> tx, tw;
+    tabLayout(px, sizePx, padPx, tabLabels, fontAtlasKey, tx, tw);
+    for (size_t i = 0; i < tx.size(); ++i)
+    {
+        if (tx[i] >= px.x + px.w) break;                       // clipped away
+        const float w = std::min(tw[i], px.x + px.w - tx[i]);  // and the last one trimmed
+        const bool  on = static_cast<int>(i) == activeTab;
+        quad(out, tx[i], px.y, w, tabH, on ? activeColor : tabColor);
+        emitText(*this, tabLabels[i], { tx[i] + padPx, px.y }, { w - 2.0f * padPx, tabH },
+                 sizePx, textColor, false, out);
+    }
+}
+
+void UITabBox::writeJson(nlohmann::json& j) const
+{
+    j["activeTab"] = activeTab;
+    j["tabHeight"] = tabHeight;
+    j["fontSize"]  = fontSize;
+    j["tabPadding"] = tabPadding;
+    j["stripColor"]  = colJson(stripColor);
+    j["tabColor"]    = colJson(tabColor);
+    j["activeColor"] = colJson(activeColor);
+    j["textColor"]   = colJson(textColor);
+    j["pageColor"]   = colJson(pageColor);
+}
+
+void UITabBox::readJson(const nlohmann::json& j)
+{
+    activeTab  = j.value("activeTab", 0);
+    tabHeight  = j.value("tabHeight", tabHeight);
+    fontSize   = j.value("fontSize", fontSize);
+    tabPadding = j.value("tabPadding", tabPadding);
+    stripColor  = colFrom(j.value("stripColor", nlohmann::json()), stripColor);
+    tabColor    = colFrom(j.value("tabColor", nlohmann::json()), tabColor);
+    activeColor = colFrom(j.value("activeColor", nlohmann::json()), activeColor);
+    textColor   = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    pageColor   = colFrom(j.value("pageColor", nlohmann::json()), pageColor);
+}
+
+// ── Splitter ─────────────────────────────────────────────────────────────────
+
+bool UISplitter::hidesChild(const UIWidgetTree& tree, const UIElement& child) const
+{
+    // Exactly two panes. A third child is not an error worth refusing — the
+    // designer would have to stop a drop mid-gesture — but it is not drawn and
+    // takes no click, which is what makes it obvious rather than confusing.
+    return uiChildIndexOf(tree, id, child.id) >= 2;
+}
+
+float UISplitter::clampedRatio(float lengthPx) const
+{
+    if (lengthPx <= 0.0f) return 0.5f;
+    const float div = std::min(dividerSize, lengthPx);
+    const float usable = std::max(0.0f, lengthPx - div);
+    if (usable <= 0.0f) return 0.5f;
+    float first = ratio * usable;
+    // The minimums, in the order that keeps them honest when they cannot both
+    // be met: the FIRST pane's minimum is applied first, then the second's, so
+    // a splitter too short for both ends up with the second pane at its floor
+    // and the first squeezed — one of them has to give, and picking silently
+    // would be the worse answer.
+    if (first < minFirst) first = minFirst;
+    if (usable - first < minSecond) first = usable - minSecond;
+    if (first < 0.0f) first = 0.0f;
+    if (first > usable) first = usable;
+    return first / usable;
+}
+
+const UIPropTable& UISplitter::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UISplitter::vertical>   ({ "Vertical", UIPropType::Bool }),
+        uiprop::slot<&UISplitter::ratio>      ({ "Ratio", UIPropType::Float, 0.0f, 1.0f }),
+        uiprop::slot<&UISplitter::dividerSize>({ "Divider Size", UIPropType::Float, 1.0f, 40.0f }),
+        uiprop::slot<&UISplitter::minFirst>   ({ "Min First", UIPropType::Float, 0.0f, 2000.0f }),
+        uiprop::slot<&UISplitter::minSecond>  ({ "Min Second", UIPropType::Float, 0.0f, 2000.0f }),
+        uiprop::slot<&UISplitter::dividerColor>({ "Divider Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UISplitter::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                        const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
+{
+    const float len = vertical ? px.h : px.w;
+    const float div = std::min(dividerSize * pxScaleY, len);
+    const float first = clampedRatio(len) * std::max(0.0f, len - div);
+    // A little brighter while the pointer is on it, so a divider you can grab
+    // says so before you try.
+    const glm::vec4 c = st.hovered
+        ? glm::vec4(glm::min(glm::vec3(dividerColor) + 0.12f, glm::vec3(1.0f)), dividerColor.a)
+        : dividerColor;
+    if (vertical) quad(out, px.x, px.y + first, px.w, div, c);
+    else          quad(out, px.x + first, px.y, div, px.h, c);
+}
+
+void UISplitter::writeJson(nlohmann::json& j) const
+{
+    j["vertical"] = vertical;
+    j["ratio"] = ratio;
+    j["dividerSize"] = dividerSize;
+    j["minFirst"] = minFirst;
+    j["minSecond"] = minSecond;
+    j["dividerColor"] = colJson(dividerColor);
+}
+
+void UISplitter::readJson(const nlohmann::json& j)
+{
+    vertical = j.value("vertical", false);
+    ratio = j.value("ratio", 0.5f);
+    dividerSize = j.value("dividerSize", dividerSize);
+    minFirst = j.value("minFirst", minFirst);
+    minSecond = j.value("minSecond", minSecond);
+    dividerColor = colFrom(j.value("dividerColor", nlohmann::json()), dividerColor);
 }
 
 } // namespace HE

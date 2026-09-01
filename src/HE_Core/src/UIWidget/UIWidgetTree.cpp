@@ -506,6 +506,51 @@ namespace
         return g;
     }
 
+    // ── A tab's page gets everything under the strip ─────────────────────────
+    // Every page, not only the active one: a page that is not showing still has
+    // a real rect, so switching to it does not have to lay it out from nothing
+    // and an auto-sized element inside it has a width to measure against. What
+    // makes it invisible is hidesChild, and that is the only thing that does.
+    UIWidgetRect tabSlotRect(const UIWidgetTree& tree, const UITabBox& tabs,
+                             const UIElement& child, const UIWidgetCanvas* canvas)
+    {
+        const UIWidgetRect b = uiElementRect(tree, tabs, canvas);
+        float bus = 1.0f, bvs = 1.0f;
+        uiElementUnitScale(tree, tabs, bus, bvs, canvas);
+        const float strip = std::min(b.h, tabs.tabHeight * bvs);
+        (void)child;
+        return { b.x, b.y + strip, b.w, std::max(0.0f, b.h - strip) };
+    }
+
+    // ── Two panes and the gap between them ───────────────────────────────────
+    UIWidgetRect splitSlotRect(const UIWidgetTree& tree, const UISplitter& sp,
+                               const UIElement& child, const UIWidgetCanvas* canvas)
+    {
+        const UIWidgetRect b = uiElementRect(tree, sp, canvas);
+        float bus = 1.0f, bvs = 1.0f;
+        uiElementUnitScale(tree, sp, bus, bvs, canvas);
+
+        const float len = sp.vertical ? b.h : b.w;
+        const float div = std::min(sp.dividerSize * (sp.vertical ? bvs : bus), len);
+        // The SAME clamp the drag and the divider's own drawing use, in the same
+        // units — a ratio the layout honoured but the divider drew elsewhere is
+        // a splitter you cannot grab where you see it.
+        const float first = sp.clampedRatio(len) * std::max(0.0f, len - div);
+
+        const int idx = uiChildIndexOf(tree, sp.id, child.id);
+        if (idx == 0)
+            return sp.vertical ? UIWidgetRect{ b.x, b.y, b.w, first }
+                               : UIWidgetRect{ b.x, b.y, first, b.h };
+        if (idx == 1)
+            return sp.vertical
+                ? UIWidgetRect{ b.x, b.y + first + div, b.w, std::max(0.0f, len - first - div) }
+                : UIWidgetRect{ b.x + first + div, b.y, std::max(0.0f, len - first - div), b.h };
+        // A third child and beyond: nothing. hidesChild already keeps it off the
+        // screen and out of the hit test; an empty rect is what stops it from
+        // quietly influencing anything that measures.
+        return { b.x, b.y, 0.0f, 0.0f };
+    }
+
     UIWidgetRect gridSlotRect(const UIWidgetTree& tree, const UIGrid& grid,
                               const UIElement& child, const UIWidgetCanvas* canvas)
     {
@@ -678,6 +723,10 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                 return wrapSlotRect(tree, *wb, &e, canvas);
             if (const auto* gr = dynamic_cast<const UIGrid*>(p))
                 return gridSlotRect(tree, *gr, e, canvas);
+            if (const auto* tb = dynamic_cast<const UITabBox*>(p))
+                return tabSlotRect(tree, *tb, e, canvas);
+            if (const auto* sp = dynamic_cast<const UISplitter*>(p))
+                return splitSlotRect(tree, *sp, e, canvas);
             return boxSlotRect(tree, *p, e, canvas);
         }
 
@@ -779,6 +828,25 @@ int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode)
 
 void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
 {
+    // What each Tab Box's strip will SAY, refreshed before anything draws. The
+    // labels are the page names, so renaming a page in the designer shows up on
+    // its tab without a second field to keep in step.
+    //
+    // A cache, and only for the drawing: which page shows and which tab a click
+    // hit are both answered from the tree itself (hidesChild, tabAtPoint), so
+    // the worst a stale entry can cost is a label one frame old.
+    for (auto& e : tree.elements)
+    {
+        auto* tabs = dynamic_cast<UITabBox*>(e.get());
+        if (!tabs) continue;
+        tabs->tabLabels.clear();
+        for (const auto& c : tree.elements)
+            if (c && c->parentId == tabs->id)
+                // An unnamed page still needs something on its tab, or the strip
+                // grows a gap nobody can click with any confidence.
+                tabs->tabLabels.push_back(c->name.empty() ? std::string("Page") : c->name);
+    }
+
     // The width handed over is the one the anchor already decides. Where the
     // anchor is a point that is just the element's own size (nothing changes);
     // where it stretches, it is the span the parent gives it, which is what a
@@ -909,12 +977,38 @@ bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
     return any;
 }
 
+int uiChildIndexOf(const UIWidgetTree& tree, int parentId, int childId)
+{
+    int i = 0;
+    for (const auto& ep : tree.elements)
+    {
+        if (!ep || ep->parentId != parentId) continue;
+        if (ep->id == childId) return i;
+        ++i;
+    }
+    return -1;
+}
+
+int uiChildCountOf(const UIWidgetTree& tree, int parentId)
+{
+    int n = 0;
+    for (const auto& ep : tree.elements)
+        if (ep && ep->parentId == parentId) ++n;
+    return n;
+}
+
 bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
 {
     if (!e.visible) return false;
     if (e.parentId == 0) return true;
     const UIElement* p = tree.find(e.parentId);
-    return p ? uiElementEffectiveVisible(tree, *p) : true;
+    if (!p) return true;
+    // …and whether the PARENT is showing it. A Tab Box hides every page but
+    // one, and this is the single place that has to know, because everything
+    // that asks "is this on screen" — the extract, the hit test, the designer —
+    // already comes through here.
+    if (p->hidesChild(tree, e)) return false;
+    return uiElementEffectiveVisible(tree, *p);
 }
 
 void uiUpdateScrollExtents(UIWidgetTree& tree)

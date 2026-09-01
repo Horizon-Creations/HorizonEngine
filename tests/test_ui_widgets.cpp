@@ -250,6 +250,25 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Size To Content", UIPropType::Bool },
             { "Min Width",  UIPropType::Float },
             { "Min Height", UIPropType::Float } } },
+        // A Tab Box's PAGES are its children and their names are the labels, so
+        // there is no list property here — that is the whole point of the design.
+        { UIWidgetType::TabBox, {
+            { "Active Tab", UIPropType::Int },
+            { "Tab Height", UIPropType::Float },
+            { "FontSize", UIPropType::Float },
+            { "Tab Padding", UIPropType::Float },
+            { "Strip Color", UIPropType::Color },
+            { "Tab Color", UIPropType::Color },
+            { "Active Tab Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "Page Color", UIPropType::Color } } },
+        { UIWidgetType::Splitter, {
+            { "Vertical", UIPropType::Bool },
+            { "Ratio", UIPropType::Float },
+            { "Divider Size", UIPropType::Float },
+            { "Min First", UIPropType::Float },
+            { "Min Second", UIPropType::Float },
+            { "Divider Color", UIPropType::Color } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -961,7 +980,10 @@ TEST_CASE("Exactly the container types accept children")
         HE::UIWidgetType::Panel, HE::UIWidgetType::Button,
         HE::UIWidgetType::VerticalBox, HE::UIWidgetType::HorizontalBox,
         HE::UIWidgetType::ScrollBox, HE::UIWidgetType::WrapBox,
-        HE::UIWidgetType::Grid };
+        HE::UIWidgetType::Grid,
+        // A Tab Box takes children because its children ARE its pages, and a
+        // Splitter because its two are its panes.
+        HE::UIWidgetType::TabBox, HE::UIWidgetType::Splitter };
     for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
     {
         auto e = HE::makeUIElement(ty);
@@ -7434,6 +7456,368 @@ TEST_CASE("Preview state: a widget's variables come back, unless the graph dropp
     // matches it.
     const auto declared = rt.variablesSnapshot(inst);
     CHECK(declared.find("draft") == declared.end());
+}
+
+// ═══ B5: tabs and splitters ══════════════════════════════════════════════════
+// Two containers, and the same question underneath both: which child is this,
+// among its parent's? A Tab Box answers "the one that shows", a Splitter "which
+// side of the divider".
+
+namespace
+{
+    // A Tab Box `n` pages deep, on a canvas that does not scale.
+    struct TabCase
+    {
+        HE::UIWidgetTree t;
+        int box = 0;
+        std::vector<int> pages;
+    };
+    TabCase makeTabs(int n, float w = 400.0f, float h = 300.0f)
+    {
+        TabCase c;
+        c.t.canvasWidth = w; c.t.canvasHeight = h;
+        c.t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        c.box = c.t.add(HE::UIWidgetType::TabBox);
+        HE::UIElement& b = *c.t.find(c.box);
+        HE::uiSetAnchorPreset(b, 0); b.pivotX = b.pivotY = 0.0f;
+        b.posX = b.posY = 0.0f; b.sizeX = w; b.sizeY = h;
+        for (int i = 0; i < n; ++i)
+        {
+            const int p = c.t.add(HE::UIWidgetType::Panel);
+            c.t.find(p)->parentId = c.box;
+            c.t.find(p)->name = "Page " + std::to_string(i + 1);
+            c.pages.push_back(p);
+        }
+        HE::uiApplyAutoSize(c.t, nullptr);
+        return c;
+    }
+}
+
+TEST_CASE("TabBox: one page shows, and the others are invisible to everything")
+{
+    TabCase c = makeTabs(3);
+    auto* tb = dynamic_cast<HE::UITabBox*>(c.t.find(c.box));
+    REQUIRE(tb);
+
+    CHECK(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.pages[0])));
+    CHECK_FALSE(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.pages[1])));
+    CHECK_FALSE(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.pages[2])));
+
+    tb->activeTab = 2;
+    CHECK_FALSE(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.pages[0])));
+    CHECK(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.pages[2])));
+
+    // It reaches DOWN: something on a hidden page is hidden too, which is the
+    // half that matters for the pointer.
+    const int deep = c.t.add(HE::UIWidgetType::Button);
+    c.t.find(deep)->parentId = c.pages[0];
+    CHECK_FALSE(HE::uiElementEffectiveVisible(c.t, *c.t.find(deep)));
+    tb->activeTab = 0;
+    CHECK(HE::uiElementEffectiveVisible(c.t, *c.t.find(deep)));
+
+    // An out-of-range active tab shows the FIRST page, not none: a container
+    // that blanks itself on a stray Set Property hides its own mistake.
+    tb->activeTab = 99;
+    CHECK(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.pages[0])));
+}
+
+TEST_CASE("TabBox: every page gets the area under the strip, shown or not")
+{
+    TabCase c = makeTabs(2);
+    auto* tb = dynamic_cast<HE::UITabBox*>(c.t.find(c.box));
+    tb->tabHeight = 30.0f;
+
+    // Both pages, because a page that is not showing still has to have been
+    // laid out — switching to it must not have to build it from nothing.
+    for (int p : c.pages)
+    {
+        const HE::UIWidgetRect r = HE::uiElementRect(c.t, *c.t.find(p));
+        CHECK(r.y == doctest::Approx(30.0f));
+        CHECK(r.h == doctest::Approx(270.0f));
+        CHECK(r.w == doctest::Approx(400.0f));
+    }
+}
+
+TEST_CASE("TabBox: a tab is as wide as its label, and a click finds it")
+{
+    TabCase c = makeTabs(3);
+    auto* tb = dynamic_cast<HE::UITabBox*>(c.t.find(c.box));
+    // The outer two say the SAME thing, so "equally wide" is a claim about the
+    // layout and not about how wide an A happens to be next to a C.
+    tb->tabLabels = { "A", "Wide label here", "A" };
+
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 300.0f };
+    std::vector<float> x, w;
+    HE::UITabBox::tabLayout(px, 16.0f, 14.0f, tb->tabLabels, 0, x, w);
+    REQUIRE(w.size() == 3);
+    // The middle one says more, so it is wider — all-equal tabs look tidy until
+    // one page is called "Settings" and another "A".
+    CHECK(w[1] > w[0]);
+    CHECK(w[0] == doctest::Approx(w[2]));
+    // They sit end to end.
+    CHECK(x[1] == doctest::Approx(x[0] + w[0]));
+
+    // …and the hit test agrees with the drawing, because it is the same
+    // arithmetic and not a second copy of it.
+    CHECK(HE::UITabBox::tabAtPoint(px, 16.0f, 14.0f, 30.0f, tb->tabLabels, 0,
+                                   x[1] + 1.0f, 10.0f) == 1);
+    CHECK(HE::UITabBox::tabAtPoint(px, 16.0f, 14.0f, 30.0f, tb->tabLabels, 0,
+                                   x[2] + 1.0f, 10.0f) == 2);
+    // Below the strip is the page, not a tab.
+    CHECK(HE::UITabBox::tabAtPoint(px, 16.0f, 14.0f, 30.0f, tb->tabLabels, 0,
+                                   x[0] + 1.0f, 50.0f) == -1);
+    // Past the last tab is nothing.
+    CHECK(HE::UITabBox::tabAtPoint(px, 16.0f, 14.0f, 30.0f, tb->tabLabels, 0,
+                                   x[2] + w[2] + 5.0f, 10.0f) == -1);
+}
+
+TEST_CASE("Splitter: two panes, the divider between them, and the minimums bite")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int sp = t.add(HE::UIWidgetType::Splitter);
+    { HE::UIElement& e = *t.find(sp);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 200.0f; }
+    auto* s = dynamic_cast<HE::UISplitter*>(t.find(sp));
+    s->dividerSize = 8.0f; s->ratio = 0.5f;
+    s->minFirst = s->minSecond = 40.0f;
+
+    const int a = t.add(HE::UIWidgetType::Panel); t.find(a)->parentId = sp;
+    const int b = t.add(HE::UIWidgetType::Panel); t.find(b)->parentId = sp;
+
+    {
+        const HE::UIWidgetRect ra = HE::uiElementRect(t, *t.find(a));
+        const HE::UIWidgetRect rb = HE::uiElementRect(t, *t.find(b));
+        CHECK(ra.x == doctest::Approx(0.0f));
+        CHECK(ra.w == doctest::Approx(196.0f));      // (400 - 8) / 2
+        CHECK(rb.x == doctest::Approx(204.0f));      // past the divider
+        CHECK(rb.w == doctest::Approx(196.0f));
+        // The two panes and the divider add up to the whole thing, with no
+        // overlap and no gap — the one arithmetic mistake nobody sees until a
+        // pane's background bleeds under the divider.
+        CHECK(ra.w + 8.0f + rb.w == doctest::Approx(400.0f));
+    }
+
+    // An authored ratio outside the minimums is clamped IN THE LAYOUT, not only
+    // while dragging: otherwise the designer and the runtime disagree the
+    // moment the file loads.
+    s->ratio = 0.0f;
+    {
+        const HE::UIWidgetRect ra = HE::uiElementRect(t, *t.find(a));
+        CHECK(ra.w == doctest::Approx(40.0f));
+    }
+    s->ratio = 1.0f;
+    {
+        const HE::UIWidgetRect rb = HE::uiElementRect(t, *t.find(b));
+        CHECK(rb.w == doctest::Approx(40.0f));
+    }
+
+    // Vertical splits the other way and the divider runs across.
+    s->ratio = 0.5f; s->vertical = true;
+    {
+        const HE::UIWidgetRect ra = HE::uiElementRect(t, *t.find(a));
+        const HE::UIWidgetRect rb = HE::uiElementRect(t, *t.find(b));
+        CHECK(ra.w == doctest::Approx(400.0f));
+        CHECK(ra.h == doctest::Approx(96.0f));       // (200 - 8) / 2
+        CHECK(rb.y == doctest::Approx(104.0f));
+    }
+
+    // A third child is not placed and not seen. Refused at the drop would mean
+    // stopping a gesture; this way it is simply obvious.
+    const int cc = t.add(HE::UIWidgetType::Panel); t.find(cc)->parentId = sp;
+    CHECK_FALSE(HE::uiElementEffectiveVisible(t, *t.find(cc)));
+    const HE::UIWidgetRect rc = HE::uiElementRect(t, *t.find(cc));
+    CHECK(rc.w == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Splitter: one inside another is the three-pane layout, and it nests")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int outer = t.add(HE::UIWidgetType::Splitter);
+    { HE::UIElement& e = *t.find(outer);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 400.0f; e.sizeY = 200.0f; }
+    auto* so = dynamic_cast<HE::UISplitter*>(t.find(outer));
+    so->dividerSize = 0.0f; so->ratio = 0.5f; so->minFirst = so->minSecond = 0.0f;
+
+    const int left = t.add(HE::UIWidgetType::Panel); t.find(left)->parentId = outer;
+    const int inner = t.add(HE::UIWidgetType::Splitter); t.find(inner)->parentId = outer;
+    auto* si = dynamic_cast<HE::UISplitter*>(t.find(inner));
+    si->dividerSize = 0.0f; si->ratio = 0.5f; si->minFirst = si->minSecond = 0.0f;
+    const int mid   = t.add(HE::UIWidgetType::Panel); t.find(mid)->parentId = inner;
+    const int right = t.add(HE::UIWidgetType::Panel); t.find(right)->parentId = inner;
+
+    // The inner splitter's panes are halves of the OUTER's right half, not of
+    // the canvas — the mistake a rect-space slip makes, and the reason nesting
+    // has its own case.
+    CHECK(HE::uiElementRect(t, *t.find(left)).w  == doctest::Approx(200.0f));
+    CHECK(HE::uiElementRect(t, *t.find(mid)).x   == doctest::Approx(200.0f));
+    CHECK(HE::uiElementRect(t, *t.find(mid)).w   == doctest::Approx(100.0f));
+    CHECK(HE::uiElementRect(t, *t.find(right)).x == doctest::Approx(300.0f));
+    CHECK(HE::uiElementRect(t, *t.find(right)).w == doctest::Approx(100.0f));
+}
+
+// The half that geometry cannot answer: what the POINTER does. A hidden page is
+// only really hidden if a button on it stops answering clicks at its own
+// coordinates — the exact failure this codebase has had before, where the
+// picture and the hit test went through different resolutions.
+TEST_CASE("TabBox: a button on a hidden page takes no click")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 300.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = t.add(HE::UIWidgetType::TabBox);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 400.0f; e.sizeY = 300.0f; }
+    // Two pages, each with a button filling it. Same coordinates, so the only
+    // thing that can tell them apart is which page is showing.
+    int buttons[2] = {};
+    for (int i = 0; i < 2; ++i)
+    {
+        const int page = t.add(HE::UIWidgetType::Panel);
+        t.find(page)->parentId = box;
+        t.find(page)->name = i == 0 ? "First" : "Second";
+        buttons[i] = t.add(HE::UIWidgetType::Button);
+        HE::UIElement& b = *t.find(buttons[i]);
+        b.parentId = page;
+        HE::uiSetAnchorPreset(b, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(b, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(b, 0.0f, 0.0f);
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto* live = dynamic_cast<HE::UITabBox*>(
+        const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(box));
+    REQUIRE(live);
+    live->tabHeight = 30.0f;
+
+    // A click in the middle of the page area lands on SOMETHING (the visible
+    // page's button) — the point is which one, so first prove one is hit.
+    CHECK(wm.processPointer(400.0f, 300.0f, 200.0f, 150.0f, true, true));
+    wm.processPointer(400.0f, 300.0f, 200.0f, 150.0f, false, true);
+
+    // Now the real claim. Whichever page is active, only ITS button may be
+    // pressed — and `pressedElem` is what the manager writes when a press lands.
+    auto pressedAt = [&](float x, float y)
+    {
+        wm.processPointer(400.0f, 300.0f, x, y, true, true);
+        const HE::UIWidgetTree* tr = wm.tree(id);
+        int found = 0;
+        for (const auto& ep : tr->elements)
+            if (ep && ep->type() == HE::UIWidgetType::Button &&
+                HE::uiElementEffectiveVisible(*tr, *ep)) found = ep->id;
+        wm.processPointer(400.0f, 300.0f, x, y, false, true);
+        return found;
+    };
+    live->activeTab = 0;
+    CHECK(pressedAt(200.0f, 150.0f) == buttons[0]);
+    live->activeTab = 1;
+    CHECK(pressedAt(200.0f, 150.0f) == buttons[1]);
+
+    // …and the strip switches pages by being clicked, which is the whole point
+    // of a tab.
+    live->activeTab = 0;
+    wm.processPointer(400.0f, 300.0f, 8.0f, 10.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 8.0f, 10.0f, false, true);
+    CHECK(live->activeTab == 0);              // clicking the active tab changes nothing
+    // The labels the STRIP draws are filled by the layout pass, so ask after a
+    // frame — the hit test does not need this (it reads the tree), but working
+    // out where tab two starts does.
+    std::vector<UIRenderObject> frame;
+    wm.extract(400.0f, 300.0f, frame);
+    std::vector<float> tx, tw;
+    HE::UITabBox::tabLayout({ 0.0f, 0.0f, 400.0f, 300.0f }, live->fontSize,
+                            live->tabPadding, live->tabLabels, live->fontAtlasKey, tx, tw);
+    REQUIRE(tx.size() == 2);
+    wm.processPointer(400.0f, 300.0f, tx[1] + 4.0f, 10.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, tx[1] + 4.0f, 10.0f, false, true);
+    CHECK(live->activeTab == 1);
+}
+
+TEST_CASE("Splitter: dragging the divider moves it, and only the divider does")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int sp = t.add(HE::UIWidgetType::Splitter);
+    { HE::UIElement& e = *t.find(sp);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 400.0f; e.sizeY = 200.0f; }
+    { auto* s = dynamic_cast<HE::UISplitter*>(t.find(sp));
+      s->dividerSize = 10.0f; s->ratio = 0.5f; s->minFirst = s->minSecond = 40.0f; }
+    for (int i = 0; i < 2; ++i)
+    { const int p = t.add(HE::UIWidgetType::Panel); t.find(p)->parentId = sp; }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto* live = dynamic_cast<HE::UISplitter*>(
+        const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(sp));
+    REQUIRE(live);
+
+    // The divider sits at (400 - 10) / 2 = 195. Press on it and drag right.
+    wm.processPointer(400.0f, 200.0f, 198.0f, 100.0f, true, true);
+    wm.processPointer(400.0f, 200.0f, 300.0f, 100.0f, true, true);
+    CHECK(live->ratio > 0.6f);
+    wm.processPointer(400.0f, 200.0f, 300.0f, 100.0f, false, true);
+
+    // Dragging PAST a minimum stops at it, in the layout — the ratio itself may
+    // run to the edge, but the panes never do.
+    wm.processPointer(400.0f, 200.0f,
+                      live->clampedRatio(400.0f) * 390.0f + 4.0f, 100.0f, true, true);
+    wm.processPointer(400.0f, 200.0f, 399.0f, 100.0f, true, true);
+    wm.processPointer(400.0f, 200.0f, 399.0f, 100.0f, false, true);
+    CHECK(live->clampedRatio(400.0f) * 390.0f == doctest::Approx(350.0f));   // 390 - 40
+
+    // A press that is NOT on the divider must not start a drag: the panes have
+    // to stay clickable, and grabbing the whole container would end that.
+    live->ratio = 0.5f;
+    const float before = live->ratio;
+    wm.processPointer(400.0f, 200.0f, 50.0f, 100.0f, true, true);
+    wm.processPointer(400.0f, 200.0f, 300.0f, 100.0f, true, true);
+    CHECK(live->ratio == doctest::Approx(before));
+    wm.processPointer(400.0f, 200.0f, 300.0f, 100.0f, false, true);
+}
+
+TEST_CASE("TabBox and Splitter: they round-trip")
+{
+    HE::UIWidgetTree t;
+    const int tb = t.add(HE::UIWidgetType::TabBox);
+    { auto* b = dynamic_cast<HE::UITabBox*>(t.find(tb));
+      b->activeTab = 2; b->tabHeight = 44.0f; b->tabPadding = 9.0f;
+      b->activeColor = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); }
+    const int sp = t.add(HE::UIWidgetType::Splitter);
+    { auto* s = dynamic_cast<HE::UISplitter*>(t.find(sp));
+      s->vertical = true; s->ratio = 0.25f; s->minFirst = 77.0f; }
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    const auto* rb = dynamic_cast<const HE::UITabBox*>(r.find(tb));
+    REQUIRE(rb);
+    CHECK(rb->activeTab == 2);
+    CHECK(rb->tabHeight == doctest::Approx(44.0f));
+    CHECK(rb->tabPadding == doctest::Approx(9.0f));
+    CHECK(rb->activeColor.r == doctest::Approx(1.0f));
+    const auto* rs = dynamic_cast<const HE::UISplitter*>(r.find(sp));
+    REQUIRE(rs);
+    CHECK(rs->vertical);
+    CHECK(rs->ratio == doctest::Approx(0.25f));
+    CHECK(rs->minFirst == doctest::Approx(77.0f));
 }
 
 // ═══ The shipped component library ═══════════════════════════════════════════

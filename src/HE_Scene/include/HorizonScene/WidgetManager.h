@@ -418,6 +418,10 @@ private:
         // down. Its own field rather than a flag on draggingSlider, because the
         // two do entirely different things with the same pointer stream.
         int draggingText   = 0;
+        // Splitter whose divider is being dragged. Its own field for the same
+        // reason as the two above: one pointer stream, three different things
+        // it can be doing, and a shared flag would make them fight.
+        int draggingSplit  = 0;
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
 

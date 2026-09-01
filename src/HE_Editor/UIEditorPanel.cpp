@@ -1994,6 +1994,56 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		}
 		break;
 	}
+	case UIWidgetType::TabBox:
+	{
+		// The strip, from the SAME layout the runtime clicks against
+		// (UITabBox::tabLayout) — a designer that spaced the tabs its own way
+		// would show an author a strip they cannot hit where they see it.
+		const auto* tb = dynamic_cast<const HE::UITabBox*>(&n);
+		if (!tb) break;
+		const float tabH = tb->tabHeight * s;
+		dl->AddRectFilled(mn, ImVec2(mx.x, mn.y + tabH), C(tb->stripColor));
+		std::vector<std::string> labels;
+		if (tree)
+			for (const auto& cp : tree->elements)
+				if (cp && cp->parentId == n.id)
+					labels.push_back(cp->name.empty() ? std::string("Page") : cp->name);
+		std::vector<float> tx, tw;
+		HE::UITabBox::tabLayout({ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y },
+		                        tb->fontSize * s, tb->tabPadding * s, labels,
+		                        n.fontAtlasKey, tx, tw);
+		for (size_t i = 0; i < tx.size(); ++i)
+		{
+			if (tx[i] >= mx.x) break;
+			const float w = std::min(tw[i], mx.x - tx[i]);
+			const bool on = static_cast<int>(i) == tb->activeTab;
+			dl->AddRectFilled(ImVec2(tx[i], mn.y), ImVec2(tx[i] + w, mn.y + tabH),
+			                  C(on ? tb->activeColor : tb->tabColor));
+			const float fs = tb->fontSize * s;
+			dl->AddText(nullptr, fs,
+			            ImVec2(tx[i] + tb->tabPadding * s, mn.y + (tabH - fs) * 0.5f),
+			            C(tb->textColor), labels[i].c_str());
+		}
+		// …and the page area's outline, so an empty Tab Box is something you can
+		// aim a drop at rather than a strip with nothing under it.
+		dl->AddRect(ImVec2(mn.x, mn.y + tabH), mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
+	case UIWidgetType::Splitter:
+	{
+		const auto* sp = dynamic_cast<const HE::UISplitter*>(&n);
+		if (!sp) break;
+		const float len = sp->vertical ? (mx.y - mn.y) : (mx.x - mn.x);
+		const float div = std::min(sp->dividerSize * s, len);
+		const float first = sp->clampedRatio(len) * std::max(0.0f, len - div);
+		const ImU32 c = C(sp->dividerColor);
+		if (sp->vertical)
+			dl->AddRectFilled(ImVec2(mn.x, mn.y + first), ImVec2(mx.x, mn.y + first + div), c);
+		else
+			dl->AddRectFilled(ImVec2(mn.x + first, mn.y), ImVec2(mn.x + first + div, mx.y), c);
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
 	case UIWidgetType::WrapBox:
 	case UIWidgetType::VerticalBox:
 	case UIWidgetType::HorizontalBox:
