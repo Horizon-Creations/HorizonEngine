@@ -966,32 +966,40 @@ void drawParamValues(HE::UIWidgetRef& ref, const HE::UIWidgetTree& sub,
 		HE::UIPropValue v = set ? *set : target->getPropAny(p.property);
 		bool changed = false;
 
+		// The knob's NAME goes above its control, not beside it. ImGui puts a
+		// label to the right by default, and beside a control stretched to the
+		// panel that means the name sits in the far corner, reading as if it
+		// belonged to whatever is next to it. Every row here goes through the
+		// editor's own label-above rows, like the rest of the tool.
 		const std::string label = p.name + "##pv";
 		switch (pd->type)
 		{
 		case UIPropType::Float:
 			changed = pd->minV < pd->maxV
-				? ImGui::SliderFloat(label.c_str(), &v.f, pd->minV, pd->maxV)
-				: ImGui::DragFloat(label.c_str(), &v.f, 0.5f);
+				? EditorWidgets::Row::sliderFloat(label.c_str(), &v.f, pd->minV, pd->maxV)
+				: EditorWidgets::Row::dragFloat(label.c_str(), &v.f, 0.5f);
 			break;
 		case UIPropType::Int:
-			changed = ImGui::DragInt(label.c_str(), &v.i, 1);
+			changed = EditorWidgets::Row::dragInt(label.c_str(), &v.i, 1.0f);
 			break;
 		case UIPropType::Bool:
+			// The one exception, and deliberately: a tick box is small and its
+			// label belongs beside it — that is what a checkbox looks like
+			// everywhere, and it is what the rest of this editor does too.
 			changed = ImGui::Checkbox(label.c_str(), &v.b);
 			if (changed) committed = true;
 			break;
 		case UIPropType::String:
 			changed = pd->multiline
-				? ImGui::InputTextMultiline(label.c_str(), &v.s,
-				                            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f))
-				: ImGui::InputText(label.c_str(), &v.s);
+				? EditorWidgets::Row::inputTextMultiline(
+					label.c_str(), &v.s, ImGui::GetTextLineHeight() * 3.0f)
+				: EditorWidgets::Row::inputText(label.c_str(), &v.s);
 			break;
 		case UIPropType::Color:
-			changed = ImGui::ColorEdit4(label.c_str(), &v.col.x);
+			changed = EditorWidgets::Row::colorEdit4(label.c_str(), &v.col.x);
 			break;
 		case UIPropType::Vec2:
-			changed = ImGui::DragFloat2(label.c_str(), &v.v2.x, 0.5f);
+			changed = EditorWidgets::Row::dragFloat2(label.c_str(), &v.v2.x, 0.5f);
 			break;
 		case UIPropType::StringList:
 		{
@@ -1233,10 +1241,21 @@ void drawDetails(State& st, AppContext& ctx)
 	bool edit      = false; // any value changed this frame (live view update)
 	bool committed = false; // an edit finished (undo snapshot + live asset)
 
-	ImGui::TextDisabled("%s", n->typeName());
+	// What KIND of thing this is. For a placed component that is the component's
+	// own name — "Card", "Form Row" — and not "WidgetRef", which is the
+	// machinery underneath and says nothing to the person who dragged it in.
+	if (n->type() == UIWidgetType::WidgetRef)
+	{
+		const std::string wp = n->getProp("Widget").s;
+		ImGui::TextDisabled("%s", wp.empty()
+			? "Component"
+			: std::filesystem::path(wp).stem().string().c_str());
+	}
+	else
+		ImGui::TextDisabled("%s", n->typeName());
 	ImGui::Separator();
 
-	ImGui::InputText("Name", &n->name);
+	EditorWidgets::Row::inputText("Name", &n->name);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Name");
 
@@ -1547,34 +1566,37 @@ void drawDetails(State& st, AppContext& ctx)
 				"This is a Surface material: it will not draw correctly here.");
 	}
 
-	// The widget a WidgetRef embeds. Picked from the project's widgets, and
-	// never itself — a widget that embeds itself is refused at runtime, so the
-	// picker does not offer the trap in the first place.
+	// ── A placed component is a CONTROL, not a reference to one ──────────────
+	// What sits on the page is a Card, a Form Row, a Title Bar. That it happens
+	// to be carried by a WidgetRef is how the engine grafts it, not something an
+	// author has to hold in their head — so the panel does not offer to re-point
+	// it at a different asset, any more than it offers to turn a Button into a
+	// Text. Change your mind, delete it and drag the other one in.
+	//
+	// The asset path is shown ONLY when it does not resolve. A component whose
+	// widget was renamed or deleted would otherwise be a blank slot with nothing
+	// to say for itself, and there would be no way to find out what it used to
+	// be — the same rule as an unreadable grid track: visible and fixable beats
+	// silent and gone.
 	if (n->type() == UIWidgetType::WidgetRef)
 	{
-		ImGui::SeparatorText("Embedded widget");
-		std::string path = n->getProp("Widget").s;
-		if (assetSlot(ctx, "Widget", path, HE::AssetType::Widget, "wref"))
+		const std::string path = n->getProp("Widget").s;
+		const HE::UIWidgetTree* sub = path.empty() ? nullptr : embeddedTreeFor(ctx, path);
+		if (!sub)
 		{
-			if (path == st.relPath)
-				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
-					"A widget cannot embed itself.");
-			else
-			{
-				n->setProp("Widget", HE::UIPropValue::ofString(path));
-				committed = true;
-			}
+			ImGui::SeparatorText("Component");
+			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+				path.empty() ? "This component points at nothing."
+				             : "This component's widget cannot be loaded.");
+			if (!path.empty()) ImGui::TextDisabled("%s", path.c_str());
+			ImGui::TextDisabled("Delete it and drag the component in again.");
 		}
-		ImGui::TextDisabled("Grafted in when the widget is created; the designer\n"
-		                    "shows the slot it will fill.");
-
-		// …and what this copy of it is told. Read from the referenced asset
-		// every frame rather than cached on the ref: the component is edited in
-		// another tab, and a knob that appears only after a reload is a knob
-		// nobody finds.
-		if (auto* wr = dynamic_cast<HE::UIWidgetRef*>(n); wr && !path.empty())
-			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, path))
-				drawParamValues(*wr, *sub, edit, committed);
+		else if (auto* wr = dynamic_cast<HE::UIWidgetRef*>(n))
+			// What this copy of it is told. Read from the referenced asset every
+			// frame rather than cached on the ref: the component is edited in
+			// another tab, and a knob that appears only after a reload is a knob
+			// nobody finds.
+			drawParamValues(*wr, *sub, edit, committed);
 	}
 
 	// Texture slot: the plain "put this picture on it" path, tinted by the
