@@ -322,6 +322,24 @@ HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = n
 HE_API int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode);
 HE_API int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode);
 
+// Which style of `theme` this element follows, or null. Empty style name means
+// the one named after the element's TYPE, which is what makes "the theme's
+// buttons" a thing an author sets once instead of per button.
+HE_API const UIThemeStyle* uiThemeStyleFor(const UIElement& e, const UITheme& theme);
+
+// What the theme says `prop` should be on this element, or false when it says
+// nothing. THE one place that question is answered: uiApplyTheme writes what
+// this returns, and the designer — which creates nothing and so is never
+// assigned to — asks it while drawing. Two implementations of this rule is
+// exactly how the designer came to show light while the preview showed dark.
+//
+// Highest wins:
+//   1. a per-property role binding — a deliberate exception to the style
+//   2. kUIThemeLiteral — this value was decided elsewhere, hands off
+//   3. the element's style
+HE_API bool uiThemeValueFor(const UIElement& e, const UITheme& theme, UIThemeMode mode,
+                            const std::string& prop, UIPropValue& out);
+
 // Measure every scroll box's content and clamp its offset to what there is to
 // scroll. Run once per frame after auto-size and before the rects are used —
 // a box whose content shrank must not stay scrolled past its own end.

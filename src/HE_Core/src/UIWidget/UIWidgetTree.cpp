@@ -771,50 +771,104 @@ void uiSetAnchorInsetsY(UIElement& e, float top, float bottom)
     e.posY  = top + e.pivotY * e.sizeY;
 }
 
-int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode)
+const UIThemeStyle* uiThemeStyleFor(const UIElement& e, const UITheme& theme)
 {
-    int written = 0;
-    for (const auto& [prop, boundName] : e.themeRoles)
+    if (!e.themeStyled) return nullptr;
+    return theme.styleFor(e.themeStyle.empty() ? std::string(e.typeName()) : e.themeStyle);
+}
+
+bool uiThemeValueFor(const UIElement& e, const UITheme& theme, UIThemeMode mode,
+                     const std::string& prop, UIPropValue& out)
+{
+    const UIPropValue cur = e.getPropAny(prop);
+    const std::string& bound = e.themeRoleFor(prop);
+
+    // Decided somewhere else and locked against the theme — a component
+    // parameter, most of the time. Not the same as no binding: no binding lets
+    // the style answer, this one does not.
+    if (bound == kUIThemeLiteral) return false;
+
+    if (!bound.empty())
     {
         // WHAT a binding means is decided by the property's TYPE, not by the
         // stored name. One map carries all of them, so a colour, a text size and
         // a rounding are bound, saved and edited the same way.
-        const UIPropValue cur = e.getPropAny(prop);
         if (cur.type == UIPropType::Color)
         {
-            const UIThemeRole role = uiThemeRoleFromName(boundName);
+            const UIThemeRole role = uiThemeRoleFromName(bound);
             // A name that no longer resolves leaves the property alone rather
             // than painting it white: an element bound to a renamed role keeps
             // the last value it had, which is visible and fixable, instead of
-            // vanishing.
-            if (role == UIThemeRole::COUNT) continue;
-            e.setPropAny(prop, UIPropValue::ofColor(theme.colorFor(role, mode)));
-            ++written;
+            // vanishing. It does NOT fall through to the style either — the
+            // binding is still there, it is only broken, and repainting it from
+            // somewhere else would hide that.
+            if (role == UIThemeRole::COUNT) return false;
+            out = UIPropValue::ofColor(theme.colorFor(role, mode));
+            return true;
         }
-        else if (cur.type == UIPropType::Float)
+        if (cur.type == UIPropType::Float)
         {
             // "FontSize" is the one Float that means TEXT, so it reads the
             // typography levels; every other one — a corner radius, a box's
             // padding or spacing — reads the size steps. The two vocabularies
             // both contain "Small", which is exactly why the property decides
             // and not the name.
-            float value = 0.0f;
             if (prop == "FontSize")
             {
-                const UIThemeTextLevel lvl = uiThemeTextLevelFromName(boundName);
-                if (lvl == UIThemeTextLevel::COUNT) continue;
-                value = theme.textSize[static_cast<int>(lvl)];
+                const UIThemeTextLevel lvl = uiThemeTextLevelFromName(bound);
+                if (lvl == UIThemeTextLevel::COUNT) return false;
+                out = UIPropValue::ofFloat(theme.textSize[static_cast<int>(lvl)]);
+                return true;
             }
-            else
-            {
-                const UIThemeSize step = uiThemeSizeFromName(boundName);
-                if (step == UIThemeSize::COUNT) continue;
-                value = theme.radius[static_cast<int>(step)];
-            }
-            e.setPropAny(prop, UIPropValue::ofFloat(value));
-            ++written;
+            const UIThemeSize step = uiThemeSizeFromName(bound);
+            if (step == UIThemeSize::COUNT) return false;
+            out = UIPropValue::ofFloat(theme.radius[static_cast<int>(step)]);
+            return true;
         }
+        return false;
     }
+
+    const UIThemeStyle* style = uiThemeStyleFor(e, theme);
+    if (!style) return false;
+    const UIThemeStyleValue* v = style->find(prop);
+    if (!v) return false;
+    // A style may name a property this type does not have — that is what lets
+    // one named style cover a Panel and a Button at once. The type has to match
+    // as well: a colour entry cannot decide a number.
+    if (v->isColor && cur.type == UIPropType::Color)
+    {
+        const int mi = static_cast<int>(mode) < static_cast<int>(UIThemeMode::COUNT)
+            ? static_cast<int>(mode) : 0;
+        out = UIPropValue::ofColor(v->color[mi]);
+        return true;
+    }
+    if (!v->isColor && cur.type == UIPropType::Float)
+    {
+        out = UIPropValue::ofFloat(v->number);
+        return true;
+    }
+    return false;
+}
+
+int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode)
+{
+    int written = 0;
+    auto write = [&](const std::string& prop)
+    {
+        UIPropValue v;
+        if (!uiThemeValueFor(e, theme, mode, prop, v)) return;
+        e.setPropAny(prop, v);
+        ++written;
+    };
+    // Everything the element bound by hand…
+    for (const auto& [prop, boundName] : e.themeRoles) write(prop);
+    // …and then everything its style decides that it did not bind itself. The
+    // themeRoleFor check is what keeps a bound property from being written
+    // twice, and it is also why a binding beats the style rather than the other
+    // way round.
+    if (const UIThemeStyle* style = uiThemeStyleFor(e, theme))
+        for (const auto& [prop, v] : style->values)
+            if (e.themeRoleFor(prop).empty()) write(prop);
     return written;
 }
 
@@ -1271,6 +1325,15 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         for (const auto& [prop, role] : e.themeRoles) roles[prop] = role;
         o["themeRoles"] = std::move(roles);
     }
+    // Only when switched ON, like everything else optional here — so a widget
+    // authored before styles existed still saves byte-identically. That the key
+    // then cannot tell "predates styles" from "switched off" is fine: both mean
+    // the same thing, that the theme's styles leave this element alone.
+    if (e.themeStyled)
+    {
+        o["themeStyled"] = true;
+        if (!e.themeStyle.empty()) o["themeStyle"] = e.themeStyle;
+    }
     if (e.innerShadow)
     {
         o["innerShadow"]      = true;
@@ -1357,6 +1420,12 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
         for (auto it = roles->begin(); it != roles->end(); ++it)
             if (it.value().is_string())
                 e->setThemeRole(it.key(), it.value().get<std::string>());
+    // Missing means FALSE here, against the field's own default of true: an
+    // element that predates styles kept the colours somebody typed into it, and
+    // opening that widget must not repaint it. New elements are constructed, not
+    // read, which is where the true comes from.
+    e->themeStyled = o.value("themeStyled", false);
+    e->themeStyle  = o.value("themeStyle", std::string());
     e->innerShadow     = o.value("innerShadow", false);
     e->innerShadowBlur = o.value("innerShadowBlur", e->innerShadowBlur);
     if (const auto ic = o.find("innerShadowColor");
@@ -1439,11 +1508,16 @@ int uiApplyWidgetParams(UIWidgetTree& tree,
         // actually reads.
         const UIPropValue cur = e->getPropAny(decl->property);
         e->setPropAny(decl->property, uiPropValueCoerce(value, cur.type));
-        // A parameter and a theme role would otherwise fight every time the
-        // theme changes, with the role winning silently a frame later. Saying
-        // it once, here, is the whole resolution: telling a component what
-        // colour to be un-binds that colour from the theme.
-        e->setThemeRole(decl->property, std::string());
+        // A parameter and the theme would otherwise fight every time the theme
+        // changes, with the theme winning silently a frame later. Saying it
+        // once, here, is the whole resolution: telling a component what colour
+        // to be takes that colour out of the theme's hands.
+        //
+        // LOCKED, not merely un-bound. Un-binding was enough while only a role
+        // could answer for a property; a style answers for properties nobody
+        // bound, so an un-bound parameter would be painted over by the style of
+        // the element's type at the next uiApplyTheme.
+        e->setThemeRole(decl->property, kUIThemeLiteral);
         ++written;
     }
     return written;

@@ -4,6 +4,8 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 // ── One place to decide what an application looks like ────────────────────────
 // docs/he-apps-plan.md D1. Without this, an author who builds ten buttons types
@@ -86,6 +88,65 @@ struct UIThemeShadow
 enum class UIThemeElevation : uint8_t { Raised = 0, Overlay, COUNT };
 HE_API const char* uiThemeElevationName(UIThemeElevation e);
 
+// ── A style: the answer for a whole KIND of element, at once ─────────────────
+// A role is one colour, and binding an element to roles is one decision PER
+// VALUE: a button is six of them, and its hover and its pressed colour are two
+// that no role vocabulary can name (there is no "Accent, but hovered").
+//
+// A style is the other half. It is keyed by the very property names the element
+// already has — "Normal Color", "Hovered Color", "Pressed Color",
+// "Corner Radius", "FontSize" — so it needs no per-type code and no second
+// vocabulary: whatever a type exposes, a style can decide. An element says
+// which style it follows (UIElement::themeStyled / themeStyle) and that is ONE
+// decision for its whole look.
+//
+// Deliberately open where the roles are closed. The roles are nine because a
+// dropdown of nine can be understood; a style's keys come from the element in
+// front of you, and its NAME may be anything, which is what lets a project
+// theme its own components ("Card", "Danger Button") and not only the built-in
+// types.
+struct UIThemeStyleValue
+{
+    // Colours carry both modes, like a role, because that is the whole point of
+    // a theme. A number does not: a corner radius is not lighter in light mode.
+    bool      isColor = true;
+    glm::vec4 color[static_cast<int>(UIThemeMode::COUNT)]{};
+    float     number = 0.0f;
+};
+
+struct UIThemeStyle
+{
+    // Ordered, not a map. The editor shows a style in the order the element's
+    // own property table has, and a map would sort "Corner Radius" above
+    // "Normal Color" for a reason no author can see.
+    std::vector<std::pair<std::string, UIThemeStyleValue>> values;
+
+    const UIThemeStyleValue* find(const std::string& prop) const
+    {
+        for (const auto& [p, v] : values) if (p == prop) return &v;
+        return nullptr;
+    }
+    // Set or replace. Removing is erase(prop) — a style holds only what it
+    // actually decides, and a value it does not hold is one the element keeps.
+    void set(const std::string& prop, const UIThemeStyleValue& v)
+    {
+        for (auto& [p, cur] : values) if (p == prop) { cur = v; return; }
+        values.emplace_back(prop, v);
+    }
+    void erase(const std::string& prop)
+    {
+        for (auto it = values.begin(); it != values.end(); ++it)
+            if (it->first == prop) { values.erase(it); return; }
+    }
+};
+
+// The binding that means "the theme decides nothing here". Not a role, and not
+// the same as having no binding at all: no binding lets the element's STYLE
+// answer, this shuts even that out. Written wherever a value was decided
+// somewhere else and must survive the next theme change — a component
+// parameter, above all (uiApplyWidgetParams).
+inline constexpr const char* kUIThemeLiteral = "(literal)";
+
 struct HE_API UITheme
 {
     std::string name = "Default";
@@ -101,10 +162,38 @@ struct HE_API UITheme
     float textSize[static_cast<int>(UIThemeTextLevel::COUNT)]{ 32.0f, 24.0f, 16.0f, 13.0f, 15.0f };
     UIThemeShadow shadow[static_cast<int>(UIThemeElevation::COUNT)];
 
+    // Styles, keyed by the element TYPE NAME ("Button") for the one every
+    // element of that type follows by default, or by a free name ("Card") for
+    // one an element points at deliberately. Empty is the normal state of a
+    // fresh theme and means "styles decide nothing" — every element keeps the
+    // values it was authored with until somebody adds a style here.
+    std::vector<std::pair<std::string, UIThemeStyle>> styles;
+
     glm::vec4 colorFor(UIThemeRole r, UIThemeMode m) const
     {
         if (r >= UIThemeRole::COUNT || m >= UIThemeMode::COUNT) return glm::vec4(1.0f);
         return color[static_cast<int>(r)][static_cast<int>(m)];
+    }
+
+    const UIThemeStyle* styleFor(const std::string& key) const
+    {
+        if (key.empty()) return nullptr;
+        for (const auto& [k, s] : styles) if (k == key) return &s;
+        return nullptr;
+    }
+    // The style under `key`, created empty if there is none. The editor writes
+    // through this; nothing else should, because an empty style saved into a
+    // theme is a key an author then has to find and delete.
+    UIThemeStyle& styleMut(const std::string& key)
+    {
+        for (auto& [k, s] : styles) if (k == key) return s;
+        styles.emplace_back(key, UIThemeStyle{});
+        return styles.back().second;
+    }
+    void eraseStyle(const std::string& key)
+    {
+        for (auto it = styles.begin(); it != styles.end(); ++it)
+            if (it->first == key) { styles.erase(it); return; }
     }
 };
 

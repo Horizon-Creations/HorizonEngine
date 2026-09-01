@@ -391,6 +391,25 @@ public:
         if (!role.empty()) themeRoles.emplace_back(prop, role);
     }
 
+    // ── Bound to the theme, the other way round ─────────────────────────────
+    // A role binding decides ONE value. This decides the element's whole look:
+    // it says "I am a Button, dress me like the theme's buttons", which is the
+    // difference between one decision and six — and it is the only way hover and
+    // pressed can be themed at all, because no role vocabulary has a name for
+    // "the accent, but hovered".
+    //
+    //   themeStyled == false → the theme's styles do not touch this element
+    //   themeStyled == true, themeStyle empty → the style named after its TYPE
+    //   themeStyled == true, themeStyle "Card" → that style
+    //
+    // Default true for an element that is CONSTRUCTED, false for one read from a
+    // file that does not mention it: a widget authored before styles existed
+    // must keep the colours somebody typed into it, while everything placed from
+    // now on follows the theme without being asked to. A per-property role
+    // binding still wins over the style, and kUIThemeLiteral shuts both out.
+    bool        themeStyled = true;
+    std::string themeStyle;
+
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
     // between the filling children in proportion. Ignored everywhere else, and

@@ -366,3 +366,234 @@ TEST_CASE("Theme: sizes and text levels bind like colours do")
     CHECK(loaded.find(text)->themeRoleFor("FontSize") == "Medium");
     CHECK(loaded.find(panel)->themeRoleFor("Corner Radius") == "Small");
 }
+
+// ═══ Styles ══════════════════════════════════════════════════════════════════
+// A role is one value and binding to it is one decision PER VALUE. A style is
+// the answer for a whole KIND of element at once — and the only way a hover or a
+// pressed colour can be themed at all, since no role vocabulary has a name for
+// "the accent, but hovered".
+
+namespace
+{
+    // A colour entry that is the same in both modes, for the tests that are not
+    // about light and dark.
+    HE::UIThemeStyleValue col(const glm::vec4& c)
+    {
+        HE::UIThemeStyleValue v;
+        v.color[static_cast<int>(HE::UIThemeMode::Light)] = c;
+        v.color[static_cast<int>(HE::UIThemeMode::Dark)]  = c;
+        return v;
+    }
+    HE::UIThemeStyleValue num(float f)
+    {
+        HE::UIThemeStyleValue v;
+        v.isColor = false;
+        v.number  = f;
+        return v;
+    }
+}
+
+TEST_CASE("Theme: one style dresses a whole element type, hover and pressed included")
+{
+    HE::UIWidgetTree tree;
+    const int button = tree.add(HE::UIWidgetType::Button);
+    const int panel  = tree.add(HE::UIWidgetType::Panel);
+
+    const glm::vec4 normal { 0.10f, 0.20f, 0.30f, 1.0f };
+    const glm::vec4 hover  { 0.20f, 0.40f, 0.60f, 1.0f };
+    const glm::vec4 press  { 0.05f, 0.10f, 0.15f, 1.0f };
+
+    HE::UITheme t;
+    HE::UIThemeStyle& s = t.styleMut("Button");
+    s.set("Normal Color",  col(normal));
+    s.set("Hovered Color", col(hover));
+    s.set("Pressed Color", col(press));
+    s.set("Corner Radius", num(11.0f));
+
+    const glm::vec4 panelBefore = tree.find(panel)->getPropAny("Color").col;
+
+    // Four values, one decision, and NOT ONE of them was bound by hand: the
+    // element only says "I am a Button" (themeStyled, on by default for anything
+    // constructed rather than read from a file).
+    REQUIRE(tree.find(button)->themeStyled);
+    REQUIRE(tree.find(button)->themeStyle.empty());
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Light) == 4);
+    CHECK(tree.find(button)->getPropAny("Normal Color").col  == normal);
+    CHECK(tree.find(button)->getPropAny("Hovered Color").col == hover);
+    CHECK(tree.find(button)->getPropAny("Pressed Color").col == press);
+    CHECK(tree.find(button)->cornerRadius.x == doctest::Approx(11.0f));
+
+    // The Panel is not a Button, so nothing about it moved.
+    CHECK(tree.find(panel)->getPropAny("Color").col == panelBefore);
+
+    // Switching it off leaves the element exactly where the last apply left it —
+    // a style is a subscription, not a bond.
+    tree.find(button)->themeStyled = false;
+    s.set("Normal Color", col(glm::vec4(1.0f, 0.0f, 1.0f, 1.0f)));
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Light) == 0);
+    CHECK(tree.find(button)->getPropAny("Normal Color").col == normal);
+}
+
+TEST_CASE("Theme: a style carries light and dark, like a role does")
+{
+    HE::UIWidgetTree tree;
+    const int button = tree.add(HE::UIWidgetType::Button);
+
+    HE::UIThemeStyleValue v;
+    v.color[static_cast<int>(HE::UIThemeMode::Light)] = glm::vec4(0.9f, 0.9f, 0.9f, 1.0f);
+    v.color[static_cast<int>(HE::UIThemeMode::Dark)]  = glm::vec4(0.1f, 0.1f, 0.1f, 1.0f);
+
+    HE::UITheme t;
+    t.styleMut("Button").set("Normal Color", v);
+    // A number is one value: a corner radius is not lighter in light mode.
+    t.styleMut("Button").set("Corner Radius", num(7.0f));
+
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Light);
+    CHECK(tree.find(button)->getPropAny("Normal Color").col.r == doctest::Approx(0.9f));
+    CHECK(tree.find(button)->cornerRadius.x == doctest::Approx(7.0f));
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    CHECK(tree.find(button)->getPropAny("Normal Color").col.r == doctest::Approx(0.1f));
+    CHECK(tree.find(button)->cornerRadius.x == doctest::Approx(7.0f));
+}
+
+TEST_CASE("Theme: a named style covers whatever points at it, including a component's parts")
+{
+    HE::UIWidgetTree tree;
+    const int panel  = tree.add(HE::UIWidgetType::Panel);
+    const int button = tree.add(HE::UIWidgetType::Button);
+
+    const glm::vec4 card{ 0.15f, 0.15f, 0.18f, 1.0f };
+    HE::UITheme t;
+    // One style, two types, and a property only one of them has: a style is a
+    // bag of property names, so what does not apply is simply skipped. That is
+    // what lets a project name a look ("Card", "Danger") instead of being
+    // limited to the built-in type names.
+    HE::UIThemeStyle& s = t.styleMut("Card");
+    s.set("Color", col(card));            // the Panel has this one
+    s.set("Normal Color", col(card));     // the Button has this one
+    s.set("Corner Radius", num(14.0f));   // both
+
+    tree.find(panel)->themeStyle  = "Card";
+    tree.find(button)->themeStyle = "Card";
+    CHECK(HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark) == 4);
+    CHECK(tree.find(panel)->getPropAny("Color").col == card);
+    CHECK(tree.find(button)->getPropAny("Normal Color").col == card);
+    CHECK(tree.find(panel)->cornerRadius.x == doctest::Approx(14.0f));
+    CHECK(tree.find(button)->cornerRadius.x == doctest::Approx(14.0f));
+
+    // A name that no longer resolves — the style was renamed or deleted — leaves
+    // the element alone rather than falling back to its type's style. Same rule
+    // a renamed role gets: visible and fixable beats quietly something else.
+    tree.find(panel)->themeStyle = "Crd";
+    t.styleMut("Panel").set("Color", col(glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)));
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    CHECK(tree.find(panel)->getPropAny("Color").col == card);
+}
+
+TEST_CASE("Theme: a binding beats the style, a lock beats both")
+{
+    HE::UIWidgetTree tree;
+    const int button = tree.add(HE::UIWidgetType::Button);
+
+    HE::UITheme t;
+    const glm::vec4 styled{ 0.2f, 0.2f, 0.2f, 1.0f };
+    t.styleMut("Button").set("Normal Color",  col(styled));
+    t.styleMut("Button").set("Hovered Color", col(styled));
+    t.styleMut("Button").set("Pressed Color", col(styled));
+
+    // A role binding is a deliberate exception to the style — "these buttons,
+    // but this one is the accent".
+    tree.find(button)->setThemeRole("Normal Color", "Accent");
+    // A lock is "somebody already decided this", which is what a component
+    // parameter writes.
+    const glm::vec4 mine{ 1.0f, 0.5f, 0.0f, 1.0f };
+    tree.find(button)->setPropAny("Pressed Color", HE::UIPropValue::ofColor(mine));
+    tree.find(button)->setThemeRole("Pressed Color", HE::kUIThemeLiteral);
+
+    HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
+    CHECK(tree.find(button)->getPropAny("Normal Color").col ==
+          t.colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Dark));
+    CHECK(tree.find(button)->getPropAny("Hovered Color").col == styled);
+    CHECK(tree.find(button)->getPropAny("Pressed Color").col == mine);
+
+    // The same three answers, asked instead of written. This is what the
+    // designer draws with, and it has to agree with what the runtime assigns —
+    // one function, so it cannot do otherwise.
+    HE::UIPropValue v;
+    const HE::UIElement& e = *tree.find(button);
+    CHECK(HE::uiThemeValueFor(e, t, HE::UIThemeMode::Dark, "Normal Color", v));
+    CHECK(v.col == t.colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Dark));
+    CHECK(HE::uiThemeValueFor(e, t, HE::UIThemeMode::Dark, "Hovered Color", v));
+    CHECK(v.col == styled);
+    CHECK_FALSE(HE::uiThemeValueFor(e, t, HE::UIThemeMode::Dark, "Pressed Color", v));
+}
+
+TEST_CASE("Theme: styles round-trip, and a theme without any saves as before")
+{
+    HE::UITheme plain;
+    CHECK(HE::uiThemeToJson(plain).find("styles") == std::string::npos);
+
+    HE::UITheme t;
+    t.name = "Night";
+    HE::UIThemeStyleValue v;
+    v.color[static_cast<int>(HE::UIThemeMode::Light)] = glm::vec4(0.7f, 0.6f, 0.5f, 1.0f);
+    v.color[static_cast<int>(HE::UIThemeMode::Dark)]  = glm::vec4(0.2f, 0.3f, 0.4f, 0.5f);
+    t.styleMut("Button").set("Normal Color", v);
+    t.styleMut("Button").set("Corner Radius", num(9.5f));
+    t.styleMut("Card").set("Color", col(glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)));
+
+    HE::UITheme back;
+    REQUIRE(HE::uiThemeFromJson(HE::uiThemeToJson(t), back));
+    REQUIRE(back.styles.size() == 2);
+    // Order is kept, both levels: an author's list must not be reshuffled by a
+    // save, which a JSON object keyed by name would do.
+    CHECK(back.styles[0].first == "Button");
+    CHECK(back.styles[1].first == "Card");
+    REQUIRE(back.styleFor("Button"));
+    REQUIRE(back.styleFor("Button")->values.size() == 2);
+    CHECK(back.styleFor("Button")->values[0].first == "Normal Color");
+    const HE::UIThemeStyleValue* n = back.styleFor("Button")->find("Normal Color");
+    REQUIRE(n);
+    CHECK(n->isColor);
+    CHECK(n->color[static_cast<int>(HE::UIThemeMode::Dark)].a == doctest::Approx(0.5f));
+    const HE::UIThemeStyleValue* r = back.styleFor("Button")->find("Corner Radius");
+    REQUIRE(r);
+    CHECK_FALSE(r->isColor);
+    CHECK(r->number == doctest::Approx(9.5f));
+    CHECK(back.styleFor("Nothing") == nullptr);
+}
+
+TEST_CASE("Theme: a widget authored before styles keeps the colours somebody typed")
+{
+    // The whole compatibility question in one test. An element READ from a file
+    // that does not mention styles must not be repainted by opening it; one that
+    // is CONSTRUCTED follows the theme, because that is what "place a button and
+    // it looks like the project's buttons" means.
+    HE::UIWidgetTree fresh;
+    const int b = fresh.add(HE::UIWidgetType::Button);
+    CHECK(fresh.find(b)->themeStyled);
+
+    const std::string old =
+        R"({"canvasWidth":1920,"canvasHeight":1080,"elements":[)"
+        R"({"id":1,"parent":0,"type":"Button","name":"Old"}]})";
+    HE::UIWidgetTree loaded;
+    REQUIRE(HE::uiWidgetTreeFromJson(old, loaded));
+    REQUIRE(loaded.find(1));
+    CHECK_FALSE(loaded.find(1)->themeStyled);
+
+    HE::UITheme t;
+    t.styleMut("Button").set("Normal Color", col(glm::vec4(1.0f, 0.0f, 1.0f, 1.0f)));
+    const glm::vec4 authored = loaded.find(1)->getPropAny("Normal Color").col;
+    CHECK(HE::uiApplyTheme(loaded, t, HE::UIThemeMode::Dark) == 0);
+    CHECK(loaded.find(1)->getPropAny("Normal Color").col == authored);
+
+    // And it survives a save either way round: off writes nothing at all (so an
+    // old widget stays byte-identical), on writes the key.
+    CHECK(HE::uiWidgetTreeToJson(loaded).find("themeStyled") == std::string::npos);
+    loaded.find(1)->themeStyled = true;
+    loaded.find(1)->themeStyle  = "Card";
+    HE::UIWidgetTree again;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(loaded), again));
+    CHECK(again.find(1)->themeStyled);
+    CHECK(again.find(1)->themeStyle == "Card");
+}

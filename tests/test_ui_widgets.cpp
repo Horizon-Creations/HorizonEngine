@@ -7201,11 +7201,16 @@ TEST_CASE("Parameters: the property's type wins over the stored one")
     CHECK(t.find(txt)->getProp("FontSize").f == doctest::Approx(0.0f));
 }
 
-// Telling a component what colour to be UN-BINDS that colour from the theme.
+// Telling a component what colour to be LOCKS that colour against the theme.
 // Without this the two fight: the parameter writes at graft time and the theme
 // pass overwrites it one line later, so a page that sets an accent colour would
 // show the theme's — silently, and only in the runtime, because the designer
 // runs no theme pass at all.
+//
+// Locked and not merely un-bound, which is the part a style changed: un-binding
+// only takes the ROLE away, and a style answers for properties nobody bound. An
+// un-bound parameter would be painted over by the style of the element's type
+// at the very next uiApplyTheme.
 TEST_CASE("Parameters: setting a themed colour releases it from the theme")
 {
     HE::UIWidgetTree t;
@@ -7213,13 +7218,23 @@ TEST_CASE("Parameters: setting a themed colour releases it from the theme")
     t.find(p)->setThemeRole("Color", "Surface");
     { HE::UIWidgetParam d; d.name = "Tint"; d.elementId = p; d.property = "Color";
       t.params.push_back(d); }
-    REQUIRE_FALSE(t.find(p)->themeRoleFor("Color").empty());
+    REQUIRE(t.find(p)->themeRoleFor("Color") == "Surface");
 
     const glm::vec4 red{ 1.0f, 0.0f, 0.0f, 1.0f };
     CHECK(HE::uiApplyWidgetParams(t, { { "Tint", HE::UIPropValue::ofColor(red) } }) == 1);
-    CHECK(t.find(p)->themeRoleFor("Color").empty());
+    CHECK(t.find(p)->themeRoleFor("Color") == HE::kUIThemeLiteral);
 
     HE::UITheme theme;
+    HE::uiApplyTheme(t, theme, HE::UIThemeMode::Dark);
+    CHECK(t.find(p)->getProp("Color").col.r == doctest::Approx(1.0f));
+    CHECK(t.find(p)->getProp("Color").col.g == doctest::Approx(0.0f));
+
+    // And the case the lock exists for: a theme that dresses every Panel still
+    // leaves this one alone, because somebody told it what colour to be.
+    HE::UIThemeStyleValue green;
+    green.color[0] = green.color[1] = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+    theme.styleMut("Panel").set("Color", green);
+    REQUIRE(t.find(p)->themeStyled);          // it would otherwise prove nothing
     HE::uiApplyTheme(t, theme, HE::UIThemeMode::Dark);
     CHECK(t.find(p)->getProp("Color").col.r == doctest::Approx(1.0f));
     CHECK(t.find(p)->getProp("Color").col.g == doctest::Approx(0.0f));

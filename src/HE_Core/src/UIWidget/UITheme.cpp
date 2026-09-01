@@ -199,6 +199,37 @@ std::string uiThemeToJson(const UITheme& t)
         shadows[kElevationNames[e]] = std::move(s);
     }
     j["shadows"] = std::move(shadows);
+
+    // Styles, and only when there are any: a theme that decides nothing about
+    // whole element types saves exactly as it did before styles existed.
+    //
+    // An ARRAY rather than an object, twice over, because both levels are
+    // ordered and a JSON object is not: the editor lists the styles and their
+    // values in the order they were added, and a reader that sorted them would
+    // shuffle an author's list every time it round-tripped.
+    if (!t.styles.empty())
+    {
+        nlohmann::json styles = nlohmann::json::array();
+        for (const auto& [key, style] : t.styles)
+        {
+            nlohmann::json vals = nlohmann::json::array();
+            for (const auto& [prop, v] : style.values)
+            {
+                nlohmann::json e = nlohmann::json::object();
+                e["prop"] = prop;
+                if (v.isColor)
+                    for (int m = 0; m < kModes; ++m) e[kModeNames[m]] = toArray(v.color[m]);
+                else
+                    e["number"] = v.number;
+                vals.push_back(std::move(e));
+            }
+            nlohmann::json s = nlohmann::json::object();
+            s["for"]    = key;
+            s["values"] = std::move(vals);
+            styles.push_back(std::move(s));
+        }
+        j["styles"] = std::move(styles);
+    }
     return j.dump(4);
 }
 
@@ -251,6 +282,37 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
                 t.shadow[e].offsetY = (*off)[1].get<float>();
             }
         }
+
+    // Styles are optional in every direction: a file that predates them keeps
+    // the default's (none), and one entry that makes no sense is dropped rather
+    // than taking the rest of the style with it.
+    if (const auto styles = j.find("styles"); styles != j.end() && styles->is_array())
+    {
+        t.styles.clear();
+        for (const auto& s : *styles)
+        {
+            if (!s.is_object()) continue;
+            const std::string key = s.value("for", std::string());
+            if (key.empty()) continue;
+            UIThemeStyle style;
+            if (const auto vals = s.find("values"); vals != s.end() && vals->is_array())
+                for (const auto& e : *vals)
+                {
+                    if (!e.is_object()) continue;
+                    const std::string prop = e.value("prop", std::string());
+                    if (prop.empty()) continue;
+                    UIThemeStyleValue v;
+                    if (const auto n = e.find("number"); n != e.end() && n->is_number())
+                    { v.isColor = false; v.number = n->get<float>(); }
+                    else
+                        for (int m = 0; m < kModes; ++m)
+                            if (const auto c = e.find(kModeNames[m]); c != e.end())
+                                readColor(*c, v.color[m]);
+                    style.set(prop, v);
+                }
+            t.styles.emplace_back(key, std::move(style));
+        }
+    }
 
     out = std::move(t);
     return true;
