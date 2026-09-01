@@ -28,6 +28,8 @@
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/MovementSystem.h>
+#include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -38,10 +40,12 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
@@ -388,6 +392,71 @@ TEST_CASE("third person: the character lands on the template's ground and stays 
 	phys.addEntityTree(world, static_cast<uint32_t>(far.entity));
 	for (int i = 0; i < 180; ++i) phys.step(world, 1.0f / 60.0f);
 	CHECK(reg.get<TransformComponent>(far.entity).position.y > -1.0f);
+}
+
+// Standing still was never the hard part, and the first version of this file
+// only ever checked standing still. The report that followed said it exactly:
+// "it falls through the floor WHEN MOVING, not while it stands after the spawn."
+// So this one walks.
+//
+// MUTATION: give Ground an explicit Box ColliderComponent in ProjectManager.cpp's
+// `playable` block — the character walks off the 1 m cube in the middle and the
+// y check below goes deeply negative.
+TEST_CASE("third person: the character can walk across the ground without falling out of it")
+{
+	const auto root = makeProject("he_tps_walk", "Starter");
+	ContentManager cm((root / "Content").string());
+
+	HorizonWorld world;
+	SceneSerializer ser;
+	REQUIRE(ser.load(world, root / "Content" / "StartupScene.hescene",
+	                 HE::SerializeFormat::JSON));
+
+	HorizonCode::Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+	const float spawn[3] = { 0.0f, 1.2f, 0.0f };
+	const EntityHost::Spawned s = host.spawn("Gameplay/PlayerCharacter.hasset",
+	                                         entt::null, spawn, nullptr);
+	REQUIRE((s.entity != entt::null));
+
+	PhysicsWorld phys;
+	phys.initialize(world);
+	auto& reg = world.registry();
+
+	for (int i = 0; i < 60; ++i) phys.step(world, 1.0f / 60.0f);   // land first
+	REQUIRE(reg.get<CharacterControllerComponent>(s.entity).isGrounded);
+
+	// Walk for six seconds, the way the shipped character graph does it: a
+	// direction pushed into Move every frame, then the movement system and
+	// physics ticked in the order the game ticks them.
+	HE::api::Ctx c{ &world, &phys, &cm };
+	const HE::api::ApiFn* move = HE::api::find("locomotion.move");
+	REQUIRE(move != nullptr);
+	const auto entityArg = HE::api::Value::ofInt(static_cast<int>(s.entity));
+
+	float lowestY = reg.get<TransformComponent>(s.entity).position.y;
+	for (int i = 0; i < 360; ++i)
+	{
+		std::vector<HE::api::Value> args{ entityArg, HE::api::Value::ofVec3({ 1.0f, 0.0f, 0.0f }) };
+		move->invoke(c, args);
+		MovementSystem::update(world, &phys, 1.0f / 60.0f);
+		phys.step(world, 1.0f / 60.0f);
+		lowestY = std::min(lowestY, reg.get<TransformComponent>(s.entity).position.y);
+	}
+
+	const auto& t = reg.get<TransformComponent>(s.entity);
+	// It went somewhere — a character that never moved would pass the height
+	// check for the wrong reason.
+	CHECK_MESSAGE(t.position.x > 2.0f,
+	              ("the character did not walk at all, x = " + std::to_string(t.position.x)).c_str());
+	// …and never left the floor on the way, not just at the end. A single frame
+	// through the ground is the failure, and a character that falls and is pushed
+	// back would pass an end-state check.
+	CHECK_MESSAGE(lowestY > -1.0f,
+	              ("the character dropped through the floor while walking, lowest y = " +
+	               std::to_string(lowestY)).c_str());
+	CHECK(reg.get<CharacterControllerComponent>(s.entity).isGrounded);
 }
 
 // The template IS two HorizonCode classes, and PlayerHost only scans HorizonCode
