@@ -472,16 +472,22 @@ void GameApplication::OnInit()
 				if (const HorizonCodeClassAsset* ea =
 				        contentManager().getHorizonCodeClass(contentManager().loadAsset(p)))
 				{
+					// Copied NOW. resolveClassAsset below loads every ancestor of
+					// this class, and asset pointers live in a dense vector — so
+					// `ea` is dead from the next line, and the string it owns with
+					// it. That matters twice here: it is the argument being passed
+					// in, and it is read again afterwards.
+					const std::string assetPath = ea->path;
 					// The RESOLVED engine base: a class deriving from another class
 					// that is an Entity is one too.
 					const HorizonCode::ResolvedClass rc =
-						HorizonCode::resolveClassAsset(contentManager(), ea->path);
+						HorizonCode::resolveClassAsset(contentManager(), assetPath);
 					if (HorizonCode::engineClassIsA(rc.engineBase, "Entity"))
 					{
 						// Placement travels with the spawn (null = authored), so
 						// Construct/BeginPlay already run at the destination.
 						const HorizonCode::InstanceId inst =
-							m_entityHost.spawn(ea->path, entt::null, pos, rot).instance;
+							m_entityHost.spawn(assetPath, entt::null, pos, rot).instance;
 						// The PlayerHost no longer creates characters, so this is
 						// the only place it can learn that one exists — and it has
 						// to, or a project without a controller loses its input.
@@ -505,14 +511,17 @@ void GameApplication::OnInit()
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
+			// Same reason as the Entity branch above: the resolve loads, and the
+			// asset pool moves when it does.
+			const std::string assetPath = a->path;
 			// The asset's OWN path is the class key, matching what the compiled
 			// branch above gets from classKey() — so one class stays one class
 			// to a Cast no matter which backend served this instance. The graph
 			// is the FLATTENED one: this class plus what it inherits.
 			HorizonCode::ResolvedClass rc =
-				HorizonCode::resolveClassAsset(contentManager(), a->path);
+				HorizonCode::resolveClassAsset(contentManager(), assetPath);
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
-				std::move(rc.levels), {}, { a->path, rc.engineBase, rc.chain });
+				std::move(rc.levels), {}, { assetPath, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};

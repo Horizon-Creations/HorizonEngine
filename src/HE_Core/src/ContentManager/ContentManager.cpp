@@ -635,6 +635,12 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	const HE::MatShaderGen gen = HE::generateFragment(g, loader, nullptr);
 	if (gen.glsl.empty()) return;
 
+	// Re-fetched for the reason spelled out in syncMaterialInstance: the
+	// function loader inside generateFragment goes through this manager, and
+	// loadAsset decides the pool from the FILE's own type.
+	mat = getMaterialMutable(materialId);
+	if (!mat) return;
+
 	mat->customShaderFragGlsl = gen.glsl;
 	mat->customShaderGBufGlsl = gen.glslGBuffer;
 	mat->customShaderVertGlsl = gen.vertexBody;
@@ -656,10 +662,21 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		"ContentManager: material-instance chain too deep / cyclic — sync aborted"); return; }
 	s_depth++;
 
-	MaterialAsset* inst = getMaterialMutable(instanceId);
-	const MaterialAsset* parent = nullptr;
-	if (inst && !inst->parentMaterialPath.empty())
-		parent = getMaterial(loadAsset(inst->parentMaterialPath));
+	// The parent path is COPIED out of the instance before anything is loaded,
+	// and both pointers are taken AFTER. Loading the parent inserts into
+	// m_materialAssets — the very pool the instance lives in, which is a dense
+	// vector — so the old code's `inst` pointed at moved memory for the whole
+	// rest of this function, and the string it handed to loadAsset died inside
+	// that call. This fires on the ordinary path: opening a project whose
+	// material instance is registered before its parent, which is most of them.
+	std::string parentPath;
+	if (const MaterialAsset* seed = getMaterial(instanceId))
+		parentPath = seed->parentMaterialPath;
+	if (parentPath.empty()) { s_depth--; return; }
+
+	const HE::UUID parentId = loadAsset(parentPath);
+	MaterialAsset*       inst   = getMaterialMutable(instanceId);
+	const MaterialAsset* parent = getMaterial(parentId);
 	if (!inst || !parent) { s_depth--; return; }
 
 	// Preserve the instance's current values for slots it overrides (matched BY NAME,
@@ -688,6 +705,15 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			std::map<std::string, HE::MaterialGraph> fnStore;
 			HE::MatFunctionLoader loader = makeMatFunctionLoader(*this, fnStore);
 			const HE::MatShaderGen gen = HE::generateFragment(g, loader, &ov);
+			// The loader above resolves material functions THROUGH this manager,
+			// so it loads. A function path normally names a MaterialFunction, a
+			// different pool — but loadAsset takes the type from the FILE, not
+			// from the caller, so a path that names a material lands in this one
+			// and moves both pointers. Re-fetching costs two lookups and closes
+			// the case entirely.
+			inst   = getMaterialMutable(instanceId);
+			parent = getMaterial(parentId);
+			if (!inst || !parent) { s_depth--; return; }
 			inst->customShaderFragGlsl = gen.glsl;
 			inst->customShaderGBufGlsl = gen.glslGBuffer;
 			// nullptr: start from the permutation's defaults — the overridden slots are

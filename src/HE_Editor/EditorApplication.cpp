@@ -1275,12 +1275,16 @@ void EditorApplication::OnInit()
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
+			// Copied before the resolve, which loads this class's whole ancestor
+			// chain and moves every asset pointer with it. `a` is dead below; the
+			// path is not, because it is a copy.
+			const std::string assetPath = a->path;
 			// Resolve the inheritance chain once: it decides BOTH whether this is
 			// an Entity class (the resolved engine base, not the raw string) and
 			// what graph actually runs (this class's own plus everything it
 			// inherits, overrides applied).
 			HorizonCode::ResolvedClass rc =
-				HorizonCode::resolveClassAsset(contentManager(), a->path);
+				HorizonCode::resolveClassAsset(contentManager(), assetPath);
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one. Creating it here instead would produce a half-object: it
 			// would answer a Cast to Entity, own no entity, and never tick.
@@ -1295,7 +1299,7 @@ void EditorApplication::OnInit()
 				// is grounded, or pushes itself) has already happened. What this
 				// file owes that is the setPhysicsWorld() handover at play start.
 				const HorizonCode::InstanceId inst =
-					m_entityHost.spawn(a->path, entt::null, pos, rot).instance;
+					m_entityHost.spawn(assetPath, entt::null, pos, rot).instance;
 				// The PlayerHost no longer creates characters, so this is the only
 				// place it can learn that one exists — and it has to, or a project
 				// without a controller loses its input in PIE.
@@ -1311,7 +1315,7 @@ void EditorApplication::OnInit()
 			// is keyed by, so an interpreted and a compiled instance of one
 			// class are never two different classes to a Cast.
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
-				std::move(rc.levels), {}, { a->path, rc.engineBase, rc.chain });
+				std::move(rc.levels), {}, { assetPath, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};

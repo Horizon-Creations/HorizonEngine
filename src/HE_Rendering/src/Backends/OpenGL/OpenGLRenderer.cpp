@@ -8206,6 +8206,10 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	// material program reads in the scene, so it binds here unchanged — only the
 	// camera has to grow to the mesh's bounds instead of the unit sphere's.
 	const GpuMesh* gm = meshId != HE::UUID{} ? ResolveMesh(meshId) : nullptr;
+	// The GL mirror of the Metal preview's re-take: ResolveMesh loads the picked
+	// mesh's baked material, the material pool is a dense vector, and `ma` is read
+	// for colour and params below.
+	if (ma) ma = m_contentManager->getMaterial(materialId);
 	unsigned int drawVAO = 0;
 	int          drawIdxCount = 0;
 	glm::vec3    center(0.0f);
