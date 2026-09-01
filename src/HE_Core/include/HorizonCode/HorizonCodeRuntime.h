@@ -217,6 +217,10 @@ public:
     void fireOnRightClicked(InstanceId id, int elem);
     // An animation reached its target — the payload is the property's name.
     void fireOnAnimationFinished(InstanceId id, int elem, const std::string& prop);
+    // An authored CLIP reached its end — the payload is the clip's name. Its
+    // own event, because a clip belongs to the widget and a tween to one
+    // element, and a graph waiting for one must not hear the other.
+    void fireOnClipFinished(InstanceId id, const std::string& clip);
     // A dialog, popup or menu closing — the whole widget, so no element.
     void fireOnDismissed(InstanceId id);
     void fireConstruct(InstanceId id);

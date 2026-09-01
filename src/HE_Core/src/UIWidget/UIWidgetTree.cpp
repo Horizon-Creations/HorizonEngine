@@ -1516,6 +1516,44 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
         j["params"] = std::move(jp);
     }
 
+    // Authored animations, and only when there are any — a widget without a
+    // timeline saves byte-identically to before they existed.
+    if (!tree.animations.empty())
+    {
+        nlohmann::json ja = nlohmann::json::array();
+        for (const UIAnimClip& c : tree.animations)
+        {
+            nlohmann::json jc;
+            jc["name"]     = c.name;
+            jc["duration"] = c.duration;
+            if (c.loop) jc["loop"] = true;
+            nlohmann::json jt = nlohmann::json::array();
+            for (const UIAnimTrack& tr : c.tracks)
+            {
+                nlohmann::json jtr;
+                jtr["elem"] = tr.element;
+                jtr["prop"] = tr.prop;
+                nlohmann::json jk = nlohmann::json::array();
+                for (const UIAnimKey& k : tr.keys)
+                {
+                    nlohmann::json jkey;
+                    jkey["t"] = k.time;
+                    // The value goes through the same writer every property
+                    // value uses, so a key of a new type never needs a second
+                    // encoder that learns about it later.
+                    uiPropValueToJson(jkey["v"], k.value);
+                    if (k.ease != UIEase::Linear) jkey["ease"] = uiEaseName(k.ease);
+                    jk.push_back(std::move(jkey));
+                }
+                jtr["keys"] = std::move(jk);
+                jt.push_back(std::move(jtr));
+            }
+            jc["tracks"] = std::move(jt);
+            ja.push_back(std::move(jc));
+        }
+        j["animations"] = std::move(ja);
+    }
+
     nlohmann::json je = nlohmann::json::array();
     for (const auto& e : tree.elements) je.push_back(uiElementToJsonObj(*e));
     j["elements"] = std::move(je);
@@ -1595,6 +1633,42 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
             // row in the host's panel that writes into the void.
             if (p.name.empty() || p.property.empty() || p.elementId <= 0) continue;
             t.params.push_back(std::move(p));
+        }
+
+    if (const auto ja = j.find("animations"); ja != j.end() && ja->is_array())
+        for (const auto& jc : *ja)
+        {
+            if (!jc.is_object()) continue;
+            UIAnimClip c;
+            c.name     = jc.value("name", std::string());
+            c.duration = jc.value("duration", 1.0f);
+            c.loop     = jc.value("loop", false);
+            // A clip with no name cannot be played — the name IS the identity —
+            // and a duration of zero is a timeline with no length.
+            if (c.name.empty() || c.duration <= 0.0f) continue;
+            if (const auto jt = jc.find("tracks"); jt != jc.end() && jt->is_array())
+                for (const auto& jtr : *jt)
+                {
+                    if (!jtr.is_object()) continue;
+                    UIAnimTrack tr;
+                    tr.element = jtr.value("elem", 0);
+                    tr.prop    = jtr.value("prop", std::string());
+                    if (tr.element <= 0 || tr.prop.empty()) continue;
+                    if (const auto jk = jtr.find("keys"); jk != jtr.end() && jk->is_array())
+                        for (const auto& jkey : *jk)
+                        {
+                            if (!jkey.is_object() || !jkey.contains("v")) continue;
+                            UIAnimKey k;
+                            k.time  = jkey.value("t", 0.0f);
+                            k.value = uiPropValueFromJson(jkey["v"]);
+                            k.ease  = uiEaseFromName(jkey.value("ease", std::string()));
+                            tr.keys.push_back(std::move(k));
+                        }
+                    // A track with no keys says nothing; dropping it here keeps
+                    // the editor from showing a row that cannot be evaluated.
+                    if (!tr.keys.empty()) c.tracks.push_back(std::move(tr));
+                }
+            t.animations.push_back(std::move(c));
         }
 
     // ── Migration: a Button's caption becomes a Text child ───────────────────

@@ -1,6 +1,7 @@
 #pragma once
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UITheme.h>
+#include <UIWidget/UIWidgetAnim.h>   // UIAnimClip — a widget owns its animations
 #include <Types/Defines.h>
 #include <memory>
 #include <string>
@@ -108,6 +109,13 @@ struct HE_API UIWidgetTree
     // between "a widget can differ" and a hierarchy nobody can predict.
     std::string themeAsset;
 
+    // ── Authored animations (docs/he-apps-plan.md B8) ────────────────────────
+    // Named clips belonging to this widget, made in the Designer's timeline.
+    // On the tree, like the parameters and the description, because they are
+    // part of what the widget IS — a second file to keep in step is a second
+    // file that goes out of step.
+    std::vector<UIAnimClip> animations;
+
     UIWidgetTree() = default;
     UIWidgetTree(const UIWidgetTree& o) { *this = o; }
     UIWidgetTree& operator=(const UIWidgetTree& o)
@@ -117,6 +125,7 @@ struct HE_API UIWidgetTree
         scaleMode = o.scaleMode; nextId = o.nextId;
         params = o.params;
         description = o.description; themeAsset = o.themeAsset;
+        animations = o.animations;
         elements.clear();
         elements.reserve(o.elements.size());
         for (const auto& e : o.elements) elements.push_back(e->clone());

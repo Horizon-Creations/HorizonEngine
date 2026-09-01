@@ -4844,6 +4844,269 @@ TEST_CASE("Animation: retargeting is smooth, stopping is not a rewind, zero is i
     wm.tick(1.0f);   // must not touch freed memory
 }
 
+// ── Clips: an animation you author instead of one you write ──────────────────
+
+namespace
+{
+    // A clip with one Float track, the shape almost every test below wants.
+    HE::UIAnimClip fadeClip(int elem, const char* name = "FadeIn",
+                            float from = 0.0f, float to = 1.0f, float dur = 1.0f)
+    {
+        HE::UIAnimClip c;
+        c.name = name; c.duration = dur;
+        HE::UIAnimTrack tr;
+        tr.element = elem; tr.prop = "Render Opacity";
+        tr.keys.push_back({ 0.0f,   HE::UIPropValue::ofFloat(from), HE::UIEase::Linear });
+        tr.keys.push_back({ dur,    HE::UIPropValue::ofFloat(to),   HE::UIEase::Linear });
+        c.tracks.push_back(std::move(tr));
+        return c;
+    }
+}
+
+TEST_CASE("Clips: what a timeline says at a moment, including the boring ends")
+{
+    HE::UIAnimClip c = fadeClip(1);
+    std::vector<HE::UIAnimSample> s;
+
+    auto at = [&](float t) { s.clear(); HE::uiAnimEvaluate(c, t, s); REQUIRE(s.size() == 1);
+                             return s[0].value.f; };
+    CHECK(at(0.0f)  == doctest::Approx(0.0f));
+    CHECK(at(0.5f)  == doctest::Approx(0.5f));
+    CHECK(at(1.0f)  == doctest::Approx(1.0f));
+    // Before the first key and after the last one: HOLD, not the element's own
+    // value — scrubbing to 0 and back would otherwise quietly lose it.
+    CHECK(at(-1.0f) == doctest::Approx(0.0f));
+    CHECK(at(99.0f) == doctest::Approx(1.0f));
+    CHECK(s[0].element == 1);
+    CHECK(s[0].prop == "Render Opacity");
+
+    // The easing belongs to the key being moved TO: "slow at the end" is a
+    // property of the arrival, not of the departure.
+    c.tracks[0].keys[1].ease = HE::UIEase::InQuad;
+    CHECK(at(0.5f) == doctest::Approx(0.25f));
+
+    // One key is a constant, not a jump at the end.
+    c.tracks[0].keys.pop_back();
+    CHECK(at(0.0f) == doctest::Approx(0.0f));
+    CHECK(at(9.0f) == doctest::Approx(0.0f));
+
+    // Two keys at one time evaluate deterministically — the later in the list
+    // wins — because a hand-edited file must not read differently twice.
+    c.tracks[0].keys.push_back({ 0.5f, HE::UIPropValue::ofFloat(0.2f), HE::UIEase::Linear });
+    c.tracks[0].keys.push_back({ 0.5f, HE::UIPropValue::ofFloat(0.8f), HE::UIEase::Linear });
+    CHECK(at(0.5f) == doctest::Approx(0.8f));
+    CHECK(at(0.6f) == doctest::Approx(0.8f));
+
+    // A track with no keys says nothing at all rather than a default.
+    HE::UIAnimClip empty;
+    empty.tracks.push_back({ 1, "Render Opacity", {} });
+    s.clear(); HE::uiAnimEvaluate(empty, 0.5f, s);
+    CHECK(s.empty());
+
+    CHECK(HE::uiAnimFind({ c }, "FadeIn") != nullptr);
+    CHECK(HE::uiAnimFind({ c }, "fadein") == nullptr);   // names are exact
+}
+
+TEST_CASE("Clips: they survive a save, and a widget without any saves as before")
+{
+    HE::UIWidgetTree t;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    CHECK(HE::uiWidgetTreeToJson(t).find("animations") == std::string::npos);
+
+    HE::UIAnimClip c = fadeClip(panel, "FadeIn", 0.0f, 1.0f, 2.5f);
+    c.loop = true;
+    c.tracks[0].keys[1].ease = HE::UIEase::OutBack;
+    // A second track, on a colour, so the round-trip covers more than one type.
+    HE::UIAnimTrack col;
+    col.element = panel; col.prop = "Color";
+    col.keys.push_back({ 0.0f, HE::UIPropValue::ofColor({1,0,0,1}), HE::UIEase::Linear });
+    col.keys.push_back({ 2.5f, HE::UIPropValue::ofColor({0,0,1,1}), HE::UIEase::OutQuad });
+    c.tracks.push_back(std::move(col));
+    t.animations.push_back(std::move(c));
+
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    REQUIRE(back.animations.size() == 1);
+    const HE::UIAnimClip& r = back.animations[0];
+    CHECK(r.name == "FadeIn");
+    CHECK(r.duration == doctest::Approx(2.5f));
+    CHECK(r.loop);
+    REQUIRE(r.tracks.size() == 2);
+    CHECK(r.tracks[0].element == panel);
+    CHECK(r.tracks[0].keys[1].ease == HE::UIEase::OutBack);
+    REQUIRE(r.tracks[1].keys.size() == 2);
+    CHECK(r.tracks[1].keys[1].value.col.b == doctest::Approx(1.0f));
+    CHECK(r.tracks[1].keys[1].ease == HE::UIEase::OutQuad);
+
+    // Junk is dropped rather than loaded as something that cannot be played: a
+    // clip with no name has no identity, one with no duration has no timeline,
+    // and a track with no keys is a row the editor could not evaluate.
+    HE::UIWidgetTree junk;
+    REQUIRE(HE::uiWidgetTreeFromJson(
+        R"({"canvasWidth":100,"canvasHeight":100,"elements":[],"animations":[
+            {"name":"","duration":1},
+            {"name":"Zero","duration":0},
+            {"name":"Empty","duration":1,"tracks":[{"elem":1,"prop":"X","keys":[]}]}]})",
+        junk));
+    REQUIRE(junk.animations.size() == 1);
+    CHECK(junk.animations[0].name == "Empty");
+    CHECK(junk.animations[0].tracks.empty());
+}
+
+TEST_CASE("Clips: playing one moves the widget, and looping never ends")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 0.5f;      // deliberately NOT where the clip starts
+    }
+    t.animations.push_back(fadeClip(panel));
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto opacity = [&]{ return wm.tree(id)->find(panel)->renderOpacity; };
+
+    CHECK_FALSE(wm.isPlayingAnimation(id));
+    CHECK_FALSE(wm.playAnimation(id, "Nope"));
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK(wm.isAnimating());              // the frame pump has to keep running
+    CHECK(opacity() == doctest::Approx(0.5f));   // starting is not playing a frame
+
+    wm.tick(0.25f);
+    CHECK(opacity() == doctest::Approx(0.25f));
+    CHECK(wm.animationTime(id, "FadeIn") == doctest::Approx(0.25f));
+    wm.tick(0.5f);
+    CHECK(opacity() == doctest::Approx(0.75f));
+
+    wm.tick(0.5f);                        // past the end
+    CHECK(opacity() == doctest::Approx(1.0f));
+    CHECK_FALSE(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK(wm.animationTime(id, "FadeIn") == doctest::Approx(-1.0f));
+
+    // Playing it again rewinds rather than stacking a second player.
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    wm.tick(0.5f);
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    CHECK(wm.animationTime(id, "FadeIn") == doctest::Approx(0.0f));
+    CHECK(wm.stopAnimationClip(id, "FadeIn") == 1);
+    CHECK_FALSE(wm.isAnimating());
+
+    // A looping clip wraps instead of ending, and keeps the pump alive.
+    const bool loop = true;
+    REQUIRE(wm.playAnimation(id, "FadeIn", &loop));
+    wm.tick(1.25f);
+    CHECK(wm.animationTime(id, "FadeIn") == doctest::Approx(0.25f));   // wrapped
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+    wm.tick(10.0f);
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK(wm.stopAnimationClip(id) == 1);
+}
+
+TEST_CASE("Clips: a clip and a tween never write the same property at once")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+    }
+    t.animations.push_back(fadeClip(panel));
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // A tween is running; the clip that drives the same property takes it over.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 10.0f));
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    CHECK(wm.stopAnimations(id, panel, "Render Opacity") == 0);   // the clip took it
+
+    // …and a tween started afterwards wins the property back, while the clip
+    // keeps playing its other tracks. Two writers on one property is the fight
+    // this rule exists to prevent, whichever side starts second.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(0.0f), 1.0f));
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK(wm.stopAnimations(id, panel, "Render Opacity") == 1);
+}
+
+// A component's clips are the component's: its tracks name elements by the ids
+// they had in ITS asset, and a graft renumbers everything. Without the offset a
+// clip inside an embedded widget animates whatever now happens to have id 1.
+TEST_CASE("Clips: an embedded component's animation plays on its own elements")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The component: one panel, one clip that fades it.
+    HE::UIWidgetTree comp;
+    comp.canvasWidth = 100.0f; comp.canvasHeight = 100.0f;
+    comp.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int inner = comp.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *comp.find(inner);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 1.0f;
+    }
+    comp.animations.push_back(fadeClip(inner, "FadeIn", 1.0f, 0.0f, 1.0f));
+    registerWidgetAs(cm, "mem://comp.hasset", comp);
+
+    // The page: something else with id 1, then the component. If the offset were
+    // forgotten, the clip would fade THIS panel instead.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int decoy = page.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *page.find(decoy);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 200.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 1.0f;
+    }
+    const int refId = page.add(HE::UIWidgetType::WidgetRef);
+    {
+        auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(refId));
+        r->widgetPath = "mem://comp.hasset";
+        HE::uiSetAnchorPreset(*r, 0); r->pivotX = r->pivotY = 0.0f;
+        r->posX = 0.0f; r->posY = 0.0f; r->sizeX = 100.0f; r->sizeY = 100.0f;
+    }
+    registerWidgetAs(cm, "mem://page.hasset", page);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(decoy == 1);   // the whole point: local id 1 exists in BOTH trees
+
+    // The page does not own the clip, but the component it embeds does, and
+    // playing by name finds it there.
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    wm.tick(0.5f);
+    // The component's panel moved…
+    const HE::UIElement* grafted = nullptr;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->id > refId) { grafted = ep.get(); break; }
+    REQUIRE(grafted);
+    CHECK(grafted->renderOpacity == doctest::Approx(0.5f));
+    // …and the page's own panel, which has the id the clip names, did not.
+    CHECK(wm.tree(id)->find(decoy)->renderOpacity == doctest::Approx(1.0f));
+}
+
 // The layer decides what the arrows MEAN. With a list hanging open, up and down
 // step through its entries; moving the focus to the next button would be
 // answering a question nobody asked — and that button is not even reachable,

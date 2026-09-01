@@ -305,6 +305,28 @@ public:
     // heartbeat's ten frames a second.
     bool isAnimating() const;
 
+    // ── Authored clips (the Designer's timeline) ─────────────────────────────
+    // Play one of the widget's own named animations. `loop` overrides what the
+    // clip says when given; without it the clip decides, which is what makes
+    // "this one loops" a property of the animation rather than of every call.
+    //
+    // Playing a clip STOPS any single-property animation on the properties it
+    // drives — two writers on one property is the fight replace-on-same-property
+    // exists to prevent, and a clip is the more specific instruction. The other
+    // way round is the same rule: animate() replaces whatever was writing that
+    // property, a clip's track included, and the clip keeps its other tracks.
+    //
+    // Restarting a clip that is already playing rewinds it to 0 rather than
+    // stacking a second player.
+    bool playAnimation(int widgetId, const std::string& clip, const bool* loop = nullptr);
+    // Stop one clip, or (empty name) every clip of the widget. Values stay where
+    // they got to, and nothing is reported — cancelled is not finished.
+    int  stopAnimationClip(int widgetId, const std::string& clip = {});
+    bool isPlayingAnimation(int widgetId, const std::string& clip = {}) const;
+    // Where a playing clip stands, in seconds (-1 = it is not playing). What a
+    // timeline's playhead reads back.
+    float animationTime(int widgetId, const std::string& clip) const;
+
     // Pointer input in render-target pixels: hit-tests interactive elements
     // (buttons/checkboxes/sliders/combos/text fields + elements bound by
     // pointer-event nodes), drives element visual state and fires the matching
@@ -502,6 +524,19 @@ private:
             HE::UIEase     ease = HE::UIEase::Linear;
         };
         std::vector<Anim> anims;
+        // A clip of this widget that is currently playing. `embed` is the index
+        // into `embeds` whose clips it belongs to, or -1 for the widget's own —
+        // an embedded component keeps its OWN clips with its own element
+        // numbering, exactly as its graph keeps its own element references, and
+        // the offset is applied when the clip is evaluated.
+        struct Playing
+        {
+            int         embed = -1;
+            std::string clip;
+            float       t = 0.0f;
+            bool        loop = false;
+        };
+        std::vector<Playing> playing;
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;
@@ -541,6 +576,13 @@ private:
             int idOffset = 0;   // host id = local id + idOffset
             int idMax    = 0;   // last host id that belongs to this embed
             HorizonCode::InstanceId scriptId = 0;
+            // The embedded asset's own animation clips, kept here rather than
+            // merged into the host's: their tracks name elements by the LOCAL
+            // ids of the widget they were authored in, and idOffset is what
+            // turns those into this tree's. Merging would mean rewriting every
+            // track on every graft and inventing a rule for two components that
+            // both call a clip "FadeIn".
+            std::vector<HE::UIAnimClip> animations;
         };
         std::vector<Embed> embeds;   // ascending by idOffset; nested ones nest
     };
@@ -693,6 +735,10 @@ private:
     HE::UIComboBox* openDropdown(Instance** owner = nullptr);
     // The element of a widget by the name it carries in the designer (0 = none).
     int elementIdByName(int widgetId, const std::string& name) const;
+    // Which clip list a playing entry draws from, and the id offset its tracks
+    // need. Null when the embed index is stale.
+    const std::vector<HE::UIAnimClip>* clipsOf(const Instance& w, int embed,
+                                               int& offset) const;
     void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
     int   m_tooltipWidget = 0, m_tooltipElem = 0;

@@ -656,6 +656,19 @@ HE_HC_VALUE_EVENT(fireOnRowBind, "OnRowBind", int,
                   onRowBind(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnAnimationFinished, "OnAnimationFinished", const std::string&,
                   onAnimationFinished(elem, v), Value::ofString(v))
+
+// The clip event has no element: a clip belongs to the widget. It therefore
+// cannot use the elem-carrying macro above, and spelling it out is shorter than
+// a third macro for one event.
+void Runtime::fireOnClipFinished(InstanceId id, const std::string& clip)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onClipFinished(clip);
+    else runEventOnLevel(*i, id, "OnClipFinished", 0, Value::ofString(clip));
+    static const EventId ev = eventId("OnClipFinished");
+    dispatchToListeners(id, ev, "OnClipFinished", Value::ofString(clip));
+}
 HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
                   onRowActivated(elem, v), Value::ofInt(v))
 #undef HE_HC_VALUE_EVENT

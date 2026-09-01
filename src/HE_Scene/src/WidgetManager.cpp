@@ -272,6 +272,12 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 		else
 			em.scriptId = rt().add(std::move(graph), makeBindings(), cls);
 
+		// Its animations come with it, unchanged. Their tracks name elements by
+		// the LOCAL ids of the asset they were authored in, and em.idOffset is
+		// what turns those into this tree's — the same translation its graph's
+		// element references get, and for the same reason.
+		em.animations = sub.animations;
+
 		w.embeds.push_back(em);
 		ref->embedded = true;
 		// What its elements measure in, and by which rule that meets this slot.
@@ -1291,6 +1297,86 @@ int WidgetManager::stopAnimations(int widgetId, int elemId, const std::string& p
 	return stopped;
 }
 
+// The clips a playing entry draws from, and the id offset they need. One place,
+// because "the widget's own or an embed's" is asked by play, by stop and by the
+// tick, and three copies of that decision is three chances to forget the offset.
+const std::vector<HE::UIAnimClip>* WidgetManager::clipsOf(const Instance& w, int embed,
+                                                          int& offset) const
+{
+	offset = 0;
+	if (embed < 0) return &w.tree.animations;
+	if (embed >= static_cast<int>(w.embeds.size())) return nullptr;
+	offset = w.embeds[embed].idOffset;
+	return &w.embeds[embed].animations;
+}
+
+bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const bool* loop)
+{
+	Instance* w = find(widgetId);
+	if (!w || clip.empty()) return false;
+
+	// The widget's own clips first, then each embed's — a page that names a clip
+	// means its own, and a component's clips belong to the component.
+	int embed = -1, offset = 0;
+	const HE::UIAnimClip* c = HE::uiAnimFind(w->tree.animations, clip);
+	if (!c)
+		for (int i = 0; i < static_cast<int>(w->embeds.size()) && !c; ++i)
+			if ((c = HE::uiAnimFind(w->embeds[i].animations, clip)))
+			{ embed = i; offset = w->embeds[i].idOffset; }
+	if (!c) return false;
+
+	// Two writers on one property is the fight replace-on-same-property exists
+	// to prevent, and between a clip and a tween the clip is the more specific
+	// instruction. It takes every property it drives.
+	for (const HE::UIAnimTrack& tr : c->tracks)
+		stopAnimations(widgetId, tr.element + offset, tr.prop);
+
+	// Already playing = rewind, not a second player on the same clip.
+	for (Instance::Playing& p : w->playing)
+		if (p.clip == clip && p.embed == embed)
+		{
+			p.t = 0.0f;
+			p.loop = loop ? *loop : c->loop;
+			m_visualDirty = true;
+			return true;
+		}
+	Instance::Playing p;
+	p.embed = embed; p.clip = clip; p.loop = loop ? *loop : c->loop;
+	w->playing.push_back(std::move(p));
+	m_visualDirty = true;
+	return true;
+}
+
+int WidgetManager::stopAnimationClip(int widgetId, const std::string& clip)
+{
+	Instance* w = find(widgetId);
+	if (!w) return 0;
+	const std::size_t before = w->playing.size();
+	w->playing.erase(std::remove_if(w->playing.begin(), w->playing.end(),
+		[&](const Instance::Playing& p){ return clip.empty() || p.clip == clip; }),
+		w->playing.end());
+	const int stopped = static_cast<int>(before - w->playing.size());
+	if (stopped) m_visualDirty = true;
+	return stopped;
+}
+
+bool WidgetManager::isPlayingAnimation(int widgetId, const std::string& clip) const
+{
+	const Instance* w = find(widgetId);
+	if (!w) return false;
+	if (clip.empty()) return !w->playing.empty();
+	for (const Instance::Playing& p : w->playing) if (p.clip == clip) return true;
+	return false;
+}
+
+float WidgetManager::animationTime(int widgetId, const std::string& clip) const
+{
+	const Instance* w = find(widgetId);
+	if (!w) return -1.0f;
+	for (const Instance::Playing& p : w->playing) if (p.clip == clip) return p.t;
+	return -1.0f;
+}
+
 // The element of `w` called `name`, or 0. Same lookup findList does, without the
 // type: anything can be animated.
 int WidgetManager::elementIdByName(int widgetId, const std::string& name) const
@@ -1319,12 +1405,63 @@ int WidgetManager::stopAnimationsNamed(int widgetId, const std::string& elemName
 
 bool WidgetManager::isAnimating() const
 {
-	for (const Instance& w : m_instances) if (!w.anims.empty()) return true;
+	for (const Instance& w : m_instances)
+		if (!w.anims.empty() || !w.playing.empty()) return true;
 	return false;
 }
 
 void WidgetManager::tick(float dt)
 {
+	// ── Authored clips ───────────────────────────────────────────────────────
+	// Before the single-property ones, so that a tween started DURING a clip
+	// (the "animate() replaces a clip's track" half of the rule) has the last
+	// word on the property they share within the same frame.
+	if (dt > 0.0f)
+		for (auto& w : m_instances)
+		{
+			if (w.playing.empty()) continue;
+			std::vector<std::string> ended;
+			std::vector<HE::UIAnimSample> samples;
+			for (auto& p : w.playing)
+			{
+				int offset = 0;
+				const std::vector<HE::UIAnimClip>* clips = clipsOf(w, p.embed, offset);
+				const HE::UIAnimClip* c = clips ? HE::uiAnimFind(*clips, p.clip) : nullptr;
+				if (!c) { p.t = -1.0f; continue; }   // the asset changed under it
+
+				p.t += dt;
+				bool done = false;
+				if (p.t >= c->duration)
+				{
+					// A looping clip never ends, so it never reports one either.
+					// Wrapping rather than resetting to 0 keeps a long frame from
+					// swallowing the start of the next pass.
+					if (p.loop) { if (c->duration > 0.0f) p.t = std::fmod(p.t, c->duration); }
+					else        { p.t = c->duration; done = true; }
+				}
+				samples.clear();
+				HE::uiAnimEvaluate(*c, p.t, samples);
+				for (const HE::UIAnimSample& s : samples)
+					if (HE::UIElement* e = w.tree.find(s.element + offset))
+					{
+						// The track's type has to match what is there, for the
+						// same reason animate() checks: a clip authored against
+						// an element that has since changed type must not write
+						// a colour into a number.
+						if (e->getPropAny(s.prop).type == s.value.type)
+							e->setPropAny(s.prop, s.value);
+					}
+				if (done) { ended.push_back(p.clip); p.t = -1.0f; }
+			}
+			w.playing.erase(std::remove_if(w.playing.begin(), w.playing.end(),
+				[](const Instance::Playing& p){ return p.t < 0.0f; }), w.playing.end());
+			m_visualDirty = true;
+			// Fired after the list is settled, like the tweens': a graph reacting
+			// to the end may start the next clip on this same widget.
+			for (const std::string& name : ended)
+				rt().fireOnClipFinished(w.scriptId, name);
+		}
+
 	// ── Animations ───────────────────────────────────────────────────────────
 	// Before the Tick events, so a graph that reads a property in its Tick reads
 	// the value this frame DRAWS rather than the one before it.

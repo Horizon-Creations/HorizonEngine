@@ -63,4 +63,75 @@ float uiEaseApply(UIEase e, float t)
     }
 }
 
+const UIAnimClip* uiAnimFind(const std::vector<UIAnimClip>& clips, const std::string& name)
+{
+    for (const UIAnimClip& c : clips) if (c.name == name) return &c;
+    return nullptr;
+}
+
+namespace
+{
+    // The value between two keys, or one key's value where there is nothing to
+    // interpolate with. Only the three types an animation can move; anything
+    // else is refused when the track is made, not silently snapped here.
+    UIPropValue between(const UIAnimKey& a, const UIAnimKey& b, float k)
+    {
+        if (a.value.type != b.value.type) return b.value;   // hand-edited file
+        switch (a.value.type)
+        {
+        case UIPropType::Float:
+            return UIPropValue::ofFloat(a.value.f + (b.value.f - a.value.f) * k);
+        case UIPropType::Vec2:
+            return UIPropValue::ofVec2(a.value.v2 + (b.value.v2 - a.value.v2) * k);
+        case UIPropType::Color:
+        {
+            glm::vec4 c = a.value.col + (b.value.col - a.value.col) * k;
+            // Out Back leaves [0,1] on purpose. That is a position overshooting
+            // its target, not a red channel overshooting red.
+            c = glm::clamp(c, glm::vec4(0.0f), glm::vec4(1.0f));
+            return UIPropValue::ofColor(c);
+        }
+        default:
+            return b.value;
+        }
+    }
+}
+
+void uiAnimEvaluate(const UIAnimClip& clip, float time, std::vector<UIAnimSample>& out)
+{
+    for (const UIAnimTrack& tr : clip.tracks)
+    {
+        if (tr.keys.empty()) continue;
+        UIAnimSample s;
+        s.element = tr.element;
+        s.prop    = tr.prop;
+
+        // The last key at or before `time`, and the first one after it. Walked
+        // rather than searched: a track has keys, not samples, and a linear walk
+        // over a handful of them is cheaper than being clever about it.
+        const UIAnimKey* prev = nullptr;
+        const UIAnimKey* next = nullptr;
+        for (const UIAnimKey& k : tr.keys)
+        {
+            // "<=" so that two keys at the same time resolve to the LATER one in
+            // the list — deterministic, which is all a hand-edited file needs.
+            if (k.time <= time) prev = &k;
+            else if (!next)     next = &k;
+        }
+        if (!prev)       s.value = tr.keys.front().value;   // before the first
+        else if (!next)  s.value = prev->value;             // after the last
+        else
+        {
+            const float span = next->time - prev->time;
+            // Two keys at one time: no span to interpolate over, so the later
+            // one simply IS the value.
+            const float k = span > 0.0f ? (time - prev->time) / span : 1.0f;
+            // The easing belongs to the key being moved TO — "slow at the end"
+            // is a property of the arrival, not of the departure.
+            s.value = between(*prev, *next, uiEaseApply(next->ease, k));
+        }
+        out.push_back(std::move(s));
+    }
+}
+
 } // namespace HE

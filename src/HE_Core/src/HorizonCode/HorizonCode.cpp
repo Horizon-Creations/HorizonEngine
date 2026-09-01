@@ -2143,6 +2143,8 @@ const std::vector<EngineEventDesc>& engineEvents()
         // An animation reached its target. String payload: WHICH property, so
         // "fade it, then hide it" can tell the fade from the slide beside it.
         { "OnAnimationFinished",  "onAnimationFinished",  P::String, true  },
+        // A named clip from the widget's timeline ended. String payload: which.
+        { "OnClipFinished",       "onClipFinished",       P::String, true  },
         // A ListView asking to have one row filled in. The argument is the ITEM
         // index, not the row: the list holds no data, so this is the only
         // question it can ask and the answer is whatever the owner keeps.

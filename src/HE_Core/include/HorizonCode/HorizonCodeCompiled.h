@@ -134,6 +134,10 @@ public:
     // "when it is done" that fires twice for two different things.
     virtual void onAnimationFinished(int elem, const std::string& prop)
     { fireEvent("OnAnimationFinished", elem, Value::ofString(prop)); }
+    // A named clip from the widget's timeline ended. On the WIDGET (elem 0):
+    // a clip belongs to the widget, not to any one element it moves.
+    virtual void onClipFinished(const std::string& clip)
+    { fireEvent("OnClipFinished", 0, Value::ofString(clip)); }
     // Layers: this widget was closed (Escape, a click outside, a script).
     virtual void onDismissed() { fireEvent("OnDismissed", 0, Value{}); }
     // GameInstance lifecycle.
