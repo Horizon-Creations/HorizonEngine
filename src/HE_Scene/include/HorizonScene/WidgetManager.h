@@ -490,11 +490,14 @@ private:
     // The reverse: the widget a script instance belongs to, plus the offset
     // that turns one of ITS element ids into one in the host tree.
     Instance* resolveScriptOwner(HorizonCode::InstanceId scriptId, int& idOffset);
-    // Graft every WidgetRef's asset into `w`'s tree, recursively. `chain` is the
-    // asset paths already being embedded on this branch — a widget that embeds
-    // itself (directly or in a circle) is refused rather than expanded forever.
+    // Graft every WidgetRef's asset into `w`'s tree, and then everything those
+    // bring with them. `rootChain` is what the widget being built is already
+    // INSIDE of — normally just its own asset path — and each reference carries
+    // its own ancestry from there, so a widget that embeds itself (directly or
+    // in a circle) is refused rather than expanded forever, while two copies of
+    // one component side by side are simply two copies.
     void embedWidgetRefs(Instance& w, ContentManager& content,
-                         std::vector<std::string>& chain, int depth);
+                         const std::vector<std::string>& rootChain);
     // Put one widget asset in as a child of `parentElem` and give it its own
     // script instance: the whole of what addChild does once the parent is found,
     // and what a list realizes each of its rows with. `rowIndex` >= 0 marks the

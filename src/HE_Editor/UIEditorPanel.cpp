@@ -176,10 +176,47 @@ std::string elementName(const UIElement& e)
 }
 
 // Generic property read helpers (return sensible fallbacks when absent).
+// ── The theme the PREVIEW resolves bound colours against ────────────────────
+// The runtime resolves a bound colour when it creates the widget: uiApplyTheme
+// writes the role's value into the ordinary property, against whatever mode is
+// in force. The designer never created anything, so it was drawing the literal
+// that happened to be stored — which for the shipped components is the light
+// palette they were generated with. Result: a page that is dark in the preview
+// and light in the designer, for the same asset.
+//
+// Resolved on the READ side rather than by applying the theme to the tree,
+// because the tree the designer draws IS the authored document: writing
+// resolved colours into it would put them in the file.
+//
+// Set once per frame by whatever is about to draw, from the editor's own widget
+// runtime — the same object the live preview asks — so the two cannot disagree
+// about either the theme or the mode.
+const HE::UITheme* g_previewTheme = nullptr;
+HE::UIThemeMode    g_previewMode  = HE::UIThemeMode::Dark;
+
+// A colour the element holds, resolved through the theme when it is bound.
+// Exactly uiApplyTheme's rule for a Color property, asked instead of written.
+glm::vec4 themedColor(const UIElement& e, const char* name, const glm::vec4& literal)
+{
+	if (g_previewTheme)
+	{
+		const std::string& role = e.themeRoleFor(name);
+		if (!role.empty())
+		{
+			const HE::UIThemeRole r = HE::uiThemeRoleFromName(role);
+			// A name that no longer resolves leaves the literal alone, the same
+			// way uiApplyTheme does — visible and fixable beats white.
+			if (r != HE::UIThemeRole::COUNT)
+				return g_previewTheme->colorFor(r, g_previewMode);
+		}
+	}
+	return literal;
+}
+
 glm::vec4 propColorOr(const UIElement& e, const char* name, const glm::vec4& fb)
 {
 	const UIPropValue v = e.getProp(name);
-	return v.type == UIPropType::Color ? v.col : fb;
+	return themedColor(e, name, v.type == UIPropType::Color ? v.col : fb);
 }
 std::string propStringOr(const UIElement& e, const char* name, const std::string& fb)
 {
@@ -2024,7 +2061,8 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		const auto* tb = dynamic_cast<const HE::UITabBox*>(&n);
 		if (!tb) break;
 		const float tabH = tb->tabHeight * s;
-		dl->AddRectFilled(mn, ImVec2(mx.x, mn.y + tabH), C(tb->stripColor));
+		dl->AddRectFilled(mn, ImVec2(mx.x, mn.y + tabH),
+		                  C(themedColor(n, "Strip Color", tb->stripColor)));
 		std::vector<std::string> labels;
 		if (tree)
 			for (const auto& cp : tree->elements)
@@ -2040,11 +2078,12 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			const float w = std::min(tw[i], mx.x - tx[i]);
 			const bool on = static_cast<int>(i) == tb->activeTab;
 			dl->AddRectFilled(ImVec2(tx[i], mn.y), ImVec2(tx[i] + w, mn.y + tabH),
-			                  C(on ? tb->activeColor : tb->tabColor));
+			                  C(themedColor(n, on ? "Active Tab Color" : "Tab Color",
+			                                on ? tb->activeColor : tb->tabColor)));
 			const float fs = tb->fontSize * s;
 			dl->AddText(nullptr, fs,
 			            ImVec2(tx[i] + tb->tabPadding * s, mn.y + (tabH - fs) * 0.5f),
-			            C(tb->textColor), labels[i].c_str());
+			            C(themedColor(n, "Text Color", tb->textColor)), labels[i].c_str());
 		}
 		// …and the page area's outline, so an empty Tab Box is something you can
 		// aim a drop at rather than a strip with nothing under it.
@@ -2058,7 +2097,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		const float len = sp->vertical ? (mx.y - mn.y) : (mx.x - mn.x);
 		const float div = std::min(sp->dividerSize * s, len);
 		const float first = sp->clampedRatio(len) * std::max(0.0f, len - div);
-		const ImU32 c = C(sp->dividerColor);
+		const ImU32 c = C(themedColor(n, "Divider Color", sp->dividerColor));
 		if (sp->vertical)
 			dl->AddRectFilled(ImVec2(mn.x, mn.y + first), ImVec2(mx.x, mn.y + first + div), c);
 		else
@@ -2412,6 +2451,16 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 
 void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
+	// What a bound colour resolves to, for everything this frame draws — taken
+	// from the editor's OWN widget runtime, which is the same object the live
+	// preview resolves against. Asking it rather than keeping a second copy is
+	// what stops the designer and the preview from showing two different themes
+	// for one asset (see themedColor).
+	if (ctx.world)
+	{
+		g_previewTheme = &ctx.world->widgets().theme();
+		g_previewMode  = ctx.world->widgets().themeMode();
+	}
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 

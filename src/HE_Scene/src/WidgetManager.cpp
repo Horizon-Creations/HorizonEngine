@@ -164,25 +164,46 @@ void WidgetManager::refreshElementAssets(Instance& w, HE::UIElement& e)
 }
 
 void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
-                                    std::vector<std::string>& chain, int depth)
+                                    const std::vector<std::string>& rootChain)
 {
 	// A widget that embeds itself, directly or around a circle, would expand
 	// forever. Both guards are cheap and both are needed: the chain catches the
 	// circle, the depth catches an honest but absurd nesting.
-	constexpr int kMaxDepth = 8;
-	if (depth > kMaxDepth) return;
+	constexpr size_t kMaxDepth = 8;
 
-	// Snapshot the ids to visit: the loop appends to tree.elements, and a ref
-	// grafted in this pass is expanded by the recursive call, not by this loop.
-	std::vector<int> refIds;
+	// ── Every reference carries its OWN ancestry ─────────────────────────────
+	// This used to be one shared chain, pushed before recursing and popped
+	// after. It read like a depth-first walk and was not one: the recursive call
+	// re-scanned the WHOLE tree, so it also met the siblings of the reference it
+	// had just expanded — with that reference's path still on the chain.
+	//
+	// Two cards of the same component on one page was therefore enough: the
+	// second one found the first's path in a chain it never descended through
+	// and was refused as a circle, with its content silently dropped. A chain
+	// that describes "what is currently open" answers a different question from
+	// "what am I inside of", and only the second one is a circle.
+	struct Pending { int refId; std::vector<std::string> chain; };
+	std::vector<Pending> queue;
 	for (const auto& ep : w.tree.elements)
-		if (ep && ep->type() == HE::UIWidgetType::WidgetRef) refIds.push_back(ep->id);
+		if (ep && ep->type() == HE::UIWidgetType::WidgetRef)
+			queue.push_back({ ep->id, rootChain });
 
-	for (const int refId : refIds)
+	for (size_t qi = 0; qi < queue.size(); ++qi)
 	{
+		const int refId = queue[qi].refId;
+		// A COPY, not a reference into `queue`: the loop below pushes into it,
+		// and a vector that grows moves what it holds — a reference taken here
+		// would be read after the move.
+		const std::vector<std::string> chain = queue[qi].chain;
 		auto* ref = dynamic_cast<HE::UIWidgetRef*>(w.tree.find(refId));
 		if (!ref || ref->embedded || ref->widgetPath.empty()) continue;
 
+		if (chain.size() > kMaxDepth)
+		{
+			HE_LOG_ERROR(Widget, "Widget '%s' is nested more than %zu deep — that "
+			                     "reference is left empty", ref->widgetPath.c_str(), kMaxDepth);
+			continue;
+		}
 		if (std::find(chain.begin(), chain.end(), ref->widgetPath) != chain.end())
 		{
 			HE_LOG_ERROR(Widget, "Widget '%s' embeds itself (directly or in a circle) — "
@@ -259,10 +280,18 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 		ref->contentH    = sub.canvasHeight;
 		ref->contentMode = sub.scaleMode;
 
-		// …and the widget it just brought in may embed further widgets.
-		chain.push_back(ref->widgetPath);
-		embedWidgetRefs(w, content, chain, depth + 1);
-		chain.pop_back();
+		// …and the widget it just brought in may embed further widgets. ONLY the
+		// elements this graft added are queued, each with THIS reference's
+		// ancestry plus this reference — which is what makes the chain describe
+		// where a reference sits rather than what happens to be in flight.
+		{
+			std::vector<std::string> childChain = chain;
+			childChain.push_back(ref->widgetPath);
+			for (const auto& ep : w.tree.elements)
+				if (ep && ep->id > offset && ep->id <= em.idMax &&
+				    ep->type() == HE::UIWidgetType::WidgetRef)
+					queue.push_back({ ep->id, childChain });
+		}
 	}
 }
 
@@ -296,8 +325,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// Graft in every embedded widget FIRST: what they bring is part of this
 	// tree from here on, so material/font resolution below covers it too.
 	{
-		std::vector<std::string> chain{ assetPath };
-		embedWidgetRefs(w, content, chain, 0);
+		embedWidgetRefs(w, content, { assetPath });
 	}
 
 	// Whatever this widget bound to a theme role takes the theme's colour now,
@@ -457,8 +485,7 @@ HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager
 		// Seeded with THIS widget's own asset, exactly as createWidget seeds it:
 		// grafting a widget into itself is the circle the guard exists for, and
 		// an empty chain would let it through and expand until the depth cap.
-		std::vector<std::string> chain{ w.assetPath };
-		embedWidgetRefs(w, content, chain, 0);
+		embedWidgetRefs(w, content, { w.assetPath });
 	}
 	if (w.embeds.size() == embedsBefore)
 	{

@@ -15,6 +15,7 @@
 #include <HorizonScene/EngineApi.h>
 #include <Backends/Software/SoftwareRaster.h>
 #include <Hpak/ProjectExporter.h>
+#include <Diagnostics/Log.h>   // the circle guard is checked by what it does NOT say
 #include <cstdio>
 #include <fstream>
 #include <algorithm>
@@ -4163,6 +4164,122 @@ TEST_CASE("WidgetRef: two copies of one widget do not share element ids")
     CHECK(wm.processPointer(400.0f, 400.0f, 100.0f,  30.0f, true, true));
     CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 130.0f, true, true));
     CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 100.0f, 250.0f, true, true));
+}
+
+// Two copies of one component beside each other are two copies, not a circle.
+// The guard used to keep ONE chain and push a path before recursing — but the
+// recursion re-scanned the whole tree, so it met the SIBLING references of the
+// one it had just expanded while that one's path was still on the chain. Two
+// cards of the same component on one page was enough, and the second one was
+// refused with its content dropped.
+TEST_CASE("WidgetRef: the same component twice on a page is not a circle")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidgetAs(cm, "mem://row.hasset", rowWidget());
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    for (int i = 0; i < 3; ++i)
+    {
+        const int ref = page.add(HE::UIWidgetType::WidgetRef);
+        HE::UIElement& e = *page.find(ref);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = static_cast<float>(i) * 100.0f;
+        e.sizeX = 200.0f; e.sizeY = 60.0f;
+        e.setProp("Widget", HE::UIPropValue::ofString("mem://row.hasset"));
+    }
+    registerWidget(cm, page);
+
+    // What actually broke was the MESSAGE, so that is what this asks about.
+    // The old code recovered — a reference refused inside the recursion was
+    // grafted anyway by the outer loop on its next turn — so every count and
+    // every hit test came out right while the console filled with reports of a
+    // circle that was not there. A false alarm about a broken document is worse
+    // than a quiet bug: it sends somebody looking for damage that never
+    // happened.
+    int circleErrors = 0;
+    const int sink = HE::Log::addSink([](const HE::Log::Record& r, void* user)
+    {
+        if (r.level >= HE::Log::Level::Error && r.message &&
+            std::string(r.message).find("embeds itself") != std::string::npos)
+            ++*static_cast<int*>(user);
+    }, &circleErrors);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    HE::Log::removeSink(sink);
+    REQUIRE(id != 0);
+    CHECK(circleErrors == 0);
+
+    // …and all three really are there, which is the half the old code also got
+    // right and which must not regress while fixing the half it did not.
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f,  30.0f, true, true));
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 130.0f, true, true));
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 230.0f, true, true));
+}
+
+// …and one component embedding another, twice over, still is not. A page with
+// two Cards where a Card holds a Section Header is the ordinary shape of the
+// component library, and it exercises the chain two levels down.
+TEST_CASE("WidgetRef: a component that embeds a component, used twice")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidgetAs(cm, "mem://leaf.hasset", rowWidget());
+
+    // The middle widget: a page-sized panel holding one leaf.
+    HE::UIWidgetTree mid;
+    mid.canvasWidth = 200.0f; mid.canvasHeight = 60.0f;
+    mid.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    { const int r = mid.add(HE::UIWidgetType::WidgetRef);
+      HE::UIElement& e = *mid.find(r);
+      HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+      HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+      HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://leaf.hasset")); }
+    registerWidgetAs(cm, "mem://mid.hasset", mid);
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    for (int i = 0; i < 2; ++i)
+    {
+        const int ref = page.add(HE::UIWidgetType::WidgetRef);
+        HE::UIElement& e = *page.find(ref);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posY = static_cast<float>(i) * 100.0f;
+        e.sizeX = 200.0f; e.sizeY = 60.0f;
+        e.setProp("Widget", HE::UIPropValue::ofString("mem://mid.hasset"));
+    }
+    registerWidget(cm, page);
+
+    int circleErrors = 0;
+    const int sink = HE::Log::addSink([](const HE::Log::Record& r, void* user)
+    {
+        if (r.level >= HE::Log::Level::Error && r.message &&
+            std::string(r.message).find("embeds itself") != std::string::npos)
+            ++*static_cast<int*>(user);
+    }, &circleErrors);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    HE::Log::removeSink(sink);
+    REQUIRE(id != 0);
+    CHECK(circleErrors == 0);
+
+    // FOUR grafts: two mids, and the leaf each of them brings. A chain that
+    // described "what is open" instead of "what am I inside of" refused one of
+    // them and left its page a row short.
+    const HE::UIWidgetTree* t = wm.tree(id);
+    REQUIRE(t);
+    int refs = 0, embedded = 0;
+    for (const auto& ep : t->elements)
+        if (const auto* r = dynamic_cast<const HE::UIWidgetRef*>(ep.get()))
+        { ++refs; if (r->embedded) ++embedded; }
+    CHECK(refs == 4);
+    CHECK(embedded == 4);
 }
 
 TEST_CASE("WidgetRef: nesting works and a circle is refused")
