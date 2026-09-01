@@ -333,11 +333,12 @@ HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = n
 HE_API int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode);
 HE_API int uiApplyTheme(UIElement& e, const UITheme& theme, UIThemeMode mode);
 
-// Every style of `theme` this element follows, LEAST specific first:
+// Every style of `theme` this element follows, LEAST specific first — CSS's
+// specificity, in CSS's order:
 //
-//   "Button"          its type
-//   "Button.success"  its type and its tag
-//   "Card"            the style it points at by name, if it does
+//   "Button"          its type                       (0,0,1)
+//   "Card"            the style it points at by name (0,1,0)
+//   "Button.success"  its type and its tag           (0,1,1)
 //
 // They layer property by property, later wins — CSS's cascade, with a
 // vocabulary small enough to predict in your head. A variant that names one

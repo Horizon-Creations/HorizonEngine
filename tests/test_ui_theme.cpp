@@ -559,6 +559,11 @@ TEST_CASE("Theme: three layers, and the most specific one wins per value")
     t.styleMut("Button.success").set("Hovered Color", col(fromTag));
     const glm::vec4 fromName{ 0.0f, 0.0f, 1.0f, 1.0f };
     t.styleMut("Card").set("Pressed Color", col(fromName));
+    // The one that decides the order: BOTH the class and the variant name this
+    // value. CSS scores Button.success (0,1,1) above .card (0,1,0), so the
+    // variant wins — an author who knows CSS already knows that, which is the
+    // whole reason the order was taken from there instead of invented.
+    t.styleMut("Card").set("Hovered Color", col(glm::vec4(1.0f, 1.0f, 0.0f, 1.0f)));
 
     HE::uiApplyTheme(tree, t, HE::UIThemeMode::Dark);
     const HE::UIElement& e = *tree.find(b);

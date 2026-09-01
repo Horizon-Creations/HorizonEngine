@@ -775,18 +775,28 @@ std::vector<const UIThemeStyle*> uiThemeStylesFor(const UIElement& e, const UITh
 {
     std::vector<const UIThemeStyle*> out;
     if (!e.themeStyled) return out;
+    // CSS's specificity, and in CSS's order:
+    //
+    //   Button           a type selector      (0,0,1)   weakest
+    //   Card             a class selector     (0,1,0)
+    //   Button.success   both at once         (0,1,1)   strongest
+    //
+    // Which is why the tag comes LAST and not the name an element points at: a
+    // variant of this very type says more about it than a look shared with
+    // everything else that carries the same class. Getting this order from CSS
+    // rather than inventing one is the point — an author who knows CSS already
+    // knows what wins here.
+    //
+    // They LAYER, all three: a "Card" that names one colour leaves the rest to
+    // the type's style, which is what a class means everywhere it exists. A name
+    // that no longer resolves therefore costs the element nothing.
     const std::string type = e.typeName();
     if (const UIThemeStyle* s = theme.styleFor(type)) out.push_back(s);
+    if (!e.themeStyle.empty())
+        if (const UIThemeStyle* s = theme.styleFor(e.themeStyle)) out.push_back(s);
     if (!e.themeTag.empty())
         if (const UIThemeStyle* s = theme.styleFor(uiThemeSelector(type, e.themeTag)))
             out.push_back(s);
-    // A style pointed at by name is the most specific thing an element can say,
-    // so it is asked last. It LAYERS like the others: a "Card" that names one
-    // colour leaves the rest to the type's style, which is what "class" means
-    // everywhere it exists. A name that no longer resolves therefore costs the
-    // element nothing — it keeps its type's look instead of falling off a cliff.
-    if (!e.themeStyle.empty())
-        if (const UIThemeStyle* s = theme.styleFor(e.themeStyle)) out.push_back(s);
     return out;
 }
 
