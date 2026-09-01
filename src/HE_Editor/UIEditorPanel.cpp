@@ -1766,10 +1766,20 @@ void drawDetails(State& st, AppContext& ctx)
 			// there is nothing to explain: the entry is the style's name.
 			if (g_previewTheme)
 			{
+				// Only styles with a name of their OWN. Another type's style is
+				// not something this element can claim — under the cascade a
+				// selector belongs to its type — and after the theme editor's
+				// "Add Every Value" there are eighteen of those to scroll past.
+				auto isTypeName = [](const std::string& k)
+				{
+					for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+						if (k == HE::uiWidgetTypeName(t)) return true;
+					return false;
+				};
 				bool ruled = false;
 				for (const auto& [key, style] : g_previewTheme->styles)
 				{
-					if (key == typeStyle || !HE::uiThemeSelectorTag(key).empty()) continue;
+					if (isTypeName(key) || !HE::uiThemeSelectorTag(key).empty()) continue;
 					if (!ruled) { ImGui::Separator(); ruled = true; }
 					if (ImGui::Selectable(key.c_str(),
 					                      n->themeStyled && n->themeStyle == key))
