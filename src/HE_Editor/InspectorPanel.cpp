@@ -1037,6 +1037,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (componentHeader("Movement", true, removed))
 		{
 			Row::dragFloat("Max Speed", &mv->maxSpeed, 0.1f, 0.0f, 100.0f); trackEdit();
+			// Above Orient To Movement on purpose: the two are constantly
+			// mistaken for one another, and this is the one that decides WHERE
+			// forward is. Reading them in this order is the explanation.
+			{
+				static const char* kSpaces[] = { "World", "Camera" };
+				int space = static_cast<int>(mv->moveSpace);
+				if (Row::combo("Move Direction Is", &space, kSpaces, 2))
+					mv->moveSpace = static_cast<MovementComponent::Space>(space);
+				trackEdit();
+			}
 			EditorWidgets::checkbox("Orient To Movement", &mv->orientToMovement); trackEdit();
 			if (mv->orientToMovement)
 			{

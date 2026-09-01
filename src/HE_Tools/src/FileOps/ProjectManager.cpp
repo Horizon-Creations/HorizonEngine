@@ -410,12 +410,21 @@ bool scaffoldThirdPersonProject(const std::string& projectRoot)
 	// Look is bound but unused by the shipped graphs: the camera rig already
 	// turns with the mouse on its own, and an axis wired to nothing is a smaller
 	// surprise than an action that exists in the mapping list and nowhere else.
+	// The Move axis IS a direction on the ground plane in the engine's own axes:
+	// its X is world X and its Y is world Z, which the character graph wires
+	// straight through. So FORWARD IS NEGATIVE — -Z is forward everywhere else in
+	// this engine (the camera rig's own forward vector, orientToMovement's atan2),
+	// and an axis that disagreed would make W walk backwards. It did, until this
+	// comment existed.
+	//
+	// That also makes the gamepad binding the plain one: SDL's left stick already
+	// reports negative when pushed up, which is forward, so it needs no flip.
 	constexpr const char* kMappings = R"JSON({"entries":[
  {"action":"Input/Move.hasset",
   "axesX":[{"source":"Key","positive":"D","negative":"A","scale":1.0},
            {"source":"GamepadAxis","axis":"leftx","scale":1.0}],
-  "axesY":[{"source":"Key","positive":"W","negative":"S","scale":1.0},
-           {"source":"GamepadAxis","axis":"lefty","scale":-1.0}]},
+  "axesY":[{"source":"Key","positive":"W","negative":"S","scale":-1.0},
+           {"source":"GamepadAxis","axis":"lefty","scale":1.0}]},
  {"action":"Input/Look.hasset",
   "axesX":[{"source":"MouseDeltaX","scale":1.0},
            {"source":"GamepadAxis","axis":"rightx","scale":1.0}],

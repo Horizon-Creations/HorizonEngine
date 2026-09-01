@@ -37,6 +37,7 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/MovementComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 
@@ -298,6 +299,31 @@ TEST_CASE("third person: the character graph drives Move and Jump from the input
 	for (const HorizonCode::Node* n : { move, jump })
 		for (const auto& l : g.links)
 			CHECK_FALSE((l.dstNode == n->id && l.dstPin == 2));
+
+	// ── The sign chain, end to end ──────────────────────────────────────────
+	// The axis is wired straight through to a world direction, so its sign IS
+	// the direction. Forward is -Z in this engine (the camera rig's own forward,
+	// and orientToMovement's atan2 agree), which makes forward NEGATIVE on the
+	// axis — and W bound as positive walked backwards until it was not.
+	//
+	// MUTATION: set the Key binding's scale back to 1.0 in ProjectManager.cpp.
+	CHECK_MESSAGE([&]{
+		for (const auto& l : g.links)
+			if (l.srcNode == 2 && l.srcPin == 2 && l.dstNode == 3 && l.dstPin == 2)
+				return true;   // Break Vector 2's Y → Make Vector 3's Z
+		return false;
+	}(), "the axis' Y no longer feeds the world Z it is signed for");
+
+	std::ifstream mapIn(root / "Content" / "Input" / "DefaultMappings.hasset", std::ios::binary);
+	const std::string raw((std::istreambuf_iterator<char>(mapIn)),
+	                       std::istreambuf_iterator<char>());
+	const std::size_t at = raw.find("\"positive\":\"W\"");
+	REQUIRE(at != std::string::npos);
+	// The scale that follows the W binding has to be negative, or forward is not.
+	const std::size_t neg = raw.find("\"scale\":-1.0", at);
+	const bool wIsForward = (neg != std::string::npos) && (neg < at + 64);
+	CHECK_MESSAGE(wIsForward,
+	              "W is not bound to the negative (forward) end of the Move axis");
 }
 
 // End to end, in a real world: spawn the character the controller's graph names
@@ -457,6 +483,94 @@ TEST_CASE("third person: the character can walk across the ground without fallin
 	              ("the character dropped through the floor while walking, lowest y = " +
 	               std::to_string(lowestY)).c_str());
 	CHECK(reg.get<CharacterControllerComponent>(s.entity).isGrounded);
+}
+
+// "Forward" has to mean where the CAMERA looks, not where the world's Z axis
+// points. Without it, turning the camera and pushing forward walks the character
+// off in the direction it was already walking, which reads as the controls being
+// broken — and no setting, node or trick produced it.
+//
+// MUTATION: in EntityHost::defaultComponents, drop `mvc.moveSpace = Camera` (or
+// in MovementSystem, skip the rotation) — the character walks the same way
+// whatever the camera does, and the two directions below come out identical.
+TEST_CASE("third person: forward is where the camera looks")
+{
+	const auto root = makeProject("he_tps_camrel", "Starter");
+	ContentManager cm((root / "Content").string());
+
+	HorizonWorld world;
+	SceneSerializer ser;
+	REQUIRE(ser.load(world, root / "Content" / "StartupScene.hescene",
+	                 HE::SerializeFormat::JSON));
+
+	HorizonCode::Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+	const float spawn[3] = { 0.0f, 1.2f, 0.0f };
+	const EntityHost::Spawned s = host.spawn("Gameplay/PlayerCharacter.hasset",
+	                                         entt::null, spawn, nullptr);
+	REQUIRE((s.entity != entt::null));
+	auto& reg = world.registry();
+
+	// The character the template ships is camera-relative and turns to face
+	// where it walks. Both are the PlayerCharacter default, not the plain
+	// component's — a bare MovementComponent stays in world space.
+	REQUIRE(reg.all_of<MovementComponent>(s.entity));
+	CHECK(reg.get<MovementComponent>(s.entity).moveSpace == MovementComponent::Space::Camera);
+	CHECK(reg.get<MovementComponent>(s.entity).orientToMovement);
+
+	// The camera the character brought with it, which is the rig the movement
+	// system asks.
+	Entity cameraEntity = entt::null;
+	for (Entity child : reg.get<HierarchyComponent>(s.entity).children)
+		if (reg.all_of<CameraRigComponent>(child)) cameraEntity = child;
+	REQUIRE((cameraEntity != entt::null));
+
+	PhysicsWorld phys;
+	phys.initialize(world);
+	for (int i = 0; i < 60; ++i) phys.step(world, 1.0f / 60.0f);
+
+	HE::api::Ctx c{ &world, &phys, &cm };
+	const HE::api::ApiFn* move = HE::api::find("locomotion.move");
+	REQUIRE(move != nullptr);
+	const auto entityArg = HE::api::Value::ofInt(static_cast<int>(s.entity));
+
+	// "Push forward" is -Z in the input frame, the same convention the rig uses
+	// for its own forward vector.
+	auto walkForwardFrom = [&](float cameraYaw) {
+		auto& tc = reg.get<TransformComponent>(s.entity);
+		tc.position = { 0.0f, tc.position.y, 0.0f };
+		tc.dirty = true;
+		phys.setPosition(static_cast<uint32_t>(s.entity), tc.position);
+		reg.get<CameraRigComponent>(cameraEntity).yaw = cameraYaw;
+		for (int i = 0; i < 120; ++i)
+		{
+			std::vector<HE::api::Value> args{ entityArg,
+			                                  HE::api::Value::ofVec3({ 0.0f, 0.0f, -1.0f }) };
+			move->invoke(c, args);
+			MovementSystem::update(world, &phys, 1.0f / 60.0f);
+			phys.step(world, 1.0f / 60.0f);
+		}
+		const auto& out = reg.get<TransformComponent>(s.entity);
+		return glm::vec2(out.position.x, out.position.z);
+	};
+
+	// Camera looking along -Z: forward is -Z.
+	const glm::vec2 north = walkForwardFrom(0.0f);
+	CHECK_MESSAGE(north.y < -2.0f,
+	              ("expected to walk towards -Z, ended at z = " + std::to_string(north.y)).c_str());
+	CHECK(std::abs(north.x) < 1.5f);
+
+	// Camera turned a quarter turn: the SAME input has to walk a quarter turn
+	// round with it. At yaw 90 the rig's own forward is -X.
+	const glm::vec2 west = walkForwardFrom(90.0f);
+	CHECK_MESSAGE(west.x < -2.0f,
+	              ("expected to walk towards -X, ended at x = " + std::to_string(west.x)).c_str());
+	CHECK(std::abs(west.y) < 1.5f);
+
+	// And behind: yaw 180 walks back up +Z.
+	const glm::vec2 south = walkForwardFrom(180.0f);
+	CHECK(south.y > 2.0f);
 }
 
 // The template IS two HorizonCode classes, and PlayerHost only scans HorizonCode

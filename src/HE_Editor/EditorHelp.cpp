@@ -334,9 +334,19 @@ namespace
 	  "How fast the character turns to face where it is going, in degrees per "
 	  "second. Only used with Orient To Movement.",
 	  "", "systems#animation" },
+	{ "Movement/Move Direction Is", "",
+	  "Which way is forward when something calls Move. World takes the direction "
+	  "as given, which is what a fixed or top-down camera wants. Camera turns it "
+	  "by the main camera rig's yaw first, so pushing forward walks where the "
+	  "player is looking — that is what a third- or first-person game means by "
+	  "the controls working, and a player character ships set to it. Not the same "
+	  "as Orient To Movement below: this decides where you GO, that one decides "
+	  "which way you FACE while going there, and they are usually both on.",
+	  "", "rendering#cameras" },
 	{ "Movement/Orient To Movement", "",
 	  "Turn the character to face the direction it walks. Switch it off when "
-	  "something else owns the facing — a camera rig with coupled rotation.",
+	  "something else owns the facing — a camera rig with coupled rotation. It "
+	  "does NOT change which way forward is; Move Direction Is does that.",
 	  "", "rendering#cameras" },
 	{ "Camera/FOV", "",
 	  "Vertical field of view in degrees. 60 is a normal game view; higher feels "

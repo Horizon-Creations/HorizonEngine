@@ -140,7 +140,37 @@ std::vector<Docs::Page> characterPages()
 			}),
 		}));
 
-		secs.push_back(section("script", "Step 3", "Driving it from a graph", {
+		secs.push_back(section("relative", "Step 3", "Walking where the camera looks", {
+			lead("The setting that makes the controls feel right, and it is not on "
+			     "the camera — it is on the character."),
+			para("Movement -> Move Direction Is, set to Camera. Then pushing forward "
+			     "walks where the view points instead of along the world's Z axis. A "
+			     "Player Character ships set to it; a Movement component you add by "
+			     "hand starts in World, which is what a fixed or top-down camera "
+			     "wants."),
+			warn("Orient To Movement is a different question", {
+				para("The two get mistaken for each other constantly, and only one of "
+				     "them answers \"why does my character not walk where I am "
+				     "looking\"."),
+				bullets({
+					"Move Direction Is decides where the character GOES.",
+					"Orient To Movement decides which way it FACES while going there.",
+				}),
+				para("With camera-relative input and no Orient To Movement the "
+				     "character strafes without ever turning, and slides sideways "
+				     "through the world. They belong together."),
+			}),
+			note("Two owners of one yaw", {
+				para("Leave Target Rotation on Free while Orient To Movement is on. "
+				     "Follow makes the rig write the character's yaw itself, and two "
+				     "things writing one number is a jitter nobody can locate "
+				     "afterwards. Follow with Orient To Movement OFF is the other "
+				     "valid pair — that is the shooter feel, where you strafe and "
+				     "walk backwards while facing where you aim."),
+			}),
+		}));
+
+		secs.push_back(section("script", "Step 4", "Driving it from a graph", {
 			lead("The rig can be read and written while the game runs."),
 			para("Look feeds it from the player's input, which is the ordinary case. "
 			     "Beyond that: Set Camera Mode switches perspective mid-game, Set "

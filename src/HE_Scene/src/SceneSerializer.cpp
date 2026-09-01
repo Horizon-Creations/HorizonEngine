@@ -257,6 +257,7 @@ namespace
 				{ "maxSpeed",         mv->maxSpeed },
 				{ "turnRate",         mv->turnRate },
 				{ "orientToMovement", mv->orientToMovement },
+				{ "moveSpace",        static_cast<uint8_t>(mv->moveSpace) },
 			};
 		}
 		if (auto* rig = registry.try_get<CameraRigComponent>(entity))
@@ -798,6 +799,10 @@ namespace
 			mv.maxSpeed         = c.value("maxSpeed",         mv.maxSpeed);
 			mv.turnRate         = c.value("turnRate",         mv.turnRate);
 			mv.orientToMovement = c.value("orientToMovement", mv.orientToMovement);
+			// Absent in every scene saved before camera-relative movement
+			// existed, and World is what those scenes meant.
+			mv.moveSpace = static_cast<MovementComponent::Space>(
+				c.value("moveSpace", static_cast<uint8_t>(mv.moveSpace)));
 			registry.emplace_or_replace<MovementComponent>(entity, mv);
 		}
 		if (comps.contains("cameraRig"))

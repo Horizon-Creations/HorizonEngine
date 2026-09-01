@@ -328,6 +328,18 @@ TEST_CASE("a base class hands a new class the components it cannot work without"
 	REQUIRE(w.registry().all_of<SkeletalMeshComponent>(root));
 	CHECK(w.registry().get<SkeletalMeshComponent>(root).meshAssetId == HE::UUID{});
 
+	// A player's movement is camera-relative and turns to face where it walks.
+	// Both are the plain component's defaults turned around, and both are what
+	// "the controls work" means — pushing forward has to walk where the player is
+	// LOOKING, and a character that never turns slides sideways through the world.
+	REQUIRE(w.registry().all_of<MovementComponent>(root));
+	CHECK(w.registry().get<MovementComponent>(root).moveSpace ==
+	      MovementComponent::Space::Camera);
+	CHECK(w.registry().get<MovementComponent>(root).orientToMovement);
+	// …and NOT on a plain one. A mover somebody adds by hand is a bare mover.
+	CHECK(MovementComponent{}.moveSpace == MovementComponent::Space::World);
+	CHECK_FALSE(MovementComponent{}.orientToMovement);
+
 	// …and a camera to see it with, as a CHILD. Without it, "how do I attach a
 	// camera to my player" is a question the tool creates: the author would have
 	// to know that a camera is its own entity, that a rig aims it, and that the

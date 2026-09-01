@@ -364,7 +364,22 @@ std::vector<uint8_t> EntityHost::defaultComponents(const std::string& baseClass)
 		// What it is doing, in the form an animator reads it. Without this the
 		// character controller is the only source, and every project rederives
 		// "how fast" and "on the ground" by hand — differently each time.
-		scratch.addComponent(root, MovementComponent{});
+		//
+		// Two settings that are the plain component's defaults turned around,
+		// because a PLAYER character is not a bare mover:
+		//
+		//  * moveSpace = Camera. Pushing forward has to walk where the player is
+		//    LOOKING. Left in world space it walks along the world's Z axis
+		//    whatever the camera does, which reads as the controls being broken —
+		//    and there was no setting, node or trick that fixed it.
+		//  * orientToMovement. With camera-relative input the character strafes
+		//    without ever turning, so it slides sideways through the world. The
+		//    two belong together and neither is much use alone; the shipped rig's
+		//    Free yaw coupling is what leaves the facing free for this to own.
+		MovementComponent mvc;
+		mvc.moveSpace        = MovementComponent::Space::Camera;
+		mvc.orientToMovement = true;
+		scratch.addComponent(root, mvc);
 
 		// …and a camera to see it with. A character class without one is a
 		// character nobody can look at: the author has to know that a camera is a
