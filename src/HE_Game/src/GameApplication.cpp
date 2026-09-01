@@ -1577,6 +1577,12 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		if (event.key.key == SDLK_ESCAPE)
 		{
 			if (m_world && m_world->widgets().closeTopLayer()) return true;
+			// …and in an APPLICATION it means nothing else. There is no
+			// FPS-style grab to give back — an app never took the cursor — so
+			// toggling one here only hid the pointer of a program that has no
+			// use for a hidden pointer. Not swallowed either: Escape is a key an
+			// application's own logic is entitled to see.
+			if (m_appMode) return false;
 			setMouseCaptured(!m_mouseCaptured);
 			return true;
 		}

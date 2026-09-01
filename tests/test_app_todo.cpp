@@ -521,6 +521,42 @@ TEST_CASE("Todo app: it exports as a software build with no scene")
         CHECK(n.find("python") == std::string::npos);
         CHECK(n.find("Python") == std::string::npos);
     }
+
+    // The shipped libraries carry no local symbol table. Asked by SIZE rather
+    // than by running `nm`: a stripped copy is strictly smaller than the
+    // developer's own binary it came from, and a test that shells out to a
+    // toolchain it may not have is a test that skips itself into uselessness.
+    //
+    // The comparison is over the SUM, because some files (a signature-only
+    // resource, a .zip) have nothing to strip and stay byte-identical — so a
+    // per-file "smaller" would be wrong, while a total that did not shrink means
+    // nothing was stripped at all.
+#if defined(__APPLE__) || defined(__linux__)
+    {
+        const std::filesystem::path runtimeDir = HE_TEST_GAME_RUNTIME_DIR;
+        std::uintmax_t shipped = 0, original = 0;
+        int compared = 0;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(out))
+        {
+            if (!entry.is_regular_file()) continue;
+            const std::string n = entry.path().filename().string();
+            if (n.find(".dylib") == std::string::npos &&
+                n.find(".so")    == std::string::npos &&
+                n != "HorizonGame") continue;
+            const auto src = runtimeDir / n;
+            std::error_code sec;
+            if (!std::filesystem::is_regular_file(src, sec)) continue;
+            shipped  += std::filesystem::file_size(entry.path());
+            original += std::filesystem::file_size(src);
+            ++compared;
+        }
+        REQUIRE(compared > 0);
+        CAPTURE(compared);
+        CAPTURE(shipped);
+        CAPTURE(original);
+        CHECK(shipped < original);
+    }
+#endif
     MESSAGE("software build left at " << out.string());
 }
 

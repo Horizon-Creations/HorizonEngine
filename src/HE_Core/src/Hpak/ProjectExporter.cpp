@@ -121,6 +121,32 @@ static bool looksMachO(const std::vector<uint8_t>& bytes)
         || w == 0xBEBAFECAu || w == 0xCAFEBABEu;  // FAT magics (either order)
 }
 
+// A path as one shell argument: wrapped in single quotes, embedded quotes
+// escaped as '\''. An apostrophe in an export path must not break a command —
+// that would skip a re-sign, not just look ugly.
+static std::string shellQuote(const std::filesystem::path& p)
+{
+    std::string out = "'";
+    for (const char c : p.string()) out += (c == '\'') ? "'\\''" : std::string(1, c);
+    return out + "'";
+}
+
+#if defined(__APPLE__) || defined(__linux__)
+// Drop the LOCAL symbol table from a copied binary. `-x` and nothing more: the
+// exported symbols stay, so a crash backtrace out of a shipped build still names
+// functions, and a game-logic module still finds what it links against. What
+// goes is the file-local half nobody outside the build ever reads — on this
+// machine about a fifth of every engine library.
+//
+// Best effort: a host without `strip` leaves the file exactly as copied, which
+// is what shipped before this existed. The caller re-signs on Apple, because a
+// stripped Mach-O has an invalid signature and arm64 kills those on launch.
+static bool stripLocalSymbols(const std::filesystem::path& p)
+{
+    return std::system(("/usr/bin/strip -x " + shellQuote(p) + " 2>/dev/null").c_str()) == 0;
+}
+#endif
+
 #ifdef __APPLE__
 // Ad-hoc re-sign in place. Patching invalidated the signature; on arm64 macOS
 // an invalid signature means the binary is killed on launch, so a failed
@@ -130,11 +156,7 @@ static bool resignMachO(const std::filesystem::path& p)
     // Shell-quote the path: wrap in single quotes, escaping embedded single
     // quotes as '\'' (an apostrophe in the export path must not break the
     // command — that would skip the re-sign, not just look ugly).
-    std::string quoted = "'";
-    for (const char c : p.string())
-        quoted += (c == '\'') ? "'\\''" : std::string(1, c);
-    quoted += "'";
-    const std::string cmd = "/usr/bin/codesign --force --sign - " + quoted + " 2>/dev/null";
+    const std::string cmd = "/usr/bin/codesign --force --sign - " + shellQuote(p) + " 2>/dev/null";
     return std::system(cmd.c_str()) == 0;
 }
 #endif
@@ -832,6 +854,40 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                     return ExportResult{false, "Failed to copy runtime binary "
                                                + dit->path().filename().string() + ": "
                                                + ec.message(), ctx.assetsPacked};
+                // Symbols the shipped build has no use for, dropped from the
+                // COPY (the developer's own binaries keep theirs). Only the
+                // file-local half — see stripLocalSymbols.
+#if defined(__APPLE__) || defined(__linux__)
+                {
+                    // Four bytes, not the whole file: the biggest thing here is
+                    // a 14 MB interpreter and all this asks is the magic.
+                    std::vector<uint8_t> head(4, 0);
+                    {
+                        std::ifstream f(dst, std::ios::binary);
+                        f.read(reinterpret_cast<char*>(head.data()), 4);
+                        if (!f) head.clear();
+                    }
+                    const bool machO = looksMachO(head);
+                    if (stripLocalSymbols(dst))
+                    {
+#ifdef __APPLE__
+                        // Stripping invalidates the signature, and arm64 kills a
+                        // binary with a broken one on launch — so a re-sign that
+                        // fails has to fail the export, exactly like the key
+                        // patch's does. The .app's later --deep sign would cover
+                        // the bundle case, but a plain-folder export has no such
+                        // second chance.
+                        if (machO && !resignMachO(dst))
+                            return ExportResult{false, "Failed to re-sign "
+                                                       + dst.filename().string()
+                                                       + " after stripping symbols",
+                                                ctx.assetsPacked};
+#else
+                        (void)machO;
+#endif
+                    }
+                }
+#endif
                 ++ctx.binaryCopied;
                 copied.push_back(dst);
             }
