@@ -4634,6 +4634,64 @@ TEST_CASE("Navigation: an open list takes the arrows, the buttons behind it do n
     CHECK(wm.focusedElement() == below);
 }
 
+// "Something is focused" and "a text field owns the keyboard" are different
+// questions, and answering the second with the first is why menu navigation
+// worked exactly once: both apps gate the arrow keys on this, the first press
+// focused a button, and from then on every key was routed into the widget as if
+// somebody were typing. It also started SDL text input, and swallowed the
+// movement keys from gameplay, for a focused BUTTON.
+TEST_CASE("Navigation: a focused button does not claim the keyboard")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    }
+    const int field = t.add(HE::UIWidgetType::TextInput);
+    {
+        HE::UIElement& e = *t.find(field);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 100.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    }
+    const int readOnly = t.add(HE::UIWidgetType::TextInput);
+    {
+        auto* e = dynamic_cast<HE::UITextInput*>(t.find(readOnly));
+        e->editable = false;                 // still selectable
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 200.0f; e->sizeX = 200.0f; e->sizeY = 40.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    CHECK_FALSE(wm.hasFocusedTextField());
+    wm.setFocus(id, btn);
+    CHECK(wm.focusedElement() == btn);
+    CHECK_FALSE(wm.hasFocusedTextField());   // a button is not a text field
+
+    wm.setFocus(id, field);
+    CHECK(wm.hasFocusedTextField());
+    // Read-only but selectable: it takes the arrows to move its selection and
+    // Ctrl+C to copy out, so it owns the keyboard just as much.
+    wm.setFocus(id, readOnly);
+    CHECK(wm.hasFocusedTextField());
+
+    // …and back to a button, which hands the keyboard back. The arrows keep
+    // working, which is the behaviour this whole thing is about.
+    wm.setFocus(id, btn);
+    CHECK_FALSE(wm.hasFocusedTextField());
+    CHECK(wm.navigate(WidgetManager::NavDir::Down, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == field);
+}
+
 TEST_CASE("Navigation: Tab walks the form in hierarchy order and wraps")
 {
     TempWidgetDir dir;

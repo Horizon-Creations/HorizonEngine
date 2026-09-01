@@ -2582,6 +2582,18 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 	return true;
 }
 
+bool WidgetManager::hasFocusedTextField() const
+{
+	const Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return false;
+	const auto* ti = dynamic_cast<const HE::UITextInput*>(w->tree.find(w->focusedElem));
+	// Editable OR selectable: a read-only field still takes the arrows to move
+	// its selection and Ctrl+C to copy out of it, so it owns the keyboard just
+	// as much as one being typed into. A field that is neither is inert and
+	// keeps nothing.
+	return ti && (ti->editable || ti->selectable);
+}
+
 bool WidgetManager::hasOpenDropdown() const
 {
 	return !m_grabs.empty() && m_grabs.back().kind == Grab::Kind::Dropdown;

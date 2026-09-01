@@ -343,7 +343,15 @@ public:
     bool setCaretFromPointer(float vpWidth, float vpHeight, float mouseX, float mouseY);
     // True while a TextInput has keyboard focus — the apps use it to decide
     // whether to route text/keys here instead of to gameplay/camera.
-    bool hasFocusedTextField() const { return m_focusWidget != 0; }
+    //
+    // It used to answer `m_focusWidget != 0`, which is "something is focused",
+    // and that is not the same question at all: setFocus writes m_focusWidget
+    // for ANY element, so focusing a BUTTON claimed the keyboard. The arrow keys
+    // are gated on this in both apps, so the first press moved the focus and the
+    // second one was never routed — menu navigation worked exactly once. It also
+    // started SDL text input, and swallowed every key from gameplay, for a
+    // focused button.
+    bool hasFocusedTextField() const;
 
     // The cursor the currently-hovered element requests (set by processPointer;
     // Default when nothing is hovered). The app maps it to a system cursor.
