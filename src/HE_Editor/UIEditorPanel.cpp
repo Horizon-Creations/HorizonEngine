@@ -3762,17 +3762,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				const auto widgets = HcEditorUtil::listAssets(ctx.contentManager,
 				                                              HE::AssetType::Widget);
-				int offered = 0;
-				for (const auto& a : widgets) if (a.path != st.relPath) ++offered;
+				// Two lists, not one. The engine's own components arrive under
+				// the "Engine/" prefix and would otherwise sit in the middle of
+				// the project's own widgets in alphabetical order — where an
+				// author cannot tell "something I made" from "something that
+				// came with the engine", which is the only distinction that
+				// matters when you are looking for a form row.
+				auto isEngine = [](const std::string& p)
+				{ return p.rfind("Engine/", 0) == 0; };
 
-				ImGui::Spacing();
-				ImGui::TextDisabled("User Defined");
-				ImGui::Separator();
-				if (offered == 0)
-					ImGui::TextDisabled("(no other widgets yet)");
-				for (const auto& a : widgets)
+				auto drawOne = [&](const HcEditorUtil::ClassRef& a)
 				{
-					if (a.path == st.relPath) continue;   // never itself
 					ImGui::PushID(a.path.c_str());
 					const bool clicked = ImGui::Button(a.label.c_str(), ImVec2(-1.0f, 0));
 					if (ImGui::BeginDragDropSource())
@@ -3796,7 +3796,28 @@ void render(AppContext& ctx, const std::string& assetPath,
 						commitEdit(st, ctx);
 					}
 					ImGui::PopID();
-				}
+				};
+
+				int own = 0;
+				for (const auto& a : widgets)
+					if (a.path != st.relPath && !isEngine(a.path)) ++own;
+
+				ImGui::Spacing();
+				ImGui::TextDisabled("User Defined");
+				ImGui::Separator();
+				if (own == 0) ImGui::TextDisabled("(no other widgets yet)");
+				for (const auto& a : widgets)
+					if (a.path != st.relPath && !isEngine(a.path)) drawOne(a);
+
+				// ── Components ───────────────────────────────────────────────
+				// What ships with the engine (docs/he-apps-plan.md D2). Copyable
+				// and editable like anything else under Engine/: a project that
+				// wants a different form row saves over it and gets its own.
+				ImGui::Spacing();
+				ImGui::TextDisabled("Components");
+				ImGui::Separator();
+				for (const auto& a : widgets)
+					if (a.path != st.relPath && isEngine(a.path)) drawOne(a);
 			}
 
 			ImGui::Spacing();

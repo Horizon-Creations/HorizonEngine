@@ -1687,6 +1687,63 @@ Kopien wieder „Default" — sieben Glyphen statt einer und dreier. Geprüft wi
 am Baum: der lebende Baum gehört dem WidgetManager, und die Frage „steht da, was ich gesetzt
 habe" muss ohnehin nur dort wahr sein, wo man sie sieht.
 
+### D2, zweite Hälfte: die ersten zwölf Komponenten (01.09.2026)
+
+`EditorDeps/EngineContent/Widgets`, erzeugt von **`widget_gen`** nach dem Vorbild von
+`mesh_gen`: deterministisch, feste UUIDs, Ausgaben **eingecheckt**, nicht Teil des normalen
+Build-Graphen. Der Grund für einen Generator statt zwölf von Hand gespeicherter Assets ist
+einfach: ein `.hasset` ist ein Binärcontainer, und zwölf davon im Repository wären zwölf Klumpen,
+die niemand prüfen oder reparieren kann, ohne den Editor zu öffnen. Genau die Bibliothek muss
+aber prüfbar bleiben, weil jedes Projekt sie erbt. Hier ist eine Komponente eine Funktion.
+
+**Die zwölf**: `FormRowText`, `FormRowToggle`, `FormRowChoice`, `SectionHeader`, `Card`,
+`ListRow`, `TitleBar`, `Toolbar`, `StatusBar`, `SearchField`, `EmptyState`, `DialogFrame`.
+
+**Eine Komponente ist ein ganzes Ding, kein Rahmen mit einem Loch.** Ein `WidgetRef` pfropft
+einen fertigen Baum; eine Seite kann keine eigenen Kinder hineinsetzen. Deshalb gibt es keine
+„Formularzeile, in die man sein Bedienelement stellt", sondern eine Text-, eine Schalter- und
+eine Auswahlzeile, jede vollständig. **Diese Grenze ist es wert, benannt zu werden**, statt um
+sie herum zu bauen: die Alternative ist ein Slot-Mechanismus, und diese Bibliothek ist genau
+das, woran sich zeigt, ob man ihn braucht.
+
+**Farben und Größen kommen aus dem Theme, und das Literal daneben ist die Vorschau.** Jede Farbe
+bindet eine Rolle, jede Textgröße eine Stufe; `bake()` schreibt anschließend die Werte des
+Standard-Themes in die gewöhnlichen Eigenschaften, damit der **Designer** — der gar keinen
+Theme-Durchgang fährt — die Komponente so zeigt, wie sie aussehen wird. Das Literal ist die
+Vorschau, die Rolle ist die Wahrheit.
+
+**Der Dialog ist die einzige Komponente mit eigener Logik, und sie brauchte keinen neuen
+Mechanismus.** Er wird mit `Create Widget` → `Show Modal` geöffnet, die Seite hält also schon
+eine Referenz auf ihn — er sendet `Confirmed` beziehungsweise `Cancelled` und versteckt sich
+selbst, die Seite bindet sich mit `Bind Event` daran. Ein Dialog, der nach OK stehen bliebe,
+machte jede Seite dafür zuständig, etwas zu schließen, das sie nicht geöffnet hat.
+
+**Drei Prüfungen halten die Bibliothek ehrlich**, und alle drei sind Tests, keine Disziplin:
+- **Jeder Parameter schreibt wirklich.** Der Test setzt jeden auf einen *anderen* Wert und liest
+  ihn zurück. Ein Parameter, der eine Eigenschaft nennt, die es an diesem Element nicht gibt,
+  schreibt nichts und sagt nichts — gegengeprüft, indem ich einen auf „Caption" umbog: der Test
+  nannte sofort Datei und Parameternamen.
+- **Die Farben gehören dem Theme.** Ein Moduswechsel muss an jeder Komponente etwas bewegen.
+  Eine, die ihre Farben selbst entschied, sieht richtig aus, bis jemand auf Dunkel schaltet.
+- **Eine Seite, die eine Komponente einbettet, übersteht das Paketieren.** Der gefährlichste
+  Pfad: ein ausgeliefertes Spiel hat kein `EditorDeps`, die Komponente muss im `.hpak` liegen
+  und der `Engine/…`-Pfad aus dessen Index auflösen. Genau so präsentierten sich der
+  `GameInstance.hcode`- und der Pfadindex-Fehler, und keiner der beiden zeigte sich im Editor.
+  Gegengeprüft, indem ich `engineContentDir` leerte.
+
+**Und ein Kontaktabzug**, gerendert durch den Software-Rasterizer nach
+`$TMPDIR/he_components.ppm`: „zeichnet überhaupt etwas" kann ein Test sagen, „sieht aus wie eine
+Formularzeile" ist eine Frage an ein Bild. Beim ersten Abzug las die halbe Bibliothek als kaputt
+— weißer Text auf hellem Grund. **Der Fehler war der Abzug, nicht die Bibliothek**: `createWidget`
+löst die Rollen gegen den Modus auf, der gerade gilt, und ich hatte den Hintergrund des *anderen*
+gemalt. Zweite Fassung, zweiter Fund: gleich hohe Fächer streckten eine 62 Pixel hohe
+Formularzeile auf zweihundert und zeigten eine Beschriftung im Leeren. Jedes Fach ist jetzt so
+hoch, wie die Komponente verfasst wurde — sonst ist der Abzug ein Bild der eigenen Rechnung.
+
+**Offen geblieben:** das Handbuch hat noch keinen Abschnitt über Komponenten (die Docs liegen im
+Website-Repository), die neuen Hilfe-Einträge zeigen deshalb auf `ui#widgets` statt auf einen
+Anker, der 404 gäbe.
+
 ---
 
 ## 11. Risiken und Fallen

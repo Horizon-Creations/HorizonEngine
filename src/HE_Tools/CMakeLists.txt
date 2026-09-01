@@ -129,5 +129,21 @@ add_executable(mesh_gen
 target_link_libraries(mesh_gen PRIVATE HorizonCore)
 target_include_directories(mesh_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── widget_gen.exe (generates the built-in component library) ────────────────
+# Same bargain as mesh_gen: widget_gen <out-dir> writes FormRowText/Card/
+# DialogFrame/… .hasset files (UI Widget) via ContentManager, byte-identical to
+# editor-authored ones. Run manually to (re)populate
+# EditorDeps/EngineContent/Widgets; the outputs are committed, so this is not
+# part of the normal build graph.
+#
+# A .hasset is a binary container: twelve of them checked in by hand would be
+# twelve blobs nobody can review or fix without opening the editor, and the
+# library is precisely what has to stay reviewable — every project inherits it.
+add_executable(widget_gen
+    src/WidgetGen/main.cpp
+)
+target_link_libraries(widget_gen PRIVATE HorizonCore)
+target_include_directories(widget_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.

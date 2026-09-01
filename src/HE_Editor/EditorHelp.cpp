@@ -1983,35 +1983,53 @@ namespace
 	  "underneath it, which is why you can rebuild the inside of this widget and "
 	  "every page that uses it keeps working. Rename it and the pages that set it "
 	  "fall back to the default, so rename early or not at all.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "Canvas/Element", "",
 	  "Which element inside this widget the parameter writes. Listed by the same "
 	  "names the hierarchy shows, so what you pick here is findable up there — "
 	  "which is a reason to name the element before exposing it.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "Canvas/Property", "",
 	  "Which of that element's properties the parameter sets. Only the ones the "
 	  "element really has are offered, and picking a different element clears this "
 	  "again: a parameter naming a property that is not there would write nothing "
 	  "at all, quietly.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "Canvas/Help", "",
 	  "One sentence, shown to whoever sets this parameter on a page. Worth writing "
 	  "for anything whose name does not already say it — the person setting it is "
 	  "looking at your component from the outside and cannot see what it does.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "Canvas/Add Parameter", "",
 	  "Adds a knob to this widget, pointed at whatever is selected. A widget with "
 	  "no parameters is a page: it can be embedded, but every copy of it looks "
 	  "exactly the same. One with parameters is a component — the same form row "
 	  "used twenty times with twenty different labels.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "UI Widget/Default", "",
 	  "Stops setting this parameter on this copy, so it shows whatever the widget "
 	  "itself was authored with. Not the same as clearing the field: an empty text "
 	  "box is a label that says nothing, this is a label that says what its "
 	  "component says.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "UI Widget/Parameters", "",
 	  "What the embedded widget lets this page set. Each row is a knob that widget "
 	  "declared for itself; what you see before touching one is the default it was "
@@ -2019,7 +2037,10 @@ namespace
 	  "the widget is created and not again — this is a starting state, not a live "
 	  "link, so anything that has to change while the app runs changes through a "
 	  "script.",
-	  "", "ui#components" },
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
 	{ "UI Widget/Line Spacing", "",
 	  "The gap between two LINES of a Wrap Box. Its own number beside Spacing, "
 	  "which is the gap between two items on the same line — a row of chips almost "
