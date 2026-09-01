@@ -146,6 +146,9 @@ add_executable(HorizonEditor WIN32
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
 	HcEditorUtil.cpp
+	HcRename.cpp
+	HcRenameSweep.cpp
+	HcRenameDialog.cpp
 	HcGraphClipboard.cpp
 	HcGraphHost.cpp
 	HcGraphShortcuts.cpp
@@ -172,6 +175,14 @@ add_executable(HorizonEditor WIN32
 	HcNodeDocs.cpp
 	HcNodeReference.cpp
 	EditorReference.cpp
+	# The guides — the third generated part of the manual. One file per content
+	# track under Guides/, so four sets of pages can be written without ever
+	# touching the same translation unit.
+	EditorGuides.cpp
+	Guides/GuidesFirstSteps.cpp
+	Guides/GuidesCharacter.cpp
+	Guides/GuidesWorld.cpp
+	Guides/GuidesShipping.cpp
 	PanelSpotlight.cpp
  "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ToolchainDialog.h" "ReportIssueDialog.h" "EditorDockState.h" "PlayReportPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 

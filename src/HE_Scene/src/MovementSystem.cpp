@@ -4,14 +4,51 @@
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/Components/CameraComponent.h"
+#include "HorizonScene/Components/CameraRigComponent.h"
+#include <Diagnostics/Logger.h>
 
 #include <algorithm>
 #include <cmath>
+
+namespace
+{
+// The yaw the main camera is looking along, for characters whose input is given
+// in camera space. Resolved ONCE per update rather than per character: it is one
+// question about the view, and asking it per entity would walk the camera view
+// as many times as there are movers.
+//
+// The MAIN camera's rig, because that is what "the camera" means in a game with
+// one view. A scene with two possessed characters would steer both by the same
+// yaw — split screen needs a rig per character to be a concept first, and it is
+// not one yet.
+//
+// Returns false when there is no main camera with a rig at all, which is a real
+// misconfiguration for a character that asked for camera-relative input and is
+// reported as one by the caller.
+bool mainCameraYaw(HorizonWorld& world, float& outYaw)
+{
+    auto& reg = world.registry();
+    bool found = false;
+    for (auto [e, cam, rig] : reg.view<CameraComponent, CameraRigComponent>().each())
+    {
+        if (!cam.isMain && found) continue;
+        outYaw = rig.yaw;
+        found  = true;
+        if (cam.isMain) return true;   // an explicit main camera wins outright
+    }
+    return found;   // else the only rig in the scene, which is the same thing
+}
+} // namespace
 
 void MovementSystem::update(HorizonWorld& world, PhysicsWorld* physics, float dt)
 {
     if (dt <= 0.0f) return;
     auto& reg = world.registry();
+
+    float cameraYaw     = 0.0f;
+    bool  haveCameraYaw = false;
+    bool  yawResolved   = false;   // asked lazily: most scenes have no camera-space mover
 
     for (auto [e, mv, t] : reg.view<MovementComponent, TransformComponent>().each())
     {
@@ -34,6 +71,39 @@ void MovementSystem::update(HorizonWorld& world, PhysicsWorld* physics, float dt
             // and only a stick pushed past 1 gets pulled back.
             planar = mv.moveInput / std::max(1.0f, inputLen) * mv.maxSpeed;
             planar.y = 0.0f;
+
+            // ── Camera space ─────────────────────────────────────────────────
+            // Turn the direction by the camera's yaw, so pushing forward walks
+            // where the view points instead of along the world's Z axis. Same
+            // rotation the rig applies to its own forward vector, so the two
+            // cannot disagree about which way "forward" is.
+            if (mv.moveSpace == MovementComponent::Space::Camera)
+            {
+                if (!yawResolved)
+                {
+                    haveCameraYaw = mainCameraYaw(world, cameraYaw);
+                    yawResolved   = true;
+                }
+                if (haveCameraYaw)
+                {
+                    const float r = glm::radians(cameraYaw);
+                    const float s = std::sin(r), c = std::cos(r);
+                    planar = glm::vec3(planar.x * c + planar.z * s,
+                                       0.0f,
+                                      -planar.x * s + planar.z * c);
+                }
+                else
+                {
+                    // Asked for a frame that does not exist. Silently falling
+                    // back to world would look exactly like the setting doing
+                    // nothing, which is the complaint this setting exists to
+                    // answer.
+                    HE_LOG_THROTTLE(Input, Warning, 5.0,
+                        "Entity %u: movement is set to Camera space but the scene has no main "
+                        "camera with a Camera Rig - moving in world space instead",
+                        static_cast<uint32_t>(e));
+                }
+            }
         }
 
         if (physics && reg.all_of<CharacterControllerComponent>(e))

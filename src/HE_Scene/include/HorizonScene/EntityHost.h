@@ -7,6 +7,8 @@
 #include <vector>
 
 class ContentManager;
+struct HorizonCodeClassAsset;
+class PhysicsWorld;
 
 // ── EntityHost ───────────────────────────────────────────────────────────────
 // Runs the HorizonCode classes that live ON scene entities — the Entity branch
@@ -33,6 +35,18 @@ public:
     // `runtime` and `world` must outlive this host's session.
     void begin(HorizonCode::Runtime& runtime, HorizonWorld& world, ContentManager& cm);
 
+    // The physics world spawned entities are given a body in (see spawn()).
+    // Nullable, and null is not fatal — the host simply spawns bodiless
+    // entities, which is what it did before it knew about physics at all.
+    //
+    // A BORROWED pointer the application owns, and deliberately NOT cleared by
+    // end(): begin() calls end() first, and both applications build the physics
+    // world BEFORE they start this host, so clearing it there would wipe the
+    // pointer that was just handed over. The application therefore sets it every
+    // time it replaces its physics world, and passes nullptr before destroying
+    // one — otherwise the next spawn writes into freed memory.
+    void setPhysicsWorld(PhysicsWorld* physics) { m_physics = physics; }
+
     // Bind every entity in `entities` that names a HorizonCode class — the
     // additive-zone counterpart of begin(), mirroring
     // ScriptContext::startScriptsFor. Without it a streamed-in zone's Entity
@@ -43,7 +57,11 @@ public:
     // Bind ONE already-existing entity to a class. Used by begin() and by
     // anything that adds a scripted entity mid-session. Returns 0 on failure
     // (no such asset, no graph). Fires Construct + BeginPlay.
-    HorizonCode::InstanceId bind(Entity entity, const std::string& classPath);
+    //
+    // classPath BY VALUE on purpose — see the note at the definition. Callers
+    // pass strings owned by content-manager assets, and binding loads assets,
+    // which moves them.
+    HorizonCode::InstanceId bind(Entity entity, std::string classPath);
 
     // Spawn a class that brings its OWN entity: instantiates the class asset's
     // component list (CHUNK_HCCP, a prefab-shaped subtree) into the world and
@@ -58,6 +76,14 @@ public:
     // graph's first frame already sees where it stands. Spawning and moving
     // afterwards was always possible (entity.owned + transform.setPosition); it
     // just runs BeginPlay at the wrong place.
+    //
+    // The new subtree is also given its PHYSICS here, before Construct and
+    // BeginPlay, when setPhysicsWorld() supplied a world. Same reason as the
+    // placement, one step further: the first line of game logic a spawned thing
+    // runs is routinely "am I grounded", "push me" or "what is under me", and
+    // until this existed every one of those answered against a bodiless world.
+    // The whole SUBTREE, not just the root — a PlayerCharacter arrives with
+    // child entities that carry colliders of their own.
     struct Spawned { HorizonCode::InstanceId instance = 0; Entity entity = entt::null; };
     Spawned spawn(const std::string& classPath, Entity parent = entt::null,
                   const float* position = nullptr, const float* rotationEuler = nullptr);
@@ -101,10 +127,27 @@ public:
     // for a base class with no body of its own (Object, PlayerController).
     static std::vector<uint8_t> defaultComponents(const std::string& baseClass);
 
+    // What a class actually spawns with: its OWN component list if it has one,
+    // else the nearest ancestor in its chain that has one, else the engine
+    // base's default list from above.
+    //
+    // One rule, in one place, because two things ask it and they were answering
+    // differently. The editor seeded a class's Components tab from the chain the
+    // first time the tab was opened — so a Player Character LOOKED furnished —
+    // while spawn() read only the stored blob, which stays empty until that tab
+    // has been opened AND saved. A class created in the Content Browser and
+    // spawned straight from a graph therefore arrived as a bare transform: no
+    // character controller, so Jump answered false; no movement component, so
+    // Move wrote nowhere; no camera, so nothing to look through. Nothing failed
+    // loudly enough to be noticed.
+    static std::vector<uint8_t> inheritedComponents(ContentManager& content,
+                                                    const HorizonCodeClassAsset& asset);
+
 private:
     HorizonCode::Runtime* m_runtime = nullptr;
     HorizonWorld*         m_world   = nullptr;
     ContentManager*       m_content = nullptr;
+    PhysicsWorld*         m_physics = nullptr;   // borrowed; see setPhysicsWorld
     Map                                                     m_byEntity;
     std::unordered_map<HorizonCode::InstanceId, uint32_t>   m_byInstance;
     // Reused per frame so the tick pass can iterate a snapshot without an

@@ -1,4 +1,5 @@
 #include "HcEditorUtil.h"
+#include "HcRename.h"         // one planner for what a rename touches
 #include <Types/TypeRegistry.h>
 #include "EditorHelp.h"       // Help::Scope — the shared default-value rows key their help here
 #include "EditorWidgets.h"    // danger buttons for deletion
@@ -906,6 +907,46 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 	}
 }
 
+void seedFunctionName(const HorizonCode::Node& entry, FnNameEdit& e)
+{
+	// Typing changes `buf` and nothing else, so `seed` still matches the node —
+	// which is exactly when the buffer must be left alone.
+	if (e.node == entry.id && e.seed == entry.s) return;
+	e.buf  = entry.s;
+	e.node = entry.id;
+	e.seed = entry.s;
+}
+
+bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e,
+                        const std::string& selfKey)
+{
+	const std::string oldName = entry.s;
+	if (e.buf == oldName) return false;
+
+	// An empty name on either side is not a name, it is the absence of one, and
+	// matching on it would sweep up every call that has picked no function yet.
+	if (oldName.empty() || e.buf.empty())
+	{
+		entry.s = e.buf;
+	}
+	else
+	{
+		// One planner decides what a rename touches, here and in the sweep over
+		// the rest of the project — including this graph's own Call Function (Ref)
+		// nodes pointed back at itself through a Get Self.
+		const HcRename::Target t{ selfKey, HcRename::Member::Function, oldName, e.buf };
+		const HcRename::Plan p = HcRename::planGraph(g, HcRename::Role::Declares, { selfKey },
+		                                             selfKey, {}, t);
+		HcRename::apply(g, p, t);
+	}
+
+	// The field goes on showing what it just committed instead of being re-seeded
+	// from the node it changed.
+	e.node = entry.id;
+	e.seed = entry.s;
+	return true;
+}
+
 bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret)
 {
 	using namespace HorizonCode;
@@ -1580,6 +1621,19 @@ namespace
 		outDesc = s.dataIns[di];
 		return di;
 	}
+
+	// Is this data-in the Target pin of an engine row that stands in the caller
+	// for it when it is left empty? The registry is asked rather than a list kept
+	// here — the rule is set in ONE post-pass over the table (EngineApi.cpp), and
+	// a second list here is how the editor would come to disagree with the engine
+	// about which nodes have it.
+	bool pinDefaultsToSelf(const HorizonCode::Node& n, int dataInIndex)
+	{
+		if (n.type != HorizonCode::NodeType::EngineCall || dataInIndex < 0) return false;
+		const HE::api::ApiFn* fn = HE::api::find(n.s);
+		return fn && dataInIndex < (int)fn->params.size() &&
+		       fn->params[(size_t)dataInIndex].selfDefault;
+	}
 }
 
 bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin)
@@ -1598,6 +1652,22 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
 	HorizonCode::PinDesc pd{};
 	const int di = dataInIndexOf(n, unifiedPin, pd);
 	if (di < 0) return;
+	// The Target pin of a character verb. A number box here was never any use:
+	// entity ids are minted at run time and differ between two starts of the same
+	// scene, so no literal an author can type into it is ever the right one — you
+	// wire it, or you mean yourself. So the pin says which of the two it is doing
+	// instead of offering a zero to drag.
+	// A literal someone did type stays visible and editable — hiding a value that
+	// is still being used would be the worse half of this.
+	if (pinDefaultsToSelf(n, di) &&
+	    (n.pinDefaults.find(di) == n.pinDefaults.end() || n.pinDefaults[di].i == 0))
+	{
+		ImGui::TextDisabled("Self");
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Empty means the entity this object sits on.\n"
+			                  "Wire another entity in to act on that one instead.");
+		return;
+	}
 	// The stored default keeps the PIN's type (retypes re-seed on next edit).
 	V& v = n.pinDefaults[di];
 	if (v.type != pd.type) { v = V{}; v.type = pd.type; }

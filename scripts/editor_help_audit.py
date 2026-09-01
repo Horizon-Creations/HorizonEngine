@@ -72,6 +72,11 @@ IGNORE = {
     # test in tests/test_editor_help.cpp instead.
     (None, "Show me"), (None, "Start"), (None, "Online"),
     ("Documentation", "Open the manual online"),
+    # The one literal entry in the Target Class dropdown (the others are asset
+    # names, built at run time and invisible here). It is not a control with an
+    # explanation of its own: "HorizonCode Node/Target Class" is the entry, and it
+    # explains "From the wire" by name.
+    ("HorizonCode Node", "From the wire"),
 }
 
 # Top-level menu titles. A menu opens when you touch it, which is the whole

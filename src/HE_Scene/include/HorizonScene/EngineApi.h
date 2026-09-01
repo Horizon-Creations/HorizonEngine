@@ -76,12 +76,43 @@ struct Ctx
     // an ordinary state, like every null handle above — app::quit then says so
     // and does nothing.
     std::function<void()> requestQuit;
-    // The host's WINDOW, as the three things a script may do to it. Callbacks
-    // for the same reason requestQuit is one: HE_Scene cannot reach an
-    // HE::Application, and the answer differs per host (a packaged app owns its
-    // window outright; the editor must not let a previewed graph resize the
-    // editor). Unset = the row logs once and does nothing, like every other
-    // unbound service here.
+    // How the host makes an OBJECT of a HorizonCode class — the same service the
+    // built-in Create Object / Destroy Object nodes go through
+    // (HorizonCode::Runtime::Services), so the text languages reach exactly what
+    // a graph reaches. A callback rather than a handle for requestQuit's reason
+    // (HE_Scene has no Application to ask) and, more importantly, because the
+    // host does MORE than EntityHost::spawn: it resolves the class's engine base
+    // (a class deriving from an Entity class is one), sends only Entity classes
+    // through EntityHost, and registers a PlayerCharacter with the PlayerHost —
+    // the only point at which the PlayerHost can learn a character exists, and
+    // without it a project with no controller loses its input. Reaching past
+    // this callback into EntityHost would skip all three.
+    //
+    // position/rotationEuler are 3 floats each, or nullptr for "place it as the
+    // class authored it". A zero vector is NOT the same thing — that distinction
+    // is what keeps every graph with an unwired Location pin spawning where it
+    // always did (see HorizonCode::Context::createObject). Rotation is Euler
+    // DEGREES.
+    //
+    // Unset is an ordinary state, like requestQuit above: entity::spawnClass
+    // then logs and returns 0.
+    //
+    // New members still go at the END: the two applications build their Ctx by
+    // positional aggregate init. The script frontends no longer do — they assign
+    // member by member through one apiCtx() builder each, which is what stopped
+    // them shipping a Ctx with half its fields defaulted (eleven audio rows and
+    // every runtime row were silently dead from Lua and Python because five call
+    // sites each filled in the first three members and left the rest).
+    std::function<uint32_t(const std::string& classPath, const float* position,
+                           const float* rotationEuler)> createObject;
+    std::function<void(uint32_t objectId)> destroyObject;
+
+    // The host's WINDOW, as the three things a script may do to it, plus one for
+    // the frame. Callbacks for the same reason requestQuit is one: HE_Scene
+    // cannot reach an HE::Application, and the answer differs per host (a
+    // packaged app owns its window outright; the editor must not let a previewed
+    // graph resize the editor). Unset = the row logs once and does nothing, like
+    // every other unbound service here.
     std::function<void(const std::string&)>   setWindowTitle;
     std::function<void(uint32_t, uint32_t)>   setWindowSize;
     std::function<glm::vec2()>                windowSize;
@@ -102,6 +133,64 @@ namespace entity {
     float       distance(Ctx&, Entity a, Entity b);                   // -1 if either invalid
     Entity      findByName(Ctx&, const std::string& name);            // first match, 0 if none
     bool        exists(Ctx&, Entity e);
+    // ── Spawning a CLASS: the furnished entity ───────────────────────────────
+    // spawn() above makes a BARE entity — a name and a transform, nothing else.
+    // These make what a game actually spawns: a projectile that arrives with
+    // its mesh, its collider, its rigid body and its logic already running,
+    // because an author furnished the class in the editor. They instantiate a
+    // HorizonCode class through the host's Create Object service
+    // (Ctx::createObject — see there for why it is not EntityHost directly).
+    // Components, placement, physics and the logic binding all happen BEFORE
+    // the class's Construct and BeginPlay run; EntityHost::spawn documents why
+    // that order is not negotiable.
+    //
+    // They return the ENTITY, because that is what every other row here takes:
+    // a spawn can be moved, pushed and read in the next statement. The way back
+    // to the HorizonCode OBJECT — for Call Function, Bind Event or a Cast — is
+    // entity.instance.
+    //
+    // SPACE: x/y/z is where the entity ends up, full stop. Both hosts spawn a
+    // class UNPARENTED, so the pose written into its transform is a world pose
+    // and there is no parent for "local" to be relative to. (The rule the rest
+    // of this API obeys — a position paired with an ENTITY is local unless the
+    // name says World — is about entities that already sit somewhere in a
+    // hierarchy. A spawn does not yet.) Rotation is Euler DEGREES.
+    // spawnClass leaves the rotation the class authored, spawnClassRotated
+    // states both — which is also why there are two functions rather than one
+    // with optional arguments: "as authored" and "zero degrees" are different
+    // requests, and a defaulted 0,0,0 could not tell them apart.
+    //
+    // 0 = nothing spawned, and every way of getting there is logged: no host
+    // service bound, an unknown class, or a class that is not an Entity class
+    // (a plain Object has no entity to hand back — Create Object is the node
+    // for those, and one created that way here is destroyed again rather than
+    // left alive with nothing able to name it).
+    Entity spawnClass(Ctx&, const std::string& classPath, float x, float y, float z);
+    Entity spawnClassRotated(Ctx&, const std::string& classPath,
+                             float x, float y, float z,
+                             float rx, float ry, float rz);
+    // Destroy a spawned OBJECT by its reference: the class instance, the entity
+    // under it and that entity's physics bodies (the host's destroyObject owns
+    // that teardown — see EditorApplication/GameApplication). The built-in
+    // Destroy Object node calls the same service; this row is how Lua, Python
+    // and generated C++ reach it.
+    //
+    // entity.destroy is the other half of the pair and NOT a synonym: it takes
+    // an entity and removes it, after which EntityHost reaps the orphaned
+    // instance on its next tick. Destroying the object is the direct route when
+    // a reference is what you are holding.
+    void destroyObject(Ctx&, uint32_t objectRef);
+    // Deliberately NOT here: a general entity.addComponent. It reads like the
+    // obvious companion to spawn(), and the game-readiness audit asks for it, so
+    // this says why it is absent rather than overlooked. It needs two things
+    // this API has no place for yet: a component TYPE registry (name → emplace,
+    // for every component type the engine has), and a per-type way to hand over
+    // parameters — a mesh component needs its asset, a rigid body its mass and
+    // motion type, a light its colour and range. That is a project of its own,
+    // with the component reflection the editor's Details panel already wants.
+    // Meanwhile the case it would serve ("spawn a projectile that has a mesh
+    // and a body") is what spawnClass covers, from a class an author furnished
+    // once instead of a call site assembling it piece by piece every time.
     // ── which entity a HorizonCode object sits on ────────────────────────────
     // An Entity-class instance is BOUND to a scene entity by EntityHost; these
     // are how a graph gets from itself (or from another object reference) to
@@ -139,8 +228,28 @@ namespace entity {
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────
 namespace transform {
     glm::vec3 getPosition(Ctx&, Entity e);                    // default (0,0,0)
+    // Sets the LOCAL position — the exact value getPosition reads back, and for
+    // a child the offset inside its parent — and TELEPORTS an entity that has a
+    // physics representation to the world position that local one puts it at.
+    //
+    // Both halves are needed: the physics step writes Jolt's pose back over
+    // TransformComponent every frame, so a plain transform write on a body or a
+    // character was undone within the same frame and looked like nothing
+    // happened. Physics deals in world poses only, so the local→world conversion
+    // happens on the way there — nothing else in this API asks the caller to
+    // think about it. Velocity is kept; physics.setPositionAndReset is the call
+    // that says otherwise.
+    //
+    // This is the ONE teleport: the flat script bindings (horizon.setPosition in
+    // Lua and Python) route through here rather than writing the transform, so
+    // "set the position" means the same thing in every language.
     void      setPosition(Ctx&, Entity e, const glm::vec3& p);
     glm::vec3 getRotation(Ctx&, Entity e);                    // default (0,0,0)
+    // Sets the LOCAL rotation and teleports a physics entity for the same reason
+    // setPosition does — the step writes Jolt's orientation back too, so a turned
+    // body used to snap back within the frame. The entity's own position and its
+    // velocity are left as they are, and the Euler triple that comes back out of
+    // getRotation is the one passed in.
     void      setRotation(Ctx&, Entity e, const glm::vec3& r);
     glm::vec3 getScale(Ctx&, Entity e);                       // default (1,1,1)
     void      setScale(Ctx&, Entity e, const glm::vec3& s);
@@ -158,6 +267,15 @@ namespace transform {
     // than reading TransformComponent::worldMatrix — see TransformHierarchy.h
     // for why that cached matrix is not trustworthy from gameplay code.
     glm::vec3 getWorldPosition(Ctx&, Entity e);               // default (0,0,0)
+    // Puts the entity AT `p`, whatever its parents do, and teleports a physics
+    // entity there for the same reason setPosition does.
+    //
+    // One conversion per side, not a detour through setPosition: the transform
+    // gets `p` with the parent's offset removed, physics gets `p` unchanged
+    // (physics already speaks world). Converting to local and back through the
+    // local setter would be the same value twice through a matrix and its
+    // inverse — and this is the one call whose entire job is landing a parented
+    // entity exactly where the caller said.
     void      setWorldPosition(Ctx&, Entity e, const glm::vec3& p);
 }
 
@@ -202,6 +320,47 @@ namespace physics {
     glm::vec3  getVelocity(Ctx&, Entity e);
     bool       isGrounded(Ctx&, Entity e);
 
+    // TELEPORT — where the entity IS, not a push towards it. Both write Jolt
+    // directly and mirror the value into the transform in the same call, so the
+    // camera, the render extraction and every script that reads the position
+    // afterwards see one pose instead of the old one until the next step.
+    // Nothing sweeps on the way: a target inside geometry stays inside it.
+    //
+    // `position` is LOCAL, exactly like transform.setPosition's — a deliberate
+    // decision, because the two are documented below as the same operation
+    // reached from two directions, and one of them meaning something else for
+    // parented entities would make that sentence a trap. The rule for this whole
+    // API is: a position paired with an ENTITY is local unless the name says
+    // World. (PhysicsWorld underneath speaks world poses only; the conversion
+    // lives in EngineApi.cpp, at the one boundary that knows both.)
+    //
+    // The gap that leaves, named rather than hidden: raycast/sphereCast report
+    // WORLD points, so "teleport onto what I hit" needs
+    // transform.setWorldPosition for a parented entity. There is no world+reset
+    // variant — a graph that needs both writes the world position first and
+    // stops the linear velocity with setVelocity(0) (which is less than
+    // ...AndReset does: that one zeroes the angular velocity as well).
+    //
+    // Rotation is left alone, and the character controller wins over the rigid
+    // body when an entity has both — the full argument for both rules lives on
+    // PhysicsWorld::setPosition.
+    //
+    // ...AndReset zeroes the velocity as well, which is what a respawn wants: a
+    // player put back at a checkpoint should not arrive carrying the fall that
+    // killed them.
+    //
+    // Both answer false (and log) for an entity with no body and no character.
+    // transform.setPosition is the call for those — and it performs this same
+    // teleport, from the same local position, for the entities that do have
+    // physics, so a graph that only ever moves things one way keeps working.
+    bool setPosition(Ctx&, Entity e, const glm::vec3& position);
+    bool setPositionAndReset(Ctx&, Entity e, const glm::vec3& position);
+
+    // Does this entity have a body or a character controller at all? The guard
+    // to ask before pushing, and the one honest answer to "why did my impulse do
+    // nothing" — false without a PhysicsWorld too.
+    bool hasPhysics(Ctx&, Entity e);
+
     // World gravity in m/s². Rigid bodies only — a character controller falls
     // by its own component's gravity value.
     void      setGravity(Ctx&, const glm::vec3& g);
@@ -221,6 +380,35 @@ namespace animator {
     void        setParam(Ctx&, Entity e, const std::string& name, float value);
     float       getParam(Ctx&, Entity e, const std::string& name);   // 0 when unset
     std::string getState(Ctx&, Entity e);                            // "" when none
+}
+
+// ── Particles: firing an effect ──────────────────────────────────────────────
+// A Particle System component used to have one control, an inspector checkbox
+// that could turn it OFF. Nothing could turn one on, nothing could fire one, and
+// a non-looping emitter shut itself down before its first particle existed — so
+// there was no muzzle flash, no impact dust and no explosion in the engine, only
+// scenery that had been running since the scene loaded.
+//
+// The intended shape of a hit effect is a spawned one: a class carrying a
+// non-looping emitter with `destroyWhenFinished`, created at the impact point
+// with Spawn Class. It plays and then takes its own entity with it, so a graph
+// firing a hundred of them leaks nothing and counts nothing down by hand.
+namespace particle {
+    // Fire (or re-fire) the emitter from the start. A one-shot that has already
+    // run needs this to run again — it is a restart, not a resume.
+    void play(Ctx&, Entity e);
+    // Emit nothing more; the particles already out live their lifetime. NOT the
+    // same as hiding it (which keeps it simulating) or clearing `playing` (which
+    // would freeze the cloud where it is).
+    void stop(Ctx&, Entity e);
+    // Whether the emitter is still running — either still emitting, or with
+    // particles still alive. False once a one-shot has completely finished.
+    bool isPlaying(Ctx&, Entity e);
+    // `count` particles at once, ignoring the emit rate. Answers how many were
+    // actually made: the emitter's maxParticles is a real cap, and a burst that
+    // silently produced eight of the thirty asked for would be unexplainable
+    // from the graph.
+    int  burst(Ctx&, Entity e, int count);
 }
 
 // ── Movement: what a character is doing ──────────────────────────────────────
@@ -253,6 +441,88 @@ namespace locomotion {
     void look(Ctx&, Entity e, float yawDegrees, float pitchDegrees);
     void setMaxSpeed(Ctx&, Entity e, float metresPerSecond);
     void setOrientToMovement(Ctx&, Entity e, bool on);
+    // Leave the ground. The grounded test and the jump both read the character
+    // controller's own state, so `if movement.isGrounded then locomotion.jump()`
+    // can never disagree with the engine — which is why there is no second
+    // "canJump" row: the one that already exists IS the answer.
+    //
+    // Returns whether the character actually left the ground, so
+    // `if (jump()) playSound()` does the obvious thing. False mid-air is an
+    // ORDINARY answer and stays silent: a player holds the button, and a warning
+    // per frame would bury the log. Only a call with nothing to act on — no
+    // character controller on the entity — says so.
+    //
+    // jump() takes the speed the author tuned on the component
+    // (CharacterControllerComponent::jumpSpeed); jumpWith() overrides it for the
+    // one call, which is what a charged jump or a low hop through a gap needs.
+    bool jump(Ctx&, Entity e);
+    bool jumpWith(Ctx&, Entity e, float metresPerSecond);
+}
+
+// ── Navigation: sending an agent across the NavMesh ──────────────────────────
+// The whole script surface of the pathfinder. Until these rows existed, an
+// author could bake a NavMesh in the editor and then had exactly two ImGui
+// buttons to start an agent with — nothing in Lua, Python or HorizonCode, and
+// so no reactive AI of any kind and nothing moving at all in a packaged game.
+//
+// Every row addresses the entity's NavAgentComponent; NavigationSystem does the
+// walking, and it steers a character controller rather than writing the
+// transform, so an agent collides and falls like the player does.
+//
+// SPACE — decided here, once, for the whole group: a nav target is a WORLD
+// position. That is a NAMED EXCEPTION to this API's otherwise universal rule
+// that a position paired with an ENTITY is local unless the name says World, and
+// it is deliberate: the NavMesh is baked in world space and hands its waypoints
+// back in world space, so a point on it has nothing whatever to do with the
+// agent's parent. Rebasing a destination onto whatever the agent happens to be
+// parented to would send it somewhere nobody asked for, and every source a
+// destination realistically comes from — another entity's world position, a
+// raycast hit, a patrol marker — is already world. (entity.spawnClass carries
+// the same exception for the same kind of reason.) The row is `moveTo` and not
+// `moveToWorld` because the suffix exists to separate a world row from a LOCAL
+// twin, and this group has none to be confused with: there is exactly one way to
+// name a nav destination. This paragraph is what the suffix would have said.
+//
+// Nothing here is silent about a missing service: no agent component, no baked
+// NavMesh, no route — each says which, throttled, because these are polled every
+// frame and the failure that reads as "navigation is broken" is the one that
+// said nothing.
+namespace nav {
+    // Plan a route to a WORLD point and start walking it. The search happens in
+    // this call, not on the next tick, so the answer is a real one: false (and a
+    // log line saying which) when the entity has no NavAgentComponent, when the
+    // scene has no baked NavMesh, when either end is off it, or when no route
+    // connects them. An author branches on that and barks instead of watching an
+    // NPC stand still wondering why.
+    //
+    // A false answer leaves the agent STOPPED, and its targetPos set to the place
+    // it could not reach — an NPC told to go somewhere new must not keep walking
+    // to the old place as if nothing had been said, and the destination on record
+    // is what the Inspector then shows the author.
+    bool  moveTo(Ctx&, Entity e, float x, float y, float z);   // x/y/z are WORLD
+    // Give up the current route. The agent stops where it stands; whatever
+    // velocity NavigationSystem was writing is unwound by NavigationSystem on its
+    // next tick, so a stopped agent does not glide on.
+    void  stop(Ctx&, Entity e);
+    bool  isMoving(Ctx&, Entity e);
+    // Is there a route to follow? NOT the same question as isMoving, and the pair
+    // is how "walking" is told apart from "was sent somewhere it cannot reach":
+    // isMoving is the order that was given, this is whether there turned out to
+    // be a way.
+    bool  hasPath(Ctx&, Entity e);
+    // Metres left along the remaining waypoints (not the straight line to the
+    // target — a route around a wall is longer than the crow flies). -1 when
+    // there is no path to measure, which is a different answer from 0: 0 is
+    // arrival.
+    float remainingDistance(Ctx&, Entity e);
+    // Walking speed in m/s. Per agent, so a fleeing NPC and a patrolling one
+    // share a class and not a pace. Negative is clamped to 0.
+    void  setSpeed(Ctx&, Entity e, float metresPerSecond);
+    // Deliberately NOT here yet: a random reachable point in a radius, which is
+    // what a patrol or a wander behaviour actually wants ("go somewhere near
+    // here, forever"). It needs a Detour query of its own on NavigationSystem
+    // (dtNavMeshQuery::findRandomPointAroundCircle) rather than a rearrangement
+    // of these rows, so it is named as the next step instead of guessed at here.
 }
 
 // ── Materials (node-graph param by name) ─────────────────────────────────────
@@ -725,6 +995,11 @@ namespace scene {
     std::vector<int>         loadedZones();
     std::string              zoneScene(int zone);            // "" unknown
     glm::vec3                zonePosition(Ctx&, int zone);   // the zone root's position
+    // Moves the zone root, then REBUILDS the zone's physics bodies from where
+    // their entities now are: a body is baked once and nothing re-derives it
+    // when an ancestor moves, so without the rebuild a moved zone would render
+    // at its new place and collide at its old one. Costs the velocity of any
+    // dynamic body in the zone — the rebuild tears the old one down first.
     void                     setZonePosition(Ctx&, int zone, const glm::vec3& p); // move the whole zone
     void                     setZoneVisible(Ctx&, int zone, bool visible);        // flip its meshes
     // Every scene the game can load: the packed scene index in shipped builds,
@@ -983,7 +1258,21 @@ namespace input {
 // codegen emits the generic `hc::callApi(ctx, "<id>", …)` thunk, which lands on
 // the same `invoke`. This is the single source of truth.
 
-struct ApiParam { const char* name; PinType type; bool isArray = false; };
+struct ApiParam
+{
+    const char* name;
+    PinType     type;
+    bool        isArray = false;
+    // "Left at 0, this parameter means the caller itself." True for the leading
+    // `entity` of every row that acts ON an entity — set in a post-pass when the
+    // table is built (see registry()), never by hand at a row, so the rule cannot
+    // be true for one character verb and forgotten at the next.
+    //
+    // Two readers besides the dispatcher: the graph editor draws such a pin as
+    // "Self" instead of a zero, and the generated node reference says so in
+    // words. Both ask this flag rather than keeping their own list.
+    bool        selfDefault = false;
+};
 
 struct ApiFn
 {

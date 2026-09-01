@@ -169,7 +169,7 @@ while [ "$BFS_IDX" -lt "${#BFS_ITEMS[@]}" ]; do
     done < <(otool -L "$CUR" 2>/dev/null | tail -n +2 | awk '{print $1}')
 done
 
-# ─── 6. Resources (Fonts + Images + EngineContent + Game runtime + cmake) ─────
+# ─── 6. Resources (Fonts + Images + Docs + EngineContent + Game runtime + cmake) ─
 # SDL_GetBasePath() returns Contents/Resources/ for a bundled .app, so everything the
 # editor loads at runtime — AND the game runtime it copies when EXPORTING a game —
 # must live here. The flat deploy in $DEPLOY_DIR holds the built game runtime + the
@@ -178,6 +178,13 @@ echo "--> Copying resources to Contents/Resources/ ..."
 EDITOR_DEPS="$SOURCE_DIR/EditorDeps"
 [ -d "$EDITOR_DEPS/Fonts"         ] && cp -R "$EDITOR_DEPS/Fonts"         "$RES_PATH/"
 [ -d "$EDITOR_DEPS/Images"        ] && cp -R "$EDITOR_DEPS/Images"        "$RES_PATH/"
+# Docs: the manual the in-editor reader shows offline (Docs/he-docs.json plus its
+# figures in Docs/img). Docs::bundlePath() looks for <base>/Docs/he-docs.json, and
+# <base> is Contents/Resources for a bundled .app. Left out until now, so Help ▸
+# Documentation in a packaged macOS editor opened an empty reader — the flat
+# deploys on Windows and Linux never showed it, because the build copies the whole
+# of EditorDeps/ next to the exe and only this packager picks resources by hand.
+[ -d "$EDITOR_DEPS/Docs"          ] && cp -R "$EDITOR_DEPS/Docs"          "$RES_PATH/"
 # EngineContent: the engine's read-only default assets (primitives, default material,
 # fonts, …) the editor loads relative to its base path. Missing it → broken editor.
 [ -d "$EDITOR_DEPS/EngineContent" ] && cp -R "$EDITOR_DEPS/EngineContent" "$RES_PATH/"
@@ -306,6 +313,33 @@ if [ "$VERIFY_FAIL" -eq 1 ]; then
     echo "    WARNING: absolute paths remain — app may not run on other machines."
 else
     echo "    OK — all references are system libs or @rpath-relative."
+fi
+
+# ─── 10b. Verify: the resources the editor loads at run time are in there ─────
+# Section 6 picks resources BY NAME, so anything added to EditorDeps/ later is
+# simply not in the bundle — and nothing says so. That is how the manual shipped
+# missing: the editor starts, the reader opens, and it is empty. Every path here
+# is one the editor asks for relative to SDL_GetBasePath(); a new one belongs in
+# this list the same day it is added to section 6.
+echo "--> Verifying resources..."
+RES_FAIL=0
+for want in \
+    "Fonts" \
+    "Images/HC_Logo.png" \
+    "Docs/he-docs.json" \
+    "Docs/img" \
+    "EngineContent"
+do
+    if [ -e "$RES_PATH/$want" ]; then
+        echo "    ok   Resources/$want"
+    else
+        echo "    MISSING Resources/$want"
+        RES_FAIL=1
+    fi
+done
+if [ "$RES_FAIL" -eq 1 ]; then
+    echo "    WARNING: the app is missing content the editor loads at run time."
+    echo "             Check EditorDeps/ in the source tree and section 6 above."
 fi
 
 # ─── 11. Code sign (ad-hoc) ───────────────────────────────────────────────────

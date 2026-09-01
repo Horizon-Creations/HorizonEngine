@@ -7,6 +7,7 @@
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "HcEditorUtil.h"
+#include "HcRenameDialog.h"     // "that rename reaches other files"
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
@@ -26,6 +27,10 @@
 #include "PreviewPick.h"              // click-to-select in an offscreen 3D pane
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+// The collider outline and the click box measure the shapes whose geometry is
+// the entity's own, so they read the two components that carry it.
+#include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/LODComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HcClassResolve.h>
 #include <ContentManager/ContentManager.h>
@@ -109,6 +114,8 @@ struct LSState
 	std::string varNameErrorName;
 	std::string evtNameEdit;        // scratch buffer for a custom Event name (uniqueness)
 	int         evtNameEditFor = 0;
+	// …and for a function's name, which its Call/Return nodes are renamed with.
+	HcEditorUtil::FnNameEdit fnNameEdit;
 	std::string dropVar;            // variable dragged onto the canvas
 	bool        openVarDrop = false;
 	// In-editor compile check (the Compile button): the last result for the
@@ -773,6 +780,32 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 // bind), the Lua/Python wording on FunctionEntry, the unnamed-function filter on
 // FunctionCall, and the "script" wording on Bind/Emit Event.
 // HcGraphHost::drawCommonNodeDetails lists the same split from the other side.
+// A rename that just happened in one of these graphs and still has to be offered
+// to the rest of the project. The details rows have no AppContext — they are
+// reached through drawGraphBody, which is given a ContentManager and nothing
+// else — so the rename is parked here and picked up by the panel entry points,
+// which do. Consumed the same frame; never more than one rename per frame,
+// because a rename takes an InputText losing focus.
+HcRename::Target s_pendingRename;
+
+bool takePendingRename(HcRename::Target& out)
+{
+	if (s_pendingRename.oldName.empty()) return false;
+	out = s_pendingRename;
+	s_pendingRename = {};
+	return true;
+}
+
+// Offer it to the rest of the project. Called at the end of each panel entry
+// point — after ImGui::End(), because the dialog is a modal and must not open
+// inside somebody else's window.
+void raisePendingRename(AppContext& ctx)
+{
+	HcRename::Target t;
+	if (takePendingRename(t))
+		HcRenameDialog::requestAfterRename(ctx, t, { t.classKey });
+}
+
 // `derivable` = this graph belongs to a CLASS asset, i.e. something another
 // class can derive from. Only there does "Overridable" mean anything.
 void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
@@ -868,16 +901,25 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	}
 	case NT::FunctionEntry:
 	{
-		std::string oldName = n->s;
-		ImGui::InputText("Name", &n->s);
+		// Through a scratch buffer, so the Call + Return nodes can be renamed with
+		// it: InputText writes into the node per keystroke, so a name read here at
+		// the top of the frame is already the NEW one by the time the edit ends.
+		// See HcEditorUtil::seedFunctionName.
+		HcEditorUtil::seedFunctionName(*n, g.fnNameEdit);
+		ImGui::InputText("Name", &g.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
 		if (ImGui::IsItemDeactivatedAfterEdit())
 		{
-			if (!n->s.empty() && n->s != oldName)
-				for (auto& c : graph.nodes)
-					if ((c.type == NT::FunctionCall || c.type == NT::FunctionReturn) && c.s == oldName)
-						c.s = n->s;
-			edited = true;
+			const std::string before = n->s;
+			if (HcEditorUtil::commitFunctionName(graph, *n, g.fnNameEdit, g.graphFor))
+			{
+				edited = true;
+				// This graph is renamed; the rest of the project is OFFERED, not
+				// rewritten behind the user's back. Parked rather than raised here
+				// because that needs the AppContext this row does not have — see
+				// takePendingRename.
+				s_pendingRename = { g.graphFor, HcRename::Member::Function, before, n->s };
+			}
 		}
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "public\0private\0"))
@@ -944,6 +986,9 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	host.content      = content;
 	host.giGraph      = giGraph;
 	host.selfBaseClass = baseClass;
+	// What a Get Self resolves to — the same key the cross-asset rename uses, so
+	// the Target Class row can name this graph instead of shrugging at it.
+	host.selfKey      = g.graphFor;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (g.compileHas && !g.compileOk) ? g.compileNode : 0;
 	host.title        = [](const HC::Node& n){ return nodeTitle(n); };
@@ -1357,6 +1402,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
 	}
 	ImGui::End();
+	raisePendingRename(ctx);
 }
 
 void LevelScriptPanel::forgetAllGraphContexts()
@@ -1387,6 +1433,7 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 		if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
 	}
 	ImGui::End();
+	raisePendingRename(ctx);
 }
 
 // ── HorizonCode Class tab (a standalone .hasset graph) ────────────────────────
@@ -1519,16 +1566,19 @@ void ensureComponentWorld(ClassState& st, const std::vector<uint8_t>& blob)
 	// An empty class seeds from what it INHERITS: its nearest ancestor's body
 	// if it derives from a class, else the engine base's default list. That is
 	// what makes a Goblin start out looking like an Enemy.
+	//
+	// Asked of EntityHost::inheritedComponents rather than worked out here, and
+	// that is the point of the call: this panel and spawn() have to agree about
+	// what a class starts with. They did not — a class whose tab had never been
+	// opened looked furnished here and spawned bare in the game — and two copies
+	// of the rule is how they came to disagree.
 	std::vector<uint8_t> inherited;
-	if (blob.empty())
-	{
-		if (!st.ancestors.empty() && st.contentForSeed)
-			if (const HorizonCodeClassAsset* parent =
-			        st.contentForSeed->getHorizonCodeClass(
-			            st.contentForSeed->loadAsset(st.ancestors.front())))
-				inherited = parent->componentBlob;
-		if (inherited.empty()) inherited = EntityHost::defaultComponents(st.engineBase);
-	}
+	if (blob.empty() && st.contentForSeed)
+		if (const HorizonCodeClassAsset* self =
+		        st.contentForSeed->getHorizonCodeClass(st.assetId))
+			inherited = EntityHost::inheritedComponents(*st.contentForSeed, *self);
+	if (blob.empty() && inherited.empty())
+		inherited = EntityHost::defaultComponents(st.engineBase);
 	const std::vector<uint8_t>& seed = blob.empty() ? inherited : blob;
 	if (!seed.empty())
 		st.compRoot = ser.instantiatePrefab(*st.compWorld, seed);
@@ -1585,9 +1635,74 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 // rather than being rebuilt here: the framing depends on GPU-side bounds only
 // the renderer has, and a copy of that rule would drift into looking like a
 // wrong collider.
+//
+// `content` is nullable — with no ContentManager the mesh-sourced shapes fall
+// back to the authored box, which is the same thing physics does with them.
+// Declared here and defined past the two helpers it needs.
 void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
                        const std::string& focus,
-                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize)
+                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize,
+                       ContentManager* content);
+
+// Defined below; the collider outline needs it for the shapes whose geometry is
+// the entity's mesh rather than the collider's own numbers.
+const HE::AABB* previewMeshBounds(ContentManager& cm, const HE::UUID& id);
+
+// Local-space bounds of the three shapes that take their geometry FROM THE
+// ENTITY (Mesh, Convex Hull, Height Field) — false when the source is not there
+// to measure. Min and max, not half extents: a mesh's bounds need not straddle
+// the entity's origin, and centring them would move the outline off the model.
+//
+// Both the outline and the click box need this, and they need the same answer:
+// before the runtime shapes existed everything non-Box was drawn as a capsule
+// and picked as a sphere of `radius`, so a mesh collider got an outline and a
+// focus box that had nothing to do with the geometry physics builds. `radius`
+// and `halfExtents` are not even read for these shapes (ColliderComponent
+// spells that out), which is why guessing from them could not be right.
+//
+// The mesh precedence is PhysicsWorld's own (colliderSourceMesh): the
+// MeshComponent's asset, overridden by LOD level 0. Drawing the bounds rather
+// than the hull is deliberate — the true silhouette needs the cooked shape Jolt
+// builds, which does not exist until play, and a bounding box is what both
+// failed mesh branches fall back to anyway.
+bool colliderSourceBounds(const entt::registry& reg, Entity e,
+                          const ColliderComponent& col, ContentManager* content,
+                          glm::vec3& outMin, glm::vec3& outMax)
+{
+	if (col.shape == ColliderShape::HeightField)
+	{
+		const auto* tc = reg.try_get<TerrainComponent>(e);
+		if (!tc) return false;
+		// The landscape's FOOTPRINT, centred like buildHeightFieldShape's offset
+		// of (-sizeX/2, 0, -sizeZ/2). Vertical extent is the noise envelope
+		// (±heightScale) rather than the real surface: the true min/max means
+		// scanning up to a million samples, which is not something an overlay
+		// redrawn every frame gets to do. A sculpted terrain can therefore poke
+		// out of this box — it is a handle to grab, not a collision proxy.
+		outMin = { -tc->sizeX * 0.5f, -tc->heightScale, -tc->sizeZ * 0.5f };
+		outMax = {  tc->sizeX * 0.5f,  tc->heightScale,  tc->sizeZ * 0.5f };
+		return true;
+	}
+	if (col.shape != ColliderShape::Mesh && col.shape != ColliderShape::ConvexHull)
+		return false;
+	if (!content) return false;
+
+	HE::UUID meshId{};
+	if (const auto* mc = reg.try_get<MeshComponent>(e))
+		meshId = mc->meshAssetId;
+	if (const auto* lod = reg.try_get<LODComponent>(e); lod && !lod->levels.empty())
+		meshId = lod->levels.front().meshId;
+	const HE::AABB* b = previewMeshBounds(*content, meshId);
+	if (!b) return false;
+	outMin = b->min;
+	outMax = b->max;
+	return true;
+}
+
+void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
+                       const std::string& focus,
+                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize,
+                       ContentManager* content)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -1660,6 +1775,15 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 		const ImU32 c = highlighted(e, "Collider") ? kSelected
 		                                          : (oneInFocus ? kIdle : kCollider);
 		const auto at = [&](float x, float y, float z){ return glm::vec3(m * glm::vec4(x, y, z, 1.0f)); };
+		const auto wireBox = [&](const glm::vec3& lo, const glm::vec3& hi)
+		{
+			const glm::vec3 v[8] = {
+				at(lo.x,lo.y,lo.z), at(hi.x,lo.y,lo.z), at(hi.x,hi.y,lo.z), at(lo.x,hi.y,lo.z),
+				at(lo.x,lo.y,hi.z), at(hi.x,lo.y,hi.z), at(hi.x,hi.y,hi.z), at(lo.x,hi.y,hi.z) };
+			constexpr int edges[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+			                               {0,4},{1,5},{2,6},{3,7} };
+			for (const auto& ed : edges) line(v[ed[0]], v[ed[1]], c);
+		};
 
 		if (col.shape == ColliderShape::Capsule || col.shape == ColliderShape::Sphere)
 		{
@@ -1687,15 +1811,23 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 				}
 			}
 		}
-		else   // Box
+		else
 		{
-			const glm::vec3 h = glm::max(col.halfExtents, glm::vec3(0.01f));
-			const glm::vec3 v[8] = {
-				at(-h.x,-h.y,-h.z), at( h.x,-h.y,-h.z), at( h.x, h.y,-h.z), at(-h.x, h.y,-h.z),
-				at(-h.x,-h.y, h.z), at( h.x,-h.y, h.z), at( h.x, h.y, h.z), at(-h.x, h.y, h.z) };
-			constexpr int edges[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
-			                               {0,4},{1,5},{2,6},{3,7} };
-			for (const auto& ed : edges) line(v[ed[0]], v[ed[1]], c);
+			// Box, and the three entity-sourced shapes. `else` used to mean Box
+			// alone, so a Mesh, Convex Hull or Height Field collider — all three
+			// pickable in the Details panel since the runtime-shape work — was
+			// outlined with half extents it does not read.
+			glm::vec3 lo, hi;
+			if (!colliderSourceBounds(reg, e, col, content, lo, hi))
+			{
+				// Box, and the honest answer for a mesh shape whose asset is not
+				// loaded or a Height Field on an entity with no terrain: physics
+				// builds authoredBox() from these very numbers in exactly those
+				// cases, so the outline still shows what would collide.
+				hi = glm::max(col.halfExtents, glm::vec3(0.01f));
+				lo = -hi;
+			}
+			wireBox(lo, hi);
 		}
 	}
 
@@ -1787,7 +1919,8 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	// problem.
 	st.previewHovered  = ImGui::IsItemHovered();
 	st.previewViewProj = viewProj;
-	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
+	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av,
+	                  ctx.contentManager);
 	return true;
 }
 
@@ -1924,12 +2057,16 @@ HE::AABB previewPickBox(AppContext& ctx, entt::registry& reg, Entity e)
 	}
 	if (const auto* col = reg.try_get<ColliderComponent>(e))
 	{
-		if (col->shape == ColliderShape::Box)
+		glm::vec3 lo, hi;
+		if (colliderSourceBounds(reg, e, *col, ctx.contentManager, lo, hi))
 		{
-			const glm::vec3 h = glm::max(col->halfExtents, glm::vec3(0.01f));
-			box.expand(-h); box.expand(h);
+			// Mesh / Convex Hull / Height Field: the geometry is the entity's,
+			// so the click box is the source's. This branch used to fall through
+			// to the sphere case below and hand a whole landscape a box of
+			// `radius` — a field none of the three shapes reads.
+			box.expand(lo); box.expand(hi);
 		}
-		else
+		else if (col->shape == ColliderShape::Sphere || col->shape == ColliderShape::Capsule)
 		{
 			// Same convention as the overlay: a capsule's `height` is the total
 			// one, hemispheres included.
@@ -1937,6 +2074,13 @@ HE::AABB previewPickBox(AppContext& ctx, entt::registry& reg, Entity e)
 			const float hy = col->shape == ColliderShape::Capsule
 			                 ? std::max(r, col->height * 0.5f) : r;
 			box.expand(glm::vec3(-r, -hy, -r)); box.expand(glm::vec3(r, hy, r));
+		}
+		else
+		{
+			// Box — and a mesh shape with no measurable source, which physics
+			// builds from these same half extents.
+			const glm::vec3 h = glm::max(col->halfExtents, glm::vec3(0.01f));
+			box.expand(-h); box.expand(h);
 		}
 	}
 	if (!box.isValid())
@@ -2106,7 +2250,8 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 			// its camera sits. Only when the renderer reported its framing — drawing
 			// gizmos against a guessed matrix would be worse than drawing none.
 			if (haveViewProj)
-				drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
+				drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av,
+				                  ctx.contentManager);
 		}
 		else
 			ImGui::TextDisabled("(preview unavailable on this backend)");
@@ -2579,4 +2724,5 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		              st.inputActions);
 	if (edited) st.dirty = true;
 	ImGui::End();
+	raisePendingRename(ctx);
 }

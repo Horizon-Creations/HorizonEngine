@@ -22,6 +22,7 @@ namespace ProjectHubPanel
 		"Simulation",
 		"Tool",
 		"Tutorial Sandbox",
+		"Third Person",
 		"Application",
 	};
 	inline constexpr const char* kPresetDescs[] = {
@@ -30,6 +31,8 @@ namespace ProjectHubPanel
 		"Assets, Scenes and Data folders.",
 		"Assets and Source folders.",
 		"A furnished scene (sky, ground, cube, light) to follow the interactive tutorial in.",
+		"Playable on the first press of Play: ground, sky, and a character on WASD, "
+		"the mouse and Space. HorizonCode.",
 		"A desktop application: UI, textures and fonts, no scene and no world. Draws only "
 		"when something changes.",
 	};

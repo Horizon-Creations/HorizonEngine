@@ -133,19 +133,24 @@ static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t 
 }
 #endif
 
-// Extract the asset UUID + embedded path from a raw .hasset blob's META chunk.
+// Extract the asset UUID + embedded path + type from a raw .hasset blob.
 // META layout: uint16_t type, uint64_t hi, uint64_t lo, string name, string path,
 // and — appended, optional — string sourcePath (the import source; see
 // ContentManager's buildMetaChunk). This reader stops before the tail, which is
 // what makes appending to META safe; stripImportSourceForPack below is the one
 // place that cares the field exists at all.
-static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::string& path)
+// `type` comes from the HAsset HEADER, not from META's leading uint16: the header
+// field is what ContentManager::discoverAssets compares against, so it is the one
+// the packed type index has to agree with.
+static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id,
+                           std::string& path, uint16_t& type)
 {
     HAsset::Reader r;
     if (!r.openData(data)) return false;
     const auto* meta = r.findChunk(HAsset::CHUNK_META);
     if (!meta) return false;
-    size_t off = sizeof(uint16_t); // skip asset type
+    type = r.assetType();
+    size_t off = sizeof(uint16_t); // skip META's own copy of the asset type
     std::string name;
     if (!HAsset::Reader::readPOD(meta->data, off, id.hi))   return false;
     if (!HAsset::Reader::readPOD(meta->data, off, id.lo))   return false;
@@ -872,6 +877,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     // instead of writing two TOC entries the reader would pick between blindly.
     std::unordered_set<HE::UUID> claimed;
     m_packedPaths.clear();
+    m_packedTypes.clear();
     for (const SourceRoot& root : roots)
     {
         if (root.dir.empty()) continue;
@@ -909,9 +915,13 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
                                             std::istreambuf_iterator<char>());
 
-                HE::UUID id; std::string path;
-                if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) break;
+                HE::UUID id; std::string path; uint16_t type = 0;
+                if (!metaFromHasset(bytes, id, path, type) || id == HE::UUID{}) break;
                 if (!claimed.insert(id).second) break;  // already packed from an earlier root
+                // Runtime UUID→type index. Recorded AFTER the claim check so it
+                // describes the entry that actually ships, and keyed by UUID, so
+                // the two path spellings below collapse into one type entry.
+                m_packedTypes[id] = type;
                 // The addressed path always resolves; the asset's own META path only
                 // when it agrees with this root's namespace. Engine defaults are
                 // generated with a bare META path relative to their own folder

@@ -212,6 +212,55 @@ namespace HcEditorUtil
 	// the level/GI/class graph editor and the widget graph editor.
 	void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool& edited);
 
+	// ── Renaming a function without losing its calls ──────────────────────────
+	// A function has no identity beyond its name: FunctionCall and FunctionReturn
+	// nodes find it by comparing strings. So a rename has to carry to them, and
+	// the obvious way to write that row does NOT do it: ImGui::InputText writes
+	// into the node on every keystroke, so a name captured at the top of the
+	// frame is already the NEW one by the time IsItemDeactivatedAfterEdit() fires
+	// and the propagation compares two identical strings. Both graph editors
+	// shipped it that way, and in both it never ran once.
+	//
+	// So the field edits a scratch buffer and the rename is committed in one
+	// step, while the node still holds the old name:
+	//
+	//     HcEditorUtil::seedFunctionName(*n, st.fnNameEdit);
+	//     ImGui::InputText("Name", &st.fnNameEdit.buf);
+	//     EditorWidgets::helpForLabel("Name");
+	//     if (ImGui::IsItemDeactivatedAfterEdit())
+	//         edited |= HcEditorUtil::commitFunctionName(graph, *n, st.fnNameEdit);
+	//
+	// Neither call touches ImGui, which is what lets the rename be tested at all
+	// (tests/test_hc_function_rename.cpp, which also drives a real InputText).
+	struct FnNameEdit
+	{
+		std::string buf;       // what the field shows, and what is being typed into it
+		int         node = 0;  // the FunctionEntry `buf` belongs to
+		std::string seed;      // the name `buf` was filled from
+	};
+
+	// Fill the buffer when the panel starts showing a different function — or
+	// when the shown one was renamed behind the panel's back (an undo, a
+	// collaborator, another graph reusing the node id). Keying on the id alone
+	// misses all three; keying on the name alone cannot tell two unnamed
+	// functions apart. Does nothing while the name is being typed, which is what
+	// keeps the keystrokes.
+	void seedFunctionName(const HorizonCode::Node& entry, FnNameEdit& e);
+
+	// Commit what was typed: rename the entry, and with it every FunctionCall and
+	// FunctionReturn that named it. Returns true when something changed (the
+	// caller's cue for an undo snapshot). Renaming TO nothing leaves the calls
+	// alone rather than pointing them all at an unnamed function, and naming a
+	// function that had no name does not adopt the calls that have none either.
+	//
+	// `selfKey` is this graph's own asset path, which is what a Call Function
+	// (Ref) pointed back at this class through a Get Self resolves to. Empty when
+	// the asset has none yet: nothing outside can reference it either way.
+	// Reaching the REST of the project is the sweep's job (HcRename), not this
+	// function's — this one only ever touches the graph it is handed.
+	bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e,
+	                        const std::string& selfKey);
+
 	// ── Literal node bodies (inline value editors on the node) ────────────────
 	// Const/literal nodes show their value right on the node body: a checkbox for
 	// Bool, a number field for Int/Float, two fields for Vec2, a swatch for Color,

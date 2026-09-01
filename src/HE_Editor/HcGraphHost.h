@@ -145,6 +145,10 @@ struct Host
 	// PlayerController, Get Owning Entity on any Entity. Only the class tab has
 	// one; a widget, a level script and the GameInstance leave it empty.
 	std::string         selfBaseClass;
+	// The edited graph's own asset path — what a Get Self resolves to. Lets the
+	// Target Class row name this class by name instead of shrugging, and it is the
+	// same key the cross-asset rename keys on (see HcRename).
+	std::string         selfKey;
 	// Node whose compile error gets a red halo (0 = none).
 	int                 errorNode    = 0;
 	// Header text for a node.

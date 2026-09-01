@@ -95,7 +95,10 @@ namespace
 	  "only path where a nav mesh has been baked.",
 	  "", "systems#navigation" },
 	{ "Component/Nav Agent", "Nav Agent",
-	  "Moves the entity along a path on the nav mesh toward a target position.",
+	  "Walks the entity along a path across the baked nav mesh — what makes an "
+	  "enemy come after the player or a villager keep a patrol. Scripts drive it "
+	  "with the Nav calls; give it a Character Controller as well and it walks "
+	  "through the world the way the player does, colliding instead of gliding.",
 	  "", "systems#navigation" },
 	{ "Component/Audio Source", "Audio Source",
 	  "Plays an audio asset from this entity. Switch on Spatial and it is heard "
@@ -260,8 +263,11 @@ namespace
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
 	{ "Collider/Shape", "",
-	  "Box, Sphere or Capsule. A capsule stands along Y and is what a character "
-	  "usually wants; the sides let it slide past corners instead of catching.",
+	  "Box, Sphere or Capsule for a shape from the numbers below; Mesh, Convex "
+	  "Hull or Height Field to take the geometry from the entity itself. A "
+	  "capsule stands along Y and is what a character usually wants; the sides "
+	  "let it slide past corners instead of catching. Mesh and Height Field are "
+	  "static-only, so a moving body wants Convex Hull.",
 	  "", "systems#physics" },
 	{ "Collider/Half Extents", "",
 	  "Half the box's size on each axis — so 0.5 is a one-metre cube.",
@@ -295,13 +301,29 @@ namespace
 	  "Downward acceleration for this character alone. Lower it for a floaty jump, "
 	  "raise it for a heavy one.",
 	  "", "systems#physics" },
+	{ "Character Controller/Jump Speed (m/s)", "",
+	  "How fast the character is thrown upward by a jump. It is a speed, not a "
+	  "height: how high that carries depends on Gravity above, so raising one "
+	  "means revisiting the other. Jump uses this; Jump With ignores it and takes "
+	  "the speed it is given.",
+	  "", "systems#physics" },
 	{ "Character Controller/Velocity", "",
-	  "The character's current speed, written by the physics step. Editable here "
-	  "for testing — normally gameplay code sets it.",
+	  "The character's current speed, written by the physics step every tick. "
+	  "Shown read-only, because a value typed here would be overwritten before it "
+	  "could do anything — gameplay code is what sets it.",
+	  "", "systems#physics" },
+	{ "Character Controller/Air Time (s)", "",
+	  "How long the character has been off the ground, written by the physics "
+	  "step. It doubles as the grace a late jump spends: a jump asked for within "
+	  "the first tenth of a second after walking off a ledge is still granted, so "
+	  "a player who presses a frame too late gets the jump they meant. Landing "
+	  "puts it back to zero.",
 	  "", "systems#physics" },
 	{ "Character Controller/Is Grounded", "",
 	  "Whether the controller is standing on something right now. Read-only "
-	  "state, shown so a jump that never fires can be diagnosed.",
+	  "state, shown so a jump that never fires can be diagnosed: Jump refuses "
+	  "once this has been off for longer than the brief grace after leaving the "
+	  "ground, and Air Time below is that clock.",
 	  "", "systems#physics" },
 
 	// ── Movement / Camera / Camera Rig ───────────────────────────────────────
@@ -312,9 +334,19 @@ namespace
 	  "How fast the character turns to face where it is going, in degrees per "
 	  "second. Only used with Orient To Movement.",
 	  "", "systems#animation" },
+	{ "Movement/Move Direction Is", "",
+	  "Which way is forward when something calls Move. World takes the direction "
+	  "as given, which is what a fixed or top-down camera wants. Camera turns it "
+	  "by the main camera rig's yaw first, so pushing forward walks where the "
+	  "player is looking — that is what a third- or first-person game means by "
+	  "the controls working, and a player character ships set to it. Not the same "
+	  "as Orient To Movement below: this decides where you GO, that one decides "
+	  "which way you FACE while going there, and they are usually both on.",
+	  "", "rendering#cameras" },
 	{ "Movement/Orient To Movement", "",
 	  "Turn the character to face the direction it walks. Switch it off when "
-	  "something else owns the facing — a camera rig with coupled rotation.",
+	  "something else owns the facing — a camera rig with coupled rotation. It "
+	  "does NOT change which way forward is; Move Direction Is does that.",
 	  "", "rendering#cameras" },
 	{ "Camera/FOV", "",
 	  "Vertical field of view in degrees. 60 is a normal game view; higher feels "
@@ -494,13 +526,25 @@ namespace
 	  "appears in the game.",
 	  "", "systems#navigation" },
 	{ "Nav Agent/Target", "",
-	  "Where the agent is walking to. Set it and a path is found on the next tick.",
+	  "Where the agent walks to. Moving it drops the path it was on and searches a "
+	  "new one from where the agent stands, so a pursuer can simply keep writing "
+	  "the player's position here. Setting it does not start the walk on its own: "
+	  "press Go below, or call Move To from a script.",
 	  "", "systems#navigation" },
-	{ "Nav Agent/Speed", "", "How fast the agent follows its path, in metres per second.",
+	{ "Nav Agent/Speed", "",
+	  "How fast the agent follows its path, in metres per second. Scripts change "
+	  "it with Set Speed — the same guard strolling a patrol and then charging.",
 	  "", "systems#navigation" },
 	{ "Nav Agent/Stop Dist", "",
 	  "How close to the target counts as arrived. Too small and the agent circles "
 	  "its destination forever.",
+	  "", "systems#navigation" },
+	{ "Nav Agent/Auto Start", "",
+	  "Walk to the target as soon as the game starts, without a script saying so. "
+	  "This is what an agent in a packaged game needs: the Go button below belongs "
+	  "to the editor and does not exist there, so an agent that is never sent off "
+	  "by a script and does not start itself simply stands still. It fires once "
+	  "per play session, so stopping the agent afterwards does not restart it.",
 	  "", "systems#navigation" },
 
 	// ── Audio ────────────────────────────────────────────────────────────────
@@ -870,6 +914,14 @@ namespace
 	  "Emits in the editor, so an effect can be judged without entering play "
 	  "mode.",
 	  "", "systems#particles" },
+	{ "Particle System/Destroy When Finished", "",
+	  "The entity goes away with the effect: once a one-shot emitter has made its "
+	  "particles and the last one has died, it deletes itself. This is what makes "
+	  "a hit effect spawnable — a graph creates one at the impact point and never "
+	  "has to think about it again. Leave it off for anything that belongs to the "
+	  "scene, like a torch, and note that a looping emitter never finishes and so "
+	  "is never cleaned up unless something stops it.",
+	  "", "systems#particles" },
 	{ "Decal/Color", "",
 	  "Tints the projected texture; the alpha channel fades the whole decal.",
 	  "", "rendering#postfx" },
@@ -910,7 +962,9 @@ namespace
 	  "", "systems#navigation" },
 	{ "Nav Agent/Go", "",
 	  "Sends the agent to the target position now, from the editor — the way to "
-	  "check a nav mesh without entering play mode.",
+	  "check a nav mesh without entering play mode. It is a test button and "
+	  "nothing more: the packaged game has no Details panel, so what sends an "
+	  "agent off there is Auto Start above, or Move To from a script.",
 	  "", "systems#navigation" },
 	{ "Nav Agent/Stop", "",
 	  "Drops the current path and leaves the agent where it is.",
@@ -2278,8 +2332,8 @@ namespace
 	  "", "ui#graph" },
 
 	{ "UI Graph Node/Name", "",
-	  "What this function is called. Calls resolve by name, so a Call node "
-	  "elsewhere in the graph goes on naming whatever it named before.",
+	  "What this function is called. Calls resolve by name, so renaming it "
+	  "renames the Call and Return nodes that named it and the wiring survives.",
 	  "", "ui#graph" },
 	{ "UI Graph Node/Access", "",
 	  "Public makes the function callable from a script through "
@@ -2953,14 +3007,22 @@ namespace
 	  "picked from the list; a class names its own instead. Two Event nodes may "
 	  "not share a name, so one that is already handled is greyed out.",
 	  "", "horizoncode#communication" },
-	// No claim that the rename carries to the Call and Return nodes: the code
-	// meant to do that cannot run (it compares against a name it re-reads every
-	// frame), so saying so would be documenting an intention. The bug is filed;
-	// when it is fixed the sentence belongs back here.
 	{ "Script Node/Name", "",
-	  "What this function is called. Calls resolve by name and the first match "
-	  "wins, so a second function with the same name is dead code that still "
-	  "looks live.",
+	  "What this function is called. Renaming it renames the Call and Return "
+	  "nodes that named it, so the wiring survives. Calls resolve by name and "
+	  "the first match wins, so a second function with the same name is dead "
+	  "code that still looks live.",
+	  "", "horizoncode#functions" },
+	// The dialog raised after a rename that reaches beyond its own graph. Both
+	// buttons are looked up under a fixed key: the first one's text counts the
+	// hits, so it is built at run time and has no stable label to key on.
+	{ "Rename Across Project/Rename in place", "Rename everywhere",
+	  "Rewrites and SAVES the listed assets, so every call, read and handler goes "
+	  "on naming the same member. Undo only reaches the graph you renamed it in.",
+	  "", "horizoncode#functions" },
+	{ "Rename Across Project/Leave the others alone", "Rename here only",
+	  "Keeps the rename inside the graph you are editing. Everything listed goes "
+	  "on naming the old one, which for a call means it now names nothing.",
 	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
@@ -2983,15 +3045,24 @@ namespace
 	  "choose from this graph's own variables plus the public ones a base class "
 	  "brings, and a function-local only when the node itself sits in that "
 	  "function's sub-graph; the node then takes that variable's type, and a wire "
-	  "the pin can no longer carry is dropped. Get (Ref) and Set (Ref) take a "
-	  "typed name instead: the public "
-	  "variable of that name on the object wired to Target.",
+	  "the pin can no longer carry is dropped. Get (Ref) and Set (Ref) name a "
+	  "public variable on the object wired to Target instead, picked from the "
+	  "Target Class above once that is known.",
 	  "", "horizoncode#functions" },
 	{ "HorizonCode Node/Function", "",
-	  "The name of the public function to call on the object wired to Target. It "
-	  "is typed rather than picked from a list, because the target is any object "
-	  "that has a function of that name — so the spelling here has to match the "
-	  "one declared there.",
+	  "Which public function to call on the object wired to Target. Once the "
+	  "Target Class above is known the list holds that class's own functions, and "
+	  "picking one mirrors its parameters and results onto the node. A name that "
+	  "class does not have is shown as such rather than hidden, because that is "
+	  "what a rename elsewhere leaves behind.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Node/Target Class", "",
+	  "Which class the object wired to Target is expected to be. Left on \"From "
+	  "the wire\" it is read off whatever produces the reference — a Create "
+	  "Object, a Cast, a typed object variable, Get Self — which is one place to "
+	  "change instead of two. Naming it here is for the cases the wire cannot "
+	  "answer, and it is also what lets renaming a member of that class find this "
+	  "node instead of leaving it pointing at a name nothing has.",
 	  "", "horizoncode#communication" },
 	{ "HorizonCode Node/Struct", "",
 	  "Which struct definition this node is bound to. Rebinding re-mirrors the "
@@ -3531,6 +3602,7 @@ namespace
 		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "HorizonCode Default Value/",  "editor-horizoncode", "HorizonCode Editor", "Default values" },
 		{ "Function Return/",            "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
+		{ "Rename Across Project/",      "editor-horizoncode", "HorizonCode Editor", "Renaming a member" },
 		{ "Node Parameter/",             "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
 		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },

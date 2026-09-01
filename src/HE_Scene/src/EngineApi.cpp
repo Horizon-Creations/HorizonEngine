@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/Components/HierarchyComponent.h"   // the parent chain the world/local boundary walks
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
@@ -15,10 +16,13 @@
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/Components/NavAgentComponent.h"
+#include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
 #include "HorizonScene/EntityHost.h"
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
+#include "HorizonScene/ParticleSystem.h"        // the particle group drives the same pool
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/EntityIdComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
@@ -79,6 +83,123 @@ void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
     if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
     if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
 }
+
+// ── The local↔world boundary ─────────────────────────────────────────────────
+// This API and PhysicsWorld do not speak the same space, and until these
+// existed nothing converted between them. TransformComponent holds a LOCAL pose
+// (relative to the parent), while EVERY position and rotation in PhysicsWorld's
+// public API is a WORLD one — see the space convention at the top of that class.
+// So every value handed to physics is converted here first, and PhysicsWorld
+// converts back on its way into the transform.
+//
+// HE::localPositionForWorld does the world→local half; these are the missing
+// other direction. Composed by walking the parent chain, never from
+// TransformComponent::worldMatrix, for the reason TransformHierarchy.h gives:
+// that matrix is only as fresh as the last propagateTransforms and is the
+// identity for an entity spawned this frame.
+//
+// A top-level entity gets identity out of all of them, so its poses pass through
+// untouched — which is why nothing noticed the missing conversion until the
+// first parented physics entity.
+
+// The matrix an entity's LOCAL pose is expressed in. Guarded exactly like
+// HE::localPositionForWorld, which is the inverse direction: the two have to
+// agree on what counts as "has a parent", and the world root carries no
+// transform of its own.
+glm::mat4 parentWorldMatrix(HorizonWorld& world, entt::entity e)
+{
+    entt::registry& reg = world.registry();
+    if (!reg.valid(e)) return glm::mat4(1.0f);
+
+    const auto*        h      = reg.try_get<HierarchyComponent>(e);
+    const entt::entity parent = h ? h->parent : entt::null;
+    if (parent == entt::null || parent == world.rootEntity() || !reg.valid(parent))
+        return glm::mat4(1.0f);   // nothing above it: local IS world
+    return HE::worldMatrixOf(world, parent);
+}
+
+// The world position an entity stands at while `localPos` is its local one.
+glm::vec3 worldPositionForLocal(HorizonWorld& world, entt::entity e, const glm::vec3& localPos)
+{
+    return glm::vec3(parentWorldMatrix(world, e) * glm::vec4(localPos, 1.0f));
+}
+
+// The rotation half of the same. Built as parentRotation * localRotation rather
+// than by decomposing the entity's own world matrix, because PhysicsWorld's
+// write-back computes local = inverse(parentRotation) * world — composing from
+// the parent is that expression's exact inverse, so a pose written here and
+// mirrored back arrives as the local rotation it started as.
+//
+// Normalising the columns and folding a mirror onto X mirrors PhysicsWorld's
+// own file-local decomposition; a shared home for it would be
+// TransformHierarchy, next to the position half. A parent chain with
+// NON-UNIFORM scale shears its children, and a sheared basis has no rotation to
+// extract — what comes out is the closest one, the same limitation the
+// write-back documents.
+glm::quat worldRotationForLocal(HorizonWorld& world, entt::entity e,
+                                const glm::vec3& localEulerDegrees)
+{
+    const glm::mat4 parentWorld = parentWorldMatrix(world, e);
+
+    glm::vec3 axis[3] = { glm::vec3(parentWorld[0]), glm::vec3(parentWorld[1]),
+                          glm::vec3(parentWorld[2]) };
+    const float len[3]  = { glm::length(axis[0]), glm::length(axis[1]), glm::length(axis[2]) };
+    // A zero scale is a real input (the inspector lets one be typed), and
+    // dividing by it would put a NaN into the body, where it surfaces as "the
+    // object disappeared".
+    for (int i = 0; i < 3; ++i)
+        axis[i] /= std::max(len[i], 1.0e-6f);
+    // Column lengths cannot see a MIRROR: an odd number of negative scale axes
+    // leaves three positive lengths and a left-handed basis, which quat_cast
+    // reads as a rotation that does not exist. The determinant is what sees it.
+    if (glm::determinant(glm::mat3(parentWorld)) < 0.0f)
+        axis[0] = -axis[0];
+
+    const glm::quat parentRot =
+        glm::normalize(glm::quat_cast(glm::mat3(axis[0], axis[1], axis[2])));
+    return glm::normalize(parentRot * glm::quat(glm::radians(localEulerDegrees)));
+}
+
+// Teleport an entity's physics representation to wherever its CURRENT local
+// pose puts it in the world. The caller writes the transform first; this is the
+// second half, for the entities that own their position in Jolt.
+//
+// It puts the local values back afterwards on purpose. PhysicsWorld mirrors the
+// world pose it is given into the transform by converting it back, which for a
+// child means passing through a matrix and its inverse: the value that lands is
+// the one that went in only up to float noise, and a script nudging a child
+// every frame would accumulate that noise. Restoring costs two assignments and
+// makes the round trip exact — which is also what keeps an entity's saved pose
+// byte-identical across save → load → save.
+//
+// `withRotation` picks the physics call: setPosition explicitly does not touch
+// rotation, so turning an entity has to go through setTransform with the
+// position it already has.
+//
+// Ctx::world and Ctx::physics must both be there — every caller has already
+// asked hasPhysics, which needs both, so this one is not tolerant like the API
+// functions above it.
+bool teleportToLocalPose(Ctx& c, Entity e, TransformComponent& tc,
+                         bool withRotation, bool resetVelocity)
+{
+    const auto      ent      = static_cast<entt::entity>(e);
+    const auto      id       = static_cast<uint32_t>(e);
+    const glm::vec3 localPos = tc.position;
+    const glm::vec3 localRot = tc.rotation;
+
+    const bool ok =
+        withRotation
+            ? c.physics->setTransform(id, worldPositionForLocal(*c.world, ent, localPos),
+                                      worldRotationForLocal(*c.world, ent, localRot),
+                                      resetVelocity)
+            : c.physics->setPosition(id, worldPositionForLocal(*c.world, ent, localPos),
+                                     resetVelocity);
+
+    tc.position = localPos;
+    tc.rotation = localRot;
+    tc.dirty    = true;
+    return ok;
+}
 } // namespace
 
 // ── Entities ─────────────────────────────────────────────────────────────────
@@ -86,6 +207,97 @@ namespace entity {
 std::string getName(Ctx& c, Entity e)                          { return c.world ? ScriptApi::getName(*c.world, e) : std::string(); }
 Entity      spawn(Ctx& c, Entity parent, const std::string& n) { return c.world ? ScriptApi::spawn(*c.world, parent, n) : 0u; }
 void        destroy(Ctx& c, Entity e)                          { if (c.world) ScriptApi::destroy(*c.world, e); }
+
+// ── Spawning a class (the furnished entity) ──────────────────────────────────
+namespace {
+// The shared body of the two spawnClass rows. Split from them because the two
+// differ only in what they hand the host as a rotation, and because the cppCall
+// invariant wants one distinct C++ callee per registry row — not one function
+// with an argument that tells the rows apart.
+Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
+                      const float* position, const float* rotationEuler)
+{
+    // Every failure below is LOUD. A script author who gets a 0 back reads it as
+    // "spawning is broken"; the log is the only place that can say which of the
+    // four quite different reasons it was.
+    if (!c.createObject)
+    {
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no Create Object service bound by the host — '" +
+            classPath + "' not spawned").c_str());
+        return 0u;
+    }
+    const uint32_t ref = c.createObject(classPath, position, rotationEuler);
+    if (ref == 0u)
+    {
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": class '" + classPath +
+            "' could not be created (unknown or unreadable class asset)").c_str());
+        return 0u;
+    }
+    if (!c.runtime)
+    {
+        // The object exists; nothing here can say which entity it landed on,
+        // because the entity is recorded on the runtime (EntityHost::bind →
+        // setOwnedEntity). Left alive rather than destroyed — it may well be
+        // ticking correctly, and throwing away a working spawn to tidy up a
+        // half-built Ctx would be the worse of the two failures.
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no HorizonCode runtime in the Ctx, so the "
+            "entity of '" + classPath + "' cannot be looked up — the object was created and is "
+            "still running").c_str());
+        return 0u;
+    }
+    const Entity e = c.runtime->ownedEntity(ref);
+    if (e == 0u)
+    {
+        // Created, but bodiless: the class is not an Entity class. The caller
+        // asked for an entity and there is none, and the reference that could
+        // still reach the object is not what this function returns — so leaving
+        // it alive would strand an instance nothing can name, tick after tick.
+        // Undo it, the way EntityHost::spawn undoes its entity when the logic
+        // fails to bind.
+        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": '" + classPath + "' is not an Entity class, "
+            "so it has no entity — use the Create Object node for plain objects").c_str());
+        if (c.destroyObject) c.destroyObject(ref);
+        return 0u;
+    }
+    return e;
+}
+} // namespace
+
+Entity spawnClass(Ctx& c, const std::string& classPath, float x, float y, float z)
+{
+    // The position is always stated (a call has no unwired pin to leave empty),
+    // the rotation is not: nullptr means "as the class authored it", which a
+    // zeroed triple would silently overwrite.
+    const float pos[3] = { x, y, z };
+    return spawnClassImpl("entity.spawnClass", c, classPath, pos, nullptr);
+}
+
+Entity spawnClassRotated(Ctx& c, const std::string& classPath,
+                         float x, float y, float z, float rx, float ry, float rz)
+{
+    const float pos[3] = { x, y, z };
+    const float rot[3] = { rx, ry, rz };   // Euler degrees
+    return spawnClassImpl("entity.spawnClassRotated", c, classPath, pos, rot);
+}
+
+void destroyObject(Ctx& c, uint32_t objectRef)
+{
+    if (!c.destroyObject)
+    {
+        HE_LOG_ERROR(Script, "%s", "entity.destroyObject: no Destroy Object service bound by the host — ignored");
+        return;
+    }
+    if (objectRef == 0u)
+    {
+        // Not the host's business: both applications drop a 0 ref silently, so
+        // without this the mistake (an unset variable, a spawn that failed and
+        // was never checked) leaves no trace at all.
+        HE_LOG_WARN(Script, "%s", "entity.destroyObject: empty object reference — nothing to destroy");
+        return;
+    }
+    c.destroyObject(objectRef);
+}
+
 float       distance(Ctx& c, Entity a, Entity b)
 {
     if (!c.world) return -1.0f;
@@ -101,6 +313,12 @@ Entity findByName(Ctx& c, const std::string& name)
 }
 bool exists(Ctx& c, Entity e)
 {
+    // 0 is "no entity", not an entity that exists. It is the world root — always
+    // valid, because HorizonWorld's constructor creates it first — and it is also
+    // what findByName hands back when it finds nothing. So without this guard the
+    // one idiom the row exists for, `if Entity Exists(Find By Name("Boss"))`,
+    // answered YES for a boss that is not in the level.
+    if (e == 0u) return false;
     return c.world && c.world->registry().valid((entt::entity)e);
 }
 Entity self(Ctx& c)
@@ -238,6 +456,24 @@ bool applySavedState(Ctx& c, Entity e)
             vec3("pos", tc->position);
             vec3("rot", tc->rotation);
             vec3("scl", tc->scale);
+
+            // Restoring a physics entity means moving the BODY, not the
+            // transform: the step overwrites the transform from Jolt, so a save
+            // restore on the one kind of entity a save exists for (the player,
+            // the crate the player pushed) used to be undone the same frame.
+            // Velocity is reset because the save carries none — arriving with
+            // the motion the entity had before the load is an artefact of the
+            // restore, not restored state.
+            //
+            // The pose above is LOCAL — it came out of TransformComponent when
+            // the save was written — so it goes through teleportToLocalPose,
+            // which converts it to the world pose physics deals in and puts the
+            // saved spelling back afterwards (setTransform would otherwise
+            // return the rotation as degrees(eulerAngles(q)), the same
+            // orientation written differently, and save → load → save would stop
+            // being byte-identical).
+            if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+                teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
         }
     }
     if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
@@ -249,11 +485,55 @@ bool applySavedState(Ctx& c, Entity e)
 // ── Transform ────────────────────────────────────────────────────────────────
 namespace transform {
 glm::vec3 getPosition(Ctx& c, Entity e)                    { return c.world ? ScriptApi::getPosition(*c.world, e) : glm::vec3(0.0f); }
-void      setPosition(Ctx& c, Entity e, const glm::vec3& p){ if (c.world) ScriptApi::setPosition(*c.world, e, p); }
 glm::vec3 getRotation(Ctx& c, Entity e)                    { return c.world ? ScriptApi::getRotation(*c.world, e) : glm::vec3(0.0f); }
-void      setRotation(Ctx& c, Entity e, const glm::vec3& r){ if (c.world) ScriptApi::setRotation(*c.world, e, r); }
 glm::vec3 getScale(Ctx& c, Entity e)                       { return c.world ? ScriptApi::getScale(*c.world, e) : glm::vec3(1.0f); }
 void      setScale(Ctx& c, Entity e, const glm::vec3& s)   { if (c.world) ScriptApi::setScale(*c.world, e, s); }
+
+void setPosition(Ctx& c, Entity e, const glm::vec3& p)
+{
+    if (!c.world) return;
+    // `p` is LOCAL, like everything TransformComponent holds, so the transform
+    // write is the plain one and it always happens.
+    ScriptApi::setPosition(*c.world, e, p);
+
+    // An entity with a body or a character owns its position in Jolt, and the
+    // step writes that pose back over TransformComponent — so the write above
+    // used to be undone within the same frame and "set the position" quietly
+    // meant nothing for exactly the entities a game moves most. Teleporting the
+    // body as well is what makes it stick; teleportToLocalPose is what turns the
+    // local value into the world one physics takes. Guarded by hasPhysics rather
+    // than by the return value: PhysicsWorld logs when it is asked to move
+    // something bodiless, and that is the common case here, not an error.
+    auto&      reg = c.world->registry();
+    const auto ent = static_cast<entt::entity>(e);
+    auto*      tc  = reg.valid(ent) ? reg.try_get<TransformComponent>(ent) : nullptr;
+    if (tc && c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+        teleportToLocalPose(c, e, *tc, /*withRotation=*/false, /*resetVelocity=*/false);
+}
+
+void setRotation(Ctx& c, Entity e, const glm::vec3& r)
+{
+    if (!c.world) return;
+    // `r` is LOCAL Euler degrees, so the transform write is the plain one, like
+    // setPosition's.
+    ScriptApi::setRotation(*c.world, e, r);
+
+    // The same defect setPosition fixes, one axis further: the step writes
+    // Jolt's orientation back over TransformComponent, so a script turning a
+    // dynamic body was undone in the frame it happened. There is no
+    // rotation-only teleport, so this goes through setTransform with the pose
+    // the entity now has — position included, read from TransformComponent
+    // rather than via getPosition so a physics entity that somehow lost its
+    // transform does not get teleported to the origin as a side effect of being
+    // turned. teleportToLocalPose converts both halves to world space and puts
+    // the caller's Euler spelling back, so getRotation answers with what was
+    // just set instead of an equivalent triple.
+    auto&      reg = c.world->registry();
+    const auto ent = static_cast<entt::entity>(e);
+    auto*      tc  = reg.valid(ent) ? reg.try_get<TransformComponent>(ent) : nullptr;
+    if (tc && c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+        teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/false);
+}
 
 glm::vec3 getWorldPosition(Ctx& c, Entity e)
 {
@@ -263,12 +543,22 @@ glm::vec3 getWorldPosition(Ctx& c, Entity e)
 
 void setWorldPosition(Ctx& c, Entity e, const glm::vec3& p)
 {
-    // Written through the LOCAL setter on purpose: that one is what marks the
-    // transform dirty and what physics and the hierarchy already listen to.
-    // Converting here and delegating keeps one writer for the position.
-    if (c.world)
-        ScriptApi::setPosition(*c.world, e,
-            HE::localPositionForWorld(*c.world, static_cast<entt::entity>(e), p));
+    if (!c.world) return;
+    const auto ent = static_cast<entt::entity>(e);
+    // Each side gets `p` in the space it stores: the transform holds a local
+    // position, physics takes a world one — and `p` ALREADY IS the world one.
+    //
+    // Deliberately not delegating to setPosition: that one converts local→world
+    // for physics, so handing it a converted `p` would run the value through a
+    // matrix and its inverse for nothing, and this is the one function whose
+    // entire job is landing a parented entity exactly where the caller said.
+    // (It also used to be worse than that: setPosition read its argument as
+    // local only after this had already made it local, and the body ended up at
+    // the local value while the transform ended up at the parent's offset
+    // removed twice.)
+    ScriptApi::setPosition(*c.world, e, HE::localPositionForWorld(*c.world, ent, p));
+    if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+        c.physics->setPosition(static_cast<uint32_t>(e), p);
 }
 } // namespace transform
 
@@ -302,6 +592,34 @@ glm::vec3 getVelocity(Ctx& c, Entity e)                { return c.physics ? c.ph
 bool isGrounded(Ctx& c, Entity e)                      { return ScriptApi::isGrounded(c.physics, e); }
 void setGravity(Ctx& c, const glm::vec3& g)            { if (c.physics) c.physics->setGravity(g); }
 glm::vec3 getGravity(Ctx& c)                           { return c.physics ? c.physics->gravity() : glm::vec3(0.0f); }
+
+// Two functions rather than one with a defaulted flag: a registry row names one
+// C++ callee, and test_engine_api holds that mapping distinct per row.
+//
+// `p` is a LOCAL position — see the header for why these two say local while
+// PhysicsWorld underneath says world. Converted here, which is the only place
+// that knows both spaces. Without a world there is no hierarchy to convert
+// through, so the value passes as it is (and for a top-level entity that is the
+// same answer either way).
+bool setPosition(Ctx& c, Entity e, const glm::vec3& p)
+{
+    if (!c.physics) return false;
+    const auto ent = static_cast<entt::entity>(e);
+    return c.physics->setPosition(static_cast<uint32_t>(e),
+                                  c.world ? worldPositionForLocal(*c.world, ent, p) : p);
+}
+bool setPositionAndReset(Ctx& c, Entity e, const glm::vec3& p)
+{
+    if (!c.physics) return false;
+    const auto ent = static_cast<entt::entity>(e);
+    return c.physics->setPosition(static_cast<uint32_t>(e),
+                                  c.world ? worldPositionForLocal(*c.world, ent, p) : p,
+                                  /*resetVelocity=*/true);
+}
+bool hasPhysics(Ctx& c, Entity e)
+{
+    return c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e));
+}
 } // namespace physics
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -341,6 +659,90 @@ std::string getState(Ctx& c, Entity e)
     return sm ? sm->currentStateName : std::string();
 }
 } // namespace animator
+
+// ── Particles ────────────────────────────────────────────────────────────────
+// The group that turns an emitter from scenery into an effect. Before this there
+// was no way to fire one at all: `playing` was a checkbox with an off-switch and
+// no on-switch, and the only shape an emitter had was "runs forever".
+namespace {
+ParticleSystemComponent* psOf(Ctx& c, Entity e, const char* who)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    ParticleSystemComponent* ps = reg.valid(id) ? reg.try_get<ParticleSystemComponent>(id) : nullptr;
+    if (!ps)
+    {
+        // One throttle site for the whole group: it is one diagnostic — "that
+        // entity has no emitter on it" — and it is the answer to the only way
+        // these four rows can quietly do nothing.
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "%s: entity %u has no Particle System component",
+                        who, static_cast<uint32_t>(e));
+        return nullptr;
+    }
+    // Anything acting on an emitter may be the FIRST thing to touch it — a Burst
+    // from a Begin Play runs before the particle system's own tick — and an
+    // unresolved config is the authored effect replaced by the default one.
+    if (c.content) ParticleSystem::resolveConfig(*ps, *c.content);
+    return ps;
+}
+} // namespace
+
+namespace particle {
+void play(Ctx& c, Entity e)
+{
+    ParticleSystemComponent* ps = psOf(c, e, "particle.play");
+    if (!ps) return;
+    // A restart, not a resume: the counter and the accumulator are this run's,
+    // and leaving them would make the second firing of a one-shot emit nothing
+    // (it has already made its maxParticles) and the first frame after it look
+    // like a resumed pause. The live particles stay — a re-triggered effect
+    // overlapping its own tail is what a machine gun looks like.
+    ps->emitted         = 0;
+    ps->emitAccumulator = 0.0f;
+    ps->stopping        = false;
+    ps->playing         = true;
+}
+void stop(Ctx& c, Entity e)
+{
+    // Soft: emit no more, but let what is already in the air live out its
+    // lifetime. Clearing `playing` here instead would freeze a smoke cloud
+    // mid-frame, and setting `visible` would only hide it while it kept
+    // simulating and allocating.
+    if (ParticleSystemComponent* ps = psOf(c, e, "particle.stop")) ps->stopping = true;
+}
+bool isPlaying(Ctx& c, Entity e)
+{
+    if (!c.world) return false;
+    const auto id = (entt::entity)e;
+    auto& reg = c.world->registry();
+    const ParticleSystemComponent* ps =
+        reg.valid(id) ? reg.try_get<ParticleSystemComponent>(id) : nullptr;
+    // Deliberately silent, unlike its four siblings: this is the row a graph asks
+    // BEFORE deciding whether to act, so "there is no emitter" is an answer here,
+    // not a mistake.
+    return ps && ps->playing;
+}
+int burst(Ctx& c, Entity e, int count)
+{
+    ParticleSystemComponent* ps = psOf(c, e, "particle.burst");
+    if (!ps || count <= 0) return 0;
+    const size_t before = ps->particles.size();
+    // The emitter's own place in the world, composed rather than read out of the
+    // cached matrix — a burst fired on the frame the effect was spawned would
+    // otherwise land at the world origin. Same reason as ParticleSystem::update.
+    const glm::vec3 at = c.world ? glm::vec3(HE::worldMatrixOf(*c.world, (entt::entity)e)[3])
+                                 : glm::vec3(0.0f);
+    ParticleSystem::burst({ ps->particles, ps->emitAccumulator, ps->emitted, ps->rng, ps->stopping },
+                          ps->resolvedConfig, at, count);
+    // A burst on a stopped emitter is a firing, so it un-stops it — otherwise the
+    // particles would appear and the pool would be declared finished around them.
+    ps->playing  = true;
+    ps->stopping = false;
+    return static_cast<int>(ps->particles.size() - before);
+}
+} // namespace particle
 
 // ── Movement / Locomotion ────────────────────────────────────────────────────
 namespace {
@@ -415,7 +817,119 @@ void look(Ctx& c, Entity e, float yawDegrees, float pitchDegrees)
 }
 void setMaxSpeed(Ctx& c, Entity e, float v)          { if (auto* mv = mvOf(c, e)) mv->maxSpeed = v; }
 void setOrientToMovement(Ctx& c, Entity e, bool on)  { if (auto* mv = mvOf(c, e)) mv->orientToMovement = on; }
+// Both jumps are PhysicsWorld::jumpCharacter — the grounded/coyote test, the
+// velocity write and the write-back into the component that stops MovementSystem
+// eating the jump all live there, at the one place that owns the character. What
+// is added here is the null-Ctx half: without a PhysicsWorld nobody is
+// simulating, and a jump that reported nothing would read as a broken jump.
+bool jump(Ctx& c, Entity e)
+{
+    if (!c.physics)
+    {
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "locomotion.jump: no physics world — entity %u cannot jump",
+                        static_cast<uint32_t>(e));
+        return false;
+    }
+    return c.physics->jumpCharacter(static_cast<uint32_t>(e));
+}
+bool jumpWith(Ctx& c, Entity e, float v)
+{
+    if (!c.physics)
+    {
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "locomotion.jumpWith: no physics world — entity %u cannot jump",
+                        static_cast<uint32_t>(e));
+        return false;
+    }
+    return c.physics->jumpCharacter(static_cast<uint32_t>(e), v);
+}
 } // namespace locomotion
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+namespace nav {
+namespace {
+// The agent, or a log line saying why there is none. One throttle site for all
+// six rows on purpose: it is one diagnostic ("that entity is not an agent"), and
+// `who` names the row that asked, so a shared five-second budget still tells the
+// author which call it was.
+NavAgentComponent* agentOf(Ctx& c, Entity e, const char* who)
+{
+    NavAgentComponent* agent = nullptr;
+    if (c.world)
+    {
+        auto&      reg = c.world->registry();
+        const auto id  = static_cast<entt::entity>(e);
+        if (reg.valid(id)) agent = reg.try_get<NavAgentComponent>(id);
+    }
+    if (!agent)
+        HE_LOG_THROTTLE(Nav, Warning, 5.0,
+                        "%s: entity %u has no NavAgentComponent (add one, or check the id)",
+                        who, static_cast<uint32_t>(e));
+    return agent;
+}
+} // namespace
+
+// x/y/z are a WORLD point — the nav block in EngineApi.h says why this group
+// breaks the local-unless-World rule rather than carrying the suffix.
+//
+// Straight through to NavigationSystem, which searches the route on the spot
+// rather than on the next tick — that is what makes the bool a real answer
+// instead of an optimistic one, and it owns the waypoint bookkeeping (which
+// index is next, which target the path was planned for) that a second writer
+// here would drift away from.
+bool moveTo(Ctx& c, Entity e, float x, float y, float z)
+{
+    // Asked first only for the log line: the row that failed should name itself,
+    // and NavigationSystem can only say which ENTITY had no agent.
+    if (!agentOf(c, e, "nav.moveTo")) return false;
+    return NavigationSystem::moveTo(*c.world, static_cast<entt::entity>(e),
+                                    glm::vec3(x, y, z));
+}
+
+void stop(Ctx& c, Entity e)
+{
+    auto* agent = agentOf(c, e, "nav.stop");
+    if (!agent) return;
+    agent->moving  = false;
+    agent->hasPath = false;
+    agent->path.clear();
+    agent->pathIdx = 0;
+    // `drivingCharacter` is left alone on purpose: NavigationSystem uses the tick
+    // it goes false to write the character's velocity back to zero, and clearing
+    // it here would skip that step and leave the agent gliding on the last value
+    // Jolt was given.
+}
+
+bool isMoving(Ctx& c, Entity e)
+{
+    const auto* agent = agentOf(c, e, "nav.isMoving");
+    return agent && agent->moving;
+}
+
+bool hasPath(Ctx& c, Entity e)
+{
+    const auto* agent = agentOf(c, e, "nav.hasPath");
+    return agent && agent->hasPath;
+}
+
+float remainingDistance(Ctx& c, Entity e)
+{
+    // NavigationSystem measures it — along the path's corners, not through the
+    // walls between them. Asked here only for the log line, as in moveTo.
+    if (!agentOf(c, e, "nav.remainingDistance")) return -1.0f;
+    return NavigationSystem::remainingDistance(*c.world, static_cast<entt::entity>(e));
+}
+
+void setSpeed(Ctx& c, Entity e, float v)
+{
+    auto* agent = agentOf(c, e, "nav.setSpeed");
+    if (!agent) return;
+    // A negative speed would walk the agent backwards along its own path, past
+    // the waypoint it came from, with no waypoint left to arrive at.
+    agent->speed = std::max(0.0f, v);
+}
+} // namespace nav
 
 // ── Entity UI ────────────────────────────────────────────────────────────────
 namespace ui {
@@ -1726,9 +2240,26 @@ void setZonePosition(Ctx& c, int zone, const glm::vec3& p)
     if (!z || !c.world) return;
     const auto e = (entt::entity)z->root;
     if (!c.world->registry().valid(e)) return;
-    // Children follow via the hierarchy's world-matrix composition — moving the
-    // zone's sub-root moves the whole zone.
+    // Children follow via the hierarchy's world-matrix composition — but only
+    // what is DRAWN does. A physics representation is baked once, out of the
+    // pose the entity had when it was built, and nothing re-derives it when an
+    // ancestor moves: without the rebuild below a moved zone renders at its new
+    // place and collides at its old one.
     c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
+
+    // Rebuild every zone body from the pose the entity has NOW. addEntity tears
+    // the old representation down first, so this is a move, not a leak — at the
+    // price of a dynamic body's velocity, which a zone placement is entitled to
+    // drop. Gated on hasPhysics so the placement both applications do straight
+    // after loading a zone (setZonePosition, THEN their addEntity pass) stays
+    // the no-op it is today.
+    if (c.physics)
+    {
+        auto& reg = c.world->registry();
+        for (uint32_t id : z->entities)
+            if (reg.valid((entt::entity)id) && c.physics->hasPhysics(id))
+                c.physics->addEntity(*c.world, id);
+    }
 }
 void setZoneVisible(Ctx& c, int zone, bool visible)
 {
@@ -2111,6 +2642,29 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawn(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
         t.push_back({ "entity.destroy", "Entity", true, {{"entity", P::Int}}, {}, "HE::api::entity::destroy",
             [](Ctx& c, const VV& a){ entity::destroy(c, (Entity)aI(a, 0)); return VV{}; } });
+        // Spawning a CLASS — components, placement, physics and logic, through
+        // the host's Create Object service. Until these rows existed, the only
+        // door to it was the built-in Create Object node, so Lua, Python and
+        // generated C++ could create nothing but a bare entity. Three loose
+        // floats rather than one Vec3 pin: the same call has to read naturally
+        // as spawn(path, x, y, z) in a text script, where a packed value would
+        // arrive spread over several arguments anyway.
+        t.push_back({ "entity.spawnClass", "Entity", true,
+            {{"class", P::String}, {"x", P::Float}, {"y", P::Float}, {"z", P::Float}},
+            {{"entity", P::Int}}, "HE::api::entity::spawnClass",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawnClass(
+                c, aS(a, 0), aF(a, 1), aF(a, 2), aF(a, 3))) }; } });
+        t.push_back({ "entity.spawnClassRotated", "Entity", true,
+            {{"class", P::String}, {"x", P::Float}, {"y", P::Float}, {"z", P::Float},
+             {"rx", P::Float}, {"ry", P::Float}, {"rz", P::Float}},
+            {{"entity", P::Int}}, "HE::api::entity::spawnClassRotated",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawnClassRotated(
+                c, aS(a, 0), aF(a, 1), aF(a, 2), aF(a, 3), aF(a, 4), aF(a, 5), aF(a, 6))) }; } });
+        // The counterpart, by object reference. A Ref pin, like entity.owned's —
+        // an object reference read as an Int comes through as 0.
+        t.push_back({ "entity.destroyObject", "Entity", true, {{"object", P::Ref}}, {},
+            "HE::api::entity::destroyObject",
+            [](Ctx& c, const VV& a){ entity::destroyObject(c, aR(a, 0)); return VV{}; } });
         // Pure: which entity an Entity-class object sits on. `self` takes no
         // argument because the caller's identity travels in the Ctx.
         t.push_back({ "entity.self", "Entity", false, {}, {{"entity", P::Int}}, "HE::api::entity::self",
@@ -2181,12 +2735,34 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ physics::setGravity(c, aV3(a, 0)); return VV{}; } });
         t.push_back({ "physics.getGravity", "Physics", false, {}, {{"gravity", P::Vec3}}, "HE::api::physics::getGravity",
             [](Ctx& c, const VV&){ return VV{ v3(physics::getGravity(c)) }; } });
+        // The teleport. A Vec3 parameter spreads as three numbers on the text
+        // bindings, so from Lua and Python these read setPosition(entity, x, y, z)
+        // — the shape the rest of the flat surface already has.
+        t.push_back({ "physics.setPosition", "Physics", true, {{"entity", P::Int}, {"position", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::setPosition",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setPosition(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.setPositionAndReset", "Physics", true, {{"entity", P::Int}, {"position", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::setPositionAndReset",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setPositionAndReset(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.hasPhysics", "Physics", false, {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasPhysics",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasPhysics(c, (Entity)aI(a, 0))) }; } });
 
         // Materials
         t.push_back({ "material.getParam", "Material", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Color}}, "HE::api::material::getParam",
             [](Ctx& c, const VV& a){ return VV{ Value::ofColor(material::getParam(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
         t.push_back({ "material.setParam", "Material", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Color}}, {{"ok", P::Bool}}, "HE::api::material::setParam",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(material::setParam(c, (Entity)aI(a, 0), aS(a, 1), aV4(a, 2))) }; } });
+
+        // Particles — the four rows that make an emitter an effect rather than
+        // scenery. Burst is the one the others exist around: a hit, a muzzle
+        // flash and a footstep are all N particles at a moment, and a rate could
+        // never say "at a moment".
+        t.push_back({ "particle.play", "Particles", true, {{"entity", P::Int}}, {}, "HE::api::particle::play",
+            [](Ctx& c, const VV& a){ particle::play(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "particle.stop", "Particles", true, {{"entity", P::Int}}, {}, "HE::api::particle::stop",
+            [](Ctx& c, const VV& a){ particle::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "particle.burst", "Particles", true, {{"entity", P::Int}, {"count", P::Int}}, {{"emitted", P::Int}}, "HE::api::particle::burst",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(particle::burst(c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "particle.isPlaying", "Particles", false, {{"entity", P::Int}}, {{"playing", P::Bool}}, "HE::api::particle::isPlaying",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(particle::isPlaying(c, (Entity)aI(a, 0))) }; } });
 
         // Animator — the state machine's parameters, and the only way to steer it
         t.push_back({ "animator.setParam", "Animator", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Float}}, {}, "HE::api::animator::setParam",
@@ -2220,6 +2796,36 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ locomotion::setMaxSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
         t.push_back({ "locomotion.setOrientToMovement", "Locomotion", true, {{"entity", P::Int}, {"on", P::Bool}}, {}, "HE::api::locomotion::setOrientToMovement",
             [](Ctx& c, const VV& a){ locomotion::setOrientToMovement(c, (Entity)aI(a, 0), aB(a, 1)); return VV{}; } });
+        // Jumping. Two rows rather than one with an optional speed: "the jump this
+        // character was tuned for" and "this speed, now" are different requests,
+        // and a defaulted 0 could not tell them apart (it would also be a jump of
+        // zero, which is a real value). Both return whether the character left the
+        // ground — the exec node still has an output pin worth wiring.
+        t.push_back({ "locomotion.jump", "Locomotion", true, {{"entity", P::Int}}, {{"jumped", P::Bool}}, "HE::api::locomotion::jump",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(locomotion::jump(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "locomotion.jumpWith", "Locomotion", true, {{"entity", P::Int}, {"speed", P::Float}}, {{"jumped", P::Bool}}, "HE::api::locomotion::jumpWith",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(locomotion::jumpWith(c, (Entity)aI(a, 0), aF(a, 1))) }; } });
+
+        // Navigation — the pathfinder's whole script surface. Three loose floats
+        // for the destination rather than one Vec3 pin, for entity.spawnClass's
+        // reason: the call has to read as moveTo(agent, x, y, z) in a text script,
+        // where a packed value arrives spread over arguments anyway. The point is
+        // in WORLD space — the nav block in EngineApi.h says why.
+        t.push_back({ "nav.moveTo", "Navigation", true,
+            {{"entity", P::Int}, {"x", P::Float}, {"y", P::Float}, {"z", P::Float}},
+            {{"started", P::Bool}}, "HE::api::nav::moveTo",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(nav::moveTo(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), aF(a, 3))) }; } });
+        t.push_back({ "nav.stop", "Navigation", true, {{"entity", P::Int}}, {}, "HE::api::nav::stop",
+            [](Ctx& c, const VV& a){ nav::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "nav.isMoving", "Navigation", false, {{"entity", P::Int}}, {{"moving", P::Bool}}, "HE::api::nav::isMoving",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(nav::isMoving(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "nav.hasPath", "Navigation", false, {{"entity", P::Int}}, {{"hasPath", P::Bool}}, "HE::api::nav::hasPath",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(nav::hasPath(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "nav.remainingDistance", "Navigation", false, {{"entity", P::Int}}, {{"distance", P::Float}}, "HE::api::nav::remainingDistance",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(nav::remainingDistance(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "nav.setSpeed", "Navigation", true, {{"entity", P::Int}, {"speed", P::Float}}, {}, "HE::api::nav::setSpeed",
+            [](Ctx& c, const VV& a){ nav::setSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
 
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
@@ -2859,6 +3465,13 @@ const std::vector<ApiFn>& registry()
             { "log", "Log" },
             { "entity.getName", "Get Name" },       { "entity.spawn", "Spawn Entity" },
             { "entity.destroy", "Destroy Entity" }, { "entity.distance", "Distance Between" },
+            { "entity.spawnClass", "Spawn Class" },
+            { "entity.spawnClassRotated", "Spawn Class Rotated" },
+            // NOT plain "Destroy Object": that name already belongs to the
+            // built-in node (HcGraphHost's Reference section), and both feed the
+            // same add-menu. The "(Ref)" suffix is that menu's own spelling for
+            // "takes an object reference" — Call Function (Ref), Get (Ref).
+            { "entity.destroyObject", "Destroy Object (Ref)" },
             { "entity.self", "Get Owning Entity" }, { "entity.owned", "Get Entity Of" },
             { "entity.instance", "Get Object On Entity" },
             { "entity.selfObject", "Get Owning Object" },
@@ -2867,6 +3480,9 @@ const std::vector<ApiFn>& registry()
             { "transform.setWorldPosition", "Set World Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
+            { "particle.play", "Play Effect" },   { "particle.stop", "Stop Effect" },
+            { "particle.burst", "Burst Particles" },
+            { "particle.isPlaying", "Is Effect Playing" },
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
             { "animator.getState", "Get Animator State" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
@@ -2876,12 +3492,27 @@ const std::vector<ApiFn>& registry()
             { "locomotion.move", "Move" }, { "locomotion.look", "Look" },
             { "locomotion.setMaxSpeed", "Set Max Speed" },
             { "locomotion.setOrientToMovement", "Set Orient To Movement" },
+            { "locomotion.jump", "Jump" }, { "locomotion.jumpWith", "Jump With Speed" },
+            { "nav.moveTo", "Move To" },
+            // Not a bare "Stop" — Audio already spells its own "Stop Sound", and
+            // the drag-off menu lists the registry flat, where an unqualified
+            // "Stop" next to it is a coin toss.
+            { "nav.stop", "Stop Moving" },
+            { "nav.isMoving", "Is Moving" }, { "nav.hasPath", "Has Path" },
+            { "nav.remainingDistance", "Remaining Distance" },
+            // Locomotion owns "Set Max Speed"; this one is the agent's pace.
+            { "nav.setSpeed", "Set Agent Speed" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             { "physics.isGrounded", "Is Grounded" },
             { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
             { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },
+            { "physics.hasPhysics", "Has Physics" },
+            // Suffixed for the same reason as Get Velocity below: Transform owns
+            // the unqualified "Set Position", and the add menu lists both flat.
+            { "physics.setPosition", "Set Position (Physics)" },
+            { "physics.setPositionAndReset", "Set Position And Stop (Physics)" },
             // Suffixed like "Length (Vec2)"/"Length (Vec3)": Movement already
             // owns a "Get Velocity", and the drag-off menu lists the registry
             // flat, where two identically named rows are a coin toss.
@@ -3034,6 +3665,83 @@ const std::vector<ApiFn>& registry()
                 if (std::strcmp(fn.id, id) == 0) { fn.displayName = name; break; }
         }
 
+        // ── Second post-pass: the Target pin defaults to the caller ──────────
+        // A character's own graph called Jump on itself and still had to wire Get
+        // Owning Entity into the Entity pin — for Jump, and again for Move, and
+        // again for every read of its own speed. The pin is now optional: left at
+        // 0 it means "the entity of the class that made this call".
+        //
+        // Zero is the right sentinel and needs no new one. HorizonWorld's
+        // constructor creates the world root as its very FIRST entity, so in a
+        // fresh entt registry the root is index 0 version 0 — the raw value 0.
+        // createEntity() therefore never hands 0 to anything, destroyEntity()
+        // already knows it as isBuiltin() and refuses to delete it, and the
+        // scripting surface already uses 0 as "no entity" in both directions:
+        // findByName, spawn, spawnClass, instance, self and owned all return it
+        // on failure.
+        //
+        // Not claimed: that the root is component-free. A scene FILE can put a
+        // transform or a character on it — applyComponents does not exclude the
+        // root, and migrateLegacyRootEnvironment exists because shipped scenes
+        // once did. What is claimed is only that no gameplay entity is ever
+        // numbered 0, which is what makes the substitution unambiguous.
+        //
+        // ONE rule, applied here rather than row by row: a leading parameter
+        // named "entity" is the thing the row acts on. Writing it into each of
+        // the sixty-odd rows by hand is how it would end up true for Jump and
+        // forgotten for Set Max Speed, and the whole value of the convention is
+        // that an author never has to ask which nodes have it.
+        static constexpr const char* kNoSelfDefault[] = {
+            // A validity question must not answer about a different entity than
+            // the one asked about. "Entity Exists" of a lookup that failed has to
+            // stay false, or the check it exists for is worthless.
+            "entity.exists",
+            // Deleting the caller because a Find By Name missed is the one
+            // mistake with no way back. Destroy Self stays explicit: wire Get
+            // Owning Entity and mean it.
+            "entity.destroy",
+        };
+        for (auto& fn : t)
+        {
+            if (fn.params.empty() || std::strcmp(fn.params[0].name, "entity") != 0) continue;
+            bool excluded = false;
+            for (const char* id : kNoSelfDefault)
+                if (std::strcmp(fn.id, id) == 0) { excluded = true; break; }
+            if (excluded) continue;
+
+            fn.params[0].selfDefault = true;
+            // Wrapping the thunk instead of touching the row's lambda keeps the
+            // free C++ functions honest: locomotion::jump(c, 0) still means the
+            // root entity, which is what a direct C++ caller (and the planned
+            // cppCall codegen) reads it as. The substitution belongs to the
+            // SCRIPTING surface, so it lives on the scripting surface's edge —
+            // and there is exactly one, since both applications and both text
+            // languages dispatch through ApiFn::invoke.
+            fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
+                        (Ctx& c, const VV& a) -> VV
+            {
+                if (a.empty() || a[0].i != 0) return inner(c, a);
+                const Entity me = entity::self(c);
+                if (me == 0u)
+                {
+                    // No caller to stand in: a text script (Lua and Python have
+                    // no instance at all), or a class not bound to an entity.
+                    // Loud, because the alternative is the engine's most
+                    // expensive failure mode — a call that does nothing and says
+                    // nothing. Throttled per row, since a Tick would repeat it
+                    // sixty times a second.
+                    HE_LOG_THROTTLE(Script, Warning, 5.0,
+                                    "%s: Entity is empty and there is no calling object to "
+                                    "stand in for it - wire an entity into the pin",
+                                    id);
+                    return inner(c, a);
+                }
+                VV withSelf = a;
+                withSelf[0] = Value::ofInt(static_cast<int>(me));
+                return inner(c, withSelf);
+            };
+        }
+
         return t;
     }();
     return table;
@@ -3045,6 +3753,19 @@ bool isScriptGroup(std::string_view group)
                                                     "string", "camera", "env", "entity", "audio",
                                                     "debug", "fs", "save", "scene", "player",
                                                     "animator", "movement", "locomotion",
+                                                    // "particle" has no flat twin either:
+                                                    // without it on this list a text script
+                                                    // can spawn an effect entity but never
+                                                    // fire it, which is the state B6 exists
+                                                    // to end.
+                                                    "particle",
+                                                    // "nav" has no flat hand-written
+                                                    // twin at all: leaving it off this
+                                                    // list would mean the pathfinder
+                                                    // stays unreachable from Lua and
+                                                    // Python, which is the state B4
+                                                    // exists to end.
+                                                    "nav",
                                                     // "physics" carries the whole force/overlap
                                                     // surface, and the flat bindings only ever
                                                     // got raycast/setVelocity/isGrounded — so

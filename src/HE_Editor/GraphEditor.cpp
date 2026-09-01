@@ -240,6 +240,16 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             st.selected = st.selection.empty() ? 0 : st.selection.front();
     }
 
+    // The raise list is subject to the same rule and for the same reason: an id
+    // left over from another sub-graph would pull whatever node happens to carry
+    // that number here to the front.
+    if (!st.raised.empty())
+    {
+        const std::unordered_set<int> visible(ids.begin(), ids.end());
+        st.raised.erase(std::remove_if(st.raised.begin(), st.raised.end(),
+            [&](int id){ return !visible.count(id); }), st.raised.end());
+    }
+
     // Links are needed twice: for the wires and to know which INPUT pins are
     // wired (unwired simple inputs show an inline default editor).
     const std::vector<std::array<int,4>> links =
@@ -287,6 +297,31 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         }
         nodes.push_back(std::move(d));
     }
+
+    // ── Raised nodes go last ─────────────────────────────────────────────────
+    // The list is tiny (what the user has actually grabbed), so a linear lookup
+    // per node beats any index. stable_partition keeps the graph's own order
+    // among the untouched ones, and the raised block is then put back in RAISE
+    // order — grab A, then B, and B stays in front of A.
+    //
+    // Reordering happens here, on the per-frame Drawn list, and never on the
+    // model: node order in the graph is what the scene file stores, so raising
+    // through it would rewrite a file for a click. The hit test needs no change
+    // either, because it reads "last one under the cursor wins" off this very
+    // order.
+    if (!st.raised.empty())
+    {
+        const auto isRaised = [&](const Drawn& d) {
+            return std::find(st.raised.begin(), st.raised.end(), d.id) != st.raised.end();
+        };
+        const auto firstRaised = std::stable_partition(
+            nodes.begin(), nodes.end(), [&](const Drawn& d){ return !isRaised(d); });
+        std::stable_sort(firstRaised, nodes.end(), [&](const Drawn& a, const Drawn& b) {
+            return std::find(st.raised.begin(), st.raised.end(), a.id) <
+                   std::find(st.raised.begin(), st.raised.end(), b.id);
+        });
+    }
+
     auto findNode = [&](int nid) -> Drawn* {
         for (auto& n : nodes) if (n.id == nid) return &n;
         return nullptr;
@@ -738,6 +773,23 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             }
             else { st.selection.clear(); st.selection.push_back(hn); }
             st.selected = hn;
+
+            // To the front, on the PRESS rather than on the first move: the drag
+            // that follows must not pull the node along behind its neighbours,
+            // and there is no frame in which that would look intended. The whole
+            // dragged group goes, not just the node under the cursor, or a
+            // multi-selection would tear in half the moment it moves — the group
+            // is exactly what the move loop below writes to.
+            //
+            // Re-grabbing a node that is already raised moves it back to the end,
+            // so the most recently touched node is the frontmost one.
+            for (int rid : st.selection.empty() ? std::vector<int>{ hn } : st.selection)
+            {
+                st.raised.erase(std::remove(st.raised.begin(), st.raised.end(), rid),
+                                st.raised.end());
+                st.raised.push_back(rid);
+            }
+
             float gx = 0, gy = 0; model.getPos(hn, gx, gy);
             st.dragNode = hn; st.dragStartMouse = mouse; st.dragStartPos = ImVec2(gx, gy);
             st.dragMoved = false;

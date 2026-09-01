@@ -778,6 +778,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat3("Target##na",     glm::value_ptr(na->targetPos), 0.1f); trackEdit();
 			Row::dragFloat("Speed##na",       &na->speed,        0.1f, 0.0f, 20.0f, "%.1f m/s"); trackEdit();
 			Row::dragFloat("Stop Dist##na",   &na->stoppingDist, 0.01f,0.0f, 2.0f,  "%.2f m"); trackEdit();
+			// Authored, unlike everything below the separator: the packaged game
+			// has no Go button, so this is what starts an agent there.
+			EditorWidgets::checkbox("Auto Start##na", &na->autoStart); trackEdit();
 			ImGui::Separator();
 			ImGui::Text("Path: %zu pts  idx=%zu  %s",
 				na->path.size(), na->pathIdx,
@@ -1034,6 +1037,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (componentHeader("Movement", true, removed))
 		{
 			Row::dragFloat("Max Speed", &mv->maxSpeed, 0.1f, 0.0f, 100.0f); trackEdit();
+			// Above Orient To Movement on purpose: the two are constantly
+			// mistaken for one another, and this is the one that decides WHERE
+			// forward is. Reading them in this order is the explanation.
+			{
+				static const char* kSpaces[] = { "World", "Camera" };
+				int space = static_cast<int>(mv->moveSpace);
+				if (Row::combo("Move Direction Is", &space, kSpaces, 2))
+					mv->moveSpace = static_cast<MovementComponent::Space>(space);
+				trackEdit();
+			}
 			EditorWidgets::checkbox("Orient To Movement", &mv->orientToMovement); trackEdit();
 			if (mv->orientToMovement)
 			{
@@ -1226,14 +1239,59 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	{
 		if (componentHeader("Collider", true, removed))
 		{
-			static const char* kShapes[] = { "Box", "Sphere", "Capsule" };
-			int shape = static_cast<int>(col->shape);
-			if (Row::combo("Shape", &shape, kShapes, 3))
+			// The entries line up 1:1 with ColliderShape's values, so the index is
+			// the enumerator and a plain cast carries it both ways. A filtered
+			// list would need a lookup table here and would drift from the enum
+			// the first time a shape was added. What the cast does NOT survive is
+			// a value that is not an enumerator at all — see the clamp below.
+			static const char* kShapes[] = {
+				"Box", "Sphere", "Capsule", "Mesh", "Convex Hull", "Height Field",
+			};
+			constexpr int kShapeCount = static_cast<int>(sizeof(kShapes) / sizeof(kShapes[0]));
+			// A scene written by a different build — or a corrupted one — can
+			// carry a value this enum does not have. Unclamped it went straight
+			// into ImGui::Combo, which then asks its list clipper for a row past
+			// the end of kShapes, and the switch below matched no case at all:
+			// a Collider showing a blank Shape with no rows under it and no way
+			// back except deleting the component.
+			//
+			// Clamped for the WIDGET only. col->shape is deliberately left as it
+			// is: silently rewriting a component from a draw call is a scene edit
+			// nobody asked for, that no undo entry covers and that would not even
+			// mark the scene dirty — the file and what is on screen would quietly
+			// disagree. Box is what PhysicsWorld falls back to for an unknown
+			// shape anyway, so showing Box tells the truth about what collides.
+			//
+			// The combo reports a change only when a DIFFERENT index is picked,
+			// and the widget already reads Box, so choosing Box is the one pick
+			// that does not write the value back. The hint says so rather than
+			// promising a repair that would not happen.
+			const int  rawShape     = static_cast<int>(col->shape);
+			const bool unknownShape = rawShape < 0 || rawShape >= kShapeCount;
+			int        shape        = unknownShape ? 0 : rawShape;
+			if (Row::combo("Shape", &shape, kShapes, kShapeCount))
 			{
 				if (undo) undo->snapshotNow();
 				col->shape = static_cast<ColliderShape>(shape);
 			}
-			switch (col->shape)
+			if (unknownShape && static_cast<int>(col->shape) == rawShape)
+				hint("This collider's shape (%d) is not one this build knows, so physics "
+				     "collides it as a Box and the rows below edit that Box. Pick any "
+				     "other shape above to store a real value in the scene.",
+				     rawShape);
+			// Re-read: the combo may have just repaired it, and the size rows must
+			// follow the value the author now sees rather than the one they had.
+			const int           curShape   = static_cast<int>(col->shape);
+			const ColliderShape shownShape = (curShape < 0 || curShape >= kShapeCount)
+			                                     ? ColliderShape::Box
+			                                     : col->shape;
+			// The last three shapes take their geometry from the entity, so they
+			// have no size rows at all — and each has a condition that decides
+			// whether it will produce a body. Saying it here beats a log line the
+			// author only finds after wondering why they fell through the world.
+			const auto* rbForShape = registry.try_get<RigidBodyComponent>(entity);
+			const bool  bodyIsStatic = !rbForShape || rbForShape->type == RigidBodyType::Static;
+			switch (shownShape)
 			{
 			case ColliderShape::Box:
 				Row::dragFloat3("Half Extents", &col->halfExtents.x, 0.01f, 0.001f, 100.0f); trackEdit();
@@ -1244,6 +1302,30 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			case ColliderShape::Capsule:
 				Row::dragFloat("Radius",       &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
 				Row::dragFloat("Total Height", &col->height, 0.01f, 0.001f, 100.0f); trackEdit();
+				break;
+			case ColliderShape::Mesh:
+				hint("Collides as the entity's own mesh, triangle for triangle. "
+				     "Level geometry, terrain props, anything that must not be a crate.");
+				if (!registry.all_of<MeshComponent>(entity))
+					hint("This entity has no Mesh, so there is no geometry to collide with.");
+				if (!bodyIsStatic)
+					hint("A triangle mesh can only be a STATIC body. Set Body Type to "
+					     "Static, or pick Convex Hull for something that moves.");
+				break;
+			case ColliderShape::ConvexHull:
+				hint("Collides as the convex hull of the entity's own mesh — the shape "
+				     "shrink-wrap gives you. Hollows and concave corners are filled in. "
+				     "This is the shape to use for a dynamic body.");
+				if (!registry.all_of<MeshComponent>(entity))
+					hint("This entity has no Mesh, so there is no geometry to hull.");
+				break;
+			case ColliderShape::HeightField:
+				hint("Collides as the entity's Landscape height field — one shape for the "
+				     "whole terrain, independent of chunking and LOD.");
+				if (!registry.all_of<TerrainComponent>(entity))
+					hint("This entity has no Landscape, so there is no height field to use.");
+				if (!bodyIsStatic)
+					hint("A height field can only be a STATIC body. Set Body Type to Static.");
 				break;
 			}
 			EditorWidgets::checkbox("Is Trigger", &col->isTrigger); trackEdit();
@@ -1261,9 +1343,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Skin Width (m)",    &cc->skinWidth,  0.001f, 0.001f, 0.5f); trackEdit();
 			Row::dragFloat("Mass (kg)",          &cc->mass,       0.5f, 1.0f, 500.0f); trackEdit();
 			Row::dragFloat("Gravity (m/s²)",     &cc->gravity,    0.1f, 0.0f, 30.0f); trackEdit();
+			// Jump height is not authored directly: it falls out of this against
+			// Gravity above, so the two rows sit next to each other.
+			Row::dragFloat("Jump Speed (m/s)",   &cc->jumpSpeed,  0.1f, 0.0f, 30.0f); trackEdit();
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
+			// The other half of "why did that jump not fire": the jump is still
+			// granted for a moment after the feet leave the ground, and this is
+			// the number that decides it.
+			float airTime = cc->airTime;
+			Row::dragFloat("Air Time (s)", &airTime, 0.0f);
 			float v[3] = { cc->velocity.x, cc->velocity.y, cc->velocity.z };
 			Row::dragFloat3("Velocity", v, 0.0f);
 			ImGui::EndDisabled();
@@ -1510,6 +1600,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ParticleSystem::markConfigDirty(*ps);
 
 			EditorWidgets::checkbox("Playing##ps", &ps->playing); trackEdit();
+			EditorWidgets::checkbox("Destroy When Finished##ps", &ps->destroyWhenFinished); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }

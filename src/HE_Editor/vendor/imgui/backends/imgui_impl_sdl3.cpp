@@ -1059,8 +1059,9 @@ struct ImGui_ImplSDL3_ViewportData
     Uint32          WindowID;       // Stored in ImGuiViewport::PlatformHandle. Use SDL_GetWindowFromID() to get SDL_Window* from Uint32 WindowID.
     bool            WindowOwned;
     SDL_GLContext   GLContext;
+    bool            Focusable;      // HE-PATCH(tooltip-focus): last focusability we pushed to SDL, see ImGui_ImplSDL3_CreateWindow.
 
-    ImGui_ImplSDL3_ViewportData()   { Window = ParentWindow = nullptr; WindowID = 0; WindowOwned = false; GLContext = nullptr; }
+    ImGui_ImplSDL3_ViewportData()   { Window = ParentWindow = nullptr; WindowID = 0; WindowOwned = false; GLContext = nullptr; Focusable = true; }
     ~ImGui_ImplSDL3_ViewportData()  { IM_ASSERT(Window == nullptr && GLContext == nullptr); }
 };
 
@@ -1103,6 +1104,21 @@ static void ImGui_ImplSDL3_CreateWindow(ImGuiViewport* viewport)
     sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoDecoration) ? 0 : SDL_WINDOW_RESIZABLE;
     sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoTaskBarIcon) ? SDL_WINDOW_UTILITY : 0;
     sdl_flags |= (viewport->Flags & ImGuiViewportFlags_TopMost) ? SDL_WINDOW_ALWAYS_ON_TOP : 0;
+    // HE-PATCH(tooltip-focus): a viewport carrying ImGuiViewportFlags_NoInputs (a tooltip, the
+    // Ctrl+Tab overlay, a window mid-drag) must never be able to take OS keyboard focus. Upstream
+    // builds sdl_flags only from NoDecoration/NoTaskBarIcon/TopMost, so such a window is born
+    // focusable and its only safeguard is the SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN hint in
+    // ImGui_ImplSDL3_ShowWindow — which on macOS is hardcoded to "1", i.e. no safeguard at all
+    // (Cocoa_ShowWindow then calls makeKeyAndOrderFront:). The moment a tooltip does not fit inside
+    // the editor window it gets its own OS window, steals key focus, and Dear ImGui reacts in
+    // UpdateViewportsNewFrame ("Focused viewport has changed") with FocusWindow(tooltip). Since a
+    // tooltip is not part of the popup stack, that call closes every open menu and drops the active
+    // id: menus snap shut on hover and text fields lose their caret mid-typing. SDL_WINDOW_NOT_FOCUSABLE
+    // makes Cocoa's canBecomeKeyWindow return NO, so the window still orders front and stays visible,
+    // but focus never moves. Keep this patch when re-vendoring — and keep its twin in
+    // ImGui_ImplSDL3_UpdateWindow, which is what makes the flag reversible.
+    sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoInputs) ? SDL_WINDOW_NOT_FOCUSABLE : 0;
+    vd->Focusable = (viewport->Flags & ImGuiViewportFlags_NoInputs) == 0;
     vd->Window = SDL_CreateWindow("No Title Yet", (int)viewport->Size.x, (int)viewport->Size.y, sdl_flags);
 #ifndef __APPLE__ // On Mac, SDL3 Parenting appears to prevent viewport from appearing in another monitor
     SDL_SetWindowParent(vd->Window, vd->ParentWindow);
@@ -1176,6 +1192,35 @@ static void ImGui_ImplSDL3_UpdateWindow(ImGuiViewport* viewport)
         SDL_SetWindowParent(vd->Window, vd->ParentWindow);
     }
 #endif
+
+    // HE-PATCH(tooltip-focus): ImGuiViewportFlags_NoInputs is not fixed for the lifetime of a
+    // viewport, so the focusability decided in ImGui_ImplSDL3_CreateWindow has to be kept in sync.
+    // The case that matters: dragging a docked panel out of the editor creates its OS window while
+    // the window is still being moved, and Dear ImGui marks a moving window's viewport NoInputs so
+    // it can hit-test what lies underneath. It clears the flag again on the NEXT frame, in
+    // ImGui::StopMouseMovingWindow (reached from UpdateMouseMovingWindowNewFrame) — not in the
+    // EndFrame half, which never touches NoInputs. Without this re-sync that panel would stay
+    // permanently unable to take keyboard focus, a worse bug than the tooltip one.
+    //
+    // Runs on every platform rather than under the __APPLE__ guard above: the flag it mirrors is
+    // set by platform-independent Dear ImGui code, so guarding it would ship the one-way half of
+    // the patch everywhere else. The price is a window-style change per drag on platforms that
+    // never had the fault (WS_EX_NOACTIVATE on Windows, XSetWMHints input on X11), which is what
+    // the Focusable cache is for: a window whose flag does not move costs no SDL call per frame.
+    //
+    // The alternative was one line in our own code instead of two hunks in vendored code:
+    // SetNextWindowViewport(GetMainViewport()->ID) before the BeginTooltip in
+    // EditorWidgets::drawQueuedHelp pins the tooltip into the editor's viewport, so no second OS
+    // window is ever born. Not taken, because it covers that one call site only — direct
+    // ImGui::SetTooltip calls and ImGui's own drag-and-drop payload tooltip would keep the fault —
+    // and because it clamps edge tooltips inside the editor window. Keep this patch when
+    // re-vendoring.
+    const bool focusable = (viewport->Flags & ImGuiViewportFlags_NoInputs) == 0;
+    if (focusable != vd->Focusable)
+    {
+        vd->Focusable = focusable;
+        SDL_SetWindowFocusable(vd->Window, focusable);
+    }
 }
 
 static ImVec2 ImGui_ImplSDL3_GetWindowPos(ImGuiViewport* viewport)

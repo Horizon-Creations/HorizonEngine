@@ -7,6 +7,7 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
+#include "HorizonScene/PhysicsWorld.h"
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Renderer/IRenderer.h>
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -85,6 +87,26 @@ namespace
         for (int k = 0; k < 4; ++k)
             tc.avgLayerWeights[k] = static_cast<float>(acc[k] / static_cast<double>(texels));
     }
+
+    // ── Terrains whose collider still has to catch up ────────────────────────
+    // Entity id → "it was edited again this tick". updateTerrains marks a
+    // terrain here every time it regenerates its meshes and rebuilds the
+    // physics height field on the first tick that leaves it alone. Why not
+    // straight away: see the flush at the end of updateTerrains.
+    //
+    // Keyed by WORLD as well, because entity ids are per-registry — terrain #7
+    // of a second world must not be flushed against the first one's. A world's
+    // entry is erased as soon as nothing of it is pending. Only a play session
+    // that STOPS mid-stroke leaves one behind (the flush needs a physics world
+    // to flush into): the next session flushes it on its first tick, where the
+    // rebuild is redundant but harmless, since initialize() has built that
+    // collider already and addEntity replaces rather than duplicates.
+    //
+    // File-static rather than a TerrainComponent field: this is bookkeeping
+    // ABOUT the component, and the component is serialised. Main-thread only,
+    // like the rest of the systems tick.
+    std::unordered_map<const HorizonWorld*, std::unordered_map<uint32_t, bool>>
+        g_pendingTerrainColliders;
 }
 
 namespace TerrainSystem
@@ -147,7 +169,19 @@ namespace TerrainSystem
         reg.emplace_or_replace<MeshComponent>(chunkEnt, mc);
     }
 
-    void updateTerrains(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
+    // The physics-aware tick. `physics` is nullable and null is the normal state
+    // outside play — the height field only has to exist while the simulation
+    // runs, so an editor that is not playing simply passes nothing.
+    //
+    // A landscape's collider is a single static height field on the TERRAIN
+    // entity (PhysicsWorld::buildTerrainBodyFor), NOT one per chunk: it is built
+    // from the same computeTerrainHeightField() array the chunk meshes are
+    // sampled out of, at the full snapped resolution, so it never follows the
+    // distance-LOD the way a collider made from the displayed chunk meshes
+    // would. What it does not get on its own is a SECOND look after a sculpt
+    // stroke, and that is what this overload adds.
+    void updateTerrains(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
+                        PhysicsWorld* physics)
     {
         auto& reg = world.registry();
 
@@ -354,6 +388,77 @@ namespace TerrainSystem
             tc.builtChunksPerSide = g.chunksPerSide;
             tc.dirty              = false;
             tc.regionDirty        = false;
+
+            // The ground the player stands on has to follow the ground they see —
+            // but NOT from here. Reached only from inside the dirty/regionDirty
+            // gate, which sounds like "once per edit" and is not: a brush drag
+            // sets regionDirty on EVERY frame it is held, and so does a drag on
+            // a noise slider with tc.dirty. Queue instead; the flush below
+            // rebuilds once the terrain is left alone.
+            if (physics)
+                g_pendingTerrainColliders[&world][static_cast<uint32_t>(te)] = true;
         }
+
+        // ── The collider catches up when the edit stops ──────────────────────
+        // A height-field rebuild is not in the same price class as the mesh
+        // regeneration above it. addEntity → buildHeightFieldShape evaluates the
+        // WHOLE field a second time (the chunk meshes only resample the copy
+        // this tick already made) and then hands Jolt every sample to quantise
+        // and to compute active edges for — about a million of them on a
+        // 1025² landscape, whereas a brush frame touches a couple of chunks.
+        // Paying that per brush FRAME is what makes a stroke stutter, and the
+        // stutter is worst on exactly the landscapes people sculpt.
+        //
+        // So the trade is: the collision surface is stale while the brush is
+        // down, and correct one tick after it lifts. Nobody can walk onto the
+        // metre of hill they are pushing up inside the same stroke — the camera
+        // is on the brush — and every other consumer (spawning, raycasts, an AI
+        // path) is asking about ground the stroke is not touching. One rebuild
+        // per stroke instead of sixty per second buys that outright.
+        //
+        // addEntity is idempotent — it tears the old height field down first —
+        // and it is deliberately NOT guarded by hasPhysics(), so a terrain whose
+        // body failed to build at scene start gets another attempt here.
+        //
+        // The heights are re-read from the TerrainComponent rather than patched
+        // region-wise on purpose: Jolt's HeightFieldShape::SetHeights silently
+        // clamps to the min/max the shape was CREATED with, which would let a
+        // sculpted mountain grow on screen while its collision stayed flat.
+        //
+        // Nothing to do for the chunk entities destroyed above: the collider
+        // lives on the terrain entity, never on a chunk. A destroyed TERRAIN
+        // entity is reaped by PhysicsWorld::step(), and the re-check below keeps
+        // a terrain that died mid-stroke from being rebuilt on its way out.
+        //
+        // find, not operator[]: the overwhelmingly common tick has nothing
+        // pending, and [] would default-construct and then erase an inner map on
+        // every one of them — a per-frame allocation inside the fix that exists
+        // to remove a per-frame rebuild.
+        const auto w = physics ? g_pendingTerrainColliders.find(&world)
+                               : g_pendingTerrainColliders.end();
+        if (w != g_pendingTerrainColliders.end())
+        {
+            auto& pending = w->second;
+            for (auto it = pending.begin(); it != pending.end(); )
+            {
+                if (it->second)          // edited again this tick — still under the brush
+                {
+                    it->second = false;
+                    ++it;
+                    continue;
+                }
+                const entt::entity te = static_cast<entt::entity>(it->first);
+                if (reg.valid(te) && reg.all_of<TerrainComponent>(te))
+                    physics->addEntity(world, it->first);
+                it = pending.erase(it);
+            }
+            if (pending.empty())
+                g_pendingTerrainColliders.erase(w);
+        }
+    }
+
+    void updateTerrains(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
+    {
+        updateTerrains(world, cm, renderer, nullptr);
     }
 }

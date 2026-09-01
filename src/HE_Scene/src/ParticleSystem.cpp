@@ -3,6 +3,7 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/TransformHierarchy.h>   // worldMatrixOf — see update()
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
 #include <ContentManager/Assets.h>
@@ -57,7 +58,9 @@ HE::UUID migrateLegacyConfig(const ParticleSystemComponent::LegacyConfig& legacy
     return cm.registerParticleGraph(std::move(asset));
 }
 
-void resolveConfigIfNeeded(ParticleSystemComponent& ps, ContentManager& cm)
+} // namespace
+
+void ParticleSystem::resolveConfig(ParticleSystemComponent& ps, ContentManager& cm)
 {
     if (ps.legacy.hasData)
     {
@@ -93,14 +96,70 @@ void resolveConfigIfNeeded(ParticleSystemComponent& ps, ContentManager& cm)
     ps.resolvedFromAssetId = ps.particleAssetId;
     ps.configDirty         = false;
 }
-} // namespace
 
 void ParticleSystem::markConfigDirty(ParticleSystemComponent& ps) { ps.configDirty = true; }
 
-bool ParticleSystem::stepPool(std::vector<Particle>& particles, float& emitAccumulator, std::mt19937& rng,
-                              const HE::ParticleEmitterConfig& config, const glm::vec3& emitterPos, float dt,
+namespace
+{
+// One particle, born at the emitter. Lifted out of the emission loop because a
+// burst needs exactly this and nothing else — before, the only way to make a
+// particle was to let enough time pass.
+Particle spawnParticle(std::mt19937& rng, const HE::ParticleEmitterConfig& config,
+                       const glm::vec3& emitterPos)
+{
+    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+    std::uniform_real_distribution<float> distAngle(0.0f, glm::two_pi<float>());
+
+    // Random lifetime in [lifetimeMin, lifetimeMax].
+    const float lt = config.lifetimeMin +
+                     dist01(rng) * (config.lifetimeMax - config.lifetimeMin);
+
+    // Random velocity within a spread cone around initialVelocity.
+    // Build an orthonormal frame around the initial velocity direction.
+    glm::vec3 dir(config.initialVelocity[0], config.initialVelocity[1], config.initialVelocity[2]);
+    const float spd = glm::length(dir);
+    if (spd < 1e-5f) dir = glm::vec3(0, 1, 0);
+    else              dir /= spd;
+
+    // Random offset within spread cone.
+    const float spread  = dist01(rng) * config.velocitySpread;
+    const float phi     = distAngle(rng);
+    // Tangent frame.
+    glm::vec3 t1 = (std::abs(dir.x) < 0.9f)
+        ? glm::normalize(glm::cross(dir, glm::vec3(1,0,0)))
+        : glm::normalize(glm::cross(dir, glm::vec3(0,1,0)));
+    glm::vec3 t2 = glm::cross(dir, t1);
+    const float sinS = std::sin(spread);
+
+    Particle p;
+    p.position    = emitterPos;
+    p.velocity    = (dir * std::cos(spread)
+                   + t1 * (sinS * std::cos(phi))
+                   + t2 * (sinS * std::sin(phi))) * spd;
+    p.lifetime    = lt;
+    p.maxLifetime = lt;
+    return p;
+}
+} // namespace
+
+void ParticleSystem::burst(PoolState state, const HE::ParticleEmitterConfig& config,
+                           const glm::vec3& emitterPos, int count)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        if (static_cast<int>(state.particles.size()) >= config.maxParticles) break;
+        state.particles.push_back(spawnParticle(state.rng, config, emitterPos));
+        ++state.emitted;
+    }
+}
+
+bool ParticleSystem::stepPool(PoolState state, const HE::ParticleEmitterConfig& config,
+                              const glm::vec3& emitterPos, float dt,
                               const PhysicsWorld* physics)
 {
+    std::vector<Particle>& particles      = state.particles;
+    float&                 emitAccumulator = state.emitAccumulator;
+    std::mt19937&          rng             = state.rng;
     // Integrate existing particles.
     const glm::vec3 gravity(config.gravity[0], config.gravity[1], config.gravity[2]);
     const bool collide = physics && config.collisionEnabled;
@@ -141,55 +200,45 @@ bool ParticleSystem::stepPool(std::vector<Particle>& particles, float& emitAccum
         particles.end());
 
     // Emit new particles.
+    //
+    // Two things decide whether this emitter is still allowed to emit at all. A
+    // stopped one is not, whatever its graph says. And a NON-LOOPING one is a
+    // burst of config.maxParticles, spread over time by the emit rate — once it
+    // has produced that many it is done, however many are still in the air.
+    //
+    // Both were missing. `looping` was read in exactly one place, the "finished"
+    // test below, and that test used to ask whether the accumulator had reached
+    // the interval — so a one-shot whose interval was longer than a frame (an
+    // emit rate under 60, which is most of them) declared itself finished on its
+    // FIRST step, before a single particle existed, and one whose interval was
+    // shorter never finished at all because it kept refilling its own pool. Both
+    // directions wrong, and the test covering it passed on the first of them.
     emitAccumulator += dt;
     const float interval = (config.emitRate > 0.0f) ? (1.0f / config.emitRate) : 1e30f;
+    // Asked again after the loop, not captured before it: the loop is what makes
+    // the answer change, and a stale copy would report "still emitting" forever.
+    const auto mayEmit = [&] {
+        return !state.stopping &&
+               (config.looping || state.emitted < config.maxParticles);
+    };
 
-    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
-    std::uniform_real_distribution<float> distAngle(0.0f, glm::two_pi<float>());
-
-    while (emitAccumulator >= interval &&
+    while (mayEmit() && emitAccumulator >= interval &&
            static_cast<int>(particles.size()) < config.maxParticles)
     {
         emitAccumulator -= interval;
-
-        // Random lifetime in [lifetimeMin, lifetimeMax].
-        const float lt = config.lifetimeMin +
-                         dist01(rng) * (config.lifetimeMax - config.lifetimeMin);
-
-        // Random velocity within a spread cone around initialVelocity.
-        // Build an orthonormal frame around the initial velocity direction.
-        glm::vec3 dir(config.initialVelocity[0], config.initialVelocity[1], config.initialVelocity[2]);
-        const float spd = glm::length(dir);
-        if (spd < 1e-5f) dir = glm::vec3(0, 1, 0);
-        else              dir /= spd;
-
-        // Random offset within spread cone.
-        const float spread  = dist01(rng) * config.velocitySpread;
-        const float phi     = distAngle(rng);
-        // Tangent frame.
-        glm::vec3 t1 = (std::abs(dir.x) < 0.9f)
-            ? glm::normalize(glm::cross(dir, glm::vec3(1,0,0)))
-            : glm::normalize(glm::cross(dir, glm::vec3(0,1,0)));
-        glm::vec3 t2 = glm::cross(dir, t1);
-        const float sinS = std::sin(spread);
-        const glm::vec3 vel = (dir * std::cos(spread)
-                             + t1 * (sinS * std::cos(phi))
-                             + t2 * (sinS * std::sin(phi))) * spd;
-
-        Particle p;
-        p.position    = emitterPos;
-        p.velocity    = vel;
-        p.lifetime    = lt;
-        p.maxLifetime = lt;
-        particles.push_back(p);
+        particles.push_back(spawnParticle(rng, config, emitterPos));
+        ++state.emitted;
     }
 
     // Clamp accumulator so we don't burst on the first tick after a pause.
     if (emitAccumulator > interval)
         emitAccumulator = interval;
 
-    // "Finished": not looping, nothing left alive, nothing queued to spawn.
-    return !config.looping && particles.empty() && emitAccumulator < interval;
+    // "Finished": nothing more will come, and nothing that came is still alive.
+    // Note it is the pool being empty that ends it, not the emission — a one-shot
+    // stays playing while its last particles fade out, which is what keeps the
+    // entity around long enough to see them.
+    return !mayEmit() && particles.empty();
 }
 
 void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
@@ -197,23 +246,42 @@ void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
 {
     auto& reg = world.registry();
 
+    // Entities whose one-shot ended and asked to be taken with it. Collected and
+    // destroyed AFTER the view — destroying inside an entt view iteration
+    // invalidates it, and a spawned hit effect is exactly the case that makes
+    // this happen every few frames rather than never.
+    std::vector<Entity> finishedAndDone;
+
     for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
     {
-        resolveConfigIfNeeded(ps, cm);
+        resolveConfig(ps, cm);
         if (!ps.playing) continue;
 
-        const glm::vec3 emitterPos = glm::vec3(tc.worldMatrix[3]);
+        // Composed from the hierarchy, NOT read out of tc.worldMatrix. The
+        // matrix is only refreshed by the transform propagation that runs later
+        // in the frame, so on the first step of a JUST-SPAWNED effect it is still
+        // identity — and every impact puff would put its first particles at the
+        // world origin before jumping to the impact point on frame two. The
+        // effect spawned at the moment of the hit is precisely the case B6
+        // exists for, so it is precisely the one that must not do that.
+        const glm::vec3 emitterPos = glm::vec3(HE::worldMatrixOf(world, e)[3]);
         const size_t before = ps.particles.size();
-        const bool finished = stepPool(ps.particles, ps.emitAccumulator, ps.rng, ps.resolvedConfig, emitterPos, dt, physics);
+        const bool finished = stepPool({ ps.particles, ps.emitAccumulator, ps.emitted,
+                                         ps.rng, ps.stopping },
+                                       ps.resolvedConfig, emitterPos, dt, physics);
         if (finished)
         {
             HE_LOG_TRACE(Particle, "Entity %u: one-shot emitter finished",
                          static_cast<uint32_t>(e));
             ps.playing = false;
+            if (ps.destroyWhenFinished) finishedAndDone.push_back(e);
         }
         // Hitting maxParticles every frame means the emit rate outruns the pool
         // and particles die early — visible as a flickering, truncated effect.
-        else if (before >= static_cast<size_t>(ps.resolvedConfig.maxParticles) &&
+        // Only for a LOOPING emitter: a one-shot's maxParticles is the size of
+        // its burst, so filling the pool is it working, not it drowning.
+        else if (ps.resolvedConfig.looping &&
+                 before >= static_cast<size_t>(ps.resolvedConfig.maxParticles) &&
                  ps.particles.size() >= static_cast<size_t>(ps.resolvedConfig.maxParticles))
         {
             HE_LOG_THROTTLE(Particle, Warning, 10.0,
@@ -222,4 +290,7 @@ void ParticleSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
                             static_cast<uint32_t>(e), ps.resolvedConfig.maxParticles);
         }
     }
+
+    for (const Entity e : finishedAndDone)
+        world.destroyEntity(e);
 }

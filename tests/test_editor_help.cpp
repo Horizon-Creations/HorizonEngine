@@ -2,11 +2,13 @@
 
 #include "DocsLibrary.h"
 #include "EditorHelp.h"
+#include "EditorGuides.h"
 #include "EditorReference.h"
 #include "EditorWidgets.h"
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <set>
 #include <string>
 
@@ -566,4 +568,63 @@ TEST_CASE("editor help: a topic without its own panel falls back to its page")
 	CHECK(Help::panelForTopic("editor#preferences") == nullptr);
 	CHECK(Help::panelForTopic("materials#nodes") == nullptr);
 	CHECK(Help::panelForTopic("") == nullptr);
+}
+
+// ── The guides ───────────────────────────────────────────────────────────────
+// The recipes are the part of the manual a reader opens first, and they have a
+// failure mode nothing else reports: a section built without its flat search
+// text is IN the manual and invisible to the search box. Someone typing
+// "navmesh" then gets nothing, concludes the manual has no answer, and never
+// finds the page that has it.
+//
+// So this asserts the two things that make a guide reachable at all — it is
+// installed, and it can be found by typing a word out of it.
+TEST_CASE("guides: every recipe is installed and findable by search")
+{
+	Docs::Library lib = shipped();
+	REQUIRE_MESSAGE(lib.loaded(), lib.error());
+	HE::Ed::Guides::install(lib);
+
+	const std::vector<std::string>& ids = HE::Ed::Guides::pageIds();
+	REQUIRE_FALSE(ids.empty());
+
+	// Every id the panel will ask for resolves. The sidebar drops the ones that
+	// do not, silently, so a typo here is a guide that is simply never listed.
+	for (const std::string& id : ids)
+		CHECK_MESSAGE(lib.pageIndex(id) >= 0,
+		              ("guide page missing from the library: " + id).c_str());
+
+	// Ids are unique: half of a topic reference is the page id, so two pages
+	// sharing one makes every link into either of them ambiguous.
+	std::set<std::string> unique(ids.begin(), ids.end());
+	CHECK(unique.size() == ids.size());
+
+	// Section ids are unique WITHIN a page, for the same reason one step further
+	// down — a cross-link addresses "page#section".
+	for (const std::string& id : ids)
+	{
+		const int pi = lib.pageIndex(id);
+		if (pi < 0) continue;
+		std::set<std::string> secIds;
+		for (const Docs::Section& s : lib.pages()[static_cast<std::size_t>(pi)].sections)
+			CHECK_MESSAGE(secIds.insert(s.id).second,
+			              ("duplicate section id " + s.id + " on guide page " + id).c_str());
+	}
+
+	// And the search finds them. This is the assertion that catches a section
+	// whose flat text was never filled: the page is there, the words are on
+	// screen, and searching for them returns nothing.
+	auto findsGuide = [&](const char* query)
+	{
+		for (const Docs::Hit& h : lib.search(query))
+		{
+			if (h.page < 0) continue;
+			const std::string& pid = lib.pages()[static_cast<std::size_t>(h.page)].id;
+			if (std::find(ids.begin(), ids.end(), pid) != ids.end()) return true;
+		}
+		return false;
+	};
+	CHECK_MESSAGE(findsGuide("navmesh"), "no guide found for \"navmesh\"");
+	CHECK_MESSAGE(findsGuide("jump"),    "no guide found for \"jump\"");
+	CHECK_MESSAGE(findsGuide("trigger"), "no guide found for \"trigger\"");
 }

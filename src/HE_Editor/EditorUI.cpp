@@ -37,6 +37,7 @@
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
+#include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
@@ -487,7 +488,13 @@ void EditorUI::render(AppContext& ctx, float dt)
             {
                 ImGui::CloseCurrentPopup();
                 ctx.contentRefreshDone = false;
-                ctx.projectLoaded      = true;
+                // Deliberately does NOT touch projectLoaded. This used to set it
+                // true, which reads as "the refresh finished, so a project must be
+                // open" — and that is false exactly once: closing a project ends
+                // its session, endProjectSession asks for a content refresh, and
+                // this branch then reopened the editor on the project that was just
+                // closed. The Project Hub was visible for the single frame in
+                // between. Every path that opens a project sets the flag itself.
             }
             ImGui::EndPopup();
         }
@@ -585,6 +592,13 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
+
+    // ── "That rename reaches other files" ────────────────────────────────────
+    // Raised by the graph editors after a HorizonCode member was renamed. Drawn
+    // here rather than in either of them because both raise it, and because it
+    // outlives the panel that asked: it writes assets, so it must not vanish
+    // because a tab was switched while it stood open.
+    HcRenameDialog::Draw(ctx);
 
     // ── Help ▸ Report Issue… ─────────────────────────────────────────────────
     // Drawn here too: something worth reporting can just as easily happen while
@@ -1089,6 +1103,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.globalState->setLastProjectPath("");
 		ctx.globalState->writeConfig();
 		ctx.projectLoaded = false;
+		// endProjectSession asks for a content refresh, which is right when it runs
+		// for a project SWITCH and pointless here: there is no project left to scan,
+		// and the modal would sit over the Hub announcing that it is updating one.
+		ctx.contentRefreshPending = false;
+		ctx.contentRefreshDone    = false;
 	};
 
 	// ── Unsaved-changes guard ───────────────────────────────────────────────
@@ -2180,6 +2199,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                         ctx.globalState->addKnownProject(heprojPath);
                         ctx.globalState->writeConfig();
                         ctx.contentRefreshPending = true;
+                        // Said here rather than left to the content-refresh modal to
+                        // infer. This was the one project-opening path that did not
+                        // set it, so the modal had to set it for everybody — and a
+                        // modal that turns "a project is open" on unconditionally
+                        // turns it on after a CLOSE too.
+                        ctx.projectLoaded = true;
                         ImGui::CloseCurrentPopup();
                     }
                     else

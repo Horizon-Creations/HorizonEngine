@@ -189,12 +189,20 @@ void install(Docs::Library& lib)
 		for (const auto& p : fn.params)  probe.params.push_back({ p.name, p.type, p.isArray });
 		for (const auto& r : fn.results) probe.results.push_back({ r.name, r.type, r.isArray });
 
+		// The Target rule is written once, here, for every row that has it —
+		// rather than repeated into sixty hand-written descriptions, where it
+		// would be right in some of them and stale in the rest.
+		std::string extra = fn.isExec ? "Runs when executed."
+		                              : "Pure - evaluated whenever an output is used.";
+		if (!fn.params.empty() && fn.params[0].selfDefault)
+			extra += " Entity left empty means the entity this object sits on, so a "
+			         "character calling this on itself wires nothing.";
+
 		page.sections.push_back(sectionFor(
 			probe, fn.id, fn.displayName ? fn.displayName : fn.id,
 			fn.category ? fn.category : "Engine",
 			NodeDocs::engineCall(fn.id),
-			fn.isExec ? "Runs when executed."
-			          : "Pure - evaluated whenever an output is used."));
+			std::move(extra)));
 	}
 
 	// Group by category, keeping the order within each. The enum's order is the

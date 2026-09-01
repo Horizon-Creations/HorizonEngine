@@ -9,6 +9,9 @@
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <ContentManager/ContentManager.h>
 
 // ── Geometry correctness ───────────────────────────────────────────────────────
@@ -548,4 +551,272 @@ TEST_CASE("Painted layer weights round-trip through the scene file")
     REQUIRE(l->layerWeights.size() == expected.size());
     CHECK(l->layerWeights == expected);
     CHECK(l->weightsDirty);   // needs an upload on the first tick after load
+}
+
+// ─── Landscape collision (B2: the player used to fall through the ground) ─────
+//
+// ColliderShape had exactly Box, Sphere and Capsule, and NOTHING ever gave a
+// terrain entity a RigidBodyComponent — not the Create Landscape tool, not the
+// scene loader, not the chunk generator. So an outdoor level had no ground at
+// all, while NavigationSystem happily baked the same terrain chunks into the
+// navmesh: the AI walked on a floor the player dropped through. Navigation and
+// physics were looking at two different worlds.
+//
+// The collider is ONE static height field on the Landscape entity, not one per
+// chunk. That is deliberate — the chunks carry distance-LOD, and a collider made
+// from whatever LOD is on screen would change shape as the camera moved.
+//
+// A note on resolution: 33 is 2ⁿ+1, so TerrainSystem's snap is a no-op and the
+// physics height field is sample-for-sample the array everything else reads.
+
+namespace
+{
+    // A landscape with real relief and NO RigidBodyComponent — the implicit
+    // terrain body is the fallback for exactly that case, which is the one the
+    // engine actually produces.
+    Entity makeLandscape(HorizonWorld& world, TerrainComponent& outTc)
+    {
+        TerrainComponent tc;
+        tc.sizeX = tc.sizeZ = 64.0f;
+        tc.resolution  = 33;          // 2⁵+1: no resample on the way to Jolt
+        tc.heightScale = 20.0f;
+        tc.seed        = 1234;        // non-zero → fBm relief, not a flat plane
+        outTc = tc;
+
+        Entity e = world.createEntity("Landscape");
+        TransformComponent t;
+        t.position = { 0.0f, 0.0f, 0.0f };
+        t.scale    = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(e, t);
+        world.registry().emplace<TerrainComponent>(e, tc);
+        return e;
+    }
+}
+
+TEST_CASE("Landscape has collision and its height matches what navigation bakes")
+{
+    HorizonWorld     world;
+    TerrainComponent tc;
+    Entity           land = makeLandscape(world, tc);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    // BEFORE THE CHANGE: no terrain entity ever had a physics representation, so
+    // this was false and every raycast below missed. That is the whole blocker
+    // in one assertion.
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(land)));
+
+    // The array NavigationSystem's input is built from: the chunk meshes sample
+    // this field, and LOD0 vertices land exactly on its grid points, so a value
+    // here IS the height the navmesh has at that point.
+    const std::vector<float> field = computeTerrainHeightField(tc);
+    REQUIRE(field.size() == static_cast<size_t>(tc.resolution) * tc.resolution);
+
+    const float step = tc.sizeX / static_cast<float>(tc.resolution - 1);
+
+    // Sample at EXACT grid points. Between samples Jolt's triangulation and the
+    // bilinear lookup can differ by a little; on a sample they must agree, and
+    // that is the comparison worth pinning.
+    int checked = 0;
+    for (uint32_t iz = 4; iz < tc.resolution - 4; iz += 7)
+        for (uint32_t ix = 4; ix < tc.resolution - 4; ix += 7)
+        {
+            const float x = -tc.sizeX * 0.5f + static_cast<float>(ix) * step;
+            const float z = -tc.sizeZ * 0.5f + static_cast<float>(iz) * step;
+
+            const auto hit = phys.raycast({ x, 200.0f, z }, { 0.0f, -1.0f, 0.0f }, 400.0f);
+            REQUIRE(hit.hit);
+            CHECK(hit.entityId == static_cast<uint32_t>(land));
+
+            // Three descriptions of the same ground, and they have to agree:
+            // what physics hit, what FoliageSystem places on, and what the
+            // navmesh was baked from.
+            const float navHeight = field[static_cast<size_t>(iz) * tc.resolution + ix];
+            CHECK(hit.point.y == doctest::Approx(navHeight).epsilon(0.01));
+            CHECK(hit.point.y == doctest::Approx(terrainHeightAt(tc, x, z)).epsilon(0.01));
+            ++checked;
+        }
+    REQUIRE(checked > 4);   // the loop actually ran
+
+    // The relief is real, not a flat plane that would make the above trivial.
+    const auto lo = *std::min_element(field.begin(), field.end());
+    const auto hi = *std::max_element(field.begin(), field.end());
+    CHECK(hi - lo > 1.0f);
+}
+
+TEST_CASE("A body dropped on a landscape comes to rest on it instead of falling through")
+{
+    HorizonWorld     world;
+    TerrainComponent tc;
+    Entity           land = makeLandscape(world, tc);
+
+    // A sphere so the resting height is exactly centre = ground + radius, with
+    // no box corner to catch on a slope.
+    const float radius = 0.5f;
+    const float dropX = 6.0f, dropZ = -10.0f;
+    const float ground = terrainHeightAt(tc, dropX, dropZ);
+
+    Entity ball = world.createEntity("Ball");
+    {
+        TransformComponent t;
+        t.position = { dropX, ground + 15.0f, dropZ };
+        t.scale    = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(ball, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        world.addComponent(ball, rb);
+        ColliderComponent col; col.shape = ColliderShape::Sphere; col.radius = radius;
+        world.addComponent(ball, col);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(land)));
+
+    // BEFORE THE CHANGE: with no terrain collider the ball fell for four seconds
+    // and was ~78 m below the ground it should have landed on. This is the
+    // player-falls-through-the-landscape bug, measured.
+    for (int i = 0; i < 240; ++i)
+        phys.step(world, 1.0f / 60.0f);
+
+    const auto& tr = world.registry().get<TransformComponent>(ball);
+    // A slope lets the ball roll a little before it settles, so the resting
+    // height is checked against the ground UNDER WHERE IT ENDED UP, not under
+    // where it was dropped.
+    const float groundBelow = terrainHeightAt(tc, tr.position.x, tr.position.z);
+    CHECK(tr.position.y > groundBelow - 0.1f);
+    CHECK(tr.position.y == doctest::Approx(groundBelow + radius).epsilon(0.15));
+    CHECK(tr.position.y > ground - 2.0f);   // it never sank through
+}
+
+TEST_CASE("An authored rigid body on a terrain entity wins over the implicit one")
+{
+    HorizonWorld     world;
+    TerrainComponent tc;
+    Entity           land = makeLandscape(world, tc);
+
+    // The implicit height field is a FALLBACK for the landscape nothing authors
+    // physics for. Once someone gives the terrain entity a rigid body of its
+    // own, that is the body — one entity must never end up with two, which would
+    // be an invisible second collider nothing can address or remove.
+    {
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        world.addComponent(land, rb);
+        ColliderComponent col;
+        col.shape = ColliderShape::Box;
+        col.halfExtents = { 2.0f, 2.0f, 2.0f };   // deliberately not terrain-shaped
+        world.addComponent(land, col);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(land)));
+
+    // The authored 4 m box sits at the origin; the terrain would have covered
+    // the whole 64 m square. A ray far out in the corner therefore hits nothing
+    // — which is only true if exactly ONE body was built, and it was the
+    // authored one.
+    const float far_ = tc.sizeX * 0.5f - 4.0f;
+    CHECK_FALSE(phys.raycast({ far_, 200.0f, far_ }, { 0.0f, -1.0f, 0.0f }, 400.0f).hit);
+
+    // And the authored box is really there.
+    CHECK(phys.raycast({ 0.0f, 200.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 400.0f).hit);
+}
+
+TEST_CASE("Sculpting a landscape moves its collider with it")
+{
+    HorizonWorld     world;
+    TerrainComponent tc;
+    Entity           land = makeLandscape(world, tc);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(land)));
+
+    const glm::vec3 from{ 0.0f, 200.0f, 0.0f };
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+    const auto before = phys.raycast(from, down, 400.0f);
+    REQUIRE(before.hit);
+
+    // Sculpt the whole landscape up to a flat plateau the way a stroke would:
+    // write sculptHeights on the component. These are ABSOLUTE heights that
+    // override the noise, not an offset added to it — so the plateau is put well
+    // above the terrain's own 0..heightScale range to make the move unambiguous.
+    const float plateau = tc.heightScale + 40.0f;
+    auto& live = world.registry().get<TerrainComponent>(land);
+    live.sculptHeights.assign(static_cast<size_t>(live.resolution) * live.resolution, plateau);
+    REQUIRE(before.point.y < plateau - 1.0f);
+
+    // The collider does NOT follow on its own — nothing polls the component.
+    CHECK(phys.raycast(from, down, 400.0f).point.y == doctest::Approx(before.point.y));
+
+    // addEntity is the refresh, and it REPLACES rather than adds: if it stacked a
+    // second height field, the ray would still stop on the old surface below.
+    CHECK(phys.addEntity(world, static_cast<uint32_t>(land)));
+    const auto after = phys.raycast(from, down, 400.0f);
+    REQUIRE(after.hit);
+    CHECK(after.entityId == static_cast<uint32_t>(land));
+    CHECK(after.point.y == doctest::Approx(plateau).epsilon(0.01));
+    CHECK(after.point.y > before.point.y + 1.0f);
+}
+
+// Red under two independent source mutations, both applied, built and observed:
+//   - disabling the `if (physics) g_pendingTerrainColliders[...] = true` queueing
+//     in TerrainSystem::updateTerrains: the collider never catches up at all.
+//   - disabling the latch's `if (it->second)` skip so the flush rebuilds in the
+//     same tick: the TICK ONE assertion below fails, which is what keeps that
+//     assertion from being decoration.
+TEST_CASE("The terrain tick pulls the collider after a sculpt, without anyone calling addEntity")
+{
+    // The ANSCHLUSS for terrain. The test above proves addEntity refreshes a
+    // height field when something calls it; this one proves the SYSTEM calls it,
+    // which is the only version of the claim a player is affected by. Nothing
+    // here touches PhysicsWorld except to read it back.
+    HorizonWorld     world;
+    ContentManager   cm(".");
+    TerrainComponent tc;
+    Entity           land = makeLandscape(world, tc);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(land)));
+
+    const glm::vec3 from{ 0.0f, 200.0f, 0.0f };
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+    const auto before = phys.raycast(from, down, 400.0f);
+    REQUIRE(before.hit);
+
+    // A stroke, in the shape the brush leaves behind: absolute heights on the
+    // component plus the dirty flag that tells the tick to regenerate.
+    const float plateau = tc.heightScale + 40.0f;
+    {
+        auto& live = world.registry().get<TerrainComponent>(land);
+        live.sculptHeights.assign(static_cast<size_t>(live.resolution) * live.resolution, plateau);
+        live.dirty = true;
+    }
+    REQUIRE(before.point.y < plateau - 1.0f);
+
+    // TICK ONE — the brush frame. The meshes regenerate, and the collider is
+    // deliberately left alone: a full height field per brush frame is what makes
+    // a stroke stutter, so the rebuild is queued instead. Stale collision while
+    // the brush is down is the documented trade, and pinning it here means a
+    // future change to that policy has to come past this assertion.
+    TerrainSystem::updateTerrains(world, cm, nullptr, &phys);
+    CHECK(phys.raycast(from, down, 400.0f).point.y == doctest::Approx(before.point.y));
+
+    // TICK TWO — the brush has lifted and nothing dirtied the terrain again, so
+    // the queued rebuild flushes. BEFORE THE CHANGE there was no physics-aware
+    // overload at all and the collision surface stayed on the pre-stroke shape
+    // for the rest of the session.
+    TerrainSystem::updateTerrains(world, cm, nullptr, &phys);
+    const auto after = phys.raycast(from, down, 400.0f);
+    REQUIRE(after.hit);
+    CHECK(after.entityId == static_cast<uint32_t>(land));
+    CHECK(after.point.y == doctest::Approx(plateau).epsilon(0.01));
+    CHECK(after.point.y > before.point.y + 1.0f);
+
+    // A third tick with nothing pending must not undo it — the queue is drained,
+    // not re-armed.
+    TerrainSystem::updateTerrains(world, cm, nullptr, &phys);
+    CHECK(phys.raycast(from, down, 400.0f).point.y == doctest::Approx(plateau).epsilon(0.01));
 }

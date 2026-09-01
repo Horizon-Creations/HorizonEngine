@@ -7967,6 +7967,11 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	// reads in the scene, so it binds here unchanged — only the camera has to grow
 	// to the mesh's bounds instead of the unit sphere's.
 	const GpuMesh* gm = meshId != HE::UUID{} ? ResolveMesh(meshId) : nullptr;
+	// ResolveMesh loads the picked mesh's own baked material, which grows the
+	// material pool — a dense vector — and moves `ma`, which is read for the
+	// preview's colour and params all the way to the end of this function. The
+	// first render after picking a preview mesh is exactly when it happens.
+	if (ma) ma = m_contentManager->getMaterial(materialId);
 	void* vertBuf = nullptr; void* idxBuf = nullptr; int idxCount = 0;
 	glm::vec3 center(0.0f);
 	float     radius = 1.0f; // what `dist` is measured in, so it frames alike
@@ -11908,13 +11913,29 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
 			// Resolve the mesh; entities without one fall back to the default cube.
+			bool meshWasResolved = false;
 			if (!meshValid || dc.meshAssetId != lastMeshId)
 			{
 				cMesh      = ResolveMesh(dc.meshAssetId);
 				lastMeshId = dc.meshAssetId; meshValid = true;
+				meshWasResolved = true;
 			}
-			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			const GpuMesh* drawMesh = cMesh;
+			if (!drawMesh) { drawMesh = ResolveMesh(HE::kDefaultCubeMeshId); meshWasResolved = true; }
 			if (!drawMesh) continue;
+			// ResolveMesh LOADS — the mesh's own baked material, in loose content
+			// through loadAsset and in a packaged build by streaming it out of the
+			// pak. Either way the material pool grows, and it is a dense vector:
+			// cMaterialParams, taken a few lines above, then points into moved
+			// memory and is dereferenced below for every draw of this material.
+			// Re-taken rather than reordered, and only on a mesh miss, so the
+			// steady state costs nothing.
+			if (meshWasResolved && cMaterialParams)
+			{
+				const MaterialAsset* ma = m_contentManager
+					? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+				cMaterialParams = (ma && !ma->shaderParamData.empty()) ? &ma->shaderParamData : nullptr;
+			}
 			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> indexBuf  = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 			NSUInteger    indexCount = (NSUInteger)drawMesh->indexCount;
@@ -13695,13 +13716,25 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			}
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
+			bool meshWasResolved = false;
 			if (!meshValid || dc.meshAssetId != lastMeshId)
 			{
 				cMesh      = ResolveMesh(dc.meshAssetId);
 				lastMeshId = dc.meshAssetId; meshValid = true;
+				meshWasResolved = true;
 			}
-			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			const GpuMesh* drawMesh = cMesh;
+			if (!drawMesh) { drawMesh = ResolveMesh(HE::kDefaultCubeMeshId); meshWasResolved = true; }
 			if (!drawMesh) continue;
+			// The G-buffer twin of the forward pass's re-take — same reason, same
+			// shape: ResolveMesh loads the mesh's material and moves the pool the
+			// cached pointer lives in.
+			if (meshWasResolved && cMaterialParams)
+			{
+				const MaterialAsset* ma = m_contentManager
+					? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+				cMaterialParams = (ma && !ma->shaderParamData.empty()) ? &ma->shaderParamData : nullptr;
+			}
 			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> indexBuf  = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 			NSUInteger    indexCount = (NSUInteger)drawMesh->indexCount;

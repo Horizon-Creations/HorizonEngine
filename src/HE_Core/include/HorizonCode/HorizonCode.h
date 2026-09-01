@@ -459,6 +459,15 @@ struct Node
     // Struct/Enum nodes (Make/Break/SetField/ConstEnum/SwitchOnEnum/IntToEnum…):
     // the definition asset's path (HE::TypeRegistry key).
     std::string typeName;
+    // CallExternal / Get- + SetExternal: which HorizonCode class the Target is
+    // expected to be (asset path). Purely EDITOR metadata, exactly like
+    // Variable::className — it fills the member picker and lets a rename find the
+    // nodes that meant this class. The runtime never reads it: a call still
+    // resolves by name on whatever instance the Ref actually carries, so a
+    // recorded class that drifts from the real one costs a stale dropdown and
+    // nothing else. Empty = never picked (or authored before the pickers existed),
+    // and then the rename falls back to reading the Target's wire.
+    std::string className;
     // Which container the node's container pins carry (see ContainerKind).
     // Get/SetVariable mirror their variable's; the Array nodes leave it None
     // (which reads as Array) so nothing authored before Set/Map moves; the

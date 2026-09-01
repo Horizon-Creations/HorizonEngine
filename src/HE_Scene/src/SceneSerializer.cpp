@@ -257,6 +257,7 @@ namespace
 				{ "maxSpeed",         mv->maxSpeed },
 				{ "turnRate",         mv->turnRate },
 				{ "orientToMovement", mv->orientToMovement },
+				{ "moveSpace",        static_cast<uint8_t>(mv->moveSpace) },
 			};
 		}
 		if (auto* rig = registry.try_get<CameraRigComponent>(entity))
@@ -328,12 +329,18 @@ namespace
 		}
 		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
 		{
+			// Authored fields only. velocity/isGrounded/airTime are runtime state
+			// written by the physics step and are meaningless in a scene file.
+			// `jumpSpeed` belongs here with gravity: it is the other half of the
+			// jump the author tuned, and without it every packaged game would
+			// jump at the 5 m/s default no matter what the Details panel showed.
 			comps["characterController"] = {
 				{ "slopeLimit", cc->slopeLimit },
 				{ "stepHeight", cc->stepHeight },
 				{ "skinWidth",  cc->skinWidth  },
 				{ "mass",       cc->mass       },
 				{ "gravity",    cc->gravity    },
+				{ "jumpSpeed",  cc->jumpSpeed  },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -446,9 +453,10 @@ namespace
 		if (auto* ps = registry.try_get<ParticleSystemComponent>(entity))
 		{
 			comps["particlesystem"] = {
-				{ "particleAsset", uuidToJson(ps->particleAssetId) },
-				{ "visible",       ps->visible },
-				{ "playing",       ps->playing },
+				{ "particleAsset",       uuidToJson(ps->particleAssetId) },
+				{ "visible",             ps->visible },
+				{ "playing",             ps->playing },
+				{ "destroyWhenFinished", ps->destroyWhenFinished },
 			};
 		}
 		if (auto* sk = registry.try_get<SkeletalMeshComponent>(entity))
@@ -516,10 +524,18 @@ namespace
 		}
 		if (auto* na = registry.try_get<NavAgentComponent>(entity))
 		{
+			// Authored fields only. path/pathIdx/hasPath/moving are runtime state
+			// and are rebuilt every session — writing `moving` out would freeze
+			// whatever the agent happened to be doing when the scene was saved
+			// into the scene file. `autoStart` is the authored half of it, and
+			// the reason an agent moves at all in a packaged game: the "Go"
+			// button that used to be the only writer of `moving` is an editor
+			// control and does not exist there.
 			comps["navagent"] = {
 				{ "targetPos",    vec3ToJson(na->targetPos) },
 				{ "speed",        na->speed },
 				{ "stoppingDist", na->stoppingDist },
+				{ "autoStart",    na->autoStart },
 			};
 		}
 		if (auto* sm = registry.try_get<AnimatorStateMachineComponent>(entity))
@@ -689,6 +705,34 @@ namespace
 		}
 	}
 
+	// The same courtesy for the collider shape, which is a raw uint8 in the file.
+	// The APPEND-ONLY rule in Types/Enums.h protects the BACKWARDS direction (an
+	// old scene keeps meaning what it meant); it says nothing about the forwards
+	// one, which is the direction that bites here. An old build reading a scene
+	// that uses Mesh/Convex Hull/Height Field (3..5, added with the runtime-shapes
+	// work) cast the value straight through, so every one of them landed as
+	// Box == 0: the imported house collided as a crate again, with nothing in the
+	// log to point at. Box is still the only answer — there is no other shape to
+	// fall back to — but it is now said out loud, and it matches what physics does
+	// with a shape it does not know (buildColliderShape's default branch logs and
+	// builds a box). Reported once per unknown value, not once per entity.
+	ColliderShape jsonToColliderShape(uint8_t raw, ColliderShape fallback)
+	{
+		if (raw <= static_cast<uint8_t>(ColliderShape::HeightField))
+			return static_cast<ColliderShape>(raw);
+
+		static std::mutex                s_mutex;
+		static std::unordered_set<uint8_t> s_reported;
+		{
+			std::lock_guard<std::mutex> lk(s_mutex);
+			if (!s_reported.insert(raw).second) return fallback;
+		}
+		HE_LOG_WARN(Serialize, "Scene contains unknown collider shape %u — loading it as a Box "
+		                       "(scene written by a newer build; SAVING IT BACK MAKES THAT "
+		                       "PERMANENT)", static_cast<unsigned>(raw));
+		return fallback;
+	}
+
 	void applyComponents(entt::registry& registry, Entity entity, const json& comps)
 	{
 		warnUnknownComponents(comps);
@@ -755,6 +799,10 @@ namespace
 			mv.maxSpeed         = c.value("maxSpeed",         mv.maxSpeed);
 			mv.turnRate         = c.value("turnRate",         mv.turnRate);
 			mv.orientToMovement = c.value("orientToMovement", mv.orientToMovement);
+			// Absent in every scene saved before camera-relative movement
+			// existed, and World is what those scenes meant.
+			mv.moveSpace = static_cast<MovementComponent::Space>(
+				c.value("moveSpace", static_cast<uint8_t>(mv.moveSpace)));
 			registry.emplace_or_replace<MovementComponent>(entity, mv);
 		}
 		if (comps.contains("cameraRig"))
@@ -821,7 +869,8 @@ namespace
 		{
 			const json& c = comps["collider"];
 			ColliderComponent col;
-			col.shape     = static_cast<ColliderShape>(c.value("shape", static_cast<uint8_t>(col.shape)));
+			col.shape     = jsonToColliderShape(c.value("shape", static_cast<uint8_t>(col.shape)),
+			                                    col.shape);
 			col.radius    = c.value("radius",    col.radius);
 			col.height    = c.value("height",    col.height);
 			col.isTrigger = c.value("isTrigger", col.isTrigger);
@@ -838,6 +887,10 @@ namespace
 			cc.skinWidth  = c.value("skinWidth",  cc.skinWidth);
 			cc.mass       = c.value("mass",       cc.mass);
 			cc.gravity    = c.value("gravity",    cc.gravity);
+			// Defaulted from the fresh component, so a scene written before this
+			// field existed loads with the 5 m/s default rather than a zero that
+			// would silently refuse every jump.
+			cc.jumpSpeed  = c.value("jumpSpeed",  cc.jumpSpeed);
 			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
 		}
 		if (comps.contains("saveState"))
@@ -968,6 +1021,10 @@ namespace
 			ParticleSystemComponent ps;
 			ps.visible = c.value("visible", ps.visible);
 			ps.playing = c.value("playing", ps.playing);
+			// Absent in every scene saved before one-shot effects existed, and
+			// the default (false) is what those scenes meant: an emitter that has
+			// always been scenery must not start deleting itself.
+			ps.destroyWhenFinished = c.value("destroyWhenFinished", ps.destroyWhenFinished);
 			if (c.contains("particleAsset"))
 			{
 				// Current format: the emitter config lives in a ParticleGraphAsset.
@@ -1089,6 +1146,12 @@ namespace
 			na.targetPos    = jsonToVec3(c.value("targetPos", json()), na.targetPos);
 			na.speed        = c.value("speed",        na.speed);
 			na.stoppingDist = c.value("stoppingDist", na.stoppingDist);
+			na.autoStart    = c.value("autoStart",    na.autoStart);
+			// `moving` deliberately stays false here. Loading a scene is not
+			// starting one — the editor loads for editing, and an agent that
+			// began walking on load would rewrite its authored position before
+			// anyone pressed Play. NavigationSystem turns autoStart into moving
+			// once the simulation is running, in both applications.
 			registry.emplace_or_replace<NavAgentComponent>(entity, na);
 		}
 		if (comps.contains("foliage"))

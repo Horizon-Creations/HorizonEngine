@@ -26,6 +26,7 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/TransformHierarchy.h>  // world pose composed from the parent chain
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
@@ -64,6 +65,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <functional>               // the host services a Ctx carries (see g_host)
 #include <filesystem>
 #include <string>
 #include <array>
@@ -151,6 +153,56 @@ struct D3D12DescriptorHeapAllocator
 // leaked `fs` into every consumer of that header. Must stay outside the
 // backend #ifdefs — the non-Metal builds use it too.
 namespace fs = std::filesystem;
+
+namespace
+{
+// ── The host half of every HE::api::Ctx this file builds ─────────────────────
+// The editor's twin of the block in GameApplication.cpp, and deliberately the
+// same shape: what a Ctx carries that belongs to the APPLICATION rather than to
+// the current scene or play session. Filled once in OnInit; the scene-scoped
+// handles (world, physics, content) stay per-call, because entering and leaving
+// play mode replaces the physics world.
+//
+// One place builds a Ctx here, which is the whole point: a call site that
+// assembles its own leaves fields out, and a left-out field is not an error but
+// a silent neutral return — eleven audio rows behaved that way for as long as
+// nobody filled `audio`.
+struct HostCtxParts
+{
+	AudioEngine*          audio    = nullptr;
+	HorizonCode::Runtime* runtime  = nullptr;
+	EntityHost*           entities = nullptr;
+	// "Create/destroy an object of this class" as this host means it — the very
+	// lambdas the HorizonCode services get, so a spawn from a Create Object
+	// node, from Lua and from Python is one operation and not three.
+	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
+	std::function<void(uint32_t)> destroyObject;
+	std::function<void()>         quit;
+};
+// One editor per process; cleared in OnShutdown so nothing here outlives the
+// object its lambdas capture.
+HostCtxParts g_host;
+
+// The only Ctx factory in this file. `self` is the calling HorizonCode instance
+// (0 for everything that is not a graph — the PIE scene-request pump, Lua,
+// Python).
+HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* content,
+                    uint32_t self = 0)
+{
+	HE::api::Ctx c;
+	c.world         = world;
+	c.physics       = physics;
+	c.content       = content;
+	c.audio         = g_host.audio;
+	c.runtime       = g_host.runtime;
+	c.self          = self;
+	c.entities      = g_host.entities;
+	c.createObject  = g_host.createObject;
+	c.destroyObject = g_host.destroyObject;
+	c.requestQuit   = g_host.quit;
+	return c;
+}
+} // namespace
 
 std::string getRHIName(HE::RendererBackend backend)
 {
@@ -1228,17 +1280,33 @@ void EditorApplication::OnInit()
 		svc.showWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
 		svc.hideWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
 		svc.destroyWidget = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
-		svc.createObject  = [this](const std::string& p, const float* pos,
+		// The app-level half of every Ctx, published once, here — the same wiring
+		// the packaged game does in GameApplication::OnInit, because a preview
+		// that spawns differently from the build is not a preview. The three
+		// pointers outlive a play session (they are members of this object); what
+		// they point AT knows whether a session is running.
+		g_host.audio    = &m_audioEngine;
+		g_host.runtime  = &m_gameInstance.runtime();
+		g_host.entities = &m_entityHost;
+		// In the editor "quit" is not closing the editor: a game played in a
+		// viewport is a preview, so its Exit button ends the preview. Parked
+		// rather than run — see m_playStopRequested.
+		g_host.quit     = [this]{ m_playStopRequested = true; };
+		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
+			// Copied before the resolve, which loads this class's whole ancestor
+			// chain and moves every asset pointer with it. `a` is dead below; the
+			// path is not, because it is a copy.
+			const std::string assetPath = a->path;
 			// Resolve the inheritance chain once: it decides BOTH whether this is
 			// an Entity class (the resolved engine base, not the raw string) and
 			// what graph actually runs (this class's own plus everything it
 			// inherits, overrides applied).
 			HorizonCode::ResolvedClass rc =
-				HorizonCode::resolveClassAsset(contentManager(), a->path);
+				HorizonCode::resolveClassAsset(contentManager(), assetPath);
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one. Creating it here instead would produce a half-object: it
 			// would answer a Cast to Entity, own no entity, and never tick.
@@ -1246,8 +1314,14 @@ void EditorApplication::OnInit()
 			{
 				// Placement travels with the spawn (null = authored), so
 				// Construct/BeginPlay already run at the destination.
+				// The spawn is given its PHYSICS inside the host, before
+				// Construct and BeginPlay run — see EntityHost::spawn. Not here:
+				// this service only ever sees the instance id, and by the time it
+				// does, the graph's first frame (which routinely asks whether it
+				// is grounded, or pushes itself) has already happened. What this
+				// file owes that is the setPhysicsWorld() handover at play start.
 				const HorizonCode::InstanceId inst =
-					m_entityHost.spawn(a->path, entt::null, pos, rot).instance;
+					m_entityHost.spawn(assetPath, entt::null, pos, rot).instance;
 				// The PlayerHost no longer creates characters, so this is the only
 				// place it can learn that one exists — and it has to, or a project
 				// without a controller loses its input in PIE.
@@ -1263,11 +1337,11 @@ void EditorApplication::OnInit()
 			// is keyed by, so an interpreted and a compiled instance of one
 			// class are never two different classes to a Cast.
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
-				std::move(rc.levels), {}, { a->path, rc.engineBase, rc.chain });
+				std::move(rc.levels), {}, { assetPath, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};
-		svc.destroyObject = [this](uint32_t ref){
+		g_host.destroyObject = [this](uint32_t ref){
 			auto& rt = m_gameInstance.runtime();
 			if (ref == 0 || ref == rt.gameInstance()) return;
 			// An Entity class owns a body, and destroying the object has to take
@@ -1279,8 +1353,24 @@ void EditorApplication::OnInit()
 			rt.destroy(ref); // fires "Destruct"
 			if (owned != 0 && m_editorWorld &&
 			    m_editorWorld->registry().valid(static_cast<Entity>(owned)))
+			{
+				// The physics representation goes with it, and it has to go BEFORE
+				// the entity does: afterwards the HierarchyComponent is gone and the
+				// subtree cannot be walked, so every child's body would stay behind
+				// as an invisible wall. step()'s reap would collect them a frame
+				// later; naming them here leaves no frame in which a destroyed
+				// object still blocks a shot. After Destruct, so that handler still
+				// sees a world it can push against.
+				if (m_physicsWorld)
+					m_physicsWorld->removeEntityTree(*m_editorWorld, owned);
 				m_editorWorld->destroyEntity(static_cast<Entity>(owned));
+			}
 		};
+		// HorizonCode reaches the two through its services; the registry rows Lua
+		// and Python call reach the SAME lambdas through the Ctx apiCtx() builds.
+		// Copies of one std::function, not a second implementation.
+		svc.createObject  = g_host.createObject;
+		svc.destroyObject = g_host.destroyObject;
 		// EngineCall nodes dispatch through the HE::api registry against the editor
 		// world, physics and content — resolved at CALL time, so PIE entering and
 		// leaving play (which creates and destroys the physics world) needs no
@@ -1310,14 +1400,11 @@ void EditorApplication::OnInit()
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
-			//
-			// So does what "quit" means here, and in the editor it is NOT closing
-			// the editor: a game being played in a viewport is a preview, and its
-			// main menu's Exit button must end the preview, not the tool. Parked
-			// rather than run — see m_playStopRequested.
-			HE::api::Ctx c{ m_editorWorld.get(), m_physicsWorld.get(), &contentManager(),
-			                &m_audioEngine, &m_gameInstance.runtime(), self, &m_entityHost,
-			                [this]{ m_playStopRequested = true; } };
+			// So does the rest of the app-level half (audio, runtime, entity
+			// host, the object services and what "quit" means in this host):
+			// apiCtx() is the one place that fills it.
+			HE::api::Ctx c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(),
+			                        &contentManager(), self);
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -1916,7 +2003,13 @@ void EditorApplication::OnRender(float dt)
 		using Kind = HE::api::scene::RequestKind;
 		for (const auto& r : HE::api::scene::takeRequests())
 		{
-			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
+			// Physics travels in the Ctx, exactly as it does in the packaged
+			// game: a zone request that reaches a row touching physics (and
+			// setZonePosition is one) must find the running simulation, not a
+			// null that turns it into a silent no-op. Null outside play mode is
+			// the honest answer — nothing is simulating then.
+			HE::api::Ctx c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(),
+			                        &contentManager());
 			if (r.kindOf() == Kind::Additive && m_editorWorld) // additive zone
 			{
 				const std::filesystem::path projRoot =
@@ -1945,6 +2038,17 @@ void EditorApplication::OnRender(float dt)
 				HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
 				if (r.pos != glm::vec3(0.0f)) HE::api::scene::setZonePosition(c, r.zone, r.pos);
 				if (r.hidden)                 HE::api::scene::setZoneVisible(c, r.zone, false);
+				// A streamed-in zone gets physics too, or the level it adds is
+				// scenery: the player walks through its walls and falls through
+				// its floor. Per created entity rather than a walk from the
+				// zone root, because `created` already holds the whole load —
+				// including entities that were never parented into it.
+				//
+				// AFTER setZonePosition, so the bodies are built where the zone
+				// ended up rather than at the origin and then left behind.
+				if (m_physicsWorld)
+					for (entt::entity e : created)
+						m_physicsWorld->addEntity(*m_editorWorld, (uint32_t)e);
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				HE_LOG_INFO(Editor, "%s",
 					("PIE: zone " + std::to_string(r.zone) + " loaded ('" + r.path + "', "
@@ -1956,6 +2060,17 @@ void EditorApplication::OnRender(float dt)
 				if (const auto* z = HE::api::scene::zoneInfo(r.zone))
 				{
 					auto& reg = m_editorWorld->registry();
+					// The bodies go back in a pass of their OWN, before anything
+					// is destroyed — an unloaded zone whose colliders stayed
+					// behind is a street of invisible walls. It has to be its own
+					// pass because destroying a zone entity takes its subtree with
+					// it, so by the time the loop below reaches a child's id that
+					// child is already invalid and skipped. removeEntity needs no
+					// valid handle and is a silent no-op on an unknown id, which
+					// is what makes one unconditional sweep the simple answer.
+					// Same shape as the packaged game's unload.
+					if (m_physicsWorld)
+						for (uint32_t id : z->entities) m_physicsWorld->removeEntity(id);
 					for (uint32_t id : z->entities)
 						if (reg.valid((entt::entity)id))
 							ScriptApi::destroy(*m_editorWorld, id);
@@ -2276,6 +2391,266 @@ void EditorApplication::OnRender(float dt)
 				(rpath == 1 && renderer()->GetCapabilities().supportsDeferredRendering)
 					? HE::RenderPath::Deferred : HE::RenderPath::Forward);
 		}
+		// ── An author's edit during play reaches the body ────────────────────
+		// The gizmo, the Details fields and undo all write TransformComponent
+		// directly, and the next step writes Jolt's own pose straight back over
+		// it — so nudging a crate in PIE snapped back a frame later and read as
+		// "the editor is broken". The SHAPE had the same hole and no visible
+		// symptom at all: switching Shape to Convex Hull, dragging Half Extents,
+		// adding a Rigid Body to something that had none, or scaling the entity
+		// changed the component and nothing else, because the Jolt shape is built
+		// once at play start and never consulted again. "I switch to Convex Hull
+		// in play and nothing happens" was literally true.
+		//
+		// Allowed rather than forbidden, and deliberately so: pause, edit, resume
+		// is how a moment gets tuned, and the gizmo is drawn by the shared
+		// viewport whatever the play state — this file could not switch it off if
+		// it wanted to. So the honest job is to make the edit REAL. A move is a
+		// TELEPORT (setPosition/setTransform); a change to what the shape is
+		// BUILT from is a rebuild (addEntity, documented as an idempotent replace
+		// and used exactly that way by the terrain rebuild below).
+		//
+		// ── Why this block sits HERE, above the world tick ───────────────────
+		// It compares against the pose the gameplay half of the PREVIOUS frame
+		// left behind (cached right after the animation tick — see the block at
+		// the end of the frame). For that comparison to mean "a person did this",
+		// only the UI phase may run between the cache and the compare.
+		//
+		// It used to sit below SceneSystems::tickWorld, and that was wrong:
+		// tickWorld runs NavigationSystem, which writes tc.position for every
+		// moving nav agent. A selected agent was therefore read as an author move
+		// EVERY frame and teleported — RefreshContacts and all — onto the spot
+		// its own path had just moved it to. Above the tick, every world-tick
+		// write of the frame is inside the cache and none of them can be mistaken
+		// for a person. The selected entity only, because it is the only one the
+		// editor's own tools can reach.
+		//
+		// What PhysicsWorld BUILDS the representation from — nothing else. A
+		// change in any of these means the existing Jolt shape no longer
+		// describes the entity; a change in anything else (a material, a light, a
+		// script variable) must not cost a rebuild.
+		struct PlayPhysicsInputs
+		{
+			bool          hasBody      = false;
+			bool          hasCollider  = false;
+			bool          hasCharacter = false;
+			// RigidBodyComponent
+			RigidBodyType bodyType     = RigidBodyType::Static;
+			float         mass         = 0.0f;
+			float         friction     = 0.0f;
+			float         restitution  = 0.0f;
+			bool          is2D         = false;
+			// ColliderComponent
+			ColliderShape shape        = ColliderShape::Box;
+			glm::vec3     halfExtents{};
+			float         radius       = 0.0f;
+			float         height       = 0.0f;
+			bool          isTrigger    = false;
+			// CharacterControllerComponent — only the three the CharacterVirtual
+			// is CONSTRUCTED with, plus its mass. gravity is deliberately absent:
+			// step() reads it fresh every frame, so changing it already works and
+			// rebuilding for it would throw the player's velocity away for free.
+			float         slopeLimit   = 0.0f;
+			float         stepHeight   = 0.0f;
+			float         skinWidth    = 0.0f;
+			float         charMass     = 0.0f;
+			// TransformComponent: baked into the mesh/hull triangles, and into
+			// the primitive shapes' extents.
+			glm::vec3     scale{ 1.0f };
+			// Mesh/ConvexHull only, and looked up exactly the way PhysicsWorld's
+			// colliderSourceMesh does — LOD0 wins over MeshComponent. Reading
+			// MeshComponent's id directly would rebuild the collider every time
+			// LODSystem swapped a level, i.e. whenever the camera moved.
+			HE::UUID      colliderMesh{};
+
+			bool operator==(const PlayPhysicsInputs&) const = default;
+		};
+		struct PlayPoseWatch
+		{
+			uint32_t          entity   = 0u;
+			bool              valid    = false;
+			glm::vec3         position{};
+			glm::vec3         rotation{};
+			PlayPhysicsInputs build{};
+		};
+		static PlayPoseWatch s_playPose;
+
+		// Read those inputs off an entity as they stand right now. Shared by the
+		// compare here and the cache at the end of the frame, so the two can
+		// never drift into asking different questions.
+		const auto samplePhysicsInputs = [](entt::registry& reg, Entity e) {
+			PlayPhysicsInputs in;
+			if (const auto* t = reg.try_get<TransformComponent>(e))
+				in.scale = t->scale;
+			if (const auto* rb = reg.try_get<RigidBodyComponent>(e))
+			{
+				in.hasBody     = true;
+				in.bodyType    = rb->type;
+				in.mass        = rb->mass;
+				in.friction    = rb->friction;
+				in.restitution = rb->restitution;
+				in.is2D        = rb->is2D;
+			}
+			if (const auto* c = reg.try_get<ColliderComponent>(e))
+			{
+				in.hasCollider  = true;
+				in.shape        = c->shape;
+				in.halfExtents  = c->halfExtents;
+				in.radius       = c->radius;
+				in.height       = c->height;
+				in.isTrigger    = c->isTrigger;
+				if (c->shape == ColliderShape::Mesh || c->shape == ColliderShape::ConvexHull)
+				{
+					if (const auto* mc = reg.try_get<MeshComponent>(e))
+						in.colliderMesh = mc->meshAssetId;
+					if (const auto* lod = reg.try_get<LODComponent>(e);
+					    lod && !lod->levels.empty())
+						in.colliderMesh = lod->levels.front().meshId;
+				}
+			}
+			if (const auto* cc = reg.try_get<CharacterControllerComponent>(e))
+			{
+				in.hasCharacter = true;
+				in.slopeLimit   = cc->slopeLimit;
+				in.stepHeight   = cc->stepHeight;
+				in.skinWidth    = cc->skinWidth;
+				in.charMass     = cc->mass;
+			}
+			return in;
+		};
+
+		if (m_isPlaying && m_physicsWorld && m_editorWorld && s_playPose.valid &&
+		    m_selectedEntity != entt::null &&
+		    static_cast<uint32_t>(m_selectedEntity) == s_playPose.entity &&
+		    m_editorWorld->registry().valid(m_selectedEntity))
+		{
+			auto&          reg = m_editorWorld->registry();
+			const uint32_t id  = static_cast<uint32_t>(m_selectedEntity);
+			const auto*    tc  = reg.try_get<TransformComponent>(m_selectedEntity);
+			const PlayPhysicsInputs now = samplePhysicsInputs(reg, m_selectedEntity);
+			if (!(now == s_playPose.build))
+			{
+				// A rebuild covers the move as well — addEntity builds from the
+				// transform as it stands, which already includes anything the
+				// gizmo did in the same UI phase. So this branch is exclusive
+				// with the teleport below rather than sitting before it.
+				//
+				// It costs the body's velocity, and that is the right trade: the
+				// author changed what the thing IS, and there is no meaningful
+				// way to carry momentum across a new shape. Removing the last
+				// physics component lands here too — addEntity tears the old
+				// representation down first and then finds nothing to build,
+				// which is exactly "this entity no longer has physics".
+				const bool built = m_physicsWorld->addEntity(*m_editorWorld, id);
+				// Throttled, not per event: dragging Radius changes the inputs on
+				// every frame of the drag, and one line per frame would bury the
+				// log the author is reading. The rebuild itself still happens
+				// every frame, which is what makes the drag feel live — and only
+				// the primitive shapes have draggable rows, so no drag can put a
+				// triangle-mesh rebuild in the frame loop.
+				HE_LOG_THROTTLE(Editor, Info, 2.0,
+					"PIE: rebuilt entity %u's physics after a component edit — %s", id,
+					built ? "the simulation now sees the new shape"
+					      : "it no longer has a shape to build");
+			}
+			else if (tc && m_physicsWorld->hasPhysics(id))
+			{
+				const auto differs = [](const glm::vec3& a, const glm::vec3& b, float eps) {
+					return std::fabs(a.x - b.x) > eps || std::fabs(a.y - b.y) > eps ||
+					       std::fabs(a.z - b.z) > eps;
+				};
+				// A character's facing belongs to the TRANSFORM, not to Jolt — the
+				// camera rig rewrites it every frame — so comparing rotation there
+				// would report an author move on every mouse movement. Position is
+				// the whole question for a character; for everything else a rotate
+				// drag counts too.
+				const bool isCharacter =
+					reg.all_of<CharacterControllerComponent>(m_selectedEntity);
+				// The COMPARISON above and below stays local-against-local:
+				// s_playPose caches tc->position/rotation verbatim, so both
+				// sides of it are in the same space and "did the author move
+				// this?" is answered without any conversion at all.
+				const bool moved  = differs(tc->position, s_playPose.position, 1e-4f);
+				const bool turned = !isCharacter &&
+				                    differs(tc->rotation, s_playPose.rotation, 1e-2f);
+
+				// The HANDOVER is where the spaces part. Every pose PhysicsWorld
+				// takes is a WORLD pose (see its header); tc holds the LOCAL one.
+				// Passing tc->position straight over put a parented body at the
+				// child's offset from its parent instead of where its mesh is
+				// drawn — invisible on a top-level crate, wrong on a prefab's
+				// children and on the contents of an additively loaded zone.
+				//
+				// Composed from the parent chain rather than read out of
+				// tc->worldMatrix, which is only as fresh as the last
+				// propagateTransforms and is the identity for anything spawned
+				// this frame.
+				//
+				// For an entity under the world root worldMatrixOf IS
+				// localMatrix, and the translation column of T*R*S is
+				// tc->position bit for bit — so the unparented case, which is
+				// every case that worked before, comes out unchanged.
+				const glm::mat4 worldXf =
+					HE::worldMatrixOf(*m_editorWorld, m_selectedEntity);
+				const glm::vec3 worldPos = glm::vec3(worldXf[3]);
+				// Velocity is kept on purpose in both branches: dragging a
+				// falling crate aside should not stop it falling.
+				if (turned)
+				{
+					// The rotation half cannot take that shortcut: quat_cast of
+					// a basis and glm::quat(radians(euler)) agree to float noise,
+					// not bit for bit, so running the unparented case through the
+					// matrix would hand Jolt a different (if equivalent)
+					// quaternion than before. Only a real parent goes that way.
+					const auto* h = reg.try_get<HierarchyComponent>(m_selectedEntity);
+					const bool  parented = h && h->parent != entt::null &&
+					                       h->parent != m_editorWorld->rootEntity();
+					glm::quat worldRot = glm::quat(glm::radians(tc->rotation));
+					if (parented)
+					{
+						// Strip the chain's scale before quat_cast, which reads a
+						// scaled basis as a rotation that is not there. Same three
+						// steps as PhysicsWorld's own decomposeWorld, determinant
+						// flip included: a MIRRORED parent still leaves three
+						// positive column lengths and a left-handed basis, which
+						// no length test can see. A zero scale is a real input
+						// (the inspector lets one be typed), hence the clamp —
+						// dividing by it would put a NaN in the body.
+						glm::vec3 axis[3] = { glm::vec3(worldXf[0]),
+						                      glm::vec3(worldXf[1]),
+						                      glm::vec3(worldXf[2]) };
+						for (int i = 0; i < 3; ++i)
+							axis[i] /= std::max(glm::length(axis[i]), 1.0e-6f);
+						if (glm::determinant(glm::mat3(worldXf)) < 0.0f)
+							axis[0] = -axis[0];
+						worldRot = glm::normalize(
+							glm::quat_cast(glm::mat3(axis[0], axis[1], axis[2])));
+					}
+					m_physicsWorld->setTransform(id, worldPos, worldRot);
+				}
+				else if (moved)
+					// A pure move goes through setPosition, which does not touch
+					// rotation at all. setTransform would write the rotation back
+					// as degrees(eulerAngles(quat)) — an EQUIVALENT triple, but
+					// not the authored one, so a sideways nudge would silently
+					// renumber the angles in the Details panel.
+					m_physicsWorld->setPosition(id, worldPos);
+			}
+		}
+
+		// Sculpting or re-parametrising a landscape during play moves its COLLIDER
+		// too, or the ground would stay the shape it had when play began and the
+		// player would walk on a memory of the old hill. That rebuild lives inside
+		// TerrainSystem::updateTerrains' physics-aware overload, which the
+		// SceneSystems::tickWorld call below now reaches (it forwards the physics
+		// world it is already given for precipitation).
+		//
+		// There used to be a stroke-end latch here that compared this frame's dirty
+		// terrains against the previous frame's and rebuilt when a terrain stopped
+		// being dirty. It is gone: the overload rebuilds from inside the same
+		// dirty gate, under the same `m_isPlaying && m_physicsWorld` condition, so
+		// the latch only added a second full height-field build per stroke.
+
 		// Regenerate terrain meshes for any entity whose TerrainComponent is dirty
 		// (newly created, parameter-edited in the inspector, or just loaded/restored).
 		if (m_editorWorld)
@@ -2346,12 +2721,19 @@ void EditorApplication::OnRender(float dt)
 		}
 
 		// Dispatch collision events to scripts (after physics has stepped this frame)
-		if (simulating && m_physicsWorld && m_scriptContext)
+		if (simulating && m_physicsWorld && m_editorWorld && m_scriptContext)
 		{
 			HE_PROFILE_SCOPE_N("CollisionDispatch");
 			// ONE call: polling drains the queues, so Lua/Python and HorizonCode
 			// have to be served by the same pass or the second one gets nothing.
-			CollisionSystem::dispatch(*m_physicsWorld, m_scriptContext.get(), m_scriptInstances,
+			//
+			// The world is passed because dispatch cannot check an event's two
+			// entity ids without it — a contact whose other half was destroyed
+			// this frame otherwise reaches a script as an ordinary-looking id
+			// that resolves to nothing. It is a reference, not an optional
+			// pointer, precisely so no call site can quietly skip the check.
+			CollisionSystem::dispatch(*m_physicsWorld, *m_editorWorld,
+			                          m_scriptContext.get(), m_scriptInstances,
 			                          &m_gameInstance.runtime(), m_entityHost.instances());
 		}
 
@@ -2419,6 +2801,41 @@ void EditorApplication::OnRender(float dt)
 			// graphs stay silent and the parameters keep their authored defaults
 			// — the behaviour state machines had before sync graphs existed.
 			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost);
+		}
+
+		// Remember what the gameplay half of this frame produced — pose AND the
+		// inputs the physics representation is built from — as the baseline the
+		// author-edit compare at the TOP of the next frame works against. Taken
+		// HERE because animation is the last thing in the frame that writes a
+		// transform: everything that writes one after this point is a person with
+		// a gizmo, an inspector field or an undo.
+		//
+		// Deliberately NOT gated on hasPhysics(): an entity with no body yet is
+		// precisely the one the author is about to give a Rigid Body in the
+		// Details panel, and gating here would mean that addition is the one edit
+		// the compare could never see.
+		if (m_isPlaying && m_physicsWorld && m_editorWorld &&
+		    m_selectedEntity != entt::null &&
+		    m_editorWorld->registry().valid(m_selectedEntity))
+		{
+			auto&       reg = m_editorWorld->registry();
+			const auto* tc  = reg.try_get<TransformComponent>(m_selectedEntity);
+			s_playPose.valid = tc != nullptr;
+			if (tc)
+			{
+				s_playPose.entity   = static_cast<uint32_t>(m_selectedEntity);
+				s_playPose.position = tc->position;
+				s_playPose.rotation = tc->rotation;
+				s_playPose.build    = samplePhysicsInputs(reg, m_selectedEntity);
+			}
+		}
+		else
+		{
+			// No selection or no play session: nothing to compare against next
+			// frame. Selecting something mid-play therefore costs one frame
+			// before its edits are followed, which is the frame the author needs
+			// to reach for a handle anyway.
+			s_playPose.valid = false;
 		}
 
 		// In-game UI pointer input (hover/click) + script event dispatch. The
@@ -2576,6 +2993,11 @@ void EditorApplication::OnRender(float dt)
 			// Collider wireframes: cyan for solid, magenta for triggers
 			{
 				auto& reg = m_editorWorld->registry();
+				// Local-space box of a mesh asset, measured once and kept. The
+				// mesh-shaped colliders below need it every frame, a loose editor
+				// mesh carries no precomputed bounds, and measuring a hundred
+				// thousand vertices per frame for a debug line is not a trade.
+				static std::unordered_map<HE::UUID, std::pair<glm::vec3, glm::vec3>> s_colliderMeshBox;
 				for (auto [entity, col, transform] :
 				     reg.view<ColliderComponent, TransformComponent>().each())
 				{
@@ -2593,6 +3015,66 @@ void EditorApplication::OnRender(float dt)
 						break;
 					case ColliderShape::Capsule:
 						dbg.capsule(pos, col.radius, col.height, color);
+						break;
+					case ColliderShape::Mesh:
+					case ColliderShape::ConvexHull:
+					{
+						// These two take their geometry from the entity's MESH, so
+						// the authored half extents describe nothing and the honest
+						// outline is the mesh's own box. Same source PhysicsWorld
+						// builds the shape from — LOD0 where there is a LODComponent,
+						// because LODSystem rewrites MeshComponent's id as the camera
+						// moves and a collider that changed with the camera would be
+						// a different game at every distance.
+						HE::UUID meshId{};
+						if (const auto* mc = reg.try_get<MeshComponent>(entity))
+							meshId = mc->meshAssetId;
+						if (const auto* lod = reg.try_get<LODComponent>(entity);
+						    lod && !lod->levels.empty())
+							meshId = lod->levels.front().meshId;
+						if (meshId == HE::UUID{}) break;
+
+						auto it = s_colliderMeshBox.find(meshId);
+						if (it == s_colliderMeshBox.end())
+						{
+							const StaticMeshAsset* mesh = contentManager().getStaticMesh(meshId);
+							if (!mesh) break;   // not loaded yet — measured on a later frame
+							const bool        cooked = mesh->cooked && !mesh->interleaved.empty();
+							const std::size_t count  = cooked ? mesh->vertexCount
+							                                  : mesh->vertices.size() / 3;
+							const std::size_t stride = cooked ? 8u : 3u;
+							const float*      data   = cooked ? mesh->interleaved.data()
+							                                  : mesh->vertices.data();
+							if (count == 0 || (cooked && mesh->interleaved.size() < count * stride))
+								break;
+							glm::vec3 lo(data[0], data[1], data[2]);
+							glm::vec3 hi = lo;
+							for (std::size_t i = 1; i < count; ++i)
+							{
+								const glm::vec3 v(data[i * stride + 0], data[i * stride + 1],
+								                  data[i * stride + 2]);
+								lo = glm::min(lo, v);
+								hi = glm::max(hi, v);
+							}
+							it = s_colliderMeshBox.emplace(meshId, std::make_pair(lo, hi)).first;
+						}
+						// Scaled like the shape itself is (PhysicsWorld bakes
+						// transform.scale into the triangles). Axis-aligned, so a
+						// rotated mesh reads as its box — the same simplification
+						// the Box case above has always made.
+						dbg.aabb(pos + it->second.first  * transform.scale,
+						         pos + it->second.second * transform.scale, color);
+						break;
+					}
+					case ColliderShape::HeightField:
+						// Deliberately nothing: the height field IS the landscape
+						// mesh in the viewport, and a box around a whole terrain
+						// would hide the scene inside it.
+						break;
+					default:
+						// An enum value this build does not know. Silent here on
+						// purpose — PhysicsWorld logs it once where it matters, and
+						// a debug overlay is not the place to repeat that per frame.
 						break;
 					}
 				}
@@ -5153,13 +5635,26 @@ void EditorApplication::duplicateSelectedEntity()
 	if (blob.empty()) return;
 
 	const Entity parent = siblingParentFor(src);
-	m_undo.snapshotNow();
+	// Not while playing. An entry pushed here could never be replayed — the whole
+	// session runs without an undo system (makeContext withholds it; see the
+	// block above `.undoSys`) and play-stop clears the history regardless. It was
+	// not merely useless either: pushUndo bumps EditorUndo::revision(), which
+	// clearHistory does NOT reset, so a Ctrl+D during play left the scene marked
+	// dirty — asterisk in the title bar — for a change the play-stop restore had
+	// already thrown away.
+	if (!m_isPlaying) m_undo.snapshotNow();
 	const Entity copy = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
 	if (copy == entt::null)
 	{
 		HE_LOG_ERROR(Editor, "%s", "EditorApplication: duplicate failed — the captured subtree did not read back");
 		return;
 	}
+	// A copy made DURING play is a spawn like any other and needs the same
+	// physics representation, subtree included — otherwise Ctrl+D in PIE
+	// produces a crate that falls through the floor, which is the very bug this
+	// pass exists to remove, reintroduced by the editor's own tools.
+	if (m_isPlaying && m_physicsWorld)
+		m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(copy));
 	// Selecting the copy is what makes the gesture useful: the next drag moves
 	// the new object, not the one it came from.
 	m_selectedEntity = copy;
@@ -5183,7 +5678,11 @@ void EditorApplication::copySelectedEntity(bool cut)
 
 	if (!cut) return;
 	m_selectedEntity = entt::null;
-	m_undo.snapshotNow();
+	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	// Same rule as the destroy service: the bodies go before the entities, while
+	// the hierarchy that names them still exists.
+	if (m_isPlaying && m_physicsWorld)
+		m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(src));
 	m_editorWorld->destroyEntity(src);
 }
 
@@ -5195,13 +5694,16 @@ void EditorApplication::pasteEntityClipboard()
 	// selected should give two cubes side by side, not one parented to the other.
 	const Entity parent = siblingParentFor(m_selectedEntity);
 	SceneSerializer serializer;
-	m_undo.snapshotNow();
+	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
 	const Entity pasted = serializer.instantiatePrefab(*m_editorWorld, m_entityClipboard, parent);
 	if (pasted == entt::null)
 	{
 		HE_LOG_ERROR(Editor, "%s", "EditorApplication: paste failed — the clipboard is not a readable subtree");
 		return;
 	}
+	// Pasting during play is a spawn — see duplicateSelectedEntity().
+	if (m_isPlaying && m_physicsWorld)
+		m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(pasted));
 	m_selectedEntity = pasted;
 	m_editorWorld->markHierarchyDirty();
 }
@@ -5215,7 +5717,13 @@ void EditorApplication::deleteSelectedEntity()
 		return;
 
 	m_selectedEntity = entt::null;
-	m_undo.snapshotNow();
+	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	// Deleting during play takes the bodies with it, and takes them first: after
+	// destroyEntity the subtree cannot be walked. step()'s reap would catch the
+	// leftovers a frame later, but a frame of invisible wall where an object was
+	// just deleted is exactly the ghost collider this pass removes.
+	if (m_isPlaying && m_physicsWorld)
+		m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(target));
 	m_editorWorld->destroyEntity(target);
 }
 
@@ -5295,9 +5803,66 @@ AppContext EditorApplication::makeContext()
 		.openScene           = [this](const std::string& p){ openScene(p); },
 		.openSceneAdditive   = [this](const std::string& p){ openSceneAdditive(p); },
 		.newScene            = [this]{ newScene(); },
-		.undoSys             = &m_undo,
-		.undo                = [this]{ if (m_undo.undo()) m_selectedEntity = entt::null; },
-		.redo                = [this]{ if (m_undo.redo()) m_selectedEntity = entt::null; },
+		// ── Undo is an EDIT-MODE tool, and is switched off during play ────────
+		// EditorUndo::restore clears the world and reloads it from a snapshot, so
+		// every entt handle is reissued. FOUR play-session tables are keyed on
+		// the old ones and not one of them is rebuilt afterwards:
+		//   • PhysicsWorld's entityToBody / entityToCharacter — every entry now
+		//     names an invalid handle, so step()'s reap destroys the collision of
+		//     the entire scene on the next frame, silently;
+		//   • EntityHost's instances — tick() reaps the ones whose entity is
+		//     gone, firing Destruct on every HorizonCode entity class and never
+		//     rebinding;
+		//   • PlayerHost's players;
+		//   • m_scriptInstances — Lua/Python onUpdate keeps running against
+		//     entities that no longer exist, and collision dispatch matches
+		//     nothing ever again.
+		// Rebuilding only the physics would trade a scene with no colliders for a
+		// scene whose scripts quietly stopped, which is the worse of the two
+		// because nothing about it looks broken.
+		//
+		// And even a complete rebuild could not make the gesture MEAN anything
+		// here: the snapshots pushed during a session capture the simulation
+		// mid-flight (a crate halfway through a fall, a projectile that exists
+		// only in this run), and leaving play mode restores the pre-play snapshot
+		// and throws all of them away regardless.
+		//
+		// So this enforces the rule setPlayMode already states in both
+		// directions — it clears the history entering play AND leaving it,
+		// "edits made while playing are not undoable". The rule was simply never
+		// enforced in between: a delete during PIE pushed a snapshot and made
+		// canUndo true again.
+		//
+		// Withholding the SYSTEM rather than refusing in the callbacks is what
+		// makes that visible: every reader is null-guarded (EditorUI's toolbar,
+		// the Edit menu and the Ctrl+Z shortcut all gate on
+		// `ctx.undoSys && canUndo()`), so the buttons grey out and the shortcut
+		// goes quiet instead of a lit button that does nothing. It also stops the
+		// PANELS recording: every one of them writes through this pointer, so no
+		// inspector drag or terrain stroke made during play pushes an entry that
+		// play-stop would only discard. The four entity gestures in this file do
+		// not go through it and are gated on m_isPlaying at their own call sites
+		// — see duplicateSelectedEntity().
+		.undoSys             = m_isPlaying ? nullptr : &m_undo,
+		// Refused here too, as a SILENT backstop for any caller that reaches the
+		// callback without consulting undoSys first. Silent because with undoSys
+		// null there is no such caller today: the footer buttons, the Edit menu
+		// items and the Ctrl+Z shortcut all gate on `undoSys && canUndo()` and so
+		// disable themselves, and the native menu command checks the same pair.
+		// A notification here could therefore never be seen — it would only look
+		// like the author had been told. Telling them is a UI job, and the place
+		// for it is the disabled controls themselves: a disabled-state tooltip in
+		// EditorUI, fed by a "why" string or callback on AppContext. Both live
+		// outside this file, which is why there is no message here rather than an
+		// unreachable one.
+		.undo                = [this]{
+			if (m_isPlaying) return;
+			if (m_undo.undo()) m_selectedEntity = entt::null;
+		},
+		.redo                = [this]{
+			if (m_isPlaying) return;
+			if (m_undo.redo()) m_selectedEntity = entt::null;
+		},
 		.duplicateEntity     = [this]{ duplicateSelectedEntity(); },
 		.copyEntity          = [this]{ copySelectedEntity(false); },
 		.cutEntity           = [this]{ copySelectedEntity(true);  },
@@ -5620,7 +6185,12 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_playReportOpen = false;
 		Logger::setSink(&hePlayLogSink, this);
-		m_undo.clearHistory(); // edits made while playing are not undoable
+		// Edits made while playing are not undoable. Clearing here only opens the
+		// session with an empty history; what keeps it that way is makeContext
+		// withholding the undo system while m_isPlaying (so no panel records) and
+		// the m_isPlaying gate on this file's four entity gestures. See the block
+		// above `.undoSys` for what a restore would do to a running scene.
+		m_undo.clearHistory();
 
 		// fs/save sandbox: the project's Saved/ dir. Set HERE — before OnInit and
 		// the script starts below — because Lua/Python dispatch straight into the
@@ -5653,7 +6223,22 @@ void EditorApplication::setPlayMode(bool play)
 		// which yields rot.x = +pitch, rot.y = -yaw.
 		// Initialise physics from the current world state
 		m_physicsWorld = std::make_unique<PhysicsWorld>();
+		// BEFORE initialize(), not after: initialize() is the call that builds the
+		// opening scene's colliders, and a Mesh or Convex Hull collider with no
+		// ContentManager to ask has no triangles to be built from — it logs and
+		// falls back to a box. Handed over afterwards, every such collider in the
+		// starting scene would silently be a crate.
+		m_physicsWorld->setContentManager(&contentManager());
 		m_physicsWorld->initialize(*m_editorWorld);
+		// Every runtime spawn goes through the entity host, and the host is what
+		// gives the new subtree a body — before Construct and BeginPlay, which is
+		// earlier than any caller of Create Object could manage. It therefore has
+		// to be told which world to build in, here, before begin() below starts
+		// running graphs that spawn. Dropped again at play stop, next to the
+		// reset that frees the world it points at. Same wiring as the packaged
+		// game (GameApplication::startPhysics), because a preview that spawns
+		// differently from the build is not a preview.
+		m_entityHost.setPhysicsWorld(m_physicsWorld.get());
 		m_physicsAccum = 0.0f;
 
 		// Start audio for sources marked playOnStart
@@ -5669,13 +6254,33 @@ void EditorApplication::setPlayMode(bool play)
 		// running script and setPlayMode tears that script's context down.
 		// Bound BEFORE the scripts start: an onStart may already call it.
 		m_scriptContext->setQuitHandler([this]{ m_playStopRequested = true; });
+		// What a text script cannot reach on its own, the same set the packaged
+		// game binds in GameApplication::startScripts. Without it a Lua or Python
+		// call lands in HE::api with audio, runtime and entity host null, which
+		// is not an error there but a neutral no-op — audio.* would be silent and
+		// entity.spawnClass dead in exactly the two languages it exists for.
+		// The entity host is handed over BEFORE begin() below, which is safe: it
+		// is a member of this object, and it is the host itself that knows
+		// whether a session is running.
+		{
+			ScriptContext::HostServices hs;
+			hs.audio         = &m_audioEngine;
+			hs.entities      = &m_entityHost;
+			hs.runtime       = &m_gameInstance.runtime();
+			hs.createObject  = g_host.createObject;  // the same lambdas HorizonCode uses
+			hs.destroyObject = g_host.destroyObject;
+			m_scriptContext->setHostServices(std::move(hs));
+		}
 
 		// Player controller classes + input events, mirroring the packaged game:
 		// spawn after the level is up (Construct + BeginPlay), pump Tick/Input.*
 		// per frame while playing.
 		// The entity host FIRST: a controller's BeginPlay is where the game spawns
-		// its character with Create Object, and that spawn is only served with a
-		// body while the entity host is running.
+		// its character with Create Object, and the entity host is what gives that
+		// spawn an entity to be — and now a BODY on it, built inside
+		// EntityHost::spawn before Construct and BeginPlay run, so a character
+		// created in BeginPlay stands on the floor instead of falling through it.
+		// AFTER the physics world above, whose pointer that build needs.
 		m_entityHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
 		// Handed the entity host so it can find the characters the LEVEL already
 		// placed; it never spawns through it.
@@ -5779,11 +6384,39 @@ void EditorApplication::setPlayMode(bool play)
 		HE::api::save::close();
 		HE::api::save::setPlayMode(false);
 
-		// Tear down physics
+		// The entity host borrows the physics world and end() deliberately does
+		// not clear that pointer (the apps set it before begin()), so it is
+		// dropped here — before the world it names is destroyed. A host left
+		// pointing at a freed PhysicsWorld would spawn into it on the next play
+		// session's first frame.
+		m_entityHost.setPhysicsWorld(nullptr);
+
+		// Tear down physics. Nothing has to be removed one by one first, and that
+		// is worth stating now that bodies are created DURING play: destroying the
+		// PhysicsWorld destroys every Jolt body with it, spawned ones included,
+		// and the entities they belonged to are already gone — clear() above wiped
+		// the play world and the snapshot restored the scene as it was authored.
+		// So a play session leaves neither a body without an entity nor an entity
+		// with a body it should not have.
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
 
-		// Tear down scripts
+		// Tear down scripts. The host services are withdrawn FIRST, and while the
+		// context that published them is still alive — the setter is a member,
+		// and the copy ScriptContext publishes for the CPython plugin is
+		// process-wide and outlives every play session. This is the sharp edge of
+		// PIE: the editor keeps running after the preview ends, so a service left
+		// standing here would still answer. entity.spawnClass would then create
+		// objects in EDIT mode — the entity host is no longer running, so the
+		// spawn falls through to the bodiless branch and leaks an instance into
+		// the runtime with nothing to tick it. Withdrawn, the same call returns 0,
+		// which is the honest answer: there is no session to spawn into.
+		//
+		// g_host stays as it is: its pointers are members of this object, its
+		// lambdas resolve the world and the physics world at CALL time, and the
+		// HorizonCode services (Runtime::Services) hold their own copies anyway —
+		// clearing it here would break Create Object for the next play session.
+		if (m_scriptContext) m_scriptContext->setHostServices({});
 		m_scriptContext.reset();
 		m_scriptInstances.clear();
 		m_uiInputState = {};
@@ -6081,9 +6714,26 @@ void EditorApplication::openSceneAdditive(const std::string& path)
 	if (!m_editorWorld || path.empty()) return;
 
 	SceneSerializer serializer;
-	if (serializer.loadAdditive(*m_editorWorld, path, SerializeFormat::JSON))
+	std::vector<entt::entity> created;
+	if (serializer.loadAdditive(*m_editorWorld, path, SerializeFormat::JSON, &created))
 	{
-		m_undo.snapshotNow();
+		// Not while playing — see duplicateSelectedEntity(). This is a merge into
+		// the current scene, not a switch to another one, so it does NOT leave
+		// play mode the way openScene() and newScene() do; it belongs with the
+		// entity gestures, and it was the only one of them without this gate.
+		if (!m_isPlaying) m_undo.snapshotNow();
+		// A scene merged DURING play is a spawn like any other and needs the same
+		// physics representation, or the level just added is scenery: the player
+		// walks through its walls and falls through its floor. This is what the
+		// PIE zone loader already does for a script-driven scene.loadAdditive,
+		// and the same gesture from the File menu owed the same thing.
+		//
+		// Per created entity rather than a walk from the merged root, because
+		// `created` already holds the whole load — including entities that were
+		// never parented into it.
+		if (m_isPlaying && m_physicsWorld)
+			for (entt::entity e : created)
+				m_physicsWorld->addEntity(*m_editorWorld, static_cast<uint32_t>(e));
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene merged from " + path).c_str());
 	}
@@ -6174,6 +6824,16 @@ void EditorApplication::OnShutdown()
 	// Same rule, same reason, same moment: after the joins, so a worker's last
 	// words still land, and before the ImGui teardown below.
 	ConsolePanel::detachFromEngineLog();
+
+	// The host half of every Ctx, withdrawn while this object is still alive.
+	// Every lambda in it captures `this`, and the copy ScriptContext publishes
+	// for the CPython plugin is process-wide, so both would outlive the editor.
+	// Quitting DURING play is the case that makes this necessary: this function
+	// never leaves play mode, so the play-stop withdrawal above does not run and
+	// m_scriptContext is still holding a published set. Ahead of the ImGui block
+	// below, which returns early in a headless build.
+	if (m_scriptContext) m_scriptContext->setHostServices({});
+	g_host = {};
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;

@@ -1,6 +1,5 @@
 #include <Hpak/ProjectExporter.h>
-#include <ContentManager/HAsset.h>   // type-index sniff
-#include <Types/Enums.h>
+#include <Types/Enums.h>            // HE::AssetType (the packed type indices)
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
@@ -592,37 +591,48 @@ static void addAssetPathIndex(HpakWriter& packer, const ExportContext& ctx)
     }
 }
 
-// Phase 3c: the pak's user-type index — the paths of every packed Struct/Enum
-// definition asset, so the game can load them eagerly before the script
-// backends bootstrap (see kTypeIndexEntry). A header sniff per packed .hasset;
-// definitions are rare and tiny, the sniff is bounded by the pack set.
-static void addTypeIndex(HpakWriter& packer, const ExportContext& ctx,
-                         const std::vector<HpakWriter::SourceRoot>& roots)
+// Phase 3c: the pak's asset TYPE index — "hi:lo" → HE::AssetType for every
+// packed asset (see kAssetTypeIndexEntry).
+static void addAssetTypeIndex(HpakWriter& packer, const ExportContext& ctx)
+{
+    // A mounted pak contributes residency and paths, but no types — and a
+    // ContentManager only learns an asset's type by loading it. So in a shipped
+    // game discoverAssets(HorizonCodeClass), the call PlayerHost uses to find the
+    // startup controller classes, asked about assets nothing had touched yet and
+    // came back empty: no controller, no BeginPlay, no player in the world.
+    //
+    // Every packed asset is listed, not just the types PlayerHost happens to ask
+    // for — discoverAssets is a general question and the next caller should not
+    // have to come back here. The reserved entries (path/scene/type index, scenes,
+    // GameInstance) are excluded by construction: packedTypes() is filled by the
+    // content scan only, and those are JSON metadata, not assets.
+    // Same codec + encryption as the assets.
+    if (packer.packedTypes().empty()) return;
+    nlohmann::json idx = nlohmann::json::object();
+    for (const auto& [id, type] : packer.packedTypes())
+        idx[std::to_string(id.hi) + ":" + std::to_string(id.lo)] =
+            static_cast<uint32_t>(type);
+    const std::string s = idx.dump();   // keys are digits + ':', values numbers: always valid UTF-8
+    packer.addEntry(sceneUuidForPath(kAssetTypeIndexEntry),
+                    std::vector<uint8_t>(s.begin(), s.end()), ctx.packSettings);
+}
+
+// Phase 3d: the pak's user-type index — the paths of every packed Struct/Enum/
+// SaveGameTemplate definition asset, so the game can load them eagerly before the
+// script backends bootstrap (see kTypeIndexEntry). The types come from the pack
+// scan, which already read each asset's header; re-opening every file of the
+// project here to sniff it a second time bought nothing.
+static void addTypeIndex(HpakWriter& packer, const ExportContext& ctx)
 {
     nlohmann::json idx = nlohmann::json::array();
-    std::error_code ec;
     for (const auto& [relPath, id] : packer.packedPaths())
     {
-        (void)id;
-        for (const auto& root : roots)
-        {
-            // Undo the root's pak prefix to find the file on disk.
-            std::string local = relPath;
-            if (!root.pathPrefix.empty())
-            {
-                if (relPath.rfind(root.pathPrefix, 0) != 0) continue;
-                local = relPath.substr(root.pathPrefix.size());
-            }
-            const std::filesystem::path p = root.dir / local;
-            if (!std::filesystem::is_regular_file(p, ec)) continue;
-            HAsset::Reader r;
-            if (r.open(p.string()) &&
-                (r.assetType() == static_cast<uint16_t>(HE::AssetType::StructType) ||
-                 r.assetType() == static_cast<uint16_t>(HE::AssetType::EnumType) ||
-                 r.assetType() == static_cast<uint16_t>(HE::AssetType::SaveGameTemplate)))
-                idx.push_back(relPath);
-            break;
-        }
+        const auto it = packer.packedTypes().find(id);
+        if (it == packer.packedTypes().end()) continue;
+        if (it->second == static_cast<uint16_t>(HE::AssetType::StructType) ||
+            it->second == static_cast<uint16_t>(HE::AssetType::EnumType) ||
+            it->second == static_cast<uint16_t>(HE::AssetType::SaveGameTemplate))
+            idx.push_back(relPath);
     }
     if (idx.empty()) return;
     const std::string s = idx.dump();
@@ -679,7 +689,8 @@ static std::optional<ExportResult> packContent(
 
     addSceneEntries(packer, startupSceneBinary, extraScenes, gameInstanceJson, ctx);
     addAssetPathIndex(packer, ctx);
-    addTypeIndex(packer, ctx, roots);
+    addAssetTypeIndex(packer, ctx);
+    addTypeIndex(packer, ctx);
 
     if (!packer.write(pakPath.string()))
         return ExportResult{false, "Failed to write " + ctx.hpakFilename, 0};

@@ -16,6 +16,8 @@ add_executable(he_tests
     test_horizoncode_runtime.cpp
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
+    test_hc_function_rename.cpp
+    test_hc_rename_scope.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
     test_gizmo_pick.cpp
@@ -84,6 +86,7 @@ add_executable(he_tests
     test_export_profiles.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
+    test_third_person_template.cpp
     test_docs_library.cpp
     test_editor_help.cpp
     test_hc_node_docs.cpp
@@ -171,12 +174,24 @@ add_executable(he_tests
     # The editor reference, generated from the help table — the test walks
     # both against each other.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorReference.cpp
+    # The guides — the third generated part of the manual, and the one a reader
+    # starts in. Same reason as the two above: DocsPanel installs them, so the
+    # test target has to carry them or it does not link.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorGuides.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesFirstSteps.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesCharacter.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesWorld.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Guides/GuidesShipping.cpp
     # The documentation reader itself, so test_ui_shot.cpp can render the real
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcEditorUtil.cpp
+    # Renaming a HorizonCode member across assets. Deliberately free of ImGui and
+    # of the content system, which is what lets the whole decision — whose call is
+    # this, may it be rewritten — be asserted here instead of clicked through.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcRename.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PanelSpotlight.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture

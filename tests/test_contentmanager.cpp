@@ -622,6 +622,92 @@ TEST_CASE("ContentManager pre-registers the default cube mesh")
 	CHECK(allInRange);  // box projection of a unit cube maps into [0,1]
 }
 
+// The ordering the other instance tests never produce, and the one every real
+// project produces: the INSTANCE is registered first and its parent is loaded
+// from disk during the sync. That load inserts into the very SlotMap the
+// instance lives in — a dense vector — so the instance pointer syncMaterialInstance
+// was holding pointed at the old buffer, and every value it copied from the
+// parent went into freed memory. The visible symptom is an instance that opens
+// with none of its parent's shading.
+//
+// Many pairs AND a varying number of unrelated materials between them, and both
+// halves are load-bearing.
+//
+// A vector only moves when it crosses its capacity, so whether this bug shows up
+// depends on which insert lands on a growth boundary. Loading pairs alone is not
+// enough and the reason is worth writing down: instance-then-parent is a strict
+// alternation, so with the pool starting at an odd size EVERY boundary falls on
+// an instance insert and never on a parent load — the sync's pointer is taken
+// after the move and survives by arithmetic. Forty pairs reproduced nothing.
+// The fillers break the alternation, so the boundaries land on parent loads too.
+//
+// That is also the honest answer to why this bug lived so long: it needs the
+// pool to grow at one specific moment, and most projects never line up.
+//
+// MUTATION: in ContentManager::syncMaterialInstance, take `inst` before the
+// loadAsset again (move `getMaterialMutable(instanceId)` above the parent load).
+TEST_CASE("Material instance: syncing survives the parent load that moves the pool")
+{
+	TempContentDir dir("he_test_cm_instance_reload");
+	constexpr int kPairs = 40;
+
+	// Author them on disk through one manager…
+	{
+		ContentManager cm(dir.path.string());
+		for (int i = 0; i < kPairs; ++i)
+		{
+			const std::string n = std::to_string(i);
+			MaterialAsset master;
+			master.type = HE::AssetType::Material;
+			master.name = "Master" + n;
+			master.path = "mats/master" + n + ".hasset";
+			// A value per pair, so a mixed-up parent is as visible as a missing one.
+			master.baseColor[0] = 0.01f * static_cast<float>(i);
+			master.metallic     = 0.5f;
+			master.roughness    = 0.25f;
+			REQUIRE(cm.saveAsset(master));
+
+			MaterialAsset inst;
+			inst.type = HE::AssetType::Material;
+			inst.name = "Inst" + n;
+			inst.path = "mats/inst" + n + ".hasset";
+			inst.parentMaterialPath = master.path;
+			REQUIRE(cm.saveAsset(inst));
+
+			// Parentless fillers, loaded between the pairs below.
+			for (int f = 0; f < 3; ++f)
+			{
+				MaterialAsset pad;
+				pad.type = HE::AssetType::Material;
+				pad.name = "Pad" + n + "_" + std::to_string(f);
+				pad.path = "mats/pad" + n + "_" + std::to_string(f) + ".hasset";
+				REQUIRE(cm.saveAsset(pad));
+			}
+		}
+	}
+
+	// …then load ONLY the instances through a fresh one, so every parent arrives
+	// during its instance's sync rather than before it.
+	ContentManager fresh(dir.path.string());
+	for (int i = 0; i < kPairs; ++i)
+	{
+		const std::string n = std::to_string(i);
+		for (int f = 0; f < i % 3; ++f)
+			fresh.loadAsset("mats/pad" + n + "_" + std::to_string(f) + ".hasset");
+
+		const HE::UUID id = fresh.loadAsset("mats/inst" + n + ".hasset");
+		const MaterialAsset* inst = fresh.getMaterial(id);
+		REQUIRE(inst != nullptr);
+		// Base surface state follows the parent — what the sync is for, and what
+		// silently did not happen for whichever instance's parent load moved the
+		// pool.
+		CHECK_MESSAGE(inst->baseColor[0] == doctest::Approx(0.01f * static_cast<float>(i)),
+		              ("instance " + n + " did not take its parent's colour").c_str());
+		CHECK(inst->metallic  == doctest::Approx(0.5f));
+		CHECK(inst->roughness == doctest::Approx(0.25f));
+	}
+}
+
 TEST_CASE("Material instance: param override survives sync; switch override re-permutes")
 {
 	ContentManager cm;

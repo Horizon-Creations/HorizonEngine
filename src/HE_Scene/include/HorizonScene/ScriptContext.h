@@ -14,6 +14,9 @@
 class HorizonWorld;
 class PhysicsWorld;
 class ContentManager;
+class AudioEngine;
+class EntityHost;
+namespace HorizonCode { class Runtime; }
 
 // Hosts the per-language script backends (Lua via ScriptEngine, Python via
 // PyScriptBackend) and binds them to a HorizonWorld, exposing the identical
@@ -36,9 +39,10 @@ class ScriptContext
 {
 public:
     explicit ScriptContext(HorizonWorld& world);
-    // Out of line: it has to withdraw this context's quit handler from the
-    // file-scope copy the CPython plugin reads, or a context that dies before
-    // its host leaves a std::function pointing at nothing.
+    // Out of line: it has to withdraw this context's quit handler AND its host
+    // services from the file-scope copies the CPython plugin reads, or a context
+    // that dies before its host leaves a std::function pointing at nothing and a
+    // set of pointers aimed at destroyed hosts.
     ~ScriptContext();
 
     ScriptContext(const ScriptContext&)            = delete;
@@ -149,6 +153,62 @@ public:
     // world/physics/content pointers that backend already keeps in file-statics.
     // Empty until a host binds one.
     static const std::function<void()>& hostQuitHandler();
+
+    // ── Everything else a text-script frontend cannot reach on its own ───────
+    // A Lua or Python call ends up in HE::api through a Ctx, and until now the
+    // backends could only fill the three handles they hold themselves (world,
+    // physics, content). Every HE::api row that reads Ctx::audio, ::entities or
+    // ::runtime therefore returned its neutral default from Lua and Python —
+    // eleven audio rows were dead in both languages and nobody noticed, because
+    // "no sound" and "a no-op" look the same.
+    //
+    // These are the services only the HOST can supply: it owns the AudioEngine,
+    // the EntityHost and the HorizonCode runtime, and it alone knows what
+    // "create an object of this class" means (see the createObject comment
+    // below). Bundled into one setter so a host binds them the way it binds the
+    // quit handler — one call, per play session.
+    struct HostServices
+    {
+        AudioEngine*          audio    = nullptr;
+        EntityHost*           entities = nullptr;
+        HorizonCode::Runtime* runtime  = nullptr;
+        // How the host understands "create an object of this class". A callback
+        // rather than a handle for the same reason requestQuit is one: HE_Scene
+        // has no Application to ask, and going straight to EntityHost::spawn
+        // would skip what the hosts built AROUND it (resolving the engine base
+        // class, registering a PlayerCharacter with the PlayerHost) and hand
+        // back a half-built object.
+        //
+        // position/rotationEuler are three floats each, or nullptr for "however
+        // the class authorized it" — a zero vector is NOT the same answer.
+        //
+        // Returns the HorizonCode OBJECT REFERENCE, not the entity, and 0 on
+        // failure. The two are not interchangeable: a plain Object class has a
+        // ref and no entity at all. entity.spawnClass turns the ref into an
+        // entity through Ctx::runtime->ownedEntity — which is why `runtime`
+        // above has to be bound too, or a spawn from Lua/Python creates a live
+        // object it then cannot name. destroyObject takes that same ref.
+        std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
+        std::function<void(uint32_t)> destroyObject;
+    };
+
+    // Bind the host's services for this session. Call it where setQuitHandler is
+    // called — per session, not once at startup: the packaged game drops its
+    // ScriptContext on every scene switch and the editor drops it at play stop,
+    // and the withdrawal below goes with it.
+    void setHostServices(HostServices s);
+
+    // The same services for a backend that lives in ANOTHER module: the CPython
+    // plugin builds its own HE::api::Ctx and never holds a ScriptContext, so it
+    // reads them from here — exactly the arrangement hostQuitHandler() already
+    // uses, and for exactly the same reason. Process-wide and last-writer-wins;
+    // a context that dies withdraws only its OWN publication, so a stale pointer
+    // to a destroyed EntityHost can never outlive the session that published it.
+    // Default-constructed (all null/empty) until a host binds one, which is the
+    // right answer for a context with no session at all (editor property
+    // inspection, tests) — the affected HE::api rows then return their neutral
+    // default, like every other null-Ctx call.
+    static const HostServices& hostServices();
 
     ScriptEngine& engine() { return m_engine; }
 

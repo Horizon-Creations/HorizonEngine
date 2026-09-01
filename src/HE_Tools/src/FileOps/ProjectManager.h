@@ -13,11 +13,27 @@ enum class ProjectPreset
 	Simulation,  // Assets, Scenes, Data sub-folders
 	Tool,        // Assets, Source sub-folders
 	Tutorial,    // Game skeleton + a furnished sandbox scene for the guided tour
+	// A project that can be played the moment it opens: ground, light, sky, and a
+	// PlayerController + PlayerCharacter already wired to WASD, the mouse and
+	// Space. Every other preset is a folder skeleton, and that is what made the
+	// first hour of this engine a scavenger hunt — the pieces a player is made of
+	// are five assets in four places, and nothing said so.
+	//
+	// HorizonCode only: PlayerHost discovers controllers by scanning HorizonCode
+	// class assets, so the two graphs this writes ARE the mechanism. See
+	// createNewProject, which forces the language rather than letting the Hub
+	// hand out a template that cannot work.
+	ThirdPerson,
 	// An APPLICATION rather than a game (docs/he-apps-plan.md E1): UI, textures
 	// and fonts, and deliberately NO startup scene — there is no world to put one
 	// in. Choosing it is what sets ProjectData::appProject, so the two can never
-	// disagree. Appended last: the value is written into the .heproj as a plain
-	// int, so the order above is on-disk format.
+	// disagree.
+	//
+	// AFTER ThirdPerson, not before it: both branches appended a row at the same
+	// number, and this file says "only ever append" because the value is written
+	// into the .heproj as a plain int. Main is the trunk and had already handed
+	// that number to ThirdPerson, so the one that had not shipped is the one that
+	// moves. Nobody's project changes template underneath them.
 	Application,
 	// Not a template: the number of them. The editor's picker is an array of
 	// names indexed by this enum, and the two drifting apart is how choosing
@@ -89,6 +105,28 @@ HE_TOOLS_API bool scaffoldCppProject(const std::string& projectRoot,
 // an existing project is safe. Returns false only on a write failure.
 HE_TOOLS_API bool scaffoldTutorialProject(const std::string& projectRoot,
                                           const std::string& projectName);
+
+// ─── Third-person starter ────────────────────────────────────────────────────
+// The five assets a ProjectPreset::ThirdPerson project needs in order to be
+// playable on first open, written straight as .hasset containers:
+//
+//   Content/Gameplay/PlayerController.hasset  Begin Play → Create Object → Possess
+//   Content/Gameplay/PlayerCharacter.hasset   Move on the Move axis, Jump on Jump
+//   Content/Input/Move.hasset                 Axis2D
+//   Content/Input/Look.hasset                 Axis2D
+//   Content/Input/Jump.hasset                 Button
+//   Content/Input/DefaultMappings.hasset      WASD + mouse + Space + gamepad
+//
+// Neither class ships a component list. It does not need one: a class with no
+// components of its own inherits its engine base's (EntityHost::
+// inheritedComponents), which is where a PlayerCharacter's character controller,
+// collider, movement component and camera child come from. Writing a blob here
+// would freeze today's component set into every project ever made from this
+// template.
+//
+// Existing files are left untouched, so re-running this on an existing project
+// is safe. Returns false only on a write failure.
+HE_TOOLS_API bool scaffoldThirdPersonProject(const std::string& projectRoot);
 
 // Emit Source/<Scene>LevelScript.{h,cpp} with the level event stubs
 // (OnLevelLoaded / OnLevelUnloaded / OnUpdate) and a REGISTER_LEVEL_SCRIPT for

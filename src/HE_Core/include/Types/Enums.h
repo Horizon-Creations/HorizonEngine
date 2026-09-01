@@ -189,11 +189,25 @@ namespace HE
         Kinematic = 2,
     };
 
+    // The raw uint8 is what lands in .hescene (and in the CBOR mirror of it), so
+    // these values are APPEND-ONLY: renumbering one would silently reinterpret
+    // every collider in every saved scene. Add at the end, never in the middle.
     enum class ColliderShape : uint8_t
     {
         Box     = 0,
         Sphere  = 1,
         Capsule = 2,
+
+        // The three below take their geometry from the entity itself rather than
+        // from the collider's own numbers, which is why an imported mesh no
+        // longer has to pretend it is a crate.
+        Mesh        = 3,  // triangle soup of the entity's mesh (LOD0). STATIC bodies
+                          // only — Jolt's MeshShape reports MustBeStatic().
+        ConvexHull  = 4,  // convex hull of that same mesh; fine on a dynamic body.
+                          // Jolt caps a hull at 256 points and FAILS rather than
+                          // simplifying, so a dense mesh may build no shape at all.
+        HeightField = 5,  // the entity's TerrainComponent height field. STATIC only,
+                          // and meaningless on an entity without a terrain.
     };
 
     enum class SerializeFormat : uint8_t

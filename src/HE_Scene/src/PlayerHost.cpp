@@ -55,10 +55,16 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 	{
 		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(id);
 		if (!a) continue;
+		// Copied before the resolve below, because the resolve LOADS: every
+		// ancestor of this class goes through the content manager, and its asset
+		// pool is a dense vector that moves everything in it when it grows. `a`
+		// is dead from the next line on, and the string it owns with it — which
+		// matters most here, where it is the argument being passed.
+		const std::string assetPath = a->path;
 		// The RESOLVED engine base, not the raw string: a class deriving from
 		// another class that is a PlayerController is one too, and asking the
 		// asset alone would miss every derived player in the project.
-		HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(cm, a->path);
+		HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(cm, assetPath);
 		if (HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter"))
 		{
 			++characterClasses;
@@ -75,9 +81,9 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 		// compiled one report its own: the asset is the authority on which base
 		// class it derives from, and a generated library that predates a
 		// baseClass edit would otherwise disagree with the editor.
-		const HorizonCode::ClassIdentity cls{ a->path, rc.engineBase, rc.chain };
+		const HorizonCode::ClassIdentity cls{ assetPath, rc.engineBase, rc.chain };
 		HorizonCode::InstanceId inst = 0;
-		if (auto compiled = HorizonCode::compiledClasses().create(a->path))
+		if (auto compiled = HorizonCode::compiledClasses().create(assetPath))
 			inst = runtime.addCompiled(std::move(compiled), {}, cls);
 		else
 			inst = runtime.addLevels(std::move(rc.levels), {}, cls);
@@ -123,6 +129,21 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 		HE_LOG_INFO(Input, "%s",
 			(std::to_string(characterClasses) + " PlayerCharacter classes found, none spawned "
 			 "automatically - spawn one from your PlayerController with Create Object").c_str());
+	// Neither a controller nor a character class anywhere: the session starts
+	// with no player in it and, until this line existed, said nothing at all.
+	// Everything a beginner does next depends on there being one, so the silence
+	// was the single most expensive one in the engine — you press Play, nothing
+	// moves, and the log is empty.
+	//
+	// A menu or cutscene scene legitimately has no player, which is why this
+	// says what is missing rather than claiming something is broken. It fires
+	// once per play session.
+	if (m_controllers.empty() && characterClasses == 0)
+		HE_LOG_WARN(Input, "%s",
+			"PlayerHost: no PlayerController and no PlayerCharacter class in this project - "
+			"nothing will respond to input. Create them in the Content Browser under "
+			"Gameplay (a HorizonCode project only), then spawn the character from the "
+			"controller's Begin Play with Create Object and take it over with Possess");
 }
 
 void PlayerHost::addCharacter(HorizonCode::InstanceId instance)

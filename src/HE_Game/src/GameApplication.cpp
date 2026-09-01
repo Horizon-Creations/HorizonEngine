@@ -23,6 +23,7 @@
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
+#include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -37,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>                // the host services a Ctx carries (see g_host)
 #include <unordered_set>
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -50,6 +52,63 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The host half of every HE::api::Ctx this file builds ─────────────────────
+// Everything a Ctx carries that belongs to the APPLICATION rather than to the
+// current scene: it is filled once in OnInit and outlives every world, physics
+// world and script context. The scene-scoped handles (world, physics, content)
+// stay per-call, because a scene switch replaces them.
+//
+// It exists so that exactly ONE place builds a Ctx here. Assembling one per call
+// site is how the half-filled Ctx got everywhere: leave out `audio` and eleven
+// audio rows silently return their neutral default, with nothing to see in the
+// log. Fill this, and every row works from every call site by construction.
+struct HostCtxParts
+{
+	AudioEngine*          audio    = nullptr;
+	HorizonCode::Runtime* runtime  = nullptr;
+	EntityHost*           entities = nullptr;
+	// "Create/destroy an object of this class" as the host means it — the very
+	// lambdas the HorizonCode services get, so a spawn from Lua, from Python and
+	// from a Create Object node are the same operation and not three.
+	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
+	std::function<void(uint32_t)> destroyObject;
+	std::function<void()>         quit;
+	// The window rows (app.setTitle/setSize/size) and app.requestRedraw. They
+	// belong HERE and not at a call site, which is the lesson this struct exists
+	// to teach: they were bound at the one Ctx the HorizonCode path builds, so a
+	// Lua or Python script asking for the window size got a silent zero.
+	std::function<void(const std::string&)> setWindowTitle;
+	std::function<void(uint32_t, uint32_t)> setWindowSize;
+	std::function<glm::vec2()>              windowSize;
+	std::function<void()>                   requestRedraw;
+};
+// One application per process; cleared in OnShutdown so nothing here outlives
+// the object its lambdas capture.
+HostCtxParts g_host;
+
+// The only Ctx factory in this file. `self` is the calling HorizonCode instance
+// (0 for everything that is not a graph — the scene-request pump, Lua, Python).
+HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* content,
+                    uint32_t self = 0)
+{
+	HE::api::Ctx c;
+	c.world         = world;
+	c.physics       = physics;
+	c.content       = content;
+	c.audio         = g_host.audio;
+	c.runtime       = g_host.runtime;
+	c.self          = self;
+	c.entities      = g_host.entities;
+	c.createObject  = g_host.createObject;
+	c.destroyObject = g_host.destroyObject;
+	c.requestQuit   = g_host.quit;
+	c.setWindowTitle = g_host.setWindowTitle;
+	c.setWindowSize  = g_host.setWindowSize;
+	c.windowSize     = g_host.windowSize;
+	c.requestRedraw  = g_host.requestRedraw;
+	return c;
+}
+
 // What this platform ran on before the config could name a backend, and what an
 // unusable choice falls back to.
 constexpr HE::RendererBackend kDefaultBackend =
@@ -482,7 +541,30 @@ void GameApplication::OnInit()
 		svc.showWidget    = [this](int id){ m_widgets.showWidget(id); };
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
-		svc.createObject  = [this](const std::string& p, const float* pos,
+		// The app-level half of every Ctx, published once, here: this is where the
+		// object services are written, and a second copy of them somewhere else is
+		// how the two paths drift apart.
+		g_host.audio    = &m_audioEngine;
+		g_host.runtime  = &m_gameInstance.runtime();
+		g_host.entities = &m_entityHost;
+		// The shipped game IS the application, so app.quit leaves the loop for
+		// real (the editor binds the same hook to stopping play mode instead).
+		g_host.quit     = [this]{ Quit(); };
+		// The shipped build owns its window outright, so unlike the editor there
+		// is nothing to protect here — a graph that resizes it means it. And
+		// "quit" means quit: the shipped game IS the application, so app.quit
+		// leaves the loop for real (the editor binds the same hook to stopping
+		// play mode instead). A main menu's Exit button has nothing else to call.
+		g_host.setWindowTitle = [this](const std::string& t) { setWindowTitle(t); };
+		g_host.setWindowSize  = [this](uint32_t w, uint32_t h) { setWindowSize(w, h); };
+		g_host.windowSize     = [this] {
+			const HE::Window* w = window();
+			return w ? glm::vec2(static_cast<float>(w->GetWidth()),
+			                     static_cast<float>(w->GetHeight()))
+			         : glm::vec2(0.0f);
+		};
+		g_host.requestRedraw  = [this] { requestRedraw(); };
+		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one — before the compiled shortcut below, because it needs that
@@ -494,16 +576,22 @@ void GameApplication::OnInit()
 				if (const HorizonCodeClassAsset* ea =
 				        contentManager().getHorizonCodeClass(contentManager().loadAsset(p)))
 				{
+					// Copied NOW. resolveClassAsset below loads every ancestor of
+					// this class, and asset pointers live in a dense vector — so
+					// `ea` is dead from the next line, and the string it owns with
+					// it. That matters twice here: it is the argument being passed
+					// in, and it is read again afterwards.
+					const std::string assetPath = ea->path;
 					// The RESOLVED engine base: a class deriving from another class
 					// that is an Entity is one too.
 					const HorizonCode::ResolvedClass rc =
-						HorizonCode::resolveClassAsset(contentManager(), ea->path);
+						HorizonCode::resolveClassAsset(contentManager(), assetPath);
 					if (HorizonCode::engineClassIsA(rc.engineBase, "Entity"))
 					{
 						// Placement travels with the spawn (null = authored), so
 						// Construct/BeginPlay already run at the destination.
 						const HorizonCode::InstanceId inst =
-							m_entityHost.spawn(ea->path, entt::null, pos, rot).instance;
+							m_entityHost.spawn(assetPath, entt::null, pos, rot).instance;
 						// The PlayerHost no longer creates characters, so this is
 						// the only place it can learn that one exists — and it has
 						// to, or a project without a controller loses its input.
@@ -527,18 +615,21 @@ void GameApplication::OnInit()
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
+			// Same reason as the Entity branch above: the resolve loads, and the
+			// asset pool moves when it does.
+			const std::string assetPath = a->path;
 			// The asset's OWN path is the class key, matching what the compiled
 			// branch above gets from classKey() — so one class stays one class
 			// to a Cast no matter which backend served this instance. The graph
 			// is the FLATTENED one: this class plus what it inherits.
 			HorizonCode::ResolvedClass rc =
-				HorizonCode::resolveClassAsset(contentManager(), a->path);
+				HorizonCode::resolveClassAsset(contentManager(), assetPath);
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
-				std::move(rc.levels), {}, { a->path, rc.engineBase, rc.chain });
+				std::move(rc.levels), {}, { assetPath, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};
-		svc.destroyObject = [this](uint32_t ref){
+		g_host.destroyObject = [this](uint32_t ref){
 			auto& rt = m_gameInstance.runtime();
 			if (ref == 0 || ref == rt.gameInstance()) return;
 			// An Entity class owns a body; destroying the object takes it too, or
@@ -549,8 +640,21 @@ void GameApplication::OnInit()
 			rt.destroy(ref); // fires "Destruct"
 			if (owned != 0 && m_world &&
 			    m_world->registry().valid(static_cast<Entity>(owned)))
+			{
+				// Hand the bodies back BEFORE the entities go: afterwards the
+				// hierarchy is gone and the subtree cannot be walked. After
+				// Destruct rather than before, so a dying object's last frame of
+				// logic still sees the physics it lived in.
+				if (m_physicsWorld)
+					m_physicsWorld->removeEntityTree(*m_world, owned);
 				m_world->destroyEntity(static_cast<Entity>(owned));
+			}
 		};
+		// HorizonCode reaches the two through its services; the registry rows that
+		// Lua and Python call reach the SAME lambdas through the Ctx apiCtx()
+		// builds. Copies of one std::function, not a second implementation.
+		svc.createObject  = g_host.createObject;
+		svc.destroyObject = g_host.destroyObject;
 		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
 		// world, physics and content — all resolved at CALL time, which is what
 		// lets this be bound before OnInit has built any of them, and what makes a
@@ -567,26 +671,12 @@ void GameApplication::OnInit()
 				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
 				return {};
 			}
-			// The caller travels along — see the editor's twin. So does what
-			// "quit" means here: the shipped game IS the application, so app.quit
-			// leaves the loop for real (the editor binds the same hook to
-			// stopping play mode instead). A main menu's Exit button has nothing
-			// else to call.
-			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine,
-			                &m_gameInstance.runtime(), self, &m_entityHost,
-			                [this]{ Quit(); } };
-			// The window rows (app.setTitle/setSize/size, app.requestRedraw). The
-			// shipped build owns its window outright, so unlike the editor there
-			// is nothing to protect here — a graph that resizes it means it.
-			c.setWindowTitle = [this](const std::string& t) { setWindowTitle(t); };
-			c.setWindowSize  = [this](uint32_t w, uint32_t h) { setWindowSize(w, h); };
-			c.windowSize     = [this] {
-				const HE::Window* w = window();
-				return w ? glm::vec2(static_cast<float>(w->GetWidth()),
-				                     static_cast<float>(w->GetHeight()))
-				         : glm::vec2(0.0f);
-			};
-			c.requestRedraw  = [this] { requestRedraw(); };
+			// The caller travels along — see the editor's twin — and so does the
+			// whole app-level half of the Ctx (audio, runtime, entity host, the
+			// object services, the window rows, quit): apiCtx() is the one place
+			// that fills it.
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(),
+			                        &contentManager(), self);
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -649,10 +739,14 @@ void GameApplication::OnInit()
 	// so their per-frame ticks below no-op on their own.
 	if (!m_appMode)
 	{
+		// Physics first of the three, because startPhysics() is what hands the
+		// entity host the world it builds spawned bodies in.
 		startPhysics();
-		// The entity host FIRST: a controller's BeginPlay is where the game spawns its
-		// character with Create Object, and that spawn is only served with a body
-		// while the entity host is running.
+		// Then the entity host, still before the player host: a controller's
+		// BeginPlay is where the game spawns its character with Create Object,
+		// and that spawn is only served — with an entity, and now with a body on
+		// it — while the entity host is running. The body half of that sentence
+		// used to be a claim rather than a fact; EntityHost::spawn makes it true.
 		if (m_world)
 			m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 		// The entity host is handed over so the player host can find the characters
@@ -915,7 +1009,7 @@ void GameApplication::executeSceneRequests()
 			if (info.root == 0 && !created.empty()) info.root = (uint32_t)created.front();
 			HE::api::scene::noteZoneLoaded(r.zone, std::move(info));
 
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
 			// Placement: move the zone's root to the requested position (zero =
 			// as authored; the merge root is a fresh identity entity).
 			if (r.pos != glm::vec3(0.0f))
@@ -923,6 +1017,21 @@ void GameApplication::executeSceneRequests()
 			// Hidden zones load with their renderables invisible until Show Zone.
 			if (r.hidden)
 				HE::api::scene::setZoneVisible(c, r.zone, false);
+
+			// A streamed-in zone needs COLLISION, or the player walks through its
+			// floor: loadSceneInto only deserialises components, and nothing
+			// builds bodies for entities that arrive that way — initialize() ran
+			// once at scene start, and step() only reaps what has gone away.
+			// `created` already holds every entity of the zone, strays included,
+			// so it is one addEntity each rather than a tree walk per root.
+			//
+			// Placed between the two on purpose: after setZonePosition, so the
+			// root's body is built where the zone ends up, and before
+			// startScriptsFor, so a zone graph's BeginPlay sees a world it can
+			// stand on.
+			if (m_physicsWorld)
+				for (entt::entity e : created)
+					m_physicsWorld->addEntity(*m_world, (uint32_t)e);
 
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
@@ -938,14 +1047,20 @@ void GameApplication::executeSceneRequests()
 		case Kind::ZoneVisible: // show/hide a zone (queued so it orders after a load)
 		{
 			if (!m_world) break;
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
 			HE::api::scene::setZoneVisible(c, r.zone, r.flag);
 			break;
 		}
 		case Kind::ZonePosition: // move a zone (queued so it orders after a load)
 		{
 			if (!m_world) break;
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			// The physics world travels in the Ctx because setZonePosition needs
+			// it: moving the root moves what is DRAWN, while a body is baked once
+			// from the pose its entity had when it was built. So the call moves
+			// the root AND rebuilds every zone entity that already has physics,
+			// at the place it now stands. With a null here that rebuild is
+			// skipped and the zone would keep colliding where it was authored.
+			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
 			HE::api::scene::setZonePosition(c, r.zone, r.pos);
 			break;
 		}
@@ -954,6 +1069,15 @@ void GameApplication::executeSceneRequests()
 			const HE::api::scene::ZoneInfo* z = HE::api::scene::zoneInfo(r.zone);
 			if (!z || !m_world) break;
 			auto& reg = m_world->registry();
+			// Bodies go back in a pass of their OWN, before anything is
+			// destroyed. Destroying a zone entity takes its whole subtree with
+			// it, so by the time the loop below reaches a child's id that child
+			// is already invalid and skipped — most of the zone's colliders
+			// would then survive until step()'s sweep noticed them. removeEntity
+			// needs no valid handle and is a silent no-op on an unknown id,
+			// which is what makes an unconditional first pass the simple answer.
+			if (m_physicsWorld)
+				for (uint32_t id : z->entities) m_physicsWorld->removeEntity(id);
 			int gone = 0;
 			for (uint32_t id : z->entities)
 			{
@@ -993,7 +1117,20 @@ void GameApplication::startPhysics()
 	// away, and a stale contact from it would report entity ids the new
 	// world knows nothing about.
 	m_physicsWorld = std::make_unique<PhysicsWorld>();
+	// BEFORE initialize(): mesh and convex-hull colliders are cut from the
+	// entity's mesh asset, and without a content manager to hand it over they
+	// fall back to a box — a house that collides as a crate. PhysicsWorld says
+	// so at ERROR, which in the editor reaches the notification centre; a
+	// packaged game has nothing but its log file, so this line is the only
+	// thing standing between a shipped level and crate-shaped houses.
+	m_physicsWorld->setContentManager(&contentManager());
 	m_physicsWorld->initialize(*m_world);
+	// Every runtime spawn goes through the entity host, so it is the host that
+	// has to know where bodies are built. Set HERE rather than at the two call
+	// sites because this function is the only place the physics world is
+	// replaced — including on a scene switch, where a host still pointing at the
+	// previous one would spawn into freed memory.
+	m_entityHost.setPhysicsWorld(m_physicsWorld.get());
 	m_physicsAccum = 0.0f;
 }
 
@@ -1007,6 +1144,21 @@ void GameApplication::startScripts()
 	// shipped game IS the application, so horizon.app.quit leaves the loop for
 	// real. Bound BEFORE the scripts start — an onStart may already call it.
 	m_scriptContext->setQuitHandler([this]{ Quit(); });
+	// What a text script cannot reach on its own. Lua and Python build their own
+	// HE::api::Ctx from world/physics/content alone, so without this the rows
+	// behind audio.*, the runtime and the entity host answer with their neutral
+	// default and say nothing — and entity.spawnClass would be dead in exactly
+	// the two languages it was added for. Bound BEFORE the scripts start, like
+	// the quit hook: an onStart may already spawn.
+	{
+		ScriptContext::HostServices hs;
+		hs.audio         = &m_audioEngine;
+		hs.entities      = &m_entityHost;
+		hs.runtime       = &m_gameInstance.runtime();
+		hs.createObject  = g_host.createObject;   // the same lambdas HorizonCode uses
+		hs.destroyObject = g_host.destroyObject;
+		m_scriptContext->setHostServices(std::move(hs));
+	}
 
 	const int started = m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 	if (started > 0)
@@ -1520,8 +1672,15 @@ void GameApplication::OnRender(float deltaTime)
 		// ONE dispatch for both frontends: polling drains the queues, so a
 		// second call would find nothing left and it would look like the
 		// events simply never fire for that language.
+		//
+		// The world goes with it because a contact can name an entity that was
+		// destroyed earlier in this very frame: entity.destroy from a script
+		// touches no physics at all, so the body outlives the entity until the
+		// next step reaps it. dispatch checks both ids against the registry and
+		// drops the whole event — the guard is only as good as this argument.
 		HE_PROFILE_SCOPE_N("CollisionDispatch");
-		CollisionSystem::dispatch(*m_physicsWorld, m_scriptContext.get(), m_scriptInstances,
+		CollisionSystem::dispatch(*m_physicsWorld, *m_world,
+		                          m_scriptContext.get(), m_scriptInstances,
 		                          &m_gameInstance.runtime(), m_entityHost.instances());
 	}
 
@@ -1555,7 +1714,9 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
 		playerMouse.buttons = 0;
 	m_playerHost.tick(input(), gameDt, playerMouse);
-	// Entity classes: Tick, plus reaping the ones whose entity is gone.
+	// Entity classes: Tick, plus reaping the ones whose entity is gone — and
+	// handing their bodies back as it notices them, rather than leaving them to
+	// step()'s own sweep a frame later.
 	m_entityHost.tick(gameDt);
 
 	// Latent HorizonCode flow (Delay nodes): resume expired continuations on
@@ -1577,9 +1738,14 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && !m_appMode)
 	{
 		glm::vec3 camPos(0.0f);
-		for (auto [e, tc, cam] : m_world->registry().view<TransformComponent, CameraComponent>().each())
+		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
 		{
-			camPos = glm::vec3(tc.worldMatrix[3]);
+			// Composed from the parent chain, not read out of tc.worldMatrix: that
+			// matrix is only as fresh as the last propagateTransforms. The rig path
+			// above runs one, the free-flight path does not, and a camera spawned
+			// this frame still carries the identity — which would put LOD and the
+			// precipitation volume at the world origin instead of at the player.
+			camPos = HE::worldPositionOf(*m_world, e);
 			break;
 		}
 		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&
@@ -1749,6 +1915,10 @@ void GameApplication::OnShutdown()
 	m_animatorHost.end();
 	m_entityHost.end();
 	m_playerHost.end();
+	// The host borrows the physics world and end() deliberately does not clear
+	// that (the apps set it before begin()), so it is dropped here — before the
+	// world it points at goes away.
+	m_entityHost.setPhysicsWorld(nullptr);
 	m_physicsWorld.reset();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).
@@ -1760,6 +1930,14 @@ void GameApplication::OnShutdown()
 	m_widgets.clear();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).
+	// The host services go FIRST, and while the context that published them still
+	// exists: the copy ScriptContext hands to the Python backend is process-wide
+	// and outlives this object, and every lambda in it captures `this`. AFTER
+	// fireShutdown above, though — a GameInstance's OnShutdown graph still runs,
+	// and it would be the one place where Create Object worked and
+	// entity.spawnClass did not.
+	if (m_scriptContext) m_scriptContext->setHostServices({});
+	g_host = {};
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
 

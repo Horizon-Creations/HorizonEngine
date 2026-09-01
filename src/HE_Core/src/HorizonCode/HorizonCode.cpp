@@ -1633,6 +1633,10 @@ nlohmann::json nodeToJsonObj(const Node& n)
         }
     }
     if (!n.typeName.empty()) e["typeName"] = n.typeName;
+    // Written under the same key a variable uses for the same thing, and omitted
+    // when empty: an older editor reading this file simply ignores it, and a
+    // graph that never picked a target class stays byte-identical.
+    if (!n.className.empty()) e["className"] = n.className;
     if (!n.pinDefaults.empty())
     {
         nlohmann::json pd = nlohmann::json::array();
@@ -1745,6 +1749,7 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
     n.keyType = (PinType)e.value("keyType", (int)P::String);
     n.keyTypeName = e.value("keyTypeName", std::string());
     n.typeName = e.value("typeName", std::string());
+    n.className = e.value("className", std::string());
     if (const auto& pd = e.value("pinDefaults", nlohmann::json::array()); pd.is_array())
         for (const auto& entry : pd)
         {

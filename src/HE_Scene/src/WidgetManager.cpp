@@ -331,17 +331,32 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 
 	// Fire Construct AFTER the widget is in m_instances, so host callbacks can
 	// resolve it by scriptId during construction.
-	Instance& stored = m_instances.back();
+	//
+	// Everything still needed is COPIED OUT FIRST, because Construct runs user
+	// graph code and that code may create or destroy widgets — and m_instances is
+	// a plain vector, so a single Create Widget inside a Construct reallocates it
+	// and any reference into it points at freed memory. A page widget that builds
+	// its own sub-widget is the ordinary case here, not an exotic one, which is
+	// why this was reachable without anything unusual happening.
+	const int                     widgetId = m_instances.back().id;
+	const HorizonCode::InstanceId scriptId = m_instances.back().scriptId;
+	std::vector<HorizonCode::InstanceId> embedScripts;
+	embedScripts.reserve(m_instances.back().embeds.size());
+	for (const Instance::Embed& em : m_instances.back().embeds)
+		embedScripts.push_back(em.scriptId);
+
 	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
-	            assetPath.c_str(), stored.id, stored.tree.elements.size(),
+	            assetPath.c_str(), widgetId, m_instances.back().tree.elements.size(),
 	            graph.nodes.empty() ? "compiled/no" : "interpreted");
-	rt().fireConstruct(stored.scriptId);
+	rt().fireConstruct(scriptId);
 	// Embedded widgets construct too, innermost last — an embed may only be
 	// spoken to once the widget holding it has run its own Construct.
-	for (const Instance::Embed& em : stored.embeds)
-		rt().fireConstruct(em.scriptId);
+	for (const HorizonCode::InstanceId embed : embedScripts)
+		rt().fireConstruct(embed);
+	// A new widget is a new picture, and in an app nothing else asks for one:
+	// the frame is only drawn when something says it changed (A2).
 	m_visualDirty = true;
-	return stored.id;
+	return widgetId;
 }
 
 void WidgetManager::setTheme(const HE::UITheme& theme)
@@ -1005,11 +1020,19 @@ void WidgetManager::destroyWidget(int id)
 	if (Instance* w = find(id))
 	{
 		HE_LOG_DEBUG(Widget, "Destroying widget id %d", id);
+		// Copied for createWidget's reason, in the mirror image: destroy() fires
+		// Destruct, Destruct is user graph code, and a Destruct that creates or
+		// destroys a widget moves m_instances out from under `w` — after which
+		// the very next loop iteration reads a freed embed list.
+		std::vector<HorizonCode::InstanceId> scripts;
+		scripts.reserve(w->embeds.size() + 1);
 		// Embedded widgets are instances of their own and have to go with it,
 		// innermost first — otherwise their scripts outlive the tree they act on.
 		for (auto it = w->embeds.rbegin(); it != w->embeds.rend(); ++it)
-			rt().destroy(it->scriptId);
-		rt().destroy(w->scriptId); // fire "Destruct", then drop it
+			scripts.push_back(it->scriptId);
+		scripts.push_back(w->scriptId);
+		for (const HorizonCode::InstanceId sid : scripts)
+			rt().destroy(sid); // fires "Destruct", then drops it
 	}
 	else
 	{

@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
+#include <cmath>
 
 static constexpr float kDt = 1.0f / 60.0f;
 
@@ -54,7 +55,7 @@ TEST_CASE("CollisionSystem: dispatch with no events does not crash")
     ScriptContext ctx(world);
     CollisionSystem::InstanceMap instances;
 
-    CHECK_NOTHROW(CollisionSystem::dispatch(phys, ctx, instances));
+    CHECK_NOTHROW(CollisionSystem::dispatch(phys, world, ctx, instances));
 }
 
 TEST_CASE("CollisionSystem: dispatch calls onCollisionEnter on colliding entities")
@@ -93,7 +94,7 @@ TEST_CASE("CollisionSystem: dispatch calls onCollisionEnter on colliding entitie
     for (int i = 0; i < 120 && !gotCallback; ++i)
     {
         phys.step(world, kDt);
-        CollisionSystem::dispatch(phys, ctx, instances);
+        CollisionSystem::dispatch(phys, world, ctx, instances);
 
         // Check if enterCount was incremented by inspecting via exec trick
         // We use the engine directly to verify
@@ -208,7 +209,7 @@ TEST_CASE("CollisionSystem: dispatch calls onCollisionExit on separating entitie
     for (int i = 0; i < 300; ++i)
     {
         phys.step(world, kDt);
-        CollisionSystem::dispatch(phys, ctx, instances);
+        CollisionSystem::dispatch(phys, world, ctx, instances);
         if (ctx.engine().getGlobalNumber("_heExitCount") > 0.0)
             break;
     }
@@ -249,7 +250,7 @@ TEST_CASE("CollisionSystem: dispatch is safe when instance map is empty")
     for (int i = 0; i < 60; ++i)
     {
         phys.step(world, kDt);
-        CHECK_NOTHROW(CollisionSystem::dispatch(phys, ctx, emptyMap));
+        CHECK_NOTHROW(CollisionSystem::dispatch(phys, world, ctx, emptyMap));
     }
 }
 
@@ -339,7 +340,7 @@ TEST_CASE("CollisionSystem: one poll serves Lua AND HorizonCode")
     for (int i = 0; i < 90; ++i)
     {
         phys.step(world, kDt);
-        CollisionSystem::dispatch(phys, &sctx, lua, &rt, hcMap);
+        CollisionSystem::dispatch(phys, world, &sctx, lua, &rt, hcMap);
     }
 
     CHECK(sctx.engine().getGlobalNumber("_heEnterCount") >= 1.0);   // Lua saw it
@@ -390,7 +391,7 @@ TEST_CASE("PhysicsWorld: a trigger collider overlaps instead of blocking")
     for (int i = 0; i < 180; ++i)
     {
         phys.step(world, kDt);
-        CollisionSystem::dispatch(phys, nullptr, {}, &rt, hcMap);
+        CollisionSystem::dispatch(phys, world, nullptr, {}, &rt, hcMap);
         lastY = world.registry().get<TransformComponent>(faller).position.y;
     }
     CHECK(rt.getVariable(hc, "overlaps").i >= 1);
@@ -402,4 +403,101 @@ TEST_CASE("PhysicsWorld: a trigger collider overlaps instead of blocking")
     // And the SAME contact never also shows up as a blocking hit — a contact
     // lands in exactly one of the two pairs, decided when it begins.
     CHECK(rt.getVariable(hit, "hits").i == 0);
+}
+
+// ── The liveness filter ─────────────────────────────────────────────────────
+
+// Lua counter that also remembers WHO it was told about, so the test can tell
+// "no event" apart from "an event about somebody else".
+static const char* kRememberEnter = R"lua(
+local M = {}
+function M.onStart(self)
+    _heLiveEnters = 0
+    _heLiveOther  = -1
+end
+function M.onCollisionEnter(self, other)
+    _heLiveEnters = (_heLiveEnters or 0) + 1
+    _heLiveOther  = other
+end
+return M
+)lua";
+
+TEST_CASE("CollisionSystem: an entity destroyed through the ECS delivers no further events")
+{
+    // entity.destroy (ScriptApi::destroy → HorizonWorld::destroyEntity) touches
+    // NO physics at all. The body outlives the entity until the next
+    // PhysicsWorld::step() reaps it, and any contact already queued for it
+    // carries an id that now resolves to nothing — an ordinary-looking integer
+    // that no amount of defensive scripting on the receiving side could catch.
+    //
+    // The window is reproduced exactly: events are left QUEUED (poll drains, so
+    // simply not dispatching during the fall accumulates them), the counterpart
+    // is destroyed, and dispatch runs before any further step. No step after the
+    // destroy is deliberate — a step would reap the body and purge the queue via
+    // PhysicsWorld's own path, which is the case that was already covered.
+    HorizonWorld world;
+
+    Entity floor = world.createEntity("Floor");
+    {
+        TransformComponent t; t.position = {0, 0, 0}; t.scale = {10, 0.2f, 10};
+        world.addComponent(floor, t);
+        world.addComponent(floor, RigidBodyComponent{});
+    }
+    // Just above the floor's surface, so it lands within a handful of steps.
+    Entity crate = world.createEntity("Crate");
+    {
+        TransformComponent t; t.position = {0, 0.75f, 0}; t.scale = {1,1,1};
+        world.addComponent(crate, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        world.addComponent(crate, rb);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    ScriptContext ctx(world);
+    REQUIRE(ctx.engine().loadScript("remember", kRememberEnter));
+    const auto id = ctx.engine().createInstance("remember", static_cast<uint32_t>(floor));
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    ctx.engine().callOnStart(id);
+    // The handler sits on the SURVIVOR. The dead entity's own instance firing
+    // would be one bug; handing a live entity a dead id is the other, and this
+    // is that one.
+    CollisionSystem::InstanceMap instances{ { static_cast<uint32_t>(floor), id } };
+
+    // Step WITHOUT dispatching, until the crate has come to REST on the floor.
+    // Rest is the proxy for "a contact enter event is now sitting in the queue"
+    // — the queues cannot be peeked at without draining them, and draining is
+    // the one thing this test must not do.
+    //
+    // "Stopped falling", not "is below some height": a threshold on y alone is
+    // crossed on the way DOWN, before the two bodies ever touch, and the test
+    // then proves nothing at all. Only a contact can stop the fall.
+    bool  landed = false;
+    float prevY  = world.registry().get<TransformComponent>(crate).position.y;
+    for (int i = 0; i < 120 && !landed; ++i)
+    {
+        phys.step(world, kDt);
+        const float y = world.registry().get<TransformComponent>(crate).position.y;
+        landed = (i > 2) && std::fabs(y - prevY) < 1.0e-5f;
+        prevY  = y;
+    }
+    REQUIRE(landed);
+    // Resting ON the floor (top at 0.1, crate half-height 0.5), not fallen
+    // through it — the contact is real.
+    REQUIRE(world.registry().get<TransformComponent>(crate).position.y
+            == doctest::Approx(0.6f).epsilon(0.05));
+    REQUIRE(ctx.engine().getGlobalNumber("_heLiveEnters") == 0.0);   // nothing dispatched yet
+
+    world.destroyEntity(crate);
+    REQUIRE_FALSE(world.registry().valid(crate));
+    // The body is still there — that is the whole point of the window.
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(crate)));
+
+    CollisionSystem::dispatch(phys, world, ctx, instances);
+
+    // The WHOLE event is dropped, not just the dead half: a contact where one
+    // end no longer exists has nothing left to mean.
+    CHECK(ctx.engine().getGlobalNumber("_heLiveEnters") == 0.0);
+    CHECK(ctx.engine().getGlobalNumber("_heLiveOther")  == -1.0);
 }

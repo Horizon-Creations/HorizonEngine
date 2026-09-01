@@ -5,6 +5,13 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/NavigationSystem.h>
+#include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/Components/NavMeshComponent.h>
+#include <HorizonScene/Components/NavAgentComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SaveStateComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/AudioEngine.h>
@@ -16,6 +23,7 @@
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
+#include <HorizonScene/ParticleSystem.h>
 #include <HorizonCode/HorizonCode.h>
 #include <UIWidget/UIWidgetTree.h>
 #include <DebugDraw/DebugDraw.h>
@@ -208,6 +216,280 @@ TEST_CASE("Transform: world position walks the parent chain, local does not")
     call("transform.setPosition", { Value::ofInt((int)lone), Value::ofVec3({ 3.0f, 4.0f, 5.0f }) });
     CHECK(call("transform.getWorldPosition", { Value::ofInt((int)lone) })[0].v3
           == glm::vec3(3.0f, 4.0f, 5.0f));
+}
+
+// ═══ The local↔world boundary, with a real physics world behind it ════════════
+//
+// The four cases below are the ones nothing covered: every other transform test
+// runs with a null-physics Ctx, and every physics test goes at PhysicsWorld
+// directly. The boundary lives in between — HE::api::transform speaks LOCAL
+// (TransformComponent's space), PhysicsWorld speaks WORLD ("EVERY pose this
+// class exchanges is a WORLD pose"), and EngineApi.cpp is the only place that
+// knows both. Nothing converted there until now, so a PARENTED physics entity
+// put its body at the local value and its transform at inv(parent) * value:
+// two different wrong places from one call.
+//
+// A rotated parent is what makes these tests worth having. With a parent that is
+// only translated, the composed position and the sum of the two positions agree,
+// so broken math passes.
+
+namespace
+{
+    // A child with a body of its own, parented to `parent`. Static rather than
+    // dynamic on purpose: these tests are about WHERE a teleport puts the body,
+    // and a body that also falls would blur the answer with gravity.
+    HE::api::Entity spawnParentedBody(HorizonWorld& world, HE::api::Entity parent,
+                                      const glm::vec3& localPos)
+    {
+        auto e = world.createEntity("ParentedBody");
+        TransformComponent t;
+        t.position = localPos;
+        t.scale    = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(e, t);
+        RigidBodyComponent rb;
+        rb.type = RigidBodyType::Static;
+        world.addComponent(e, rb);
+        REQUIRE(world.reparentEntity(e, static_cast<entt::entity>(parent)));
+        return static_cast<HE::api::Entity>(e);
+    }
+
+    // A top-level dynamic box, the "no parent" half of each pair below.
+    HE::api::Entity spawnLoneDynamicBody(HorizonWorld& world, const glm::vec3& pos)
+    {
+        auto e = world.createEntity("LoneBody");
+        TransformComponent t;
+        t.position = pos;
+        t.scale    = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(e, t);
+        RigidBodyComponent rb;
+        rb.type = RigidBodyType::Dynamic;
+        rb.mass = 1.0f;
+        world.addComponent(e, rb);
+        return static_cast<HE::api::Entity>(e);
+    }
+}
+
+TEST_CASE("Transform: setPosition on a PARENTED physics entity places the body in world space")
+{
+    HorizonWorld world;
+
+    // Parent 10 along X and turned a quarter turn about Y, exactly the shape the
+    // hierarchy test above uses: a child sitting 2 in front of it (local +Z)
+    // therefore stands 2 further along X (world +X), at (12, 0, 0).
+    const auto parent = spawnWithTransform(world, { 10.0f, 0.0f, 0.0f });
+    world.registry().get<TransformComponent>(static_cast<entt::entity>(parent)).rotation =
+        { 0.0f, 90.0f, 0.0f };
+    const auto child = spawnParentedBody(world, parent, { 0.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(child)));
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    call("transform.setPosition", { Value::ofInt((int)child), Value::ofVec3({ 0.0f, 0.0f, 2.0f }) });
+
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+
+    // Where the child is DRAWN — the composed world position — is where its
+    // collider has to be.
+    const auto atWorld = phys.raycast({ 12.0f, 50.0f, 0.0f }, down, 100.0f);
+    REQUIRE(atWorld.hit);
+    CHECK(atWorld.entityId == static_cast<uint32_t>(child));
+
+    // And nothing is at the RAW LOCAL value. This is the half that fails without
+    // the conversion: PhysicsWorld reads what it is handed as a world pose, so
+    // an unconverted local (0,0,2) parked the body here, 12 m from its mesh.
+    CHECK_FALSE(phys.raycast({ 0.0f, 50.0f, 2.0f }, down, 100.0f).hit);
+
+    // Read back in the space it was written in. Exact rather than approximate on
+    // purpose: teleportToLocalPose puts the caller's local values back after the
+    // body move, so the round trip does not drift through a matrix and its
+    // inverse. Asked BEFORE any step() — a body's own pose only overwrites the
+    // transform when the simulation runs.
+    const Value back = call("transform.getPosition", { Value::ofInt((int)child) })[0];
+    CHECK(back.v3.x == doctest::Approx(0.0f));
+    CHECK(back.v3.y == doctest::Approx(0.0f));
+    CHECK(back.v3.z == doctest::Approx(2.0f));
+}
+
+TEST_CASE("Transform: setWorldPosition on a PARENTED physics entity lands both halves on the spot")
+{
+    // The regression this pins down. setWorldPosition converts world→local and
+    // used to hand the result to transform::setPosition — which, once that one
+    // started teleporting the body, read the already-converted value as a world
+    // one again. The single function whose entire job is hierarchy-correct
+    // placement was the one that misplaced parented entities, and it did so
+    // WORSE than the committed tree does.
+    HorizonWorld world;
+
+    const auto parent = spawnWithTransform(world, { 10.0f, 0.0f, 0.0f });
+    world.registry().get<TransformComponent>(static_cast<entt::entity>(parent)).rotation =
+        { 0.0f, 90.0f, 0.0f };
+    const auto child = spawnParentedBody(world, parent, { 0.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasPhysics(static_cast<uint32_t>(child)));
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    const glm::vec3 target{ 5.0f, 0.0f, -7.0f };
+    call("transform.setWorldPosition", { Value::ofInt((int)child), Value::ofVec3(target) });
+
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+
+    // The body is at the world position the caller named. Nothing else is
+    // acceptable here — "world" is in the name.
+    const auto atTarget = phys.raycast({ 5.0f, 50.0f, -7.0f }, down, 100.0f);
+    REQUIRE(atTarget.hit);
+    CHECK(atTarget.entityId == static_cast<uint32_t>(child));
+
+    // And NOT at the double-converted place. inverse(parent) applied to the
+    // target is (7, 0, -5) — the local position the transform legitimately gets,
+    // and the exact spot the body used to be dumped at when that local value was
+    // passed on to a setter that reads world.
+    CHECK_FALSE(phys.raycast({ 7.0f, 50.0f, -5.0f }, down, 100.0f).hit);
+
+    // Both spaces agree with the two questions asked of them: world is the
+    // target, local is the target expressed inside the parent.
+    const Value w = call("transform.getWorldPosition", { Value::ofInt((int)child) })[0];
+    CHECK(w.v3.x == doctest::Approx(5.0f).epsilon(0.001));
+    CHECK(w.v3.z == doctest::Approx(-7.0f).epsilon(0.001));
+    const Value l = call("transform.getPosition", { Value::ofInt((int)child) })[0];
+    CHECK(l.v3.x == doctest::Approx(7.0f).epsilon(0.001));
+    CHECK(l.v3.z == doctest::Approx(-5.0f).epsilon(0.001));
+}
+
+TEST_CASE("Transform: setPosition on an UNPARENTED physics entity is unchanged by the conversion")
+{
+    // The other side of the boundary, and the reason it can ship: with no parent
+    // above it every conversion is the identity, so the overwhelming majority of
+    // scenes behave exactly as they did.
+    //
+    // Not written as a pure "nothing changed" check, because that would pass
+    // without any of this code existing. It asserts the thing that IS new for a
+    // top-level entity too: the teleport reaches the body, so the move survives
+    // the step instead of being overwritten by Jolt's own pose.
+    HorizonWorld world;
+    const auto box = spawnLoneDynamicBody(world, { 0.0f, 10.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Fall a while first, so the body's own idea of where it is has drifted far
+    // from where the teleport wants it.
+    for (int i = 0; i < 120; ++i)
+        phys.step(world, 1.0f / 60.0f);
+    REQUIRE(world.registry().get<TransformComponent>(static_cast<entt::entity>(box)).position.y < 0.0f);
+
+    call("transform.setPosition", { Value::ofInt((int)box), Value::ofVec3({ 3.0f, 50.0f, -4.0f }) });
+
+    // Immediately readable, in the spelling it was written in.
+    const Value back = call("transform.getPosition", { Value::ofInt((int)box) })[0];
+    CHECK(back.v3.x == doctest::Approx(3.0f));
+    CHECK(back.v3.y == doctest::Approx(50.0f));
+    CHECK(back.v3.z == doctest::Approx(-4.0f));
+
+    // …and it is where the COLLIDER is, not just where the mesh is drawn.
+    const auto hit = phys.raycast({ 3.0f, 60.0f, -4.0f }, { 0.0f, -1.0f, 0.0f }, 100.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId == static_cast<uint32_t>(box));
+
+    // The step is the judge: without the body move it writes the falling pose
+    // back over the transform and the set means nothing.
+    phys.step(world, 1.0f / 60.0f);
+    const auto& tr = world.registry().get<TransformComponent>(static_cast<entt::entity>(box));
+    CHECK(tr.position.y > 49.0f);
+    CHECK(tr.position.x == doctest::Approx(3.0f).epsilon(0.02));
+    CHECK(tr.position.z == doctest::Approx(-4.0f).epsilon(0.02));
+}
+
+TEST_CASE("Transform: setWorldPosition on an UNPARENTED physics entity is the same operation")
+{
+    // Top-level: local IS world, so this and the case above must agree. The
+    // assertion that matters is again that the body followed — setWorldPosition
+    // reaches physics on its own path rather than through setPosition, so its
+    // teleport needs its own coverage.
+    HorizonWorld world;
+    const auto box = spawnLoneDynamicBody(world, { 0.0f, 10.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    for (int i = 0; i < 120; ++i)
+        phys.step(world, 1.0f / 60.0f);
+    REQUIRE(world.registry().get<TransformComponent>(static_cast<entt::entity>(box)).position.y < 0.0f);
+
+    call("transform.setWorldPosition", { Value::ofInt((int)box), Value::ofVec3({ -6.0f, 40.0f, 8.0f }) });
+
+    const auto hit = phys.raycast({ -6.0f, 60.0f, 8.0f }, { 0.0f, -1.0f, 0.0f }, 100.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId == static_cast<uint32_t>(box));
+
+    phys.step(world, 1.0f / 60.0f);
+    const auto& tr = world.registry().get<TransformComponent>(static_cast<entt::entity>(box));
+    CHECK(tr.position.y > 39.0f);
+    CHECK(tr.position.x == doctest::Approx(-6.0f).epsilon(0.02));
+    CHECK(tr.position.z == doctest::Approx(8.0f).epsilon(0.02));
+
+    // Both spaces answer the same for a top-level entity — the property that
+    // lets a whole codebase confuse the two and never notice.
+    const Value w = call("transform.getWorldPosition", { Value::ofInt((int)box) })[0];
+    const Value l = call("transform.getPosition", { Value::ofInt((int)box) })[0];
+    CHECK(w.v3.x == doctest::Approx(l.v3.x));
+    CHECK(w.v3.y == doctest::Approx(l.v3.y));
+    CHECK(w.v3.z == doctest::Approx(l.v3.z));
+}
+
+TEST_CASE("Transform: setRotation on a dynamic body survives the next step")
+{
+    // The rotation axis of the same defect. The physics loop writes Jolt's
+    // orientation back over TransformComponent every step, so turning a dynamic
+    // body from a script was undone in the frame it happened — a door that
+    // swings open and is shut again before anyone sees it.
+    //
+    // There is no rotation-only teleport, so this goes through setTransform with
+    // the position the entity already has; the test therefore also checks the
+    // entity did not move as a side effect of being turned.
+    HorizonWorld world;
+    const auto box = spawnLoneDynamicBody(world, { 0.0f, 20.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // In the air and awake — a sleeping body is not written back at all, which
+    // would make this pass for a reason that has nothing to do with the fix.
+    for (int i = 0; i < 10; ++i)
+        phys.step(world, 1.0f / 60.0f);
+    const float yBefore =
+        world.registry().get<TransformComponent>(static_cast<entt::entity>(box)).position.y;
+    REQUIRE(yBefore < 20.0f);
+
+    call("transform.setRotation", { Value::ofInt((int)box), Value::ofVec3({ 0.0f, 37.0f, 0.0f }) });
+
+    // Nothing torques a free-falling box, so one step must leave the orientation
+    // where it was put.
+    phys.step(world, 1.0f / 60.0f);
+
+    const Value r = call("transform.getRotation", { Value::ofInt((int)box) })[0];
+    CHECK(r.v3.x == doctest::Approx(0.0f).epsilon(0.01));
+    CHECK(r.v3.y == doctest::Approx(37.0f).epsilon(0.01));
+    CHECK(r.v3.z == doctest::Approx(0.0f).epsilon(0.01));
+
+    // Turned, not teleported: it is still falling from where it was.
+    const auto& tr = world.registry().get<TransformComponent>(static_cast<entt::entity>(box));
+    CHECK(tr.position.x == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK(tr.position.z == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK(tr.position.y < yBefore);
 }
 
 TEST_CASE("EngineApi: transform round-trips through the registry")
@@ -1197,6 +1479,131 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     CHECK(envRows == 2 * (39 + 6 + 4 + 9));   // float + bool + int + colour fields
 }
 
+// ═══ Spawning a class: the host service contract ══════════════════════════════
+// entity.spawnClass is the row that made "spawn something furnished" reachable
+// from Lua, Python and generated C++ at all — before it, ScriptApi::spawn's bare
+// entity was the only door. What it can NOT do is reach EntityHost itself: the
+// hosts wrap that call in a service that resolves the class's engine base and
+// registers a PlayerCharacter with the PlayerHost, and a row going round that
+// would hand back the half-built object those steps exist to prevent. So the
+// contract tested here is the one with the HOST — that the row asks the service,
+// asks it the right thing, and survives every way the service can say no. The
+// furnished entity itself is driven end to end in test_entity_host.cpp.
+
+TEST_CASE("Spawn class: an unbound host service is a logged 0, never a crash")
+{
+    // The state a Ctx is in wherever no session is running: the editor outside
+    // play mode, a tool, this test. Every field null is an ORDINARY state in this
+    // API (see the tolerance note in EngineApi.h), so the answer has to be a 0
+    // and a log line — calling straight through the empty std::function would
+    // throw std::bad_function_call out of a script call instead.
+    Ctx none{};
+    CHECK(HE::api::entity::spawnClass(none, "Classes/Bullet.hasset", 1.0f, 2.0f, 3.0f) == 0u);
+    CHECK(HE::api::entity::spawnClassRotated(none, "Classes/Bullet.hasset",
+                                             1.0f, 2.0f, 3.0f, 0.0f, 90.0f, 0.0f) == 0u);
+    CHECK_NOTHROW(HE::api::entity::destroyObject(none, 7u));
+    CHECK_NOTHROW(HE::api::entity::destroyObject(none, 0u));
+
+    // …and through the registry dispatch, which is the path a script takes.
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(none, a); };
+    CHECK(call("entity.spawnClass", { Value::ofString("Classes/Bullet.hasset"),
+                                      Value::ofFloat(1.0f), Value::ofFloat(2.0f),
+                                      Value::ofFloat(3.0f) })[0].i == 0);
+    CHECK_NOTHROW(call("entity.destroyObject", { Value::ofRef(5u) }));
+}
+
+TEST_CASE("Spawn class: the position is always stated, the rotation only when asked")
+{
+    // The distinction the two rows exist for. "Leave the rotation the class
+    // authored" and "face zero degrees" are different requests, and the only
+    // thing carrying that difference to the host is a null pointer — a defaulted
+    // 0,0,0 would silently re-aim every spawn that never asked for a facing.
+    // Recorded here at the boundary, because by the time EntityHost has applied
+    // it the two are indistinguishable.
+    struct Seen { std::string path; bool hadPos = false, hadRot = false;
+                  float pos[3]{}, rot[3]{}; int calls = 0; } seen;
+
+    Ctx c{};
+    c.createObject = [&](const std::string& p, const float* pos, const float* rot) -> uint32_t
+    {
+        ++seen.calls;
+        seen.path   = p;
+        seen.hadPos = pos != nullptr;
+        seen.hadRot = rot != nullptr;
+        if (pos) { seen.pos[0] = pos[0]; seen.pos[1] = pos[1]; seen.pos[2] = pos[2]; }
+        if (rot) { seen.rot[0] = rot[0]; seen.rot[1] = rot[1]; seen.rot[2] = rot[2]; }
+        return 0u;   // "unknown class" — the lookup is not what this test is about
+    };
+
+    HE::api::entity::spawnClass(c, "Classes/Crate.hasset", 4.0f, 5.0f, 6.0f);
+    CHECK(seen.calls == 1);
+    CHECK(seen.path == "Classes/Crate.hasset");
+    CHECK(seen.hadPos);
+    CHECK(seen.pos[0] == doctest::Approx(4.0f));
+    CHECK(seen.pos[1] == doctest::Approx(5.0f));
+    CHECK(seen.pos[2] == doctest::Approx(6.0f));
+    CHECK_FALSE(seen.hadRot);            // as authored, NOT (0,0,0)
+
+    HE::api::entity::spawnClassRotated(c, "Classes/Crate.hasset",
+                                       4.0f, 5.0f, 6.0f, 0.0f, 0.0f, 0.0f);
+    CHECK(seen.calls == 2);
+    CHECK(seen.hadRot);                  // zero degrees, stated on purpose
+    CHECK(seen.rot[1] == doctest::Approx(0.0f));
+
+    HE::api::entity::spawnClassRotated(c, "Classes/Crate.hasset",
+                                       0.0f, 0.0f, 0.0f, 10.0f, 90.0f, -20.0f);
+    CHECK(seen.rot[0] == doctest::Approx(10.0f));
+    CHECK(seen.rot[1] == doctest::Approx(90.0f));
+    CHECK(seen.rot[2] == doctest::Approx(-20.0f));
+}
+
+TEST_CASE("Spawn class: a class with no entity is undone, not left running")
+{
+    // A class that is not an Entity class HAS no entity, so the caller gets 0 —
+    // but the object was created, and this row returns entities, so nothing the
+    // caller holds could ever name it again. An instance nobody can name still
+    // ticks, still answers a Cast and never ends. It is therefore destroyed
+    // again, the way EntityHost::spawn undoes its entity when the binding fails.
+    HorizonCode::Runtime rt;   // empty: ownedEntity() of anything is 0
+
+    uint32_t destroyed = 0;
+    int      destroyCalls = 0;
+    Ctx c{};
+    c.runtime       = &rt;
+    c.createObject  = [](const std::string&, const float*, const float*) -> uint32_t { return 4242u; };
+    c.destroyObject = [&](uint32_t ref){ destroyed = ref; ++destroyCalls; };
+
+    CHECK(HE::api::entity::spawnClass(c, "Classes/GameRules.hasset", 0.0f, 0.0f, 0.0f) == 0u);
+    CHECK(destroyCalls == 1);
+    CHECK(destroyed == 4242u);           // the SAME object, cleaned up
+
+    // The other half of the pair: a ref the caller does hold goes through
+    // untouched, and an empty one is refused before it reaches the host (both
+    // applications drop a 0 silently, so this row is the only place it is seen).
+    destroyed = 0; destroyCalls = 0;
+    HE::api::entity::destroyObject(c, 77u);
+    CHECK(destroyCalls == 1);
+    CHECK(destroyed == 77u);
+    HE::api::entity::destroyObject(c, 0u);
+    CHECK(destroyCalls == 1);            // unchanged: nothing was forwarded
+}
+
+TEST_CASE("Spawn class: without a runtime the entity cannot be named, and the object stays")
+{
+    // The half-built Ctx, which is what this whole change is about. The object
+    // is created and may well be ticking correctly; what is missing is the only
+    // record of which entity it landed on. Throwing away a working spawn to tidy
+    // that up would be the worse of the two failures, so it is left alive and
+    // the caller is told 0 — loudly, in the log.
+    int destroyCalls = 0;
+    Ctx c{};                              // no runtime
+    c.createObject  = [](const std::string&, const float*, const float*) -> uint32_t { return 9u; };
+    c.destroyObject = [&](uint32_t){ ++destroyCalls; };
+
+    CHECK(HE::api::entity::spawnClass(c, "Classes/Bullet.hasset", 1.0f, 0.0f, 0.0f) == 0u);
+    CHECK(destroyCalls == 0);
+}
+
 TEST_CASE("Entity query: findByName + exists through the registry")
 {
     HorizonWorld world;
@@ -2086,4 +2493,390 @@ TEST_CASE("prefs: typed round-trip inside the fs sandbox")
     CHECK_FALSE(prefs::has(c, "lastFolder"));
 
     std::filesystem::remove_all(sandbox);
+}
+
+// ═══ Jumping and navigation, from a script's side of the wall ═════════════════
+
+namespace
+{
+    // Flat 20×20 nav mesh floor at Y=0, matching the physics slab below it.
+    NavMeshGeometry flatNavFloor(float half = 10.0f)
+    {
+        NavMeshGeometry geo;
+        geo.verts = { -half, 0.0f,  half,   half, 0.0f,  half,
+                       half, 0.0f, -half,  -half, 0.0f, -half };
+        geo.tris  = { 0, 1, 2,  0, 2, 3 };
+        return geo;
+    }
+
+    void addPhysicsFloor(HorizonWorld& world)
+    {
+        auto floor = world.createEntity("Floor");
+        TransformComponent t;
+        t.position = { 0.0f, -0.25f, 0.0f };   // half-extents are scale/2 → top at 0
+        t.scale    = { 40.0f, 0.5f, 40.0f };
+        world.registry().emplace<TransformComponent>(floor, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        world.registry().emplace<RigidBodyComponent>(floor, rb);
+    }
+
+    // A character standing on that floor: the controller that walks plus the
+    // kinematic proxy everything else collides with.
+    entt::entity addCharacter(HorizonWorld& world, const glm::vec3& pos)
+    {
+        auto e = world.createEntity("Character");
+        TransformComponent t; t.position = pos; t.scale = glm::vec3(1.0f);
+        world.registry().emplace<TransformComponent>(e, t);
+        world.registry().emplace<CharacterControllerComponent>(e);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Kinematic;
+        world.registry().emplace<RigidBodyComponent>(e, rb);
+        return e;
+    }
+}
+
+// MUTATION: remove the `"nav",` entry from isScriptGroup's list in
+// EngineApi.cpp — every nav row disappears from Lua, Python and HorizonCode, and
+// the group check below fails while find() still resolves the rows. That is
+// exactly the state B4 describes: the pathfinder exists and no language can
+// reach it.
+TEST_CASE("EngineApi: the nav group exists and reaches every scripting frontend")
+{
+    // Before B4 there was no nav-, agent- or path-anything in the registry.
+    for (const char* id : { "nav.moveTo", "nav.stop", "nav.isMoving",
+                            "nav.hasPath", "nav.remainingDistance", "nav.setSpeed" })
+    {
+        INFO("row: " << id);
+        CHECK(HE::api::find(id) != nullptr);
+    }
+    CHECK(HE::api::find("locomotion.jump")     != nullptr);
+    CHECK(HE::api::find("locomotion.jumpWith") != nullptr);
+
+    // Reaching the frontends is a separate fact from existing in the registry.
+    CHECK(HE::api::isScriptGroup("nav"));
+    CHECK(HE::api::isScriptGroup("locomotion"));
+
+    // The two that answer a question rather than doing something are readable
+    // from a pure-expression context; the four that act are not.
+    CHECK(HE::api::find("nav.isMoving")->isExec  == false);
+    CHECK(HE::api::find("nav.hasPath")->isExec   == false);
+    CHECK(HE::api::find("nav.remainingDistance")->isExec == false);
+    CHECK(HE::api::find("nav.moveTo")->isExec    == true);
+    CHECK(HE::api::find("nav.stop")->isExec      == true);
+
+    // moveTo's answer is the reason it is a call and not a field write.
+    REQUIRE(HE::api::find("nav.moveTo")->results.size() == 1);
+    CHECK(HE::api::find("nav.moveTo")->results[0].type == P::Bool);
+    REQUIRE(HE::api::find("locomotion.jump")->results.size() == 1);
+    CHECK(HE::api::find("locomotion.jump")->results[0].type == P::Bool);
+}
+
+// MUTATION: in HE::api::nav::moveTo, return `false` without delegating to
+// NavigationSystem — the row reports failure and both the REQUIRE on the call
+// and the movement check fail. (Delegating but dropping `agent->moving = true`
+// inside NavigationSystem::moveTo shows the same test catching the silent
+// variant: the call says yes and nothing walks.)
+TEST_CASE("EngineApi: nav.moveTo walks an agent, nav.stop halts it")
+{
+    HorizonWorld world;
+    addPhysicsFloor(world);
+
+    auto navE = world.createEntity("NavMesh");
+    {
+        NavMeshComponent nmc;
+        nmc.geometry = flatNavFloor();
+        REQUIRE(NavigationSystem::bake(nmc));
+        world.registry().emplace<NavMeshComponent>(navE, nmc);
+    }
+
+    const auto agent = addCharacter(world, { -6.0f, 1.0f, 0.0f });
+    {
+        NavAgentComponent na; na.speed = 3.0f; na.stoppingDist = 0.3f;
+        world.registry().emplace<NavAgentComponent>(agent, na);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 90; ++i) phys.step(world, 1.0f / 60.0f);   // settle
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(agent));
+    auto flatX = [&]{ return HE::worldPositionOf(world, agent).x; };
+
+    CHECK_FALSE(call("nav.isMoving", { id })[0].b);
+    CHECK_FALSE(call("nav.hasPath",  { id })[0].b);
+    CHECK(call("nav.remainingDistance", { id })[0].f == doctest::Approx(-1.0f));
+
+    // The destination is a WORLD point — the named exception this group carries.
+    CHECK(call("nav.moveTo", { id, Value::ofFloat(6.0f), Value::ofFloat(0.0f),
+                                   Value::ofFloat(0.0f) })[0].b);
+    CHECK(call("nav.isMoving", { id })[0].b);
+    CHECK(call("nav.hasPath",  { id })[0].b);
+
+    const float startX = flatX();
+    const float startRemaining = call("nav.remainingDistance", { id })[0].f;
+    CHECK(startRemaining > 10.0f);
+
+    for (int i = 0; i < 60; ++i)
+    {
+        NavigationSystem::update(world, 1.0f / 60.0f, &phys);
+        phys.step(world, 1.0f / 60.0f);
+    }
+
+    CHECK(flatX() > startX + 2.0f);
+    // Shrinking as it walks, which is what a "close enough to attack yet" check
+    // is polling.
+    const float midRemaining = call("nav.remainingDistance", { id })[0].f;
+    CHECK(midRemaining < startRemaining - 2.0f);
+    CHECK(midRemaining > 0.0f);
+
+    // Halt. The order is dropped here; the zero velocity is written by the
+    // system on its next tick, which is why the loop below is what proves it.
+    call("nav.stop", { id });
+    CHECK_FALSE(call("nav.isMoving", { id })[0].b);
+    CHECK_FALSE(call("nav.hasPath",  { id })[0].b);
+
+    const float stoppedX = flatX();
+    for (int i = 0; i < 120; ++i)
+    {
+        NavigationSystem::update(world, 1.0f / 60.0f, &phys);
+        phys.step(world, 1.0f / 60.0f);
+    }
+    // Two seconds of not being steered. Without the release write it would have
+    // coasted six more metres on the last velocity Jolt was handed.
+    CHECK(std::abs(flatX() - stoppedX) < 0.15f);
+
+    // setSpeed reaches the component, and a negative pace is clamped rather than
+    // walking the agent backwards past the waypoint it came from.
+    call("nav.setSpeed", { id, Value::ofFloat(7.5f) });
+    CHECK(world.registry().get<NavAgentComponent>(agent).speed == doctest::Approx(7.5f));
+    call("nav.setSpeed", { id, Value::ofFloat(-4.0f) });
+    CHECK(world.registry().get<NavAgentComponent>(agent).speed == doctest::Approx(0.0f));
+}
+
+// MUTATION: in PhysicsWorld::jumpCharacter, invert the ground gate to
+// `if (cc->isGrounded && cc->airTime < kCoyoteWindow) return false;` — the
+// grounded call returns false and the rise never happens.
+TEST_CASE("EngineApi: locomotion.jump lifts a grounded character and refuses an airborne one")
+{
+    HorizonWorld world;
+    addPhysicsFloor(world);
+    const auto character = addCharacter(world, { 0.0f, 4.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 120; ++i) phys.step(world, 1.0f / 60.0f);   // land and settle
+
+    Ctx c{ &world, &phys, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(character));
+
+    REQUIRE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
+    const float restY = world.registry().get<TransformComponent>(character).position.y;
+
+    // The bool is the row's whole point: a script writes `if jump() then …`.
+    CHECK(call("locomotion.jump", { id })[0].b);
+    for (int i = 0; i < 15; ++i) phys.step(world, 1.0f / 60.0f);
+    CHECK(world.registry().get<TransformComponent>(character).position.y > restY + 0.3f);
+
+    // Mid-air the answer is a plain no — an ordinary answer, not an error.
+    REQUIRE_FALSE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
+    CHECK_FALSE(call("locomotion.jump",     { id })[0].b);
+    CHECK_FALSE(call("locomotion.jumpWith", { id, Value::ofFloat(9.0f) })[0].b);
+}
+
+// The group that did not exist: before it, an emitter could be turned off by an
+// inspector checkbox and by nothing else, so no graph could fire an effect.
+//
+// MUTATION: in particle::burst, drop the ParticleSystem::burst call — the row
+// answers 0 and no particle appears, which is what "there is no burst" looked
+// like before this group existed.
+TEST_CASE("EngineApi: the particle group fires, stops and restarts an effect")
+{
+    ContentManager cm;
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    const auto e = world.createEntity("smoke");
+    TransformComponent t;
+    t.position = { 5.0f, 0.0f, 0.0f };
+    reg.emplace<TransformComponent>(e, t);
+    reg.emplace<ParticleSystemComponent>(e, ParticleSystemComponent{});
+
+    Ctx c{ &world, nullptr, &cm };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(e));
+
+    // A burst is N at a moment, with no time passing at all — the thing the
+    // rate-driven loop could never express.
+    CHECK(call("particle.burst", { id, Value::ofInt(12) })[0].i == 12);
+    REQUIRE(reg.get<ParticleSystemComponent>(e).particles.size() == 12);
+    // At the emitter, not at the origin: this emitter's worldMatrix has never
+    // been propagated, exactly like an effect spawned this frame.
+    CHECK(reg.get<ParticleSystemComponent>(e).particles[0].position.x == doctest::Approx(5.0f));
+
+    // Max Particles is a real cap, and the answer says so rather than pretending.
+    const int cap = reg.get<ParticleSystemComponent>(e).resolvedConfig.maxParticles;
+    const int room = cap - 12;
+    CHECK(call("particle.burst", { id, Value::ofInt(room + 50) })[0].i == room);
+
+    CHECK(call("particle.isPlaying", { id })[0].b);
+
+    // Stop is soft: nothing more is emitted, what is out stays out. The hard
+    // alternative would freeze a cloud of smoke in mid-air.
+    call("particle.stop", { id });
+    CHECK(reg.get<ParticleSystemComponent>(e).stopping);
+    CHECK(reg.get<ParticleSystemComponent>(e).particles.size() == static_cast<size_t>(cap));
+    ParticleSystem::update(world, cm, 0.1f);
+    CHECK(reg.get<ParticleSystemComponent>(e).particles.size() == static_cast<size_t>(cap));
+
+    // Play is a restart, which is the half a one-shot needs to fire twice.
+    reg.get<ParticleSystemComponent>(e).emitted = 999;
+    call("particle.play", { id });
+    CHECK(reg.get<ParticleSystemComponent>(e).emitted == 0);
+    CHECK_FALSE(reg.get<ParticleSystemComponent>(e).stopping);
+    CHECK(reg.get<ParticleSystemComponent>(e).playing);
+}
+
+// The self-default convention reaches the new group too — which is the point of
+// making it a rule instead of a list.
+TEST_CASE("EngineApi: particle rows are safe on an entity with no emitter, and default to self")
+{
+    HorizonWorld world;
+    const auto bare = world.createEntity("no emitter");
+    world.registry().emplace<TransformComponent>(bare, TransformComponent{});
+
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(static_cast<int>(bare));
+
+    CHECK(call("particle.burst", { id, Value::ofInt(5) })[0].i == 0);
+    CHECK_FALSE(call("particle.isPlaying", { id })[0].b);
+    call("particle.play", { id });   // must not crash
+    call("particle.stop", { id });   // must not crash
+
+    for (const char* row : { "particle.play", "particle.stop", "particle.burst",
+                             "particle.isPlaying" })
+        CHECK(HE::api::find(row)->params[0].selfDefault);
+    CHECK(HE::api::isScriptGroup("particle"));
+}
+
+// MUTATION: in EngineApi.cpp's self-default post-pass, delete the two lines that
+// build `withSelf` and return `inner(c, a)` unchanged instead — the jump is then
+// asked of the world root, the character never leaves the floor, and the row
+// answers false.
+TEST_CASE("EngineApi: an empty Entity means the object that made the call")
+{
+    HorizonWorld world;
+    addPhysicsFloor(world);
+    const auto character = addCharacter(world, { 0.0f, 4.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 120; ++i) phys.step(world, 1.0f / 60.0f);   // land and settle
+
+    // One instance owning the character: what a PlayerCharacter class IS at run
+    // time. The graph itself is empty because nothing here runs graph code — the
+    // rows are called directly, exactly as the interpreter calls them.
+    HorizonCode::Runtime rt;
+    const HorizonCode::InstanceId inst = rt.add(HorizonCode::Graph{});
+    rt.setOwnedEntity(inst, static_cast<uint32_t>(character));
+
+    Ctx c{ &world, &phys, nullptr };
+    c.runtime = &rt;
+    c.self    = inst;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto none = Value::ofInt(0);   // the pin an author never wired
+
+    REQUIRE(world.registry().get<CharacterControllerComponent>(character).isGrounded);
+    const float restY = world.registry().get<TransformComponent>(character).position.y;
+
+    CHECK(call("locomotion.jump", { none })[0].b);
+    for (int i = 0; i < 15; ++i) phys.step(world, 1.0f / 60.0f);
+    CHECK(world.registry().get<TransformComponent>(character).position.y > restY + 0.3f);
+
+    // Readers answer about the same character, so a graph can ask how fast IT is
+    // going without naming itself either.
+    CHECK(call("movement.verticalSpeed", { none })[0].f > 0.5f);
+
+    // An explicitly wired entity is untouched by any of this: the pin still wins
+    // over the caller, which is the half that would make the change a regression
+    // if it broke.
+    const auto other = addCharacter(world, { 6.0f, 4.0f, 0.0f });
+    CHECK(call("transform.getPosition", { Value::ofInt(static_cast<int>(other)) })[0].v3.x
+          == doctest::Approx(6.0f));
+}
+
+// The two halves of the same guarantee: without a caller nothing is invented,
+// and the rows that must not self-resolve do not.
+TEST_CASE("EngineApi: the Entity self-default is off where it would lie")
+{
+    HorizonWorld world;
+    const auto e = world.createEntity("Crate");
+    world.registry().emplace<TransformComponent>(e, TransformComponent{});
+
+    // No runtime, no caller — a Lua or Python script, or an unbound class.
+    Ctx c{ &world, nullptr, nullptr };
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Nothing is substituted, so the row behaves exactly as it did before: the
+    // world root has no transform, so this reads as the neutral answer.
+    CHECK(call("transform.getPosition", { Value::ofInt(0) })[0].f == doctest::Approx(0.0f));
+
+    // Entity Exists must answer about the entity it was ASKED about. 0 is what
+    // Find By Name returns when it finds nothing, and the root — always valid —
+    // is what it used to be checked against, so the miss read as a hit.
+    CHECK_FALSE(call("entity.exists", { Value::ofInt(0) })[0].b);
+    CHECK(call("entity.exists", { Value::ofInt(static_cast<int>(e)) })[0].b);
+
+    // Destroy Self stays something an author has to mean.
+    CHECK_FALSE(HE::api::find("entity.destroy")->params[0].selfDefault);
+    CHECK_FALSE(HE::api::find("entity.exists")->params[0].selfDefault);
+}
+
+// The convention is only worth anything if it holds everywhere without being
+// remembered per row — so it is asserted over the whole table, not over a list.
+TEST_CASE("EngineApi: every row that acts on an entity carries the self-default")
+{
+    size_t flagged = 0;
+    for (const HE::api::ApiFn& fn : HE::api::registry())
+    {
+        const bool leads = !fn.params.empty() && std::strcmp(fn.params[0].name, "entity") == 0;
+        const bool excluded = std::strcmp(fn.id, "entity.exists")  == 0 ||
+                              std::strcmp(fn.id, "entity.destroy") == 0;
+        if (leads && !excluded)
+        {
+            CHECK_MESSAGE(fn.params[0].selfDefault,
+                          std::string("row without the self-default: ").append(fn.id).c_str());
+            ++flagged;
+        }
+        // Never on anything else — not on a later parameter, not on a row whose
+        // first argument happens to be an int meaning something quite different
+        // (a widget id, a zone handle, a parent).
+        for (size_t i = 0; i < fn.params.size(); ++i)
+            if (i > 0 || !leads || excluded)
+                CHECK_MESSAGE(!fn.params[i].selfDefault,
+                              std::string("unexpected self-default on ").append(fn.id).c_str());
+    }
+    CHECK(flagged > 40);   // it is a convention, not a handful of exceptions
+}
+
+// Would have been green before the change only in the sense that the rows did
+// not exist to crash: this is the null-Ctx tolerance every group in this file is
+// held to, extended to the two new ones.
+TEST_CASE("EngineApi: nav and jump rows are safe with no world and no physics")
+{
+    Ctx c{};   // nothing wired up at all
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const auto id = Value::ofInt(1);
+
+    CHECK_FALSE(call("locomotion.jump",     { id })[0].b);
+    CHECK_FALSE(call("locomotion.jumpWith", { id, Value::ofFloat(5.0f) })[0].b);
+    CHECK_FALSE(call("nav.moveTo", { id, Value::ofFloat(0.0f), Value::ofFloat(0.0f),
+                                         Value::ofFloat(0.0f) })[0].b);
+    CHECK_FALSE(call("nav.isMoving", { id })[0].b);
+    CHECK_FALSE(call("nav.hasPath",  { id })[0].b);
+    CHECK(call("nav.remainingDistance", { id })[0].f == doctest::Approx(-1.0f));
+    call("nav.stop",     { id });                        // must not crash
+    call("nav.setSpeed", { id, Value::ofFloat(2.0f) });  // must not crash
 }
