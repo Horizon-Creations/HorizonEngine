@@ -23,6 +23,7 @@
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
+#include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1500,9 +1501,14 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world)
 	{
 		glm::vec3 camPos(0.0f);
-		for (auto [e, tc, cam] : m_world->registry().view<TransformComponent, CameraComponent>().each())
+		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
 		{
-			camPos = glm::vec3(tc.worldMatrix[3]);
+			// Composed from the parent chain, not read out of tc.worldMatrix: that
+			// matrix is only as fresh as the last propagateTransforms. The rig path
+			// above runs one, the free-flight path does not, and a camera spawned
+			// this frame still carries the identity — which would put LOD and the
+			// precipitation volume at the world origin instead of at the player.
+			camPos = HE::worldPositionOf(*m_world, e);
 			break;
 		}
 		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&

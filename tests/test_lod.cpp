@@ -123,13 +123,12 @@ TEST_CASE("LODSystem uses entity world position for distance")
     HorizonWorld world;
     auto& reg = world.registry();
 
-    // Entity at world (100, 0, 0), camera at origin → distance 100. LODSystem reads
-    // the WORLD position (worldMatrix translation, as the extractor maintains it),
-    // not the local position — set it explicitly here.
+    // Entity at world (100, 0, 0), camera at origin → distance 100. LODSystem
+    // composes the WORLD position from the parent chain; under the world root that
+    // chain is the entity's own local matrix, so worldMatrix is deliberately left
+    // untouched here — it is derived state and nothing has propagated it.
     auto e = world.createEntity("Distant Mesh");
-    TransformComponent tf{ .position = glm::vec3(100.f, 0.f, 0.f) };
-    tf.worldMatrix[3] = glm::vec4(100.f, 0.f, 0.f, 1.f);
-    reg.emplace<TransformComponent>(e, tf);
+    reg.emplace<TransformComponent>(e, TransformComponent{ .position = glm::vec3(100.f, 0.f, 0.f) });
     reg.emplace<MeshComponent>(e, MeshComponent{});
 
     LODComponent lod;
@@ -141,6 +140,69 @@ TEST_CASE("LODSystem uses entity world position for distance")
 
     LODSystem::update(world, glm::vec3(0.f));
     CHECK(reg.get<LODComponent>(e).current == 1); // 100 > 10 → LOD1
+}
+
+TEST_CASE("LODSystem measures an entity spawned THIS frame where it actually is")
+{
+    // The one-frame trap. worldMatrix is derived state, written by
+    // propagateTransforms — and nothing in SceneSystems::tickWorld runs one, so an
+    // entity created during this frame still carries the identity there. Reading it
+    // would place every fresh entity at the world origin for one frame.
+    //
+    // No propagate anywhere in this test, on purpose: this IS the state of a scene
+    // the frame it spawns something.
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto e = world.createEntity("Freshly Spawned");
+    reg.emplace<TransformComponent>(e, TransformComponent{ .position = glm::vec3(500.f, 0.f, 0.f) });
+    reg.emplace<MeshComponent>(e, MeshComponent{});
+    REQUIRE(reg.get<TransformComponent>(e).worldMatrix == glm::mat4(1.f)); // nothing propagated it
+
+    LODComponent lod;
+    lod.levels = {
+        { makeId(1,0), 10.f }, // LOD0: dist <= 10
+        { makeId(2,0), 1e9f }, // LOD1: fallback
+    };
+    reg.emplace<LODComponent>(e, lod);
+
+    // Camera sits ON the entity → distance 0 → the finest level. Reading the stale
+    // worldMatrix would measure 500 instead and drop straight to the fallback.
+    LODSystem::update(world, glm::vec3(500.f, 0.f, 0.f));
+    CHECK(reg.get<LODComponent>(e).current == 0);
+    CHECK(reg.get<MeshComponent>(e).meshAssetId == makeId(1,0));
+}
+
+TEST_CASE("LODSystem composes the parent chain for a chunk that has not propagated")
+{
+    // The terrain case, which is the one that actually happens in the engine:
+    // TerrainSystem creates the chunk entities at the top of tickWorld and LOD
+    // picks their level at the bottom of the SAME tick. A chunk is a CHILD, so its
+    // local position is only the per-chunk offset — the world position needs the
+    // parent chain, and worldMatrix has not been written on either of them yet.
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto terrain = world.createEntity("Terrain");
+    reg.emplace<TransformComponent>(terrain, TransformComponent{ .position = glm::vec3(0.f, 0.f, 300.f) });
+
+    auto chunk = world.createEntity("TerrainChunk");
+    reg.emplace<TransformComponent>(chunk, TransformComponent{ .position = glm::vec3(0.f, 0.f, 20.f) });
+    reg.emplace<MeshComponent>(chunk, MeshComponent{});
+    REQUIRE(world.reparentEntity(chunk, terrain));
+
+    LODComponent lod;
+    lod.levels = {
+        { makeId(7,0), 50.f }, // LOD0: dist <= 50
+        { makeId(8,0), 1e9f }, // LOD1: fallback
+    };
+    reg.emplace<LODComponent>(chunk, lod);
+
+    // Chunk world position is (0,0,320), camera 30 away → inside LOD0's 50. The
+    // local position alone (20) or a stale identity (0) both put it out of range.
+    LODSystem::update(world, glm::vec3(0.f, 0.f, 350.f));
+    CHECK(reg.get<LODComponent>(chunk).current == 0);
+    CHECK(reg.get<MeshComponent>(chunk).meshAssetId == makeId(7,0));
 }
 
 // ─── Serialisation round-trip ─────────────────────────────────────────────────
