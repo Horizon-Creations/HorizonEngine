@@ -613,6 +613,16 @@ namespace widget {
     // value stays where it got to, because a stop is not a rewind.
     int  stopAnimation(Ctx&, int id, const std::string& element, const std::string& prop);
 
+    // ── Authored clips ──────────────────────────────────────────────────────
+    // The animations the widget carries, made in the designer's timeline. By
+    // NAME, because the name is what the timeline shows and what a graph can
+    // type. An embedded component's clips are found too — a page can play the
+    // animation its component brought with it.
+    bool playAnimation(Ctx&, int id, const std::string& clip);
+    bool playAnimationLooped(Ctx&, int id, const std::string& clip, bool loop);
+    int  stopAnimationClip(Ctx&, int id, const std::string& clip);
+    bool isPlayingAnimation(Ctx&, int id, const std::string& clip);
+
     // ── Layers (docs/he-apps-plan.md B4) ────────────────────────────────────
     // A dialog, a menu, a context menu. All three are "input belongs to this
     // until it lets go"; they differ in whether the screen behind is dimmed and

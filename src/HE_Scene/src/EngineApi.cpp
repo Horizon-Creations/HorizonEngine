@@ -995,6 +995,15 @@ bool animateVec2(Ctx& c, int id, const std::string& element, const std::string& 
                  : false; }
 int stopAnimation(Ctx& c, int id, const std::string& element, const std::string& prop)
 { return c.world ? ScriptApi::stopAnimation(*c.world, id, element, prop) : 0; }
+
+bool playAnimation(Ctx& c, int id, const std::string& clip)
+{ return c.world ? ScriptApi::playClipAsAuthored(*c.world, id, clip) : false; }
+bool playAnimationLooped(Ctx& c, int id, const std::string& clip, bool loop)
+{ return c.world ? ScriptApi::playClip(*c.world, id, clip, loop) : false; }
+int stopAnimationClip(Ctx& c, int id, const std::string& clip)
+{ return c.world ? ScriptApi::stopClip(*c.world, id, clip) : 0; }
+bool isPlayingAnimation(Ctx& c, int id, const std::string& clip)
+{ return c.world ? ScriptApi::isClipPlaying(*c.world, id, clip) : false; }
 void showModal(Ctx& c, int id)
 { if (c.world) ScriptApi::showModalWidget(*c.world, id); }
 void openPopup(Ctx& c, int id, float x, float y)
@@ -3336,6 +3345,28 @@ const std::vector<ApiFn>& registry()
             {{"stopped", P::Int}}, "HE::api::widget::stopAnimation",
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
                 widget::stopAnimation(c, (int)aR(a, 0), aS(a, 1), aS(a, 2))) }; } });
+
+        // The widget's own authored clips, by name.
+        t.push_back({ "widget.playAnimation", "Widget", true,
+            {{"widget", P::Ref}, {"animation", P::String}}, {{"ok", P::Bool}},
+            "HE::api::widget::playAnimation",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::playAnimation(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.playAnimationLooped", "Widget", true,
+            {{"widget", P::Ref}, {"animation", P::String}, {"loop", P::Bool}},
+            {{"ok", P::Bool}}, "HE::api::widget::playAnimationLooped",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::playAnimationLooped(c, (int)aR(a, 0), aS(a, 1), aB(a, 2))) }; } });
+        t.push_back({ "widget.stopAnimationClip", "Widget", true,
+            {{"widget", P::Ref}, {"animation", P::String}}, {{"stopped", P::Int}},
+            "HE::api::widget::stopAnimationClip",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::stopAnimationClip(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.isPlayingAnimation", "Widget", false,
+            {{"widget", P::Ref}, {"animation", P::String}}, {{"playing", P::Bool}},
+            "HE::api::widget::isPlayingAnimation",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::isPlayingAnimation(c, (int)aR(a, 0), aS(a, 1))) }; } });
 
         // Layers. A dialog and a menu are the same thing to the engine: input
         // belongs to them until they let go. Only the leaving differs.

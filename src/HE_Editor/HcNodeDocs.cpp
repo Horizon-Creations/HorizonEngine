@@ -457,6 +457,23 @@ namespace
 	{ "widget.animateVec2",
 	  "The same for a POINT: Position to slide something in, Size to grow it. "
 	  "\"Out Back\" is the curve that makes a dialog land rather than arrive." },
+	{ "widget.playAnimation",
+	  "Plays one of the animations the widget carries — the ones made in the "
+	  "Designer's timeline, by name. Whether it loops is the animation's own "
+	  "decision. An embedded component's animations count too, so a page can "
+	  "play what its component brought with it. OnClipFinished says when it ends; "
+	  "a looping one never does." },
+	{ "widget.playAnimationLooped",
+	  "The same, but you decide about looping instead of the animation. For the "
+	  "case where one clip is both the spinner that runs until you stop it and "
+	  "the flourish that plays once." },
+	{ "widget.stopAnimationClip",
+	  "Stops that animation, or every one of the widget's when the name is left "
+	  "empty. Values stay where they got to, and nothing is reported — cancelled "
+	  "is not finished." },
+	{ "widget.isPlayingAnimation",
+	  "Whether that animation is running right now. What a toggle asks before "
+	  "deciding which way to go." },
 	{ "widget.stopAnimation",
 	  "Stops what is running on that property, or on the whole element when the "
 	  "property is left empty. The value stays where it got to — a stop is not a "

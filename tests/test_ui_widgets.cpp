@@ -5045,6 +5045,54 @@ TEST_CASE("Clips: a clip and a tween never write the same property at once")
     CHECK(wm.stopAnimations(id, panel, "Render Opacity") == 1);
 }
 
+// The loop the whole feature closes: authored in the timeline, played from a
+// graph. Through the registry rows a graph actually calls, not the manager
+// directly — a row that compiles and does nothing is the failure this catches.
+TEST_CASE("Clips: a graph plays one by name through the engine API")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HorizonWorld world;
+    WidgetManager wm;
+    world.setWidgetManager(&wm);
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        e.renderOpacity = 1.0f;
+    }
+    t.animations.push_back(fadeClip(panel, "FadeIn", 0.0f, 1.0f, 1.0f));
+    registerWidget(cm, t);
+
+    const int id = wm.createWidget(cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    wm.showWidget(id);
+
+    HE::api::Ctx c;
+    c.world = &world;
+    c.content = &cm;
+    CHECK_FALSE(HE::api::widget::isPlayingAnimation(c, id, "FadeIn"));
+    CHECK_FALSE(HE::api::widget::playAnimation(c, id, "Nope"));
+    REQUIRE(HE::api::widget::playAnimation(c, id, "FadeIn"));
+    CHECK(HE::api::widget::isPlayingAnimation(c, id, "FadeIn"));
+    wm.tick(0.5f);
+    CHECK(wm.tree(id)->find(panel)->renderOpacity == doctest::Approx(0.5f));
+    CHECK(HE::api::widget::stopAnimationClip(c, id, "FadeIn") == 1);
+    CHECK_FALSE(HE::api::widget::isPlayingAnimation(c, id, "FadeIn"));
+
+    // The looped row overrides what the clip says, which is the only reason it
+    // exists beside the plain one.
+    REQUIRE(HE::api::widget::playAnimationLooped(c, id, "FadeIn", true));
+    wm.tick(2.5f);
+    CHECK(HE::api::widget::isPlayingAnimation(c, id, "FadeIn"));   // still going
+    CHECK(HE::api::widget::stopAnimationClip(c, id, "") == 1);
+}
+
 // A component's clips are the component's: its tracks name elements by the ids
 // they had in ITS asset, and a graft renumbers everything. Without the offset a
 // clip inside an embedded widget animates whatever now happens to have id 1.

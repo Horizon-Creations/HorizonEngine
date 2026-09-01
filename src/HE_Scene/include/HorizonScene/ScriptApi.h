@@ -140,6 +140,13 @@ namespace ScriptApi
 	int  stopAnimation(HorizonWorld& world, int widgetId, const std::string& elemName,
 	                   const std::string& prop);
 
+	// The widget's OWN named clips, made in the designer's timeline. `loop`
+	// overrides what the clip says about looping.
+	bool playClip(HorizonWorld& world, int widgetId, const std::string& clip, bool loop);
+	bool playClipAsAuthored(HorizonWorld& world, int widgetId, const std::string& clip);
+	int  stopClip(HorizonWorld& world, int widgetId, const std::string& clip);
+	bool isClipPlaying(HorizonWorld& world, int widgetId, const std::string& clip);
+
 	// ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ────────────
 	// While one of these is up, input belongs to it and to nothing underneath.
 	// A modal dims the screen and has to be answered; a popup dismisses itself
