@@ -2006,6 +2006,7 @@ void drawDetails(State& st, AppContext& ctx)
 	ImGui::SeparatorText("Interaction");
 	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
 	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
+	if (EditorWidgets::checkbox("Focus frame", &n->focusFrame)) committed = true;
 	const bool cursorOpen = ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor));
 	if (!cursorOpen) EditorWidgets::helpForLabel("Hover cursor");
 	if (cursorOpen)

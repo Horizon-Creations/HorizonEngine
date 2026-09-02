@@ -2608,6 +2608,14 @@ namespace
 	  "neither drawn nor clickable — it is what makes a list longer than its box "
 	  "look like a list in a box instead of spilling across the screen.",
 	  "", "ui#widgets" },
+	{ "UI Widget/Focus frame", "",
+	  "While anything INSIDE this element has the keyboard focus, the focus ring "
+	  "is drawn around this element instead of around whatever holds it. A "
+	  "search field is a rounded frame with an icon and a text field inset "
+	  "between them: the field takes the keys, but the frame is what a person "
+	  "sees as the control, and a ring around the field alone is a small "
+	  "rectangle floating inside a pill. Set it on the frame.",
+	  "", "ui#widgets" },
 
 	{ "UI Graph/Event Graph", "Event Graph",
 	  "The widget's main graph, where the event handlers live. The functions "

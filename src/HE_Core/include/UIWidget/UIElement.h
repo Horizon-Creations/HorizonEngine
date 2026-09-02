@@ -489,6 +489,20 @@ public:
     // across the screen.
     bool        clipChildren = false;
 
+    // ── Where the focus ring goes ────────────────────────────────────────────
+    // Set on an ANCESTOR: while anything inside it has the focus, the ring is
+    // drawn around THIS element instead of around the focused one. CSS calls the
+    // same idea :focus-within, and every search field ever built needs it.
+    //
+    // A control people see as one thing is often several: a rounded frame, an
+    // icon, and a text field inset between them. The field is what takes the
+    // keyboard, so the ring landed on the field — a small rectangle floating
+    // inside a pill, marking a part nobody thinks of as the control. This is how
+    // the frame says "I am the control", and it is a flag rather than something
+    // clever, because which element that is cannot be worked out from the tree:
+    // a form component holds a dozen fields and wants the ring on each of them.
+    bool        focusFrame = false;
+
     virtual ~UIElement() = default;
 
     virtual UIWidgetType type() const = 0;
@@ -645,6 +659,7 @@ protected:
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
         dst.tooltip = tooltip;
         dst.clipChildren = clipChildren;
+        dst.focusFrame = focusFrame;
         dst.cornerRadius = cornerRadius;
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;
         dst.gradient = gradient; dst.gradientColor = gradientColor;

@@ -3731,15 +3731,37 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			{
 				constexpr float kRing = 2.0f;   // pixels
 				const size_t ringFirst = out.size();
+				// Around the element, or around the FRAME that says it is the
+				// control (UIElement::focusFrame). A search field is a rounded
+				// panel with an icon and an inset text field inside it: the
+				// field takes the keyboard, but the thing a person sees is the
+				// panel, and a ring around the field is a small rectangle
+				// floating inside a pill.
+				const HE::UIElement* ringOn = &e;
+				for (int p = e.parentId; p != 0; )
+				{
+					const HE::UIElement* anc = w.tree.find(p);
+					if (!anc) break;
+					if (anc->focusFrame) { ringOn = anc; break; }
+					p = anc->parentId;
+				}
+				HE::UIWidgetRect rpx{ px.x, px.y, px.w, px.h };
+				float rus = eus, rvs = evs;
+				if (ringOn != &e)
+				{
+					const HE::UIWidgetRect rr = HE::uiElementRect(w.tree, *ringOn, &canvas);
+					rpx = { rr.x * sx, rr.y * sy, rr.w * sx, rr.h * sy };
+					HE::uiElementUnitScale(w.tree, *ringOn, rus, rvs, &canvas);
+				}
 				UIRenderObject ro;
-				ro.position = { px.x - kRing, px.y - kRing };
-				ro.size     = { px.w + 2 * kRing, px.h + 2 * kRing };
+				ro.position = { rpx.x - kRing, rpx.y - kRing };
+				ro.size     = { rpx.w + 2 * kRing, rpx.h + 2 * kRing };
 				ro.color    = glm::vec4(0.0f);
 				// Grown by the ring's own width, so the curve stays concentric
 				// with the element's: a ring at the same radius as the box it
 				// surrounds pinches at the corners.
-				ro.cornerRadius = e.maxCornerRadius() > 0.0f
-					? e.cornerRadius * (sy * evs) + glm::vec4(kRing) : glm::vec4(0.0f);
+				ro.cornerRadius = ringOn->maxCornerRadius() > 0.0f
+					? ringOn->cornerRadius * (sy * rvs) + glm::vec4(kRing) : glm::vec4(0.0f);
 				ro.borderWidth  = kRing;
 				ro.borderColor  = glm::vec4(1.0f, 0.78f, 0.25f, 0.95f);
 				out.push_back(std::move(ro));

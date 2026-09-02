@@ -5693,6 +5693,55 @@ TEST_CASE("Focus: the ring follows the field's own corners")
         }
     CHECK(slivers == 0);
 
+    // ── …and around the FRAME when an ancestor claims to be the control ──────
+    // A search field is a rounded frame with an icon and a text field inset
+    // between them. The field takes the keyboard, so the ring landed on the
+    // field: a small rectangle floating inside a pill, marking a part nobody
+    // thinks of as the control.
+    {
+        HE::UIWidgetTree st;
+        st.canvasWidth = 400.0f; st.canvasHeight = 400.0f;
+        st.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int frame = st.add(HE::UIWidgetType::Panel);
+        {
+            HE::UIElement& e = *st.find(frame);
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 300.0f; e.sizeY = 34.0f;
+            e.cornerRadius = glm::vec4(17.0f);   // the pill
+            e.focusFrame = true;
+        }
+        const int inner = st.add(HE::UIWidgetType::TextInput);
+        {
+            HE::UIElement& e = *st.find(inner);
+            e.parentId = frame;
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 14.0f; e.posY = 2.0f; e.sizeX = 272.0f; e.sizeY = 30.0f;
+        }
+        TempWidgetDir dir2;
+        ContentManager cm2(dir2.path.string());
+        registerWidgetAs(cm2, "mem://search.hasset", st);
+
+        WidgetManager wm2;
+        const int sid = createShown(wm2, cm2, "mem://search.hasset");
+        REQUIRE(sid != 0);
+        REQUIRE(wm2.setFocus(sid, inner));
+
+        std::vector<UIRenderObject> so;
+        wm2.extract(400.0f, 400.0f, so);
+        int framed = 0;
+        for (const UIRenderObject& ro : so)
+        {
+            if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
+            // The frame's rect, not the field's — and the frame's rounding.
+            CHECK(ro.position.x == doctest::Approx(-2.0f));
+            CHECK(ro.size.x == doctest::Approx(304.0f));
+            CHECK(ro.size.y == doctest::Approx(38.0f));
+            CHECK(ro.cornerRadius.x == doctest::Approx(19.0f));
+            ++framed;
+        }
+        CHECK(framed == 1);
+    }
+
     // Nothing of the sort while it is not focused.
     REQUIRE(wm.setFocus(id, 0));
     out.clear();
@@ -8602,7 +8651,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 37);
+    CHECK(HE::uiBaseProperties().size() == 38);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -9535,6 +9584,46 @@ TEST_CASE("Engine components: their colours belong to the theme, not to them")
 // rasterizer and written where a person can look at it. The assertions below can
 // say that every component draws SOMETHING; whether it looks like a form row is
 // a question about an image, and this is how that question gets asked.
+// The report this came from was about the SHIPPED component, so the shipped
+// component is what this checks: the flag has to survive the generator, the
+// asset, the load and the graft. A rule that only works on a tree built in a
+// test is a rule nobody will ever see working.
+TEST_CASE("Engine components: the search field wears its ring on the frame")
+{
+    const std::filesystem::path root =
+        std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent";
+    REQUIRE(std::filesystem::is_directory(root));
+    ContentManager cm(root.string());
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "Widgets/SearchField.hasset");
+    REQUIRE(id != 0);
+
+    // The text field inside, by the name the component gives it.
+    int field = 0;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->name == "Field") field = ep->id;
+    REQUIRE(field != 0);
+    REQUIRE(wm.setFocus(id, field));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(320.0f, 34.0f, out);
+
+    int rings = 0;
+    for (const UIRenderObject& ro : out)
+    {
+        if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
+        ++rings;
+        // The frame is the whole component (320 x 34) and its corner is half its
+        // height — a pill. The ring is that, two pixels out, with the radius
+        // grown to match: NOT the inset field's small rectangle.
+        CHECK(ro.size.x == doctest::Approx(324.0f));
+        CHECK(ro.size.y == doctest::Approx(38.0f));
+        CHECK(ro.cornerRadius.x == doctest::Approx(19.0f));
+    }
+    CHECK(rings == 1);
+}
+
 TEST_CASE("Engine components: the contact sheet")
 {
     const std::filesystem::path dir =

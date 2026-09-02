@@ -708,6 +708,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Visible")      { out = UIPropValue::ofBool(e.visible);            return true; }
     if (n == "Hit Testable") { out = UIPropValue::ofBool(e.hitTestable);        return true; }
     if (n == "Clip Children"){ out = UIPropValue::ofBool(e.clipChildren);       return true; }
+    if (n == "Focus Frame")  { out = UIPropValue::ofBool(e.focusFrame);         return true; }
     if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
     if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
@@ -760,6 +761,7 @@ const std::vector<UIPropDesc>& uiBaseProperties()
         { "Visible",             UIPropType::Bool },
         { "Hit Testable",        UIPropType::Bool },
         { "Clip Children",       UIPropType::Bool },
+        { "Focus Frame",         UIPropType::Bool },
         { "Enabled",             UIPropType::Bool },
         { "Render Opacity",      UIPropType::Float, 0.0f, 1.0f },
         { "Slot Fill",           UIPropType::Float },
@@ -805,6 +807,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Visible")      { e.visible     = v.b; return true; }
     if (n == "Hit Testable") { e.hitTestable = v.b; return true; }
     if (n == "Clip Children"){ e.clipChildren = v.b; return true; }
+    if (n == "Focus Frame")  { e.focusFrame = v.b; return true; }
     if (n == "Enabled")      { e.enabled = v.b; return true; }
     if (n == "Render Opacity"){ e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
@@ -860,6 +863,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Visible",      UIPropType::Bool });
     out.push_back({ "Hit Testable", UIPropType::Bool });
     out.push_back({ "Clip Children",UIPropType::Bool });
+    out.push_back({ "Focus Frame",  UIPropType::Bool });
     out.push_back({ "Enabled",      UIPropType::Bool });
     out.push_back({ "Render Opacity", UIPropType::Float, 0.0f, 1.0f });
     out.push_back({ "Slot Fill",    UIPropType::Float });

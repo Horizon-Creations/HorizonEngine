@@ -528,6 +528,11 @@ Comp searchField()
     c.at(frame).cornerRadius = glm::vec4(17.0f);
     c.at(frame).borderWidth = 1.0f;
     c.role(frame, "Border Color", UIThemeRole::Border);
+    // The focus ring goes round the PILL, not round the text field inset inside
+    // it. The field is what takes the keyboard; the frame is what a person sees
+    // as the control, and a ring around the field alone is a small rectangle
+    // floating inside a pill (UIElement::focusFrame).
+    c.at(frame).focusFrame = true;
 
     const int icon = c.add(UIWidgetType::Image, frame, "Icon");
     { UIElement& e = c.at(icon);
