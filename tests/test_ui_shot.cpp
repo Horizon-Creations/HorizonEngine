@@ -1467,6 +1467,8 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 	{
 		HorizonCode::Value v; v.type = HorizonCode::PinType::String; v.s = "Ping Pong";
 		node.pinDefaults[3] = v;   // data-in 3 = direction
+		v.s = "FadeIn";
+		node.pinDefaults[1] = v;   // data-in 1 = animation
 	}
 
 	GraphEditor::Model m;
@@ -1502,7 +1504,17 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 		bool committed = false;
 		HcEditorUtil::drawPinDefaultEditor(node, pin, committed,
 			[](const HorizonCode::Node& n, const std::string& param)
-			{ return HcEditorUtil::engineParamChoices(n, param, nullptr); });
+			{
+				// Both halves, in the order the real canvas asks them. The HOST
+				// half is what a widget editor answers with — the clips this
+				// asset carries — and it is the reason the animation pin is a
+				// list at all: no widget behind the node, no animations, and the
+				// pin falls back to a text box, which is right but is NOT what
+				// somebody editing a widget sees.
+				if (param == "animation")
+					return std::vector<std::string>{ "FadeIn", "Pulse", "SlideOut" };
+				return HcEditorUtil::engineParamChoices(n, param, nullptr);
+			});
 	};
 
 	// Where the canvas puts the editor column, measured with the same rule it
@@ -1548,10 +1560,15 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 		       std::abs(int(b) - int(kBgB)) > 24;
 	};
 
-	// The Direction row. The left column starts with the EXEC pin, so it is the
-	// fifth row under the title bar, not the fourth.
-	const float rowY = originY + 30.0f + GraphEditor::kTitleH + 4.5f * GraphEditor::kRowH;
-	const int y0 = int(rowY) - 8, y1 = int(rowY) + 8;
+	// The rows to look at. The left column starts with the EXEC pin, so Animation
+	// is the third row under the title bar and Direction the fifth.
+	auto rowBand = [&](float row, int& y0, int& y1)
+	{
+		const float y = originY + 30.0f + GraphEditor::kTitleH + row * GraphEditor::kRowH;
+		y0 = int(y) - 8; y1 = int(y) + 8;
+	};
+	int y0 = 0, y1 = 0;
+	rowBand(4.5f, y0, y1);   // Direction
 
 	// 1. The ARROW is drawn at the right-hand end of the slot. Bright pixels,
 	//    not any ink: the frame's background fills the slot whatever happens to
@@ -1575,6 +1592,18 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 	     << " (band x " << (slotRight - 18) << ".." << (slotRight - 2)
 	     << ", y " << y0 << ".." << y1 << ", editorX " << editorX << ")");
 	CHECK(arrowInk > 10);
+
+	// …and the ANIMATION pin is the same control, for the same reason. It comes
+	// from the host rather than from the shared vocabularies, which is the one
+	// difference between the two rows and the one worth a second look.
+	int animRow0 = 0, animRow1 = 0;
+	rowBand(2.5f, animRow0, animRow1);
+	int animArrow = 0;
+	for (int y = animRow0; y < animRow1; ++y)
+		for (int x = slotRight - 18; x < slotRight - 2; ++x)
+			if (isGlyph(x, y)) ++animArrow;
+	INFO("the animation pin's arrow, in bright pixels: " << animArrow);
+	CHECK(animArrow > 10);
 
 	// 2. …because the NODE made room for it. Its right edge is the last ink on
 	//    the row, and it has to stand beyond both the default width and the end
