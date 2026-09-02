@@ -1359,6 +1359,214 @@ TEST_CASE("Material/Font base properties round-trip as strings")
     CHECK(!hasFont(*makeUIElement(UIWidgetType::Button)));
 }
 
+// ── Rich text markup ─────────────────────────────────────────────────────────
+// This is a FILE FORMAT: what a saved label means must not shift under it. The
+// rules for everything malformed are therefore assertions and not implementation
+// details — and there is only one of them, which is why they all fit here.
+
+TEST_CASE("Rich text: the tags, and what they leave behind")
+{
+    const HE::UIRichText r = HE::uiParseRichText(
+        "Hello <color=#ff8800>world</>, read the <link=terms>terms</>.");
+    // The tags are gone from the text: what a person reads is what is left.
+    CHECK(r.text == "Hello world, read the terms.");
+    CHECK(r.hasLinks);
+    // The runs cover it exactly once, in order, with no gaps and no empties.
+    REQUIRE(r.runs.size() >= 3);
+    std::size_t at = 0;
+    for (const HE::UITextRun& run : r.runs)
+    {
+        CHECK(run.begin == at);
+        CHECK(run.end > run.begin);
+        at = run.end;
+    }
+    CHECK(at == r.text.size());
+    // …and each says what it is.
+    auto runAt = [&](const char* needle) {
+        const std::size_t pos = r.text.find(needle);
+        REQUIRE(pos != std::string::npos);
+        for (const HE::UITextRun& run : r.runs)
+            if (pos >= run.begin && pos < run.end) return run;
+        return HE::UITextRun{};
+    };
+    CHECK(runAt("world").color == "#ff8800");
+    CHECK(runAt("terms").link == "terms");
+    CHECK(runAt("Hello").color.empty());
+    CHECK(runAt("Hello").link.empty());
+}
+
+TEST_CASE("Rich text: nesting is a stack, and a plain label is one run")
+{
+    const HE::UIRichText r = HE::uiParseRichText("<link=x><color=#ff0000>a</>b</>");
+    CHECK(r.text == "ab");
+    REQUIRE(r.runs.size() == 2);
+    // "a" carries both, "b" only the one still open. That is what a stack means,
+    // and anyone who has written markup expects exactly this.
+    CHECK(r.runs[0].link == "x");
+    CHECK(r.runs[0].color == "#ff0000");
+    CHECK(r.runs[1].link == "x");
+    CHECK(r.runs[1].color.empty());
+
+    // A label with no markup is ONE run over the whole string — that is what
+    // lets every consumer treat plain and rich text with the same code.
+    const HE::UIRichText plain = HE::uiParseRichText("just words");
+    CHECK(plain.text == "just words");
+    REQUIRE(plain.runs.size() == 1);
+    CHECK_FALSE(plain.hasLinks);
+    CHECK(plain.runs[0].sizeScale == doctest::Approx(1.0f));
+
+    // An empty string has no runs and no text, and nothing downstream may crash
+    // on that — it is what a freshly added Text holds before anyone types.
+    CHECK(HE::uiParseRichText("").runs.empty());
+}
+
+TEST_CASE("Rich text: a tag that is not fully understood IS text")
+{
+    // The whole malformed-input contract, one rule, every case. The alternative
+    // is a table of special cases nobody can remember, and a label that silently
+    // loses characters somebody meant to see.
+    struct Case { const char* markup; const char* text; };
+    const Case cases[] = {
+        { "a <unknown=1>b",      "a <unknown=1>b" },   // unknown name
+        { "a <color=nope>b",     "a <color=nope>b" },  // the value is not a colour
+        { "a <color=#ff00>b",    "a <color=#ff00>b" }, // …nor is a short hex
+        { "a <color>b",          "a <color>b" },       // no value at all
+        { "a <=red>b",           "a <=red>b" },        // no name at all
+        { "a </>b",              "a </>b" },           // closes nothing
+        { "a <color=#ff0000 b",  "a <color=#ff0000 b" },// never closed with '>'
+        { "5 << 6",              "5 < 6" },            // the escape, the one way in
+    };
+    for (const Case& c : cases)
+        CHECK_MESSAGE(HE::uiParseRichText(c.markup).text == c.text, c.markup);
+
+    // …and an unclosed tag runs to the end rather than dropping the text after it.
+    const HE::UIRichText open = HE::uiParseRichText("plain <color=#00ff00>green");
+    CHECK(open.text == "plain green");
+    REQUIRE(open.runs.size() == 2);
+    CHECK(open.runs[1].color == "#00ff00");
+}
+
+TEST_CASE("Rich text: size is a SCALE, and colours parse the way the tag promised")
+{
+    const HE::UIRichText r = HE::uiParseRichText("a<size=2.5>big</>");
+    REQUIRE(r.runs.size() == 2);
+    CHECK(r.runs[0].sizeScale == doctest::Approx(1.0f));
+    CHECK(r.runs[1].sizeScale == doctest::Approx(2.5f));
+
+    glm::vec4 c{};
+    REQUIRE(HE::uiParseRichColor("#ff8800", c));
+    CHECK(c.r == doctest::Approx(1.0f));
+    CHECK(c.g == doctest::Approx(0.533f).epsilon(0.01));
+    CHECK(c.b == doctest::Approx(0.0f));
+    CHECK(c.a == doctest::Approx(1.0f));       // no alpha given = opaque
+    REQUIRE(HE::uiParseRichColor("#00000080", c));
+    CHECK(c.a == doctest::Approx(0.502f).epsilon(0.01));
+    CHECK_FALSE(HE::uiParseRichColor("#gg0000", c));
+    CHECK_FALSE(HE::uiParseRichColor("ff8800", c));    // '#' is not optional
+}
+
+TEST_CASE("Rich text: one layout, and plain text lands exactly where it always did")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const glm::vec2 pos{ 10.0f, 20.0f }, size{ 300.0f, 80.0f };
+    HE::UITextLayout opts;
+
+    // The claim that makes this safe to switch on: with one size throughout, the
+    // rich path's mixed-size arithmetic has to collapse to the plain path's
+    // formula. If it does not, turning Rich Text on moves every label a little,
+    // which is the kind of change nobody can attribute later.
+    std::vector<UIRenderObject> plain;
+    HE::emitUITextGlyphs(f, 0, "Hello world", pos, size, 24.0f,
+                         glm::vec4(1.0f), 0, opts, plain);
+    const HE::UIRichText rt = HE::uiParseRichText("Hello world");
+    const HE::UIRichLayout lay = HE::uiLayoutRichText(f, rt, pos, size, 24.0f, opts);
+    std::vector<UIRenderObject> rich;
+    HE::uiEmitRichText(f, 0, rt, lay, glm::vec4(1.0f), 0, rich);
+    REQUIRE(rich.size() == plain.size());
+    for (std::size_t i = 0; i < rich.size(); ++i)
+    {
+        CHECK(rich[i].position.x == doctest::Approx(plain[i].position.x));
+        CHECK(rich[i].position.y == doctest::Approx(plain[i].position.y));
+        CHECK(rich[i].size.x == doctest::Approx(plain[i].size.x));
+    }
+}
+
+TEST_CASE("Rich text: a bigger word sits ON the line, not above it")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    HE::UITextLayout opts;
+    const HE::UIRichText rt = HE::uiParseRichText("small <size=2>BIG</> small");
+    const HE::UIRichLayout lay =
+        HE::uiLayoutRichText(f, rt, { 0.0f, 0.0f }, { 600.0f, 100.0f }, 20.0f, opts);
+    REQUIRE(lay.pieces.size() >= 3);
+    // Every piece of one line shares one baseline. Without that the big word
+    // floats and the line reads as two lines badly overlapping — the single
+    // most visible way mixed-size text goes wrong.
+    const float base = lay.pieces[0].baseline;
+    bool sawBig = false;
+    for (const HE::UIRichPiece& pc : lay.pieces)
+    {
+        CHECK(pc.baseline == doctest::Approx(base));
+        if (pc.sizePx > 30.0f) sawBig = true;
+    }
+    CHECK(sawBig);                       // the <size=2> run really is bigger
+    // …and the line is as tall as its tallest run, so the block does not clip it.
+    CHECK(lay.size.y >= 40.0f);
+    // The pieces run left to right without gaps or overlaps.
+    for (std::size_t i = 1; i < lay.pieces.size(); ++i)
+        if (lay.pieces[i].line == lay.pieces[i - 1].line)
+            CHECK(lay.pieces[i].x ==
+                  doctest::Approx(lay.pieces[i - 1].x + lay.pieces[i - 1].width));
+}
+
+TEST_CASE("Rich text: wrapping breaks inside a run, and the link comes with it")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    HE::UITextLayout opts; opts.wrap = true;
+    const HE::UIRichText rt =
+        HE::uiParseRichText("<link=go>one two three four five six seven</>");
+    const HE::UIRichLayout lay =
+        HE::uiLayoutRichText(f, rt, { 0.0f, 0.0f }, { 120.0f, 200.0f }, 18.0f, opts);
+    REQUIRE(!lay.pieces.empty());
+    int lastLine = 0;
+    for (const HE::UIRichPiece& pc : lay.pieces) lastLine = std::max(lastLine, pc.line);
+    CHECK(lastLine > 0);                       // it really did wrap
+    // No line runs past the rect, which is what wrapping is for.
+    for (const HE::UIRichPiece& pc : lay.pieces)
+        CHECK(pc.x + pc.width <= doctest::Approx(120.0f).epsilon(0.02));
+    // …and the link survives the break: it is clickable on every line it covers.
+    for (const HE::UIRichPiece& pc : lay.pieces)
+        CHECK(HE::uiRichLinkAt(rt, lay, pc.x + pc.width * 0.5f,
+                               pc.top + pc.height * 0.5f) == "go");
+}
+
+TEST_CASE("Rich text: the hit test answers where the link is DRAWN, and nowhere else")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    HE::UITextLayout opts;
+    const HE::UIRichText rt = HE::uiParseRichText("plain <link=terms>terms</> plain");
+    const HE::UIRichLayout lay =
+        HE::uiLayoutRichText(f, rt, { 0.0f, 0.0f }, { 400.0f, 40.0f }, 20.0f, opts);
+
+    const HE::UIRichPiece* link = nullptr;
+    for (const HE::UIRichPiece& pc : lay.pieces)
+        if (pc.run < rt.runs.size() && rt.runs[pc.run].link == "terms") link = &pc;
+    REQUIRE(link != nullptr);
+    const float cy = link->top + link->height * 0.5f;
+    CHECK(HE::uiRichLinkAt(rt, lay, link->x + link->width * 0.5f, cy) == "terms");
+    // Just outside it on either side is the plain text around it, which is not
+    // a link — a link you can click next to is worse than one you cannot click.
+    CHECK(HE::uiRichLinkAt(rt, lay, link->x - 2.0f, cy).empty());
+    CHECK(HE::uiRichLinkAt(rt, lay, link->x + link->width + 2.0f, cy).empty());
+    // …and above/below the line it is on.
+    CHECK(HE::uiRichLinkAt(rt, lay, link->x + 1.0f, link->top - 5.0f).empty());
+    CHECK(HE::uiRichLinkAt(rt, lay, link->x + 1.0f, link->top + link->height + 5.0f).empty());
+}
+
 // ── Multi-line text ───────────────────────────────────────────────────────────
 // emitUITextGlyphs used to lay out strictly one line and DROP every byte < 32,
 // so '\n' silently vanished and the whole string ran together.

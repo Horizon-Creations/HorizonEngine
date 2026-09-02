@@ -7,6 +7,7 @@
 
 #include <Renderer/UIFont.h>
 #include <algorithm>
+#include <string>      // std::stof — the markup's size value
 #include <unordered_map>
 
 namespace HE {
@@ -190,6 +191,334 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
         wrapped.push_back(trimmed(acc));
     }
     return wrapped;
+}
+
+// ── Rich text markup ─────────────────────────────────────────────────────────
+
+bool uiParseRichColor(const std::string& s, glm::vec4& out)
+{
+    if (s.size() != 7 && s.size() != 9) return false;
+    if (s[0] != '#') return false;
+    auto hex = [](char c, int& v) {
+        if (c >= '0' && c <= '9') { v = c - '0';      return true; }
+        if (c >= 'a' && c <= 'f') { v = c - 'a' + 10; return true; }
+        if (c >= 'A' && c <= 'F') { v = c - 'A' + 10; return true; }
+        return false;
+    };
+    float ch[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const int count = s.size() == 7 ? 3 : 4;
+    for (int i = 0; i < count; ++i)
+    {
+        int hi = 0, lo = 0;
+        if (!hex(s[1 + i * 2], hi) || !hex(s[2 + i * 2], lo)) return false;
+        ch[i] = static_cast<float>(hi * 16 + lo) / 255.0f;
+    }
+    out = glm::vec4(ch[0], ch[1], ch[2], ch[3]);
+    return true;
+}
+
+namespace
+{
+    // A run of attributes while the parser is inside a tag. The stack IS the
+    // nesting: `<link=x><color=#f00>a</>b</>` gives "a" both and "b" only the
+    // link, which is what anyone who has written markup expects.
+    struct RichScope { std::string color; float sizeScale = 1.0f; std::string link; };
+
+    // Does `s` at `i` start a tag this parser understands, and where does it end?
+    // Returns false for everything else — the one rule the whole format rests on:
+    // a tag that is not fully understood is TEXT. No special case per mistake,
+    // nothing silently swallowed, and a stray '<' in a sentence stays a '<'.
+    bool readTag(const std::string& s, std::size_t i, std::size_t& outEnd,
+                 std::string& outName, std::string& outValue)
+    {
+        if (i >= s.size() || s[i] != '<') return false;
+        const std::size_t close = s.find('>', i + 1);
+        if (close == std::string::npos) return false;
+        const std::string body = s.substr(i + 1, close - i - 1);
+        outEnd = close + 1;
+        if (body == "/") { outName = "/"; outValue.clear(); return true; }
+        const std::size_t eq = body.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= body.size()) return false;
+        outName  = body.substr(0, eq);
+        outValue = body.substr(eq + 1);
+        if (outName == "color")
+        { glm::vec4 ignored{}; return uiParseRichColor(outValue, ignored); }
+        if (outName == "size")
+        {
+            try { const float v = std::stof(outValue); return v > 0.0f && v < 100.0f; }
+            catch (...) { return false; }
+        }
+        if (outName == "link") return true;   // any id will do; it is the graph's word
+        return false;                          // unknown name: text, like everything else
+    }
+} // namespace
+
+UIRichText uiParseRichText(const std::string& markup)
+{
+    UIRichText out;
+    std::vector<RichScope> stack;
+    // The run being built. Flushed whenever the attributes change, so the run
+    // list covers the plain text exactly once with no empty runs in it.
+    UITextRun cur;
+    auto attrs = [&]() -> RichScope { return stack.empty() ? RichScope{} : stack.back(); };
+    auto flush = [&]() {
+        cur.end = out.text.size();
+        if (cur.end > cur.begin) out.runs.push_back(cur);
+        cur = UITextRun{};
+        cur.begin = out.text.size();
+        const RichScope a = attrs();
+        cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+    };
+
+    for (std::size_t i = 0; i < markup.size(); )
+    {
+        // The escape, before anything else looks at a '<'.
+        if (markup[i] == '<' && i + 1 < markup.size() && markup[i + 1] == '<')
+        { out.text.push_back('<'); i += 2; continue; }
+
+        std::size_t end = 0;
+        std::string name, value;
+        if (markup[i] == '<' && readTag(markup, i, end, name, value))
+        {
+            if (name == "/")
+            {
+                // Nothing open: a `</>` that closes nothing is text, by the one
+                // rule. It is also the only way to write one literally.
+                if (stack.empty()) { out.text += "</>"; i = end; continue; }
+                flush();
+                stack.pop_back();
+                const RichScope a = attrs();
+                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+            }
+            else
+            {
+                flush();
+                RichScope a = attrs();
+                if (name == "color") a.color = value;
+                else if (name == "size") a.sizeScale = std::stof(value);
+                else if (name == "link") { a.link = value; out.hasLinks = true; }
+                stack.push_back(a);
+                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+            }
+            i = end;
+            continue;
+        }
+        out.text.push_back(markup[i]);
+        ++i;
+    }
+    // An unclosed tag simply runs to the end — the alternative is dropping text
+    // somebody wrote because they forgot four characters.
+    cur.end = out.text.size();
+    if (cur.end > cur.begin) out.runs.push_back(cur);
+    // A label with no markup at all is ONE run over the whole string, which is
+    // what makes every consumer able to treat plain and rich text alike.
+    if (out.runs.empty() && !out.text.empty())
+        out.runs.push_back({ 0, out.text.size(), {}, 1.0f, {} });
+    return out;
+}
+
+UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
+                              const glm::vec2& rectPos, const glm::vec2& rectSize,
+                              float sizePx, const UITextLayout& opts)
+{
+    UIRichLayout out;
+    if (!font.ok || sizePx <= 0.0f || rt.text.empty()) return out;
+
+    // Which run a byte belongs to. The runs cover the text exactly once and in
+    // order, so this walks forward with the scan rather than searching.
+    std::size_t runCursor = 0;
+    auto runAt = [&](std::size_t b) {
+        while (runCursor + 1 < rt.runs.size() && b >= rt.runs[runCursor].end) ++runCursor;
+        while (runCursor > 0 && b < rt.runs[runCursor].begin) --runCursor;
+        return runCursor;
+    };
+    auto sizeAt = [&](std::size_t b) {
+        if (rt.runs.empty()) return sizePx;
+        return sizePx * rt.runs[runAt(b)].sizeScale;
+    };
+    auto advanceAt = [&](std::size_t b) {
+        const unsigned char ch = static_cast<unsigned char>(rt.text[b]);
+        if (ch < 32 || ch >= 128) return 0.0f;
+        return font.glyphs[ch - 32].xadvance * (sizeAt(b) / font.bakePx);
+    };
+
+    // ── Lines ────────────────────────────────────────────────────────────────
+    // Byte ranges, because a piece has to name bytes to know its run. Hard breaks
+    // always; greedy word wrap on top when asked, measured with each character's
+    // OWN size — a wrap that measured everything at the element's size would put
+    // a large word past the edge.
+    struct Line { std::size_t begin = 0, end = 0; };
+    std::vector<Line> lines;
+    {
+        Line cur{ 0, 0 };
+        std::size_t i = 0;
+        float width = 0.0f;          // of what is on the line, trailing spaces included
+        float sinceBreak = 0.0f;     // width of the word being built
+        std::size_t lastBreak = std::string::npos;   // byte after the last space run
+        auto push = [&](std::size_t end) {
+            cur.end = end;
+            lines.push_back(cur);
+            cur = Line{ end, end };
+            width = sinceBreak = 0.0f;
+            lastBreak = std::string::npos;
+        };
+        while (i < rt.text.size())
+        {
+            const char c = rt.text[i];
+            if (c == '\r') { ++i; continue; }
+            if (c == '\n') { push(i); cur.begin = i + 1; ++i; continue; }
+            const float adv = advanceAt(i);
+            const bool wrapHere = opts.wrap && rectSize.x > 0.0f &&
+                                  width + adv > rectSize.x && i > cur.begin;
+            if (wrapHere)
+            {
+                // Break at the last space if the line has one, otherwise inside
+                // the word — a single word wider than the line must never
+                // overflow the rect, the same rule the plain path follows.
+                if (lastBreak != std::string::npos && lastBreak > cur.begin)
+                {
+                    const std::size_t at = lastBreak;
+                    push(at);
+                    cur.begin = at;
+                    i = at;
+                    // Re-measure the word that moved down with us.
+                    continue;
+                }
+                push(i);
+                cur.begin = i;
+                continue;
+            }
+            if (c == ' ') { lastBreak = i + 1; sinceBreak = 0.0f; }
+            else sinceBreak += adv;
+            width += adv;
+            ++i;
+        }
+        cur.end = rt.text.size();
+        lines.push_back(cur);
+        // A trailing break does not start a line — the same rule (and the same
+        // reason) as layoutUITextLines: an empty last line is half a line of
+        // height, and a centred label with a stray newline sits too high.
+        if (lines.size() > 1 && lines.back().begin >= lines.back().end) lines.pop_back();
+    }
+
+    // ── Where each line sits ─────────────────────────────────────────────────
+    // A line is as tall as its TALLEST run, and every piece on it shares one
+    // baseline. With one size throughout, all of this collapses to the plain
+    // path's formula, which is what keeps existing labels exactly where they are.
+    std::vector<float> lineSize(lines.size(), sizePx), lineWidthPx(lines.size(), 0.0f);
+    for (std::size_t li = 0; li < lines.size(); ++li)
+    {
+        float mx = 0.0f, w = 0.0f;
+        std::size_t lastInk = lines[li].begin;
+        for (std::size_t b = lines[li].begin; b < lines[li].end; ++b)
+        {
+            mx = std::max(mx, sizeAt(b));
+            w += advanceAt(b);
+            if (rt.text[b] != ' ') lastInk = b + 1;
+        }
+        // Trailing spaces neither widen the line nor shift a centred one.
+        float trimmed = 0.0f;
+        for (std::size_t b = lines[li].begin; b < lastInk; ++b) trimmed += advanceAt(b);
+        lineSize[li]    = mx > 0.0f ? mx : sizePx;
+        lineWidthPx[li] = lines[li].end > lines[li].begin ? trimmed : 0.0f;
+        (void)w;
+    }
+    float blockHeight = lineSize.empty() ? 0.0f : lineSize.back();
+    for (std::size_t li = 0; li + 1 < lines.size(); ++li)
+        blockHeight += lineSize[li] * opts.lineSpacing;
+
+    float blockTop = rectPos.y + (rectSize.y - blockHeight) * 0.5f;      // 1 = middle
+    if (opts.alignV == 0)      blockTop = rectPos.y;
+    else if (opts.alignV == 2) blockTop = rectPos.y + rectSize.y - blockHeight;
+
+    // ── Pieces ───────────────────────────────────────────────────────────────
+    float centre = blockTop + (lines.empty() ? 0.0f : lineSize[0] * 0.5f);
+    for (std::size_t li = 0; li < lines.size(); ++li)
+    {
+        const float ls = lineSize[li];
+        const float slack = std::max(0.0f, rectSize.x - lineWidthPx[li]);
+        float x = rectPos.x + (opts.alignH == 1 ? slack * 0.5f
+                             : opts.alignH == 2 ? slack : 0.0f);
+        const float baseline = centre + (font.ascent * (ls / font.bakePx)) * 0.5f - ls * 0.08f;
+        std::size_t b = lines[li].begin;
+        while (b < lines[li].end)
+        {
+            const std::size_t r = runAt(b);
+            std::size_t e = b;
+            float w = 0.0f;
+            while (e < lines[li].end && runAt(e) == r) { w += advanceAt(e); ++e; }
+            UIRichPiece pc;
+            pc.run = r; pc.begin = b; pc.end = e;
+            pc.line = static_cast<int>(li);
+            pc.x = x; pc.width = w;
+            pc.sizePx = rt.runs.empty() ? sizePx : sizePx * rt.runs[r].sizeScale;
+            pc.baseline = baseline;
+            pc.top = centre - ls * 0.5f; pc.height = ls;
+            out.pieces.push_back(pc);
+            x += w;
+            b = e;
+        }
+        out.size.x = std::max(out.size.x, lineWidthPx[li]);
+        if (li + 1 < lines.size()) centre += ls * opts.lineSpacing;
+    }
+    out.size.y = blockHeight;
+    return out;
+}
+
+void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
+                    const UIRichText& rt, const UIRichLayout& layout,
+                    const glm::vec4& defaultColor, int layer,
+                    std::vector<UIRenderObject>& out)
+{
+    if (!font.ok) return;
+    const float invW = 1.0f / (float)font.atlasW;
+    const float invH = 1.0f / (float)font.atlasH;
+    for (const UIRichPiece& pc : layout.pieces)
+    {
+        glm::vec4 colour = defaultColor;
+        if (pc.run < rt.runs.size() && !rt.runs[pc.run].color.empty())
+        {
+            glm::vec4 c{};
+            // Alpha travels with the element's own: a run says which colour, the
+            // element says how visible it is (inherited opacity is applied to
+            // every quad afterwards anyway, so this only keeps a run from being
+            // MORE opaque than the label it sits in).
+            if (uiParseRichColor(rt.runs[pc.run].color, c))
+                colour = glm::vec4(glm::vec3(c), c.a * defaultColor.a);
+        }
+        const float scale = pc.sizePx / font.bakePx;
+        float penX = pc.x;
+        for (std::size_t b = pc.begin; b < pc.end && b < rt.text.size(); ++b)
+        {
+            const unsigned char ch = static_cast<unsigned char>(rt.text[b]);
+            if (ch < 32 || ch >= 128) continue;
+            const BakedGlyph& g = font.glyphs[ch - 32];
+            UIRenderObject ro;
+            ro.position = { penX + g.xoff * scale, pc.baseline + g.yoff * scale };
+            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
+            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
+            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
+            ro.color    = colour;
+            ro.type     = 2;
+            ro.layer    = layer;
+            ro.fontAtlasKey = atlasKey;
+            out.push_back(std::move(ro));
+            penX += g.xadvance * scale;
+        }
+    }
+}
+
+std::string uiRichLinkAt(const UIRichText& rt, const UIRichLayout& layout,
+                         float x, float y)
+{
+    for (const UIRichPiece& pc : layout.pieces)
+    {
+        if (pc.run >= rt.runs.size() || rt.runs[pc.run].link.empty()) continue;
+        if (x < pc.x || x > pc.x + pc.width) continue;
+        if (y < pc.top || y > pc.top + pc.height) continue;
+        return rt.runs[pc.run].link;
+    }
+    return {};
 }
 
 std::vector<UITextLineRange> uiTextLineRanges(const std::string& text)

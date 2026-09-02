@@ -112,6 +112,93 @@ HE_API std::vector<UITextLineRange> uiTextLineRanges(const std::string& text);
 // so a caret that outlived an edit still lands somewhere real.
 HE_API std::size_t uiLineOfOffset(const std::vector<UITextLineRange>& lines, std::size_t byte);
 
+// ── Rich text: one label with more than one voice ────────────────────────────
+// A markup STRING rather than a structured list of runs, and that is a decision
+// rather than a shortcut: a script produces text with Set Property, so anything
+// a label can be must be expressible as a string, or formatted text becomes a
+// second API that only C++ can reach. UMG, TextMeshPro and Slate all landed on
+// the same answer.
+//
+//     Hello <color=#ff8800>world</>, read the <link=terms>terms</>.
+//
+// Three tags — `color=#RRGGBB` or `#RRGGBBAA`, `size=<scale>`, `link=<id>` —
+// closed by `</>`, which closes the innermost one. `<<` is a literal '<'.
+//
+// ONE rule for everything malformed: a tag that is not fully understood IS
+// text. An unknown name, a broken hex value, a missing value, a `</>` with
+// nothing open — all the same, no special cases to remember and nothing that
+// silently eats a character somebody meant to see. This is a file format, so
+// those rules are pinned by tests rather than left to the implementation.
+struct UITextRun
+{
+    std::size_t begin = 0, end = 0;   // byte range into UIRichText::text
+    // Empty = "whatever colour the element draws in". A STRING and not a
+    // resolved colour, so a theme role ("accent") can move in later without the
+    // saved markup meaning something different than it did.
+    std::string color;
+    // A SCALE on the element's font size, never pixels: the element's size is
+    // already scaled by the canvas and by auto-size, and a run in absolute
+    // pixels would fight both.
+    float       sizeScale = 1.0f;
+    std::string link;                 // empty = not clickable
+};
+struct UIRichText
+{
+    std::string            text;      // the markup with its tags removed
+    std::vector<UITextRun> runs;      // in order, covering `text` exactly
+    bool                   hasLinks = false;
+};
+// Never fails: text that parses to nothing special is one run over the whole
+// string, which is exactly what a plain label is.
+HE_API UIRichText uiParseRichText(const std::string& markup);
+// "#RRGGBB" / "#RRGGBBAA" → a colour. False leaves `out` untouched — the same
+// check the parser makes when it decides whether a tag is a tag.
+HE_API bool uiParseRichColor(const std::string& s, glm::vec4& out);
+
+// ── Laying rich text out, ONCE ───────────────────────────────────────────────
+// Three things need the answer — the draw, the measure that auto-sizes the
+// element, and the hit test that says which link the pointer is on — and the day
+// they are three pieces of arithmetic is the day a link is clickable somewhere
+// other than where it is drawn. So the layout is one function and they are its
+// readers, exactly as tabLayout serves the tab strip.
+//
+// A `piece` is the largest stretch of one line that belongs to one run: it has a
+// single colour and a single size, so drawing it is one loop.
+struct UIRichPiece
+{
+    std::size_t run   = 0;            // index into UIRichText::runs
+    std::size_t begin = 0, end = 0;   // byte range in UIRichText::text
+    int   line   = 0;
+    float x      = 0.0f;              // left edge, absolute pixels
+    float width  = 0.0f;
+    float sizePx = 0.0f;              // this piece's size (run scale applied)
+    // The BASELINE is shared by every piece on the line, which is what keeps a
+    // big word sitting on the same line as its small neighbours instead of
+    // floating above them. `top`/`height` are the line's box, which is what the
+    // hit test needs and what a piece alone cannot say.
+    float baseline = 0.0f;
+    float top = 0.0f, height = 0.0f;
+};
+struct UIRichLayout
+{
+    std::vector<UIRichPiece> pieces;
+    glm::vec2 size{ 0.0f };           // widest line × block height
+};
+// Plain text laid out through here lands byte-identically where the plain path
+// puts it — the mixed-size arithmetic collapses to the old formula when every
+// run is the same size, and a test pins that.
+HE_API UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
+                                     const glm::vec2& rectPos, const glm::vec2& rectSize,
+                                     float sizePx, const UITextLayout& opts);
+// Draw it. `defaultColor` is what a run without a colour of its own uses.
+HE_API void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
+                           const UIRichText& rt, const UIRichLayout& layout,
+                           const glm::vec4& defaultColor, int layer,
+                           std::vector<UIRenderObject>& out);
+// Which link is at this point (absolute pixels), or "" for none.
+HE_API std::string uiRichLinkAt(const UIRichText& rt, const UIRichLayout& layout,
+                                float x, float y);
+
 // Pixel extent the run occupies at `sizePx`: x = widest line, y = the block
 // height ((lines-1) * lineSpacing * sizePx + sizePx). Lets callers size an
 // element to fit its own text (see UIElement auto-size).
