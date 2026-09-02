@@ -2830,7 +2830,7 @@ void EditorApplication::OnRender(float dt)
 			// transition, so it doesn't fight ImGui's own text-input management.
 			if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
 			{
-				const bool want = m_editorWorld->widgets().hasFocusedTextField();
+				const bool want = m_editorWorld->widgets().isEditingText();
 				if (want != m_widgetTextInputActive)
 				{
 					if (want) SDL_StartTextInput(w); else SDL_StopTextInput(w);
@@ -2936,7 +2936,7 @@ void EditorApplication::OnRender(float dt)
 			// south button activate. Held state only, so the edges live here —
 			// and a focused text field keeps the arrows for its own text.
 			// ── Back, OUTSIDE the text-field gate ────────────────────────
-			// hasFocusedTextField() is "something has the keyboard", and
+			// isEditingText() is "something has the keyboard", and
 			// showModal hands the keyboard to the dialog by construction — so
 			// inside the block below this would be switched off at exactly the
 			// moment a dialog is open, which is the one case it exists for. It
@@ -2962,7 +2962,7 @@ void EditorApplication::OnRender(float dt)
 			// The arrows reach the widgets when no text field has the keyboard —
 			// or when a list hangs open, because then they belong to the list
 			// whatever else has the focus.
-			if (uiTakesInput && (!m_editorWorld->widgets().hasFocusedTextField() ||
+			if (uiTakesInput && (!m_editorWorld->widgets().isEditingText() ||
 			                     m_editorWorld->widgets().hasOpenDropdown()))
 			{
 				using Nav = WidgetManager::NavDir;
@@ -7101,7 +7101,7 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 
 	// A focused in-game text field (PIE) owns the keyboard: route text + edit keys
 	// to the widget. Checked before Esc so typing works, but Esc still releases.
-	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().hasFocusedTextField())
+	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().isEditingText())
 	{
 		if (event.type == SDL_EVENT_TEXT_INPUT)
 		{
@@ -7185,6 +7185,10 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 	if (m_isPlaying && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat
 	    && event.key.key == SDLK_ESCAPE)
 	{
+		// …but leaving a text field comes first, exactly as in the packaged
+		// game: Escape out of a search box means "stop typing", and the focus
+		// stays where it is so Tab carries on through the form.
+		if (m_editorWorld && m_editorWorld->widgets().stopEditingText()) return true;
 		setPlayMouseCaptured(!m_playMouseCaptured);
 		return true;
 	}

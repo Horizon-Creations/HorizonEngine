@@ -2221,6 +2221,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						m_focusWidget = w.id;
 						fireP(&HorizonCode::Runtime::fireOnFocused, hot);
 					}
+					// A click IS the confirmation: pointing at a field and
+					// pressing is nobody's idea of "select it for later". The
+					// two-state rule is for the keyboard, where the same
+					// gesture has to serve arriving and entering.
+					m_focusEditing = true;
 					setCaretFromPointer(vpWidth, vpHeight, mouseX, mouseY);
 					// From here until the button comes up, pointer movement
 					// extends the selection instead of moving the caret.
@@ -2346,6 +2351,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 HE::UITextInput* WidgetManager::focusedTextField(Instance*& outWidget)
 {
 	outWidget = nullptr;
+	// Focused is not editing. Every entry point below this one is a keystroke,
+	// and a field that has merely been tabbed onto does not take keystrokes —
+	// that is the whole of the two-state rule, kept in ONE place so no entry
+	// point can be added that forgets it.
+	if (!m_focusEditing) return nullptr;
 	if (m_focusWidget == 0) return nullptr;
 	Instance* w = find(m_focusWidget);
 	if (!w || w->focusedElem == 0) return nullptr;
@@ -3042,6 +3052,10 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 	m_visualDirty = true;
 	Instance* w = find(widgetId);
 	if (!w) return false;
+	// Moving the focus always leaves editing behind: the keyboard belongs to
+	// the field somebody confirmed into, and the moment the focus is somewhere
+	// else that is nobody.
+	m_focusEditing = false;
 	// Focus events go to whichever script owns the element (see scriptTargetFor).
 	auto fireFocus = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int), int elem)
 	{
@@ -3063,6 +3077,19 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 	w->focusedElem = elementId;
 	m_focusWidget  = widgetId;
 	fireFocus(&HorizonCode::Runtime::fireOnFocused, elementId);
+	return true;
+}
+
+bool WidgetManager::isEditingText() const
+{
+	return m_focusEditing && hasFocusedTextField();
+}
+
+bool WidgetManager::stopEditingText()
+{
+	if (!m_focusEditing) return false;
+	m_focusEditing = false;
+	m_visualDirty = true;   // the caret goes away
 	return true;
 }
 
@@ -3123,6 +3150,16 @@ bool WidgetManager::activateFocused()
 	const HE::UIElement* e = w->tree.find(w->focusedElem);
 	if (!e || !HE::uiElementEffectiveEnabled(w->tree, *e) ||
 	    !HE::uiElementEffectiveVisible(w->tree, *e)) return false;
+	// A text field starts being EDITED. Reaching one with Tab does not give it
+	// the keyboard — this is the confirmation that does, and until it comes the
+	// arrows and Tab still belong to the form, which is what stops the tab order
+	// from dying in the first search box it walks into.
+	if (const auto* ti = dynamic_cast<const HE::UITextInput*>(w->tree.find(w->focusedElem));
+	    ti && (ti->editable || ti->selectable))
+	{
+		m_focusEditing = true;
+		return true;
+	}
 	// A list opens its picked row rather than clicking itself. Deliberately NOT
 	// in activateElement: that one also runs on every pointer release, and a
 	// list where a single click both picks and opens is a list you cannot browse.
@@ -3514,6 +3551,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			st.hovered = (e.id == w.hoveredElem);
 			st.pressed = (e.id == w.pressedElem && m_wasDown);
 			st.focused = (e.id == w.focusedElem);
+			st.editing = st.focused && m_focusEditing && m_focusWidget == w.id;
 
 			const auto matIt = w.materials.find(e.id);
 			const HE::UUID matId = matIt != w.materials.end() ? matIt->second : HE::UUID{};

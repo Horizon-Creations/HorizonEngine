@@ -1284,7 +1284,7 @@ void GameApplication::updateUIInput()
 	// move the focus, Enter/Space and the south button activate it. Not routed
 	// while a text field has the keyboard: there the arrows belong to the text.
 	// ── Back, and NOT behind the text-field gate ─────────────────────────────
-	// hasFocusedTextField() is "something has the keyboard", and showModal gives
+	// isEditingText() is "something has the keyboard", and showModal gives
 	// the keyboard to the dialog by construction — so putting this inside the
 	// block below would switch it off at exactly the moment a dialog is up. It
 	// also has to work WHILE typing: cancelling a dialog from inside its own
@@ -1313,7 +1313,7 @@ void GameApplication::updateUIInput()
 	// a list hangs open, because then they belong to the list whatever else has
 	// the focus. That second half is what makes a dropdown opened from beside a
 	// text field navigable at all.
-	if (uiTakesInput && (!m_world->widgets().hasFocusedTextField() ||
+	if (uiTakesInput && (!m_world->widgets().isEditingText() ||
 	                     m_world->widgets().hasOpenDropdown()))
 	{
 		Input& in = input();
@@ -1460,7 +1460,7 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 	// that still held focus from before the switch would otherwise keep eating
 	// the movement keys with no way for the player to take them back.
 	if (m_world && HE::api::input::mode() != HE::api::input::Mode::GameOnly &&
-	    m_world->widgets().hasFocusedTextField())
+	    m_world->widgets().isEditingText())
 	{
 		if (event.type == SDL_EVENT_TEXT_INPUT)
 		{
@@ -1576,6 +1576,11 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		// is already spoken for is a dialog nobody can leave.
 		if (event.key.key == SDLK_ESCAPE)
 		{
+			// Leaving a field comes first, and before closing anything: Escape
+			// out of a search box means "stop typing", not "throw away the
+			// dialog I was typing in". The focus stays where it is, so the very
+			// next Tab carries on through the form.
+			if (m_world && m_world->widgets().stopEditingText()) return true;
 			if (m_world && m_world->widgets().closeTopLayer()) return true;
 			// …and in an APPLICATION it means nothing else. There is no
 			// FPS-style grab to give back — an app never took the cursor — so

@@ -1211,7 +1211,10 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const glm::vec2 ts{ px.w - 2 * pad, px.h };
     const float sizePx = fontSize * pxScaleY;
 
-    if (text.empty() && !st.focused)
+    // The placeholder goes away when somebody starts EDITING, not when the tab
+    // order walks past: a hint that vanishes because the focus went by leaves an
+    // empty box that says nothing about itself.
+    if (text.empty() && !st.editing)
     {
         emitText(*this, placeholder, tp, ts, sizePx,
                  glm::vec4(glm::vec3(textColor) * 0.5f, textColor.a * 0.7f), false, out);
@@ -1261,7 +1264,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         // to look at something should not be yanked back by a caret they are not
         // moving.
         const size_t caretLine = HE::uiLineOfOffset(lines, caret);
-        if (st.focused)
+        if (st.editing)
         {
             const float top = static_cast<float>(caretLine) * step;
             if (top < scrollPxY)                      scrollPxY = top;
@@ -1285,7 +1288,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         // Selection first, behind the glyphs. Three shapes in one loop: the
         // first line from the anchor to its end, whole lines in between, the
         // last from its start to the caret.
-        if (st.focused && selectable && hasSelection())
+        if (st.editing && selectable && hasSelection())
         {
             const size_t a = selMin(), b = selMax();
             for (size_t i = 0; i < lines.size(); ++i)
@@ -1322,7 +1325,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         float compW = 0.0f;
         const float caretY = lineY(caretLine);
         const float caretX = shownUpTo(lines[caretLine], caret);
-        if (st.focused && !composition.empty())
+        if (st.editing && !composition.empty())
         {
             HE::UITextLayout copts; copts.alignV = 0;
             compW = runWidth(composition);
@@ -1332,7 +1335,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
                  std::max(1.0f, compW), std::max(1.0f, sizePx * 0.06f), textColor);
         }
 
-        if (st.focused)
+        if (st.editing)
         {
             float cx = caretX;
             if (!composition.empty())
@@ -1353,7 +1356,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // takes the text you are typing with it. Unfocused fields snap back to the
     // start, because that is the half a reader wants to see.
     const float inner = std::max(1.0f, ts.x);
-    if (!st.focused) scrollPx = 0.0f;
+    if (!st.editing) scrollPx = 0.0f;
     else
     {
         const float caretX = widthTo(caret);
@@ -1368,7 +1371,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const glm::vec2 sp{ tp.x - scrollPx, tp.y };
 
     // Selection behind the text, so the glyphs stay readable on top of it.
-    if (st.focused && selectable && hasSelection())
+    if (st.editing && selectable && hasSelection())
     {
         const float x0 = widthTo(selMin()), x1 = widthTo(selMax());
         const float h  = std::min(px.h - 4.0f, sizePx * 1.25f);
@@ -1384,7 +1387,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // rather than coloured differently: an underline is what every platform's
     // preedit looks like, and it survives a theme that made the text any colour.
     float compositionWidth = 0.0f;
-    if (st.focused && !composition.empty())
+    if (st.editing && !composition.empty())
     {
         const float caretX = widthTo(caret);
         const glm::vec2 cp{ sp.x + caretX, sp.y };
@@ -1405,7 +1408,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // string — that could only ever be at the end, which is why the field had
     // no way to edit anywhere else. While an IME is composing it sits inside the
     // composition, where that input method put it.
-    if (st.focused)
+    if (st.editing)
     {
         const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
         float caretX = widthTo(caret);

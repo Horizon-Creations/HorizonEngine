@@ -475,7 +475,27 @@ public:
     // Fire what a click would fire on the focused element: a button clicks, a
     // checkbox toggles, a combo opens — or, with a list already open, the
     // entry the keys walked to is taken. False when nothing is focused.
+    //
+    // On a TEXT FIELD it starts EDITING, which is a state of its own. Tab walks
+    // onto a field without giving it the keyboard, and it takes the keyboard
+    // only when somebody says so — that is what stops the tab order dying in
+    // the first search box it meets, and it is how a field behaves under a
+    // gamepad everywhere. See isEditingText.
     bool activateFocused();
+
+    // ── Focused, and editing, are two states ─────────────────────────────────
+    // A field with the focus wears the ring and is where Tab left off. A field
+    // being EDITED owns the keyboard: the letters, the arrows and the caret.
+    // Between them lies one confirmation — Enter, Space, the pad's south
+    // button, or a click, which says the same thing with a mouse.
+    //
+    // Without the distinction Tab moved INTO a field and never out of it: the
+    // field had the keyboard from the moment it was reached, so every key after
+    // that was text, Tab included.
+    bool isEditingText() const;
+    // Leave the field without moving the focus (Escape). False when nothing was
+    // being edited, so a caller can fall through to what Escape means next.
+    bool stopEditingText();
 
     // ── Tab order ────────────────────────────────────────────────────────────
     // The other way through a form, and the one people actually use in one:
@@ -842,6 +862,10 @@ private:
     // the system" exists to avoid.
     HE::UIThemeMode       m_systemMode = HE::UIThemeMode::Dark;
     bool m_visualDirty = true;     // see consumeVisualDirty
-    int  m_focusWidget = 0;        // widget id owning the focused TextInput
+    int  m_focusWidget = 0;        // widget id owning the focused element
+    // …and whether that element, being a text field, currently owns the
+    // KEYBOARD. Cleared by every focus change, so it can only ever be true for
+    // the element the focus is on right now (see isEditingText).
+    bool m_focusEditing = false;
     HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants
 };

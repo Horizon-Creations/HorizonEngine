@@ -240,6 +240,13 @@ struct UIElementRenderState
     bool hovered = false;
     bool pressed = false;
     bool focused = false;
+    // …and, for a text field, whether it is being EDITED rather than merely
+    // stood on. Tab walks onto a field and leaves it alone; one confirmation
+    // gives it the keyboard. A caret blinking in a field that is not taking
+    // keystrokes is the picture lying about what the keys will do, so the caret,
+    // the selection and the input method's preedit all hang on this and not on
+    // `focused` (see WidgetManager::isEditingText).
+    bool editing = false;
 };
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };

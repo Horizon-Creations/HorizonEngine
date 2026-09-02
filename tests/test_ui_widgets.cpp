@@ -5817,6 +5817,79 @@ TEST_CASE("Navigation: a focused button does not claim the keyboard")
     CHECK(wm.focusedElement() == field);
 }
 
+// Standing on a field and typing into it are two states, and the tab order dies
+// in the first search box it meets unless they are. Reaching one with Tab used
+// to hand it the keyboard on the spot, so every key after that was text — Tab
+// included, which is why there was no way back out.
+TEST_CASE("Navigation: a field takes the keyboard only when it is confirmed")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int field = t.add(HE::UIWidgetType::TextInput);
+    {
+        HE::UIElement& e = *t.find(field);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    }
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 100.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto text = [&]{ return dynamic_cast<const HE::UITextInput*>(wm.tree(id)->find(field))->text; };
+
+    // Tab onto it: focused, ringed, and NOT taking keystrokes.
+    REQUIRE(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == field);
+    CHECK(wm.hasFocusedTextField());     // a text field HAS the focus…
+    CHECK_FALSE(wm.isEditingText());     // …and does not own the keyboard
+    wm.inputText("no");
+    CHECK(text().empty());
+
+    // …so Tab still means Tab. This is the bug: it used to stay here for ever.
+    REQUIRE(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == btn);
+
+    // Back, and confirmed this time.
+    REQUIRE(wm.focusNext(true, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == field);
+    CHECK(wm.activateFocused());
+    CHECK(wm.isEditingText());
+    wm.inputText("yes");
+    CHECK(text() == "yes");
+
+    // Escape leaves the field WITHOUT moving the focus, so the next Tab carries
+    // on from here rather than from the top of the form.
+    CHECK(wm.stopEditingText());
+    CHECK_FALSE(wm.isEditingText());
+    CHECK(wm.focusedElement() == field);
+    CHECK_FALSE(wm.stopEditingText());   // nothing left to leave
+    wm.inputText("!");
+    CHECK(text() == "yes");
+    REQUIRE(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == btn);
+
+    // A CLICK is its own confirmation: pointing at a field and pressing is
+    // nobody's idea of "select it for later".
+    wm.processPointer(400.0f, 400.0f, 100.0f, 20.0f, true, true);
+    CHECK(wm.focusedElement() == field);
+    CHECK(wm.isEditingText());
+    wm.processPointer(400.0f, 400.0f, 100.0f, 20.0f, false, true);
+
+    // And walking away drops it again, whatever it was doing.
+    REQUIRE(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK_FALSE(wm.isEditingText());
+}
+
 TEST_CASE("Navigation: Tab walks the form in hierarchy order and wraps")
 {
     TempWidgetDir dir;
