@@ -5492,12 +5492,15 @@ TEST_CASE("Get/Set Property (Ref): by name, inside whatever the reference points
         e.name = "Title";
         e.renderOpacity = 1.0f;
     }
-    const int slot = page.add(HE::UIWidgetType::Panel);
-    page.find(slot)->name = "Slot";
+    // The slot, placed in the designer: a WidgetRef with a NAME, which is what
+    // makes the component in it addressable from the graph.
+    const int slot = page.add(HE::UIWidgetType::WidgetRef);
     {
-        HE::UIElement& e = *page.find(slot);
-        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
-        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(slot));
+        r->widgetPath = "mem://comp.hasset";
+        r->name = "Card";
+        HE::uiSetAnchorPreset(*r, 0); r->pivotX = r->pivotY = 0.0f;
+        r->posX = 0.0f; r->posY = 0.0f; r->sizeX = 100.0f; r->sizeY = 100.0f;
     }
     registerWidgetAs(cm, "mem://page.hasset", page);
 
@@ -5509,7 +5512,7 @@ TEST_CASE("Get/Set Property (Ref): by name, inside whatever the reference points
     wm.setRuntime(&rt);
     const int id = createShown(wm, cm, "mem://page.hasset");
     REQUIRE(id != 0);
-    const HorizonCode::InstanceId child = wm.addChild(cm, id, "Slot", "mem://comp.hasset");
+    const HorizonCode::InstanceId child = wm.childInstance(id, "Card");
     REQUIRE(child != 0);
 
     // The page's own "Title" and the component's are two different elements
@@ -5532,6 +5535,23 @@ TEST_CASE("Get/Set Property (Ref): by name, inside whatever the reference points
     REQUIRE(rt.callFunction(child, "Missing"));
     CHECK(grafted->renderOpacity == doctest::Approx(0.25f));
     CHECK(wm.tree(id)->find(pageTitle)->renderOpacity == doctest::Approx(1.0f));
+
+    // The other kind of reference: what SITS IN the slot. A component is an
+    // instance, so the slot's name yields the handle its functions and its
+    // public variables are reached through — and, wired into a Set Property
+    // (Ref), the page can drive the component's element from outside.
+    HorizonWorld world;
+    world.setWidgetManager(&wm);
+    HE::api::Ctx c;
+    c.world = &world;
+    c.content = &cm;
+    CHECK(HE::api::widget::childRef(c, id, "Card") == child);
+    // The slot has to be a slot: a plain element is not an instance, and a name
+    // nobody carries is not one either.
+    CHECK(HE::api::widget::childRef(c, id, "Title") == 0u);
+    CHECK(HE::api::widget::childRef(c, id, "Nope") == 0u);
+    CHECK(HE::api::widget::childRef(c, id, "") == 0u);
+    CHECK(HE::api::widget::childRef(c, 0, "Card") == 0u);
 }
 
 // The layer decides what the arrows MEAN. With a list hanging open, up and down

@@ -2634,6 +2634,13 @@ namespace
 	  "because a name is what a reference can carry — an id belongs to the asset "
 	  "that made it and means nothing in another widget.",
 	  "", "ui#graph" },
+	{ "UI Graph/Get Widget Ref", "Get Widget Ref",
+	  "A reference to the COMPONENT sitting in this slot. A component is a class "
+	  "like any other, so from here you can call its functions, bind its events "
+	  "and read its public variables — and tell one of three identical cards "
+	  "apart. Offered only on a slot, because only a slot holds an instance; "
+	  "everything else on this menu is a property.",
+	  "", "ui#graph" },
 	{ "UI Graph/Show the node that failed", "Show the node that failed",
 	  "Jumps to the node the compile check stopped at, opening its sub-graph and "
 	  "selecting it. The message says what went wrong; this says where.",

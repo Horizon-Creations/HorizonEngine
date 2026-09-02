@@ -4721,6 +4721,32 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::EndDisabled();
 		if (!named)
 			ImGui::TextDisabled("Give the element a name to reach it by reference.");
+
+		// A slot holding a component is the other kind of reference: the thing
+		// in it is an INSTANCE, with functions, events and public variables of
+		// its own. That one is not a property at all, so it is its own entry.
+		if (named && tgt->type() == UIWidgetType::WidgetRef)
+		{
+			if (EditorWidgets::menuItem("Get Widget Ref"))
+			{
+				const int id = addGraphNode(st, NT::EngineCall, st.geState.addMenuGraphPos);
+				HC::Node* nn = st.graph.findNode(id);
+				if (const HE::api::ApiFn* fn = HE::api::find("widget.childRef"))
+				{
+					nn->s = fn->id;
+					nn->hasArg = fn->isExec;
+					for (const auto& p : fn->params)
+						nn->params.push_back({ p.name, p.type, p.isArray });
+					for (const auto& r : fn->results)
+						nn->results.push_back({ r.name, r.type, r.isArray });
+					HC::Value v; v.type = PT::String; v.s = tgt->name;
+					nn->pinDefaults[1] = std::move(v);
+				}
+				st.selectedGraphNode = id;
+				commitEdit(st, ctx);
+			}
+			EditorWidgets::helpForLabel("Get Widget Ref");
+		}
 		ImGui::EndPopup();
 	}
 

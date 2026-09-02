@@ -471,6 +471,12 @@ namespace
 	  "The same, but you decide about looping instead of the animation. For the "
 	  "case where one clip is both the spinner that runs until you stop it and "
 	  "the flourish that plays once." },
+	{ "widget.childRef",
+	  "A reference to the component sitting in one of this widget's slots, by "
+	  "the slot's name. A component is a class like any other, so this is how "
+	  "you call its functions, bind its events and read its public variables — "
+	  "and how a page tells one of three identical cards apart. Leave Widget "
+	  "unwired for this widget's own slots." },
 	{ "widget.stopAllAnimations",
 	  "Stops everything moving in the widget: the authored animations and the "
 	  "single-property ones both. What a screen being torn down or swapped "

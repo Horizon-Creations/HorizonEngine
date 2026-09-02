@@ -90,6 +90,12 @@ public:
     // Take one back out, addressed by the instance id addChild returned. Its
     // elements and its script instance both go.
     bool removeChild(int widgetId, HorizonCode::InstanceId child);
+    // The script instance of the component embedded in the slot called
+    // `elementName` (0 = no such slot, or nothing grafted into it). A component
+    // IS another instance, so this is the reference every by-reference node
+    // wants: Call Function, Bind Event, Get/Set (Ref). The same handle
+    // listRow hands out for a row, for a slot that was placed in the designer.
+    HorizonCode::InstanceId childInstance(int widgetId, const std::string& elementName) const;
     // …or all of them under one parent. Returns how many were removed, which is
     // what "rebuild the list from scratch" is written with.
     int  clearChildren(int widgetId, const std::string& parentName);

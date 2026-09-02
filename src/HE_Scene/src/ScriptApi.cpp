@@ -351,6 +351,10 @@ int widgetOfScript(HorizonWorld& world, uint32_t scriptId)
 {
 	return world.widgets().widgetIdForScript(scriptId);
 }
+uint32_t childWidget(HorizonWorld& world, int widgetId, const std::string& element)
+{
+	return world.widgets().childInstance(widgetId, element);
+}
 int stopAllAnimations(HorizonWorld& world, int widgetId)
 {
 	return world.widgets().stopAllAnimations(widgetId);

@@ -613,6 +613,12 @@ namespace widget {
     // value stays where it got to, because a stop is not a rewind.
     int  stopAnimation(Ctx&, int id, const std::string& element, const std::string& prop);
 
+    // The component embedded in the slot of that name, as a REFERENCE (0 = no
+    // such slot, or nothing in it). A component is another instance, so this is
+    // the handle its functions, its events and its public variables are reached
+    // through — the same one listRow hands out for a list row.
+    uint32_t childRef(Ctx&, int id, const std::string& element);
+
     // ── Authored clips ──────────────────────────────────────────────────────
     // The animations the widget carries, made in the designer's timeline. By
     // NAME, because the name is what the timeline shows and what a graph can

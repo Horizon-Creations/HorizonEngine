@@ -3030,6 +3030,7 @@ TEST_CASE("EngineApi: every row that acts on an entity carries the self-default"
         "widget.stopAnimation", "widget.playAnimation", "widget.playAnimationLooped",
         "widget.stopAnimationClip", "widget.isPlayingAnimation",
         "widget.stopAllAnimations", "widget.restoreOriginalState",
+        "widget.childRef",
     };
 
     size_t flagged = 0, widgets = 0;

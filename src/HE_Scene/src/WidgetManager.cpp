@@ -631,6 +631,21 @@ HorizonCode::InstanceId WidgetManager::instanceOfChild(const Instance& w, int re
 	return 0;
 }
 
+HorizonCode::InstanceId WidgetManager::childInstance(int widgetId,
+                                                     const std::string& elementName) const
+{
+	const Instance* w = find(widgetId);
+	if (!w || elementName.empty()) return 0;
+	// The WidgetRef element that carries the name — the slot, not what is in it.
+	// Its instance is the component's own script, which is what a reference to a
+	// component MEANS: the same thing a list row hands out (listRow), and the
+	// same thing Call Function and Get (Ref) expect on their Target.
+	for (const auto& ep : w->tree.elements)
+		if (ep && ep->name == elementName && ep->type() == HE::UIWidgetType::WidgetRef)
+			return instanceOfChild(*w, ep->id);
+	return 0;
+}
+
 bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 {
 	Instance* w = find(widgetId);

@@ -153,6 +153,10 @@ namespace ScriptApi
 	// The widget a HorizonCode instance belongs to (0 = none). What lets a call
 	// from a widget's own graph mean "this widget" with nothing wired.
 	int  widgetOfScript(HorizonWorld& world, uint32_t scriptId);
+	// The component embedded in the slot of that name, as a reference (0 = no
+	// such slot). A component is another instance, so this is what its
+	// functions, its events and its public variables are reached through.
+	uint32_t childWidget(HorizonWorld& world, int widgetId, const std::string& element);
 	// Everything moving in this widget, clips and single properties both.
 	int  stopAllAnimations(HorizonWorld& world, int widgetId);
 	// Stop everything and put every animated property back the way it was.

@@ -996,6 +996,9 @@ bool animateVec2(Ctx& c, int id, const std::string& element, const std::string& 
 int stopAnimation(Ctx& c, int id, const std::string& element, const std::string& prop)
 { return c.world ? ScriptApi::stopAnimation(*c.world, id, element, prop) : 0; }
 
+uint32_t childRef(Ctx& c, int id, const std::string& element)
+{ return c.world ? ScriptApi::childWidget(*c.world, id, element) : 0u; }
+
 bool playAnimation(Ctx& c, int id, const std::string& clip, bool restore,
                    const std::string& direction)
 { return c.world ? ScriptApi::playClipAsAuthored(*c.world, id, clip, restore, direction)
@@ -3384,6 +3387,15 @@ const std::vector<ApiFn>& registry()
             "HE::api::widget::isPlayingAnimation",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
                 widget::isPlayingAnimation(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        // A reference to the component sitting in one of this widget's slots.
+        // Pure: it is a lookup, not an action. What makes a component reachable
+        // the way any other class is — its functions, its events, its public
+        // variables — instead of only through the elements it grafted in.
+        t.push_back({ "widget.childRef", "Widget", false,
+            {{"widget", P::Ref}, {"element", P::String}}, {{"child", P::Ref}},
+            "HE::api::widget::childRef",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
+                widget::childRef(c, (int)aR(a, 0), aS(a, 1))) }; } });
         t.push_back({ "widget.stopAllAnimations", "Widget", true,
             {{"widget", P::Ref}}, {{"stopped", P::Int}},
             "HE::api::widget::stopAllAnimations",
@@ -4074,6 +4086,7 @@ const std::vector<ApiFn>& registry()
             { "widget.playAnimationLooped", "Play Animation Looped" },
             { "widget.stopAnimationClip", "Stop Animation" },
             { "widget.isPlayingAnimation", "Is Animation Playing" },
+            { "widget.childRef", "Get Child Widget" },
             { "widget.stopAllAnimations", "Stop All Animations" },
             { "widget.restoreOriginalState", "Restore Original State" },
             { "widget.showModal", "Show Modal Widget" },
@@ -4306,6 +4319,9 @@ const std::vector<ApiFn>& registry()
             "widget.playAnimation", "widget.playAnimationLooped",
             "widget.stopAnimationClip", "widget.isPlayingAnimation",
             "widget.stopAllAnimations", "widget.restoreOriginalState",
+            // Not an animation, same argument: "which component sits in my slot"
+            // is a question about oneself far more often than about a stranger.
+            "widget.childRef",
         };
         for (auto& fn : t)
         {
