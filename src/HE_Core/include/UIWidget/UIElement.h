@@ -247,6 +247,11 @@ struct UIElementRenderState
     // the selection and the input method's preedit all hang on this and not on
     // `focused` (see WidgetManager::isEditingText).
     bool editing = false;
+    // …and whether something is being dragged over it right now and would land
+    // HERE if it were let go. Its own state and not `hovered`, because during a
+    // drag the pointer is over an element without touching it: the hover is
+    // about the mouse, this is about the payload.
+    bool dropTarget = false;
 };
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };
@@ -503,6 +508,18 @@ public:
     // a form component holds a dozen fields and wants the ring on each of them.
     bool        focusFrame = false;
 
+    // ── Can something be dropped on this? (docs/he-apps-plan.md B7) ──────────
+    // Off by default, and that is the whole design: a drop has to be ACCEPTED
+    // somewhere, and an element that never said so is transparent to it. The
+    // drop then travels up from whatever the pointer hit to the first ancestor
+    // that says yes — the same bubbling a click does, and for the same reason:
+    // a file dragged onto the caption of a card is dragged onto the card.
+    //
+    // A flag rather than a widget type, because "drop a file here" is a thing a
+    // panel, a list, an image and a text field all want to be, and none of them
+    // wants to be a different type for it.
+    bool        acceptsDrop = false;
+
     virtual ~UIElement() = default;
 
     virtual UIWidgetType type() const = 0;
@@ -538,6 +555,11 @@ public:
         // ended. It was not in the per-type lists because until animations
         // existed there was nothing a Panel or a Text could ever fire.
         out.push_back({ "OnAnimationFinished", UIPropType::String, /*hasArg=*/true });
+        // …and anything can be a drop zone, for the same reason: "a file was
+        // let go over me" is a thing that happens TO an element, not something
+        // a particular type does. Whether it ever fires is Accepts Drop's
+        // business, not this list's.
+        out.push_back({ "OnFileDropped", UIPropType::String, /*hasArg=*/true });
         return out;
     }
     virtual std::vector<UIEventDesc> events() const { return {}; }
@@ -660,6 +682,7 @@ protected:
         dst.tooltip = tooltip;
         dst.clipChildren = clipChildren;
         dst.focusFrame = focusFrame;
+        dst.acceptsDrop = acceptsDrop;
         dst.cornerRadius = cornerRadius;
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;
         dst.gradient = gradient; dst.gradientColor = gradientColor;

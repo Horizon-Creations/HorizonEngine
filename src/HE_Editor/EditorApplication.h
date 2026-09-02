@@ -317,6 +317,16 @@ struct AppContext
 	std::function<void(float mx, float my, float vpW, float vpH,
 	                   bool down, bool valid, float wheel,
 	                   bool rightDown, bool doubleClick)> reportPlayUIPointer;
+	// …and WHERE that image sits, so an OS file drop can be turned into the same
+	// coordinates. A drag from the desktop is not a mouse: it arrives as its own
+	// SDL event with a position in the window that received it, and nobody but
+	// the panel knows where in that window the preview is. `x`/`y` are the
+	// image's top-left corner in window points, `scale` turns points into
+	// render-target pixels, and `windowId` is the SDL window the panel is in —
+	// a torn-off viewport is a different window, and a drop on it is not a drop
+	// on the main one.
+	std::function<void(float x, float y, float scaleX, float scaleY,
+	                   unsigned windowId)> reportPlayUIRect;
 
 	// ── Scene file management ──────────────────────────────────────────────
 	// currentScenePath is empty for an unsaved/new scene. sceneDirty reflects
@@ -719,6 +729,17 @@ private:
 	// the live preview is a preview of an application you cannot fully use.
 	bool  m_uiPointerRight = false, m_uiPointerDouble = false;
 	float m_uiWheel = 0.0f;   // this frame's notches, consumed by the widget pass
+	// Where the preview image sits inside its own window, and how its points map
+	// to render-target pixels. Only a file drop needs this: the mouse arrives
+	// already converted (reportPlayUIPointer), a drag from the desktop does not.
+	float m_uiPanelX = 0.0f, m_uiPanelY = 0.0f;
+	float m_uiPanelScaleX = 1.0f, m_uiPanelScaleY = 1.0f;
+	unsigned m_uiPanelWindow = 0;   // SDL window id of the panel's viewport
+	// The files of the drag in flight, collected between DROP_BEGIN and
+	// DROP_COMPLETE, and where it was last seen in preview pixels.
+	std::vector<std::string> m_dropPaths;
+	float m_dropX = 0.0f, m_dropY = 0.0f;
+	bool  m_dropInPreview = false;   // …and whether it is over the preview at all
 	// Last frame's UI-navigation buttons (bits: up/down/left/right/activate) —
 	// the input layer reports held state, and holding Down must step one entry.
 	std::uint8_t m_uiNavPrev = 0;

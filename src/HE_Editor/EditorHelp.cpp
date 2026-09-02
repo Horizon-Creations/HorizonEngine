@@ -2616,6 +2616,13 @@ namespace
 	  "sees as the control, and a ring around the field alone is a small "
 	  "rectangle floating inside a pill. Set it on the frame.",
 	  "", "ui#widgets" },
+	{ "UI Widget/Accepts drop", "",
+	  "Makes this element a drop zone: a file dragged in from the desktop and let "
+	  "go over it fires On File Dropped, once per file, with the file's path. The "
+	  "drop travels UP from whatever the pointer met to the first element that "
+	  "accepts one, so set it on the panel and not on the label inside it. Where "
+	  "nothing accepts, the window took it and the Game Instance hears it instead.",
+	  "", "ui#widgets" },
 
 	{ "UI Graph/Event Graph", "Event Graph",
 	  "The widget's main graph, where the event handlers live. The functions "

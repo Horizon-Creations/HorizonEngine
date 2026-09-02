@@ -696,6 +696,8 @@ void Runtime::fireOnClipFinished(InstanceId id, const std::string& clip)
 }
 HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
                   onRowActivated(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnFileDropped, "OnFileDropped", const std::string&,
+                  onFileDropped(elem, v), Value::ofString(v))
 #undef HE_HC_VALUE_EVENT
 
 // The physics contacts: one Int argument (the other entity), no element. Same

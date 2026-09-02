@@ -154,6 +154,15 @@ private:
     // 3 = triple). Latched in OnEvent, consumed by updateUIInput, which is where
     // the pointer arithmetic lives. Zero means "no multi-click this frame".
     int  m_uiClickCount = 0;
+    // Files being dragged in from the desktop. SDL hands them over one at a time
+    // while the drag is still in the air and only then says it is over, so they
+    // are collected here and delivered at the end: dropping three files onto a
+    // window is one gesture. Cleared at the start of every drag, so a drag that
+    // leaves the window again cannot leave its files behind for the next one.
+    std::vector<std::string> m_dropPaths;
+    // Where the drag was last seen, in drawable pixels — the position comes with
+    // the movement, not with the drop that ends it.
+    float m_dropX = 0.0f, m_dropY = 0.0f;
     // Startup window + backend, settled once by applyShippedConfig. The values
     // here are the ones a game shipped with before the config could carry them,
     // so an export without those keys behaves exactly as it always did.

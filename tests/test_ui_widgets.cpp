@@ -385,8 +385,15 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnAnimationFinished")
         { textCanFinish = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
     CHECK(textCanFinish);
-    CHECK(HE::UIText{}.allEvents().size() == 1);
-    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 1);
+    // The second one of those: anything can be a drop zone, so anything can be
+    // told that a file was let go over it.
+    bool textCanTakeAFile = false;
+    for (const auto& e : HE::UIText{}.allEvents())
+        if (e.name == "OnFileDropped")
+        { textCanTakeAFile = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
+    CHECK(textCanTakeAFile);
+    CHECK(HE::UIText{}.allEvents().size() == 2);
+    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 2);
     CHECK(HE::UIButton{}.interactive());
     CHECK(!HE::UIText{}.interactive());
 }
@@ -8679,7 +8686,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 38);
+    CHECK(HE::uiBaseProperties().size() == 39);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -10038,4 +10045,232 @@ TEST_CASE("Timeline view: playback brings the playhead back into view")
     // …and centring never scrolls past the end.
     v.reveal(10.0f);
     CHECK(v.scroll == doctest::Approx(8.0f));
+}
+
+// ═══ B7: files dragged in from the desktop ═══════════════════════════════════
+
+namespace
+{
+// A drop zone with a caption lying across it, an inert panel beside it, and a
+// graph that writes what it was given into the caption while counting the
+// events. The caption is the point: the pointer meets IT, and the zone is what
+// accepts — if the drop did not travel up, nothing would ever hear it.
+struct DropFixture
+{
+    HE::UIWidgetTree  tree;
+    HorizonCode::Graph graph;
+    int zone = 0, caption = 0, inert = 0;
+
+    DropFixture()
+    {
+        tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+        tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+
+        zone = tree.add(HE::UIWidgetType::Panel);
+        {
+            HE::UIElement& e = *tree.find(zone);
+            e.name = "Zone"; e.acceptsDrop = true;
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 300.0f;
+        }
+        caption = tree.add(HE::UIWidgetType::Text);
+        {
+            HE::UIElement& e = *tree.find(caption);
+            e.parentId = zone; e.name = "Caption";
+            e.setProp("Text", HE::UIPropValue::ofString(""));
+            e.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+            // Inset, not filling: the ring has to be provably on the ZONE, and
+            // a caption whose rect is the zone's rect could not tell the two
+            // apart — the assertion would pass either way, which is the same as
+            // not making it.
+            HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+            HE::uiSetAnchorInsetsX(e, 20.0f, 20.0f);
+            HE::uiSetAnchorInsetsY(e, 20.0f, 20.0f);
+        }
+        inert = tree.add(HE::UIWidgetType::Panel);
+        {
+            HE::UIElement& e = *tree.find(inert);
+            e.name = "Inert";
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 200.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 300.0f;
+        }
+
+        HorizonCode::Variable count;
+        count.name = "count"; count.type = PinType::Int;
+        graph.variables.push_back(count);
+
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnFileDropped";
+        ev.elem = zone; ev.hasArg = true; ev.propType = PinType::String;
+        const int evId = graph.addNode(ev);
+        HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = caption;
+        set.s = "Text"; set.propType = PinType::String;
+        const int setId = graph.addNode(set);
+        REQUIRE(graph.connect(evId, 0, setId, 0));   // exec
+        REQUIRE(graph.connect(evId, 1, setId, 2));   // the path → the caption
+
+        // …and one up on the counter, so "one event per file" is a number and
+        // not an impression.
+        HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = "count";
+        get.propType = PinType::Int;
+        const int getId = graph.addNode(get);
+        HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+        const int oneId = graph.addNode(one);
+        HorizonCode::Node add; add.type = NodeType::Add;
+        const int addId = graph.addNode(add);
+        HorizonCode::Node inc; inc.type = NodeType::SetVariable; inc.s = "count";
+        inc.propType = PinType::Int;
+        const int incId = graph.addNode(inc);
+        REQUIRE(graph.connect(getId, 0, addId, 0));
+        REQUIRE(graph.connect(oneId, 0, addId, 1));
+        REQUIRE(graph.connect(setId, 1, incId, 0));  // exec, after the caption
+        REQUIRE(graph.connect(addId, 2, incId, 2));
+    }
+};
+
+// The drop ring: an outlined rectangle with no fill, in the drop colour rather
+// than the focus one. Counting THAT is what tells the two rings apart.
+int countDropRings(const std::vector<UIRenderObject>& out)
+{
+    int n = 0;
+    for (const UIRenderObject& o : out)
+        if (o.borderWidth > 0.0f && o.color.a <= 0.001f && o.borderColor.b > 0.9f)
+            ++n;
+    return n;
+}
+}
+
+TEST_CASE("Drop: the file lands on the element that ACCEPTS it, not on the one it was let go over")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DropFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+
+    // Let go over the CAPTION, which accepts nothing. The zone under it does,
+    // and that is where the event has to arrive.
+    CHECK(wm.processDrop(400.0f, 300.0f, 100.0f, 150.0f, { "/tmp/a.txt" }));
+    auto captionText = [&] { return wm.tree(id)->find(f.caption)->getProp("Text").s; };
+    CHECK(captionText() == "/tmp/a.txt");
+    CHECK(rt.getVariable(inst, "count").i == 1);
+
+    // Beside it, over a panel that never said it takes drops: nothing hears it,
+    // and the caption keeps what it had. An element that has not opted in is
+    // transparent to a drop, which is the whole meaning of the flag.
+    CHECK_FALSE(wm.processDrop(400.0f, 300.0f, 300.0f, 150.0f, { "/tmp/b.txt" }));
+    CHECK(captionText() == "/tmp/a.txt");
+    CHECK(rt.getVariable(inst, "count").i == 1);
+
+    // Three files at once are three events. A drop of many is one gesture and
+    // many answers — the last one is what the caption ends up showing.
+    CHECK(wm.processDrop(400.0f, 300.0f, 100.0f, 150.0f,
+                         { "/tmp/1.txt", "/tmp/2.txt", "/tmp/3.txt" }));
+    CHECK(rt.getVariable(inst, "count").i == 4);
+    CHECK(captionText() == "/tmp/3.txt");
+
+    // An empty drop is not a drop. The OS sends the end of a drag that carried
+    // nothing too, and firing on it would be an application opening a file it
+    // was never given.
+    CHECK_FALSE(wm.processDrop(400.0f, 300.0f, 100.0f, 150.0f, {}));
+    CHECK(rt.getVariable(inst, "count").i == 4);
+}
+
+TEST_CASE("Drop: what no element accepts, the window took")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DropFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    // The application's own script: it hears a drop that landed on no drop zone,
+    // with elem 0, because no element took it. An app that opens whatever it is
+    // handed wants exactly one place to say so.
+    HorizonCode::Graph app;
+    {
+        HorizonCode::Variable taken;
+        taken.name = "taken"; taken.type = PinType::String;
+        app.variables.push_back(taken);
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnFileDropped";
+        ev.elem = 0; ev.hasArg = true; ev.propType = PinType::String;
+        const int evId = app.addNode(ev);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "taken";
+        set.propType = PinType::String;
+        const int setId = app.addNode(set);
+        REQUIRE(app.connect(evId, 0, setId, 0));
+        REQUIRE(app.connect(evId, 1, setId, 2));
+    }
+    const HorizonCode::InstanceId gi = rt.setGameInstance(app);
+    REQUIRE(gi != 0);
+
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Over the inert half: no element accepts, so the window did.
+    CHECK_FALSE(wm.processDrop(400.0f, 300.0f, 300.0f, 150.0f, { "/tmp/loose.txt" }));
+    CHECK(rt.getVariable(gi, "taken").s == "/tmp/loose.txt");
+
+    // …and a drop a zone DID take stops there. Both hearing it would mean every
+    // application opening the file twice, once per listener.
+    CHECK(wm.processDrop(400.0f, 300.0f, 100.0f, 150.0f, { "/tmp/mine.txt" }));
+    CHECK(rt.getVariable(gi, "taken").s == "/tmp/loose.txt");
+}
+
+TEST_CASE("Drop: the highlight marks the element that would take it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DropFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 300.0f, out);
+    REQUIRE(countDropRings(out) == 0);       // nothing is being dragged yet
+
+    // Over the caption: the mark goes on the ZONE, the same element the drop
+    // would reach. A highlight that promises one thing while the drop lands on
+    // another is worse than no highlight.
+    CHECK(wm.dropHover(400.0f, 300.0f, 100.0f, 150.0f, true));
+    out.clear(); wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 1);
+    const HE::UIWidgetRect zr =
+        HE::uiElementRect(*wm.tree(id), *wm.tree(id)->find(f.zone));
+    bool onTheZone = false;
+    for (const UIRenderObject& o : out)
+        if (o.borderWidth > 0.0f && o.color.a <= 0.001f && o.borderColor.b > 0.9f)
+            onTheZone = std::abs(o.position.x - zr.x) < 0.5f &&
+                        std::abs(o.size.x - zr.w) < 0.5f;
+    CHECK(onTheZone);
+
+    // Dragged over the half that accepts nothing: the mark goes away rather
+    // than staying on the last thing it touched.
+    CHECK_FALSE(wm.dropHover(400.0f, 300.0f, 300.0f, 150.0f, true));
+    out.clear(); wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 0);
+
+    // …and the drag leaving the window ends it too.
+    CHECK(wm.dropHover(400.0f, 300.0f, 100.0f, 150.0f, true));
+    CHECK_FALSE(wm.dropHover(400.0f, 300.0f, 100.0f, 150.0f, false));
+    out.clear(); wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 0);
+
+    // The drop itself clears the mark: the gesture is over, whatever it hit.
+    CHECK(wm.dropHover(400.0f, 300.0f, 100.0f, 150.0f, true));
+    CHECK(wm.processDrop(400.0f, 300.0f, 100.0f, 150.0f, { "/tmp/a.txt" }));
+    out.clear(); wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 0);
 }

@@ -456,6 +456,19 @@ void render(AppContext& ctx, float dt)
 							viewportHovered &&
 								ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
 					}
+					// Where the image IS, for the drags that are not the mouse.
+					// The corner is measured against the panel's own platform
+					// viewport rather than the desktop: a file drop arrives in
+					// window coordinates, and a panel torn out into a window of
+					// its own would otherwise be offset by wherever that window
+					// happens to sit on the screen.
+					if (ctx.reportPlayUIRect)
+					{
+						const ImGuiViewport* vp = ImGui::GetWindowViewport();
+						ctx.reportPlayUIRect(rectMin.x - vp->Pos.x, rectMin.y - vp->Pos.y,
+							fbScale.x, fbScale.y,
+							static_cast<unsigned>(reinterpret_cast<intptr_t>(vp->PlatformHandle)));
+					}
 				}
 				else if (ctx.editorCamera)
 				{

@@ -128,6 +128,12 @@ public:
     virtual void onRowActivated(int elem, int index)
     { fireEvent("OnRowActivated", elem, Value::ofInt(index)); }
     virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
+    // A file was dropped on this element from the desktop. One call per file,
+    // the argument being its absolute path — a drop of three files is three
+    // events, because "open what I gave you" is the same answer three times and
+    // a list would only make the simple case carry the hard one's weight.
+    virtual void onFileDropped(int elem, const std::string& path)
+    { fireEvent("OnFileDropped", elem, Value::ofString(path)); }
     // An animation reached its target. The argument is the PROPERTY's name, not
     // the element's: two animations on one element (fade it and slide it) end
     // separately, and an event that could not say which one ended would be a

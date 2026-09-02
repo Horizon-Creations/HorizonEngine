@@ -371,6 +371,25 @@ public:
                         bool primaryDown, bool valid,
                         bool secondaryDown = false);
 
+    // ── Files dragged in from the desktop (docs/he-apps-plan.md B7) ──────────
+    // The OS drag is a gesture in three parts and these are two of them: while
+    // it hovers, and when it is let go. Both take the pointer in the same
+    // render-target pixels processPointer does, and both resolve the element
+    // through the same hit test, because a drop that lands somewhere other than
+    // where the highlight promised is worse than no highlight at all.
+    //
+    // dropHover marks the element that WOULD take it (`false` clears the mark,
+    // which is what a drag leaving the window means). Returns true when there is
+    // a target — the app turns that into the OS "this is allowed" cursor.
+    bool dropHover(float vpWidth, float vpHeight, float x, float y, bool active);
+    // …and the drop itself: one OnFileDropped per path on the first element at
+    // or above the pointer that accepts drops. Nothing there? Then the WINDOW
+    // took it, and the event goes to the GameInstance with elem 0 — an app that
+    // opens whatever it is given wants exactly one place to say so, not one per
+    // panel. Returns true when an element took it.
+    bool processDrop(float vpWidth, float vpHeight, float x, float y,
+                     const std::vector<std::string>& paths);
+
     // What the last processPointer answered. Both apps drop that return value,
     // so this is how anyone else — gameplay code and scripts, through
     // HE::api::ui::pointerOverUI — finds out that this frame's click belongs to
@@ -872,4 +891,26 @@ private:
     // the element the focus is on right now (see isEditingText).
     bool m_focusEditing = false;
     HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants
+    // The element a drag is currently hovering over, and would land on (0 = none).
+    // Held across frames because the OS sends the position while the drag moves
+    // and the drop only at the end: without remembering it, the highlight would
+    // be gone by the time the file arrives.
+    int m_dropWidget = 0, m_dropElem = 0;
+
+    // ── The one hit test ─────────────────────────────────────────────────────
+    // Topmost hit-testable element under a point, across every visible widget
+    // that takes input: highest (widget zOrder, element sort key) wins, which is
+    // the order the draw paints in. The pointer and the drop both come through
+    // here, so what the highlight promises and what the drop reaches cannot
+    // drift apart — they cannot be two pieces of arithmetic if they are one.
+    struct PointerHit
+    {
+        Instance* widget = nullptr;
+        int  elem = 0;             // the RAW hit, before any bubbling
+        bool interactive = false;  // does it take pointer events itself?
+        HE::UICursor cursor = HE::UICursor::Default;
+    };
+    PointerHit topmostHit(float vpWidth, float vpHeight, float x, float y);
+    // First element at or above `hitElem` that accepts a drop (0 = none).
+    int dropTargetAt(Instance& w, int hitElem) const;
 };

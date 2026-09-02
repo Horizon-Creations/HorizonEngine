@@ -1454,6 +1454,64 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
 	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
 
+	// The desktop switched between light and dark while we were running. An
+	// application set to "System" follows it now rather than at the next start —
+	// that is the entire difference between the setting and a once-at-boot
+	// reading. Outside every gate below: the desktop's theme has nothing to do
+	// with whether a text field happens to be open, and it sat inside that gate
+	// long enough to mean the setting only worked while someone was typing.
+	if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED)
+	{
+		const SDL_SystemTheme sys = SDL_GetSystemTheme();
+		if (sys == SDL_SYSTEM_THEME_LIGHT)
+			m_widgets.setSystemThemeMode(HE::UIThemeMode::Light);
+		else if (sys == SDL_SYSTEM_THEME_DARK)
+			m_widgets.setSystemThemeMode(HE::UIThemeMode::Dark);
+		return true;
+	}
+
+	// ── Files dragged in from the desktop (docs/he-apps-plan.md B7) ──────────
+	// SDL reports one drag as four kinds of event: it entered the window, it
+	// moved, here is a file, it is over. The files arrive one at a time BEFORE
+	// the end, so they are collected and delivered when the gesture finishes —
+	// dropping three files is one drop, not three.
+	if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION ||
+	    event.type == SDL_EVENT_DROP_FILE  || event.type == SDL_EVENT_DROP_COMPLETE)
+	{
+		// The drop position comes in window points, like the mouse; the UI works
+		// in drawable pixels. Same conversion updateUIInput does, and for the
+		// same reason: on a Retina display the two differ by a factor of two.
+		SDL_Window* win = window() ? window()->GetNativeWindow() : nullptr;
+		int ww = 1, wh = 1, pw = 1, ph = 1;
+		if (win) { SDL_GetWindowSize(win, &ww, &wh); SDL_GetWindowSizeInPixels(win, &pw, &ph); }
+		const float dsx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
+		const float dsy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
+		if (event.type != SDL_EVENT_DROP_COMPLETE)
+		{
+			m_dropX = event.drop.x * dsx;
+			m_dropY = event.drop.y * dsy;
+		}
+		switch (event.type)
+		{
+		case SDL_EVENT_DROP_BEGIN:
+			m_dropPaths.clear();
+			break;
+		case SDL_EVENT_DROP_POSITION:
+			m_widgets.dropHover(static_cast<float>(pw), static_cast<float>(ph),
+			                    m_dropX, m_dropY, true);
+			break;
+		case SDL_EVENT_DROP_FILE:
+			if (event.drop.data) m_dropPaths.emplace_back(event.drop.data);
+			break;
+		default:   // SDL_EVENT_DROP_COMPLETE
+			m_widgets.processDrop(static_cast<float>(pw), static_cast<float>(ph),
+			                      m_dropX, m_dropY, m_dropPaths);
+			m_dropPaths.clear();
+			break;
+		}
+		return true;
+	}
+
 	// A focused in-game text field owns the keyboard: route text + edit keys to
 	// the widget and swallow them so they don't drive the camera/gameplay.
 	// Not under game-only routing: there the UI receives nothing, and a field
@@ -1474,19 +1532,6 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		{
 			m_world->widgets().inputComposition(event.edit.text ? event.edit.text : "",
 			                                    event.edit.start);
-			return true;
-		}
-		// The desktop switched between light and dark while we were running. An
-		// application set to "System" follows it now rather than at the next
-		// start — that is the entire difference between the setting and a
-		// once-at-boot reading.
-		if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED)
-		{
-			const SDL_SystemTheme sys = SDL_GetSystemTheme();
-			if (sys == SDL_SYSTEM_THEME_LIGHT)
-				m_widgets.setSystemThemeMode(HE::UIThemeMode::Light);
-			else if (sys == SDL_SYSTEM_THEME_DARK)
-				m_widgets.setSystemThemeMode(HE::UIThemeMode::Dark);
 			return true;
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)

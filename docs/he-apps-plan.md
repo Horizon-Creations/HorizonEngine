@@ -2018,6 +2018,53 @@ gibt.
 
 ---
 
+### B7, erste Hälfte: was von außen hereinkommt (02.09.2026)
+
+Eine Datei aufs Fenster ziehen, der Teil von B7, den man einer App zuerst ansieht. Die zweite
+Hälfte, das Ziehen innerhalb der Anwendung, steht noch aus.
+
+**Ein Drop ist keine Maus.** Er kommt als eigene Ereignisfolge, mit einer Position im Fenster,
+und während er in der Luft ist bewegt sich der Zeiger nicht. Deshalb sind es zwei Aufrufe,
+`dropHover` und `processDrop`, und nicht ein Flag am Zeiger.
+
+**Angenommen wird ausdrücklich, geerbt wird nach oben.** `acceptsDrop` ist ein Feld am
+Basiselement und kein eigener Typ, weil „hier kann man etwas ablegen" etwas ist, das eine
+Fläche, eine Liste, ein Bild und ein Textfeld alle sein wollen. Der Drop wandert vom
+getroffenen Element nach oben zum ersten, das zusagt, genau wie ein Klick: eine Datei, die man
+auf die Beschriftung einer Karte zieht, zieht man auf die Karte.
+
+**Ein Ereignis pro Datei.** Drei Dateien sind drei `OnFileDropped` mit je einem Pfad. Eine
+Liste als Nutzlast würde den einfachen Fall das Gewicht des schweren tragen lassen, und die
+Ereignis-Argumente kennen ohnehin nur Exec, String, Float, Bool und Int.
+
+**Was kein Element annimmt, hat das Fenster genommen.** Dann hört es die GameInstance, mit
+elem 0. Eine Anwendung, die öffnet was man ihr gibt, will genau eine Stelle dafür und nicht
+eine pro Panel. Beides zugleich feuert nie, sonst öffnete jede App jede Datei doppelt.
+
+**Der Treffertest ist jetzt eine Funktion mit zwei Aufrufern.** `topmostHit` war der
+eingerückte Doppelblock in `processPointer`; ihn stehen zu lassen und für den Drop
+nachzubauen wäre die Falle aus der Liste unten gewesen, wörtlich: Bild und Zeiger müssen
+durch dieselbe Auflösung. Der Drop gehört zum Zeiger. Aus demselben Grund ist auch der Ring
+nur einmal geschrieben (`emitRing`), die beiden Aufrufer unterscheiden sich in Farbe und in
+der Frage, an welchem Element er hängt, in sonst nichts.
+
+**Der Rahmen sagt, wo es landet, nicht wo die Tasten hingehen.** Zwei Ringe in zwei Farben,
+und das ist kein Schmuck: wer eine Datei zieht, muss auf einen Blick sehen können, welche der
+beiden Zusagen gerade gemeint ist.
+
+**Nebenbefund, mitgefixt:** `SDL_EVENT_SYSTEM_THEME_CHANGED` lag im
+`isEditingText()`-Zweig von `GameApplication::OnEvent`. „Dem System folgen" funktionierte
+damit nur, solange jemand gerade in einem Textfeld tippte. Der Zweig war der falsche Ort,
+und das fällt erst auf, wenn man daneben etwas Neues einhängt.
+
+**Die Live-Vorschau nimmt sie auch.** Der Editor hatte bisher gar keinen Drop-Pfad. Das
+Viewport-Panel meldet jetzt neben dem Zeiger auch sein Rechteck, in Fensterpunkten und
+gegen die eigene Plattform-Ansicht gerechnet, damit ein herausgezogenes Panel nicht um die
+Fensterposition daneben liegt; die SDL-Fenster-Id kommt mit, weil ein Drop auf ein anderes
+Fenster kein Drop auf dieses ist.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

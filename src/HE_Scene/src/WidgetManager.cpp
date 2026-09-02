@@ -1806,6 +1806,82 @@ bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) con
 	return false;
 }
 
+// Topmost hit-testable element under a point. The pointer asks this, and so
+// does a file being dragged in — one arithmetic with two callers, because the
+// day they are two is the day the drop lands somewhere other than the highlight
+// promised.
+WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeight,
+                                                    float x, float y)
+{
+	PointerHit hit;
+	long topKey = 0;
+	for (auto& w : m_instances)
+	{
+		if (!w.visible) continue;
+		// A layer is up and this is not it: inert, all the way down. The
+		// same question every other way in asks (takesInput).
+		if (!takesInput(w.id)) continue;
+		// Same resolution the draw uses (see extract) — a hit test on a
+		// differently-scaled canvas is a button that is not where it looks.
+		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		const float sx = canvas.scaleX;
+		const float sy = canvas.scaleY;
+		for (const auto& ep : w.tree.elements)
+		{
+			const HE::UIElement& e = *ep;
+			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
+			// hitTestable false = transparent to the pointer: the only way
+			// out of the stack.
+			if (!e.hitTestable) continue;
+			// Disabled is inert, all the way down: a greyed-out button that
+			// still hovers and clicks is the classic UI lie.
+			if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
+			// Faded to nothing means gone — a menu at opacity 0 must not
+			// keep swallowing the clicks meant for what is behind it.
+			if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) continue;
+			HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+			// Rotated? Then the pointer is turned back into the element's
+			// own unrotated space and the test stays a plain rectangle —
+			// a tilted button has to be clickable where it LOOKS, and its
+			// corners are the parts that move the furthest.
+			float mcx = x / sx, mcy = y / sy;
+			if (HE::UIRotation rot; HE::uiElementRotation(w.tree, e, rot, &canvas))
+				HE::uiUnrotatePoint(rot, mcx, mcy, mcx, mcy);
+			const float testX = mcx * sx, testY = mcy * sy;
+			// A clipping ancestor cuts the hit area down with the picture:
+			// the half of a list row that hangs out of its box is not
+			// visible, so it must not be clickable either.
+			HE::UIWidgetRect clip{};
+			if (HE::uiElementClipRect(w.tree, e, clip, &canvas))
+			{
+				const float cx0 = std::max(r.x, clip.x), cy0 = std::max(r.y, clip.y);
+				const float cx1 = std::min(r.x + r.w, clip.x + clip.w);
+				const float cy1 = std::min(r.y + r.h, clip.y + clip.h);
+				if (cx1 <= cx0 || cy1 <= cy0) continue;   // fully cut off
+				r.x = cx0; r.y = cy0; r.w = cx1 - cx0; r.h = cy1 - cy0;
+			}
+			const float x0 = r.x * sx, y0 = r.y * sy;
+			const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
+			if (testX < x0 || testX > x1 || testY < y0 || testY > y1)
+				continue;
+			const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
+			if (!hit.widget || key >= topKey)
+			{
+				hit.widget = &w; hit.elem = e.id;
+				topKey = key; hit.cursor = e.hoverCursor;
+				hit.interactive = isInteractive(w, e);
+				// A text field asks for the I-beam by BEING a text field.
+				// Only when the author picked nothing else: an explicit
+				// hoverCursor is a decision and stays one.
+				if (hit.cursor == HE::UICursor::Default &&
+				    e.type() == HE::UIWidgetType::TextInput)
+					hit.cursor = HE::UICursor::Text;
+			}
+		}
+	}
+	return hit;
+}
+
 bool WidgetManager::processPointer(float vpWidth, float vpHeight,
                                    float mouseX, float mouseY,
                                    bool primaryDown, bool valid,
@@ -1906,83 +1982,17 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// frame it becomes visible.
 	syncLists();
 
-	Instance* topW = nullptr;
-	int  topElem = 0;
+	const PointerHit ph = valid ? topmostHit(vpWidth, vpHeight, mouseX, mouseY)
+	                            : PointerHit{};
+	Instance* topW = ph.widget;
+	int  topElem = ph.elem;
 	// The element the pointer LANDED on, before the bubbling below moves the
 	// event to whoever reacts. A list highlights the row under the pointer even
 	// when what is under it is a button in that row, and only the raw hit can
 	// answer that.
-	int  topHit  = 0;
-	long topKey  = 0;
-	bool topActs = false;      // does the winner actually take events?
-	HE::UICursor topCursor = HE::UICursor::Default;
-	if (valid)
-	{
-		for (auto& w : m_instances)
-		{
-			if (!w.visible) continue;
-			// A layer is up and this is not it: inert, all the way down. The
-			// same question every other way in asks (takesInput).
-			if (!takesInput(w.id)) continue;
-			// Same resolution the draw uses (see extract) — a hit test on a
-			// differently-scaled canvas is a button that is not where it looks.
-			const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
-			const float sx = canvas.scaleX;
-			const float sy = canvas.scaleY;
-			for (const auto& ep : w.tree.elements)
-			{
-				const HE::UIElement& e = *ep;
-				if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
-				// hitTestable false = transparent to the pointer: the only way
-				// out of the stack.
-				if (!e.hitTestable) continue;
-				// Disabled is inert, all the way down: a greyed-out button that
-				// still hovers and clicks is the classic UI lie.
-				if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
-				// Faded to nothing means gone — a menu at opacity 0 must not
-				// keep swallowing the clicks meant for what is behind it.
-				if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) continue;
-				HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
-				// Rotated? Then the pointer is turned back into the element's
-				// own unrotated space and the test stays a plain rectangle —
-				// a tilted button has to be clickable where it LOOKS, and its
-				// corners are the parts that move the furthest.
-				float mcx = mouseX / sx, mcy = mouseY / sy;
-				if (HE::UIRotation rot; HE::uiElementRotation(w.tree, e, rot, &canvas))
-					HE::uiUnrotatePoint(rot, mcx, mcy, mcx, mcy);
-				const float testX = mcx * sx, testY = mcy * sy;
-				// A clipping ancestor cuts the hit area down with the picture:
-				// the half of a list row that hangs out of its box is not
-				// visible, so it must not be clickable either.
-				HE::UIWidgetRect clip{};
-				if (HE::uiElementClipRect(w.tree, e, clip, &canvas))
-				{
-					const float cx0 = std::max(r.x, clip.x), cy0 = std::max(r.y, clip.y);
-					const float cx1 = std::min(r.x + r.w, clip.x + clip.w);
-					const float cy1 = std::min(r.y + r.h, clip.y + clip.h);
-					if (cx1 <= cx0 || cy1 <= cy0) continue;   // fully cut off
-					r.x = cx0; r.y = cy0; r.w = cx1 - cx0; r.h = cy1 - cy0;
-				}
-				const float x0 = r.x * sx, y0 = r.y * sy;
-				const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
-				if (testX < x0 || testX > x1 || testY < y0 || testY > y1)
-					continue;
-				const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
-				if (!topW || key >= topKey)
-				{
-					topW = &w; topElem = e.id; topHit = e.id;
-					topKey = key; topCursor = e.hoverCursor;
-					topActs = isInteractive(w, e);
-					// A text field asks for the I-beam by BEING a text field.
-					// Only when the author picked nothing else: an explicit
-					// hoverCursor is a decision and stays one.
-					if (topCursor == HE::UICursor::Default &&
-					    e.type() == HE::UIWidgetType::TextInput)
-						topCursor = HE::UICursor::Text;
-				}
-			}
-		}
-	}
+	const int topHit = ph.elem;
+	bool topActs = ph.interactive;      // does the winner actually take events?
+	HE::UICursor topCursor = ph.cursor;
 	// The winner blocks either way. Who RECEIVES the hover, the press and the
 	// focus is decided from there — and it bubbles UP, never down: a click on a
 	// button's caption is a click on the button, and so is one on the icon next
@@ -2343,6 +2353,98 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// to the UI. Without it, clicking beside a pause dialog fires into the game.
 	m_pointerOverUI = topW != nullptr || hasModal();
 	return m_pointerOverUI;
+}
+
+// ── What a drop would land on ────────────────────────────────────────────────
+// The hit walks UP to the first element that accepts one. That is the same
+// bubbling a click does and it is the same reason: a control people see as one
+// thing is several, and a file dragged onto a card's caption is dragged onto the
+// card. An element that never said "Accepts Drop" is simply not in the answer,
+// which is what makes the flag mean something.
+int WidgetManager::dropTargetAt(Instance& w, int hitElem) const
+{
+	int guard = 0;
+	for (const HE::UIElement* e = w.tree.find(hitElem);
+	     e && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
+	{
+		if (e->acceptsDrop) return e->id;
+		if (e->parentId == 0) break;
+		e = w.tree.find(e->parentId);
+	}
+	return 0;
+}
+
+bool WidgetManager::dropHover(float vpWidth, float vpHeight, float x, float y,
+                              bool active)
+{
+	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
+	int newW = 0, newE = 0;
+	if (active)
+	{
+		// Rows a list can show may have moved since the last frame, exactly as
+		// in processPointer — a drag hovering over a list that has just been
+		// scrolled must highlight the row that is there NOW.
+		syncLists();
+		const PointerHit ph = topmostHit(vpWidth, vpHeight, x, y);
+		if (ph.widget)
+		{
+			const int t = dropTargetAt(*ph.widget, ph.elem);
+			if (t != 0) { newW = ph.widget->id; newE = t; }
+		}
+	}
+	// Only a CHANGE is a redraw. A drag sends its position continuously, and an
+	// application that repaints on every one of them is the idle-CPU problem
+	// (A2) wearing a different hat.
+	if (newW != m_dropWidget || newE != m_dropElem)
+	{
+		m_dropWidget = newW; m_dropElem = newE;
+		m_visualDirty = true;
+	}
+	return m_dropElem != 0;
+}
+
+bool WidgetManager::processDrop(float vpWidth, float vpHeight, float x, float y,
+                                const std::vector<std::string>& paths)
+{
+	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
+	// The highlight is over either way — the gesture ended, whatever it hit.
+	if (m_dropWidget != 0 || m_dropElem != 0)
+	{
+		m_dropWidget = 0; m_dropElem = 0;
+		m_visualDirty = true;
+	}
+	if (paths.empty()) return false;
+
+	// Resolved HERE and not from the remembered hover: the two agree in the
+	// normal case, and where they do not it is because the drag moved after the
+	// last position we were told about. Where the file was let go is the truth.
+	syncLists();
+	Instance* w = nullptr;
+	int elem = 0;
+	{
+		const PointerHit ph = topmostHit(vpWidth, vpHeight, x, y);
+		if (ph.widget)
+		{
+			const int t = dropTargetAt(*ph.widget, ph.elem);
+			if (t != 0) { w = ph.widget; elem = t; }
+		}
+	}
+
+	if (w && elem != 0)
+	{
+		const ScriptTarget t = scriptTargetFor(*w, elem);
+		for (const std::string& p : paths)
+			rt().fireOnFileDropped(t.scriptId, t.elem, p);
+		return true;
+	}
+
+	// Nothing accepted it, so the WINDOW did. An application that opens what it
+	// is handed wants one place to say so, and the GameInstance is the one thing
+	// that is always there — elem 0, because no element took it.
+	if (const HorizonCode::InstanceId gi = rt().gameInstance())
+		for (const std::string& p : paths)
+			rt().fireOnFileDropped(gi, 0, p);
+	return false;
 }
 
 // The focused text field, or nullptr. Every editing entry point starts here,
@@ -3555,6 +3657,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			st.pressed = (e.id == w.pressedElem && m_wasDown);
 			st.focused = (e.id == w.focusedElem);
 			st.editing = st.focused && m_focusEditing && m_focusWidget == w.id;
+			st.dropTarget = (e.id == m_dropElem && m_dropWidget == w.id);
 
 			const auto matIt = w.materials.find(e.id);
 			const HE::UUID matId = matIt != w.materials.end() ? matIt->second : HE::UUID{};
@@ -3730,10 +3833,54 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// sticking out past the curve, which reads as a drawing mistake
 			// rather than as focus. No fill and a border — the shaders blend the
 			// border over the fill, so a transparent fill leaves the outline.
-			if (st.focused && m_focusWidget == w.id)
+			//
+			// Two things ask for one, so the ring itself is written once: the
+			// keyboard is on this element, or something is being dragged over
+			// it. They differ in WHICH element they hang on and in colour, and
+			// in nothing else.
+			auto emitRing = [&](const HE::UIElement& ringOn, const glm::vec4& colour)
 			{
 				constexpr float kRing = 2.0f;   // pixels
 				const size_t ringFirst = out.size();
+				HE::UIWidgetRect rpx{ px.x, px.y, px.w, px.h };
+				float rus = eus, rvs = evs;
+				if (&ringOn != &e)
+				{
+					const HE::UIWidgetRect rr = HE::uiElementRect(w.tree, ringOn, &canvas);
+					rpx = { rr.x * sx, rr.y * sy, rr.w * sx, rr.h * sy };
+					HE::uiElementUnitScale(w.tree, ringOn, rus, rvs, &canvas);
+				}
+				// ON the element's edge, not around it. Outside would be the
+				// prettier ring and it is the one that disappears: a text field
+				// clips its own glyphs to its rect (uiElementClipRect), a list
+				// row is clipped by its box, and a ring drawn two pixels beyond
+				// the edge is two pixels of nothing but clipped-away band. It
+				// also cannot bleed into whatever sits next to it.
+				UIRenderObject ro;
+				ro.position = { rpx.x, rpx.y };
+				ro.size     = { rpx.w, rpx.h };
+				ro.color    = glm::vec4(0.0f);
+				ro.cornerRadius = ringOn.maxCornerRadius() > 0.0f
+					? ringOn.cornerRadius * (sy * rvs) : glm::vec4(0.0f);
+				ro.borderWidth  = kRing;
+				ro.borderColor  = colour;
+				out.push_back(std::move(ro));
+				// Clipped by whatever clips the element the ring is drawn ON —
+				// which for a focus frame is NOT the focused element. The field
+				// clips itself; the frame around it does not, and stamping the
+				// field's clip onto a ring that belongs to the frame is how a
+				// ring ends up cut away to nothing.
+				HE::UIWidgetRect rclip{};
+				if (HE::uiElementClipRect(w.tree, ringOn, rclip, &canvas))
+				{
+					const glm::vec4 r(rclip.x * sx, rclip.y * sy,
+					                  std::max(rclip.w * sx, 0.0f),
+					                  std::max(rclip.h * sy, 0.0f));
+					for (size_t i = ringFirst; i < out.size(); ++i) out[i].clipRect = r;
+				}
+			};
+			if (st.focused && m_focusWidget == w.id)
+			{
 				// Around the element, or around the FRAME that says it is the
 				// control (UIElement::focusFrame). A search field is a rounded
 				// panel with an icon and an inset text field inside it: the
@@ -3748,43 +3895,15 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 					if (anc->focusFrame) { ringOn = anc; break; }
 					p = anc->parentId;
 				}
-				HE::UIWidgetRect rpx{ px.x, px.y, px.w, px.h };
-				float rus = eus, rvs = evs;
-				if (ringOn != &e)
-				{
-					const HE::UIWidgetRect rr = HE::uiElementRect(w.tree, *ringOn, &canvas);
-					rpx = { rr.x * sx, rr.y * sy, rr.w * sx, rr.h * sy };
-					HE::uiElementUnitScale(w.tree, *ringOn, rus, rvs, &canvas);
-				}
-				// ON the element's edge, not around it. Outside would be the
-				// prettier ring and it is the one that disappears: a text field
-				// clips its own glyphs to its rect (uiElementClipRect), a list
-				// row is clipped by its box, and a ring drawn two pixels beyond
-				// the edge is two pixels of nothing but clipped-away band. It
-				// also cannot bleed into whatever sits next to it.
-				UIRenderObject ro;
-				ro.position = { rpx.x, rpx.y };
-				ro.size     = { rpx.w, rpx.h };
-				ro.color    = glm::vec4(0.0f);
-				ro.cornerRadius = ringOn->maxCornerRadius() > 0.0f
-					? ringOn->cornerRadius * (sy * rvs) : glm::vec4(0.0f);
-				ro.borderWidth  = kRing;
-				ro.borderColor  = glm::vec4(1.0f, 0.78f, 0.25f, 0.95f);
-				out.push_back(std::move(ro));
-				// Clipped by whatever clips the element the ring is drawn ON —
-				// which for a focus frame is NOT the focused element. The field
-				// clips itself; the frame around it does not, and stamping the
-				// field's clip onto a ring that belongs to the frame is how a
-				// ring ends up cut away to nothing.
-				HE::UIWidgetRect rclip{};
-				if (HE::uiElementClipRect(w.tree, *ringOn, rclip, &canvas))
-				{
-					const glm::vec4 r(rclip.x * sx, rclip.y * sy,
-					                  std::max(rclip.w * sx, 0.0f),
-					                  std::max(rclip.h * sy, 0.0f));
-					for (size_t i = ringFirst; i < out.size(); ++i) out[i].clipRect = r;
-				}
+				emitRing(*ringOn, glm::vec4(1.0f, 0.78f, 0.25f, 0.95f));
 			}
+			// The drop zone, in a colour of its own — "this is where it lands"
+			// and "this is where the keys go" are two different promises, and a
+			// person dragging a file has to be able to tell them apart at a
+			// glance. On the ACCEPTING element itself: it is the one that said
+			// it takes drops, so it is the one the drop belongs to.
+			if (st.dropTarget)
+				emitRing(e, glm::vec4(0.35f, 0.80f, 1.0f, 0.95f));
 		}
 	}
 

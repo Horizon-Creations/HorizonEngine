@@ -5866,6 +5866,12 @@ AppContext EditorApplication::makeContext()
 			// ImGui saw it, and this block may run before or after that.
 			m_uiPointerDouble = m_uiPointerDouble || doubleClick;
 		},
+		.reportPlayUIRect = [this](float x, float y, float sx, float sy, unsigned win)
+		{
+			m_uiPanelX = x; m_uiPanelY = y;
+			m_uiPanelScaleX = sx; m_uiPanelScaleY = sy;
+			m_uiPanelWindow = win;
+		},
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,
 		.exitRequested       = m_exitRequested,
@@ -7098,6 +7104,58 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 	// OnWindowFocusChanged only while play mode is running).
 	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
 	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
+
+	// ── A file dragged onto the live preview (docs/he-apps-plan.md B7) ───────
+	// The same gesture the packaged application takes, aimed at the panel: the
+	// drop arrives in the window's own points and the widgets live in
+	// render-target pixels, so it is turned around by the rectangle the viewport
+	// panel reported. Only inside the image — a file dropped on the Outliner is
+	// not a file dropped on the application.
+	if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION ||
+	    event.type == SDL_EVENT_DROP_FILE  || event.type == SDL_EVENT_DROP_COMPLETE)
+	{
+		const bool live = m_editorWorld &&
+			(m_isPlaying || m_projectManager.currentProject().appProject) &&
+			m_uiViewportW > 0.0f && m_uiViewportH > 0.0f &&
+			m_uiPanelWindow != 0 && event.drop.windowID == m_uiPanelWindow;
+		if (event.type != SDL_EVENT_DROP_COMPLETE)
+		{
+			m_dropX = (event.drop.x - m_uiPanelX) * m_uiPanelScaleX;
+			m_dropY = (event.drop.y - m_uiPanelY) * m_uiPanelScaleY;
+			m_dropInPreview = live &&
+				m_dropX >= 0.0f && m_dropX <= m_uiViewportW &&
+				m_dropY >= 0.0f && m_dropY <= m_uiViewportH;
+		}
+		if (live)
+		{
+			WidgetManager& wm = m_editorWorld->widgets();
+			switch (event.type)
+			{
+			case SDL_EVENT_DROP_BEGIN:
+				m_dropPaths.clear();
+				break;
+			case SDL_EVENT_DROP_POSITION:
+				wm.dropHover(m_uiViewportW, m_uiViewportH, m_dropX, m_dropY,
+				             m_dropInPreview);
+				break;
+			case SDL_EVENT_DROP_FILE:
+				if (event.drop.data) m_dropPaths.emplace_back(event.drop.data);
+				break;
+			default:   // SDL_EVENT_DROP_COMPLETE
+				if (m_dropInPreview)
+					wm.processDrop(m_uiViewportW, m_uiViewportH, m_dropX, m_dropY,
+					               m_dropPaths);
+				else
+					wm.dropHover(m_uiViewportW, m_uiViewportH, 0.0f, 0.0f, false);
+				m_dropPaths.clear();
+				m_dropInPreview = false;
+				break;
+			}
+			// Only a drop that landed IN the preview is answered here; one that
+			// missed it stays available to whatever the editor grows next.
+			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
 
 	// A focused in-game text field (PIE) owns the keyboard: route text + edit keys
 	// to the widget. Checked before Esc so typing works, but Esc still releases.

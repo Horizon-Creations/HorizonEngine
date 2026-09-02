@@ -225,6 +225,9 @@ public:
     void fireOnRowBind(InstanceId id, int elem, int index);
     void fireOnRowActivated(InstanceId id, int elem, int index);
     void fireOnRightClicked(InstanceId id, int elem);
+    // A file dropped from the desktop — the payload is its absolute path, and
+    // elem 0 means the window itself took it (nothing under the pointer accepts).
+    void fireOnFileDropped(InstanceId id, int elem, const std::string& path);
     // An animation reached its target — the payload is the property's name.
     void fireOnAnimationFinished(InstanceId id, int elem, const std::string& prop);
     // An authored CLIP reached its end — the payload is the clip's name. Its

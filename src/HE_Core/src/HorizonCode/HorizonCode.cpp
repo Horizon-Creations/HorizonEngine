@@ -2187,6 +2187,11 @@ const std::vector<EngineEventDesc>& engineEvents()
         // flag on OnClicked, because a right-click means something different
         // everywhere it means anything: it opens a menu, it never presses.
         { "OnRightClicked",       "onRightClicked",       P::Exec,   true  },
+        // A file dragged in from the desktop and let go over an element that
+        // says "Accepts Drop". String payload: the file's absolute path, one
+        // event per file. Bubbles up like a click, so the drop zone is the
+        // element that ACCEPTS, never whichever caption the pointer met.
+        { "OnFileDropped",        "onFileDropped",        P::String, true  },
         // A dialog, popup or menu closing. Fired on the widget's OWN graph and
         // not addressed to an element, because what closed is the whole thing.
         { "OnDismissed",          "onDismissed",          P::Exec,   false },
