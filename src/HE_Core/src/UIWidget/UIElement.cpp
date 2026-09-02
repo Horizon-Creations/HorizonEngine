@@ -536,6 +536,7 @@ const UIPropTable& UIText::propTable() const
         uiprop::slot<&UIText::color>   ({ "Color", UIPropType::Color }),
         uiprop::slot<&UIText::wordWrap>({ "WordWrap", UIPropType::Bool }),
         uiprop::slot<&UIText::autoSize>({ "AutoSize", UIPropType::Bool }),
+        uiprop::slot<&UIText::richText>({ "RichText", UIPropType::Bool }),
         // 0/1/2 each. The details panel draws these two as ONE 3×3 grid (see
         // UIEditorPanel) rather than as two number fields — the first attribute
         // that needed a hand-built editor, because "which of nine positions" is
@@ -1100,6 +1101,42 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
 // font size; the width tracks the widest line unless WordWrap owns it (then the
 // authored width IS the wrap column). A small padding keeps descenders and the
 // last glyph's side bearing off the edge.
+const HE::UIRichText& UIText::parsed() const
+{
+    if (!m_parsedOnce || m_parsedFrom != text)
+    {
+        m_parsed = HE::uiParseRichText(text);
+        m_parsedFrom = text;
+        m_parsedOnce = true;
+    }
+    return m_parsed;
+}
+
+namespace
+{
+    // The one place that says how a Text's rect and font turn into a rich
+    // layout. Three callers — measure, draw, hit test — and they must agree
+    // down to the pixel or a link is clickable somewhere it is not drawn.
+    HE::UIRichLayout richLayoutOf(const UIText& t, const HE::UIWidgetRect& px,
+                                  float pxScaleY)
+    {
+        HE::UITextLayout opts;
+        opts.alignH = t.alignH;
+        opts.alignV = t.alignV;
+        opts.wrap   = t.wordWrap;
+        const HE::BakedUIFont* f = HE::UIFontCache::find(t.fontAtlasKey);
+        const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+        return HE::uiLayoutRichText(font, t.parsed(), { px.x, px.y }, { px.w, px.h },
+                                    t.fontSize * pxScaleY, opts);
+    }
+}
+
+std::string UIText::linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y) const
+{
+    if (!richText || !parsed().hasLinks) return {};
+    return HE::uiRichLinkAt(parsed(), richLayoutOf(*this, px, pxScaleY), x, y);
+}
+
 void UIText::applyAutoSize(float resolvedWidth)
 {
     if (!autoSize) return;
@@ -1112,8 +1149,20 @@ void UIText::applyAutoSize(float resolvedWidth)
     // would wrap the text at one unit.
     const float wrapW = wordWrap ? std::max(1.0f, resolvedWidth) : 0.0f;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    const glm::vec2 m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)
-                          : HE::measureUIText(text, fontSize, wrapW, opts);
+    // Rich text measures through the rich layout, or a label would be sized for
+    // the markup it is written in rather than the words it shows — the tags
+    // would count as characters and a <size=2> word would not count enough.
+    glm::vec2 m;
+    if (richText)
+    {
+        const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+        m = HE::uiLayoutRichText(font, parsed(), { 0.0f, 0.0f },
+                                 { wrapW > 0.0f ? wrapW : 1.0e6f, 0.0f },
+                                 fontSize, opts).size;
+    }
+    else
+        m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)
+              : HE::measureUIText(text, fontSize, wrapW, opts);
     // An axis the anchor stretches belongs to the parent — content does not get
     // to resize it, or a label anchored across a side would come out one text
     // width WIDER than the side it is anchored to.
@@ -1126,6 +1175,16 @@ void UIText::applyAutoSize(float resolvedWidth)
 void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
                     const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
+    if (richText)
+    {
+        const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+        const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+        // `color` is what a run without one of its own draws in, so a rich label
+        // with no colour tags is exactly the label it was before the flag.
+        HE::uiEmitRichText(font, fontAtlasKey, parsed(),
+                           richLayoutOf(*this, px, pxScaleY), color, layer, out);
+        return;
+    }
     HE::UITextLayout opts;
     opts.alignH = alignH;
     opts.alignV = alignV;
@@ -1726,7 +1785,9 @@ void UIText::writeJson(nlohmann::json& j) const
   j["wordWrap"] = wordWrap; j["autoSize"] = autoSize;
   // "align" keeps its name and meaning (the horizontal one), so a widget saved
   // before there was a vertical alignment still loads with its text where it was.
-  j["align"] = alignH; j["alignV"] = alignV; }
+  j["align"] = alignH; j["alignV"] = alignV;
+  // Only when it is on: a label that never heard of markup saves byte-identically.
+  if (richText) j["richText"] = true; }
 void UIText::readJson(const nlohmann::json& j)
 { text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
   color = colFrom(j.value("color", nlohmann::json()), color);
@@ -1736,7 +1797,10 @@ void UIText::readJson(const nlohmann::json& j)
   autoSize = j.value("autoSize", false);
   alignH   = j.value("align", alignH);
   // Absent = middle, which is where text always sat before this existed.
-  alignV   = j.value("alignV", alignV); }
+  alignV   = j.value("alignV", alignV);
+  // Absent = off, which is the only safe default: a label authored before this
+  // may hold a literal '<' that markup would eat.
+  richText = j.value("richText", false); }
 
 void UIButton::writeJson(nlohmann::json& j) const
 {

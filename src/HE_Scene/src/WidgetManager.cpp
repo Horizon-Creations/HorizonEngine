@@ -1896,6 +1896,13 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 				if (hit.cursor == HE::UICursor::Default &&
 				    e.type() == HE::UIWidgetType::TextInput)
 					hit.cursor = HE::UICursor::Text;
+				// …and a link asks for the hand, by being under the pointer
+				// rather than by the label being under it: the words around a
+				// link are not clickable and must not say they are.
+				if (hit.cursor == HE::UICursor::Default &&
+				    e.type() == HE::UIWidgetType::Text &&
+				    !linkAtPoint(w, e.id, x, y).empty())
+					hit.cursor = HE::UICursor::Hand;
 			}
 		}
 	}
@@ -3304,9 +3311,36 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 				m_visualDirty = true;
 			}
 		break;
+	case HE::UIWidgetType::Text:
+		// A link, and only a link: the rest of a label is not a button. Which one
+		// is asked at the pointer's LAST position, which is where the release
+		// just happened — a press on a link and a release somewhere else is not
+		// a click on it, and the press/release pairing above already sees to that.
+		if (const std::string id = linkAtPoint(w, elemId, m_pointerX, m_pointerY); !id.empty())
+			rt().fireOnLinkClicked(target.scriptId, target.elem, id);
+		break;
 	default:
 		break;
 	}
+}
+
+// ── Which link of a rich-text label a point is on ────────────────────────────
+// The element's own pixel rect and font scale, worked out the way `extract`
+// works them out, and handed to the layout the draw uses. Two callers — the
+// cursor and the click — and they must agree with the picture or a link is
+// clickable somewhere other than where it is written.
+std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y) const
+{
+	const auto* t = dynamic_cast<const HE::UIText*>(w.tree.find(elemId));
+	if (!t || !t->richText) return {};
+	const HE::UIWidgetCanvas canvas =
+		HE::uiResolveCanvas(w.tree, m_lastViewportW, m_lastViewportH);
+	const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *t, &canvas);
+	float us = 1.0f, vs = 1.0f;
+	HE::uiElementUnitScale(w.tree, *t, us, vs, &canvas);
+	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+	return t->linkAt(px, canvas.scaleY * vs, x, y);
 }
 
 bool WidgetManager::isFocusable(const Instance& w, const HE::UIElement& e,

@@ -2632,6 +2632,17 @@ namespace
 	  "accepts one, so set it on the panel and not on the label inside it. Where "
 	  "nothing accepts, the window took it and the Game Instance hears it instead.",
 	  "", "ui#widgets" },
+	{ "UI Widget/RichText", "",
+	  "Reads the Text as MARKUP instead of as plain words. Four things it "
+	  "understands: <color=#ff8800>, <size=1.5> and <link=id>, each closed by "
+	  "</>, and << for a literal '<'. A link makes that stretch of words "
+	  "clickable — the pointer turns into a hand over it and On Link Clicked "
+	  "fires with the id — while the rest of the label stays as inert as any "
+	  "other text. Anything the parser does not fully understand is left as "
+	  "text, so a stray '<' shows up as one rather than eating the sentence. "
+	  "Off by default: a label written before this may hold a '<' that means a "
+	  "'<'. Sizes are a MULTIPLE of Font Size, not pixels.",
+	  "", "ui#widgets" },
 	{ "UI Widget/Draggable", "",
 	  "Lets this element be picked up and carried onto a drop zone. The drag "
 	  "begins at a DISTANCE, not at the press, so a draggable element can still "

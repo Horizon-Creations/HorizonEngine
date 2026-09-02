@@ -2161,6 +2161,53 @@ sondern die Adresse. Deshalb steht dafür jetzt eine eigene Zusicherung im Test.
 
 ---
 
+### B6: ein Label mit mehr als einer Stimme (02.09.2026)
+
+Rich Text, also der Teil von B6, der übrig war: Umbruch und Ausrichtung gab es schon.
+
+**Markup-String, kein strukturiertes Run-Modell.** Ein Skript erzeugt Text mit Set Property,
+also muss alles, was ein Label sein kann, als String ausdrückbar sein, sonst wird
+formatierter Text eine zweite API, die nur C++ erreicht. UMG, TextMeshPro und Slate sind aus
+demselben Grund dort gelandet.
+
+**Eine Regel für alles Kaputte: ein Tag, das nicht vollständig verstanden wird, IST Text.**
+Unbekannter Name, kaputtes Hex, fehlender Wert, herrenloses `</>` — derselbe Fall. Die
+Alternative ist eine Tabelle von Sonderfällen, die sich niemand merkt, und ein Label, das
+still Zeichen verliert, die jemand sehen wollte. Das ist ein Dateiformat, also stehen die
+Regeln als Tabelle im Test.
+
+**`size` ist ein Skalar, keine Pixel.** Die Schriftgröße ist schon von Canvas und Auto-Size
+skaliert; absolute Pixel würden sich mit beiden streiten.
+
+**Ein Flag am Text, kein zwanzigster Elementtyp.** Ein Text ist rich oder nicht, und ein Flag
+erspart Löschen-und-neu-Anlegen, wenn nachträglich ein Wort bunt werden soll. Aber:
+**`interactive()` fragt das MARKUP, nicht das Flag.** Ein rich Label, das nur eine Farbe
+enthält, darf die Klicks nicht schlucken, die dem Ding dahinter galten.
+
+**Das Layout ist eine Funktion mit drei Verbrauchern**, zeichnen, messen, treffen. Dieselbe
+Lehre wie bei `tabLayout`. Zwei Dinge, die der Klartextpfad nicht kennt: eine Zeile ist so
+hoch wie ihr höchster Run, und alle Stücke einer Zeile teilen **eine** Grundlinie, sonst
+schwebt ein großes Wort über seinen Nachbarn.
+
+**Die Zusicherung, die den Rest trägt:** einfarbiger Text landet durch den neuen Weg
+glyphengenau dort, wo der alte ihn hinlegt. Ohne sie verschiebt das Einschalten von Rich Text
+jedes Label ein wenig, und das ist die Sorte Änderung, die später niemand mehr zuordnet.
+
+**Der Zeiger sagt es, bevor der Klick es tut**, und zwar pro Link und nicht pro Element: die
+Wörter neben einem Link sind nicht anklickbar und dürfen das nicht behaupten. Die Hand hängt
+deshalb am Treffertest und nicht am Elementtyp, gleich neben der I-Beam-Regel des Textfelds.
+
+**Zwei Grenzen, gemeldet statt umgangen:** der Atlas kennt ASCII 32..127, also sind
+**Icon-Schriften aus B6 blockiert** (eigene Baustelle, sie leben in der Private Use Area weit
+jenseits von 127), und es gibt keine zweite Schnittbreite im Atlas, also **kein `<b>`**, das
+still nichts täte. Theme-Rollen als Farbe (`<color=accent>`) sind die offensichtliche v2,
+deshalb ist der Farbslot im Parser ein String und kein aufgelöster Wert.
+
+**Nicht gebaut:** auswählbarer statischer Text, der dritte Rest von B6. Das ist eine eigene
+Scheibe, näher am Textfeld als am Label.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

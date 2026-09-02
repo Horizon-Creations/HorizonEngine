@@ -4,6 +4,8 @@
 // it carries that widget's scale mode. (No cycle: UIWidgetTree.h includes
 // UIElement.h only.)
 #include <UIWidget/UIWidgetTree.h>
+// UIRichText — a Text element caches its parsed markup (see UIText::parsed).
+#include <Renderer/UIFont.h>
 
 // Concrete widget element types. Each declares its own data + properties +
 // events; the property tables (propTable), render() and JSON live in
@@ -100,6 +102,13 @@ public:
     // there was a choice; Top would move every existing label.
     int         alignH = 0;
     int         alignV = 1;
+    // ── More than one voice in one label (docs/he-apps-plan.md B6) ───────────
+    // Off, and off is what every existing label means: a Text that has always
+    // shown a literal "<" must go on showing it. With it on, Text is markup —
+    // `<color=#ff8800>`, `<size=1.5>`, `<link=id>`, closed by `</>`, `<<` for a
+    // literal '<' — and the element becomes clickable exactly when the markup
+    // declares a link, not before (see interactive()).
+    bool        richText = false;
 
     UIText() { sizeX = 200.0f; sizeY = 30.0f; }
     UIWidgetType type() const override { return UIWidgetType::Text; }
@@ -117,6 +126,32 @@ public:
                 float, std::vector<UIRenderObject>&) const override;
     void writeJson(nlohmann::json&) const override;
     void readJson(const nlohmann::json&) override;
+
+    // ── The parsed markup, and the three things that read it ─────────────────
+    // Parsed on demand and kept until the text changes. Lazy rather than parsed
+    // where the text is set, because the text is set from six places (the panel,
+    // a Set Property, a component parameter, the loader, an animation, a script)
+    // and a cache that any one of them can forget to refresh is a label showing
+    // the last thing somebody typed.
+    // On the TEXT and not on the base: only a label can hold a link, and an
+    // event offered on every element there is would be one more thing to read
+    // past in every menu.
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnLinkClicked", UIPropType::String, true } }; }
+
+    const HE::UIRichText& parsed() const;
+    // Which link is at this point, or "" — the same layout the draw uses, which
+    // is the whole reason it is a function and not a second calculation.
+    std::string linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y) const;
+    // A label is inert; a label with a link in it is not. Asking the MARKUP
+    // rather than the flag is what keeps a rich label that happens to have no
+    // link from swallowing the clicks meant for whatever is behind it.
+    bool interactive() const override { return richText && parsed().hasLinks; }
+
+private:
+    mutable std::string      m_parsedFrom;   // the markup m_parsed was built from
+    mutable HE::UIRichText   m_parsed;
+    mutable bool             m_parsedOnce = false;
 };
 
 // ── Button ────────────────────────────────────────────────────────────────────

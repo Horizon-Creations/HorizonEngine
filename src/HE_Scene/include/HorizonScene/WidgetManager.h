@@ -936,6 +936,10 @@ private:
         HE::UICursor cursor = HE::UICursor::Default;
     };
     PointerHit topmostHit(float vpWidth, float vpHeight, float x, float y);
+    // Which link of a rich-text label a point lands on ("" = none). Its own
+    // helper because two callers need it — the cursor and the click — and both
+    // have to agree with what was drawn.
+    std::string linkAtPoint(Instance& w, int elemId, float x, float y) const;
     // First element at or above `hitElem` that accepts a drop (0 = none).
     int dropTargetAt(Instance& w, int hitElem) const;
     // …and the same walk for the other half: the first that can be picked up.

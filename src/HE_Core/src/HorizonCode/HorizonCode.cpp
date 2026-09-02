@@ -2198,6 +2198,10 @@ const std::vector<EngineEventDesc>& engineEvents()
         // one thing the target has to know and the only thing an event argument
         // can carry. OnDragEnded's Bool says whether anything took it, which is
         // how a source knows to put itself back.
+        // A link inside a rich-text label was clicked. String payload: the id the
+        // markup gave it (`<link=terms>`), because a label may hold several and
+        // "which one" is the only question the graph has.
+        { "OnLinkClicked",        "onLinkClicked",        P::String, true  },
         { "OnDragStarted",        "onDragStarted",        P::Exec,   true  },
         { "OnDrop",               "onDrop",               P::String, true  },
         { "OnDragEnded",          "onDragEnded",          P::Bool,   true  },

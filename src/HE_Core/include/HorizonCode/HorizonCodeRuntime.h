@@ -228,6 +228,8 @@ public:
     // A file dropped from the desktop — the payload is its absolute path, and
     // elem 0 means the window itself took it (nothing under the pointer accepts).
     void fireOnFileDropped(InstanceId id, int elem, const std::string& path);
+    // A link in a rich-text label — the payload is the id the markup gave it.
+    void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
     // Dragging inside the application. OnDrop's payload is what the SOURCE said
     // it was; OnDragEnded's bool is whether anything took it.
     void fireOnDragStarted(InstanceId id, int elem);

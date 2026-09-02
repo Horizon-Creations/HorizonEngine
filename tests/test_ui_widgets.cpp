@@ -144,6 +144,9 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Color", UIPropType::Color },
             { "WordWrap", UIPropType::Bool },
             { "AutoSize", UIPropType::Bool },
+            // Reads Text as markup instead of as words — off, so every label
+            // written before it still shows the '<' it was given.
+            { "RichText", UIPropType::Bool },
             { "Align H", UIPropType::Int },
             { "Align V", UIPropType::Int } } },
         // Three state colours and nothing else: a Button is a surface, and its
@@ -374,9 +377,14 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnCheckChanged") { hasCheckChanged = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::Bool); }
     CHECK(hasCheckChanged);
 
-    // Its OWN list is empty — a Text does not click and a bar does not change.
-    CHECK(HE::UIText{}.events().empty());
+    // A bar does not change, so its own list is empty. A TEXT has exactly one
+    // of its own since rich text: a link inside a label is clicked, and that is
+    // a thing only a label can report. It used to be in this line as an example
+    // of an element with nothing to say, and that stopped being true.
     CHECK(HE::UIProgressBar{}.events().empty());
+    REQUIRE(HE::UIText{}.events().size() == 1);
+    CHECK(HE::UIText{}.events()[0].name == "OnLinkClicked");
+    CHECK(HE::UIText{}.events()[0].argType == HE::UIPropType::String);
     // …but every element has the base list under it, and since animations
     // exist there is one thing anything can report. This used to say "a Text
     // has no events" and that stopped being true the day a Text could fade.
@@ -392,8 +400,9 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnFileDropped")
         { textCanTakeAFile = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
     CHECK(textCanTakeAFile);
-    // Plus the three of the drag: picked up, dropped on, ended.
-    CHECK(HE::UIText{}.allEvents().size() == 5);
+    // Five on the base — animation, file drop, and the three of the drag — plus
+    // whatever the type adds, which for a Text is its link.
+    CHECK(HE::UIText{}.allEvents().size() == HE::UIText{}.events().size() + 5);
     CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 5);
     CHECK(HE::UIButton{}.interactive());
     CHECK(!HE::UIText{}.interactive());
@@ -1565,6 +1574,144 @@ TEST_CASE("Rich text: the hit test answers where the link is DRAWN, and nowhere 
     // …and above/below the line it is on.
     CHECK(HE::uiRichLinkAt(rt, lay, link->x + 1.0f, link->top - 5.0f).empty());
     CHECK(HE::uiRichLinkAt(rt, lay, link->x + 1.0f, link->top + link->height + 5.0f).empty());
+}
+
+TEST_CASE("Rich text: a label is inert until its markup says otherwise")
+{
+    HE::UIText t;
+    t.text = "plain <link=go>go</> plain";
+    // Off: markup is not read at all, so there is nothing to click and the
+    // '<' is a '<'. This is what every label written before today means.
+    CHECK_FALSE(t.richText);
+    CHECK_FALSE(t.interactive());
+    // …and it DRAWS the markup as the characters it is, which is the promise
+    // that matters: a label written before today may hold a '<' that means a
+    // '<'. (parsed() would strip the tags either way — it is simply not asked
+    // while the flag is off, and asserting on it would test the wrong thing.)
+    {
+        const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 40.0f };
+        std::vector<UIRenderObject> drawn, literal;
+        t.render(px, {}, {}, 1.0f, drawn);
+        HE::UITextLayout o; o.alignH = t.alignH; o.alignV = t.alignV;
+        HE::emitUITextGlyphs(HE::sharedUIFont(), 0, t.text, { px.x, px.y },
+                             { px.w, px.h }, t.fontSize, t.color, t.layer, o, literal);
+        CHECK(drawn.size() == literal.size());
+    }
+
+    // On, with a link: clickable.
+    t.richText = true;
+    CHECK(t.interactive());
+
+    // On, without a link: still inert. A rich label that merely has a colour in
+    // it must not swallow the clicks meant for whatever is behind it, which is
+    // why the flag alone is not the question.
+    t.text = "just <color=#ff0000>red</>";
+    CHECK_FALSE(t.interactive());
+
+    // The parse follows the text rather than being cached once — the text is set
+    // from six places and a stale cache is a label showing the last thing
+    // somebody typed.
+    t.text = "<link=a>a</>";
+    CHECK(t.interactive());
+}
+
+TEST_CASE("Rich text: what a label is sized for is what it SHOWS")
+{
+    HE::UIText plain, rich;
+    plain.autoSize = rich.autoSize = true;
+    plain.wordWrap = rich.wordWrap = false;
+    plain.fontSize = rich.fontSize = 20.0f;
+    // The same words, one written as markup. Sized for the tags, the rich one
+    // would come out much wider than the words it shows.
+    plain.text = "Hello world";
+    rich.text  = "Hello <color=#ff8800>world</>";
+    rich.richText = true;
+    plain.applyAutoSize(0.0f);
+    rich.applyAutoSize(0.0f);
+    CHECK(rich.sizeX == doctest::Approx(plain.sizeX).epsilon(0.02));
+
+    // …and a bigger run really does ask for more room.
+    HE::UIText big;
+    big.autoSize = true; big.richText = true; big.fontSize = 20.0f;
+    big.text = "Hello <size=2>world</>";
+    big.applyAutoSize(0.0f);
+    CHECK(big.sizeX > plain.sizeX);
+    CHECK(big.sizeY > plain.sizeY);
+}
+
+TEST_CASE("Rich text: clicking a link fires with its id, clicking the words beside it fires nothing")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int label = t.add(HE::UIWidgetType::Text);
+    {
+        auto* e = dynamic_cast<HE::UIText*>(t.find(label));
+        e->name = "Label";
+        e->richText = true;
+        e->autoSize = false;
+        e->fontSize = 20.0f;
+        e->setProp("Text", HE::UIPropValue::ofString("plain <link=terms>terms</> tail"));
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 400.0f; e->sizeY = 60.0f;
+    }
+    // What the graph does with it: write the id it was handed into a variable.
+    HorizonCode::Graph g;
+    HorizonCode::Variable v; v.name = "clicked"; v.type = PinType::String;
+    g.variables.push_back(v);
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnLinkClicked";
+    ev.elem = label; ev.hasArg = true; ev.propType = PinType::String;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "clicked";
+    set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(evId, 1, setId, 2));
+    registerWidget(cm, t, &g);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+
+    // Where the link actually IS, asked of the same layout the draw uses.
+    const auto* live = dynamic_cast<const HE::UIText*>(wm.tree(id)->find(label));
+    REQUIRE(live);
+    const HE::UIRichLayout lay = HE::uiLayoutRichText(
+        HE::sharedUIFont(), live->parsed(), { 0.0f, 0.0f }, { 400.0f, 60.0f },
+        20.0f, [&]{ HE::UITextLayout o; o.alignH = live->alignH;
+                    o.alignV = live->alignV; o.wrap = live->wordWrap; return o; }());
+    const HE::UIRichPiece* link = nullptr;
+    for (const HE::UIRichPiece& pc : lay.pieces)
+        if (pc.run < live->parsed().runs.size() &&
+            live->parsed().runs[pc.run].link == "terms") link = &pc;
+    REQUIRE(link != nullptr);
+    const float lx = link->x + link->width * 0.5f;
+    const float ly = link->top + link->height * 0.5f;
+
+    auto clickAt = [&](float x, float y) {
+        wm.processPointer(400.0f, 200.0f, x, y, true,  true);
+        wm.processPointer(400.0f, 200.0f, x, y, false, true);
+        return rt.getVariable(inst, "clicked").s;
+    };
+    CHECK(clickAt(lx, ly) == "terms");
+
+    // The plain words before it are not a button, and a label that fired for
+    // them would make every sentence a click target.
+    rt.setVariable(inst, "clicked", HorizonCode::Value::ofString(""));
+    CHECK(clickAt(2.0f, ly).empty());
+
+    // …and the pointer says so before the click does: hand on the link, plain
+    // arrow beside it.
+    wm.processPointer(400.0f, 200.0f, lx, ly, false, true);
+    CHECK(wm.hoverCursor() == HE::UICursor::Hand);
+    wm.processPointer(400.0f, 200.0f, 2.0f, ly, false, true);
+    CHECK(wm.hoverCursor() != HE::UICursor::Hand);
 }
 
 // ── Multi-line text ───────────────────────────────────────────────────────────
