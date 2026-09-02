@@ -2108,6 +2108,16 @@ Zug, dessen Quelle an ihrem alten Platz stehen bleibt, liest sich als Kopie.
 betrifft zwei Elemente, die in zwei verschiedenen Widgets liegen können, und pro Widget würde
 er zweimal oder von der falschen Seite enden.
 
+**Was das `isInteractive` gekostet hat, und wo B2 und B7 sich treffen:** die Auswahl in einer
+Liste hing an `hot`, also an dem, was den Druck GENOMMEN hat. Solange in einer Zeile nichts
+reagierte, war das dieselbe Antwort wie „worauf wurde gedrückt". Eine ziehbare Zeile reagiert,
+und damit war eine umsortierbare Liste eine, in der man nichts mehr auswählen konnte. Die
+Auswahl läuft jetzt vom ROHEN Treffer nach oben zur umschließenden Liste, so wie die
+Hover-Hervorhebung es längst tut. Gefunden, weil ein Test dafür geschrieben wurde, und der
+erste Anlauf dieses Tests war selbst nicht unterscheidend: die Zeilenbeschriftung war
+auto-sized und leer, also schrumpfte sie auf nichts und der Druck segelte an genau dem Ding
+vorbei, um das es ging.
+
 ---
 
 ## 11. Risiken und Fallen

@@ -10548,3 +10548,70 @@ TEST_CASE("Drag: it cannot be dropped on itself, and Escape puts it back")
     wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
     CHECK(rt.getVariable(inst, "clicks").i == 0);
 }
+
+// The case B2 and B7 meet in, and the one that pays for making rows draggable.
+TEST_CASE("Drag: a draggable row is still a row you can pick")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    {
+        // The same list page as everywhere else, except that its rows can be
+        // picked up — which is what makes a list reorderable, and which must not
+        // cost the list the ability to be selected in.
+        HE::UIWidgetTree row;
+        row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+        row.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int label = row.add(HE::UIWidgetType::Text);
+        HE::UIElement& lab = *row.find(label);
+        lab.name = "Label";
+        lab.draggable = true;
+        // Filling the row, and NOT auto-sized: an auto-sizing label with no text
+        // shrinks to nothing, and a press then sails past it into the list —
+        // which would make this test pass by never touching the thing it is
+        // about.
+        lab.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+        HE::uiSetAnchorPreset(lab, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(lab, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(lab, 0.0f, 0.0f);
+        registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+        HE::UIWidgetTree page;
+        page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+        page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int list = page.add(HE::UIWidgetType::ListView);
+        auto* lv = dynamic_cast<HE::UIListView*>(page.find(list));
+        lv->name = "List";
+        lv->acceptsDrop = true;        // …and rows land back in the list
+        HE::uiSetAnchorPreset(*lv, 0); lv->pivotX = lv->pivotY = 0.0f;
+        lv->posX = 0.0f; lv->posY = 0.0f; lv->sizeX = 400.0f; lv->sizeY = 400.0f;
+        lv->rowWidget = "mem://row.hasset";
+        lv->rowHeight = 40.0f; lv->spacing = 0.0f; lv->padding = 0.0f;
+        registerWidget(cm, page, nullptr, "mem://page.hasset");
+    }
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 100));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    REQUIRE(wm.listSelected(id, "List") == -1);
+
+    // Rows are 40 tall from the top: y=100 is inside row 2. A press that does
+    // not travel is still a press on the ROW, and the list still hears it.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, true, true);
+    CHECK(wm.listSelected(id, "List") == 2);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, false, true);
+    CHECK(wm.listSelected(id, "List") == 2);
+
+    // …and a press that DOES travel carries the row instead, without changing
+    // the selection on the way: picking something up is not choosing it.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 220.0f, true, true);
+    CHECK(wm.listSelected(id, "List") == 5);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 260.0f, true, true);
+    CHECK(wm.isDragging());
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, true, true);
+    CHECK(wm.listSelected(id, "List") == 5);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, false, true);
+    CHECK_FALSE(wm.isDragging());
+}

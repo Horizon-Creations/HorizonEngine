@@ -1190,6 +1190,15 @@ void WidgetManager::clear()
 	m_grabs.clear();
 	m_tooltipWidget = m_tooltipElem = 0;
 	m_tooltipHeld = 0.0f; m_tooltipUp = false;
+	// A carry in flight is over too, and silently: the element it was about is
+	// being destroyed, so there is nobody left to tell. Dropped rather than
+	// cancelled for exactly that reason — cancelDrag fires OnDragEnded at a
+	// script that is on its way out. Ids, not pointers, so nothing dangles; what
+	// this prevents is a reload mid-drag leaving the flag true against ids that
+	// have since been reissued to different elements.
+	m_dragWidget = m_dragElem = 0;
+	m_dragArmed = m_dragActive = m_dragAteClick = false;
+	m_dropWidget = m_dropElem = 0;
 	// Fire each widget's "Destruct" and unregister it from the shared runtime
 	// (which may also host the level script / GameInstance — so tear down
 	// per-instance, don't wipe). Snapshot the ids first: a Destruct handler may
@@ -2297,12 +2306,31 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					// A press in a list picks the row under it — and takes the
 					// keyboard focus, so the arrows step through the list rather
 					// than hunting for the next button somewhere on the page.
-					if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(hot)))
+					//
+					// Found by walking UP from what the pointer actually HIT, not
+					// from whatever took the press. The two used to be the same
+					// thing because nothing in a row reacted; a row that can be
+					// picked up does (draggable is interactive), and asking only
+					// "did the press land on the list" then makes a reorderable
+					// list one you cannot select in — which is precisely the case
+					// B2 and B7 meet in. The hover highlight already walks from
+					// the raw hit for the same reason.
 					{
-						setFocus(w.id, hot);
-						selectListRow(w, *lv,
-							listRowAtPointer(w.tree, *lv,
-								HE::uiResolveCanvas(w.tree, vpWidth, vpHeight), mouseY));
+						int guard = 0;
+						for (const HE::UIElement* le = w.tree.find(isTop ? topHit : 0);
+						     le && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
+						{
+							if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(le->id)))
+							{
+								setFocus(w.id, lv->id);
+								selectListRow(w, *lv,
+									listRowAtPointer(w.tree, *lv,
+										HE::uiResolveCanvas(w.tree, vpWidth, vpHeight), mouseY));
+								break;
+							}
+							if (le->parentId == 0) break;
+							le = w.tree.find(le->parentId);
+						}
 					}
 				}
 			}
