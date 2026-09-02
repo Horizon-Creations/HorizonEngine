@@ -164,7 +164,7 @@ struct Host
 	// A hook rather than a table because the answer is a property of the asset
 	// being edited, which the registry cannot know and this file must not have
 	// to ask about.
-	std::function<std::vector<std::string>(const std::string& apiId,
+	std::function<std::vector<std::string>(const HC::Node& node,
 	                                       const std::string& param)> paramChoices;
 	const MenuOpts*     menus        = nullptr;
 };

@@ -3468,6 +3468,52 @@ namespace
 	  "the Designer. Only named elements are offered: a name is what a graph can "
 	  "hold on to, and an element without one is the asset's private business.",
 	  "", "horizoncode#palette" },
+	{ "Node Parameter/Property", "Property",
+	  "Which property of the element named beside it. The list follows that "
+	  "element, so picking another one changes what is on offer — and on an "
+	  "Animate call it holds only what can be moved: a number, a colour, a "
+	  "point.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/List", "List",
+	  "Which list this call drives. Only ListView elements are offered, because "
+	  "a Set List Count pointed at a button is a call that cannot work.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Parent", "Parent",
+	  "Which element the new child is placed under, by name.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Function", "Function",
+	  "Which function to call. The list holds this widget's own public "
+	  "functions; a function on a widget somebody else made cannot be listed "
+	  "from here, so that one is typed.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Mode", "Mode",
+	  "Light, Dark, or System. The third is a rule and not a colour: an "
+	  "application set to System follows the desktop, and follows it again when "
+	  "the desktop changes while it is running.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Button", "Button",
+	  "Which gamepad button, in the names the platform layer uses. Picked "
+	  "rather than typed, because a name that does not match is a button that "
+	  "is simply never down.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Axis", "Axis",
+	  "Which gamepad axis, in the names the platform layer uses. A name that "
+	  "does not match reads zero for ever, and says nothing.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Class", "Class",
+	  "Which HorizonCode class to spawn, from the ones in the project.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Asset", "Asset",
+	  "Which asset this call uses, from the ones in the project. Picked rather "
+	  "than typed: a moved or renamed asset would otherwise leave a path behind "
+	  "that points nowhere, and fails silently.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/WidgetAsset", "Widget Asset",
+	  "Which widget to instantiate, from the ones in the project.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/ThemeAsset", "Theme Asset",
+	  "Which theme to switch to, from the ones in the project.",
+	  "", "horizoncode#palette" },
 	{ "HorizonCode Node/Type", "",
 	  "The type of the external variable this node reads or writes, so the node's "
 	  "value pin matches the variable on the other side. Changing it drops the "

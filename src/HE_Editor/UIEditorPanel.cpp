@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -4552,11 +4553,20 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// widget carries (its own and the ones its embedded components brought), and
 	// its elements by the names they have in the designer. Both are lists the
 	// registry cannot know and the author should not have to spell.
-	host.paramChoices = [&st, &ctx](const std::string& apiId, const std::string& param)
+	host.paramChoices = [&st, &ctx](const HC::Node& node, const std::string& param)
 		-> std::vector<std::string>
 	{
 		std::vector<std::string> out;
-		if (apiId.rfind("widget.", 0) != 0) return out;
+		if (node.s.rfind("widget.", 0) != 0) return out;
+		// Named elements, optionally of one type. A name is what a graph can
+		// hold on to; an element without one is the asset's private business,
+		// which is also why it cannot be addressed and is not offered.
+		auto named = [&st, &out](std::optional<HE::UIWidgetType> only)
+		{
+			for (const auto& ep : st.tree.elements)
+				if (ep && !ep->name.empty() && (!only || ep->type() == *only))
+					out.push_back(ep->name);
+		};
 		if (param == "animation")
 		{
 			for (const HE::UIAnimClip& c : st.tree.animations) out.push_back(c.name);
@@ -4570,9 +4580,46 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 							if (std::find(out.begin(), out.end(), c.name) == out.end())
 								out.push_back(c.name);
 		}
-		else if (param == "element")
+		else if (param == "element" || param == "parent") named(std::nullopt);
+		// Only the lists: a Set List Count pointed at a Button is a call that
+		// cannot work, and a menu that offers it is a menu that lies.
+		else if (param == "list") named(HE::UIWidgetType::ListView);
+		else if (param == "property")
+		{
+			// The properties of the element this same node names — which is why
+			// the provider is handed the NODE and not just the parameter. The
+			// element pin is the one before this one on every row that has both.
+			std::string elem;
+			for (std::size_t i = 0; i + 1 < node.params.size(); ++i)
+				if (node.params[i].name == "element" && node.params[i + 1].name == param)
+					if (auto it = node.pinDefaults.find((int)i);
+					    it != node.pinDefaults.end() && it->second.type == PT::String)
+						elem = it->second.s;
 			for (const auto& ep : st.tree.elements)
-				if (ep && !ep->name.empty()) out.push_back(ep->name);
+				if (ep && ep->name == elem)
+				{
+					for (const UIPropDesc& pd : ep->allProperties())
+					{
+						// The animation rows can only move a number, a colour or
+						// a point; offering the rest would be offering a call
+						// that refuses itself at run time.
+						if (node.s.rfind("widget.animate", 0) == 0 &&
+						    pd.type != UIPropType::Float && pd.type != UIPropType::Color &&
+						    pd.type != UIPropType::Vec2) continue;
+						out.push_back(pd.name);
+					}
+					break;
+				}
+		}
+		else if (param == "function")
+		{
+			// This widget's own public functions. A call at a widget somebody
+			// else made cannot be listed from here, and guessing at one would
+			// be worse than the text box.
+			for (const HC::Node& fn : st.graph.nodes)
+				if (fn.type == NT::FunctionEntry && !fn.s.empty() && fn.access == 0)
+					out.push_back(fn.s);
+		}
 		return out;
 	};
 	host.menus        = &kMenus;

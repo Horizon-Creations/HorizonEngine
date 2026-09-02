@@ -597,10 +597,23 @@ GraphEditor::Model buildModel(const Host& h)
 	m.pinHasInlineEditor = [&graph](int nid, int pin){
 		const HC::Node* n = graph.findNode(nid);
 		return n && HcEditorUtil::pinSupportsInlineDefault(*n, pin); };
+	// …and a string pin whose values are a LIST edits it as a dropdown instead.
+	// Two answers, in this order: the host knows about the asset being edited
+	// (which animations this widget carries, what its elements are called), the
+	// shared half knows about the engine and the project (curves, directions,
+	// scenes, classes, savegame fields). One provider, so every frontend that
+	// goes through this file gets the same controls without asking.
 	m.drawPinInlineEditor = [&h, &graph](int nid, int pin){
 		HC::Node* n = graph.findNode(nid); if (!n) return;
 		bool committed = false;
-		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
+		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed,
+			[&h](const HC::Node& node, const std::string& param)
+			{
+				std::vector<std::string> c;
+				if (h.paramChoices) c = h.paramChoices(node, param);
+				if (c.empty()) c = HcEditorUtil::engineParamChoices(node, param, h.content);
+				return c;
+			});
 		if (committed) h.onEdit(true); };
 	// Hovering a node shows what it does + its inputs/outputs, and F1 while it is
 	// up opens the manual at that node's own entry — the reference is generated
@@ -1882,42 +1895,13 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 
 	case NT::EngineCall:
 	{
-		// scene.load / scene.loadAdditive: choose the scene from a dropdown
-		// instead of typing the path (a typo silently fails to load); save.*
-		// field params get the template-field dropdown the same way.
-		// Each picker draws its combo when the node matches (returning true only
-		// on a CHANGE), so "did one draw" is the node-shape test, not the return.
-		const bool hasFieldParam = [&]{
-			for (const auto& p : n.params)
-				if (p.name == "field" && p.type == PT::String) return true;
-			return false; }();
-		const bool sceneNode = n.s == "scene.load" || n.s == "scene.loadAdditive";
-		const bool saveField = n.s.rfind("save.", 0) == 0 && hasFieldParam;
-		if (HcEditorUtil::drawSceneParamPicker(n, h.content))          edit(true);
-		else if (HcEditorUtil::drawSaveFieldParamPicker(n, h.content)) edit(true);
-
-		// Every other string parameter whose values are a closed list: the
-		// animations this widget carries, its elements, the easing curves, the
-		// play directions. The host answers first — what an "animation" can be
-		// is a property of the asset being edited — and the shared vocabularies
-		// fill in behind it.
-		bool drewChoice = false;
-		for (const auto& p : n.params)
-		{
-			if (p.type != PT::String || p.isArray) continue;
-			std::vector<std::string> choices;
-			if (h.paramChoices) choices = h.paramChoices(n.s, p.name);
-			if (choices.empty()) choices = HcEditorUtil::engineParamChoices(p.name);
-			if (choices.empty()) continue;
-			// "animation" → "Animation": the pins are named in the registry's
-			// spelling, the rows are read by a person.
-			std::string label = p.name;
-			if (!label.empty()) label[0] = (char)std::toupper((unsigned char)label[0]);
-			if (HcEditorUtil::drawChoiceParamPicker(n, p.name, label.c_str(), choices))
-				edit(true);
-			drewChoice = true;
-		}
-		if (!sceneNode && !saveField && !drewChoice)
+		// Nothing to edit HERE any more: every input of an engine call is set on
+		// its pins, and the ones whose values are a list are dropdowns there
+		// (see drawPinInlineEditor). What is left is the sentence saying where
+		// a particular row's entries come from.
+		if (const char* hint = HcEditorUtil::engineParamHint(n))
+			ImGui::TextDisabled("%s", hint);
+		else
 			ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
 		return true;
 	}
