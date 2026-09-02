@@ -2008,6 +2008,9 @@ void drawDetails(State& st, AppContext& ctx)
 	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
 	if (EditorWidgets::checkbox("Focus frame", &n->focusFrame)) committed = true;
 	if (EditorWidgets::checkbox("Accepts drop", &n->acceptsDrop)) committed = true;
+	if (EditorWidgets::checkbox("Draggable", &n->draggable)) committed = true;
+	if (n->draggable)
+		if (EditorWidgets::Row::inputText("Drag payload", &n->dragPayload)) committed = true;
 	const bool cursorOpen = ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor));
 	if (!cursorOpen) EditorWidgets::helpForLabel("Hover cursor");
 	if (cursorOpen)

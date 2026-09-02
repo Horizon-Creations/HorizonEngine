@@ -2623,6 +2623,21 @@ namespace
 	  "accepts one, so set it on the panel and not on the label inside it. Where "
 	  "nothing accepts, the window took it and the Game Instance hears it instead.",
 	  "", "ui#widgets" },
+	{ "UI Widget/Draggable", "",
+	  "Lets this element be picked up and carried onto a drop zone. The drag "
+	  "begins at a DISTANCE, not at the press, so a draggable element can still "
+	  "be clicked. It fires On Drag Started when it lifts and On Drag Ended when "
+	  "it lands, with a bool saying whether anything took it; the zone it was "
+	  "dropped on gets On Drop. Like Accepts drop, this bubbles: pressing the "
+	  "label of a draggable card carries the card.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Drag payload", "",
+	  "What this element calls itself when it is dropped somewhere: the string "
+	  "the target receives with On Drop. A list row writes its index in here, a "
+	  "tool button its tool. Left empty it falls back to the element's name, "
+	  "which is enough for dragging one named thing onto another without a line "
+	  "of logic.",
+	  "", "ui#widgets" },
 
 	{ "UI Graph/Event Graph", "Event Graph",
 	  "The widget's main graph, where the event handlers live. The functions "

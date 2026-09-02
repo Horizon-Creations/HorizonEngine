@@ -2021,7 +2021,7 @@ gibt.
 ### B7, erste Hälfte: was von außen hereinkommt (02.09.2026)
 
 Eine Datei aufs Fenster ziehen, der Teil von B7, den man einer App zuerst ansieht. Die zweite
-Hälfte, das Ziehen innerhalb der Anwendung, steht noch aus.
+Hälfte steht direkt darunter.
 
 **Ein Drop ist keine Maus.** Er kommt als eigene Ereignisfolge, mit einer Position im Fenster,
 und während er in der Luft ist bewegt sich der Zeiger nicht. Deshalb sind es zwei Aufrufe,
@@ -2062,6 +2062,51 @@ Viewport-Panel meldet jetzt neben dem Zeiger auch sein Rechteck, in Fensterpunkt
 gegen die eigene Plattform-Ansicht gerechnet, damit ein herausgezogenes Panel nicht um die
 Fensterposition daneben liegt; die SDL-Fenster-Id kommt mit, weil ein Drop auf ein anderes
 Fenster kein Drop auf dieses ist.
+
+---
+
+### B7, zweite Hälfte: etwas in der Anwendung tragen (02.09.2026)
+
+**Ein Zug beginnt an einer Strecke, nie am Druck.** Das ist der ganze Unterschied zwischen
+einem ziehbaren Ding, das man noch anklicken kann, und einem, das man nicht mehr anklicken
+kann: ein Druck ist auch der Anfang eines Klicks. Also gibt es zwei Zustände, gespannt und
+aktiv, und dazwischen liegen vier Pixel. Gemessen wird ab dem Druck und nicht ab dem letzten
+Bild, sonst ist ein langsames Ziehen keines.
+
+**Was daraus folgt, ist die Zeile, die man vergisst:** ein Druck, der zum Zug geworden ist,
+darf beim Loslassen kein Klick mehr sein. Ohne sie feuert jeder ziehbare Knopf genau dann,
+wenn man ihn wieder hinlegt.
+
+**Die Nutzlast ist ein String, den die Quelle über sich selbst sagt.** Eine Listenzeile
+schreibt ihren Index hinein, ein Werkzeugknopf sein Werkzeug. Leer heißt: der Name des
+Elements, und damit funktioniert „ziehe dieses benannte Ding auf jenes" ohne eine Zeile
+Logik. Mehr als ein String passt ohnehin nicht in ein Ereignis-Argument, und ein
+Nutzlast-System nebenher wäre eine zweite Wertewelt neben HorizonCode.
+
+**Drei Ereignisse, weil es drei Momente sind:** `OnDragStarted` an der Quelle, `OnDrop` am
+Ziel mit der Nutzlast, `OnDragEnded` wieder an der Quelle mit einem Bool. Das Bool ist das,
+woran eine Quelle merkt, dass sie sich zurücklegen muss.
+
+**Aufheben ist Zeigerinteraktion.** `draggable` musste in `isInteractive`, sonst blast der
+Druck an einem ziehbaren Panel ohne Klick-Bindung nach oben vorbei und es spannt nie. Ein
+Flag, das sagt „hier tut der Zeiger etwas", muss eine der Antworten auf „tut der Zeiger hier
+etwas" sein.
+
+**Auf sich selbst kann man nichts fallen lassen**, und das ist kein Sonderfall, sondern der
+Normalfall: das getragene Ding ist per Definition unter dem Zeiger. Quelle und alles darin
+fallen deshalb aus der Zielsuche heraus, im Bild wie beim Loslassen, sonst verspricht der
+Rahmen etwas, das das Loslassen nicht halten kann.
+
+**Escape gehört dem Zug, vor jedem Dialog.** Er wurde zuletzt begonnen, und „mach die Geste
+rückgängig, in der ich gerade stecke" ist, was Escape dort heißt. Ein Zug, dessen Zeiger
+ungültig wird (eingefangen, aus dem Viewport), geht aus demselben Grund zurück.
+
+**Die Quelle wird halb durchsichtig, das Ziel bekommt den Rahmen aus der ersten Hälfte.** Ein
+Zug, dessen Quelle an ihrem alten Platz stehen bleibt, liest sich als Kopie.
+
+**Das Beenden liegt an einer Stelle** (`finishDrag`), außerhalb der Widget-Schleife: ein Drop
+betrifft zwei Elemente, die in zwei verschiedenen Widgets liegen können, und pro Widget würde
+er zweimal oder von der falschen Seite enden.
 
 ---
 

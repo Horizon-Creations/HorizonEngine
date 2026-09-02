@@ -134,6 +134,12 @@ public:
     // a list would only make the simple case carry the hard one's weight.
     virtual void onFileDropped(int elem, const std::string& path)
     { fireEvent("OnFileDropped", elem, Value::ofString(path)); }
+    // Dragging inside the application: picked up, let go over me, and over.
+    virtual void onDragStarted(int elem) { fireEvent("OnDragStarted", elem, Value{}); }
+    virtual void onDrop(int elem, const std::string& payload)
+    { fireEvent("OnDrop", elem, Value::ofString(payload)); }
+    virtual void onDragEnded(int elem, bool accepted)
+    { fireEvent("OnDragEnded", elem, Value::ofBool(accepted)); }
     // An animation reached its target. The argument is the PROPERTY's name, not
     // the element's: two animations on one element (fade it and slide it) end
     // separately, and an event that could not say which one ended would be a

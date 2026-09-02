@@ -390,6 +390,19 @@ public:
     bool processDrop(float vpWidth, float vpHeight, float x, float y,
                      const std::vector<std::string>& paths);
 
+    // ── Dragging INSIDE the application ──────────────────────────────────────
+    // Driven entirely by processPointer, because it is made of a press, a move
+    // and a release and those are already there. What is public is only what
+    // somebody outside has to know or be able to say.
+    //
+    // Is something being carried right now, and what. 0 when nothing is.
+    bool isDragging() const { return m_dragActive; }
+    int  dragSourceElement() const { return m_dragActive ? m_dragElem : 0; }
+    // Put it back: Escape, the window losing focus, a reload under a running
+    // drag. Fires OnDragEnded(false) on the source, exactly like a release over
+    // nothing, because that is what it is.
+    void cancelDrag();
+
     // What the last processPointer answered. Both apps drop that return value,
     // so this is how anyone else — gameplay code and scripts, through
     // HE::api::ui::pointerOverUI — finds out that this frame's click belongs to
@@ -896,6 +909,18 @@ private:
     // and the drop only at the end: without remembering it, the highlight would
     // be gone by the time the file arrives.
     int m_dropWidget = 0, m_dropElem = 0;
+    // ── The drag in flight, and the press that may yet become one ────────────
+    // Armed on a press over a draggable element, active only once the pointer
+    // has travelled far enough. The gap between the two is the whole reason a
+    // draggable thing can still be clicked: a press is where a click begins as
+    // well, and a drag that starts on the press eats every click there is.
+    int   m_dragWidget = 0, m_dragElem = 0;
+    bool  m_dragArmed = false, m_dragActive = false;
+    float m_dragStartX = 0.0f, m_dragStartY = 0.0f;
+    // The click this press would have been, suppressed because it turned into a
+    // drag instead. Read and cleared by the release in the same call.
+    bool  m_dragAteClick = false;
+    static constexpr float kDragThreshold = 4.0f;   // pixels
 
     // ── The one hit test ─────────────────────────────────────────────────────
     // Topmost hit-testable element under a point, across every visible widget
@@ -913,4 +938,16 @@ private:
     PointerHit topmostHit(float vpWidth, float vpHeight, float x, float y);
     // First element at or above `hitElem` that accepts a drop (0 = none).
     int dropTargetAt(Instance& w, int hitElem) const;
+    // …and the same walk for the other half: the first that can be picked up.
+    int draggableAt(Instance& w, int hitElem) const;
+    // Mark (or unmark) what a drop would land on, and redraw only on a change.
+    void setDropMark(int widgetId, int elemId);
+    // Where a carried payload would land right now: the hit's drop target,
+    // unless that is the source itself or something inside it — dropping a row
+    // onto itself is not a move, and the picture must not promise that it is.
+    int dragTargetUnder(float vpWidth, float vpHeight, float x, float y, Instance** outW);
+    // End the carry: fires OnDrop on the target when there is one, then always
+    // OnDragEnded on the source. One place, because "let go" and "give up" are
+    // the same event with a different answer.
+    void finishDrag(bool accepted, Instance* targetW, int targetElem);
 };

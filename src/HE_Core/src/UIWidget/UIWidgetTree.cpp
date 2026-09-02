@@ -1302,6 +1302,8 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.clipChildren)      o["clipChildren"] = true;
     if (e.focusFrame)        o["focusFrame"] = true;
     if (e.acceptsDrop)       o["acceptsDrop"] = true;
+    if (e.draggable)         o["draggable"] = true;
+    if (!e.dragPayload.empty()) o["dragPayload"] = e.dragPayload;
     if (e.renderOpacity < 1.0f) o["renderOpacity"] = e.renderOpacity;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
@@ -1420,6 +1422,8 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->clipChildren  = o.value("clipChildren", false);
     e->focusFrame    = o.value("focusFrame", false);
     e->acceptsDrop   = o.value("acceptsDrop", false);
+    e->draggable     = o.value("draggable", false);
+    e->dragPayload   = o.value("dragPayload", std::string{});
     e->renderOpacity = o.value("renderOpacity", 1.0f);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);

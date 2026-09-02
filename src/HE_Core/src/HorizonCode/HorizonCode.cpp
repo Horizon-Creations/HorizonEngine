@@ -2192,6 +2192,15 @@ const std::vector<EngineEventDesc>& engineEvents()
         // event per file. Bubbles up like a click, so the drop zone is the
         // element that ACCEPTS, never whichever caption the pointer met.
         { "OnFileDropped",        "onFileDropped",        P::String, true  },
+        // The gesture inside the application: this element was picked up, a
+        // payload was let go over this one, and the carry is over. OnDrop's
+        // String is the SOURCE's payload (its Drag Payload, or its name) — the
+        // one thing the target has to know and the only thing an event argument
+        // can carry. OnDragEnded's Bool says whether anything took it, which is
+        // how a source knows to put itself back.
+        { "OnDragStarted",        "onDragStarted",        P::Exec,   true  },
+        { "OnDrop",               "onDrop",               P::String, true  },
+        { "OnDragEnded",          "onDragEnded",          P::Bool,   true  },
         // A dialog, popup or menu closing. Fired on the widget's OWN graph and
         // not addressed to an element, because what closed is the whole thing.
         { "OnDismissed",          "onDismissed",          P::Exec,   false },

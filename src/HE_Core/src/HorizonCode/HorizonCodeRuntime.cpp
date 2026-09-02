@@ -632,6 +632,7 @@ HE_HC_POINTER_EVENT(fireOnMouseLeave, "OnMouseLeave", onMouseLeave)
 HE_HC_POINTER_EVENT(fireOnFocused,    "OnFocused",    onFocused)
 HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
 HE_HC_POINTER_EVENT(fireOnRightClicked, "OnRightClicked", onRightClicked)
+HE_HC_POINTER_EVENT(fireOnDragStarted,  "OnDragStarted",  onDragStarted)
 #undef HE_HC_POINTER_EVENT
 
 // The no-payload lifecycle events — their hooks take nothing, so they cannot
@@ -698,6 +699,10 @@ HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
                   onRowActivated(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnFileDropped, "OnFileDropped", const std::string&,
                   onFileDropped(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDrop, "OnDrop", const std::string&,
+                  onDrop(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDragEnded, "OnDragEnded", bool,
+                  onDragEnded(elem, v), Value::ofBool(v))
 #undef HE_HC_VALUE_EVENT
 
 // The physics contacts: one Int argument (the other entity), no element. Same

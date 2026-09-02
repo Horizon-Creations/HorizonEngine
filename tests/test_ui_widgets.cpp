@@ -392,8 +392,9 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnFileDropped")
         { textCanTakeAFile = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
     CHECK(textCanTakeAFile);
-    CHECK(HE::UIText{}.allEvents().size() == 2);
-    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 2);
+    // Plus the three of the drag: picked up, dropped on, ended.
+    CHECK(HE::UIText{}.allEvents().size() == 5);
+    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 5);
     CHECK(HE::UIButton{}.interactive());
     CHECK(!HE::UIText{}.interactive());
 }
@@ -8686,7 +8687,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 39);
+    CHECK(HE::uiBaseProperties().size() == 41);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -10273,4 +10274,277 @@ TEST_CASE("Drop: the highlight marks the element that would take it")
     CHECK(wm.processDrop(400.0f, 300.0f, 100.0f, 150.0f, { "/tmp/a.txt" }));
     out.clear(); wm.extract(400.0f, 300.0f, out);
     CHECK(countDropRings(out) == 0);
+}
+
+// ═══ B7: dragging inside the application ═════════════════════════════════════
+
+namespace
+{
+// A card that can be picked up on the left, a bin that takes things on the
+// right, and a graph that writes down everything that happened to either. The
+// card carries a caption, because the press has to be able to land on a child
+// and still lift the card.
+struct DragFixture
+{
+    HE::UIWidgetTree   tree;
+    HorizonCode::Graph graph;
+    int card = 0, caption = 0, bin = 0;
+
+    explicit DragFixture(const char* payload = "")
+    {
+        tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+        tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+
+        card = tree.add(HE::UIWidgetType::Panel);
+        {
+            HE::UIElement& e = *tree.find(card);
+            e.name = "Card"; e.draggable = true; e.dragPayload = payload;
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 180.0f; e.sizeY = 300.0f;
+        }
+        caption = tree.add(HE::UIWidgetType::Text);
+        {
+            HE::UIElement& e = *tree.find(caption);
+            e.parentId = card; e.name = "Caption";
+            e.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+            HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+            HE::uiSetAnchorInsetsX(e, 20.0f, 20.0f);
+            HE::uiSetAnchorInsetsY(e, 20.0f, 20.0f);
+        }
+        bin = tree.add(HE::UIWidgetType::Panel);
+        {
+            HE::UIElement& e = *tree.find(bin);
+            e.name = "Bin"; e.acceptsDrop = true;
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 220.0f; e.posY = 0.0f; e.sizeX = 180.0f; e.sizeY = 300.0f;
+        }
+
+        auto counter = [&](const char* name, const char* event, int elem)
+        {
+            HorizonCode::Variable v; v.name = name; v.type = PinType::Int;
+            graph.variables.push_back(v);
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = elem;
+            const int evId = graph.addNode(ev);
+            HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = name;
+            get.propType = PinType::Int;
+            const int getId = graph.addNode(get);
+            HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+            const int oneId = graph.addNode(one);
+            HorizonCode::Node add; add.type = NodeType::Add;
+            const int addId = graph.addNode(add);
+            HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = name;
+            set.propType = PinType::Int;
+            const int setId = graph.addNode(set);
+            REQUIRE(graph.connect(getId, 0, addId, 0));
+            REQUIRE(graph.connect(oneId, 0, addId, 1));
+            REQUIRE(graph.connect(evId, 0, setId, 0));
+            REQUIRE(graph.connect(addId, 2, setId, 2));
+            return evId;
+        };
+        counter("clicks",  "OnClicked",      card);
+        counter("started", "OnDragStarted",  card);
+
+        // What the bin was handed…
+        {
+            HorizonCode::Variable v; v.name = "took"; v.type = PinType::String;
+            graph.variables.push_back(v);
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnDrop"; ev.elem = bin;
+            ev.hasArg = true; ev.propType = PinType::String;
+            const int evId = graph.addNode(ev);
+            HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "took";
+            set.propType = PinType::String;
+            const int setId = graph.addNode(set);
+            REQUIRE(graph.connect(evId, 0, setId, 0));
+            REQUIRE(graph.connect(evId, 1, setId, 2));
+        }
+        // …and how it went for the card. Both a count and the verdict: "it
+        // ended" and "it was taken" are two different questions, and a cancel
+        // has to answer the first one too.
+        {
+            HorizonCode::Variable v; v.name = "accepted"; v.type = PinType::Bool;
+            graph.variables.push_back(v);
+            HorizonCode::Variable n; n.name = "ends"; n.type = PinType::Int;
+            graph.variables.push_back(n);
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnDragEnded";
+            ev.elem = card; ev.hasArg = true; ev.propType = PinType::Bool;
+            const int evId = graph.addNode(ev);
+            HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "accepted";
+            set.propType = PinType::Bool;
+            const int setId = graph.addNode(set);
+            REQUIRE(graph.connect(evId, 0, setId, 0));
+            REQUIRE(graph.connect(evId, 1, setId, 2));
+            HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = "ends";
+            get.propType = PinType::Int;
+            const int getId = graph.addNode(get);
+            HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+            const int oneId = graph.addNode(one);
+            HorizonCode::Node add; add.type = NodeType::Add;
+            const int addId = graph.addNode(add);
+            HorizonCode::Node inc; inc.type = NodeType::SetVariable; inc.s = "ends";
+            inc.propType = PinType::Int;
+            const int incId = graph.addNode(inc);
+            REQUIRE(graph.connect(getId, 0, addId, 0));
+            REQUIRE(graph.connect(oneId, 0, addId, 1));
+            REQUIRE(graph.connect(setId, 1, incId, 0));
+            REQUIRE(graph.connect(addId, 2, incId, 2));
+        }
+    }
+};
+}
+
+TEST_CASE("Drag: a press is still a click, and a press that travels is a drag")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+    auto var = [&](const char* n) { return rt.getVariable(inst, n).i; };
+
+    // Press and let go where you pressed: a click, and nothing was carried.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true,  true);
+    CHECK_FALSE(wm.isDragging());
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, false, true);
+    CHECK(var("clicks") == 1);
+    CHECK(var("started") == 0);
+
+    // A press that wobbles by less than the threshold is still a click. This is
+    // the assertion the threshold exists for: a hand is never perfectly still.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 92.0f, 151.0f, true, true);
+    CHECK_FALSE(wm.isDragging());
+    wm.processPointer(400.0f, 300.0f, 92.0f, 151.0f, false, true);
+    CHECK(var("clicks") == 2);
+    CHECK(var("started") == 0);
+
+    // Travel far enough and it lifts — from a press on the CAPTION, because a
+    // card is picked up by any part of it.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 140.0f, 150.0f, true, true);
+    CHECK(wm.isDragging());
+    CHECK(wm.dragSourceElement() == f.card);
+    CHECK(var("started") == 1);
+
+    // Let go over nothing: it ended, nothing took it, and it was NOT a click.
+    wm.processPointer(400.0f, 300.0f, 200.0f, 150.0f, false, true);
+    CHECK_FALSE(wm.isDragging());
+    CHECK(var("ends") == 1);
+    CHECK(rt.getVariable(inst, "accepted").b == false);
+    CHECK(rt.getVariable(inst, "took").s.empty());
+    CHECK(var("clicks") == 2);          // the drag ate it
+}
+
+TEST_CASE("Drag: what lands on a zone arrives there, and says what it is")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;                       // no payload → the name answers
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+
+    // Over the bin, the mark is on the bin: the same ring the file drop uses,
+    // answering the same question.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 1);
+    // …and the card is half there, because it is under the hand and not in its
+    // place any more.
+    const HE::UIWidgetRect cr =
+        HE::uiElementRect(*wm.tree(id), *wm.tree(id)->find(f.card));
+    bool cardFaded = false;
+    for (const UIRenderObject& o : out)
+        if (std::abs(o.position.x - cr.x) < 0.5f && std::abs(o.size.x - cr.w) < 0.5f &&
+            o.color.a > 0.001f && o.color.a < 0.9f)
+            cardFaded = true;
+    CHECK(cardFaded);
+
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(rt.getVariable(inst, "took").s == "Card");     // the name, unset payload
+    CHECK(rt.getVariable(inst, "accepted").b == true);
+    CHECK(rt.getVariable(inst, "ends").i == 1);
+    // The mark goes with the gesture.
+    out.clear(); wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 0);
+}
+
+TEST_CASE("Drag: the payload is what the source says it is")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f("row:7");
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(rt.getVariable(static_cast<HorizonCode::InstanceId>(id), "took").s == "row:7");
+}
+
+TEST_CASE("Drag: it cannot be dropped on itself, and Escape puts it back")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    // The card takes drops as well as making them — a reorderable list row is
+    // exactly this, and the row under the hand is the one the pointer is on.
+    f.tree.find(f.card)->acceptsDrop = true;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+
+    // Lift it and stay over itself: no mark, because there is nowhere to land.
+    wm.processPointer(400.0f, 300.0f, 40.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 100.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 300.0f, out);
+    CHECK(countDropRings(out) == 0);
+
+    // Letting go there is a cancel, not a drop onto itself.
+    wm.processPointer(400.0f, 300.0f, 100.0f, 150.0f, false, true);
+    CHECK(rt.getVariable(inst, "took").s.empty());
+    CHECK(rt.getVariable(inst, "accepted").b == false);
+    CHECK(rt.getVariable(inst, "ends").i == 1);
+
+    // Escape while carrying puts it back, and it is the topmost thing there is:
+    // above any dialog, because it was begun last.
+    wm.processPointer(400.0f, 300.0f, 40.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.isDragging());
+    CHECK(rt.getVariable(inst, "ends").i == 2);
+    CHECK(rt.getVariable(inst, "accepted").b == false);
+
+    // …and the release that follows the cancel is not a click either. The press
+    // became a drag; that it was given up does not turn it back into one.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(rt.getVariable(inst, "clicks").i == 0);
 }

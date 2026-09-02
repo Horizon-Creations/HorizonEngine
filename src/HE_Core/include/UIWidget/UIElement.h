@@ -252,6 +252,9 @@ struct UIElementRenderState
     // drag the pointer is over an element without touching it: the hover is
     // about the mouse, this is about the payload.
     bool dropTarget = false;
+    // …and whether THIS element is the one being carried. The thing under the
+    // hand should look like it left its place, or a drag reads as a copy.
+    bool dragging = false;
 };
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };
@@ -520,6 +523,21 @@ public:
     // wants to be a different type for it.
     bool        acceptsDrop = false;
 
+    // ── …and can this one be PICKED UP? ──────────────────────────────────────
+    // The other half of the same gesture. Also bubbling: a press on the caption
+    // of a draggable card starts the card moving, not the caption.
+    //
+    // A drag begins at a DISTANCE, never at the press — anything else turns
+    // every click on a draggable thing into a drag of it, and the press is
+    // where a click begins too. Which distance is the manager's business
+    // (kDragThreshold); that it is a distance is this comment's.
+    bool        draggable = false;
+    // What this element IS, in the eye of whatever it is dropped on. A string,
+    // set by whoever knows: a list row writes its index in here when the drag
+    // starts, a tool button its tool. Empty falls back to the element's NAME,
+    // which is right often enough that the simple case needs no script at all.
+    std::string dragPayload;
+
     virtual ~UIElement() = default;
 
     virtual UIWidgetType type() const = 0;
@@ -560,6 +578,13 @@ public:
         // a particular type does. Whether it ever fires is Accepts Drop's
         // business, not this list's.
         out.push_back({ "OnFileDropped", UIPropType::String, /*hasArg=*/true });
+        // The three of the gesture that happens INSIDE the application: it was
+        // picked up, something was let go over me, and it is over. All three on
+        // the base for the same reason as the two above — being dragged is
+        // something that happens to an element, not something a type does.
+        out.push_back({ "OnDragStarted", UIPropType::Bool, /*hasArg=*/false });
+        out.push_back({ "OnDrop",        UIPropType::String, /*hasArg=*/true });
+        out.push_back({ "OnDragEnded",   UIPropType::Bool, /*hasArg=*/true });
         return out;
     }
     virtual std::vector<UIEventDesc> events() const { return {}; }
@@ -683,6 +708,7 @@ protected:
         dst.clipChildren = clipChildren;
         dst.focusFrame = focusFrame;
         dst.acceptsDrop = acceptsDrop;
+        dst.draggable = draggable; dst.dragPayload = dragPayload;
         dst.cornerRadius = cornerRadius;
         dst.borderWidth = borderWidth; dst.borderColor = borderColor;
         dst.gradient = gradient; dst.gradientColor = gradientColor;

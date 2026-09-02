@@ -858,6 +858,11 @@ void WidgetManager::openPopupAtPointer(int widgetId)
 
 bool WidgetManager::closeTopLayer()
 {
+	// A carry in flight is the topmost thing there is, above any dialog: it was
+	// started last and Escape means "undo the gesture I am in the middle of".
+	// Putting it back is also cheaper to be wrong about than closing a dialog
+	// somebody was filling in.
+	if (m_dragActive) { cancelDrag(); return true; }
 	if (m_grabs.empty()) return false;
 	popGrab(/*notify=*/true);
 	return true;
@@ -1789,6 +1794,12 @@ namespace
 bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) const
 {
 	if (e.interactive()) return true;
+	// Something you can pick up takes the pointer by definition. Without this a
+	// draggable panel that binds no click is not "interactive", the press
+	// bubbles past it to whatever is, and nothing ever arms: a flag that says
+	// "the pointer does something here" has to be one of the answers to "does
+	// the pointer do something here".
+	if (e.draggable) return true;
 	// Bound by a pointer-event node? (elem 0 = any element.) eventBindingsOf
 	// serves interpreted (Event nodes) and compiled (static tables) scripts alike.
 	// The bindings to ask are the ones of the script that OWNS this element, and
@@ -2090,6 +2101,39 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		}
 	}
 
+	// ── An armed press that has travelled far enough is a drag ───────────────
+	// The threshold is the whole difference between a draggable thing you can
+	// still click and one you cannot. Measured from where the press landed, not
+	// from the last frame: a slow drag crosses no single frame's distance and is
+	// still a drag.
+	if (m_dragArmed && !m_dragActive && primaryDown && valid)
+	{
+		const float dx = mouseX - m_dragStartX, dy = mouseY - m_dragStartY;
+		if (dx * dx + dy * dy >= kDragThreshold * kDragThreshold)
+		{
+			m_dragActive = true;
+			// Whatever this press was going to be, it is not a click any more.
+			m_dragAteClick = true;
+			m_visualDirty = true;
+			if (Instance* src = find(m_dragWidget))
+			{
+				const ScriptTarget s = scriptTargetFor(*src, m_dragElem);
+				rt().fireOnDragStarted(s.scriptId, s.elem);
+			}
+		}
+	}
+	// The pointer went away under a carry (captured, off the viewport). Nothing
+	// can be let go over a place the pointer is not, so it goes back.
+	if (m_dragActive && !valid) cancelDrag();
+	// …and while it IS being carried, the mark follows: the same highlight the
+	// file drop uses, because it answers the same question.
+	if (m_dragActive)
+	{
+		Instance* tw = nullptr;
+		const int te = dragTargetUnder(vpWidth, vpHeight, mouseX, mouseY, &tw);
+		setDropMark(te != 0 && tw ? tw->id : 0, te);
+	}
+
 	for (auto& w : m_instances)
 	{
 		const bool isTop = topW == &w;
@@ -2269,6 +2313,20 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				w.focusedElem = 0;
 				if (m_focusWidget == w.id) m_focusWidget = 0;
 			}
+
+			// ── A press that MIGHT become a drag ──────────────────────────────
+			// Armed, not started. The distance decides that later, and until then
+			// this is an ordinary press with an ordinary click still ahead of it.
+			// The three drags above get first claim: a slider's handle inside a
+			// draggable card belongs to the slider, and the card would otherwise
+			// steal every value change made on it.
+			if (hot != 0 && !w.draggingSlider && !w.draggingText && !w.draggingSplit)
+				if (const int src = draggableAt(w, hot))
+				{
+					m_dragWidget = w.id; m_dragElem = src;
+					m_dragStartX = mouseX; m_dragStartY = mouseY;
+					m_dragArmed = true; m_dragActive = false;
+				}
 		}
 
 		// ── Slider drag ──────────────────────────────────────────────────────
@@ -2336,13 +2394,33 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		// ── Release ──────────────────────────────────────────────────────────
 		if (releaseEdge)
 		{
-			if (w.pressedElem != 0 && w.pressedElem == hot)
+			// A press that turned into a drag is not a click. Without this every
+			// draggable button fires the moment it is put down again, which is
+			// the one thing a drag must not do.
+			if (w.pressedElem != 0 && w.pressedElem == hot && !m_dragAteClick)
 				activateElement(w, hot);
 			w.pressedElem    = 0;
 			w.draggingSlider = 0;
 			w.draggingText   = 0;
 			w.draggingSplit  = 0;
 		}
+	}
+
+	// ── Letting go ends the carry, once, after every widget has had the frame ─
+	// Out here and not in the loop above: a drop concerns two elements that may
+	// live in two different widgets, and a per-widget block would finish it
+	// twice or from the wrong side. The suppressed click is consumed here too,
+	// because the release that used it has just run.
+	if (releaseEdge)
+	{
+		if (m_dragActive)
+		{
+			Instance* tw = nullptr;
+			const int te = dragTargetUnder(vpWidth, vpHeight, mouseX, mouseY, &tw);
+			finishDrag(te != 0, tw, te);
+		}
+		m_dragArmed = false;
+		m_dragAteClick = false;
 	}
 
 	m_wasDown = primaryDown;
@@ -2374,6 +2452,32 @@ int WidgetManager::dropTargetAt(Instance& w, int hitElem) const
 	return 0;
 }
 
+// The same walk for the other half of the gesture. Written out rather than
+// folded into one function with a flag: "who takes this" and "who moves" are two
+// questions, and an element is often the answer to one and not the other.
+int WidgetManager::draggableAt(Instance& w, int hitElem) const
+{
+	int guard = 0;
+	for (const HE::UIElement* e = w.tree.find(hitElem);
+	     e && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
+	{
+		if (e->draggable) return e->id;
+		if (e->parentId == 0) break;
+		e = w.tree.find(e->parentId);
+	}
+	return 0;
+}
+
+void WidgetManager::setDropMark(int widgetId, int elemId)
+{
+	// Only a CHANGE is a redraw. A drag reports its position continuously, and
+	// an application that repaints on every one of them is the idle-CPU problem
+	// (A2) wearing a different hat.
+	if (widgetId == m_dropWidget && elemId == m_dropElem) return;
+	m_dropWidget = widgetId; m_dropElem = elemId;
+	m_visualDirty = true;
+}
+
 bool WidgetManager::dropHover(float vpWidth, float vpHeight, float x, float y,
                               bool active)
 {
@@ -2392,14 +2496,7 @@ bool WidgetManager::dropHover(float vpWidth, float vpHeight, float x, float y,
 			if (t != 0) { newW = ph.widget->id; newE = t; }
 		}
 	}
-	// Only a CHANGE is a redraw. A drag sends its position continuously, and an
-	// application that repaints on every one of them is the idle-CPU problem
-	// (A2) wearing a different hat.
-	if (newW != m_dropWidget || newE != m_dropElem)
-	{
-		m_dropWidget = newW; m_dropElem = newE;
-		m_visualDirty = true;
-	}
+	setDropMark(newW, newE);
 	return m_dropElem != 0;
 }
 
@@ -2408,11 +2505,7 @@ bool WidgetManager::processDrop(float vpWidth, float vpHeight, float x, float y,
 {
 	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
 	// The highlight is over either way — the gesture ended, whatever it hit.
-	if (m_dropWidget != 0 || m_dropElem != 0)
-	{
-		m_dropWidget = 0; m_dropElem = 0;
-		m_visualDirty = true;
-	}
+	setDropMark(0, 0);
 	if (paths.empty()) return false;
 
 	// Resolved HERE and not from the remembered hover: the two agree in the
@@ -2445,6 +2538,71 @@ bool WidgetManager::processDrop(float vpWidth, float vpHeight, float x, float y,
 		for (const std::string& p : paths)
 			rt().fireOnFileDropped(gi, 0, p);
 	return false;
+}
+
+// ── Where a carried payload would land ───────────────────────────────────────
+// The drop target under the pointer, minus one case: the source itself and
+// anything inside it. Dropping a row onto itself is not a move, and a highlight
+// that says otherwise promises something the release cannot keep. It is also the
+// common case, because the thing being carried is under the pointer by
+// definition.
+int WidgetManager::dragTargetUnder(float vpWidth, float vpHeight, float x, float y,
+                                   Instance** outW)
+{
+	if (outW) *outW = nullptr;
+	if (!m_dragActive) return 0;
+	const PointerHit ph = topmostHit(vpWidth, vpHeight, x, y);
+	if (!ph.widget) return 0;
+	const int t = dropTargetAt(*ph.widget, ph.elem);
+	if (t == 0) return 0;
+	if (ph.widget->id == m_dragWidget && isSelfOrDescendant(ph.widget->tree, m_dragElem, t))
+		return 0;
+	if (outW) *outW = ph.widget;
+	return t;
+}
+
+// ── The end of a carry ───────────────────────────────────────────────────────
+// One place for both endings. Letting go over a target and giving up are the
+// same event with a different answer, and writing them apart is how the two
+// drift until only one of them tells the source it is over.
+void WidgetManager::finishDrag(bool accepted, Instance* targetW, int targetElem)
+{
+	Instance* src = find(m_dragWidget);
+	const int srcElem = m_dragElem;
+	// Cleared BEFORE the events: a handler may destroy the widget it was told
+	// about, and leaving a live drag pointing at freed memory is the kind of
+	// crash that only happens to whoever ships it.
+	m_dragActive = false; m_dragArmed = false;
+	m_dragWidget = 0; m_dragElem = 0;
+	setDropMark(0, 0);
+	m_visualDirty = true;
+
+	// What the source SAYS it is: its payload, or its name when nobody set one.
+	// The fallback is not a nicety — it is what lets a drag between two named
+	// panels work without a line of script.
+	std::string payload;
+	if (src)
+		if (const HE::UIElement* e = src->tree.find(srcElem))
+			payload = e->dragPayload.empty() ? e->name : e->dragPayload;
+
+	if (accepted && targetW && targetElem != 0)
+	{
+		const ScriptTarget t = scriptTargetFor(*targetW, targetElem);
+		rt().fireOnDrop(t.scriptId, t.elem, payload);
+	}
+	// …and the source hears how it went either way, which is how it knows
+	// whether to put itself back.
+	if (src)
+	{
+		const ScriptTarget s = scriptTargetFor(*src, srcElem);
+		rt().fireOnDragEnded(s.scriptId, s.elem, accepted);
+	}
+}
+
+void WidgetManager::cancelDrag()
+{
+	if (!m_dragActive) { m_dragArmed = false; return; }
+	finishDrag(/*accepted=*/false, nullptr, 0);
 }
 
 // The focused text field, or nullptr. Every editing entry point starts here,
@@ -3658,6 +3816,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			st.focused = (e.id == w.focusedElem);
 			st.editing = st.focused && m_focusEditing && m_focusWidget == w.id;
 			st.dropTarget = (e.id == m_dropElem && m_dropWidget == w.id);
+			st.dragging   = (m_dragActive && e.id == m_dragElem && m_dragWidget == w.id);
 
 			const auto matIt = w.materials.find(e.id);
 			const HE::UUID matId = matIt != w.materials.end() ? matIt->second : HE::UUID{};
@@ -3776,7 +3935,11 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// with five quads gets both right without knowing they exist.
 			// Multiplied, never assigned: an element's own colours keep their
 			// alpha, they are only faded further.
-			const float alpha = HE::uiElementEffectiveOpacity(w.tree, e);
+			// …and the thing under the hand is half there. A drag whose source
+			// stays solid in its old place reads as a copy, which is the wrong
+			// promise for a gesture that is about to move something.
+			const float alpha = HE::uiElementEffectiveOpacity(w.tree, e)
+			                  * (st.dragging ? HE::kUIDraggedAlpha : 1.0f);
 			const bool  usable = HE::uiElementEffectiveEnabled(w.tree, e);
 			if (alpha < 1.0f || !usable)
 			{

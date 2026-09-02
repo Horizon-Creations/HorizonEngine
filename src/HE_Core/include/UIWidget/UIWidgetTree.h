@@ -313,6 +313,12 @@ HE_API bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement&
 // runtime and the designer preview grey things out identically.
 inline constexpr float kUIDisabledDim = 0.55f;
 
+// …and how much of an element is left where it was while it is being CARRIED.
+// A drag whose source stays solid in its old place reads as a copy, and the
+// gesture is about to move something. Alpha rather than a dim: it has to look
+// like it has left, not like it has been switched off.
+inline constexpr float kUIDraggedAlpha = 0.45f;
+
 // The rect this element is cut off at, in canvas units: the intersection of the
 // rects of every ancestor whose clipChildren is on (an element's own flag clips
 // its CHILDREN, never itself). False = no clipping ancestor, `out` untouched.
