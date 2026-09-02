@@ -3357,11 +3357,14 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 {
 	m_visualDirty = true;
 
-	// An open list swallows Tab as well, and closes on it: leaving a dropdown
-	// without choosing is what Escape does, and Tab means "I am done here" —
-	// both end with the list shut, so the key that moves on has to shut it
-	// first or the next field would be typed into behind an open list.
-	if (hasOpenDropdown()) popGrab(/*notify=*/false);
+	// An open list takes Tab too, and steps through its ENTRIES with it. The
+	// layer on top decides what a key means, and while a list hangs there the
+	// only things a keyboard can reach are its rows: Tab used to close it and
+	// move on, which walked out of a list somebody had just opened. Escape is
+	// how you leave without choosing and Enter is how you take one; Tab is
+	// simply the down arrow of a form.
+	if (hasOpenDropdown())
+		return navigate(backwards ? NavDir::Up : NavDir::Down, vpWidth, vpHeight);
 
 	// Whose form is being tabbed through: the layer, else the widget that has
 	// the focus, else the topmost visible one. Same three answers navigate()

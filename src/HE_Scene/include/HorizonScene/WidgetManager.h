@@ -508,6 +508,10 @@ public:
     // Wraps at both ends, stays inside the widget that owns the input (the
     // topmost layer), and works while a text field has the keyboard: leaving a
     // field is what Tab is for.
+    //
+    // With a list hanging open it steps through the LIST instead — the layer on
+    // top decides what a key means, and inside an open list Tab is the down
+    // arrow. Escape leaves it without choosing, Enter takes the row.
     bool focusNext(bool backwards, float vpWidth, float vpHeight);
 
     // True while a list hangs open. The apps ask because the arrow keys then

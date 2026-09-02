@@ -5632,6 +5632,26 @@ TEST_CASE("Navigation: an open list takes the arrows, the buttons behind it do n
     // With the list shut, the arrows are the focus's again.
     CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
     CHECK(wm.focusedElement() == below);
+
+    // ── Tab belongs to the list too ─────────────────────────────────────────
+    // The layer on top decides what a key means, and that is as true of Tab as
+    // of the arrows: it used to close the list and move on, which walked out of
+    // a list somebody had just opened. Inside one it is simply the down arrow.
+    CHECK(wm.setFocus(id, combo));
+    CHECK(wm.activateFocused());
+    REQUIRE(box()->open);
+    const int from = box()->hoverIndex;
+    CHECK(wm.focusNext(false, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == from + 1);
+    CHECK(box()->open);                        // …and it is still open
+    CHECK(wm.focusedElement() == combo);       // …and the focus never left
+    CHECK(wm.focusNext(true, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == from);
+    // Escape is still how you leave without choosing.
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(box()->open);
+    CHECK(wm.focusNext(false, 400.0f, 800.0f));
+    CHECK(wm.focusedElement() == below);
 }
 
 // A focus ring made of four edge quads can only draw a square, so a rounded
@@ -6051,15 +6071,22 @@ TEST_CASE("Navigation: Tab shuts an open list, and stays inside a dialog")
     }
     (void)pageBtn;
 
-    // Open the list, then Tab: the list shuts and the focus moves on. Tabbing
-    // into the next field with a list still hanging open would type behind it.
+    // Open the list, then Tab: it steps through the LIST and stays open. The
+    // layer on top decides what a key means, and walking out of a list somebody
+    // has just opened is answering a question nobody asked — the same reason
+    // the arrows belong to it.
     wm.setFocus(dialog, combo);
     CHECK(wm.activateFocused());
     REQUIRE(wm.hasOpenDropdown());
     CHECK(wm.focusNext(false, 400.0f, 400.0f));
-    CHECK_FALSE(wm.hasOpenDropdown());
-    CHECK(wm.focusedElement() == ok);
+    CHECK(wm.hasOpenDropdown());
+    CHECK(wm.focusedElement() == combo);
+    // Stepping is not choosing: nothing is taken until Enter.
     CHECK(dynamic_cast<const HE::UIComboBox*>(wm.tree(dialog)->find(combo))->selectedIndex == 0);
+    // …and once it is shut, Tab is the form's again.
+    CHECK(wm.closeTopLayer());
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == ok);
 }
 
 TEST_CASE("Navigation: left and right step a focused slider instead of leaving it")
