@@ -5634,6 +5634,131 @@ TEST_CASE("Navigation: an open list takes the arrows, the buttons behind it do n
     CHECK(wm.focusedElement() == below);
 }
 
+// A focus ring made of four edge quads can only draw a square, so a rounded
+// search field wore a square ring with its corners poking out of it. A ring
+// whose shape disagrees with the thing it marks reads as a drawing mistake, not
+// as focus.
+TEST_CASE("Focus: the ring follows the field's own corners")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int field = t.add(HE::UIWidgetType::TextInput);
+    {
+        HE::UIElement& e = *t.find(field);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+        e.cornerRadius = glm::vec4(12.0f);   // a search field, as they are drawn
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setFocus(id, field));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // Exactly ONE outlined object — the shared ring, and no second one of the
+    // field's own — and it is round, and it sits outside the box by its own
+    // width with the curve grown to match.
+    int rings = 0;
+    for (const UIRenderObject& ro : out)
+    {
+        if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
+        CHECK(ro.position.x == doctest::Approx(-2.0f));
+        CHECK(ro.position.y == doctest::Approx(-2.0f));
+        CHECK(ro.size.x == doctest::Approx(204.0f));
+        CHECK(ro.size.y == doctest::Approx(44.0f));
+        CHECK(ro.cornerRadius.x == doctest::Approx(14.0f));
+        CHECK(ro.borderColor.r > ro.borderColor.b);   // the focus amber
+        ++rings;
+    }
+    CHECK(rings == 1);
+
+    // …and none of the old edge slivers: a 2 px band the width of the field is
+    // what a square ring is made of, and there must not be one left.
+    int slivers = 0;
+    for (const UIRenderObject& ro : out)
+        if (ro.type == 0 && std::fabs(ro.size.y - 2.0f) < 0.01f &&
+            ro.size.x > 100.0f)
+        {
+            ++slivers;
+            MESSAGE("sliver at " << ro.position.x << "," << ro.position.y
+                    << " size " << ro.size.x << "x" << ro.size.y
+                    << " colour a=" << ro.color.a);
+        }
+    CHECK(slivers == 0);
+
+    // Nothing of the sort while it is not focused.
+    REQUIRE(wm.setFocus(id, 0));
+    out.clear();
+    wm.extract(400.0f, 400.0f, out);
+    for (const UIRenderObject& ro : out)
+    {
+        const bool outlined = ro.borderWidth > 0.0f && ro.color.a <= 0.001f;
+        CHECK_FALSE(outlined);
+    }
+}
+
+// An application calls processPointer every frame whether the mouse stirred or
+// not. The open list took "where the mouse is" from every one of those calls,
+// so the arrow keys set the highlight and the very next frame put it back — the
+// row flashed and the selection snapped home, which is what it looked like.
+TEST_CASE("Navigation: a mouse that has not moved does not take the highlight back")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 800.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int combo = t.add(HE::UIWidgetType::ComboBox);
+    {
+        auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(combo));
+        HE::uiSetAnchorPreset(*cb, 0); cb->pivotX = cb->pivotY = 0.0f;
+        cb->posX = 0.0f; cb->posY = 0.0f; cb->sizeX = 200.0f; cb->sizeY = 20.0f;
+        cb->options = { "Zero", "One", "Two", "Three" };
+        cb->selectedIndex = 0;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    using Nav = WidgetManager::NavDir;
+    auto box = [&]{ return dynamic_cast<const HE::UIComboBox*>(wm.tree(id)->find(combo)); };
+    // The pointer parked well away from the list, which is where it is when
+    // somebody is using the keyboard.
+    auto idleFrame = [&]{ wm.processPointer(400.0f, 800.0f, 380.0f, 700.0f, false, true); };
+
+    idleFrame();
+    REQUIRE(wm.setFocus(id, combo));
+    REQUIRE(wm.activateFocused());   // the keyboard's way of opening one
+    REQUIRE(box()->open);
+    CHECK(box()->hoverIndex == 0);
+
+    // Two arrows and a frame between them, exactly as an application runs it.
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    CHECK(box()->hoverIndex == 1);
+    idleFrame();
+    CHECK(box()->hoverIndex == 1);   // …and it stays there
+    CHECK(wm.navigate(Nav::Down, 400.0f, 800.0f));
+    idleFrame();
+    idleFrame();
+    CHECK(box()->hoverIndex == 2);
+
+    // A mouse that MOVES takes it back, because then it is the mouse's again.
+    // Over the second row of the list, which hangs under the closed box.
+    wm.processPointer(400.0f, 800.0f, 100.0f, 30.0f, false, true);
+    CHECK(box()->hoverIndex == 0);
+    wm.processPointer(400.0f, 800.0f, 100.0f, 50.0f, false, true);
+    CHECK(box()->hoverIndex == 1);
+}
+
 // "Something is focused" and "a text field owns the keyboard" are different
 // questions, and answering the second with the first is why menu navigation
 // worked exactly once: both apps gate the arrow keys on this, the first press
@@ -5867,8 +5992,9 @@ TEST_CASE("Navigation: the focused element gets a ring drawn around it")
     REQUIRE(wm.navigate(WidgetManager::NavDir::Down, 400.0f, 400.0f));
     std::vector<UIRenderObject> after;
     wm.extract(400.0f, 400.0f, after);
-    // Four hairlines more than before — one per edge.
-    CHECK(after.size() == before.size() + 4);
+    // One object more than before: the ring is a single outlined rectangle that
+    // follows the element's corners, not four hairlines that can only be square.
+    CHECK(after.size() == before.size() + 1);
 
     // Clearing the focus takes them away again.
     CHECK(wm.setFocus(1, 0));

@@ -254,7 +254,14 @@ void draw(Image& target, const std::vector<UIRenderObject>& objects, const glm::
     for (const UIRenderObject& o : objects)
     {
         if (o.size.x <= 0.0f || o.size.y <= 0.0f) continue;
-        if (o.color.a <= 0.0f && o.type != 2) continue;
+        // Invisible FILL is not invisible OBJECT: an outlined rectangle with no
+        // fill is how a ring is drawn — the border is blended over the fill, so
+        // a transparent one leaves exactly the outline. Both GPU paths draw it
+        // (uiFragment / kUIFS have no such early-out, they simply shade every
+        // pixel), and this line made the CPU renderer the odd one out: the
+        // focus ring was there on Metal and GL and missing in the software
+        // runtime and in every test that rasterises.
+        if (o.color.a <= 0.0f && o.type != 2 && o.borderWidth <= 0.0f) continue;
 
         // Which atlas a glyph quad samples; 0 = the shared default font.
         const HE::BakedUIFont* font = &shared;

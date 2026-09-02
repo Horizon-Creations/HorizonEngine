@@ -1815,6 +1815,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// at the pointer, a tooltip is drawn beside it, and a popup is placed in a
 	// canvas that needs the viewport.
 	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
+	// Did the POINTER move, or is this just the next frame? An application calls
+	// this every frame whether the mouse stirred or not, so "where the mouse is"
+	// arrives sixty times a second and would otherwise outvote the keyboard on
+	// everything the two of them share — a menu's highlight, above all.
+	const bool moved = valid && (mouseX != m_pointerX || mouseY != m_pointerY);
 	if (valid) { m_pointerX = mouseX; m_pointerY = mouseY; }
 
 	// ── An open dropdown owns the pointer ────────────────────────────────────
@@ -1845,7 +1850,15 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
 			const int over = valid
 				? comboOptionAtPointer(w->tree, *cb, canvas, mouseX, mouseY) : -1;
-			if (cb->hoverIndex != over) { cb->hoverIndex = over; m_visualDirty = true; }
+			// Only a pointer that MOVED takes the highlight. Without that the
+			// arrow keys were unusable: they set the highlighted row, this ran
+			// on the very next frame with the mouse parked somewhere else, and
+			// put it back — which looks exactly like the row flashing and the
+			// selection snapping home, because that is what it was.
+			//
+			// It is also how every menu behaves: the keyboard has it until the
+			// mouse is moved, and then the mouse has it.
+			if (moved && cb->hoverIndex != over) { cb->hoverIndex = over; m_visualDirty = true; }
 			m_hoverCursor = HE::UICursor::Default;
 			// The row under the pointer when the button comes UP is the one
 			// that is chosen — and a release with nothing under it closes the
@@ -3666,26 +3679,32 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 				}
 			}
 
-			// Focus ring: four hairlines around the element the keyboard or
-			// gamepad is on. Drawn here rather than by the widget types because
-			// every type needs it and none of them should have to know.
+			// Focus ring: ONE outlined rectangle around the element the keyboard
+			// or gamepad is on. Drawn here rather than by the widget types
+			// because every type needs it and none of them should have to know.
+			//
+			// It follows the element's OWN corners. It used to be four
+			// hairlines, and four rectangles can only draw a square: around a
+			// rounded search field that put a square ring with its corners
+			// sticking out past the curve, which reads as a drawing mistake
+			// rather than as focus. No fill and a border — the shaders blend the
+			// border over the fill, so a transparent fill leaves the outline.
 			if (st.focused && m_focusWidget == w.id)
 			{
 				constexpr float kRing = 2.0f;   // pixels
-				const glm::vec4 ringCol(1.0f, 0.78f, 0.25f, 0.95f);
 				const size_t ringFirst = out.size();
-				auto ring = [&](float x, float y, float rw, float rh)
-				{
-					UIRenderObject ro;
-					ro.position = { x, y };
-					ro.size     = { rw, rh };
-					ro.color    = ringCol;
-					out.push_back(ro);
-				};
-				ring(px.x - kRing, px.y - kRing, px.w + 2 * kRing, kRing);              // top
-				ring(px.x - kRing, px.y + px.h,  px.w + 2 * kRing, kRing);              // bottom
-				ring(px.x - kRing, px.y,         kRing,            px.h);               // left
-				ring(px.x + px.w,  px.y,         kRing,            px.h);               // right
+				UIRenderObject ro;
+				ro.position = { px.x - kRing, px.y - kRing };
+				ro.size     = { px.w + 2 * kRing, px.h + 2 * kRing };
+				ro.color    = glm::vec4(0.0f);
+				// Grown by the ring's own width, so the curve stays concentric
+				// with the element's: a ring at the same radius as the box it
+				// surrounds pinches at the corners.
+				ro.cornerRadius = e.maxCornerRadius() > 0.0f
+					? e.cornerRadius * (sy * evs) + glm::vec4(kRing) : glm::vec4(0.0f);
+				ro.borderWidth  = kRing;
+				ro.borderColor  = glm::vec4(1.0f, 0.78f, 0.25f, 0.95f);
+				out.push_back(std::move(ro));
 				if (clipped)
 				{
 					const glm::vec4 r(clip.x * sx, clip.y * sy,

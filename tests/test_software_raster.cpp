@@ -596,3 +596,81 @@ TEST_CASE("ComboBox: the indicator is a triangle, and it turns over when open")
         MESSAGE("arrow sheet written to " << out.string());
     }
 }
+
+// ── The focus ring around something round ────────────────────────────────────
+// It was four hairlines, and four rectangles can only draw a square. Around a
+// rounded search field that left the ring's corners hanging outside the curve,
+// which is what "the highlight is square although the bar is round" means. The
+// shape is a matter for the eye, so this draws it; what is pinned is the part
+// that is not a matter of taste — the corner is EMPTY and the flat sides are not.
+TEST_CASE("Focus ring: it follows a rounded field instead of boxing it")
+{
+    using namespace HE;
+
+    // The field and the ring exactly as WidgetManager emits them: a rounded
+    // surface, then one outlined rectangle two pixels outside it whose radius
+    // has grown by the same two, so the two curves stay concentric.
+    const float x = 40.0f, y = 40.0f, w = 240.0f, h = 56.0f, r = 20.0f, ring = 2.0f;
+    std::vector<UIRenderObject> quads;
+    {
+        UIRenderObject bg;
+        bg.position = { x, y };
+        bg.size     = { w, h };
+        bg.color    = glm::vec4(0.16f, 0.16f, 0.18f, 1.0f);
+        bg.cornerRadius = glm::vec4(r);
+        quads.push_back(bg);
+
+        UIRenderObject ro;
+        ro.position = { x - ring, y - ring };
+        ro.size     = { w + 2 * ring, h + 2 * ring };
+        ro.color    = glm::vec4(0.0f);
+        ro.cornerRadius = glm::vec4(r + ring);
+        ro.borderWidth  = ring;
+        ro.borderColor  = glm::vec4(1.0f, 0.78f, 0.25f, 0.95f);
+        quads.push_back(ro);
+    }
+
+    Image img = canvas(320, 140);
+    HE::sw::draw(img, quads);
+
+    auto amber = [&](int px, int py)
+    {
+        const Px p = at(img, px, py);
+        return p.r > 150 && p.g > 100 && p.b < 110;
+    };
+
+    // The ring is there, on all four flat sides.
+    CHECK(amber(int(x + w * 0.5f), int(y - ring)));          // top
+    CHECK(amber(int(x + w * 0.5f), int(y + h + ring) - 1));  // bottom
+    CHECK(amber(int(x - ring), int(y + h * 0.5f)));          // left
+    CHECK(amber(int(x + w + ring) - 1, int(y + h * 0.5f)));  // right
+
+    // …and the CORNER of the bounding box is empty, which is the whole point: a
+    // square ring would have ink there, hanging outside the field's curve.
+    CHECK_FALSE(amber(int(x - ring), int(y - ring)));
+    CHECK_FALSE(amber(int(x + w + ring) - 1, int(y - ring)));
+    CHECK_FALSE(amber(int(x - ring), int(y + h + ring) - 1));
+
+    // The curve is still drawn where the corner actually is: on the diagonal,
+    // (1 - cos 45°) of the radius in from the box's corner, the ring is ink
+    // again. Looked for in a small neighbourhood — the band is two pixels wide
+    // and the arc crosses it at an angle, so the exact pixel is arithmetic
+    // nobody should have to get right to know the corner is drawn.
+    const float d = (r + ring) * 0.293f;
+    bool onTheArc = false;
+    for (int dy = -2; dy <= 2 && !onTheArc; ++dy)
+        for (int dx = -2; dx <= 2 && !onTheArc; ++dx)
+            onTheArc = amber(int(x - ring + d) + dx, int(y - ring + d) + dy);
+    CHECK(onTheArc);
+
+    const std::filesystem::path out =
+        std::filesystem::temp_directory_path() / "he_focus_ring.ppm";
+    if (FILE* f = std::fopen(out.string().c_str(), "wb"))
+    {
+        std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height);
+        for (std::size_t i = 0; i + 3 < img.rgba.size(); i += 4)
+            std::fwrite(&img.rgba[i], 1, 3, f);
+        std::fclose(f);
+        MESSAGE("focus ring sheet written to " << out.string());
+    }
+}

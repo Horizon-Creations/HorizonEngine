@@ -1200,15 +1200,12 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     glm::vec4 bg = backColor;
     if (st.focused) bg = glm::vec4(glm::min(glm::vec3(backColor) + 0.06f, glm::vec3(1.0f)), backColor.a);
     quad(out, px.x, px.y, px.w, px.h, bg, {}, 0.0f);   // radius is stamped (authored)
-    // Thin focus border (four edge quads).
-    if (st.focused)
-    {
-        const glm::vec4 b(0.35f, 0.55f, 0.90f, 1.0f);
-        quad(out, px.x, px.y, px.w, 2.0f, b);
-        quad(out, px.x, px.y + px.h - 2.0f, px.w, 2.0f, b);
-        quad(out, px.x, px.y, 2.0f, px.h, b);
-        quad(out, px.x + px.w - 2.0f, px.y, 2.0f, px.h, b);
-    }
+    // No border of its own any more. This type used to draw four blue edge
+    // quads, from before the manager drew a focus ring for EVERY element type —
+    // and two rings around one field is not twice as clear, it is a field with
+    // something wrong with it. The lightened background above stays: that is
+    // this type's own answer to "the caret is in here", and it survives being
+    // clipped, which a ring drawn outside the box does not.
     const float pad = 6.0f;
     const glm::vec2 tp{ px.x + pad, px.y };
     const glm::vec2 ts{ px.w - 2 * pad, px.h };
