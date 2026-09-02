@@ -1429,15 +1429,23 @@ void WidgetManager::tick(float dt)
 				const HE::UIAnimClip* c = clips ? HE::uiAnimFind(*clips, p.clip) : nullptr;
 				if (!c) { p.t = -1.0f; continue; }   // the asset changed under it
 
+				// Playback ends at the LAST KEY, not at the authored length.
+				// After it every track is holding a value that will not change
+				// again, so the tail is a wait with nothing in it — and a clip
+				// that reports finished a second after it visibly finished makes
+				// every graph waiting on it late.
+				const float end = HE::uiAnimPlayEnd(*c);
 				p.t += dt;
 				bool done = false;
-				if (p.t >= c->duration)
+				if (p.t >= end)
 				{
 					// A looping clip never ends, so it never reports one either.
 					// Wrapping rather than resetting to 0 keeps a long frame from
-					// swallowing the start of the next pass.
-					if (p.loop) { if (c->duration > 0.0f) p.t = std::fmod(p.t, c->duration); }
-					else        { p.t = c->duration; done = true; }
+					// swallowing the start of the next pass. With no keys there
+					// is nothing to loop, and looping forever over nothing is a
+					// widget that never stops asking for frames.
+					if (p.loop && end > 0.0f) p.t = std::fmod(p.t, end);
+					else                      { p.t = end; done = true; }
 				}
 				samples.clear();
 				HE::uiAnimEvaluate(*c, p.t, samples);

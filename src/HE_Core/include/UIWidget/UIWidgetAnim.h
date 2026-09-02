@@ -115,6 +115,24 @@ struct UIAnimSample
 HE_API void uiAnimEvaluate(const UIAnimClip& clip, float time,
                            std::vector<UIAnimSample>& out);
 
+// How long the clip actually PLAYS: the last key on any of its tracks, capped by
+// the authored length.
+//
+// Not the same thing as `duration`, and the difference is what somebody watching
+// notices. Past the last key nothing moves any more — every track is holding a
+// value that will not change again — so playing on to the authored end is a wait
+// with nothing in it, and a clip that reports finished a second after it visibly
+// finished makes every graph waiting on it late. The length stays what it is,
+// the room you author in; this is the part of it that has anything to say.
+//
+// Capped by `duration` because that is what shortening a clip MEANS: keys past
+// the end are hidden, not thrown away, and a hidden key must not be able to
+// stretch playback past the length the author set.
+//
+// A clip with no keys at all ends at zero. Playing one is a no-op that reports
+// finished at once — including a looping one, because there is nothing to loop.
+HE_API float uiAnimPlayEnd(const UIAnimClip& clip);
+
 // The clip of that name, or null. Names are what a graph node and the editor
 // both store, so they are the identity — there is no clip id.
 HE_API const UIAnimClip* uiAnimFind(const std::vector<UIAnimClip>& clips,

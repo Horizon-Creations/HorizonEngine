@@ -2282,9 +2282,11 @@ namespace
 	  "the old name.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Length", "",
-	  "How long the animation is. Keys past the end still exist and still hold "
-	  "their value — shortening the clip hides them rather than throwing them "
-	  "away, so lengthening it again brings them back.",
+	  "How much time you have room to work in, which is not the same as how "
+	  "long the animation runs: playing stops at the LAST KEY, and the lane "
+	  "greys out everything after it. Keys past the end still exist and still "
+	  "hold their value — shortening the clip hides them rather than throwing "
+	  "them away, so lengthening it again brings them back.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Loop", "",
 	  "Runs it again from the start instead of ending. A looping animation never "
@@ -2293,8 +2295,9 @@ namespace
 	  "", "ui#elements" },
 	{ "ui.timeline-play", "Play",
 	  "Plays the animation in the DESIGNER — the running application is not "
-	  "involved. Drag the ruler to scrub by hand; either way the canvas shows "
-	  "the clip at the playhead. To see the widget's own values again, pick "
+	  "involved — and stops at the last key, exactly where the running one "
+	  "would. Drag the ruler to scrub by hand; either way the canvas shows the "
+	  "clip at the playhead. To see the widget's own values again, pick "
 	  "\"(none)\" as the animation.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Zoom In", "",

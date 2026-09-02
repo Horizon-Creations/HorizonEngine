@@ -2239,10 +2239,14 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	ImGui::SameLine();
 	if (EditorWidgets::checkbox("Loop", &clip.loop)) commitEdit(st, ctx);
 	ImGui::SameLine();
+	// Where the animation stops having anything to say: the last key, capped by
+	// the length. The designer plays to here and the lane greys out the rest,
+	// so what you watch is what the runtime will run (see uiAnimPlayEnd).
+	const float playEnd = HE::uiAnimPlayEnd(clip);
 	if (EditorWidgets::smallButton(st.clipPlaying ? "Stop" : "Play"))
 	{
 		st.clipPlaying = !st.clipPlaying;
-		if (st.clipPlaying && st.playhead >= clip.duration) st.playhead = 0.0f;
+		if (st.clipPlaying && st.playhead >= playEnd) st.playhead = 0.0f;
 	}
 	// By KEY, not by label: the button says Play or Stop depending on what it
 	// would do, and a label-keyed tooltip would exist for one of the two.
@@ -2253,12 +2257,15 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// interesting digits are milliseconds, above it they are not.
 	auto fmtTime = [&](char* buf, size_t n, float t)
 	{
-		if (clip.duration <= 2.0f) std::snprintf(buf, n, "%.0f ms", t * 1000.0f);
-		else                       std::snprintf(buf, n, "%.2f s", t);
+		if (playEnd <= 2.0f) std::snprintf(buf, n, "%.0f ms", t * 1000.0f);
+		else                 std::snprintf(buf, n, "%.2f s", t);
 	};
+	// Against the last key, not against the length: the second number is what
+	// the reader is counting towards, and counting towards a moment nothing
+	// happens at is the confusion the greyed tail beside it is also about.
 	char nowTxt[24], endTxt[24];
 	fmtTime(nowTxt, sizeof(nowTxt), st.playhead);
-	fmtTime(endTxt, sizeof(endTxt), clip.duration);
+	fmtTime(endTxt, sizeof(endTxt), playEnd);
 	ImGui::SameLine();
 	ImGui::TextDisabled("%s / %s", nowTxt, endTxt);
 
@@ -2283,10 +2290,10 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	if (st.clipPlaying)
 	{
 		st.playhead += ImGui::GetIO().DeltaTime;
-		if (st.playhead >= clip.duration)
+		if (st.playhead >= playEnd)
 		{
-			if (clip.loop) st.playhead = std::fmod(st.playhead, clip.duration);
-			else { st.playhead = clip.duration; st.clipPlaying = false; }
+			if (clip.loop && playEnd > 0.0f) st.playhead = std::fmod(st.playhead, playEnd);
+			else { st.playhead = playEnd; st.clipPlaying = false; }
 		}
 	}
 
@@ -2490,14 +2497,31 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 		commitEdit(st, ctx);
 	}
 
+	const float laneBottom = std::max(
+		top.y + 20.0f + kRowH * static_cast<float>(clip.tracks.size()) + 4.0f, top.y + 40.0f);
+
+	// After the last key the animation is over: nothing moves there any more, so
+	// nothing plays there either, and the lane says so instead of leaving a
+	// stretch that looks like part of the clip. The difference between "this is
+	// 200 ms long" and "this is 200 ms in a two second box" is one somebody has
+	// to be able to SEE, or they spend the wait wondering what is happening.
+	if (playEnd < clip.duration - 0.0005f)
+	{
+		const float x = view.xOf(playEnd);
+		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+		dl->AddRectFilled(ImVec2(std::max(x, laneL), top.y), ImVec2(laneR, laneBottom),
+		                  IM_COL32(16, 15, 14, 170));
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, laneBottom), IM_COL32(130, 124, 114, 200));
+		dl->PopClipRect();
+	}
+
 	// The playhead, over everything, carrying its own time: the ruler says where
 	// the ticks are, this says where YOU are, and at a glance the two together
 	// are the answer to "how far in is this".
 	{
 		const float x = view.xOf(st.playhead);
-		const float bottom = top.y + 20.0f + kRowH * static_cast<float>(clip.tracks.size()) + 4.0f;
 		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
-		dl->AddLine(ImVec2(x, top.y), ImVec2(x, std::max(bottom, top.y + 40.0f)),
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, laneBottom),
 		            IM_COL32(255, 240, 200, 220), 1.5f);
 		// Re-read after this frame's scrubbing and playing: the bar's copy was
 		// printed before either happened, and a tag that trails the line it is

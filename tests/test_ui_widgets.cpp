@@ -5014,6 +5014,92 @@ TEST_CASE("Clips: playing one moves the widget, and looping never ends")
     CHECK(wm.stopAnimationClip(id) == 1);
 }
 
+// An animation is over when its last key is, not when its length is. The tail
+// after it is a wait with nothing in it: nothing moves there, and a clip that
+// reported finished a second late would make every graph waiting on it late.
+TEST_CASE("Clips: playing stops at the last key, not at the authored length")
+{
+    HE::UIAnimClip c = fadeClip(1, "FadeIn", 0.0f, 1.0f, /*dur=*/0.25f);
+    c.duration = 4.0f;                       // room to work in, not what plays
+    CHECK(HE::uiAnimPlayEnd(c) == doctest::Approx(0.25f));
+
+    // A second track pushes the end out; the LAST key of any track decides.
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Render Opacity";
+    tr.keys.push_back({ 1.5f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });
+    c.tracks.push_back(tr);
+    CHECK(HE::uiAnimPlayEnd(c) == doctest::Approx(1.5f));
+
+    // A key hidden past the length cannot stretch playback past it — hiding is
+    // what shortening a clip means.
+    c.duration = 1.0f;
+    CHECK(HE::uiAnimPlayEnd(c) == doctest::Approx(1.0f));
+
+    // Nothing keyed at all ends at zero, so playing it is a no-op that reports
+    // finished at once rather than an empty wait of `duration` seconds.
+    HE::UIAnimClip empty;
+    empty.name = "Empty"; empty.duration = 3.0f;
+    CHECK(HE::uiAnimPlayEnd(empty) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Clips: the runtime ends one at its last key, and loops there too")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 100.0f;
+    }
+    // Keyed over a quarter second, inside a clip four seconds long.
+    HE::UIAnimClip c = fadeClip(panel, "FadeIn", 0.0f, 1.0f, 0.25f);
+    c.duration = 4.0f;
+    t.animations.push_back(c);
+    // A clip with no keys at all, to check that playing one is not a four
+    // second silence with a pump running behind it.
+    HE::UIAnimClip hollow; hollow.name = "Hollow"; hollow.duration = 4.0f;
+    t.animations.push_back(hollow);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto opacity = [&]{ return wm.tree(id)->find(panel)->renderOpacity; };
+
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    wm.tick(0.125f);
+    CHECK(opacity() == doctest::Approx(0.5f));
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+
+    // One more tick past the last key: over, at the last key's value. Under the
+    // old rule this widget would have gone on "playing" for another 3.6 s.
+    wm.tick(0.2f);
+    CHECK(opacity() == doctest::Approx(1.0f));
+    CHECK_FALSE(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK_FALSE(wm.isAnimating());
+
+    // Looping wraps at the last key as well, so a pulse authored in 250 ms
+    // pulses four times a second instead of once every four.
+    const bool loop = true;
+    REQUIRE(wm.playAnimation(id, "FadeIn", &loop));
+    wm.tick(0.3f);
+    CHECK(wm.animationTime(id, "FadeIn") == doctest::Approx(0.05f));
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+    CHECK(wm.stopAnimationClip(id, "FadeIn") == 1);
+
+    // And a clip with nothing in it finishes on the first tick, looping or not:
+    // there is nothing to loop, and a widget looping over nothing would ask for
+    // frames forever.
+    REQUIRE(wm.playAnimation(id, "Hollow", &loop));
+    wm.tick(0.016f);
+    CHECK_FALSE(wm.isPlayingAnimation(id, "Hollow"));
+    CHECK_FALSE(wm.isAnimating());
+}
+
 TEST_CASE("Clips: a clip and a tween never write the same property at once")
 {
     TempWidgetDir dir;

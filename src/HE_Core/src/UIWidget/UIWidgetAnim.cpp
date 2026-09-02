@@ -69,6 +69,19 @@ const UIAnimClip* uiAnimFind(const std::vector<UIAnimClip>& clips, const std::st
     return nullptr;
 }
 
+float uiAnimPlayEnd(const UIAnimClip& clip)
+{
+    float last = 0.0f;
+    for (const UIAnimTrack& tr : clip.tracks)
+        for (const UIAnimKey& k : tr.keys)
+            last = std::max(last, k.time);
+    // Negative key times are possible in a hand-edited file; they hold from
+    // before the start anyway (uiAnimEvaluate) and cannot lengthen anything,
+    // which is why the running maximum starts at zero rather than at the first
+    // key it sees.
+    return std::min(last, std::max(clip.duration, 0.0f));
+}
+
 namespace
 {
     // The value between two keys, or one key's value where there is nothing to
