@@ -1504,6 +1504,15 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 			if (event.drop.data) m_dropPaths.emplace_back(event.drop.data);
 			break;
 		default:   // SDL_EVENT_DROP_COMPLETE
+			// Dragging a file onto the window IS choosing it, exactly as picking
+			// it in an open dialog is — same person, same intent, and the app was
+			// handed the path either way. So the drop grants it, or the event
+			// would arrive carrying a path the script is not allowed to read,
+			// which is a file drop that cannot open a file. The grant belongs
+			// HERE and not in the widget layer: turning a human gesture into a
+			// permission is the host's job, and the dialogs do it from the same
+			// side (HE::api::fs::grantPath).
+			for (const std::string& p : m_dropPaths) HE::api::fs::grantPath(p);
 			m_widgets.processDrop(static_cast<float>(pw), static_cast<float>(ph),
 			                      m_dropX, m_dropY, m_dropPaths);
 			m_dropPaths.clear();

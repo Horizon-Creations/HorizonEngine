@@ -83,6 +83,29 @@ bool eventNameUsed(const HC::Graph& g, const std::string& name, int exceptId = 0
 	return false;
 }
 
+// What a catalog event carries, asked of the ONE table that knows
+// (HorizonCode::engineEvents) rather than of a chain of name comparisons. Two
+// places spelled that chain out and both said "Bool for window focus, Float
+// otherwise" — which stays right exactly until an event carries a string, and is
+// then wrong in two places at once. An event added to the table now arrives here
+// with the right pin by itself.
+void applyEventSignature(HC::Node& n, const std::string& ev)
+{
+	n.elem = 0;   // these graphs have no elements; the event is the class's own
+	if (const HC::EngineEventDesc* d = HC::findEngineEvent(ev))
+	{
+		n.hasArg   = d->arg != PT::Exec;
+		n.propType = n.hasArg ? d->arg : PT::Float;
+		return;
+	}
+	// Input.<Action>.Axis is not an engine event, it is a name the input pump
+	// makes up per action asset, and it carries the axis value.
+	const bool axisEvent = ev.rfind("Input.", 0) == 0 && ev.size() >= 5 &&
+		ev.compare(ev.size() - 5, 5, ".Axis") == 0;
+	n.hasArg   = axisEvent;
+	n.propType = PT::Float;
+}
+
 // One InputAction asset, as the add menu offers it. The kind decides the shape
 // of the node the menu inserts — press/release pair, one value, or two.
 struct InputActionRef
@@ -887,8 +910,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 					if (ImGui::Selectable(ev.c_str(), n->s == ev,
 					        used ? ImGuiSelectableFlags_Disabled : 0) && !used)
 					{
-						n->s = ev; n->hasArg = (ev == "OnWindowFocusChanged");
-						n->propType = n->hasArg ? PT::Bool : PT::Float; n->elem = 0;
+						n->s = ev;
+						applyEventSignature(*n, ev);
 						edited = true;
 					}
 				}
@@ -1026,14 +1049,9 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 				const int id = addNode(graph, NT::Event, g.ge.addMenuGraphPos);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = ev;
-				// Events with a data-out: window focus (Bool), Tick (delta seconds),
-				// and Input.<Action>.Axis (the axis value). Names come from the
-				// shared HE::inputEvent* helpers so the runtime pump matches.
-				const bool axisEvent = ev.rfind("Input.", 0) == 0 && ev.size() >= 5 &&
-					ev.compare(ev.size() - 5, 5, ".Axis") == 0;
-				nn->hasArg = (ev == "OnWindowFocusChanged") || (ev == "Tick") || axisEvent;
-				nn->propType = (ev == "OnWindowFocusChanged") ? PT::Bool : PT::Float;
-				nn->elem = 0;
+				// Which of them carries a value, and of what type, comes from the
+				// engine's own event table — see applyEventSignature.
+				applyEventSignature(*nn, ev);
 				created = id; ImGui::CloseCurrentPopup();
 			}
 			if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
@@ -1424,7 +1442,11 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 	}
 	else
 	{
-		static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
+		// OnFileDropped belongs here and nowhere else: a file let go over the
+		// window that no drop zone accepted was given to the APPLICATION, and
+		// the Game Instance is the one script that is always there to take it.
+		static const std::vector<std::string> kEvents = {
+			"OnInit", "OnShutdown", "OnWindowFocusChanged", "OnFileDropped" };
 		bool edited = false;
 		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);

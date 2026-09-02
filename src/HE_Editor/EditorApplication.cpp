@@ -7143,8 +7143,15 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 				break;
 			default:   // SDL_EVENT_DROP_COMPLETE
 				if (m_dropInPreview)
+				{
+					// The drop is the permission, the same way picking a file in
+					// a dialog is — see the twin in GameApplication. Only for a
+					// drop that actually reached the application: a file let go
+					// over the Outliner was never handed to it.
+					for (const std::string& p : m_dropPaths) HE::api::fs::grantPath(p);
 					wm.processDrop(m_uiViewportW, m_uiViewportH, m_dropX, m_dropY,
 					               m_dropPaths);
+				}
 				else
 					wm.dropHover(m_uiViewportW, m_uiViewportH, 0.0f, 0.0f, false);
 				m_dropPaths.clear();
