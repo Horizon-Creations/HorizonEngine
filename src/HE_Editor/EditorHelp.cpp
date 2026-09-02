@@ -2278,8 +2278,17 @@ namespace
 	  "", "ui#elements" },
 	{ "UI Timeline/New", "",
 	  "Makes an animation and names it. The name is the identity: a graph plays "
-	  "it by name, so renaming one later means finding every Play node that used "
-	  "the old name.",
+	  "it by name. Renaming it later is safe — \"Rename\" carries this widget's "
+	  "own Play and Stop nodes with it and asks about the rest of the project.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Rename", "",
+	  "Renames this animation and retargets what plays it. The Play and Stop "
+	  "nodes in this widget's own graph follow immediately; every other asset "
+	  "that names it is listed first and only rewritten once you say so. A node "
+	  "that names it but whose target cannot be proved — a Play on a widget this "
+	  "graph was handed rather than one it made — is reported and left alone, "
+	  "because renaming it on the strength of the name would break graphs that "
+	  "were correct.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Length", "",
 	  "How much time you have room to work in, which is not the same as how "

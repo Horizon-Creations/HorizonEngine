@@ -102,6 +102,10 @@ struct State
 	// so typing straight into a clip's name would leave a clip called "F" behind
 	// on the way to "FadeIn".
 	std::string newClipName;
+	// …and the same for renaming one, which has the stronger reason: every
+	// keystroke would be a rename of its own, and each would drag the graph's
+	// Play nodes along to a name nobody meant to type.
+	std::string clipRenameEdit;
 	float  timelineH = 210.0f;  // the strip's height, dragged by its top edge
 
 	// Which theme the canvas RESOLVES bound colours against (toolbar ▸ theme).
@@ -2221,6 +2225,52 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 		return;
 	}
 	HE::UIAnimClip& clip = st.tree.animations[st.clipIndex];
+
+	// ── Renaming one, with the graph following it ────────────────────────────
+	// The name IS the identity — a graph plays a clip by name — so a rename is
+	// a retargeting job and not a text edit. This graph's own Play/Stop nodes
+	// are rewritten here, and the rest of the project is ASKED about through the
+	// same dialog every other HorizonCode rename uses. Nothing is rewritten
+	// behind anyone's back, and nothing that names it is left unmentioned.
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Rename"))
+	{
+		st.clipRenameEdit = clip.name;
+		ImGui::OpenPopup("##renameclip");
+	}
+	if (ImGui::BeginPopup("##renameclip"))
+	{
+		ImGui::TextDisabled("A new name for this animation");
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputText("##renameclipname", &st.clipRenameEdit,
+		                     ImGuiInputTextFlags_EnterReturnsTrue) &&
+		    !st.clipRenameEdit.empty())
+		{
+			const std::string before = clip.name;
+			const std::string after  = st.clipRenameEdit;
+			// Taken only when it is free: two clips of one name would make every
+			// Play node ambiguous, which is the state this whole control exists
+			// to keep the widget out of.
+			bool taken = false;
+			for (const HE::UIAnimClip& c : st.tree.animations)
+				if (&c != &clip && c.name == after) taken = true;
+			if (!taken && after != before)
+			{
+				clip.name = after;
+				const HcRename::Target t{ st.relPath, HcRename::Member::Animation,
+				                          before, after };
+				const HcRename::Plan p = HcRename::planGraph(
+					st.graph, HcRename::Role::Declares, { st.relPath }, st.relPath, {}, t);
+				HcRename::apply(st.graph, p, t);
+				commitEdit(st, ctx);
+				HcRenameDialog::requestAfterRename(ctx, t, { st.relPath });
+			}
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::TextDisabled("(type a name, then Enter)");
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("Rename");
 
 	ImGui::SameLine();
 	if (EditorWidgets::dangerSmallButton("Delete"))

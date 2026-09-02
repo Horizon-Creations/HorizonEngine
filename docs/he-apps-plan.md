@@ -2120,6 +2120,47 @@ vorbei, um das es ging.
 
 ---
 
+### Eine Animation umbenennen ist Retargeting, kein Textfeld (02.09.2026)
+
+Der Hinweis am „New"-Knopf sagte: der Name ist die Identität, wer später umbenennt, muss jede
+Play-Node selbst suchen. Der User: **das ist eine Aufgabe von automatischem Retargeting.**
+Richtig, und beim Nachsehen war es schlimmer als der Hinweis behauptete: es gab **überhaupt
+keine Umbenennung** für einen Clip. Der Hinweis warnte vor Kosten, die man über die
+Oberfläche gar nicht auslösen konnte.
+
+**Es ist derselbe Vorgang wie bei Funktion, Variable und Ereignis**, also gehört es in
+dieselbe Maschinerie (`HcRename`) und nicht daneben. Damit kommen der projektweite Durchlauf
+und der Dialog geschenkt. Nur die Form ist anders, und das ist der ganze Unterschied: die
+anderen drei stehen als `Node::s` auf dem Knoten, ein Clipname steht **als Wert in einem Pin**
+(dem `animation`-Parameter einer Engine-Zeile), entweder inline oder in einem Const String,
+und seine Deklaration liegt gar nicht in einem Graphen, sondern in `UIWidgetTree::animations`.
+
+**Welcher Parameter eine Animation benennt, fragt die Registry**, nicht eine Liste von vier
+Zeilen-Ids hier. Dieselbe Regel wie bei `selfDefault`: die fünfte Zeile, die eine Animation
+nimmt, wird sonst still vergessen.
+
+**Ein Const String wird gezählt, nicht beurteilt.** Es gibt nur EINEN String: hängt derselbe
+Literal an einer Animation und an einem Set Text, wäre das Umschreiben eine Umbenennung, die
+Wörter auf dem Bildschirm ändert. Also wird umbenannt, wenn jede Leitung daraus auf einen
+bewiesenen Animationspin geht, sonst gemeldet.
+
+**Beweisbar fremd wird schweigend übersprungen, unbeweisbar wird gemeldet.** Genau der
+Vertrag, den die Datei schon hatte, hier nur auf den Ziel-Pin angewandt: jedes Widget im
+Projekt darf ein „Fade" haben.
+
+**Bekannte Grenze, ausdrücklich nicht geraten:** ein `OnClipFinished`-Handler, der die
+Nutzlast gegen ein Literal vergleicht, ist nicht retargetbar. Und ein Play auf einem Widget,
+das der Graph gereicht bekam statt es selbst erzeugt zu haben, landet in der Melde-Liste
+statt in der Umbenennung.
+
+**Der Fehler dabei, und der ist es wert:** `ApiParam::name` ist ein `const char*`, mein
+Vergleich war `p.name == "animation"`, also ein **Zeigervergleich**. Er compiliert
+stillschweigend und ist genau so lange wahr, wie der Linker beide Literale auf dieselbe
+Adresse legt. Ein Test war grün, drei waren rot, und die Erklärung war nicht die Logik,
+sondern die Adresse. Deshalb steht dafür jetzt eine eigene Zusicherung im Test.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein
