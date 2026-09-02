@@ -5663,17 +5663,18 @@ TEST_CASE("Focus: the ring follows the field's own corners")
     wm.extract(400.0f, 400.0f, out);
 
     // Exactly ONE outlined object — the shared ring, and no second one of the
-    // field's own — and it is round, and it sits outside the box by its own
-    // width with the curve grown to match.
+    // field's own — round, and drawn ON the element's edge rather than outside
+    // it: a text field clips its own glyphs to its rect, so a ring two pixels
+    // beyond that edge is two pixels of clipped-away nothing.
     int rings = 0;
     for (const UIRenderObject& ro : out)
     {
         if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
-        CHECK(ro.position.x == doctest::Approx(-2.0f));
-        CHECK(ro.position.y == doctest::Approx(-2.0f));
-        CHECK(ro.size.x == doctest::Approx(204.0f));
-        CHECK(ro.size.y == doctest::Approx(44.0f));
-        CHECK(ro.cornerRadius.x == doctest::Approx(14.0f));
+        CHECK(ro.position.x == doctest::Approx(0.0f));
+        CHECK(ro.position.y == doctest::Approx(0.0f));
+        CHECK(ro.size.x == doctest::Approx(200.0f));
+        CHECK(ro.size.y == doctest::Approx(40.0f));
+        CHECK(ro.cornerRadius.x == doctest::Approx(12.0f));
         CHECK(ro.borderColor.r > ro.borderColor.b);   // the focus amber
         ++rings;
     }
@@ -5733,10 +5734,10 @@ TEST_CASE("Focus: the ring follows the field's own corners")
         {
             if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
             // The frame's rect, not the field's — and the frame's rounding.
-            CHECK(ro.position.x == doctest::Approx(-2.0f));
-            CHECK(ro.size.x == doctest::Approx(304.0f));
-            CHECK(ro.size.y == doctest::Approx(38.0f));
-            CHECK(ro.cornerRadius.x == doctest::Approx(19.0f));
+            CHECK(ro.position.x == doctest::Approx(0.0f));
+            CHECK(ro.size.x == doctest::Approx(300.0f));
+            CHECK(ro.size.y == doctest::Approx(34.0f));
+            CHECK(ro.cornerRadius.x == doctest::Approx(17.0f));
             ++framed;
         }
         CHECK(framed == 1);
@@ -9615,13 +9616,101 @@ TEST_CASE("Engine components: the search field wears its ring on the frame")
         if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
         ++rings;
         // The frame is the whole component (320 x 34) and its corner is half its
-        // height — a pill. The ring is that, two pixels out, with the radius
-        // grown to match: NOT the inset field's small rectangle.
-        CHECK(ro.size.x == doctest::Approx(324.0f));
-        CHECK(ro.size.y == doctest::Approx(38.0f));
-        CHECK(ro.cornerRadius.x == doctest::Approx(19.0f));
+        // height — a pill. The ring is exactly that, drawn on its edge: NOT the
+        // inset field's small rectangle.
+        CHECK(ro.size.x == doctest::Approx(320.0f));
+        CHECK(ro.size.y == doctest::Approx(34.0f));
+        CHECK(ro.cornerRadius.x == doctest::Approx(17.0f));
     }
     CHECK(rings == 1);
+}
+
+// …and EMBEDDED in a page, which is how anybody actually uses it. The component
+// is grafted into the host tree with its ids shifted and its rect placed by the
+// slot, so this is where a rule that reads the tree can go wrong — and where a
+// ring drawn two pixels outside the slot can be cut off by it.
+TEST_CASE("Engine components: an embedded search field still shows its ring")
+{
+    const std::filesystem::path root =
+        std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent";
+    REQUIRE(std::filesystem::is_directory(root));
+    ContentManager cm(root.string());
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 600.0f; page.canvasHeight = 200.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int slot = page.add(HE::UIWidgetType::WidgetRef);
+    {
+        auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(slot));
+        r->widgetPath = "Widgets/SearchField.hasset";
+        r->name = "Search";
+        HE::uiSetAnchorPreset(*r, 0); r->pivotX = r->pivotY = 0.0f;
+        r->posX = 40.0f; r->posY = 30.0f; r->sizeX = 320.0f; r->sizeY = 34.0f;
+    }
+    registerWidgetAs(cm, "mem://page.hasset", page);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    int field = 0;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->name == "Field") field = ep->id;
+    REQUIRE(field != 0);
+    REQUIRE(wm.setFocus(id, field));
+
+    std::vector<UIRenderObject> out;
+    wm.extract(600.0f, 200.0f, out);
+
+    int rings = 0;
+    for (const UIRenderObject& ro : out)
+    {
+        if (ro.borderWidth <= 0.0f || ro.color.a > 0.001f) continue;
+        ++rings;
+        // Where the slot put it, and the size of the slot: the ring belongs to
+        // the component's frame, which fills the slot.
+        CHECK(ro.position.x == doctest::Approx(40.0f));
+        CHECK(ro.position.y == doctest::Approx(30.0f));
+        CHECK(ro.size.x == doctest::Approx(320.0f));
+        CHECK(ro.size.y == doctest::Approx(34.0f));
+        // …and nothing has clipped it away. A clip rect that excludes the ring
+        // is the same as no ring at all, and it is invisible in the numbers
+        // above — every one of them would still be right.
+        const bool clippedOut = ro.clipRect.z > 0.0f &&
+            (ro.position.x + ro.size.x <= ro.clipRect.x ||
+             ro.position.x >= ro.clipRect.x + ro.clipRect.z ||
+             ro.position.y + ro.size.y <= ro.clipRect.y ||
+             ro.position.y >= ro.clipRect.y + ro.clipRect.w);
+        CHECK_FALSE(clippedOut);
+    }
+    CHECK(rings == 1);
+
+    // …and it reaches the SCREEN. Everything above is the model; this is the
+    // picture, drawn the way an application draws it. A ring that is emitted
+    // correctly and rasterises to nothing is exactly what "no highlight at all"
+    // looks like, and none of the numbers above would have noticed.
+    HE::sw::Image img;
+    img.resize(600, 200);
+    img.clear(20, 20, 24, 255);
+    HE::sw::draw(img, out);
+    int amber = 0;
+    for (int y = 20; y < 80; ++y)
+        for (int x = 20; x < 400; ++x)
+        {
+            std::uint8_t r, g, b, a;
+            img.pixel(x, y, r, g, b, a);
+            if (r > 150 && g > 100 && b < 110) ++amber;
+        }
+    INFO("amber pixels of the focus ring: " << amber);
+    CHECK(amber > 200);   // a 324x38 outline is well over a thousand
+
+    if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+        if (FILE* f = std::fopen((std::string(dir) + "/search_focus.ppm").c_str(), "wb"))
+        {
+            std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height);
+            for (std::size_t i = 0; i + 3 < img.rgba.size(); i += 4)
+                std::fwrite(&img.rgba[i], 1, 3, f);
+            std::fclose(f);
+        }
 }
 
 TEST_CASE("Engine components: the contact sheet")

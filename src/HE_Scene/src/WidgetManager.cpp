@@ -3753,22 +3753,32 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 					rpx = { rr.x * sx, rr.y * sy, rr.w * sx, rr.h * sy };
 					HE::uiElementUnitScale(w.tree, *ringOn, rus, rvs, &canvas);
 				}
+				// ON the element's edge, not around it. Outside would be the
+				// prettier ring and it is the one that disappears: a text field
+				// clips its own glyphs to its rect (uiElementClipRect), a list
+				// row is clipped by its box, and a ring drawn two pixels beyond
+				// the edge is two pixels of nothing but clipped-away band. It
+				// also cannot bleed into whatever sits next to it.
 				UIRenderObject ro;
-				ro.position = { rpx.x - kRing, rpx.y - kRing };
-				ro.size     = { rpx.w + 2 * kRing, rpx.h + 2 * kRing };
+				ro.position = { rpx.x, rpx.y };
+				ro.size     = { rpx.w, rpx.h };
 				ro.color    = glm::vec4(0.0f);
-				// Grown by the ring's own width, so the curve stays concentric
-				// with the element's: a ring at the same radius as the box it
-				// surrounds pinches at the corners.
 				ro.cornerRadius = ringOn->maxCornerRadius() > 0.0f
-					? ringOn->cornerRadius * (sy * rvs) + glm::vec4(kRing) : glm::vec4(0.0f);
+					? ringOn->cornerRadius * (sy * rvs) : glm::vec4(0.0f);
 				ro.borderWidth  = kRing;
 				ro.borderColor  = glm::vec4(1.0f, 0.78f, 0.25f, 0.95f);
 				out.push_back(std::move(ro));
-				if (clipped)
+				// Clipped by whatever clips the element the ring is drawn ON —
+				// which for a focus frame is NOT the focused element. The field
+				// clips itself; the frame around it does not, and stamping the
+				// field's clip onto a ring that belongs to the frame is how a
+				// ring ends up cut away to nothing.
+				HE::UIWidgetRect rclip{};
+				if (HE::uiElementClipRect(w.tree, *ringOn, rclip, &canvas))
 				{
-					const glm::vec4 r(clip.x * sx, clip.y * sy,
-					                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
+					const glm::vec4 r(rclip.x * sx, rclip.y * sy,
+					                  std::max(rclip.w * sx, 0.0f),
+					                  std::max(rclip.h * sy, 0.0f));
 					for (size_t i = ringFirst; i < out.size(); ++i) out[i].clipRect = r;
 				}
 			}
