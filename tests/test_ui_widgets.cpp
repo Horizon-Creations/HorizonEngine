@@ -16,6 +16,8 @@
 #include <Backends/Software/SoftwareRaster.h>
 #include <Hpak/ProjectExporter.h>
 #include <Diagnostics/Log.h>   // the circle guard is checked by what it does NOT say
+#include "../src/HE_Editor/UITimelineMath.h"   // header-only: the timeline's seconds ⇄ pixels
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <algorithm>
@@ -9123,4 +9125,116 @@ TEST_CASE("Parameters: a half-written declaration does not survive loading")
     REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
     REQUIRE(back.params.size() == 1);
     CHECK(back.params[0].name == "Label");
+}
+
+// ── The timeline's arithmetic ────────────────────────────────────────────────
+// The strip itself needs a window, but the part of it that can be wrong in a way
+// nobody notices — a ruler whose labels crowd, a zoom that slides the view out
+// from under the pointer — is arithmetic, and arithmetic can be pinned.
+TEST_CASE("Timeline ruler: labels stay on the 1-2-5 ladder and keep their distance")
+{
+    // The rung below the one that was picked: 1 → 0.5, 2 → 1, 5 → 2. What the
+    // function must NOT have returned, because it would crowd the labels.
+    auto rungBelow = [](float mant, float decade)
+    {
+        if (mant < 1.5f) return 0.5f * decade;
+        if (mant < 3.0f) return 1.0f * decade;
+        return 2.0f * decade;
+    };
+
+    // Every rung, at every magnitude, across five orders of pixels-per-second.
+    for (float pps = 4.0f; pps < 400000.0f; pps *= 1.17f)
+    {
+        const float step   = HE::Ed::uiTimelineTickStep(pps, 64.0f);
+        const float decade = std::pow(10.0f, std::floor(std::log10(step) + 1e-4f));
+        const float mant   = step / decade;
+
+        // The mantissa is 1, 2 or 5 — never 3, never 7. A tick marked 0.3 is
+        // one nobody can read a quarter-second off.
+        CHECK((std::fabs(mant - 1.0f) < 0.02f ||
+               std::fabs(mant - 2.0f) < 0.02f ||
+               std::fabs(mant - 5.0f) < 0.05f));
+        // Far enough apart to read…
+        CHECK(step * pps >= 64.0f * 0.999f);
+        // …and no further: the rung below would have crowded them.
+        CHECK(rungBelow(mant, decade) * pps < 64.0f * 1.001f);
+    }
+    // A lane one pixel wide while a panel is being dragged must not divide by
+    // zero or hand back an infinity that walks into the ruler's loop.
+    const float degenerate = HE::Ed::uiTimelineTickStep(0.0f, 64.0f);
+    CHECK(std::isfinite(degenerate));
+    CHECK(degenerate > 0.0f);
+}
+
+TEST_CASE("Timeline view: seconds and pixels agree in both directions")
+{
+    HE::Ed::UITimelineView v{ /*laneX*/ 300.0f, /*laneW*/ 600.0f, /*duration*/ 2.0f };
+
+    // At fit, the clip spans the lane exactly.
+    CHECK(v.xOf(0.0f) == doctest::Approx(300.0f));
+    CHECK(v.xOf(2.0f) == doctest::Approx(900.0f));
+
+    // Zoomed and scrolled, a time still round-trips through pixels.
+    v.zoom = 4.0f;
+    v.scroll = 0.75f;
+    for (float t = 0.75f; t <= 1.25f; t += 0.05f)
+        CHECK(v.tOf(v.xOf(t)) == doctest::Approx(t).epsilon(0.001));
+
+    // And what comes back is always a time IN the clip: everything asking is
+    // asking "what moment did the pointer land on".
+    CHECK(v.tOf(-10000.0f) == doctest::Approx(0.0f));
+    CHECK(v.tOf(10000.0f) == doctest::Approx(2.0f));
+}
+
+TEST_CASE("Timeline view: zooming leaves the anchored moment under the pointer")
+{
+    HE::Ed::UITimelineView v{ 300.0f, 600.0f, 10.0f };
+    const float anchor = 700.0f;              // some pixel inside the lane
+    const float before = v.tOf(anchor);
+
+    v.zoomAt(6.0f, anchor);
+    CHECK(v.tOf(anchor) == doctest::Approx(before).epsilon(0.002));
+    v.zoomAt(20.0f, anchor);
+    CHECK(v.tOf(anchor) == doctest::Approx(before).epsilon(0.002));
+
+    // Zooming out stops at fit rather than sliding off into empty time, and
+    // fit has nothing to scroll.
+    v.zoomAt(0.2f, anchor);
+    CHECK(v.zoom == doctest::Approx(1.0f));
+    CHECK(v.scroll == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Timeline view: the right edge never runs past the clip")
+{
+    HE::Ed::UITimelineView v{ 0.0f, 600.0f, 4.0f };
+    v.zoom = 2.0f;
+    v.scroll = 99.0f;
+    v.clampScroll();
+    // Half the clip visible → the furthest left edge is halfway in.
+    CHECK(v.scroll == doctest::Approx(2.0f));
+    CHECK(v.scroll + v.visibleSpan() == doctest::Approx(4.0f));
+
+    // Shortening the clip under a scrolled view pulls it back rather than
+    // leaving the lane pointing past the end (Length is a live drag).
+    v.duration = 1.0f;
+    v.clampScroll();
+    CHECK(v.scroll == doctest::Approx(0.5f));
+}
+
+TEST_CASE("Timeline view: playback brings the playhead back into view")
+{
+    HE::Ed::UITimelineView v{ 0.0f, 600.0f, 10.0f };
+    v.zoom = 5.0f;                 // two seconds visible
+    v.scroll = 0.0f;
+
+    v.reveal(1.0f);                // already visible → nothing moves
+    CHECK(v.scroll == doctest::Approx(0.0f));
+
+    v.reveal(5.0f);                // gone past the edge → centred on it
+    CHECK(v.scroll == doctest::Approx(4.0f));
+    CHECK(v.tOf(v.xOf(5.0f)) == doctest::Approx(5.0f).epsilon(0.001));
+
+    // …and centring never scrolls past the end.
+    v.reveal(10.0f);
+    CHECK(v.scroll == doctest::Approx(8.0f));
 }

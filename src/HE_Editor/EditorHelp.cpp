@@ -2291,15 +2291,41 @@ namespace
 	  "reports finished — the only way it ends is somebody stopping it — which is "
 	  "what a spinner or a pulse wants.",
 	  "", "ui#elements" },
-	{ "UI Timeline/Preview", "",
-	  "Draws the canvas AT the playhead instead of showing the widget's own "
-	  "values. Switch it off to edit: with it on, what you see is the animation, "
-	  "and the values the Details panel writes are underneath it.",
-	  "", "ui#elements" },
 	{ "ui.timeline-play", "Play",
 	  "Plays the animation in the DESIGNER — the running application is not "
-	  "involved. Drag the ruler to scrub by hand; either way the canvas shows the "
-	  "clip while Preview is on.",
+	  "involved. Drag the ruler to scrub by hand; either way the canvas shows "
+	  "the clip at the playhead. To see the widget's own values again, pick "
+	  "\"(none)\" as the animation.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Zoom In", "",
+	  "Spreads the time axis out around the playhead, so keys milliseconds "
+	  "apart become separate things you can grab. The ruler follows: its labels "
+	  "turn from seconds into milliseconds by themselves. The wheel over the "
+	  "lane does the same around the pointer, and Shift+wheel slides along.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Zoom Out", "",
+	  "Back towards the whole clip in one lane. Zoom stops at fit — there is "
+	  "nothing outside an animation to look at.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Fit", "",
+	  "The whole clip across the lane again, from the start. The way back when "
+	  "zooming has left you somewhere in the middle of a long animation.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Time", "",
+	  "When the selected key happens. The playhead follows while you drag it, "
+	  "so the canvas keeps showing the key you are moving — the same thing "
+	  "dragging its diamond does, with a number for when you know the number.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Value", "",
+	  "What the animated property IS at this key. This is where an animation is "
+	  "edited: the Details panel writes the widget's own values, which is what "
+	  "the widget looks like with no animation playing.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Ease", "",
+	  "The curve leading INTO this key — how the value arrives from the one "
+	  "before it. On the first key it means nothing; there is nothing to come "
+	  "from. Out curves land softly, In curves leave softly, and Out Back "
+	  "overshoots and settles, which is what makes a dialog land.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Add Track", "",
 	  "Adds a row for one property of the SELECTED element. Only what can be "
@@ -2309,10 +2335,10 @@ namespace
 	  "element has right now.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Key", "",
-	  "Records the element's CURRENT value as a key at the playhead, replacing "
-	  "one already there. That is the whole workflow: move the playhead, change "
-	  "the value in Details, press Key. The value that gets recorded is the one "
-	  "you typed, not the one the preview happens to be showing.",
+	  "Adds a key at the playhead, holding whatever the animation already shows "
+	  "there, and replaces one that was already at that moment. Adding it "
+	  "changes nothing on its own — that is the point: you place the moment "
+	  "first, then type what should happen at it in the row below.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Delete Key", "",
 	  "Removes this key. The track keeps the others, and a track with one key "

@@ -15,6 +15,7 @@
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
+#include "UITimelineMath.h"                     // seconds ⇄ pixels for the animation strip
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <MaterialGraph/MaterialGraph.h>        // MatDomain (widget materials are UI-domain)
@@ -87,9 +88,15 @@ struct State
 	int    clipIndex = -1;
 	float  playhead  = 0.0f;    // seconds into the open clip
 	bool   clipPlaying = false; // previewing it in the designer, not at runtime
-	bool   clipPreview = true;  // draw the canvas AT the playhead
 	int    trackSel = -1;       // the track new keys go on (-1 = none)
+	int    keySel   = -1;       // the key on it whose value the strip edits
 	bool   keyDragged = false;  // a key moved this drag → one undo on release
+	// The lane's view onto the clip: zoom is a multiple of FIT (1 = the whole
+	// clip spans the lane) and scroll is the second at its left edge. View
+	// state, like the canvas zoom beside it — where somebody was looking is not
+	// part of the animation.
+	float  clipZoom   = 1.0f;
+	float  clipScroll = 0.0f;
 	// Scratch buffers, not the document: an InputText writes on every keystroke,
 	// so typing straight into a clip's name would leave a clip called "F" behind
 	// on the way to "FadeIn".
@@ -2033,21 +2040,121 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 // adds (or focuses) the matching event node in the logic graph and jumps to
 // Graph mode (Unreal-style "add event → wire it up in the graph"). Events come
 // from the element type's events() list.
+// ── The selected key, edited where it was clicked ────────────────────────────
+// This row is what replaced the round trip through the details panel. Clicking a
+// key puts the playhead on it, so the canvas already shows the moment whose
+// value stands in this field: change the number and the picture changes with it,
+// which is the shortest loop an animation editor can have.
+void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
+{
+	// Its own scope although its only caller already opened the same one: a
+	// helper that relies on the scope of whoever called it is a helper whose
+	// tooltips move when it is called from somewhere else, and the coverage
+	// audit reads it where it stands rather than where it runs.
+	HE::Ed::Help::Scope helpScope("UI Timeline");
+	ImGui::Separator();
+	const bool haveTrack = st.trackSel >= 0 && st.trackSel < static_cast<int>(clip.tracks.size());
+	if (!haveTrack || st.keySel < 0 ||
+	    st.keySel >= static_cast<int>(clip.tracks[st.trackSel].keys.size()))
+	{
+		ImGui::TextDisabled("Click a key to edit its value here.");
+		return;
+	}
+	HE::UIAnimTrack& tr  = clip.tracks[st.trackSel];
+	HE::UIAnimKey&   key = tr.keys[st.keySel];
+
+	bool edited = false, committed = false;
+
+	ImGui::SetNextItemWidth(110.0f);
+	if (ImGui::DragFloat("Time", &key.time, 0.005f, 0.0f, clip.duration, "%.3f s"))
+	{
+		// The playhead rides along, so the canvas keeps showing the key being
+		// moved rather than the instant it has just left.
+		key.time = std::clamp(key.time, 0.0f, clip.duration);
+		st.playhead = key.time;
+		edited = true;
+	}
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Time");
+
+	// Deliberately NOT re-sorted afterwards: the index this row is holding
+	// would move under it mid-drag. Evaluation does not depend on the order
+	// (see uiAnimEvaluate), so the only cost is a file whose keys are listed
+	// out of order, and the only gain would be tidiness nobody sees.
+	ImGui::SameLine(); ImGui::SetNextItemWidth(220.0f);
+	switch (key.value.type)
+	{
+	case UIPropType::Float:
+		if (ImGui::DragFloat("Value", &key.value.f, 0.5f)) edited = true;
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Value");
+		break;
+	case UIPropType::Color:
+		if (ImGui::ColorEdit4("Value", &key.value.col.x)) edited = true;
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Value");
+		break;
+	case UIPropType::Vec2:
+		if (ImGui::DragFloat2("Value", &key.value.v2.x, 0.5f)) edited = true;
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Value");
+		break;
+	default:
+		// Only reachable through a hand-edited file — Add Track offers nothing
+		// else. Said out loud rather than hidden: a key you can neither see nor
+		// edit is a file nobody can repair.
+		ImGui::TextDisabled("(this key's type cannot be interpolated)");
+		break;
+	}
+
+	ImGui::SameLine(); ImGui::SetNextItemWidth(130.0f);
+	const bool easeOpen = ImGui::BeginCombo("Ease", HE::uiEaseName(key.ease));
+	if (!easeOpen) EditorWidgets::helpForLabel("Ease");
+	if (easeOpen)
+	{
+		for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+		{
+			const auto e = static_cast<HE::UIEase>(c);
+			if (ImGui::Selectable(HE::uiEaseName(e), key.ease == e))
+			{ key.ease = e; committed = true; }
+		}
+		ImGui::EndCombo();
+	}
+
+	ImGui::SameLine();
+	if (EditorWidgets::dangerSmallButton("Delete Key"))
+	{
+		tr.keys.erase(tr.keys.begin() + st.keySel);
+		st.keySel = -1;
+		committed = true;
+	}
+	EditorWidgets::helpForLabel("Delete Key");
+
+	if (edited) st.dirty = true;
+	if (committed) commitEdit(st, ctx);
+}
+
 // ── The timeline (docs/he-apps-plan.md B8) ───────────────────────────────────
 // The strip under the canvas: the widget's clips, their tracks, their keys, and
 // a playhead you can drag. What the animation editor of every engine looks like,
 // with the vocabulary this one already has — a track is an element's property,
 // a key is a value at a time, and the easing sits on the key.
 //
-// The division of labour is worth stating, because it is the thing that
-// surprises people: the DETAILS panel edits the widget's authored values, the
-// TIMELINE records those values as keys. "Move the playhead, change the value,
-// press Key" — the same three steps as everywhere else, and the value you key is
-// the one you just typed, not the one the preview happens to be showing.
+// An animation is edited HERE, not in the details panel. That was the first
+// version and it asked people to hold two documents in their head at once: the
+// canvas showed the clip, the details panel wrote the widget's own values, and a
+// switch between them decided which of the two you were looking at. So: with a
+// clip open the canvas always shows it, a key is selected by clicking it, and
+// its value is typed in this strip. The details panel goes back to being what it
+// is everywhere else — the widget's authored state, seen by closing the clip.
 void drawTimeline(State& st, AppContext& ctx, float height)
 {
 	HE::Ed::Help::Scope helpScope("UI Timeline");
-	ImGui::BeginChild("##uiw_timeline", ImVec2(0.0f, height), ImGuiChildFlags_Borders);
+	// NoScrollWithMouse because the wheel belongs to the lane: it zooms the
+	// time axis, and a strip that scrolled its own rows instead the moment a
+	// third track appeared would be zoom that works until you use it.
+	ImGui::BeginChild("##uiw_timeline", ImVec2(0.0f, height), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_NoScrollWithMouse);
 
 	const int clipCount = static_cast<int>(st.tree.animations.size());
 	if (st.clipIndex >= clipCount) { st.clipIndex = clipCount - 1; st.playhead = 0.0f; }
@@ -2060,9 +2167,17 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	if (!open) EditorWidgets::helpForLabel("Animation");
 	if (open)
 	{
+		// Closing the clip is a real choice, not an absence of one: it is how
+		// you get the canvas back to the widget's own values, so it has to be
+		// reachable after the first animation exists.
+		if (ImGui::Selectable("(none)##c", st.clipIndex < 0))
+		{ st.clipIndex = -1; st.playhead = 0.0f; st.trackSel = -1; st.keySel = -1; st.clipPlaying = false; }
 		for (int i = 0; i < clipCount; ++i)
 			if (ImGui::Selectable((st.tree.animations[i].name + "##c").c_str(), i == st.clipIndex))
-			{ st.clipIndex = i; st.playhead = 0.0f; st.trackSel = -1; st.clipPlaying = false; }
+			{
+				st.clipIndex = i; st.playhead = 0.0f; st.trackSel = -1; st.keySel = -1;
+				st.clipPlaying = false; st.clipZoom = 1.0f; st.clipScroll = 0.0f;
+			}
 		ImGui::EndCombo();
 	}
 	ImGui::SameLine();
@@ -2081,6 +2196,8 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 			st.tree.animations.push_back(std::move(c));
 			st.clipIndex = static_cast<int>(st.tree.animations.size()) - 1;
 			st.playhead = 0.0f;
+			st.trackSel = -1; st.keySel = -1;
+			st.clipZoom = 1.0f; st.clipScroll = 0.0f;
 			st.newClipName.clear();
 			commitEdit(st, ctx);
 			ImGui::CloseCurrentPopup();
@@ -2103,7 +2220,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	if (EditorWidgets::dangerSmallButton("Delete"))
 	{
 		st.tree.animations.erase(st.tree.animations.begin() + st.clipIndex);
-		st.clipIndex = -1; st.trackSel = -1; st.clipPlaying = false;
+		st.clipIndex = -1; st.trackSel = -1; st.keySel = -1; st.clipPlaying = false;
 		commitEdit(st, ctx);
 		ImGui::EndChild();
 		return;
@@ -2122,11 +2239,6 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	ImGui::SameLine();
 	if (EditorWidgets::checkbox("Loop", &clip.loop)) commitEdit(st, ctx);
 	ImGui::SameLine();
-	// The preview is what makes the playhead mean anything, and switching it off
-	// is what makes EDITING mean anything: with it on, the canvas shows the clip
-	// and not the values the details panel writes.
-	EditorWidgets::checkbox("Preview", &st.clipPreview);
-	ImGui::SameLine();
 	if (EditorWidgets::smallButton(st.clipPlaying ? "Stop" : "Play"))
 	{
 		st.clipPlaying = !st.clipPlaying;
@@ -2135,8 +2247,36 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// By KEY, not by label: the button says Play or Stop depending on what it
 	// would do, and a label-keyed tooltip would exist for one of the two.
 	EditorWidgets::helpForKey("ui.timeline-play");
+
+	// Where we are, in the unit the clip is actually in. A 400 ms hover read as
+	// "0.40 s" is arithmetic the reader has to do; below two seconds the
+	// interesting digits are milliseconds, above it they are not.
+	auto fmtTime = [&](char* buf, size_t n, float t)
+	{
+		if (clip.duration <= 2.0f) std::snprintf(buf, n, "%.0f ms", t * 1000.0f);
+		else                       std::snprintf(buf, n, "%.2f s", t);
+	};
+	char nowTxt[24], endTxt[24];
+	fmtTime(nowTxt, sizeof(nowTxt), st.playhead);
+	fmtTime(endTxt, sizeof(endTxt), clip.duration);
 	ImGui::SameLine();
-	ImGui::TextDisabled("%.2f s", st.playhead);
+	ImGui::TextDisabled("%s / %s", nowTxt, endTxt);
+
+	// The zoom controls sit here, on the bar, but they can only be APPLIED once
+	// the lane's width is known a few lines further down — zooming around a
+	// point needs the point in pixels. So the bar records the intent.
+	int  zoomIntent = 0;
+	bool zoomFit = false;
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Zoom Out")) zoomIntent = -1;
+	EditorWidgets::helpForLabel("Zoom Out");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Zoom In")) zoomIntent = 1;
+	EditorWidgets::helpForLabel("Zoom In");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Fit")) zoomFit = true;
+	EditorWidgets::helpForLabel("Fit");
+	if (st.clipZoom > 1.001f) { ImGui::SameLine(); ImGui::TextDisabled("%.0f%%", st.clipZoom * 100.0f); }
 
 	// Playing here is the DESIGNER's own preview — the runtime is not involved,
 	// and the editor draws every frame anyway, so it needs no pump.
@@ -2157,31 +2297,84 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	const float  laneW = std::max(60.0f, area.x - kNameW - 8.0f);
 	const ImVec2 top   = ImGui::GetCursorScreenPos();
 	ImDrawList*  dl    = ImGui::GetWindowDrawList();
+	const float  laneL = top.x + kNameW, laneR = laneL + laneW;
 
-	// Seconds ⇄ pixels, the one conversion everything below shares.
-	auto xOf = [&](float t) { return top.x + kNameW + laneW * (t / clip.duration); };
-	auto tOf = [&](float x) { return std::clamp((x - top.x - kNameW) / laneW, 0.0f, 1.0f)
-	                                 * clip.duration; };
+	// Seconds ⇄ pixels, the one conversion everything below shares — the ruler,
+	// the diamonds, the playhead and every hit test. It lives in its own header
+	// because it is the one part of an animation editor that can be checked
+	// without a window (see UITimelineMath.h).
+	HE::Ed::UITimelineView view{ laneL, laneW, clip.duration, st.clipZoom, st.clipScroll };
+	view.clampScroll();   // Length may have shrunk under a scrolled view
 
-	// The ruler: one label per second while they fit, else every five.
-	const float step = laneW / clip.duration >= 40.0f ? 1.0f
-	                 : laneW / clip.duration >= 12.0f ? 5.0f : 10.0f;
-	dl->AddRectFilled(ImVec2(top.x + kNameW, top.y), ImVec2(top.x + kNameW + laneW, top.y + 18.0f),
-	                  IM_COL32(28, 26, 24, 255));
-	for (float t = 0.0f; t <= clip.duration + 0.001f; t += step)
+	// The wheel over the lane zooms at the pointer, Shift+wheel pans. Plain
+	// wheel zooms rather than pans on purpose: at fit there is nothing to pan
+	// to, so panning would be the gesture that does nothing most of the time.
+	const ImVec2 mp = ImGui::GetIO().MousePos;
+	const bool overLane = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+	                      mp.x >= laneL && mp.x <= laneR &&
+	                      mp.y >= top.y && mp.y <= top.y + area.y;
+	const float wheel = ImGui::GetIO().MouseWheel;
+	if (overLane && wheel != 0.0f)
 	{
-		const float x = xOf(t);
+		if (ImGui::GetIO().KeyShift)
+		{ view.scroll -= wheel * view.visibleSpan() * 0.15f; view.clampScroll(); }
+		else view.zoomAt(view.zoom * std::pow(1.25f, wheel), mp.x);
+	}
+	// The buttons zoom around the PLAYHEAD — that is what somebody pressing +
+	// is looking at — falling back to the middle of the view when it is off
+	// screen, because anchoring on something invisible reads as a jump.
+	if (zoomIntent != 0)
+	{
+		const bool onScreen = st.playhead >= view.scroll &&
+		                      st.playhead <= view.scroll + view.visibleSpan();
+		view.zoomAt(view.zoom * (zoomIntent > 0 ? 1.5f : 1.0f / 1.5f),
+		            onScreen ? view.xOf(st.playhead) : laneL + laneW * 0.5f);
+	}
+	if (zoomFit) { view.zoom = 1.0f; view.scroll = 0.0f; }
+	// Playback follows the playhead when it runs out of the view. Scrubbing
+	// deliberately does not: there the pointer IS the playhead, and a view that
+	// slid under it would fight the hand holding it.
+	if (st.clipPlaying) view.reveal(st.playhead);
+	st.clipZoom = view.zoom; st.clipScroll = view.scroll;
+
+	// The ruler. Labels stand on the 1-2-5 rung that keeps them ~64 px apart,
+	// so zooming in turns seconds into milliseconds by itself, and a half-step
+	// tick without a label gives the eye something to halve.
+	dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+	dl->AddRectFilled(ImVec2(laneL, top.y), ImVec2(laneR, top.y + 18.0f),
+	                  IM_COL32(28, 26, 24, 255));
+	const float step  = HE::Ed::uiTimelineTickStep(view.pixelsPerSecond());
+	const float first = std::floor(view.scroll / step) * step;
+	const float last  = view.scroll + view.visibleSpan();
+	// Counted, not accumulated: a step of a millisecond added a thousand times
+	// is not the same number as a thousand milliseconds.
+	for (int n = 0; n < 4096; ++n)
+	{
+		const float t = first + step * static_cast<float>(n);
+		if (t > last + step) break;
+		if (t < -0.0001f || t > clip.duration + 0.0001f) continue;
+		const float x = view.xOf(t);
 		dl->AddLine(ImVec2(x, top.y), ImVec2(x, top.y + 18.0f), IM_COL32(90, 86, 80, 255));
-		char lbl[16]; std::snprintf(lbl, sizeof(lbl), "%.0f", t);
+		if (t + step * 0.5f <= clip.duration)
+		{
+			const float hx = view.xOf(t + step * 0.5f);
+			dl->AddLine(ImVec2(hx, top.y + 11.0f), ImVec2(hx, top.y + 18.0f),
+			            IM_COL32(64, 61, 57, 255));
+		}
+		char lbl[24];
+		if (step >= 1.0f)        std::snprintf(lbl, sizeof(lbl), "%.0f s", t);
+		else if (step >= 0.001f) std::snprintf(lbl, sizeof(lbl), "%.0f ms", t * 1000.0f);
+		else                     std::snprintf(lbl, sizeof(lbl), "%.2f ms", t * 1000.0f);
 		dl->AddText(ImVec2(x + 3.0f, top.y + 2.0f), IM_COL32(150, 145, 138, 255), lbl);
 	}
+	dl->PopClipRect();
 
 	// The ruler strip takes clicks and drags: that is the scrub.
-	ImGui::SetCursorScreenPos(ImVec2(top.x + kNameW, top.y));
+	ImGui::SetCursorScreenPos(ImVec2(laneL, top.y));
 	ImGui::InvisibleButton("##ruler", ImVec2(laneW, 18.0f));
 	if (ImGui::IsItemActive())
 	{
-		st.playhead = tOf(ImGui::GetMousePos().x);
+		st.playhead = view.tOf(ImGui::GetMousePos().x);
 		st.clipPlaying = false;
 	}
 
@@ -2200,27 +2393,48 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 		ImGui::SetCursorScreenPos(ImVec2(top.x, rowY + 2.0f));
 		if (ImGui::Selectable((label + "##t").c_str(), st.trackSel == i, 0,
 		                      ImVec2(kNameW - 22.0f, kRowH - 4.0f)))
-			st.trackSel = i;
+			{ st.trackSel = i; st.keySel = -1; }
 		ImGui::SameLine();
 		if (EditorWidgets::dangerSmallButton("x")) removeTrack = i;
 
 		// The lane, and a diamond per key. Dragging one moves it in time, which
 		// is the one edit a timeline has to have.
-		dl->AddRectFilled(ImVec2(top.x + kNameW, rowY), ImVec2(top.x + kNameW + laneW, rowY + kRowH),
+		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+		dl->AddRectFilled(ImVec2(laneL, rowY), ImVec2(laneR, rowY + kRowH),
 		                  st.trackSel == i ? IM_COL32(46, 42, 38, 255) : IM_COL32(34, 32, 30, 255));
+		dl->PopClipRect();
 		for (int k = 0; k < static_cast<int>(tr.keys.size()); ++k)
 		{
 			HE::UIAnimKey& key = tr.keys[k];
-			const float cx = xOf(key.time), cy = rowY + kRowH * 0.5f;
+			const float cx = view.xOf(key.time), cy = rowY + kRowH * 0.5f;
+			// A key scrolled out of the lane gets no button at all. Clipping is
+			// a drawing matter; an invisible button at x = -400 would still sit
+			// on top of the track NAME and eat its clicks.
+			if (cx < laneL - 6.0f || cx > laneR + 6.0f) continue;
 			ImGui::PushID(k);
 			ImGui::SetCursorScreenPos(ImVec2(cx - 6.0f, cy - 6.0f));
 			ImGui::InvisibleButton("##key", ImVec2(12.0f, 12.0f));
 			const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+			const bool picked = st.trackSel == i && st.keySel == k;
+			// Clicking a key goes TO it: it becomes the one the strip edits and
+			// the playhead lands on its time, so the canvas shows exactly the
+			// moment whose value is now in the field below. Selecting a key and
+			// then editing a value belonging to some other instant is the
+			// confusion this editor is meant to be free of.
+			if (ImGui::IsItemActivated())
+			{
+				st.trackSel = i;
+				st.keySel = k;
+				st.playhead = key.time;
+				st.clipPlaying = false;
+			}
 			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
 			{
-				key.time = tOf(ImGui::GetMousePos().x);
+				key.time = view.tOf(ImGui::GetMousePos().x);
+				st.playhead = key.time;
 				st.dirty = true;
 				st.trackSel = i;
+				st.keySel = k;
 				st.keyDragged = true;
 			}
 			// IsItemDeactivatedAfterEdit is no use here: an InvisibleButton never
@@ -2243,6 +2457,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 				if (EditorWidgets::dangerMenuItem("Delete Key"))
 				{
 					tr.keys.erase(tr.keys.begin() + k);
+					if (st.trackSel == i && st.keySel >= k) st.keySel = -1;
 					commitEdit(st, ctx);
 					ImGui::EndPopup();
 					ImGui::PopID();
@@ -2252,7 +2467,17 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 			}
 			const ImU32 col = hot ? IM_COL32(255, 214, 140, 255) : IM_COL32(230, 170, 60, 255);
 			const ImVec2 d[4] = { { cx, cy - 6.0f }, { cx + 6.0f, cy }, { cx, cy + 6.0f }, { cx - 6.0f, cy } };
+			dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
 			dl->AddConvexPolyFilled(d, 4, col);
+			// The selected key wears a ring rather than another fill: which key
+			// you are editing has to be readable next to which key the pointer
+			// happens to be over, and two shades of amber are not.
+			if (picked)
+			{
+				const ImVec2 o[4] = { { cx, cy - 9.0f }, { cx + 9.0f, cy }, { cx, cy + 9.0f }, { cx - 9.0f, cy } };
+				dl->AddPolyline(o, 4, IM_COL32(255, 250, 240, 255), ImDrawFlags_Closed, 1.5f);
+			}
+			dl->PopClipRect();
 			ImGui::PopID();
 		}
 		ImGui::PopID();
@@ -2261,15 +2486,31 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	{
 		clip.tracks.erase(clip.tracks.begin() + removeTrack);
 		st.trackSel = -1;
+		st.keySel = -1;
 		commitEdit(st, ctx);
 	}
 
-	// The playhead, over everything.
+	// The playhead, over everything, carrying its own time: the ruler says where
+	// the ticks are, this says where YOU are, and at a glance the two together
+	// are the answer to "how far in is this".
 	{
-		const float x = xOf(st.playhead);
+		const float x = view.xOf(st.playhead);
 		const float bottom = top.y + 20.0f + kRowH * static_cast<float>(clip.tracks.size()) + 4.0f;
+		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
 		dl->AddLine(ImVec2(x, top.y), ImVec2(x, std::max(bottom, top.y + 40.0f)),
 		            IM_COL32(255, 240, 200, 220), 1.5f);
+		// Re-read after this frame's scrubbing and playing: the bar's copy was
+		// printed before either happened, and a tag that trails the line it is
+		// attached to by a frame is worse than no tag.
+		fmtTime(nowTxt, sizeof(nowTxt), st.playhead);
+		const ImVec2 sz = ImGui::CalcTextSize(nowTxt);
+		// Kept inside the lane: a tag that hangs off the left edge at time zero
+		// is unreadable exactly when the number is most obviously right.
+		const float tagX = std::clamp(x + 3.0f, laneL, laneR - sz.x - 6.0f);
+		dl->AddRectFilled(ImVec2(tagX, top.y), ImVec2(tagX + sz.x + 6.0f, top.y + 16.0f),
+		                  IM_COL32(120, 90, 30, 235), 2.0f);
+		dl->AddText(ImVec2(tagX + 3.0f, top.y + 1.0f), IM_COL32(255, 245, 225, 255), nowTxt);
+		dl->PopClipRect();
 	}
 
 	// ── Adding tracks and keys ───────────────────────────────────────────────
@@ -2302,6 +2543,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 				tr.keys.push_back({ st.playhead, sel->getPropAny(pd.name), HE::UIEase::Linear });
 				clip.tracks.push_back(std::move(tr));
 				st.trackSel = static_cast<int>(clip.tracks.size()) - 1;
+				st.keySel = 0;
 				commitEdit(st, ctx);
 			}
 		ImGui::EndPopup();
@@ -2316,7 +2558,18 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 		HE::UIAnimTrack& tr = clip.tracks[st.trackSel];
 		if (const UIElement* e = st.tree.find(tr.element))
 		{
-			const UIPropValue v = e->getPropAny(tr.prop);
+			// What the CLIP says here, not what the element holds: with the
+			// canvas showing the animation, a key made of the authored value
+			// would make the picture jump the moment it was added. Adding a key
+			// changes nothing about the animation until you edit it, which is
+			// what "add a key" means everywhere. An empty track has nothing to
+			// say, so there the authored value is the only candidate.
+			UIPropValue v = e->getPropAny(tr.prop);
+			std::vector<HE::UIAnimSample> samples;
+			HE::uiAnimEvaluate(clip, st.playhead, samples);
+			for (const HE::UIAnimSample& s : samples)
+				if (s.element == tr.element && s.prop == tr.prop && s.value.type == v.type)
+					v = s.value;
 			// A key at this moment already? Replace it. Two keys at one time
 			// evaluate deterministically but mean nothing to a person.
 			bool replaced = false;
@@ -2325,6 +2578,12 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 			if (!replaced) tr.keys.push_back({ st.playhead, v, HE::UIEase::Linear });
 			std::stable_sort(tr.keys.begin(), tr.keys.end(),
 				[](const HE::UIAnimKey& a, const HE::UIAnimKey& b){ return a.time < b.time; });
+			// Sorting moved the indices under the selection, so it is found
+			// again by TIME — and the new key is selected either way, because
+			// the next thing anybody does is type its value.
+			st.keySel = -1;
+			for (int k = 0; k < static_cast<int>(tr.keys.size()); ++k)
+				if (std::fabs(tr.keys[k].time - st.playhead) < 0.001f) st.keySel = k;
 			commitEdit(st, ctx);
 		}
 	}
@@ -2332,9 +2591,10 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	EditorWidgets::helpForLabel("Key");
 	ImGui::SameLine();
 	ImGui::TextDisabled("%s", canKey
-		? "Records the element's CURRENT value at the playhead."
-		: "Pick a track, then Key records the element's value at the playhead.");
+		? "Adds a key at the playhead, holding what the animation shows there."
+		: "Pick a track first, or click a key to edit it.");
 
+	drawKeyEditor(st, ctx, clip);
 	ImGui::EndChild();
 }
 
@@ -3100,7 +3360,7 @@ struct ScrubPreview
 
 	explicit ScrubPreview(State& st)
 	{
-		if (!st.clipPreview || st.clipIndex < 0 ||
+		if (st.clipIndex < 0 ||
 		    st.clipIndex >= static_cast<int>(st.tree.animations.size())) return;
 		std::vector<HE::UIAnimSample> samples;
 		HE::uiAnimEvaluate(st.tree.animations[st.clipIndex], st.playhead, samples);
