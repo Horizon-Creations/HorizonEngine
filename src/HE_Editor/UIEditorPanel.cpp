@@ -4541,6 +4541,33 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.onEdit       = [&st, &ctx](bool committed){
 		st.dirty = true;
 		if (committed) commitEdit(st, ctx); };
+	// What a widget's own graph can put in a string pin: the animations this
+	// widget carries (its own and the ones its embedded components brought), and
+	// its elements by the names they have in the designer. Both are lists the
+	// registry cannot know and the author should not have to spell.
+	host.paramChoices = [&st, &ctx](const std::string& apiId, const std::string& param)
+		-> std::vector<std::string>
+	{
+		std::vector<std::string> out;
+		if (apiId.rfind("widget.", 0) != 0) return out;
+		if (param == "animation")
+		{
+			for (const HE::UIAnimClip& c : st.tree.animations) out.push_back(c.name);
+			// An embedded component's clips play by name too (WidgetManager
+			// searches the embeds), so a page can offer what its parts brought.
+			for (const auto& ep : st.tree.elements)
+				if (ep && ep->type() == HE::UIWidgetType::WidgetRef)
+					if (const HE::UIWidgetTree* sub =
+					        embeddedTreeFor(ctx, ep->getProp("Widget").s))
+						for (const HE::UIAnimClip& c : sub->animations)
+							if (std::find(out.begin(), out.end(), c.name) == out.end())
+								out.push_back(c.name);
+		}
+		else if (param == "element")
+			for (const auto& ep : st.tree.elements)
+				if (ep && !ep->name.empty()) out.push_back(ep->name);
+		return out;
+	};
 	host.menus        = &kMenus;
 
 	GraphEditor::Model m = HGH::buildModel(host);

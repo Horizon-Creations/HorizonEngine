@@ -11,6 +11,7 @@
 #include <ContentManager/HAsset.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
+#include <UIWidget/UIWidgetAnim.h>   // the easing + direction vocabularies, for their dropdowns
 #include <Types/Enums.h>
 #include <filesystem>
 #include <algorithm>
@@ -1801,6 +1802,62 @@ bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
 	}
 	ImGui::TextDisabled("Project-relative scene path — packed + resolved\nby this exact string (no manual typing).");
 	return changed;
+}
+
+bool drawChoiceParamPicker(HorizonCode::Node& n, const std::string& param,
+                           const char* label, const std::vector<std::string>& choices,
+                           const char* hint)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	if (n.type != HorizonCode::NodeType::EngineCall || choices.empty()) return false;
+	// The pin-default key is the data-in index, which for an EngineCall is the
+	// param index: its data-ins are exactly its params, in order.
+	int di = -1;
+	for (size_t i = 0; i < n.params.size(); ++i)
+		if (n.params[i].type == P::String && !n.params[i].isArray && n.params[i].name == param)
+			{ di = (int)i; break; }
+	if (di < 0) return false;
+
+	std::string cur;
+	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
+		cur = it->second.s;
+
+	HE::Ed::Help::Scope helpScope("Node Parameter");
+
+	bool changed = false;
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const std::string preview = cur.empty() ? ("(" + std::string(choices[0]) + ")") : cur;
+	const bool open = ImGui::BeginCombo(label, preview.c_str());
+	if (!open) EditorWidgets::helpForLabel(label);
+	if (open)
+	{
+		for (const std::string& c : choices)
+			if (ImGui::Selectable(c.c_str(), cur == c))
+			{
+				V v; v.type = P::String; v.s = c;
+				n.pinDefaults[di] = std::move(v);
+				changed = true;
+			}
+		ImGui::EndCombo();
+	}
+	// The empty default is shown in brackets rather than as "(pick one)": every
+	// one of these lists has a sensible first entry that an unset pin already
+	// behaves as (Linear, Forward), and pretending a choice is missing when the
+	// call would work is a warning about nothing.
+	if (hint) ImGui::TextDisabled("%s", hint);
+	return changed;
+}
+
+std::vector<std::string> engineParamChoices(const std::string& param)
+{
+	std::vector<std::string> out;
+	if (param == "easing")
+		for (int i = 0; i < (int)HE::UIEase::COUNT; ++i)
+			out.push_back(HE::uiEaseName((HE::UIEase)i));
+	else if (param == "direction")
+		for (int i = 0; i < (int)HE::UIAnimDirection::COUNT; ++i)
+			out.push_back(HE::uiAnimDirectionName((HE::UIAnimDirection)i));
+	return out;
 }
 
 int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,

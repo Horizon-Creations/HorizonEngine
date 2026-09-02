@@ -1895,7 +1895,29 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		const bool saveField = n.s.rfind("save.", 0) == 0 && hasFieldParam;
 		if (HcEditorUtil::drawSceneParamPicker(n, h.content))          edit(true);
 		else if (HcEditorUtil::drawSaveFieldParamPicker(n, h.content)) edit(true);
-		if (!sceneNode && !saveField)
+
+		// Every other string parameter whose values are a closed list: the
+		// animations this widget carries, its elements, the easing curves, the
+		// play directions. The host answers first — what an "animation" can be
+		// is a property of the asset being edited — and the shared vocabularies
+		// fill in behind it.
+		bool drewChoice = false;
+		for (const auto& p : n.params)
+		{
+			if (p.type != PT::String || p.isArray) continue;
+			std::vector<std::string> choices;
+			if (h.paramChoices) choices = h.paramChoices(n.s, p.name);
+			if (choices.empty()) choices = HcEditorUtil::engineParamChoices(p.name);
+			if (choices.empty()) continue;
+			// "animation" → "Animation": the pins are named in the registry's
+			// spelling, the rows are read by a person.
+			std::string label = p.name;
+			if (!label.empty()) label[0] = (char)std::toupper((unsigned char)label[0]);
+			if (HcEditorUtil::drawChoiceParamPicker(n, p.name, label.c_str(), choices))
+				edit(true);
+			drewChoice = true;
+		}
+		if (!sceneNode && !saveField && !drewChoice)
 			ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
 		return true;
 	}

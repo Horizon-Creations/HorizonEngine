@@ -87,6 +87,28 @@ namespace HcEditorUtil
 	// Returns true when changed; no-op otherwise.
 	bool drawSaveFieldParamPicker(HorizonCode::Node& n, ContentManager* cm);
 
+	// A dropdown for a STRING parameter whose values are a closed list — the
+	// generalisation of the two pickers above, for the cases where the list is
+	// short and known: the easing curves, an animation's play direction, the
+	// animations a widget carries, its elements by name.
+	//
+	// Typing those was never a real choice. A misspelled easing plays Linear, a
+	// misspelled animation plays nothing at all, and neither says so — the whole
+	// class of bug a dropdown makes impossible.
+	//
+	// `label` is what the row is called; `hint` a line under it (may be null).
+	// Writes the pick to the param's inline pin default. Returns true on a
+	// change, false (and draws nothing) when the node has no such param.
+	bool drawChoiceParamPicker(HorizonCode::Node& n, const std::string& param,
+	                           const char* label, const std::vector<std::string>& choices,
+	                           const char* hint = nullptr);
+
+	// The choices that need no context: the easing curves and the play
+	// directions, which are the engine's own closed vocabularies. Empty for
+	// anything else — a host that knows more (which animations THIS widget has)
+	// answers first, and this is the fallback every graph editor shares.
+	std::vector<std::string> engineParamChoices(const std::string& param);
+
 	// ── HC class registry ─────────────────────────────────────────────────────
 	// The public interface of one HorizonCode class the editor knows about — an
 	// asset (widget / HC class) or an in-memory graph (level / GameInstance). This

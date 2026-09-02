@@ -3425,6 +3425,29 @@ namespace
 	  "a renamed or moved scene cannot leave a path behind that no longer points "
 	  "anywhere.",
 	  "", "horizoncode#palette" },
+	{ "Node Parameter/Animation", "Animation",
+	  "Which of the widget's animations this call plays or asks about, picked "
+	  "from the ones it actually has — its own and the ones its embedded "
+	  "components brought with them. A typed name that does not match plays "
+	  "nothing and says nothing, which is the whole reason this is a list.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Direction", "Direction",
+	  "Which way the animation runs: forwards, backwards, or out and back. "
+	  "Backwards reads the same animation from its end, so \"the way it came in, "
+	  "in reverse\" is a setting rather than a second animation to maintain. "
+	  "Ping Pong takes twice as long, and with Loop it is the shape every "
+	  "breathing animation has.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Easing", "Easing",
+	  "The curve the value travels along. Out curves land softly, In curves "
+	  "leave softly, In Out does both, and Out Back overshoots and settles, "
+	  "which is what makes a dialog land instead of arrive.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Element", "Element",
+	  "Which element of this widget the call acts on, by the name it carries in "
+	  "the Designer. Only named elements are offered: a name is what a graph can "
+	  "hold on to, and an element without one is the asset's private business.",
+	  "", "horizoncode#palette" },
 	{ "HorizonCode Node/Type", "",
 	  "The type of the external variable this node reads or writes, so the node's "
 	  "value pin matches the variable on the other side. Changing it drops the "
