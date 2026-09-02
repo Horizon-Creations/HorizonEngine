@@ -69,6 +69,46 @@ const UIAnimClip* uiAnimFind(const std::vector<UIAnimClip>& clips, const std::st
     return nullptr;
 }
 
+namespace
+{
+    constexpr int kDirCount = static_cast<int>(UIAnimDirection::COUNT);
+    // Index-matched to the enum, like kNames above.
+    const char* const kDirNames[kDirCount] = { "Forward", "Backward", "Ping Pong" };
+}
+
+const char* uiAnimDirectionName(UIAnimDirection d)
+{
+    const int i = static_cast<int>(d);
+    return (i >= 0 && i < kDirCount) ? kDirNames[i] : kDirNames[0];
+}
+
+UIAnimDirection uiAnimDirectionFromName(const std::string& s)
+{
+    for (int i = 0; i < kDirCount; ++i)
+        if (s == kDirNames[i]) return static_cast<UIAnimDirection>(i);
+    return UIAnimDirection::Forward;
+}
+
+float uiAnimPlaySpan(UIAnimDirection dir, float playEnd)
+{
+    const float end = std::max(playEnd, 0.0f);
+    return dir == UIAnimDirection::PingPong ? end * 2.0f : end;
+}
+
+float uiAnimDirectedTime(UIAnimDirection dir, float elapsed, float playEnd)
+{
+    const float end = std::max(playEnd, 0.0f);
+    const float t   = std::clamp(elapsed, 0.0f, uiAnimPlaySpan(dir, end));
+    switch (dir)
+    {
+    case UIAnimDirection::Backward: return end - t;
+    case UIAnimDirection::PingPong: return t <= end ? t : end * 2.0f - t;
+    case UIAnimDirection::Forward:
+    case UIAnimDirection::COUNT:
+    default:                        return t;
+    }
+}
+
 float uiAnimPlayEnd(const UIAnimClip& clip)
 {
     float last = 0.0f;

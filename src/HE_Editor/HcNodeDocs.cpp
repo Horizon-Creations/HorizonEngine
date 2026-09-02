@@ -459,14 +459,30 @@ namespace
 	  "\"Out Back\" is the curve that makes a dialog land rather than arrive." },
 	{ "widget.playAnimation",
 	  "Plays one of the animations the widget carries — the ones made in the "
-	  "Designer's timeline, by name. Whether it loops is the animation's own "
-	  "decision. An embedded component's animations count too, so a page can "
-	  "play what its component brought with it. OnClipFinished says when it ends; "
-	  "a looping one never does." },
+	  "Designer's timeline — picked from the dropdown. Leave Widget unwired and "
+	  "it plays this widget's own. Whether it loops is the animation's own "
+	  "decision. Direction runs it forwards, backwards, or out and back. "
+	  "Restore After Completed puts the properties it moved back the way they "
+	  "were when it finishes, which is the whole of \"flash this and undo it\". "
+	  "An embedded component's animations count too, so a page can play what its "
+	  "component brought with it. OnClipFinished says when it ends; a looping "
+	  "one never does, and never restores either." },
 	{ "widget.playAnimationLooped",
 	  "The same, but you decide about looping instead of the animation. For the "
 	  "case where one clip is both the spinner that runs until you stop it and "
 	  "the flourish that plays once." },
+	{ "widget.stopAllAnimations",
+	  "Stops everything moving in the widget: the authored animations and the "
+	  "single-property ones both. What a screen being torn down or swapped "
+	  "reaches for, because it does not have to name what it started. Values "
+	  "stay where they got to; Restore Original State is the one that puts them "
+	  "back." },
+	{ "widget.restoreOriginalState",
+	  "Stops everything and puts every property an animation ever touched back "
+	  "the way it was BEFORE anything animated it — not the way it was a moment "
+	  "ago. Stopping is part of it: a clip left running would write over the "
+	  "restored values on the next frame. Outputs how many properties were put "
+	  "back, which is 0 when nothing had been animated." },
 	{ "widget.stopAnimationClip",
 	  "Stops that animation, or every one of the widget's when the name is left "
 	  "empty. Values stay where they got to, and nothing is reported — cancelled "

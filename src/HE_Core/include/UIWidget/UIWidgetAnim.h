@@ -51,6 +51,32 @@ HE_API UIEase uiEaseFromName(const std::string& s);
 // caller that interpolates a bounded value has to clamp the result, not this.
 HE_API float uiEaseApply(UIEase e, float t);
 
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  THESE NAMES ARE STORED too — a graph node keeps the direction by NAME.  ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+// Which way a clip runs. Closed vocabulary for the same reason UIEase is one:
+// it can be offered as a dropdown and checked by a test.
+//
+// Backward is not "the same animation, mirrored" in the easing sense — the
+// curves still sit on the keys where the author put them, and the clip is read
+// from the far end towards zero. That is what makes "the way it came in, in
+// reverse" one setting rather than a second clip somebody has to maintain.
+enum class UIAnimDirection : uint8_t
+{
+    Forward = 0,
+    Backward,
+    // Out and back in one play: the panel that grows and settles, the button
+    // that nudges. Twice as long as the clip, and with Loop it is the shape
+    // every "breathing" animation has.
+    PingPong,
+    COUNT
+};
+
+HE_API const char* uiAnimDirectionName(UIAnimDirection d);
+// Unknown name → Forward, never a failure. Same rule as uiEaseFromName: a
+// misspelled setting should still play the animation.
+HE_API UIAnimDirection uiAnimDirectionFromName(const std::string& s);
+
 // ── Clips: an animation you author instead of one you write ──────────────────
 // The other half of B8, and the half a designer needs: a NAMED animation that
 // belongs to the widget, made of tracks (one property of one element) made of
@@ -132,6 +158,16 @@ HE_API void uiAnimEvaluate(const UIAnimClip& clip, float time,
 // A clip with no keys at all ends at zero. Playing one is a no-op that reports
 // finished at once — including a looping one, because there is nothing to loop.
 HE_API float uiAnimPlayEnd(const UIAnimClip& clip);
+
+// How long ONE pass takes in this direction: the clip's own length, or twice it
+// for a ping-pong (out and back). What playback wraps and finishes on.
+HE_API float uiAnimPlaySpan(UIAnimDirection dir, float playEnd);
+
+// The moment of the CLIP to sample, `elapsed` seconds into a pass. Forward is
+// the identity; backward reads from the far end towards zero; ping-pong goes out
+// and comes back. Clamped into [0, playEnd], so a caller that has just wrapped
+// its elapsed time cannot ask for a moment outside the clip.
+HE_API float uiAnimDirectedTime(UIAnimDirection dir, float elapsed, float playEnd);
 
 // The clip of that name, or null. Names are what a graph node and the editor
 // both store, so they are the identity — there is no clip id.

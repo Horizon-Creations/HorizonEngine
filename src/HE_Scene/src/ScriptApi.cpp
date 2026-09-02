@@ -329,19 +329,35 @@ int stopAnimation(HorizonWorld& world, int widgetId, const std::string& elemName
 	return world.widgets().stopAnimationsNamed(widgetId, elemName, prop);
 }
 
-bool playClip(HorizonWorld& world, int widgetId, const std::string& clip, bool loop)
+bool playClip(HorizonWorld& world, int widgetId, const std::string& clip, bool loop,
+              const std::string& direction)
 {
-	return world.widgets().playAnimation(widgetId, clip, &loop);
+	return world.widgets().playAnimation(widgetId, clip, &loop,
+	                                     HE::uiAnimDirectionFromName(direction));
 }
-bool playClipAsAuthored(HorizonWorld& world, int widgetId, const std::string& clip)
+bool playClipAsAuthored(HorizonWorld& world, int widgetId, const std::string& clip,
+                        bool restore, const std::string& direction)
 {
-	// No override: the clip's own Loop decides, which is what makes looping a
-	// property of the animation instead of of every call site.
-	return world.widgets().playAnimation(widgetId, clip);
+	// No loop override: the clip's own Loop decides, which is what makes looping
+	// a property of the animation instead of of every call site.
+	return world.widgets().playAnimation(widgetId, clip, nullptr,
+	                                     HE::uiAnimDirectionFromName(direction), restore);
 }
 int stopClip(HorizonWorld& world, int widgetId, const std::string& clip)
 {
 	return world.widgets().stopAnimationClip(widgetId, clip);
+}
+int widgetOfScript(HorizonWorld& world, uint32_t scriptId)
+{
+	return world.widgets().widgetIdForScript(scriptId);
+}
+int stopAllAnimations(HorizonWorld& world, int widgetId)
+{
+	return world.widgets().stopAllAnimations(widgetId);
+}
+int restoreOriginalState(HorizonWorld& world, int widgetId)
+{
+	return world.widgets().restoreOriginalState(widgetId);
 }
 bool isClipPlaying(HorizonWorld& world, int widgetId, const std::string& clip)
 {

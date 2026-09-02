@@ -996,14 +996,31 @@ bool animateVec2(Ctx& c, int id, const std::string& element, const std::string& 
 int stopAnimation(Ctx& c, int id, const std::string& element, const std::string& prop)
 { return c.world ? ScriptApi::stopAnimation(*c.world, id, element, prop) : 0; }
 
-bool playAnimation(Ctx& c, int id, const std::string& clip)
-{ return c.world ? ScriptApi::playClipAsAuthored(*c.world, id, clip) : false; }
-bool playAnimationLooped(Ctx& c, int id, const std::string& clip, bool loop)
-{ return c.world ? ScriptApi::playClip(*c.world, id, clip, loop) : false; }
+// "This widget" when nobody wired the pin. The animation rows are called from a
+// widget's OWN graph almost every time — "play my fade-in" — and wiring Get Self
+// into each of them is friction with no decision in it. Scoped to these rows
+// rather than to every widget row: the others (Show, Destroy, Add Child) are
+// mostly about a widget somebody else made, where a silent "self" would be a
+// guess. Zero stays the sentinel, exactly like the entity Target pins below.
+int selfWidget(Ctx& c, int id)
+{ return (id == 0 && c.world && c.self) ? ScriptApi::widgetOfScript(*c.world, c.self) : id; }
+
+bool playAnimation(Ctx& c, int id, const std::string& clip, bool restore,
+                   const std::string& direction)
+{ return c.world ? ScriptApi::playClipAsAuthored(*c.world, selfWidget(c, id), clip,
+                                                 restore, direction) : false; }
+bool playAnimationLooped(Ctx& c, int id, const std::string& clip, bool loop,
+                         const std::string& direction)
+{ return c.world ? ScriptApi::playClip(*c.world, selfWidget(c, id), clip, loop, direction)
+                 : false; }
 int stopAnimationClip(Ctx& c, int id, const std::string& clip)
-{ return c.world ? ScriptApi::stopClip(*c.world, id, clip) : 0; }
+{ return c.world ? ScriptApi::stopClip(*c.world, selfWidget(c, id), clip) : 0; }
 bool isPlayingAnimation(Ctx& c, int id, const std::string& clip)
-{ return c.world ? ScriptApi::isClipPlaying(*c.world, id, clip) : false; }
+{ return c.world ? ScriptApi::isClipPlaying(*c.world, selfWidget(c, id), clip) : false; }
+int stopAllAnimations(Ctx& c, int id)
+{ return c.world ? ScriptApi::stopAllAnimations(*c.world, selfWidget(c, id)) : 0; }
+int restoreOriginalState(Ctx& c, int id)
+{ return c.world ? ScriptApi::restoreOriginalState(*c.world, selfWidget(c, id)) : 0; }
 void showModal(Ctx& c, int id)
 { if (c.world) ScriptApi::showModalWidget(*c.world, id); }
 void openPopup(Ctx& c, int id, float x, float y)
@@ -3346,17 +3363,27 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
                 widget::stopAnimation(c, (int)aR(a, 0), aS(a, 1), aS(a, 2))) }; } });
 
-        // The widget's own authored clips, by name.
+        // The widget's own authored clips, by name. `widget` left unwired means
+        // the widget whose graph is calling (widget::selfWidget), so playing
+        // one's own animation is "pick it from the dropdown" and nothing else.
+        //
+        // `restore` is the shortcut for the commonest pair of calls there is:
+        // play something, put it back. `direction` is a UIAnimDirection name
+        // ("Forward", "Backward", "Ping Pong"), a NAME for the same reason the
+        // easing is one — a row that survives the vocabulary growing.
         t.push_back({ "widget.playAnimation", "Widget", true,
-            {{"widget", P::Ref}, {"animation", P::String}}, {{"ok", P::Bool}},
-            "HE::api::widget::playAnimation",
+            {{"widget", P::Ref}, {"animation", P::String},
+             {"restoreAfterCompleted", P::Bool}, {"direction", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::playAnimation",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
-                widget::playAnimation(c, (int)aR(a, 0), aS(a, 1))) }; } });
+                widget::playAnimation(c, (int)aR(a, 0), aS(a, 1), aB(a, 2), aS(a, 3))) }; } });
         t.push_back({ "widget.playAnimationLooped", "Widget", true,
-            {{"widget", P::Ref}, {"animation", P::String}, {"loop", P::Bool}},
+            {{"widget", P::Ref}, {"animation", P::String}, {"loop", P::Bool},
+             {"direction", P::String}},
             {{"ok", P::Bool}}, "HE::api::widget::playAnimationLooped",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
-                widget::playAnimationLooped(c, (int)aR(a, 0), aS(a, 1), aB(a, 2))) }; } });
+                widget::playAnimationLooped(c, (int)aR(a, 0), aS(a, 1), aB(a, 2),
+                                            aS(a, 3))) }; } });
         t.push_back({ "widget.stopAnimationClip", "Widget", true,
             {{"widget", P::Ref}, {"animation", P::String}}, {{"stopped", P::Int}},
             "HE::api::widget::stopAnimationClip",
@@ -3367,6 +3394,16 @@ const std::vector<ApiFn>& registry()
             "HE::api::widget::isPlayingAnimation",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
                 widget::isPlayingAnimation(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.stopAllAnimations", "Widget", true,
+            {{"widget", P::Ref}}, {{"stopped", P::Int}},
+            "HE::api::widget::stopAllAnimations",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::stopAllAnimations(c, (int)aR(a, 0))) }; } });
+        t.push_back({ "widget.restoreOriginalState", "Widget", true,
+            {{"widget", P::Ref}}, {{"restored", P::Int}},
+            "HE::api::widget::restoreOriginalState",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::restoreOriginalState(c, (int)aR(a, 0))) }; } });
 
         // Layers. A dialog and a menu are the same thing to the engine: input
         // belongs to them until they let go. Only the leaving differs.
@@ -4047,6 +4084,8 @@ const std::vector<ApiFn>& registry()
             { "widget.playAnimationLooped", "Play Animation Looped" },
             { "widget.stopAnimationClip", "Stop Animation" },
             { "widget.isPlayingAnimation", "Is Animation Playing" },
+            { "widget.stopAllAnimations", "Stop All Animations" },
+            { "widget.restoreOriginalState", "Restore Original State" },
             { "widget.showModal", "Show Modal Widget" },
             { "widget.openPopup", "Open Popup" },
             { "widget.openPopupAtPointer", "Open Popup At Pointer" },

@@ -5100,6 +5100,153 @@ TEST_CASE("Clips: the runtime ends one at its last key, and loops there too")
     CHECK_FALSE(wm.isAnimating());
 }
 
+// The stored names, pinned like the easing ones: a graph node keeps the
+// direction by NAME, so renaming one silently turns every animation that used
+// it into Forward.
+TEST_CASE("Clips: the play directions are a closed, named vocabulary")
+{
+    CHECK(std::string(HE::uiAnimDirectionName(HE::UIAnimDirection::Forward)) == "Forward");
+    CHECK(std::string(HE::uiAnimDirectionName(HE::UIAnimDirection::Backward)) == "Backward");
+    CHECK(std::string(HE::uiAnimDirectionName(HE::UIAnimDirection::PingPong)) == "Ping Pong");
+    for (int i = 0; i < (int)HE::UIAnimDirection::COUNT; ++i)
+    {
+        const auto d = (HE::UIAnimDirection)i;
+        CHECK(HE::uiAnimDirectionFromName(HE::uiAnimDirectionName(d)) == d);
+    }
+    // Unknown plays forwards rather than nothing, like an unknown easing.
+    CHECK(HE::uiAnimDirectionFromName("sideways") == HE::UIAnimDirection::Forward);
+    CHECK(HE::uiAnimDirectionFromName("") == HE::UIAnimDirection::Forward);
+
+    // One pass: the clip's length, or twice it out and back.
+    CHECK(HE::uiAnimPlaySpan(HE::UIAnimDirection::Forward, 0.5f) == doctest::Approx(0.5f));
+    CHECK(HE::uiAnimPlaySpan(HE::UIAnimDirection::Backward, 0.5f) == doctest::Approx(0.5f));
+    CHECK(HE::uiAnimPlaySpan(HE::UIAnimDirection::PingPong, 0.5f) == doctest::Approx(1.0f));
+
+    // Which moment of the clip a pass is showing.
+    auto at = [](HE::UIAnimDirection d, float t){ return HE::uiAnimDirectedTime(d, t, 1.0f); };
+    CHECK(at(HE::UIAnimDirection::Forward, 0.25f)  == doctest::Approx(0.25f));
+    CHECK(at(HE::UIAnimDirection::Backward, 0.0f)  == doctest::Approx(1.0f));
+    CHECK(at(HE::UIAnimDirection::Backward, 0.25f) == doctest::Approx(0.75f));
+    CHECK(at(HE::UIAnimDirection::Backward, 1.0f)  == doctest::Approx(0.0f));
+    CHECK(at(HE::UIAnimDirection::PingPong, 0.5f)  == doctest::Approx(0.5f));
+    CHECK(at(HE::UIAnimDirection::PingPong, 1.0f)  == doctest::Approx(1.0f));
+    CHECK(at(HE::UIAnimDirection::PingPong, 1.5f)  == doctest::Approx(0.5f));
+    CHECK(at(HE::UIAnimDirection::PingPong, 2.0f)  == doctest::Approx(0.0f));
+    // Past the pass, and before it: clamped into the clip, never outside it.
+    CHECK(at(HE::UIAnimDirection::Forward, 99.0f)  == doctest::Approx(1.0f));
+    CHECK(at(HE::UIAnimDirection::Backward, -9.0f) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("Clips: backwards, out and back, and putting it back afterwards")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 100.0f;
+        e.renderOpacity = 0.3f;      // the authored value, and what a restore owes
+    }
+    t.animations.push_back(fadeClip(panel, "FadeIn", 0.0f, 1.0f, 1.0f));
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto opacity = [&]{ return wm.tree(id)->find(panel)->renderOpacity; };
+
+    // Backwards: the clip read from its end towards zero.
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Backward));
+    wm.tick(0.25f);
+    CHECK(opacity() == doctest::Approx(0.75f));
+    wm.tick(0.75f);
+    CHECK(opacity() == doctest::Approx(0.0f));
+    CHECK_FALSE(wm.isPlayingAnimation(id, "FadeIn"));
+
+    // Out and back: twice as long, and it ends where it started.
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::PingPong));
+    wm.tick(1.0f);
+    CHECK(opacity() == doctest::Approx(1.0f));   // the far end
+    wm.tick(0.5f);
+    CHECK(opacity() == doctest::Approx(0.5f));   // on the way back
+    CHECK(wm.isPlayingAnimation(id, "FadeIn"));
+    wm.tick(0.5f);
+    CHECK(opacity() == doctest::Approx(0.0f));
+    CHECK_FALSE(wm.isPlayingAnimation(id, "FadeIn"));
+
+    // Restore After Completed: back to 0.3, the value the widget was AUTHORED
+    // with — not the 0.0 the last two plays left behind. That is the whole
+    // difference between "the way it was" and "the way it was a moment ago".
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Forward,
+                             /*restore=*/true));
+    wm.tick(0.5f);
+    CHECK(opacity() == doctest::Approx(0.5f));
+    wm.tick(0.6f);
+    CHECK(opacity() == doctest::Approx(0.3f));
+    CHECK_FALSE(wm.isPlayingAnimation(id, "FadeIn"));
+
+    // A clip STOPPED by hand did not finish, so it does not restore: that is
+    // what the explicit Restore Original State node is for.
+    REQUIRE(wm.playAnimation(id, "FadeIn", nullptr, HE::UIAnimDirection::Forward, true));
+    wm.tick(0.5f);
+    CHECK(wm.stopAnimationClip(id, "FadeIn") == 1);
+    CHECK(opacity() == doctest::Approx(0.5f));
+    CHECK(wm.restoreOriginalState(id) == 1);
+    CHECK(opacity() == doctest::Approx(0.3f));
+    // Nothing left to remember once it has been put back.
+    CHECK(wm.restoreOriginalState(id) == 0);
+}
+
+TEST_CASE("Clips: stop all, and what 'original' means after two animations")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    const int label = t.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 100.0f;
+        e.renderOpacity = 0.4f;
+    }
+    t.find(label)->rotation = 10.0f;
+    t.animations.push_back(fadeClip(panel, "FadeIn", 0.0f, 1.0f, 1.0f));
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto opacity  = [&]{ return wm.tree(id)->find(panel)->renderOpacity; };
+    auto rotation = [&]{ return wm.tree(id)->find(label)->rotation; };
+
+    // A clip and a tween on two different properties: Stop All takes both, and
+    // does not need to be told what is running.
+    REQUIRE(wm.playAnimation(id, "FadeIn"));
+    REQUIRE(wm.animate(id, label, "Rotation", HE::UIPropValue::ofFloat(90.0f), 1.0f));
+    wm.tick(0.5f);
+    CHECK(wm.stopAllAnimations(id) == 2);
+    CHECK_FALSE(wm.isAnimating());
+    // Stopped, not rewound.
+    CHECK(opacity() == doctest::Approx(0.5f));
+    CHECK(rotation() > 10.0f);
+
+    // A SECOND animation on a property must not record the first one's
+    // mid-flight value as the original — the memory is of the widget, not of
+    // the last thing that touched it.
+    REQUIRE(wm.animate(id, panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    wm.tick(0.5f);
+    CHECK(wm.restoreOriginalState(id) == 2);
+    CHECK(opacity() == doctest::Approx(0.4f));
+    CHECK(rotation() == doctest::Approx(10.0f));
+}
+
 TEST_CASE("Clips: a clip and a tween never write the same property at once")
 {
     TempWidgetDir dir;
@@ -5179,6 +5326,29 @@ TEST_CASE("Clips: a graph plays one by name through the engine API")
     wm.tick(2.5f);
     CHECK(HE::api::widget::isPlayingAnimation(c, id, "FadeIn"));   // still going
     CHECK(HE::api::widget::stopAnimationClip(c, id, "") == 1);
+
+    // Stop All and Restore, through the rows a graph calls. Restore puts the
+    // opacity back to the 1.0 the widget was authored with, from wherever the
+    // half-played clip left it.
+    REQUIRE(HE::api::widget::playAnimation(c, id, "FadeIn"));
+    wm.tick(0.5f);
+    CHECK(HE::api::widget::stopAllAnimations(c, id) == 1);
+    CHECK(wm.tree(id)->find(panel)->renderOpacity == doctest::Approx(0.5f));
+    CHECK(HE::api::widget::restoreOriginalState(c, id) == 1);
+    CHECK(wm.tree(id)->find(panel)->renderOpacity == doctest::Approx(1.0f));
+
+    // Backwards and "put it back afterwards", the two knobs the Play node has,
+    // through the row rather than through the manager.
+    REQUIRE(HE::api::widget::playAnimation(c, id, "FadeIn", /*restore=*/true, "Backward"));
+    wm.tick(0.25f);
+    CHECK(wm.tree(id)->find(panel)->renderOpacity == doctest::Approx(0.75f));
+    wm.tick(1.0f);
+    CHECK(wm.tree(id)->find(panel)->renderOpacity == doctest::Approx(1.0f));   // restored
+
+    // Nobody wired the Widget pin: with no calling instance either, there is no
+    // widget to guess and the call is a no-op rather than a wrong guess.
+    CHECK_FALSE(HE::api::widget::playAnimation(c, 0, "FadeIn"));
+    CHECK(HE::api::widget::stopAllAnimations(c, 0) == 0);
 }
 
 // A component's clips are the component's: its tracks name elements by the ids
@@ -5209,6 +5379,7 @@ TEST_CASE("Clips: an embedded component's animation plays on its own elements")
     page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
     page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
     const int decoy = page.add(HE::UIWidgetType::Panel);
+    page.find(decoy)->name = "Slot";   // somewhere for addChild to graft into
     {
         HE::UIElement& e = *page.find(decoy);
         HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
@@ -5241,6 +5412,18 @@ TEST_CASE("Clips: an embedded component's animation plays on its own elements")
     CHECK(grafted->renderOpacity == doctest::Approx(0.5f));
     // …and the page's own panel, which has the id the clip names, did not.
     CHECK(wm.tree(id)->find(decoy)->renderOpacity == doctest::Approx(1.0f));
+
+    // "This widget" for an engine call with the Widget pin left unwired. For an
+    // EMBEDDED component's graph that is the page it was grafted into: the page
+    // is what owns the elements and the clips its offset points at, so playing
+    // its own "FadeIn" from inside the component has to land on the same tree.
+    const HorizonCode::InstanceId embedded =
+        wm.addChild(cm, id, "Slot", "mem://comp.hasset");
+    CHECK(embedded != 0);
+    CHECK(wm.widgetIdForScript(embedded) == id);
+    // Nothing to resolve is not a wrong guess: no instance, no widget.
+    CHECK(wm.widgetIdForScript(0) == 0);
+    CHECK(wm.widgetIdForScript(999999) == 0);
 }
 
 // The layer decides what the arrows MEAN. With a list hanging open, up and down

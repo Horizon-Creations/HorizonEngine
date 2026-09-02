@@ -1262,6 +1262,10 @@ bool WidgetManager::animate(int widgetId, int elemId, const std::string& prop,
 	// — that is what makes a retarget smooth — and it reports nothing, because a
 	// cancelled animation did not finish.
 	stopAnimations(widgetId, elemId, prop);
+	// Before the write below, for the same reason a clip does it before its
+	// first frame: one line later this value is the animation's, not the
+	// widget's (see Instance::originals).
+	rememberOriginal(*w, elemId, prop);
 
 	m_visualDirty = true;
 	if (seconds <= 0.0f)
@@ -1310,7 +1314,28 @@ const std::vector<HE::UIAnimClip>* WidgetManager::clipsOf(const Instance& w, int
 	return &w.embeds[embed].animations;
 }
 
-bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const bool* loop)
+// Remember what a property looked like before an animation touched it, unless
+// something already did. "Unless" is the whole rule: the second animation on a
+// property must not record the first one's mid-flight value as the original.
+void WidgetManager::rememberOriginal(Instance& w, int elem, const std::string& prop)
+{
+	for (const Instance::Original& o : w.originals)
+		if (o.elem == elem && o.prop == prop) return;
+	const HE::UIElement* e = w.tree.find(elem);
+	// A track naming a property the element does not have records nothing:
+	// getPropAny would hand back a default-constructed value, and restoring
+	// THAT is writing a zero nobody authored. (setPropAny ignores the unknown
+	// name on the way back anyway, but a list full of phantom rows is a list
+	// nobody can read in a debugger.)
+	if (!e) return;
+	bool known = false;
+	for (const HE::UIPropDesc& pd : e->allProperties()) if (pd.name == prop) { known = true; break; }
+	if (!known) return;
+	w.originals.push_back({ elem, prop, e->getPropAny(prop) });
+}
+
+bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const bool* loop,
+                                  HE::UIAnimDirection dir, bool restore)
 {
 	Instance* w = find(widgetId);
 	if (!w || clip.empty()) return false;
@@ -1329,7 +1354,12 @@ bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const b
 	// to prevent, and between a clip and a tween the clip is the more specific
 	// instruction. It takes every property it drives.
 	for (const HE::UIAnimTrack& tr : c->tracks)
+	{
 		stopAnimations(widgetId, tr.element + offset, tr.prop);
+		// Before the first frame writes anything: this is the state a Restore
+		// puts back, and one tick later it would already be the animation's.
+		rememberOriginal(*w, tr.element + offset, tr.prop);
+	}
 
 	// Already playing = rewind, not a second player on the same clip.
 	for (Instance::Playing& p : w->playing)
@@ -1337,14 +1367,67 @@ bool WidgetManager::playAnimation(int widgetId, const std::string& clip, const b
 		{
 			p.t = 0.0f;
 			p.loop = loop ? *loop : c->loop;
+			p.dir = dir; p.restore = restore;
 			m_visualDirty = true;
 			return true;
 		}
 	Instance::Playing p;
 	p.embed = embed; p.clip = clip; p.loop = loop ? *loop : c->loop;
+	p.dir = dir; p.restore = restore;
 	w->playing.push_back(std::move(p));
 	m_visualDirty = true;
 	return true;
+}
+
+// Put one property back and forget it. Forgetting matters: the entry is what
+// makes the NEXT animation on that property record its own starting point, and
+// a stale one would restore a value from two animations ago.
+void WidgetManager::restoreOne(Instance& w, int elem, const std::string& prop)
+{
+	for (std::size_t i = 0; i < w.originals.size(); ++i)
+	{
+		const Instance::Original& o = w.originals[i];
+		if (o.elem != elem || o.prop != prop) continue;
+		if (HE::UIElement* e = w.tree.find(elem)) e->setPropAny(prop, o.value);
+		w.originals.erase(w.originals.begin() + static_cast<long>(i));
+		m_visualDirty = true;
+		return;
+	}
+}
+
+int WidgetManager::stopAllAnimations(int widgetId)
+{
+	return stopAnimationClip(widgetId) + stopAnimations(widgetId);
+}
+
+int WidgetManager::restoreOriginalState(int widgetId)
+{
+	Instance* w = find(widgetId);
+	if (!w) return 0;
+	// Stopped first, and not optionally: a clip still running would write its
+	// own value over the restored one on the next tick, and the node would look
+	// like it had done nothing.
+	stopAllAnimations(widgetId);
+	int n = 0;
+	for (const Instance::Original& o : w->originals)
+		if (HE::UIElement* e = w->tree.find(o.elem)) { e->setPropAny(o.prop, o.value); ++n; }
+	w->originals.clear();
+	if (n) m_visualDirty = true;
+	return n;
+}
+
+int WidgetManager::widgetIdForScript(HorizonCode::InstanceId scriptId) const
+{
+	if (!scriptId) return 0;
+	for (const Instance& w : m_instances)
+	{
+		if (w.scriptId == scriptId) return w.id;
+		// An embedded component's graph is its own instance, and "this widget"
+		// for it is the page it was grafted into — that page is what owns the
+		// elements and the clips its offset points at.
+		for (const Instance::Embed& em : w.embeds) if (em.scriptId == scriptId) return w.id;
+	}
+	return 0;
 }
 
 int WidgetManager::stopAnimationClip(int widgetId, const std::string& clip)
@@ -1434,21 +1517,25 @@ void WidgetManager::tick(float dt)
 				// again, so the tail is a wait with nothing in it — and a clip
 				// that reports finished a second after it visibly finished makes
 				// every graph waiting on it late.
-				const float end = HE::uiAnimPlayEnd(*c);
+				const float end  = HE::uiAnimPlayEnd(*c);
+				// A pass, which is the clip's length forwards or backwards and
+				// twice it out and back. p.t counts the PASS; what gets sampled
+				// is worked out from it below.
+				const float span = HE::uiAnimPlaySpan(p.dir, end);
 				p.t += dt;
 				bool done = false;
-				if (p.t >= end)
+				if (p.t >= span)
 				{
 					// A looping clip never ends, so it never reports one either.
 					// Wrapping rather than resetting to 0 keeps a long frame from
 					// swallowing the start of the next pass. With no keys there
 					// is nothing to loop, and looping forever over nothing is a
 					// widget that never stops asking for frames.
-					if (p.loop && end > 0.0f) p.t = std::fmod(p.t, end);
-					else                      { p.t = end; done = true; }
+					if (p.loop && span > 0.0f) p.t = std::fmod(p.t, span);
+					else                       { p.t = span; done = true; }
 				}
 				samples.clear();
-				HE::uiAnimEvaluate(*c, p.t, samples);
+				HE::uiAnimEvaluate(*c, HE::uiAnimDirectedTime(p.dir, p.t, end), samples);
 				for (const HE::UIAnimSample& s : samples)
 					if (HE::UIElement* e = w.tree.find(s.element + offset))
 					{
@@ -1459,7 +1546,19 @@ void WidgetManager::tick(float dt)
 						if (e->getPropAny(s.prop).type == s.value.type)
 							e->setPropAny(s.prop, s.value);
 					}
-				if (done) { ended.push_back(p.clip); p.t = -1.0f; }
+				if (done)
+				{
+					// "Play it and put it back": the properties this clip drove
+					// go back to what they were before anything animated them,
+					// BEFORE the finished event fires. A graph reacting to the
+					// end must not see the last frame of an animation that, as
+					// far as this widget is concerned, has been undone.
+					if (p.restore)
+						for (const HE::UIAnimTrack& tr : c->tracks)
+							restoreOne(w, tr.element + offset, tr.prop);
+					ended.push_back(p.clip);
+					p.t = -1.0f;
+				}
 			}
 			w.playing.erase(std::remove_if(w.playing.begin(), w.playing.end(),
 				[](const Instance::Playing& p){ return p.t < 0.0f; }), w.playing.end());

@@ -318,7 +318,30 @@ public:
     //
     // Restarting a clip that is already playing rewinds it to 0 rather than
     // stacking a second player.
-    bool playAnimation(int widgetId, const std::string& clip, const bool* loop = nullptr);
+    // `dir` runs it forwards, backwards, or out and back; `restore` puts the
+    // properties it drove back the way they were before anything animated them
+    // when it FINISHES — not when it is stopped by hand, and never for a loop,
+    // which never finishes. See Instance::originals for what "the way they
+    // were" means.
+    bool playAnimation(int widgetId, const std::string& clip, const bool* loop = nullptr,
+                       HE::UIAnimDirection dir = HE::UIAnimDirection::Forward,
+                       bool restore = false);
+    // Everything at once: the clips and the single-property animations. The one
+    // a graph reaches for when a screen is being torn down or replaced, so it
+    // does not have to name what it started. Values stay where they got to;
+    // restoreOriginalState is the one that puts them back.
+    int  stopAllAnimations(int widgetId);
+    // Stop everything and put every property an animation ever touched back the
+    // way it was. Stopping first is not optional: a clip left running would
+    // overwrite the restored values on the very next tick, which would look
+    // like the node doing nothing.
+    //
+    // Returns how many properties were put back (0 = nothing had been animated).
+    int  restoreOriginalState(int widgetId);
+    // The widget a HorizonCode instance belongs to, or 0. What lets an engine
+    // call from a widget's own graph mean "this widget" when nobody wired the
+    // pin — the same courtesy the entity rows do for their Target.
+    int  widgetIdForScript(HorizonCode::InstanceId scriptId) const;
     // Stop one clip, or (empty name) every clip of the widget. Values stay where
     // they got to, and nothing is reported — cancelled is not finished.
     int  stopAnimationClip(int widgetId, const std::string& clip = {});
@@ -533,10 +556,34 @@ private:
         {
             int         embed = -1;
             std::string clip;
+            // Seconds into the PASS, which is not the moment of the clip being
+            // shown: a backward or ping-pong pass reads the clip from somewhere
+            // else (uiAnimDirectedTime). Elapsed, so that wrapping a loop is
+            // one modulo and not a direction-dependent special case.
             float       t = 0.0f;
             bool        loop = false;
+            HE::UIAnimDirection dir = HE::UIAnimDirection::Forward;
+            // Put the properties this clip drove back the way they were when it
+            // finishes. Only on FINISHING: a clip that was stopped by hand did
+            // not finish, and a looping one never does.
+            bool        restore = false;
         };
         std::vector<Playing> playing;
+        // What a property looked like before anything animated it. Written once,
+        // when the first clip or tween to touch that property starts, and never
+        // overwritten — so it is the state the widget was AUTHORED in, not the
+        // state it happened to be in between two animations.
+        //
+        // Kept after an animation ends on purpose: "put it back the way it was"
+        // is a thing somebody asks for long after the animation that moved it,
+        // and the entry is the only memory of what "the way it was" means.
+        struct Original
+        {
+            int             elem = 0;   // host-tree id (an embed's offset applied)
+            std::string     prop;
+            HE::UIPropValue value;
+        };
+        std::vector<Original> originals;
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;
@@ -739,6 +786,11 @@ private:
     // need. Null when the embed index is stale.
     const std::vector<HE::UIAnimClip>* clipsOf(const Instance& w, int embed,
                                                int& offset) const;
+    // Record what a property was before an animation touched it — once, and
+    // never again while the entry stands (Instance::originals).
+    void rememberOriginal(Instance& w, int elem, const std::string& prop);
+    // Put one recorded property back and drop the record.
+    void restoreOne(Instance& w, int elem, const std::string& prop);
     void drawTooltip(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
 
     int   m_tooltipWidget = 0, m_tooltipElem = 0;

@@ -618,10 +618,25 @@ namespace widget {
     // NAME, because the name is what the timeline shows and what a graph can
     // type. An embedded component's clips are found too — a page can play the
     // animation its component brought with it.
-    bool playAnimation(Ctx&, int id, const std::string& clip);
-    bool playAnimationLooped(Ctx&, int id, const std::string& clip, bool loop);
+    //
+    // `id` 0 means the widget whose graph is calling: playing one's own
+    // animation is the overwhelmingly common case, and it should not need a
+    // wire. `direction` is a UIAnimDirection name ("Forward", "Backward",
+    // "Ping Pong"); an unknown one plays forwards rather than nothing.
+    // `restore` puts the properties the clip drove back the way they were when
+    // it FINISHES — not when it is stopped, and never for a loop.
+    bool playAnimation(Ctx&, int id, const std::string& clip, bool restore = false,
+                       const std::string& direction = {});
+    bool playAnimationLooped(Ctx&, int id, const std::string& clip, bool loop,
+                             const std::string& direction = {});
     int  stopAnimationClip(Ctx&, int id, const std::string& clip);
     bool isPlayingAnimation(Ctx&, int id, const std::string& clip);
+    // Everything moving in the widget, clips and single properties both — what
+    // a screen being torn down reaches for without naming what it started.
+    int  stopAllAnimations(Ctx&, int id);
+    // Stop everything and put every property an animation ever touched back the
+    // way it was before it did. Returns how many were put back.
+    int  restoreOriginalState(Ctx&, int id);
 
     // ── Layers (docs/he-apps-plan.md B4) ────────────────────────────────────
     // A dialog, a menu, a context menu. All three are "input belongs to this

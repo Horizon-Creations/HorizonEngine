@@ -142,10 +142,21 @@ namespace ScriptApi
 
 	// The widget's OWN named clips, made in the designer's timeline. `loop`
 	// overrides what the clip says about looping.
-	bool playClip(HorizonWorld& world, int widgetId, const std::string& clip, bool loop);
-	bool playClipAsAuthored(HorizonWorld& world, int widgetId, const std::string& clip);
+	bool playClip(HorizonWorld& world, int widgetId, const std::string& clip, bool loop,
+	              const std::string& direction = {});
+	// `restore` puts the properties the clip drove back when it FINISHES (never
+	// for a loop, which does not); `direction` is a UIAnimDirection name.
+	bool playClipAsAuthored(HorizonWorld& world, int widgetId, const std::string& clip,
+	                        bool restore = false, const std::string& direction = {});
 	int  stopClip(HorizonWorld& world, int widgetId, const std::string& clip);
 	bool isClipPlaying(HorizonWorld& world, int widgetId, const std::string& clip);
+	// The widget a HorizonCode instance belongs to (0 = none). What lets a call
+	// from a widget's own graph mean "this widget" with nothing wired.
+	int  widgetOfScript(HorizonWorld& world, uint32_t scriptId);
+	// Everything moving in this widget, clips and single properties both.
+	int  stopAllAnimations(HorizonWorld& world, int widgetId);
+	// Stop everything and put every animated property back the way it was.
+	int  restoreOriginalState(HorizonWorld& world, int widgetId);
 
 	// ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ────────────
 	// While one of these is up, input belongs to it and to nothing underneath.
