@@ -3885,6 +3885,13 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 			return "Get " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
 		case NT::SetProperty:
 			return "Set " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
+		// The by-reference pair names the property but NOT the element: which
+		// one it lands on is a pin, and a title that answered a question the
+		// node leaves open would be a title that lies half the time.
+		case NT::GetPropertyOn:
+			return "Get (Ref) ." + (n.s.empty() ? std::string("prop") : n.s);
+		case NT::SetPropertyOn:
+			return "Set (Ref) ." + (n.s.empty() ? std::string("prop") : n.s);
 		default:
 			return HGH::defaultNodeTitle(n);
 	}
@@ -4668,6 +4675,14 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			nn->elem = st.gDropElem;
 			nn->s = pd.name;
 			nn->propType = HE::uiPropTypeToPin(pd.type);
+			// The by-reference pair addresses the element by NAME instead —
+			// filled in here, because the name of the element you dropped is
+			// the one piece of it the node cannot work out for itself.
+			if (type == NT::GetPropertyOn || type == NT::SetPropertyOn)
+			{
+				HC::Value v; v.type = PT::String; v.s = tgt ? tgt->name : std::string();
+				nn->pinDefaults[1] = std::move(v);
+			}
 			st.selectedGraphNode = id;
 			commitEdit(st, ctx);
 		};
@@ -4690,6 +4705,22 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		const bool setOpen = ImGui::BeginMenu("Set", !props.empty());
 		if (!setOpen) EditorWidgets::helpForLabel("Set");
 		if (setOpen) { propItems(NT::SetProperty); ImGui::EndMenu(); }
+
+		// …and the same two through a reference, which is how every other class
+		// is reached. Offered only for a NAMED element: these address it by
+		// name, and an element without one cannot be pointed at.
+		ImGui::Separator();
+		const bool named = tgt && !tgt->name.empty();
+		ImGui::BeginDisabled(!named);
+		const bool getRefOpen = ImGui::BeginMenu("Get Ref", named && !props.empty());
+		if (!getRefOpen) EditorWidgets::helpForLabel("Get Ref");
+		if (getRefOpen) { propItems(NT::GetPropertyOn); ImGui::EndMenu(); }
+		const bool setRefOpen = ImGui::BeginMenu("Set Ref", named && !props.empty());
+		if (!setRefOpen) EditorWidgets::helpForLabel("Set Ref");
+		if (setRefOpen) { propItems(NT::SetPropertyOn); ImGui::EndMenu(); }
+		ImGui::EndDisabled();
+		if (!named)
+			ImGui::TextDisabled("Give the element a name to reach it by reference.");
 		ImGui::EndPopup();
 	}
 

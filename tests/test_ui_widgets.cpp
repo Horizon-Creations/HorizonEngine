@@ -5426,6 +5426,114 @@ TEST_CASE("Clips: an embedded component's animation plays on its own elements")
     CHECK(wm.widgetIdForScript(999999) == 0);
 }
 
+// Get/Set Property reach an element of the widget the graph belongs to, by the
+// id it has there. The by-REFERENCE pair reaches one through a widget reference
+// and by NAME, which is what lets a graph act on a widget it did not author —
+// and what makes the id offset of an embedded component matter again.
+TEST_CASE("Get/Set Property (Ref): by name, inside whatever the reference points at")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A component with a "Title" of its own…
+    HE::UIWidgetTree comp;
+    comp.canvasWidth = 100.0f; comp.canvasHeight = 100.0f;
+    comp.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int compTitle = comp.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *comp.find(compTitle);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 20.0f;
+        e.name = "Title";
+        e.renderOpacity = 1.0f;
+    }
+    // Its graph: two functions, one writing an element that exists in it and one
+    // writing a name that does not. Both leave Target unwired, which means the
+    // instance that is running — the component, not the page it sits in.
+    HorizonCode::Graph cg;
+    {
+        HorizonCode::Node entry; entry.type = NodeType::FunctionEntry; entry.s = "Go";
+        const int entryId = cg.addNode(entry);
+        HorizonCode::Node set; set.type = NodeType::SetPropertyOn;
+        set.s = "Render Opacity"; set.propType = PinType::Float;
+        HorizonCode::Value nameV; nameV.type = PinType::String; nameV.s = "Title";
+        set.pinDefaults[1] = nameV;
+        const int setId = cg.addNode(set);
+        HorizonCode::Node lit; lit.type = NodeType::ConstFloat; lit.f[0] = 0.25f;
+        const int litId = cg.addNode(lit);
+        REQUIRE(cg.connect(entryId, 0, setId, 0));   // exec
+        // Unified pin index: [exec in][exec out][Target][Element][Value].
+        REQUIRE(cg.connect(litId, 0, setId, 4));
+
+        HorizonCode::Node entry2; entry2.type = NodeType::FunctionEntry; entry2.s = "Missing";
+        const int entry2Id = cg.addNode(entry2);
+        HorizonCode::Node set2; set2.type = NodeType::SetPropertyOn;
+        set2.s = "Render Opacity"; set2.propType = PinType::Float;
+        HorizonCode::Value nope; nope.type = PinType::String; nope.s = "Nope";
+        set2.pinDefaults[1] = nope;
+        const int set2Id = cg.addNode(set2);
+        HorizonCode::Node lit2; lit2.type = NodeType::ConstFloat; lit2.f[0] = 0.0f;
+        const int lit2Id = cg.addNode(lit2);
+        REQUIRE(cg.connect(entry2Id, 0, set2Id, 0));
+        REQUIRE(cg.connect(lit2Id, 0, set2Id, 4));
+    }
+    registerWidgetAs(cm, "mem://comp.hasset", comp, &cg);
+
+    // …inside a page that also has one. Same name, two trees: the whole reason
+    // the lookup is scoped to what the reference stands for.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int pageTitle = page.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *page.find(pageTitle);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 200.0f; e.sizeX = 100.0f; e.sizeY = 20.0f;
+        e.name = "Title";
+        e.renderOpacity = 1.0f;
+    }
+    const int slot = page.add(HE::UIWidgetType::Panel);
+    page.find(slot)->name = "Slot";
+    {
+        HE::UIElement& e = *page.find(slot);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+    }
+    registerWidgetAs(cm, "mem://page.hasset", page);
+
+    // The runtime is held here so the test can call the COMPONENT's own
+    // function: its graph is its own instance, which nothing outside reaches
+    // through the page.
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    const HorizonCode::InstanceId child = wm.addChild(cm, id, "Slot", "mem://comp.hasset");
+    REQUIRE(child != 0);
+
+    // The page's own "Title" and the component's are two different elements
+    // with one name; the grafted one sits past the page's ids.
+    const HE::UIElement* grafted = nullptr;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->name == "Title" && ep->id != pageTitle) grafted = ep.get();
+    REQUIRE(grafted);
+
+    // The component's own graph, run through the runtime: Target left unwired,
+    // so it means the instance that is calling — the COMPONENT, whose "Title"
+    // is not the page's. Get the value back the same way and compare, so the
+    // read is checked against the same scoping as the write.
+    REQUIRE(rt.callFunction(child, "Go"));
+    CHECK(grafted->renderOpacity == doctest::Approx(0.25f));
+    CHECK(wm.tree(id)->find(pageTitle)->renderOpacity == doctest::Approx(1.0f));
+
+    // A name that is not in THAT tree writes nothing: a graph pointed at the
+    // wrong widget must not be able to invent an element in it.
+    REQUIRE(rt.callFunction(child, "Missing"));
+    CHECK(grafted->renderOpacity == doctest::Approx(0.25f));
+    CHECK(wm.tree(id)->find(pageTitle)->renderOpacity == doctest::Approx(1.0f));
+}
+
 // The layer decides what the arrows MEAN. With a list hanging open, up and down
 // step through its entries; moving the focus to the next button would be
 // answering a question nobody asked — and that button is not even reachable,

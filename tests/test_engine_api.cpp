@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <set>
 #include <HorizonScene/EngineApi.h>
 #include <Types/TypeRegistry.h>
 #include <HorizonGameServices.h>
@@ -3019,27 +3020,51 @@ TEST_CASE("EngineApi: the Entity self-default is off where it would lie")
 // remembered per row — so it is asserted over the whole table, not over a list.
 TEST_CASE("EngineApi: every row that acts on an entity carries the self-default")
 {
-    size_t flagged = 0;
+    // The second family that has it: a widget's ANIMATION rows, where the empty
+    // pin means the widget whose graph is calling. Listed here rather than
+    // derived, because "leading widget param" is emphatically NOT the rule —
+    // Show, Destroy and Add Child lead with one too, and there an empty pin
+    // must stay empty rather than quietly mean the caller.
+    const std::set<std::string> widgetSelf = {
+        "widget.animate", "widget.animateColor", "widget.animateVec2",
+        "widget.stopAnimation", "widget.playAnimation", "widget.playAnimationLooped",
+        "widget.stopAnimationClip", "widget.isPlayingAnimation",
+        "widget.stopAllAnimations", "widget.restoreOriginalState",
+    };
+
+    size_t flagged = 0, widgets = 0;
     for (const HE::api::ApiFn& fn : HE::api::registry())
     {
         const bool leads = !fn.params.empty() && std::strcmp(fn.params[0].name, "entity") == 0;
         const bool excluded = std::strcmp(fn.id, "entity.exists")  == 0 ||
                               std::strcmp(fn.id, "entity.destroy") == 0;
+        const bool widgetRow = widgetSelf.count(fn.id) != 0;
         if (leads && !excluded)
         {
             CHECK_MESSAGE(fn.params[0].selfDefault,
                           std::string("row without the self-default: ").append(fn.id).c_str());
             ++flagged;
         }
+        if (widgetRow)
+        {
+            REQUIRE(!fn.params.empty());
+            CHECK_MESSAGE(std::strcmp(fn.params[0].name, "widget") == 0,
+                          std::string("animation row not leading with widget: ").append(fn.id).c_str());
+            CHECK_MESSAGE(fn.params[0].selfDefault,
+                          std::string("animation row without the self-default: ").append(fn.id).c_str());
+            ++widgets;
+        }
         // Never on anything else — not on a later parameter, not on a row whose
         // first argument happens to be an int meaning something quite different
-        // (a widget id, a zone handle, a parent).
+        // (another widget, a zone handle, a parent).
+        const bool firstMayHaveIt = (leads && !excluded) || widgetRow;
         for (size_t i = 0; i < fn.params.size(); ++i)
-            if (i > 0 || !leads || excluded)
+            if (i > 0 || !firstMayHaveIt)
                 CHECK_MESSAGE(!fn.params[i].selfDefault,
                               std::string("unexpected self-default on ").append(fn.id).c_str());
     }
     CHECK(flagged > 40);   // it is a convention, not a handful of exceptions
+    CHECK(widgets == widgetSelf.size());   // every listed row still exists
 }
 
 // Would have been green before the change only in the sense that the rows did

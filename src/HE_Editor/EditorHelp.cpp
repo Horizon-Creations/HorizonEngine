@@ -2621,6 +2621,19 @@ namespace
 	  "Adds a node that WRITES it. A function-local variable can only be used "
 	  "inside its own function, which is why this is sometimes greyed out.",
 	  "", "ui#graph" },
+	{ "UI Graph/Get Ref", "Get Ref",
+	  "The same read, but through a REFERENCE: the node takes a widget and the "
+	  "element's NAME instead of being tied to this one element. Leave its "
+	  "Target unwired and it means this widget, so it behaves like the plain "
+	  "Get — wire one in and the same node reads the same element of a widget "
+	  "somewhere else. That is what lets one function serve every card on a "
+	  "page instead of one node per card.",
+	  "", "ui#graph" },
+	{ "UI Graph/Set Ref", "Set Ref",
+	  "The same write through a reference. Needs the element to have a name, "
+	  "because a name is what a reference can carry — an id belongs to the asset "
+	  "that made it and means nothing in another widget.",
+	  "", "ui#graph" },
 	{ "UI Graph/Show the node that failed", "Show the node that failed",
 	  "Jumps to the node the compile check stopped at, opening its sub-graph and "
 	  "selecting it. The message says what went wrong; this says where.",

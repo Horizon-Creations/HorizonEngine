@@ -383,6 +383,31 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         const Inst* i = find(id);
         if (i && i->host.setProperty) i->host.setProperty(id, elem, prop, v);
     };
+    // Through a reference: the bindings of the TARGET answer, not this
+    // instance's. That is what makes the node work across widgets — a page's
+    // graph reaching into a component it embeds, or a shared function reaching
+    // into whatever it was handed.
+    // An unwired Target means THIS instance. The same courtesy the engine
+    // rows do for their own Target pins, and the reason these nodes are usable
+    // straight out of the menu: reaching an element of one's own widget is the
+    // common case, and it should not need a Get Self wired into it to work.
+    // Zero is the sentinel; a real reference always goes where it points.
+    ctx.getPropertyOn = [this, id](uint32_t target, const std::string& elem,
+                                   const std::string& prop) -> Value
+    {
+        const uint32_t t = target ? target : id;
+        const Inst* i = find(t);
+        if (!i) { hcError("null reference — Get Property '" + prop + "' on a null/destroyed widget"); return {}; }
+        return i->host.getPropertyOn ? i->host.getPropertyOn(t, elem, prop) : Value{};
+    };
+    ctx.setPropertyOn = [this, id](uint32_t target, const std::string& elem,
+                                   const std::string& prop, const Value& v)
+    {
+        const uint32_t t = target ? target : id;
+        const Inst* i = find(t);
+        if (!i) { hcError("null reference — Set Property '" + prop + "' on a null/destroyed widget"); return; }
+        if (i->host.setPropertyOn) i->host.setPropertyOn(t, elem, prop, v);
+    };
     ctx.showSelf = [this, id]
     {
         const Inst* i = find(id);

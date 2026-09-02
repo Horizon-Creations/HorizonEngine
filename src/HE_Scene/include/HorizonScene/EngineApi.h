@@ -619,9 +619,11 @@ namespace widget {
     // type. An embedded component's clips are found too — a page can play the
     // animation its component brought with it.
     //
-    // `id` 0 means the widget whose graph is calling: playing one's own
-    // animation is the overwhelmingly common case, and it should not need a
-    // wire. `direction` is a UIAnimDirection name ("Forward", "Backward",
+    // In a GRAPH, an empty Widget pin means the widget whose graph is calling —
+    // playing one's own animation is the overwhelming case and should not need
+    // a wire. That substitution sits on the scripting edge (the registry's
+    // third post-pass), so these C++ functions still read `id` 0 as widget 0.
+    // `direction` is a UIAnimDirection name ("Forward", "Backward",
     // "Ping Pong"); an unknown one plays forwards rather than nothing.
     // `restore` puts the properties the clip drove back the way they were when
     // it FINISHES — not when it is stopped, and never for a loop.

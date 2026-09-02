@@ -68,6 +68,36 @@ WidgetManager::Instance* WidgetManager::resolveScriptOwner(HorizonCode::Instance
 	return nullptr;
 }
 
+// The element called `name` INSIDE what `scriptId` stands for — the widget
+// itself, or just the part of the host tree an embedded component occupies.
+//
+// The scoping is the whole point. A grafted component's elements live in the
+// host's tree with their ids shifted, but they keep their NAMES, and a page
+// that embeds two cards both containing a "Title" is the normal case rather
+// than a strange one. Searching the whole tree would hand the first "Title" to
+// everyone who asked, which is the id-offset trap wearing a different hat.
+const HE::UIElement* WidgetManager::elementOfScript(HorizonCode::InstanceId scriptId,
+                                                    const std::string& name)
+{
+	if (name.empty()) return nullptr;
+	int off = 0;
+	const Instance* w = resolveScriptOwner(scriptId, off);
+	if (!w) return nullptr;
+	// The embed's slice of the host tree, or the whole thing for the widget's
+	// own graph. idMax is inclusive; 0 means "no upper bound".
+	int lo = 0, hi = 0;
+	for (const Instance::Embed& em : w->embeds)
+		if (em.scriptId == scriptId) { lo = em.idOffset; hi = em.idMax; break; }
+	for (const auto& ep : w->tree.elements)
+	{
+		if (!ep || ep->name != name) continue;
+		if (ep->id <= lo) continue;
+		if (hi > 0 && ep->id > hi) continue;
+		return ep.get();
+	}
+	return nullptr;
+}
+
 // Host bindings shared by every widget: the central runtime owns the graph +
 // variable state and hands back the InstanceId, so one binding set serves all
 // widgets. Property access + show/hide resolve the widget from the id and act on
@@ -103,6 +133,29 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		// immediately so the set is visible this frame, not on the next reload.
 		if (prop == "Material" || prop == "Font")
 			refreshElementAssets(*w, *e);
+	};
+	// The same two through a reference, addressing the element by NAME. Same
+	// resolution as above — the target's own script owner and offset — so a page
+	// reaching into a component it embeds gets that component's elements, and
+	// its local numbering never leaks out. A name that is not there reads as
+	// nothing and writes nothing: a graph pointed at the wrong widget must not
+	// be able to invent an element in it.
+	b.getPropertyOn = [this](HorizonCode::InstanceId target, const std::string& elemName,
+	                         const std::string& prop) -> HorizonCode::Value
+	{
+		const HE::UIElement* e = elementOfScript(target, elemName);
+		return e ? HE::uiPropToHcValue(e->getPropAny(prop)) : HorizonCode::Value{};
+	};
+	b.setPropertyOn = [this](HorizonCode::InstanceId target, const std::string& elemName,
+	                         const std::string& prop, const HorizonCode::Value& v)
+	{
+		int off = 0;
+		Instance* w = resolveScriptOwner(target, off);
+		HE::UIElement* e = const_cast<HE::UIElement*>(elementOfScript(target, elemName));
+		if (!e || !w) return;
+		e->setPropAny(prop, HE::uiHcValueToProp(v, e->getPropAny(prop).type));
+		m_visualDirty = true;
+		if (prop == "Material" || prop == "Font") refreshElementAssets(*w, *e);
 	};
 	// "Self" for an EMBEDDED widget is that widget, not the whole page it sits
 	// on: showing itself shows its WidgetRef element, and nothing around it.

@@ -996,31 +996,21 @@ bool animateVec2(Ctx& c, int id, const std::string& element, const std::string& 
 int stopAnimation(Ctx& c, int id, const std::string& element, const std::string& prop)
 { return c.world ? ScriptApi::stopAnimation(*c.world, id, element, prop) : 0; }
 
-// "This widget" when nobody wired the pin. The animation rows are called from a
-// widget's OWN graph almost every time — "play my fade-in" — and wiring Get Self
-// into each of them is friction with no decision in it. Scoped to these rows
-// rather than to every widget row: the others (Show, Destroy, Add Child) are
-// mostly about a widget somebody else made, where a silent "self" would be a
-// guess. Zero stays the sentinel, exactly like the entity Target pins below.
-int selfWidget(Ctx& c, int id)
-{ return (id == 0 && c.world && c.self) ? ScriptApi::widgetOfScript(*c.world, c.self) : id; }
-
 bool playAnimation(Ctx& c, int id, const std::string& clip, bool restore,
                    const std::string& direction)
-{ return c.world ? ScriptApi::playClipAsAuthored(*c.world, selfWidget(c, id), clip,
-                                                 restore, direction) : false; }
+{ return c.world ? ScriptApi::playClipAsAuthored(*c.world, id, clip, restore, direction)
+                 : false; }
 bool playAnimationLooped(Ctx& c, int id, const std::string& clip, bool loop,
                          const std::string& direction)
-{ return c.world ? ScriptApi::playClip(*c.world, selfWidget(c, id), clip, loop, direction)
-                 : false; }
+{ return c.world ? ScriptApi::playClip(*c.world, id, clip, loop, direction) : false; }
 int stopAnimationClip(Ctx& c, int id, const std::string& clip)
-{ return c.world ? ScriptApi::stopClip(*c.world, selfWidget(c, id), clip) : 0; }
+{ return c.world ? ScriptApi::stopClip(*c.world, id, clip) : 0; }
 bool isPlayingAnimation(Ctx& c, int id, const std::string& clip)
-{ return c.world ? ScriptApi::isClipPlaying(*c.world, selfWidget(c, id), clip) : false; }
+{ return c.world ? ScriptApi::isClipPlaying(*c.world, id, clip) : false; }
 int stopAllAnimations(Ctx& c, int id)
-{ return c.world ? ScriptApi::stopAllAnimations(*c.world, selfWidget(c, id)) : 0; }
+{ return c.world ? ScriptApi::stopAllAnimations(*c.world, id) : 0; }
 int restoreOriginalState(Ctx& c, int id)
-{ return c.world ? ScriptApi::restoreOriginalState(*c.world, selfWidget(c, id)) : 0; }
+{ return c.world ? ScriptApi::restoreOriginalState(*c.world, id) : 0; }
 void showModal(Ctx& c, int id)
 { if (c.world) ScriptApi::showModalWidget(*c.world, id); }
 void openPopup(Ctx& c, int id, float x, float y)
@@ -4295,6 +4285,53 @@ const std::vector<ApiFn>& registry()
                 }
                 VV withSelf = a;
                 withSelf[0] = Value::ofInt(static_cast<int>(me));
+                return inner(c, withSelf);
+            };
+        }
+
+        // ── Third post-pass: the Widget pin of the ANIMATION rows ───────────
+        // The same courtesy for the same reason, on the rows where it is the
+        // overwhelming case: a widget's own graph playing its own animation.
+        // "Play Animation" with nothing wired but the name it picked from the
+        // dropdown is the whole point of that dropdown.
+        //
+        // Deliberately NOT every widget.* row. Show, Destroy and Add Child are
+        // mostly about a widget somebody else made — a silent "self" there would
+        // be a guess, and the loud kind of wrong: destroying the caller because
+        // a pin was empty is the mistake with no way back (the same argument
+        // that keeps entity.destroy off the list above).
+        static constexpr const char* kWidgetSelfRows[] = {
+            "widget.animate", "widget.animateColor", "widget.animateVec2",
+            "widget.stopAnimation",
+            "widget.playAnimation", "widget.playAnimationLooped",
+            "widget.stopAnimationClip", "widget.isPlayingAnimation",
+            "widget.stopAllAnimations", "widget.restoreOriginalState",
+        };
+        for (auto& fn : t)
+        {
+            bool wanted = false;
+            for (const char* id : kWidgetSelfRows)
+                if (std::strcmp(fn.id, id) == 0) { wanted = true; break; }
+            if (!wanted || fn.params.empty()) continue;
+
+            fn.params[0].selfDefault = true;
+            // Wrapped at the scripting edge, like the entity pass: the free C++
+            // widget::playAnimation(c, 0, …) still means widget 0, which is what
+            // a direct caller and the planned cppCall codegen read it as.
+            fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
+                        (Ctx& c, const VV& a) -> VV
+            {
+                if (a.empty() || a[0].ref != 0u || !c.world || !c.self) return inner(c, a);
+                const int me = ScriptApi::widgetOfScript(*c.world, c.self);
+                if (me == 0)
+                {
+                    HE_LOG_THROTTLE(Script, Warning, 5.0,
+                                    "%s: Widget is empty and the caller is not a widget - "
+                                    "wire a widget into the pin", id);
+                    return inner(c, a);
+                }
+                VV withSelf = a;
+                withSelf[0] = Value::ofRef(static_cast<uint32_t>(me));
                 return inner(c, withSelf);
             };
         }

@@ -782,6 +782,11 @@ private:
     HE::UIComboBox* openDropdown(Instance** owner = nullptr);
     // The element of a widget by the name it carries in the designer (0 = none).
     int elementIdByName(int widgetId, const std::string& name) const;
+    // The element called `name` inside what a script instance stands for: the
+    // whole widget for its own graph, or only the slice of the host tree an
+    // embedded component occupies. Null when there is none.
+    const HE::UIElement* elementOfScript(HorizonCode::InstanceId scriptId,
+                                         const std::string& name);
     // Which clip list a playing entry draws from, and the id offset its tracks
     // need. Null when the embed index is stale.
     const std::vector<HE::UIAnimClip>* clipsOf(const Instance& w, int embed,

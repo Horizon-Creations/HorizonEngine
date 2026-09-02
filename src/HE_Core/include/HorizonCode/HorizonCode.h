@@ -343,6 +343,18 @@ enum class NodeType : uint8_t
     MapFindByValue,   // Map + V → the FIRST key holding it, + Found
     MapRemoveByValue, // Map + V → Map without EVERY pair holding it
 
+    // ── A property of an element of a REFERENCED widget ──────────────────────
+    // Get/Set Property reach an element of the widget the graph belongs to, by
+    // the id it has in that asset. These reach one through a REFERENCE, the way
+    // Get (Ref) / Set (Ref) reach another instance's variables: dataIn Target
+    // (Ref) + Element (a NAME), `s` = the property, `propType` = its type.
+    //
+    // By name and not by id, because an id is the asset's private business and
+    // a reference points at a widget this graph did not author. That is what
+    // makes them the pair you can write once and point anywhere: a function
+    // that takes a widget and fades whatever is called "Panel" inside it.
+    GetPropertyOn, SetPropertyOn,
+
     COUNT
 };
 
@@ -854,6 +866,13 @@ struct Context
 {
     std::function<Value(int elem, const std::string& prop)>              getProperty;
     std::function<void(int elem, const std::string& prop, const Value&)> setProperty;
+    // The same pair on a REFERENCED instance, by element NAME (Get/Set Property
+    // (Ref)). No instance id in the ones above because they always mean "mine";
+    // this one is handed the target the node's pin resolved to.
+    std::function<Value(uint32_t target, const std::string& elem, const std::string& prop)>
+        getPropertyOn;
+    std::function<void(uint32_t target, const std::string& elem, const std::string& prop,
+                       const Value&)> setPropertyOn;
     std::function<Value(const std::string& var)>              getVariable;
     std::function<void(const std::string& var, const Value&)> setVariable;
     std::function<void()> showSelf;

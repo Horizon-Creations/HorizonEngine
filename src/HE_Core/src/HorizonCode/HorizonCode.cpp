@@ -165,6 +165,21 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { { "Value", n.propType, false, tn } };
         s.dataOuts = { { "Value", n.propType, false, tn } }; // pass the set value through
         break;
+    // The same two through a reference: which widget, and which element of it
+    // by name. Element is a PIN and not a field on the node, so the answer can
+    // come from a variable — that is the difference between a node bound to one
+    // element and one that can be pointed at any.
+    case T::GetPropertyOn:
+        s.dataIns  = { { "Target", P::Ref }, { "Element", P::String } };
+        s.dataOuts = { { "Value", n.propType, false, tn } };
+        break;
+    case T::SetPropertyOn:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Target", P::Ref }, { "Element", P::String },
+                       { "Value", n.propType, false, tn } };
+        s.dataOuts = { { "Value", n.propType, false, tn } }; // pass the set value through
+        break;
     case T::GetVariable:
         s.dataOuts = { { "Value", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
         break;
@@ -633,6 +648,11 @@ const char* nodeDisplayName(NodeType t)
         case T::Sequence:     return "Sequence";
         case T::GetProperty:  return "Get Property";
         case T::SetProperty:  return "Set Property";
+        // Named after the pair they belong with: "Get (Ref)" reads a variable
+        // on a referenced instance, these read a PROPERTY on a referenced
+        // widget. The name is the on-disk key, so it is also a promise.
+        case T::GetPropertyOn: return "Get Property (Ref)";
+        case T::SetPropertyOn: return "Set Property (Ref)";
         case T::GetVariable:  return "Get Variable";
         case T::SetVariable:  return "Set Variable";
         case T::ShowSelf:   return "Show Self";
@@ -813,6 +833,14 @@ const char* nodeTooltip(NodeType t)
         case T::SetProperty:
             return "Writes the wired value to a property of the chosen target element\n"
                    "when executed.";
+        case T::GetPropertyOn:
+            return "Reads a property of an element of the REFERENCED widget, by the\n"
+                   "element's name. Target left unwired means this widget.\n"
+                   "Pure — evaluated whenever the output is used.";
+        case T::SetPropertyOn:
+            return "Writes a property of an element of the REFERENCED widget, by the\n"
+                   "element's name, when executed. Target left unwired means this\n"
+                   "widget; wired, it reaches one this graph did not have to author.";
         case T::GetVariable:
             return "Reads a graph variable (persistent per running instance).\n"
                    "Pure — evaluated whenever the output is used.";
@@ -1066,7 +1094,9 @@ const char* nodeCategory(NodeType t)
         case T::IsValid:
         case T::Cast:          return "Reference";
         case T::GetProperty:
-        case T::SetProperty:   return "Property";
+        case T::SetProperty:
+        case T::GetPropertyOn:
+        case T::SetPropertyOn: return "Property";
         case T::GetVariable:
         case T::SetVariable:   return "Variables";
         case T::ShowSelf:
@@ -2881,6 +2911,18 @@ void Runner::execNode(const Node& n, int depth)
         if (m_ctx.setProperty)
             m_ctx.setProperty(n.elem, n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
         break;
+    case T::SetPropertyOn:
+    {
+        // Every input is read, in pin order, whether or not the write happens:
+        // a data wire may run a chain of pure nodes, and skipping them because
+        // the target turned out to be null would make an unwired pin change
+        // what the graph COMPUTES, not just what it writes.
+        const Value target = evalInput(n, 0, depth + 1);
+        const Value elem   = coerce(evalInput(n, 1, depth + 1), P::String);
+        const Value val    = coerce(evalInput(n, 2, depth + 1), n.propType);
+        if (m_ctx.setPropertyOn) m_ctx.setPropertyOn(target.ref, elem.s, n.s, val);
+        break;
+    }
     case T::SetVariable:
         // A function-local writes the innermost frame of its owning function;
         // outside that function the write is dropped. Everything else goes to
@@ -3556,6 +3598,17 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};
         return coerce(v, n.propType);
     }
+    case T::GetPropertyOn:
+    {
+        const Value target = evalInput(n, 0, depth + 1);
+        const Value elem   = coerce(evalInput(n, 1, depth + 1), P::String);
+        Value v = m_ctx.getPropertyOn ? m_ctx.getPropertyOn(target.ref, elem.s, n.s) : Value{};
+        return coerce(v, n.propType);
+    }
+    // Set-node pass-through, like SetProperty's below: the value output re-reads
+    // the Value input, which for this node is the THIRD pin.
+    case T::SetPropertyOn:
+        return coerce(evalInput(n, 2, depth + 1), n.propType);
     case T::GetVariable:
     {
         // Function-local: read the innermost frame of the owning function;

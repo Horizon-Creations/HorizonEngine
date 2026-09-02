@@ -39,6 +39,16 @@ struct HostBindings
 {
     std::function<Value(InstanceId id, int elem, const std::string& prop)>              getProperty;
     std::function<void (InstanceId id, int elem, const std::string& prop, const Value&)> setProperty;
+    // The same two on a REFERENCED instance, addressing the element by NAME —
+    // an id belongs to the asset that authored it, and a reference points at
+    // one this graph did not. `target` is where they differ from the pair
+    // above: those act on the instance that is running, these on the one the
+    // Target pin names. Unbound (a host with no elements) reads as nothing and
+    // writes nothing, like every other binding here.
+    std::function<Value(InstanceId target, const std::string& elem, const std::string& prop)>
+        getPropertyOn;
+    std::function<void (InstanceId target, const std::string& elem, const std::string& prop,
+                        const Value&)> setPropertyOn;
     std::function<void (InstanceId id)> showSelf;
     std::function<void (InstanceId id)> hideSelf;
 };
