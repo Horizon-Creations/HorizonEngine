@@ -75,6 +75,26 @@ TEST_CASE("EngineApi: registry is populated and well-formed")
     }
 }
 
+// A row without a display name falls back to its id, and the palette then shows
+// "widget.animateVec2" between "Play Animation" and "Set Theme" — which is what
+// the animation rows did for as long as they existed. The fallback is right (a
+// name is better missing than crashing); this is what stops it being used.
+TEST_CASE("EngineApi: every row has an editor name, not a raw id")
+{
+    std::unordered_map<std::string, std::string> nameToId;   // display → first id
+    for (const auto& fn : HE::api::registry())
+    {
+        INFO("row: " << std::string(fn.id));
+        REQUIRE(fn.displayName != nullptr);
+        CHECK(std::string(fn.displayName) != fn.id);
+        // Two rows under one name is the coin toss the flat drag-off menu makes
+        // you lose: the suffixed names ("Get Velocity (Physics)") exist for this.
+        const auto [it, fresh] = nameToId.emplace(fn.displayName, fn.id);
+        INFO("also claimed by: " << it->second);
+        CHECK(fresh);
+    }
+}
+
 TEST_CASE("EngineApi: cppCall names one real, distinct callee per row")
 {
     // cppCall is staged input for the planned direct-call codegen and nothing

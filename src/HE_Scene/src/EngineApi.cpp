@@ -3997,7 +3997,11 @@ const std::vector<ApiFn>& registry()
             // Locomotion owns "Set Max Speed"; this one is the agent's pace.
             { "nav.setSpeed", "Set Agent Speed" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
-            { "physics.isGrounded", "Is Grounded" },
+            // Suffixed like Set Position and Get Velocity above, and for the
+            // same reason: Movement owns the unqualified "Is Grounded", and the
+            // drag-off menu lists the registry flat, where two rows under one
+            // name is a coin toss.
+            { "physics.isGrounded", "Is Grounded (Physics)" },
             { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
@@ -4031,6 +4035,18 @@ const std::vector<ApiFn>& registry()
             { "widget.setListSelected", "Set List Selected" },
             { "widget.listSelected", "Get List Selected" },
             { "widget.scrollListToItem", "Scroll List To Item" },
+            // Animation. "Animate" alone would be a coin toss in the flat
+            // drag-off list, so each says WHAT it animates — and the three
+            // typed rows say it in the words a graph author is thinking in
+            // ("a number", "a colour", "a point"), not in pin-type spelling.
+            { "widget.animate", "Animate Number" },
+            { "widget.animateColor", "Animate Color" },
+            { "widget.animateVec2", "Animate Position" },
+            { "widget.stopAnimation", "Stop Animating Property" },
+            { "widget.playAnimation", "Play Animation" },
+            { "widget.playAnimationLooped", "Play Animation Looped" },
+            { "widget.stopAnimationClip", "Stop Animation" },
+            { "widget.isPlayingAnimation", "Is Animation Playing" },
             { "widget.showModal", "Show Modal Widget" },
             { "widget.openPopup", "Open Popup" },
             { "widget.openPopupAtPointer", "Open Popup At Pointer" },

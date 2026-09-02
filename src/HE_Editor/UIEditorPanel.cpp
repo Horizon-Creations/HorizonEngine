@@ -4623,7 +4623,17 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::TextDisabled("%s", elemLabel(st, st.gDropElem).c_str());
 		ImGui::Separator();
 		const UIElement* tgt = st.tree.find(st.gDropElem);
-		const std::vector<UIPropDesc> props = tgt ? tgt->properties() : std::vector<UIPropDesc>{};
+		// ALL of them, not just the type's own: the runtime reads and writes
+		// through getPropAny/setPropAny, so Visible, Render Opacity, Position,
+		// Size, Rotation, Tooltip and the surface styles were all settable from
+		// a graph already — this menu was simply not offering them, which reads
+		// as "a button has no Visible" rather than as a menu being short.
+		//
+		// allProperties() puts the type's own first and the shared ones after,
+		// so the split below is where one list ends and the other begins.
+		const std::vector<UIPropDesc> props = tgt ? tgt->allProperties()
+		                                         : std::vector<UIPropDesc>{};
+		const std::size_t ownCount = tgt ? tgt->properties().size() : 0u;
 		auto makePropNode = [&](NT type, const UIPropDesc& pd)
 		{
 			const int id = addGraphNode(st, type, st.geState.addMenuGraphPos);
@@ -4636,22 +4646,23 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		};
 		// Same rule as everywhere a submenu carries an entry: ask while the header
 		// is still the last item, and only while the submenu is shut.
+		// One list, drawn twice, with a rule between the two halves: the type's
+		// own properties first, because that is what somebody who dropped a
+		// Slider came for, then the ones every element has.
+		auto propItems = [&](NT type)
+		{
+			for (std::size_t i = 0; i < props.size(); ++i)
+			{
+				if (i == ownCount && i != 0) ImGui::Separator();
+				if (ImGui::MenuItem(props[i].name.c_str())) makePropNode(type, props[i]);
+			}
+		};
 		const bool getOpen = ImGui::BeginMenu("Get", !props.empty());
 		if (!getOpen) EditorWidgets::helpForLabel("Get");
-		if (getOpen)
-		{
-			for (const UIPropDesc& pd : props)
-				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::GetProperty, pd);
-			ImGui::EndMenu();
-		}
+		if (getOpen) { propItems(NT::GetProperty); ImGui::EndMenu(); }
 		const bool setOpen = ImGui::BeginMenu("Set", !props.empty());
 		if (!setOpen) EditorWidgets::helpForLabel("Set");
-		if (setOpen)
-		{
-			for (const UIPropDesc& pd : props)
-				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::SetProperty, pd);
-			ImGui::EndMenu();
-		}
+		if (setOpen) { propItems(NT::SetProperty); ImGui::EndMenu(); }
 		ImGui::EndPopup();
 	}
 
