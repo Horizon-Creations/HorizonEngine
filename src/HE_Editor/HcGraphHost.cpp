@@ -597,6 +597,9 @@ GraphEditor::Model buildModel(const Host& h)
 	m.pinHasInlineEditor = [&graph](int nid, int pin){
 		const HC::Node* n = graph.findNode(nid);
 		return n && HcEditorUtil::pinSupportsInlineDefault(*n, pin); };
+	m.pinInlineEditorWidth = [&graph](int nid, int pin){
+		const HC::Node* n = graph.findNode(nid);
+		return n ? HcEditorUtil::pinInlineEditorWidth(*n, pin) : 0.0f; };
 	// …and a string pin whose values are a LIST edits it as a dropdown instead.
 	// Two answers, in this order: the host knows about the asset being edited
 	// (which animations this widget carries, what its elements are called), the

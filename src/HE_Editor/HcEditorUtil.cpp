@@ -1648,6 +1648,20 @@ bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin)
 	       pd.type == P::Float || pd.type == P::String;
 }
 
+float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
+{
+	using P = HorizonCode::PinType;
+	HorizonCode::PinDesc pd{};
+	const int di = dataInIndexOf(n, unifiedPin, pd);
+	if (di < 0) return 0.0f;
+	// A number or a checkbox is happy in the default slot. A NAME is not: it has
+	// to be readable to be checkable, and as a dropdown it also has an arrow to
+	// put somewhere. Wide enough for "Ping Pong" and most element names, capped
+	// because a node is not a panel — the list that opens is sized to its
+	// entries, so a long path is one click from being read in full.
+	return pd.type == P::String ? 112.0f : 0.0f;
+}
+
 void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
                           const ParamChoices& choices)
 {
@@ -1674,7 +1688,9 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 	// The stored default keeps the PIN's type (retypes re-seed on next edit).
 	V& v = n.pinDefaults[di];
 	if (v.type != pd.type) { v = V{}; v.type = pd.type; }
-	ImGui::SetNextItemWidth(-FLT_MIN);
+	// No SetNextItemWidth here: the canvas pushed the width of the slot it gave
+	// us (GraphEditor), and "fill the window" would lay the widget out across
+	// the whole canvas to be clipped back to a stub — the arrow first.
 	switch (pd.type)
 	{
 		case P::Bool:

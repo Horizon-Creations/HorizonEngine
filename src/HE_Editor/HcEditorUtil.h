@@ -412,6 +412,10 @@ namespace HcEditorUtil
 		std::function<std::vector<std::string>(const HorizonCode::Node&, const std::string&)>;
 	void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 	                          const ParamChoices& choices = {});
+	// How much room that editor needs, in graph units (0 = the canvas's default
+	// slot). A string pin asks for more: a name has to be readable to be
+	// checkable, and as a dropdown it carries an arrow as well.
+	float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin);
 
 	// ── Drag-off compatibility ────────────────────────────────────────────────
 	// First unified pin index on a FRESH node of `t` (propType seeded with the

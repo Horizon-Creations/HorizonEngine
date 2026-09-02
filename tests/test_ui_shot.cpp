@@ -1441,3 +1441,151 @@ TEST_CASE("Section header: the + sits on the heading, not on a row below it")
 	// behind the label — red for a helper that only fixed the height.
 	CHECK(hdr.btnMin.x > hdr.labelX1);
 }
+
+// ── A dropdown on a pin has to FIT on the pin ────────────────────────────────
+// The inline editor slot was invented for a number box and sized for one. A
+// string pin that offers a list needs more: the name has to be readable, and the
+// arrow that says "this is a list" sits at the right-hand end, which is the
+// first thing a slot too narrow throws away. Both halves are visible only in
+// pixels, so they are checked in pixels.
+TEST_CASE("ui shot: a pin's dropdown fits inside its node")
+{
+	constexpr int W = 420, H = 200;
+	Harness harness(W, H);
+
+	// One engine call, shaped like Play Animation: a reference, a name that is
+	// a list, a flag, and a second name that is a list.
+	HorizonCode::Node node;
+	node.type = HorizonCode::NodeType::EngineCall;
+	node.s = "widget.playAnimation";
+	node.hasArg = true;   // exec node
+	node.params = { { "widget", HorizonCode::PinType::Ref },
+	                { "animation", HorizonCode::PinType::String },
+	                { "restoreAfterCompleted", HorizonCode::PinType::Bool },
+	                { "direction", HorizonCode::PinType::String } };
+	node.results = { { "ok", HorizonCode::PinType::Bool } };
+	{
+		HorizonCode::Value v; v.type = HorizonCode::PinType::String; v.s = "Ping Pong";
+		node.pinDefaults[3] = v;   // data-in 3 = direction
+	}
+
+	GraphEditor::Model m;
+	GraphEditor::State st;
+	st.pan = ImVec2(0.0f, 0.0f);
+	st.zoom = 1.0f;
+	m.nodeIds = []{ return std::vector<int>{ 1 }; };
+	m.getPos  = [](int, float& x, float& y){ x = 30.0f; y = 30.0f; };
+	m.setPos  = [](int, float, float){};
+	m.title   = [](int){ return std::string("Play Animation"); };
+	m.headerColor = [](int){ return IM_COL32(60, 60, 70, 255); };
+	m.links   = []{ return std::vector<std::array<int, 4>>{}; };
+	m.connect = [](int, int, int, int){ return false; };
+	// The pins as the graph sees them: [exec in][exec out][data ins][data outs].
+	m.pins = [](int)
+	{
+		std::vector<GraphEditor::Pin> pins;
+		pins.push_back({ 0, "",          IM_COL32(230, 230, 230, 255), true,  true  });
+		pins.push_back({ 1, "",          IM_COL32(230, 230, 230, 255), false, true  });
+		pins.push_back({ 2, "Widget",    IM_COL32(120, 180, 240, 255), true,  false });
+		pins.push_back({ 3, "Animation", IM_COL32(240, 180, 120, 255), true,  false });
+		pins.push_back({ 4, "Restore",   IM_COL32(200, 120, 200, 255), true,  false });
+		pins.push_back({ 5, "Direction", IM_COL32(240, 180, 120, 255), true,  false });
+		pins.push_back({ 6, "Ok",        IM_COL32(200, 120, 200, 255), false, false });
+		return pins;
+	};
+	m.pinHasInlineEditor = [&node](int, int pin)
+	{ return HcEditorUtil::pinSupportsInlineDefault(node, pin); };
+	m.pinInlineEditorWidth = [&node](int, int pin)
+	{ return HcEditorUtil::pinInlineEditorWidth(node, pin); };
+	m.drawPinInlineEditor = [&node](int, int pin)
+	{
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(node, pin, committed,
+			[](const HorizonCode::Node& n, const std::string& param)
+			{ return HcEditorUtil::engineParamChoices(n, param, nullptr); });
+	};
+
+	// Where the canvas puts the editor column, measured with the same rule it
+	// uses: past the longest input label, in the size the labels are drawn at.
+	// Captured during the frame, because it needs the font.
+	float editorX = 0.0f, originX = 0.0f, originY = 0.0f;
+	const he_ui::Image img = shoot("graph-pin-dropdown", W, H, 3, [&](int)
+	{
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##canvas", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		const float labelScale = 13.0f / ImGui::GetFontSize();
+		float labelW = 0.0f;
+		for (const GraphEditor::Pin& p : m.pins(1))
+			if (p.input && !p.isExec && !p.label.empty())
+				labelW = std::max(labelW, ImGui::CalcTextSize(p.label.c_str()).x * labelScale);
+		editorX = 8.0f + labelW + 6.0f;
+		// Where graph (0,0) lands on screen: the canvas draws from the cursor,
+		// and with no pan and zoom 1 that is the whole transform.
+		originX = ImGui::GetCursorScreenPos().x;
+		originY = ImGui::GetCursorScreenPos().y;
+		GraphEditor::draw("##ge", m, st, ImVec2((float)W, (float)H));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	REQUIRE(editorX > 0.0f);
+
+	// What the canvas laid out: the node grew by what the widest editor asked
+	// for beyond the default slot, and the slot itself starts in a column past
+	// the longest label. Measured from the picture rather than from an absolute
+	// number, because where the canvas puts its origin is its own business.
+	const float slotW = HcEditorUtil::pinInlineEditorWidth(node, 3);
+	const float extra = slotW - GraphEditor::kPinEditorW;
+	CHECK(extra > 0.0f);   // a string pin really does ask for more room
+
+	auto isInk = [&](int x, int y)
+	{
+		std::uint8_t r, g, b, a;
+		img.pixel(x, y, r, g, b, a);
+		return std::abs(int(r) - int(kBgR)) + std::abs(int(g) - int(kBgG)) +
+		       std::abs(int(b) - int(kBgB)) > 24;
+	};
+
+	// The Direction row. The left column starts with the EXEC pin, so it is the
+	// fifth row under the title bar, not the fourth.
+	const float rowY = originY + 30.0f + GraphEditor::kTitleH + 4.5f * GraphEditor::kRowH;
+	const int y0 = int(rowY) - 8, y1 = int(rowY) + 8;
+
+	// 1. The ARROW is drawn at the right-hand end of the slot. Bright pixels,
+	//    not any ink: the frame's background fills the slot whatever happens to
+	//    the widget inside it, so counting ink here would pass for a control
+	//    laid out to the whole canvas and clipped back to a stub — which is the
+	//    bug this is about, and which leaves the arrow outside.
+	auto isGlyph = [&](int x, int y)
+	{
+		std::uint8_t r, g, b, a;
+		img.pixel(x, y, r, g, b, a);
+		return r > 150 && g > 150 && b > 150;
+	};
+	// Node and slot in screen pixels, from the transform the canvas used.
+	const int nodeLeft  = int(originX + 30.0f);
+	const int slotRight = int(originX + 30.0f + editorX + slotW);
+	int arrowInk = 0;
+	for (int y = y0; y < y1; ++y)
+		for (int x = slotRight - 18; x < slotRight - 2; ++x)
+			if (isGlyph(x, y)) ++arrowInk;
+	INFO("the dropdown's arrow, in bright pixels: " << arrowInk
+	     << " (band x " << (slotRight - 18) << ".." << (slotRight - 2)
+	     << ", y " << y0 << ".." << y1 << ", editorX " << editorX << ")");
+	CHECK(arrowInk > 10);
+
+	// 2. …because the NODE made room for it. Its right edge is the last ink on
+	//    the row, and it has to stand beyond both the default width and the end
+	//    of the control. Without the growth the arrow would sit on the edge or
+	//    outside it.
+	int nodeRight = 0;
+	for (int y = y0; y < y1; ++y)
+		for (int x = W - 5; x > nodeLeft; --x)
+			if (isInk(x, y)) { nodeRight = std::max(nodeRight, x); break; }
+	INFO("node " << nodeLeft << ".." << nodeRight << " (" << (nodeRight - nodeLeft)
+	     << " wide, default is " << int(GraphEditor::kNodeW) << "), slot ends at " << slotRight);
+	CHECK(nodeRight - nodeLeft > int(GraphEditor::kNodeW));
+	CHECK(slotRight < nodeRight - 2);
+}
