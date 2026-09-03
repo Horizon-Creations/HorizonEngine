@@ -1291,6 +1291,18 @@ void drawFontsPage(AppContext& ctx)
 	ImGui::Unindent();
 	ImGui::Spacing();
 
+	// No control, because there is nothing to decide: the icon face is baked the
+	// first time a label asks for one, and a project that shows no icon never
+	// pays for it. Said out loud anyway, because "how do I get an icon" is a
+	// question this page is where somebody looks for.
+	ImGui::SeparatorText("Icons");
+	ImGui::TextWrapped("%zu icons are built in, written as <icon=name> in a rich text "
+	                   "label (<icon=home>, <icon=settings>, <icon=save>). They are baked "
+	                   "only once a label actually asks for one, so a project without "
+	                   "icons carries none of it.",
+	                   HE::uiIconCount());
+	ImGui::Spacing();
+
 	ImGui::SeparatorText("Scripts");
 	ImGui::TextWrapped("Every project gets Latin: A to Z, the umlauts and accents of "
 	                   "Latin-1, the Central European letters of Latin Extended-A, the "

@@ -2266,6 +2266,57 @@ Beschriftungen erben, was die Überschrift getragen hat.
 
 ---
 
+### Ein Schnitt und ein Icon sind dasselbe Problem (03.09.2026)
+
+Die beiden übrigen Grenzen aus B6, `<b>` und Icon-Schriften. Die Frage des Users war, ob er
+Schriften anschaffen muss: nein. **Roboto Condensed Regular** (SIL OFL 1.1) und **Material
+Icons** (Apache 2.0), beide frei mitlieferbar, beide eingebettet, die Lizenztexte liegen
+neben den Dateien. `scripts/embed_font.py` und `scripts/embed_icon_names.py` machen daraus
+Header, damit die nächste Schrift ein Befehl ist und kein Nachmittag.
+
+**Ein Face pro Run, nicht zwei Mechanismen.** `<b>fett</>` und `<icon=home>` heißen beide
+„diese Zeichen kommen aus einer anderen Datei". Also trägt `UITextRun` ein Face, `UIRichPiece`
+das aufgelöste, aufgelöst wird an EINER Stelle (`resolveFace`, von Messung UND Zeichnen
+benutzt), und gestempelt wird pro Quad — was `UIRenderObject` immer schon konnte.
+
+**Eine Zeile hat eine Grundlinie, auch mit drei Schriften darauf.** Sie rechnet sich weiter
+aus dem Ascent der BASIS. Pro Run gerechnet säße ein fettes Wort einen Pixel neben seinen
+Nachbarn, und das liest sich als Wackeln, nicht als Betonung.
+
+**Fett ist nicht breiter.** In einer Condensed ist die fette Vorbreite von `H` kleiner als
+die magere (33.52 gegen 33.87), obwohl die Zeile als Ganzes breiter wird. Die erste
+Zusicherung maß die Vorbreite und war damit falsch. Gewicht misst man als Tinte (Deckung im
+Atlas), und was das Layout beweisen muss, ist etwas anderes: dass ein Stück in SEINEM Face
+gemessen wurde.
+
+**`<b>` bleibt wirkungslos, solange die Basis Bold ist**, und die war es immer. Deshalb wählt
+Preferences ▸ Project ▸ Fonts das Textgewicht, mit der Asymmetrie von `themeStyled`: fehlt
+heißt Bold (kein bestehendes Projekt bewegt sich), ein NEUES Projekt wird mit Regular
+angelegt. Ein Tag, das still nichts tut, wäre das gewesen, was hier eine Scheibe vorher
+abgelehnt wurde.
+
+**Icons haben ihren eigenen Atlas, und zwar faul.** 2234 Namen, 2188 Umrisse (46 Namen sind
+Aliase), gebacken beim ERSTEN `<icon=…>` und dann ganz, bei 40 px in 2048² — 48 px passen
+nicht, und ein Icon wird bei 16 bis 32 gezeichnet, also ist es ein Verkleinern statt eines
+Verwischens. Ein Projekt ohne Icons zahlt nichts, und der Atlas wächst nach dem ersten Upload
+nie, also gilt die Sechs-Backends-Regel weiter.
+
+**`<icon=…>` ist das einzige Tag, das ein Zeichen EINFÜGT**, statt die folgenden zu färben.
+Es erbt Farbe, Größe und Link von der Stelle, an der es steht, denn die Alternative wäre eine
+Regel darüber, welche Eigenschaften ein Icon erreichen und welche nicht, und die merkt sich
+niemand. Ein Name wird gegen die SCHRIFT geprüft, nicht nur gegen die Liste: sonst wäre ein
+Tippfehler ein unsichtbares Zeichen statt des Textes, den jemand geschrieben hat.
+
+**Das Gewicht gilt pro Prozess**, weil der Atlas einmal gebacken wird. Der Test dafür hat
+deshalb eine eigene Datei, damit ctest ihm einen eigenen Prozess gibt. Erster Versuch mit
+einem statischen Initialisierer hat die Bold-Tests der Nachbardatei umgelegt: der läuft auch
+dann, wenn doctests Filter die Datei ausschließt.
+
+**Damit ist B6 zu.** Offen bleibt aus dem Kapitel nur auswählbarer statischer Text, und der
+ist näher am Textfeld als am Label.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

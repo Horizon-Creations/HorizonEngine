@@ -8,6 +8,11 @@
 // `<b>` can mean something. Shipped as the variable file; stb_truetype reads its
 // default master, which is Regular (SIL OFL 1.1, EditorDeps/Fonts/).
 #include <RobotoRegular_ttf.h>
+// …and the icon face: 2234 pictures in the Private Use Area, addressed by name.
+// The names live beside the outlines because a TTF knows that E88A has a shape,
+// never that the shape is called "home" (Apache 2.0, EditorDeps/Fonts/).
+#include <MaterialIcons_ttf.h>
+#include <MaterialIcons_names.h>
 
 #include <Renderer/UIFont.h>
 #include <algorithm>
@@ -75,6 +80,12 @@ namespace
 {
     // One block of codepoints to bake.
     struct CpRange { std::uint32_t first, count; };
+
+    // Icons are baked once at this size and scaled to whatever a label asks for.
+    // 40 px is what puts all of them into a 2048² atlas with stb's shelf packer
+    // (48 does not), and an icon in a user interface is drawn at 16 to 32, so it
+    // is a downscale rather than a blur.
+    constexpr float kIconBakePx = 40.0f;
 
     // The base set plus whatever `scripts` asks for, ascending. The base is the
     // promise every project gets without deciding anything: Latin as it is
@@ -163,25 +174,38 @@ namespace
         return true;
     }
 
-    // Bake `ttf` into `f` (using f.atlasW/atlasH/bakePx as the REQUEST). Fills
-    // pixels + glyphs + ranges + ascent + ok.
-    void bakeInto(const unsigned char* ttf, BakedUIFont& f, std::uint32_t scripts)
+    // Pack `want` at the size `f` asks for, doubling the atlas rather than losing
+    // a range: Latin alone fits 1024², Cyrillic on top of it might not, and an
+    // atlas one size too small would drop exactly the characters somebody asked
+    // for. Fills pixels + glyphs + ranges + ascent; leaves `ok` to the caller,
+    // which is the one that knows what to do with a failure.
+    bool bakeRanges(const unsigned char* ttf, BakedUIFont& f, const std::vector<CpRange>& want)
     {
-        f.scripts = scripts;
-        f.ok      = false;
-        const std::vector<CpRange> want = rangesFor(scripts);
-        const int reqW = f.atlasW, reqH = f.atlasH;
-
-        // Grow rather than lose a script: Latin alone fits 1024², Cyrillic on top
-        // of it does not, and an atlas that is one size too small would drop
-        // exactly the characters the project asked for.
+        bool ok = false;
         for (int attempt = 0; attempt < 3; ++attempt)
         {
-            if (packOnce(ttf, f, want)) { f.ok = true; break; }
+            if (packOnce(ttf, f, want)) { ok = true; break; }
             if (f.atlasW >= 4096 && f.atlasH >= 4096) break;
             f.atlasW = std::min(4096, f.atlasW * 2);
             f.atlasH = std::min(4096, f.atlasH * 2);
         }
+        stbtt_fontinfo info;
+        if (stbtt_InitFont(&info, ttf, 0))
+        {
+            int ascent = 0, descent = 0, lineGap = 0;
+            stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
+            f.ascent = ascent * stbtt_ScaleForPixelHeight(&info, f.bakePx);
+        }
+        return ok;
+    }
+
+    // Bake `ttf` into `f` (using f.atlasW/atlasH/bakePx as the REQUEST) as a TEXT
+    // face: the base set plus whatever scripts were asked for.
+    void bakeInto(const unsigned char* ttf, BakedUIFont& f, std::uint32_t scripts)
+    {
+        f.scripts = scripts;
+        const int reqW = f.atlasW, reqH = f.atlasH;
+        f.ok = bakeRanges(ttf, f, rangesFor(scripts));
         if (!f.ok)
         {
             // Nothing fits, so fall back to ASCII at the size that was asked for.
@@ -191,14 +215,6 @@ namespace
             f.atlasH  = reqH;
             f.scripts = 0;
             f.ok      = packOnce(ttf, f, { { 0x0020, 0x5F } });
-        }
-
-        stbtt_fontinfo info;
-        if (stbtt_InitFont(&info, ttf, 0))
-        {
-            int ascent = 0, descent = 0, lineGap = 0;
-            stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
-            f.ascent = ascent * stbtt_ScaleForPixelHeight(&info, f.bakePx);
         }
     }
 
@@ -250,26 +266,54 @@ BakedUIFont bakeDefaultUIFont(float bakePx, int atlasW, int atlasH)
     return f;
 }
 
-std::uint32_t uiEngineFaceKey(UIFontFace face)
+namespace
 {
-    switch (face)
+    // The icon font's table directory, parsed once. Cheap next to a bake: this
+    // answers "does that outline exist" without touching the atlas, which is what
+    // lets a NAME be checked while parsing markup rather than while drawing it.
+    const stbtt_fontinfo* iconFontInfo()
     {
-    case UIFontFace::Bold:
+        static stbtt_fontinfo s_info;
+        static const bool s_ok = stbtt_InitFont(&s_info, MaterialIcons_data, 0) != 0;
+        return s_ok ? &s_info : nullptr;
+    }
+}
+
+std::uint32_t uiIconCodepoint(const std::string& name)
+{
+    // Binary search over the generated table: sorted at generation time, so the
+    // lookup a rich label does per icon per frame is a handful of comparisons.
+    std::size_t lo = 0, hi = MaterialIcons_name_count;
+    while (lo < hi)
     {
-        // Nothing is bolder than bold. Answering 0 here is what makes `<b>` a
-        // visible no-op in a project whose base weight IS bold, instead of a
-        // second atlas that draws the same glyphs.
-        if (g_weightBold) return 0;
-        static const std::uint32_t s_key = UIFontCache::keyFor(
-            0x8B01D0FACEull,
-            std::vector<uint8_t>(Roboto_data, Roboto_data + Roboto_size),
-            BakedUIFont::kBakePx);
-        return s_key;
+        const std::size_t mid = (lo + hi) / 2;
+        const int c = name.compare(MaterialIcons_names[mid].name);
+        if (c < 0) { hi = mid; continue; }
+        if (c > 0) { lo = mid + 1; continue; }
+        // Asked of the FONT, not just of the list: the two are separate files and
+        // a name whose outline is not in this cut has to behave like a typo — the
+        // tag stays as the text somebody typed — instead of inserting a character
+        // nobody can see. (Today all 2234 resolve; 46 of them are aliases, which
+        // is why there are fewer outlines than names.)
+        const std::uint32_t cp = MaterialIcons_names[mid].cp;
+        const stbtt_fontinfo* info = iconFontInfo();
+        return (info && stbtt_FindGlyphIndex(info, (int)cp)) ? cp : 0;
     }
-    case UIFontFace::Icon:
-    default:
-        return 0;
-    }
+    return 0;
+}
+
+std::size_t uiIconCount()
+{
+    static const std::size_t s_count = []
+    {
+        const stbtt_fontinfo* info = iconFontInfo();
+        if (!info) return std::size_t{ 0 };
+        std::size_t n = 0;
+        for (unsigned i = 0; i < MaterialIcons_name_count; ++i)
+            if (stbtt_FindGlyphIndex(info, (int)MaterialIcons_names[i].cp)) ++n;
+        return n;
+    }();
+    return s_count;
 }
 
 namespace UIFontCache
@@ -312,6 +356,53 @@ namespace UIFontCache
         auto& c = cache();
         auto it = c.find(key);
         return it != c.end() ? &it->second : nullptr;
+    }
+}
+
+// Down here rather than beside sharedUIFont(): the icon face is put into the
+// cache directly, and the cache is defined just above.
+std::uint32_t uiEngineFaceKey(UIFontFace face)
+{
+    switch (face)
+    {
+    case UIFontFace::Bold:
+    {
+        // Nothing is bolder than bold. Answering 0 here is what makes `<b>` a
+        // visible no-op in a project whose base weight IS bold, instead of a
+        // second atlas that draws the same glyphs.
+        if (g_weightBold) return 0;
+        static const std::uint32_t s_key = UIFontCache::keyFor(
+            0x8B01D0FACEull,
+            std::vector<uint8_t>(Roboto_data, Roboto_data + Roboto_size),
+            BakedUIFont::kBakePx);
+        return s_key;
+    }
+    case UIFontFace::Icon:
+    {
+        // Baked on the FIRST icon anybody draws, never before: an application
+        // without icons pays neither the four megabytes nor the bake. And baked
+        // WHOLE, so the atlas never grows afterwards — six backends upload it
+        // once, and a texture whose glyphs moved under them is the one failure
+        // this file is arranged to avoid.
+        static const std::uint32_t s_key = []() -> std::uint32_t
+        {
+            constexpr std::uint32_t kKey = 0x1C0F0117u;
+            BakedUIFont f;
+            f.atlasW = 2048;
+            f.atlasH = 2048;
+            f.bakePx = kIconBakePx;
+            // The whole Private Use Area: the codepoints the font does not use
+            // cost one empty rectangle each and nothing in the atlas, and asking
+            // for the range is simpler than asking for a list of 2234.
+            if (!bakeRanges(MaterialIcons_data, f, { { 0xE000, 0x1900 } })) return 0;
+            f.ok = true;
+            UIFontCache::cache().emplace(kKey, std::move(f));
+            return kKey;
+        }();
+        return s_key;
+    }
+    default:
+        return 0;
     }
 }
 
@@ -478,7 +569,35 @@ namespace
             catch (...) { return false; }
         }
         if (outName == "link") return true;   // any id will do; it is the graph's word
+        // An icon name is checked HERE, against the face's own list, so a
+        // misspelled one falls under the same rule as everything else and shows
+        // up as the text somebody typed instead of as an invisible nothing.
+        if (outName == "icon") return uiIconCodepoint(outValue) != 0;
         return false;                          // unknown name: text, like everything else
+    }
+
+    // Append `cp` to `s` as UTF-8. Icons live above 0xE000, so this is the
+    // three-byte case; the rest is here so the function is not a lie.
+    void appendUtf8(std::string& s, std::uint32_t cp)
+    {
+        if (cp < 0x80) { s.push_back((char)cp); return; }
+        if (cp < 0x800)
+        {
+            s.push_back((char)(0xC0 | (cp >> 6)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+            return;
+        }
+        if (cp < 0x10000)
+        {
+            s.push_back((char)(0xE0 | (cp >> 12)));
+            s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+            return;
+        }
+        s.push_back((char)(0xF0 | (cp >> 18)));
+        s.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        s.push_back((char)(0x80 | (cp & 0x3F)));
     }
 } // namespace
 
@@ -520,6 +639,33 @@ UIRichText uiParseRichText(const std::string& markup)
                 const RichScope a = attrs();
                 cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
                 cur.face  = a.face;
+            }
+            else if (name == "icon")
+            {
+                // The one tag that does not open a scope: it INSERTS a character
+                // and is done. It inherits colour, size and link from where it
+                // stands — an icon inside a link is part of the link, and an
+                // icon in a coloured run is that colour — because the alternative
+                // is explaining which attributes reach it and which do not.
+                flush();
+                const RichScope a = attrs();
+                UITextRun ic;
+                ic.begin = out.text.size();
+                appendUtf8(out.text, uiIconCodepoint(value));
+                ic.end       = out.text.size();
+                ic.color     = a.color;
+                ic.sizeScale = a.sizeScale;
+                ic.link      = a.link;
+                ic.face      = UIFontFace::Icon;
+                out.runs.push_back(ic);
+                cur = UITextRun{};
+                cur.begin     = out.text.size();
+                cur.color     = a.color;
+                cur.sizeScale = a.sizeScale;
+                cur.link      = a.link;
+                cur.face      = a.face;
+                i = end;
+                continue;
             }
             else
             {

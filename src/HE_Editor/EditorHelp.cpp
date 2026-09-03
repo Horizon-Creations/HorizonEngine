@@ -2664,9 +2664,13 @@ namespace
 	  "nothing accepts, the window took it and the Game Instance hears it instead.",
 	  "", "ui#widgets" },
 	{ "UI Widget/RichText", "",
-	  "Reads the Text as MARKUP instead of as plain words. Four things it "
-	  "understands: <color=#ff8800>, <size=1.5> and <link=id>, each closed by "
-	  "</>, and << for a literal '<'. A link makes that stretch of words "
+	  "Reads the Text as MARKUP instead of as plain words. What it understands: "
+	  "<color=#ff8800>, <size=1.5>, <b> and <link=id>, each closed by </>, plus "
+	  "<icon=home> for one of the built-in icons and << for a literal '<'. An "
+	  "icon inserts a single character and inherits the colour, size and link it "
+	  "stands in. <b> needs the project's text weight to be Regular, since "
+	  "nothing is bolder than bold (Preferences > Project > Fonts). A link makes "
+	  "that stretch of words "
 	  "clickable — the pointer turns into a hand over it and On Link Clicked "
 	  "fires with the id — while the rest of the label stays as inert as any "
 	  "other text. Anything the parser does not fully understand is left as "

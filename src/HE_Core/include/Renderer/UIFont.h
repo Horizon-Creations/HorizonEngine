@@ -105,6 +105,12 @@ enum class UIFontFace : std::uint8_t { Base = 0, Bold = 1, Icon = 2 };
 // `<b>` says so by being a no-op rather than by baking a second identical atlas.
 HE_API std::uint32_t uiEngineFaceKey(UIFontFace face);
 
+// The codepoint an icon NAME stands for ("home" → U+E88A), or 0 for a name the
+// icon face does not have. A font knows that E88A has an outline, never that the
+// outline is called "home", so the mapping is a table the engine carries.
+HE_API std::uint32_t uiIconCodepoint(const std::string& name);
+HE_API std::size_t   uiIconCount();
+
 // The weight the shared font is baked in. Bold is the default because it is what
 // the engine has always drawn; a project that wants ordinary body text sets
 // Regular and `<b>` then has something to be bolder THAN. Same rule as the

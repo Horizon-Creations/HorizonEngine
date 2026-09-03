@@ -1924,6 +1924,82 @@ TEST_CASE("With bold as the base weight, <b> is a visible no-op")
     CHECK(out[1].fontAtlasKey == out[0].fontAtlasKey);
 }
 
+TEST_CASE("An icon is a name, and a name the font does not have is text")
+{
+    CHECK(HE::uiIconCodepoint("home") == 0xE88A);
+    CHECK(HE::uiIconCodepoint("settings") == 0xE8B8);
+    CHECK(HE::uiIconCodepoint("no_such_icon") == 0u);
+    CHECK(HE::uiIconCount() > 2000);
+
+    // The tag INSERTS a character rather than colouring the next ones, which is
+    // what makes it the only self-contained tag in the format.
+    const HE::UIRichText rt = HE::uiParseRichText("a<icon=home>b");
+    REQUIRE(rt.runs.size() == 3);
+    CHECK(rt.runs[1].face == HE::UIFontFace::Icon);
+    CHECK(rt.text.size() == 5);                       // 'a' + three bytes + 'b'
+    std::size_t at = rt.runs[1].begin;
+    CHECK(HE::uiUtf8Decode(rt.text, at) == 0xE88A);
+    CHECK(at == rt.runs[1].end);                      // exactly one character
+
+    // A misspelled name falls under the format's one rule, like every other tag
+    // that is not fully understood: it is the text somebody typed.
+    CHECK(HE::uiParseRichText("a<icon=hmoe>b").text == "a<icon=hmoe>b");
+}
+
+TEST_CASE("An icon is drawn from its own atlas, measured at its own bake size")
+{
+    const HE::BakedUIFont& base = HE::sharedUIFont();
+    const std::uint32_t iconKey = HE::uiEngineFaceKey(HE::UIFontFace::Icon);
+    REQUIRE(iconKey != 0);
+    const HE::BakedUIFont* icons = HE::UIFontCache::find(iconKey);
+    REQUIRE(icons != nullptr);
+    REQUIRE(icons->ok);
+    // Its own atlas, at its own size: the icons are baked smaller than the text,
+    // which is exactly why the layout has to divide by the FACE's bake size.
+    CHECK(icons->bakePx != base.bakePx);
+    CHECK(icons->glyph(0xE88A) != nullptr);
+
+    const HE::UIRichText rt = HE::uiParseRichText("<icon=home> Start");
+    HE::UITextLayout opts;
+    const HE::UIRichLayout lay =
+        HE::uiLayoutRichText(base, rt, { 0.0f, 0.0f }, { 400.0f, 40.0f }, 24.0f, opts);
+    REQUIRE(lay.pieces.size() >= 2);
+    CHECK(lay.pieces[0].face == HE::UIFontFace::Icon);
+    CHECK(lay.pieces[0].width ==
+          doctest::Approx(icons->glyph(0xE88A)->xadvance * (24.0f / icons->bakePx)));
+    // Same line, same baseline as the words beside it.
+    CHECK(lay.pieces[0].baseline == doctest::Approx(lay.pieces[1].baseline));
+
+    std::vector<UIRenderObject> out;
+    HE::uiEmitRichText(base, 0, rt, lay, { 1, 1, 1, 1 }, 0, out);
+    REQUIRE(out.size() >= 2);
+    CHECK(out[0].fontAtlasKey == iconKey);
+    CHECK(out[1].fontAtlasKey == 0u);
+}
+
+TEST_CASE("An icon inside a link is part of the link")
+{
+    // It inherits colour, size and link from where it stands. Anything else would
+    // need a rule about which attributes reach an icon and which do not, and
+    // nobody would remember that rule.
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    const HE::UIRichText rt =
+        HE::uiParseRichText("<link=save><color=#ff8800><icon=save> Speichern</></>");
+    REQUIRE(rt.hasLinks);
+    REQUIRE(rt.runs.size() >= 2);
+    CHECK(rt.runs[0].face == HE::UIFontFace::Icon);
+    CHECK(rt.runs[0].link == "save");
+    CHECK(rt.runs[0].color == "#ff8800");
+
+    HE::UITextLayout opts;
+    const HE::UIRichLayout lay =
+        HE::uiLayoutRichText(f, rt, { 0.0f, 0.0f }, { 400.0f, 40.0f }, 24.0f, opts);
+    REQUIRE_FALSE(lay.pieces.empty());
+    const HE::UIRichPiece& icon = lay.pieces[0];
+    CHECK(HE::uiRichLinkAt(rt, lay, icon.x + icon.width * 0.5f,
+                           icon.top + icon.height * 0.5f) == "save");
+}
+
 TEST_CASE("The chosen scripts travel into the exported application")
 {
     // The shipped app bakes its own atlas on a machine that never saw the
