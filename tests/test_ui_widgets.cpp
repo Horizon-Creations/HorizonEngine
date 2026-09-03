@@ -1746,7 +1746,8 @@ TEST_CASE("layoutUITextLines word-wraps within the width and never overflows")
     for (const std::string& l : lines)
     {
         float w = 0.0f;
-        for (unsigned char ch : l) if (ch >= 32 && ch < 128) w += f.glyphs[ch - 32].xadvance * scale;
+        for (size_t i = 0; i < l.size(); )
+            if (const HE::BakedGlyph* g = f.glyph(HE::uiUtf8Decode(l, i))) w += g->xadvance * scale;
         CHECK(w <= wrapW + 0.01f);
     }
     // Wrapping off leaves the run on one line.
@@ -1764,6 +1765,125 @@ TEST_CASE("layoutUITextLines hard-breaks a word wider than the line")
     std::string joined;
     for (const std::string& l : lines) joined += l;
     CHECK(joined == "supercalifragilistic");
+}
+
+// ── The atlas beyond ASCII ────────────────────────────────────────────────────
+TEST_CASE("A word with umlauts is drawn and measured as the word it is")
+{
+    // "Größe": six characters, eight bytes. Before the atlas carried Latin-1 the
+    // three non-ASCII ones were skipped by BOTH the glyph loop and the width, so
+    // the label read "Gre" and everything aligned to it sat too far left.
+    const std::string umlaut = "Gr\xc3\xb6\xc3\x9f" "e";     // Größe
+    std::vector<UIRenderObject> out;
+    HE::emitUITextGlyphs(umlaut, { 0.0f, 0.0f }, { 400.0f, 40.0f }, 22.0f,
+                         { 1, 1, 1, 1 }, 0, false, out);
+    CHECK(out.size() == 5);
+
+    HE::UITextLayout opts;
+    const float wide   = HE::measureUIText(umlaut, 22.0f, 0.0f, opts).x;
+    const float narrow = HE::measureUIText("Gre", 22.0f, 0.0f, opts).x;
+    CHECK(wide > narrow);
+    // Width and glyphs have to agree, or the caret lands beside the character.
+    float advances = 0.0f;
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    for (size_t i = 0; i < umlaut.size(); )
+        if (const HE::BakedGlyph* g = f.glyph(HE::uiUtf8Decode(umlaut, i)))
+            advances += g->xadvance * (22.0f / f.bakePx);
+    CHECK(advances == doctest::Approx(wide));
+}
+
+TEST_CASE("A password field draws its dots")
+{
+    // The dot is U+2022, three bytes, none of them ASCII. With an ASCII-only
+    // atlas the field drew NOTHING and measured zero, so the caret could not
+    // move either — a login screen with no visible input and no test that said so.
+    HE::UITextInput ti;
+    ti.text     = "abc";
+    ti.password = true;
+    std::vector<UIRenderObject> out;
+    ti.render({ 0.0f, 0.0f, 200.0f, 30.0f }, {}, HE::UUID{}, 1.0f, out);
+    int glyphs = 0;
+    for (const UIRenderObject& o : out) if (o.type == 2) ++glyphs;
+    CHECK(glyphs == 3);
+    CHECK(ti.caretAtPoint(200.0f, 15.0f, 1.0f) == 3);   // click past the end → after the last
+}
+
+TEST_CASE("A character the atlas does not carry costs nothing, and costs it once")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    // U+4E00 is outside every baked range; the font's own missing glyph must not
+    // stand in for it, because a box would claim the character was drawn.
+    CHECK(f.glyph(0x4E00) == nullptr);
+    HE::UITextLayout opts;
+    const float withCjk = HE::measureUIText("a\xE4\xB8\x80" "b", 20.0f, 0.0f, opts).x;
+    const float without = HE::measureUIText("ab", 20.0f, 0.0f, opts).x;
+    CHECK(withCjk == doctest::Approx(without));
+}
+
+TEST_CASE("Wrapping breaks between characters, never inside one")
+{
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    // One long word of two-byte characters, hard-broken because it cannot fit.
+    std::string word;
+    for (int i = 0; i < 20; ++i) word += "\xc3\xa4";      // ä
+    const auto lines = HE::layoutUITextLines(f, word, 24.0f, 40.0f, true);
+    CHECK(lines.size() > 1);
+    std::string joined;
+    for (const std::string& l : lines)
+    {
+        // Every line is whole characters: walking it by codepoint has to land
+        // exactly on its end. Half an ä is not a narrow ä, it is nothing at all.
+        size_t i = 0;
+        while (i < l.size()) i = HE::uiUtf8Next(l, i);
+        CHECK(i == l.size());
+        CHECK(l.size() % 2 == 0);
+        joined += l;
+    }
+    CHECK(joined == word);
+}
+
+TEST_CASE("Rich text measures a character once, not once per byte")
+{
+    // The rich path walks bytes to know which run a character belongs to, so it
+    // is the one most easily made to count a two-byte character twice: the
+    // second byte of an ä is 0xA4, which the Latin-1 range now carries a glyph
+    // for. Stepping by byte would draw it AND add its width.
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    REQUIRE(f.ok);
+    const std::string s = "\xc3\xa4\xc3\xa4";              // ää
+    const HE::UIRichText rt = HE::uiParseRichText(s);
+    HE::UITextLayout opts;
+    const HE::UIRichLayout rl =
+        HE::uiLayoutRichText(f, rt, { 0.0f, 0.0f }, { 400.0f, 40.0f }, 22.0f, opts);
+    // The same two characters through the plain path, which is the reference the
+    // whole rich layout is held to.
+    const float plain = HE::measureUIText(s, 22.0f, 0.0f, opts).x;
+    CHECK(rl.size.x == doctest::Approx(plain));
+    // …and the pieces the layout hands the renderer are that same width: the
+    // block and the piece are measured by two loops, and the day they disagree
+    // is the day a coloured run is drawn wider than the text under it.
+    float pieces = 0.0f;
+    for (const HE::UIRichPiece& p : rl.pieces) pieces += p.width;
+    CHECK(pieces == doctest::Approx(plain));
+
+    std::vector<UIRenderObject> out;
+    HE::uiEmitRichText(f, 0, rt, rl, { 1, 1, 1, 1 }, 0, out);
+    CHECK(out.size() == 2);
+}
+
+TEST_CASE("The scripts are chosen before the first bake, and say so afterwards")
+{
+    // The backends upload each atlas once per key. A mask that changed after the
+    // shared font was baked would leave them holding a texture whose glyphs have
+    // moved, so the request is refused rather than half-applied — and the caller
+    // can tell, which is what lets the settings page say "after a restart".
+    REQUIRE(HE::sharedUIFont().ok);                       // forces the bake
+    const std::uint32_t now = HE::uiFontScripts();
+    CHECK(HE::uiSetFontScripts(now));                     // asking for what it has
+    CHECK_FALSE(HE::uiSetFontScripts(now ^ HE::UIFontScriptGreek));
+    CHECK(HE::uiFontScripts() == now);                    // and nothing moved
 }
 
 TEST_CASE("emitUITextGlyphs emits both lines of a two-line run")

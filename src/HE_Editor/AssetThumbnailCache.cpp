@@ -281,11 +281,12 @@ namespace
 		std::vector<Quad> quads;
 		float penX = 0.0f;
 		float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
-		for (const char* c = kSample; *c; ++c)
+		const std::string sample = kSample;
+		for (std::size_t i = 0; i < sample.size(); )
 		{
-			const unsigned char ch = static_cast<unsigned char>(*c);
-			if (ch < 32 || ch >= 128) continue;
-			const HE::BakedGlyph& g = font->glyphs[ch - 32];
+			const HE::BakedGlyph* gp = font->glyph(HE::uiUtf8Decode(sample, i));
+			if (!gp) continue;
+			const HE::BakedGlyph& g = *gp;
 			const Quad q{ penX + g.xoff, g.yoff,
 			              penX + g.xoff + (g.x1 - g.x0), g.yoff + (g.y1 - g.y0), &g };
 			if (q.x1 > q.x0 && q.y1 > q.y0)

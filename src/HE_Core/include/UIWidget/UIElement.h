@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <Renderer/UIFont.h>       // the baked atlas + the UTF-8 walk the caret shares with it
 #include <Renderer/UIRenderObject.h>
 #include <Types/UUID.h>
 #include <Types/Defines.h>
@@ -728,11 +729,9 @@ protected:
 // ── UTF-8 cursor movement ────────────────────────────────────────────────────
 // Byte offsets that never land inside a multi-byte character. Every text-field
 // operation goes through these: one press of Left has to step over a whole
-// character, not over one of the bytes it is made of.
-HE_API size_t uiUtf8Prev(const std::string& s, size_t byteIndex);
-HE_API size_t uiUtf8Next(const std::string& s, size_t byteIndex);
-// Nearest character boundary at or before `byteIndex`, clamped to the string.
-HE_API size_t uiUtf8Clamp(const std::string& s, size_t byteIndex);
+// character, not over one of the bytes it is made of. They live in
+// Renderer/UIFont.h, next to the glyph walk that has to agree with them about
+// where a character begins.
 
 // Factory + registry (JSON load, editor palette).
 HE_API std::unique_ptr<UIElement> makeUIElement(UIWidgetType type);

@@ -76,36 +76,9 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     return UIWidgetType::Panel;
 }
 
-// ── UTF-8 cursor movement ────────────────────────────────────────────────────
-namespace
-{
-    // A continuation byte is 10xxxxxx: never a character boundary.
-    bool isUtf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
-}
-
-size_t uiUtf8Prev(const std::string& s, size_t i)
-{
-    if (i == 0) return 0;
-    if (i > s.size()) i = s.size();
-    --i;
-    while (i > 0 && isUtf8Cont(s[i])) --i;
-    return i;
-}
-
-size_t uiUtf8Next(const std::string& s, size_t i)
-{
-    if (i >= s.size()) return s.size();
-    ++i;
-    while (i < s.size() && isUtf8Cont(s[i])) ++i;
-    return i;
-}
-
-size_t uiUtf8Clamp(const std::string& s, size_t i)
-{
-    if (i >= s.size()) return s.size();
-    while (i > 0 && isUtf8Cont(s[i])) --i;
-    return i;
-}
+// The UTF-8 walk moved to Renderer/UIFont.cpp, where the glyph loops use the
+// same one: the caret and the glyphs have to agree about where a character
+// begins, and two copies of that rule would eventually disagree.
 
 const char* uiCursorName(UICursor c)
 {

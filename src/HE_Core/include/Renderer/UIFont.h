@@ -17,13 +17,36 @@ struct BakedGlyph
     float xoff = 0, yoff = 0, xadvance = 0;
 };
 
-// A baked font atlas: an R8 coverage bitmap + per-glyph metrics for ASCII 32..127.
-// The engine bakes the default UI font (Roboto) once; UIFontCache bakes imported
-// Font assets on demand. `atlasW/atlasH/bakePx` are per-instance so different
-// fonts can use different sizes.
+// One contiguous block of codepoints in the atlas: `count` glyphs starting at
+// `first`, stored from `offset` in the glyph vector.
+struct UIGlyphRange
+{
+    std::uint32_t first = 0, count = 0, offset = 0;
+};
+
+// Which scripts an atlas carries BEYOND the base set. The base is always baked
+// and is what an application in a Western language needs: ASCII, Latin-1
+// Supplement (the umlauts and accents), Latin Extended-A (Polish, Czech,
+// Turkish), the punctuation block that holds the bullet and the typographic
+// quotes, and the Euro sign. Everything past that costs atlas area for scripts
+// most projects never show, so it is a project decision (Preferences ▸ Project
+// ▸ Fonts) rather than a default.
+enum UIFontScripts : std::uint32_t
+{
+    UIFontScriptGreek    = 1u << 0,
+    UIFontScriptCyrillic = 1u << 1,
+};
+
+// A baked font atlas: an R8 coverage bitmap + per-glyph metrics, in ranges (see
+// UIFontScripts). The engine bakes the default UI font (Roboto) once; UIFontCache
+// bakes imported Font assets on demand. `atlasW/atlasH/bakePx` are per-instance
+// so different fonts can use different sizes — and the atlas GROWS when the
+// requested scripts do not fit, so read the dimensions off the instance and
+// never off the constants below.
 struct BakedUIFont
 {
-    // Defaults for the shared UI font atlas (also used by the backend upload path).
+    // What a bake ASKS for. The atlas can end up larger (a script that did not
+    // fit doubles it), which is why the backends upload atlasW × atlasH.
     static constexpr int   kWidth  = 1024;
     static constexpr int   kHeight = 1024;
     static constexpr float kBakePx = 64.0f;
@@ -31,11 +54,53 @@ struct BakedUIFont
     int   atlasW = kWidth;
     int   atlasH = kHeight;
     float bakePx = kBakePx;
-    float ascent = 0.0f;                 // baseline offset from the top, at bakePx
-    std::vector<uint8_t>       pixels;   // atlasW × atlasH, single channel (alpha)
-    std::array<BakedGlyph, 96> glyphs{}; // ASCII 32..127
+    float ascent = 0.0f;               // baseline offset from the top, at bakePx
+    std::vector<uint8_t>     pixels;   // atlasW × atlasH, single channel (alpha)
+    std::vector<BakedGlyph>  glyphs;   // packed, in `ranges` order
+    std::vector<UIGlyphRange> ranges;  // ascending, non-overlapping
+    std::uint32_t scripts = 0;         // the UIFontScripts this atlas was baked with
     bool  ok = false;
+
+    // The glyph for `cp`, or null when this atlas does not carry it. Null covers
+    // both "outside the baked ranges" and "the font has no such glyph": a caller
+    // draws nothing and adds no width in either case, so a missing character
+    // cannot silently become a box in one place and a gap in another.
+    const BakedGlyph* glyph(std::uint32_t cp) const
+    {
+        for (const UIGlyphRange& r : ranges)
+            if (cp >= r.first && cp < r.first + r.count)
+            {
+                const BakedGlyph& g = glyphs[r.offset + (cp - r.first)];
+                // A codepoint the font itself lacks was packed as an empty box
+                // with no advance; that is "not carried", not "a zero-width
+                // character".
+                return (g.x1 > g.x0 || g.xadvance > 0.0f) ? &g : nullptr;
+            }
+        return nullptr;
+    }
 };
+
+// ── UTF-8 ─────────────────────────────────────────────────────────────────────
+// The text pipeline walks bytes but draws CODEPOINTS, and the caret has to agree
+// with the glyphs about where a character begins. One decoder, here, so it can
+// only agree.
+HE_API std::size_t uiUtf8Prev(const std::string& s, std::size_t byteIndex);
+HE_API std::size_t uiUtf8Next(const std::string& s, std::size_t byteIndex);
+// Nearest character boundary at or before `byteIndex` (clamped to the string).
+HE_API std::size_t uiUtf8Clamp(const std::string& s, std::size_t byteIndex);
+// The codepoint at `i`, with `i` advanced past it. A byte sequence that is not
+// valid UTF-8 decodes as the raw byte and advances one: it then matches no range
+// and draws nothing, which is what damaged text should do.
+HE_API std::uint32_t uiUtf8Decode(const std::string& s, std::size_t& i);
+
+// Which scripts the atlases bake, beyond the base set (a UIFontScripts mask).
+// Set from the project before any text is drawn: the backends upload each atlas
+// once, so a mask that changes after the first bake would leave them holding a
+// texture whose glyphs have moved. Returns false when the shared font is already
+// baked and the mask differs — the caller then says so rather than showing text
+// that disagrees with the setting.
+HE_API bool uiSetFontScripts(std::uint32_t scripts);
+HE_API std::uint32_t uiFontScripts();
 
 // The engine-wide default UI font (Roboto Condensed Bold), baked lazily.
 HE_API const BakedUIFont& sharedUIFont();

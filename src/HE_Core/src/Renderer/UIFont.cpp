@@ -12,23 +12,183 @@
 
 namespace HE {
 
+// ── UTF-8 ────────────────────────────────────────────────────────────────────
 namespace
 {
-    // Bake ASCII 32..127 of `ttf` into `f` (using f.atlasW/atlasH/bakePx). Fills
-    // pixels + glyphs + ascent + ok. `f` must have its atlas dims/size set.
-    void bakeInto(const unsigned char* ttf, BakedUIFont& f)
+    // A continuation byte is 10xxxxxx: never a character boundary.
+    bool isUtf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+}
+
+std::size_t uiUtf8Prev(const std::string& s, std::size_t i)
+{
+    if (i == 0) return 0;
+    if (i > s.size()) i = s.size();
+    --i;
+    while (i > 0 && isUtf8Cont(s[i])) --i;
+    return i;
+}
+
+std::size_t uiUtf8Next(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) return s.size();
+    ++i;
+    while (i < s.size() && isUtf8Cont(s[i])) ++i;
+    return i;
+}
+
+std::size_t uiUtf8Clamp(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) return s.size();
+    while (i > 0 && isUtf8Cont(s[i])) --i;
+    return i;
+}
+
+std::uint32_t uiUtf8Decode(const std::string& s, std::size_t& i)
+{
+    if (i >= s.size()) { i = s.size(); return 0; }
+    const unsigned char b0 = static_cast<unsigned char>(s[i]);
+    // How many bytes the lead byte PROMISES, and the bits it contributes.
+    int extra = 0;
+    std::uint32_t cp = 0;
+    if      (b0 < 0x80) { ++i; return b0; }
+    else if ((b0 & 0xE0) == 0xC0) { extra = 1; cp = b0 & 0x1Fu; }
+    else if ((b0 & 0xF0) == 0xE0) { extra = 2; cp = b0 & 0x0Fu; }
+    else if ((b0 & 0xF8) == 0xF0) { extra = 3; cp = b0 & 0x07u; }
+    else { ++i; return b0; } // a continuation byte or 0xFE/0xFF standing alone
+    // A promise the string does not keep is not a character: hand back the lead
+    // byte and move one, so a truncated sequence costs one glyph and not the
+    // rest of the line.
+    for (int k = 1; k <= extra; ++k)
     {
+        if (i + k >= s.size() || !isUtf8Cont(s[i + k])) { ++i; return b0; }
+        cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3Fu);
+    }
+    i += extra + 1;
+    return cp;
+}
+
+namespace
+{
+    // One block of codepoints to bake.
+    struct CpRange { std::uint32_t first, count; };
+
+    // The base set plus whatever `scripts` asks for, ascending. The base is the
+    // promise every project gets without deciding anything: Latin as it is
+    // actually written, including the punctuation a text field produces on its
+    // own (U+2022 is the password dot).
+    std::vector<CpRange> rangesFor(std::uint32_t scripts)
+    {
+        std::vector<CpRange> r;
+        r.push_back({ 0x0020, 0x5F });                       // ASCII 0x20..0x7E
+        r.push_back({ 0x00A0, 0x60 });                       // Latin-1 Supplement
+        r.push_back({ 0x0100, 0x80 });                       // Latin Extended-A
+        if (scripts & UIFontScriptGreek)    r.push_back({ 0x0370, 0x90 });
+        if (scripts & UIFontScriptCyrillic) r.push_back({ 0x0400, 0x100 });
+        r.push_back({ 0x2010, 0x18 });                       // dashes, quotes, bullet, ellipsis
+        r.push_back({ 0x20AC, 0x01 });                       // €
+        return r;
+    }
+
+    // One packing attempt at the atlas size `f` currently carries. Leaves f.pixels
+    // /glyphs/ranges filled on success and undefined (about to be retried or
+    // replaced) on failure.
+    //
+    // Gather/pack/render by hand rather than stbtt_PackFontRanges, for one
+    // reason: with skip_missing on, that function reports failure for every
+    // codepoint the FONT does not have. "Roboto has no Cyrillic" would then read
+    // exactly like "the atlas is too small", the growth below would double the
+    // atlas three times over nothing and still end in the fallback. Here the
+    // rectangles answer the only question that matters — did everything the font
+    // does have find a place.
+    bool packOnce(const unsigned char* ttf, BakedUIFont& f, const std::vector<CpRange>& rs)
+    {
+        stbtt_fontinfo info;
+        if (!stbtt_InitFont(&info, ttf, 0)) return false;
+
         f.pixels.assign(static_cast<size_t>(f.atlasW) * f.atlasH, 0);
-        stbtt_bakedchar chars[96];
-        const int r = stbtt_BakeFontBitmap(ttf, 0, f.bakePx, f.pixels.data(),
-                                           f.atlasW, f.atlasH, 32, 96, chars);
-        f.ok = r > 0;
-        for (int i = 0; i < 96; ++i)
+        f.glyphs.clear();
+        f.ranges.clear();
+
+        std::vector<stbtt_pack_range> pr(rs.size());
+        std::vector<std::vector<stbtt_packedchar>> chars(rs.size());
+        std::size_t total = 0;
+        for (size_t i = 0; i < rs.size(); ++i)
         {
-            f.glyphs[i] = { (float)chars[i].x0, (float)chars[i].y0,
-                            (float)chars[i].x1, (float)chars[i].y1,
-                            chars[i].xoff, chars[i].yoff, chars[i].xadvance };
+            chars[i].assign(rs[i].count, stbtt_packedchar{});
+            pr[i] = stbtt_pack_range{};
+            // POSITIVE size, which is stbtt_ScaleForPixelHeight — the same scale
+            // stbtt_BakeFontBitmap used before this. STBTT_POINT_SIZE would ask
+            // for ScaleForMappingEmToPixels instead and move every glyph in every
+            // label that already exists.
+            pr[i].font_size                        = f.bakePx;
+            pr[i].first_unicode_codepoint_in_range = static_cast<int>(rs[i].first);
+            pr[i].num_chars                        = static_cast<int>(rs[i].count);
+            pr[i].chardata_for_range               = chars[i].data();
+            total += rs[i].count;
         }
+
+        stbtt_pack_context spc;
+        if (!stbtt_PackBegin(&spc, f.pixels.data(), f.atlasW, f.atlasH, 0, 1, nullptr))
+            return false;
+        // A codepoint the font does not have stays zeroed rather than becoming the
+        // font's box glyph: BakedUIFont::glyph reads that as "not carried", and a
+        // gap is honest where a box would claim the character was drawn.
+        stbtt_PackSetSkipMissingCodepoints(&spc, 1);
+
+        std::vector<stbrp_rect> rects(total);
+        const int n = stbtt_PackFontRangesGatherRects(&spc, &info, pr.data(),
+                                                      static_cast<int>(pr.size()), rects.data());
+        stbtt_PackFontRangesPackRects(&spc, rects.data(), n);
+        bool fits = true;
+        for (int i = 0; i < n; ++i)
+            if (rects[i].w > 0 && rects[i].h > 0 && !rects[i].was_packed) { fits = false; break; }
+        if (fits)
+            stbtt_PackFontRangesRenderIntoRects(&spc, &info, pr.data(),
+                                                static_cast<int>(pr.size()), rects.data());
+        stbtt_PackEnd(&spc);
+        if (!fits) return false;
+
+        for (size_t i = 0; i < rs.size(); ++i)
+        {
+            f.ranges.push_back({ rs[i].first, rs[i].count,
+                                 static_cast<std::uint32_t>(f.glyphs.size()) });
+            for (const stbtt_packedchar& pc : chars[i])
+                f.glyphs.push_back({ (float)pc.x0, (float)pc.y0, (float)pc.x1, (float)pc.y1,
+                                     pc.xoff, pc.yoff, pc.xadvance });
+        }
+        return true;
+    }
+
+    // Bake `ttf` into `f` (using f.atlasW/atlasH/bakePx as the REQUEST). Fills
+    // pixels + glyphs + ranges + ascent + ok.
+    void bakeInto(const unsigned char* ttf, BakedUIFont& f, std::uint32_t scripts)
+    {
+        f.scripts = scripts;
+        f.ok      = false;
+        const std::vector<CpRange> want = rangesFor(scripts);
+        const int reqW = f.atlasW, reqH = f.atlasH;
+
+        // Grow rather than lose a script: Latin alone fits 1024², Cyrillic on top
+        // of it does not, and an atlas that is one size too small would drop
+        // exactly the characters the project asked for.
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            if (packOnce(ttf, f, want)) { f.ok = true; break; }
+            if (f.atlasW >= 4096 && f.atlasH >= 4096) break;
+            f.atlasW = std::min(4096, f.atlasW * 2);
+            f.atlasH = std::min(4096, f.atlasH * 2);
+        }
+        if (!f.ok)
+        {
+            // Nothing fits, so fall back to ASCII at the size that was asked for.
+            // A missing script is a gap in a sentence; a failed bake is an
+            // application with no text at all, and that is the worse of the two.
+            f.atlasW  = reqW;
+            f.atlasH  = reqH;
+            f.scripts = 0;
+            f.ok      = packOnce(ttf, f, { { 0x0020, 0x5F } });
+        }
+
         stbtt_fontinfo info;
         if (stbtt_InitFont(&info, ttf, 0))
         {
@@ -37,14 +197,27 @@ namespace
             f.ascent = ascent * stbtt_ScaleForPixelHeight(&info, f.bakePx);
         }
     }
+
+    std::uint32_t g_scripts = 0;
+    bool          g_sharedBaked = false;
 }
+
+bool uiSetFontScripts(std::uint32_t scripts)
+{
+    if (g_sharedBaked) return scripts == g_scripts;
+    g_scripts = scripts;
+    return true;
+}
+
+std::uint32_t uiFontScripts() { return g_scripts; }
 
 const BakedUIFont& sharedUIFont()
 {
     static BakedUIFont s_font = []
     {
         BakedUIFont f; // atlasW/atlasH/bakePx default to the shared-atlas constants
-        bakeInto(Roboto_data, f);
+        bakeInto(Roboto_data, f, g_scripts);
+        g_sharedBaked = true;
         return f;
     }();
     return s_font;
@@ -56,7 +229,7 @@ BakedUIFont bakeDefaultUIFont(float bakePx, int atlasW, int atlasH)
     f.bakePx = std::clamp(bakePx, 6.0f, 256.0f);
     f.atlasW = std::clamp(atlasW, 64, 4096);
     f.atlasH = std::clamp(atlasH, 64, 4096);
-    bakeInto(Roboto_data, f);
+    bakeInto(Roboto_data, f, g_scripts);
     return f;
 }
 
@@ -75,8 +248,11 @@ namespace UIFontCache
     {
         if (ttf.empty()) return 0;
         const int px = std::clamp((int)(bakePx + 0.5f), 8, 120);
-        // Fold the font id + bake size into a non-zero 32-bit key.
+        // Fold the font id + bake size + the scripts into a non-zero 32-bit key:
+        // an imported font baked for Latin and one baked for Cyrillic are two
+        // atlases, and the renderer uploads them under two keys.
         std::uint64_t h = stableId * 1099511628211ull ^ (std::uint64_t)px;
+        h ^= (std::uint64_t)uiFontScripts() * 0x9E3779B97F4A7C15ull;
         std::uint32_t key = (std::uint32_t)(h ^ (h >> 32));
         if (key == 0) key = 1;
         auto& c = cache();
@@ -84,7 +260,7 @@ namespace UIFontCache
         {
             BakedUIFont f;
             f.atlasW = 1024; f.atlasH = 1024; f.bakePx = (float)px;
-            bakeInto(ttf.data(), f);
+            bakeInto(ttf.data(), f, uiFontScripts());
             if (!f.ok) return 0; // baking failed → caller uses the shared font
             c.emplace(key, std::move(f));
         }
@@ -102,13 +278,14 @@ namespace UIFontCache
 
 namespace
 {
-    // Advance width of one line at `sizePx` (glyphs outside ASCII 32..127 have no
-    // metrics and contribute nothing, exactly as the emit loop skips them).
+    // Advance width of one line at `sizePx`. A character the atlas does not carry
+    // has no metrics and contributes nothing, exactly as the emit loop draws
+    // nothing for it — the two have to agree or the caret lands beside the glyph.
     float lineWidth(const BakedUIFont& font, const std::string& s, float scale)
     {
         float w = 0.0f;
-        for (unsigned char ch : s)
-            if (ch >= 32 && ch < 128) w += font.glyphs[ch - 32].xadvance * scale;
+        for (std::size_t i = 0; i < s.size(); )
+            if (const BakedGlyph* g = font.glyph(uiUtf8Decode(s, i))) w += g->xadvance * scale;
         return w;
     }
 } // namespace
@@ -177,11 +354,17 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
             while (acc.empty() && word.size() > 1 &&
                    lineWidth(font, trimmed(word), scale) > wrapWidth)
             {
+                // Character by character, not byte by byte: a break inside a
+                // two-byte umlaut would leave half a character on each line, and
+                // neither half is anything.
                 std::string head;
-                for (char c : word)
+                for (std::size_t k = 0; k < word.size(); )
                 {
-                    if (!head.empty() && lineWidth(font, head + c, scale) > wrapWidth) break;
-                    head.push_back(c);
+                    const std::size_t next = uiUtf8Next(word, k);
+                    const std::string ch = word.substr(k, next - k);
+                    if (!head.empty() && lineWidth(font, head + ch, scale) > wrapWidth) break;
+                    head += ch;
+                    k = next;
                 }
                 wrapped.push_back(head);
                 word.erase(0, head.size());
@@ -336,10 +519,13 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
         if (rt.runs.empty()) return sizePx;
         return sizePx * rt.runs[runAt(b)].sizeScale;
     };
+    // Advance of the CHARACTER at `b` — the byte walks below all step with
+    // uiUtf8Next, so `b` is always a character boundary and a two-byte umlaut is
+    // measured once, not twice.
     auto advanceAt = [&](std::size_t b) {
-        const unsigned char ch = static_cast<unsigned char>(rt.text[b]);
-        if (ch < 32 || ch >= 128) return 0.0f;
-        return font.glyphs[ch - 32].xadvance * (sizeAt(b) / font.bakePx);
+        std::size_t j = b;
+        const BakedGlyph* g = font.glyph(uiUtf8Decode(rt.text, j));
+        return g ? g->xadvance * (sizeAt(b) / font.bakePx) : 0.0f;
     };
 
     // ── Lines ────────────────────────────────────────────────────────────────
@@ -391,7 +577,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             if (c == ' ') { lastBreak = i + 1; sinceBreak = 0.0f; }
             else sinceBreak += adv;
             width += adv;
-            ++i;
+            i = uiUtf8Next(rt.text, i);
         }
         cur.end = rt.text.size();
         lines.push_back(cur);
@@ -410,15 +596,18 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
     {
         float mx = 0.0f, w = 0.0f;
         std::size_t lastInk = lines[li].begin;
-        for (std::size_t b = lines[li].begin; b < lines[li].end; ++b)
+        for (std::size_t b = lines[li].begin; b < lines[li].end; )
         {
+            const std::size_t next = uiUtf8Next(rt.text, b);
             mx = std::max(mx, sizeAt(b));
             w += advanceAt(b);
-            if (rt.text[b] != ' ') lastInk = b + 1;
+            if (rt.text[b] != ' ') lastInk = next;
+            b = next;
         }
         // Trailing spaces neither widen the line nor shift a centred one.
         float trimmed = 0.0f;
-        for (std::size_t b = lines[li].begin; b < lastInk; ++b) trimmed += advanceAt(b);
+        for (std::size_t b = lines[li].begin; b < lastInk; b = uiUtf8Next(rt.text, b))
+            trimmed += advanceAt(b);
         lineSize[li]    = mx > 0.0f ? mx : sizePx;
         lineWidthPx[li] = lines[li].end > lines[li].begin ? trimmed : 0.0f;
         (void)w;
@@ -446,7 +635,8 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             const std::size_t r = runAt(b);
             std::size_t e = b;
             float w = 0.0f;
-            while (e < lines[li].end && runAt(e) == r) { w += advanceAt(e); ++e; }
+            while (e < lines[li].end && runAt(e) == r)
+            { w += advanceAt(e); e = uiUtf8Next(rt.text, e); }
             UIRichPiece pc;
             pc.run = r; pc.begin = b; pc.end = e;
             pc.line = static_cast<int>(li);
@@ -488,11 +678,12 @@ void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
         }
         const float scale = pc.sizePx / font.bakePx;
         float penX = pc.x;
-        for (std::size_t b = pc.begin; b < pc.end && b < rt.text.size(); ++b)
+        std::size_t b = pc.begin;
+        while (b < pc.end && b < rt.text.size())
         {
-            const unsigned char ch = static_cast<unsigned char>(rt.text[b]);
-            if (ch < 32 || ch >= 128) continue;
-            const BakedGlyph& g = font.glyphs[ch - 32];
+            const BakedGlyph* gp = font.glyph(uiUtf8Decode(rt.text, b));
+            if (!gp) continue;
+            const BakedGlyph& g = *gp;
             UIRenderObject ro;
             ro.position = { penX + g.xoff * scale, pc.baseline + g.yoff * scale };
             ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
@@ -617,10 +808,11 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
                              + (font.ascent * scale) * 0.5f - sizePx * 0.08f;
 
         float penX = 0.0f;
-        for (unsigned char ch : line)
+        for (std::size_t b = 0; b < line.size(); )
         {
-            if (ch < 32 || ch >= 128) continue;
-            const BakedGlyph& g = font.glyphs[ch - 32];
+            const BakedGlyph* gp = font.glyph(uiUtf8Decode(line, b));
+            if (!gp) continue;
+            const BakedGlyph& g = *gp;
             UIRenderObject ro;
             ro.position = { x + penX + g.xoff * scale, baseline + g.yoff * scale };
             ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
