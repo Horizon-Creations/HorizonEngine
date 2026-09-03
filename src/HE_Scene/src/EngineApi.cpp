@@ -1113,6 +1113,58 @@ void clearTrayMenu(Ctx& c)
     c.clearTrayMenu();
 }
 
+void addMenu(Ctx& c, const std::string& id, const std::string& label)
+{
+    if (!c.addMenu)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenu: no menu bar bound by the host — ignored");
+        return;
+    }
+    // A menu with no id could never be filled, since addMenuItem names it.
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenu: a menu needs an id — ignored");
+        return;
+    }
+    c.addMenu(id, label.empty() ? id : label);
+}
+
+void addMenuItem(Ctx& c, const std::string& menuId, const std::string& id,
+                 const std::string& label)
+{
+    if (!c.addMenuItem)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenuItem: no menu bar bound by the host — ignored");
+        return;
+    }
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenuItem: an entry needs an id — ignored");
+        return;
+    }
+    c.addMenuItem(menuId, id, label.empty() ? id : label);
+}
+
+void addMenuSeparator(Ctx& c, const std::string& menuId)
+{
+    if (!c.addMenuSeparator)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenuSeparator: no menu bar bound by the host — ignored");
+        return;
+    }
+    c.addMenuSeparator(menuId);
+}
+
+void clearMenuBar(Ctx& c)
+{
+    if (!c.clearMenuBar)
+    {
+        HE_LOG_WARN(Script, "%s", "app.clearMenuBar: no menu bar bound by the host — ignored");
+        return;
+    }
+    c.clearMenuBar();
+}
+
 void setAutostart(Ctx& c, bool enabled)
 {
     // The permission first: this asks the system to run a program at every
@@ -3537,6 +3589,19 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ app::addTrayItem(c, aS(a, 0), aS(a, 1)); return VV{}; } });
         t.push_back({ "app.clearTrayMenu", "App", true, {}, {}, "HE::api::app::clearTrayMenu",
             [](Ctx& c, const VV&){ app::clearTrayMenu(c); return VV{}; } });
+        // The menu bar, built row by row from a graph.
+        t.push_back({ "app.addMenu", "App", true,
+            {{"id", P::String}, {"label", P::String}}, {}, "HE::api::app::addMenu",
+            [](Ctx& c, const VV& a){ app::addMenu(c, aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "app.addMenuItem", "App", true,
+            {{"menu", P::String}, {"id", P::String}, {"label", P::String}}, {},
+            "HE::api::app::addMenuItem",
+            [](Ctx& c, const VV& a){ app::addMenuItem(c, aS(a, 0), aS(a, 1), aS(a, 2)); return VV{}; } });
+        t.push_back({ "app.addMenuSeparator", "App", true, {{"menu", P::String}}, {},
+            "HE::api::app::addMenuSeparator",
+            [](Ctx& c, const VV& a){ app::addMenuSeparator(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "app.clearMenuBar", "App", true, {}, {}, "HE::api::app::clearMenuBar",
+            [](Ctx& c, const VV&){ app::clearMenuBar(c); return VV{}; } });
         t.push_back({ "app.setAutostart", "App", true, {{"enabled", P::Bool}}, {},
             "HE::api::app::setAutostart",
             [](Ctx& c, const VV& a){ app::setAutostart(c, aB(a, 0)); return VV{}; } });
@@ -4190,6 +4255,9 @@ const std::vector<ApiFn>& registry()
             { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
             { "app.showTray", "Show Tray Icon" },    { "app.hideTray", "Hide Tray Icon" },
             { "app.addTrayItem", "Add Tray Item" },  { "app.clearTrayMenu", "Clear Tray Menu" },
+            { "app.addMenu", "Add Menu" },           { "app.addMenuItem", "Add Menu Item" },
+            { "app.addMenuSeparator", "Add Menu Separator" },
+            { "app.clearMenuBar", "Clear Menu Bar" },
             { "app.setAutostart", "Set Start at Login" },
             { "app.autostart", "Starts at Login" },
             { "clipboard.getText", "Get Clipboard Text" },

@@ -305,7 +305,7 @@ erste lauffähige App hinter einen Umbau. A3a gehört in Welle 2, A3b in Welle 3
 Widget-Baum, eigener Canvas, eigenem Skript-Kontext. Modale Dialoge als echtes Fenster statt
 als Overlay. Das ist deutlich mehr Arbeit als A4 und gehört in eine spätere Welle.
 
-**A6 Menüleiste.** Auf macOS die echte (der Editor hat mit `MacMenuBar` schon einen
+**A6 Menüleiste.** **Gezeichnete Fassung fertig am 03.09.2026** (Abschnitt weiter unten), die native steht noch aus. Auf macOS die echte (der Editor hat mit `MacMenuBar` schon einen
 Präzedenzfall), auf Windows/Linux eine gezeichnete im Fenster. Definiert als Asset, nicht als
 Code, damit HorizonCode sie befüllen kann.
 
@@ -2395,6 +2395,45 @@ damit die Laufzeit nicht ein zweites Mal ableitet und zu einer anderen Antwort k
 
 **Damit ist A7 zu.** Was blind geschrieben ist, steht oben: die Windows- und Linux-Pfade für
 Dateitypen und Autostart, wie seinerzeit der GL-Port.
+
+---
+
+### A6: die Menüleiste, gezeichnet (03.09.2026)
+
+**Abweichung vom Plan, mit Grund:** der Plan wollte die Leiste als ASSET. Gebaut ist sie als
+Laufzeit-API (`Add Menu`, `Add Menu Item`, `Add Menu Separator`, `Clear Menu Bar`), weil das
+Ziel dahinter war, dass HorizonCode sie füllen kann statt sie fest zu verdrahten — und das tut
+eine API direkt, während ein neuer Asset-Typ zuerst eine Editor-Oberfläche bräuchte, nach der
+niemand gefragt hat. `HE::AppMenu` ist die Struktur, in die so ein Asset später laden würde.
+
+**Und die zweite Abweichung:** gebaut ist zuerst die GEZEICHNETE Leiste, nicht die native.
+Der Plan nennt macOS zuerst, aber die native ist auf dieser Maschine nicht zu sehen (eine
+Anwendung mit Fenster lässt sich hier nicht anschauen), während die gezeichnete vollständig
+headless prüfbar ist. Eine Funktion, die auf einer Plattform läuft, die ich nicht sehen kann,
+und auf zwei anderen gar nicht, ist die schlechtere erste Hälfte. Die native ist danach eine
+Aufwertung mit derselben API und derselben Datenstruktur.
+
+**Der Grab-Stapel trägt sie mit.** Ein offenes Menü schiebt einen Grab mit `widget = 0` — und
+weil `takesInput` gegen die Spitze des Stapels vergleicht und keine Widget-Id 0 ist, ist damit
+alles darunter automatisch taub. Escape schließt es durch dieselbe Tür wie einen Dialog, ohne
+eine Zeile extra.
+
+**Das eine, was eine Leiste von einer Reihe Dropdowns unterscheidet:** mit gedrückter Taste
+auf den nächsten Titel zu wandern schaltet das Menü um, ohne loszulassen, und es bleibt EIN
+Grab. Genau dafür gibt es eine eigene Zusicherung, und ihre Gegenprobe ist rot.
+
+**Sie überlagert die Leinwand, sie schrumpft sie nicht.** Schrumpfen hieße, `UIWidgetCanvas`
+einen Ursprung zu geben, den jede Rechteck-Rechnung in HE_Core liest — eine größere Änderung
+als die Leiste selbst, und eine, die man absichtlich macht und nicht nebenbei. Bis dahin frisst
+der Streifen den Zeiger in seinem eigenen Band (eine Leiste, durch die man die Seite darunter
+anklicken kann, wäre keine), und `menuBarHeight()` sagt, wie viel Platz eine Seite lassen muss.
+
+**Ein Trennstrich ist kein Eintrag.** Loslassen darauf wählt nichts und schließt nichts: er hat
+keine Id, und ein um drei Pixel danebengegangener Zielversuch soll das Menü nicht zumachen.
+
+**Offen:** die native macOS-Leiste (`NSApp.mainMenu` aus demselben Vektor, ObjC++ in HE_Game
+und **nicht** in HE_Core — dessen Cocoa-Abhängigkeit zöge AppKit in die Tests und in die
+Windows-CI), Tastenkürzel und `enabled`/`checked` an Einträgen.
 
 ---
 

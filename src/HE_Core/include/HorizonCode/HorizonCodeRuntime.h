@@ -231,6 +231,8 @@ public:
     // An entry in the tray menu was chosen (elem 0: the tray belongs to the
     // application, not to any element).
     void fireOnTrayItem(InstanceId id, int elem, const std::string& itemId);
+    // …and one in the menu bar (elem 0 for the same reason).
+    void fireOnMenuItem(InstanceId id, int elem, const std::string& itemId);
     // A link in a rich-text label — the payload is the id the markup gave it.
     void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
     // Dragging inside the application. OnDrop's payload is what the SOURCE said

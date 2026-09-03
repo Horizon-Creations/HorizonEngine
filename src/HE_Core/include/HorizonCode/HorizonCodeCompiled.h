@@ -137,6 +137,9 @@ public:
     // An entry in the tray menu was chosen; the argument is its id.
     virtual void onTrayItem(int elem, const std::string& id)
     { fireEvent("OnTrayItem", elem, Value::ofString(id)); }
+    // An entry in the menu bar was chosen; the argument is its id.
+    virtual void onMenuItem(int elem, const std::string& id)
+    { fireEvent("OnMenuItem", elem, Value::ofString(id)); }
     // A link in a rich-text label. The argument is the link's id.
     virtual void onLinkClicked(int elem, const std::string& id)
     { fireEvent("OnLinkClicked", elem, Value::ofString(id)); }

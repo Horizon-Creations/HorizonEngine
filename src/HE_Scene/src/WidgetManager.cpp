@@ -755,6 +755,15 @@ void WidgetManager::popGrab(bool notify)
 			{ cb->open = false; cb->hoverIndex = -1; }
 		return;
 	}
+	if (g.kind == Grab::Kind::MenuBar)
+	{
+		// The grab is already off the stack, so this only clears the strip's own
+		// state — and it is why Escape closes an open menu without any extra
+		// wiring.
+		m_menuOpen  = -1;
+		m_menuHover = -1;
+		return;
+	}
 
 	Instance* w = find(g.widget);
 	if (w)
@@ -854,6 +863,138 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 void WidgetManager::openPopupAtPointer(int widgetId)
 {
 	openPopupAt(widgetId, m_pointerX, m_pointerY);
+}
+
+// ── The application's menu bar (docs/he-apps-plan.md A6) ─────────────────────
+// Fixed metrics in render-target pixels, like the tooltip's: this is chrome, not
+// content. Everything below measures with them, so moving one number moves the
+// picture and the hit test together.
+namespace
+{
+	constexpr float kMenuFontPx   = 15.0f;
+	constexpr float kMenuBarH     = 26.0f;
+	constexpr float kMenuTitlePad = 12.0f;   // left and right of a title
+	constexpr float kMenuItemH    = 24.0f;
+	constexpr float kMenuSepH     = 7.0f;
+	constexpr float kMenuItemPad  = 14.0f;
+	constexpr float kMenuMinW     = 120.0f;
+
+	float menuTextWidth(const std::string& s)
+	{
+		return HE::measureUIText(HE::sharedUIFont(), s, kMenuFontPx, 0.0f,
+		                         HE::UITextLayout{}).x;
+	}
+}
+
+void WidgetManager::setMenuBar(std::vector<HE::AppMenu> menus)
+{
+	m_menuBar = std::move(menus);
+	// A bar that is replaced while one of its menus is open would leave the open
+	// index pointing at something else — the classic "the menu I clicked is not
+	// the menu that opened".
+	closeMenu();
+	m_visualDirty = true;
+}
+
+float WidgetManager::menuBarHeight() const
+{
+	return m_menuBar.empty() ? 0.0f : kMenuBarH;
+}
+
+bool WidgetManager::menuTitleRect(std::size_t i, float& x, float& w) const
+{
+	if (i >= m_menuBar.size()) return false;
+	float pen = 0.0f;
+	for (std::size_t k = 0; k < i; ++k)
+		pen += menuTextWidth(m_menuBar[k].label) + 2.0f * kMenuTitlePad;
+	x = pen;
+	w = menuTextWidth(m_menuBar[i].label) + 2.0f * kMenuTitlePad;
+	return true;
+}
+
+bool WidgetManager::menuPopupRect(float& x, float& y, float& w, float& h) const
+{
+	if (m_menuOpen < 0 || m_menuOpen >= static_cast<int>(m_menuBar.size())) return false;
+	const HE::AppMenu& m = m_menuBar[static_cast<std::size_t>(m_menuOpen)];
+	if (m.items.empty()) return false;
+	float tx = 0.0f, tw = 0.0f;
+	if (!menuTitleRect(static_cast<std::size_t>(m_menuOpen), tx, tw)) return false;
+
+	float widest = kMenuMinW;
+	float height = 0.0f;
+	for (const HE::AppMenuItem& it : m.items)
+	{
+		height += it.separator ? kMenuSepH : kMenuItemH;
+		if (!it.separator)
+			widest = std::max(widest, menuTextWidth(it.label) + 2.0f * kMenuItemPad);
+	}
+	x = tx;
+	y = kMenuBarH;
+	w = widest;
+	h = height;
+	return true;
+}
+
+int WidgetManager::menuTitleAt(float x, float y) const
+{
+	if (m_menuBar.empty() || y < 0.0f || y >= kMenuBarH) return -1;
+	for (std::size_t i = 0; i < m_menuBar.size(); ++i)
+	{
+		float tx = 0.0f, tw = 0.0f;
+		if (!menuTitleRect(i, tx, tw)) continue;
+		if (x >= tx && x < tx + tw) return static_cast<int>(i);
+	}
+	return -1;
+}
+
+int WidgetManager::menuItemAt(float x, float y) const
+{
+	float px = 0.0f, py = 0.0f, pw = 0.0f, ph = 0.0f;
+	if (!menuPopupRect(px, py, pw, ph)) return -1;
+	if (x < px || x >= px + pw || y < py || y >= py + ph) return -1;
+	const HE::AppMenu& m = m_menuBar[static_cast<std::size_t>(m_menuOpen)];
+	float row = py;
+	for (std::size_t i = 0; i < m.items.size(); ++i)
+	{
+		const float hgt = m.items[i].separator ? kMenuSepH : kMenuItemH;
+		if (y >= row && y < row + hgt)
+			return m.items[i].separator ? -1 : static_cast<int>(i);
+		row += hgt;
+	}
+	return -1;
+}
+
+void WidgetManager::openMenuAt(int index)
+{
+	if (index < 0 || index >= static_cast<int>(m_menuBar.size())) return;
+	if (m_menuOpen == index) return;
+	// One grab for the whole strip, pushed on the first open and kept while the
+	// pointer walks from title to title: switching menus is not closing one and
+	// opening another as far as the input is concerned.
+	if (m_menuOpen < 0)
+	{
+		Grab g;
+		g.kind = Grab::Kind::MenuBar;
+		g.widget = 0;
+		g.prevFocusWidget = m_focusWidget;
+		if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
+		m_grabs.push_back(g);
+	}
+	m_menuOpen  = index;
+	m_menuHover = -1;
+	m_visualDirty = true;
+}
+
+void WidgetManager::closeMenu()
+{
+	if (m_menuOpen < 0) return;
+	m_menuOpen  = -1;
+	m_menuHover = -1;
+	// The grab goes with it. popGrab knows this kind and comes straight back
+	// here, so this checks first that there is one of ours to pop.
+	if (!m_grabs.empty() && m_grabs.back().kind == Grab::Kind::MenuBar)
+		m_grabs.pop_back();
+	m_visualDirty = true;
 }
 
 bool WidgetManager::closeTopLayer()
@@ -1942,6 +2083,73 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// the list, let go on the entry you want. That is how a menu has worked
 	// since menus existed, and it falls out of committing on the release rather
 	// than being a second code path.
+	// ── An open menu owns the pointer, and the strip owns its own band ───────
+	// Before the dropdown block because the bar is the application's chrome and
+	// sits above every page. It never steals from a dialog, though: the strip
+	// only answers while nothing else holds the input.
+	if (m_menuOpen >= 0 && !m_grabs.empty() && m_grabs.back().kind == Grab::Kind::MenuBar)
+	{
+		const int overTitle = valid ? menuTitleAt(mouseX, mouseY) : -1;
+		const int overItem  = valid ? menuItemAt(mouseX, mouseY) : -1;
+		// Walking onto another title switches menus without letting go. That is
+		// the one thing a menu BAR does which a dropdown cannot, so it is the one
+		// thing worth a test of its own.
+		if (moved && overTitle >= 0 && overTitle != m_menuOpen) openMenuAt(overTitle);
+		if (moved && m_menuHover != overItem) { m_menuHover = overItem; m_visualDirty = true; }
+		m_hoverCursor = HE::UICursor::Default;
+
+		if (primaryDown && !m_wasDown && overTitle >= 0)
+		{
+			// Pressing the open title again closes it — the same click that
+			// opened it, used the other way round.
+			if (overTitle == m_menuOpen) closeMenu();
+			else                         openMenuAt(overTitle);
+		}
+		else if (!primaryDown && m_wasDown)
+		{
+			// Letting go decides, exactly as it does in a dropdown. On a title
+			// it decides nothing: that release belongs to the press that opened
+			// the menu, and closing there would make a menu impossible to click.
+			if (overItem >= 0)
+			{
+				const HE::AppMenu& m = m_menuBar[static_cast<std::size_t>(m_menuOpen)];
+				const std::string id = m.items[static_cast<std::size_t>(overItem)].id;
+				closeMenu();
+				if (const HorizonCode::InstanceId gi = rt().gameInstance())
+					if (!id.empty()) rt().fireOnMenuItem(gi, 0, id);
+			}
+			else if (overTitle < 0)
+			{
+				// Outside the whole thing closes it. INSIDE the card but not on
+				// an entry — a separator, or the padding — decides nothing and
+				// leaves it open: a line is not a row, and closing on it would
+				// punish an aim that was off by three pixels.
+				float px = 0.0f, py = 0.0f, pw = 0.0f, ph = 0.0f;
+				const bool inCard = menuPopupRect(px, py, pw, ph) && valid &&
+				                    mouseX >= px && mouseX < px + pw &&
+				                    mouseY >= py && mouseY < py + ph;
+				if (!inCard) closeMenu();
+			}
+		}
+		m_wasDown = primaryDown;
+		m_wasSecondaryDown = secondaryDown;
+		m_pointerOverUI = true;
+		return true;
+	}
+	if (!m_menuBar.empty() && m_grabs.empty() && valid && mouseY < menuBarHeight())
+	{
+		// Closed, but the strip is still there: a click on it opens a menu and a
+		// click on its empty part reaches nothing underneath. A bar that let the
+		// page beneath be clicked through it would not be a bar.
+		if (primaryDown && !m_wasDown)
+			openMenuAt(menuTitleAt(mouseX, mouseY));
+		m_hoverCursor = HE::UICursor::Default;
+		m_wasDown = primaryDown;
+		m_wasSecondaryDown = secondaryDown;
+		m_pointerOverUI = true;
+		return true;
+	}
+
 	if (!m_grabs.empty() && m_grabs.back().kind == Grab::Kind::Dropdown)
 	{
 		const Grab g = m_grabs.back();
@@ -4138,7 +4346,95 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 	// That makes them the manager's to draw, exactly like the scrim and the
 	// focus ring — appended after the loop, so they land last.
 	drawOpenDropdown(vpWidth, vpHeight, out);
+	// The menu bar is above the widgets and below the tooltip: it belongs to the
+	// application rather than to any page, and a tooltip still explains it.
+	drawMenuBar(vpWidth, vpHeight, out);
 	drawTooltip(vpWidth, vpHeight, out);
+}
+
+// The strip and, when one is open, its menu. Every rectangle comes from the same
+// four functions the pointer asks, so a title cannot be drawn in one place and
+// clicked in another.
+void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
+                                std::vector<UIRenderObject>& out)
+{
+	(void)vpHeight;
+	if (m_menuBar.empty()) return;
+
+	const glm::vec4 barColor  { 0.13f, 0.13f, 0.15f, 1.0f };
+	const glm::vec4 textColor { 0.90f, 0.90f, 0.92f, 1.0f };
+	const glm::vec4 hotColor  { 0.30f, 0.45f, 0.75f, 1.0f };
+
+	UIRenderObject bar;
+	bar.position = { 0.0f, 0.0f };
+	bar.size     = { vpWidth, kMenuBarH };
+	bar.color    = barColor;
+	out.push_back(bar);
+
+	for (std::size_t i = 0; i < m_menuBar.size(); ++i)
+	{
+		float tx = 0.0f, tw = 0.0f;
+		if (!menuTitleRect(i, tx, tw)) continue;
+		if (static_cast<int>(i) == m_menuOpen)
+		{
+			UIRenderObject hl;
+			hl.position = { tx, 0.0f };
+			hl.size     = { tw, kMenuBarH };
+			hl.color    = hotColor;
+			out.push_back(hl);
+		}
+		HE::UITextLayout opts;
+		opts.alignH = 1;   // centred in its title box
+		opts.alignV = 1;
+		HE::emitUITextGlyphs(HE::sharedUIFont(), 0, m_menuBar[i].label,
+		                     { tx, 0.0f }, { tw, kMenuBarH }, kMenuFontPx,
+		                     textColor, 0, opts, out);
+	}
+
+	float px = 0.0f, py = 0.0f, pw = 0.0f, ph = 0.0f;
+	if (!menuPopupRect(px, py, pw, ph)) return;
+	const HE::AppMenu& m = m_menuBar[static_cast<std::size_t>(m_menuOpen)];
+
+	UIRenderObject card;
+	card.position = { px, py };
+	card.size     = { pw, ph };
+	card.color    = { 0.16f, 0.16f, 0.18f, 0.98f };
+	card.cornerRadius = glm::vec4(4.0f);
+	card.borderWidth  = 1.0f;
+	card.borderColor  = { 0.0f, 0.0f, 0.0f, 0.55f };
+	out.push_back(card);
+
+	float row = py;
+	for (std::size_t i = 0; i < m.items.size(); ++i)
+	{
+		const HE::AppMenuItem& it = m.items[i];
+		const float hgt = it.separator ? kMenuSepH : kMenuItemH;
+		if (it.separator)
+		{
+			UIRenderObject line;
+			line.position = { px + kMenuItemPad * 0.5f, row + hgt * 0.5f };
+			line.size     = { pw - kMenuItemPad, 1.0f };
+			line.color    = { 1.0f, 1.0f, 1.0f, 0.18f };
+			out.push_back(line);
+		}
+		else
+		{
+			if (static_cast<int>(i) == m_menuHover)
+			{
+				UIRenderObject hl;
+				hl.position = { px, row };
+				hl.size     = { pw, hgt };
+				hl.color    = hotColor;
+				out.push_back(hl);
+			}
+			HE::UITextLayout opts;
+			opts.alignV = 1;
+			HE::emitUITextGlyphs(HE::sharedUIFont(), 0, it.label,
+			                     { px + kMenuItemPad, row }, { pw - 2.0f * kMenuItemPad, hgt },
+			                     kMenuFontPx, textColor, 0, opts, out);
+		}
+		row += hgt;
+	}
 }
 
 // The list a ComboBox drops down. Its rows come from `comboListRect`, the same

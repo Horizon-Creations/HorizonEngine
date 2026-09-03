@@ -10823,6 +10823,170 @@ TEST_CASE("Drop: the file lands on the element that ACCEPTS it, not on the one i
     CHECK(rt.getVariable(inst, "count").i == 4);
 }
 
+// ── The application's menu bar (plan A6) ─────────────────────────────────────
+namespace
+{
+    // A bar with two menus, the first of which has a separator in it — enough
+    // shape for every question below and no more.
+    std::vector<HE::AppMenu> sampleMenuBar()
+    {
+        HE::AppMenu file;
+        file.id = "file"; file.label = "File";
+        file.items.push_back({ "new",  "New",   false });
+        file.items.push_back({ "open", "Open…", false });
+        file.items.push_back({ "",     "",      true  });
+        file.items.push_back({ "quit", "Quit",  false });
+        HE::AppMenu edit;
+        edit.id = "edit"; edit.label = "Edit";
+        edit.items.push_back({ "undo", "Undo", false });
+        return { file, edit };
+    }
+}
+
+TEST_CASE("The menu bar opens on a title, chooses on release, and closes on Escape")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A page underneath, so "the bar eats its own band" is a claim about
+    // something rather than about an empty screen.
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int panel = tree.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *tree.find(panel);
+        e.name = "Under";
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 300.0f;
+    }
+    registerWidget(cm, tree, nullptr);
+    HorizonCode::Runtime rt;
+    // The menu belongs to the APPLICATION, so its entries arrive at the
+    // application's own script — the same door a drop nobody accepted uses.
+    HorizonCode::Graph app;
+    {
+        HorizonCode::Variable chosen;
+        chosen.name = "chosen"; chosen.type = PinType::String;
+        app.variables.push_back(chosen);
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnMenuItem";
+        ev.elem = 0; ev.hasArg = true; ev.propType = PinType::String;
+        const int evId = app.addNode(ev);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "chosen";
+        set.propType = PinType::String;
+        const int setId = app.addNode(set);
+        REQUIRE(app.connect(evId, 0, setId, 0));
+        REQUIRE(app.connect(evId, 1, setId, 2));
+    }
+    const HorizonCode::InstanceId gi = rt.setGameInstance(app);
+    REQUIRE(gi != 0);
+
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    (void)panel;
+
+    wm.setMenuBar(sampleMenuBar());
+    CHECK(wm.menuBarHeight() > 0.0f);
+    CHECK(wm.openMenu() == -1);
+
+    const float barMid = wm.menuBarHeight() * 0.5f;
+    // Press on "File" opens it, and the press is not a click on the page below:
+    // a bar the page can be clicked through would not be a bar.
+    CHECK(wm.processPointer(400.0f, 300.0f, 20.0f, barMid, true, true));
+    CHECK(wm.openMenu() == 0);
+    CHECK(wm.hasLayer());
+    // Releasing on the title keeps it open — that release belongs to the press
+    // that opened the menu, and closing there makes a menu impossible to use.
+    wm.processPointer(400.0f, 300.0f, 20.0f, barMid, false, true);
+    CHECK(wm.openMenu() == 0);
+
+    // Down the list to "Open…", and let go: the id arrives, not the label.
+    const float itemY = wm.menuBarHeight() + 12.0f + 24.0f;   // second row
+    wm.processPointer(400.0f, 300.0f, 30.0f, itemY, true, true);
+    wm.processPointer(400.0f, 300.0f, 30.0f, itemY, false, true);
+    CHECK(wm.openMenu() == -1);          // choosing closes it
+    CHECK_FALSE(wm.hasLayer());
+    CHECK(rt.getVariable(gi, "chosen").s == "open");   // the id, not the label
+
+    // Escape closes an open menu, through the same door that closes a dialog.
+    wm.processPointer(400.0f, 300.0f, 20.0f, barMid, true, true);
+    CHECK(wm.openMenu() == 0);
+    CHECK(wm.closeTopLayer());
+    CHECK(wm.openMenu() == -1);
+    CHECK_FALSE(wm.hasLayer());
+}
+
+TEST_CASE("Walking onto the next title switches menus without letting go")
+{
+    // The one thing a menu BAR does that a dropdown cannot. Without it a menu
+    // bar is a row of separate dropdowns, and everyone can feel the difference
+    // even if nobody names it.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.add(HE::UIWidgetType::Panel);
+    registerWidget(cm, tree, nullptr);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    wm.setMenuBar(sampleMenuBar());
+
+    const float barMid = wm.menuBarHeight() * 0.5f;
+    wm.processPointer(400.0f, 300.0f, 20.0f, barMid, true, true);
+    REQUIRE(wm.openMenu() == 0);
+    // The button is still down, and the pointer moves onto "Edit". (Its box
+    // starts where "File"'s ends, which is why the x is asked for rather than
+    // guessed — a title is as wide as its word.)
+    float ex = 0.0f, ew = 0.0f;
+    REQUIRE(wm.menuTitleBox(1, ex, ew));
+    wm.processPointer(400.0f, 300.0f, ex + ew * 0.5f, barMid, true, true);
+    CHECK(wm.openMenu() == 1);
+    // …and there is still exactly ONE layer: switching is not closing and
+    // opening, or the page underneath would flicker back into reach between them.
+    CHECK(wm.hasLayer());
+    wm.closeTopLayer();
+    CHECK_FALSE(wm.hasLayer());
+}
+
+TEST_CASE("A separator is a line, not a row that can be chosen")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.add(HE::UIWidgetType::Panel);
+    registerWidget(cm, tree, nullptr);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    wm.setMenuBar(sampleMenuBar());
+
+    // Drawn: the strip, its two titles and — once open — the card and its rows.
+    std::vector<UIRenderObject> before;
+    wm.extract(400.0f, 300.0f, before);
+    const std::size_t closed = before.size();
+
+    wm.processPointer(400.0f, 300.0f, 20.0f, wm.menuBarHeight() * 0.5f, true, true);
+    REQUIRE(wm.openMenu() == 0);
+    std::vector<UIRenderObject> after;
+    wm.extract(400.0f, 300.0f, after);
+    CHECK(after.size() > closed);      // the open menu is drawn over the page
+
+    // Releasing on the separator's line chooses nothing and leaves the menu
+    // open: it has no id, so there is nothing it could mean.
+    const float sepY = wm.menuBarHeight() + 24.0f * 2.0f + 3.0f;
+    wm.processPointer(400.0f, 300.0f, 30.0f, sepY, true, true);
+    wm.processPointer(400.0f, 300.0f, 30.0f, sepY, false, true);
+    CHECK(wm.openMenu() == 0);
+}
+
 TEST_CASE("A tray entry arrives as its ID, at the application")
 {
     // The tray itself needs a desktop, so what is checked here is the part that

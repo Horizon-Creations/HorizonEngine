@@ -556,6 +556,20 @@ namespace
 	  "Adds an entry to the tray menu, in order. The ID is what On Tray Item "
 	  "receives when somebody chooses it, and the label is what they read: "
 	  "translating the menu then cannot quietly rewire what its entries do." },
+	{ "app.addMenu",
+	  "Adds a menu to the application's menu bar, in order. The id is how Add "
+	  "Menu Item names it afterwards; the label is what is drawn in the strip. "
+	  "Adding the same id twice is one menu, not two." },
+	{ "app.addMenuItem",
+	  "Adds an entry to the menu with that id. Choosing it fires On Menu Item "
+	  "with the ENTRY's id — the label is only what somebody reads, so "
+	  "translating the menu leaves what it does alone." },
+	{ "app.addMenuSeparator",
+	  "Adds a dividing line to a menu. It carries no id and cannot be chosen: it "
+	  "is there to group the entries above and below it." },
+	{ "app.clearMenuBar",
+	  "Removes the whole menu bar. A menu usually changes as a set, so the way "
+	  "to change one is to clear it and build the new one." },
 	{ "app.setAutostart",
 	  "Arranges for this application to start when the user logs in, or takes "
 	  "that back. It needs the project's \"Run other programs\" permission: it "

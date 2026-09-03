@@ -3,6 +3,7 @@
 #include <UIWidget/UIWidgetAnim.h>   // UIEase — animate() takes one
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
+#include <UIWidget/AppMenu.h>        // the application's menu bar (plan A6)
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Renderer/UIRenderObject.h>
@@ -157,6 +158,32 @@ public:
     // is drawn by this class and is not an element, so nothing else could say so.
     bool hasLayer() const { return !m_grabs.empty(); }
     bool hasModal() const;
+
+    // ── The application's menu bar (plan A6) ─────────────────────────────────
+    // A strip along the top of the render target, drawn by the MANAGER and not
+    // by any widget: it belongs to the application, and no page should have to
+    // contain it in order for the application to have one. Setting it replaces
+    // it whole — the API that fills it (app.addMenu…) rebuilds rather than
+    // patches, because a menu usually changes as a set.
+    //
+    // It OVERLAYS the canvas rather than shrinking it, and eats the pointer in
+    // its own band. Shrinking would mean an origin on UIWidgetCanvas, which
+    // every rect computation in HE_Core reads — a bigger change than the bar,
+    // and one to make on purpose rather than in passing. Until then a page that
+    // wants to sit clear of the bar asks how tall it is.
+    void setMenuBar(std::vector<HE::AppMenu> menus);
+    const std::vector<HE::AppMenu>& menuBar() const { return m_menuBar; }
+    // Render-target pixels; 0 when there is no bar. Fixed, like the tooltip's
+    // metrics: the bar is chrome, not content, and it does not scale with a
+    // canvas it is not part of.
+    float menuBarHeight() const;
+    // Which menu is open (-1 = none). The strip's own state, not a widget's.
+    int   openMenu() const { return m_menuOpen; }
+    // Where a title sits, for a caller that has to aim at one (a test, and later
+    // an editor overlay). A title is as wide as its word, so this is asked and
+    // never assumed.
+    bool  menuTitleBox(std::size_t index, float& x, float& width) const
+    { return menuTitleRect(index, x, width); }
 
     // Read-only view of a live widget's element tree (nullptr = no such
     // widget). The manager owns a deep copy per widget; this is how a caller
@@ -801,7 +828,10 @@ private:
     bool takesInput(int widgetId) const;
     struct Grab
     {
-        enum class Kind : uint8_t { Modal, Popup, Dropdown };
+        // MenuBar holds no widget (widget = 0), which is exactly what makes
+        // every widget inert while a menu is open: takesInput compares against
+        // the top of the stack, and nothing has id 0.
+        enum class Kind : uint8_t { Modal, Popup, Dropdown, MenuBar };
         Kind kind = Kind::Popup;
         int  widget = 0;   // the widget that holds the input
         int  elem   = 0;   // Dropdown only: the ComboBox that is open
@@ -811,6 +841,25 @@ private:
         int  prevZOrder = 0;   // Modal only: it was raised to the top
     };
     std::vector<Grab> m_grabs;
+
+    // ── The menu bar's own state and arithmetic ──────────────────────────────
+    // One source for the rectangles, used by the draw AND by the pointer. The
+    // day they are two is the day a menu opens under the title next to the one
+    // that was clicked.
+    std::vector<HE::AppMenu> m_menuBar;
+    int   m_menuOpen  = -1;   // index into m_menuBar, -1 = closed
+    int   m_menuHover = -1;   // item under the pointer in the open menu
+    // Left edge and width of a title in the strip.
+    bool  menuTitleRect(std::size_t i, float& x, float& w) const;
+    // The open menu's popup, and one of its rows.
+    bool  menuPopupRect(float& x, float& y, float& w, float& h) const;
+    // Which title is at this point (-1 = none), and which row of the open menu.
+    int   menuTitleAt(float x, float y) const;
+    int   menuItemAt(float x, float y) const;
+    // Open / switch / close, keeping the grab stack in step.
+    void  openMenuAt(int index);
+    void  closeMenu();
+    void  drawMenuBar(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
     // Close the top layer WITHOUT firing OnDismissed — for the paths where the
     // widget is going away anyway (destroyed, cleared).
     void popGrab(bool notify);

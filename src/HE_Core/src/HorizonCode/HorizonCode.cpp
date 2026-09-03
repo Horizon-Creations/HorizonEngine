@@ -2196,6 +2196,9 @@ const std::vector<EngineEventDesc>& engineEvents()
         // the entry's ID, never its label — a menu that is translated must not
         // quietly stop working.
         { "OnTrayItem",           "onTrayItem",           P::String, true  },
+        // An entry in the application's MENU BAR was chosen. Same shape as the
+        // tray, for the same reason: the id comes back, never the label.
+        { "OnMenuItem",           "onMenuItem",           P::String, true  },
         // The gesture inside the application: this element was picked up, a
         // payload was let go over this one, and the carry is over. OnDrop's
         // String is the SOURCE's payload (its Drag Payload, or its name) — the

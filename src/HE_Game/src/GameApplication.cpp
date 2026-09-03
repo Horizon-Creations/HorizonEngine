@@ -92,6 +92,10 @@ struct HostCtxParts
 	std::function<void()>                                       clearTrayMenu;
 	std::function<bool(bool)>                                   setAutostart;
 	std::function<bool()>                                       autostart;
+	std::function<void(const std::string&, const std::string&)> addMenu;
+	std::function<void(const std::string&, const std::string&, const std::string&)> addMenuItem;
+	std::function<void(const std::string&)>                     addMenuSeparator;
+	std::function<void()>                                       clearMenuBar;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
@@ -227,6 +231,10 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.clearTrayMenu  = g_host.clearTrayMenu;
 	c.setAutostart   = g_host.setAutostart;
 	c.autostart      = g_host.autostart;
+	c.addMenu          = g_host.addMenu;
+	c.addMenuItem      = g_host.addMenuItem;
+	c.addMenuSeparator = g_host.addMenuSeparator;
+	c.clearMenuBar     = g_host.clearMenuBar;
 	return c;
 }
 
@@ -728,6 +736,39 @@ void GameApplication::OnInit()
 			                          executablePathForAutostart(), on);
 		};
 		g_host.autostart      = [this] { return HE::heAutostart(m_config.bundleId); };
+		// The menu bar lives in the widget manager, which is where it is drawn.
+		// Built row by row here rather than handed over whole: a graph adds a
+		// menu, then its entries, and each call has to land somewhere.
+		g_host.addMenu = [this](const std::string& id, const std::string& label) {
+			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
+			for (const HE::AppMenu& m : menus)
+				if (m.id == id) return;   // adding the same menu twice is one menu
+			menus.push_back({ id, label, {} });
+			m_widgets.setMenuBar(std::move(menus));
+		};
+		g_host.addMenuItem = [this](const std::string& menuId, const std::string& id,
+		                            const std::string& label) {
+			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
+			for (HE::AppMenu& m : menus)
+				if (m.id == menuId)
+				{
+					m.items.push_back({ id, label, false });
+					m_widgets.setMenuBar(std::move(menus));
+					return;
+				}
+			HE_LOG_WARN(Core, "app.addMenuItem: no menu called '%s'", menuId.c_str());
+		};
+		g_host.addMenuSeparator = [this](const std::string& menuId) {
+			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
+			for (HE::AppMenu& m : menus)
+				if (m.id == menuId)
+				{
+					m.items.push_back({ "", "", true });
+					m_widgets.setMenuBar(std::move(menus));
+					return;
+				}
+		};
+		g_host.clearMenuBar = [this] { m_widgets.setMenuBar({}); };
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives

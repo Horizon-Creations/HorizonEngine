@@ -131,6 +131,14 @@ struct Ctx
     // and where its executable is, which is the host and nowhere else.
     std::function<bool(bool enabled)>                               setAutostart;
     std::function<bool()>                                           autostart;
+    // The menu bar. One callback per operation rather than a shared "apply this
+    // whole menu" so a graph can build it row by row, which is how a graph
+    // builds anything.
+    std::function<void(const std::string& id, const std::string& label)>       addMenu;
+    std::function<void(const std::string& menuId, const std::string& id,
+                       const std::string& label)>                              addMenuItem;
+    std::function<void(const std::string& menuId)>                             addMenuSeparator;
+    std::function<void()>                                                      clearMenuBar;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -720,6 +728,17 @@ namespace app {
     // not be able to arrange it.
     void setAutostart(Ctx&, bool enabled);
     bool autostart(Ctx&);
+
+    // ── The menu bar (plan A6) ──────────────────────────────────────────────
+    // Built, not authored: addMenu opens a menu, addMenuItem fills it, and
+    // clearMenuBar starts over — which is how a menu usually changes, as a set.
+    // Choosing an entry fires OnMenuItem with its id, the same shape the tray
+    // has.
+    void addMenu(Ctx&, const std::string& id, const std::string& label);
+    void addMenuItem(Ctx&, const std::string& menuId, const std::string& id,
+                     const std::string& label);
+    void addMenuSeparator(Ctx&, const std::string& menuId);
+    void clearMenuBar(Ctx&);
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────────────
