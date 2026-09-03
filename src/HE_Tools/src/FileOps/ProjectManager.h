@@ -272,6 +272,18 @@ struct ProjectData
 	// ordinary body text is regular, and `<b>` then has something to be bolder
 	// than. Same asymmetry as `themeStyled` on an element, for the same reason.
 	bool fontWeightBold = true;
+
+	// ── What the application IS, to the system around it (plan A7) ───────────
+	// The icon is GENERATED from one of the engine's built-in icons on a plate
+	// of `appIconColor`, so a project has an icon on the day it is created and
+	// nobody has to produce a .icns, an .ico and a .png of the same picture.
+	// Empty name = no icon written, and the runtime's default stands.
+	std::string appIconName  = "widgets";
+	std::string appIconColor = "#1e70c8";   // "#RRGGBB", as everywhere else
+	// Empty = derived from the project name, which is what every export did
+	// before this field existed. Set it and the export says exactly this.
+	std::string bundleId;
+	std::string appVersion = "1.0";
 };
 
 class HE_TOOLS_API ProjectManager

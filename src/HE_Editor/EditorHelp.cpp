@@ -1777,6 +1777,33 @@ namespace
 	  "here so that a project which has already thought about what it may reach "
 	  "does not have to be asked a second time when that group arrives.",
 	  "", "editor#preferences" },
+	{ "Application/Icon", "Icon",
+	  "The name of one of the engine's built-in icons — the same names <icon=…> "
+	  "uses in a rich text label. The export GENERATES the icon from it: a .icns "
+	  "for macOS, an .ico for Windows and a .png the runtime uses as its window "
+	  "icon, all from one picture on a coloured plate.\n\n"
+	  "So there is nothing to draw and nothing to keep in three formats. Leave it "
+	  "empty and the export writes no icon at all, which is what it did before "
+	  "this existed.",
+	  "", "editor#preferences" },
+	{ "Application/Plate colour", "Plate colour",
+	  "The rounded square the icon sits on. The icon itself is white on a dark "
+	  "plate and near-black on a light one, so this is one choice and not two — "
+	  "white on yellow is not an option somebody should be able to pick by "
+	  "accident.",
+	  "", "editor#preferences" },
+	{ "Application/Bundle identifier", "Bundle identifier",
+	  "What the system calls this application: CFBundleIdentifier on macOS, and "
+	  "the name every later per-app setting hangs off. Empty derives "
+	  "com.horizonengine.<project>, which is what every export did before this "
+	  "field existed — set it to your own reverse domain once you have one.\n\n"
+	  "Changing it after release makes the system treat the result as a DIFFERENT "
+	  "application: new settings, new permissions, new place in the Dock.",
+	  "", "editor#preferences" },
+	{ "Application/Version", "Version",
+	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle. "
+	  "Free-form text; \"1.4\" and \"1.4.2\" are both fine.",
+	  "", "editor#preferences" },
 	{ "Fonts/Regular", "Regular",
 	  "Ordinary body text, and the setting a new project starts with. It is also "
 	  "what makes <b> in rich text visible: a bold run is drawn in the same "
@@ -4078,6 +4105,7 @@ namespace
 		// under "Preferences".
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
+		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────

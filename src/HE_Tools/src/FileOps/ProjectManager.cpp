@@ -907,6 +907,11 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// project: those keep the bold the engine always drew, a new one starts where
 	// text should start and can use <b> for emphasis.
 	j["fontWeightBold"] = false;
+	// An application with an icon from the first day. A game gets one too — it
+	// is the same "this is what you are in the Dock" problem.
+	j["appIconName"]    = isApp ? "widgets" : "sports_esports";
+	j["appIconColor"]   = "#1e70c8";
+	j["appVersion"]     = "1.0";
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -1068,6 +1073,13 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// Absent means bold, which is what every project written before this was
 	// getting. New projects say false explicitly (see the template below).
 	m_currentProject.fontWeightBold = jsonBool(j, "fontWeightBold", true);
+	// The application's identity. Absent icon name means the default one rather
+	// than none: a project made before this had no icon at all, and the generated
+	// one is strictly better than the engine placeholder.
+	m_currentProject.appIconName  = jsonString(j, "appIconName", "widgets");
+	m_currentProject.appIconColor = jsonString(j, "appIconColor", "#1e70c8");
+	m_currentProject.bundleId     = jsonString(j, "bundleId");
+	m_currentProject.appVersion   = jsonString(j, "appVersion", "1.0");
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -1145,6 +1157,12 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["allowNetwork"]          = m_currentProject.allowNetwork;
 	j["fontScripts"]           = m_currentProject.fontScripts;
 	j["fontWeightBold"]        = m_currentProject.fontWeightBold;
+	j["appIconName"]           = m_currentProject.appIconName;
+	j["appIconColor"]          = m_currentProject.appIconColor;
+	j["appVersion"]            = m_currentProject.appVersion;
+	// Only when it was chosen: an empty key would freeze today's derived value
+	// into the file and make a later rename of the project stop moving it.
+	if (!m_currentProject.bundleId.empty()) j["bundleId"] = m_currentProject.bundleId;
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

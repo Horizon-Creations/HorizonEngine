@@ -1230,8 +1230,17 @@ void startExport(AppContext& ctx)
                     es.allowNetwork   = ctx.projectManager->currentProject().allowNetwork;
                     es.fontScripts    = ctx.projectManager->currentProject().fontScripts;
                     es.fontWeightBold = ctx.projectManager->currentProject().fontWeightBold;
+                    // What the application is to the system it lands on: the
+                    // icon is generated at export time from these three.
+                    es.appIconName  = ctx.projectManager->currentProject().appIconName;
+                    es.appIconColor = ctx.projectManager->currentProject().appIconColor;
+                    es.bundleId     = ctx.projectManager->currentProject().bundleId;
+                    es.appVersion   = ctx.projectManager->currentProject().appVersion;
                 }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
+                // Which icon container the output gets. Host resolves to what
+                // this editor is running on, so the exporter never has to guess.
+                es.iconPlatform     = exportPlatformFromName(s_exportPlatform);
                 // Texture-compression cook target, chosen automatically from the
                 // export target's GPU family (all encoding happens at pack time —
                 // the shipped game only uploads the resulting blocks). Values are

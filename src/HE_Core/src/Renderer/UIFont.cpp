@@ -302,6 +302,42 @@ std::uint32_t uiIconCodepoint(const std::string& name)
     return 0;
 }
 
+const char* uiIconNameAt(std::size_t i)
+{
+    return i < MaterialIcons_name_count ? MaterialIcons_names[i].name : "";
+}
+
+bool uiRasterizeIcon(const std::string& name, int px, std::vector<std::uint8_t>& out)
+{
+    const std::uint32_t cp = uiIconCodepoint(name);
+    const stbtt_fontinfo* info = iconFontInfo();
+    if (cp == 0 || !info || px <= 0) return false;
+
+    // 0.62 of the box: Material icons are drawn to fill their em, and an icon
+    // that touched the edges of an app icon would look like a mistake. The tight
+    // box is then CENTRED, so icons of different shapes sit alike rather than
+    // each on its own baseline.
+    const float scale = stbtt_ScaleForPixelHeight(info, px * 0.62f);
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    stbtt_GetCodepointBitmapBox(info, (int)cp, scale, scale, &x0, &y0, &x1, &y1);
+    const int gw = x1 - x0, gh = y1 - y0;
+    if (gw <= 0 || gh <= 0) return false;
+
+    std::vector<std::uint8_t> glyph((std::size_t)gw * gh, 0);
+    stbtt_MakeCodepointBitmap(info, glyph.data(), gw, gh, gw, scale, scale, (int)cp);
+
+    out.assign((std::size_t)px * px, 0);
+    const int ox = (px - gw) / 2, oy = (px - gh) / 2;
+    for (int y = 0; y < gh; ++y)
+        for (int x = 0; x < gw; ++x)
+        {
+            const int dx = ox + x, dy = oy + y;
+            if (dx < 0 || dx >= px || dy < 0 || dy >= px) continue;
+            out[(std::size_t)dy * px + dx] = glyph[(std::size_t)y * gw + x];
+        }
+    return true;
+}
+
 std::size_t uiIconCount()
 {
     static const std::size_t s_count = []

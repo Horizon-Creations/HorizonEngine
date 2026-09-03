@@ -110,6 +110,14 @@ HE_API std::uint32_t uiEngineFaceKey(UIFontFace face);
 // outline is called "home", so the mapping is a table the engine carries.
 HE_API std::uint32_t uiIconCodepoint(const std::string& name);
 HE_API std::size_t   uiIconCount();
+// The `n`-th icon name (alphabetical), for a picker that has to list them.
+HE_API const char*   uiIconNameAt(std::size_t i);
+
+// One icon rasterized at an EXACT size, centred in a `px` × `px` coverage
+// bitmap (`out` is px*px bytes). Its own rasterization rather than a scaled
+// atlas glyph, because an application icon is drawn at 512 and the atlas holds
+// 40. False for a name the face does not have; `out` is then untouched.
+HE_API bool uiRasterizeIcon(const std::string& name, int px, std::vector<std::uint8_t>& out);
 
 // The weight the shared font is baked in. Bold is the default because it is what
 // the engine has always drawn; a project that wants ordinary body text sets

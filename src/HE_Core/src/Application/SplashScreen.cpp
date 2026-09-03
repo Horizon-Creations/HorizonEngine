@@ -1,9 +1,10 @@
 #include "Application/SplashScreen.h"
 #include "Diagnostics/Log.h"
 
-// PNG only, and private to this file: the splash needs one decoder for one
-// image, and nothing else in HorizonCore has an opinion about stb_image.
-#define STB_IMAGE_STATIC
+// PNG only, and this is HorizonCore's ONE copy of the decoder: AppIcon.cpp reads
+// the generated window icon back through the same symbols, so it must not be
+// file-local (it was, until there were two readers). Still not exported — the
+// library's own translation units share it, nothing outside sees stb_image.
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #include <stb_image.h>

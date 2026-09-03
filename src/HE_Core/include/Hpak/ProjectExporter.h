@@ -8,6 +8,15 @@
 #include <vector>
 #include <cstdint>
 
+// ─── Export target platforms ──────────────────────────────────────────────────
+// The pak + project.hcfg are platform-neutral; the target only decides which
+// game-runtime binaries ship and (in the editor) the output sub-folder. Host =
+// the platform the editor is running on, served from <base>/../Game as always;
+// cross-targets are served from <base>/../GameRuntimes/<Name>/ — a prebuilt
+// runtime bundle the user drops there (built on that platform / CI).
+// Declared up here because ExportSettings names one.
+enum class ExportPlatform : uint8_t { Host = 0, Windows, MacOS, Linux };
+
 struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
@@ -69,6 +78,20 @@ struct HE_API ExportSettings {
     // "fontWeightBold"). True is what the engine always drew; the exported app
     // has to be told, or a project that chose regular body text ships bold.
     bool fontWeightBold = true;
+    // ── What the shipped application IS to the system (plan A7) ─────────────
+    // The icon is generated from a built-in icon name on a coloured plate, so
+    // the export writes the .icns / .ico / .png itself. Empty name = no icon
+    // files, which is what every export did before this existed.
+    std::string appIconName;
+    std::string appIconColor = "#1e70c8";
+    // Empty = derived from the project name (com.horizonengine.<name>), the
+    // behaviour every earlier export had.
+    std::string bundleId;
+    std::string appVersion = "1.0";
+    // Which system the output is FOR. The runtime binaries are chosen by the
+    // caller (gameRuntimeDir), but the icon has one container per platform and
+    // writing all three would leave two of them lying beside every build.
+    ExportPlatform iconPlatform = ExportPlatform::Host;
     // The Theme asset the shipped application boots with (content-relative;
     // empty = the engine's built-in default) and the mode it was asked for
     // ("System"/"Light"/"Dark"). Both ride in project.hcfg, not config.json —
@@ -155,14 +178,7 @@ struct HE_API ExportResult {
     std::filesystem::path executablePath;
 };
 
-// ─── Export target platforms ──────────────────────────────────────────────────
-// The pak + project.hcfg are platform-neutral; the target only decides which
-// game-runtime binaries ship and (in the editor) the output sub-folder. Host =
-// the platform the editor is running on, served from <base>/../Game as always;
-// cross-targets are served from <base>/../GameRuntimes/<Name>/ — a prebuilt
-// runtime bundle the user drops there (built on that platform / CI).
-enum class ExportPlatform : uint8_t { Host = 0, Windows, MacOS, Linux };
-
+// ─── Export target platforms (the enum is declared at the top of this file) ───
 HE_API const char*    exportPlatformName(ExportPlatform p);   // "Host"/"Windows"/"macOS"/"Linux"
 HE_API ExportPlatform exportPlatformFromName(const std::string& name); // unknown → Host
 HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,

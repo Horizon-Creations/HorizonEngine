@@ -2317,6 +2317,42 @@ ist näher am Textfeld als am Label.
 
 ---
 
+### A7, erster Teil: die Anwendung bekommt ein Gesicht (03.09.2026)
+
+Aus B6 fällt A7 billiger heraus, als es im Plan steht: **das App-Icon wird erzeugt, nicht
+verlangt.** Ein Name aus der eingebauten Icon-Schrift plus eine Plattenfarbe, und der Export
+schreibt daraus die drei Container, auf denen drei Systeme bestehen. Niemand zeichnet dasselbe
+Bild dreimal, und ein Projekt hat ein Icon an dem Tag, an dem es angelegt wird — neue Projekte
+bekommen `widgets` beziehungsweise `sports_esports` in die `.heproj` geschrieben.
+
+**Ein PNG-Encoder, nicht drei Container-Encoder.** `.icns` und `.ico` tragen beide PNG-Nutzlast,
+also gibt es genau eine Stelle, die Pixel in Bytes verwandelt, und zwei kurze Funktionen, die
+Verzeichnisse drumherum bauen. Der Encoder ist `stb_image_write.h` (vendort, Public Domain):
+die erste Fassung schrieb PNG mit STORED-Deflate von Hand, war korrekt, und produzierte 1,4 MB
+statt 25 KB pro `.icns`. Ein Icon, das vierzigmal zu groß ist, reist in jede ausgelieferte
+Anwendung mit.
+
+**Die Falle beim zweiten Leser einer vendorten Bibliothek.** Der PNG-DECODER lag mit
+`STB_IMAGE_STATIC` in `SplashScreen.cpp`, also dateilokal — mit dem Kommentar „nichts sonst in
+HorizonCore hat eine Meinung zu stb_image". Jetzt hat etwas: das Fenster-Icon wird zur Laufzeit
+aus derselben PNG gelesen. Statt einer zweiten Kopie des Decoders ist das `static` gefallen; die
+Symbole bleiben innerhalb der Bibliothek und werden nicht exportiert.
+
+**Und die Falle, die C++ still stellt:** ein `struct SDL_Window;` INNERHALB von `namespace HE`
+deklariert `HE::SDL_Window` und damit einen anderen Typ als den, den SDL meint. Die
+Vorwärtsdeklaration gehört auf globale Ebene, sonst findet der Linker die Funktion nicht, die
+direkt darüber steht.
+
+**Was das System sonst noch wissen muss**, ist jetzt auch einstellbar statt abgeleitet:
+Bundle-Identifier (leer = `com.horizonengine.<projekt>` wie bisher) und Version wandern in die
+`Info.plist`, `CFBundleIconFile` wird nur gesetzt, wenn die Datei wirklich daneben liegt — ein
+Bundle, das auf ein fehlendes Icon zeigt, bekommt das generische UND lässt es cachen.
+
+**Nicht gebaut, und damit ist A7 nicht zu:** Dateitypen-Zuordnung, „Öffnen mit", Autostart,
+Tray-Icon. Für den Tray hat SDL3 inzwischen `SDL_tray.h`, das ist die nächste Scheibe.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

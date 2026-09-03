@@ -35,7 +35,7 @@ namespace EditorSettingsPanel
 		// live in Preferences because there is no project settings surface yet
 		// and a permission nobody can find is a permission nobody grants; each
 		// page says whose settings they are in its first line.
-		Permissions, Fonts,
+		Permissions, Fonts, Application,
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).

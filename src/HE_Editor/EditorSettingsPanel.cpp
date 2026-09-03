@@ -13,6 +13,8 @@
 #include <SourceControl/RepoStatus.h>
 #include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
+#include <Application/AppIcon.h>       // the generated app icon + its preview
+#include <Renderer/UIFont.h>           // icon names, and the plate colour parser
 #include <Types/Enums.h>
 #include <algorithm>
 #include <cfloat>
@@ -1246,6 +1248,142 @@ void drawPermissionsPage(AppContext& ctx)
 	}
 }
 
+// ─── Project ▸ Application ───────────────────────────────────────────────────
+// What the application IS to the system it lands on (plan A7): its icon, its
+// identifier, its version. The icon is GENERATED from one of the built-in icons
+// on a coloured plate — the export writes the .icns, the .ico and the .png from
+// it — so a project has an icon on the day it is made and nobody produces the
+// same picture three times.
+//
+// The preview is a real texture of the real bytes, rebuilt only when the answer
+// changes: a picture of the icon rendered by some other code would be the one
+// thing on this page that can lie.
+void drawApplicationPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Application");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData& p = ctx.projectManager->currentProject();
+
+	EditorWidgets::hint("These belong to the PROJECT: saved in its .heproj and written into "
+	                    "the application you export.");
+	ImGui::Spacing();
+
+	// ── The icon ─────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Icon");
+
+	static std::string   s_previewKey;      // name + colour the texture was built from
+	static ImTextureID   s_previewTex = 0;
+	static void*         s_previewHandle = nullptr;
+	static const int     kPreviewPx = 128;
+
+	// The model is written per keystroke (so the preview follows the typing), but
+	// the FILE is written when an edit ends. A .heproj rewritten per character is
+	// a lot of temp-file churn for one word, and it is a versioned file with a
+	// watcher on it.
+	bool commit = false;
+
+	EditorWidgets::Row::inputText("Icon##appiconname", &p.appIconName);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Icon");
+	const bool nameOk = !p.appIconName.empty() && HE::uiIconCodepoint(p.appIconName) != 0;
+	if (!p.appIconName.empty() && !nameOk)
+		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+		                   "No built-in icon is called that — the export writes none.");
+	else
+		ImGui::TextDisabled("One of the %zu built-in icons, by name. The same names "
+		                    "<icon=…> uses in a label.", HE::uiIconCount());
+
+	// A few names that contain what was typed, so somebody who half-remembers one
+	// can find it without leaving the page. Ten is enough to recognise the
+	// pattern; a full list of two thousand is a different panel.
+	if (!p.appIconName.empty() && !nameOk)
+	{
+		std::string matches;
+		int found = 0;
+		for (std::size_t i = 0; i < HE::uiIconCount() && found < 10; ++i)
+		{
+			const char* n = HE::uiIconNameAt(i);
+			if (std::strstr(n, p.appIconName.c_str()))
+			{
+				matches += (found++ ? ", " : "");
+				matches += n;
+			}
+		}
+		if (found) ImGui::TextDisabled("Did you mean: %s", matches.c_str());
+	}
+	ImGui::Spacing();
+
+	{
+		glm::vec4 col(0.12f, 0.44f, 0.78f, 1.0f);
+		HE::uiParseRichColor(p.appIconColor, col);
+		float rgb[3] = { col.r, col.g, col.b };
+		if (EditorWidgets::Row::colorEdit3("Plate colour##appiconcolor", rgb))
+		{
+			char hex[8];
+			std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
+			              (int)std::lround(std::clamp(rgb[0], 0.0f, 1.0f) * 255.0f),
+			              (int)std::lround(std::clamp(rgb[1], 0.0f, 1.0f) * 255.0f),
+			              (int)std::lround(std::clamp(rgb[2], 0.0f, 1.0f) * 255.0f));
+			p.appIconColor = hex;
+		}
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+	}
+	EditorWidgets::helpForLabel("Plate colour");
+	ImGui::TextDisabled("The icon itself is white on a dark plate and near-black on a light "
+	                    "one, so there is one colour to choose and not two.");
+	ImGui::Spacing();
+
+	// ── The preview ──────────────────────────────────────────────────────────
+	const std::string key = p.appIconName + "|" + p.appIconColor;
+	if (key != s_previewKey && ctx.renderer)
+	{
+		s_previewKey = key;
+		if (s_previewHandle) { ctx.renderer->DestroyImGuiTexture(s_previewHandle); s_previewHandle = nullptr; }
+		s_previewTex = 0;
+		glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
+		HE::uiParseRichColor(p.appIconColor, bg);
+		const std::vector<std::uint8_t> rgba =
+			HE::heRenderAppIcon(p.appIconName, kPreviewPx, bg, HE::heAppIconForeground(bg));
+		if (!rgba.empty())
+			if (void* h = ctx.renderer->CreateImGuiTexture(rgba.data(), kPreviewPx, kPreviewPx))
+			{
+				s_previewHandle = h;
+				s_previewTex    = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(h));
+			}
+	}
+	if (s_previewTex)
+		ImGui::Image(s_previewTex, ImVec2((float)kPreviewPx, (float)kPreviewPx));
+	else
+		ImGui::TextDisabled("(no icon to show)");
+	ImGui::Spacing();
+
+	// ── Identity ─────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Identity");
+	EditorWidgets::Row::inputText("Bundle identifier##bundleid", &p.bundleId);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Bundle identifier");
+	ImGui::TextDisabled("Empty derives com.horizonengine.<project>, which is what every\n"
+	                    "export did before this field existed. Set it once you own a domain.");
+	ImGui::Spacing();
+	EditorWidgets::Row::inputText("Version##appversion", &p.appVersion);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Version");
+
+	if (commit)
+	{
+		// Straight to disk, as on the other project pages: a value that is in the
+		// panel and not in the file is the state somebody loses an evening to.
+		if (!ctx.projectManager->saveProject(p.path))
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's application settings", p.path);
+	}
+}
+
 // ─── Project ▸ Fonts ─────────────────────────────────────────────────────────
 // Which scripts this project's text is written in. The atlas always carries
 // Latin as it is actually written — umlauts, accents, the punctuation a text
@@ -1646,6 +1784,7 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::Effects,            "Effects" },
 };
 constexpr NavItem kProjectItems[] = {
+	{ Page::Application, "Application" },
 	{ Page::Permissions, "Permissions" },
 	{ Page::Fonts,       "Fonts" },
 };
@@ -1768,6 +1907,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
 	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
 	else if (s_page == Page::Fonts)       drawFontsPage(ctx);
+	else if (s_page == Page::Application) drawApplicationPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

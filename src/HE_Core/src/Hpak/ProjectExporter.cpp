@@ -2,6 +2,8 @@
 #include <Types/Enums.h>            // HE::AssetType (the packed type indices)
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
+#include <Application/AppIcon.h>            // the generated .icns/.ico/.png
+#include <Renderer/UIFont.h>                // uiParseRichColor for the plate colour
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
@@ -330,7 +332,10 @@ static std::string bundleIdentifier(const std::string& projectName)
 }
 
 static bool writeInfoPlist(const std::filesystem::path& contentsDir,
-                           const std::string& projectName)
+                           const std::string& projectName,
+                           const std::string& bundleId,
+                           const std::string& version,
+                           bool hasIcon)
 {
     // XML-escape the display name (project names can contain & < > " ').
     std::string name;
@@ -345,19 +350,27 @@ static bool writeInfoPlist(const std::filesystem::path& contentsDir,
         default: name += c;
         }
 
+    // An empty identifier means "derive it", which is what every export did
+    // before the field existed; a version that is empty means the same for 1.0.
+    const std::string ident = bundleId.empty() ? bundleIdentifier(projectName) : bundleId;
+    const std::string ver   = version.empty() ? std::string("1.0") : version;
+
     const std::string plist =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
         "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         "<plist version=\"1.0\">\n<dict>\n"
         "  <key>CFBundleExecutable</key><string>HorizonGame</string>\n"
-        "  <key>CFBundleIdentifier</key><string>" + bundleIdentifier(projectName) + "</string>\n"
+        "  <key>CFBundleIdentifier</key><string>" + ident + "</string>\n"
         "  <key>CFBundleName</key><string>" + name + "</string>\n"
         "  <key>CFBundleDisplayName</key><string>" + name + "</string>\n"
         "  <key>CFBundlePackageType</key><string>APPL</string>\n"
         "  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n"
-        "  <key>CFBundleVersion</key><string>1.0</string>\n"
-        "  <key>CFBundleShortVersionString</key><string>1.0</string>\n"
+        "  <key>CFBundleVersion</key><string>" + ver + "</string>\n"
+        "  <key>CFBundleShortVersionString</key><string>" + ver + "</string>\n" +
+        // Named only when the file is actually there: a bundle that points at a
+        // missing icon shows the generic one AND makes Finder cache that.
+        (hasIcon ? "  <key>CFBundleIconFile</key><string>AppIcon</string>\n" : "") +
         "  <key>NSHighResolutionCapable</key><true/>\n"
         "  <key>LSMinimumSystemVersion</key><string>11.0</string>\n"
         "</dict>\n</plist>\n";
@@ -1043,16 +1056,70 @@ static std::optional<ExportResult> writeGameConfig(const ExportSettings& setting
     return std::nullopt;
 }
 
+// Phase 7b: the application's icon, generated rather than demanded. One name
+// from the built-in icon face on a coloured plate becomes the three files three
+// systems each insist on — nobody draws the same picture three times, and a
+// project has an icon on the day it is created.
+//
+// Reports whether the macOS container was written, which is what decides
+// CFBundleIconFile below: a bundle that names a missing icon shows the generic
+// one and gets that cached.
+static bool writeAppIcons(const ExportSettings& settings, const ExportContext& ctx)
+{
+    if (settings.appIconName.empty()) return false;
+
+    glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
+    HE::uiParseRichColor(settings.appIconColor, bg);   // unparsable → the default plate
+    const glm::vec4 fg = HE::heAppIconForeground(bg);
+    const std::vector<HE::AppIconImage> set =
+        HE::heRenderAppIconSet(settings.appIconName, bg, fg, { 16, 32, 64, 128, 256, 512 });
+    if (set.empty()) return false;   // a name the face does not have is no icon
+
+    // The PNG goes everywhere: it is what the runtime loads to set its window
+    // icon, which is the taskbar entry on Windows and Linux both.
+    const auto at = [&set](int px) -> const HE::AppIconImage* {
+        for (const HE::AppIconImage& i : set) if (i.px == px) return &i;
+        return nullptr;
+    };
+    if (const HE::AppIconImage* png = at(256))
+        HE::hePngWrite(ctx.dataDir / "AppIcon.png", png->rgba.data(), png->px, png->px);
+
+    // "Host" means the machine this editor runs on, resolved here so the phase
+    // never has to ask the caller what it meant.
+    ExportPlatform target = settings.iconPlatform;
+    if (target == ExportPlatform::Host)
+    {
+#ifdef _WIN32
+        target = ExportPlatform::Windows;
+#elif defined(__APPLE__)
+        target = ExportPlatform::MacOS;
+#else
+        target = ExportPlatform::Linux;
+#endif
+    }
+    const bool mac = ctx.app || target == ExportPlatform::MacOS;
+    const bool win = target == ExportPlatform::Windows;
+    bool icns = false;
+    if (mac && ctx.app)
+        icns = HE::heIcnsWrite(ctx.appPath / "Contents" / "Resources" / "AppIcon.icns", set);
+    if (win)
+        HE::heIcoWrite(ctx.binDir / "AppIcon.ico", set);
+    return icns;
+}
+
 // Phase 8: finalize the .app — Info.plist makes Contents/ a real bundle (so
 // SDL_GetBasePath resolves Resources), then an ad-hoc codesign of the whole
 // thing — the key patch already re-signed the bare executable, but adding
 // Info.plist and dylibs invalidates that; the bundle must be sealed last.
-static std::optional<ExportResult> finalizeAppBundle(const std::string&   projectName,
-                                                     const ExportContext& ctx)
+static std::optional<ExportResult> finalizeAppBundle(const std::string&    projectName,
+                                                     const ExportSettings& settings,
+                                                     bool                  hasIcon,
+                                                     const ExportContext&  ctx)
 {
     if (ctx.app)
     {
-        if (!writeInfoPlist(ctx.appPath / "Contents", projectName))
+        if (!writeInfoPlist(ctx.appPath / "Contents", projectName,
+                            settings.bundleId, settings.appVersion, hasIcon))
             return ExportResult{false, "Failed to write Info.plist", ctx.assetsPacked};
 #ifdef __APPLE__
         if (!signAppBundle(ctx.appPath))
@@ -1095,8 +1162,10 @@ ExportResult ProjectExporter::exportProject(
     if (auto fail = writeProjectConfig(projectName, settings, startupSceneBinary, ctx))
         return *fail;
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
+    stage("icon");
+    const bool hasIcon = writeAppIcons(settings, ctx);
     stage("bundle");
-    if (auto fail = finalizeAppBundle(projectName, ctx))                        return *fail;
+    if (auto fail = finalizeAppBundle(projectName, settings, hasIcon, ctx))     return *fail;
 
     // The runtime always ships under this name (routeRuntime above keys on it),
     // so the executable is derived, not searched for. Reported only if it is

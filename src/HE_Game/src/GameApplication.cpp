@@ -3,6 +3,7 @@
 #include "EmbeddedPakKey.h"
 #include <fstream>
 #include <Hpak/ProjectConfig.h>
+#include <Application/AppIcon.h>       // the window icon the export generated
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
@@ -324,6 +325,17 @@ void GameApplication::OnInit()
 		return;
 	}
 	const std::filesystem::path exeDir(baseRaw);
+
+	// ── The window icon (plan A7) ────────────────────────────────────────────
+	// AppIcon.png sits beside the data because the exporter generated it there.
+	// On macOS the Dock icon comes from the bundle's .icns and setting one here
+	// would replace it with the bare bitmap, so this is the other platforms'
+	// path — where the window icon IS the taskbar entry. Same reasoning the
+	// editor's own icon follows.
+#ifndef __APPLE__
+	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+		HE::heSetWindowIcon(w, exeDir / "AppIcon.png");
+#endif
 
 	if (!ProjectConfigLoader::load(exeDir, m_config))
 	{
