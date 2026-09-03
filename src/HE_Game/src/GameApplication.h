@@ -163,6 +163,11 @@ private:
     // Where the drag was last seen, in drawable pixels — the position comes with
     // the movement, not with the drop that ends it.
     float m_dropX = 0.0f, m_dropY = 0.0f;
+    // "Open with" (plan A7): the documents this process was STARTED with, held
+    // until the first frame. They arrive before the GameInstance exists, and a
+    // file handed to nobody is a file lost — so they wait one frame and then go
+    // through the same door a drop does.
+    bool m_launchFilesPending = true;
     // Startup window + backend, settled once by applyShippedConfig. The values
     // here are the ones a game shipped with before the config could carry them,
     // so an export without those keys behaves exactly as it always did.

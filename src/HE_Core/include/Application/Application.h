@@ -176,6 +176,12 @@ namespace HE
 		// stop it restores the previous vsync state and writes a dump.
 		void toggleProfilerCapture();
 
+		// What the process was started with, minus argv[0]. Kept because
+		// "open with" hands an application its document as an argument on Windows
+		// and Linux (macOS sends an event instead), and by the time anything can
+		// act on that, main() is long gone.
+		const std::vector<std::string>& launchArguments() const { return m_launchArgs; }
+
 	protected:
 		// Frames completed by the main loop. Stamped onto every log record (see
 		// HE::Log::setFrameNumber) so a message can be tied to a specific frame.
@@ -190,6 +196,7 @@ namespace HE
 		// destroying the splash's 2D renderer can leave no context current.
 		void closeSplash();
 
+		std::vector<std::string>   m_launchArgs;   // see launchArguments()
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture

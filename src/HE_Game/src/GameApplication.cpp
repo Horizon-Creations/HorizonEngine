@@ -1686,6 +1686,29 @@ void GameApplication::OnRender(float deltaTime)
 	// — the checks used to be applied to some calls and forgotten on others.
 	IRenderer* const r = renderer();
 
+	// ── "Open with", delivered once ──────────────────────────────────────────
+	// Through the SAME door a drop uses, and deliberately so: an application that
+	// opens what it is handed wants ONE place to say so, and whether the document
+	// arrived by double-click or by being dragged onto the window is the system's
+	// business, not the author's. Position (-1, -1) is honest — nothing was
+	// dropped anywhere, so no element takes it and it reaches the GameInstance.
+	// (On macOS this list is empty: the system sends an open event, which SDL
+	// turns into the drop path above.)
+	if (m_launchFilesPending)
+	{
+		m_launchFilesPending = false;
+		const std::vector<std::string>& files = launchArguments();
+		if (!files.empty())
+		{
+			for (const std::string& p : files) HE::api::fs::grantPath(p);
+			int pw = 1, ph = 1;
+			if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+				SDL_GetWindowSizeInPixels(w, &pw, &ph);
+			m_widgets.processDrop(static_cast<float>(pw), static_cast<float>(ph),
+			                      -1.0f, -1.0f, files);
+		}
+	}
+
 	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);

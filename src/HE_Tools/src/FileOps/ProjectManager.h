@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <Application/DocumentTypes.h>   // HE::AppDocumentType (the .heproj list)
 
 // Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
@@ -284,6 +285,10 @@ struct ProjectData
 	// before this field existed. Set it and the export says exactly this.
 	std::string bundleId;
 	std::string appVersion = "1.0";
+	// The file types this application owns (".heproj \"documentTypes\"", an array
+	// of {extension, name, icon}). Empty is the normal case — an application that
+	// owns no file type is not a lesser one.
+	std::vector<HE::AppDocumentType> documentTypes;
 };
 
 class HE_TOOLS_API ProjectManager

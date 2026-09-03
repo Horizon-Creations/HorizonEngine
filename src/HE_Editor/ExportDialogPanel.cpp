@@ -1236,6 +1236,7 @@ void startExport(AppContext& ctx)
                     es.appIconColor = ctx.projectManager->currentProject().appIconColor;
                     es.bundleId     = ctx.projectManager->currentProject().bundleId;
                     es.appVersion   = ctx.projectManager->currentProject().appVersion;
+                    es.documentTypes = ctx.projectManager->currentProject().documentTypes;
                 }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 // Which icon container the output gets. Host resolves to what

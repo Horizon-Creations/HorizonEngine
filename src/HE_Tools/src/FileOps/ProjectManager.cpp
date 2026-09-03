@@ -1080,6 +1080,19 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.appIconColor = jsonString(j, "appIconColor", "#1e70c8");
 	m_currentProject.bundleId     = jsonString(j, "bundleId");
 	m_currentProject.appVersion   = jsonString(j, "appVersion", "1.0");
+	m_currentProject.documentTypes.clear();
+	if (j.contains("documentTypes") && j["documentTypes"].is_array())
+		for (const auto& e : j["documentTypes"])
+		{
+			if (!e.is_object()) continue;
+			HE::AppDocumentType t;
+			t.extension   = jsonString(e, "extension");
+			t.displayName = jsonString(e, "name");
+			t.iconName    = jsonString(e, "icon");
+			// A type with no extension is not a type; dropped on load rather than
+			// carried around as a row that can never be written out.
+			if (!t.extension.empty()) m_currentProject.documentTypes.push_back(std::move(t));
+		}
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -1163,6 +1176,17 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	// Only when it was chosen: an empty key would freeze today's derived value
 	// into the file and make a later rename of the project stop moving it.
 	if (!m_currentProject.bundleId.empty()) j["bundleId"] = m_currentProject.bundleId;
+	// Written only when there are any, so a project that owns no file type keeps
+	// a manifest that says nothing about file types.
+	if (!m_currentProject.documentTypes.empty())
+	{
+		json types = json::array();
+		for (const HE::AppDocumentType& t : m_currentProject.documentTypes)
+			types.push_back({ { "extension", t.extension },
+			                  { "name",      t.displayName },
+			                  { "icon",      t.iconName } });
+		j["documentTypes"] = std::move(types);
+	}
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

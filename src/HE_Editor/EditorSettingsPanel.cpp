@@ -1373,6 +1373,54 @@ void drawApplicationPage(AppContext& ctx)
 	EditorWidgets::Row::inputText("Version##appversion", &p.appVersion);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Version");
+	ImGui::Spacing();
+
+	// ── The file types this application owns ─────────────────────────────────
+	ImGui::SeparatorText("File types");
+	ImGui::TextWrapped("Which files belong to this application. The export declares them the "
+	                   "way each system wants it: inside the bundle on macOS, as a .desktop "
+	                   "and a MIME file on Linux, as a .reg on Windows. Installing the last "
+	                   "two is an installer's job — the export writes what would be installed.");
+	ImGui::Spacing();
+
+	int removeAt = -1;
+	for (std::size_t i = 0; i < p.documentTypes.size(); ++i)
+	{
+		HE::AppDocumentType& t = p.documentTypes[i];
+		ImGui::PushID(static_cast<int>(i));
+		EditorWidgets::Row::inputText("Extension##docext", &t.extension);
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+		if (i == 0) EditorWidgets::helpForLabel("Extension");
+		if (!t.extension.empty() && !HE::heValidDocumentExtension(t.extension))
+			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+			                   "Letters and digits only, no dot, not starting with a digit — "
+			                   "this one is skipped.");
+		EditorWidgets::Row::inputText("Name##docname", &t.displayName);
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+		if (i == 0) EditorWidgets::helpForLabel("Name");
+		EditorWidgets::Row::inputText("Icon##docicon", &t.iconName);
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+		if (i == 0) EditorWidgets::helpForLabel("Icon##doc");
+		if (!t.iconName.empty() && HE::uiIconCodepoint(t.iconName) == 0)
+			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+			                   "No built-in icon is called that — the files wear the "
+			                   "application's icon.");
+		if (EditorWidgets::button("Remove")) removeAt = static_cast<int>(i);
+		EditorWidgets::helpForLabel("Remove");
+		ImGui::Separator();
+		ImGui::PopID();
+	}
+	if (removeAt >= 0)
+	{
+		p.documentTypes.erase(p.documentTypes.begin() + removeAt);
+		commit = true;
+	}
+	if (EditorWidgets::button("Add file type"))
+	{
+		p.documentTypes.push_back({ "", "Document", "" });
+		commit = true;
+	}
+	EditorWidgets::helpForLabel("Add file type");
 
 	if (commit)
 	{

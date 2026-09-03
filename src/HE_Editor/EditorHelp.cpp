@@ -1804,6 +1804,33 @@ namespace
 	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle. "
 	  "Free-form text; \"1.4\" and \"1.4.2\" are both fine.",
 	  "", "editor#preferences" },
+	{ "Application/Extension", "Extension",
+	  "The file ending this type owns, without the dot: \"hnote\". Letters and "
+	  "digits only, because the system's own name for the type is derived from "
+	  "it — the UTI on macOS, the MIME type on Linux, the ProgId on Windows — and "
+	  "those may not contain anything else.\n\n"
+	  "Deriving rather than asking is deliberate: three names that can disagree "
+	  "with each other is how a file ends up opening in the wrong application.",
+	  "", "editor#preferences" },
+	{ "Application/Name", "Name",
+	  "What a file dialog calls this type — \"Horizon Note\", not \"hnote\". It "
+	  "is what somebody reads in an Open panel and in the Get Info window.",
+	  "", "editor#preferences" },
+	{ "Application/Icon##doc", "Icon",
+	  "The built-in icon these files wear, on the same plate as the application. "
+	  "Empty gives them the application's own icon, which is fine — a folder of "
+	  "files that all look alike is only a problem once there are two types.",
+	  "", "editor#preferences" },
+	{ "Application/Remove", "Remove",
+	  "Drops this file type. The declaration disappears from the next export; a "
+	  "system that already learned the association keeps it until something "
+	  "replaces it, which is the system's business and not the export's.",
+	  "", "editor#preferences" },
+	{ "Application/Add file type", "Add file type",
+	  "Adds a file type this application owns. It takes effect at the next "
+	  "export: a declaration only means something to a system that has an "
+	  "application installed to read it.",
+	  "", "editor#preferences" },
 	{ "Fonts/Regular", "Regular",
 	  "Ordinary body text, and the setting a new project starts with. It is also "
 	  "what makes <b> in rich text visible: a bold run is drawn in the same "

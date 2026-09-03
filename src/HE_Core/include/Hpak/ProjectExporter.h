@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/Defines.h>
 #include <Types/UUID.h>
+#include <Application/DocumentTypes.h>   // AppDocumentType (what the export declares)
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -88,6 +89,10 @@ struct HE_API ExportSettings {
     // behaviour every earlier export had.
     std::string bundleId;
     std::string appVersion = "1.0";
+    // The file types the shipped application owns. They become the plist's
+    // document types on macOS, a .desktop plus a MIME file on Linux and a .reg
+    // on Windows — three words for one declaration.
+    std::vector<HE::AppDocumentType> documentTypes;
     // Which system the output is FOR. The runtime binaries are chosen by the
     // caller (gameRuntimeDir), but the icon has one container per platform and
     // writing all three would leave two of them lying beside every build.

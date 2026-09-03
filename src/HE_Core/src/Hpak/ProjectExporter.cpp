@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>            // the generated .icns/.ico/.png
+#include <Application/DocumentTypes.h>      // …and the three ways to declare a file type
 #include <Renderer/UIFont.h>                // uiParseRichColor for the plate colour
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
 #include <Hpak/HpakWriter.h>
@@ -335,7 +336,8 @@ static bool writeInfoPlist(const std::filesystem::path& contentsDir,
                            const std::string& projectName,
                            const std::string& bundleId,
                            const std::string& version,
-                           bool hasIcon)
+                           bool hasIcon,
+                           const std::vector<HE::AppDocumentType>& docTypes)
 {
     // XML-escape the display name (project names can contain & < > " ').
     std::string name;
@@ -371,6 +373,10 @@ static bool writeInfoPlist(const std::filesystem::path& contentsDir,
         // Named only when the file is actually there: a bundle that points at a
         // missing icon shows the generic one AND makes Finder cache that.
         (hasIcon ? "  <key>CFBundleIconFile</key><string>AppIcon</string>\n" : "") +
+        // Which files are this application's, and what the system should call
+        // them. Empty when the project claims none, and then the plist reads
+        // exactly as it did before document types existed.
+        HE::heInfoPlistDocumentTypes(docTypes, ident) +
         "  <key>NSHighResolutionCapable</key><true/>\n"
         "  <key>LSMinimumSystemVersion</key><string>11.0</string>\n"
         "</dict>\n</plist>\n";
@@ -1104,7 +1110,67 @@ static bool writeAppIcons(const ExportSettings& settings, const ExportContext& c
         icns = HE::heIcnsWrite(ctx.appPath / "Contents" / "Resources" / "AppIcon.icns", set);
     if (win)
         HE::heIcoWrite(ctx.binDir / "AppIcon.ico", set);
+
+    // A document type gets an icon of its own when it names one, on the same
+    // plate as the application: a folder of files that all wear the app's icon
+    // tells nobody which is which, and asking for a second drawing is how the
+    // whole feature would go unused.
+    for (const HE::AppDocumentType& t : settings.documentTypes)
+    {
+        if (t.iconName.empty() || !HE::heValidDocumentExtension(t.extension)) continue;
+        const std::vector<HE::AppIconImage> docSet =
+            HE::heRenderAppIconSet(t.iconName, bg, fg, { 16, 32, 64, 128, 256, 512 });
+        if (docSet.empty()) continue;
+        if (mac && ctx.app)
+            HE::heIcnsWrite(ctx.appPath / "Contents" / "Resources" / ("Doc-" + t.extension + ".icns"),
+                            docSet);
+        if (win)
+            HE::heIcoWrite(ctx.binDir / ("Doc-" + t.extension + ".ico"), docSet);
+    }
     return icns;
+}
+
+// Phase 7c: the declarations the OTHER two systems want. macOS carries its own
+// inside Info.plist; Linux and Windows want files beside the executable, and
+// INSTALLING them is an installer's job — an export writes what would be
+// installed, never the registry or the user's mime database.
+static void writeDocumentTypeFiles(const std::string& projectName,
+                                   const ExportSettings& settings, const ExportContext& ctx)
+{
+    if (settings.documentTypes.empty() || ctx.app) return;
+
+    const std::string ident = settings.bundleId.empty()
+                                  ? bundleIdentifier(projectName) : settings.bundleId;
+    ExportPlatform target = settings.iconPlatform;
+    if (target == ExportPlatform::Host)
+    {
+#ifdef _WIN32
+        target = ExportPlatform::Windows;
+#elif defined(__APPLE__)
+        target = ExportPlatform::MacOS;
+#else
+        target = ExportPlatform::Linux;
+#endif
+    }
+
+    const auto write = [](const std::filesystem::path& p, const std::string& text) {
+        std::ofstream f(p, std::ios::trunc);
+        if (f) f << text;
+    };
+
+    if (target == ExportPlatform::Windows)
+    {
+        write(ctx.binDir / "RegisterFileTypes.reg",
+              HE::heWindowsRegistration(projectName, "HorizonGame.exe", ident,
+                                        settings.documentTypes));
+    }
+    else if (target == ExportPlatform::Linux)
+    {
+        write(ctx.binDir / (ident + ".desktop"),
+              HE::heDesktopEntry(projectName, "HorizonGame", ident, settings.documentTypes));
+        write(ctx.binDir / (ident + ".xml"),
+              HE::heSharedMimeInfo(ident, settings.documentTypes));
+    }
 }
 
 // Phase 8: finalize the .app — Info.plist makes Contents/ a real bundle (so
@@ -1119,7 +1185,8 @@ static std::optional<ExportResult> finalizeAppBundle(const std::string&    proje
     if (ctx.app)
     {
         if (!writeInfoPlist(ctx.appPath / "Contents", projectName,
-                            settings.bundleId, settings.appVersion, hasIcon))
+                            settings.bundleId, settings.appVersion, hasIcon,
+                            settings.documentTypes))
             return ExportResult{false, "Failed to write Info.plist", ctx.assetsPacked};
 #ifdef __APPLE__
         if (!signAppBundle(ctx.appPath))
@@ -1164,6 +1231,7 @@ ExportResult ProjectExporter::exportProject(
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
     stage("icon");
     const bool hasIcon = writeAppIcons(settings, ctx);
+    writeDocumentTypeFiles(projectName, settings, ctx);
     stage("bundle");
     if (auto fail = finalizeAppBundle(projectName, settings, hasIcon, ctx))     return *fail;
 

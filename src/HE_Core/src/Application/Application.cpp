@@ -87,7 +87,16 @@ namespace HE
 		if (argc > 1 && argv)
 		{
 			std::string cmd;
-			for (int i = 1; i < argc; ++i) { if (!cmd.empty()) cmd += ' '; cmd += argv[i] ? argv[i] : ""; }
+			for (int i = 1; i < argc; ++i)
+			{
+				const std::string a = argv[i] ? argv[i] : "";
+				if (!cmd.empty()) cmd += ' ';
+				cmd += a;
+				// Kept, not just logged: this is where "open with" arrives on
+				// Windows and Linux. Options are not documents, so anything
+				// starting with a dash stays out of the list.
+				if (!a.empty() && a[0] != '-') m_launchArgs.push_back(a);
+			}
 			HE_LOG_INFO(Core, "Command line: %s", cmd.c_str());
 		}
 
