@@ -72,6 +72,12 @@ struct HE_API ProjectConfig {
     bool         allowFiles     = false;
     bool         allowProcesses = false;
     bool         allowNetwork   = false;   // reserved for `http` (Welle 3)
+
+    // Which scripts the font atlas carries beyond Latin (a HE::UIFontScripts
+    // mask). Rides in the same flags word — one bit per script, stored straight,
+    // so a build written before this reads back as the base set, which is what
+    // it had.
+    std::uint32_t fontScripts = 0;
 };
 
 class HE_API ProjectConfigLoader {

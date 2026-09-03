@@ -1464,6 +1464,15 @@ void EditorApplication::OnInit()
 	{
 		setWorld(m_editorWorld.get());
 
+		// Which scripts this project's text needs, as early as the project is
+		// known: the font atlas is baked ONCE and every backend uploads it once,
+		// so a mask that arrives after the first label was drawn cannot be
+		// applied. uiSetFontScripts says so rather than half-applying it, and
+		// Preferences ▸ Project ▸ Fonts turns that "no" into a sentence about
+		// restarting. Opening a second project with a different answer in one
+		// session is exactly that case.
+		HE::uiSetFontScripts(m_projectManager.currentProject().fontScripts);
+
 		// Point the ContentManager at this project's content folder so the
 		// renderer and the content browser can resolve asset references.
 		{

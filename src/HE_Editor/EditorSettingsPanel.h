@@ -31,11 +31,11 @@ namespace EditorSettingsPanel
 		HorizonCode, CollabGeneral, Repository, Status,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
-		// Project — the only page here that edits the PROJECT rather than the
-		// editor. It lives in Preferences anyway because there is no project
-		// settings surface yet and a permission nobody can find is a permission
-		// nobody grants; the page says whose settings they are in its first line.
-		Permissions,
+		// Project — the pages that edit the PROJECT rather than the editor. They
+		// live in Preferences because there is no project settings surface yet
+		// and a permission nobody can find is a permission nobody grants; each
+		// page says whose settings they are in its first line.
+		Permissions, Fonts,
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).

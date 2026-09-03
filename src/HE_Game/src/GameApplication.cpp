@@ -533,6 +533,12 @@ void GameApplication::OnInit()
 		g.network   = m_config.allowNetwork;
 		HE::api::perm::set(g);
 	}
+	// Which scripts the text in this build is written in, straight off the hcfg
+	// and before anything draws: the atlas is baked once, on first use, so this
+	// is the only moment it can be decided. A shipped app never sees the editor,
+	// which is why the answer travels in the config rather than being asked.
+	HE::uiSetFontScripts(m_config.fontScripts);
+
 	// Savegames: the shipped game IS play mode, and save.create() resolves the
 	// project's default template from the hcfg.
 	HE::api::save::setDefaultTemplate(m_config.defaultSaveTemplate);

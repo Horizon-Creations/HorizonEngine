@@ -60,6 +60,11 @@ struct HE_API ExportSettings {
     bool allowFiles     = false;
     bool allowProcesses = false;
     bool allowNetwork   = false;
+    // Which scripts the shipped application's font atlas carries beyond the base
+    // set (.heproj "fontScripts", a HE::UIFontScripts mask). Zero is Latin, and
+    // an export that forgets it ships an app whose Greek labels are blank — so
+    // it is copied across with the permissions above, from the same place.
+    std::uint32_t fontScripts = 0;
     // The Theme asset the shipped application boots with (content-relative;
     // empty = the engine's built-in default) and the mode it was asked for
     // ("System"/"Light"/"Dark"). Both ride in project.hcfg, not config.json —

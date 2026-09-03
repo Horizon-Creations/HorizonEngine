@@ -1753,9 +1753,9 @@ namespace
 	  "", "editor#preferences" },
 
 	// ── Preferences » Project ────────────────────────────────────────────────
-	// The one page on this tab that edits the PROJECT. Everything else here
-	// follows the editor from project to project; these three travel with the
-	// project and into the application it exports.
+	// The pages on this tab that edit the PROJECT. Everything else here follows
+	// the editor from project to project; these travel with the project and into
+	// the application it exports.
 	{ "Permissions/Files outside the project", "Files outside the project",
 	  "Off, a script reads and writes only inside the project's Saved folder — an "
 	  "absolute path is simply refused. On, it may name any path on the machine.\n\n"
@@ -1776,6 +1776,23 @@ namespace
 	  "Reserved. Nothing reads it yet — the `http` group is a later wave. It is "
 	  "here so that a project which has already thought about what it may reach "
 	  "does not have to be asked a second time when that group arrives.",
+	  "", "editor#preferences" },
+	{ "Fonts/Greek", "Greek",
+	  "Adds the Greek alphabet to the font atlas. Off by default, like Cyrillic: "
+	  "the base set (Latin, its umlauts and accents, the punctuation and the Euro "
+	  "sign) is always there, and everything past it costs room in a texture "
+	  "every project pays for.\n\n"
+	  "A character the atlas does not carry draws nothing at all — no box, no "
+	  "gap in the width — so a Greek label in a project that never ticked this "
+	  "is simply blank.",
+	  "", "editor#preferences" },
+	{ "Fonts/Cyrillic", "Cyrillic",
+	  "Adds the Cyrillic alphabet to the font atlas. See Greek above for what the "
+	  "base set already covers.\n\n"
+	  "Both take effect when the atlas is baked, which happens once per run. The "
+	  "exported application bakes on its own start and gets this immediately; "
+	  "this editor session has to be restarted, and the page says so when that "
+	  "is the case.",
 	  "", "editor#preferences" },
 
 	// ── Preferences » Editor » Tool Status ───────────────────────────────────
@@ -4039,10 +4056,11 @@ namespace
 		// deserves a list rather than being scattered through the designer's
 		// controls.
 		{ "UI Palette/",     "editor-ui", "UI Designer", "The elements" },
-		// The one page on the Preferences tab that edits the PROJECT rather than
-		// the editor, which is why it gets its own section rather than sitting
+		// The pages on the Preferences tab that edit the PROJECT rather than the
+		// editor, which is why they get their own sections rather than sitting
 		// under "Preferences".
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
+		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────

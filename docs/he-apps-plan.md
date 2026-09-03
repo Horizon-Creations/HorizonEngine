@@ -2208,6 +2208,64 @@ Scheibe, näher am Textfeld als am Label.
 
 ---
 
+### Der Atlas kannte 96 Zeichen (03.09.2026)
+
+Aus einer Nachfrage entstanden: was zu tun ist, um die oben gemeldeten Grenzen aufzuheben.
+Beim Nachmessen war die Grenze größer als gemeldet.
+
+**Die Icon-Grenze war die Umlaut-Grenze.** Alle vier Byte-Schleifen der Textpipeline
+übersprangen Bytes ab 128. „Größe" wurde als „Gre" gezeichnet **und so gemessen**, also saß
+auch alles daneben, was sich am Text ausrichtet. Und ein Passwortfeld zeichnete gar nichts:
+sein Punkt ist U+2022, drei Bytes, keines davon ASCII, also null Glyphen, Breite null und ein
+Cursor, der sich nicht bewegen kann. Beides gemessen, bevor es behauptet wurde, und beides
+ohne Zusicherung, die es festhielt.
+
+**Drei Fallen, an denen es beinahe gescheitert wäre.**
+
+`stbtt_PackFontRanges` skaliert bei negativer Größe (`STBTT_POINT_SIZE`) über
+`ScaleForMappingEmToPixels`, bei positiver über `ScaleForPixelHeight` — und letzteres ist,
+was `stbtt_BakeFontBitmap` vorher benutzte. Die Zusicherung dahinter ist die gleiche wie bei
+Rich Text: bestehende Labels dürfen sich nicht bewegen. Nachgewiesen, indem beide Fassungen
+gebaut und die 95 ASCII-Metriken Zeichen für Zeichen verglichen wurden.
+
+Der **Rückgabewert** von `PackFontRanges` taugt mit `skip_missing` nicht als „hat gepasst":
+er meldet Fehlschlag für jedes Zeichen, das die *Schrift* nicht hat. „Roboto kennt kein
+Kyrillisch" sah damit aus wie „der Atlas ist zu klein", und genau das ist zuerst passiert,
+still, mit Rückfall auf ASCII. Deshalb Gather/Pack/Render von Hand: die Rechtecke
+beantworten die einzige Frage, die zählt.
+
+Ein Zeichen ohne Glyphe zeichnet **nichts**, statt das Kästchen der Schrift zu bekommen. Ein
+Kästchen behauptet, das Zeichen sei da gewesen.
+
+**Die Bereiche sind eine Projekteinstellung, keine Konstante.** Basis ist immer Latein, wie
+es geschrieben wird: ASCII, Latin-1, Latin Extended-A, die Satzzeichen samt Punkt und
+Gedankenstrich, das Eurozeichen. Griechisch und Kyrillisch kosten Fläche, also werden sie
+gefragt (Preferences ▸ Project ▸ Fonts) und reisen im `.heproj` und in der `project.hcfg` in
+die exportierte Anwendung, die ihren Atlas auf einer Maschine backt, die den Editor nie
+gesehen hat. Zwei freie Bits im vorhandenen Flagwort, also bewegt sich kein Dateiformat.
+Alles zusammen passt in dieselben 1024², in denen vorher 96 Zeichen lagen.
+
+**Der Atlas wird einmal gebacken, und die Backends laden ihn einmal hoch.** Deshalb wird die
+Maske beim Projektöffnen gesetzt und danach nicht mehr: `uiSetFontScripts` lehnt eine spätere
+Änderung ab, statt sie halb anzuwenden, und die Seite macht aus diesem Nein einen Satz über
+den Neustart. Eine Textur, deren Glyphen sich verschoben haben, während sechs Backends noch
+die alte halten, wäre der teurere Weg zur selben Einstellung.
+
+**Die UTF-8-Schritte wohnen jetzt neben den Glyphenschleifen** (`Renderer/UIFont.h`) und
+nicht mehr im Element: der Cursor und die Glyphen müssen sich einig sein, wo ein Zeichen
+anfängt, und zwei Kopien dieser Regel werden es irgendwann nicht mehr sein.
+
+**Immer noch nicht gebaut:** Icon-Schriften (Private Use Area plus ein `<icon=name>`-Tag,
+denn niemand tippt einen PUA-Codepoint in ein Textfeld) und `<b>` (die Standardschrift **ist**
+Roboto Condensed Bold, es gibt nichts Fetteres; der Weg dahin ist ein `<font=asset>`-Tag pro
+Run, der Icon-Schriften gleich mitbedient).
+
+Nebenbei aufgeräumt: Collaboration, Source Control und Tools hatten im Einstellungs-Rail je
+eine Gruppe mit genau einem Eintrag. Sie stehen jetzt unter **Editor**, und die
+Beschriftungen erben, was die Überschrift getragen hat.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein

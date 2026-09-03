@@ -1246,6 +1246,84 @@ void drawPermissionsPage(AppContext& ctx)
 	}
 }
 
+// ─── Project ▸ Fonts ─────────────────────────────────────────────────────────
+// Which scripts this project's text is written in. The atlas always carries
+// Latin as it is actually written — umlauts, accents, the punctuation a text
+// field produces on its own — so most projects never open this page. The two
+// boxes here cost atlas area, which is the whole reason they are a question.
+//
+// The awkward part is honest and stays visible: the atlas is baked once per
+// process and every renderer backend uploads it once, so a change reaches THIS
+// editor session only after a restart. The page says which answer is live.
+void drawFontsPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Fonts");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData& p = ctx.projectManager->currentProject();
+
+	EditorWidgets::hint("These belong to the PROJECT: they are saved in its .heproj and "
+	                    "travel into the application you export, which has to bake its own "
+	                    "atlas on a machine that never saw this editor.");
+	ImGui::Spacing();
+
+	ImGui::TextWrapped("Every project gets Latin: A to Z, the umlauts and accents of "
+	                   "Latin-1, the Central European letters of Latin Extended-A, the "
+	                   "typographic quotes and dashes, and the Euro sign. The two below "
+	                   "are added on top and cost room in the atlas.");
+	ImGui::Spacing();
+
+	const std::uint32_t before = p.fontScripts;
+	bool greek    = (p.fontScripts & HE::UIFontScriptGreek)    != 0;
+	bool cyrillic = (p.fontScripts & HE::UIFontScriptCyrillic) != 0;
+
+	if (ImGui::Checkbox("Greek", &greek))
+		p.fontScripts = greek ? (p.fontScripts | HE::UIFontScriptGreek)
+		                      : (p.fontScripts & ~HE::UIFontScriptGreek);
+	EditorWidgets::helpForLabel("Greek");
+	ImGui::Spacing();
+
+	if (ImGui::Checkbox("Cyrillic", &cyrillic))
+		p.fontScripts = cyrillic ? (p.fontScripts | HE::UIFontScriptCyrillic)
+		                         : (p.fontScripts & ~HE::UIFontScriptCyrillic);
+	EditorWidgets::helpForLabel("Cyrillic");
+	ImGui::Spacing();
+
+	if (p.fontScripts != before)
+	{
+		// Straight to disk, like the permissions page: a setting that is on in
+		// the panel and off in the file is the state somebody spends an evening on.
+		if (!ctx.projectManager->saveProject(p.path))
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's font settings", p.path);
+	}
+
+	// What this session actually baked, said plainly. Asking for the mask that is
+	// already live answers yes, and then there is nothing to report.
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	if (!HE::uiSetFontScripts(p.fontScripts))
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+		ImGui::TextWrapped("Saved, but not drawn yet: this editor session already baked its "
+		                   "font atlas, and every renderer holds that one texture. Restart "
+		                   "the editor to see the change. An exported application bakes on "
+		                   "its own start and needs no restart.");
+		ImGui::PopStyleColor();
+	}
+	else
+	{
+		const HE::BakedUIFont& f = HE::sharedUIFont();
+		ImGui::TextDisabled("Live: %zu characters in a %d x %d atlas.",
+		                    f.glyphs.size(), f.atlasW, f.atlasH);
+	}
+}
+
 void drawStatusPage(AppContext& ctx)
 {
 	HE::Ed::Help::Scope helpScope("Tool Status");
@@ -1534,6 +1612,7 @@ constexpr NavItem kRenderingItems[] = {
 };
 constexpr NavItem kProjectItems[] = {
 	{ Page::Permissions, "Permissions" },
+	{ Page::Fonts,       "Fonts" },
 };
 constexpr NavGroup kNavGroups[] = {
 	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
@@ -1653,6 +1732,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
 	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
 	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
+	else if (s_page == Page::Fonts)       drawFontsPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

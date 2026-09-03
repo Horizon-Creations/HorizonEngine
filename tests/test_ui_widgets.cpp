@@ -15,6 +15,7 @@
 #include <HorizonScene/EngineApi.h>
 #include <Backends/Software/SoftwareRaster.h>
 #include <Hpak/ProjectExporter.h>
+#include <Hpak/ProjectConfig.h>
 #include <Diagnostics/Log.h>   // the circle guard is checked by what it does NOT say
 #include "../src/HE_Editor/UITimelineMath.h"   // header-only: the timeline's seconds ⇄ pixels
 #include <cmath>
@@ -1871,6 +1872,36 @@ TEST_CASE("Rich text measures a character once, not once per byte")
     std::vector<UIRenderObject> out;
     HE::uiEmitRichText(f, 0, rt, rl, { 1, 1, 1, 1 }, 0, out);
     CHECK(out.size() == 2);
+}
+
+TEST_CASE("The chosen scripts travel into the exported application")
+{
+    // The shipped app bakes its own atlas on a machine that never saw the
+    // editor, so the answer has to be in project.hcfg — and it rides in the
+    // existing flags word, which means no format version moves and an older
+    // runtime reads the same file it always did.
+    const auto dir = std::filesystem::temp_directory_path() / "he_fontscripts_hcfg";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    ProjectConfig cfg;
+    cfg.projectName = "Greek";
+    cfg.fontScripts = HE::UIFontScriptGreek | HE::UIFontScriptCyrillic;
+    REQUIRE(ProjectConfigLoader::save(dir, cfg));
+    ProjectConfig back;
+    REQUIRE(ProjectConfigLoader::load(dir, back));
+    CHECK(back.fontScripts == (HE::UIFontScriptGreek | HE::UIFontScriptCyrillic));
+
+    // A build written before this existed has the bits clear, and clear is also
+    // what it should mean: the base set, which is what it had.
+    ProjectConfig plain;
+    plain.projectName = "Plain";
+    REQUIRE(ProjectConfigLoader::save(dir, plain));
+    ProjectConfig plainBack;
+    REQUIRE(ProjectConfigLoader::load(dir, plainBack));
+    CHECK(plainBack.fontScripts == 0u);
+    CHECK(plainBack.allowFiles == false);      // the neighbouring bits are unmoved
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("The scripts are chosen before the first bake, and say so afterwards")

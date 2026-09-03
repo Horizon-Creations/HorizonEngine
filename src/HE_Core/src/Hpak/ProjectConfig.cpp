@@ -50,7 +50,12 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
                          // file or process access does not get it.
                          | (cfg.allowFiles            ? 64u : 0u)
                          | (cfg.allowProcesses        ? 128u: 0u)
-                         | (cfg.allowNetwork          ? 256u: 0u);
+                         | (cfg.allowNetwork          ? 256u: 0u)
+                         // Bits 512/1024 are the font scripts, one bit per
+                         // script, in the same order as HE::UIFontScripts. Two
+                         // fit here; a third would need its own bit rather than
+                         // widening this shift, so the mask is masked.
+                         | ((cfg.fontScripts & 3u) << 9);
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
@@ -103,6 +108,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     out.allowFiles            = (flags & 64u) != 0;
     out.allowProcesses        = (flags & 128u) != 0;
     out.allowNetwork          = (flags & 256u) != 0;
+    out.fontScripts           = (flags >> 9) & 3u;
     if (off + 32 > buf.size()) return false;
     std::memcpy(out.encKey, buf.data() + off, 32);
     off += 32;

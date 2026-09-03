@@ -256,6 +256,15 @@ struct ProjectData
 	bool allowFiles     = false;
 	bool allowProcesses = false;
 	bool allowNetwork   = false;   // reserved for `http` (Welle 3)
+
+	// ── Which scripts this project's text is written in ──────────────────────
+	// A HE::UIFontScripts mask, ".heproj \"fontScripts\"", carried into the
+	// packaged build. Zero is the base set every project gets: Latin as it is
+	// actually written, umlauts and accents included. The bits above it (Greek,
+	// Cyrillic) cost atlas area, which is why they are asked for rather than
+	// assumed — and why they are a PROJECT setting: the shipped app has to bake
+	// what its own text needs, on a machine that never saw the editor.
+	std::uint32_t fontScripts = 0;
 };
 
 class HE_TOOLS_API ProjectManager

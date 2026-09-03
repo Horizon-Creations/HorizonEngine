@@ -901,6 +901,8 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["allowFiles"]     = false;
 	j["allowProcesses"] = false;
 	j["allowNetwork"]   = false;
+	// The base set, for the same reason: the file says what it gets from day one.
+	j["fontScripts"]    = 0;
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -1055,6 +1057,10 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.allowFiles     = jsonBool(j, "allowFiles", false);
 	m_currentProject.allowProcesses = jsonBool(j, "allowProcesses", false);
 	m_currentProject.allowNetwork   = jsonBool(j, "allowNetwork", false);
+	// Absent means the base set, which is what every project written before this
+	// existed was getting anyway.
+	m_currentProject.fontScripts    = j.contains("fontScripts") && j["fontScripts"].is_number_unsigned()
+	                                      ? j["fontScripts"].get<std::uint32_t>() : 0u;
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -1130,6 +1136,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["allowFiles"]            = m_currentProject.allowFiles;
 	j["allowProcesses"]        = m_currentProject.allowProcesses;
 	j["allowNetwork"]          = m_currentProject.allowNetwork;
+	j["fontScripts"]           = m_currentProject.fontScripts;
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an
