@@ -556,6 +556,15 @@ namespace
 	  "Adds an entry to the tray menu, in order. The ID is what On Tray Item "
 	  "receives when somebody chooses it, and the label is what they read: "
 	  "translating the menu then cannot quietly rewire what its entries do." },
+	{ "app.setAutostart",
+	  "Arranges for this application to start when the user logs in, or takes "
+	  "that back. It needs the project's \"Run other programs\" permission: it "
+	  "asks the SYSTEM to run a program at every login, which is more than "
+	  "running one now, not less." },
+	{ "app.autostart",
+	  "Whether this application is currently set to start at login. Reads what "
+	  "the system was told, not what the application believes — so a checkbox "
+	  "bound to it stays right even after somebody changed it elsewhere." },
 	{ "app.clearTrayMenu",
 	  "Removes every entry from the tray menu, leaving the icon in place. What a "
 	  "menu offers usually depends on what the application is doing, and rebuilding "

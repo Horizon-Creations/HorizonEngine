@@ -311,7 +311,7 @@ Code, damit HorizonCode sie befüllen kann.
 
 **A7 Systemintegration.** App-Icon, Bundle-Identifier, Dateitypen-Zuordnung, „Öffnen mit",
 Autostart, Tray-Icon. Alles klein einzeln, zusammen der Unterschied zwischen „App" und
-„Fenster mit Zeug drin".
+„Fenster mit Zeug drin". **Erledigt am 03.09.2026** (zwei Abschnitte weiter unten).
 
 ---
 
@@ -2348,8 +2348,53 @@ Bundle-Identifier (leer = `com.horizonengine.<projekt>` wie bisher) und Version 
 `Info.plist`, `CFBundleIconFile` wird nur gesetzt, wenn die Datei wirklich daneben liegt — ein
 Bundle, das auf ein fehlendes Icon zeigt, bekommt das generische UND lässt es cachen.
 
-**Nicht gebaut, und damit ist A7 nicht zu:** Dateitypen-Zuordnung, „Öffnen mit", Autostart,
-Tray-Icon. Für den Tray hat SDL3 inzwischen `SDL_tray.h`, das ist die nächste Scheibe.
+---
+
+### A7, der Rest: Dateitypen, Öffnen mit, Tray, Autostart (03.09.2026)
+
+**Anmelden und Empfangen gehören zusammen.** Einen Dateityp anzumelden, den man nicht
+empfangen kann, ist eine tote Funktion; empfangen ohne anzumelden kann man nicht ausprobieren.
+Deshalb ein Commit für beides.
+
+Ein Dateityp ist Endung, Anzeigename, Icon. Die Namen, die die Systeme dafür wollen, sind
+**abgeleitet und nie gefragt**: UTI, MIME-Typ und ProgId kommen alle aus Bundle-Id plus
+Endung. Drei Namen, die sich widersprechen können, sind genau der Weg, auf dem eine Datei in
+der falschen Anwendung aufgeht. Erlaubt sind nur Buchstaben und Ziffern, also das, was eine
+UTI tragen kann, und abgelehnt wird dort, wo es getippt wird.
+
+Beide Hälften der Plist müssen sein: nur `CFBundleDocumentTypes` wäre ein Verweis auf einen
+Typ, von dem das System nie gehört hat. Die Gegenprobe ohne `UTExportedTypeDeclarations` ist
+rot. Geprüft mit Apples eigenem `plutil`, das die erzeugte Datei liest und UTI und
+Anzeigename zurückgibt, samt maskiertem `&`.
+
+**„Öffnen mit" kommt durch dieselbe Tür wie ein Drop.** `OnFileDropped` am GameInstance, mit
+derselben Freigabe des Pfades. Ein zweites Ereignis hätte denselben Handler zweimal
+geschrieben, und ob ein Dokument per Doppelklick oder per Ziehen ankam, ist Sache des Systems.
+Unter macOS kostet das nichts, dort macht SDL aus dem Open-Event schon ein Drop-Event.
+Zugestellt wird im ERSTEN BILD, nicht in OnInit: vorher gibt es die GameInstance nicht.
+
+**Tray.** `Show Tray Icon`, `Add Tray Item`, `Clear Tray Menu`, `Hide Tray Icon`, dazu
+`OnTrayItem`. Ein Eintrag hat eine **Id und eine Beschriftung**, zurück kommt die Id: wer nach
+der Beschriftung feuert, dessen Menü hört auf zu funktionieren, sobald es übersetzt wird. Ein
+Klick kommt aus SDLs Ereignisschleife, also wartet er in einer Schlange und das Bild stellt
+ihn zu, statt den Interpreter mitten im Bild erneut zu betreten. Und das Tray liegt neben
+`g_host` in der .cpp, weil SDL dem Rückruf einen nackten `void*` gibt: eine `std::list` von
+Ids bewegt sich nie, ein Vector schon.
+
+**Autostart** liegt hinter „Run other programs". Nicht weil es jetzt ein Programm startet,
+sondern weil es das SYSTEM bittet, bei jedem Login eines zu starten, und das ist mehr als
+eines jetzt zu starten, nicht weniger. Lesen braucht keine Berechtigung, sonst lügt jede
+Checkbox, die daran hängt. Auf macOS ein LaunchAgent, auf Linux ein `.desktop` unter
+`~/.config/autostart`, auf Windows die Registry unter HKCU (blind geschrieben). Die
+Zusicherung zeigt `HOME` auf ein Wegwerfverzeichnis und schaut nach, was dort landet.
+
+Dafür trägt die `project.hcfg` jetzt die **Bundle-Id** (Format v5, Anhang wie die anderen):
+die Laufzeit muss wissen, wie die Anwendung heißt, und ein Login-Eintrag unter einem anderen
+Namen als dem des Bundles ist einer, den später niemand findet. Aufgelöst wird beim Export,
+damit die Laufzeit nicht ein zweites Mal ableitet und zu einer anderen Antwort kommt.
+
+**Damit ist A7 zu.** Was blind geschrieben ist, steht oben: die Windows- und Linux-Pfade für
+Dateitypen und Autostart, wie seinerzeit der GL-Port.
 
 ---
 

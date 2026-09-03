@@ -4,6 +4,7 @@
 #include <fstream>
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>       // the window icon the export generated
+#include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
@@ -89,6 +90,8 @@ struct HostCtxParts
 	std::function<void()>                                       hideTray;
 	std::function<void(const std::string&, const std::string&)> addTrayItem;
 	std::function<void()>                                       clearTrayMenu;
+	std::function<bool(bool)>                                   setAutostart;
+	std::function<bool()>                                       autostart;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
@@ -111,6 +114,22 @@ void SDLCALL trayEntryClicked(void* userdata, SDL_TrayEntry*)
 {
     if (const TrayItem* item = static_cast<const TrayItem*>(userdata))
         g_trayClicks.push_back(item->id);
+}
+
+// What a login entry has to point at. SDL_GetBasePath gives the directory the
+// executable lives in — inside a .app that is Contents/Resources, and launching
+// THAT does nothing, so the bundle itself is what macOS is told to open.
+std::filesystem::path executablePathForAutostart()
+{
+    const char* base = SDL_GetBasePath();
+    if (!base) return {};
+    std::filesystem::path p(base);
+#ifdef __APPLE__
+    // …/Foo.app/Contents/Resources/ → …/Foo.app
+    for (std::filesystem::path up = p; !up.empty() && up != up.root_path(); up = up.parent_path())
+        if (up.extension() == ".app") return up;
+#endif
+    return p / "HorizonGame";
 }
 
 void destroyTray()
@@ -206,6 +225,8 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.hideTray       = g_host.hideTray;
 	c.addTrayItem    = g_host.addTrayItem;
 	c.clearTrayMenu  = g_host.clearTrayMenu;
+	c.setAutostart   = g_host.setAutostart;
+	c.autostart      = g_host.autostart;
 	return c;
 }
 
@@ -698,6 +719,15 @@ void GameApplication::OnInit()
 		g_host.addTrayItem    = [](const std::string& id, const std::string& label)
 		                        { trayAddItem(id, label); };
 		g_host.clearTrayMenu  = [] { trayClearMenu(); };
+		// Autostart needs three things the host is the only one to know: who this
+		// application is, what it is called, and where its executable actually
+		// sits right now — a login entry pointing at where it USED to be is worse
+		// than none.
+		g_host.setAutostart   = [this](bool on) {
+			return HE::heSetAutostart(m_config.bundleId, m_config.projectName,
+			                          executablePathForAutostart(), on);
+		};
+		g_host.autostart      = [this] { return HE::heAutostart(m_config.bundleId); };
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives

@@ -1113,6 +1113,29 @@ void clearTrayMenu(Ctx& c)
     c.clearTrayMenu();
 }
 
+void setAutostart(Ctx& c, bool enabled)
+{
+    // The permission first: this asks the system to run a program at every
+    // login, which is a bigger thing than running one now, not a smaller one.
+    if (!perm::allowed(perm::get().processes, "app.setAutostart")) return;
+    if (!c.setAutostart)
+    {
+        HE_LOG_WARN(Script, "%s", "app.setAutostart: no host support — ignored");
+        return;
+    }
+    if (!c.setAutostart(enabled))
+        HE_LOG_WARN(Script, "app.setAutostart: the system refused to %s the entry",
+                    enabled ? "write" : "remove");
+}
+
+bool autostart(Ctx& c)
+{
+    // Reading it needs no permission: an application may always ask what it is
+    // set to do, and refusing the question would only make a checkbox lie.
+    if (!c.autostart) return false;
+    return c.autostart();
+}
+
 void setSize(Ctx& c, int width, int height)
 {
     if (!c.setWindowSize)
@@ -3514,6 +3537,12 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ app::addTrayItem(c, aS(a, 0), aS(a, 1)); return VV{}; } });
         t.push_back({ "app.clearTrayMenu", "App", true, {}, {}, "HE::api::app::clearTrayMenu",
             [](Ctx& c, const VV&){ app::clearTrayMenu(c); return VV{}; } });
+        t.push_back({ "app.setAutostart", "App", true, {{"enabled", P::Bool}}, {},
+            "HE::api::app::setAutostart",
+            [](Ctx& c, const VV& a){ app::setAutostart(c, aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.autostart", "App", false, {}, {{"enabled", P::Bool}},
+            "HE::api::app::autostart",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::autostart(c)) }; } });
 
         // Clipboard — the same system clipboard Ctrl+C/V already use in a focused
         // text field, reachable from a graph.
@@ -4161,6 +4190,8 @@ const std::vector<ApiFn>& registry()
             { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
             { "app.showTray", "Show Tray Icon" },    { "app.hideTray", "Hide Tray Icon" },
             { "app.addTrayItem", "Add Tray Item" },  { "app.clearTrayMenu", "Clear Tray Menu" },
+            { "app.setAutostart", "Set Start at Login" },
+            { "app.autostart", "Starts at Login" },
             { "clipboard.getText", "Get Clipboard Text" },
             { "clipboard.setText", "Set Clipboard Text" },
             { "clipboard.hasText", "Has Clipboard Text" },

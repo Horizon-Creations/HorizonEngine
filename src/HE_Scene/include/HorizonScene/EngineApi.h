@@ -127,6 +127,10 @@ struct Ctx
     std::function<void()>                                           hideTray;
     std::function<void(const std::string& id, const std::string&)>  addTrayItem;
     std::function<void()>                                           clearTrayMenu;
+    // Starting with the machine. Bound where the application knows its own name
+    // and where its executable is, which is the host and nowhere else.
+    std::function<bool(bool enabled)>                               setAutostart;
+    std::function<bool()>                                           autostart;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -708,6 +712,14 @@ namespace app {
     void hideTray(Ctx&);
     void addTrayItem(Ctx&, const std::string& id, const std::string& label);
     void clearTrayMenu(Ctx&);
+
+    // ── Starting with the machine (plan A7) ─────────────────────────────────
+    // Behind the "Run other programs" permission, and not because it runs one
+    // now: it asks the SYSTEM to run one, every login, without anybody being
+    // there. That is the same door, and a project that has not opened it should
+    // not be able to arrange it.
+    void setAutostart(Ctx&, bool enabled);
+    bool autostart(Ctx&);
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────────────

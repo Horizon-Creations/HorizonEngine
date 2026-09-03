@@ -83,6 +83,12 @@ struct HE_API ProjectConfig {
     // advancedShaderEffects above): a build written before this has the bit clear
     // and must read back as bold, which is what it drew.
     bool         fontWeightBold = true;
+
+    // What the application calls itself to the system it runs on (the same
+    // string as CFBundleIdentifier). Resolved at export, never derived again
+    // here: an autostart entry filed under a different name than the bundle is
+    // an entry nobody can find later. Empty in a build made before this existed.
+    std::string  bundleId;
 };
 
 class HE_API ProjectConfigLoader {

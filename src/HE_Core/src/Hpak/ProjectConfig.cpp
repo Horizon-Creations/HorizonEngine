@@ -7,7 +7,9 @@
 static constexpr char     k_magic[4] = {'H','C','F','G'};
 // v3: appends defaultSaveTemplate (string) after startupSceneUuid.
 // v4: appends theme + themeMode (two strings) after that.
-static constexpr uint16_t k_version  = 4;
+// v5: appends bundleId (string) — the application's own name for itself, which
+//     the runtime needs to write an autostart entry that belongs to it.
+static constexpr uint16_t k_version  = 5;
 
 bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectConfig& cfg)
 {
@@ -24,7 +26,8 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     // Each tail is written only when it CARRIES something, so a project that
     // uses none of it keeps emitting the plain v2 every runtime can read.
     const bool hasTheme = !cfg.theme.empty() || !cfg.themeMode.empty();
-    const uint16_t version = hasTheme ? 4
+    const uint16_t version = !cfg.bundleId.empty() ? 5
+                           : hasTheme ? 4
                            : cfg.defaultSaveTemplate.empty() ? 2 : 3;
     HAsset::Writer::appendPOD(buf, version);
     const uint16_t reserved = 0;
@@ -69,6 +72,8 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
         HAsset::Writer::appendString(buf, cfg.theme);
         HAsset::Writer::appendString(buf, cfg.themeMode);
     }
+    if (version >= 5)
+        HAsset::Writer::appendString(buf, cfg.bundleId);
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
@@ -92,7 +97,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     if (!HAsset::Reader::readPOD(buf, off, reserved)) return false;
     // Every version this build knows. Each adds a tail; an older one simply has
     // fewer, and the reader stops where that version stopped.
-    if (version != 2 && version != 3 && version != 4) return false;
+    if (version != 2 && version != 3 && version != 4 && version != 5) return false;
 
     if (!HAsset::Reader::readString(buf, off, out.projectName))   return false;
     if (!HAsset::Reader::readString(buf, off, out.hpakFilename))  return false;
@@ -129,5 +134,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
         if (!HAsset::Reader::readString(buf, off, out.theme))     return false;
         if (!HAsset::Reader::readString(buf, off, out.themeMode)) return false;
     }
+    out.bundleId.clear();
+    if (version >= 5 && !HAsset::Reader::readString(buf, off, out.bundleId)) return false;
     return true;
 }

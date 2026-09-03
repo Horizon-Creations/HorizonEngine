@@ -1016,6 +1016,10 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.allowNetwork          = settings.allowNetwork;
     cfg.fontScripts           = settings.fontScripts;
     cfg.fontWeightBold        = settings.fontWeightBold;
+    // RESOLVED here, so the runtime never derives it a second time and reaches a
+    // different answer than the bundle around it.
+    cfg.bundleId              = settings.bundleId.empty()
+                                    ? bundleIdentifier(projectName) : settings.bundleId;
     cfg.theme                 = settings.theme;
     cfg.themeMode             = settings.themeMode;
     // Key placement: inside the game executable when the patch succeeded (the
