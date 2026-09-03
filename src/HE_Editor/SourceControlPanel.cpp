@@ -31,7 +31,7 @@ namespace SourceControlPanel
 namespace {
 
 // Panel-local input state. A commit message is short-lived by design. (Repo
-// init and remote/GitHub setup live in Preferences ▸ Source Control now.)
+// init and remote/GitHub setup live in Preferences ▸ Editor ▸ Source Control now.)
 char s_commitMessage[512] = "";
 bool s_prefsLoaded        = false;
 

@@ -520,7 +520,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				ImGui::TextWrapped("The router answered neither UPnP nor NAT-PMP — guests will "
 				                   "probably not reach this machine without a hand-made port "
 				                   "forward. Opening a session still works; see "
-				                   "Preferences > Tools > Status.");
+				                   "Preferences > Editor > Tool Status.");
 				ImGui::PopStyleColor();
 			}
 			if (r.carrierNat)

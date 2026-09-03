@@ -405,7 +405,7 @@ struct AppContext
 	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
 	// same null-means-still-running convention as the two above. Read-only: it
 	// discovers the router but never creates a mapping. Shown in
-	// Preferences ▸ Tools ▸ Status and in the Collaboration window.
+	// Preferences ▸ Editor ▸ Tool Status and in the Collaboration window.
 	const HE::Net::RouterProbe* routerProbe = nullptr;
 	std::function<void()> recheckRouter;
 

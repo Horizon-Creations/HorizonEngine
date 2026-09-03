@@ -25,7 +25,7 @@ void requestShow() { s_forceShowToolchainDialog = true; }
 // this only reacts to its result. Self-triggering (no `open` flag like the other
 // dialogs here) — it watches ctx.toolchainProbe transition from null (checking)
 // to non-null (done) and opens itself the first time that happens, unless the
-// user has permanently suppressed it (Preferences > Tools > Status > "Fix"
+// user has permanently suppressed it (Preferences > Editor > Tool Status > "Fix"
 // bypasses the suppression, since that's an explicit request to see the result).
 void DrawToolchainDialog(AppContext& ctx)
 {

@@ -1,6 +1,6 @@
 #include "EditorSettingsPanel.h"
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
-#include "ToolchainDialog.h"             // Tools > Status > cmake/compiler "Fix" opens the dialog
+#include "ToolchainDialog.h"             // Tool Status > cmake/compiler "Fix" opens the dialog
 #include "GitController.h"               // Source Control page
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
@@ -1515,8 +1515,16 @@ constexpr NavItem kGeneralItems[] = {
 	{ Page::Viewport,       "Viewport" },
 	{ Page::ContentBrowser, "Content Browser" },
 };
+// Everything the EDITOR does that is not the renderer, under one heading. The
+// three groups that used to stand alone here (Collaboration, Source Control,
+// Tools) were one page each: three headings for three rows made the rail long
+// and said nothing the page titles did not. The labels grew back what the
+// headings carried — "Sessions" under no heading is not a topic.
 constexpr NavItem kEditorItems[] = {
-	{ Page::HorizonCode, "HorizonCode" },
+	{ Page::HorizonCode,   "HorizonCode" },
+	{ Page::CollabGeneral, "Collaboration" },
+	{ Page::Repository,    "Source Control" },
+	{ Page::Status,        "Tool Status" },
 };
 constexpr NavItem kRenderingItems[] = {
 	{ Page::Display,            "Display" },
@@ -1524,31 +1532,19 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::GlobalIllumination, "Global Illumination" },
 	{ Page::Effects,            "Effects" },
 };
-constexpr NavItem kCollaborationItems[] = {
-	{ Page::CollabGeneral, "Sessions" },
-};
-constexpr NavItem kSourceControlItems[] = {
-	{ Page::Repository, "Repository" },
-};
-constexpr NavItem kToolsItems[] = {
-	{ Page::Status, "Status" },
-};
 constexpr NavItem kProjectItems[] = {
 	{ Page::Permissions, "Permissions" },
 };
 constexpr NavGroup kNavGroups[] = {
-	{ "General",        kGeneralItems,       IM_ARRAYSIZE(kGeneralItems) },
+	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
 	// Right behind General: these are the editor's own tools, so they belong
 	// next to the rest of "how the editor behaves" and ahead of the renderer.
-	{ "Editor",         kEditorItems,        IM_ARRAYSIZE(kEditorItems) },
-	{ "Rendering",      kRenderingItems,     IM_ARRAYSIZE(kRenderingItems) },
-	{ "Collaboration",  kCollaborationItems, IM_ARRAYSIZE(kCollaborationItems) },
-	{ "Source Control", kSourceControlItems, IM_ARRAYSIZE(kSourceControlItems) },
-	{ "Tools",          kToolsItems,         IM_ARRAYSIZE(kToolsItems) },
+	{ "Editor",    kEditorItems,    IM_ARRAYSIZE(kEditorItems) },
+	{ "Rendering", kRenderingItems, IM_ARRAYSIZE(kRenderingItems) },
 	// Last, and named "Project" rather than folded into one of the groups above:
 	// everything else on this tab follows the EDITOR from project to project,
 	// and this one travels with the project and into its exported build.
-	{ "Project",        kProjectItems,       IM_ARRAYSIZE(kProjectItems) },
+	{ "Project",   kProjectItems,   IM_ARRAYSIZE(kProjectItems) },
 };
 
 // Engine-settings pages map onto one catalog category each; the rest have

@@ -1698,7 +1698,7 @@ namespace
 	  "pinned settings and the project itself are untouched.",
 	  "", "editor#preferences" },
 
-	// ── Preferences » Source Control ─────────────────────────────────────────
+	// ── Preferences » Editor » Source Control ────────────────────────────────
 	// The one-time setup page: is git usable on this machine, and is this
 	// project in a repository. Its own scope rather than "Preferences" because
 	// its labels are about a repository, not about the editor — and because the
@@ -1778,7 +1778,7 @@ namespace
 	  "does not have to be asked a second time when that group arrives.",
 	  "", "editor#preferences" },
 
-	// ── Preferences » Tools ──────────────────────────────────────────────────
+	// ── Preferences » Editor » Tool Status ───────────────────────────────────
 	// One table of every external thing the editor leans on. The rows are text;
 	// only these two are controls.
 	{ "Tool Status/Fix", "Fix",
@@ -1823,7 +1823,8 @@ namespace
 	  "", "horizoncode#compiler" },
 	{ "Build Tools/Don't show this again", "",
 	  "Stops this dialog appearing at startup. The tools stay missing, and "
-	  "Preferences » Tools still says so — this only silences the interruption.",
+	  "Preferences » Editor » Tool Status still says so — this only silences the "
+	  "interruption.",
 	  "", "horizoncode#compiler" },
 	{ "Build Tools/Recheck", "Recheck",
 	  "Probes for cmake and a compiler again. A clean result closes this dialog "
