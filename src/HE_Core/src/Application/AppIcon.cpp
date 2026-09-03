@@ -207,6 +207,21 @@ bool heIcoWrite(const std::filesystem::path& path, const std::vector<AppIconImag
     return writeFile(path, out);
 }
 
+bool heLoadPngRGBA(const std::filesystem::path& png,
+                   std::vector<std::uint8_t>& rgba, int& width, int& height)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(png, ec)) return false;
+    int w = 0, h = 0, ch = 0;
+    unsigned char* pixels = stbi_load(png.string().c_str(), &w, &h, &ch, 4);
+    if (!pixels) return false;
+    rgba.assign(pixels, pixels + (std::size_t)w * h * 4);
+    width  = w;
+    height = h;
+    stbi_image_free(pixels);
+    return true;
+}
+
 bool heSetWindowIcon(SDL_Window* window, const std::filesystem::path& png)
 {
     if (!window) return false;

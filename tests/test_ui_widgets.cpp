@@ -10823,6 +10823,50 @@ TEST_CASE("Drop: the file lands on the element that ACCEPTS it, not on the one i
     CHECK(rt.getVariable(inst, "count").i == 4);
 }
 
+TEST_CASE("A tray entry arrives as its ID, at the application")
+{
+    // The tray itself needs a desktop, so what is checked here is the part that
+    // does not: the event exists, it carries a String, and firing it reaches a
+    // graph. The id and not the label, because a translated menu must keep
+    // working — that is the whole reason an entry has two of them.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 200.0f; tree.canvasHeight = 100.0f;
+    const int caption = tree.add(HE::UIWidgetType::Text);
+    tree.find(caption)->name = "Caption";
+    tree.find(caption)->setProp("Text", HE::UIPropValue::ofString(""));
+
+    HorizonCode::Graph graph;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnTrayItem";
+    ev.elem = 0; ev.hasArg = true; ev.propType = PinType::String;
+    const int evId = graph.addNode(ev);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = caption;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = graph.addNode(set);
+    REQUIRE(graph.connect(evId, 0, setId, 0));   // exec
+    REQUIRE(graph.connect(evId, 1, setId, 2));   // the id → the caption
+
+    registerWidget(cm, tree, &graph);
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    rt.fireOnTrayItem(static_cast<HorizonCode::InstanceId>(id), 0, "quit");
+    REQUIRE(wm.tree(id) != nullptr);
+    CHECK(wm.tree(id)->find(caption)->getProp("Text").s == "quit");
+
+    // The event is one the graph editor can offer, which is the difference
+    // between a runtime path and a feature: it has to be in the table the
+    // authoring side reads.
+    const HorizonCode::EngineEventDesc* desc = HorizonCode::findEngineEvent("OnTrayItem");
+    REQUIRE(desc != nullptr);
+    CHECK(desc->arg == PinType::String);
+}
+
 TEST_CASE("Drop: what no element accepts, the window took")
 {
     TempWidgetDir dir;

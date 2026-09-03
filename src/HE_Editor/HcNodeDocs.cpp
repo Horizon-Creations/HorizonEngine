@@ -543,6 +543,23 @@ namespace
 	  "Draws one more frame. An application sleeps until something happens, so "
 	  "anything that changes the screen without an input event behind it — a "
 	  "timer, a finished load — has to say so here." },
+	{ "app.showTray",
+	  "Puts the application's icon in the system tray (the menu bar on macOS) "
+	  "with a tooltip. Called again while it is up, it only changes the tooltip. "
+	  "The icon is the one the export generated, so the tray and the window agree "
+	  "about what this application looks like." },
+	{ "app.hideTray",
+	  "Takes the tray icon away again. It also goes when the application exits — "
+	  "an icon left behind by a program that is gone is the worst thing a tray "
+	  "can do — so this is for hiding it while still running." },
+	{ "app.addTrayItem",
+	  "Adds an entry to the tray menu, in order. The ID is what On Tray Item "
+	  "receives when somebody chooses it, and the label is what they read: "
+	  "translating the menu then cannot quietly rewire what its entries do." },
+	{ "app.clearTrayMenu",
+	  "Removes every entry from the tray menu, leaving the icon in place. What a "
+	  "menu offers usually depends on what the application is doing, and rebuilding "
+	  "it is how that stays true." },
 
 	// ── Clipboard ────────────────────────────────────────────────────────────
 	{ "clipboard.getText",

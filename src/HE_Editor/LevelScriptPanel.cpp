@@ -1445,8 +1445,12 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 		// OnFileDropped belongs here and nowhere else: a file let go over the
 		// window that no drop zone accepted was given to the APPLICATION, and
 		// the Game Instance is the one script that is always there to take it.
+		// Same for the file an application was STARTED with, which arrives
+		// through that same event, and for the tray: neither belongs to any
+		// element on any page.
 		static const std::vector<std::string> kEvents = {
-			"OnInit", "OnShutdown", "OnWindowFocusChanged", "OnFileDropped" };
+			"OnInit", "OnShutdown", "OnWindowFocusChanged", "OnFileDropped",
+			"OnTrayItem" };
 		bool edited = false;
 		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);

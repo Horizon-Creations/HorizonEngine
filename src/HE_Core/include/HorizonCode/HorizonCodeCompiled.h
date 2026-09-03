@@ -134,6 +134,9 @@ public:
     // a list would only make the simple case carry the hard one's weight.
     virtual void onFileDropped(int elem, const std::string& path)
     { fireEvent("OnFileDropped", elem, Value::ofString(path)); }
+    // An entry in the tray menu was chosen; the argument is its id.
+    virtual void onTrayItem(int elem, const std::string& id)
+    { fireEvent("OnTrayItem", elem, Value::ofString(id)); }
     // A link in a rich-text label. The argument is the link's id.
     virtual void onLinkClicked(int elem, const std::string& id)
     { fireEvent("OnLinkClicked", elem, Value::ofString(id)); }

@@ -168,6 +168,16 @@ private:
     // file handed to nobody is a file lost — so they wait one frame and then go
     // through the same door a drop does.
     bool m_launchFilesPending = true;
+
+    // ── The tray (plan A7) ───────────────────────────────────────────────────
+    // SDL owns the icon and the menu; what is kept here is what SDL cannot hold
+    // for us. The ids are stored because a tray entry's callback gets a `void*`
+    // and a std::string in a vector that reallocates would hand it a dangling
+    // one — so they live in a deque-like list that never moves its elements.
+    // The tray itself lives in GameApplication.cpp beside g_host, for the reason
+    // that struct exists: there is one application per process, and SDL's tray
+    // callback gets a bare void* that has to point at something whose address
+    // never moves.
     // Startup window + backend, settled once by applyShippedConfig. The values
     // here are the ones a game shipped with before the config could carry them,
     // so an export without those keys behaves exactly as it always did.

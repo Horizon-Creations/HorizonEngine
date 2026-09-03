@@ -120,6 +120,13 @@ struct Ctx
     // sleeps until something happens, and a script changing a widget is exactly
     // the kind of "something" that carries no OS event with it.
     std::function<void()> requestRedraw;
+    // The tray icon (docs/he-apps-plan.md A7). Callbacks like the window rows
+    // above, and unbound in the editor for the same reason: a previewed graph
+    // must not put an icon in the menu bar of the machine somebody is working on.
+    std::function<void(const std::string& tooltip)>                 showTray;
+    std::function<void()>                                           hideTray;
+    std::function<void(const std::string& id, const std::string&)>  addTrayItem;
+    std::function<void()>                                           clearTrayMenu;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -687,6 +694,20 @@ namespace app {
     void      setSize(Ctx&, int width, int height);
     glm::vec2 size(Ctx&);                 // logical points; (0,0) when unbound
     void      requestRedraw(Ctx&);        // draw one more frame (event-driven apps)
+
+    // ── The tray (plan A7) ──────────────────────────────────────────────────
+    // An icon in the system's tray / menu bar, with a menu of the application's
+    // own entries. showTray puts it there (again with a new tooltip if it is
+    // already up), hideTray takes it away, and the menu is built by adding
+    // entries to it.
+    //
+    // An entry is an ID and a LABEL, not just a label: clicking one fires
+    // OnTrayItem with the id, so translating the menu does not silently rewire
+    // what its entries do.
+    void showTray(Ctx&, const std::string& tooltip);
+    void hideTray(Ctx&);
+    void addTrayItem(Ctx&, const std::string& id, const std::string& label);
+    void clearTrayMenu(Ctx&);
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────────────

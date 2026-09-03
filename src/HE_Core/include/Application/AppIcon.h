@@ -68,4 +68,10 @@ HE_API bool heIcoWrite(const std::filesystem::path& path,
 // icon is not a reason to refuse to start.
 HE_API bool heSetWindowIcon(::SDL_Window* window, const std::filesystem::path& png);
 
+// The same PNG as raw RGBA, for a caller that needs the pixels rather than a
+// window icon (the tray wants its own SDL_Surface, and building one from a file
+// path is the decoder's job, not the caller's). False leaves the outputs alone.
+HE_API bool heLoadPngRGBA(const std::filesystem::path& png,
+                          std::vector<std::uint8_t>& rgba, int& width, int& height);
+
 } // namespace HE

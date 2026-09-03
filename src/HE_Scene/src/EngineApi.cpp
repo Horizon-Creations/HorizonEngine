@@ -1066,6 +1066,53 @@ void setTitle(Ctx& c, const std::string& title)
     c.setWindowTitle(title);
 }
 
+void showTray(Ctx& c, const std::string& tooltip)
+{
+    if (!c.showTray)
+    {
+        HE_LOG_WARN(Script, "%s", "app.showTray: no tray bound by the host — ignored");
+        return;
+    }
+    c.showTray(tooltip);
+}
+
+void hideTray(Ctx& c)
+{
+    if (!c.hideTray)
+    {
+        HE_LOG_WARN(Script, "%s", "app.hideTray: no tray bound by the host — ignored");
+        return;
+    }
+    c.hideTray();
+}
+
+void addTrayItem(Ctx& c, const std::string& id, const std::string& label)
+{
+    if (!c.addTrayItem)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addTrayItem: no tray bound by the host — ignored");
+        return;
+    }
+    // An entry with no id could never be told apart in OnTrayItem, so it is
+    // refused here rather than becoming a menu row that does nothing.
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.addTrayItem: an entry needs an id — ignored");
+        return;
+    }
+    c.addTrayItem(id, label.empty() ? id : label);
+}
+
+void clearTrayMenu(Ctx& c)
+{
+    if (!c.clearTrayMenu)
+    {
+        HE_LOG_WARN(Script, "%s", "app.clearTrayMenu: no tray bound by the host — ignored");
+        return;
+    }
+    c.clearTrayMenu();
+}
+
 void setSize(Ctx& c, int width, int height)
 {
     if (!c.setWindowSize)
@@ -3455,6 +3502,18 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV&){ return VV{ Value::ofVec2(app::size(c)) }; } });
         t.push_back({ "app.requestRedraw", "App", true, {}, {}, "HE::api::app::requestRedraw",
             [](Ctx& c, const VV&){ app::requestRedraw(c); return VV{}; } });
+        // The tray. Bound by the packaged application and by nothing else, so a
+        // graph previewed in the editor logs once and leaves the menu bar alone.
+        t.push_back({ "app.showTray", "App", true, {{"tooltip", P::String}}, {},
+            "HE::api::app::showTray",
+            [](Ctx& c, const VV& a){ app::showTray(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "app.hideTray", "App", true, {}, {}, "HE::api::app::hideTray",
+            [](Ctx& c, const VV&){ app::hideTray(c); return VV{}; } });
+        t.push_back({ "app.addTrayItem", "App", true,
+            {{"id", P::String}, {"label", P::String}}, {}, "HE::api::app::addTrayItem",
+            [](Ctx& c, const VV& a){ app::addTrayItem(c, aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "app.clearTrayMenu", "App", true, {}, {}, "HE::api::app::clearTrayMenu",
+            [](Ctx& c, const VV&){ app::clearTrayMenu(c); return VV{}; } });
 
         // Clipboard — the same system clipboard Ctrl+C/V already use in a focused
         // text field, reachable from a graph.
@@ -4100,6 +4159,8 @@ const std::vector<ApiFn>& registry()
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },
             { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
+            { "app.showTray", "Show Tray Icon" },    { "app.hideTray", "Hide Tray Icon" },
+            { "app.addTrayItem", "Add Tray Item" },  { "app.clearTrayMenu", "Clear Tray Menu" },
             { "clipboard.getText", "Get Clipboard Text" },
             { "clipboard.setText", "Set Clipboard Text" },
             { "clipboard.hasText", "Has Clipboard Text" },

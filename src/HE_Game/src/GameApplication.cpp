@@ -42,6 +42,8 @@
 #include <functional>                // the host services a Ctx carries (see g_host)
 #include <unordered_set>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_tray.h>   // the tray icon (plan A7)
+#include <list>              // tray ids: addresses SDL's userdata may keep
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <filesystem>
@@ -82,10 +84,103 @@ struct HostCtxParts
 	std::function<void(uint32_t, uint32_t)> setWindowSize;
 	std::function<glm::vec2()>              windowSize;
 	std::function<void()>                   requestRedraw;
+	// The tray rows, bound for the same reason and in the same place.
+	std::function<void(const std::string&)>                     showTray;
+	std::function<void()>                                       hideTray;
+	std::function<void(const std::string&, const std::string&)> addTrayItem;
+	std::function<void()>                                       clearTrayMenu;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
 HostCtxParts g_host;
+
+// ── The tray (plan A7) ───────────────────────────────────────────────────────
+// Beside g_host and for its reason: one application per process. SDL hands a
+// tray entry's callback a bare void*, so the thing it points at must outlive the
+// click and never move — a std::list of ids does both, a vector would not.
+struct TrayItem { std::string id; };
+SDL_Tray*            g_tray     = nullptr;
+SDL_TrayMenu*        g_trayMenu = nullptr;
+std::list<TrayItem>  g_trayIds;
+// A click arrives from INSIDE SDL's event pump. Firing a graph from there would
+// re-enter the interpreter in the middle of a frame, so the id waits here and
+// the frame loop delivers it — the same shape the drop path uses.
+std::vector<std::string> g_trayClicks;
+
+void SDLCALL trayEntryClicked(void* userdata, SDL_TrayEntry*)
+{
+    if (const TrayItem* item = static_cast<const TrayItem*>(userdata))
+        g_trayClicks.push_back(item->id);
+}
+
+void destroyTray()
+{
+    if (g_tray) SDL_DestroyTray(g_tray);   // takes the menu and its entries with it
+    g_tray     = nullptr;
+    g_trayMenu = nullptr;
+    g_trayIds.clear();
+}
+
+void trayShow(const std::string& tooltip)
+{
+    if (g_tray)
+    {
+        // Already up: showing it again is how a tooltip is changed.
+        SDL_SetTrayTooltip(g_tray, tooltip.empty() ? nullptr : tooltip.c_str());
+        return;
+    }
+    // The icon the export generated — the same picture as the window's, because
+    // an application with two different icons is two applications to whoever is
+    // looking at the screen.
+    SDL_Surface* icon = nullptr;
+    std::vector<std::uint8_t> rgba;
+    int w = 0, h = 0;
+    if (const char* base = SDL_GetBasePath())
+        if (HE::heLoadPngRGBA(std::filesystem::path(base) / "AppIcon.png", rgba, w, h))
+            icon = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, rgba.data(), w * 4);
+
+    g_tray = SDL_CreateTray(icon, tooltip.empty() ? nullptr : tooltip.c_str());
+    if (icon) SDL_DestroySurface(icon);
+    if (!g_tray)
+    {
+        HE_LOG_WARN(Core, "app.showTray: the system refused a tray icon (%s)", SDL_GetError());
+        return;
+    }
+    g_trayMenu = SDL_CreateTrayMenu(g_tray);
+}
+
+void trayAddItem(const std::string& id, const std::string& label)
+{
+    if (!g_trayMenu)
+    {
+        HE_LOG_WARN(Core, "%s", "app.addTrayItem: there is no tray yet — call Show Tray Icon first");
+        return;
+    }
+    g_trayIds.push_back({ id });
+    SDL_TrayEntry* entry =
+        SDL_InsertTrayEntryAt(g_trayMenu, -1, label.c_str(), SDL_TRAYENTRY_BUTTON);
+    if (!entry)
+    {
+        g_trayIds.pop_back();
+        HE_LOG_WARN(Core, "app.addTrayItem: %s", SDL_GetError());
+        return;
+    }
+    SDL_SetTrayEntryCallback(entry, trayEntryClicked, &g_trayIds.back());
+}
+
+void trayClearMenu()
+{
+    if (!g_trayMenu) return;
+    int count = 0;
+    // Copied first: removing an entry invalidates the list SDL handed back.
+    const SDL_TrayEntry** entries = SDL_GetTrayEntries(g_trayMenu, &count);
+    std::vector<SDL_TrayEntry*> doomed;
+    for (int i = 0; i < count; ++i)
+        doomed.push_back(const_cast<SDL_TrayEntry*>(entries[i]));
+    for (SDL_TrayEntry* e : doomed) SDL_RemoveTrayEntry(e);
+    // The ids go with them; nothing points at them any more.
+    g_trayIds.clear();
+}
 
 // The only Ctx factory in this file. `self` is the calling HorizonCode instance
 // (0 for everything that is not a graph — the scene-request pump, Lua, Python).
@@ -107,6 +202,10 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.setWindowSize  = g_host.setWindowSize;
 	c.windowSize     = g_host.windowSize;
 	c.requestRedraw  = g_host.requestRedraw;
+	c.showTray       = g_host.showTray;
+	c.hideTray       = g_host.hideTray;
+	c.addTrayItem    = g_host.addTrayItem;
+	c.clearTrayMenu  = g_host.clearTrayMenu;
 	return c;
 }
 
@@ -594,6 +693,11 @@ void GameApplication::OnInit()
 			         : glm::vec2(0.0f);
 		};
 		g_host.requestRedraw  = [this] { requestRedraw(); };
+		g_host.showTray       = [](const std::string& tip) { trayShow(tip); };
+		g_host.hideTray       = [] { destroyTray(); };
+		g_host.addTrayItem    = [](const std::string& id, const std::string& label)
+		                        { trayAddItem(id, label); };
+		g_host.clearTrayMenu  = [] { trayClearMenu(); };
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
@@ -1709,6 +1813,19 @@ void GameApplication::OnRender(float deltaTime)
 		}
 	}
 
+	// Tray clicks, collected inside SDL's pump and delivered here — outside it,
+	// where firing a graph is what the frame is for. Same reason the launch
+	// files above wait, and the ids go to the GameInstance because the tray
+	// belongs to the application and not to any element.
+	if (!g_trayClicks.empty())
+	{
+		std::vector<std::string> clicks;
+		clicks.swap(g_trayClicks);
+		if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+			for (const std::string& id : clicks)
+				m_gameInstance.runtime().fireOnTrayItem(gi, 0, id);
+	}
+
 	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
@@ -2055,6 +2172,12 @@ void GameApplication::OnRender(float deltaTime)
 
 void GameApplication::OnShutdown()
 {
+	// The tray outlives the window unless it is taken down deliberately, and an
+	// icon left in the menu bar of a program that has exited is the worst thing
+	// a tray can do.
+	destroyTray();
+	g_trayClicks.clear();
+
 	// Stop audio first: sounds reference asset PCM the ContentManager owns.
 	m_audioEngine.shutdown();
 
