@@ -78,6 +78,11 @@ struct HE_API ProjectConfig {
     // so a build written before this reads back as the base set, which is what
     // it had.
     std::uint32_t fontScripts = 0;
+
+    // The weight the UI text is drawn in. Stored NEGATED in the flags word (like
+    // advancedShaderEffects above): a build written before this has the bit clear
+    // and must read back as bold, which is what it drew.
+    bool         fontWeightBold = true;
 };
 
 class HE_API ProjectConfigLoader {

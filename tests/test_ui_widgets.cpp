@@ -1874,6 +1874,56 @@ TEST_CASE("Rich text measures a character once, not once per byte")
     CHECK(out.size() == 2);
 }
 
+TEST_CASE("<b> is a scope like every other, and closes like every other")
+{
+    const HE::UIRichText rt = HE::uiParseRichText("plain <b>bold</> plain");
+    CHECK(rt.text == "plain bold plain");
+    REQUIRE(rt.runs.size() == 3);
+    CHECK(rt.runs[0].face == HE::UIFontFace::Base);
+    CHECK(rt.runs[1].face == HE::UIFontFace::Bold);
+    CHECK(rt.runs[2].face == HE::UIFontFace::Base);
+
+    // It nests with the others rather than beside them: a bold link stays a link.
+    const HE::UIRichText both = HE::uiParseRichText("<link=x>see <b>this</></>");
+    REQUIRE(both.runs.size() == 2);
+    CHECK(both.runs[1].face == HE::UIFontFace::Bold);
+    CHECK(both.runs[1].link == "x");
+
+    // And the format's one rule still holds: a tag that is not understood is
+    // text, so a `<bb>` in a sentence is a `<bb>`.
+    CHECK(HE::uiParseRichText("a<bb>c").text == "a<bb>c");
+}
+
+TEST_CASE("With bold as the base weight, <b> is a visible no-op")
+{
+    // The engine's default weight IS bold, and there is nothing bolder. Saying so
+    // by drawing the same atlas is the honest answer; the alternative is a second
+    // atlas holding identical glyphs and a tag that pretends to do something.
+    //
+    // The weight is per PROCESS, and ctest gives this file one of its own. Run
+    // the binary by hand with test_ui_font_weight.cpp in the same run and that
+    // file may have got there first, so step aside rather than report its choice
+    // as this file's failure.
+    if (!HE::uiFontWeightBold())
+    {
+        MESSAGE("this process was baked regular — the no-op only exists with bold as the base");
+        return;
+    }
+    CHECK(HE::uiEngineFaceKey(HE::UIFontFace::Bold) == 0u);
+
+    const HE::BakedUIFont& f = HE::sharedUIFont();
+    const HE::UIRichText rt = HE::uiParseRichText("a<b>a</>a");
+    HE::UITextLayout opts;
+    const HE::UIRichLayout lay =
+        HE::uiLayoutRichText(f, rt, { 0.0f, 0.0f }, { 400.0f, 40.0f }, 24.0f, opts);
+    REQUIRE(lay.pieces.size() == 3);
+    CHECK(lay.pieces[1].width == doctest::Approx(lay.pieces[0].width));
+    std::vector<UIRenderObject> out;
+    HE::uiEmitRichText(f, 0, rt, lay, { 1, 1, 1, 1 }, 0, out);
+    REQUIRE(out.size() == 3);
+    CHECK(out[1].fontAtlasKey == out[0].fontAtlasKey);
+}
+
 TEST_CASE("The chosen scripts travel into the exported application")
 {
     // The shipped app bakes its own atlas on a machine that never saw the
@@ -1901,6 +1951,15 @@ TEST_CASE("The chosen scripts travel into the exported application")
     REQUIRE(ProjectConfigLoader::load(dir, plainBack));
     CHECK(plainBack.fontScripts == 0u);
     CHECK(plainBack.allowFiles == false);      // the neighbouring bits are unmoved
+    // The weight rides in the same word, negated: absent means bold, which is
+    // what a build written before the setting existed drew.
+    CHECK(plainBack.fontWeightBold);
+    cfg.fontWeightBold = false;
+    REQUIRE(ProjectConfigLoader::save(dir, cfg));
+    ProjectConfig regular;
+    REQUIRE(ProjectConfigLoader::load(dir, regular));
+    CHECK_FALSE(regular.fontWeightBold);
+    CHECK(regular.fontScripts == (HE::UIFontScriptGreek | HE::UIFontScriptCyrillic));
     std::filesystem::remove_all(dir);
 }
 

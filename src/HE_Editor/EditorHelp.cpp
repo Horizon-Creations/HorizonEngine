@@ -1777,6 +1777,19 @@ namespace
 	  "here so that a project which has already thought about what it may reach "
 	  "does not have to be asked a second time when that group arrives.",
 	  "", "editor#preferences" },
+	{ "Fonts/Regular", "Regular",
+	  "Ordinary body text, and the setting a new project starts with. It is also "
+	  "what makes <b> in rich text visible: a bold run is drawn in the same "
+	  "family's Bold, which only looks like anything if the text around it is "
+	  "not already bold.",
+	  "", "editor#preferences" },
+	{ "Fonts/Bold", "Bold",
+	  "What the engine has always drawn, so a project made before this setting "
+	  "existed keeps it and nothing moves.\n\n"
+	  "With Bold as the base weight there is nothing bolder to reach for, so <b> "
+	  "draws the same letters. That is deliberate: the alternative is a second "
+	  "atlas holding the same glyphs and a tag that pretends.",
+	  "", "editor#preferences" },
 	{ "Fonts/Greek", "Greek",
 	  "Adds the Greek alphabet to the font atlas. Off by default, like Cyrillic: "
 	  "the base set (Latin, its umlauts and accents, the punctuation and the Euro "

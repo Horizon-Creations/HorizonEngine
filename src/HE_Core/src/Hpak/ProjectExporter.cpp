@@ -996,6 +996,7 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.allowProcesses        = settings.allowProcesses;
     cfg.allowNetwork          = settings.allowNetwork;
     cfg.fontScripts           = settings.fontScripts;
+    cfg.fontWeightBold        = settings.fontWeightBold;
     cfg.theme                 = settings.theme;
     cfg.themeMode             = settings.themeMode;
     // Key placement: inside the game executable when the patch succeeded (the

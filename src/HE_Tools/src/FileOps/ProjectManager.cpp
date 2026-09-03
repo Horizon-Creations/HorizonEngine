@@ -903,6 +903,10 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["allowNetwork"]   = false;
 	// The base set, for the same reason: the file says what it gets from day one.
 	j["fontScripts"]    = 0;
+	// …and regular body text, which is the one place this differs from an older
+	// project: those keep the bold the engine always drew, a new one starts where
+	// text should start and can use <b> for emphasis.
+	j["fontWeightBold"] = false;
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -1061,6 +1065,9 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// existed was getting anyway.
 	m_currentProject.fontScripts    = j.contains("fontScripts") && j["fontScripts"].is_number_unsigned()
 	                                      ? j["fontScripts"].get<std::uint32_t>() : 0u;
+	// Absent means bold, which is what every project written before this was
+	// getting. New projects say false explicitly (see the template below).
+	m_currentProject.fontWeightBold = jsonBool(j, "fontWeightBold", true);
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -1137,6 +1144,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["allowProcesses"]        = m_currentProject.allowProcesses;
 	j["allowNetwork"]          = m_currentProject.allowNetwork;
 	j["fontScripts"]           = m_currentProject.fontScripts;
+	j["fontWeightBold"]        = m_currentProject.fontWeightBold;
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

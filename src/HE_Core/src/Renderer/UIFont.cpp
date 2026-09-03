@@ -4,6 +4,10 @@
 // Roboto Condensed Bold — the same smooth TTF the editor UI uses, so live
 // widgets render like the designer preview (was the blocky ProggyClean bitmap).
 #include <Roboto_ttf.h>
+// …and the same family's Regular, so a project can have ordinary body text and
+// `<b>` can mean something. Shipped as the variable file; stb_truetype reads its
+// default master, which is Regular (SIL OFL 1.1, EditorDeps/Fonts/).
+#include <RobotoRegular_ttf.h>
 
 #include <Renderer/UIFont.h>
 #include <algorithm>
@@ -200,7 +204,17 @@ namespace
 
     std::uint32_t g_scripts = 0;
     bool          g_sharedBaked = false;
+    bool          g_weightBold  = true;   // what the engine has always drawn
 }
+
+bool uiSetFontWeightBold(bool bold)
+{
+    if (g_sharedBaked) return bold == g_weightBold;
+    g_weightBold = bold;
+    return true;
+}
+
+bool uiFontWeightBold() { return g_weightBold; }
 
 bool uiSetFontScripts(std::uint32_t scripts)
 {
@@ -216,7 +230,7 @@ const BakedUIFont& sharedUIFont()
     static BakedUIFont s_font = []
     {
         BakedUIFont f; // atlasW/atlasH/bakePx default to the shared-atlas constants
-        bakeInto(Roboto_data, f, g_scripts);
+        bakeInto(g_weightBold ? Roboto_data : RobotoRegular_data, f, g_scripts);
         g_sharedBaked = true;
         return f;
     }();
@@ -225,12 +239,37 @@ const BakedUIFont& sharedUIFont()
 
 BakedUIFont bakeDefaultUIFont(float bakePx, int atlasW, int atlasH)
 {
+    // Deliberately the BOLD face whatever the project asked for: the one caller
+    // is the editor's own splash screen, and editor chrome does not change its
+    // look because a project it is about to open prefers Regular body text.
     BakedUIFont f;
     f.bakePx = std::clamp(bakePx, 6.0f, 256.0f);
     f.atlasW = std::clamp(atlasW, 64, 4096);
     f.atlasH = std::clamp(atlasH, 64, 4096);
     bakeInto(Roboto_data, f, g_scripts);
     return f;
+}
+
+std::uint32_t uiEngineFaceKey(UIFontFace face)
+{
+    switch (face)
+    {
+    case UIFontFace::Bold:
+    {
+        // Nothing is bolder than bold. Answering 0 here is what makes `<b>` a
+        // visible no-op in a project whose base weight IS bold, instead of a
+        // second atlas that draws the same glyphs.
+        if (g_weightBold) return 0;
+        static const std::uint32_t s_key = UIFontCache::keyFor(
+            0x8B01D0FACEull,
+            std::vector<uint8_t>(Roboto_data, Roboto_data + Roboto_size),
+            BakedUIFont::kBakePx);
+        return s_key;
+    }
+    case UIFontFace::Icon:
+    default:
+        return 0;
+    }
 }
 
 namespace UIFontCache
@@ -405,7 +444,11 @@ namespace
     // A run of attributes while the parser is inside a tag. The stack IS the
     // nesting: `<link=x><color=#f00>a</>b</>` gives "a" both and "b" only the
     // link, which is what anyone who has written markup expects.
-    struct RichScope { std::string color; float sizeScale = 1.0f; std::string link; };
+    struct RichScope
+    {
+        std::string color; float sizeScale = 1.0f; std::string link;
+        UIFontFace  face = UIFontFace::Base;
+    };
 
     // Does `s` at `i` start a tag this parser understands, and where does it end?
     // Returns false for everything else — the one rule the whole format rests on:
@@ -420,6 +463,9 @@ namespace
         const std::string body = s.substr(i + 1, close - i - 1);
         outEnd = close + 1;
         if (body == "/") { outName = "/"; outValue.clear(); return true; }
+        // The one tag with no value: `<b>` … `</>`. Closed the same way as every
+        // other scope, so there is one closing form to remember and not two.
+        if (body == "b") { outName = "b"; outValue.clear(); return true; }
         const std::size_t eq = body.find('=');
         if (eq == std::string::npos || eq == 0 || eq + 1 >= body.size()) return false;
         outName  = body.substr(0, eq);
@@ -451,6 +497,7 @@ UIRichText uiParseRichText(const std::string& markup)
         cur.begin = out.text.size();
         const RichScope a = attrs();
         cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+        cur.face  = a.face;
     };
 
     for (std::size_t i = 0; i < markup.size(); )
@@ -472,6 +519,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 stack.pop_back();
                 const RichScope a = attrs();
                 cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+                cur.face  = a.face;
             }
             else
             {
@@ -480,8 +528,10 @@ UIRichText uiParseRichText(const std::string& markup)
                 if (name == "color") a.color = value;
                 else if (name == "size") a.sizeScale = std::stof(value);
                 else if (name == "link") { a.link = value; out.hasLinks = true; }
+                else if (name == "b") a.face = UIFontFace::Bold;
                 stack.push_back(a);
                 cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+                cur.face  = a.face;
             }
             i = end;
             continue;
@@ -500,9 +550,32 @@ UIRichText uiParseRichText(const std::string& markup)
     return out;
 }
 
+namespace
+{
+    // Which baked atlas a run's glyphs come from, and under which key the
+    // renderer knows it. One function, used by the measure AND the draw, for the
+    // same reason the layout itself is one function.
+    struct ResolvedFace { const BakedUIFont* font; std::uint32_t key; };
+
+    ResolvedFace resolveFace(const BakedUIFont& base, std::uint32_t baseKey, UIFontFace face)
+    {
+        if (face == UIFontFace::Base) return { &base, baseKey };
+        // An element drawing in an imported Font asset has no engine bold of ITS
+        // family, so `<b>` there stays in the family it is in — a Roboto bold
+        // word inside somebody's serif label is worse than an unbolded one. An
+        // icon is not a weight of anything, so it is not subject to that.
+        if (face == UIFontFace::Bold && baseKey != 0) return { &base, baseKey };
+        const std::uint32_t k = uiEngineFaceKey(face);
+        if (k == 0) return { &base, baseKey };
+        const BakedUIFont* f = UIFontCache::find(k);
+        return (f && f->ok) ? ResolvedFace{ f, k } : ResolvedFace{ &base, baseKey };
+    }
+} // namespace
+
 UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
                               const glm::vec2& rectPos, const glm::vec2& rectSize,
-                              float sizePx, const UITextLayout& opts)
+                              float sizePx, const UITextLayout& opts,
+                              std::uint32_t baseKey)
 {
     UIRichLayout out;
     if (!font.ok || sizePx <= 0.0f || rt.text.empty()) return out;
@@ -519,13 +592,20 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
         if (rt.runs.empty()) return sizePx;
         return sizePx * rt.runs[runAt(b)].sizeScale;
     };
+    auto faceAt = [&](std::size_t b) {
+        return resolveFace(font, baseKey,
+                           rt.runs.empty() ? UIFontFace::Base : rt.runs[runAt(b)].face);
+    };
     // Advance of the CHARACTER at `b` — the byte walks below all step with
     // uiUtf8Next, so `b` is always a character boundary and a two-byte umlaut is
-    // measured once, not twice.
+    // measured once, not twice. Scaled by ITS OWN face's bake size: the icon face
+    // is baked smaller than the text one, and dividing by the wrong one would
+    // make every icon the wrong size in a way that only shows up next to text.
     auto advanceAt = [&](std::size_t b) {
+        const ResolvedFace rf = faceAt(b);
         std::size_t j = b;
-        const BakedGlyph* g = font.glyph(uiUtf8Decode(rt.text, j));
-        return g ? g->xadvance * (sizeAt(b) / font.bakePx) : 0.0f;
+        const BakedGlyph* g = rf.font->glyph(uiUtf8Decode(rt.text, j));
+        return g ? g->xadvance * (sizeAt(b) / rf.font->bakePx) : 0.0f;
     };
 
     // ── Lines ────────────────────────────────────────────────────────────────
@@ -628,6 +708,10 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
         const float slack = std::max(0.0f, rectSize.x - lineWidthPx[li]);
         float x = rectPos.x + (opts.alignH == 1 ? slack * 0.5f
                              : opts.alignH == 2 ? slack : 0.0f);
+        // The BASE font's ascent, deliberately, even where a piece is in another
+        // face: one line has one baseline. Taking each run's own ascent would put
+        // a bold word a pixel off its neighbours, which reads as a wobble rather
+        // than as emphasis.
         const float baseline = centre + (font.ascent * (ls / font.bakePx)) * 0.5f - ls * 0.08f;
         std::size_t b = lines[li].begin;
         while (b < lines[li].end)
@@ -642,6 +726,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             pc.line = static_cast<int>(li);
             pc.x = x; pc.width = w;
             pc.sizePx = rt.runs.empty() ? sizePx : sizePx * rt.runs[r].sizeScale;
+            pc.face   = rt.runs.empty() ? UIFontFace::Base : rt.runs[r].face;
             pc.baseline = baseline;
             pc.top = centre - ls * 0.5f; pc.height = ls;
             out.pieces.push_back(pc);
@@ -661,10 +746,14 @@ void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
                     std::vector<UIRenderObject>& out)
 {
     if (!font.ok) return;
-    const float invW = 1.0f / (float)font.atlasW;
-    const float invH = 1.0f / (float)font.atlasH;
     for (const UIRichPiece& pc : layout.pieces)
     {
+        // Per piece, because a piece is exactly the stretch that shares one face:
+        // its atlas, its bake size and the key the renderer samples all come from
+        // the same answer the layout already measured with.
+        const ResolvedFace rf = resolveFace(font, atlasKey, pc.face);
+        const float invW = 1.0f / (float)rf.font->atlasW;
+        const float invH = 1.0f / (float)rf.font->atlasH;
         glm::vec4 colour = defaultColor;
         if (pc.run < rt.runs.size() && !rt.runs[pc.run].color.empty())
         {
@@ -676,12 +765,12 @@ void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
             if (uiParseRichColor(rt.runs[pc.run].color, c))
                 colour = glm::vec4(glm::vec3(c), c.a * defaultColor.a);
         }
-        const float scale = pc.sizePx / font.bakePx;
+        const float scale = pc.sizePx / rf.font->bakePx;
         float penX = pc.x;
         std::size_t b = pc.begin;
         while (b < pc.end && b < rt.text.size())
         {
-            const BakedGlyph* gp = font.glyph(uiUtf8Decode(rt.text, b));
+            const BakedGlyph* gp = rf.font->glyph(uiUtf8Decode(rt.text, b));
             if (!gp) continue;
             const BakedGlyph& g = *gp;
             UIRenderObject ro;
@@ -692,7 +781,7 @@ void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
             ro.color    = colour;
             ro.type     = 2;
             ro.layer    = layer;
-            ro.fontAtlasKey = atlasKey;
+            ro.fontAtlasKey = rf.key;
             out.push_back(std::move(ro));
             penX += g.xadvance * scale;
         }

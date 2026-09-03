@@ -1271,6 +1271,27 @@ void drawFontsPage(AppContext& ctx)
 	                    "atlas on a machine that never saw this editor.");
 	ImGui::Spacing();
 
+	// ── Weight ───────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Text weight");
+	ImGui::TextWrapped("Which weight ordinary text is drawn in. Regular is what body text "
+	                   "usually is, and it is what gives <b> in rich text something to be "
+	                   "bolder than.");
+	ImGui::Spacing();
+
+	const bool wasBold = p.fontWeightBold;
+	if (ImGui::RadioButton("Regular", !p.fontWeightBold)) p.fontWeightBold = false;
+	EditorWidgets::helpForLabel("Regular");
+	ImGui::Spacing();
+	if (ImGui::RadioButton("Bold", p.fontWeightBold)) p.fontWeightBold = true;
+	EditorWidgets::helpForLabel("Bold");
+	ImGui::Indent();
+	EditorWidgets::hint("What the engine has always drawn, so an older project keeps it "
+	                    "until somebody says otherwise. With Bold as the base, <b> has "
+	                    "nothing bolder to reach for and draws the same letters.");
+	ImGui::Unindent();
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Scripts");
 	ImGui::TextWrapped("Every project gets Latin: A to Z, the umlauts and accents of "
 	                   "Latin-1, the Central European letters of Latin Extended-A, the "
 	                   "typographic quotes and dashes, and the Euro sign. The two below "
@@ -1293,7 +1314,7 @@ void drawFontsPage(AppContext& ctx)
 	EditorWidgets::helpForLabel("Cyrillic");
 	ImGui::Spacing();
 
-	if (p.fontScripts != before)
+	if (p.fontScripts != before || p.fontWeightBold != wasBold)
 	{
 		// Straight to disk, like the permissions page: a setting that is on in
 		// the panel and off in the file is the state somebody spends an evening on.
@@ -1302,12 +1323,13 @@ void drawFontsPage(AppContext& ctx)
 			               "Could not save the project's font settings", p.path);
 	}
 
-	// What this session actually baked, said plainly. Asking for the mask that is
-	// already live answers yes, and then there is nothing to report.
+	// What this session actually baked, said plainly. Asking for what is already
+	// live answers yes, and then there is nothing to report.
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
-	if (!HE::uiSetFontScripts(p.fontScripts))
+	const bool weightLive = HE::uiSetFontWeightBold(p.fontWeightBold);
+	if (!HE::uiSetFontScripts(p.fontScripts) || !weightLive)
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
 		ImGui::TextWrapped("Saved, but not drawn yet: this editor session already baked its "
@@ -1319,8 +1341,9 @@ void drawFontsPage(AppContext& ctx)
 	else
 	{
 		const HE::BakedUIFont& f = HE::sharedUIFont();
-		ImGui::TextDisabled("Live: %zu characters in a %d x %d atlas.",
-		                    f.glyphs.size(), f.atlasW, f.atlasH);
+		ImGui::TextDisabled("Live: %zu characters in a %d x %d atlas, %s.",
+		                    f.glyphs.size(), f.atlasW, f.atlasH,
+		                    HE::uiFontWeightBold() ? "bold" : "regular");
 	}
 }
 

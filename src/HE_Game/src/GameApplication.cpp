@@ -538,6 +538,7 @@ void GameApplication::OnInit()
 	// is the only moment it can be decided. A shipped app never sees the editor,
 	// which is why the answer travels in the config rather than being asked.
 	HE::uiSetFontScripts(m_config.fontScripts);
+	HE::uiSetFontWeightBold(m_config.fontWeightBold);
 
 	// Savegames: the shipped game IS play mode, and save.create() resolves the
 	// project's default template from the hcfg.

@@ -265,6 +265,13 @@ struct ProjectData
 	// assumed — and why they are a PROJECT setting: the shipped app has to bake
 	// what its own text needs, on a machine that never saw the editor.
 	std::uint32_t fontScripts = 0;
+
+	// The weight the UI text is drawn in, ".heproj \"fontWeightBold\"". True is
+	// what the engine has always drawn, so an ABSENT key means true and no
+	// existing project changes its look. A NEW project is written with false:
+	// ordinary body text is regular, and `<b>` then has something to be bolder
+	// than. Same asymmetry as `themeStyled` on an element, for the same reason.
+	bool fontWeightBold = true;
 };
 
 class HE_TOOLS_API ProjectManager

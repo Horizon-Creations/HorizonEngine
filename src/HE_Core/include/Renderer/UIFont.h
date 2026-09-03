@@ -93,6 +93,25 @@ HE_API std::size_t uiUtf8Clamp(const std::string& s, std::size_t byteIndex);
 // and draws nothing, which is what damaged text should do.
 HE_API std::uint32_t uiUtf8Decode(const std::string& s, std::size_t& i);
 
+// ── The engine's own faces ────────────────────────────────────────────────────
+// Base is whatever the element draws in (the shared font, or an imported Font
+// asset). Bold and Icon are faces the ENGINE ships, each with its own atlas key,
+// so a backend uploads each exactly once.
+enum class UIFontFace : std::uint8_t { Base = 0, Bold = 1, Icon = 2 };
+
+// The atlas key for one of the engine's faces, baked on first use. Returns 0 —
+// "no face of its own, use the base" — when the face would be the base anyway:
+// with the project's weight already set to Bold there is nothing bolder, and
+// `<b>` says so by being a no-op rather than by baking a second identical atlas.
+HE_API std::uint32_t uiEngineFaceKey(UIFontFace face);
+
+// The weight the shared font is baked in. Bold is the default because it is what
+// the engine has always drawn; a project that wants ordinary body text sets
+// Regular and `<b>` then has something to be bolder THAN. Same rule as the
+// scripts below: the atlas is baked once, so this is refused once it is.
+HE_API bool uiSetFontWeightBold(bool bold);
+HE_API bool uiFontWeightBold();
+
 // Which scripts the atlases bake, beyond the base set (a UIFontScripts mask).
 // Set from the project before any text is drawn: the backends upload each atlas
 // once, so a mask that changes after the first bake would leave them holding a
@@ -206,6 +225,10 @@ struct UITextRun
     // pixels would fight both.
     float       sizeScale = 1.0f;
     std::string link;                 // empty = not clickable
+    // Which FACE this run is drawn in. A second weight and an icon glyph are the
+    // same problem — "these characters come from another file" — so they are the
+    // same field and not two mechanisms.
+    UIFontFace  face = UIFontFace::Base;
 };
 struct UIRichText
 {
@@ -243,6 +266,9 @@ struct UIRichPiece
     // hit test needs and what a piece alone cannot say.
     float baseline = 0.0f;
     float top = 0.0f, height = 0.0f;
+    // Resolved once, here, so the draw and the hit test cannot disagree about
+    // which file a piece's glyphs came from.
+    UIFontFace face = UIFontFace::Base;
 };
 struct UIRichLayout
 {
@@ -252,9 +278,14 @@ struct UIRichLayout
 // Plain text laid out through here lands byte-identically where the plain path
 // puts it — the mixed-size arithmetic collapses to the old formula when every
 // run is the same size, and a test pins that.
+// `baseKey` is the atlas key of `font` (0 = the shared default). It is here so a
+// run in another FACE can be resolved while measuring and not only while drawing:
+// a bold word is wider than a regular one, and a layout that learned that late
+// would put the line break in a different place than the draw does.
 HE_API UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
                                      const glm::vec2& rectPos, const glm::vec2& rectSize,
-                                     float sizePx, const UITextLayout& opts);
+                                     float sizePx, const UITextLayout& opts,
+                                     std::uint32_t baseKey = 0);
 // Draw it. `defaultColor` is what a run without a colour of its own uses.
 HE_API void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
                            const UIRichText& rt, const UIRichLayout& layout,

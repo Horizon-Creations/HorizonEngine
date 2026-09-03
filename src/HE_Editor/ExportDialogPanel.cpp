@@ -1229,6 +1229,7 @@ void startExport(AppContext& ctx)
                     es.allowProcesses = ctx.projectManager->currentProject().allowProcesses;
                     es.allowNetwork   = ctx.projectManager->currentProject().allowNetwork;
                     es.fontScripts    = ctx.projectManager->currentProject().fontScripts;
+                    es.fontWeightBold = ctx.projectManager->currentProject().fontWeightBold;
                 }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 // Texture-compression cook target, chosen automatically from the

@@ -131,11 +131,14 @@ def main(argv):
     # The thresholds are a RELEASE claim. Judging a Debug tree by them would be
     # a red test that says nothing about what ships — the numbers above are still
     # printed, because knowing what a debug build weighs is occasionally useful.
-    if build_type and build_type.lower() not in ("release", "relwithdebinfo",
-                                                 "minsizerel"):
+    # An EMPTY build type is the same case, not a licence to judge: a single-config
+    # build directory with no CMAKE_BUILD_TYPE set hands this an empty string, and
+    # such a tree is a debug tree in every way that matters here. Judging it fails
+    # by three times the threshold and says nothing about what ships.
+    if build_type.lower() not in ("release", "relwithdebinfo", "minsizerel"):
         print()
-        print(f"runtime_size: {build_type} build — the thresholds are measured on a "
-              "Release tree, so this run only reports (skipped)")
+        print(f"runtime_size: {build_type or 'unspecified'} build — the thresholds are "
+              "measured on a Release tree, so this run only reports (skipped)")
         return 2
 
     failed = []

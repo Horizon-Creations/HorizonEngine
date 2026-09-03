@@ -55,7 +55,10 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
                          // script, in the same order as HE::UIFontScripts. Two
                          // fit here; a third would need its own bit rather than
                          // widening this shift, so the mask is masked.
-                         | ((cfg.fontScripts & 3u) << 9);
+                         | ((cfg.fontScripts & 3u) << 9)
+                         // Bit 2048 is the text weight, NEGATED like bit 32: a
+                         // build that predates it has the bit clear and drew bold.
+                         | (cfg.fontWeightBold        ? 0u  : 2048u);
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
@@ -109,6 +112,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     out.allowProcesses        = (flags & 128u) != 0;
     out.allowNetwork          = (flags & 256u) != 0;
     out.fontScripts           = (flags >> 9) & 3u;
+    out.fontWeightBold        = (flags & 2048u) == 0;   // stored negated, see save()
     if (off + 32 > buf.size()) return false;
     std::memcpy(out.encKey, buf.data() + off, 32);
     off += 32;

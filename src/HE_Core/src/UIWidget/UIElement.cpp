@@ -1100,7 +1100,7 @@ namespace
         const HE::BakedUIFont* f = HE::UIFontCache::find(t.fontAtlasKey);
         const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
         return HE::uiLayoutRichText(font, t.parsed(), { px.x, px.y }, { px.w, px.h },
-                                    t.fontSize * pxScaleY, opts);
+                                    t.fontSize * pxScaleY, opts, t.fontAtlasKey);
     }
 }
 
@@ -1131,7 +1131,7 @@ void UIText::applyAutoSize(float resolvedWidth)
         const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
         m = HE::uiLayoutRichText(font, parsed(), { 0.0f, 0.0f },
                                  { wrapW > 0.0f ? wrapW : 1.0e6f, 0.0f },
-                                 fontSize, opts).size;
+                                 fontSize, opts, fontAtlasKey).size;
     }
     else
         m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)

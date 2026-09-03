@@ -65,6 +65,10 @@ struct HE_API ExportSettings {
     // an export that forgets it ships an app whose Greek labels are blank — so
     // it is copied across with the permissions above, from the same place.
     std::uint32_t fontScripts = 0;
+    // The weight the shipped application draws text in (.heproj
+    // "fontWeightBold"). True is what the engine always drew; the exported app
+    // has to be told, or a project that chose regular body text ships bold.
+    bool fontWeightBold = true;
     // The Theme asset the shipped application boots with (content-relative;
     // empty = the engine's built-in default) and the mode it was asked for
     // ("System"/"Light"/"Dark"). Both ride in project.hcfg, not config.json —

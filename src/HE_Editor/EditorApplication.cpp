@@ -1472,6 +1472,7 @@ void EditorApplication::OnInit()
 		// restarting. Opening a second project with a different answer in one
 		// session is exactly that case.
 		HE::uiSetFontScripts(m_projectManager.currentProject().fontScripts);
+		HE::uiSetFontWeightBold(m_projectManager.currentProject().fontWeightBold);
 
 		// Point the ContentManager at this project's content folder so the
 		// renderer and the content browser can resolve asset references.
