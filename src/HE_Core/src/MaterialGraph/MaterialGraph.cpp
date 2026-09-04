@@ -134,6 +134,22 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::ScreenPos, "Screen Position", "Input",
           {}, { { "XY", F::Vec2, 0 } }, 0 },
 
+        // ── v11: the widget under the pixel (D5 Schicht 1) ──
+        { MatNodeType::ElementSize, "Element Size", "UI",
+          {}, { { "Size", F::Vec2, 0 }, { "Width", F::Float, 0 }, { "Height", F::Float, 0 } }, 0 },
+        { MatNodeType::ElementUV, "Element UV", "UI",
+          {}, { { "UV", F::Vec2, 0 } }, 0 },
+        // Radius/Inset are AUTHORED (this is the shape you want, not the one the
+        // element has) — Border Distance below is the element's own outline.
+        { MatNodeType::RoundedRectSDF, "Rounded Rect SDF", "UI",
+          { { "Radius", F::Float, 8.0f }, { "Inset", F::Float, 0.0f } },
+          { { "Distance", F::Float, 0 }, { "Mask", F::Float, 0 } }, 0 },
+        { MatNodeType::BorderDistance, "Border Distance", "UI",
+          {}, { { "Distance", F::Float, 0 } }, 0 },
+        { MatNodeType::ElementState, "Element State", "UI",
+          {}, { { "Hovered", F::Float, 0 }, { "Pressed", F::Float, 0 },
+                { "Focused", F::Float, 0 }, { "Disabled", F::Float, 0 } }, 0 },
+
         // ── v5: baked constants, parameter types, logic ──
         { MatNodeType::ConstBool, "Bool", "Constant",
           {}, { { "Out", F::Float, 0 } }, 1 }, // p[0] = 0/1
@@ -451,6 +467,10 @@ struct EmitCtx
     // material advertises its layer names (order = weightmap channel order).
     bool usesLandscapeWeights = false;
     std::vector<std::string> layerNames;
+    // UI element inputs (D5 Schicht 1): the HeUI block, and the rounded-box SDF
+    // helper the two distance nodes share.
+    bool usesUI    = false;
+    bool usesUISdf = false;
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
@@ -816,6 +836,44 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         case MatNodeType::ScreenPos:
             decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
 
+        // ── v11: the widget under the pixel (D5 Schicht 1) ──
+        // All of these read heUI, which is a uniform block in a UI material and a
+        // compile-time constant everywhere else — so there is one node text, not
+        // one per domain, and nothing to fold.
+        case MatNodeType::ElementSize:
+            c.usesUI = true;
+            decl = "vec2 " + v + " = heUI.rect.xy;";
+            pinExpr = { v, v + ".x", v + ".y" };
+            break;
+        case MatNodeType::ElementUV:
+            // The element's own 0..1, deliberately NOT the UV node: that one bakes
+            // tiling/offset, and a tiled element UV is no longer the element's.
+            decl = "vec2 " + v + " = vUV;"; break;
+        case MatNodeType::RoundedRectSDF:
+        {
+            c.usesUI = true; c.usesUISdf = true;
+            const std::string rad = inputExpr(c, sc, n, 0, F::Float);
+            const std::string ins = inputExpr(c, sc, n, 1, F::Float);
+            decl = "float " + v + " = heUIBoxSDF((vUV - 0.5) * heUI.rect.xy, "
+                   "max(heUI.rect.xy * 0.5 - vec2(" + ins + "), vec2(0.0)), vec4(" + rad + "));";
+            // Mask is the same distance turned into coverage over ONE pixel, which
+            // is the only reason anyone asks a UI SDF for a number at all.
+            pinExpr = { v, "clamp(0.5 - " + v + ", 0.0, 1.0)" };
+            break;
+        }
+        case MatNodeType::BorderDistance:
+            c.usesUI = true; c.usesUISdf = true;
+            // Negated: the SDF is negative inside, and "how far am I from the edge"
+            // is a number that grows as you walk inwards.
+            decl = "float " + v + " = -heUIBoxSDF((vUV - 0.5) * heUI.rect.xy, "
+                   "heUI.rect.xy * 0.5, heUI.radius);";
+            break;
+        case MatNodeType::ElementState:
+            c.usesUI = true;
+            decl = "vec4 " + v + " = heUI.state;";
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
+            break;
+
         // ── v5: baked constants, parameter types, logic ──
         case MatNodeType::ConstBool:
             decl = "float " + v + " = " + (n.p[0] > 0.5f ? "1.0" : "0.0") + ";"; break;
@@ -1064,6 +1122,37 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     if (!c.params.empty())
         src += "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v["
              + std::to_string(kMatMaxParams) + "]; } heParams;\n";
+    // ── The element under the pixel (D5 Schicht 1) ───────────────────────────
+    // Binding 8, the first slot free of the shared preamble's pins, filled PER
+    // QUAD by the UI pass: rect = {w, h, x, y} in pixels, radius = the four
+    // corners in CSS order, state = {hover, press, focus, disabled}.
+    //
+    // Outside a UI material the very same name is a CONSTANT, not a second
+    // binding. That is what keeps the deferred G-buffer variant (whose pin table
+    // already spends fragment buffer 3 on HeResolve) out of this entirely, and
+    // it means an Element node in a Surface graph is a defined answer — a 1x1
+    // element with no radius and no state — rather than a compile error.
+    if (c.usesUI)
+        src += uiDomain
+            ? "layout(std140, set = 0, binding = 8) uniform HeUI {\n"
+              "    vec4 rect;   // xy = element size in px, zw = its top-left on screen\n"
+              "    vec4 radius; // corner radii in px, CSS order (TL, TR, BR, BL)\n"
+              "    vec4 state;  // hovered, pressed, focused, disabled (0..1)\n"
+              "} heUI;\n"
+            : "struct HeUIBlock { vec4 rect; vec4 radius; vec4 state; };\n"
+              "const HeUIBlock heUI = HeUIBlock(vec4(1.0, 1.0, 0.0, 0.0), vec4(0.0), vec4(0.0));\n";
+    // Rounded box, per-quadrant radius — the same shape (and the same CSS corner
+    // order) the built-in UI shaders draw, so an SDF a graph computes and the
+    // edge the engine antialiases agree on where the element ends.
+    if (c.usesUISdf)
+        src +=
+            "float heUIBoxSDF(vec2 p, vec2 b, vec4 r) {\n"
+            "    float rad = (p.x >= 0.0) ? ((p.y >= 0.0) ? r.z : r.y)\n"
+            "                             : ((p.y >= 0.0) ? r.w : r.x);\n"
+            "    rad = clamp(rad, 0.0, min(b.x, b.y));\n"
+            "    vec2 q = abs(p) - b + rad;\n"
+            "    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - rad;\n"
+            "}\n";
     if (c.usesNoise)
         src +=
             "float heHash21(vec2 p) { p = fract(p * vec2(123.34, 456.21));"

@@ -11147,6 +11147,16 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			u.model[3] = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 			u.color    = obj.color;
 			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			// HeUI (D5 Schicht 1): the element under the pixel, per quad —
+			// rect = {w, h, x, y}, the four corner radii, the interaction state.
+			// Only a UserInterface-domain shader declares the block; for any
+			// other material the bytes simply go unread.
+			const simd::float4 heUI[3] = {
+				{ obj.size.x, obj.size.y, obj.position.x, obj.position.y },
+				{ obj.cornerRadius.x, obj.cornerRadius.y, obj.cornerRadius.z, obj.cornerRadius.w },
+				{ obj.uiState.x, obj.uiState.y, obj.uiState.z, obj.uiState.w },
+			};
+			[enc setFragmentBytes:heUI length:sizeof(heUI) atIndex:3];
 			[enc setFragmentBytes:&matLight length:sizeof(matLight)
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 

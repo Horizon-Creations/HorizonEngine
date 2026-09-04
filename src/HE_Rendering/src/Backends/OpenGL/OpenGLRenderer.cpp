@@ -5129,6 +5129,12 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 	glGenBuffers(1, &m_matParamUBO);
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 	glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+	// HeUI (D5 Schicht 1): rect, corner radii, interaction state — per QUAD, so
+	// unlike HeParams it is re-uploaded inside the UI loop rather than per draw
+	// call's material.
+	glGenBuffers(1, &m_matUIUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matUIUBO);
+	glBufferData(GL_UNIFORM_BUFFER, 48, nullptr, GL_DYNAMIC_DRAW); // 3 x vec4
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 }
 
@@ -5358,6 +5364,11 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
 			const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
 			if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
+			// HeUI (D5 Schicht 1). Wiring it by name is not optional on GL 4.1:
+			// a block whose binding is never set defaults to 0, which here is
+			// HeLighting — the element would read the sun instead of itself.
+			const GLuint wIdx = glGetUniformBlockIndex(prog, "HeUI");
+			if (wIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, wIdx, 8);
 			glUseProgram(prog);
 			if (GLint l = glGetUniformLocation(prog, "heTex0"); l >= 0) glUniform1i(l, 0);
 			for (int k = 0; k < 4; ++k)
@@ -7466,6 +7477,15 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 			glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
+			// HeUI: the element under the pixel, per QUAD (D5 Schicht 1).
+			const glm::vec4 heUI[3] = {
+				{ obj.size.x, obj.size.y, obj.position.x, obj.position.y },
+				obj.cornerRadius,
+				obj.uiState,
+			};
+			glBindBuffer(GL_UNIFORM_BUFFER, m_matUIUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(heUI), heUI);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 8, m_matUIUBO);    // block "HeUI"
 
 			// HeParams + graph textures, mirroring the mesh path's bind points.
 			if (const MaterialAsset* ma = m_contentManager
@@ -9529,6 +9549,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
 	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
+	if (m_matUIUBO)    { glDeleteBuffers(1, &m_matUIUBO);    m_matUIUBO    = 0; }
 	if (m_previewColor) { glDeleteTextures(1, &m_previewColor);      m_previewColor = 0; }
 	if (m_previewDepth) { glDeleteRenderbuffers(1, &m_previewDepth); m_previewDepth = 0; }
 	if (m_previewFBO)   { glDeleteFramebuffers(1, &m_previewFBO);    m_previewFBO = 0; }

@@ -87,4 +87,14 @@ struct UIRenderObject {
     // chain and shifts the rect; see uiElementRotation).
     float       rotation = 0.0f;
     glm::vec2   rotationPivot{ 0.0f, 0.0f };
+    // ── Element state for node-graph materials ("Schicht 1", D5) ─────────────
+    // What the Element State node reads: x = hovered, y = pressed, z = focused,
+    // w = disabled. 0..1 rather than 0/1 — an element with a Transition (B8)
+    // hands over its BLEND, so a material eases with the widget instead of
+    // snapping while the widget fades. All zero on every quad that is not a
+    // widget surface, which is what every quad carried before this existed.
+    //
+    // It rides on the quad rather than on the material because the whole point
+    // is that two widgets sharing one material are in different states.
+    glm::vec4   uiState{ 0.0f, 0.0f, 0.0f, 0.0f };
 };

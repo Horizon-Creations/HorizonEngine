@@ -4253,6 +4253,24 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			const size_t firstQuad = out.size();
 			e.render(px, st, matId, sy * evs, out);
 
+			// ── The element's state, handed to its material (D5 Schicht 1) ───
+			// Stamped onto the quads that actually carry the material, not onto
+			// the first quad like the border: the border asks "which quad is the
+			// surface", this asks "which quad will a shader read it in", and a
+			// widget that draws its material on a second quad still means it.
+			//
+			// Through hoverAmount()/pressAmount(), never the raw hoverT/pressT:
+			// those carry the -1 "nobody is driving this" sentinel, and a
+			// negative hover in a shader is a black button.
+			if (matId != HE::UUID{})
+			{
+				const glm::vec4 state(st.hoverAmount(), st.pressAmount(),
+				                      st.focused ? 1.0f : 0.0f,
+				                      e.enabled ? 0.0f : 1.0f);
+				for (size_t qi = firstQuad; qi < out.size(); ++qi)
+					if (out[qi].materialAssetId == matId) out[qi].uiState = state;
+			}
+
 			// ── The border, stamped onto the element's SURFACE ────────────────
 			// Only the FIRST quad an element emits, and only when it covers the
 			// element's whole rect. That is the background — the surface the

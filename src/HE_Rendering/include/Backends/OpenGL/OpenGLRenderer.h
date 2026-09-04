@@ -256,6 +256,7 @@ private:
 	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
 	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient/camPos), 64 B
 	unsigned int m_matParamUBO = 0;  // HeParams       (exposed graph parameters), 256 B
+	unsigned int m_matUIUBO    = 0;  // HeUI           (the element under the pixel), 48 B
 	// Material-preview target (RenderMaterialPreview) — a small dedicated FBO + a
 	// lazily-built unit sphere, independent of the main viewport.
 	unsigned int m_previewFBO = 0, m_previewColor = 0, m_previewDepth = 0;
