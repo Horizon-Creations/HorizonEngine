@@ -233,6 +233,11 @@ public:
     void fireOnTrayItem(InstanceId id, int elem, const std::string& itemId);
     // …and one in the menu bar (elem 0 for the same reason).
     void fireOnMenuItem(InstanceId id, int elem, const std::string& itemId);
+    // An HTTP request this application started has been answered (elem 0: it
+    // belongs to the application). The payload is the TICKET, not the answer —
+    // an event carries one value and a response is four, so the readers
+    // (http.status, http.body, …) say what came back.
+    void fireOnHttpResponse(InstanceId id, int elem, int ticket);
     // A link in a rich-text label — the payload is the id the markup gave it.
     void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
     // Dragging inside the application. OnDrop's payload is what the SOURCE said

@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <set>
 #include <HorizonScene/EngineApi.h>
+#include <Net/HttpsClient.h>   // http.available must answer what the backend says
 #include <Types/TypeRegistry.h>
 #include <HorizonGameServices.h>
 #include <ContentManager/ContentManager.h>
@@ -1873,6 +1874,53 @@ TEST_CASE("process: shut by default, and asking is not running")
     // A program that is not there does not start, and does not pretend to.
     const auto missing = HE::api::process::run(c, "definitely-not-a-real-program", {}, 5.0);
     CHECK_FALSE(missing.ok);
+}
+
+TEST_CASE("http: shut by default, and a ticket is the only way in")
+{
+    // Nothing here touches the network — a test that needs a server is a test
+    // that fails on a train. What IS checkable without one: who may start a
+    // request, what a ticket that never existed answers, and that the readers
+    // are open to everybody.
+    PermReset restore;
+    Ctx c;
+    HE::api::perm::set(HE::api::perm::Grants{});
+
+    // Refused: 0, which is never a valid ticket, so "did it start" is one
+    // question everywhere.
+    CHECK(HE::api::http::get(c, "https://example.invalid/") == 0);
+    CHECK(HE::api::http::post(c, "https://example.invalid/", "", "{}") == 0);
+
+    { HE::api::perm::Grants g; g.network = true; HE::api::perm::set(g); }
+    // Permitted, and STILL 0 — because there is no URL. The gate is not the
+    // only reason a request does not start, and a caller that treats 0 as
+    // "forbidden" would be wrong here.
+    CHECK(HE::api::http::get(c, "") == 0);
+
+    // A ticket nobody was ever given: in flight, unknown, forgotten and evicted
+    // all answer the same, because a caller cannot act differently on them.
+    CHECK_FALSE(HE::api::http::done(c, 4242));
+    CHECK_FALSE(HE::api::http::ok(c, 4242));
+    CHECK(HE::api::http::status(c, 4242) == 0);
+    CHECK(HE::api::http::body(c, 4242).empty());
+    CHECK(HE::api::http::error(c, 4242).empty());
+    HE::api::http::forget(c, 4242);           // forgetting a stranger is not an error
+
+    // The readers are ungated on purpose: they answer about a request this
+    // process already made, and hiding that from the code that was allowed to
+    // ask would only make the failure harder to read.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK_FALSE(HE::api::http::done(c, 4242));
+
+    // Whether this build can reach the network at all is its own question — on
+    // a Linux built without libcurl every request fails, and an application
+    // should be able to say so instead of discovering it per request.
+    CHECK(HE::api::http::available(c) == HE::Net::httpsAvailable());
+
+    // Nothing was ever queued, so this has no worker to stop and must not hang.
+    HE::api::http::shutdown();
+    int ticket = 0;
+    CHECK_FALSE(HE::api::http::takeFinished(ticket));
 }
 
 // A ContentManager holding one in-memory SaveGameTemplate ("mem://tpl") with

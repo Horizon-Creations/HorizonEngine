@@ -33,9 +33,14 @@
 #include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
 #include <DebugDraw/DebugDraw.h>
 #include <Platform/Process.h>      // the process group runs on HE::Proc
+#include <Net/HttpsClient.h>       // …and the http group on the platform TLS stack
 #include <atomic>                  // the file dialogs answer on another thread
+#include <condition_variable>      // the http worker sleeps between requests
+#include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
@@ -1953,6 +1958,195 @@ std::string which(Ctx&, const std::string& exe)
     return p ? p->string() : std::string();
 }
 } // namespace process
+
+// ── HTTP ─────────────────────────────────────────────────────────────────────
+namespace http {
+namespace {
+
+struct Pending
+{
+    int         ticket = 0;
+    std::string url, method, contentType, body;
+};
+
+struct Finished
+{
+    bool        ok = false;
+    int         status = 0;
+    std::string body, error;
+};
+
+// ONE worker, started on the first request and joined at shutdown. Not a thread
+// per request: libcurl's implicit global init is not thread-safe, and a detached
+// thread outliving these statics would write into freed memory on the way out.
+// One queue, one thread, and shutdown has exactly one thing to wait for.
+std::mutex                     g_mtx;
+std::condition_variable        g_cv;
+std::deque<Pending>            g_queue;        // waiting to go out
+std::map<int, Finished>        g_done;         // answered, waiting to be read
+std::deque<int>                g_doneOrder;    // eviction order, oldest first
+std::deque<int>                g_delivery;     // finished, not yet handed to the frame
+std::thread                    g_worker;
+bool                           g_stop = false;
+bool                           g_running = false;
+int                            g_nextTicket = 1;
+
+// How many answers are kept. A response nobody reads is a leak with a slow
+// fuse, and an application that fires a request per second would find it.
+constexpr std::size_t kMaxKept = 32;
+// Shorter than HttpsClient's own 10 s default because shutdown waits for the
+// request in flight: five seconds of "closing…" is a long time already.
+constexpr int kTimeoutMs = 5000;
+
+void workerLoop()
+{
+    for (;;)
+    {
+        Pending job;
+        {
+            std::unique_lock<std::mutex> lk(g_mtx);
+            g_cv.wait(lk, [] { return g_stop || !g_queue.empty(); });
+            // Stop wins over a full queue: what is still waiting was never sent,
+            // and answering it during teardown helps nobody.
+            if (g_stop) return;
+            job = g_queue.front();
+            g_queue.pop_front();
+        }
+
+        const std::vector<std::string> headers =
+            job.method == "POST" ? std::vector<std::string>{ "Content-Type: " + job.contentType }
+                                 : std::vector<std::string>{};
+        const HE::Net::HttpsResponse r =
+            HE::Net::httpsRequest(job.url, job.method, headers, job.body, kTimeoutMs);
+
+        std::lock_guard<std::mutex> lk(g_mtx);
+        Finished f;
+        f.ok     = r.ok;
+        f.status = r.statusCode;
+        f.body   = r.body;
+        f.error  = r.error;
+        g_done[job.ticket] = std::move(f);
+        g_doneOrder.push_back(job.ticket);
+        while (g_doneOrder.size() > kMaxKept)
+        {
+            g_done.erase(g_doneOrder.front());
+            g_doneOrder.pop_front();
+        }
+        g_delivery.push_back(job.ticket);
+    }
+}
+
+// Queue a request and answer with its ticket. 0 = it never started, and the
+// caller has already been told why.
+int start(const char* row, const std::string& url, const std::string& method,
+          const std::string& contentType, const std::string& body)
+{
+    if (!perm::allowed(perm::get().network, row)) return 0;
+    if (url.empty())
+    {
+        HE_LOG_WARN(Script, "%s: no URL — ignored", row);
+        return 0;
+    }
+    if (!HE::Net::httpsAvailable())
+    {
+        // Worth its own message: on a Linux built without libcurl EVERY request
+        // fails, and "the network is broken" is the wrong thing to conclude.
+        HE_LOG_WARN(Net, "%s: this build has no HTTP backend (%s)", row,
+                    HE::Net::httpsBackendName());
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (!g_running)
+    {
+        g_stop = false;
+        g_worker = std::thread(workerLoop);
+        g_running = true;
+    }
+    const int ticket = g_nextTicket++;
+    g_queue.push_back({ ticket, url, method, contentType, body });
+    g_cv.notify_one();
+    return ticket;
+}
+
+// The answer for a ticket, or nullptr while it is in flight, unknown, forgotten
+// or evicted. All four are the same answer on purpose: a caller cannot act
+// differently on them, and pretending otherwise would invite it to try.
+const Finished* look(int ticket)
+{
+    const auto it = g_done.find(ticket);
+    return it == g_done.end() ? nullptr : &it->second;
+}
+
+} // namespace
+
+int get(Ctx&, const std::string& url)
+{ return start("http.get", url, "GET", {}, {}); }
+
+int post(Ctx&, const std::string& url, const std::string& contentType,
+         const std::string& body)
+{
+    return start("http.post", url, "POST",
+                 contentType.empty() ? std::string("application/json") : contentType, body);
+}
+
+bool done(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); return look(ticket) != nullptr; }
+
+bool ok(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f && f->ok; }
+
+int status(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f ? f->status : 0; }
+
+std::string body(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f ? f->body : std::string(); }
+
+std::string error(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f ? f->error : std::string(); }
+
+void forget(Ctx&, int ticket)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_done.erase(ticket) == 0) return;
+    for (auto it = g_doneOrder.begin(); it != g_doneOrder.end(); ++it)
+        if (*it == ticket) { g_doneOrder.erase(it); break; }
+}
+
+bool available(Ctx&) { return HE::Net::httpsAvailable(); }
+
+bool takeFinished(int& ticket)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_delivery.empty()) return false;
+    ticket = g_delivery.front();
+    g_delivery.pop_front();
+    return true;
+}
+
+void shutdown()
+{
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (!g_running) return;
+        g_stop = true;
+        g_running = false;
+        worker.swap(g_worker);
+    }
+    // Notified and joined OUTSIDE the lock: the worker takes it the moment it
+    // wakes, and joining while holding it is the deadlock that writes itself.
+    g_cv.notify_all();
+    if (worker.joinable()) worker.join();
+
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_queue.clear();
+    g_delivery.clear();
+    g_done.clear();
+    g_doneOrder.clear();
+}
+
+} // namespace http
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
 namespace json {
@@ -4035,6 +4229,37 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "process.which", "Process", false, {{"exe", P::String}}, {{"path", P::String}}, "HE::api::process::which",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(process::which(c, aS(a, 0))) }; } });
 
+        // HTTP: the two that START something are exec rows, the readers are pure.
+        // Both halves are needed because a request answers later — see the header.
+        t.push_back({ "http.get", "HTTP", true, {{"url", P::String}}, {{"ticket", P::Int}},
+            "HE::api::http::get",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(http::get(c, aS(a, 0))) }; } });
+        t.push_back({ "http.post", "HTTP", true,
+            {{"url", P::String}, {"contentType", P::String}, {"body", P::String}},
+            {{"ticket", P::Int}}, "HE::api::http::post",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(http::post(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "http.done", "HTTP", false, {{"ticket", P::Int}}, {{"done", P::Bool}},
+            "HE::api::http::done",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(http::done(c, aI(a, 0))) }; } });
+        t.push_back({ "http.ok", "HTTP", false, {{"ticket", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::http::ok",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(http::ok(c, aI(a, 0))) }; } });
+        t.push_back({ "http.status", "HTTP", false, {{"ticket", P::Int}}, {{"status", P::Int}},
+            "HE::api::http::status",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(http::status(c, aI(a, 0))) }; } });
+        t.push_back({ "http.body", "HTTP", false, {{"ticket", P::Int}}, {{"body", P::String}},
+            "HE::api::http::body",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(http::body(c, aI(a, 0))) }; } });
+        t.push_back({ "http.error", "HTTP", false, {{"ticket", P::Int}}, {{"error", P::String}},
+            "HE::api::http::error",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(http::error(c, aI(a, 0))) }; } });
+        t.push_back({ "http.forget", "HTTP", true, {{"ticket", P::Int}}, {},
+            "HE::api::http::forget",
+            [](Ctx& c, const VV& a){ http::forget(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "http.available", "HTTP", false, {}, {{"available", P::Bool}},
+            "HE::api::http::available",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(http::available(c)) }; } });
+
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
         // manager; field access validates against it and fails LOUD.
@@ -4370,6 +4595,11 @@ const std::vector<ApiFn>& registry()
             { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
             { "process.run", "Run Program" },      { "process.openUrl", "Open URL" },
             { "process.which", "Find Program" },
+            { "http.get", "HTTP Get" },              { "http.post", "HTTP Post" },
+            { "http.done", "Response Arrived" },     { "http.ok", "Response OK" },
+            { "http.status", "Response Status" },    { "http.body", "Response Body" },
+            { "http.error", "Response Error" },      { "http.forget", "Forget Response" },
+            { "http.available", "HTTP Available" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },
@@ -4557,6 +4787,12 @@ bool isScriptGroup(std::string_view group)
                                                     // ui.pointerOverUI, which has no flat twin
                                                     // and is exactly what a script needs to
                                                     // stop a menu click reaching the game.
+                                                    // "http" has no flat twin at
+                                                    // all: without it here a text
+                                                    // script cannot reach the
+                                                    // network, which is the state
+                                                    // Welle 3 exists to end.
+                                                    "http",
                                                     "ui", "app" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;

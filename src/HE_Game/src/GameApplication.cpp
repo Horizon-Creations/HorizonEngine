@@ -1914,6 +1914,16 @@ void GameApplication::OnRender(float deltaTime)
 				m_gameInstance.runtime().fireOnTrayItem(gi, 0, id);
 	}
 
+	// Answered HTTP requests, collected on the worker thread and delivered here
+	// for the same reason the tray's clicks are: firing a graph belongs in the
+	// frame. The graph gets the TICKET and asks the readers what came back.
+	{
+		int ticket = 0;
+		while (HE::api::http::takeFinished(ticket))
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnHttpResponse(gi, 0, ticket);
+	}
+
 #ifdef __APPLE__
 	// ── The same menu bar, in the system bar (plan A6) ───────────────────────
 	// Whether there IS one is asked here and not at startup: it is SDL's answer,
@@ -2287,6 +2297,10 @@ void GameApplication::OnShutdown()
 	// a tray can do.
 	destroyTray();
 	g_trayClicks.clear();
+	// The HTTP worker before anything it could still answer into. A request in
+	// flight is waited out (up to its own timeout), which is why that timeout is
+	// five seconds and not ten.
+	HE::api::http::shutdown();
 #ifdef __APPLE__
 	// Ours out of the system bar again, SDL's own left standing. One application
 	// per process, and this file's statics outlive the object that filled them.

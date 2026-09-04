@@ -2199,6 +2199,10 @@ const std::vector<EngineEventDesc>& engineEvents()
         // An entry in the application's MENU BAR was chosen. Same shape as the
         // tray, for the same reason: the id comes back, never the label.
         { "OnMenuItem",           "onMenuItem",           P::String, true  },
+        // An HTTP request this application started has been answered. Int
+        // payload: the TICKET http.get/http.post handed back, because an event
+        // carries one value and a response is four — the readers say the rest.
+        { "OnHttpResponse",       "onHttpResponse",       P::Int,    true  },
         // The gesture inside the application: this element was picked up, a
         // payload was let go over this one, and the carry is over. OnDrop's
         // String is the SOURCE's payload (its Drag Payload, or its name) — the

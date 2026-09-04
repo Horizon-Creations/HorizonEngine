@@ -1056,6 +1056,62 @@ namespace process {
     std::string which(Ctx&, const std::string& exe);
 }
 
+// ── HTTP (asynchronous; plan C, Welle 3) ─────────────────────────────────────
+// A request is STARTED here and answered later: `get`/`post` hand back a ticket
+// number and return immediately, the work happens on one worker thread, and the
+// finished ticket arrives at the application as OnHttpResponse. Then the readers
+// below say what came back. Blocking would have been half a line of code and the
+// wrong half — the frame loop is what draws the window, and a script that waits
+// ten seconds for a server is a program somebody force-quits.
+//
+// Why a ticket and not the answer: an event carries ONE value, and a response is
+// four (ok, status, body, error). The ticket is the one thing that fits, and it
+// is also what tells two requests in flight apart.
+//
+// The transport is HE::Net::httpsRequest, which delegates to NSURLSession,
+// WinHTTP or libcurl — certificate validation is exactly the thing not to write
+// by hand. http:// and https:// both work.
+//
+// Behind the project's "Network access" permission (perm::network). A refused
+// call returns 0 and logs once; 0 is never a valid ticket, so "did it start" is
+// the same question everywhere.
+namespace http {
+    // Start a request. Returns the ticket, or 0 when the permission is missing,
+    // the URL is empty, or this build has no TLS backend at all.
+    int  get(Ctx&, const std::string& url);
+    // `contentType` empty means application/json — the one an app posting from a
+    // graph almost always wants, and spelling it out every time is a way to get
+    // it wrong once.
+    int  post(Ctx&, const std::string& url, const std::string& contentType,
+              const std::string& body);
+
+    // Readers. Unpermissioned on purpose: they answer about a request this
+    // process already made, and a gate here would only hide the answer from the
+    // code that was allowed to ask the question.
+    bool        done(Ctx&, int ticket);    // false while in flight or unknown
+    bool        ok(Ctx&, int ticket);      // reached the server and got an answer
+    int         status(Ctx&, int ticket);  // HTTP status, 0 when there is none
+    std::string body(Ctx&, int ticket);
+    std::string error(Ctx&, int ticket);   // "" unless ok is false
+    // Drop a finished response. Optional politeness: the table keeps the last 32
+    // and evicts the oldest by itself, so a long-running app cannot grow through
+    // it. Reading a forgotten (or evicted) ticket answers like an unknown one.
+    void        forget(Ctx&, int ticket);
+    // Does this build have a TLS backend? False on a Linux built without libcurl,
+    // where every request fails — a thing an application should be able to say
+    // out loud rather than discover per request.
+    bool        available(Ctx&);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // The frame loop takes finished tickets out of here and fires OnHttpResponse.
+    // Delivery is the host's because firing a graph belongs in the frame, not on
+    // the worker — the same rule the tray's clicks follow.
+    bool takeFinished(int& ticket);
+    // Stop the worker and join it. Called at shutdown; a request already in
+    // flight still has to end, so this waits up to the request timeout.
+    void shutdown();
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 // Reading and writing JSON text, addressed by a dotted PATH: "user.name",
 // "items[2].id", "" for the document itself. Text in, text out, because that is

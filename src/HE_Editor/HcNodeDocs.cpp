@@ -987,6 +987,37 @@ namespace
 	  "installed runs nothing, and it is how a script tells somebody what it "
 	  "would need before they decide to allow it." },
 
+	// ── HTTP ─────────────────────────────────────────────────────────────────
+	{ "http.get",
+	  "Starts a GET and returns straight away with a ticket number. The answer "
+	  "arrives later as On Http Response, carrying that same ticket. Needs the "
+	  "project's \"Network access\" permission; 0 means it never started." },
+	{ "http.post",
+	  "Starts a POST with this body. An empty Content Type means "
+	  "application/json. Like Get it returns a ticket and answers later." },
+	{ "http.done",
+	  "Has this ticket been answered yet? Usually not needed — On Http Response "
+	  "fires exactly when it turns true — but useful for a screen that shows "
+	  "\"loading\" while it waits." },
+	{ "http.ok",
+	  "Did the request REACH the server and come back? This is about the "
+	  "connection, not about the answer: a 404 is ok=true with status 404." },
+	{ "http.status",
+	  "The HTTP status code, 200 for the ordinary success. 0 when the request "
+	  "never got an answer, and then Response Error says why." },
+	{ "http.body",
+	  "What came back, as text. Feed it to the JSON nodes when it is JSON." },
+	{ "http.error",
+	  "Why the request failed to reach anybody (no network, bad host, timed "
+	  "out). Empty when Response OK is true." },
+	{ "http.forget",
+	  "Drops a response you are finished with. Optional: the engine keeps the "
+	  "last 32 and forgets the oldest by itself." },
+	{ "http.available",
+	  "Does this build have a network stack at all? False only on a Linux build "
+	  "made without libcurl, where every request would fail — worth saying out "
+	  "loud once instead of failing per request." },
+
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",
 	  "Starts a NEW save from the project's SaveGame Template, with the fields "

@@ -2480,6 +2480,63 @@ headless Test über den Schalter, der entscheidet, ob das Fenster die Leiste auc
 
 ---
 
+### Vergleichen, was zwei Texte sind (04.09.2026)
+
+Aufgefallen beim Beantworten der Frage „wie reagiere ich auf die Menüleiste": ein Graph konnte
+auf eine Id **nicht verzweigen**. `Equals` vergleicht Zahlen (der Interpreter rechnet
+`fabs(a - b) < 1e-6`), ein String kommt dort als 0 an, also war jede Id gleich jeder anderen.
+Der einzige exakte Weg ging über `Make Array` + `Array Index Of` + `Int to Enum` +
+`Switch on Enum`, vier Knoten für einen Vergleich, und das traf jedes Ereignis mit einer Id:
+`On Menu Item`, `On Tray Item`, `On Drop`, `On Link Clicked`.
+
+**String Equals** ist eine Zeile in der `HE::api`-Registry und damit in HorizonCode, Lua,
+Python und im Codegen zugleich. Eine eigene Zeile und **nicht** „Equals nimmt jetzt auch
+Strings": die Pins des Operator-Knotens sind auf beiden Seiten Float, und sie zu verbreitern
+würde ändern, wie jedes bestehende Equals in jedem Projekt liest.
+
+---
+
+### C: `http`, asynchron und mit Zettel (04.09.2026)
+
+Die Fahrkarte statt der Antwort. `HTTP Get` und `HTTP Post` **starten** etwas und geben sofort
+eine Ticketnummer zurück, gearbeitet wird auf einem Worker, und das fertige Ticket kommt als
+`On Http Response` am Game Instance an. Danach sagen die Leser (`Response Status`,
+`Response Body`, `Response OK`, `Response Error`), was zurückkam.
+
+**Warum ein Ticket und nicht die Antwort:** ein Ereignis trägt EINEN Wert, eine Antwort besteht
+aus vier. Das Ticket ist das Einzige, was passt, und nebenbei das, was zwei gleichzeitige
+Anfragen unterscheidet. Blockierend wäre es eine halbe Zeile Code gewesen und die falsche
+Hälfte: der Frame-Loop zeichnet das Fenster, und ein Skript, das zehn Sekunden auf einen Server
+wartet, ist ein Programm, das man abschießt.
+
+**Der Transport war schon da:** `HE::Net::httpsRequest` (NSURLSession, WinHTTP, libcurl). Nichts
+an TLS ist selbst geschrieben, und das ist Absicht, Zertifikatsprüfung ist genau die Stelle, an
+der ein Fehler unsichtbar bleibt, bis jemand angegriffen wird.
+
+**Ein Worker, kein Thread pro Anfrage.** libcurls implizite Initialisierung ist nicht
+thread-sicher, und ein abgekoppelter Thread, der die Statics überlebt, schreibt beim Beenden in
+freigegebenen Speicher. Eine Warteschlange, ein Thread, und `shutdown()` hat genau eine Sache
+zu joinen. Der Timeout ist deshalb 5 s und nicht die 10 s der Voreinstellung: das Herunterfahren
+wartet die laufende Anfrage ab.
+
+**0 heißt „nicht gestartet", immer.** Fehlende Berechtigung, leere URL, kein TLS-Backend, alles
+0, und 0 ist nie ein gültiges Ticket. Ein unbekanntes, vergessenes, verdrängtes und noch
+laufendes Ticket antworten ebenfalls gleich, weil ein Aufrufer auf diese Fälle nicht
+unterschiedlich reagieren kann. Die Tabelle hält die letzten 32 Antworten und verdrängt die
+älteste, `Forget Response` ist die höfliche Variante.
+
+**Hinter `perm::network`**, dem Bit, das seit Block C reserviert war und das bis jetzt niemand
+gelesen hat. Die LESER sind ungegated: sie beantworten eine Frage über eine Anfrage, die dieses
+Programm schon gestellt hat.
+
+**Nicht geprüft, mit Absicht:** eine echte Runde übers Netz. Ein Test, der einen Server braucht,
+ist ein Test, der im Zug fehlschlägt. Geprüft ist alles ohne Netz Erreichbare, wer starten darf,
+was ein nie vergebenes Ticket antwortet, dass `HTTP Available` dasselbe sagt wie das Backend, und
+dass `shutdown()` ohne Worker nicht hängt. **Und wie beim Menü:** zugestellt wird in
+`GameApplication`, in der Editor-Vorschau kommt also nichts an.
+
+---
+
 ## 11. Risiken und Fallen
 
 - **Zwei Betriebsmodi bedeuten zwei Testpfade, mit dem Advanced-Schalter sind es drei.** Ein
