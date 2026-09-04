@@ -60,7 +60,14 @@ enum class MatNodeType : uint8_t
     // ── v3: channels + functions ──
     SplitRGBA,     // vec4 → R, G, B, A
     CombineRGBA,   // (R, G, B, A) → vec4
-    FnInput,       // function-graph interface: s = name, p[0] = type (0=Float 1=Vec2 2=Vec3 3=Vec4)
+    FnInput,       // function-graph interface: s = name, p[0] = type (0=Float 1=Vec2 2=Vec3 3=Vec4),
+                   // p[1] = the value an UNCONNECTED caller pin takes, p[2] = 1 when that
+                   // default is authored. The flag is what keeps the number optional: a
+                   // graph written before defaults existed has p[1] = p[2] = 0 and must
+                   // keep the old blanket 0.5, not silently start reading 0.
+                   // One number, splatted across a vector input — a shipped effect wants
+                   // "blur by 12 px" to mean something without a wire, not a per-component
+                   // literal editor on an interface row.
     FnOutput,      // function-graph interface: s = name, p[0] = type; one input pin
     FunctionCall,  // s = content-relative path of the MaterialFunction asset; pins from its graph
 
@@ -263,8 +270,15 @@ HE_API const MatNodeDesc*              matNodeDescByName(const std::string& name
 // kMatOutputOpacityPin, Masked renames it to OpacityMask.
 HE_API void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
 
+// What an unconnected FunctionCall input was worth before FnInput could carry a
+// default (see the FnInput entry): one blanket number for every pin of every type.
+// Still the answer for a function whose input declares none.
+inline constexpr float kMatFnInputLegacyDefault = 0.5f;
+
 // Interface pins of a FUNCTION graph: its FnInput nodes (sorted by id) become the call
 // node's inputs, FnOutput nodes its outputs. Used by codegen and the editor canvas.
+// The pin `def` is the FnInput's authored default (or kMatFnInputLegacyDefault).
+// NOTE: pin NAMES point into fnGraph's node strings — it must outlive the result.
 HE_API void matFunctionPins(const MaterialGraph& fnGraph,
                      std::vector<MatPinDesc>& inputs, std::vector<MatPinDesc>& outputs);
 

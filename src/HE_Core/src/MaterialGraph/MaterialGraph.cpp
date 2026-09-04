@@ -354,7 +354,8 @@ void matFunctionPins(const MaterialGraph& fnGraph,
     const std::vector<const MatGraphNode*> ins  = fnInterfaceNodes(fnGraph, MatNodeType::FnInput);
     const std::vector<const MatGraphNode*> outs = fnInterfaceNodes(fnGraph, MatNodeType::FnOutput);
     for (const auto* n : ins)
-        inputs.push_back({ n->s.c_str(), pinTypeFromParam(n->p[0]), 0.0f });
+        inputs.push_back({ n->s.c_str(), pinTypeFromParam(n->p[0]),
+                           n->p[2] >= 0.5f ? n->p[1] : kMatFnInputLegacyDefault });
     for (const auto* n : outs)
         outputs.push_back({ n->s.c_str(), pinTypeFromParam(n->p[0]), 0.0f });
 }
@@ -1013,9 +1014,22 @@ std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
         const std::string expr = emitNode(c, sc, *src, l.srcPin);
         return coerce(expr, outputPinType(c, *src, l.srcPin), wantType);
     }
-    // Unconnected: the static pin default (FunctionCall inputs: typed 0.5 default).
+    // Unconnected: the static pin default. A FunctionCall has no static pins — they
+    // come from the function it names, so its defaults do too: the k-th FnInput's
+    // authored number (p[1], flagged by p[2]). Without that, a shipped effect
+    // dropped into a graph blurs by 0.5 px and looks broken until every pin is
+    // wired, which is the opposite of what a library is for.
     if (node.type == MatNodeType::FunctionCall)
-        return coerce("0.5", F::Float, wantType);
+    {
+        const MaterialGraph* fn = (c.loader && *c.loader) ? (*c.loader)(node.s) : nullptr;
+        if (fn)
+        {
+            const std::vector<const MatGraphNode*> ins = fnInterfaceNodes(*fn, MatNodeType::FnInput);
+            if (pinIdx >= 0 && pinIdx < (int)ins.size() && ins[pinIdx]->p[2] >= 0.5f)
+                return coerce(fmtF(ins[pinIdx]->p[1]), F::Float, wantType);
+        }
+        return coerce(fmtF(kMatFnInputLegacyDefault), F::Float, wantType);
+    }
     const MatNodeDesc& d = matNodeDesc(node.type);
     if (pinIdx >= 0 && pinIdx < (int)d.inputs.size())
     {

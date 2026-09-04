@@ -1258,6 +1258,7 @@ Schicht 0 ebenfalls tragen muss.
 - C: `http`, `notify` **(beide fertig 04.09.2026, Abschnitte weiter unten)**
 - D3 alle App-Vorlagen
 - D5 Schicht 1: Parameter pro Instanz, UI-Nodes, MaterialFunction-Effektbibliothek, Backdrop
+  **(vollständig, 04.09.2026, Abschnitte weiter unten)**
 - A3b WidgetManager-Umzug, UI-Materialien aus vorkompilierten Varianten (beide Hälften!),
   Advanced-an-Ausprägung ohne Shader-Übersetzer, Größenschwelle in der CI
 
@@ -2637,3 +2638,68 @@ entscheidet die Domäne über den emittierten TEXT, als einziger Knoten bisher.
 Material-Vorschau im Editor (sie hat kein Kommandopuffer-Paar zum Schneiden, ihr Backdrop
 bleibt die Dummy-Textur). Auf echter Hardware gesehen ist noch nichts davon, geprüft sind
 Codegen und Cross-Compile für Metal und GL.
+
+---
+
+### Neun Effekte, die schon fertig sind (04.09.2026)
+
+Der Rest von D5 Schicht 1, Teil 2: die mitgelieferten Bausteine als
+`MaterialFunction`-Assets, in `EditorDeps/EngineContent/MaterialFunctions`. Der
+`FunctionCall`-Knoten und die Funktions-Assets gab es längst, gefehlt hat der Inhalt,
+und das ist genau der Punkt, an dem eine Effektbibliothek entweder benutzbar wird oder
+eine Sammlung von Vorlagen zum Abschreiben bleibt.
+
+**Ein Generator, keine neun Binärdateien.** `matfn_gen <out-dir>` schreibt sie, wie
+`mesh_gen` und `widget_gen` ihre schreiben: feste UUIDs (Block 0x300), Ausgabe
+deterministisch, Ergebnisse eingecheckt, nicht Teil des normalen Bauens. Eine `.hasset`
+ist ein Container; neun davon von Hand gespeichert wären neun Blobs, die niemand ohne
+den Editor lesen, vergleichen oder reparieren kann, und die Bibliothek ist das, was
+jedes Projekt erbt. Hier ist ein Effekt eine Funktion und die Verdrahtung der Quelltext.
+
+**Die Bedingung, unter der eine Bibliothek überhaupt eine ist: jeder Eingang hat einen
+Vorgabewert.** Ein unverdrahteter Eingang eines Aufrufs war bisher pauschal 0.5, für
+jeden Pin jedes Typs. „Milchglas mit einem halben Pixel Radius" ist kein Effekt,
+sondern ein Effekt, der kaputt aussieht, bis man ihn fertig verkabelt hat, und das ist
+das Gegenteil dessen, wofür eine Bibliothek da ist. Der Wert steht jetzt am
+`Function Input` (`p[1]`), und `p[2]` sagt, dass er gesetzt wurde. Die Flagge ist der
+ganze Trick: ein Graph aus der Zeit davor hat beide auf 0 und behält die alten 0.5,
+statt still 0 zu lesen. Es ist eine Zahl, auf alle Komponenten eines Vektoreingangs
+verteilt, und mehr braucht eine Schnittstellenzeile auch nicht.
+
+**Die Knöpfe sind Eingänge, nie Param-Knoten.** Der bequeme Weg wäre gewesen, in der
+Funktion einen `Param (Float)` zu setzen; der landet aber im Parameterfeld des
+AUFRUFENDEN Materials, unter einem festen Namen, kollidiert mit sich selbst, sobald der
+Effekt zweimal benutzt wird, und verbraucht einen der sechzehn Plätze für einen Wert,
+von dem der Aufrufer nicht einmal weiß, dass es ihn gibt. Der Test prüft deshalb, dass
+ein frisch aufgerufener Effekt null Parameter erzeugt.
+
+**Flach.** Kein Effekt ruft einen anderen. Ein solcher Aufruf müsste sein Ziel über den
+inhaltsrelativen Pfad benennen (`Engine/MaterialFunctions/…`), also über einen zweiten
+Auflösungsweg, und das für ersparte vier Knoten.
+
+**Die neun.** Jeder liest einen v11-UI-Knoten oder die Zeit; ein reiner Rechenhelfer
+wäre nichts, was eine UI-Effektbibliothek jemandem schuldet, dafür gibt es die
+Standardpalette.
+
+| Effekt | Eingänge (Vorgabe) | Ausgänge | Woraus er gemacht ist |
+|---|---|---|---|
+| `FrostedGlass` | Blur Radius (14), Tint (1), Tint Amount (0.18) | Color | Backdrop, gemischt statt multipliziert, damit weiß wirklich „kein Farbton" heißt |
+| `StateTint` | Base Color (1), Hover Lift (0.08), Press Drop (0.10), Disabled Fade (0.45) | Color | Element State; deaktiviert dämpft, was die anderen beiden ergeben haben |
+| `FocusRing` | Ring Color (1), Width (2), Inset (2) | Color, Mask | Border Distance mal Focused, folgt dem Eckenradius des Elements |
+| `InnerBorder` | Width (1.5), Inset (0), Softness (1) | Mask | dasselbe Band ohne Zustand, für Kartenkanten und Trenner |
+| `EdgeFade` | Distance (12), Power (1) | Mask | 1 in der Mitte, 0 an der Kontur |
+| `Sheen` | Speed (0.35), Width (0.18), Skew (0.4), Strength (0.35) | Amount | Element UV plus Zeit, geneigt, damit es als Reflex und nicht als Wischer liest |
+| `Pulse` | Speed (1.5), Min (0.6), Max (1) | Value | Zeit; Speed in Zyklen pro Sekunde, nicht in Radiant |
+| `Scanlines` | Line Count (48), Strength (0.12), Speed (0) | Multiplier | ein Multiplikator, keine Farbe, Speed 0 macht es statisch |
+| `SoftRoundedMask` | Radius (10), Inset (0), Feather (1) | Mask | der GEWÜNSCHTE Rundrechteck-SDF, nicht die Kontur, die das Element hat |
+
+**Ein Detail, das dreimal auftaucht:** jeder Divisor kommt aus einem Eingang, und ein
+Eingang kann null sein. `saturate` macht aus unendlich eine 1, aus 0/0 aber ein NaN, das
+alles danach überlebt. Deshalb geht jeder Divisor hier vorher durch ein `+ 0.001`.
+
+**Geprüft** ist die Bibliothek als Bibliothek: alle neun laden, jeder Eingang hat einen
+Vorgabewert, keine geschachtelten Aufrufe, jeder Pin heißt etwas, ein unverdrahteter
+Aufruf erzeugt echten Code statt des Magenta-Platzhalters, und alle neun übersetzen für
+Metal UND GL, in BEIDEN Domänen. Die zweite Domäne ist kein Selbstzweck: `Backdrop` ist
+der eine Knoten, dessen Text von der Domäne abhängt, und ein Milchglas auf einem Mesh
+ist ausdrücklich erlaubt. Auf echter Hardware gesehen ist auch hier noch nichts.

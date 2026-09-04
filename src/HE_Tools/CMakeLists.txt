@@ -145,5 +145,17 @@ add_executable(widget_gen
 target_link_libraries(widget_gen PRIVATE HorizonCore)
 target_include_directories(widget_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── matfn_gen.exe (generates the built-in UI effect library) ─────────────────
+# Same bargain again: matfn_gen <out-dir> writes FrostedGlass/StateTint/FocusRing/…
+# .hasset files (Material Function) via ContentManager, byte-identical to
+# editor-authored ones. Run manually to (re)populate
+# EditorDeps/EngineContent/MaterialFunctions; the outputs are committed, so this
+# is not part of the normal build graph.
+add_executable(matfn_gen
+    src/MatFnGen/main.cpp
+)
+target_link_libraries(matfn_gen PRIVATE HorizonCore)
+target_include_directories(matfn_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # HorizonTools is NEVER linked into HorizonGame or any runtime target.
 # It is an editor/build-time only dependency.

@@ -1979,6 +1979,12 @@ namespace
 	  "mesh's material already carries. That is what makes one graph work for many "
 	  "different meshes.",
 	  "", "materials#nodes" },
+	{ "Material Function/Default", "Default",
+	  "What a caller's pin is worth while nothing is wired to it. One number, used "
+	  "for every component of a vector input — enough for a shipped effect to mean "
+	  "something the moment it is dropped into a graph, instead of showing nothing "
+	  "until every pin is connected.",
+	  "", "materials#functions" },
 	{ "Material Node/Open Function", "Open Function",
 	  "Opens the material function this node calls, in its own tab. "
 	  "Double-clicking the node does the same.",
@@ -4142,6 +4148,7 @@ namespace
 		{ "Material Parameter/", "editor-materials", "Material Editor", "Parameters" },
 		{ "Material Settings/",  "editor-materials", "Material Editor", "Material settings" },
 		{ "Material Preview/",   "editor-materials", "Material Editor", "The preview" },
+		{ "Material Function/",  "editor-materials", "Material Editor", "Function interface" },
 		{ "ui.",             "editor-ui", "UI Designer", "Widget designer" },
 		{ "UI Hierarchy/",   "editor-ui", "UI Designer", "The hierarchy" },
 		{ "Canvas/",         "editor-ui", "UI Designer", "The canvas" },
