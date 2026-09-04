@@ -332,6 +332,13 @@ Dazu zwei konkrete Punkte, beide am Code geprüft:
   > das kein Sonderfall mehr, sondern die eine Regel: Code, der nur nichts mehr tut, muss
   > man nicht wegschneiden.
   >
+  > **Gemessen, nicht geschätzt:** `libHorizonRendering.dylib` fällt im selben Debug-Baum
+  > von 22 auf 6 MB, und der GANZE Baum baut mit `-DHE_ENABLE_SHADERC=OFF` durch, Editor
+  > und Testbinary eingeschlossen. Der Testlauf dort ist grün, nachdem eine Bedingung
+  > richtiggestellt war: `HE_TESTS_HAVE_SHADERC` hing an „gibt es das Target", und das
+  > Target gibt es jetzt immer. Die Frage der Fälle ist aber „kann dieser Build
+  > übersetzen", und die beantwortet nur `HE_HAVE_SHADERC`.
+  >
   > Nicht mitgenommen (bewusst): Deferred, SSR, Decals und der GI-Resolve bleiben hinter
   > `HE_HAVE_SHADERC`. Ihre Shader entstehen zur Laufzeit aus der Lighting-Preamble, eine
   > App ohne Welt zeichnet sie nie, und das Herausfallen ist hier der Gewinn, nicht der

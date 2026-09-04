@@ -437,8 +437,12 @@ target_link_libraries(he_tests PRIVATE
 # Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
-if(TARGET he_materialshader)
-    target_link_libraries(he_tests PRIVATE he_materialshader)
+target_link_libraries(he_tests PRIVATE he_materialshader)
+# The TARGET is always there now (A3b Teil 2 — without glslang it is built against the
+# stub), so "can I link it" stopped being the question. The question these cases ask is
+# "can this build actually cross-compile", and only HE_HAVE_SHADERC answers that: a
+# -DHE_ENABLE_SHADERC=OFF build compiles every one of them into a guaranteed failure.
+if(HE_HAVE_SHADERC)
     target_compile_definitions(he_tests PRIVATE HE_TESTS_HAVE_SHADERC=1)
 endif()
 
