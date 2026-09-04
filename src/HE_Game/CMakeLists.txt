@@ -20,6 +20,14 @@ if(APPLE)
     set_target_properties(HorizonGame PROPERTIES
         BUILD_RPATH "@executable_path"
     )
+    # The application's menu bar in the system bar (plan A6). ObjC++, so it is
+    # compiled here and nowhere else — the same reason the editor's MacMenuBar
+    # sits in HE_Editor: Cocoa must not reach HorizonCore, which he_tests,
+    # hc_codegen, widget_gen and the Windows CI all link.
+    target_sources(HorizonGame PRIVATE src/AppMacMenu.mm src/AppMacMenu.h)
+    set_source_files_properties(src/AppMacMenu.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(HorizonGame PRIVATE "-framework Cocoa")
 endif()
 
 # The game picks its backend from config.json ("GameBackend"), so it has to know

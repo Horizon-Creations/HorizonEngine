@@ -305,9 +305,11 @@ erste lauffähige App hinter einen Umbau. A3a gehört in Welle 2, A3b in Welle 3
 Widget-Baum, eigener Canvas, eigenem Skript-Kontext. Modale Dialoge als echtes Fenster statt
 als Overlay. Das ist deutlich mehr Arbeit als A4 und gehört in eine spätere Welle.
 
-**A6 Menüleiste.** **Gezeichnete Fassung fertig am 03.09.2026** (Abschnitt weiter unten), die native steht noch aus. Auf macOS die echte (der Editor hat mit `MacMenuBar` schon einen
-Präzedenzfall), auf Windows/Linux eine gezeichnete im Fenster. Definiert als Asset, nicht als
-Code, damit HorizonCode sie befüllen kann.
+**A6 Menüleiste.** **Fertig** (Abschnitte weiter unten): gezeichnet am 03.09.2026, nativ auf
+macOS am 04.09.2026. Auf macOS die echte (der Editor hat mit `MacMenuBar` schon einen
+Präzedenzfall), auf Windows/Linux eine gezeichnete im Fenster. Definiert als Laufzeit-API statt
+als Asset, damit HorizonCode sie befüllen kann — die Begründung steht beim Abschnitt. Offen
+bleiben nur Tastenkürzel und `enabled`/`checked`.
 
 **A7 Systemintegration.** App-Icon, Bundle-Identifier, Dateitypen-Zuordnung, „Öffnen mit",
 Autostart, Tray-Icon. Alles klein einzeln, zusammen der Unterschied zwischen „App" und
@@ -2431,9 +2433,50 @@ anklicken kann, wäre keine), und `menuBarHeight()` sagt, wie viel Platz eine Se
 **Ein Trennstrich ist kein Eintrag.** Loslassen darauf wählt nichts und schließt nichts: er hat
 keine Id, und ein um drei Pixel danebengegangener Zielversuch soll das Menü nicht zumachen.
 
-**Offen:** die native macOS-Leiste (`NSApp.mainMenu` aus demselben Vektor, ObjC++ in HE_Game
-und **nicht** in HE_Core — dessen Cocoa-Abhängigkeit zöge AppKit in die Tests und in die
-Windows-CI), Tastenkürzel und `enabled`/`checked` an Einträgen.
+**Offen:** Tastenkürzel und `enabled`/`checked` an Einträgen. Die native macOS-Leiste ist der
+Abschnitt direkt darunter.
+
+---
+
+### A6: dieselbe Leiste, nativ auf macOS (04.09.2026)
+
+`HE_Game/src/AppMacMenu.mm`, ObjC++ und **nicht** in HE_Core: dessen Cocoa-Abhängigkeit zöge
+AppKit in he_tests, hc_codegen, widget_gen und die Windows-CI. Der Editor hält seine
+`MacMenuBar` aus demselben Grund in HE_Editor.
+
+**Sie fügt ein, sie ersetzt nicht.** SDL baut auf macOS selbst eine Menüleiste (App-Menü mit
+Über/Dienste/Ausblenden/Beenden, dazu Fenster mit Schließen/Minimieren/Zoom/Vollbild) und hängt
+sie an `NSApp.mainMenu`. Ein `NSApp.mainMenu = eigenes` hätte das alles weggeworfen, und zwar
+auch in jedem ausgelieferten **Spiel**, nicht nur in einer Anwendung, die eine Leiste bestellt
+hat. Die Menüs der Anwendung gehen deshalb zwischen App-Menü und Fenster, wo die eigenen Menüs
+eines Mac-Programms hingehören. Wer nie `Add Menu` aufruft, bekommt exakt die Leiste, die SDL
+gebaut hat.
+
+**Zwei Leisten wären nicht die doppelte Funktion.** Deshalb `setMenuBarNative(true)`: der
+Streifen im Fenster wird nicht gezeichnet, `menuBarHeight()` ist 0, und das Band gehört wieder
+der Seite. Die Daten bleiben dieselben — beide Leisten lesen denselben Vektor, die Anwendung
+sagt ihre Menüs genau einmal.
+
+**Ob es eine Systemleiste gibt, wird pro Frame gefragt und nicht beim Start.** Das ist SDLs
+Antwort und sie stimmt erst, wenn SDL die Anwendung registriert hat; einmal zu früh gefragt,
+zeichnet das Fenster den Streifen für den Rest des Laufs.
+
+**Die Id reist auf dem Eintrag** (`representedObject`), nicht in einer Tabelle neben dem Menü:
+eine Seitentabelle müsste im Gleichschritt mit jedem Neubau gepflegt werden, und was das
+kostet, hat der Tray schon gezeigt. Der Klick kommt aus AppKits eigener Schleife und wartet
+darum wie ein Tray-Klick auf den Frame, statt den Interpreter mittendrin zu betreten.
+
+**Neu gebaut wird einmal pro Frame, nicht pro Aufruf.** Ein Graph, der ein Menü mit sechs
+Einträgen aufbaut, fasst die Leiste siebenmal an; sechs davon wären NSMenu-Neubauten auf dem
+Weg zum selben Ergebnis.
+
+**Kein Tastenkürzel, mit Grund:** ein natives schluckt den Anschlag, bevor irgendetwas im
+Fenster ihn sieht. Genau daran ist im Editor das ⌘Z des Material-Graphen gestorben, und
+Kürzel sind ohnehin ein eigenes Stück Arbeit.
+
+**Was hier NICHT verifiziert ist:** wie die Leiste aussieht. Diese Maschine kann kein Fenster
+zeigen, geprüft ist also der lokale macOS-Build (die `.mm` kompiliert keine CI) plus der
+headless Test über den Schalter, der entscheidet, ob das Fenster die Leiste auch noch zeichnet.
 
 ---
 

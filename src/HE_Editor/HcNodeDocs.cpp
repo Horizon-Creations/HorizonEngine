@@ -559,7 +559,10 @@ namespace
 	{ "app.addMenu",
 	  "Adds a menu to the application's menu bar, in order. The id is how Add "
 	  "Menu Item names it afterwards; the label is what is drawn in the strip. "
-	  "Adding the same id twice is one menu, not two." },
+	  "Adding the same id twice is one menu, not two. On macOS the same menus go "
+	  "into the SYSTEM bar next to the Apple symbol instead, and the strip in the "
+	  "window is not drawn at all — a page that leaves room for the bar gets that "
+	  "room back there." },
 	{ "app.addMenuItem",
 	  "Adds an entry to the menu with that id. Choosing it fires On Menu Item "
 	  "with the ENTRY's id — the label is only what somebody reads, so "

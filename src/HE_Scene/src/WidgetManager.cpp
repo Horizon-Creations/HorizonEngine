@@ -896,9 +896,22 @@ void WidgetManager::setMenuBar(std::vector<HE::AppMenu> menus)
 	m_visualDirty = true;
 }
 
+void WidgetManager::setMenuBarNative(bool on)
+{
+	if (m_menuNative == on) return;
+	m_menuNative = on;
+	// A menu that was open in the strip cannot stay open in a strip that has
+	// stopped existing — and its grab would outlive the thing that owns it.
+	closeMenu();
+	m_visualDirty = true;
+}
+
 float WidgetManager::menuBarHeight() const
 {
-	return m_menuBar.empty() ? 0.0f : kMenuBarH;
+	// Native means the bar is not in this window at all, so there is no band to
+	// leave clear: a page told to keep 24 pixels free on macOS would keep them
+	// free of nothing.
+	return (m_menuNative || m_menuBar.empty()) ? 0.0f : kMenuBarH;
 }
 
 bool WidgetManager::menuTitleRect(std::size_t i, float& x, float& w) const
@@ -966,6 +979,9 @@ int WidgetManager::menuItemAt(float x, float y) const
 
 void WidgetManager::openMenuAt(int index)
 {
+	// Nothing to open when the system draws the bar: the grab would make every
+	// widget inert for a menu nobody can see.
+	if (m_menuNative) return;
 	if (index < 0 || index >= static_cast<int>(m_menuBar.size())) return;
 	if (m_menuOpen == index) return;
 	// One grab for the whole strip, pushed on the first open and kept while the
@@ -2136,7 +2152,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		m_pointerOverUI = true;
 		return true;
 	}
-	if (!m_menuBar.empty() && m_grabs.empty() && valid && mouseY < menuBarHeight())
+	if (!m_menuBar.empty() && !m_menuNative && m_grabs.empty() && valid &&
+	    mouseY < menuBarHeight())
 	{
 		// Closed, but the strip is still there: a click on it opens a menu and a
 		// click on its empty part reaches nothing underneath. A bar that let the
@@ -4359,7 +4376,7 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
                                 std::vector<UIRenderObject>& out)
 {
 	(void)vpHeight;
-	if (m_menuBar.empty()) return;
+	if (m_menuBar.empty() || m_menuNative) return;
 
 	const glm::vec4 barColor  { 0.13f, 0.13f, 0.15f, 1.0f };
 	const glm::vec4 textColor { 0.90f, 0.90f, 0.92f, 1.0f };

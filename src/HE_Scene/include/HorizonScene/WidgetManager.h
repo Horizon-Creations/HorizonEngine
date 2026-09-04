@@ -177,6 +177,14 @@ public:
     // metrics: the bar is chrome, not content, and it does not scale with a
     // canvas it is not part of.
     float menuBarHeight() const;
+    // On macOS the same menus go into the SYSTEM bar instead (AppMacMenu, in
+    // HE_Game — the Cocoa half cannot live here). Then the strip must not also
+    // be drawn: two bars carrying the same entries is not twice the feature,
+    // and the system one is not inside the window, so nothing is left to make
+    // room for either. With this on, menuBarHeight() is 0, nothing is drawn,
+    // and the band belongs to the page again. Off macOS it stays false.
+    void  setMenuBarNative(bool on);
+    bool  menuBarNative() const { return m_menuNative; }
     // Which menu is open (-1 = none). The strip's own state, not a widget's.
     int   openMenu() const { return m_menuOpen; }
     // Where a title sits, for a caller that has to aim at one (a test, and later
@@ -849,6 +857,7 @@ private:
     std::vector<HE::AppMenu> m_menuBar;
     int   m_menuOpen  = -1;   // index into m_menuBar, -1 = closed
     int   m_menuHover = -1;   // item under the pointer in the open menu
+    bool  m_menuNative = false; // the system bar draws it, so we do not
     // Left edge and width of a title in the strip.
     bool  menuTitleRect(std::size_t i, float& x, float& w) const;
     // The open menu's popup, and one of its rows.

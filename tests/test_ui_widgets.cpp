@@ -10987,6 +10987,80 @@ TEST_CASE("A separator is a line, not a row that can be chosen")
     CHECK(wm.openMenu() == 0);
 }
 
+TEST_CASE("With a native bar the strip is gone, band and all")
+{
+    // macOS puts these menus in the SYSTEM bar (HE_Game/AppMacMenu), which is
+    // outside the window. The Cocoa half cannot be tested here, but the half
+    // that decides whether the window ALSO has a bar can, and that is the half
+    // that would show as two menu bars carrying the same entries.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A page that reaches all the way up, and says so when it is clicked: the
+    // band the strip used to own is the only place this button is asked about.
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int label = tree.add(HE::UIWidgetType::Text);
+    tree.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    const int btn = tree.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *tree.find(btn);
+        e.name = "Under";
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 300.0f;
+    }
+    HorizonCode::Graph g;
+    {
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+        const int evId = g.addNode(ev);
+        HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OK";
+        const int litId = g.addNode(lit);
+        HorizonCode::Node set; set.type = NodeType::SetProperty;
+        set.elem = label; set.s = "Text"; set.propType = PinType::String;
+        const int setId = g.addNode(set);
+        REQUIRE(g.connect(evId, 0, setId, 0));
+        REQUIRE(g.connect(litId, 0, setId, 2));
+    }
+    registerWidget(cm, tree, &g);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    wm.setMenuBar(sampleMenuBar());
+
+    const float drawnHeight = wm.menuBarHeight();
+    REQUIRE(drawnHeight > 0.0f);
+    std::vector<UIRenderObject> drawn;
+    wm.extract(400.0f, 300.0f, drawn);
+
+    wm.setMenuBarNative(true);
+    CHECK(wm.menuBarNative());
+    // No band to keep clear: the bar is not in this window, and a page told to
+    // leave room for it would leave room for nothing.
+    CHECK(wm.menuBarHeight() == 0.0f);
+    // …and nothing of it is drawn any more. Fewer objects than with the strip,
+    // which is the only way to say "the strip is gone" without naming its parts.
+    std::vector<UIRenderObject> nowNative;
+    wm.extract(400.0f, 300.0f, nowNative);
+    CHECK(nowNative.size() < drawn.size());
+
+    // A click where the strip used to be reaches the page — and opens nothing:
+    // a grab for a menu nobody can see would make the whole window inert.
+    wm.processPointer(400.0f, 300.0f, 20.0f, drawnHeight * 0.5f, true, true);
+    CHECK(wm.openMenu() == -1);
+    CHECK_FALSE(wm.hasLayer());
+    wm.processPointer(400.0f, 300.0f, 20.0f, drawnHeight * 0.5f, false, true);
+    std::vector<UIRenderObject> clicked;
+    wm.extract(400.0f, 300.0f, clicked);
+    CHECK(countGlyphs(clicked) == 2);   // "OK" — the button under the old band
+
+    // The menus themselves are untouched — they are the data both bars read, and
+    // switching who draws them must not lose them.
+    CHECK(wm.menuBar().size() == 2u);
+}
+
 TEST_CASE("A tray entry arrives as its ID, at the application")
 {
     // The tray itself needs a desktop, so what is checked here is the part that

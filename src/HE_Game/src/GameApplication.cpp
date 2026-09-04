@@ -5,6 +5,9 @@
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
+#ifdef __APPLE__
+#include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
+#endif
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
@@ -113,6 +116,12 @@ std::list<TrayItem>  g_trayIds;
 // re-enter the interpreter in the middle of a frame, so the id waits here and
 // the frame loop delivers it — the same shape the drop path uses.
 std::vector<std::string> g_trayClicks;
+
+// The menu bar changed and the SYSTEM bar has not been told yet (macOS). Set by
+// the four app.*Menu* callbacks, acted on once per frame — a graph that builds a
+// menu of six entries touches the bar seven times, and rebuilding NSMenus seven
+// times to arrive at the same bar is six rebuilds nobody asked for.
+bool g_menuDirty = false;
 
 void SDLCALL trayEntryClicked(void* userdata, SDL_TrayEntry*)
 {
@@ -739,12 +748,18 @@ void GameApplication::OnInit()
 		// The menu bar lives in the widget manager, which is where it is drawn.
 		// Built row by row here rather than handed over whole: a graph adds a
 		// menu, then its entries, and each call has to land somewhere.
+		//
+		// Every one of them only marks the bar dirty for the SYSTEM menu (macOS);
+		// rebuilding NSMenus once per call would rebuild them four times while a
+		// graph's OnInit lays out one menu, and the frame loop is where that kind
+		// of work belongs anyway.
 		g_host.addMenu = [this](const std::string& id, const std::string& label) {
 			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
 			for (const HE::AppMenu& m : menus)
 				if (m.id == id) return;   // adding the same menu twice is one menu
 			menus.push_back({ id, label, {} });
 			m_widgets.setMenuBar(std::move(menus));
+			g_menuDirty = true;
 		};
 		g_host.addMenuItem = [this](const std::string& menuId, const std::string& id,
 		                            const std::string& label) {
@@ -754,6 +769,7 @@ void GameApplication::OnInit()
 				{
 					m.items.push_back({ id, label, false });
 					m_widgets.setMenuBar(std::move(menus));
+					g_menuDirty = true;
 					return;
 				}
 			HE_LOG_WARN(Core, "app.addMenuItem: no menu called '%s'", menuId.c_str());
@@ -765,10 +781,11 @@ void GameApplication::OnInit()
 				{
 					m.items.push_back({ "", "", true });
 					m_widgets.setMenuBar(std::move(menus));
+					g_menuDirty = true;
 					return;
 				}
 		};
-		g_host.clearMenuBar = [this] { m_widgets.setMenuBar({}); };
+		g_host.clearMenuBar = [this] { m_widgets.setMenuBar({}); g_menuDirty = true; };
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
@@ -1897,6 +1914,28 @@ void GameApplication::OnRender(float deltaTime)
 				m_gameInstance.runtime().fireOnTrayItem(gi, 0, id);
 	}
 
+#ifdef __APPLE__
+	// ── The same menu bar, in the system bar (plan A6) ───────────────────────
+	// Whether there IS one is asked here and not at startup: it is SDL's answer,
+	// and it only becomes true once SDL has registered the application. Asking
+	// once too early would draw the strip for the rest of the run.
+	if (g_menuDirty)
+	{
+		g_menuDirty = false;
+		m_widgets.setMenuBarNative(HE::AppMacMenu::available());
+		HE::AppMacMenu::set(m_widgets.menuBar());
+	}
+	// A menu click comes out of AppKit's own run loop, so it waits exactly like a
+	// tray click and arrives at the same door as the drawn bar's: OnMenuItem at
+	// the GameInstance, carrying the id.
+	{
+		std::string menuItemId;
+		while (HE::AppMacMenu::take(menuItemId))
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnMenuItem(gi, 0, menuItemId);
+	}
+#endif
+
 	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
@@ -2248,6 +2287,12 @@ void GameApplication::OnShutdown()
 	// a tray can do.
 	destroyTray();
 	g_trayClicks.clear();
+#ifdef __APPLE__
+	// Ours out of the system bar again, SDL's own left standing. One application
+	// per process, and this file's statics outlive the object that filled them.
+	HE::AppMacMenu::set({});
+	g_menuDirty = false;
+#endif
 
 	// Stop audio first: sounds reference asset PCM the ContentManager owns.
 	m_audioEngine.shutdown();

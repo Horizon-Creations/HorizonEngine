@@ -734,6 +734,13 @@ namespace app {
     // clearMenuBar starts over — which is how a menu usually changes, as a set.
     // Choosing an entry fires OnMenuItem with its id, the same shape the tray
     // has.
+    //
+    // WHERE it appears is the platform's answer, not the application's: Windows
+    // and Linux get a strip drawn along the top of the window, macOS gets the
+    // system bar next to the Apple symbol (HE_Game/AppMacMenu) and no strip.
+    // Same calls, same ids, same event — only WidgetManager::menuBarHeight()
+    // tells them apart, and on macOS it is 0 because the bar is not in the
+    // window to leave room for.
     void addMenu(Ctx&, const std::string& id, const std::string& label);
     void addMenuItem(Ctx&, const std::string& menuId, const std::string& id,
                      const std::string& label);
