@@ -688,6 +688,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Drag Payload") { out = UIPropValue::ofString(e.dragPayload);      return true; }
     if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
     if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
+    if (n == "Transition")   { out = UIPropValue::ofFloat(e.transition);        return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
     if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
     if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
@@ -746,6 +747,7 @@ const std::vector<UIPropDesc>& uiBaseProperties()
         { "Drag Payload",        UIPropType::String },
         { "Enabled",             UIPropType::Bool },
         { "Render Opacity",      UIPropType::Float, 0.0f, 1.0f },
+        { "Transition",          UIPropType::Float, 0.0f, 2.0f },
         { "Slot Fill",           UIPropType::Float },
         { "Grid Column",         UIPropType::Int },
         { "Grid Row",            UIPropType::Int },
@@ -795,6 +797,9 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Drag Payload") { e.dragPayload = v.s; return true; }
     if (n == "Enabled")      { e.enabled = v.b; return true; }
     if (n == "Render Opacity"){ e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); return true; }
+    // A negative transition is a state change running backwards, which is
+    // nothing; it lands on 0, the value that means "at once".
+    if (n == "Transition")   { e.transition = v.f < 0.0f ? 0.0f : v.f; return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
     // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
     if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
@@ -851,6 +856,11 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Focus Frame",  UIPropType::Bool });
     out.push_back({ "Enabled",      UIPropType::Bool });
     out.push_back({ "Render Opacity", UIPropType::Float, 0.0f, 1.0f });
+    // Offered on every type, not only the ones that blend today: it is a
+    // property of the ELEMENT, a theme sets it once for a whole application,
+    // and a row that appears and disappears depending on the widget type is a
+    // row nobody trusts. What each type does with it is the renderer's business.
+    out.push_back({ "Transition",   UIPropType::Float, 0.0f, 2.0f });
     out.push_back({ "Slot Fill",    UIPropType::Float });
     out.push_back({ "Grid Column",  UIPropType::Int });
     out.push_back({ "Grid Row",     UIPropType::Int });
@@ -1171,9 +1181,11 @@ void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
 void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
                       const HE::UUID& mat, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
-    glm::vec4 c = color;
-    if (st.hovered) c = hoveredColor;
-    if (st.pressed) c = pressedColor;
+    // Rest → hover → press, as two mixes rather than two assignments. At 0 and
+    // at 1 they give back exactly what the two `if`s gave before (a press wins
+    // over a hover either way), and in between they are the transition.
+    glm::vec4 c = glm::mix(color, hoveredColor, st.hoverAmount());
+    c = glm::mix(c, pressedColor, st.pressAmount());
     // The surface, and only the surface. No radius here either: it is an
     // authored property now, stamped onto this quad by the manager. Whatever is
     // ON the button is made of children, drawn by the same loop that draws every
@@ -1193,8 +1205,8 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // centred in it so the box sits with the text rather than above it.
     const float box = std::min(px.h, fontSize * pxScaleY * 1.15f);
     const float by  = px.y + (px.h - box) * 0.5f;
-    glm::vec4 bc = boxColor;
-    if (st.hovered) bc = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
+    const glm::vec4 bcHover = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
+    glm::vec4 bc = glm::mix(boxColor, bcHover, st.hoverAmount());
     quad(out, px.x, by, box, box, bc, {}, roundedR(box, box, 4.0f));
     if (checked)
     {

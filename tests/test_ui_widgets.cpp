@@ -9328,7 +9328,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 41);
+    CHECK(HE::uiBaseProperties().size() == 42);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -11537,4 +11537,88 @@ TEST_CASE("Drag: a draggable row is still a row you can pick")
     CHECK(wm.listSelected(id, "List") == 5);
     wm.processPointer(400.0f, 400.0f, 200.0f, 100.0f, false, true);
     CHECK_FALSE(wm.isDragging());
+}
+
+TEST_CASE("Transition: a hover travels to its colour instead of jumping there")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 60.0f;
+        // Black at rest, white hovered: every channel travels the whole way, so
+        // "somewhere in between" is one number to read and not a judgement.
+        e.setProp("Normal Color",  HE::UIPropValue::ofColor({ 0.0f, 0.0f, 0.0f, 1.0f }));
+        e.setProp("Hovered Color", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+        e.transition = 0.2f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // The button's own quad: the only 200×60 solid in the frame.
+    auto face = [&]
+    {
+        std::vector<UIRenderObject> out;
+        wm.extract(400.0f, 400.0f, out);
+        for (const UIRenderObject& o : out)
+            if (o.type == 0 && o.size.x == 200.0f && o.size.y == 60.0f) return o.color.r;
+        return -1.0f;
+    };
+
+    CHECK(face() == 0.0f);                       // untouched
+
+    // Hovered, but not yet arrived. The pointer alone changes nothing: the
+    // journey is made of ticks, and the frame it starts in is still the resting
+    // colour.
+    wm.processPointer(400.0f, 400.0f, 100.0f, 30.0f, false, true);
+    CHECK(face() == 0.0f);
+
+    wm.consumeVisualDirty();
+    wm.tick(0.1f);
+    // Halfway in time, and eased, so the number is not 0.5 — what matters is
+    // that it is neither end. A blend that reached white in one tick would pass
+    // "is it hovered" and still be the jump this is meant to remove.
+    const float mid = face();
+    CHECK(mid > 0.0f);
+    CHECK(mid < 1.0f);
+    // …and the frame it moved in is a frame the application knows to draw.
+    CHECK(wm.consumeVisualDirty());
+    // Nothing else is moving, and the blend still is: an event-driven app must
+    // stay awake for it.
+    CHECK(wm.isAnimating());
+
+    wm.tick(0.2f);
+    CHECK(face() == 1.0f);                       // arrived
+    // Arrived and standing still is not animating any more — the entry stays
+    // (it is what the way back out starts from) but nothing asks for frames.
+    wm.consumeVisualDirty();
+    wm.tick(0.2f);
+    CHECK_FALSE(wm.consumeVisualDirty());
+
+    // Away again, and the way back is a journey too.
+    wm.processPointer(400.0f, 400.0f, 350.0f, 350.0f, false, true);
+    wm.tick(0.1f);
+    const float back = face();
+    CHECK(back > 0.0f);
+    CHECK(back < 1.0f);
+    wm.tick(0.2f);
+    CHECK(face() == 0.0f);
+    // Back at rest the entry is swept, or isAnimating() would be true forever
+    // after the first hover and the application would never sleep again.
+    CHECK_FALSE(wm.isAnimating());
+
+    // Transition 0 is the old behaviour, exactly: the hover lands on the
+    // hovered colour in the frame it happens, with no tick in between.
+    REQUIRE(wm.animate(id, btn, "Transition", HE::UIPropValue::ofFloat(0.0f), 0.0f));
+    wm.processPointer(400.0f, 400.0f, 100.0f, 30.0f, false, true);
+    CHECK(face() == 1.0f);
+    CHECK_FALSE(wm.isAnimating());
 }

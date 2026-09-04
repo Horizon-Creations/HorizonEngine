@@ -256,6 +256,24 @@ struct UIElementRenderState
     // …and whether THIS element is the one being carried. The thing under the
     // hand should look like it left its place, or a drag reads as a copy.
     bool dragging = false;
+
+    // How far ALONG the hover and the press are, for an element with a
+    // "Transition" time — 0 is untouched, 1 is fully there, and the values in
+    // between are what a blend between the two colours is made of. Eased
+    // already: the manager stores the progress linear and shapes it here, so a
+    // renderer only ever mixes.
+    //
+    // -1 means "nobody is driving this", and that is the DEFAULT on purpose.
+    // The designer's preview and the tests build their own render state and
+    // know nothing about transitions; a 0 default would tell them every element
+    // is un-hovered and quietly turn off every highlight outside the running
+    // application. Read them through hoverAmount()/pressAmount(), which fall
+    // back to the bools, and an untouched caller keeps drawing what it drew.
+    float hoverT = -1.0f;
+    float pressT = -1.0f;
+
+    float hoverAmount() const { return hoverT >= 0.0f ? hoverT : (hovered ? 1.0f : 0.0f); }
+    float pressAmount() const { return pressT >= 0.0f ? pressT : (pressed ? 1.0f : 0.0f); }
 };
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };
@@ -291,6 +309,18 @@ public:
     // chain. This is what fades a whole menu in and out: one value on the root
     // panel instead of an animation per colour of every element in it.
     float   renderOpacity = 1.0f;
+
+    // Seconds a change of interaction state takes: how long this element needs
+    // to go from its resting colour to its hovered one, and from there to its
+    // pressed one. 0 = at once, and that is the default, so every widget
+    // authored before this draws exactly as it did.
+    //
+    // ONE number for both directions and both states. A hover that fades in
+    // over a fifth of a second and out over a whole one is a thing a designer
+    // sometimes wants and a thing nobody can keep in step across forty
+    // elements; the single number is the one that gets set on a style and holds
+    // for a whole application.
+    float   transition = 0.0f;
 
     // Off = greyed out and inert: the element (and its subtree) still draws,
     // dimmed, but nothing in it hovers, clicks, drags or takes the keyboard.
@@ -697,7 +727,8 @@ protected:
         dst.anchorMinX = anchorMinX; dst.anchorMinY = anchorMinY;
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
-        dst.renderOpacity = renderOpacity; dst.enabled = enabled;
+        dst.renderOpacity = renderOpacity; dst.transition = transition;
+        dst.enabled = enabled;
         dst.slotFill = slotFill; dst.rotation = rotation;
         dst.gridColumn = gridColumn; dst.gridRow = gridRow;
         dst.gridColumnSpan = gridColumnSpan; dst.gridRowSpan = gridRowSpan;

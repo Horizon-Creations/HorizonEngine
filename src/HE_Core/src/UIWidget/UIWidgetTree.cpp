@@ -1305,6 +1305,10 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.draggable)         o["draggable"] = true;
     if (!e.dragPayload.empty()) o["dragPayload"] = e.dragPayload;
     if (e.renderOpacity < 1.0f) o["renderOpacity"] = e.renderOpacity;
+    // Written only when there IS one, like every other addition to this list:
+    // 0 is the old behaviour, so a widget that never asked for a transition
+    // saves byte-identical.
+    if (e.transition > 0.0f) o["transition"] = e.transition;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
     // Written only when the element really sits in a named cell, so every widget
@@ -1425,6 +1429,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->draggable     = o.value("draggable", false);
     e->dragPayload   = o.value("dragPayload", std::string{});
     e->renderOpacity = o.value("renderOpacity", 1.0f);
+    e->transition    = std::max(0.0f, o.value("transition", 0.0f));
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
     e->gridColumn     = o.value("gridColumn", -1);

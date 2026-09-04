@@ -681,6 +681,18 @@ private:
             HE::UIPropValue value;
         };
         std::vector<Original> originals;
+        // How far along the hover and the press of one element are, for the
+        // elements whose "Transition" is greater than zero. Linear progress,
+        // 0..1; the easing is put on when the render state is filled, so that
+        // stopping and turning round mid-blend picks up where the value is and
+        // not where the curve says it should be.
+        //
+        // A map with entries only while something is moving, and swept the
+        // moment both values have arrived at 0 — isAnimating() reads whether it
+        // is empty, and an entry that stays behind after the pointer left is an
+        // event-driven application that never sleeps again.
+        struct Blend { float hover = 0.0f; float press = 0.0f; };
+        std::unordered_map<int, Blend> blends;
         // This widget's script instance in the runtime (owns the graph + the
         // private variable store); 0 = no logic graph.
         HorizonCode::InstanceId scriptId = 0;

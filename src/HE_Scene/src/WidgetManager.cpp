@@ -1728,7 +1728,12 @@ int WidgetManager::stopAnimationsNamed(int widgetId, const std::string& elemName
 bool WidgetManager::isAnimating() const
 {
 	for (const Instance& w : m_instances)
-		if (!w.anims.empty() || !w.playing.empty()) return true;
+		// The state blends belong here with the tweens and the clips: a button
+		// fading from its resting colour to its hovered one changes the picture
+		// with nobody touching the machine, which is the whole test. Left out,
+		// an event-driven application falls asleep in the middle of the blend
+		// and wakes up somewhere in it whenever the next event happens to come.
+		if (!w.anims.empty() || !w.playing.empty() || !w.blends.empty()) return true;
 	return false;
 }
 
@@ -1847,6 +1852,70 @@ void WidgetManager::tick(float dt)
 				const ScriptTarget t = scriptTargetFor(w, elem);
 				rt().fireOnAnimationFinished(t.scriptId, t.elem, prop);
 			}
+		}
+
+	// ── Transitions between states ───────────────────────────────────────────
+	// Hover and press stop being a switch and become a journey, for the elements
+	// whose "Transition" says how long the journey takes. Everything else has a
+	// transition of 0, gets no entry here, and keeps snapping the way it always
+	// did — which is why every widget authored before this draws unchanged.
+	//
+	// After the tweens and before the Tick events, for the same reason the
+	// tweens are: what a graph reads in its Tick should be what this frame
+	// draws, not what the last one did.
+	if (dt > 0.0f)
+		for (auto& w : m_instances)
+		{
+			// What each of the two is heading FOR. Read from the same two fields
+			// the render state is filled from further down, so the blend cannot
+			// aim somewhere other than where the snap would have landed.
+			const int hoverTarget = w.hoveredElem;
+			const int pressTarget = (w.pressedElem != 0 && m_wasDown) ? w.pressedElem : 0;
+
+			// Elements that need an entry: the two targets, when they have a
+			// transition at all. Anything else in the map is on its way back to 0
+			// and stays until it gets there.
+			for (const int elem : { hoverTarget, pressTarget })
+			{
+				if (elem == 0) continue;
+				const HE::UIElement* e = w.tree.find(elem);
+				if (e && e->transition > 0.0f) w.blends.try_emplace(elem);
+			}
+
+			bool moved = false;
+			for (auto it = w.blends.begin(); it != w.blends.end(); )
+			{
+				const HE::UIElement* e = w.tree.find(it->first);
+				// Gone, or the transition was edited down to nothing while this
+				// one was running: drop the entry rather than let it crawl. The
+				// element goes back to the bools on the very next frame, which
+				// is what a transition of 0 means.
+				if (!e || e->transition <= 0.0f) { it = w.blends.erase(it); continue; }
+
+				const float step = dt / e->transition;
+				auto toward = [step, &moved](float cur, float target)
+				{
+					if (cur == target) return cur;
+					const float next = cur < target ? std::min(target, cur + step)
+					                                : std::max(target, cur - step);
+					if (next != cur) moved = true;
+					return next;
+				};
+				it->second.hover = toward(it->second.hover, it->first == hoverTarget ? 1.0f : 0.0f);
+				it->second.press = toward(it->second.press, it->first == pressTarget ? 1.0f : 0.0f);
+
+				// Arrived, and arrived at rest: nothing is left to draw and
+				// nothing is left to remember. Kept while the value is 1, because
+				// that entry is what the way back out will start from.
+				if (it->second.hover == 0.0f && it->second.press == 0.0f &&
+				    it->first != hoverTarget && it->first != pressTarget)
+					it = w.blends.erase(it);
+				else
+					++it;
+			}
+			// The picture changed because time passed and for no other reason —
+			// the same thing the tooltip's wait has to say about itself.
+			if (moved) m_visualDirty = true;
 		}
 
 	// ── The tooltip's wait ───────────────────────────────────────────────────
@@ -4104,6 +4173,29 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			st.editing = st.focused && m_focusEditing && m_focusWidget == w.id;
 			st.dropTarget = (e.id == m_dropElem && m_dropWidget == w.id);
 			st.dragging   = (m_dragActive && e.id == m_dragElem && m_dragWidget == w.id);
+			// The blend, eased on the way out. Stored linear (see Instance::
+			// Blend) so a hover that turns round halfway carries on from where
+			// it is; shaped here, because a curve is how it should LOOK and the
+			// renderers should only have to mix. Out Quad: quick off the mark
+			// and gentle at the end, which is the one every desktop toolkit
+			// uses for a state change.
+			//
+			// The ELEMENT decides whether it blends, not the presence of an
+			// entry: the entry is made by the tick, and between the pointer
+			// event and that tick there is a frame in which one does not exist
+			// yet. Reading the bools there would put the jump back for exactly
+			// one frame, which is the flicker at the start of every hover. No
+			// entry therefore means the journey has not begun — 0 — and a
+			// transition of 0 leaves the two at -1, where the render state
+			// answers from the bools and nothing changes at all.
+			if (e.transition > 0.0f)
+			{
+				const auto blendIt = w.blends.find(e.id);
+				const Instance::Blend b =
+					blendIt != w.blends.end() ? blendIt->second : Instance::Blend{};
+				st.hoverT = HE::uiEaseApply(HE::UIEase::OutQuad, b.hover);
+				st.pressT = HE::uiEaseApply(HE::UIEase::OutQuad, b.press);
+			}
 
 			const auto matIt = w.materials.find(e.id);
 			const HE::UUID matId = matIt != w.materials.end() ? matIt->second : HE::UUID{};
