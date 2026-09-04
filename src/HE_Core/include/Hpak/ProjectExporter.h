@@ -18,6 +18,19 @@
 // Declared up here because ExportSettings names one.
 enum class ExportPlatform : uint8_t { Host = 0, Windows, MacOS, Linux };
 
+// Which of the three runtimes an export ships (docs/he-apps-plan.md A3b). They
+// differ in the two things that cost megabytes: how many renderers are linked,
+// and whether a shader cross-compiler is present. A project picks its flavour
+// from what it IS, not from a setting of its own — a game gets Game, an app gets
+// one of the two App runtimes depending on Advanced Shader Effects.
+//   Game        every backend of the platform, cross-compiler included
+//   AppAdvanced one forward renderer, shaders from precompiled variants
+//   AppBasic    the software rasterizer alone, no GPU stack at all
+// The directory names are the enum's name(), and they are also what
+// scripts/build_runtimes.py writes and HE_RUNTIME_DIR_NAME in the root
+// CMakeLists.txt spells — one word, three places, deliberately identical.
+enum class RuntimeFlavor : uint8_t { Game = 0, AppAdvanced, AppBasic };
+
 struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
@@ -187,7 +200,16 @@ struct HE_API ExportResult {
 HE_API const char*    exportPlatformName(ExportPlatform p);   // "Host"/"Windows"/"macOS"/"Linux"
 HE_API ExportPlatform exportPlatformFromName(const std::string& name); // unknown → Host
 HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
-                                               ExportPlatform p);
+                                               ExportPlatform p,
+                                               RuntimeFlavor f = RuntimeFlavor::Game);
+
+// "Game" / "AppAdvanced" / "AppBasic" — the directory name, and the word the
+// export log uses.
+HE_API const char*  runtimeFlavorName(RuntimeFlavor f);
+// Which runtime a project of this shape ships with: an app takes an app runtime,
+// and Advanced Shader Effects decides which of the two. One function so the
+// export dialog, the exporter and any test agree.
+HE_API RuntimeFlavor runtimeFlavorFor(bool appMode, bool advancedShaderEffects);
 
 // Locate a COMPLETE runtime bundle (a directory that actually contains
 // HorizonGame / HorizonGame.exe) for the target platform. resolveRuntimeDir
@@ -196,8 +218,17 @@ HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& edit
 // editorBaseDir (a few levels) checking <dir>/Game (Host) resp.
 // <dir>/GameRuntimes/<Name>, plus <dir>/out/deploy/... at each level.
 // Returns an empty path when no bundle with a game executable is found.
+//
+// The flavour is a WISH, not a requirement: an editor built before the app
+// runtimes existed, or a checkout where nobody ran scripts/build_runtimes.py,
+// has only Game — and an app that exports a working, merely fatter, runtime
+// beats an app that cannot be exported at all. outFlavor therefore reports what
+// was actually found, so the caller can say so in the log instead of quietly
+// shipping something else than it promised.
 HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseDir,
-                                               ExportPlatform p);
+                                               ExportPlatform p,
+                                               RuntimeFlavor  f = RuntimeFlavor::Game,
+                                               RuntimeFlavor* outFlavor = nullptr);
 
 // ─── Embedded pak key ─────────────────────────────────────────────────────────
 // The game executable carries a 64-byte patchable key block (see

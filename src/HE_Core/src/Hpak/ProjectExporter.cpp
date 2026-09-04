@@ -42,12 +42,40 @@ ExportPlatform exportPlatformFromName(const std::string& name)
     return ExportPlatform::Host;
 }
 
-std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
-                                        ExportPlatform p)
+const char* runtimeFlavorName(RuntimeFlavor f)
 {
+    switch (f)
+    {
+    case RuntimeFlavor::AppAdvanced: return "AppAdvanced";
+    case RuntimeFlavor::AppBasic:    return "AppBasic";
+    case RuntimeFlavor::Game:
+    default:                         return "Game";
+    }
+}
+
+RuntimeFlavor runtimeFlavorFor(bool appMode, bool advancedShaderEffects)
+{
+    // A game always takes the full runtime: it has a world, and dropping four of
+    // the platform's five backends from something that may run on any GPU is not
+    // a size saving, it is a support problem.
+    if (!appMode) return RuntimeFlavor::Game;
+    return advancedShaderEffects ? RuntimeFlavor::AppAdvanced : RuntimeFlavor::AppBasic;
+}
+
+std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
+                                        ExportPlatform p,
+                                        RuntimeFlavor f)
+{
+    // Host keeps its flat layout (…/Game, …/AppAdvanced, …/AppBasic) — that is
+    // where the build deploys. Cross-targets nest the flavour under the platform
+    // rather than beside it, because what a user drops there is a bundle built on
+    // that platform, and all three of a platform's runtimes arrive together.
     if (p == ExportPlatform::Host)
-        return editorBaseDir / ".." / "Game";
-    return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p);
+        return editorBaseDir / ".." / runtimeFlavorName(f);
+    if (f == RuntimeFlavor::Game)
+        return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p);
+    return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p)
+                         / runtimeFlavorName(f);
 }
 
 // A directory qualifies as a runtime bundle only if the game executable is
@@ -64,26 +92,51 @@ static bool isRuntimeBundle(const std::filesystem::path& dir)
 }
 
 std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseDir,
-                                        ExportPlatform p)
+                                        ExportPlatform p,
+                                        RuntimeFlavor  f,
+                                        RuntimeFlavor* outFlavor)
 {
+    if (outFlavor) *outFlavor = f;
     if (editorBaseDir.empty()) return {};
 
-    const std::filesystem::path sub = (p == ExportPlatform::Host)
-        ? std::filesystem::path("Game")
-        : std::filesystem::path("GameRuntimes") / exportPlatformName(p);
+    // Wanted flavour first, then Game as the fallback. Searching flavour-by-
+    // flavour rather than directory-by-directory is deliberate: an editor that
+    // has BOTH an out/deploy/AppBasic two levels up and a Game right beside it
+    // must still ship the app runtime it was asked for — walking the tree first
+    // would hand back whichever happened to sit closer.
+    RuntimeFlavor wanted[2] = { f, RuntimeFlavor::Game };
+    const int tries = (f == RuntimeFlavor::Game) ? 1 : 2;
 
-    // Walk upward: <dir>/Game next to the editor covers the deploy layout
-    // (deploy/Editor + deploy/Game); <dir>/out/deploy/Game covers running the
-    // editor from a build tree anywhere inside the repo.
-    std::error_code ec;
-    std::filesystem::path dir = editorBaseDir.lexically_normal();
-    for (int depth = 0; depth < 7 && !dir.empty(); ++depth)
+    for (int t = 0; t < tries; ++t)
     {
-        if (isRuntimeBundle(dir / sub))                    return dir / sub;
-        if (isRuntimeBundle(dir / "out" / "deploy" / sub)) return dir / "out" / "deploy" / sub;
-        const auto parent = dir.parent_path();
-        if (parent == dir) break; // filesystem root
-        dir = parent;
+        const RuntimeFlavor flavor = wanted[t];
+        const std::filesystem::path sub = (p == ExportPlatform::Host)
+            ? std::filesystem::path(runtimeFlavorName(flavor))
+            : (flavor == RuntimeFlavor::Game
+                   ? std::filesystem::path("GameRuntimes") / exportPlatformName(p)
+                   : std::filesystem::path("GameRuntimes") / exportPlatformName(p)
+                         / runtimeFlavorName(flavor));
+
+        // Walk upward: <dir>/Game next to the editor covers the deploy layout
+        // (deploy/Editor + deploy/Game); <dir>/out/deploy/Game covers running the
+        // editor from a build tree anywhere inside the repo.
+        std::filesystem::path dir = editorBaseDir.lexically_normal();
+        for (int depth = 0; depth < 7 && !dir.empty(); ++depth)
+        {
+            if (isRuntimeBundle(dir / sub))
+            {
+                if (outFlavor) *outFlavor = flavor;
+                return dir / sub;
+            }
+            if (isRuntimeBundle(dir / "out" / "deploy" / sub))
+            {
+                if (outFlavor) *outFlavor = flavor;
+                return dir / "out" / "deploy" / sub;
+            }
+            const auto parent = dir.parent_path();
+            if (parent == dir) break; // filesystem root
+            dir = parent;
+        }
     }
     return {};
 }

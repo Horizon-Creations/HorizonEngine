@@ -320,16 +320,47 @@ target_include_directories(HorizonRendering
             ${CMAKE_CURRENT_SOURCE_DIR}/glad/include
 )
 
-set(HR_BACKENDS RendererOpenGL RendererSoftware)
-if(HE_VULKAN_ENABLED)
-    list(APPEND HR_BACKENDS RendererVulkan)
+# ─── Which backends this runtime carries (docs/he-apps-plan.md A3b) ───────────
+# All backend libraries are still BUILT above — the editor links several of them
+# by name, and a target that exists costs nothing until something links it. What
+# the runtime flavour decides is which ones end up INSIDE HorizonRendering:
+#
+#   game          every backend the platform has            (as before)
+#   app-advanced  the platform's forward renderer, alone    (Metal on macOS, GL elsewhere)
+#   app-basic     RendererSoftware, alone                   (no GPU stack at all)
+#
+# Each linked backend also gets a HE_BACKEND_* define on HorizonRendering, and
+# RendererFactory switches on those rather than on the platform macros: asking
+# "am I on Windows" answered the wrong question the moment a Windows runtime
+# could deliberately carry only OpenGL.
+if(HE_RUNTIME_FLAVOR STREQUAL "app-basic")
+    set(HR_BACKENDS RendererSoftware)
+    set(HR_BACKEND_DEFS HE_BACKEND_SOFTWARE)
+elseif(HE_RUNTIME_FLAVOR STREQUAL "app-advanced")
+    if(APPLE)
+        set(HR_BACKENDS RendererMetal)
+        set(HR_BACKEND_DEFS HE_BACKEND_METAL)
+    else()
+        set(HR_BACKENDS RendererOpenGL)
+        set(HR_BACKEND_DEFS HE_BACKEND_OPENGL)
+    endif()
+else()
+    set(HR_BACKENDS RendererOpenGL RendererSoftware)
+    set(HR_BACKEND_DEFS HE_BACKEND_OPENGL HE_BACKEND_SOFTWARE)
+    if(HE_VULKAN_ENABLED)
+        list(APPEND HR_BACKENDS RendererVulkan)
+        list(APPEND HR_BACKEND_DEFS HE_BACKEND_VULKAN)
+    endif()
+    if(WIN32)
+        list(APPEND HR_BACKENDS RendererD3D11 RendererD3D12)
+        list(APPEND HR_BACKEND_DEFS HE_BACKEND_D3D11 HE_BACKEND_D3D12)
+    endif()
+    if(APPLE)
+        list(APPEND HR_BACKENDS RendererMetal)
+        list(APPEND HR_BACKEND_DEFS HE_BACKEND_METAL)
+    endif()
 endif()
-if(WIN32)
-    list(APPEND HR_BACKENDS RendererD3D11 RendererD3D12)
-endif()
-if(APPLE)
-    list(APPEND HR_BACKENDS RendererMetal)
-endif()
+message(STATUS "HorizonRendering: backends linked (${HE_RUNTIME_FLAVOR}): ${HR_BACKENDS}")
 
 # HorizonScene is PRIVATE: only RenderExtractor.cpp touches the ECS —
 # the dependency must never leak to consumers of HorizonRendering.
@@ -338,7 +369,8 @@ target_link_libraries(HorizonRendering
     PRIVATE ${HR_BACKENDS} SDL3::SDL3 HorizonScene
 )
 target_compile_definitions(HorizonRendering
-    PRIVATE HE_RENDERING_BUILD_DLL
+    PRIVATE HE_RENDERING_BUILD_DLL ${HR_BACKEND_DEFS}
+            HE_RUNTIME_FLAVOR_NAME="${HE_RUNTIME_FLAVOR}"
     PUBLIC  HE_RENDERING_DLL
 )
 if(HE_VULKAN_ENABLED)

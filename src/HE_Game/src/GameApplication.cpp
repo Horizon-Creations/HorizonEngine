@@ -300,14 +300,16 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	return c;
 }
 
-// What this platform ran on before the config could name a backend, and what an
-// unusable choice falls back to.
-constexpr HE::RendererBackend kDefaultBackend =
-#ifdef __APPLE__
-	HE::RendererBackend::Metal;
-#else
-	HE::RendererBackend::OpenGL;
-#endif
+// What this runtime runs on before the config could name a backend, and what an
+// unusable choice falls back to. It used to be a constexpr picked by __APPLE__,
+// which stopped being the right question with the runtime flavours (A3b): an
+// app-basic runtime links the software rasterizer ALONE, and defaulting it to
+// Metal would throw in RendererFactory before the window opens. The library that
+// links the backends is the only one that knows, so it answers.
+static HE::RendererBackend defaultBackend()
+{
+	return RendererFactory::Default();
+}
 
 // Backends by NAME (the editor's getRHIName spelling), because config.json is a
 // file a player or a support ticket edits by hand: "Metal" survives a
@@ -324,30 +326,15 @@ bool backendFromName(const std::string& name, HE::RendererBackend& out)
 }
 
 // Whether THIS runtime can create that backend at all. RendererFactory throws
-// for one whose implementation was not compiled in, so the same #ifdef set has
-// to be answered here — a config authored for another platform must fall back,
-// not abort the game before its window opens.
+// for one whose implementation was not compiled in, so the question has to be
+// asked before the answer is used — a config authored for another platform, or
+// for another runtime flavour, must fall back and not abort the game before its
+// window opens. The duplicate #ifdef ladder that used to stand here is gone: it
+// had to be kept in step with the factory by hand, and the flavours (A3b) are
+// exactly the change that would have broken that.
 bool backendAvailable(HE::RendererBackend backend)
 {
-	switch (backend)
-	{
-	case HE::RendererBackend::OpenGL: return true;
-	// A CPU rasterizer needs nothing to be present, so it is available wherever
-	// the runtime is — which is what makes it the safe fallback as well as the
-	// deliberate choice.
-	case HE::RendererBackend::Software: return true;
-#ifdef HE_VULKAN_ENABLED
-	case HE::RendererBackend::Vulkan: return true;
-#endif
-#ifdef _WIN32
-	case HE::RendererBackend::D3D11:
-	case HE::RendererBackend::D3D12:  return true;
-#endif
-#ifdef __APPLE__
-	case HE::RendererBackend::Metal:  return true;
-#endif
-	default: return false;
-	}
+	return RendererFactory::Available(backend);
 }
 
 bool windowModeFromName(const std::string& name, HE::WindowMode& out)
@@ -406,7 +393,7 @@ GameApplication::~GameApplication() = default;
 
 void GameApplication::applyShippedConfig()
 {
-	m_backend = kDefaultBackend;
+	m_backend = defaultBackend();
 
 	// Before a single shipped key is laid over the in-memory config: the game
 	// must not persist any of it. configFilePath() resolves to the per-user file
@@ -463,7 +450,7 @@ void GameApplication::applyShippedConfig()
 
 	if (const std::string name = gs.getCustomConfigString("GameBackend"); !name.empty())
 	{
-		HE::RendererBackend wanted = kDefaultBackend;
+		HE::RendererBackend wanted = defaultBackend();
 		if (!backendFromName(name, wanted))
 			HE_LOG_WARN(Core, "GameApplication: unknown graphics backend '%s' — using the default",
 			            name.c_str());
@@ -489,7 +476,11 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 
 std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 {
-	HE_LOG_INFO(Core, "%s", "GameApplication: creating renderer");
+	// The flavour goes in the log next to the backend because the two are the
+	// whole difference between the three shipped runtimes, and a report that
+	// says "the app is slow" is worth nothing without knowing which one ran.
+	HE_LOG_INFO(Core, "GameApplication: creating renderer (runtime flavour '%s')",
+	            RendererFactory::RuntimeFlavor());
 	return RendererFactory::Create(m_backend);
 }
 

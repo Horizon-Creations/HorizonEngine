@@ -612,6 +612,155 @@ TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
     he_test::removeAllQuiet(root);
 }
 
+// ─── Runtime flavours (docs/he-apps-plan.md A3b) ──────────────────────────────
+//
+// Three runtimes per platform, told apart by one word. That word is spelled in
+// four places — this enum, HE_RUNTIME_DIR_NAME in the root CMakeLists.txt,
+// FLAVOR_DIRS in scripts/build_runtimes.py and DIR_TO_FLAVOR in
+// scripts/runtime_size.py — so the first thing worth pinning is the spelling
+// itself: a rename in one place and not the others produces an exporter that
+// looks in a directory nobody writes, and nothing else notices.
+
+TEST_CASE("runtimeFlavorName: the directory spelling is the enum's name")
+{
+    CHECK(std::string(runtimeFlavorName(RuntimeFlavor::Game))        == "Game");
+    CHECK(std::string(runtimeFlavorName(RuntimeFlavor::AppAdvanced)) == "AppAdvanced");
+    CHECK(std::string(runtimeFlavorName(RuntimeFlavor::AppBasic))    == "AppBasic");
+}
+
+TEST_CASE("runtimeFlavorFor: a game always takes the full runtime")
+{
+    // Advanced Shader Effects is an app-side question. For a game it decides
+    // nothing about the runtime, because a game may meet any GPU and dropping
+    // four of five backends from it is a support problem, not a size saving.
+    CHECK(runtimeFlavorFor(false, true)  == RuntimeFlavor::Game);
+    CHECK(runtimeFlavorFor(false, false) == RuntimeFlavor::Game);
+    CHECK(runtimeFlavorFor(true,  true)  == RuntimeFlavor::AppAdvanced);
+    CHECK(runtimeFlavorFor(true,  false) == RuntimeFlavor::AppBasic);
+}
+
+TEST_CASE("resolveRuntimeDir: Host is flat, cross-targets nest under the platform")
+{
+    const fs::path base = fs::path("/tmp") / "he_editor";
+    auto norm = [](const fs::path& p) { return p.lexically_normal(); };
+
+    // Host: the three deploy directories sit beside each other, because that is
+    // where the build writes them.
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Host, RuntimeFlavor::Game))
+          == norm(fs::path("/tmp") / "Game"));
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Host, RuntimeFlavor::AppAdvanced))
+          == norm(fs::path("/tmp") / "AppAdvanced"));
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Host, RuntimeFlavor::AppBasic))
+          == norm(fs::path("/tmp") / "AppBasic"));
+
+    // Cross-target: the game runtime keeps the path it always had — an editor
+    // updated to this change must still find a bundle a user dropped there
+    // before it existed.
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Windows, RuntimeFlavor::Game))
+          == norm(fs::path("/tmp") / "GameRuntimes" / "Windows"));
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Windows))
+          == norm(fs::path("/tmp") / "GameRuntimes" / "Windows"));
+    // The app flavours nest one level deeper: all three of a platform's runtimes
+    // arrive together, so they must not collide on one directory name.
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Linux, RuntimeFlavor::AppBasic))
+          == norm(fs::path("/tmp") / "GameRuntimes" / "Linux" / "AppBasic"));
+}
+
+TEST_CASE("findRuntimeBundle: the wanted flavour wins, Game is the fallback")
+{
+    const auto root = fs::temp_directory_path() / "he_flavor_root";
+    he_test::removeAllQuiet(root);
+    const auto editor = root / "deploy" / "Editor";
+    fs::create_directories(editor);
+
+    // Only the game runtime exists — the state of every checkout where nobody
+    // ran scripts/build_runtimes.py, and of every editor built before the app
+    // runtimes did. An app must still export: fatter beats not at all.
+    writeBlob(root / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
+    RuntimeFlavor got = RuntimeFlavor::AppBasic;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppAdvanced, &got)
+          == (root / "deploy" / "Game").lexically_normal());
+    // And it must SAY so, or the fallback is a silent ~20 MB substitution.
+    CHECK(got == RuntimeFlavor::Game);
+
+    // Now the app runtime is there. It is preferred, and outFlavor confirms it.
+    writeBlob(root / "deploy" / "AppAdvanced" / "HorizonGame", fakeGameBinary(false));
+    got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppAdvanced, &got)
+          == (root / "deploy" / "AppAdvanced").lexically_normal());
+    CHECK(got == RuntimeFlavor::AppAdvanced);
+
+    // Asking for a flavour that was never built, while a DIFFERENT app flavour
+    // exists, still falls back to Game and never to the wrong app runtime — an
+    // app-basic tree has no GPU backend at all, shipping it for an advanced
+    // project would start and then render nothing.
+    got = RuntimeFlavor::AppAdvanced;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppBasic, &got)
+          == (root / "deploy" / "Game").lexically_normal());
+    CHECK(got == RuntimeFlavor::Game);
+
+    // The default argument is Game, so every caller written before the flavours
+    // existed keeps behaving exactly as it did.
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host)
+          == (root / "deploy" / "Game").lexically_normal());
+
+    he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("findRuntimeBundle: a distant app runtime beats a close game runtime")
+{
+    // The reason the search runs flavour-by-flavour and not directory-by-
+    // directory. The editor runs from a build tree with out/deploy/Game right
+    // beside it and the app runtime two levels up; walking the tree once and
+    // taking the first bundle found would hand back Game and silently ship
+    // ~20 MB of glslang the app never uses.
+    const auto root = fs::temp_directory_path() / "he_flavor_depth";
+    he_test::removeAllQuiet(root);
+    const auto editor = root / "inner" / "cmake-build" / "src" / "HE_Editor";
+    fs::create_directories(editor);
+    writeBlob(root / "inner" / "cmake-build" / "src" / "out" / "deploy" / "Game" / "HorizonGame",
+              fakeGameBinary(false));
+    writeBlob(root / "out" / "deploy" / "AppBasic" / "HorizonGame", fakeGameBinary(false));
+
+    RuntimeFlavor got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppBasic, &got)
+          == (root / "out" / "deploy" / "AppBasic").lexically_normal());
+    CHECK(got == RuntimeFlavor::AppBasic);
+
+    he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("findRuntimeBundle: cross-platform app runtimes nest under the platform")
+{
+    const auto root = fs::temp_directory_path() / "he_flavor_cross";
+    he_test::removeAllQuiet(root);
+    const auto editor = root / "deploy" / "Editor";
+    fs::create_directories(editor);
+    const auto rts = root / "deploy" / "GameRuntimes" / "Windows";
+    writeBlob(rts / "HorizonGame.exe", fakeGameBinary(false));
+    writeBlob(rts / "AppBasic" / "HorizonGame.exe", fakeGameBinary(false));
+
+    RuntimeFlavor got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Windows, RuntimeFlavor::AppBasic, &got)
+          == (rts / "AppBasic").lexically_normal());
+    CHECK(got == RuntimeFlavor::AppBasic);
+
+    // The nested one is not visible to a Game search: <platform>/AppBasic is a
+    // sub-directory of the game bundle, and isRuntimeBundle only looks at the
+    // directory it is handed.
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Windows, RuntimeFlavor::Game)
+          == rts.lexically_normal());
+
+    // Nothing at all for a platform: empty, and outFlavor is left at the wish
+    // rather than at some half-found value.
+    got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Linux, RuntimeFlavor::AppAdvanced, &got)
+          .empty());
+    CHECK(got == RuntimeFlavor::AppAdvanced);
+
+    he_test::removeAllQuiet(root);
+}
+
 // ─── macOS .app bundle ────────────────────────────────────────────────────────
 
 TEST_CASE("Export .app bundle: layout routes binaries vs data correctly")

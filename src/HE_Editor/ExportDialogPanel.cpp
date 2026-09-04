@@ -189,6 +189,10 @@ static std::string s_exportNewProfileName;
 // shows up on reopen.
 static std::string           s_exportBundleKey;
 static std::filesystem::path s_exportBundleCache;
+// Which flavour that cached path actually IS — not necessarily the one asked
+// for, since findRuntimeBundle falls back to the game runtime when the app one
+// was never built (docs/he-apps-plan.md A3b).
+static RuntimeFlavor         s_exportBundleFlavor = RuntimeFlavor::Game;
 // Worker-thread state. What the user watches while it runs — the steps, each
 // step's own progress, each step's log and the result — is BuildProgressDialog's
 // model, written by the worker itself; this panel owns the settings and the
@@ -671,22 +675,42 @@ void render(AppContext& ctx)
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
                 const ExportPlatform plat = exportPlatformFromName(s_exportPlatform);
-                if (s_exportBundleKey != s_exportPlatform)
+                // The flavour is part of the cache key: switching Advanced Shader
+                // Effects on the project changes which runtime this line has to
+                // name, and a key of the platform alone would keep showing the old
+                // one until the platform changed too.
+                const RuntimeFlavor wantFlavor = runtimeFlavorFor(
+                    exportingApp,
+                    !ctx.projectManager ||
+                        ctx.projectManager->currentProject().advancedShaderEffects);
+                const std::string bundleKey =
+                    s_exportPlatform + "/" + runtimeFlavorName(wantFlavor);
+                if (s_exportBundleKey != bundleKey)
                 {
-                    s_exportBundleKey   = s_exportPlatform;
-                    s_exportBundleCache = findRuntimeBundle(base, plat);
+                    s_exportBundleKey   = bundleKey;
+                    s_exportBundleCache = findRuntimeBundle(base, plat, wantFlavor,
+                                                            &s_exportBundleFlavor);
                 }
                 const auto& bundle = s_exportBundleCache;
                 if (!bundle.empty())
-                    ImGui::TextDisabled("Game runtime: %s",
+                {
+                    ImGui::TextDisabled("%s runtime: %s",
+                                        runtimeFlavorName(s_exportBundleFlavor),
                                         bundle.lexically_normal().string().c_str());
+                    if (s_exportBundleFlavor != wantFlavor)
+                        ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
+                            "No %s runtime built — the full game runtime ships instead "
+                            "(runs, but larger). scripts/build_runtimes.py builds it.",
+                            runtimeFlavorName(wantFlavor));
+                }
                 else
                     ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
                         plat == ExportPlatform::Host
                             ? "No game runtime found — build the HorizonGame target first."
                             : "No %s runtime bundle — place one at %s.",
                         s_exportPlatform.c_str(),
-                        resolveRuntimeDir(base, plat).lexically_normal().string().c_str());
+                        resolveRuntimeDir(base, plat, wantFlavor)
+                            .lexically_normal().string().c_str());
                 if (plat != ExportPlatform::Host)
                     ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
             }
@@ -1171,7 +1195,19 @@ void startExport(AppContext& ctx)
                 const std::filesystem::path base =
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
-                const std::filesystem::path runtimeDir = findRuntimeBundle(base, platform);
+                // Which of the three runtimes this project ships with (A3b). The
+                // wish comes from what the project IS; what is on disk decides
+                // what it gets, and a fallback to Game is reported below rather
+                // than silently swallowed — the difference is ~20 MB and whether
+                // the export needs a GPU, so nobody may find out by accident.
+                const bool projAppMode = ctx.projectManager &&
+                                         ctx.projectManager->currentProject().appProject;
+                const bool projAdvanced = !ctx.projectManager ||
+                                          ctx.projectManager->currentProject().advancedShaderEffects;
+                const RuntimeFlavor wantFlavor = runtimeFlavorFor(projAppMode, projAdvanced);
+                RuntimeFlavor gotFlavor = wantFlavor;
+                const std::filesystem::path runtimeDir =
+                    findRuntimeBundle(base, platform, wantFlavor, &gotFlavor);
 
                 // ── The run's shape is known now: build the step list and show it.
                 //
@@ -1211,7 +1247,8 @@ void startExport(AppContext& ctx)
                         ? std::string("Error: no game runtime found — build the HorizonGame "
                                       "target, then export again.")
                         : "Error: no " + s_exportPlatform + " runtime bundle at "
-                          + resolveRuntimeDir(base, platform).lexically_normal().string()
+                          + resolveRuntimeDir(base, platform, wantFlavor)
+                                .lexically_normal().string()
                           + " — build the game runtime on " + s_exportPlatform
                           + " and place it there.";
                     Build::log(2, m);
@@ -1219,6 +1256,13 @@ void startExport(AppContext& ctx)
                 }
                 else
                 {
+                Build::log(0, std::string("Runtime: ") + runtimeFlavorName(gotFlavor)
+                              + " (" + runtimeDir.lexically_normal().string() + ")");
+                if (gotFlavor != wantFlavor)
+                    Build::log(1, std::string("No ") + runtimeFlavorName(wantFlavor)
+                                  + " runtime here — shipping the full game runtime instead. "
+                                    "It runs, it is just larger; run "
+                                    "scripts/build_runtimes.py to build the app runtimes.");
                 ExportSettings es;
                 es.compress         = s_exportCompress;
                 es.encrypt          = s_exportEncrypt;

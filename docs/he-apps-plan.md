@@ -2640,6 +2640,55 @@ eingefrorenes Fenster. Vor der Antwort gepostete Benachrichtigungen hält das Fr
 tun, leer auf beiden Seiten erreicht den Host gar nicht, und eine Zeile ohne Überschrift ist
 weiterhin etwas zu sagen.
 
+### A3b Teil 3: drei Runtimes statt einer (04.09.2026)
+
+Der Exporter kopiert ein Runtime-Verzeichnis wörtlich in einen Packaged Build. Ab jetzt gibt
+es davon **drei** pro Plattform, und sie unterscheiden sich in genau zwei Dingen: wie viele
+Renderer gelinkt sind, und ob ein Shader-Übersetzer dabei ist.
+
+| Ausprägung | Backends | Shader-Übersetzer | gemessen (Release, macOS/arm64) |
+|---|---|---|---|
+| `game` | alle der Plattform | ja | Schwelle 90 / 32 MB (unverändert) |
+| `app-advanced` | ein Forward-Renderer (Metal, sonst GL) | nein | **76,9 MB** gesamt, **22,2 MB** ohne Python |
+| `app-basic` | `RendererSoftware` allein | nein | **76,2 MB** gesamt, **21,5 MB** ohne Python |
+
+**Es ist ein Baum-Schalter, kein Ziel-Schalter.** `HE_ENABLE_SHADERC` entscheidet, ob glslang
+überhaupt geholt wird, und der Backend-Satz ist in ein gemeinsames `HorizonRendering`
+gebacken — beides kann ein zweites Ziel im selben Build nicht anders haben. Eine
+App-Ausprägung ist deshalb ihr **eigenes** Build-Verzeichnis (`scripts/build_runtimes.py`
+treibt sie), und genau das hält den Spiel-Build byteweise so, wie er vorher war.
+
+**Zwei Fallen, die dieser Schnitt aufmacht.** Erstens schreibt `he_deploy_dll` jede
+Engine-Bibliothek bedingungslos nach `DEPLOY_EDITOR` — eine Ausprägung würde dem Editor still
+einen Renderer unterschieben, der keinen Shader übersetzen kann. `DEPLOY_EDITOR` zeigt in
+einem Ausprägungsbaum deshalb ins Leere. Zweitens hätte `add_subdirectory(src/HE_Editor)`
+genau die Bibliotheken wieder hereingezogen, die die Ausprägung weglässt (ImGui hat eine
+Backend-Datei pro Renderer), also baut ein Ausprägungsbaum keinen Editor.
+
+**`RendererFactory` fragt nicht mehr die Plattform.** Die `#ifdef`s heißen jetzt
+`HE_BACKEND_*` und kommen aus dem Backend-Satz statt aus `_WIN32`/`__APPLE__`. „Bin ich auf
+Windows" hat „ist D3D11 in diesem Binary" beantwortet, und das ist ab der ersten Ausprägung
+mit einem Renderer schlicht falsch. `Available()` und `Default()` stehen in derselben Datei
+wie `Create()`, weil die Leiter, die `GameApplication` sich selbst hielt, von Hand
+nachgezogen werden musste — und die Ausprägungen sind genau die Änderung, die das gebrochen
+hätte. Die Ausprägung steht beim Start im Log neben dem Backend: ein Bericht über eine
+Messung ist ohne sie nichts wert.
+
+**Die Ausprägung ist ein Wunsch, keine Bedingung.** Ein Checkout, in dem niemand
+`build_runtimes.py` laufen ließ, hat nur `Game`. Eine App, die ein funktionierendes, bloß
+dickeres Runtime ausliefert, schlägt eine App, die sich gar nicht exportieren lässt — also
+fällt `findRuntimeBundle` auf `Game` zurück, **meldet das aber** über `outFlavor`, im
+Export-Log wie im Dialog. Gesucht wird ausprägungsweise und nicht verzeichnisweise: ein
+Editor mit `out/deploy/Game` direkt daneben und `AppBasic` zwei Ebenen höher muss trotzdem
+die App-Ausprägung nehmen, und ein Baumdurchlauf hätte das nähere gewonnen.
+
+**Die Schwelle ist jetzt drei Schwellen.** `scripts/runtime_size.py` kennt die Grenzen pro
+Ausprägung, `ctest` hat drei Zeilen (`runtime_size`, `runtime_size_app_advanced`,
+`runtime_size_app_basic`), und wer nicht gebaut wurde, wird übersprungen statt rot — in CI
+sind das die beiden App-Zeilen, weil dort nur der Spiel-Build läuft. Die App-Zahlen stehen
+erst in der Datei, seit sie gemessen wurden; die 0,7 MB zwischen den beiden App-Ausprägungen
+sind der ganze Unterschied zwischen einem Metal-Backend und einem Software-Rasterizer.
+
 ---
 
 ## 11. Risiken und Fallen

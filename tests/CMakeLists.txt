@@ -520,13 +520,38 @@ endif()
 # The build type is handed over for the same reason the path is printed: the
 # thresholds were measured on a RELEASE tree and mean nothing on a Debug one,
 # which is several times the size. Anything else reports and skips.
+#
+# One test per runtime flavour (docs/he-apps-plan.md A3b), because the three are
+# different artefacts with different limits and a single number would either let
+# the app runtimes grow unwatched or fail the game runtime on day one. Only the
+# game flavour is deployed by an ordinary build; the two app ones come from
+# scripts/build_runtimes.py, so on a normal machine — and in CI — they skip. That
+# is deliberate: the test exists so that a tree which HAS built them is measured,
+# and it costs nothing in one that has not.
 if(Python3_Interpreter_FOUND)
-    add_test(NAME runtime_size
-             COMMAND ${Python3_EXECUTABLE}
-                     "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
-                     "${DEPLOY_GAME}" --check
-                     "--build-type=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,${CMAKE_BUILD_TYPE}>")
-    set_tests_properties(runtime_size PROPERTIES SKIP_RETURN_CODE 2)
+    set(_runtime_size_dirs
+        runtime_size              "${DEPLOY_DIR}/Game"        game
+        runtime_size_app_advanced "${DEPLOY_DIR}/AppAdvanced" app-advanced
+        runtime_size_app_basic    "${DEPLOY_DIR}/AppBasic"    app-basic)
+    list(LENGTH _runtime_size_dirs _rs_len)
+    math(EXPR _rs_last "${_rs_len} / 3 - 1")
+    foreach(_i RANGE ${_rs_last})
+        math(EXPR _n "${_i} * 3")
+        math(EXPR _d "${_n} + 1")
+        math(EXPR _f "${_n} + 2")
+        list(GET _runtime_size_dirs ${_n} _rs_name)
+        list(GET _runtime_size_dirs ${_d} _rs_dir)
+        list(GET _runtime_size_dirs ${_f} _rs_flavor)
+        # --flavor is passed explicitly rather than left to the directory name:
+        # DEPLOY_DIR is a cache PATH a user may point anywhere, and a runtime
+        # weighed against the wrong flavour's threshold is worse than none.
+        add_test(NAME ${_rs_name}
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
+                         "${_rs_dir}" --check "--flavor=${_rs_flavor}"
+                         "--build-type=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,${CMAKE_BUILD_TYPE}>")
+        set_tests_properties(${_rs_name} PROPERTIES SKIP_RETURN_CODE 2)
+    endforeach()
 endif()
 
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP

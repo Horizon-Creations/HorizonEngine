@@ -514,6 +514,40 @@ if(HE_ENABLE_ASTC)
     endif()
 endif()
 
+# ─── Runtime flavour (docs/he-apps-plan.md A3b) ────────────────────────────────
+# The exporter copies a runtime directory verbatim into a packaged build. There
+# are THREE of them per platform, and they differ in exactly two things: which
+# renderers are linked, and whether a shader cross-compiler is present.
+#
+#   game          all backends of the platform, shaderc ON      — as before
+#   app-advanced  one forward renderer (Metal/GL), shaderc OFF  — tool with material graphs
+#   app-basic     RendererSoftware alone,         shaderc OFF   — tool without effects
+#
+# This is a whole-tree switch and not a per-target one, because both differences
+# are: HE_ENABLE_SHADERC decides whether glslang is even fetched, and the backend
+# set is baked into one shared HorizonRendering. So an app runtime is its OWN
+# build directory (scripts/build_runtimes.py drives them), never a second output
+# of the game build — which is also what keeps the game build byte-identical to
+# what it was before this switch existed.
+set(HE_RUNTIME_FLAVOR "game" CACHE STRING
+    "Which runtime this tree builds: game | app-advanced | app-basic")
+set_property(CACHE HE_RUNTIME_FLAVOR PROPERTY STRINGS game app-advanced app-basic)
+if(NOT HE_RUNTIME_FLAVOR MATCHES "^(game|app-advanced|app-basic)$")
+    message(FATAL_ERROR "HE_RUNTIME_FLAVOR must be game, app-advanced or app-basic "
+                        "(got '${HE_RUNTIME_FLAVOR}')")
+endif()
+if(NOT HE_RUNTIME_FLAVOR STREQUAL "game")
+    # Forcing it silently would produce an app runtime that still carries the 5 MB
+    # of glslang + SPIRV-Cross and measures like the game — the one thing the size
+    # threshold exists to notice. So say it, once, and force it.
+    if(HE_ENABLE_SHADERC)
+        message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}' — shader "
+                       "cross-compiler forced OFF (it ships precompiled variants)")
+    endif()
+    set(HE_ENABLE_SHADERC OFF CACHE BOOL "" FORCE)
+endif()
+message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}'")
+
 # ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
 # Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
 # The backbone for the cross-backend material system (docs/material-system-design.md).
@@ -642,8 +676,27 @@ else()
     set(_default_deploy_dir "${CMAKE_SOURCE_DIR}/out/deploy")
 endif()
 set(DEPLOY_DIR "${_default_deploy_dir}" CACHE PATH "Where the editor/game POST_BUILD deploys")
-set(DEPLOY_GAME   "${DEPLOY_DIR}/Game")
+# One deploy root, one directory per runtime flavour (A3b): the exporter looks
+# for them by these names next to the editor, and scripts/runtime_size.py weighs
+# each of them separately.
+if(HE_RUNTIME_FLAVOR STREQUAL "app-advanced")
+    set(HE_RUNTIME_DIR_NAME "AppAdvanced")
+elseif(HE_RUNTIME_FLAVOR STREQUAL "app-basic")
+    set(HE_RUNTIME_DIR_NAME "AppBasic")
+else()
+    set(HE_RUNTIME_DIR_NAME "Game")
+endif()
+set(DEPLOY_GAME   "${DEPLOY_DIR}/${HE_RUNTIME_DIR_NAME}")
 set(DEPLOY_EDITOR "${DEPLOY_DIR}/Editor")
+# An app-flavour tree must never write into the editor deploy. It builds a
+# Software-only (or one-backend, shaderc-free) libHorizonRendering, and
+# he_deploy_dll copies every engine library into DEPLOY_EDITOR unconditionally —
+# a flavour build would quietly replace the editor's renderer with one that
+# cannot compile a shader. Building only --target HorizonGame does not save you:
+# the libraries are its dependencies, so their POST_BUILD steps run too.
+if(NOT HE_RUNTIME_FLAVOR STREQUAL "game")
+    set(DEPLOY_EDITOR "${CMAKE_BINARY_DIR}/deploy-editor-unused")
+endif()
 
 # ─── Linux: find bundled .so next to the executable ($ORIGIN) ───────────────────
 # The editor/game POST_BUILD copies the engine .so (HorizonCore/Scene/Rendering/
@@ -729,7 +782,13 @@ add_subdirectory(src/HE_Python)
 add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
-add_subdirectory(src/HE_Editor)
+# An app-flavour tree builds a runtime, not an editor. Skipping the subdirectory
+# is not a saving of build time alone: HE_Editor links every backend by name
+# (ImGui has a backend file per renderer), so keeping it would drag exactly the
+# libraries this flavour exists to leave out back into the tree.
+if(HE_RUNTIME_FLAVOR STREQUAL "game")
+    add_subdirectory(src/HE_Editor)
+endif()
 
 # Building the editor always (re)builds + deploys the game runtime: the editor's
 # Build > Export ships those binaries, and a stale/missing out/deploy/Game
