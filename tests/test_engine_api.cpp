@@ -1430,6 +1430,13 @@ TEST_CASE("String: the registry's string library evaluates correctly")
     auto S = [](const char* s){ return Value::ofString(s); };
 
     CHECK(call("string.length",    { S("hello") })[0].i == 5);
+    // Exact and case-sensitive, and — the whole reason it exists — it tells two
+    // DIFFERENT texts apart, which the Equals operator node cannot: that one
+    // compares floats, and every string coerces to 0 on the way in.
+    CHECK(call("string.equals",    { S("open"), S("open") })[0].b == true);
+    CHECK(call("string.equals",    { S("open"), S("quit") })[0].b == false);
+    CHECK(call("string.equals",    { S("Open"), S("open") })[0].b == false);
+    CHECK(call("string.equals",    { S(""),     S("") })[0].b == true);
     CHECK(call("string.substring", { S("hello world"), Value::ofInt(6), Value::ofInt(5) })[0].s == "world");
     CHECK(call("string.contains",  { S("hello"), S("ell") })[0].b == true);
     CHECK(call("string.find",      { S("hello"), S("lo") })[0].i == 3);

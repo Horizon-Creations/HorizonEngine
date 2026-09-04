@@ -1065,6 +1065,12 @@ namespace
 	  "does not have to hardcode the list." },
 
 	// ── String ───────────────────────────────────────────────────────────────
+	{ "string.equals",
+	  "Are the two texts the same? Exact and case-sensitive — put To Lower on "
+	  "both sides when case should not matter. This is what to branch on after "
+	  "On Menu Item or On Tray Item: the Equals node next door compares NUMBERS, "
+	  "and two texts arriving there both count as 0, so every id would match "
+	  "every other one." },
 	{ "string.length",
 	  "How many characters the text has." },
 	{ "string.substring",

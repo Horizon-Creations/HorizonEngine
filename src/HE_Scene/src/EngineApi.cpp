@@ -2837,6 +2837,8 @@ std::string substring(const std::string& s, int start, int count)
     if (start >= (int)s.size() || count <= 0) return {};
     return s.substr((size_t)start, (size_t)count);
 }
+bool equals(const std::string& a, const std::string& b)
+{ return a == b; }
 bool contains(const std::string& s, const std::string& needle)
 { return needle.empty() || s.find(needle) != std::string::npos; }
 int find(const std::string& s, const std::string& needle)
@@ -4118,6 +4120,13 @@ const std::vector<ApiFn>& registry()
         // String library (pure)
         t.push_back({ "string.length", "String", false, {{"s", P::String}}, {{"length", P::Int}}, "HE::api::str::length",
             [](Ctx&, const VV& a){ return VV{ Value::ofInt(str::length(aS(a, 0))) }; } });
+        // The one a graph reaches for to route on an id. Its own row rather than
+        // an "Equals accepts strings too": the operator node's pins are Float on
+        // both sides, and widening them would change how every existing Equals
+        // in every project reads.
+        t.push_back({ "string.equals", "String", false,
+            {{"a", P::String}, {"b", P::String}}, {{"result", P::Bool}}, "HE::api::str::equals",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(str::equals(aS(a, 0), aS(a, 1))) }; } });
         t.push_back({ "string.substring", "String", false,
             {{"s", P::String}, {"start", P::Int}, {"count", P::Int}}, {{"result", P::String}}, "HE::api::str::substring",
             [](Ctx&, const VV& a){ return VV{ Value::ofString(str::substring(aS(a, 0), aI(a, 1), aI(a, 2))) }; } });
@@ -4343,6 +4352,7 @@ const std::vector<ApiFn>& registry()
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
+            { "string.equals", "String Equals" },
             { "string.length", "String Length" },  { "string.substring", "Substring" },
             { "string.contains", "String Contains" }, { "string.find", "String Find" },
             { "string.replace", "String Replace" },   { "string.toUpper", "To Upper" },

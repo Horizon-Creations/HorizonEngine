@@ -1284,6 +1284,13 @@ namespace scene {
 // std::string in this header's users).
 namespace str {
     int         length(const std::string& s);
+    // Exact, case-sensitive. The node HorizonCode was missing: its Equals is
+    // Float (the interpreter compares |a-b| < 1e-6), so two strings arriving
+    // there both coerce to 0 and every id equals every other one. Anything that
+    // routes on a String — On Menu Item, On Tray Item, a dropped file's name —
+    // needs this to branch at all. Case-insensitive is toLower on both sides,
+    // which is a decision the caller should have to make visible.
+    bool        equals(const std::string& a, const std::string& b);
     std::string substring(const std::string& s, int start, int count); // clamped
     bool        contains(const std::string& s, const std::string& needle);
     int         find(const std::string& s, const std::string& needle);   // -1 if absent
