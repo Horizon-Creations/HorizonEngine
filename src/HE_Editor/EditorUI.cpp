@@ -2152,7 +2152,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             //
             // Forced back on for every other template, so leaving it unticked and
             // then picking Game cannot carry the setting across.
-            if (ctx.hubSelectedPreset == static_cast<int>(ProjectPreset::Application))
+            if (isAppPreset(static_cast<ProjectPreset>(ctx.hubSelectedPreset)))
             {
                 ImGui::Spacing();
                 ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);

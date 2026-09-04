@@ -255,7 +255,7 @@ void render(AppContext& ctx)
         // Advanced Shader Effects — applications only, and forced on otherwise.
         // See the New Project popup's twin in EditorUI.cpp for why it is not
         // offered for a game.
-        if (ctx.hubSelectedPreset == static_cast<int>(ProjectPreset::Application))
+        if (isAppPreset(static_cast<ProjectPreset>(ctx.hubSelectedPreset)))
         {
             ImGui::Spacing();
             ImGui::SetCursorPosX(padding);

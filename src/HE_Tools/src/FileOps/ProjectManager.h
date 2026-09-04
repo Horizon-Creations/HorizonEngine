@@ -36,11 +36,42 @@ enum class ProjectPreset
 	// that number to ThirdPerson, so the one that had not shipped is the one that
 	// moves. Nobody's project changes template underneath them.
 	Application,
+	// ── The five shaped applications (docs/he-apps-plan.md D3) ───────────────
+	// All of them ARE applications: they take the same manifest, the same three
+	// folders and the same GameInstance as Application above, and differ in one
+	// thing only — the root widget they lay down. "Application" is the empty
+	// window; these five are the layouts people actually start from, and each
+	// one draws something the moment it is opened rather than after an hour of
+	// building the frame everybody builds.
+	//
+	// Appended, like everything else in this enum: the value goes into the
+	// .heproj as a plain int, so inserting one would change what an existing
+	// project says it was made from.
+	AppSidebar,     // navigation left, content right
+	AppWizard,      // one step at a time, Back/Next, progress
+	AppDashboard,   // a grid of cards with numbers in them
+	AppForm,        // a labelled form with a save bar
+	AppTool,        // toolbar on top, list beside canvas, status bar below
 	// Not a template: the number of them. The editor's picker is an array of
 	// names indexed by this enum, and the two drifting apart is how choosing
 	// "Application" silently created an Empty project.
 	COUNT,
 };
+
+// Does this template make an APPLICATION? Asked in four places (folder layout,
+// the manifest's appProject flag, the starter content, the Advanced checkbox in
+// both create forms), and every one of them used to compare against
+// ProjectPreset::Application by hand — which is exactly the shape of thing that
+// forgets the sixth template the day a sixth exists.
+inline bool isAppPreset(ProjectPreset p)
+{
+	return p == ProjectPreset::Application ||
+	       p == ProjectPreset::AppSidebar  ||
+	       p == ProjectPreset::AppWizard   ||
+	       p == ProjectPreset::AppDashboard||
+	       p == ProjectPreset::AppForm     ||
+	       p == ProjectPreset::AppTool;
+}
 
 // The gameplay scripting language a project is authored in, chosen at creation
 // and persisted in the .heproj manifest ("scriptLanguage"). Lua and Python map

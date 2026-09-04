@@ -70,11 +70,443 @@ std::string rootWidgetTreeJson(const std::string& projectName)
 	return HE::uiWidgetTreeToJson(tree);
 }
 
+// ── The five shaped templates (docs/he-apps-plan.md D3) ──────────────────────
+// Each one is a root widget and nothing else: same manifest, same folders, same
+// GameInstance as the plain Application. The layout IS the template.
+//
+// What they deliberately do NOT carry is graph logic. A nav button that swaps
+// the page needs an event wired in the widget's own class, and a template that
+// ships wiring teaches its wiring rather than the frame — so what moves here
+// moves because the ELEMENT moves it (the splitter divider, the tab strip, the
+// scroll box, the fields), and the first thing the user writes is the first
+// thing they would have written anyway. Each template says so, on itself, in
+// the one place they will read: the text on the page.
+namespace tpl
+{
+// The shared palette. Literal colors rather than theme roles: a new project has
+// no theme asset yet, and a template that looks unfinished until one exists is
+// worse than one that looks the same everywhere.
+const glm::vec4 kBack  { 0.11f, 0.11f, 0.13f, 1.0f };  // window ground
+const glm::vec4 kSurf  { 0.16f, 0.16f, 0.19f, 1.0f };  // cards, bars, panes
+const glm::vec4 kAccent{ 0.24f, 0.52f, 0.86f, 1.0f };
+const glm::vec4 kText  { 0.93f, 0.93f, 0.96f, 1.0f };
+const glm::vec4 kMuted { 0.62f, 0.63f, 0.70f, 1.0f };
+
+// Every helper returns the new element's id, and takes the parent's — a tree
+// built by nesting calls reads like the tree it makes.
+int panel(HE::UIWidgetTree& t, int parent, const char* name, const glm::vec4& c,
+          float corner = 0.0f)
+{
+	const int id = t.add(HE::UIWidgetType::Panel);
+	auto* e = t.find(id);
+	e->name = name; e->parentId = parent;
+	e->cornerRadius = glm::vec4(corner);
+	if (auto* p = dynamic_cast<HE::UIPanel*>(e)) p->color = c;
+	return id;
+}
+
+int text(HE::UIWidgetTree& t, int parent, const char* name, const std::string& s,
+         float size, const glm::vec4& c = kText, bool wrap = false)
+{
+	const int id = t.add(HE::UIWidgetType::Text);
+	auto* e = t.find(id);
+	e->name = name; e->parentId = parent;
+	e->sizeY = size * 1.6f;
+	e->hitTestable = false;   // a label never takes a click away from what it labels
+	if (auto* x = dynamic_cast<HE::UIText*>(e))
+	{
+		x->text = s; x->fontSize = size; x->color = c;
+		x->wordWrap = wrap; x->autoSize = !wrap;
+	}
+	return id;
+}
+
+// A button IS a rectangle with a label child — there is no label field on it —
+// so the two are made together or every template writes the same two calls.
+int button(HE::UIWidgetTree& t, int parent, const std::string& label,
+           float w = 140.0f, float h = 38.0f, const glm::vec4& c = kSurf)
+{
+	const int id = t.add(HE::UIWidgetType::Button);
+	auto* e = t.find(id);
+	e->name = label; e->parentId = parent;
+	e->sizeX = w; e->sizeY = h; e->cornerRadius = glm::vec4(6.0f);
+	if (auto* b = dynamic_cast<HE::UIButton*>(e))
+	{
+		b->color        = c;
+		b->hoveredColor = c + glm::vec4(0.06f, 0.06f, 0.06f, 0.0f);
+		b->pressedColor = c - glm::vec4(0.04f, 0.04f, 0.04f, 0.0f);
+	}
+	const int lbl = text(t, id, "Label", label, 16.0f);
+	auto* l = t.find(lbl);
+	HE::uiSetAnchorPreset(*l, 5);            // centred in the button
+	l->posX = l->posY = 0.0f;
+	if (auto* x = dynamic_cast<HE::UIText*>(l)) { x->alignH = 1; x->alignV = 1; }
+	return id;
+}
+
+int box(HE::UIWidgetTree& t, int parent, HE::UIWidgetType type, const char* name,
+        float padding, float spacing)
+{
+	const int id = t.add(type);
+	auto* e = t.find(id);
+	e->name = name; e->parentId = parent;
+	if (auto* b = dynamic_cast<HE::UIBoxBase*>(e)) { b->padding = padding; b->spacing = spacing; }
+	return id;
+}
+
+// A gap that eats what is left over. Slot Fill above zero is what pins the row
+// after it to the far end, and it is the one piece of box layout nobody guesses.
+int spacer(HE::UIWidgetTree& t, int parent, float fill, float size = 8.0f)
+{
+	const int id = t.add(HE::UIWidgetType::Spacer);
+	auto* e = t.find(id);
+	e->name = fill > 0.0f ? "Fill" : "Gap"; e->parentId = parent;
+	e->sizeX = e->sizeY = size;
+	e->slotFill = fill;
+	return id;
+}
+
+// The full-bleed ground every template starts from, plus a vertical box inside
+// it that the template fills. Returns the box.
+int shell(HE::UIWidgetTree& t, float padding = 0.0f, float spacing = 0.0f)
+{
+	t.canvasWidth  = 1280.0f;
+	t.canvasHeight = 720.0f;
+	const int root = panel(t, -1, "Root", kBack);
+	auto* r = t.find(root);
+	HE::uiSetAnchorPreset(*r, 15);            // stretched to all four edges
+	r->posX = r->posY = r->sizeX = r->sizeY = 0.0f;
+
+	const int col = box(t, root, HE::UIWidgetType::VerticalBox, "Content", padding, spacing);
+	auto* c = t.find(col);
+	HE::uiSetAnchorPreset(*c, 15);
+	c->posX = c->posY = c->sizeX = c->sizeY = 0.0f;
+	return col;
+}
+
+// The line each template leaves for its reader. Same sentence shape everywhere:
+// what already works, and the one wire they write first.
+int hint(HE::UIWidgetTree& t, int parent, const std::string& s)
+{
+	const int id = text(t, parent, "Hint", s, 14.0f, kMuted, true);
+	t.find(id)->sizeY = 44.0f;
+	return id;
+}
+
+// ── Sidebar ──────────────────────────────────────────────────────────────────
+void sidebar(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t);
+
+	const int split = t.add(HE::UIWidgetType::Splitter);
+	{
+		auto* s = t.find(split);
+		s->name = "Split"; s->parentId = col; s->slotFill = 1.0f;
+		if (auto* sp = dynamic_cast<HE::UISplitter*>(s))
+		{
+			sp->vertical = false; sp->ratio = 0.22f;
+			sp->minFirst = 140.0f; sp->minSecond = 240.0f;
+		}
+	}
+
+	const int nav = box(t, split, HE::UIWidgetType::VerticalBox, "Sidebar", 12.0f, 6.0f);
+	text(t, nav, "AppName", projectName, 20.0f);
+	spacer(t, nav, 0.0f, 10.0f);
+	for (const char* item : { "Home", "Library", "Activity" })
+		button(t, nav, item, 0.0f, 38.0f);
+	spacer(t, nav, 1.0f);
+	button(t, nav, "Settings", 0.0f, 38.0f);
+
+	const int page = box(t, split, HE::UIWidgetType::VerticalBox, "Page", 24.0f, 12.0f);
+	text(t, page, "Title", "Home", 28.0f);
+	text(t, page, "Body",
+	     "The divider between the two panes is draggable, and the sidebar keeps its "
+	     "minimum width.", 16.0f, kMuted, true);
+	hint(t, page,
+	     "Next: give this page a name, then wire a sidebar button's On Clicked to set "
+	     "Title's Text — that one wire is the whole navigation.");
+	spacer(t, page, 1.0f);
+}
+
+// ── Wizard ───────────────────────────────────────────────────────────────────
+void wizard(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t, 32.0f, 14.0f);
+
+	text(t, col, "Title", projectName + " Setup", 28.0f);
+	text(t, col, "Step", "Step 1 of 3", 15.0f, kMuted);
+
+	const int bar = t.add(HE::UIWidgetType::ProgressBar);
+	{
+		auto* b = t.find(bar);
+		b->name = "Progress"; b->parentId = col; b->sizeY = 8.0f;
+		if (auto* p = dynamic_cast<HE::UIProgressBar*>(b))
+		{
+			p->value = 1.0f / 3.0f;
+			p->fillColor = kAccent;
+			p->backColor = kSurf;
+		}
+	}
+
+	const int card = panel(t, col, "Card", kSurf, 10.0f);
+	t.find(card)->slotFill = 1.0f;
+	const int inner = box(t, card, HE::UIWidgetType::VerticalBox, "StepContent", 20.0f, 10.0f);
+	{
+		auto* i = t.find(inner);
+		HE::uiSetAnchorPreset(*i, 15);
+		i->posX = i->posY = i->sizeX = i->sizeY = 0.0f;
+	}
+	text(t, inner, "Question", "What should we call it?", 20.0f);
+	const int field = t.add(HE::UIWidgetType::TextInput);
+	{
+		auto* f = t.find(field);
+		f->name = "Answer"; f->parentId = inner; f->sizeY = 36.0f;
+		f->cornerRadius = glm::vec4(6.0f);
+		if (auto* x = dynamic_cast<HE::UITextInput*>(f)) x->placeholder = "Name";
+	}
+	hint(t, inner,
+	     "Next: wire Next's On Clicked to raise Progress's Value and swap this text — a "
+	     "step is a value, not a screen.");
+	spacer(t, inner, 1.0f);
+
+	const int row = box(t, col, HE::UIWidgetType::HorizontalBox, "Buttons", 0.0f, 10.0f);
+	t.find(row)->sizeY = 44.0f;
+	button(t, row, "Back");
+	spacer(t, row, 1.0f);
+	button(t, row, "Next", 140.0f, 38.0f, kAccent);
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+void dashboard(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t, 24.0f, 16.0f);
+
+	const int head = box(t, col, HE::UIWidgetType::HorizontalBox, "Header", 0.0f, 10.0f);
+	t.find(head)->sizeY = 44.0f;
+	text(t, head, "Title", projectName, 26.0f);
+	spacer(t, head, 1.0f);
+	button(t, head, "Refresh", 120.0f, 36.0f);
+
+	// Two columns of equal share, two rows: the shape a dashboard is, said once.
+	const int grid = t.add(HE::UIWidgetType::Grid);
+	{
+		auto* g = t.find(grid);
+		g->name = "Cards"; g->parentId = col; g->slotFill = 1.0f;
+		if (auto* x = dynamic_cast<HE::UIGrid*>(g))
+		{
+			x->columns = { "*", "*" };
+			x->rows    = { "*", "*" };
+			x->spacing = x->rowSpacing = 16.0f;
+			x->reparse();
+		}
+	}
+
+	struct Card { const char* title; const char* value; float fill; };
+	const Card cards[] = {
+		{ "Sessions",  "1,284", 0.72f },
+		{ "Errors",    "3",     0.08f },
+		{ "Storage",   "46 GB", 0.46f },
+		{ "Uptime",    "99.4 %",0.99f },
+	};
+	for (const Card& c : cards)
+	{
+		const int p = panel(t, grid, c.title, kSurf, 10.0f);
+		const int in = box(t, p, HE::UIWidgetType::VerticalBox, "Body", 16.0f, 6.0f);
+		{
+			auto* i = t.find(in);
+			HE::uiSetAnchorPreset(*i, 15);
+			i->posX = i->posY = i->sizeX = i->sizeY = 0.0f;
+		}
+		text(t, in, "Label", c.title, 15.0f, kMuted);
+		text(t, in, "Value", c.value, 34.0f);
+		spacer(t, in, 1.0f);
+		const int b = t.add(HE::UIWidgetType::ProgressBar);
+		auto* e = t.find(b);
+		e->name = "Bar"; e->parentId = in; e->sizeY = 6.0f;
+		if (auto* pb = dynamic_cast<HE::UIProgressBar*>(e))
+		{
+			pb->value = c.fill; pb->fillColor = kAccent; pb->backColor = kBack;
+		}
+	}
+
+	hint(t, col,
+	     "Next: wire Refresh's On Clicked to set a card's Value — every tile here is a "
+	     "Text and a Progress Bar, both writable from a graph.");
+}
+
+// ── Form / Editor ────────────────────────────────────────────────────────────
+void form(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t, 24.0f, 14.0f);
+
+	text(t, col, "Title", projectName, 26.0f);
+	text(t, col, "Subtitle", "Edit the fields and save.", 15.0f, kMuted);
+
+	// The form scrolls, because a form is the one layout that always outgrows
+	// its window, and finding that out later means rebuilding it.
+	const int scroll = box(t, col, HE::UIWidgetType::ScrollBox, "Scroll", 0.0f, 10.0f);
+	t.find(scroll)->slotFill = 1.0f;
+
+	const int grid = t.add(HE::UIWidgetType::Grid);
+	{
+		auto* g = t.find(grid);
+		g->name = "Fields"; g->parentId = scroll;
+		if (auto* x = dynamic_cast<HE::UIGrid*>(g))
+		{
+			// A label column that fits its labels, beside a field column that
+			// takes the rest — the reason Grid exists.
+			x->columns = { "auto", "*" };
+			x->rows    = { "auto", "auto", "auto", "auto" };
+			x->spacing = 12.0f; x->rowSpacing = 10.0f;
+			x->reparse();
+		}
+	}
+
+	auto label = [&](const char* s)
+	{
+		const int id = text(t, grid, s, s, 16.0f, kMuted);
+		t.find(id)->sizeY = 34.0f;
+	};
+
+	label("Name");
+	{
+		const int f = t.add(HE::UIWidgetType::TextInput);
+		auto* e = t.find(f);
+		e->name = "Name"; e->parentId = grid; e->sizeY = 34.0f;
+		e->cornerRadius = glm::vec4(6.0f);
+		if (auto* x = dynamic_cast<HE::UITextInput*>(e)) x->placeholder = "Untitled";
+	}
+	label("Kind");
+	{
+		const int f = t.add(HE::UIWidgetType::ComboBox);
+		auto* e = t.find(f);
+		e->name = "Kind"; e->parentId = grid; e->sizeY = 34.0f;
+		e->cornerRadius = glm::vec4(6.0f);
+		if (auto* x = dynamic_cast<HE::UIComboBox*>(e))
+			x->options = { "Draft", "Published", "Archived" };
+	}
+	label("Amount");
+	{
+		const int f = t.add(HE::UIWidgetType::Slider);
+		auto* e = t.find(f);
+		e->name = "Amount"; e->parentId = grid; e->sizeY = 28.0f;
+		if (auto* x = dynamic_cast<HE::UISlider*>(e)) { x->value = 0.35f; x->fillColor = kAccent; }
+	}
+	label("Options");
+	{
+		const int f = t.add(HE::UIWidgetType::CheckBox);
+		auto* e = t.find(f);
+		e->name = "Notify"; e->parentId = grid; e->sizeY = 28.0f;
+		if (auto* x = dynamic_cast<HE::UICheckBox*>(e)) x->label = "Notify me about changes";
+	}
+
+	hint(t, col,
+	     "Next: wire Save's On Clicked to read Name's Text — the fields already type, "
+	     "toggle and drag on their own.");
+
+	const int row = box(t, col, HE::UIWidgetType::HorizontalBox, "Actions", 0.0f, 10.0f);
+	t.find(row)->sizeY = 44.0f;
+	spacer(t, row, 1.0f);
+	button(t, row, "Cancel");
+	button(t, row, "Save", 140.0f, 38.0f, kAccent);
+}
+
+// ── Tool with a toolbar ──────────────────────────────────────────────────────
+void tool(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t);
+
+	const int barPanel = panel(t, col, "Toolbar", kSurf);
+	t.find(barPanel)->sizeY = 48.0f;
+	const int bar = box(t, barPanel, HE::UIWidgetType::HorizontalBox, "Buttons", 8.0f, 8.0f);
+	{
+		auto* b = t.find(bar);
+		HE::uiSetAnchorPreset(*b, 15);
+		b->posX = b->posY = b->sizeX = b->sizeY = 0.0f;
+	}
+	for (const char* item : { "New", "Open", "Save" })
+		button(t, bar, item, 84.0f, 32.0f);
+	spacer(t, bar, 1.0f);
+	{
+		const int f = t.add(HE::UIWidgetType::TextInput);
+		auto* e = t.find(f);
+		e->name = "Search"; e->parentId = bar; e->sizeX = 220.0f; e->sizeY = 32.0f;
+		e->cornerRadius = glm::vec4(16.0f);
+		if (auto* x = dynamic_cast<HE::UITextInput*>(e)) x->placeholder = "Search";
+	}
+
+	const int split = t.add(HE::UIWidgetType::Splitter);
+	{
+		auto* s = t.find(split);
+		s->name = "Split"; s->parentId = col; s->slotFill = 1.0f;
+		if (auto* sp = dynamic_cast<HE::UISplitter*>(s))
+		{
+			sp->vertical = false; sp->ratio = 0.28f;
+			sp->minFirst = 160.0f; sp->minSecond = 240.0f;
+		}
+	}
+
+	const int list = box(t, split, HE::UIWidgetType::ScrollBox, "Items", 8.0f, 4.0f);
+	for (int i = 1; i <= 12; ++i)
+	{
+		const int rowPanel = panel(t, list, "Item", kSurf, 6.0f);
+		t.find(rowPanel)->sizeY = 32.0f;
+		const int lbl = text(t, rowPanel, "Label", "Item " + std::to_string(i), 15.0f);
+		auto* l = t.find(lbl);
+		HE::uiSetAnchorPreset(*l, 3);   // centred on the left edge
+		l->posX = 10.0f; l->posY = 0.0f;
+		if (auto* x = dynamic_cast<HE::UIText*>(l)) x->alignV = 1;
+	}
+
+	const int work = box(t, split, HE::UIWidgetType::VerticalBox, "Work", 24.0f, 10.0f);
+	text(t, work, "Title", projectName, 26.0f);
+	text(t, work, "Body",
+	     "The list scrolls, the divider drags, the search field types. This pane is where "
+	     "the tool's own view goes.", 16.0f, kMuted, true);
+	hint(t, work,
+	     "Next: turn Items into a List View if the list gets long — it realizes only the "
+	     "rows that fit, however many items there are.");
+	spacer(t, work, 1.0f);
+
+	const int statusPanel = panel(t, col, "StatusBar", kSurf);
+	t.find(statusPanel)->sizeY = 26.0f;
+	const int status = box(t, statusPanel, HE::UIWidgetType::HorizontalBox, "Status", 8.0f, 8.0f);
+	{
+		auto* s = t.find(status);
+		HE::uiSetAnchorPreset(*s, 15);
+		s->posX = s->posY = s->sizeX = s->sizeY = 0.0f;
+	}
+	text(t, status, "State", "Ready", 13.0f, kMuted);
+	spacer(t, status, 1.0f);
+	text(t, status, "Count", "12 items", 13.0f, kMuted);
+}
+} // namespace tpl
+
+// The root widget a preset lays down. Application keeps the panel-with-a-name it
+// always had; the five shaped ones each build their own frame. One switch, so a
+// new template is one case and one entry in the picker.
+std::string presetWidgetTreeJson(ProjectPreset preset, const std::string& projectName)
+{
+	HE::UIWidgetTree tree;
+	switch (preset)
+	{
+	case ProjectPreset::AppSidebar:   tpl::sidebar(tree, projectName);   break;
+	case ProjectPreset::AppWizard:    tpl::wizard(tree, projectName);    break;
+	case ProjectPreset::AppDashboard: tpl::dashboard(tree, projectName); break;
+	case ProjectPreset::AppForm:      tpl::form(tree, projectName);      break;
+	case ProjectPreset::AppTool:      tpl::tool(tree, projectName);      break;
+	default:
+		return rootWidgetTreeJson(projectName);
+	}
+	return HE::uiWidgetTreeToJson(tree);
+}
+
 // Write the root widget as a real .hasset: META (so the content browser and every
 // picker can see what it is) plus the tree chunk. Same shape the editor's own
 // "New UI Widget" writes, because a template asset that differs from a
 // hand-made one is a second format nobody maintains.
-bool writeRootWidgetAsset(const fs::path& root, const std::string& projectName)
+bool writeRootWidgetAsset(const fs::path& root, const std::string& projectName,
+                          ProjectPreset preset)
 {
 	HAsset::Writer w;
 	const HE::UUID assetId = HE::UUID::generate();
@@ -86,7 +518,7 @@ bool writeRootWidgetAsset(const fs::path& root, const std::string& projectName)
 	HAsset::Writer::appendString(meta, std::string(kRootWidgetRel));
 	w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
 
-	const std::string treeJson = rootWidgetTreeJson(projectName);
+	const std::string treeJson = presetWidgetTreeJson(preset, projectName);
 	w.addChunk(HAsset::CHUNK_UIWT, treeJson.data(), treeJson.size());
 
 	return w.write((root / "Content" / kRootWidgetRel).string(),
@@ -853,6 +1285,11 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// no Materials — the last of those only when Advanced Shader Effects are on,
 	// and even then a folder can be made when the first one is.
 	case ProjectPreset::Application:
+	case ProjectPreset::AppSidebar:
+	case ProjectPreset::AppWizard:
+	case ProjectPreset::AppDashboard:
+	case ProjectPreset::AppForm:
+	case ProjectPreset::AppTool:
 		fs::create_directories(root / "Content" / "UI");
 		fs::create_directories(root / "Content" / "Textures");
 		fs::create_directories(root / "Content" / "Fonts");
@@ -872,7 +1309,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// Choosing the Application preset IS the decision that this is an app, so the
 	// caller's flag and the preset are merged here rather than left able to
 	// disagree.
-	const bool isApp = appProject || preset == ProjectPreset::Application;
+	const bool isApp = appProject || isAppPreset(preset);
 
 	// Default startup scene: Content/StartupScene.hescene — except for an
 	// application, which has no world to load one into. Its startupScene stays
@@ -960,7 +1397,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// leaves a blank window nobody could mistake for working.
 	if (isApp)
 	{
-		if (!writeRootWidgetAsset(root, projectName))
+		if (!writeRootWidgetAsset(root, projectName, preset))
 			HE_LOG_WARN(Config, "%s", "Application template: could not write the root widget "
 			                          "asset — the preview will start empty");
 		if (!writeAppGameInstance(root))

@@ -24,6 +24,11 @@ namespace ProjectHubPanel
 		"Tutorial Sandbox",
 		"Third Person",
 		"Application",
+		"App: Sidebar",
+		"App: Wizard",
+		"App: Dashboard",
+		"App: Form / Editor",
+		"App: Tool",
 	};
 	inline constexpr const char* kPresetDescs[] = {
 		"Only the basic folder skeleton, no extra content.",
@@ -35,6 +40,16 @@ namespace ProjectHubPanel
 		"the mouse and Space. HorizonCode.",
 		"A desktop application: UI, textures and fonts, no scene and no world. Draws only "
 		"when something changes.",
+		"An application with a navigation sidebar on the left and a page area on the right, "
+		"split by a divider you can drag.",
+		"An application that asks one thing at a time: a progress bar, a step, and a "
+		"Back/Next bar at the bottom.",
+		"An application whose front page is a grid of cards with numbers, bars and a "
+		"refresh button.",
+		"An application built around one form: labelled fields in two columns, scrollable, "
+		"with a Cancel/Save bar.",
+		"An application shaped like a tool: toolbar on top, a list beside a work area, and "
+		"a status bar along the bottom.",
 	};
 	inline constexpr int kPresetCount =
 		static_cast<int>(sizeof(kPresetNames) / sizeof(kPresetNames[0]));
