@@ -1105,14 +1105,50 @@ static std::optional<ExportResult> writeGameConfig(const ExportSettings& setting
     // config.json does not fail loudly in the game — it silently resets every
     // graphics setting to the engine default, which is exactly the bug this
     // file exists to close.
-    const auto parsed = nlohmann::json::parse(settings.gameConfigJson, nullptr,
-                                              /*allow_exceptions=*/false);
+    auto parsed = nlohmann::json::parse(settings.gameConfigJson, nullptr,
+                                        /*allow_exceptions=*/false);
     if (parsed.is_discarded() || !parsed.is_object())
         return ExportResult{false, "Game settings are not a JSON object", ctx.assetsPacked};
 
+    // ── An application does not take over the display (plan E6) ──────────────
+    // The runtime already opens an app windowed, but this file is the LAST word:
+    // GameWindowMode read from here overrides that default, so a "Fullscreen" in
+    // it undoes the whole thing. Enforced at the exporter rather than only in
+    // the dialog that fills gameConfigJson, because there the mode is a setting
+    // remembered across exports — export a game, then an app, and the game's
+    // Fullscreen is what the app would have shipped with.
+    //
+    // ONLY Fullscreen is rewritten, and Borderless deliberately passes through:
+    // a window without a frame is what an application with its own title bar
+    // asks for (plan F3), and clamping everything to "Windowed" would take that
+    // away in the name of a rule about something else.
+    std::string configText = settings.gameConfigJson;
+    if (settings.appProject)
+    {
+        bool rewritten = false;
+        if (const auto entries = parsed.find("CustomConfig");
+            entries != parsed.end() && entries->is_array())
+        {
+            for (auto& e : *entries)
+            {
+                if (!e.is_object()) continue;
+                const auto key = e.find("Key");
+                if (key == e.end() || !key->is_string() || *key != "GameWindowMode") continue;
+                const auto value = e.find("Value");
+                if (value == e.end() || !value->is_string() || *value != "Fullscreen") continue;
+                *value    = "Windowed";
+                rewritten = true;
+            }
+        }
+        // Re-serialized only when something actually changed, so an export that
+        // was already right writes the caller's bytes through untouched.
+        if (rewritten)
+            configText = parsed.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+    }
+
     const auto dst = ctx.dataDir / "config.json";
     std::ofstream out(dst, std::ios::trunc);
-    out << settings.gameConfigJson;
+    out << configText;
     out.flush();
     if (!out.good())
         return ExportResult{false, "Failed to write " + dst.string(), ctx.assetsPacked};

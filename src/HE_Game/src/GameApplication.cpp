@@ -424,11 +424,20 @@ void GameApplication::applyShippedConfig()
 	// late, the window exists by then. So it is peeked at here, into a LOCAL
 	// config: this is only the default, and an explicit GameWindowMode below
 	// still wins.
+	//
+	// The answer is LATCHED into m_appMode, because the window mode is not the
+	// only thing that has to know before OnInit reads the real config: the
+	// FPS-style mouse grab at the top of OnInit is the other one (plan E6).
+	// OnInit overwrites the member from the same file a moment later, so this is
+	// the same answer arriving earlier, not a second source of truth.
 	if (baseRaw)
 	{
 		ProjectConfig peek;
 		if (ProjectConfigLoader::load(fs::path(baseRaw), peek) && peek.appMode)
+		{
+			m_appMode    = true;
 			m_windowMode = HE::WindowMode::Windowed;
+		}
 	}
 
 	// An absent key keeps what the member already holds, which is what a game
@@ -491,7 +500,17 @@ void GameApplication::OnInit()
 	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
 	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
 	// cursor is always reachable. The window is already open by the time OnInit runs.
-	setMouseCaptured(true);
+	//
+	// …and that last sentence is exactly why an APPLICATION must not come
+	// through here (plan E6). The window is open, so this hides the system
+	// cursor and puts the window into relative mode; the release further down,
+	// once project.hcfg is read, undoes it — but a tool that flashes the pointer
+	// away on launch is a tool that looks like a game engine's leftovers. The
+	// constructor already peeked at the same file, so the answer is available
+	// before the grab rather than after it. A game, and every path where there
+	// is no hcfg to peek at, behaves exactly as before.
+	if (!m_appMode)
+		setMouseCaptured(true);
 
 	// Enable SDL text-input so focused in-game TextInput widgets receive
 	// SDL_EVENT_TEXT_INPUT. Harmless when no field is focused (OnEvent only
@@ -532,10 +551,12 @@ void GameApplication::OnInit()
 	{
 		HE_LOG_INFO(Core, "%s", "GameApplication: application mode — no world, no physics, "
 		                        "no scene");
-		// The FPS-style grab above happens before this config is readable, so it
-		// is undone here rather than made conditional there — an app must not
-		// swallow the cursor, and the early-return paths above (no hcfg, no pak)
-		// keep behaving exactly as they always did.
+		// Normally already false: the grab at the top of OnInit is skipped for an
+		// application, off the constructor's peek at this same file. This is the
+		// case the peek cannot answer — a config that only becomes readable HERE
+		// (SDL_GetBasePath disagreeing with itself, a hcfg written between the
+		// two reads). Cheap, and an app that swallowed the cursor is not a bug
+		// the user can talk their way out of.
 		setMouseCaptured(false);
 		// A2: draw on events, not on a clock.
 		setEventDriven(true);

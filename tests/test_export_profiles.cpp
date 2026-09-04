@@ -5,6 +5,7 @@
 #include <Hpak/HpakReader.h>
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/ProjectConfig.h>
+#include <Application/SplashScreen.h>
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Types/UUID.h>
@@ -578,6 +579,92 @@ TEST_CASE("Export fails when the runtime dir yields no binaries")
     CHECK(r.errorMessage.find("no files") != std::string::npos);
 
     he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
+}
+
+// ─── E6: no game leftovers in a shipped application ───────────────────────────
+
+namespace
+{
+// The window half of what the export dialog writes into config.json, in the
+// shape GlobalState reads (the "CustomConfig" array — a flat object parses and
+// is then ignored).
+std::string windowConfigJson(const char* mode)
+{
+    nlohmann::json j;
+    j["CustomConfig"] = nlohmann::json::array({
+        nlohmann::json{ { "Key", "GameWindowWidth"  }, { "Value", "1280"  } },
+        nlohmann::json{ { "Key", "GameWindowHeight" }, { "Value", "720"   } },
+        nlohmann::json{ { "Key", "GameWindowMode"   }, { "Value", mode    } },
+    });
+    return j.dump(4);
+}
+
+// The GameWindowMode the export left in config.json, or "" when it wrote none.
+std::string shippedWindowMode(const fs::path& outDir)
+{
+    std::ifstream in(outDir / "config.json");
+    if (!in) return {};
+    const auto j = nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return {};
+    const auto entries = j.find("CustomConfig");
+    if (entries == j.end() || !entries->is_array()) return {};
+    for (const auto& e : *entries)
+        if (e.is_object() && e.value("Key", std::string{}) == "GameWindowMode")
+            return e.value("Value", std::string{});
+    return {};
+}
+
+// One export into a fresh directory pair, with a single asset so packing has
+// something to do. Returns the directory config.json lands in.
+fs::path exportWithWindowMode(const char* tag, bool appProject, const char* mode)
+{
+    const auto dir = fs::temp_directory_path() / (std::string("he_e6_src_")  + tag);
+    const auto out = fs::temp_directory_path() / (std::string("he_e6_out_")  + tag);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
+    writeBlob(dir / "a.hasset", tinyHasset({ 0xE, 0x6 }, "a.hasset"));
+
+    ExportSettings s;
+    s.compress        = false;
+    s.appProject      = appProject;
+    s.gameConfigJson  = windowConfigJson(mode);
+    const auto r = ProjectExporter::exportProject(dir, tag, "", out, s);
+    REQUIRE_MESSAGE(r.success, r.errorMessage);
+    he_test::removeAllQuiet(dir);
+    return out;
+}
+} // namespace
+
+TEST_CASE("E6: an exported application never ships a fullscreen window mode")
+{
+    // The dialog remembers the window mode across exports, so a Fullscreen left
+    // standing from a game export is exactly what reaches an app export. The
+    // runtime opens an app windowed by itself, but config.json overrides that
+    // default — so this has to be corrected before it is written, not after.
+    const auto app = exportWithWindowMode("app", /*appProject=*/true, "Fullscreen");
+    CHECK(shippedWindowMode(app) == "Windowed");
+    he_test::removeAllQuiet(app);
+
+    // Borderless is NOT touched: a frameless window is what an application with
+    // its own title bar asks for, and the rule is about fullscreen.
+    const auto brdr = exportWithWindowMode("brdr", /*appProject=*/true, "Borderless");
+    CHECK(shippedWindowMode(brdr) == "Borderless");
+    he_test::removeAllQuiet(brdr);
+
+    // A GAME keeps what it was given. Fullscreen is the right default there, and
+    // this guard must not reach across into it.
+    const auto game = exportWithWindowMode("game", /*appProject=*/false, "Fullscreen");
+    CHECK(shippedWindowMode(game) == "Fullscreen");
+    he_test::removeAllQuiet(game);
+}
+
+TEST_CASE("E6: the engine's splash screen is off unless a host asks for it")
+{
+    // Every host links HorizonCore, a shipped game and a shipped application
+    // included. With this default flipped, each of them would open a window
+    // carrying the Horizon wordmark ahead of its own first frame — the engine
+    // advertising itself inside someone else's product. The editor is the only
+    // host that sets it, and it sets it explicitly.
+    CHECK_FALSE(HE::SplashConfig{}.enabled);
 }
 
 TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")

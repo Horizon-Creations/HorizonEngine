@@ -2832,3 +2832,46 @@ Aufruf erzeugt echten Code statt des Magenta-Platzhalters, und alle neun überse
 Metal UND GL, in BEIDEN Domänen. Die zweite Domäne ist kein Selbstzweck: `Backdrop` ist
 der eine Knoten, dessen Text von der Domäne abhängt, und ein Milchglas auf einem Mesh
 ist ausdrücklich erlaubt. Auf echter Hardware gesehen ist auch hier noch nichts.
+
+### E6: was eine Anwendung beim Start NICHT tut (05.09.2026)
+
+Der Schritt ist zu drei Vierteln von den vorigen mit erledigt worden, und das ist die
+ehrliche Reihenfolge: A1 hat den Weltaufbau abgeschaltet, A2 das Zeichnen auf Uhr, E5
+das Vollbild aus dem Export-Dialog genommen, und der Splash war nie an — `SplashConfig`
+steht auf `enabled = false`, weil HorizonCore in jedem Wirt steckt und ein anderer
+Vorgabewert jedem ausgelieferten Spiel das Horizon-Wortzeichen vor sein erstes Bild
+gehängt hätte. Übrig blieben zwei Stellen, an denen ein Spiel noch durchschlug.
+
+**Der Zeiger, der für einen Wimpernschlag verschwand.** `OnInit` griff die Maus als
+Erstes, im FPS-Stil: relativer Modus plus `SDL_HideCursor`. Der Kommentar daneben
+begründete das damit, dass `project.hcfg` an dieser Stelle noch nicht lesbar sei, und
+gab den Zeiger deshalb ein paar Zeilen später wieder frei. Lesbar war die Datei aber
+längst: der Konstruktor schaut selbst hinein, um das Fenster einer Anwendung nicht im
+Vollbild zu öffnen. Die Antwort wird jetzt dort in `m_appMode` festgehalten, und der
+Griff findet gar nicht erst statt. Das Freigeben weiter unten bleibt stehen, für den
+Fall, dass die Datei erst dort lesbar wird; ein Werkzeug, das dem Benutzer beim Start
+den Mauszeiger wegnimmt, ist nichts, was man mit einer Erklärung wieder einfängt.
+
+**Vollbild wird im Exporter verboten, nicht nur im Dialog.** Der Dialog fragt eine
+Anwendung schon nicht mehr nach dem Fenstermodus und setzt „Windowed". Der Modus ist
+dort aber eine über Exporte hinweg gemerkte Einstellung, und `config.json` ist das
+letzte Wort: was darin steht, überschreibt den Vorgabewert, mit dem die Laufzeit eine
+Anwendung im Fenster öffnet. Erst ein Spiel exportieren, dann eine Anwendung, und das
+Vollbild des Spiels wäre mitgefahren. `writeGameConfig` schreibt deshalb bei
+`appProject` ein `GameWindowMode: "Fullscreen"` in „Windowed" um, bevor die Datei
+entsteht.
+
+**Nur Vollbild, nicht „alles außer Windowed".** `Borderless` geht ausdrücklich durch:
+ein Fenster ohne Rahmen ist das, was eine Anwendung mit eigener Titelleiste (F3)
+verlangt, und eine Regel über Vollbild darf das nicht nebenbei mitnehmen. Neu
+geschrieben wird die Datei außerdem nur, wenn sich wirklich etwas geändert hat, sonst
+gehen die Bytes des Aufrufers unverändert durch.
+
+**„Escape beendet" gab es hier nie** — Escape schaltete den Mausgriff um, und das ist
+im Anwendungsmodus schon seit A1 abgeschaltet und wird nicht geschluckt, damit die
+Logik der Anwendung die Taste sieht.
+
+Geprüft: der Exporter dreimal (Anwendung mit Vollbild → Windowed, Anwendung mit
+Borderless → unverändert, Spiel mit Vollbild → unverändert) und der Splash-Vorgabewert
+als eigene Zusicherung. Die Zeile in `GameApplication` hat keinen Platz für einen Test:
+`HE_Game` ist eine ausführbare Datei, keine Bibliothek, und `he_tests` bindet sie nicht.
