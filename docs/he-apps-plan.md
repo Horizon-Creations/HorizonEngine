@@ -411,8 +411,6 @@ Was wirklich noch fehlt, klein und abzählbar:
   läuft der Cursor bei langem Text aus dem Feld heraus.
 - **IME.** `SDL_EVENT_TEXT_EDITING` kommt im ganzen Baum nicht vor, ebenso wenig
   `SDL_SetTextInputArea` für das Kandidatenfenster. Ohne das ist CJK-Eingabe nicht benutzbar.
-- **I-Beam automatisch.** `UICursor::Text` existiert, `hoverCursor` ist aber eine gestaltete
-  Eigenschaft pro Element mit Standard `Default`, kein Automatismus für TextInput.
 - **Eingabefilter** (nur Zahlen, Muster, Live-Validierung).
 
 **B1b Mehrzeiligkeit** ist der einzige große Rest davon und deshalb ein eigener Punkt:
@@ -690,8 +688,22 @@ Systemskalierung auf Windows und Linux korrekt aufnimmt, ist ungeprüft.
 **F3 Randlose Fenster mit eigener Titelleiste**, inklusive Ziehen, Größenänderung an den
 Rändern und Snap-Verhalten auf Windows.
 
-**F4 Systemcursor** (Text-Cursor über Textfeldern, Größenänderungs-Cursor an Splittern).
-`UICursor` existiert bereits als Enum, die Verdrahtung ist zu prüfen.
+**F4 Systemcursor** ist verdrahtet. `UICursor` ist die Absicht, `WidgetManager::hoverCursor()`
+liefert sie pro Frame, und die Anwendung setzt sie: das ausgelieferte Programm über
+`applyUICursor` (`UICursorSDL.h`, SDL-Systemcursor, gecacht), der Editor in seiner Vorschau über
+`ImGui::SetMouseCursor`, weil dort ImGui den Cursor besitzt.
+
+Drei Formen kommen von selbst, ohne dass jemand sie gestaltet: der I-Beam über einem
+Textfeld, die Hand über einem Link (an der Stelle, nicht über der ganzen Beschriftung), und
+die Pfeile über dem **Teiler** eines Splitters. Der Teiler ist der einzige Teil, den man
+greifen kann, also auch der einzige, der das sagen darf: `splitterDividerAt` beantwortet die
+Frage für den Druck und für den Cursor aus derselben Rechnung, und die Pfeile bleiben, solange
+der Griff hält, nicht nur solange der Zeiger auf dem Band steht. Ein gesetzter `hoverCursor`
+ist immer eine Entscheidung und schlägt alle drei.
+
+Zwei bekannte Grenzen: `Crosshair` hat keine ImGui-Form, in der Editor-Vorschau bleibt es der
+Pfeil (im ausgelieferten Programm nicht). Und der Rahmen eines randlosen Fensters gehört zu
+**F3**, nicht hierher.
 
 ---
 

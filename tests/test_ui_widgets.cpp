@@ -10111,6 +10111,78 @@ TEST_CASE("Splitter: dragging the divider moves it, and only the divider does")
     wm.processPointer(400.0f, 200.0f, 300.0f, 100.0f, false, true);
 }
 
+// The divider is the only part of a splitter you can grab, so it is the only
+// part that may say so. A resize cursor over the panes would promise a drag
+// that the press there does not start.
+TEST_CASE("Splitter: the divider asks for the resize cursor, and keeps it while dragged")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    auto build = [&](bool vertical) {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int sp = t.add(HE::UIWidgetType::Splitter);
+        { HE::UIElement& e = *t.find(sp);
+          HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+          e.sizeX = 400.0f; e.sizeY = 200.0f; }
+        { auto* s = dynamic_cast<HE::UISplitter*>(t.find(sp));
+          s->vertical = vertical; s->dividerSize = 10.0f; s->ratio = 0.5f;
+          s->minFirst = s->minSecond = 40.0f; }
+        for (int i = 0; i < 2; ++i)
+        { const int p = t.add(HE::UIWidgetType::Panel); t.find(p)->parentId = sp; }
+        return t;
+    };
+
+    {
+        // Panes side by side: the divider is the band x = 195…205.
+        HE::UIWidgetTree t = build(false);
+        registerWidget(cm, t, nullptr, "mem://split-h.hasset");
+        WidgetManager wm;
+        const int id = createShown(wm, cm, "mem://split-h.hasset");
+        REQUIRE(id != 0);
+
+        wm.processPointer(400.0f, 200.0f, 198.0f, 100.0f, false, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::ResizeWE);
+        // Over a pane it is a plain pointer again.
+        wm.processPointer(400.0f, 200.0f, 50.0f, 100.0f, false, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::Default);
+
+        // Grab it and pull the pointer clean off the widget: the arrows stay,
+        // because the grab does. This is the case a hover-only rule gets wrong,
+        // and every fast drag hits it.
+        wm.processPointer(400.0f, 200.0f, 198.0f, 100.0f, true, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::ResizeWE);
+        wm.processPointer(400.0f, 200.0f, 300.0f, 900.0f, true, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::ResizeWE);
+        wm.processPointer(400.0f, 200.0f, 300.0f, 900.0f, false, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::Default);
+
+        // An authored cursor is a decision and outranks the automatic one —
+        // the same rule the text field's I-beam follows.
+        auto* live = dynamic_cast<HE::UISplitter*>(
+            const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(t.elements[0]->id));
+        REQUIRE(live);
+        live->ratio = 0.5f;
+        live->hoverCursor = HE::UICursor::Hand;
+        wm.processPointer(400.0f, 200.0f, 198.0f, 100.0f, false, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::Hand);
+    }
+    {
+        // Panes stacked: the divider moves up and down, so the arrows do too.
+        HE::UIWidgetTree t = build(true);
+        registerWidget(cm, t, nullptr, "mem://split-v.hasset");
+        WidgetManager wm;
+        const int id = createShown(wm, cm, "mem://split-v.hasset");
+        REQUIRE(id != 0);
+        wm.processPointer(400.0f, 200.0f, 200.0f, 98.0f, false, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::ResizeNS);
+        wm.processPointer(400.0f, 200.0f, 200.0f, 20.0f, false, true);
+        CHECK(wm.hoverCursor() == HE::UICursor::Default);
+    }
+}
+
 TEST_CASE("TabBox and Splitter: they round-trip")
 {
     HE::UIWidgetTree t;

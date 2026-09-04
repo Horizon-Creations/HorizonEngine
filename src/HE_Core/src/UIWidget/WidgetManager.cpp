@@ -1961,6 +1961,34 @@ namespace
 		return lv.rowAt((mouseY / canvas.scaleY - r.y) / vs);
 	}
 
+	// Is the point on a splitter's DIVIDER, the strip between the two panes?
+	// In canvas units, like the rect it is measured against. One function
+	// because three things ask it and they must not drift: the press decides
+	// whether a drag starts, the hover decides whether the resize cursor is
+	// shown, and a cursor that promises a grab the press does not give is worse
+	// than no cursor at all.
+	bool splitterDividerAt(const HE::UIWidgetTree& tree, const HE::UISplitter& sp,
+	                       const HE::UIWidgetCanvas& canvas, float canvasX, float canvasY)
+	{
+		const HE::UIWidgetRect r = HE::uiElementRect(tree, sp, &canvas);
+		float us = 1.0f, vs = 1.0f;
+		HE::uiElementUnitScale(tree, sp, us, vs, &canvas);
+		const float len = sp.vertical ? r.h : r.w;
+		const float div = std::min(sp.dividerSize * (sp.vertical ? vs : us), len);
+		const float first = sp.clampedRatio(len) * std::max(0.0f, len - div);
+		const float p  = sp.vertical ? canvasY : canvasX;
+		const float lo = (sp.vertical ? r.y : r.x) + first;
+		return p >= lo && p <= lo + div;
+	}
+
+	// The cursor a splitter's divider asks for. Named after what the PANES do,
+	// so a vertical splitter (panes stacked) has a divider that moves up and
+	// down — the arrows point the way the drag goes, not the way the strip lies.
+	HE::UICursor splitterCursor(const HE::UISplitter& sp)
+	{
+		return sp.vertical ? HE::UICursor::ResizeNS : HE::UICursor::ResizeWE;
+	}
+
 	// What a modal dims the rest of the screen with. A plain constant and not a
 	// theme role: a scrim is not a colour anybody designs, it is the absence of
 	// one, and it has to work on a light page and a dark one alike.
@@ -2128,6 +2156,14 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 				    e.type() == HE::UIWidgetType::Text &&
 				    !linkAtPoint(w, e.id, x, y).empty())
 					hit.cursor = HE::UICursor::Hand;
+				// …and a splitter asks for the arrows only where it can be
+				// GRABBED. Its rect covers both panes, so asking by type alone
+				// would put a resize cursor over the whole thing and promise a
+				// drag that a press there does not start.
+				if (hit.cursor == HE::UICursor::Default)
+					if (const auto* sp = dynamic_cast<const HE::UISplitter*>(&e))
+						if (splitterDividerAt(w.tree, *sp, canvas, mcx, mcy))
+							hit.cursor = splitterCursor(*sp);
 			}
 		}
 	}
@@ -2532,15 +2568,10 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				{
 					const HE::UIWidgetCanvas canvas =
 						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
-					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *sp, &canvas);
-					float us = 1.0f, vs = 1.0f;
-					HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
-					const float len = sp->vertical ? r.h : r.w;
-					const float div = std::min(sp->dividerSize * (sp->vertical ? vs : us), len);
-					const float first = sp->clampedRatio(len) * std::max(0.0f, len - div);
-					const float p  = sp->vertical ? mouseY / canvas.scaleY : mouseX / canvas.scaleX;
-					const float lo = (sp->vertical ? r.y : r.x) + first;
-					if (p >= lo && p <= lo + div) w.draggingSplit = hot;
+					if (canvas.scaleX > 0.0f && canvas.scaleY > 0.0f &&
+					    splitterDividerAt(w.tree, *sp, canvas,
+					                      mouseX / canvas.scaleX, mouseY / canvas.scaleY))
+						w.draggingSplit = hot;
 				}
 				// A Tab Box: the strip switches pages, the rest is the page.
 				if (const auto* tb = dynamic_cast<const HE::UITabBox*>(e))
@@ -2686,6 +2717,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (auto* sp = dynamic_cast<HE::UISplitter*>(w.tree.find(w.draggingSplit)))
 			{
+				// The arrows stay for as long as the grab does. A drag runs
+				// ahead of the divider it is moving — the pointer is off the
+				// band on any fast pull — and a cursor that flickers back to
+				// the arrow mid-drag says the grab was lost when it was not.
+				m_hoverCursor = splitterCursor(*sp);
 				const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *sp, &canvas);
 				float us = 1.0f, vs = 1.0f;

@@ -3014,6 +3014,10 @@ void EditorApplication::OnRender(float dt)
 					case HE::UICursor::ResizeNS:  mc = ImGuiMouseCursor_ResizeNS;  break;
 					case HE::UICursor::Move:      mc = ImGuiMouseCursor_ResizeAll; break;
 					case HE::UICursor::No:        mc = ImGuiMouseCursor_NotAllowed;break;
+					case HE::UICursor::Wait:      mc = ImGuiMouseCursor_Wait;      break;
+					// Crosshair has no ImGui shape, so in the preview it stays
+					// the arrow. The packaged application gets the real one from
+					// SDL — this is the editor's limit, not the enum's.
 					default:                      mc = ImGuiMouseCursor_Arrow;     break;
 				}
 				ImGui::SetMouseCursor(mc);
