@@ -1666,6 +1666,21 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 // Assets.h), so one template serves both — a layout change stays in one place.
 namespace
 {
+// Does this variant type carry a UI vertex? Material does (A3b — one variant serves the
+// mesh and the UI path), Particle does not. Detected instead of specialised so the two
+// codecs stay ONE function: the layout lives in one place, which is the point of the
+// template.
+template<typename Variant>
+inline constexpr bool kHasUIVertex = requires(Variant v) { v.uiVertex; };
+
+// A record grew a field, and the record is repeated — so a reader that stops early
+// mis-parses everything AFTER it, not just the tail. Hence a version, and hence it is
+// written where an old blob can never be mistaken for it: v1 starts with the variant
+// COUNT, and encode returns {} for an empty list, so a leading 0 is impossible in v1
+// and marks "versioned header follows".
+constexpr uint8_t kShaderVariantVersionMark = 0;
+constexpr uint8_t kShaderVariantVersion     = 2; // v2 = + uiVertex per record
+
 template<typename Variant>
 std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 {
@@ -1673,12 +1688,18 @@ std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 	// chunk entirely (rather than baking a count-0 PSHD that decodes to nothing).
 	if (vars.empty()) return {};
 	std::vector<uint8_t> b;
+	if constexpr (kHasUIVertex<Variant>)
+	{
+		HAsset::Writer::appendPOD(b, kShaderVariantVersionMark);
+		HAsset::Writer::appendPOD(b, kShaderVariantVersion);
+	}
 	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
 	for (const auto& v : vars)
 	{
 		HAsset::Writer::appendPOD(b, v.backend);
 		HAsset::Writer::appendString(b, v.vertex);
 		HAsset::Writer::appendString(b, v.fragment);
+		if constexpr (kHasUIVertex<Variant>) HAsset::Writer::appendString(b, v.uiVertex);
 	}
 	return b;
 }
@@ -1689,6 +1710,13 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 	std::vector<Variant> out;
 	size_t o = 0; uint8_t count = 0;
 	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
+	uint8_t version = 1;
+	if (count == kShaderVariantVersionMark)
+	{
+		// Versioned header: the 0 was the mark, the real count follows the version.
+		if (!HAsset::Reader::readPOD(bytes, o, version)) return out;
+		if (!HAsset::Reader::readPOD(bytes, o, count))   return out;
+	}
 	out.reserve(count);
 	for (uint8_t i = 0; i < count; ++i)
 	{
@@ -1696,6 +1724,12 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
 		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
 		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
+		if constexpr (kHasUIVertex<Variant>)
+		{
+			// v1 paks simply have no UI vertex; the renderer then cross-compiles it,
+			// exactly as it did before the field existed.
+			if (version >= 2 && !HAsset::Reader::readString(bytes, o, v.uiVertex)) break;
+		}
 		out.push_back(std::move(v));
 	}
 	return out;

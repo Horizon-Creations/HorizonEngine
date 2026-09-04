@@ -686,7 +686,6 @@ private:
 	// Fullscreen tonemap of an HDR target → LDR. `sourceHdr` null = the scene's
 	// m_hdrColor; the world preview passes its own and turns bloom/flare off.
 	void  EncodeTonemap(void* renderEncoder, void* sourceHdr = nullptr, bool withBloom = true);
-#if defined(HE_HAVE_SHADERC)
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).
 	// precompiled != null → build directly from baked MSL (no runtime cross-compile).
@@ -706,7 +705,6 @@ private:
 	// material has none and its draws are routed through the forward extra pass.
 	bool  ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                              std::string& vertBody);
-#endif
 
 	// ── Anti-aliasing resolve (docs/anti-aliasing-plan.md) ───────────────────
 	// Tonemap writes to m_ldrColor; this pass reads it and writes the final image

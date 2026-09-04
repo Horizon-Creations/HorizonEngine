@@ -298,6 +298,48 @@ Dazu zwei konkrete Punkte, beide am Code geprüft:
      UI-Materialpfad statt eines abgespeckten, und „eigene Shader in kleinen Apps" wird von
      wahr zu falsch.
 
+  > **Erledigt (04.09.2026, A3b Teil 2).** Beide Hälften, plus eine dritte, die erst beim
+  > Bauen sichtbar wurde.
+  >
+  > **Eine Variante bedient beide Pfade.** `MaterialShaderVariant` hat ein drittes Feld,
+  > `uiVertex`: dasselbe Fragment, gepaart mit dem Bildschirmraum-Quad-Vertex statt mit dem
+  > Standard-Vertex. Das Fragment ist wörtlich derselbe String — deshalb reicht EINE
+  > Variante für Mesh und UI, und deshalb wäre ein zweiter Eintrag pro Material nur eine
+  > Kopie gewesen. Der Exporter backt ihn neben dem Mesh-Vertex; scheitert er, bleibt das
+  > Feld leer, und leer heißt genau eine Sache: der Renderer übersetzt diese Hälfte wie
+  > bisher zur Ladezeit.
+  >
+  > **Der Datensatz wiederholt sich, also braucht er eine Version.** Wer beim Lesen eines
+  > alten PSHD-Blobs ein Feld zu viel erwartet, verliert nicht einen Schwanz, sondern
+  > verschiebt jede folgende Variante. Die Version steht deshalb da, wo ein v1-Blob sie nie
+  > vortäuschen kann: v1 beginnt mit der ANZAHL, und die leere Liste kodiert zu nichts, also
+  > ist eine führende 0 in v1 unmöglich und markiert den versionierten Kopf. Partikel-
+  > Varianten teilen dieselbe Template-Funktion und behalten ihre Bytes (`if constexpr` auf
+  > das Feld statt zweier Codecs).
+  >
+  > **`HE_HAVE_SHADERC` heißt jetzt nur noch „darf zur Laufzeit übersetzen".** Der Weg
+  > dahin war nicht, die Gates zu verschieben, sondern den Übersetzer zu ersetzen:
+  > `he_shadercompiler` existiert IMMER, nur besteht er ohne glslang aus
+  > `ShaderCompilerStub.cpp`, das jede Anfrage mit `ok = false` und einem Satz beantwortet,
+  > warum. Der Header leckt keine glslang-Typen, also merkt niemand oberhalb davon etwas.
+  > Damit baut `he_materialshader` immer, alle fünf Backends linken es immer, und der
+  > Materialpfad bleibt IM Binary — er zieht seine Shader nur aus den vorkompilierten
+  > Varianten statt aus dem Übersetzer.
+  >
+  > **Und genau das war die dritte Hälfte:** `GetOrBuildUIMaterialPipeline` in Metal stand
+  > nie in einem Gate und rief trotzdem in die gegateten Funktionen hinein. Ein
+  > `HE_ENABLE_SHADERC=OFF`-Build war also nicht kleiner, sondern kaputt. Mit dem Stub ist
+  > das kein Sonderfall mehr, sondern die eine Regel: Code, der nur nichts mehr tut, muss
+  > man nicht wegschneiden.
+  >
+  > Nicht mitgenommen (bewusst): Deferred, SSR, Decals und der GI-Resolve bleiben hinter
+  > `HE_HAVE_SHADERC`. Ihre Shader entstehen zur Laufzeit aus der Lighting-Preamble, eine
+  > App ohne Welt zeichnet sie nie, und das Herausfallen ist hier der Gewinn, nicht der
+  > Verlust. Ebenfalls offen: der `uiVertex` ist material-UNABHÄNGIG und wird trotzdem pro
+  > Material gebacken (ein bis zwei Kilobyte je Material und Backend). Ein Blob pro Pak
+  > wäre kleiner, kostet aber eine zweite Stelle, an der der UI-Vertex lebt und von
+  > `kUIVertex` abdriften kann.
+
 **Ein Kostenpunkt, der leicht untergeht:** der Exporter kopiert die Binaries aus
 `gameRuntimeDir` wörtlich. Mit dem Schalter aus A0 heißt das **drei Runtime-Ausprägungen pro
 Plattform**, die gebaut, mit dem Editor ausgeliefert und beim Export ausgewählt werden:

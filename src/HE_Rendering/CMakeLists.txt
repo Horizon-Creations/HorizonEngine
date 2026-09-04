@@ -16,16 +16,19 @@ set(HE_CORE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../HE_Core/include)
 # ─── Shared cross-backend material shader layer ────────────────────────────────
 # Backend-agnostic: MaterialAsset custom GLSL → per-backend source via he::shaderc.
 # Every backend links this and builds its own pipeline object from the shared source.
-# Only available when the shader cross-compiler was fetched (HE_ENABLE_SHADERC).
-if(TARGET he_shadercompiler)
-    add_library(he_materialshader STATIC
-        src/material/MaterialShaderLibrary.cpp
-        include/material/MaterialShaderLibrary.h)
-    target_include_directories(he_materialshader PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${HE_CORE_INCLUDE})
-    target_link_libraries(he_materialshader PUBLIC HorizonCore PRIVATE he_shadercompiler)
-    target_compile_features(he_materialshader PUBLIC cxx_std_20)
+# ALWAYS built: he_shadercompiler is either the real cross-compiler or the stub that
+# answers every compile with a failure (root CMakeLists). The difference is
+# HE_HAVE_SHADERC, and it means one thing only — "may cross-compile at runtime".
+# The material path itself, precompiled variants included, is in every build.
+add_library(he_materialshader STATIC
+    src/material/MaterialShaderLibrary.cpp
+    include/material/MaterialShaderLibrary.h)
+target_include_directories(he_materialshader PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${HE_CORE_INCLUDE})
+target_link_libraries(he_materialshader PUBLIC HorizonCore PRIVATE he_shadercompiler)
+target_compile_features(he_materialshader PUBLIC cxx_std_20)
+if(HE_HAVE_SHADERC)
     target_compile_definitions(he_materialshader PUBLIC HE_HAVE_SHADERC=1)
 endif()
 

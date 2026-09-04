@@ -332,11 +332,27 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 			             + vert.log + " " + frag.log).c_str());
 			continue; // skip this backend; runtime falls back to cross-compile
 		}
+		// The same fragment on the screen-space UI quad vertex (A3b): a widget with
+		// this material must not need glslang at load either. Failure here is NOT
+		// fatal for the variant — the mesh half is still worth shipping, and an
+		// empty uiVertex means the renderer cross-compiles that half as before.
+		// Baked per material even though the UI vertex is material-INDEPENDENT: it
+		// is one to two kilobytes, and the alternative (one blob per pak, or a
+		// checked-in generated copy) buys that back at the price of a second place
+		// where the UI vertex lives and can drift from kUIVertex.
+		const auto& uiVert = lib.uiVertex(lb);
+		if (!uiVert.ok)
+			HE_LOG_WARN(Editor, "%s",
+			            ("Export: UI vertex precompile failed for backend "
+			             + std::to_string(static_cast<int>(v)) + " — " + uiVert.log
+			             + " (materials on widgets will cross-compile at load)").c_str());
 
 		MaterialShaderVariant var;
 		var.backend  = v;
 		var.vertex   = (lb == LB::SpirV) ? spirvToBytes(vert.spirv) : vert.source;
 		var.fragment = (lb == LB::SpirV) ? spirvToBytes(frag.spirv) : frag.source;
+		if (uiVert.ok)
+			var.uiVertex = (lb == LB::SpirV) ? spirvToBytes(uiVert.spirv) : uiVert.source;
 		variants.push_back(std::move(var));
 	}
 

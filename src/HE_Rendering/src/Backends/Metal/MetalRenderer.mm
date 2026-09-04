@@ -10388,7 +10388,13 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_ssaoResult = m_ssaoBlurTex;
 }
 
-#if defined(HE_HAVE_SHADERC)
+// ─── Node-graph material path ────────────────────────────────────────────────
+// Compiled into EVERY build, HE_ENABLE_SHADERC=OFF included (docs/he-apps-plan.md
+// A3b): a packaged build gets its MSL from MaterialAsset::precompiledShaders, and
+// only the FALLBACK below — cross-compiling at load — needs the translator. The
+// UI material pipeline further down was never guarded and called straight into
+// this region, so gating it out did not even give a smaller build; it gave one
+// that failed to link.
 void* MetalRenderer::EnsureMaterialArchive()
 {
 	if (m_matArchiveTried) return m_matBinaryArchive;
@@ -10578,8 +10584,6 @@ bool MetalRenderer::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
-
-#endif // HE_HAVE_SHADERC
 
 // Build (or fetch) a Metal pipeline for GPU-instanced ParticleGraph particle
 // rendering (RenderWorld::particleBatches — the real scene path, not
@@ -11016,19 +11020,45 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bo
 	if (auto it = m_uiMaterialPipelines.find(key); it != m_uiMaterialPipelines.end())
 		return it->second;
 
+	// Baked at export time (A3b): the same variant the MESH path already reads,
+	// paired with its UI vertex instead of the standard one — the fragment is
+	// literally the same string, which is why one variant can serve both. Present
+	// → no runtime cross-compile, so a packaged application needs no glslang to
+	// draw a widget with a material on it. Read out of the asset and copied at
+	// once: ContentManager's getters point into a dense vector, and the next load
+	// invalidates them.
 	using Backend = HE::MaterialShaderLibrary::Backend;
-	const auto& v = m_matShaderLib.uiVertex(Backend::Metal);
-	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal);
+	std::string vertMSL, fragMSL, log;
+	bool ok = false;
+	if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal) && !var.uiVertex.empty())
+			{
+				vertMSL = var.uiVertex; fragMSL = var.fragment;
+				ok = !fragMSL.empty();
+				break;
+			}
+	if (!ok)
+	{
+		// No baked UI half — loose editor assets, a pak from before the field
+		// existed, a backend the export skipped. Cross-compile, as before; in a
+		// build without the translator this simply fails and the quad falls back
+		// to its solid colour.
+		const auto& v = m_matShaderLib.uiVertex(Backend::Metal);
+		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal);
+		vertMSL = v.source; fragMSL = f.source; log = v.log + f.log;
+		ok = v.ok && f.ok;
+	}
 
 	void* result = nullptr;
-	if (v.ok && f.ok)
+	if (ok)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* err = nil;
-		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
 		                                           options:nil error:&err];
 		id<MTLLibrary> fLib = err ? nil
-			: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
+			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
 			                       options:nil error:&err];
 		if (vLib && fLib)
 		{
@@ -11054,7 +11084,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bo
 	}
 	else
 		HE_LOG_ERROR(RHI, "%s",
-			(std::string("MetalRenderer: UI material shader compile failed\n") + v.log + f.log).c_str());
+			(std::string("MetalRenderer: UI material shader compile failed\n") + log).c_str());
 
 	m_uiMaterialPipelines[key] = result; // cache success AND failure (null)
 	return result;
@@ -11784,7 +11814,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
-#if defined(HE_HAVE_SHADERC)
 	// Compact "material lighting ABI" for custom-shader materials (M2 std-lit). Bound at
 	// fragment buffer 1 so the shared MaterialShaderLibrary preamble's heLit() has sun +
 	// ambient. Harmless for the default PBR pipeline (which doesn't read buffer 1).
@@ -11797,7 +11826,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 
 	// Transparent (opacity < 1) draws collected during the opaque loop and replayed
 	// sorted back-to-front, alpha-blended, after the sky. In deferred mode the
@@ -11835,7 +11863,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
 		ru.depthParams[3] = static_cast<float>(m_gbufferDebugView); // HE_DUMP_GBUFFER
-#if defined(HE_HAVE_SHADERC)
 		// P7: point/spot lights come from the cluster lists; the resolve's
 		// heLight window shrinks to directional-only (a COPY — the full fill in
 		// `matLight` keeps serving the forward-routed and transparent draws).
@@ -11846,16 +11873,13 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			[encoder setFragmentBytes:&clusterLight length:sizeof(clusterLight)
 			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 		}
-#endif
 		[encoder setFragmentBytes:&ru length:sizeof(ru) atIndex:3];
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 		++m_counters.draws;
-#if defined(HE_HAVE_SHADERC)
 		// Restore the FULL light window for everything drawn after the resolve.
 		if (m_deferredClustered)
 			[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 
 		// Restore what the resolve draw clobbered for the passes below: the
 		// scene-pass texture slots 1-3 and the GI uniforms on fragment buffer 3.
@@ -11882,10 +11906,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 				if (t.pipeline)
 				{
-#if defined(HE_HAVE_SHADERC)
 					[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 					                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 					float padded[64] = { 0 };
 					std::memcpy(padded, t.params.data(),
 					            std::min(t.params.size(), size_t(64)) * sizeof(float));
@@ -11898,9 +11920,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						}
 					if (t.wpo)
 					{
-#if defined(HE_HAVE_SHADERC)
 						[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-#endif
 						[encoder setVertexBytes:padded length:sizeof(padded) atIndex:3];
 					}
 				}

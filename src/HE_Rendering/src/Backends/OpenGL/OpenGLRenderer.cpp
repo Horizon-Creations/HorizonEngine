@@ -5009,7 +5009,15 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_giLocsUnlit    = FetchGISceneLocs(m_unlitProgram);
 }
 
-#if defined(HE_HAVE_SHADERC)
+// ─── Node-graph material path ────────────────────────────────────────────────
+// Compiled into EVERY build, HE_ENABLE_SHADERC=OFF included (docs/he-apps-plan.md
+// A3b): a packaged build gets its shaders from MaterialAsset::precompiledShaders,
+// and only the FALLBACK below — cross-compiling at load — needs the translator.
+// Gating this region out is what used to leave an application-sized build without
+// a UI material path at all instead of with a precompiled one; the shader library
+// links either way now (he_shadercompiler is the stub there) and simply answers
+// every compile with ok = false.
+
 // Resolve a material's custom shader via the shared, backend-agnostic library.
 bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                            std::string& vertBody)
@@ -5346,15 +5354,41 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 	EnsureMaterialUBOs();
 	if (auto it = m_uiMaterialPrograms.find(key); it != m_uiMaterialPrograms.end()) return it->second;
 
+	// Baked at export time (A3b): the same variant the MESH path already reads,
+	// paired with its UI vertex instead of the standard one — the fragment is
+	// literally the same string, which is why one variant can serve both. Present
+	// → no runtime cross-compile, so a packaged application needs no glslang to
+	// draw a widget with a material on it. Read out of the asset and copied at
+	// once: ContentManager's getters point into a dense vector, and the next load
+	// invalidates them.
 	using Backend = HE::MaterialShaderLibrary::Backend;
-	const auto& v = m_matShaderLib.uiVertex(Backend::GLSL410);
-	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+	std::string vertSrc, fragSrc, log;
+	bool ok = false;
+	if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL) && !var.uiVertex.empty())
+			{
+				vertSrc = var.uiVertex; fragSrc = var.fragment;
+				ok = !fragSrc.empty();
+				break;
+			}
+	if (!ok)
+	{
+		// No baked UI half — loose editor assets, a pak from before the field
+		// existed, a backend the export skipped. Cross-compile, as before; in a
+		// build without the translator this simply fails and the quad falls back
+		// to its solid colour.
+		const auto& v = m_matShaderLib.uiVertex(Backend::GLSL410);
+		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log;
+		ok = v.ok && f.ok;
+	}
 
 	unsigned int program = 0;
-	if (v.ok && f.ok)
+	if (ok)
 	{
-		GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
-		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
 		glAttachShader(prog, vs);
 		glAttachShader(prog, fs);
@@ -5409,12 +5443,11 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 	}
 	else
 		HE_LOG_ERROR(RHI, "%s",
-			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + v.log + f.log).c_str());
+			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + log).c_str());
 
 	m_uiMaterialPrograms[key] = program; // cache success AND failure (0)
 	return program;
 }
-#endif // HE_HAVE_SHADERC
 
 void OpenGLRenderer::CreateSkinnedPipeline()
 {
@@ -7409,9 +7442,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 	bool         basicBound    = false; // solid/glyph program currently active?
 	uint32_t     boundAtlasKey = 0;     // font atlas currently bound on unit 0
 	unsigned int boundMaterial = 0;     // material program currently active
-#if defined(HE_HAVE_SHADERC)
 	bool uiLightUploaded = false;       // HeLighting uploaded once per UI pass
-#endif
 	// Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
 	// emits its quads in tree order, so equally-clipped quads arrive in runs.
 	// GL's origin is bottom-left, the UI's is top-left, hence the flip.
@@ -7442,8 +7473,6 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 	// what is under it. Every quad drawn afterwards makes it stale again, so a
 	// dialog over a panel blurs the PANEL, not the scene the panel covers.
 	bool backdropStale = true;
-	(void)backdropStale; // no material path without shaderc, so nothing reads it
-#if defined(HE_HAVE_SHADERC)
 	auto snapshotBackdrop = [&]()
 	{
 		if (!m_uiBackdropTex || m_uiBackdropW != pw || m_uiBackdropH != ph)
@@ -7469,20 +7498,16 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glBindTexture(GL_TEXTURE_2D, 0);
 		backdropStale = false;
 	};
-#endif
 
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
-#if defined(HE_HAVE_SHADERC)
 		// Custom material on an image quad → material program (the solid path below
 		// stays the fallback when the material has no custom shader / failed).
 		bool wantsBackdrop = false;
 		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
 			? GetOrBuildUIMaterialProgram(obj.materialAssetId, &wantsBackdrop) : 0;
 		if (matProg && wantsBackdrop && backdropStale) snapshotBackdrop();
-#endif
 		applyClip(obj.clipRect);
-#if defined(HE_HAVE_SHADERC)
 		if (matProg)
 		{
 			if (boundMaterial != matProg)
@@ -7574,7 +7599,6 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			backdropStale = true; // this quad is now part of what is "behind"
 			continue;
 		}
-#endif
 		if (!basicBound)
 		{
 			glUseProgram(m_uiProgram);
@@ -9600,7 +9624,9 @@ void OpenGLRenderer::Shutdown()
 	m_retiredTextures.clear();
 
 	if (m_unlitProgram)     { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
-#if defined(HE_HAVE_SHADERC)
+	// Material path — unconditional, like the path itself: these programs, UBOs and
+	// the backdrop snapshot exist in a shaderc-free build too (from precompiled
+	// variants), and a cleanup that skipped them there would simply leak.
 	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
 	m_materialPrograms.clear();
 	for (auto& [k, prog] : m_uiMaterialPrograms) if (prog) glDeleteProgram(prog);
@@ -9619,9 +9645,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_previewVAO)   { glDeleteVertexArrays(1, &m_previewVAO);    m_previewVAO = 0; }
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
-#endif
-	// Content-Browser thumbnail target + its mesh program — outside the shaderc
-	// guard above, since the mesh path needs no cross-compiler.
+	// Content-Browser thumbnail target + its mesh program.
 	if (m_thumbColor)         { glDeleteTextures(1, &m_thumbColor);       m_thumbColor = 0; }
 	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
 	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }

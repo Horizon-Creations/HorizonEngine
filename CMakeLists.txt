@@ -579,6 +579,26 @@ if(HE_ENABLE_SHADERC)
     endif()
 endif()
 
+# No glslang (switched off, or the fetch found nothing)? The TARGET still exists — it is
+# just built from the stub, which answers every compile with "this build has no shader
+# compiler" (src/HE_Tools/ShaderCompiler/ShaderCompilerStub.cpp).
+#
+# docs/he-apps-plan.md A3b: this is what makes the "App, Advanced an" runtime flavour a
+# build option instead of a second renderer. Everything downstream — he_materialshader
+# and through it all five backends — links the same target and the same header either
+# way, so the material path stays COMPILED IN and keeps working from the precompiled
+# variants in the .hpak. Only HE_HAVE_SHADERC is absent, and that now means exactly one
+# thing: "no cross-compile at runtime", not "no materials".
+if(NOT TARGET he_shadercompiler)
+    add_library(he_shadercompiler STATIC
+        ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler/ShaderCompilerStub.cpp)
+    target_include_directories(he_shadercompiler PUBLIC
+        ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler)
+    target_compile_features(he_shadercompiler PUBLIC cxx_std_20)
+    target_compile_definitions(he_shadercompiler PUBLIC HE_SHADERC_STUB=1)
+    message(STATUS "HorizonEngine: he_shadercompiler is the STUB — shaders must come precompiled")
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.
