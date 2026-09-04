@@ -8,6 +8,7 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Renderer/UIRenderObject.h>
 #include <Types/UUID.h>
+#include <Types/Defines.h>   // HE_API — HorizonCore exports explicitly, see below
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -23,7 +24,12 @@ class ContentManager;
 // callWidgetFunction. Each instance carries its own deep copy of the widget
 // tree (mutable state: text/colors/layout/visibility) plus its HorizonCode
 // graph, whose events fire from pointer input, keyboard and the frame tick.
-class WidgetManager
+// HE_API because this class lives in HorizonCore, which (unlike HorizonScene)
+// is NOT built with WINDOWS_EXPORT_ALL_SYMBOLS: without it the editor, the game
+// host and the tests find no symbols to link against on Windows. The nested
+// types (StateSnapshot, NavDir, TextEdit, …) need no mark of their own — they
+// are enums or have only inline members.
+class HE_API WidgetManager
 {
 public:
     // Instantiate a widget asset (content-relative path). Resolves per-element

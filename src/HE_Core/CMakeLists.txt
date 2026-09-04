@@ -37,6 +37,7 @@ add_library(HorizonCore SHARED
 	src/UIWidget/UITheme.cpp
 	src/UIWidget/UIWidgetAnim.cpp
 	src/UIWidget/UIWidgetBinding.cpp
+	src/UIWidget/WidgetManager.cpp
 	src/HorizonCode/HorizonCode.cpp
 	src/HorizonCode/HorizonCodeRuntime.cpp
 	src/HorizonCode/HcClassResolve.cpp

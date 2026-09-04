@@ -29,7 +29,6 @@ add_library(HorizonScene SHARED
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/UIInputSystem.cpp
-    src/WidgetManager.cpp
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp

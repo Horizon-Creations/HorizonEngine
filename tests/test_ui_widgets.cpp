@@ -11,7 +11,7 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/HorizonWorld.h>
-#include <HorizonScene/WidgetManager.h>
+#include <UIWidget/WidgetManager.h>
 #include <HorizonScene/EngineApi.h>
 #include <Backends/Software/SoftwareRaster.h>
 #include <Hpak/ProjectExporter.h>

@@ -7,7 +7,7 @@
 #include "Components/NameComponent.h"
 #include "Components/HierarchyComponent.h"
 #include "Components/EntityIdComponent.h"
-#include "WidgetManager.h"
+#include <UIWidget/WidgetManager.h>
 
 using Entity = entt::entity;
 

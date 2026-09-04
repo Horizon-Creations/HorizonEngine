@@ -1,5 +1,4 @@
-#include <HorizonScene/WidgetManager.h>
-#include <HorizonScene/UISystem.h>   // sortKey — one painter-order rule for both UI paths
+#include <UIWidget/WidgetManager.h>
 #include <HorizonCode/HcCompiledLoader.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -12,7 +11,7 @@
 namespace
 {
 	// Sort key inside one widget: layer (major) + nesting depth (minor), the
-	// same rule (and the same formula, UISystem::sortKey) the entity UI path
+	// same rule (and the same formula, HE::uiSortKey) the entity UI path
 	// uses — children draw over their parents. Only the depth walk differs:
 	// a widget tree nests by parentId, the entity path by HierarchyComponent.
 	int elementSortKey(const HE::UIWidgetTree& tree, const HE::UIElement& e)
@@ -24,7 +23,7 @@ namespace
 			if (!p) break;
 			c = p;
 		}
-		return UISystem::sortKey(e.layer, depth);
+		return HE::uiSortKey(e.layer, depth);
 	}
 }
 

@@ -3,7 +3,7 @@
 #include "EditorWidgets.h"
 #include "EditorHelp.h"                  // scopes for the context and create menus
 #include <HorizonScene/HorizonScene.h>
-#include <HorizonScene/WidgetManager.h>   // application projects list widgets, not entities
+#include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
 #include <functional>
 #include <Diagnostics/Logger.h>
 #include <cstdio>

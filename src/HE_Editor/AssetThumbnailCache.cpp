@@ -7,7 +7,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
-#include <HorizonScene/WidgetManager.h>   // WIDGET tiles instantiate + lay out the tree
+#include <UIWidget/WidgetManager.h>   // WIDGET tiles instantiate + lay out the tree
 #include <HorizonScene/ParticleSystem.h>  // PARTICLE tiles step a real pool
 #include <HorizonScene/Components/ParticleSystemComponent.h> // struct Particle
 #include <ParticleGraph/ParticleGraph.h>

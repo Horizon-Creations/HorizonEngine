@@ -16,7 +16,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
-#include <HorizonScene/WidgetManager.h>
+#include <UIWidget/WidgetManager.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetTree.h>

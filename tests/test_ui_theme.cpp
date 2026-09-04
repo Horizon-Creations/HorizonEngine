@@ -2,7 +2,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <HorizonScene/WidgetManager.h>
+#include <UIWidget/WidgetManager.h>
 #include <Hpak/ProjectConfig.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UITheme.h>

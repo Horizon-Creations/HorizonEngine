@@ -265,6 +265,25 @@ Dazu zwei konkrete Punkte, beide am Code geprüft:
   Core-Sachen (`UIWidget/*`, `HorizonCode/*`, `Renderer/UIRenderObject.h`, `Types/UUID.h`) und
   deklariert `ContentManager` vorwärts; `HorizonWorld` hängt laut Kommentar nur an der
   Lebensdauer. Das ist ein Umzug, kein Umbau. Mitzunehmen wäre `sortKey` aus `UISystem`.
+
+  > **Erledigt (04.09.2026, A3b Teil 1).** `WidgetManager` liegt jetzt in
+  > `src/HE_Core/{include,src}/UIWidget/`, eingebunden als `<UIWidget/WidgetManager.h>`.
+  > Es war wirklich ein Umzug: die `.cpp` nannte aus `HE_Scene` nur `UISystem::sortKey`,
+  > kein `entt`, kein `HorizonWorld`. Der Sortierschlüssel heißt jetzt `HE::uiSortKey` und
+  > steht in `Renderer/UIRenderObject.h`, also neben dem Objekt, das er ordnet — beide
+  > UI-Erzeuger müssen sich einig sein, deshalb eine Definition statt einer geteilten.
+  >
+  > **Die eine Zeile, die der Umzug erzwingt:** `HorizonScene` wird mit
+  > `WINDOWS_EXPORT_ALL_SYMBOLS ON` gebaut, `HorizonCore` nicht. Über diese Grenze
+  > geschoben braucht die Klasse `HE_API`, sonst findet auf Windows weder der Editor noch
+  > der Spiel-Host noch ein Test ein Symbol. Die verschachtelten Typen brauchen keine
+  > eigene Marke: `NavDir` und `TextEdit` sind Enums, `StateSnapshot` und die übrigen haben
+  > nur eingebettete Member — MSVC exportiert verschachtelte Typen nämlich NICHT mit der
+  > umschließenden Klasse mit, das gilt nur für deren Methoden und statischen Daten.
+  >
+  > Was das nicht ist: `HorizonScene` hängt weiterhin an `HorizonWorld` und damit an Jolt
+  > und Recast. Der Gewinn ist, dass ein App-Runtime `WidgetManager` künftig OHNE
+  > `HorizonScene` bekommen kann — die Ausprägungen aus der Tabelle unten sind Teil 2.
 - **Der Shader-Übersetzer muss aus dem App-Runtime raus, aber ohne Schicht 1 zu killen.**
   `MaterialShaderVariant` sagt es selbst: „baked at export time **so the shipped game never
   cross-compiles**", und hält Backend-Quelltext (MSL, HLSL, Desktop-GLSL) oder SPIR-V. Der

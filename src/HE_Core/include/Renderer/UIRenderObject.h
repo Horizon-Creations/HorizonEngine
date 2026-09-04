@@ -98,3 +98,16 @@ struct UIRenderObject {
     // is that two widgets sharing one material are in different states.
     glm::vec4   uiState{ 0.0f, 0.0f, 0.0f, 0.0f };
 };
+
+namespace HE {
+
+// Painter sort key inside one canvas (and inside one standalone widget, see
+// WidgetManager): layer is the major key, UI nesting depth the minor one, so a
+// child draws over its parent at equal layer. Both UI producers — the entity
+// path (UISystem::extract) and the widget path (WidgetManager::extract) — sort
+// by this, and they have to agree, so the formula lives next to the object it
+// orders rather than in either producer. 256 = the exclusive depth cap both
+// walks clamp to.
+inline int uiSortKey(int layer, int depth) { return layer * 256 + depth; }
+
+} // namespace HE
