@@ -570,6 +570,18 @@ namespace
 	{ "app.addMenuSeparator",
 	  "Adds a dividing line to a menu. It carries no id and cannot be chosen: it "
 	  "is there to group the entries above and below it." },
+	{ "app.notify",
+	  "Puts a banner in the system's notification centre — what an application "
+	  "says when it has finished something nobody is watching any more. It is "
+	  "not a dialog: nothing waits for it and nothing comes back. True means the "
+	  "system took it, not that somebody read it; whether it appears is the "
+	  "system's decision (Do Not Disturb, this app's own switch). On macOS it "
+	  "needs the packaged app — a game runtime started straight from a build "
+	  "folder has no identity to post as." },
+	{ "app.notifyAvailable",
+	  "Can this program show notifications at all? False in the editor preview, "
+	  "and on a Linux without notify-send. Ask once instead of finding out per "
+	  "notification." },
 	{ "app.clearMenuBar",
 	  "Removes the whole menu bar. A menu usually changes as a set, so the way "
 	  "to change one is to clear it and build the new one." },

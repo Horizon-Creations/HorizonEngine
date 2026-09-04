@@ -7,6 +7,7 @@
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
 #ifdef __APPLE__
 #include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
+#include "AppNotify.h"                 // …and the notification centre
 #endif
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
@@ -129,6 +130,54 @@ void SDLCALL trayEntryClicked(void* userdata, SDL_TrayEntry*)
         g_trayClicks.push_back(item->id);
 }
 
+// ── Notifications (plan C) ───────────────────────────────────────────────────
+// One function, three answers, and only one of them written where it can be
+// seen working. macOS goes through UserNotifications (AppNotify.mm). Linux hands
+// the text to `notify-send`, the tool every desktop that has a notification
+// daemon ships with — the D-Bus call underneath it would be the same message
+// with a protocol implementation around it, and this one is readable.
+//
+// Windows has neither and gets a warning instead of a wrong guess: its toasts
+// need a WinRT activation identity and a Start-menu shortcut to post from, which
+// is a piece of work rather than a fallback, and nothing here could be tested.
+bool notifyAvailable()
+{
+#if defined(__APPLE__)
+    return HE::AppNotify::available();
+#elif defined(__linux__)
+    return HE::Proc::which("notify-send").has_value();
+#else
+    return false;
+#endif
+}
+
+bool notifyShow(const std::string& title, const std::string& body)
+{
+#if defined(__APPLE__)
+    return HE::AppNotify::show(title, body);
+#elif defined(__linux__)
+    const auto tool = HE::Proc::which("notify-send");
+    if (!tool)
+    {
+        HE_LOG_WARN(Core, "%s", "notify: notify-send is not installed — nothing was shown");
+        return false;
+    }
+    // Title first, then the text, which is notify-send's own argument order.
+    // Two arguments and never a shell line: a title with a quote in it would
+    // otherwise be somebody else's command.
+    HE::Proc::Options opt;
+    opt.exe = *tool;
+    opt.args.push_back(title.empty() ? body : title);
+    if (!title.empty() && !body.empty()) opt.args.push_back(body);
+    opt.timeoutMs = 5000;
+    return HE::Proc::run(opt).ok();
+#else
+    (void)title; (void)body;
+    HE_LOG_WARN(Core, "%s", "notify: not implemented on this platform yet");
+    return false;
+#endif
+}
+
 // What a login entry has to point at. SDL_GetBasePath gives the directory the
 // executable lives in — inside a .app that is Contents/Resources, and launching
 // THAT does nothing, so the bundle itself is what macOS is told to open.
@@ -244,6 +293,10 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.addMenuItem      = g_host.addMenuItem;
 	c.addMenuSeparator = g_host.addMenuSeparator;
 	c.clearMenuBar     = g_host.clearMenuBar;
+	// Not through g_host: notifications need nothing from the application object,
+	// so they are the platform function itself and there is no state to capture.
+	c.notify          = [](const std::string& t, const std::string& b) { return notifyShow(t, b); };
+	c.notifyAvailable = [] { return notifyAvailable(); };
 	return c;
 }
 

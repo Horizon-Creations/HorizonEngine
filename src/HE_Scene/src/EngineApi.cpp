@@ -1170,6 +1170,27 @@ void clearMenuBar(Ctx& c)
     c.clearMenuBar();
 }
 
+bool notify(Ctx& c, const std::string& title, const std::string& body)
+{
+    if (!c.notify)
+    {
+        HE_LOG_WARN(Script, "%s",
+                    "app.notify: no notification centre bound by the host — ignored");
+        return false;
+    }
+    // A banner with nothing on it is a banner nobody can act on, and every
+    // platform draws the title differently when it is missing.
+    if (title.empty() && body.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.notify: neither title nor text — ignored");
+        return false;
+    }
+    return c.notify(title, body);
+}
+
+bool notifyAvailable(Ctx& c)
+{ return c.notifyAvailable ? c.notifyAvailable() : false; }
+
 void setAutostart(Ctx& c, bool enabled)
 {
     // The permission first: this asks the system to run a program at every
@@ -3798,6 +3819,15 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ app::addMenuSeparator(c, aS(a, 0)); return VV{}; } });
         t.push_back({ "app.clearMenuBar", "App", true, {}, {}, "HE::api::app::clearMenuBar",
             [](Ctx& c, const VV&){ app::clearMenuBar(c); return VV{}; } });
+        // A notification is exec (it does something out there) and answers
+        // whether the system took it, not whether anybody read it.
+        t.push_back({ "app.notify", "App", true,
+            {{"title", P::String}, {"text", P::String}}, {{"shown", P::Bool}},
+            "HE::api::app::notify",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(app::notify(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "app.notifyAvailable", "App", false, {}, {{"available", P::Bool}},
+            "HE::api::app::notifyAvailable",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::notifyAvailable(c)) }; } });
         t.push_back({ "app.setAutostart", "App", true, {{"enabled", P::Bool}}, {},
             "HE::api::app::setAutostart",
             [](Ctx& c, const VV& a){ app::setAutostart(c, aB(a, 0)); return VV{}; } });
@@ -4491,6 +4521,8 @@ const std::vector<ApiFn>& registry()
             { "app.addTrayItem", "Add Tray Item" },  { "app.clearTrayMenu", "Clear Tray Menu" },
             { "app.addMenu", "Add Menu" },           { "app.addMenuItem", "Add Menu Item" },
             { "app.addMenuSeparator", "Add Menu Separator" },
+            { "app.notify", "Notify" },
+            { "app.notifyAvailable", "Notifications Available" },
             { "app.clearMenuBar", "Clear Menu Bar" },
             { "app.setAutostart", "Set Start at Login" },
             { "app.autostart", "Starts at Login" },

@@ -139,6 +139,12 @@ struct Ctx
                        const std::string& label)>                              addMenuItem;
     std::function<void(const std::string& menuId)>                             addMenuSeparator;
     std::function<void()>                                                      clearMenuBar;
+    // A notification in the system's own notification centre. Bound in the host
+    // because every platform answers it somewhere else — and unbound in the
+    // editor, for the reason the tray is: a previewed graph must not put a
+    // banner on the screen of somebody who is working.
+    std::function<bool(const std::string& title, const std::string& body)>     notify;
+    std::function<bool()>                                                      notifyAvailable;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -746,6 +752,25 @@ namespace app {
                      const std::string& label);
     void addMenuSeparator(Ctx&, const std::string& menuId);
     void clearMenuBar(Ctx&);
+
+    // ── Notifications (plan C, Welle 3) ─────────────────────────────────────
+    // A banner in the system's notification centre — what an application says
+    // when it has finished something the person is no longer watching. It is
+    // NOT a dialog: nothing waits for it, nothing comes back from it, and the
+    // system decides whether it is shown at all (Do Not Disturb, the user's
+    // settings for this app, a full screen).
+    //
+    // Ungated on purpose, unlike the file and process rows. A notification
+    // cannot read anything, reach anywhere or start anything; the worst it can
+    // do is be annoying, and that is what the system's own per-app switch is
+    // for.
+    //
+    // True means "handed to the system", never "somebody read it".
+    bool notify(Ctx&, const std::string& title, const std::string& body);
+    // Can this build put one there at all? False in the editor (nothing is
+    // bound), and on a Linux without notify-send. Worth asking once rather than
+    // discovering it per notification.
+    bool notifyAvailable(Ctx&);
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────────────

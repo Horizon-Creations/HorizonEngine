@@ -1876,6 +1876,38 @@ TEST_CASE("process: shut by default, and asking is not running")
     CHECK_FALSE(missing.ok);
 }
 
+TEST_CASE("notify: nothing bound means nothing shown, and it says so")
+{
+    // The banner itself belongs to the desktop, so what is checked here is the
+    // half that does not: an unbound host answers false instead of pretending,
+    // and a notification with nothing in it never reaches the host at all.
+    Ctx c;   // no host callbacks — this is the editor's situation exactly
+    CHECK_FALSE(HE::api::app::notify(c, "Done", "The export finished"));
+    CHECK_FALSE(HE::api::app::notifyAvailable(c));
+
+    // Bound, and now it goes through — with both halves of the text.
+    std::string sawTitle, sawBody;
+    int calls = 0;
+    c.notify = [&](const std::string& t, const std::string& b)
+    { sawTitle = t; sawBody = b; ++calls; return true; };
+    c.notifyAvailable = [] { return true; };
+
+    CHECK(HE::api::app::notify(c, "Done", "The export finished"));
+    CHECK(sawTitle == "Done");
+    CHECK(sawBody == "The export finished");
+    CHECK(HE::api::app::notifyAvailable(c));
+
+    // Empty on both sides is refused HERE rather than by each platform: an empty
+    // banner is drawn differently everywhere and means nothing anywhere.
+    CHECK_FALSE(HE::api::app::notify(c, "", ""));
+    CHECK(calls == 1);   // …and the host was never asked
+
+    // One of the two is enough: a line with no headline is still something to
+    // say, and the platform half decides how to draw it.
+    CHECK(HE::api::app::notify(c, "", "Just a line"));
+    CHECK(calls == 2);
+}
+
 TEST_CASE("http: shut by default, and a ticket is the only way in")
 {
     // Nothing here touches the network — a test that needs a server is a test

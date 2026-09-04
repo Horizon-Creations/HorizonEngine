@@ -1255,7 +1255,7 @@ Schicht 0 ebenfalls tragen muss.
 **Welle 3, konkurrenzfähig**
 - A6 Menüleiste, A7 Icon und Dateitypen
 - B1b mehrzeiliges Textfeld, B5 Tabs/Splitter, B6 RichText, B7 Drag & Drop, B8 Animationen
-- C: `http`, `notify`
+- C: `http`, `notify` **(beide fertig 04.09.2026, Abschnitte weiter unten)**
 - D3 alle App-Vorlagen
 - D5 Schicht 1: Parameter pro Instanz, UI-Nodes, MaterialFunction-Effektbibliothek, Backdrop
 - A3b WidgetManager-Umzug, UI-Materialien aus vorkompilierten Varianten (beide Hälften!),
@@ -2534,6 +2534,42 @@ ist ein Test, der im Zug fehlschlägt. Geprüft ist alles ohne Netz Erreichbare,
 was ein nie vergebenes Ticket antwortet, dass `HTTP Available` dasselbe sagt wie das Backend, und
 dass `shutdown()` ohne Worker nicht hängt. **Und wie beim Menü:** zugestellt wird in
 `GameApplication`, in der Editor-Vorschau kommt also nichts an.
+
+---
+
+### C: `notify`, und was drei Plattformen daraus machen (04.09.2026)
+
+`Notify` mit Titel und Text, dazu `Notifications Available`. Damit ist Block C bis auf `db` und
+`print` beisammen, die beide bewusst hinten stehen.
+
+**Ohne Berechtigung, anders als Dateien und Prozesse.** Eine Benachrichtigung kann nichts lesen,
+nichts starten und nirgends hin; das Schlimmste, was sie kann, ist lästig sein, und dafür hat
+jedes System seinen eigenen Schalter pro Anwendung. Ein Riegel hier hätte nur den Weg verstellt,
+ohne etwas zu schützen.
+
+**„Übergeben", nicht „gesehen".** Der Rückgabewert sagt, dass das System sie genommen hat. Ob sie
+erscheint, entscheidet es später und ohne uns (Nicht stören, der Schalter für diese App, ein
+Vollbild). Alles andere wäre eine Behauptung, die niemand prüfen kann.
+
+**Drei Plattformen, drei Ehrlichkeitsgrade.** macOS geht über UserNotifications
+(`HE_Game/src/AppNotify.mm`, ObjC++, dieselbe Platzierungsregel wie `AppMacMenu`) — und **braucht
+einen Bundle-Identifier**: das Framework fragt das laufende Programm, wer es ist, ein nacktes
+Executable hat darauf keine Antwort, und die Autorisierung anzufordern **wirft** dann, statt
+höflich zu scheitern. Deshalb fragt `available()` zuerst, und ein aus dem Build-Ordner
+gestarteter HorizonGame sagt es in einer Logzeile, statt still nichts zu tun. Linux reicht den
+Text an `notify-send` weiter, als zwei Argumente und nie als Kommandozeile, sonst ist ein Titel
+mit einem Anführungszeichen jemandes anderes Befehl. **Windows bekommt eine Warnung statt einer
+Vermutung:** dessen Toasts brauchen eine WinRT-Aktivierungsidentität und eine Verknüpfung im
+Startmenü, aus der gepostet wird. Das ist ein eigenes Stück Arbeit, kein Notnagel, und nichts
+davon wäre hier prüfbar gewesen.
+
+**Die Autorisierung wird angefordert und nicht abgewartet.** Die Antwort gehört dem Benutzer und
+kommt, wann sie kommt; ein Frame-Loop, der auf einen Berechtigungsdialog wartet, ist ein
+eingefrorenes Fenster. Vor der Antwort gepostete Benachrichtigungen hält das Framework selbst.
+
+**Geprüft ist die Hälfte ohne Bildschirm:** ein ungebundener Host antwortet false statt so zu
+tun, leer auf beiden Seiten erreicht den Host gar nicht, und eine Zeile ohne Überschrift ist
+weiterhin etwas zu sagen.
 
 ---
 
