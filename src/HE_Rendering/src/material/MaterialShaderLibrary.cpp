@@ -1857,6 +1857,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // only a UserInterface-domain graph declares the block at all, so a
               // mesh draw never reaches an unbound buffer 3.
               { Stage::Fragment, 0, 8, 3 },
+              // heBackdrop (D5 Schicht 1) → fragment texture/sampler 5: the UI
+              // pass's snapshot of what it had already drawn. Only a Backdrop
+              // node in the UI domain declares it.
+              { Stage::Fragment, 0, 9, 5 },
               // Node-graph project textures heTexP0..3 (GLSL binding 4..7) → MSL
               // texture/sampler 1..4. Pinned unconditionally (harmless when unused).
               { Stage::Fragment, 0, 4, 1 },

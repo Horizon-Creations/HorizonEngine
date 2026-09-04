@@ -804,8 +804,24 @@ private:
 	// paired with the screen-space uiVertex and the LDR/blend target of the UI
 	// pass — so they need their own cache (key = material shader hash).
 	std::unordered_map<uint64_t, void*> m_uiMaterialPipelines;
-	void* GetOrBuildUIMaterialPipeline(const HE::UUID& materialId);
-	void  EncodeUIPass(void* renderEncoder, int width, int height);
+	// usesBackdrop (optional out): this material samples heBackdrop, so the UI
+	// pass owes it a fresh snapshot of what it has drawn so far.
+	void* GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bool* usesBackdrop = nullptr);
+	// Returns the encoder to carry on with: a Backdrop material forces the pass
+	// to be cut in two (end → blit the target into m_uiBackdrop → reopen with
+	// LoadActionLoad), and everything after the UI — the ImGui overlay — must
+	// then use the SECOND encoder. cmdBuf/passDesc null = no snapshot possible
+	// (the material-preview path), the backdrop stays the dummy texture.
+	void* EncodeUIPass(void* renderEncoder, int width, int height,
+	                   void* cmdBuf = nullptr, void* passDesc = nullptr);
+	// The snapshot itself: the UI target as it was BEFORE the frosted element,
+	// mip-mapped, so a wide blur is one level of the chain instead of a hundred
+	// taps. Same pixel format and size as the target it was copied from.
+	void* m_uiBackdrop = nullptr; // id<MTLTexture>
+	int   m_uiBackdropW = 0, m_uiBackdropH = 0;
+	// Copies `srcTexture` into m_uiBackdrop (reallocating on a size/format change)
+	// and regenerates its mips. Returns false when there is nothing to copy from.
+	bool  SnapshotUIBackdrop(void* cmdBuf, void* srcTexture);
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
 	// Mirrors the GL backend: highlights above a soft-knee threshold are blurred

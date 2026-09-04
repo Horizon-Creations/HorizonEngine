@@ -1581,3 +1581,74 @@ TEST_CASE("A UI-domain material cross-compiles for Metal and GL")
 	CHECK(lib.uiVertex(B::GLSL410).ok);
 }
 #endif
+
+// ═══ Backdrop: what is behind the element (D5 Schicht 1) ══════════════════════
+TEST_CASE("Backdrop samples the snapshot in the UI domain and nothing outside it")
+{
+	auto build = [](HE::MatDomain domain)
+	{
+		MaterialGraph g;
+		const int outId = g.addNode(MatNodeType::Output);
+		g.findNode(outId)->p[3] = static_cast<float>(domain);
+		const int bd = g.addNode(MatNodeType::Backdrop);
+		g.findNode(bd)->p[0] = 12.0f;
+		REQUIRE(g.connect(bd, 0, outId, HE::kMatOutputBaseColorPin));
+		return HE::generateFragment(g).glsl;
+	};
+
+	const std::string ui = build(HE::MatDomain::UserInterface);
+	CHECK(ui.find("uniform sampler2D heBackdrop") != std::string::npos);
+	CHECK(ui.find("heBackdropBlur(") != std::string::npos);
+	// It reads its place from the ELEMENT, never from gl_FragCoord: that one's
+	// origin differs between GLSL and MSL, and a mirrored backdrop is the bug
+	// nobody sees in a screenshot of a symmetric window.
+	CHECK(ui.find("heUI.rect.zw + vUV") != std::string::npos);
+	// The block grew a fourth row for it — and the non-UI CONSTANT has to grow
+	// with it, or every Surface graph with an Element node stops compiling.
+	CHECK(ui.find("vec4 screen;") != std::string::npos);
+
+	const std::string surf = build(HE::MatDomain::Surface);
+	CHECK(surf.find("heBackdrop") == std::string::npos);
+
+	// The constant stand-in outside the UI domain has to carry the new row too,
+	// or every Surface graph with an Element node stops compiling. Backdrop
+	// alone does not ask for the block there (it answers black), so this needs
+	// a node that does.
+	MaterialGraph s;
+	const int sOut = s.addNode(MatNodeType::Output);
+	const int size = s.addNode(MatNodeType::ElementSize);
+	REQUIRE(s.connect(size, 0, sOut, HE::kMatOutputBaseColorPin));
+	CHECK(HE::generateFragment(s).glsl.find(
+		"struct HeUIBlock { vec4 rect; vec4 radius; vec4 state; vec4 screen; };")
+	      != std::string::npos);
+}
+
+#if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("A Backdrop material cross-compiles for Metal and GL")
+{
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	g.findNode(outId)->p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+	const int bd  = g.addNode(MatNodeType::Backdrop);
+	const int st  = g.addNode(MatNodeType::ElementState);
+	const int sdf = g.addNode(MatNodeType::RoundedRectSDF);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	// Frosted glass that brightens on hover: the two halves of Schicht 1 wired
+	// into one graph, which is the combination the shipped Glass function is.
+	REQUIRE(g.connect(bd,  0, mul,   0));
+	REQUIRE(g.connect(st,  0, mul,   1));
+	REQUIRE(g.connect(mul, 0, outId, HE::kMatOutputBaseColorPin));
+	REQUIRE(g.connect(sdf, 1, outId, HE::kMatOutputOpacityPin));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.glsl.empty());
+	HE::MaterialShaderLibrary lib;
+	using B = HE::MaterialShaderLibrary::Backend;
+	const auto& mtl = lib.fragment(0xBD01u, gen.glsl, B::Metal);
+	INFO(mtl.log);
+	CHECK(mtl.ok);
+	const auto& gl = lib.fragment(0xBD01u, gen.glsl, B::GLSL410);
+	INFO(gl.log);
+	CHECK(gl.ok);
+}
+#endif

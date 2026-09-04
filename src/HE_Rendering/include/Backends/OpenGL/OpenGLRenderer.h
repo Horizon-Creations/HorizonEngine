@@ -391,7 +391,16 @@ private:
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
-	unsigned int GetOrBuildUIMaterialProgram(const HE::UUID& materialId);
+	// The backdrop snapshot (D5 Schicht 1): the UI target copied out of the
+	// framebuffer immediately before a frosted element, with its mip chain — so
+	// a wide blur reads one level instead of a hundred taps. Upside down as a
+	// texture (GL's origin), which is what heUI.screen.z tells the shader.
+	unsigned int m_uiBackdropTex = 0;
+	int          m_uiBackdropW = 0, m_uiBackdropH = 0;
+	// usesBackdrop (optional out): this material samples heBackdrop, so the UI
+	// pass owes it a fresh copy of what it has drawn so far.
+	unsigned int GetOrBuildUIMaterialProgram(const HE::UUID& materialId,
+	                                         bool* usesBackdrop = nullptr);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;

@@ -2597,3 +2597,43 @@ weiterhin etwas zu sagen.
 
 Web-Export, Mobile, ein Browser-Widget, ein Rich-Text-Editor auf Word-Niveau, ein
 Diagramm-Framework, ein eigenes Fenstersystem statt SDL. Alles davon ist ein eigenes Projekt.
+
+---
+
+### Backdrop: was hinter dem Element liegt (04.09.2026)
+
+Der zweite Teil von D5 Schicht 1, und der Punkt, an dem der Plan selbst gewarnt hat: „ein
+Backdrop-Node ist kein Node, sondern ein Arbeitspaket". Das ist er auch geblieben, ein Knoten
+im Graphen und zwei Renderer, die ihren eigenen Pass aufschneiden.
+
+**Was er zeigt, ist das, was der UI-Pass vorher gezeichnet hat.** Nicht die Szene, sondern
+alles bis zu diesem Quad: ein Dialog über einer Seitenleiste weichzeichnet die SEITENLEISTE.
+Dafür macht der Pass unmittelbar vor dem ersten Milchglas-Quad einen Abzug seines eigenen
+Ziels, und jedes danach gezeichnete Quad macht diesen Abzug wieder ungültig. Ein Fenster ohne
+solches Material zahlt nichts, eines mit drei Dialogen zahlt drei Kopien.
+
+**Metal muss den Pass dafür zerschneiden** (Encoder beenden, Blit, neuer Encoder mit
+`LoadActionLoad`), und `EncodeUIPass` gibt deshalb den Encoder zurück, mit dem der Aufrufer
+weitermachen muss, sonst zeichnet das ImGui-Overlay danach in einen beendeten Encoder. Dazu
+`layer.framebufferOnly = NO`: ein Drawable, das nur Framebuffer sein will, ist keine
+Blit-Quelle. GL kommt mit `glCopyTexSubImage2D` aus, mitten im Pass, ohne Schnitt.
+
+**Die Unschärfe ist eine Mip-Stufe plus neun Taps.** `log2(radius)` wählt die Stufe, der Ring
+darüber glättet sie; damit kostet „weichzeichnen mit 60 px" genauso viel wie mit 8. Der Abzug
+wird deshalb mipmapped angelegt, und der Sampler muss `LINEAR_MIPMAP_LINEAR` sein, sonst
+antwortet jeder Radius mit Stufe 0, also mit neun Punkten Rauschen statt einer Unschärfe.
+
+**Die Stelle im Bild kommt vom ELEMENT, nie von `gl_FragCoord`:** dessen Ursprung liegt in
+GLSL unten und in MSL oben, ein gemeinsamer Shader-Text würde also auf einem der beiden
+Backends gespiegelt lesen. Aus `heUI.rect` plus `vUV` ist die Stelle eindeutig, und die eine
+echte Differenz — GLs Kopie aus dem Framebuffer steht als Textur auf dem Kopf — trägt
+`heUI.screen.z` als Zahl statt als zweiter Shader.
+
+**Außerhalb der UI-Domäne ist Backdrop schwarz.** Unter einem Mesh liegt kein UI-Pass, und ein
+Sampler, den niemand bindet, ist eine Pipeline, die bei der Validierung stirbt. Deshalb
+entscheidet die Domäne über den emittierten TEXT, als einziger Knoten bisher.
+
+**Nicht abgedeckt:** das ImGui-Overlay des Editors (es zeichnet nach dem UI-Pass) und die
+Material-Vorschau im Editor (sie hat kein Kommandopuffer-Paar zum Schneiden, ihr Backdrop
+bleibt die Dummy-Textur). Auf echter Hardware gesehen ist noch nichts davon, geprüft sind
+Codegen und Cross-Compile für Metal und GL.

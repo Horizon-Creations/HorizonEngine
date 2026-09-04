@@ -149,6 +149,11 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::ElementState, "Element State", "UI",
           {}, { { "Hovered", F::Float, 0 }, { "Pressed", F::Float, 0 },
                 { "Focused", F::Float, 0 }, { "Disabled", F::Float, 0 } }, 0 },
+        // Radius in PIXELS, the same unit the rest of this category speaks. It is
+        // a blur radius and not a mip level: what a designer means by "blur by 12"
+        // must not change when the window is bigger.
+        { MatNodeType::Backdrop, "Backdrop", "UI",
+          { { "Radius", F::Float, 8.0f } }, { { "Color", F::Vec3, 0 } }, 0 },
 
         // ── v5: baked constants, parameter types, logic ──
         { MatNodeType::ConstBool, "Bool", "Constant",
@@ -469,8 +474,13 @@ struct EmitCtx
     std::vector<std::string> layerNames;
     // UI element inputs (D5 Schicht 1): the HeUI block, and the rounded-box SDF
     // helper the two distance nodes share.
-    bool usesUI    = false;
-    bool usesUISdf = false;
+    bool usesUI       = false;
+    bool usesUISdf    = false;
+    bool usesBackdrop = false;
+    // The domain, known BEFORE the first node is emitted (the Output node carries
+    // it). Backdrop is the one node whose emitted TEXT differs by domain: a
+    // sampler that only the UI pass ever binds must not appear in a mesh shader.
+    bool uiDomain     = false;
     int  varCounter  = 0;
     std::vector<MatParamSlot> params;                    // exposed parameters, slot order
     std::vector<std::string>  textures;                  // project textures, slot order (max 4)
@@ -873,6 +883,22 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             decl = "vec4 " + v + " = heUI.state;";
             pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
             break;
+        case MatNodeType::Backdrop:
+        {
+            const std::string rad = inputExpr(c, sc, n, 0, F::Float);
+            if (c.uiDomain)
+            {
+                c.usesUI = true; c.usesBackdrop = true;
+                decl = "vec3 " + v + " = heBackdropBlur(" + rad + ");";
+            }
+            else
+                // A mesh has no UI pass under it. Black is the answer that says so;
+                // the alternative — declaring a sampler nothing ever binds — is a
+                // pipeline that fails validation on a graph the author never
+                // intended for a widget.
+                decl = "vec3 " + v + " = vec3(0.0) * " + rad + "; // Backdrop: UI domain only";
+            break;
+        }
 
         // ── v5: baked constants, parameter types, logic ──
         case MatNodeType::ConstBool:
@@ -1059,6 +1085,11 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     c.switchOv = switchOverrides;
     Scope root;
     root.g = &graph;
+    // Read the domain HERE and not with its siblings below: emitting a node is
+    // what needs it (Backdrop), and that happens in the inputExpr calls that
+    // follow. Same expression as `uiDomain` further down, which stays the one
+    // the tail reads.
+    c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
 
     const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
     const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
@@ -1138,9 +1169,11 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
               "    vec4 rect;   // xy = element size in px, zw = its top-left on screen\n"
               "    vec4 radius; // corner radii in px, CSS order (TL, TR, BR, BL)\n"
               "    vec4 state;  // hovered, pressed, focused, disabled (0..1)\n"
+              "    vec4 screen; // xy = viewport in px, z = 1 when the backdrop is flipped\n"
               "} heUI;\n"
-            : "struct HeUIBlock { vec4 rect; vec4 radius; vec4 state; };\n"
-              "const HeUIBlock heUI = HeUIBlock(vec4(1.0, 1.0, 0.0, 0.0), vec4(0.0), vec4(0.0));\n";
+            : "struct HeUIBlock { vec4 rect; vec4 radius; vec4 state; vec4 screen; };\n"
+              "const HeUIBlock heUI = HeUIBlock(vec4(1.0, 1.0, 0.0, 0.0), vec4(0.0), vec4(0.0),"
+              " vec4(1.0, 1.0, 0.0, 0.0));\n";
     // Rounded box, per-quadrant radius — the same shape (and the same CSS corner
     // order) the built-in UI shaders draw, so an SDF a graph computes and the
     // edge the engine antialiases agree on where the element ends.
@@ -1152,6 +1185,42 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    rad = clamp(rad, 0.0, min(b.x, b.y));\n"
             "    vec2 q = abs(p) - b + rad;\n"
             "    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - rad;\n"
+            "}\n";
+    // ── What is behind the element (D5 Schicht 1, Backdrop) ──────────────────
+    // Binding 9 → the snapshot the UI pass takes of its own target immediately
+    // before this quad, WITH its mip chain. The blur is one level of that chain
+    // plus a nine-tap ring on top: a wide blur then costs the same nine samples
+    // as a narrow one, which is the only way "blur by 60 px" is affordable at all.
+    //
+    // The place to read is derived from the ELEMENT (rect + vUV), never from
+    // gl_FragCoord: that one's origin is bottom-left in GLSL and top-left in MSL,
+    // so a shared shader text would sample the screen mirrored on one of the two
+    // backends. GL flips instead through heUI.screen.z, because ITS snapshot is a
+    // framebuffer copy and thus upside down as a texture.
+    if (c.usesBackdrop)
+        src +=
+            "layout(set = 0, binding = 9) uniform sampler2D heBackdrop;\n"
+            "vec3 heBd(vec2 uv, float lod) {\n"
+            "    return textureLod(heBackdrop, clamp(uv, vec2(0.0), vec2(1.0)), lod).rgb;\n"
+            "}\n"
+            "vec3 heBackdropBlur(float radius) {\n"
+            "    vec2 vp = max(heUI.screen.xy, vec2(1.0));\n"
+            "    vec2 uv = (heUI.rect.zw + vUV * heUI.rect.xy) / vp;\n"
+            "    uv.y = mix(uv.y, 1.0 - uv.y, heUI.screen.z);\n"
+            "    float r   = max(radius, 0.0);\n"
+            "    float lod = log2(max(r, 1.0));\n"
+            "    vec2  s   = (r * 0.6) / vp;\n"
+            "    vec2  d   = s * 0.70710678;\n"
+            "    vec3  c   = heBd(uv, lod) * 0.28;\n"
+            "    c += heBd(uv + vec2( s.x, 0.0), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2(-s.x, 0.0), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2(0.0,  s.y), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2(0.0, -s.y), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2( d.x,  d.y), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2(-d.x, -d.y), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2( d.x, -d.y), lod) * 0.09;\n"
+            "    c += heBd(uv + vec2(-d.x,  d.y), lod) * 0.09;\n"
+            "    return c;\n"
             "}\n";
     if (c.usesNoise)
         src +=

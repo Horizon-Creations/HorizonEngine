@@ -5812,6 +5812,8 @@ void MetalRenderer::Shutdown()
 	m_uiFontAtlases.clear();
 	for (auto& [k, pso] : m_uiMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_uiMaterialPipelines.clear();
+	if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
+	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
@@ -9458,7 +9460,12 @@ void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
 
 	layer.device             = (__bridge id<MTLDevice>)m_device;
 	layer.pixelFormat        = kSwapchainFormat;
-	layer.framebufferOnly    = YES;
+	// NO, not YES: a Backdrop material (D5 Schicht 1) blits the drawable into the
+	// backdrop snapshot mid-UI-pass, and a framebuffer-only drawable refuses to be
+	// a blit source. The cost is that the driver may not pick its most compressed
+	// layout for the swapchain; the alternative is that frosted glass cannot exist
+	// in a direct-to-window game window at all.
+	layer.framebufferOnly    = NO;
 	layer.opaque             = YES; // game window fully covers the framebuffer —
 	                                // ignore the alpha channel so transparent UI
 	                                // (glyph gaps, rounded corners) shows the scene
@@ -10995,11 +11002,17 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 // Build (or fetch) the pipeline that draws a UI quad with a node-graph material:
 // the material's shared fragment MSL paired with the screen-space uiVertex, alpha-
 // blended into the LDR UI target. Cache key = the material's shader hash.
-void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
+void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bool* usesBackdrop)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (usesBackdrop) *usesBackdrop = false;
 	if (!ResolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return nullptr; // no custom shader → solid-color quad
+	// Read off the SOURCE, not off a field on the asset: a packaged build skips
+	// the graph regeneration entirely (precompiled blobs) and a material instance
+	// takes a second road through syncMaterialInstance — the generated shader is
+	// the one thing all three configurations share.
+	if (usesBackdrop) *usesBackdrop = fragGlsl.find("heBackdrop") != std::string::npos;
 	if (auto it = m_uiMaterialPipelines.find(key); it != m_uiMaterialPipelines.end())
 		return it->second;
 
@@ -11066,9 +11079,51 @@ void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
 	return stored;
 }
 
-void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
+// Copy the UI target into the backdrop snapshot and rebuild its mip chain. Runs
+// between two halves of the UI pass, so no encoder may be open when it is called.
+bool MetalRenderer::SnapshotUIBackdrop(void* cmdBufPtr, void* srcTexturePtr)
 {
-	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	id<MTLTexture>       src    = (__bridge id<MTLTexture>)srcTexturePtr;
+	if (!cmdBuf || !src) return false;
+	const int w = (int)src.width, h = (int)src.height;
+	if (w <= 0 || h <= 0) return false;
+
+	id<MTLTexture> dst = (__bridge id<MTLTexture>)m_uiBackdrop;
+	// Format is part of the identity, not just the size: a blit demands the two
+	// textures agree on it, and the source is the drawable in one path and the
+	// viewport texture in the other.
+	if (!dst || m_uiBackdropW != w || m_uiBackdropH != h || dst.pixelFormat != src.pixelFormat)
+	{
+		if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:src.pixelFormat width:w height:h mipmapped:YES];
+		// RenderTarget alongside ShaderRead: generating mips renders into the
+		// levels, and a ShaderRead-only texture is rejected for it.
+		d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+		d.storageMode = MTLStorageModePrivate;
+		dst = [device newTextureWithDescriptor:d];
+		if (!dst) return false;
+		m_uiBackdrop = (void*)CFBridgingRetain(dst);
+		m_uiBackdropW = w; m_uiBackdropH = h;
+	}
+
+	id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+	[blit copyFromTexture:src sourceSlice:0 sourceLevel:0
+	          sourceOrigin:MTLOriginMake(0, 0, 0)
+	            sourceSize:MTLSizeMake(w, h, 1)
+	             toTexture:dst destinationSlice:0 destinationLevel:0
+	     destinationOrigin:MTLOriginMake(0, 0, 0)];
+	[blit generateMipmapsForTexture:dst];
+	[blit endEncoding];
+	return true;
+}
+
+void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
+                                  void* cmdBufPtr, void* passDescPtr)
+{
+	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return renderEncoderPtr;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	const simd::float2 vp = { (float)std::max(1, width), (float)std::max(1, height) };
 
@@ -11124,13 +11179,43 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setScissorRect:s];
 	};
 
+	// ── The backdrop snapshot (D5 Schicht 1) ────────────────────────────────
+	// "Stale" from the start: the pass has drawn nothing yet, so the first
+	// frosted element still needs a picture — of the scene, which is exactly
+	// what is under it. Every quad drawn afterwards makes it stale again, so a
+	// dialog over a panel blurs the PANEL, not the scene the panel covers.
+	bool backdropStale = true;
+	auto cutForBackdrop = [&]()
+	{
+		if (!cmdBufPtr || !passDescPtr) return; // preview path: no snapshot to take
+		MTLRenderPassDescriptor* pd = (__bridge MTLRenderPassDescriptor*)passDescPtr;
+		id<MTLTexture> src = pd.colorAttachments[0].texture;
+		[enc endEncoding];
+		SnapshotUIBackdrop(cmdBufPtr, (__bridge void*)src);
+		// Reopen on the SAME target, keeping what is already there. A descriptor
+		// is copied when the encoder is created, so editing it now only affects
+		// the encoder made on the next line.
+		pd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+		if (pd.depthAttachment.texture) pd.depthAttachment.loadAction = MTLLoadActionLoad;
+		enc = [(__bridge id<MTLCommandBuffer>)cmdBufPtr renderCommandEncoderWithDescriptor:pd];
+		// A new encoder inherits nothing: every piece of bound state this loop
+		// tracks has to be forgotten, or the next quad draws with none of it.
+		basicBound = false; boundMaterial = nullptr; boundAtlasKey = 0;
+		appliedClip = glm::vec4(-1.0f);
+		backdropStale = false;
+	};
+
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
-		applyClip(obj.clipRect);
 		// Custom material on an image quad → material pipeline (solid path below
 		// stays the fallback when the material has no custom shader / failed).
+		bool wantsBackdrop = false;
 		void* matPso = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? GetOrBuildUIMaterialPipeline(obj.materialAssetId) : nullptr;
+			? GetOrBuildUIMaterialPipeline(obj.materialAssetId, &wantsBackdrop) : nullptr;
+		// Before the clip is applied, and before anything is bound: cutting the
+		// pass throws both away.
+		if (matPso && wantsBackdrop && backdropStale) cutForBackdrop();
+		applyClip(obj.clipRect);
 		if (matPso)
 		{
 			if (boundMaterial != matPso)
@@ -11151,12 +11236,23 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			// rect = {w, h, x, y}, the four corner radii, the interaction state.
 			// Only a UserInterface-domain shader declares the block; for any
 			// other material the bytes simply go unread.
-			const simd::float4 heUI[3] = {
+			// screen.z = 0: a Metal snapshot is a texture copy of a top-left
+			// target, so it is already the right way up (GL flips, see there).
+			const simd::float4 heUI[4] = {
 				{ obj.size.x, obj.size.y, obj.position.x, obj.position.y },
 				{ obj.cornerRadius.x, obj.cornerRadius.y, obj.cornerRadius.z, obj.cornerRadius.w },
 				{ obj.uiState.x, obj.uiState.y, obj.uiState.z, obj.uiState.w },
+				{ vp.x, vp.y, 0.0f, 0.0f },
 			};
 			[enc setFragmentBytes:heUI length:sizeof(heUI) atIndex:3];
+			// The backdrop snapshot, or the dummy when there is none (the preview
+			// path, or a first frame): a declared texture must be bound either way.
+			{
+				id<MTLTexture> bd = m_uiBackdrop ? (__bridge id<MTLTexture>)m_uiBackdrop
+				                                 : (__bridge id<MTLTexture>)m_dummyTexture;
+				[enc setFragmentTexture:bd atIndex:5];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
+			}
 			[enc setFragmentBytes:&matLight length:sizeof(matLight)
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 
@@ -11184,6 +11280,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 			}
 			[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+			backdropStale = true; // this quad is now part of what is "behind"
 			continue;
 		}
 
@@ -11259,10 +11356,14 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setFragmentBytes:&fx       length:sizeof(fx)       atIndex:7];
 		[enc setFragmentBytes:&innerCol length:sizeof(innerCol) atIndex:8];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+		backdropStale = true; // this quad is now part of what is "behind"
 	}
 	// Hand the encoder back in the state it was given in: the scissor is
 	// encoder-wide, and whatever draws after this pass never asked for one.
 	applyClip(glm::vec4(0.0f));
+	// The encoder the CALLER must carry on with — the same one it handed in
+	// unless a Backdrop material forced the pass to be cut.
+	return (__bridge void*)enc;
 }
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────
@@ -14516,7 +14617,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				// UI is laid out in OUTPUT pixels — it is drawn onto the viewport
 				// texture after the rescale, so a render scale must not reach it
 				// (or every widget would be placed as if the screen were smaller).
-				EncodeUIPass((__bridge void*)fxEncoder, outW, outH);
+				fxEncoder = (__bridge id<MTLRenderCommandEncoder>)
+					EncodeUIPass((__bridge void*)fxEncoder, outW, outH,
+					             (__bridge void*)cmdBuf, (__bridge void*)fxPass);
 				[fxEncoder endEncoding];
 			}
 			else if (m_viewportColor)
@@ -14552,7 +14655,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			// ── In-Game UI ──────────────────────────────────────────────────
 			if (isPrimary && !offscreen)
-				EncodeUIPass((__bridge void*)encoder, pw, ph);
+				// May hand back a SECOND encoder (a Backdrop material cuts the
+				// pass in two) — the overlay below has to use that one.
+				encoder = (__bridge id<MTLRenderCommandEncoder>)
+					EncodeUIPass((__bridge void*)encoder, pw, ph,
+					             (__bridge void*)cmdBuf, (__bridge void*)pass);
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
 			if (isPrimary && m_overlayCallback)

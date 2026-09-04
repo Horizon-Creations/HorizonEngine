@@ -5134,7 +5134,7 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 	// call's material.
 	glGenBuffers(1, &m_matUIUBO);
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matUIUBO);
-	glBufferData(GL_UNIFORM_BUFFER, 48, nullptr, GL_DYNAMIC_DRAW); // 3 x vec4
+	glBufferData(GL_UNIFORM_BUFFER, 64, nullptr, GL_DYNAMIC_DRAW); // 4 x vec4
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 }
 
@@ -5329,11 +5329,18 @@ unsigned int OpenGLRenderer::GetOrBuildParticleProgram(uint64_t key, const HE::P
 // repurposed — model[0]=rect px, model[1]=uvRect, model[2].xy=viewport px, color=
 // tint; see MaterialShaderLibrary::uiVertex). Same fragment hash as the mesh path,
 // but a different vertex → own cache. Cached by hash; 0 cached on failure.
-unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId)
+unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId,
+                                                        bool* usesBackdrop)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (usesBackdrop) *usesBackdrop = false;
 	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return 0; // no custom shader → solid-color quad
+	// Read off the SOURCE, not off a field on the asset: a packaged build skips
+	// the graph regeneration entirely (precompiled blobs) and a material instance
+	// takes a second road through syncMaterialInstance — the generated shader is
+	// the one thing all three configurations share.
+	if (usesBackdrop) *usesBackdrop = fragGlsl.find("heBackdrop") != std::string::npos;
 	// A UI quad can be the first material user of the session; same "before every
 	// return, memo hit included" rule as the mesh path.
 	EnsureMaterialUBOs();
@@ -5376,6 +5383,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 				const std::string nm = "heTexP" + std::to_string(k);
 				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
 			}
+			// heBackdrop — unit 5, the first one free between the graph textures
+			// (1..4) and the GI/shadow maps (9..12).
+			if (GLint l = glGetUniformLocation(prog, "heBackdrop"); l >= 0) glUniform1i(l, 5);
 			// GI masks for heLitP() — units 9/10 (UI materials never sample them:
 			// giParams.z stays 0 on the UI path, but the units must be assigned).
 			if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
@@ -7426,14 +7436,53 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		          static_cast<GLsizei>(std::max(0.0f, y1 - y0)));
 	};
 
+	// ── The backdrop snapshot (D5 Schicht 1) ─────────────────────────────────
+	// "Stale" from the start: the pass has drawn nothing yet, so the first
+	// frosted element still needs a picture — of the scene, which is exactly
+	// what is under it. Every quad drawn afterwards makes it stale again, so a
+	// dialog over a panel blurs the PANEL, not the scene the panel covers.
+	bool backdropStale = true;
+	(void)backdropStale; // no material path without shaderc, so nothing reads it
+#if defined(HE_HAVE_SHADERC)
+	auto snapshotBackdrop = [&]()
+	{
+		if (!m_uiBackdropTex || m_uiBackdropW != pw || m_uiBackdropH != ph)
+		{
+			if (!m_uiBackdropTex) glGenTextures(1, &m_uiBackdropTex);
+			glBindTexture(GL_TEXTURE_2D, m_uiBackdropTex);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pw, ph, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			// LINEAR_MIPMAP_LINEAR is the whole point: the blur radius picks a
+			// level, and a texture without a mip filter would answer every
+			// radius with level 0 — nine taps of noise instead of a blur.
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			m_uiBackdropW = pw; m_uiBackdropH = ph;
+		}
+		else
+			glBindTexture(GL_TEXTURE_2D, m_uiBackdropTex);
+		// Reads the bound framebuffer, and a copy is not a draw: the scissor
+		// this pass leaves standing does not clip it.
+		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, pw, ph);
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		backdropStale = false;
+	};
+#endif
+
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
-		applyClip(obj.clipRect);
 #if defined(HE_HAVE_SHADERC)
 		// Custom material on an image quad → material program (the solid path below
 		// stays the fallback when the material has no custom shader / failed).
+		bool wantsBackdrop = false;
 		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? GetOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
+			? GetOrBuildUIMaterialProgram(obj.materialAssetId, &wantsBackdrop) : 0;
+		if (matProg && wantsBackdrop && backdropStale) snapshotBackdrop();
+#endif
+		applyClip(obj.clipRect);
+#if defined(HE_HAVE_SHADERC)
 		if (matProg)
 		{
 			if (boundMaterial != matProg)
@@ -7478,10 +7527,14 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 			glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
 			// HeUI: the element under the pixel, per QUAD (D5 Schicht 1).
-			const glm::vec4 heUI[3] = {
+			// screen.z = 1: the backdrop snapshot is a copy OUT of the
+			// framebuffer, whose first row is the bottom of the screen — the
+			// shader flips its lookup rather than this backend flipping a texture.
+			const glm::vec4 heUI[4] = {
 				{ obj.size.x, obj.size.y, obj.position.x, obj.position.y },
 				obj.cornerRadius,
 				obj.uiState,
+				{ static_cast<float>(pw), static_cast<float>(ph), 1.0f, 0.0f },
 			};
 			glBindBuffer(GL_UNIFORM_BUFFER, m_matUIUBO);
 			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(heUI), heUI);
@@ -7510,10 +7563,15 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
 			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			// The backdrop snapshot on unit 5 — white when none was taken (the
+			// material asks for it, but nothing was behind it yet).
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_2D, m_uiBackdropTex ? m_uiBackdropTex : m_whiteTex);
 			// Legacy/mesh texture slot 0 (heTex0) must be bound too — white dummy.
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, m_whiteTex);
 			glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+			backdropStale = true; // this quad is now part of what is "behind"
 			continue;
 		}
 #endif
@@ -7567,6 +7625,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIInnerColor, obj.innerShadowColor.r, obj.innerShadowColor.g,
 		            obj.innerShadowColor.b, obj.innerShadowColor.a);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		backdropStale = true; // this quad is now part of what is "behind"
 	}
 
 	// Leave the state as it was found: the scissor test is global and nothing
@@ -9550,6 +9609,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
 	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
 	if (m_matUIUBO)    { glDeleteBuffers(1, &m_matUIUBO);    m_matUIUBO    = 0; }
+	if (m_uiBackdropTex) { glDeleteTextures(1, &m_uiBackdropTex); m_uiBackdropTex = 0;
+	                       m_uiBackdropW = m_uiBackdropH = 0; }
 	if (m_previewColor) { glDeleteTextures(1, &m_previewColor);      m_previewColor = 0; }
 	if (m_previewDepth) { glDeleteRenderbuffers(1, &m_previewDepth); m_previewDepth = 0; }
 	if (m_previewFBO)   { glDeleteFramebuffers(1, &m_previewFBO);    m_previewFBO = 0; }

@@ -128,6 +128,10 @@ enum class MatNodeType : uint8_t
     ElementState,   // Hovered / Pressed / Focused / Disabled. 0..1, not 0/1: an
                     // element with a Transition (B8) hands over its BLEND, so a
                     // shipped "button glow" eases in without a single wire.
+    Backdrop,       // What was drawn BEHIND this element, blurred: the frosted
+                    // glass every modern dialog is made of. A UI-domain node in
+                    // the strong sense — outside it there is no pass underneath
+                    // to read, and it emits black instead of a sampler.
 };
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
