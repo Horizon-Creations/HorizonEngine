@@ -3900,6 +3900,135 @@ TEST_CASE("Text field: an input method's unfinished text is held apart from the 
     CHECK_FALSE(ro.wm.hasComposition());
 }
 
+// ─── Undo and redo, per field ────────────────────────────────────────────────
+// The last thing on the B1 list. Everything else about it is arithmetic on two
+// stacks; what has to be pinned down is where one step ENDS, because a history
+// that takes typing back one letter at a time is not one anybody would use.
+
+TEST_CASE("Text field: a run of typing is one undo step, and a caret move ends it")
+{
+    TextFieldFixture f;
+    using TE = WidgetManager::TextEdit;
+
+    f.wm.inputText("a"); f.wm.inputText("b"); f.wm.inputText("c");
+    REQUIRE(f.text() == "abc");
+    // One step, not three.
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text().empty());
+    CHECK_FALSE(f.wm.undoFocusedText());
+
+    // Redo puts the whole run back, caret included.
+    CHECK(f.wm.redoFocusedText());
+    CHECK(f.text() == "abc");
+    CHECK(f.caret() == 3);
+    CHECK_FALSE(f.wm.redoFocusedText());
+
+    // A caret move between two runs makes them two steps.
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    f.wm.inputText("x"); f.wm.inputText("y");
+    REQUIRE(f.text() == "xyabc");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "abc");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text().empty());
+}
+
+TEST_CASE("Text field: deleting is its own run, and a new edit drops the redo stack")
+{
+    TextFieldFixture f("hello");
+    f.wm.inputBackspace(); f.wm.inputBackspace();
+    REQUIRE(f.text() == "hel");
+    // Typing and deleting are different kinds, so they never merge.
+    f.wm.inputText("p");
+    REQUIRE(f.text() == "help");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "hel");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "hello");
+
+    // There is a redo waiting — until something new is typed over it.
+    f.wm.inputText("!");
+    CHECK(f.text() == "hello!");
+    CHECK_FALSE(f.wm.redoFocusedText());
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "hello");
+}
+
+TEST_CASE("Text field: undo restores the selection a step was taken over")
+{
+    TextFieldFixture f("hello world");
+    using TE = WidgetManager::TextEdit;
+    CHECK(f.wm.editFocusedText(TE::SelectAll, false));
+    REQUIRE(f.wm.focusedSelection() == "hello world");
+    // Typing over a selection is one step of its own, never folded into a run.
+    f.wm.inputText("z");
+    REQUIRE(f.text() == "z");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "hello world");
+    CHECK(f.wm.focusedSelection() == "hello world");
+
+    // A cut is a step as well.
+    CHECK(f.wm.deleteFocusedSelection());
+    CHECK(f.text().empty());
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "hello world");
+}
+
+TEST_CASE("Text field: a paste comes back in one step, and a word delete in another")
+{
+    TextFieldFixture f;
+    f.wm.inputText("one two");           // a paste: more than one character
+    f.wm.inputText("!");                 // a keystroke after it
+    REQUIRE(f.text() == "one two!");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "one two");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text().empty());
+
+    TextFieldFixture g("alpha beta");
+    CHECK(g.wm.editFocusedText(WidgetManager::TextEdit::DeleteWordLeft, false));
+    REQUIRE(g.text() == "alpha ");
+    CHECK(g.wm.undoFocusedText());
+    CHECK(g.text() == "alpha beta");
+}
+
+TEST_CASE("Text field: a read-only field has no history, and a filtered keystroke leaves none")
+{
+    TextFieldFixture ro("locked", 0, /*editable=*/false);
+    ro.wm.inputText("x");
+    CHECK(ro.text() == "locked");
+    CHECK_FALSE(ro.wm.undoFocusedText());
+    CHECK_FALSE(ro.wm.redoFocusedText());
+
+    // A character the filter refuses changed nothing, so there is nothing to
+    // take back — an undo step for a keystroke that never landed would take
+    // back the one before it instead.
+    TextFieldFixture f;
+    f.live()->inputFilter = HE::UITextInput::FilterInteger;
+    f.wm.inputText("4");
+    f.wm.inputText("q");
+    REQUIRE(f.text() == "4");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text().empty());
+    CHECK_FALSE(f.wm.undoFocusedText());
+}
+
+TEST_CASE("Text field: a new line is one step of its own")
+{
+    TextFieldFixture f;
+    f.live()->multiline = true;
+    f.wm.inputText("one");
+    f.wm.inputSubmit();                  // Enter, which here means a new line
+    f.wm.inputText("two");
+    REQUIRE(f.text() == "one\ntwo");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "one\n");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text() == "one");
+    CHECK(f.wm.undoFocusedText());
+    CHECK(f.text().empty());
+}
+
 // ─── Schicht 0: borders ──────────────────────────────────────────────────────
 // A border is an element-level style, so no widget type knows about it: the
 // manager stamps it onto the SURFACE the element drew. The interesting half is

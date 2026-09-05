@@ -7229,6 +7229,17 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			case SDLK_RETURN:
 			case SDLK_KP_ENTER:  wm.inputSubmit(); return true;
 			case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+			case SDLK_Z:
+				// Ctrl+Z takes back, Ctrl+Shift+Z puts back — the chord every
+				// platform agrees on. Ctrl+Y is the Windows spelling of redo and
+				// is bound below for the people who reach for it.
+				if (ctrl)
+				{
+					if (shift) wm.redoFocusedText(); else wm.undoFocusedText();
+					return true;
+				}
+				break;
+			case SDLK_Y: if (ctrl) { wm.redoFocusedText(); return true; } break;
 			case SDLK_C:
 				if (ctrl)
 				{

@@ -850,7 +850,8 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
   Pfaden und `[i]`-Indizes, **`prefs`** (typisiert, als eine JSON-Datei in derselben Sandbox
   wie `fs`, Schreiben bei jeder Änderung) und **`datetime`** (now/format plus sieben Felder,
   lokale Zeit, `localtime_r`/`localtime_s` statt des geteilten Puffers).
-- **B1-Rest, bis auf IME und Eingabefilter:** Wortsprünge (Ctrl **und** Alt, für beide
+- **B1-Rest, bis auf Undo/Redo** (IME und Eingabefilter kamen später nach, Undo/Redo am
+  05.09.2026 als Letztes, Abschnitte weiter unten)**:** Wortsprünge (Ctrl **und** Alt, für beide
   Plattform-Konventionen), Ctrl+Backspace löscht ein Wort, **Ziehen wählt aus** (eigener
   `draggingText`-Zustand, der Anker bleibt am Druckpunkt), Doppelklick nimmt das Wort,
   Dreifachklick alles, **waagerechtes Scrollen** unter dem Cursor mit passendem Rückweg im
@@ -2875,3 +2876,51 @@ Geprüft: der Exporter dreimal (Anwendung mit Vollbild → Windowed, Anwendung m
 Borderless → unverändert, Spiel mit Vollbild → unverändert) und der Splash-Vorgabewert
 als eigene Zusicherung. Die Zeile in `GameApplication` hat keinen Platz für einen Test:
 `HE_Game` ist eine ausführbare Datei, keine Bibliothek, und `he_tests` bindet sie nicht.
+
+### B1: Undo im Feld, und wo ein Schritt aufhört (05.09.2026)
+
+Der letzte Punkt der B1-Liste, und der Grund, warum er zuletzt kam: von den sieben Resten
+waren sechs längst gebaut. Ziehen zum Auswählen (`draggingText`), Doppel- und Dreifachklick
+(`selectWordAtPointer`), die Wortsprünge (`WordLeft`, `WordRight`, `DeleteWordLeft`, auf Ctrl
+**und** Alt), das waagerechte Scrollen (`scrollPx`), der I-Beam über einem Textfeld und der
+Eingabefilter stehen seit den Durchgängen davor im Code. Übrig war die Historie.
+
+**Der Kern ist eine Frage, die keine Datenstruktur ist:** wo hört ein Schritt auf. Ein Stapel
+von Zuständen ist in zwanzig Zeilen geschrieben; ein Feld, das „abc" in drei Zügen zurücknimmt,
+benutzt trotzdem niemand. Die Regel steht deshalb an einer Stelle, `UITextInput::recordEdit`,
+und sie lautet: eine Gruppe sammelt weiter, solange die nächste Änderung **von derselben Art**
+ist (tippen, rückwärts löschen, vorwärts löschen, Wort löschen) und **ein einzelnes Zeichen**
+betrifft. Alles andere fängt eine neue an. Ein Einfügen aus der Zwischenablage ist deshalb ein
+Zug, kein Buchstabenregen, und Tippen über eine Auswahl auch.
+
+**Beendet wird eine Gruppe von allem, was den Cursor bewegt:** die acht Pfeil- und
+Sprungtasten, Select All, ein Klick, ein Ziehen, ein Doppelklick, ein Fokuswechsel und das
+Verlassen des Eingabemodus. Das ist der Unterschied zwischen „tippen, wegklicken, tippen" als
+zwei Schritten und als einem, und es ist billiger, ihn an neun Stellen zu setzen, als ihn aus
+Zeitstempeln zu raten.
+
+**Aufgezeichnet wird der Zustand VOR der Änderung, nicht die Änderung.** Das ist der Grund,
+warum `inputText` jetzt einen Schnappschuss oben nimmt und alle vier Ausgänge über dasselbe
+`commit` laufen: die Funktion löscht die Auswahl, bevor sie merkt, dass der Filter oder die
+Längengrenze das Zeichen gar nicht durchlässt. Bisher kehrte sie an diesen Stellen einfach um
+— das Feld war verändert und **kein `OnTextChanged` gefeuert**. Dieser Fehler fällt mit dem
+Umbau weg, denn eine Historie, die eine solche Änderung nicht sieht, gibt beim nächsten Undo
+den vorletzten Zustand zurück.
+
+Der Preis dieser Richtung: schreibt ein Skript `Text` von außen um, beschreibt die Historie
+das Feld nicht mehr, und ein Undo legt seinen älteren Text darüber. Das steht als Kommentar an
+`UITextInput::undoEdit`, weil es das ist, was jedes Textfeld tut, dem man den Wert hinter dem
+Rücken setzt, und weil die Alternative, den Wert zu überwachen, mehr Maschinerie wäre als der
+Fall wert ist. Hundert Schritte pro Feld, ganze Zeichenketten statt Diffs: ein Textfeld hält
+einen Satz, kein Dokument.
+
+**Tasten:** Ctrl+Z, Ctrl+Shift+Z und Ctrl+Y, in `GameApplication` und im Editor, in derselben
+Tabelle wie Ctrl+A/C/X/V und damit auch auf Cmd. Im Editor kann das die Szenen-Historie nicht
+treffen: der Block gilt nur `m_isPlaying`, die Szenen-Undo-Aufrufe gehen bei `m_isPlaying`
+sofort zurück, und der Block schluckt ohnehin jede Taste außer Escape, solange getippt wird.
+
+Geprüft in sechs Fällen: ein Tipplauf ist ein Schritt und ein Pfeil dazwischen macht zwei;
+Löschen und Tippen verschmelzen nie; eine neue Eingabe wirft den Redo-Stapel weg; Undo bringt
+die Auswahl mit zurück, über die geschrieben wurde; Einfügen und Wortlöschen kommen je in
+einem Zug zurück; ein Nur-Lese-Feld und ein vom Filter abgelehnter Tastendruck hinterlassen
+gar keinen Schritt. Dazu die Zeile, dass ein Zeilenumbruch im mehrzeiligen Feld für sich steht.

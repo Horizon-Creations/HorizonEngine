@@ -506,6 +506,13 @@ public:
     // on. False = nothing under the pointer had an "open me".
     bool activateAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY);
     bool selectAllFocused();
+    // Ctrl+Z / Ctrl+Shift+Z (and Ctrl+Y) inside a text field: take back or put
+    // back one group of edits in the FOCUSED field only. A group is a run of
+    // typing or of deleting; a caret move, a click or a change of focus ends it.
+    // False when there is nothing left on the respective stack, or when the
+    // field is read-only. See UITextInput::undoEdit for what a group is.
+    bool undoFocusedText();
+    bool redoFocusedText();
     // What is selected in the focused field, for a copy or a cut.
     std::string focusedSelection() const;
     // Drop it (the second half of a cut). False when nothing was selected.
@@ -785,6 +792,11 @@ private:
     // double-click all need — three copies of it would drift.
     bool caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY,
                               size_t& outOffset);
+    // Undo and redo differ by one bool and nothing else, so they share a body.
+    bool stepFocusedTextHistory(bool redo);
+    // Close the open undo group of whatever field currently has the focus. Used
+    // where the focus is about to leave it and there is no `ti` in hand.
+    void sealFocusedUndoRun();
 
     // ── Embedded-widget translation ──────────────────────────────────────────
     // Which script owns an element, and what that script calls it. For anything

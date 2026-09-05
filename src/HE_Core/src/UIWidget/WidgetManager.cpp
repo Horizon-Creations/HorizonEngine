@@ -3010,9 +3010,24 @@ void WidgetManager::inputText(const std::string& utf8)
 	ti->composition.clear();
 	ti->compositionCursor = -1;
 
+	// What undo has to put back. Taken before anything is touched, because the
+	// rest of this function has three exits that have already dropped the
+	// selection by the time they decide the keystroke does not fit.
+	const HE::UITextInput::EditState before{ ti->text, ti->caret, ti->selAnchor };
+	// The single exit that records the step and tells the scripts. Every early
+	// return below goes through it: dropping the selection HAS changed the text
+	// even when the filter then throws the character away, and that used to
+	// leave the field changed with nobody told.
+	auto commit = [&](bool coalesce)
+	{
+		ti->recordEdit(before, HE::UITextInput::EditKind::Insert, coalesce);
+		const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+	};
+
 	// Typing over a selection replaces it — the thing every text field does and
 	// this one could not, because it only ever appended.
-	ti->deleteSelection();
+	const bool replaced = ti->deleteSelection();
 
 	std::string add = utf8;
 
@@ -3043,7 +3058,7 @@ void WidgetManager::inputText(const std::string& utf8)
 		// Put the text back the way it was; the insert below is the real one.
 		ti->text.erase(ti->caret, kept.size());
 		add.swap(kept);
-		if (add.empty()) return;
+		if (add.empty()) { if (replaced) commit(false); return; }
 	}
 
 	if (ti->maxLength > 0)
@@ -3051,17 +3066,19 @@ void WidgetManager::inputText(const std::string& utf8)
 		// Counted in CHARACTERS: a limit of 8 that lets through two accented
 		// letters fewer is a limit nobody can explain.
 		int room = ti->maxLength - ti->charCount();
-		if (room <= 0) return;
+		if (room <= 0) { if (replaced) commit(false); return; }
 		size_t cut = 0;
 		while (cut < add.size() && room > 0) { cut = HE::uiUtf8Next(add, cut); --room; }
 		add.resize(cut);
-		if (add.empty()) return;
+		if (add.empty()) { if (replaced) commit(false); return; }
 	}
 	ti->text.insert(ti->caret, add);
 	ti->caret += add.size();
 	ti->selAnchor = ti->caret;
-	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
-	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+	// One typed character continues the run that is open. A paste and a
+	// replaced selection each begin their own, because undo should take back a
+	// paste in one step rather than letter by letter.
+	commit(!replaced && HE::uiUtf8Next(add, 0) == add.size());
 }
 
 void WidgetManager::inputComposition(const std::string& utf8, int cursorByte)
@@ -3104,13 +3121,17 @@ void WidgetManager::inputBackspace()
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti || !ti->editable) return;
-	if (!ti->deleteSelection())
+	const HE::UITextInput::EditState before{ ti->text, ti->caret, ti->selAnchor };
+	const bool replaced = ti->deleteSelection();
+	if (!replaced)
 	{
 		if (ti->caret == 0) return;               // nothing before it
 		const size_t from = HE::uiUtf8Prev(ti->text, ti->caret);
 		ti->text.erase(from, ti->caret - from);
 		ti->caret = ti->selAnchor = from;
 	}
+	// A run of Backspaces is one step; wiping out a selection is its own.
+	ti->recordEdit(before, HE::UITextInput::EditKind::DeleteBack, !replaced);
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
 	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 }
@@ -3174,12 +3195,15 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 	case TextEdit::Delete:
 	{
 		if (!ti->editable) return false;
-		if (!ti->deleteSelection())
+		const HE::UITextInput::EditState before{ ti->text, ti->caret, ti->selAnchor };
+		const bool replaced = ti->deleteSelection();
+		if (!replaced)
 		{
 			if (ti->caret >= ti->text.size()) return false;   // nothing after it
 			const size_t to = HE::uiUtf8Next(ti->text, ti->caret);
 			ti->text.erase(ti->caret, to - ti->caret);
 		}
+		ti->recordEdit(before, HE::UITextInput::EditKind::DeleteForward, !replaced);
 		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 		return true;
 	}
@@ -3187,13 +3211,19 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 		if (ti->text.empty() || !ti->selectable) return false;
 		ti->selAnchor = 0;
 		ti->caret     = ti->text.size();
+		// Selecting is not editing, but it does end the run: type, Select All,
+		// type again has to be two steps or the first typing comes back with the
+		// second.
+		ti->sealUndoRun();
 		return true;
 	case TextEdit::DeleteWordLeft:
 	{
 		if (!ti->editable) return false;
+		const HE::UITextInput::EditState before{ ti->text, ti->caret, ti->selAnchor };
 		// A selection wins: Ctrl+Backspace over a selection deletes exactly the
 		// selection, like every other destructive key here.
-		if (!ti->deleteSelection())
+		const bool replaced = ti->deleteSelection();
+		if (!replaced)
 		{
 			if (ti->caret == 0) return false;
 			const size_t from = wordStartBefore(ti->text, ti->caret);
@@ -3201,6 +3231,7 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 			ti->text.erase(from, ti->caret - from);
 			ti->caret = ti->selAnchor = from;
 		}
+		ti->recordEdit(before, HE::UITextInput::EditKind::DeleteWord, !replaced);
 		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 		return true;
 	}
@@ -3214,6 +3245,11 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 	case TextEdit::Down:
 	{
 		const size_t before = ti->caret;
+		// Moving the caret ends the group of edits that was being collected —
+		// that is what makes "type, arrow away, type again" two undo steps.
+		// Set for every one of the eight moves, including the ones that turn out
+		// not to move at all, since the intent is the same either way.
+		ti->sealUndoRun();
 		// Without shift, a plain arrow COLLAPSES a selection to its near end
 		// rather than moving off the caret — what every text field does.
 		if (!extend && ti->hasSelection() &&
@@ -3299,10 +3335,39 @@ bool WidgetManager::deleteFocusedSelection()
 	m_visualDirty = true;   // see inputText
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
-	if (!ti || !ti->editable || !ti->deleteSelection()) return false;
+	if (!ti || !ti->editable) return false;
+	const HE::UITextInput::EditState before{ ti->text, ti->caret, ti->selAnchor };
+	if (!ti->deleteSelection()) return false;
+	// A cut is always its own step, never folded into neighbouring typing.
+	ti->recordEdit(before, HE::UITextInput::EditKind::Replace, /*coalesce=*/false);
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
 	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 	return true;
+}
+
+bool WidgetManager::undoFocusedText() { return stepFocusedTextHistory(/*redo=*/false); }
+bool WidgetManager::redoFocusedText() { return stepFocusedTextHistory(/*redo=*/true);  }
+
+bool WidgetManager::stepFocusedTextHistory(bool redo)
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	// A read-only field has no history to walk: nothing was ever typed into it,
+	// and putting text back into one would be the one way to edit it.
+	if (!ti || !ti->editable) return false;
+	if (!(redo ? ti->redoEdit() : ti->undoEdit())) return false;
+	m_visualDirty = true;
+	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+	return true;
+}
+
+void WidgetManager::sealFocusedUndoRun()
+{
+	Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return;
+	if (auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem)))
+		ti->sealUndoRun();
 }
 
 // Byte offset in the focused field that a pointer at (mouseX, mouseY) points at.
@@ -3340,6 +3405,7 @@ bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight,
 	// Any move that is not an up/down arrow forgets the column those arrows were
 	// aiming for — see UITextInput::preferredCaretX.
 	ti->preferredCaretX = -1.0f;
+	ti->sealUndoRun();   // clicking elsewhere ends the run, like an arrow key
 	return true;
 }
 
@@ -3356,6 +3422,7 @@ bool WidgetManager::dragCaretFromPointer(float vpWidth, float vpHeight,
 	// rather than a second click.
 	ti->caret = at;
 	ti->preferredCaretX = -1.0f;
+	ti->sealUndoRun();
 	return true;
 }
 
@@ -3372,6 +3439,7 @@ bool WidgetManager::selectWordAtPointer(float vpWidth, float vpHeight,
 	if (from == to) return false;
 	ti->selAnchor = from;
 	ti->caret     = to;
+	ti->sealUndoRun();
 	return true;
 }
 
@@ -3580,14 +3648,29 @@ void WidgetManager::inputSubmit()
 	if (ti->multiline)
 	{
 		if (!ti->editable) return;
-		ti->deleteSelection();
+		const HE::UITextInput::EditState before{ ti->text, ti->caret, ti->selAnchor };
+		const bool replaced = ti->deleteSelection();
 		// Through the same filter every other character goes through: a field
 		// that only accepts digits must not gain a newline through the one key
 		// that skipped the check.
-		if (!ti->acceptsCharacter("\n", ti->caret)) return;
+		if (!ti->acceptsCharacter("\n", ti->caret))
+		{
+			// The selection is already gone; record that much and say so.
+			if (replaced)
+			{
+				ti->recordEdit(before, HE::UITextInput::EditKind::Replace, false);
+				m_visualDirty = true;
+				rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+			}
+			return;
+		}
 		ti->text.insert(ti->caret, 1, '\n');
 		ti->caret = ti->selAnchor = ti->caret + 1;
 		ti->preferredCaretX = -1.0f;
+		// A new line is its own undo step: taking back a paragraph should not
+		// also take back the sentence before it.
+		ti->recordEdit(before, HE::UITextInput::EditKind::Replace, /*coalesce=*/false);
+		ti->sealUndoRun();
 		m_visualDirty = true;
 		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 		return;
@@ -3707,6 +3790,10 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 	// the field somebody confirmed into, and the moment the focus is somewhere
 	// else that is nobody.
 	m_focusEditing = false;
+	// …and it ends the undo group the field it is leaving was collecting, so
+	// coming back to that field and typing does not extend what was typed
+	// before somebody went elsewhere.
+	sealFocusedUndoRun();
 	// Focus events go to whichever script owns the element (see scriptTargetFor).
 	auto fireFocus = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int), int elem)
 	{
@@ -3740,6 +3827,7 @@ bool WidgetManager::stopEditingText()
 {
 	if (!m_focusEditing) return false;
 	m_focusEditing = false;
+	sealFocusedUndoRun();   // see setFocus
 	m_visualDirty = true;   // the caret goes away
 	return true;
 }

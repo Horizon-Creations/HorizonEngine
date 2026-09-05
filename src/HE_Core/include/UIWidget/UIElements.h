@@ -401,6 +401,47 @@ public:
     // that is not an up/down arrow.
     mutable float preferredCaretX = -1.0f;
 
+    // ── Undo history (runtime, never serialized) ─────────────────────────────
+    // Per FIELD, not per app: Ctrl+Z inside a text box takes back what was typed
+    // into that box, and nothing else. The scene's undo stack and this one never
+    // meet — the editor only routes keys here while a field is being edited, and
+    // in a packaged app there is no scene undo at all.
+    //
+    // Each entry is the whole field as it stood BEFORE a group of edits. Whole
+    // strings rather than diffs because a text field holds a sentence, not a
+    // document, and a hundred copies of a sentence is nothing next to being able
+    // to read this code.
+    struct EditState { std::string text; size_t caret = 0; size_t selAnchor = 0; };
+    // What the group currently being collected consists of. Typing 'a', 'b', 'c'
+    // is one step; a Backspace after them starts a second, because undo that
+    // walks back through a run of same-kind keystrokes one at a time is not what
+    // anybody means by "take that back".
+    enum class EditKind : int { None, Insert, DeleteBack, DeleteForward, DeleteWord, Replace };
+    std::vector<EditState> undoStack;
+    std::vector<EditState> redoStack;
+    EditKind openRun = EditKind::None;
+    static constexpr size_t kMaxUndoSteps = 100;
+
+    // Close the open group without recording anything: the next edit starts a
+    // new one. Every caret move, click and focus change does this, which is what
+    // makes "type, click elsewhere, type again" two undo steps instead of one.
+    void sealUndoRun() { openRun = EditKind::None; }
+    // Remember `before` as the state to come back to. Does nothing when the text
+    // did not actually change, and nothing when `coalesce` says this edit
+    // continues the group already open. Always clears the redo stack: once you
+    // edit again there is only one future left.
+    void recordEdit(const EditState& before, EditKind kind, bool coalesce);
+    // Step back / forward one group, caret and selection included. False when
+    // the respective stack is empty.
+    //
+    // A script that rewrote `text` from outside leaves a history that no longer
+    // describes the field, and undo will put its own older text back over it.
+    // That is the price of recording the state before each edit rather than
+    // watching the property for changes, and it is the same thing every text
+    // box does when its value is set behind its back.
+    bool undoEdit();
+    bool redoEdit();
+
     // A multiline field is a scrolling container as far as the wheel is
     // concerned. Answering nullptr while single-line is what keeps a wheel over
     // an ordinary field scrolling the PAGE, which is what it did before.

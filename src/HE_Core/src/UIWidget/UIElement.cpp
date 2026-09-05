@@ -633,6 +633,52 @@ bool UITextInput::acceptsCharacter(const std::string& ch, size_t atByte) const
     }
 }
 
+void UITextInput::recordEdit(const EditState& before, EditKind kind, bool coalesce)
+{
+    // An edit that did not change anything is not a step to come back to. This
+    // is what lets the callers snapshot unconditionally and hand the snapshot
+    // over on every exit path, instead of each of them working out whether the
+    // keystroke survived the filter, the length limit and the read-only flag.
+    if (before.text == text) return;
+    redoStack.clear();
+    // Continuing the open group means NOT pushing: the state to come back to is
+    // the one from the start of the run, which is already on the stack.
+    if (coalesce && openRun == kind && !undoStack.empty()) return;
+    undoStack.push_back(before);
+    if (undoStack.size() > kMaxUndoSteps)
+        undoStack.erase(undoStack.begin(),
+                        undoStack.begin() + static_cast<long>(undoStack.size() - kMaxUndoSteps));
+    // An edit that refused to be merged INTO a group does not open one either:
+    // a paste is a step by itself, and the character typed straight after it
+    // must not be swallowed by it. Only a mergeable edit leaves a run open.
+    openRun = coalesce ? kind : EditKind::None;
+}
+
+namespace
+{
+// The half of undo and redo that is the same in both directions: hand the state
+// you are in to the other stack, take the top of this one, become it.
+bool uiTextStep(UITextInput& ti, std::vector<UITextInput::EditState>& from,
+                std::vector<UITextInput::EditState>& to)
+{
+    if (from.empty()) return false;
+    to.push_back({ ti.text, ti.caret, ti.selAnchor });
+    const UITextInput::EditState s = from.back();
+    from.pop_back();
+    ti.text      = s.text;
+    ti.caret     = s.caret;
+    ti.selAnchor = s.selAnchor;
+    ti.clampCaret();
+    ti.preferredCaretX = -1.0f;
+    // Whatever run was open belongs to the text that just went away.
+    ti.sealUndoRun();
+    return true;
+}
+} // namespace
+
+bool UITextInput::undoEdit() { return uiTextStep(*this, undoStack, redoStack); }
+bool UITextInput::redoEdit() { return uiTextStep(*this, redoStack, undoStack); }
+
 const UIPropTable& UIComboBox::propTable() const
 {
     static const UIPropTable t = {
