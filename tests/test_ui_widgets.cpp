@@ -12850,3 +12850,50 @@ TEST_CASE("Text catalog: switching language re-resolves every live widget")
     wm.setLanguage("de");
     CHECK_FALSE(wm.consumeVisualDirty());
 }
+
+// D4, first of four: a gap is not a rounding.
+//
+// The theme has carried two number scales since it was written, `radius` and
+// `spacing`, both editable in the theme editor. Only one of them was ever read:
+// every Float binding that was not a font size resolved against `radius`, so
+// the spacing steps were a field an author could set and never see. Since the
+// two arrays hold the same defaults (4/8/16), nothing looked wrong until a
+// theme moved one of them.
+TEST_CASE("Theme: padding and spacing read the spacing steps, rounding reads the radius steps")
+{
+    HE::UITheme theme;
+    // Pulled apart on purpose: with the defaults the bug is invisible.
+    theme.spacing[static_cast<int>(HE::UIThemeSize::Medium)] = 99.0f;
+    theme.radius[static_cast<int>(HE::UIThemeSize::Medium)]  = 7.0f;
+    theme.textSize[static_cast<int>(HE::UIThemeTextLevel::Body)] = 21.0f;
+
+    HE::UIWidgetTree t;
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    HE::UIElement* b = t.find(box);
+    b->setThemeRole("Padding", "Medium");
+    b->setThemeRole("Spacing", "Medium");
+    b->setThemeRole("Corner Radius", "Medium");
+    const int txt = t.add(HE::UIWidgetType::Text);
+    t.find(txt)->setThemeRole("FontSize", "Body");
+
+    HE::uiApplyTheme(t, theme, HE::UIThemeMode::Light);
+    CHECK(b->getProp("Padding").f == doctest::Approx(99.0f));
+    CHECK(b->getProp("Spacing").f == doctest::Approx(99.0f));
+    CHECK(b->getPropAny("Corner Radius").f == doctest::Approx(7.0f));
+    CHECK(t.find(txt)->getProp("FontSize").f == doctest::Approx(21.0f));
+
+    // The rule itself, so the designer's role button and the resolver cannot
+    // drift apart again: three scales, and the PROPERTY picks which one.
+    CHECK(HE::uiThemeScaleFor("Padding")       == HE::UIThemeScale::Spacing);
+    CHECK(HE::uiThemeScaleFor("Spacing")       == HE::UIThemeScale::Spacing);
+    CHECK(HE::uiThemeScaleFor("FontSize")      == HE::UIThemeScale::Text);
+    CHECK(HE::uiThemeScaleFor("Corner Radius") == HE::UIThemeScale::Radius);
+    CHECK(HE::uiThemeScaleFor("Border Width")  == HE::UIThemeScale::Radius);
+    // A number no vocabulary can name still answers Radius rather than nothing,
+    // which is what a hand-written binding on it used to resolve to.
+    CHECK(HE::uiThemeScaleFor("Min")           == HE::UIThemeScale::Radius);
+    CHECK_FALSE(HE::uiThemeScaleBindable("Min"));
+    CHECK(HE::uiThemeScaleBindable("Padding"));
+    CHECK(HE::uiThemeScaleBindable("Spacing"));
+    CHECK(HE::uiThemeScaleBindable("FontSize"));
+}

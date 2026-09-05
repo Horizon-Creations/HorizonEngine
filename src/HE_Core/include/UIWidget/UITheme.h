@@ -77,6 +77,24 @@ HE_API const char* uiThemeTextLevelName(UIThemeTextLevel t);
 HE_API UIThemeSize      uiThemeSizeFromName(const std::string& s);
 HE_API UIThemeTextLevel uiThemeTextLevelFromName(const std::string& s);
 
+// Which of the theme's three number scales a Float property reads. This is the
+// rule the sentence above describes, written once so that resolving a binding
+// (uiThemeValueFor) and offering one (the designer's role button) cannot drift
+// apart — they used to be two half-rules, and the half in the resolver said
+// "radius" for everything that was not a font size.
+//
+// A gap is not a rounding. "Padding" and "Spacing" are distances between things
+// and read the spacing steps; a corner radius and a border width are the shape
+// of one thing and read the radius steps. Every other Float lands on Radius,
+// which is where it landed before: a slider's minimum has no step that means it,
+// nothing offers a binding for it, and a hand-written one keeps its old answer.
+enum class UIThemeScale : uint8_t { Radius = 0, Spacing, Text };
+HE_API UIThemeScale uiThemeScaleFor(const std::string& prop);
+// Whether a Float property can be bound to a step BY HAND at all — true for
+// exactly the ones with a vocabulary that names their case. False does not mean
+// "the theme decides nothing here": a style may still name any property.
+HE_API bool uiThemeScaleBindable(const std::string& prop);
+
 // A drop shadow as the theme hands it out: one step of "how far off the page".
 struct UIThemeShadow
 {

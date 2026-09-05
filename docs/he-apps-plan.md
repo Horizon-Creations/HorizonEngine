@@ -572,6 +572,24 @@ sonst steht jedes animierte Material auf 0. Billig jetzt, ärgerlich später.
 **D4 Layout-Hilfen.** Abstände aus der Theme-Skala statt Zahlen, Ausrichtungshilfen und
 Einrasten im Designer, „an Inhalt anpassen" als Größenmodus, Mindest-/Maximalgrößen.
 
+*Erster Teil: die Abstandsskala wurde nie gelesen.* Das Theme trägt seit D1 zwei Zahlenskalen,
+`radius` und `spacing`, beide im Theme-Editor einstellbar. Gelesen wurde immer nur die erste:
+`uiThemeValueFor` löste jede Float-Bindung, die keine Schriftgröße war, gegen `radius` auf. Weil
+beide Skalen dieselben Vorgaben tragen (4/8/16), fiel das erst auf, wenn ein Theme eine der
+beiden verschiebt. Und binden ließ sich ohnehin nur die Schriftgröße: `Padding` und `Spacing`
+hatten im Designer keinen Knopf, obwohl sie genau die Eigenschaften sind, für die es die
+Abstandsskala gibt.
+
+Die Regel steht jetzt einmal, in `uiThemeScaleFor` (UITheme.h): **ein Abstand ist keine
+Rundung.** `Padding` und `Spacing` lesen die Abstandsstufen, ein Eckenradius und eine
+Rahmenbreite die Radiusstufen, `FontSize` die Typografie-Ebenen. Alles andere landet weiter auf
+Radius, also dort, wo es vorher schon landete. Der Auflöser und der Rollenknopf des Designers
+fragen dieselbe Funktion, deshalb können die beiden Hälften nicht wieder auseinanderlaufen; bis
+eben waren es zwei halbe Regeln, und die im Auflöser sagte „Radius" zu allem.
+
+Alle Container heißen ihre beiden Zahlen gleich (`UIBoxBase`, `UIGrid`, `UIWrapBox`,
+`UIScrollBox`, `UIListView`), deshalb reicht eine Zeile für alle fünf.
+
 ---
 
 ## 7. Block E: Editor- und Projektseite

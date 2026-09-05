@@ -1023,14 +1023,14 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	{
 	case UIPropType::Float:
 	{
-		// A font size can come from the theme's typography levels, the same way a
-		// colour comes from a role — that is what makes "every heading on every
-		// screen" one number instead of forty.
-		// Only a font size can be bound to a ROLE by hand (there is no size step
-		// that means "a slider's minimum"), but any number a STYLE names is
-		// decided by the theme — so the two questions are separate: what may be
-		// bound here, and what is already answered elsewhere.
-		const bool bindable = pd.name == "FontSize";
+		// A font size can come from the theme's typography levels, and a gap from
+		// its spacing steps, the same way a colour comes from a role — that is
+		// what makes "every heading on every screen" one number instead of forty.
+		// Not every number can be bound by hand (there is no size step that means
+		// "a slider's minimum"), but any number a STYLE names is decided by the
+		// theme — so the two questions are separate: what may be bound here, and
+		// what is already answered elsewhere.
+		const bool bindable = HE::uiThemeScaleBindable(pd.name);
 		const bool bound = themeDecides(e, pd.name.c_str());
 		float v = themedFloat(e, pd.name.c_str(), e.getProp(pd.name).f);
 		const bool ranged = pd.minV < pd.maxV;
@@ -1041,7 +1041,11 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		if (ch) { e.setProp(pd.name, UIPropValue::ofFloat(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		ImGui::EndDisabled();
-		if (bindable) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::TextLevel);
+		if (bindable)
+			drawThemeRoleButton(e, pd.name, committed,
+			                    HE::uiThemeScaleFor(pd.name) == HE::UIThemeScale::Text
+			                        ? ThemeBindKind::TextLevel
+			                        : ThemeBindKind::SizeStep);
 		// A number the style decided, that no role vocabulary can name: the row
 		// is greyed out, so it needs the button that says why and lets you take
 		// it back.

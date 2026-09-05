@@ -851,12 +851,12 @@ bool uiThemeValueFor(const UIElement& e, const UITheme& theme, UIThemeMode mode,
         }
         if (cur.type == UIPropType::Float)
         {
-            // "FontSize" is the one Float that means TEXT, so it reads the
-            // typography levels; every other one — a corner radius, a box's
-            // padding or spacing — reads the size steps. The two vocabularies
-            // both contain "Small", which is exactly why the property decides
-            // and not the name.
-            if (prop == "FontSize")
+            // WHICH scale the step is read from is the property's decision, not
+            // the stored name's: all three vocabularies overlap ("Small" is in
+            // two of them), so the name alone could never say. uiThemeScaleFor
+            // is that rule, and the designer's role button asks the same one.
+            const UIThemeScale scale = uiThemeScaleFor(prop);
+            if (scale == UIThemeScale::Text)
             {
                 const UIThemeTextLevel lvl = uiThemeTextLevelFromName(bound);
                 if (lvl == UIThemeTextLevel::COUNT) return false;
@@ -865,7 +865,9 @@ bool uiThemeValueFor(const UIElement& e, const UITheme& theme, UIThemeMode mode,
             }
             const UIThemeSize step = uiThemeSizeFromName(bound);
             if (step == UIThemeSize::COUNT) return false;
-            out = UIPropValue::ofFloat(theme.radius[static_cast<int>(step)]);
+            const float* steps = scale == UIThemeScale::Spacing ? theme.spacing
+                                                                : theme.radius;
+            out = UIPropValue::ofFloat(steps[static_cast<int>(step)]);
             return true;
         }
         return false;

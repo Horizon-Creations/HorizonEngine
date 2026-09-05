@@ -99,6 +99,22 @@ UIThemeTextLevel uiThemeTextLevelFromName(const std::string& s)
     return UIThemeTextLevel::COUNT;
 }
 
+UIThemeScale uiThemeScaleFor(const std::string& prop)
+{
+    if (prop == "FontSize") return UIThemeScale::Text;
+    // The two names every container agrees on (UIBoxBase, UIGrid, UIWrapBox,
+    // UIScrollBox and UIListView all call them this), which is what makes one
+    // line here reach all of them.
+    if (prop == "Padding" || prop == "Spacing") return UIThemeScale::Spacing;
+    return UIThemeScale::Radius;
+}
+
+bool uiThemeScaleBindable(const std::string& prop)
+{
+    return prop == "FontSize" || prop == "Padding" || prop == "Spacing" ||
+           prop == "Corner Radius";
+}
+
 const char* uiThemeElevationName(UIThemeElevation e)
 {
     const int i = static_cast<int>(e);
