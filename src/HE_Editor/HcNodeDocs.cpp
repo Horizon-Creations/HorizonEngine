@@ -520,6 +520,15 @@ namespace
 	  "What was ASKED for: Light, Dark or System. This is what a Preferences "
 	  "screen shows and writes back, because System is a rule and not a colour — "
 	  "storing what it resolved to today would stop it following tomorrow." },
+	{ "theme.setFontScale",
+	  "How big the text is for the person reading it: 1 is what the designer "
+	  "drew, 1.5 is half again. Only the TEXT grows — corners, padding and tab "
+	  "strips stay where they were authored, because a whole interface zoomed is "
+	  "a different setting (the display scale, which the system supplies). "
+	  "Clamped to 0.5 … 3." },
+	{ "theme.getFontScale",
+	  "The text size actually in use, after clamping — what a Preferences screen "
+	  "shows next to its slider." },
 
 	// ── Cursor / App ─────────────────────────────────────────────────────────
 	{ "cursor.setVisible",

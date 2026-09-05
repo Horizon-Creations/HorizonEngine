@@ -179,6 +179,14 @@ namespace ScriptApi
 	void setThemeMode(HorizonWorld& world, const std::string& mode);
 	std::string themeMode(HorizonWorld& world);       // resolved: "Light" or "Dark"
 	std::string themePreference(HorizonWorld& world); // asked for: + "System"
+	// The reader's text size: a factor on every authored font size and on
+	// nothing else (docs/he-apps-plan.md B10). It sits beside the theme because
+	// it is the same kind of setting — one switch a Preferences screen writes
+	// for the whole application. Clamped to 0.5 … 3 on the way in, so what
+	// fontScale() gives back is what is actually being drawn and not what was
+	// asked for.
+	void  setFontScale(HorizonWorld& world, float scale);
+	float fontScale(HorizonWorld& world);
 	// Is the pointer currently over an interactive widget element? The verdict
 	// of the last WidgetManager::processPointer — what gameplay needs to skip a
 	// click that belongs to the menu it just landed in.

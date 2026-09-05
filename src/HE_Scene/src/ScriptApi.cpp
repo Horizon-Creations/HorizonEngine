@@ -457,6 +457,18 @@ std::string themePreference(HorizonWorld& world)
 	return HE::uiThemePreferenceName(world.widgets().themePreference());
 }
 
+void setFontScale(HorizonWorld& world, float scale)
+{
+	world.widgets().setFontScale(scale);
+}
+
+float fontScale(HorizonWorld& world)
+{
+	// What was CLAMPED to, not what was asked for — the same rule themeMode
+	// follows: a Preferences screen has to show the number on screen.
+	return world.widgets().fontScale();
+}
+
 bool pointerOverUI(HorizonWorld& world) { return world.widgets().pointerOverUI(); }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────

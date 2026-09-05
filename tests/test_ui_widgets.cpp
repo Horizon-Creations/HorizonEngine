@@ -3544,6 +3544,158 @@ namespace
     };
 }
 
+// ═══ B10: the reader's text size ═════════════════════════════════════════════
+// One factor on every authored font size. The whole risk of the feature is that
+// it reaches SOME of the places a font size is used: then the glyphs are one
+// size and the arithmetic about them another, and the caret lands beside the
+// character it was aimed at while everything still looks fine.
+
+TEST_CASE("The text size is clamped where it stops being a text size")
+{
+    WidgetManager wm;
+    CHECK(wm.fontScale() == doctest::Approx(1.0f));   // the default draws what was drawn
+    wm.setFontScale(1.25f);
+    CHECK(wm.fontScale() == doctest::Approx(1.25f));
+    // 0 and negative are not "smaller", they are text that has stopped existing.
+    wm.setFontScale(0.0f);
+    CHECK(wm.fontScale() == doctest::Approx(1.0f));
+    wm.setFontScale(-3.0f);
+    CHECK(wm.fontScale() == doctest::Approx(1.0f));
+    wm.setFontScale(0.1f);
+    CHECK(wm.fontScale() == doctest::Approx(0.5f));
+    wm.setFontScale(99.0f);
+    CHECK(wm.fontScale() == doctest::Approx(3.0f));
+}
+
+TEST_CASE("Auto-size fits the text as DRAWN, not as authored")
+{
+    // The first of the two quiet breakers: a box that fits at 100 % cuts the
+    // label in half at 150 %, and nothing about the picture says why.
+    HE::UIText t;
+    t.text = "Hello";
+    t.autoSize = true;
+    t.fontSize = 20.0f;
+    t.applyAutoSize(t.sizeX);
+    const float w1 = t.sizeX, h1 = t.sizeY;
+
+    t.applyAutoSize(t.sizeX, 1.5f);
+    CHECK(t.sizeX > w1);
+    CHECK(t.sizeY > h1);
+    // …and it is exactly the box a 30 px label gets, because 20 at 150 % IS 30.
+    HE::UIText ref;
+    ref.text = "Hello";
+    ref.autoSize = true;
+    ref.fontSize = 30.0f;
+    ref.applyAutoSize(ref.sizeX);
+    CHECK(t.sizeX == doctest::Approx(ref.sizeX));
+    CHECK(t.sizeY == doctest::Approx(ref.sizeY));
+}
+
+TEST_CASE("The caret is measured at the size the glyphs were drawn at")
+{
+    // The second quiet breaker. Wider glyphs mean fewer of them fit under the
+    // same click, so the answer has to MOVE — and it has to move to exactly the
+    // answer a field with that font size would have given.
+    HE::UITextInput ti;
+    ti.text     = "abcdefghij";
+    ti.fontSize = 20.0f;
+    const size_t at100 = ti.caretAtPoint(60.0f, 0.0f, 1.0f);
+    const size_t at200 = ti.caretAtPoint(60.0f, 0.0f, 1.0f, 2.0f);
+    REQUIRE(at100 > 0);
+    CHECK(at200 < at100);
+
+    HE::UITextInput big;
+    big.text     = "abcdefghij";
+    big.fontSize = 40.0f;
+    CHECK(at200 == big.caretAtPoint(60.0f, 0.0f, 1.0f));
+}
+
+TEST_CASE("The reader's text size reaches the picture AND the pointer")
+{
+    // The end-to-end one: through the manager, which is the only place that
+    // knows the setting. If the two halves ever disagree, this is what says so.
+    auto firstGlyphHeight = [](const std::vector<UIRenderObject>& v)
+    {
+        for (const UIRenderObject& o : v) if (o.type == 2) return o.size.y;
+        return 0.0f;
+    };
+
+    TextFieldFixture f("abcdefghij");
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+    const float h100 = firstGlyphHeight(out);
+    REQUIRE(h100 > 0.0f);
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 60.0f, 20.0f));
+    const size_t caret100 = f.caret();
+    REQUIRE(caret100 > 0);
+
+    f.wm.setFontScale(1.5f);
+    out.clear();
+    f.wm.extract(400.0f, 200.0f, out);
+    // The picture.
+    CHECK(firstGlyphHeight(out) > h100);
+    // …and the pointer, in the same breath.
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 60.0f, 20.0f));
+    CHECK(f.caret() < caret100);
+    // Not merely "different": the same offset the field itself works out at
+    // that size, 6 being the field's own padding.
+    CHECK(f.caret() == f.live()->caretAtPoint(60.0f - 6.0f, 20.0f - 6.0f, 1.0f, 1.5f));
+}
+
+TEST_CASE("A tab is hit where it is drawn, on a canvas that scales")
+{
+    // The tab strip asked its hit test with the element's units and drew with
+    // canvas pixels, so on any canvas other than 1:1 a click landed on the tab
+    // NEXT to the one under the pointer. Found while threading the text size
+    // through the same three numbers.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int tabs = t.add(HE::UIWidgetType::TabBox);
+    auto* tb = dynamic_cast<HE::UITabBox*>(t.find(tabs));
+    HE::uiSetAnchorPreset(*tb, 0); tb->pivotX = tb->pivotY = 0.0f;
+    tb->posX = 0.0f; tb->posY = 0.0f; tb->sizeX = 380.0f; tb->sizeY = 180.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        const int page = t.add(HE::UIWidgetType::Panel);
+        t.find(page)->parentId = tabs;
+        t.find(page)->name = i == 0 ? "One" : (i == 1 ? "Two" : "Three");
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    wm.setDisplayScale(2.0f);          // one unit is two pixels
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(800.0f, 400.0f, out);
+
+    // Where the SECOND tab was drawn, asked of the same layout the draw used —
+    // of the LIVE tree, because that is the one on screen.
+    const HE::UIWidgetTree& lt = *wm.tree(id);
+    const auto* ltb = dynamic_cast<const HE::UITabBox*>(lt.find(tabs));
+    REQUIRE(ltb != nullptr);
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(lt, 800.0f, 400.0f, 2.0f);
+    const HE::UIWidgetRect r = HE::uiElementRect(lt, *ltb, &canvas);
+    const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+                                r.w * canvas.scaleX, r.h * canvas.scaleY };
+    std::vector<float> tx, tw;
+    HE::UITabBox::tabLayout(pxr, ltb->fontSize * canvas.scaleY,
+                            ltb->tabPadding * canvas.scaleY,
+                            { "One", "Two", "Three" }, ltb->fontAtlasKey, tx, tw);
+    REQUIRE(tx.size() == 3);
+    const float midX = tx[1] + tw[1] * 0.5f;
+    const float midY = pxr.y + ltb->tabHeight * canvas.scaleY * 0.5f;
+
+    REQUIRE(wm.processPointer(800.0f, 400.0f, midX, midY, true, true));
+    wm.processPointer(800.0f, 400.0f, midX, midY, false, true);
+    const auto* live = dynamic_cast<const HE::UITabBox*>(wm.tree(id)->find(tabs));
+    REQUIRE(live != nullptr);
+    CHECK(live->activeTab == 1);
+}
+
 // ═══ B1b: more than one line ═════════════════════════════════════════════════
 // A field that holds newlines. Everything below is about the two things that
 // makes hard: a caret is a byte offset and has to survive being talked about in
@@ -11760,6 +11912,53 @@ namespace
         edit.items.push_back({ "undo", "Undo", false });
         return { file, edit };
     }
+}
+
+TEST_CASE("The menu bar grows with the reader's text size, drawing and hit test together")
+{
+    // The bar is chrome and does not scale with any canvas — but a reader who
+    // enlarged the text and got a menu that stayed tiny has been sold half a
+    // feature. The risk is the same one as everywhere else in B10, and it is why
+    // the seven constants became one bundle: a bar drawn taller than the band it
+    // answers clicks in is worse than a small bar.
+    WidgetManager wm;
+    wm.setMenuBar(sampleMenuBar());
+    const float h100 = wm.menuBarHeight();
+    float x100 = 0.0f, w100 = 0.0f;
+    REQUIRE(wm.menuTitleBox(1, x100, w100));   // "Edit", the second one
+
+    wm.setFontScale(2.0f);
+    const float h200 = wm.menuBarHeight();
+    CHECK(h200 > h100);
+    float x200 = 0.0f, w200 = 0.0f;
+    REQUIRE(wm.menuTitleBox(1, x200, w200));
+    CHECK(w200 > w100);   // a wider word wants a wider title
+    CHECK(x200 > x100);   // …and pushes the one beside it along
+
+    // What is DRAWN is that same height, which is the whole point of the bundle.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 300.0f, out);
+    bool drawnBar = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(400.0f) && o.size.y == doctest::Approx(h200))
+            drawnBar = true;
+    CHECK(drawnBar);
+
+    // And the pointer agrees. The row that matters is the band the bar GREW
+    // into: at 100 % it was under the bar and hit nothing, and it has to open a
+    // menu now, or the strip is drawn somewhere it cannot be clicked.
+    const float grownY = (h100 + h200) * 0.5f;
+    const float midX   = x200 + w200 * 0.5f;
+    REQUIRE(wm.processPointer(400.0f, 300.0f, midX, grownY, true, true));
+    CHECK(wm.openMenu() == 1);
+
+    // The same point on a bar that was never enlarged opens nothing, which is
+    // what makes the line above a statement about the SIZE and not about a
+    // manager that opens a menu wherever it is poked.
+    WidgetManager small;
+    small.setMenuBar(sampleMenuBar());
+    small.processPointer(400.0f, 300.0f, midX, grownY, true, true);
+    CHECK(small.openMenu() == -1);
 }
 
 TEST_CASE("The menu bar opens on a title, chooses on release, and closes on Escape")

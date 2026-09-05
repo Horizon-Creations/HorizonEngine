@@ -973,7 +973,7 @@ int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode)
     return written;
 }
 
-void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
+void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fontScale)
 {
     // What each Tab Box's strip will SAY, refreshed before anything draws. The
     // labels are the page names, so renaming a page in the designer shows up on
@@ -1006,7 +1006,7 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
         // embedded widget the resolved rect is in the host's units instead.
         float us = 1.0f, vs = 1.0f;
         uiElementUnitScale(tree, *e, us, vs, canvas);
-        e->applyAutoSize(uiElementRect(tree, *e, canvas).w / std::max(1e-4f, us));
+        e->applyAutoSize(uiElementRect(tree, *e, canvas).w / std::max(1e-4f, us), fontScale);
     }
 
     // Then the containers that size themselves to what is in them, INNERMOST

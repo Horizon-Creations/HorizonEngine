@@ -676,12 +676,31 @@ public:
     void  setDisplayScale(float s) { m_displayScale = s > 0.0f ? s : 1.0f; }
     float displayScale() const { return m_displayScale; }
 
+    // ── The reader's text size (docs/he-apps-plan.md B10) ────────────────────
+    // A factor on every authored font size, and on nothing else: 1.25 is a
+    // reader who wants larger text, and the buttons keep the corners and the
+    // padding the designer gave them. The display scale above is the other
+    // knob — that one is "this screen has more pixels" and it moves everything.
+    //
+    // It is runtime state on the manager and NOT a property of a tree: nothing
+    // serializes it, so every .hasset written before this existed stays byte
+    // for byte what it was, and one setting covers every widget at once, which
+    // is what a reader is actually asking for.
+    //
+    // Clamped like setDisplayScale, and for the same reason: 0 or a negative
+    // number is not a smaller font, it is text that has stopped existing. The
+    // upper end is 3 — past that a label is bigger than the box it names and
+    // the answer is a different layout, not a larger number.
+    void  setFontScale(float s);
+    float fontScale() const { return m_fontScale; }
+
 private:
     // Every canvas in here goes through this, so the display scale is applied
     // in ONE place instead of at forty call sites that each have to remember.
     HE::UIWidgetCanvas resolveCanvas(const HE::UIWidgetTree& t, float vpW, float vpH) const
     { return HE::uiResolveCanvas(t, vpW, vpH, m_displayScale); }
     float m_displayScale = 1.0f;
+    float m_fontScale = 1.0f;
 
     struct Instance
     {

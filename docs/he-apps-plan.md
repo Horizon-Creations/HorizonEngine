@@ -3396,3 +3396,67 @@ String-Eigenschaft, also auch auf Tooltip und Platzhalter; und die Katalogdatei 
 von Sprachen mit einer Liste von Paaren, kein Objekt, weil nlohmann Objektschlüssel sortiert und
 diese Datei von Menschen übersetzt wird. Offen dazu: eine Editor-Oberfläche für den Katalog und
 eine Skript-Bindung für die Sprachumschaltung.
+
+---
+
+### B10 Schriftgrößenskalierung (06.09.2026)
+
+Der letzte offene Punkt aus B10. Eine Zahl, `WidgetManager::setFontScale`, und sie multipliziert
+jede *geschriebene* Schriftgröße, sonst nichts.
+
+**Warum nicht `pxScaleY`.** Das wäre eine Zeile gewesen, und es wäre das falsche Feature. `pxScaleY`
+ist die Leinwand, die Einheiten in Pixel übersetzt, und dieselbe Zahl streckt Eckenradien,
+Reiterhöhen und die Pfeile am Zahlenfeld. Wer größere Schrift braucht, will keine Oberfläche mit
+doppelt so runden Ecken, sondern lesbaren Text in den Kästen, die der Designer gezeichnet hat. Eine
+ganze Oberfläche zu vergrößern ist die andere Einstellung und die gibt es schon: `setDisplayScale`,
+gespeist aus `SDL_GetWindowDisplayScale`.
+
+**Träger ist `UIElementRenderState::fontScale`**, gefüllt an der einen Stelle, an der der Manager
+den Zustand baut. Der Vorgabewert ist 1 und nicht 0, aus demselben Grund, aus dem `hoverT` bei -1
+anfängt: die Vorschau im Designer und jeder Test bauen sich ihren Zustand selbst, und eine 0 hätte
+still jede Beschriftung auf nichts gezeichnet. Dazu `st.fontPx(fontSize, pxScaleY)`, damit das
+Produkt einmal an einer Stelle steht statt neunmal ausgeschrieben.
+
+**Die Bedingung, an der das Feature hängt: jede Stelle, an der eine Schriftgröße zu Pixeln wird
+oder gemessen wird, muss den Faktor sehen.** Sonst sind die Glyphen groß und die Rechnung über sie
+klein, und nichts am Bild sagt, dass etwas nicht stimmt. Die drei Rechner ohne Renderzustand
+bekommen ihn als nachgestelltes Argument mit Vorgabe 1 (`applyAutoSize`, `caretAtPoint`, `linkAt`,
+und `uiApplyAutoSize` reicht ihn durch) — damit compiliert jeder alte Aufruf weiter und zeichnet
+weiter, was er zeichnete.
+
+Die zwei, die *leise* brechen, standen schon im Entwurf und sind beide getestet:
+
+* **`caretAtPoint`.** Der Klick misst die Textbreite bis zum Buchstaben. Ohne den Faktor misst er
+  sie an der geschriebenen Größe, während die Glyphen an der skalierten stehen: der Cursor landet
+  ein paar Zeichen vor der Stelle, auf die gezielt wurde. Der Test prüft nicht nur „anders",
+  sondern dass ein Feld mit 20 px bei 200 % dieselbe Byte-Position nennt wie ein Feld mit 40 px.
+* **`applyAutoSize`.** „Passe dich an deinen Inhalt an" ist eine Frage über die *gezeichnete*
+  Größe. Ohne den Faktor bleibt die Kiste die alte und die Beschriftung wird bei 150 % abgeschnitten.
+
+**Ein echter Fehler ist dabei aufgefallen, und er hat mit Schriftgrößen nichts zu tun.** Der
+Treffertest der Reiterleiste (`WidgetManager`, TabBox-Zweig) rechnete mit `tb->fontSize * vs`,
+während sein `pxr` in Leinwandpixeln steht — jeder Nachbar in derselben Datei (Farbwähler, Cursor,
+Link) nimmt `canvas.scaleY * vs`. Auf jeder Leinwand, die nicht 1:1 ist, wurde also der Reiter
+*neben* dem unter dem Zeiger geschaltet. Gefixt und mit einem Test festgenagelt, der bei
+`displayScale = 2` auf die Mitte des zweiten Reiters zeigt.
+
+**Menüleiste und Tooltip skalieren mit.** Sie sind Chrome und nicht Inhalt, und der Kommentar über
+ihren Maßen sagt bis heute, dass sie an keiner Leinwand hängen — das bleibt richtig. Lesbarkeit ist
+aber kein Layoutthema: eine Anwendung, deren Text man vergrößert hat, deren Menü aber winzig
+bleibt, hat die Einstellung nicht verstanden. Damit Bild und Treffer zusammenbleiben, sind die
+sieben `constexpr` durch *ein* Bündel ersetzt, das eine Funktion aus dem Faktor baut; jede Stelle,
+die vorher eine Konstante las, liest jetzt dieses Bündel. Die *Höhen* wachsen mit der Schrift, denn
+eine 26-Pixel-Leiste hält kein 30-Pixel-Wort; die Abstände bleiben, denn sie sind der Platz um die
+Wörter, und größer geworden sind die Wörter. Bei 100 % kommt byteweise dieselbe Leiste heraus wie
+vorher. Der Tooltip kostete gar nichts: seine Karte wird aus den Wörtern gemessen und wächst von
+selbst mit.
+
+**Skript-Bindung** `theme.setFontScale` / `theme.getFontScale`, neben dem Theme, weil es dieselbe
+Art Einstellung ist: eine Preferences-Seite schreibt sie für die ganze Anwendung. `get` gibt
+zurück, worauf *geklemmt* wurde (0,5 … 3) und nicht, was gefragt wurde — dieselbe Regel wie bei
+`theme.getMode`, weil eine Preferences-Seite die Zahl anzeigt, die wirklich gilt.
+
+**Was bewusst nicht passiert ist.** Der Faktor ist Laufzeitzustand am Manager und *keine*
+Eigenschaft eines Baums: nichts serialisiert ihn, jede ältere `.hasset` bleibt byteweise dieselbe,
+und eine Einstellung deckt alle Widgets auf einmal ab — genau das, wonach ein Leser fragt. Der
+Designer zeigt weiter 100 %; ein Schieberegler dort wäre ein eigener Schritt.

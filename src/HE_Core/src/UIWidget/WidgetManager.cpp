@@ -902,17 +902,43 @@ void WidgetManager::openPopupAtPointer(int widgetId)
 // picture and the hit test together.
 namespace
 {
-	constexpr float kMenuFontPx   = 15.0f;
-	constexpr float kMenuBarH     = 26.0f;
-	constexpr float kMenuTitlePad = 12.0f;   // left and right of a title
-	constexpr float kMenuItemH    = 24.0f;
-	constexpr float kMenuSepH     = 7.0f;
-	constexpr float kMenuItemPad  = 14.0f;
-	constexpr float kMenuMinW     = 120.0f;
-
-	float menuTextWidth(const std::string& s)
+	// One bundle rather than seven constants, and the sizes derived from the
+	// reader's text size. The bar does not scale with the CANVAS — the comment
+	// above still holds, it is not part of any page — but readability is not a
+	// layout question: an application whose text somebody enlarged, with a menu
+	// that stayed tiny, has not understood what was asked of it. Bundling them
+	// is what keeps the promise the old comment made: one number moves the
+	// picture and the hit test together, and both read this.
+	struct MenuMetrics
 	{
-		return HE::measureUIText(HE::sharedUIFont(), s, kMenuFontPx, 0.0f,
+		float fontPx;    // the strip's own type size
+		float barH;      // …and the strip, which has to hold it
+		float titlePad;  // left and right of a title
+		float itemH;
+		float sepH;
+		float itemPad;
+		float minW;
+	};
+
+	MenuMetrics menuMetricsFor(float fontScale)
+	{
+		// The HEIGHTS follow the text, because a 26 px strip cannot hold a 30 px
+		// word. The paddings do not: they are the space around the words, and it
+		// is the words that grew. The `max` keeps 100 % byte for byte the bar it
+		// has always been.
+		const float f = 15.0f * fontScale;
+		return { f,
+		         std::max(26.0f, f + 11.0f),
+		         12.0f,
+		         std::max(24.0f, f + 9.0f),
+		         7.0f,
+		         14.0f,
+		         120.0f };
+	}
+
+	float menuTextWidth(const std::string& s, float fontPx)
+	{
+		return HE::measureUIText(HE::sharedUIFont(), s, fontPx, 0.0f,
 		                         HE::UITextLayout{}).x;
 	}
 }
@@ -924,6 +950,20 @@ void WidgetManager::setMenuBar(std::vector<HE::AppMenu> menus)
 	// index pointing at something else — the classic "the menu I clicked is not
 	// the menu that opened".
 	closeMenu();
+	m_visualDirty = true;
+}
+
+// ── The reader's text size (docs/he-apps-plan.md B10) ───────────────────────
+void WidgetManager::setFontScale(float s)
+{
+	// Out of range does not mean "as far as it goes", it means somebody handed
+	// over a number they had not looked at — 0 would be text that has stopped
+	// existing. Clamped rather than rejected, like setDisplayScale.
+	const float v = std::clamp(s > 0.0f ? s : 1.0f, 0.5f, 3.0f);
+	if (v == m_fontScale) return;
+	m_fontScale = v;
+	// Every label is a different size now, and auto-sized ones a different BOX.
+	// Nothing about the tree changed, so only the drawing has to be redone.
 	m_visualDirty = true;
 }
 
@@ -942,17 +982,19 @@ float WidgetManager::menuBarHeight() const
 	// Native means the bar is not in this window at all, so there is no band to
 	// leave clear: a page told to keep 24 pixels free on macOS would keep them
 	// free of nothing.
-	return (m_menuNative || m_menuBar.empty()) ? 0.0f : kMenuBarH;
+	return (m_menuNative || m_menuBar.empty()) ? 0.0f
+	                                           : menuMetricsFor(m_fontScale).barH;
 }
 
 bool WidgetManager::menuTitleRect(std::size_t i, float& x, float& w) const
 {
 	if (i >= m_menuBar.size()) return false;
+	const MenuMetrics mm = menuMetricsFor(m_fontScale);
 	float pen = 0.0f;
 	for (std::size_t k = 0; k < i; ++k)
-		pen += menuTextWidth(m_menuBar[k].label) + 2.0f * kMenuTitlePad;
+		pen += menuTextWidth(m_menuBar[k].label, mm.fontPx) + 2.0f * mm.titlePad;
 	x = pen;
-	w = menuTextWidth(m_menuBar[i].label) + 2.0f * kMenuTitlePad;
+	w = menuTextWidth(m_menuBar[i].label, mm.fontPx) + 2.0f * mm.titlePad;
 	return true;
 }
 
@@ -964,16 +1006,18 @@ bool WidgetManager::menuPopupRect(float& x, float& y, float& w, float& h) const
 	float tx = 0.0f, tw = 0.0f;
 	if (!menuTitleRect(static_cast<std::size_t>(m_menuOpen), tx, tw)) return false;
 
-	float widest = kMenuMinW;
+	const MenuMetrics mm = menuMetricsFor(m_fontScale);
+	float widest = mm.minW;
 	float height = 0.0f;
 	for (const HE::AppMenuItem& it : m.items)
 	{
-		height += it.separator ? kMenuSepH : kMenuItemH;
+		height += it.separator ? mm.sepH : mm.itemH;
 		if (!it.separator)
-			widest = std::max(widest, menuTextWidth(it.label) + 2.0f * kMenuItemPad);
+			widest = std::max(widest,
+			                  menuTextWidth(it.label, mm.fontPx) + 2.0f * mm.itemPad);
 	}
 	x = tx;
-	y = kMenuBarH;
+	y = mm.barH;
 	w = widest;
 	h = height;
 	return true;
@@ -981,7 +1025,7 @@ bool WidgetManager::menuPopupRect(float& x, float& y, float& w, float& h) const
 
 int WidgetManager::menuTitleAt(float x, float y) const
 {
-	if (m_menuBar.empty() || y < 0.0f || y >= kMenuBarH) return -1;
+	if (m_menuBar.empty() || y < 0.0f || y >= menuMetricsFor(m_fontScale).barH) return -1;
 	for (std::size_t i = 0; i < m_menuBar.size(); ++i)
 	{
 		float tx = 0.0f, tw = 0.0f;
@@ -997,10 +1041,11 @@ int WidgetManager::menuItemAt(float x, float y) const
 	if (!menuPopupRect(px, py, pw, ph)) return -1;
 	if (x < px || x >= px + pw || y < py || y >= py + ph) return -1;
 	const HE::AppMenu& m = m_menuBar[static_cast<std::size_t>(m_menuOpen)];
+	const MenuMetrics mm = menuMetricsFor(m_fontScale);
 	float row = py;
 	for (std::size_t i = 0; i < m.items.size(); ++i)
 	{
-		const float hgt = m.items[i].separator ? kMenuSepH : kMenuItemH;
+		const float hgt = m.items[i].separator ? mm.sepH : mm.itemH;
 		if (y >= row && y < row + hgt)
 			return m.items[i].separator ? -1 : static_cast<int>(i);
 		row += hgt;
@@ -2901,8 +2946,16 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					// shared layout answers in.
 					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					// The three numbers render() lays the strip out with, and
+					// they have to be the SAME three. Two things were wrong
+					// here: the canvas scale was missing (`pxr` is in canvas
+					// pixels, so a tab was hit half a strip away from where it
+					// was drawn on any canvas that scales), and the label needs
+					// the reader's text size like every other measured string.
+					const float tabPx = canvas.scaleY * vs;
 					const int hit = HE::UITabBox::tabAtPoint(
-						pxr, tb->fontSize * vs, tb->tabPadding * vs, tb->tabHeight * vs,
+						pxr, tb->fontSize * tabPx * m_fontScale,
+						tb->tabPadding * tabPx, tb->tabHeight * tabPx,
 						labels, tb->fontAtlasKey, mouseX, mouseY);
 					if (hit >= 0 && hit != tb->activeTab)
 						if (auto* live = dynamic_cast<HE::UITabBox*>(w.tree.find(hot)))
@@ -3785,7 +3838,7 @@ bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight,
 	// Y is measured from the top of the text area, which is where render() puts
 	// the first line. Single-line fields ignore it.
 	const float localY = mouseY - (r.y * canvas.scaleY + kPad);
-	outOffset = ti->caretAtPoint(localX, localY, canvas.scaleY * vs);
+	outOffset = ti->caretAtPoint(localX, localY, canvas.scaleY * vs, m_fontScale);
 	return true;
 }
 
@@ -4183,7 +4236,7 @@ std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y
 	HE::uiElementUnitScale(w.tree, *t, us, vs, &canvas);
 	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
-	return t->linkAt(px, canvas.scaleY * vs, x, y);
+	return t->linkAt(px, canvas.scaleY * vs, x, y, m_fontScale);
 }
 
 bool WidgetManager::isFocusable(const Instance& w, const HE::UIElement& e,
@@ -4772,7 +4825,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 		// Auto-sizing elements fit themselves BEFORE the rects are resolved, so a
 		// text/font change made this frame (script, HorizonCode Set Property) is
 		// already reflected in the layout below.
-		HE::uiApplyAutoSize(w.tree, &canvas);
+		HE::uiApplyAutoSize(w.tree, &canvas, m_fontScale);
 		// Scroll boxes measure their content after auto-size (a text that grew
 		// changes it) and before any rect is asked for.
 		HE::uiUpdateScrollExtents(w.tree);
@@ -4808,6 +4861,9 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			st.dropTarget = (e.id == m_dropElem && m_dropWidget == w.id);
 			st.dragging   = (m_dragActive && e.id == m_dragElem && m_dragWidget == w.id);
 			st.time       = m_uiClock;
+			// The reader's text size. One setting, read here, so no element
+			// type has to know the setting exists.
+			st.fontScale  = m_fontScale;
 			// The blend, eased on the way out. Stored linear (see Instance::
 			// Blend) so a hover that turns round halfway carries on from where
 			// it is; shaped here, because a curve is how it should LOOK and the
@@ -5127,9 +5183,12 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 	const glm::vec4 textColor { 0.90f, 0.90f, 0.92f, 1.0f };
 	const glm::vec4 hotColor  { 0.30f, 0.45f, 0.75f, 1.0f };
 
+	// The same bundle menuTitleRect, menuPopupRect and the two hit tests read.
+	const MenuMetrics mm = menuMetricsFor(m_fontScale);
+
 	UIRenderObject bar;
 	bar.position = { 0.0f, 0.0f };
-	bar.size     = { vpWidth, kMenuBarH };
+	bar.size     = { vpWidth, mm.barH };
 	bar.color    = barColor;
 	out.push_back(bar);
 
@@ -5141,7 +5200,7 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 		{
 			UIRenderObject hl;
 			hl.position = { tx, 0.0f };
-			hl.size     = { tw, kMenuBarH };
+			hl.size     = { tw, mm.barH };
 			hl.color    = hotColor;
 			out.push_back(hl);
 		}
@@ -5149,7 +5208,7 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 		opts.alignH = 1;   // centred in its title box
 		opts.alignV = 1;
 		HE::emitUITextGlyphs(HE::sharedUIFont(), 0, m_menuBar[i].label,
-		                     { tx, 0.0f }, { tw, kMenuBarH }, kMenuFontPx,
+		                     { tx, 0.0f }, { tw, mm.barH }, mm.fontPx,
 		                     textColor, 0, opts, out);
 	}
 
@@ -5170,12 +5229,12 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 	for (std::size_t i = 0; i < m.items.size(); ++i)
 	{
 		const HE::AppMenuItem& it = m.items[i];
-		const float hgt = it.separator ? kMenuSepH : kMenuItemH;
+		const float hgt = it.separator ? mm.sepH : mm.itemH;
 		if (it.separator)
 		{
 			UIRenderObject line;
-			line.position = { px + kMenuItemPad * 0.5f, row + hgt * 0.5f };
-			line.size     = { pw - kMenuItemPad, 1.0f };
+			line.position = { px + mm.itemPad * 0.5f, row + hgt * 0.5f };
+			line.size     = { pw - mm.itemPad, 1.0f };
 			line.color    = { 1.0f, 1.0f, 1.0f, 0.18f };
 			out.push_back(line);
 		}
@@ -5192,8 +5251,8 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 			HE::UITextLayout opts;
 			opts.alignV = 1;
 			HE::emitUITextGlyphs(HE::sharedUIFont(), 0, it.label,
-			                     { px + kMenuItemPad, row }, { pw - 2.0f * kMenuItemPad, hgt },
-			                     kMenuFontPx, textColor, 0, opts, out);
+			                     { px + mm.itemPad, row }, { pw - 2.0f * mm.itemPad, hgt },
+			                     mm.fontPx, textColor, 0, opts, out);
 		}
 		row += hgt;
 	}
@@ -5267,7 +5326,8 @@ void WidgetManager::drawOpenDropdown(float vpWidth, float vpHeight,
 		opts.alignV = 1;   // centred in its row
 		HE::emitUITextGlyphs(HE::sharedUIFont(), 0, cb->options[i],
 		                     { x + pad, ry }, { wid - 2.0f * pad, rowH },
-		                     cb->fontSize * sy * evs, cb->textColor, 0, opts, out);
+		                     cb->fontSize * sy * evs * m_fontScale, cb->textColor,
+		                     0, opts, out);
 	}
 }
 
@@ -5284,8 +5344,10 @@ void WidgetManager::drawTooltip(float vpWidth, float vpHeight,
 	// A tooltip belongs to something you can still see and still use.
 	if (!HE::uiElementEffectiveVisible(w->tree, *e)) return;
 
-	constexpr float kFontPx = 14.0f;
-	constexpr float kPad    = 6.0f;
+	// The reader's text size applies here too, and it costs nothing: the card is
+	// measured from the words, so it grows with them by itself.
+	const float kFontPx = 14.0f * m_fontScale;
+	constexpr float kPad = 6.0f;
 	const glm::vec2 text = HE::measureUIText(HE::sharedUIFont(), e->tooltip, kFontPx,
 	                                         0.0f, HE::UITextLayout{});
 	const float bw = text.x + 2.0f * kPad;

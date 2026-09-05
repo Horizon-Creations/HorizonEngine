@@ -1251,7 +1251,7 @@ namespace
     // layout. Three callers — measure, draw, hit test — and they must agree
     // down to the pixel or a link is clickable somewhere it is not drawn.
     HE::UIRichLayout richLayoutOf(const UIText& t, const HE::UIWidgetRect& px,
-                                  float pxScaleY)
+                                  float pxScaleY, float fontScale)
     {
         HE::UITextLayout opts;
         opts.alignH = t.alignH;
@@ -1260,17 +1260,18 @@ namespace
         const HE::BakedUIFont* f = HE::UIFontCache::find(t.fontAtlasKey);
         const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
         return HE::uiLayoutRichText(font, t.parsed(), { px.x, px.y }, { px.w, px.h },
-                                    t.fontSize * pxScaleY, opts, t.fontAtlasKey);
+                                    t.fontSize * pxScaleY * fontScale, opts, t.fontAtlasKey);
     }
 }
 
-std::string UIText::linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y) const
+std::string UIText::linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y,
+                           float fontScale) const
 {
     if (!richText || !parsed().hasLinks) return {};
-    return HE::uiRichLinkAt(parsed(), richLayoutOf(*this, px, pxScaleY), x, y);
+    return HE::uiRichLinkAt(parsed(), richLayoutOf(*this, px, pxScaleY, fontScale), x, y);
 }
 
-void UIText::applyAutoSize(float resolvedWidth)
+void UIText::applyAutoSize(float resolvedWidth, float fontScale)
 {
     if (!autoSize) return;
     HE::UITextLayout opts;
@@ -1281,6 +1282,11 @@ void UIText::applyAutoSize(float resolvedWidth)
     // axis sizeX is the difference to the anchored span (often negative), so it
     // would wrap the text at one unit.
     const float wrapW = wordWrap ? std::max(1.0f, resolvedWidth) : 0.0f;
+    // The size the reader actually sees, in canvas units — sizeX/sizeY are
+    // authored units, and the measurement has to be in the same space as what
+    // it is going to be written into. A box that fits at 100 % clips at 150 %,
+    // which is the whole reason this argument exists.
+    const float fs = fontSize * fontScale;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
     // Rich text measures through the rich layout, or a label would be sized for
     // the markup it is written in rather than the words it shows — the tags
@@ -1291,21 +1297,21 @@ void UIText::applyAutoSize(float resolvedWidth)
         const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
         m = HE::uiLayoutRichText(font, parsed(), { 0.0f, 0.0f },
                                  { wrapW > 0.0f ? wrapW : 1.0e6f, 0.0f },
-                                 fontSize, opts, fontAtlasKey).size;
+                                 fs, opts, fontAtlasKey).size;
     }
     else
-        m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)
-              : HE::measureUIText(text, fontSize, wrapW, opts);
+        m = f ? HE::measureUIText(*f, text, fs, wrapW, opts)
+              : HE::measureUIText(text, fs, wrapW, opts);
     // An axis the anchor stretches belongs to the parent — content does not get
     // to resize it, or a label anchored across a side would come out one text
     // width WIDER than the side it is anchored to.
     const bool stretchX = anchorMaxX > anchorMinX + 1e-4f;
     const bool stretchY = anchorMaxY > anchorMinY + 1e-4f;
-    if (!wordWrap && !stretchX) sizeX = m.x + fontSize * 0.25f;
-    if (!stretchY)              sizeY = m.y + fontSize * 0.35f;
+    if (!wordWrap && !stretchX) sizeX = m.x + fs * 0.25f;
+    if (!stretchY)              sizeY = m.y + fs * 0.35f;
 }
 
-void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
+void UIText::render(const UIWidgetRect& px, const UIElementRenderState& st,
                     const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
     if (richText)
@@ -1315,14 +1321,14 @@ void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
         // `color` is what a run without one of its own draws in, so a rich label
         // with no colour tags is exactly the label it was before the flag.
         HE::uiEmitRichText(font, fontAtlasKey, parsed(),
-                           richLayoutOf(*this, px, pxScaleY), color, layer, out);
+                           richLayoutOf(*this, px, pxScaleY, st.fontScale), color, layer, out);
         return;
     }
     HE::UITextLayout opts;
     opts.alignH = alignH;
     opts.alignV = alignV;
     opts.wrap   = wordWrap;
-    emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
+    emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, st.fontPx(fontSize, pxScaleY),
               color, opts, out);
 }
 
@@ -1353,7 +1359,7 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // (to place its label, say) grew a box the size of half the screen. Capped
     // at the element's height so a deliberately tiny one still fits, and
     // centred in it so the box sits with the text rather than above it.
-    const float box = std::min(px.h, fontSize * pxScaleY * 1.15f);
+    const float box = std::min(px.h, st.fontPx(fontSize, pxScaleY) * 1.15f);
     const float by  = px.y + (px.h - box) * 0.5f;
     const glm::vec4 bcHover = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
     glm::vec4 bc = glm::mix(boxColor, bcHover, st.hoverAmount());
@@ -1391,7 +1397,7 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float gap = 0.4f * box;   // scales with the box, not a fixed 8 px
     const float lx = px.x + ctrl + gap;
     emitText(*this, label, { lx, px.y }, { px.w - ctrl - gap, px.h },
-             fontSize * pxScaleY, textColor, /*centerH=*/false, out);
+             st.fontPx(fontSize, pxScaleY), textColor, /*centerH=*/false, out);
 }
 
 // ── Slider ───────────────────────────────────────────────────────────────────
@@ -1534,7 +1540,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float rightPad = hasSteppers ? pad + (px.x + px.w - upR.x) : pad;
     const glm::vec2 tp{ px.x + pad, px.y };
     const glm::vec2 ts{ px.w - pad - rightPad, px.h };
-    const float sizePx = fontSize * pxScaleY;
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
     if (hasSteppers)
     {
         // A chevron out of three rows rather than a glyph: the field draws with
@@ -1797,9 +1803,14 @@ std::vector<HE::UITextVisualLine> UITextInput::visualLines() const
 
 // Byte offset in `text` nearest to a point `localX` pixels into the field's
 // text area — what a click has to answer to put the caret where it was aimed.
-size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY) const
+size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY,
+                                 float fontScale) const
 {
-    const float sizePx = fontSize * pxScaleY;
+    // The same product render() drew with. This is the first of the two places
+    // that break QUIETLY when the reader's text size is not passed through: the
+    // glyphs are wide and the walk below measures them narrow, so the caret
+    // lands a few characters short of where it was aimed and nothing looks wrong.
+    const float sizePx = fontSize * pxScaleY * fontScale;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
     HE::UITextLayout opts;
     auto runWidth = [&](std::string run)
@@ -1868,7 +1879,7 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // a fixed 6 puts the first letters out over the curve.
     const float pad = contentInset(cornerRadius.x * pxScaleY);
     emitText(*this, currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
-             fontSize * pxScaleY, textColor, false, out);
+             st.fontPx(fontSize, pxScaleY), textColor, false, out);
     // The indicator. It used to be the LETTER "v" set in the UI font, which is
     // what it looked like: a letter. Now it is the same triangle the designer
     // draws, from the same numbers, and it turns over while the list is down —
@@ -2277,11 +2288,15 @@ const UIPropTable& UITabBox::propTable() const
     return t;
 }
 
-void UITabBox::render(const UIWidgetRect& px, const UIElementRenderState&,
+void UITabBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                       const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
+    // Only the LABEL takes the reader's text size. The strip stays the height it
+    // was authored at, like every other piece of geometry — that is the line
+    // between "text is bigger" and "the whole interface is zoomed", and the
+    // second one is the display scale, which lives somewhere else.
     const float tabH   = tabHeight * pxScaleY;
-    const float sizePx = fontSize  * pxScaleY;
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
     const float padPx  = tabPadding * pxScaleY;
 
     // The page area first, behind everything the pages themselves draw.
@@ -2582,7 +2597,7 @@ const UIPropTable& UIDatePicker::propTable() const
     return t;
 }
 
-void UIDatePicker::render(const UIWidgetRect& px, const UIElementRenderState&,
+void UIDatePicker::render(const UIWidgetRect& px, const UIElementRenderState& st,
                           const HE::UUID&, float pxScaleY,
                           std::vector<UIRenderObject>& out) const
 {
@@ -2591,7 +2606,7 @@ void UIDatePicker::render(const UIWidgetRect& px, const UIElementRenderState&,
     quad(out, px.x, px.y, px.w, px.h, backColor);
 
     const Layout L = layoutIn(px);
-    const float sizePx = fontSize * pxScaleY;
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
     if (headerColor.a > 0.0f)
         quad(out, L.header.x, L.header.y, L.header.w, L.header.h, headerColor);
 

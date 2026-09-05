@@ -299,6 +299,32 @@ struct UIElementRenderState
     // spinner beside it. A caller that builds its own state (the designer's
     // preview, the tests) leaves it at 0 and sees the first frame of the cycle.
     float time = 0.0f;
+
+    // The reader's own text size, as a factor on every authored font size —
+    // 1 is what the designer drew, 1.5 is a reader who needs it bigger. It
+    // rides HERE and not in `pxScaleY` on purpose: pxScaleY is the canvas
+    // turning units into pixels, and it also stretches corner radii, tab
+    // strips and stepper arrows. Text that grows while its rounding stays put
+    // is the point; a whole interface zoomed is the display scale, and that
+    // already exists (WidgetManager::setDisplayScale).
+    //
+    // 1.0 and not 0 for the same reason hoverT is -1: the designer's preview
+    // and every test build their own state, and a 0 default would silently
+    // draw every label at nothing.
+    //
+    // The rule that makes it usable rather than merely present: EVERY place
+    // where a font size becomes pixels or gets measured must see this factor,
+    // or the picture and the pointer say different things. The two that break
+    // quietly are UITextInput::caretAtPoint (the caret lands on the wrong
+    // character) and applyAutoSize (labels are cut off at 150 %), and both take
+    // it as a trailing argument because they have no render state to read.
+    float fontScale = 1.0f;
+
+    // What an authored font size is worth in pixels, once. Every render() goes
+    // through this instead of writing the product out, so there is one place to
+    // look when the answer is wrong.
+    float fontPx(float fontSize, float pxScaleY) const
+    { return fontSize * pxScaleY * fontScale; }
 };
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };
@@ -837,7 +863,13 @@ public:
     // not touch it — but a wrapping text still has to know how wide it may run,
     // and there the field alone no longer says (it is the difference to the
     // anchored span, not the width).
-    virtual void applyAutoSize(float resolvedWidth) { (void)resolvedWidth; }
+    //
+    // `fontScale` is the reader's text size (UIElementRenderState::fontScale).
+    // It has to arrive here too, because a box that fits the text at 100 % cuts
+    // it in half at 150 % — "fit your content" is a question about the drawn
+    // size, not about the authored one.
+    virtual void applyAutoSize(float resolvedWidth, float fontScale = 1.0f)
+    { (void)resolvedWidth; (void)fontScale; }
 
     // Type-specific JSON (base fields are handled by the tree serializer).
     virtual void writeJson(nlohmann::json&) const {}

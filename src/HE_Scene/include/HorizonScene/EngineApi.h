@@ -693,6 +693,11 @@ namespace theme {
     void        setMode(Ctx&, const std::string& mode);    // "Light", "Dark" or "System"
     std::string mode(Ctx&);        // what it RESOLVED to: "Light" or "Dark"
     std::string preference(Ctx&);  // what was ASKED for: + "System"
+    // The reader's text size (B10): a factor on every authored font size and on
+    // nothing else. Clamped to 0.5 … 3, and fontScale gives back what it was
+    // clamped TO, not what was asked for.
+    void        setFontScale(Ctx&, float scale);
+    float       fontScale(Ctx&);
 }
 
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────

@@ -120,7 +120,7 @@ public:
 
     // Element size implied by the current text/font (see autoSize). Callers apply
     // it before layout so the rect the glyphs lay out in already fits them.
-    void applyAutoSize(float resolvedWidth) override;
+    void applyAutoSize(float resolvedWidth, float fontScale = 1.0f) override;
 
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override;
@@ -142,7 +142,8 @@ public:
     const HE::UIRichText& parsed() const;
     // Which link is at this point, or "" — the same layout the draw uses, which
     // is the whole reason it is a function and not a second calculation.
-    std::string linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y) const;
+    std::string linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y,
+                       float fontScale = 1.0f) const;
     // A label is inert; a label with a link in it is not. Asking the MARKUP
     // rather than the flag is what keeps a rich label that happens to have no
     // link from swallowing the clicks meant for whatever is behind it.
@@ -547,7 +548,8 @@ public:
     // from the top of that area and only matters while multiline; it takes a
     // real argument rather than defaulting to 0 on purpose, because a defaulted
     // zero would quietly mean "the first line" at every call site that forgot.
-    size_t caretAtPoint(float localX, float localY, float pxScaleY) const;
+    size_t caretAtPoint(float localX, float localY, float pxScaleY,
+                        float fontScale = 1.0f) const;
     // The rows the field shows, wrapping included. THE line source: drawing,
     // clicking and Home/End/Up/Down all ask this, because a field where the
     // caret disagrees with the glyphs about where row two starts is a field

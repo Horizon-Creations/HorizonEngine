@@ -1039,6 +1039,10 @@ std::string mode(Ctx& c)
 { return c.world ? ScriptApi::themeMode(*c.world) : std::string("Dark"); }
 std::string preference(Ctx& c)
 { return c.world ? ScriptApi::themePreference(*c.world) : std::string("System"); }
+void setFontScale(Ctx& c, float s)
+{ if (c.world) ScriptApi::setFontScale(*c.world, s); }
+float fontScale(Ctx& c)
+{ return c.world ? ScriptApi::fontScale(*c.world) : 1.0f; }
 } // namespace theme
 
 // ── Cursor ───────────────────────────────────────────────────────────────────
@@ -3987,6 +3991,14 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "theme.getPreference", "Theme", false, {}, {{"preference", P::String}},
             "HE::api::theme::preference",
             [](Ctx& c, const VV&){ return VV{ Value::ofString(theme::preference(c)) }; } });
+        // The reader's text size, beside the theme because it is the same kind
+        // of setting: one switch for the whole application (B10).
+        t.push_back({ "theme.setFontScale", "Theme", true, {{"scale", P::Float}}, {},
+            "HE::api::theme::setFontScale",
+            [](Ctx& c, const VV& a){ theme::setFontScale(c, aF(a, 0)); return VV{}; } });
+        t.push_back({ "theme.getFontScale", "Theme", false, {}, {{"scale", P::Float}},
+            "HE::api::theme::fontScale",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(theme::fontScale(c)) }; } });
 
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
@@ -4731,6 +4743,8 @@ const std::vector<ApiFn>& registry()
             { "theme.set", "Set Theme" }, { "theme.setMode", "Set Theme Mode" },
             { "theme.getMode", "Get Theme Mode" },
             { "theme.getPreference", "Get Theme Preference" },
+            { "theme.setFontScale", "Set Text Size" },
+            { "theme.getFontScale", "Get Text Size" },
             { "cursor.setVisible", "Set Cursor Visible" },
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },

@@ -358,7 +358,11 @@ HE_API bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
 // Let every element that auto-sizes fit itself to its content. Call BEFORE
 // uiElementRect so the rects already reflect the new sizes; cheap enough to run
 // each frame (only text elements with AutoSize on do any work).
-HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = nullptr);
+// `fontScale` is the reader's text size (UIElementRenderState::fontScale): a
+// box fitting its content has to fit the text as DRAWN, or every auto-sized
+// label clips the moment somebody turns the size up.
+HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = nullptr,
+                            float fontScale = 1.0f);
 
 // ── Resolve theme roles into ordinary colours ────────────────────────────────
 // Every property an element bound to a role (see UIElement::themeRoles) is
