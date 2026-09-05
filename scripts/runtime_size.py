@@ -24,9 +24,18 @@ forward renderer, no shader cross-compiler) and the one with it off (the
 software rasterizer alone). --flavor says which is being weighed; without it the
 directory name decides, because that name is what the exporter goes by too.
 
+And there are three such directories PER PLATFORM, which is the second half of
+the same thought: a Windows runtime carries the MSVC redistributable and a .exe,
+a Linux one carries .so files and whatever bundle_native_deps.sh staged next to
+them, a macOS one carries dylibs. Those trees weigh different amounts for
+reasons that have nothing to do with a regression, so the thresholds are keyed
+by platform as well as by flavour and a platform nobody has measured is reported
+and skipped rather than judged by another platform's number.
+
 Usage:
     scripts/runtime_size.py [RUNTIME_DIR] [--check] [--build-type=TYPE]
                             [--flavor=game|app-advanced|app-basic]
+                            [--platform=darwin|win32|linux]
 
     --check exits non-zero when a threshold is exceeded. Without it the script
     only reports, which is what one wants while cutting.
@@ -36,6 +45,11 @@ Usage:
     the same code is several times the size, and failing on that would be the
     check crying wolf at the one thing it is not measuring. Anything that is not
     a release configuration therefore REPORTS and skips.
+
+    --platform says which platform's thresholds apply. Without it the platform
+    this script is RUNNING on decides, which is right for every build that
+    measures its own output; the flag exists for weighing a tree that was
+    downloaded from another platform's CI run.
 
 Exit codes: 0 fine (or reporting), 1 over threshold, 2 nothing to measure or
 nothing this may judge.
@@ -58,21 +72,64 @@ import sys
 # A flavour whose limits are None is REPORTED and skipped: that is the honest
 # state for one nobody has built and measured yet, and it is what the first
 # version of the A3 table got wrong by writing down a number it had not weighed.
+#
+# Keyed by PLATFORM first, because the three trees a platform produces are only
+# comparable to each other. Windows ships the MSVC redistributable and a .exe
+# where macOS ships nothing of the sort; Linux stages its third-party .so next
+# to the binaries where macOS rewrites install names. Judging one platform's
+# tree by another's number would fail on the difference between platforms, which
+# is the one thing this check must never report as a regression.
+#
+# A platform or flavour whose limits are None is REPORTED and skipped: that is
+# the honest state for one nobody has built and measured yet, and it is what the
+# first version of the A3 table got wrong by writing down a number it had not
+# weighed.
 LIMITS = {
-    # (total incl. Python, total without Python)
-    "game":         (90.0, 32.0),
-    # Both measured 04.09.2026, Release, macOS/arm64, on the tree
-    # scripts/build_runtimes.py produces, plus roughly 10% headroom:
-    #   app-advanced  76.9 MB total, 22.2 MB without python  (rendering 1.1 MB)
-    #   app-basic     76.2 MB total, 21.5 MB without python  (rendering 0.4 MB)
-    # The two differ by 0.7 MB and that IS the whole difference: one Metal
-    # backend against one software rasterizer. Everything else they carry is the
-    # same, which is why their limits are nearly the same number and why a jump
-    # in either is worth looking at.
-    "app-advanced": (85.0, 26.0),
-    "app-basic":    (84.0, 25.0),
+    # ── macOS/arm64 ─────────────────────────────────────────────────────────
+    "darwin": {
+        # (total incl. Python, total without Python)
+        "game":         (90.0, 32.0),
+        # Both measured 04.09.2026, Release, macOS/arm64, on the tree
+        # scripts/build_runtimes.py produces, plus roughly 10% headroom:
+        #   app-advanced  76.9 MB total, 22.2 MB without python  (rendering 1.1 MB)
+        #   app-basic     76.2 MB total, 21.5 MB without python  (rendering 0.4 MB)
+        # The two differ by 0.7 MB and that IS the whole difference: one Metal
+        # backend against one software rasterizer. Everything else they carry is
+        # the same, which is why their limits are nearly the same number and why
+        # a jump in either is worth looking at.
+        "app-advanced": (85.0, 26.0),
+        "app-basic":    (84.0, 25.0),
+    },
+    # ── Windows/x64 ─────────────────────────────────────────────────────────
+    "win32": {
+        "game":         None,
+        "app-advanced": None,
+        "app-basic":    None,
+    },
+    # ── Linux/x64 ───────────────────────────────────────────────────────────
+    "linux": {
+        "game":         None,
+        "app-advanced": None,
+        "app-basic":    None,
+    },
 }
+FLAVORS = ("game", "app-advanced", "app-basic")
 DEFAULT_FLAVOR = "game"
+
+
+def current_platform():
+    """sys.platform, folded onto the three keys of LIMITS.
+
+    Anything else (a BSD, a platform nobody has built this on) is returned
+    unchanged and therefore misses the table, which lands it in the
+    reported-and-skipped path rather than borrowing a threshold that was never
+    measured there.
+    """
+    if sys.platform.startswith("win"):
+        return "win32"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform
 
 # Deploy directory name → flavour, so a caller that only knows the path (ctest,
 # CI) does not have to repeat itself. Same spelling as HE_RUNTIME_DIR_NAME in the
@@ -97,6 +154,18 @@ BUCKETS = [
     ("core",      lambda n, rel: "HorizonCore" in n),
     ("sdl",       lambda n, rel: n.startswith("libSDL") or n.startswith("SDL")),
     ("compress",  lambda n, rel: "zstd" in n or "lz4" in n),
+    # Windows only (he_bundle_crt in the root CMakeLists.txt): the MSVC
+    # redistributable, bundled so a clean PC needs no redist install. Its own
+    # bucket rather than "unaccounted", because it ships on purpose and only
+    # there — a platform where this bucket is missing is not a platform that
+    # lost something.
+    ("crt",       lambda n, rel: n.lower().startswith(("vcruntime", "msvcp",
+                                                       "concrt", "vccorlib"))),
+    # Runtime-loaded shader binaries (Vulkan .spv, D3D12 DXR .cso) deployed as a
+    # directory next to the exe. Matched by their PLACE, not their extension:
+    # the set of files in there is decided by which backends the flavour built,
+    # which is exactly what these numbers are meant to show moving.
+    ("shaders",   lambda n, rel: rel.replace("\\", "/").startswith("Shaders/")),
     ("exe",       lambda n, rel: n in ("HorizonGame", "HorizonGame.exe")),
 ]
 
@@ -129,21 +198,26 @@ def main(argv):
     check = "--check" in argv[1:]
     build_type = ""
     flavor = ""
+    platform = ""
     for a in argv[1:]:
         if a.startswith("--build-type="):
             build_type = a.split("=", 1)[1]
         elif a.startswith("--flavor="):
             flavor = a.split("=", 1)[1]
+        elif a.startswith("--platform="):
+            platform = a.split("=", 1)[1]
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     root = args[0] if args else os.path.join(repo, "out", "deploy", "Game")
 
     if not flavor:
         flavor = DIR_TO_FLAVOR.get(os.path.basename(os.path.normpath(root)),
                                    DEFAULT_FLAVOR)
-    if flavor not in LIMITS:
+    if flavor not in FLAVORS:
         print(f"runtime_size: unknown flavour '{flavor}' "
-              f"(expected one of {', '.join(LIMITS)})")
+              f"(expected one of {', '.join(FLAVORS)})")
         return 2
+    if not platform:
+        platform = current_platform()
 
     if not os.path.isdir(root):
         # Not a failure: a configure without the deploy step, a fresh checkout,
@@ -159,7 +233,7 @@ def main(argv):
 
     print(f"Runtime measured at: {root}"
           + (f"  ({build_type} build)" if build_type else "")
-          + f"  [flavour: {flavor}]")
+          + f"  [flavour: {flavor}, platform: {platform}]")
     print()
     print(f"{'component':<14}{'MB':>10}")
     print("-" * 24)
@@ -191,13 +265,20 @@ def main(argv):
               "measured on a Release tree, so this run only reports (skipped)")
         return 2
 
-    limits = LIMITS[flavor]
+    if platform not in LIMITS:
+        # A platform nobody has weighed this on. Borrowing another one's number
+        # would fail on the difference between platforms, not on a regression.
+        print()
+        print(f"runtime_size: platform '{platform}' has no measured thresholds — "
+              "reported only (skipped)")
+        return 2
+    limits = LIMITS[platform][flavor]
     if limits is None:
         # An unmeasured flavour. Inventing a limit here would be the exact
         # mistake this file exists to prevent, so it reports and stops.
         print()
-        print(f"runtime_size: flavour '{flavor}' has no measured threshold yet — "
-              "reported only (skipped)")
+        print(f"runtime_size: flavour '{flavor}' has no measured threshold on "
+              f"{platform} yet — reported only (skipped)")
         return 2
     limit_total, limit_no_py = limits
 
@@ -209,7 +290,8 @@ def main(argv):
                       f"> {limit_no_py:.1f} MB")
     if failed:
         print()
-        print(f"FAIL: the shipped '{flavor}' runtime grew past its threshold")
+        print(f"FAIL: the shipped '{flavor}' runtime grew past its "
+              f"{platform} threshold")
         for f in failed:
             print(f"  {f}")
         print(f"  measured at {root}")
@@ -219,7 +301,7 @@ def main(argv):
               " number.")
         return 1
     print()
-    print(f"OK: within the '{flavor}' thresholds "
+    print(f"OK: within the '{flavor}' thresholds on {platform} "
           f"({limit_total:.0f} MB total, {limit_no_py:.0f} MB without python)")
     return 0
 

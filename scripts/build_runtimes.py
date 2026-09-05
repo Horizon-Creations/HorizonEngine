@@ -8,19 +8,26 @@ a packaged build, and there are THREE of them per platform.
     app-advanced  the platform's forward renderer alone, cross-compiler OFF
     app-basic     RendererSoftware alone,                cross-compiler OFF
 
-The game flavour is the normal build of this repository and is NOT built here —
-building the editor already builds and deploys it. This script builds the two
-app flavours, each in its own build directory, because the two differences are
-whole-tree ones: HE_ENABLE_SHADERC decides whether glslang is fetched at all,
-and the backend set is baked into one shared HorizonRendering. A second output
-of the game build cannot differ in either.
+By default this script builds the two APP flavours, each in its own build
+directory, because the two differences are whole-tree ones: HE_ENABLE_SHADERC
+decides whether glslang is fetched at all, and the backend set is baked into one
+shared HorizonRendering. A second output of the game build cannot differ in
+either.
+
+The game flavour is the normal build of this repository, so on a dev box it is
+already there — building the editor builds and deploys it — and asking for it
+here would only build it a second time. `--flavor game` exists anyway, for the
+one place where that is not true: a CI job that weighs all three runtimes of a
+platform wants them built the same way, from the same recipe, in one run. Ask
+for it explicitly; it is never a default.
 
 Each flavour lands in <deploy>/AppAdvanced resp. <deploy>/AppBasic, next to the
 Game directory the editor already deploys — which is where findRuntimeBundle()
 looks for them.
 
 Usage:
-    scripts/build_runtimes.py [--flavor app-advanced] [--flavor app-basic]
+    scripts/build_runtimes.py [--flavor game] [--flavor app-advanced]
+                              [--flavor app-basic]
                               [--build-type Release] [--jobs N]
                               [--deploy-dir DIR] [--build-root DIR]
                               [--define NAME=VALUE ...]
@@ -81,11 +88,22 @@ def find_generator():
     return []
 
 
-def existing_sources():
-    """-DFETCHCONTENT_SOURCE_DIR_<PKG> for every dependency already checked out."""
+def existing_sources(build_root=None):
+    """-DFETCHCONTENT_SOURCE_DIR_<PKG> for every dependency already checked out.
+
+    A dev box has a build tree to borrow from; a CI runner starts with none, and
+    there the first flavour of the run becomes the one the next two borrow from.
+    That is why build_root is searched as well: without it, a three-flavour run
+    clones SDL, Jolt and Recast three times over for nothing.
+    """
+    trees = [os.path.join(REPO, "cmake-build-release"),
+             os.path.join(REPO, "cmake-build-debug")]
+    if build_root and os.path.isdir(build_root):
+        trees += [os.path.join(build_root, d)
+                  for d in sorted(os.listdir(build_root))]
     args = []
-    for tree in ("cmake-build-release", "cmake-build-debug"):
-        deps = os.path.join(REPO, tree, "_deps")
+    for tree in trees:
+        deps = os.path.join(tree, "_deps")
         if not os.path.isdir(deps):
             continue
         for pkg in SHARED_SOURCES:
@@ -111,7 +129,7 @@ def build(flavor, args):
                  # they link the editor-side tools this flavour deliberately drops.
                  "-DHE_BUILD_TESTS=OFF"]
     configure += [f"-D{d}" for d in args.define]
-    configure += find_generator() + existing_sources()
+    configure += find_generator() + existing_sources(args.build_root)
     if subprocess.call(configure) != 0:
         print(f"build_runtimes: configure failed for {flavor}", file=sys.stderr)
         return False
@@ -139,8 +157,10 @@ def build(flavor, args):
 def main(argv):
     p = argparse.ArgumentParser()
     p.add_argument("--flavor", action="append", default=[],
-                   choices=["app-advanced", "app-basic"],
-                   help="repeatable; default is both app flavours")
+                   choices=["game", "app-advanced", "app-basic"],
+                   help="repeatable; default is both app flavours. 'game' is "
+                        "the ordinary build of this repository and has to be "
+                        "asked for by name")
     p.add_argument("--build-type", default="Release")
     p.add_argument("--jobs", type=int, default=0)
     p.add_argument("--deploy-dir", default=os.path.join(REPO, "out", "deploy"))
