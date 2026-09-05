@@ -2654,6 +2654,16 @@ namespace
 	  "rotates about. 0,0 is the top left corner, 0.5,0.5 the middle, 1,1 the "
 	  "bottom right.",
 	  "", "ui#designer" },
+	{ "UI Widget/Min Size", "",
+	  "The width and height this widget never goes below, whoever decides its "
+	  "size: a layout box, an anchor stretched across the parent, or its own "
+	  "content. 0 on an axis means no floor there.",
+	  "", "ui#designer" },
+	{ "UI Widget/Max Size", "",
+	  "The width and height it never goes above. 0 on an axis means no ceiling "
+	  "there. A ceiling below the floor loses, because \"never smaller than "
+	  "this\" is the promise a layout can keep.",
+	  "", "ui#designer" },
 	{ "UI Widget/Left/Right", "",
 	  "The margins from the parent's left and right edges. They replace position "
 	  "and width because this widget is anchored across the whole horizontal "

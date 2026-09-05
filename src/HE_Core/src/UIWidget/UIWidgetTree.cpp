@@ -713,8 +713,53 @@ void uiGridTracks(const UIWidgetTree& tree, const UIGrid& grid,
     outRows    = g.rowSize;
 }
 
+namespace
+{
+    // The floor and the ceiling, applied to the FINISHED rectangle. Every way an
+    // element can get a rect runs through here, which is the point: the bound has
+    // to hold for a box's child (whose size field the box ignores) and for a
+    // stretched anchor (whose size field is a negative inset) just as much as for
+    // an element that places itself.
+    //
+    // The bounds are in the element's own units, the rect is in canvas pixels, so
+    // one conversion each. Where a bound bites, the element keeps its PIVOT where
+    // it was — a centred element stays centred, a left-pinned one keeps its left
+    // edge. And the floor is applied after the ceiling, so a max below a min
+    // loses: "never smaller than this" is the promise a layout can keep.
+    void applySizeBounds(const UIWidgetTree& tree, const UIElement& e,
+                         const UIWidgetCanvas* canvas, UIWidgetRect& r)
+    {
+        if (e.minSizeX <= 0.0f && e.minSizeY <= 0.0f &&
+            e.maxSizeX <= 0.0f && e.maxSizeY <= 0.0f) return;
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, e, us, vs, canvas);
+        const auto bound = [](float extent, float lo, float hi)
+        {
+            if (hi > 0.0f && extent > hi) extent = hi;
+            if (lo > 0.0f && extent < lo) extent = lo;
+            return extent;
+        };
+        const float w = bound(r.w, e.minSizeX * us, e.maxSizeX * us);
+        const float h = bound(r.h, e.minSizeY * vs, e.maxSizeY * vs);
+        r.x += (r.w - w) * e.pivotX;
+        r.y += (r.h - h) * e.pivotY;
+        r.w = w;
+        r.h = h;
+    }
+}
+
 UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                            const UIWidgetCanvas* canvas)
+{
+    UIWidgetRect r = uiElementRectUnbounded(tree, e, canvas);
+    applySizeBounds(tree, e, canvas, r);
+    return r;
+}
+
+// Split out so the bound is applied in exactly one place instead of at each of
+// the seven ways out of this walk.
+UIWidgetRect uiElementRectUnbounded(const UIWidgetTree& tree, const UIElement& e,
+                                    const UIWidgetCanvas* canvas)
 {
     // A child of a layout container does not place itself: the box does, and
     // the child's own anchors and position are not consulted at all.
@@ -985,6 +1030,19 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
     std::sort(boxes.begin(), boxes.end(),
               [](const auto& a, const auto& b){ return a.first > b.first; });
 
+    // The measured extent, held between the element's floor and its ceiling. The
+    // rect is bounded anyway (applySizeBounds), but the SIZE FIELD has to be too:
+    // it is what a parent box adds up when it stacks its children, so a box that
+    // measured itself twice as tall as its Max would push its siblings down by a
+    // height it does not have.
+    const auto held = [](const UIElement& e, float v, bool xAxis)
+    {
+        const float hi = xAxis ? e.maxSizeX : e.maxSizeY;
+        const float lo = xAxis ? e.minSizeX : e.minSizeY;
+        if (hi > 0.0f && v > hi) v = hi;
+        return lo > 0.0f ? std::max(lo, v) : v;
+    };
+
     for (auto& [depth, box] : boxes)
     {
         // A wrap box is measured by WRAPPING, not by stacking — and only on the
@@ -997,8 +1055,7 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
             float wus = 1.0f, wvs = 1.0f;
             uiElementUnitScale(tree, *wb, wus, wvs, canvas);
             const float pad = std::max(0.0f, wb->padding);
-            wb->sizeY = std::max(wb->minSizeY,
-                                 content / std::max(1e-4f, wvs) + 2.0f * pad);
+            wb->sizeY = held(*wb, content / std::max(1e-4f, wvs) + 2.0f * pad, false);
             continue;
         }
         // A grid is measured by its TRACKS. Fixed and `auto` ones add up;
@@ -1011,10 +1068,8 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
             float gus = 1.0f, gvs = 1.0f;
             uiElementUnitScale(tree, *gr, gus, gvs, canvas);
             const float pad = std::max(0.0f, gr->padding);
-            gr->sizeX = std::max(gr->minSizeX,
-                                 sg.contentW / std::max(1e-4f, gus) + 2.0f * pad);
-            gr->sizeY = std::max(gr->minSizeY,
-                                 sg.contentH / std::max(1e-4f, gvs) + 2.0f * pad);
+            gr->sizeX = held(*gr, sg.contentW / std::max(1e-4f, gus) + 2.0f * pad, true);
+            gr->sizeY = held(*gr, sg.contentH / std::max(1e-4f, gvs) + 2.0f * pad, false);
             continue;
         }
         const bool  vert = box->stacksVertically();
@@ -1034,8 +1089,8 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
         if (count > 1) along += gap * static_cast<float>(count - 1);
         const float w = (vert ? across : along) + 2.0f * pad;
         const float h = (vert ? along : across) + 2.0f * pad;
-        box->sizeX = std::max(box->minSizeX, w);
-        box->sizeY = std::max(box->minSizeY, h);
+        box->sizeX = held(*box, w, true);
+        box->sizeY = held(*box, h, false);
     }
 }
 
@@ -1323,6 +1378,12 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.tabIndex != 0)     o["tabIndex"] = e.tabIndex;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
+    // The floor and the ceiling. "minSize" is the key the four container types
+    // already wrote when it lived on them, written under the same condition and
+    // into the same object, so a box that carries one saves byte-identically;
+    // "maxSize" is new and follows the same "only once set" rule.
+    if (e.minSizeX > 0.0f || e.minSizeY > 0.0f) o["minSize"] = { e.minSizeX, e.minSizeY };
+    if (e.maxSizeX > 0.0f || e.maxSizeY > 0.0f) o["maxSize"] = { e.maxSizeX, e.maxSizeY };
     // Written only when the element really sits in a named cell, so every widget
     // authored before grids existed saves byte-identical.
     if (e.gridColumn >= 0)     o["gridColumn"] = e.gridColumn;
@@ -1453,6 +1514,10 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->tabIndex      = o.value("tabIndex", 0);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
+    if (const auto& m = o.value("minSize", nlohmann::json::array()); m.size() >= 2)
+    { e->minSizeX = std::max(0.0f, m[0].get<float>()); e->minSizeY = std::max(0.0f, m[1].get<float>()); }
+    if (const auto& m = o.value("maxSize", nlohmann::json::array()); m.size() >= 2)
+    { e->maxSizeX = std::max(0.0f, m[0].get<float>()); e->maxSizeY = std::max(0.0f, m[1].get<float>()); }
     e->gridColumn     = o.value("gridColumn", -1);
     e->gridRow        = o.value("gridRow", -1);
     e->gridColumnSpan = std::max(1, o.value("gridColSpan", 1));

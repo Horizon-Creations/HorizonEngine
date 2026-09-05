@@ -284,6 +284,12 @@ HE_API void uiGridTracks(const UIWidgetTree& tree, const UIGrid& grid,
 
 HE_API UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                                   const UIWidgetCanvas* canvas = nullptr);
+// The same rectangle before the element's Min/Max bounds are applied to it: the
+// anchor solve, or the slot its layout container hands it. Exported so that a
+// caller who needs to see what the layout WOULD have produced — how far a bound
+// is biting, and on which axis — can ask instead of recomputing the walk.
+HE_API UIWidgetRect uiElementRectUnbounded(const UIWidgetTree& tree, const UIElement& e,
+                                           const UIWidgetCanvas* canvas = nullptr);
 
 // The element's anchor rectangle itself, in canvas units — what the editor
 // draws and what the insets below are measured against.

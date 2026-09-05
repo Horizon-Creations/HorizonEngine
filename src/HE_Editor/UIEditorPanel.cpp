@@ -1688,7 +1688,7 @@ void drawDetails(State& st, AppContext& ctx)
 			EditorWidgets::helpForLabel("Size");
 			ImGui::EndDisabled();
 			if (measured)
-				ImGui::TextDisabled("Measured from the content (Min Width/Height below).");
+				ImGui::TextDisabled("Measured from the content (Min/Max Size below).");
 		}
 	}
 	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
@@ -1749,6 +1749,24 @@ void drawDetails(State& st, AppContext& ctx)
 		                  "side; the bottom-right cell fills the parent entirely.\n"
 		                  "Re-anchoring keeps the element exactly where it is.");
 	} // end of the anchored (non-box-child) branch
+
+	// ── The floor and the ceiling ────────────────────────────────────────────
+	// Below both branches on purpose: a bound is the one size rule that means
+	// the same thing whoever does the placing. In a box the box decides the
+	// extent and these hold it; on an anchor the anchor does and these hold it;
+	// with Size To Content the measurement does. That is why they are not up in
+	// the branch that draws "Size", where they would look like a property of
+	// authored sizes only.
+	edit |= ImGui::DragFloat2("Min Size", &n->minSizeX, 1.0f, 0.0f, 10000.0f);
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Min Size");
+	edit |= ImGui::DragFloat2("Max Size", &n->maxSizeX, 1.0f, 0.0f, 10000.0f);
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Max Size");
+	if (n->minSizeX < 0.0f) n->minSizeX = 0.0f;
+	if (n->minSizeY < 0.0f) n->minSizeY = 0.0f;
+	if (n->maxSizeX < 0.0f) n->maxSizeX = 0.0f;
+	if (n->maxSizeY < 0.0f) n->maxSizeY = 0.0f;
 
 	// The four tooltips that stood here are entries now, so F1 reaches them too.
 	int layer = n->layer;

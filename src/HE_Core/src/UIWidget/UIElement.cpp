@@ -460,8 +460,6 @@ const UIPropTable& UIBoxBase::propTable() const
         uiprop::slot<&UIBoxBase::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIBoxBase::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIBoxBase::sizeToContent>({ "Size To Content", UIPropType::Bool }),
-        uiprop::slot<&UIBoxBase::minSizeX>({ "Min Width",  UIPropType::Float }),
-        uiprop::slot<&UIBoxBase::minSizeY>({ "Min Height", UIPropType::Float }),
     };
     return t;
 }
@@ -521,8 +519,6 @@ const UIPropTable& UIGrid::propTable() const
         uiprop::slot<&UIGrid::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIGrid::rowSpacing>({ "Row Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIGrid::sizeToContent>({ "Size To Content", UIPropType::Bool }),
-        uiprop::slot<&UIGrid::minSizeX>({ "Min Width",  UIPropType::Float }),
-        uiprop::slot<&UIGrid::minSizeY>({ "Min Height", UIPropType::Float }),
     };
     return t;
 }
@@ -536,8 +532,6 @@ const UIPropTable& UIWrapBox::propTable() const
         uiprop::slot<&UIWrapBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIWrapBox::lineSpacing>({ "Line Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIWrapBox::sizeToContent>({ "Size To Content", UIPropType::Bool }),
-        uiprop::slot<&UIWrapBox::minSizeX>({ "Min Width",  UIPropType::Float }),
-        uiprop::slot<&UIWrapBox::minSizeY>({ "Min Height", UIPropType::Float }),
     };
     return t;
 }
@@ -550,8 +544,6 @@ const UIPropTable& UIScrollBox::propTable() const
         uiprop::slot<&UIScrollBox::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIScrollBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIScrollBox::sizeToContent>({ "Size To Content", UIPropType::Bool }),
-        uiprop::slot<&UIScrollBox::minSizeX>({ "Min Width",  UIPropType::Float }),
-        uiprop::slot<&UIScrollBox::minSizeY>({ "Min Height", UIPropType::Float }),
         uiprop::slot<&UIScrollBox::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
         uiprop::slot<&UIScrollBox::barColor>({ "Bar Color", UIPropType::Color }),
     };
@@ -821,6 +813,12 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Rotation")     { out = UIPropValue::ofFloat(e.rotation);          return true; }
     if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
     if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
+    // Beside Size, and shaped like it: what an author sets here is one pair,
+    // and two scalar rows for one idea is how somebody ends up with a floor on
+    // the width and none on the height without meaning to. 0 on an axis = no
+    // bound on that axis.
+    if (n == "Min Size")     { out = UIPropValue::ofVec2({ e.minSizeX, e.minSizeY }); return true; }
+    if (n == "Max Size")     { out = UIPropValue::ofVec2({ e.maxSizeX, e.maxSizeY }); return true; }
     if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
     if (n == "Hover Cursor") { out = UIPropValue::ofInt((int)e.hoverCursor);    return true; }
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
@@ -881,6 +879,8 @@ const std::vector<UIPropDesc>& uiBaseProperties()
         { "Rotation",            UIPropType::Float },
         { "Position",            UIPropType::Vec2 },
         { "Size",                UIPropType::Vec2 },
+        { "Min Size",            UIPropType::Vec2 },
+        { "Max Size",            UIPropType::Vec2 },
         { "Layer",               UIPropType::Int },
         { "Hover Cursor",        UIPropType::Int },
         { "Material",            UIPropType::String },
@@ -936,6 +936,13 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Rotation")     { e.rotation = v.f; return true; }
     if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
     if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
+    // Floored at 0, which is the value that means "no bound": a negative one
+    // would be a third meaning nobody could name, and clamping it here keeps
+    // uiElementRect from having to ask.
+    if (n == "Min Size")
+    { e.minSizeX = std::max(0.0f, v.v2.x); e.minSizeY = std::max(0.0f, v.v2.y); return true; }
+    if (n == "Max Size")
+    { e.maxSizeX = std::max(0.0f, v.v2.x); e.maxSizeY = std::max(0.0f, v.v2.y); return true; }
     if (n == "Layer")        { e.layer = v.i; return true; }
     if (n == "Hover Cursor")
     {
@@ -997,6 +1004,8 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Rotation",     UIPropType::Float });
     out.push_back({ "Position",     UIPropType::Vec2 });
     out.push_back({ "Size",         UIPropType::Vec2 });
+    out.push_back({ "Min Size",     UIPropType::Vec2 });
+    out.push_back({ "Max Size",     UIPropType::Vec2 });
     out.push_back({ "Layer",        UIPropType::Int });
     out.push_back({ "Hover Cursor", UIPropType::Int });
     out.push_back({ "Tooltip",      UIPropType::String });
@@ -1875,14 +1884,14 @@ void UIBoxBase::writeJson(nlohmann::json& j) const
     // Written only once used, so a box authored before this existed stays
     // byte-identical.
     if (sizeToContent) j["sizeToContent"] = true;
-    if (minSizeX > 0.0f || minSizeY > 0.0f) j["minSize"] = { minSizeX, minSizeY };
+    // "minSize" used to be written here and is written by the tree serializer
+    // now, into this very object — same key, same condition, so every box that
+    // carries one still saves and loads byte-identically.
 }
 void UIBoxBase::readJson(const nlohmann::json& j)
 {
     padding = j.value("padding", padding); spacing = j.value("spacing", spacing);
     sizeToContent = j.value("sizeToContent", false);
-    if (const auto& m = j.value("minSize", nlohmann::json::array()); m.size() >= 2)
-    { minSizeX = m[0].get<float>(); minSizeY = m[1].get<float>(); }
 }
 
 void UIGrid::writeJson(nlohmann::json& j) const

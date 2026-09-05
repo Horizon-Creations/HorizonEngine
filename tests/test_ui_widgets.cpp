@@ -208,21 +208,15 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
         { UIWidgetType::VerticalBox, {
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float },
-            { "Size To Content", UIPropType::Bool },
-            { "Min Width", UIPropType::Float },
-            { "Min Height", UIPropType::Float } } },
+            { "Size To Content", UIPropType::Bool } } },
         { UIWidgetType::HorizontalBox, {
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float },
-            { "Size To Content", UIPropType::Bool },
-            { "Min Width", UIPropType::Float },
-            { "Min Height", UIPropType::Float } } },
+            { "Size To Content", UIPropType::Bool } } },
         { UIWidgetType::ScrollBox, {
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float },
             { "Size To Content", UIPropType::Bool },
-            { "Min Width", UIPropType::Float },
-            { "Min Height", UIPropType::Float },
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color } } },
         { UIWidgetType::WidgetRef, {
@@ -251,9 +245,7 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float },
             { "Line Spacing", UIPropType::Float },
-            { "Size To Content", UIPropType::Bool },
-            { "Min Width",  UIPropType::Float },
-            { "Min Height", UIPropType::Float } } },
+            { "Size To Content", UIPropType::Bool } } },
         // A Grid's two track lists are its whole vocabulary; Row Spacing is the
         // gap between rows, `Spacing` the one between columns.
         { UIWidgetType::Grid, {
@@ -262,9 +254,7 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float },
             { "Row Spacing", UIPropType::Float },
-            { "Size To Content", UIPropType::Bool },
-            { "Min Width",  UIPropType::Float },
-            { "Min Height", UIPropType::Float } } },
+            { "Size To Content", UIPropType::Bool } } },
         // A Tab Box's PAGES are its children and their names are the labels, so
         // there is no list property here — that is the whole point of the design.
         { UIWidgetType::TabBox, {
@@ -3108,7 +3098,7 @@ TEST_CASE("Layout box: Size To Content round-trips, off by default")
     // By name too — a script can switch it on for a menu that just grew.
     back->setPropAny("Size To Content", HE::UIPropValue::ofBool(false));
     CHECK_FALSE(back->sizeToContent);
-    CHECK(back->getPropAny("Min Width").f == doctest::Approx(120.0f));
+    CHECK(back->getPropAny("Min Size").v2.x == doctest::Approx(120.0f));
 }
 
 TEST_CASE("Layout box: the new types round-trip by name and carry their slots")
@@ -10159,7 +10149,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 43);
+    CHECK(HE::uiBaseProperties().size() == 45);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -12896,4 +12886,119 @@ TEST_CASE("Theme: padding and spacing read the spacing steps, rounding reads the
     CHECK(HE::uiThemeScaleBindable("Padding"));
     CHECK(HE::uiThemeScaleBindable("Spacing"));
     CHECK(HE::uiThemeScaleBindable("FontSize"));
+}
+
+// D4, second of four: a floor and a ceiling that hold whoever does the placing.
+//
+// minSize used to live on the four container types and was read in exactly one
+// situation, "Size To Content" being on. It is a base property now, together
+// with a maxSize that did not exist, and it is applied to the finished RECT —
+// which is the only place it can work for a box's child (whose size field the
+// box ignores) or for a stretched anchor (whose size field is a negative inset).
+TEST_CASE("Layout: Min and Max Size hold the rect, whoever computed it")
+{
+    HE::UIWidgetCanvas canvas{};
+    canvas.width = 800.0f; canvas.height = 600.0f;
+    canvas.scaleX = canvas.scaleY = 1.0f;
+
+    SUBCASE("a stretched anchor is held, and the pivot stays put")
+    {
+        HE::UIWidgetTree t;
+        const int p = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement* e = t.find(p);
+        HE::uiSetAnchorPreset(*e, HE::kUIAnchorFill);
+        e->posX = e->posY = 0.0f; e->sizeX = e->sizeY = 0.0f;
+        e->pivotX = e->pivotY = 0.5f;
+        // Unbound it fills the whole canvas: the size FIELD says 0, which on a
+        // stretched axis means "exactly the anchored span".
+        CHECK(HE::uiElementRect(t, *e, &canvas).w == doctest::Approx(800.0f));
+
+        e->maxSizeX = 300.0f;
+        const HE::UIWidgetRect r = HE::uiElementRect(t, *e, &canvas);
+        CHECK(r.w == doctest::Approx(300.0f));
+        CHECK(r.h == doctest::Approx(600.0f));      // the other axis is untouched
+        // Centred pivot, so the ceiling takes the same amount off each side.
+        CHECK(r.x == doctest::Approx(250.0f));
+        // And the unbounded answer is still there to be asked for.
+        CHECK(HE::uiElementRectUnbounded(t, *e, &canvas).w == doctest::Approx(800.0f));
+
+        // Left-pinned instead: the left edge is what stays.
+        e->pivotX = 0.0f;
+        CHECK(HE::uiElementRect(t, *e, &canvas).x == doctest::Approx(0.0f));
+
+        // A ceiling below the floor loses.
+        e->minSizeX = 500.0f;
+        CHECK(HE::uiElementRect(t, *e, &canvas).w == doctest::Approx(500.0f));
+    }
+
+    SUBCASE("a box's child is held too, though the box computed its slot")
+    {
+        HE::UIWidgetTree t;
+        const int v = t.add(HE::UIWidgetType::VerticalBox);
+        { auto* b = dynamic_cast<HE::UIBoxBase*>(t.find(v));
+          b->padding = 0.0f; b->spacing = 0.0f; }
+        t.find(v)->sizeX = 400.0f; t.find(v)->sizeY = 300.0f;
+        t.find(v)->pivotX = t.find(v)->pivotY = 0.0f;
+        const int c = t.add(HE::UIWidgetType::Panel);
+        t.find(c)->parentId = v;
+        t.find(c)->sizeY = 50.0f;
+        t.find(c)->pivotX = 0.0f;
+        // Across the axis the box hands over its full inner width…
+        CHECK(HE::uiElementRect(t, *t.find(c), &canvas).w == doctest::Approx(400.0f));
+        // …and the ceiling holds it anyway, which is the whole point: the size
+        // field the author would otherwise reach for is not read here at all.
+        t.find(c)->maxSizeX = 120.0f;
+        CHECK(HE::uiElementRect(t, *t.find(c), &canvas).w == doctest::Approx(120.0f));
+    }
+
+    SUBCASE("a measured box stops at its ceiling, in the size field as well")
+    {
+        HE::UIWidgetTree t;
+        const int v = t.add(HE::UIWidgetType::VerticalBox);
+        { auto* b = dynamic_cast<HE::UIBoxBase*>(t.find(v));
+          b->padding = 0.0f; b->spacing = 0.0f; b->sizeToContent = true; }
+        for (int i = 0; i < 4; ++i)
+        {
+            const int c = t.add(HE::UIWidgetType::Panel);
+            t.find(c)->parentId = v; t.find(c)->sizeY = 30.0f; t.find(c)->sizeX = 40.0f;
+        }
+        HE::uiApplyAutoSize(t, &canvas);
+        CHECK(t.find(v)->sizeY == doctest::Approx(120.0f));
+
+        // The FIELD has to be held, not only the rect: a parent box adds these
+        // numbers up when it stacks its children.
+        t.find(v)->maxSizeY = 70.0f;
+        HE::uiApplyAutoSize(t, &canvas);
+        CHECK(t.find(v)->sizeY == doctest::Approx(70.0f));
+
+        t.find(v)->minSizeY = 200.0f;   // the floor still wins over the ceiling
+        HE::uiApplyAutoSize(t, &canvas);
+        CHECK(t.find(v)->sizeY == doctest::Approx(200.0f));
+    }
+
+    SUBCASE("both pairs round-trip, and an unbounded element writes neither key")
+    {
+        HE::UIWidgetTree t;
+        const int p = t.add(HE::UIWidgetType::Button);
+        const std::string plain = HE::uiWidgetTreeToJson(t);
+        CHECK(plain.find("minSize") == std::string::npos);
+        CHECK(plain.find("maxSize") == std::string::npos);
+
+        t.find(p)->setPropAny("Min Size", HE::UIPropValue::ofVec2({ 10.0f, 20.0f }));
+        t.find(p)->setPropAny("Max Size", HE::UIPropValue::ofVec2({ 30.0f, 40.0f }));
+        // A negative bound is not a third meaning; it lands on "no bound".
+        t.find(p)->setPropAny("Max Size", HE::UIPropValue::ofVec2({ 30.0f, -5.0f }));
+
+        HE::UIWidgetTree r;
+        REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+        CHECK(r.find(p)->minSizeX == doctest::Approx(10.0f));
+        CHECK(r.find(p)->minSizeY == doctest::Approx(20.0f));
+        CHECK(r.find(p)->maxSizeX == doctest::Approx(30.0f));
+        CHECK(r.find(p)->maxSizeY == doctest::Approx(0.0f));
+
+        // And a clone carries them, which is what a component copy is.
+        const auto cl = r.find(p)->clone();
+        CHECK(cl->minSizeX == doctest::Approx(10.0f));
+        CHECK(cl->maxSizeX == doctest::Approx(30.0f));
+    }
 }

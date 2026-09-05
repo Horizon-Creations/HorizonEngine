@@ -332,6 +332,29 @@ public:
     int     layer  = 0;
     bool    visible = true;
 
+    // ── The floor and the ceiling ────────────────────────────────────────────
+    // Bounds on the size this element ENDS UP with, in its own units, applied to
+    // the finished rectangle (uiElementRect) rather than to the size field. That
+    // is deliberate and it is the only place they can work: on a stretched
+    // anchor the size field is a negative inset and says nothing about how wide
+    // the element is, and inside a layout container the field is not read at
+    // all — the box decides. The rect is the one answer the hit test, the
+    // renderer and the designer all read, so the bound belongs there.
+    //
+    // 0 = no bound, on both ends, which is what every element authored before
+    // this carries. A max below a min loses: the floor is applied last, because
+    // "never smaller than this" is the promise a layout can actually keep.
+    //
+    // Where the bound bites, the element keeps its PIVOT in place — the same
+    // rule solveAxis already follows, so a centred element stays centred and a
+    // left-pinned one stays where its left edge was.
+    //
+    // minSize used to be four numbers on the four container types, read only
+    // while "Size To Content" was on. It is one pair here, it means the same
+    // thing there, and it now also means something on a Panel and a Button.
+    float   minSizeX = 0.0f, minSizeY = 0.0f;
+    float   maxSizeX = 0.0f, maxSizeY = 0.0f;
+
     // Opacity of this element AND everything under it, multiplied down the
     // chain. This is what fades a whole menu in and out: one value on the root
     // panel instead of an animation per colour of every element in it.
@@ -805,6 +828,8 @@ protected:
         dst.anchorMinX = anchorMinX; dst.anchorMinY = anchorMinY;
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
+        dst.minSizeX = minSizeX; dst.minSizeY = minSizeY;
+        dst.maxSizeX = maxSizeX; dst.maxSizeY = maxSizeY;
         dst.renderOpacity = renderOpacity; dst.transition = transition;
         dst.tabIndex = tabIndex;
         dst.enabled = enabled;

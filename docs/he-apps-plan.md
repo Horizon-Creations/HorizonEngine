@@ -590,6 +590,35 @@ eben waren es zwei halbe Regeln, und die im Auflöser sagte „Radius" zu allem.
 Alle Container heißen ihre beiden Zahlen gleich (`UIBoxBase`, `UIGrid`, `UIWrapBox`,
 `UIScrollBox`, `UIListView`), deshalb reicht eine Zeile für alle fünf.
 
+*Zweiter Teil: Mindest- und Höchstgröße gelten jetzt für jedes Element.* `minSize` saß auf den
+vier Containertypen und wurde in genau einer Lage gelesen, nämlich solange „Size To Content" an
+war. Eine Höchstgröße gab es überhaupt nicht. Beides sind jetzt Basiseigenschaften, `Min Size`
+und `Max Size`, als Vec2 neben `Size` und nicht als vier Zahlenfelder: was ein Autor hier setzt,
+ist ein Paar.
+
+**Sie greifen am fertigen Rechteck, nicht am Größenfeld** (`applySizeBounds` in
+`uiElementRect`). Das ist die einzige Stelle, an der sie überhaupt wirken können: das Kind einer
+Layout-Box hat kein gelesenes Größenfeld, die Box entscheidet; ein gedehnter Anker hat eines,
+aber dort ist es ein negativer Einzug und sagt nichts über die Breite. Das Rechteck ist die eine
+Antwort, die Trefferprüfung, Renderer und Designer alle lesen, also gehört die Grenze dorthin.
+Wo eine Grenze beißt, bleibt der **Pivot** stehen, dieselbe Regel, der `solveAxis` schon folgt.
+
+Zwei Dinge, die man dabei nicht übersieht:
+
+- **Das Größenfeld wird bei „Size To Content" trotzdem mitgehalten** (`held` in
+  `uiApplyAutoSize`). Eine Elternbox addiert die Größenfelder ihrer Kinder, wenn sie stapelt;
+  eine gemessene Box, die doppelt so hoch rechnet wie ihr Max, würde ihre Geschwister um eine
+  Höhe verschieben, die sie gar nicht hat.
+- **Ein Max unter dem Min verliert.** Der Boden wird zuletzt angewendet, weil „nie kleiner als
+  das" das Versprechen ist, das ein Layout wirklich halten kann.
+
+Auf der Platte ist es derselbe Schlüssel: `minSize` wird jetzt vom Baum-Serialisierer in
+dasselbe Objekt geschrieben, in das der Typ vorher schrieb, unter derselben Bedingung. Boxen mit
+einer Untergrenze speichern also byte-gleich; `maxSize` ist neu und folgt derselben Regel „erst
+schreiben, wenn gesetzt". Im ausgelieferten `EngineContent` trägt kein Widget ein `minSize`, die
+Verhaltensänderung (eine Box mit Untergrenze und ausgeschaltetem „Size To Content" wächst jetzt)
+trifft dort also nichts.
+
 ---
 
 ## 7. Block E: Editor- und Projektseite

@@ -773,14 +773,13 @@ public:
     // ── Size to content ──────────────────────────────────────────────────────
     // While this is on, the box's size is not authored: it is measured from
     // what is inside it (children plus spacing plus padding) every frame, and
-    // the two Min values are the floor it cannot shrink below. That makes a
-    // menu grow and shrink with the number of entries in it instead of being a
-    // fixed rectangle that a sixth entry falls out of.
+    // the base element's Min/Max values are the floor and the ceiling it stays
+    // between. That makes a menu grow and shrink with the number of entries in
+    // it instead of being a fixed rectangle that a sixth entry falls out of.
     //
     // A FILLING child cannot be measured (its size is a share of what is left
     // over, which is what this is computing), so it counts as nothing.
     bool  sizeToContent = false;
-    float minSizeX = 0.0f, minSizeY = 0.0f;
 
     bool laysOutChildren() const override { return true; }
     bool acceptsChildren() const override { return true; }
