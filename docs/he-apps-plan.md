@@ -728,7 +728,10 @@ Mac schon immer.
 **Der Software-Renderer stimmt ohne Zutun.** Sein Fenster hat kein
 `SDL_WINDOW_HIGH_PIXEL_DENSITY`: auf macOS sind Pixel gleich Punkte und die Display Scale 1, das
 System skaliert selbst hoch; auf Windows sind die Punkte Pixel und die Display Scale 2, also
-skaliert der Modus. Beide Wege enden bei derselben physischen Größe.
+skaliert der Modus. Beide Wege enden bei derselben physischen Größe. Auf Windows/X11 kostet das
+den Rasterizer bei 200% aber wirklich das Vierfache an Pixeln — die Ersparnis, die das
+Weglassen von `SDL_WINDOW_HIGH_PIXEL_DENSITY` auf macOS bringt, gibt es dort nicht, und ein halb
+so großes Fenster wäre keine Ersparnis, sondern ein Fehler.
 
 **Was nicht geprüft ist.** Kein Lauf auf echter Windows- oder Linux-Hardware mit gesetzter
 Skalierung — dieser Rechner ist ein Mac. Belegt sind die SDL-Semantik (die Tabelle in

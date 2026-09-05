@@ -109,6 +109,12 @@ namespace
             // rasterizer fills is the logical one, and asking for four times
             // the pixels would quadruple the work for a blit that is then
             // downscaled again.
+            //
+            // On Windows and X11 that saving does not exist and must not be
+            // faked: the window coordinates ARE pixels there, so the content
+            // scale below really does hand the rasterizer four times the work
+            // at 200%. The alternative is a window half the size it should be,
+            // which is a bug, not a saving.
             break;
         }
 
