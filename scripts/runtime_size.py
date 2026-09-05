@@ -57,6 +57,15 @@ nothing this may judge.
 import os
 import sys
 
+# A Windows console hands Python a cp1252 stdout, and every em dash in the report
+# below then raises UnicodeEncodeError instead of printing. The report is the
+# whole point of this script, so the console gives way, not the text.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):  # not a text stream, or already redirected
+        pass
+
 # ── Thresholds, in megabytes ─────────────────────────────────────────────────
 # Set from what is MEASURED today plus headroom, deliberately not from the plan's
 # aspirational 15 MB: that number is the target AFTER the structural work (A3b —

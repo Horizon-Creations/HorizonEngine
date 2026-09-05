@@ -9,6 +9,9 @@
 #include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
 #include "AppNotify.h"                 // …and the notification centre
 #endif
+#ifdef __linux__
+#include <Platform/Process.h>          // notifyShow hands the text to notify-send
+#endif
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>

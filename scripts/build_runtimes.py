@@ -46,6 +46,16 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# A Windows console hands Python a cp1252 stdout, and the first arrow or em dash
+# below then raises UnicodeEncodeError instead of printing — which is how this
+# script failed on its first Windows CI run, after building nothing at all. The
+# report IS the output here, so it is the console that gives way, not the text.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):  # not a text stream, or already redirected
+        pass
+
 # Flavour → the deploy directory name the exporter knows it by. Kept in step with
 # HE_RUNTIME_DIR_NAME in the root CMakeLists.txt, RuntimeFlavor in
 # HE_Core/include/Hpak/ProjectExporter.h and DIR_TO_FLAVOR in runtime_size.py —
