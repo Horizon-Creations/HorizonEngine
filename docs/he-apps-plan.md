@@ -2743,6 +2743,54 @@ sind das die beiden App-Zeilen, weil dort nur der Spiel-Build läuft. Die App-Za
 erst in der Datei, seit sie gemessen wurden; die 0,7 MB zwischen den beiden App-Ausprägungen
 sind der ganze Unterschied zwischen einem Metal-Backend und einem Software-Rasterizer.
 
+### A3b Teil 3, nachgereicht: dieselbe Messung auf Windows und Linux (05.09.2026)
+
+Alles darüber war auf **einer** Plattform gebaut und gewogen. Auf Windows und Linux war die
+Aussage blind: dort war `build_runtimes.py` nie gelaufen, und die Schwellen galten
+stillschweigend für alle drei. `.github/workflows/runtime-flavors.yml` schließt das. Es baut
+alle drei Ausprägungen auf macOS, Windows und Linux mit dem Rezept, mit dem `ci.yml`
+ausliefert (`HE_PORTABLE_BUILD`, `HE_PREFER_MBEDTLS`), meldet die Tabelle und prüft danach
+gegen die Schwellen; wer keine gemessene Schwelle hat, wird übersprungen statt rot. Bewusst
+nicht in `ci.yml`: das sind drei `HorizonGame`-Builds pro Plattform, kein Editor, keine Tests.
+
+Gemessen im Lauf 33966761978, alles Release:
+
+| | `game` gesamt / ohne Python | `app-advanced` | `app-basic` |
+|---|---|---|---|
+| Windows/x64 | 35,9 / 26,2 MB | 32,0 / 22,3 MB | 31,4 / 21,7 MB |
+| Linux/x64 | 52,7 / 29,9 MB | 45,8 / 23,1 MB | 45,0 / 22,2 MB |
+| macOS/arm64 (CI) | 54,8 / 23,7 MB | 48,8 / 17,7 MB | 48,0 / 17,0 MB |
+
+**Der Renderer-Anteil ist das, was den ganzen Schnitt rechtfertigt**, und er ist auf allen
+drei Plattformen derselbe Verlauf: Linux 8,3 → 1,4 → 0,6 MB, Windows 4,8 → 0,9 → 0,3 MB.
+Windows ist insgesamt die leichteste Plattform, und fast der ganze Abstand ist sein Python:
+9,8 MB gegen Linux' 22,7 MB. Zwei Eimer kamen dazu, sonst wären sie „unaccounted": `crt`
+(das MSVC-Redistributable, 1,6 MB, nur Windows) und `shaders` (die zur Laufzeit geladenen
+`.spv`/`.cso`, nach ORT gematcht statt nach Endung).
+
+**Der Messpunkt ist wichtiger als die Zahl, und diesmal gibt es dafür einen Beleg.** Dieselbe
+macOS-Ausprägung wog lokal 76,9 MB und auf dem Runner 48,8 MB. Beide Messungen stimmen: der
+Runner hat ein kleineres CPython und statisches mbedTLS, wo der lokale Baum Homebrews OpenSSL
+mitschleppt (4,8 MB Ladezeit-Kante, A3a). Die Schwellen tragen deshalb rund 10 Prozent
+Luft **plus etwa 5 MB**, und die 5 MB haben einen Namen — sie sind die Breite des Rezepts,
+nicht Schlaffheit. Für die Fehler, um die es geht (glslang zurück im App-Runtime, Jolt und
+Recast hinter `HorizonScene` hereingezogen), sind das immer noch Zehnerpotenzen zu eng.
+
+**Der erste Lauf hat zwei echte Fehler gefunden**, beide auf einem Mac unsichtbar.
+`GameApplication.cpp` rief im `__linux__`-Zweig `HE::Proc::which("notify-send")`, ohne
+`<Platform/Process.h>` einzubinden — der Linux-Build brach ab. Und beide Skripte starben auf
+Windows, **bevor** sie irgendetwas gebaut hatten, an einem `UnicodeEncodeError`: eine
+Windows-Konsole reicht Python ein cp1252-stdout, und der erste Pfeil in `=== game → …` ist
+darin nicht darstellbar. Beides gefixt; die zweite Falle trifft jedes Skript in `scripts/`,
+das auf Windows laufen soll und Pfeile oder Gedankenstriche ausgibt.
+
+**Was offen bleibt:** die drei `ctest`-Zeilen messen nur, was im selben `DEPLOY_DIR` liegt,
+und ein Ausprägungsbaum baut mit `HE_BUILD_TESTS=OFF`. In `ci.yml` überspringen die beiden
+App-Zeilen deshalb weiterhin. Der neue Workflow prüft die Schwellen darum selbst, direkt
+statt über `ctest`. Sie zu echten `ctest`-Zeilen zu machen hieße, den Ausprägungsbau in
+`ci.yml` vor dessen `ctest`-Schritt zu ziehen — zwei zusätzliche `HorizonGame`-Builds pro
+Plattform und Lauf auf `main`. Das ist eine Kostenentscheidung, keine technische.
+
 ---
 
 ## 11. Risiken und Fallen

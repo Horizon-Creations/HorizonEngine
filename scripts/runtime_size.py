@@ -106,22 +106,66 @@ LIMITS = {
         # backend against one software rasterizer. Everything else they carry is
         # the same, which is why their limits are nearly the same number and why
         # a jump in either is worth looking at.
+        #
+        # Weighed a second time 05.09.2026, on macos-latest with the recipe
+        # ci.yml ships with (run 33966761978), and it came out much lighter:
+        #   game          54.8 MB total, 23.7 MB without python
+        #   app-advanced  48.8 MB total, 17.7 MB without python
+        #   app-basic     48.0 MB total, 17.0 MB without python
+        # Two measuring points, 28 MB apart, and neither is wrong: the runner
+        # has a smaller CPython and static mbedTLS where the local tree has
+        # Homebrew's OpenSSL. The limits are deliberately left at the LOCAL
+        # numbers so that both trees pass — see the note under the tables.
         "app-advanced": (85.0, 26.0),
         "app-basic":    (84.0, 25.0),
     },
     # ── Windows/x64 ─────────────────────────────────────────────────────────
+    # Measured 05.09.2026 on windows-latest, Release, all three flavours built
+    # by scripts/build_runtimes.py in .github/workflows/runtime-flavors.yml
+    # (run 33966761978) — the first time these trees had ever been built on
+    # Windows at all:
+    #   game          35.9 MB total, 26.2 MB without python  (rendering 4.8 MB)
+    #   app-advanced  32.0 MB total, 22.3 MB without python  (rendering 0.9 MB)
+    #   app-basic     31.4 MB total, 21.7 MB without python  (rendering 0.3 MB)
+    # Plus the 1.6 MB MSVC redistributable in each, which macOS and Linux do not
+    # carry. Windows is the smallest of the three platforms here, and almost all
+    # of the difference is its python: 9.8 MB against Linux's 22.7 MB.
     "win32": {
-        "game":         None,
-        "app-advanced": None,
-        "app-basic":    None,
+        "game":         (45.0, 34.0),
+        "app-advanced": (41.0, 30.0),
+        "app-basic":    (40.0, 29.0),
     },
     # ── Linux/x64 ───────────────────────────────────────────────────────────
+    # Measured 05.09.2026 on ubuntu-latest, same run, same recipe:
+    #   game          52.7 MB total, 29.9 MB without python  (rendering 8.3 MB)
+    #   app-advanced  45.8 MB total, 23.1 MB without python  (rendering 1.4 MB)
+    #   app-basic     45.0 MB total, 22.2 MB without python  (rendering 0.6 MB)
+    # The rendering figures are the point of the whole exercise: the app-advanced
+    # tree carries one OpenGL backend where the game tree carries all of them,
+    # and app-basic carries the software rasterizer alone.
     "linux": {
-        "game":         None,
-        "app-advanced": None,
-        "app-basic":    None,
+        "game":         (64.0, 38.0),
+        "app-advanced": (56.0, 31.0),
+        "app-basic":    (55.0, 30.0),
     },
 }
+# ── On the headroom in the two tables above ─────────────────────────────────
+# Roughly 10 percent, PLUS about 5 MB, and the 5 MB has a name.
+#
+# Every number above was measured on a CI runner with the recipe ci.yml ships
+# with: HE_PORTABLE_BUILD=ON and HE_PREFER_MBEDTLS=ON. A developer's own tree
+# usually has neither, and the mbedTLS one alone moves the total: statically
+# linked mbedcrypto costs HorizonCore 0.3 MB where a system libcrypto is a
+# 4.8 MB load-time edge that ships beside the binaries (docs/he-apps-plan.md
+# A3a). The same macOS flavour weighed 76.9 MB on a local tree and 48.8 MB on
+# the runner for exactly that kind of reason.
+#
+# So the headroom is not slack, it is the width of the recipe. A threshold tight
+# enough to fail on a developer's own Release build would be a threshold that
+# fails on the difference between two honest trees, which is the one thing this
+# check must never report as a regression. It is still far too tight to hide the
+# failures it exists for: glslang coming back into an app runtime, or Jolt and
+# Recast being dragged in behind HorizonScene, are tens of megabytes each.
 FLAVORS = ("game", "app-advanced", "app-basic")
 DEFAULT_FLAVOR = "game"
 
