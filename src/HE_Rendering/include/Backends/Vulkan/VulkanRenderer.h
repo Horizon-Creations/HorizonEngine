@@ -127,6 +127,59 @@ private:
 	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
 	uint32_t       m_shadowSize     = HE::kShadowMapResolution;
 
+	// ── Screen-space decals (docs/decals-cross-backend-plan.md §2.1 "Weg 2") ─
+	// Vulkan has no G-buffer, so decals are NOT composited into a base-colour
+	// attachment like on Metal/GL — they are blended into the lit forward colour
+	// target at the end of the opaque pass. That needs the scene depth as a
+	// SAMPLED texture, and the depth attachment of the active render pass cannot
+	// be sampled while it is bound; hence a depth PRE-pass into an image of our
+	// own, rendered with the camera's view-proj right before the scene pass.
+	// The pre-pass reuses m_shadowPass (depth-only, m_depthFormat, final layout
+	// SHADER_READ_ONLY — exactly what is needed) and therefore m_shadowPipeline:
+	// a framebuffer's size is independent of its render pass, so only the image
+	// and the framebuffer are ours. Keep those three facts about m_shadowPass in
+	// sync if the shadow map ever changes format.
+	struct DecalDepth
+	{
+		VkImage        image = VK_NULL_HANDLE;
+		VkDeviceMemory mem   = VK_NULL_HANDLE;
+		VkImageView    view  = VK_NULL_HANDLE;
+		VkFramebuffer  fb    = VK_NULL_HANDLE; // built lazily: m_shadowPass exists only after init
+		uint32_t       w = 0, h = 0;
+	};
+	DecalDepth m_decalDepth;      // swapchain-sized (game path)
+	DecalDepth m_decalDepthVp;    // editor-viewport-sized
+	// Which of the two the pre-pass filled this frame — chosen in Render() where
+	// `useViewport` is known, read by DrawScene where it is not.
+	const DecalDepth* m_decalDepthActive = nullptr;
+	bool createDecalDepth(DecalDepth& d, uint32_t w, uint32_t h);
+	void destroyDecalDepth(DecalDepth& d);
+	// Scene depth from the camera into `d`, opaque static meshes only (see the
+	// limitation note in the plan). No-op without decals in the frame.
+	void EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d);
+	// One unit-cube projector per decal, drawn INSIDE the currently open scene
+	// render pass after the opaque draws. Caller restores its own pipeline/sets.
+	void EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
+	                  uint32_t width, uint32_t height, bool hdr);
+	bool EnsureDecalPipelines();
+	void destroyDecalPipelines();
+	// Decal base texture by UUID (DecalData::textureId is a TEXTURE, not a
+	// material — the albedo cache is keyed by material id and cannot serve it).
+	// Returns nullptr while the asset is still loading or unsupported.
+	const VkImageView* resolveDecalTexture(const HE::UUID& textureId);
+
+	VkDescriptorSetLayout m_decalSetLayout    = VK_NULL_HANDLE;
+	VkPipelineLayout      m_decalPipeLayout   = VK_NULL_HANDLE;
+	VkPipeline            m_decalPipeline     = VK_NULL_HANDLE; // m_renderPass (LDR + viewport)
+	VkPipeline            m_decalPipelineHDR  = VK_NULL_HANDLE; // m_postFxSceneRP (RGBA16F)
+	VkSampler             m_decalDepthSampler = VK_NULL_HANDLE; // NEAREST: no interpolation across silhouettes
+	VkDescriptorPool      m_decalPool[2]      = {};             // per frame in flight, reset whole
+	struct DecalFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
+	DecalFrameBuf         m_decalUBO[2];
+	bool                  m_decalTried        = false;          // pipeline build attempted (and failed)
+	static constexpr uint32_t k_maxDecals       = 256;
+	static constexpr uint32_t k_decalSlotStride = 512; // DecalUniforms > 256 B; stride ≥ minUniformBufferOffsetAlignment
+
 	VkInstance               m_instance       = VK_NULL_HANDLE;
 	uint32_t                 m_instanceApiVersion = 0; // actual requested VkApplicationInfo::apiVersion
 	VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE; // validation → Logger (debug only)
@@ -249,6 +302,10 @@ private:
 		VkDescriptorSet set   = VK_NULL_HANDLE; // null → override material has no texture (draw flat)
 	};
 	std::unordered_map<HE::UUID, MaterialTexVk> m_materialTexCache;
+	// Decal base textures, keyed by TEXTURE uuid (DecalComponent::textureId).
+	// Same payload, but resolved through resolveTextureRef instead of a material,
+	// and `.set` stays null — the decal pass writes its own per-draw descriptor.
+	std::unordered_map<HE::UUID, MaterialTexVk> m_decalTexCache;
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
 	// Resolve an override material's texture (dc.materialAssetId), cached by UUID. Returns true
