@@ -478,6 +478,39 @@ public:
         if (!role.empty()) themeRoles.emplace_back(prop, role);
     }
 
+    // ── Bound to the text catalog ────────────────────────────────────────────
+    // The same idea as themeRoles, for the same reason, resolved the same way:
+    // property name → catalog key, and uiApplyTextCatalog writes the translation
+    // into the ordinary property. So the runtime, the designer's preview and the
+    // thumbnails all show translated text through the field reads they already
+    // do, and switching language is one pass rather than a lookup at every draw.
+    //
+    // Generic over any String property, not a "Text Key" field on the types that
+    // have text: a Tooltip is a sentence a person reads, a TextInput's
+    // Placeholder is too, and a per-field member would have to be added to each
+    // of them separately and would still miss the next one.
+    //
+    // Same consequence as a theme binding, and worth knowing: a script that
+    // writes a literal into a bound property is overwritten at the next language
+    // switch.
+    std::vector<std::pair<std::string, std::string>> textKeys;
+    const std::string& textKeyFor(const std::string& prop) const
+    {
+        static const std::string none;
+        for (const auto& [p, k] : textKeys) if (p == prop) return k;
+        return none;
+    }
+    void setTextKey(const std::string& prop, const std::string& key)
+    {
+        for (auto it = textKeys.begin(); it != textKeys.end(); ++it)
+            if (it->first == prop)
+            {
+                if (key.empty()) textKeys.erase(it); else it->second = key;
+                return;
+            }
+        if (!key.empty()) textKeys.emplace_back(prop, key);
+    }
+
     // ── Bound to the theme, the other way round ─────────────────────────────
     // A role binding decides ONE value. This decides the element's whole look:
     // it says "I am a Button, dress me like the theme's buttons", which is the
@@ -793,6 +826,7 @@ protected:
         dst.gradientAngle = gradientAngle;
         dst.gradientShape = gradientShape;
         dst.themeRoles = themeRoles;
+        dst.textKeys = textKeys;
         dst.themeStyled = themeStyled; dst.themeStyle = themeStyle;
         dst.themeTag = themeTag;
         dst.shadow = shadow; dst.shadowColor = shadowColor;

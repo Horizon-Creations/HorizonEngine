@@ -415,6 +415,10 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// before anything looks at it. Assignment, not lookup-at-draw: from here on
 	// the runtime, the designer and the thumbnails all read plain fields.
 	HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
+	// …and its bound text takes the current language, in the same breath and for
+	// the same reason: a widget created after the language was switched must not
+	// come up in the one it was authored in.
+	HE::uiApplyTextCatalog(w.tree, m_catalog, m_language);
 
 	// Resolve per-element material references once (paths → UUIDs) and bake each
 	// element's Font asset → a stable atlas key its text emits with (0 = the
@@ -507,6 +511,28 @@ void WidgetManager::setSystemThemeMode(HE::UIThemeMode mode)
     // decision about the machine, not about one widget.
     for (Instance& w : m_instances) HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
     m_visualDirty = true;
+}
+
+void WidgetManager::setTextCatalog(const HE::UITextCatalog& catalog)
+{
+	m_catalog = catalog;
+	int written = 0;
+	for (Instance& w : m_instances)
+		written += HE::uiApplyTextCatalog(w.tree, m_catalog, m_language);
+	// Only when something really changed. A catalog handed in a second time, or
+	// one that translates nothing this application shows, must not wake an
+	// event-driven window up — the same rule setThemePreference follows.
+	if (written > 0) m_visualDirty = true;
+}
+
+void WidgetManager::setLanguage(const std::string& lang)
+{
+	if (lang == m_language) return;
+	m_language = lang;
+	int written = 0;
+	for (Instance& w : m_instances)
+		written += HE::uiApplyTextCatalog(w.tree, m_catalog, m_language);
+	if (written > 0) m_visualDirty = true;
 }
 
 HorizonCode::InstanceId WidgetManager::addChild(ContentManager& content, int widgetId,
@@ -613,6 +639,10 @@ HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager
 	// the HOST widget's theme: what is grafted in becomes part of this instance,
 	// so it wears what the instance wears.
 	HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
+	// …and it speaks the language the instance speaks, for the same reason: a
+	// row grafted in after a language switch must not come up in the one it was
+	// authored in.
+	HE::uiApplyTextCatalog(w.tree, m_catalog, m_language);
 	for (const auto& e : w.tree.elements)
 		if (e && e->id > 0) refreshElementAssets(w, *e);
 

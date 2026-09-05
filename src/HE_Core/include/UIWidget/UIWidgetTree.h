@@ -412,6 +412,50 @@ HE_API void uiUpdateScrollExtents(UIWidgetTree& tree);
 // which is how a caller knows the wheel was NOT consumed.
 HE_API bool uiScrollBy(UIWidgetTree& tree, int id, float delta);
 
+// ── The text catalog ─────────────────────────────────────────────────────────
+// Every translatable string of an application, by key, in every language it has.
+// Deliberately the same shape as a theme, and resolved the same way: an element
+// binds a PROPERTY to a key (UIElement::textKeys) and uiApplyTextCatalog writes
+// the translation into that property, so switching language is one pass over
+// the tree and nothing downstream needs to know a catalog exists.
+//
+// Ordered vectors and not maps, for the reason UIThemeStyle gives: the order is
+// the file's, and a map would sort the keys for a reason no author can see.
+struct HE_API UITextCatalog
+{
+    // What a key falls back to when the language being asked for does not have
+    // it. A half-translated application shows English where it has nothing, not
+    // a blank or a key — and the fallback is the catalog's decision, not the
+    // caller's, because the caller is a language switch and knows nothing.
+    std::string fallback = "en";
+    // language → (key → text).
+    std::vector<std::pair<std::string,
+                std::vector<std::pair<std::string, std::string>>>> languages;
+
+    // The text for `key` in `lang`, else in the fallback language, else null.
+    // Null and an empty string are different answers: an empty translation is a
+    // deliberate "say nothing here".
+    const std::string* find(const std::string& lang, const std::string& key) const;
+    // Set or replace, creating the language if it is new.
+    void set(const std::string& lang, const std::string& key, const std::string& text);
+    std::vector<std::string> languageNames() const;
+};
+
+HE_API std::string uiTextCatalogToJson(const UITextCatalog& c);
+HE_API bool        uiTextCatalogFromJson(const std::string& json, UITextCatalog& out);
+
+// Write the translations into the properties that are bound to keys. Returns how
+// many were written, which is what a caller uses to decide whether anything has
+// to be redrawn — the same contract uiApplyTheme has, and for the same reason.
+//
+// A key the catalog does not know at all leaves the property ALONE. That is the
+// difference between "not translated yet" and "translated to nothing", and
+// blanking the authored text would make an incomplete catalog worse than none.
+HE_API int uiApplyTextCatalog(UIWidgetTree& tree, const UITextCatalog& c,
+                              const std::string& lang);
+HE_API int uiApplyTextCatalog(UIElement& e, const UITextCatalog& c,
+                              const std::string& lang);
+
 // ── Contrast (WCAG 2.1) ──────────────────────────────────────────────────────
 // Whether the text in this widget can actually be read on what is behind it.
 // The numbers are the accessibility standard's, not a taste: relative luminance

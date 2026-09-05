@@ -12736,3 +12736,117 @@ TEST_CASE("Contrast: every shipped component is legible in both modes")
     }
 }
 #endif
+
+// ═══ B10: the text catalog ═══════════════════════════════════════════════════
+// Resolved by ASSIGNMENT, exactly the way a theme is, so everything downstream
+// keeps reading plain fields and switching language is one pass.
+TEST_CASE("Text catalog: a bound property takes the language's text")
+{
+    HE::UITextCatalog c;
+    c.fallback = "en";
+    c.set("en", "greet", "Hello");
+    c.set("en", "bye",   "Goodbye");
+    c.set("de", "greet", "Hallo");   // half-translated on purpose
+
+    HE::UIWidgetTree t;
+    const int a = t.add(HE::UIWidgetType::Text);
+    const int b = t.add(HE::UIWidgetType::Text);
+    t.find(a)->setTextKey("Text", "greet");
+    t.find(b)->setTextKey("Text", "bye");
+    t.find(b)->setTextKey("Tooltip", "greet");   // any String property, not just Text
+    static_cast<HE::UIText*>(t.find(a))->text = "AUTHORED";
+    static_cast<HE::UIText*>(t.find(b))->text = "AUTHORED";
+
+    CHECK(HE::uiApplyTextCatalog(t, c, "en") == 3);
+    CHECK(t.find(a)->getPropAny("Text").s == "Hello");
+    CHECK(t.find(b)->getPropAny("Text").s == "Goodbye");
+    CHECK(t.find(b)->tooltip == "Hello");
+    // Nothing to write the second time round — the count is what tells a caller
+    // whether anything has to be redrawn, so it must not lie.
+    CHECK(HE::uiApplyTextCatalog(t, c, "en") == 0);
+
+    // German has "greet" and not "bye": the first switches, the second falls
+    // back to English rather than going blank or showing the key.
+    CHECK(HE::uiApplyTextCatalog(t, c, "de") == 2);
+    CHECK(t.find(a)->getPropAny("Text").s == "Hallo");
+    CHECK(t.find(b)->getPropAny("Text").s == "Goodbye");
+
+    // A key the catalog does not know AT ALL leaves the property alone: "not
+    // translated yet" and "translated to nothing" are different answers.
+    t.find(a)->setTextKey("Text", "missing");
+    CHECK(HE::uiApplyTextCatalog(t, c, "de") == 0);
+    CHECK(t.find(a)->getPropAny("Text").s == "Hallo");
+    // …and an empty translation IS a translation.
+    c.set("de", "missing", "");
+    CHECK(HE::uiApplyTextCatalog(t, c, "de") == 1);
+    CHECK(t.find(a)->getPropAny("Text").s.empty());
+
+    // A key on a property that is not a string writes nothing rather than
+    // coercing — a black label nobody can explain is worse than an untranslated
+    // one.
+    const int col = t.add(HE::UIWidgetType::Panel);
+    t.find(col)->setTextKey("Color", "greet");
+    CHECK(HE::uiApplyTextCatalog(t, c, "de") == 0);
+}
+
+TEST_CASE("Text catalog: the binding survives the file, and costs nothing unbound")
+{
+    HE::UIWidgetTree t;
+    const int e = t.add(HE::UIWidgetType::Text);
+    CHECK(HE::uiWidgetTreeToJson(t).find("textKeys") == std::string::npos);
+
+    t.find(e)->setTextKey("Text", "greet");
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    CHECK(back.find(e)->textKeyFor("Text") == "greet");
+    CHECK(back.find(e)->clone()->textKeyFor("Text") == "greet");
+    // Unbinding is writing an empty key, the same way a theme role is unbound.
+    back.find(e)->setTextKey("Text", "");
+    CHECK(back.find(e)->textKeys.empty());
+
+    // The catalog's own file keeps the author's order — it is read by people who
+    // translate it, and a map would reshuffle every language on every save.
+    HE::UITextCatalog c;
+    c.set("en", "zebra", "Zebra");
+    c.set("en", "apple", "Apple");
+    HE::UITextCatalog round;
+    REQUIRE(HE::uiTextCatalogFromJson(HE::uiTextCatalogToJson(c), round));
+    REQUIRE(round.languages.size() == 1);
+    REQUIRE(round.languages[0].second.size() == 2);
+    CHECK(round.languages[0].second[0].first == "zebra");
+    CHECK(*round.find("en", "apple") == "Apple");
+    CHECK(round.find("en", "nothing") == nullptr);
+}
+
+TEST_CASE("Text catalog: switching language re-resolves every live widget")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setTextKey("Text", "greet");
+    static_cast<HE::UIText*>(t.find(label))->text = "AUTHORED";
+    registerWidget(cm, t);
+
+    HE::UITextCatalog c;
+    c.set("en", "greet", "Hello");
+    c.set("de", "greet", "Hallo");
+
+    WidgetManager wm;
+    wm.setTextCatalog(c);
+    // No language asked for yet, so the catalog's fallback answers: an
+    // application that never sets one still shows text and not keys.
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    CHECK(wm.tree(id)->find(label)->getPropAny("Text").s == "Hello");
+
+    wm.consumeVisualDirty();
+    wm.setLanguage("de");
+    CHECK(wm.tree(id)->find(label)->getPropAny("Text").s == "Hallo");
+    CHECK(wm.consumeVisualDirty());        // something changed, so redraw
+    // …and asking for the same language again is not a reason to wake up.
+    wm.setLanguage("de");
+    CHECK_FALSE(wm.consumeVisualDirty());
+}

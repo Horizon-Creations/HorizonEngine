@@ -3222,3 +3222,14 @@ Modi**, und sie hat beim ersten Lauf neun echte Befunde gehabt, keinen davon erf
   „Öffnen mit" durch dieselbe Tür kommt wie ein Drop. Zwei Fallen: auf dem Mac feuert es
   doppelt, wenn die native Leiste ein `keyEquivalent` bekommt UND die Engine mit abgleicht,
   und ein Kürzel ohne Modifikator darf nicht losgehen, während ein Textfeld getippt wird.
+
+**Nachtrag, Textkatalog ist gebaut.** `UITextCatalog` (Sprache → Schlüssel → Text, mit
+Rückfallsprache), `UIElement::textKeys` als Zwilling von `themeRoles`, `uiApplyTextCatalog` als
+Zwilling von `uiApplyTheme`, und `WidgetManager::setTextCatalog` / `setLanguage`, die an
+denselben Stellen auflösen wie die Themes. Drei Entscheidungen: ein unbekannter Schlüssel lässt
+die Eigenschaft STEHEN (das ist der Unterschied zwischen „noch nicht übersetzt" und „übersetzt
+zu nichts", und ein leerer Eintrag ist sehr wohl eine Übersetzung); die Bindung geht auf jede
+String-Eigenschaft, also auch auf Tooltip und Platzhalter; und die Katalogdatei ist eine LISTE
+von Sprachen mit einer Liste von Paaren, kein Objekt, weil nlohmann Objektschlüssel sortiert und
+diese Datei von Menschen übersetzt wird. Offen dazu: eine Editor-Oberfläche für den Katalog und
+eine Skript-Bindung für die Sprachumschaltung.

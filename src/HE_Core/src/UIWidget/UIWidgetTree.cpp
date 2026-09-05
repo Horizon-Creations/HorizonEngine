@@ -1382,6 +1382,14 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         for (const auto& [prop, role] : e.themeRoles) roles[prop] = role;
         o["themeRoles"] = std::move(roles);
     }
+    // Same rule again: an element whose text is written out in one language
+    // saves byte-identically to before catalogues existed.
+    if (!e.textKeys.empty())
+    {
+        nlohmann::json keys = nlohmann::json::object();
+        for (const auto& [prop, key] : e.textKeys) keys[prop] = key;
+        o["textKeys"] = std::move(keys);
+    }
     // Only when switched ON, like everything else optional here — so a widget
     // authored before styles existed still saves byte-identically. That the key
     // then cannot tell "predates styles" from "switched off" is fine: both mean
@@ -1484,6 +1492,10 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
         for (auto it = roles->begin(); it != roles->end(); ++it)
             if (it.value().is_string())
                 e->setThemeRole(it.key(), it.value().get<std::string>());
+    if (const auto keys = o.find("textKeys"); keys != o.end() && keys->is_object())
+        for (auto it = keys->begin(); it != keys->end(); ++it)
+            if (it.value().is_string())
+                e->setTextKey(it.key(), it.value().get<std::string>());
     // Missing means FALSE here, against the field's own default of true: an
     // element that predates styles kept the colours somebody typed into it, and
     // opening that widget must not repaint it. New elements are constructed, not
@@ -1764,6 +1776,120 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
 
     out = std::move(t);
     return true;
+}
+
+// ── The text catalog ─────────────────────────────────────────────────────────
+const std::string* UITextCatalog::find(const std::string& lang,
+                                       const std::string& key) const
+{
+    const auto look = [&](const std::string& l) -> const std::string*
+    {
+        for (const auto& [name, entries] : languages)
+        {
+            if (name != l) continue;
+            for (const auto& [k, text] : entries) if (k == key) return &text;
+            return nullptr;   // the language is here and does not have the key
+        }
+        return nullptr;
+    };
+    if (const std::string* s = look(lang)) return s;
+    return lang == fallback ? nullptr : look(fallback);
+}
+
+void UITextCatalog::set(const std::string& lang, const std::string& key,
+                        const std::string& text)
+{
+    for (auto& [name, entries] : languages)
+        if (name == lang)
+        {
+            for (auto& [k, v] : entries) if (k == key) { v = text; return; }
+            entries.emplace_back(key, text);
+            return;
+        }
+    languages.push_back({ lang, { { key, text } } });
+}
+
+std::vector<std::string> UITextCatalog::languageNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(languages.size());
+    for (const auto& [name, entries] : languages) { (void)entries; out.push_back(name); }
+    return out;
+}
+
+std::string uiTextCatalogToJson(const UITextCatalog& c)
+{
+    nlohmann::json o = nlohmann::json::object();
+    o["fallback"] = c.fallback;
+    // An ARRAY of languages, each an array of pairs: nlohmann sorts the keys of
+    // an object, and this file is read by people who translate it — losing the
+    // author's order would reshuffle every language on every save.
+    nlohmann::json langs = nlohmann::json::array();
+    for (const auto& [name, entries] : c.languages)
+    {
+        nlohmann::json l = nlohmann::json::object();
+        l["language"] = name;
+        nlohmann::json items = nlohmann::json::array();
+        for (const auto& [k, text] : entries)
+            items.push_back(nlohmann::json::object({ { "key", k }, { "text", text } }));
+        l["entries"] = std::move(items);
+        langs.push_back(std::move(l));
+    }
+    o["languages"] = std::move(langs);
+    return o.dump(2);
+}
+
+bool uiTextCatalogFromJson(const std::string& json, UITextCatalog& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    UITextCatalog c;
+    c.fallback = j.value("fallback", std::string("en"));
+    if (const auto langs = j.find("languages"); langs != j.end() && langs->is_array())
+        for (const auto& l : *langs)
+        {
+            if (!l.is_object()) continue;
+            const std::string name = l.value("language", std::string());
+            if (name.empty()) continue;
+            const auto entries = l.find("entries");
+            if (entries == l.end() || !entries->is_array()) continue;
+            for (const auto& item : *entries)
+            {
+                if (!item.is_object()) continue;
+                const std::string k = item.value("key", std::string());
+                if (k.empty()) continue;
+                c.set(name, k, item.value("text", std::string()));
+            }
+        }
+    out = std::move(c);
+    return true;
+}
+
+int uiApplyTextCatalog(UIElement& e, const UITextCatalog& c, const std::string& lang)
+{
+    int written = 0;
+    for (const auto& [prop, key] : e.textKeys)
+    {
+        const std::string* text = c.find(lang, key);
+        if (!text) continue;
+        // Only String properties: a key bound to a colour is an authoring
+        // mistake, and writing the translation into it through a coercion would
+        // turn that mistake into a black label nobody can explain.
+        const UIPropValue cur = e.getPropAny(prop);
+        if (cur.type != UIPropType::String) continue;
+        if (cur.s == *text) continue;   // already says it; not a change to redraw
+        e.setPropAny(prop, UIPropValue::ofString(*text));
+        ++written;
+    }
+    return written;
+}
+
+int uiApplyTextCatalog(UIWidgetTree& tree, const UITextCatalog& c, const std::string& lang)
+{
+    int written = 0;
+    for (auto& ep : tree.elements)
+        if (ep) written += uiApplyTextCatalog(*ep, c, lang);
+    return written;
 }
 
 // ── Contrast (WCAG 2.1) ──────────────────────────────────────────────────────

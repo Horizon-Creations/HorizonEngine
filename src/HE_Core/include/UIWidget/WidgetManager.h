@@ -76,6 +76,21 @@ public:
                                                             : m_systemMode;
     }
 
+    // ── The language everything is written in ────────────────────────────────
+    // The catalog every widget's bound text resolves against (see
+    // UIElement::textKeys and uiApplyTextCatalog). Exactly the shape the theme
+    // above has, and for the same reason: setting either re-resolves EVERY live
+    // widget straight away, which is what makes switching language a switch
+    // rather than a reload.
+    //
+    // The default language is empty, which resolves to the catalog's fallback:
+    // an application that never sets one still shows its catalog's base
+    // language rather than the keys.
+    void setTextCatalog(const HE::UITextCatalog& catalog);
+    const HE::UITextCatalog& textCatalog() const { return m_catalog; }
+    void setLanguage(const std::string& lang);
+    const std::string& language() const { return m_language; }
+
     // ── Building the interface while it runs ─────────────────────────────────
     // A list of things — todos, search results, files, messages — is the most
     // ordinary thing an application shows, and until this existed it was the one
@@ -1018,6 +1033,9 @@ private:
     // that flashes white on a dark desktop for one frame is the thing "follow
     // the system" exists to avoid.
     HE::UIThemeMode       m_systemMode = HE::UIThemeMode::Dark;
+    // What bound text resolves to. Empty language = the catalog's fallback.
+    HE::UITextCatalog     m_catalog;
+    std::string           m_language;
     bool m_visualDirty = true;     // see consumeVisualDirty
     // The clock every indeterminate progress bar reads (UIElementRenderState::
     // time). Wrapped rather than left to grow: a float that has been counting
