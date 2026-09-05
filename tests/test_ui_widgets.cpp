@@ -3972,6 +3972,16 @@ TEST_CASE("Text field: undo restores the selection a step was taken over")
     CHECK(f.text().empty());
     CHECK(f.wm.undoFocusedText());
     CHECK(f.text() == "hello world");
+
+    // The most ordinary edit there is: select something and type over it. The
+    // letters that follow belong to the same step, so one Ctrl+Z brings the
+    // original back rather than the first letter of the replacement.
+    TextFieldFixture g("hello world");
+    CHECK(g.wm.editFocusedText(TE::SelectAll, false));
+    g.wm.inputText("a"); g.wm.inputText("b"); g.wm.inputText("c");
+    REQUIRE(g.text() == "abc");
+    CHECK(g.wm.undoFocusedText());
+    CHECK(g.text() == "hello world");
 }
 
 TEST_CASE("Text field: a paste comes back in one step, and a word delete in another")

@@ -3078,7 +3078,13 @@ void WidgetManager::inputText(const std::string& utf8)
 	// One typed character continues the run that is open. A paste and a
 	// replaced selection each begin their own, because undo should take back a
 	// paste in one step rather than letter by letter.
-	commit(!replaced && HE::uiUtf8Next(add, 0) == add.size());
+	const bool single = HE::uiUtf8Next(add, 0) == add.size();
+	commit(!replaced && single);
+	// …but a keystroke that replaced a selection leaves its run OPEN, so the
+	// letters after it join in. "Select the word, type a new one" is the most
+	// ordinary edit there is and has to come back in one Ctrl+Z; only a paste
+	// closes itself off.
+	if (replaced && single) ti->openRun = HE::UITextInput::EditKind::Insert;
 }
 
 void WidgetManager::inputComposition(const std::string& utf8, int cursorByte)

@@ -2891,7 +2891,13 @@ benutzt trotzdem niemand. Die Regel steht deshalb an einer Stelle, `UITextInput:
 und sie lautet: eine Gruppe sammelt weiter, solange die nächste Änderung **von derselben Art**
 ist (tippen, rückwärts löschen, vorwärts löschen, Wort löschen) und **ein einzelnes Zeichen**
 betrifft. Alles andere fängt eine neue an. Ein Einfügen aus der Zwischenablage ist deshalb ein
-Zug, kein Buchstabenregen, und Tippen über eine Auswahl auch.
+Zug, kein Buchstabenregen.
+
+Die Ausnahme, ohne die die Regel am häufigsten Fall vorbeiginge: ein **Tastendruck über eine
+Auswahl** beginnt zwar eine eigene Gruppe, lässt sie aber **offen**. „Wort markieren, neues
+tippen" ist die gewöhnlichste Änderung in einem Textfeld überhaupt und muss mit einem Ctrl+Z
+zurückkommen, nicht mit dem ersten Buchstaben der Ersetzung. Ein Einfügen schließt sich dagegen
+ab, denn was danach getippt wird, gehört nicht mehr dazu.
 
 **Beendet wird eine Gruppe von allem, was den Cursor bewegt:** die acht Pfeil- und
 Sprungtasten, Select All, ein Klick, ein Ziehen, ein Doppelklick, ein Fokuswechsel und das
