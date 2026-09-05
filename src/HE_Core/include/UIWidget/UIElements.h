@@ -905,6 +905,8 @@ public:
     }
     float* scrollOffsetPtr() override { return &scrollOffset; }
     float  maxScrollAmount() const override { return maxScroll(); }
+    bool   scrollBar(UIScrollBarStyle& s) const override
+    { s = { barWidth, padding, contentExtent, barColor }; return true; }
     void render(const UIWidgetRect& px, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>& out) const override;
     void writeJson(nlohmann::json&) const override;
@@ -1032,6 +1034,11 @@ public:
     }
     float* scrollOffsetPtr() override { return &scrollOffset; }
     float  maxScrollAmount() const override { return maxScroll(); }
+    // The MEASURED extent, not the cached one: a list's content is worked out
+    // from its item count, and the cache is a frame behind on the frame the
+    // count changed.
+    bool   scrollBar(UIScrollBarStyle& s) const override
+    { s = { barWidth, padding, measuredExtent(), barColor }; return true; }
 
     // Which item is under a point `localY` canvas units below the element's TOP
     // edge; -1 when that is padding, a gap between two rows, or past the end.

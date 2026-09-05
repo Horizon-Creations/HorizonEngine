@@ -729,6 +729,20 @@ private:
         // reason as the two above: one pointer stream, three different things
         // it can be doing, and a shared flag would make them fight.
         int draggingSplit  = 0;
+        // The scrollbar thumb being dragged, and how far below its TOP edge the
+        // pointer took hold of it. Without the grab offset the thumb jumps so
+        // its middle is under the pointer the moment it is touched, which reads
+        // as the list moving on its own before the drag has started.
+        int   draggingScroll = 0;
+        float scrollGrabDy   = 0.0f;
+        // What the wheel left behind: canvas units per second, per scrolling
+        // element. A notch moves the box AND pushes it, and this is the push —
+        // integrated and damped in tick(), erased the moment it has died down.
+        //
+        // Same discipline as `blends` above: entries exist only while something
+        // is moving. One left behind is an event-driven application that never
+        // sleeps again, because isAnimating() reads this map too.
+        std::unordered_map<int, float> scrollVel;
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
 
@@ -1024,6 +1038,16 @@ private:
         HE::UICursor cursor = HE::UICursor::Default;
     };
     PointerHit topmostHit(float vpWidth, float vpHeight, float x, float y);
+
+    // The scrollbar thumb under the pointer in THIS widget, deepest first, and
+    // how far below the thumb's top edge the pointer is. 0 = none.
+    //
+    // It asks the geometry rather than the hit test on purpose: a scroll box is
+    // not hit-testable at all (it is a container, its children take the clicks)
+    // and its bar still has to be grabbable. The bar is also drawn ON TOP of
+    // everything in the box, so it takes the press before anything under it.
+    int scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeight,
+                             float mouseX, float mouseY, float& grabDy) const;
     // Which link of a rich-text label a point lands on ("" = none). Its own
     // helper because two callers need it — the cursor and the click — and both
     // have to agree with what was drawn.

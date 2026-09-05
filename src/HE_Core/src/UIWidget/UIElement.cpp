@@ -7,6 +7,73 @@
 
 namespace HE {
 
+// ── The scrollbar, worked out once ───────────────────────────────────────────
+// Everything the thumb needs, in the element's pixel space. Both the drawing
+// and the grab go through this, and the offset↔thumb conversion below is it
+// read backwards — which is the whole point of it being one function.
+
+namespace {
+
+struct ScrollTrack
+{
+    float x = 0.0f;      // left edge of the bar, pixels
+    float w = 0.0f;      // its width
+    float top = 0.0f;    // top of the TRACK the thumb slides in
+    float len = 0.0f;    // the track's length
+    float thumb = 0.0f;  // the thumb's height
+    float maxOff = 0.0f; // the element's own scroll range, canvas units
+};
+
+bool scrollTrackOf(const UIElement& e, const UIWidgetRect& px, ScrollTrack& t)
+{
+    UIScrollBarStyle sb;
+    if (!e.scrollBar(sb) || sb.barWidth <= 0.0f || sb.extent <= 0.0f) return false;
+    t.maxOff = e.maxScrollAmount();
+    if (t.maxOff <= 0.0f) return false;          // it all fits: no thumb
+
+    const float scaleX = px.w / std::max(1.0f, e.sizeX);
+    const float scaleY = px.h / std::max(1.0f, e.sizeY);
+    const float inner  = std::max(1.0f, e.sizeY - 2.0f * sb.inset);
+    t.len   = inner * scaleY;
+    // How much of the content the view holds IS how long the thumb is, with a
+    // floor: a thumb of two pixels in a list of ten thousand is not a handle.
+    t.thumb = std::max(12.0f, t.len * std::min(1.0f, inner / sb.extent));
+    t.x     = px.x + px.w - (sb.barWidth + sb.inset) * scaleX;
+    t.w     = sb.barWidth * scaleX;
+    t.top   = px.y + sb.inset * scaleY;
+    return true;
+}
+
+} // namespace
+
+bool uiScrollThumbRect(const UIElement& e, const UIWidgetRect& px, UIWidgetRect& out)
+{
+    ScrollTrack t;
+    if (!scrollTrackOf(e, px, t)) return false;
+    // const_cast because scrollOffsetPtr is the setter and the getter at once;
+    // nothing is written through it here.
+    const float* off = const_cast<UIElement&>(e).scrollOffsetPtr();
+    if (!off) return false;
+    const float f = std::clamp(*off / t.maxOff, 0.0f, 1.0f);
+    out.x = t.x;
+    out.y = t.top + f * (t.len - t.thumb);
+    out.w = t.w;
+    out.h = t.thumb;
+    return true;
+}
+
+float uiScrollOffsetForThumbTop(const UIElement& e, const UIWidgetRect& px, float thumbTopPx)
+{
+    ScrollTrack t;
+    if (!scrollTrackOf(e, px, t)) return 0.0f;
+    const float travel = t.len - t.thumb;
+    // A thumb that fills its track cannot say anything about where it is, so a
+    // drag on one means "stay" rather than "jump to the top".
+    if (travel <= 0.0f) return std::clamp(0.0f, 0.0f, t.maxOff);
+    const float f = std::clamp((thumbTopPx - t.top) / travel, 0.0f, 1.0f);
+    return f * t.maxOff;
+}
+
 // ── Factory / registry ───────────────────────────────────────────────────────
 
 std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
@@ -1706,22 +1773,11 @@ void UIScrollBox::readJson(const nlohmann::json& j)
 void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
                          const HE::UUID&, float, std::vector<UIRenderObject>& out) const
 {
-    const float maxOff = maxScroll();
-    if (barWidth <= 0.0f || maxOff <= 0.0f || contentExtent <= 0.0f) return;
-    const float inner = std::max(1.0f, sizeY - 2.0f * padding);
-    // Screen pixels per canvas unit on this axis, so the bar is drawn in the
-    // same space as the rect handed in.
-    const float scaleY = px.h / std::max(1.0f, sizeY);
-    const float scaleX = px.w / std::max(1.0f, sizeX);
-
-    const float visibleFrac = std::min(1.0f, inner / contentExtent);
-    const float trackPx     = inner * scaleY;
-    const float thumbPx     = std::max(12.0f, trackPx * visibleFrac);
-    const float t           = maxOff > 0.0f ? (scrollOffset / maxOff) : 0.0f;
-    const float x = px.x + px.w - (barWidth + padding) * scaleX;
-    const float y = px.y + padding * scaleY + t * (trackPx - thumbPx);
-    quad(out, x, y, barWidth * scaleX, thumbPx, barColor, HE::UUID{},
-         barWidth * scaleX * 0.5f);
+    // Where the thumb goes is not this function's business: it is the same
+    // question a press on the bar asks, and both go through uiScrollThumbRect.
+    UIWidgetRect th;
+    if (!uiScrollThumbRect(*this, px, th)) return;
+    quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
 }
 
 // ── ListView ─────────────────────────────────────────────────────────────────
@@ -1765,18 +1821,10 @@ void UIListView::render(const UIWidgetRect& px, const UIElementRenderState&,
     // noise rather than feedback.
     if (hoveredRow >= 0 && !isSelected(hoveredRow)) rowQuad(hoveredRow, rowHoverColor);
 
-    const float maxOff = maxScroll();
-    if (barWidth > 0.0f && maxOff > 0.0f && measuredExtent() > 0.0f)
-    {
-        const float visibleFrac = std::min(1.0f, innerHeight() / measuredExtent());
-        const float trackPx = innerH;
-        const float thumbPx = std::max(12.0f, trackPx * visibleFrac);
-        const float t = scrollOffset / maxOff;
-        quad(out, px.x + px.w - (barWidth + padding) * scaleX,
-             innerY + t * (trackPx - thumbPx),
-             barWidth * scaleX, thumbPx, barColor, HE::UUID{},
-             barWidth * scaleX * 0.5f);
-    }
+    // Same sum as the scroll box's, because it is now literally the same sum.
+    UIWidgetRect th;
+    if (uiScrollThumbRect(*this, px, th))
+        quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
 }
 
 // The item count, the offset and the selection are all runtime state: a list

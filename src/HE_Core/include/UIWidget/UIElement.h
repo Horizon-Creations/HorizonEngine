@@ -278,6 +278,24 @@ struct UIElementRenderState
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };
 
+// ── The scrollbar of anything that scrolls ───────────────────────────────────
+// A scroll box and a list view both draw a thumb on their right edge, and both
+// worked it out with their own copy of the same six lines. The thumb is now ONE
+// sum (uiScrollThumbRect) fed by this: what the element contributes is three
+// numbers and a colour, and where the thumb lands is nobody's private business.
+//
+// That matters more than tidiness, because grabbing the bar asks the same
+// question drawing it does. The day those are two sums is the day the bar is
+// grabbed somewhere other than where it is drawn — the lesson tabLayout and the
+// rich-text hit test each arrived at separately.
+struct UIScrollBarStyle
+{
+    float     barWidth = 0.0f;   // canvas units; 0 = no bar at all
+    float     inset    = 0.0f;   // the box's own padding: top, bottom and right
+    float     extent   = 0.0f;   // total height of the content, canvas units
+    glm::vec4 color{ 1.0f };
+};
+
 // ── Base class ────────────────────────────────────────────────────────────────
 class HE_API UIElement
 {
@@ -685,6 +703,10 @@ public:
     // How far it may be scrolled — 0 when everything already fits, which is
     // also what says "the wheel belongs to whatever is behind me".
     virtual float  maxScrollAmount() const { return 0.0f; }
+    // …and what its scrollbar is made of. Answered by the same elements that
+    // answer the two above; false means "no bar", which is also what a bar
+    // width of 0 says. See UIScrollBarStyle for why this exists at all.
+    virtual bool   scrollBar(UIScrollBarStyle&) const { return false; }
     // Which way a container stacks (only asked when laysOutChildren()).
     virtual bool stacksVertically() const { return true; }
 
@@ -763,6 +785,18 @@ protected:
 // character, not over one of the bytes it is made of. They live in
 // Renderer/UIFont.h, next to the glyph walk that has to agree with them about
 // where a character begins.
+
+// ── The scrollbar thumb, in the element's own pixel space ────────────────────
+// `px` is the element's rect in screen pixels, the same rectangle render() is
+// handed. False when there is no thumb to draw: no bar, no content, or content
+// that already fits.
+HE_API bool uiScrollThumbRect(const UIElement& e, const UIWidgetRect& px,
+                              UIWidgetRect& out);
+// The inverse: the scroll offset that would put the thumb's TOP at this pixel.
+// Clamped to the element's range. It lives beside the sum above because it is
+// that sum read backwards, and two functions in two files would drift.
+HE_API float uiScrollOffsetForThumbTop(const UIElement& e, const UIWidgetRect& px,
+                                       float thumbTopPx);
 
 // Factory + registry (JSON load, editor palette).
 HE_API std::unique_ptr<UIElement> makeUIElement(UIWidgetType type);

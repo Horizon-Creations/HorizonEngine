@@ -7332,6 +7332,134 @@ TEST_CASE("WidgetManager: the wheel scrolls the box under the cursor")
     CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f));
 }
 
+// ── B9: the glide, and the bar as a handle ───────────────────────────────────
+// Four buttons of 100 in a box of 200: the content is 400 units tall, so it can
+// be scrolled by 200. The same shape as the wheel test above, and the two things
+// the wheel test does not ask about.
+
+namespace {
+
+// The box the two cases below share: 200×200 at the origin, no padding, four
+// 100-tall buttons in it.
+int makeScrollFixture(ContentManager& cm, WidgetManager& wm, int& boxOut)
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = t.add(HE::UIWidgetType::ScrollBox);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f;
+      e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+      e.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f)); }
+    for (int i = 0; i < 4; ++i)
+    {
+        const int b = t.add(HE::UIWidgetType::Button);
+        HE::UIElement& e = *t.find(b);
+        e.parentId = box;
+        e.setProp("Text", HE::UIPropValue::ofString(""));
+        e.sizeY = 100.0f;
+    }
+    registerWidget(cm, t);
+    boxOut = box;
+    return createShown(wm, cm, "mem://w.hasset");
+}
+
+float scrollOf(WidgetManager& wm, int widget, int box)
+{
+    auto* live = const_cast<HE::UIWidgetTree*>(wm.tree(widget));
+    if (!live) return -1.0f;
+    HE::UIElement* e = live->find(box);
+    const float* off = e ? e->scrollOffsetPtr() : nullptr;
+    return off ? *off : -1.0f;
+}
+
+} // namespace
+
+TEST_CASE("WidgetManager: a notch keeps moving after the wheel has stopped")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    WidgetManager wm;
+    int box = 0;
+    const int wid = makeScrollFixture(cm, wm, box);
+    REQUIRE(wid != 0);
+
+    // The notch moves it NOW — a wheel that only started a glide would feel
+    // like lag, and this is the number the wheel test above pins.
+    CHECK(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f));
+    CHECK(scrollOf(wm, wid, box) == doctest::Approx(48.0f));
+    // …and it is still moving with nobody touching the machine, which is what
+    // an event-driven application has to be told so it does not fall asleep in
+    // the middle of the throw.
+    CHECK(wm.isAnimating());
+
+    wm.tick(1.0f / 60.0f);
+    const float afterOne = scrollOf(wm, wid, box);
+    CHECK(afterOne > 48.0f);
+
+    // A second of frames is far longer than the damping takes: it settles, the
+    // entry is swept, and nothing asks for another frame.
+    for (int i = 0; i < 60; ++i) wm.tick(1.0f / 60.0f);
+    const float settled = scrollOf(wm, wid, box);
+    CHECK(settled > afterOne);
+    CHECK(settled < 100.0f);          // a glide, not a jump to the end
+    CHECK_FALSE(wm.isAnimating());
+    wm.tick(1.0f / 60.0f);
+    CHECK(scrollOf(wm, wid, box) == doctest::Approx(settled));
+}
+
+TEST_CASE("WidgetManager: the scrollbar thumb is a handle, not a picture")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    WidgetManager wm;
+    int box = 0;
+    const int wid = makeScrollFixture(cm, wm, box);
+    REQUIRE(wid != 0);
+
+    // One frame first. How tall the content is is a MEASUREMENT the layout
+    // takes, so a box that has never been drawn does not know it has anything
+    // to scroll — and a bar nobody has drawn yet is nothing to grab either.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // The bar sits in the last 6 units of the box's width, and the thumb is
+    // half the track (200 of 400 units of content are in view), so it covers
+    // y 0..100 while the box is at the top.
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 200.0f, 200.0f };
+    HE::UIWidgetRect th{};
+    const auto* live = wm.tree(wid);
+    REQUIRE(live != nullptr);
+    REQUIRE(HE::uiScrollThumbRect(*live->find(box), px, th));
+    CHECK(th.x == doctest::Approx(194.0f));
+    CHECK(th.w == doctest::Approx(6.0f));
+    CHECK(th.y == doctest::Approx(0.0f));
+    CHECK(th.h == doctest::Approx(100.0f));
+
+    // Take hold of it 50 pixels below its top, then pull down by 50. The thumb
+    // top follows the pointer minus that grab, and the offset that puts it at
+    // 50 in a 100-pixel travel is half of the 200 units it can scroll.
+    wm.processPointer(400.0f, 400.0f, 197.0f, 50.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 197.0f, 100.0f, true, true);
+    CHECK(scrollOf(wm, wid, box) == doctest::Approx(100.0f));
+
+    // Past the end of the track is the end of the track, not past it.
+    wm.processPointer(400.0f, 400.0f, 197.0f, 900.0f, true, true);
+    CHECK(scrollOf(wm, wid, box) == doctest::Approx(200.0f));
+
+    // Letting go leaves it exactly where the hand put it: a bar that threw the
+    // list on afterwards would undo the aim the drag just took.
+    wm.processPointer(400.0f, 400.0f, 197.0f, 900.0f, false, true);
+    CHECK_FALSE(wm.isAnimating());
+    for (int i = 0; i < 10; ++i) wm.tick(1.0f / 60.0f);
+    CHECK(scrollOf(wm, wid, box) == doctest::Approx(200.0f));
+
+    // And the pointer moving on with the button up does not still scroll it.
+    wm.processPointer(400.0f, 400.0f, 197.0f, 20.0f, false, true);
+    CHECK(scrollOf(wm, wid, box) == doctest::Approx(200.0f));
+}
+
 // ═══ Opacity + enabled ═══════════════════════════════════════════════════════
 // Fading a menu meant animating every colour in it, and a button could only be
 // "disabled" by a script remembering not to react. Both are inherited now: one

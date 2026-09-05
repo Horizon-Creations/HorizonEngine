@@ -1732,7 +1732,12 @@ bool WidgetManager::isAnimating() const
 		// with nobody touching the machine, which is the whole test. Left out,
 		// an event-driven application falls asleep in the middle of the blend
 		// and wakes up somewhere in it whenever the next event happens to come.
-		if (!w.anims.empty() || !w.playing.empty() || !w.blends.empty()) return true;
+		// The glide belongs here for the same reason: a list still moving after
+		// the wheel stopped is the picture changing with nobody touching the
+		// machine, and an application that slept through it would show the throw
+		// as a jump the next time an event happened to come.
+		if (!w.anims.empty() || !w.playing.empty() || !w.blends.empty() ||
+		    !w.scrollVel.empty()) return true;
 	return false;
 }
 
@@ -1915,6 +1920,35 @@ void WidgetManager::tick(float dt)
 			// The picture changed because time passed and for no other reason —
 			// the same thing the tooltip's wait has to say about itself.
 			if (moved) m_visualDirty = true;
+		}
+
+	// ── The glide the wheel left behind ──────────────────────────────────────
+	// Scrolling stops where the wheel stopped only on a machine; on paper it
+	// carries. The notch already moved the box (processWheel); this is the part
+	// that keeps moving it, damped exponentially so it settles rather than
+	// creeps, and cut off below a speed that would take a second to cross a
+	// pixel.
+	if (dt > 0.0f)
+		for (auto& w : m_instances)
+		{
+			if (w.scrollVel.empty()) continue;
+			constexpr float kDamping = 0.12f;   // seconds to lose ~63% of it
+			constexpr float kStop    = 8.0f;    // canvas units per second
+			for (auto it = w.scrollVel.begin(); it != w.scrollVel.end(); )
+			{
+				HE::UIElement* e = w.tree.find(it->first);
+				// Gone, held by the hand, or scrolled into an end: in all three
+				// cases there is nothing left to spend. uiScrollBy returning
+				// false IS "it did not move", which at the top or the bottom is
+				// exactly the throw being over.
+				if (!e || it->first == w.draggingScroll ||
+				    !HE::uiScrollBy(w.tree, it->first, it->second * dt))
+				{ it = w.scrollVel.erase(it); continue; }
+				m_visualDirty = true;
+				it->second *= std::exp(-dt / kDamping);
+				if (std::fabs(it->second) < kStop) it = w.scrollVel.erase(it);
+				else                               ++it;
+			}
 		}
 
 	// ── The tooltip's wait ───────────────────────────────────────────────────
@@ -2409,6 +2443,29 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	const bool secondEdge  = secondaryDown && !m_wasSecondaryDown;
 	m_wasSecondaryDown = secondaryDown;
 
+	// ── Which scrollbar thumb this press would take ──────────────────────────
+	// Settled once and BEFORE the per-widget loop, because it is a
+	// topmost-wins question the way the wheel's is, and that loop runs in
+	// creation order — which is not the order things are stacked in. Asking
+	// inside it would let two overlapping widgets both grab the same press.
+	Instance* thumbW    = nullptr;
+	int       thumbElem = 0;
+	float     thumbGrab = 0.0f;
+	if (pressEdge)
+	{
+		std::vector<Instance*> byZ;
+		for (auto& w : m_instances)
+			if (w.visible && takesInput(w.id)) byZ.push_back(&w);
+		std::stable_sort(byZ.begin(), byZ.end(),
+			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		for (Instance* wp : byZ)
+		{
+			float g = 0.0f;
+			if (const int t = scrollThumbAtPointer(*wp, vpWidth, vpHeight, mouseX, mouseY, g))
+			{ thumbW = wp; thumbElem = t; thumbGrab = g; break; }
+		}
+	}
+
 	// ── A press on nothing closes a popup ────────────────────────────────────
 	// That IS the difference between a popup and a modal: one is dismissed by
 	// looking somewhere else, the other has to be answered. `topW` can only be
@@ -2551,8 +2608,19 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		// ── Press ────────────────────────────────────────────────────────────
 		if (pressEdge)
 		{
-			w.pressedElem = hot;
-			if (hot != 0)
+			// The bar first, and instead of everything else. It is drawn over
+			// the box's content, so a press that lands on it is a press on it —
+			// and letting the element underneath have the same press would
+			// select a row while dragging the thumb past it.
+			const int thumb = thumbW == &w ? thumbElem : 0;
+			if (thumb != 0)
+			{
+				w.draggingScroll = thumb;
+				w.scrollGrabDy   = thumbGrab;
+				w.scrollVel.erase(thumb);   // a hand on the bar stops the glide
+			}
+			w.pressedElem = thumb != 0 ? 0 : hot;
+			if (thumb == 0 && hot != 0)
 			{
 				const HE::UIElement* e = w.tree.find(hot);
 				if (e && e->type() == HE::UIWidgetType::Button)
@@ -2746,6 +2814,31 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			}
 		}
 
+		// ── Scrollbar drag ───────────────────────────────────────────────────
+		// No hit test, like the two above: dragging the pointer off the side of
+		// the bar must keep scrolling, because letting go is what ends a grab.
+		if (w.draggingScroll != 0 && primaryDown)
+		{
+			if (HE::UIElement* e = w.tree.find(w.draggingScroll))
+			{
+				if (float* off = e->scrollOffsetPtr())
+				{
+					const HE::UIWidgetCanvas canvas =
+						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *e, &canvas);
+					const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+					                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+					// The pointer minus where on the thumb it took hold IS the
+					// thumb's top, and the offset that puts it there is the
+					// drawing sum read backwards.
+					const float nv = HE::uiScrollOffsetForThumbTop(
+						*e, px, mouseY - w.scrollGrabDy);
+					if (nv != *off) { *off = nv; m_visualDirty = true; }
+				}
+			}
+			else w.draggingScroll = 0;   // the element went away under the hand
+		}
+
 		// ── Text selection drag ──────────────────────────────────────────────
 		// Held down after a press inside a field: the anchor stays put and the
 		// caret follows the pointer, which is what selecting with the mouse is.
@@ -2767,6 +2860,10 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			w.draggingSlider = 0;
 			w.draggingText   = 0;
 			w.draggingSplit  = 0;
+			// Let go of the bar and it STAYS: a thumb has been put exactly
+			// where it was wanted, and throwing it on afterwards would undo the
+			// aim the drag just took.
+			w.draggingScroll = 0;
 		}
 	}
 
@@ -4166,6 +4263,39 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	return setFocus(w->id, order[next]);
 }
 
+int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeight,
+                                        float mouseX, float mouseY, float& grabDy) const
+{
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+	int best = 0, bestDepth = -1;
+	for (auto& ep : w.tree.elements)
+	{
+		HE::UIElement& e = *ep;
+		if (!e.scrollOffsetPtr()) continue;
+		if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
+		if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
+		const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+		const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+		                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+		HE::UIWidgetRect th;
+		if (!HE::uiScrollThumbRect(e, px, th)) continue;
+		if (mouseX < th.x || mouseX > th.x + th.w ||
+		    mouseY < th.y || mouseY > th.y + th.h) continue;
+		// Deepest wins, the same rule the wheel follows: a list inside a list
+		// hands its bar to the one the pointer is actually in.
+		int depth = 0, guard = 0;
+		for (const HE::UIElement* c = &e;
+		     c->parentId != 0 && guard++ < static_cast<int>(w.tree.elements.size()) + 1;)
+		{
+			const HE::UIElement* p = w.tree.find(c->parentId);
+			if (!p) break;
+			++depth; c = p;
+		}
+		if (depth > bestDepth) { bestDepth = depth; best = e.id; grabDy = mouseY - th.y; }
+	}
+	return best;
+}
+
 bool WidgetManager::processWheel(float vpWidth, float vpHeight,
                                  float mouseX, float mouseY, float wheel)
 {
@@ -4218,7 +4348,24 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 			if (depth > bestDepth) { bestDepth = depth; best = e.id; }
 		}
 		if (best != 0 && HE::uiScrollBy(w.tree, best, -wheel * kUnitsPerNotch))
+		{
+			// …and the notch leaves something behind. The box moves its 48 units
+			// NOW — a wheel that only started a glide would feel like lag, and
+			// every assertion about the offset in the same call would be wrong —
+			// and on top of that it is pushed, which tick() spends over the next
+			// tenth of a second. Notches add up, so a fast flick throws further
+			// than three separate clicks do.
+			constexpr float kFlingPerNotch = 200.0f;  // canvas units per second
+			constexpr float kFlingMax      = 3000.0f;
+			// Not while the bar is held: a hand on the thumb is an exact
+			// instruction, and a glide underneath it would fight the hand.
+			if (w.draggingScroll != best)
+			{
+				float& v = w.scrollVel[best];
+				v = std::clamp(v - wheel * kFlingPerNotch, -kFlingMax, kFlingMax);
+			}
 			return true;
+		}
 	}
 	return false;
 }
