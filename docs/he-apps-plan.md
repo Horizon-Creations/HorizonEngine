@@ -2971,3 +2971,68 @@ Löschen und Tippen verschmelzen nie; eine neue Eingabe wirft den Redo-Stapel we
 die Auswahl mit zurück, über die geschrieben wurde; Einfügen und Wortlöschen kommen je in
 einem Zug zurück; ein Nur-Lese-Feld und ein vom Filter abgelehnter Tastendruck hinterlassen
 gar keinen Schritt. Dazu die Zeile, dass ein Zeilenumbruch im mehrzeiligen Feld für sich steht.
+
+---
+
+### B9 Feinschliff-Widgets (05.09.2026)
+
+Neun Punkte standen auf der Liste, zwei davon waren schon gebaut. Das SUCHFELD gibt es als
+Komponente (`SearchField.hasset`, Pille, Icon-Platz, Feld mit Platzhalter, vier Parameter);
+was ihm fehlt, ist ein Löschkreuz, und das braucht Logik, die eine Komponente heute nicht
+trägt. Die BILDLAUFLEISTE wurde schon gezeichnet, sie war nur kein Griff.
+
+**Der Daumen ist eine Summe, kein Bild.** Scroll Box und List View hatten je ihre eigene Kopie
+derselben sechs Zeilen, und ihn greifbar zu machen hätte eine dritte gebraucht.
+`uiScrollThumbRect` rechnet ihn aus, `uiScrollOffsetForThumbTop` liest dieselbe Summe rückwärts
+für den Zug; was ein Element beisteuert, sind drei Zahlen und eine Farbe (`UIScrollBarStyle`,
+virtuell neben `scrollOffsetPtr`). Dieselbe Lehre wie `tabLayout` und der RichText-Treffertest:
+der Tag, an dem Zeichnen und Greifen zwei Rechnungen sind, ist der Tag, an dem der Balken
+woanders angefasst wird, als er zu sehen ist.
+
+Der Griff fragt die GEOMETRIE, nicht den Treffertest. Eine Scroll Box ist gar nicht treffbar,
+ihre Kinder nehmen die Klicks, und der Balken muss trotzdem zu packen sein. Er wird über allem
+im Kasten gezeichnet, also nimmt er den Druck auch vor allem darunter — sonst wählt ein Zug am
+Daumen jede Zeile aus, an der er vorbeikommt. Welcher Daumen, wird einmal vor der Schleife über
+die Instanzen entschieden, weil die in Erzeugungsreihenfolge läuft und das eine Frage nach dem
+Obersten ist.
+
+**Trägheit** sitzt an der Instanz wie die Zustandsblenden aus B8: eine Geschwindigkeit je
+scrollendem Element, Einträge nur solange etwas läuft. Die Raste bewegt den Kasten SOFORT um
+ihre 48 Einheiten und schiebt ihn zusätzlich an — sofort, weil ein Rad, das nur eine Fahrt
+anstößt, sich wie Verzögerung anfühlt, und weil jede Zusicherung über den Versatz im selben
+Aufruf sonst falsch wäre. Rasten addieren sich. Eine Hand am Balken löscht die Fahrt und bekommt
+keine neue.
+
+**Der Spinner ist eine Eigenschaft, kein Typ** (`Indeterminate` an der ProgressBar): ein Segment
+wandert über die Bahn statt einen Bruchteil zu füllen. Das ist das einzige ehrliche Bild für
+eine Arbeit, deren Länge niemand kennt. Die Uhr sitzt am Manager, nicht am Element — ein Spinner
+hat keinen eigenen Zustand, er ist eine Funktion der Zeit, und eine Phase je Element wäre eine
+Zahl zum Aufheben, zum versehentlichen Serialisieren und zum Aus-dem-Takt-Geraten mit dem
+Spinner daneben. Ob überhaupt einer läuft, wird einmal pro Tick entschieden und gemerkt, weil
+zwei Stellen die Antwort brauchen: „noch ein Bild bitte" und `isAnimating()`.
+
+**Der Umschalter ist derselbe Wert mit einem zweiten Bild** (`Switch` an der CheckBox). Kein
+eigener Typ: ein Schalter hat nichts, was eine Checkbox nicht hat — ein Bool, ein Text, ein
+Ereignis. Das Bild sagt, welches von beiden ein Bedienelement ist: ein Kasten heißt „das wird
+wahr, wenn ich OK drücke", ein Schalter heißt „das gilt jetzt".
+
+**Das Zahlenfeld** ist ein Textfeld mit zwei Pfeilen (`Steppers`, `Step`, `Min Value`,
+`Max Value` am TextInput), nicht ein zweiter Typ daneben: ein Zahlenfeld IST ein Textfeld, in
+das man auch tippen kann, und jedes Toolkit, das daraus ein eigenes Bedienelement gemacht hat,
+hat Auswahl, Zwischenablage und Cursor darin noch einmal gebaut. Der Eingabefilter für Ziffern
+war schon da. `stepperRects` ist wieder eine Summe für Zeichnen und Klicken; leeres oder
+unlesbares Feld steppt von 0; die Zahl wird ohne Nachkommaschwanz und ohne Gebietsschema
+geschrieben, weil ein Feld, das in Deutschland „1,5" sagt, ein Feld ist, über dessen Text kein
+Parser einig ist.
+
+**Trennlinie und Badge** als widget_gen-Bauteile, hinten angehängt (der Index IST die UUID).
+Beim Divider ist die LUFT der Parameter, nicht die Linie: einen zu dicken Trennstrich baut
+niemand, einen ohne Abstand jeder.
+
+Jede neue Eigenschaft landet nur dann in der Datei, wenn sie an ist, also speichert jedes ältere
+Widget byteweise dasselbe wie gestern — dieselbe Regel wie B8s „Transition".
+
+**Offen aus B9:** Datumswähler und Farbwähler. Beide sind eigene Elementtypen (~12 Dateien je
+Typ, gemessen am Splitter) und gehören als eigener Schritt verteilt; der Entwurf steht: eingebaut
+statt als Popup, der Kalender zeichnet sein Monatsraster selbst, der Farbwähler Hue-Streifen plus
+SV-Feld aus Quads, und wer sie schwebend will, stellt sie in ein Modal aus B4.

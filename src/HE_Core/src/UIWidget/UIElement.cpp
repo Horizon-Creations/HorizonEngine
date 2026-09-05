@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
 
 namespace HE {
 
@@ -659,6 +662,10 @@ const UIPropTable& UITextInput::propTable() const
         // Characters. See UITextInput::Filter.
         uiprop::slot<&UITextInput::inputFilter>({ "Input Filter", UIPropType::Int, 0.0f, 3.0f }),
         uiprop::slot<&UITextInput::allowedChars>({ "Allowed Characters", UIPropType::String }),
+        uiprop::slot<&UITextInput::steppers>   ({ "Steppers", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::step>       ({ "Step", UIPropType::Float }),
+        uiprop::slot<&UITextInput::minValue>   ({ "Min Value", UIPropType::Float }),
+        uiprop::slot<&UITextInput::maxValue>   ({ "Max Value", UIPropType::Float }),
     };
     return t;
 }
@@ -1412,6 +1419,71 @@ void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState& s
         quad(out, x0, px.y, x1 - x0, px.h, fillColor, {}, roundedR(x1 - x0, px.h, 4.0f));
 }
 
+// ── TextInput: the number field's two arrows ─────────────────────────────────
+
+bool UITextInput::stepperRects(const UIWidgetRect& px, UIWidgetRect& up,
+                               UIWidgetRect& down) const
+{
+    if (!steppers || multiline) return false;
+    constexpr float kInset = 2.0f;
+    // As wide as it is tall, roughly, and never more than a third of the field:
+    // a narrow field must still have somewhere to type.
+    const float w = std::min(px.w * 0.33f, std::max(10.0f, px.h * 0.62f));
+    const float h = (px.h - 2.0f * kInset) * 0.5f;
+    if (w <= 0.0f || h <= 0.0f) return false;
+    const float x = px.x + px.w - kInset - w;
+    up   = { x, px.y + kInset,     w, h };
+    down = { x, px.y + kInset + h, w, h };
+    return true;
+}
+
+namespace {
+
+// A number the way a person writes it: no decimal tail on a whole number, and
+// no trailing zeros on one that has a tail. Printed rather than streamed so the
+// result does not depend on the locale — a field that says "1,5" in Germany and
+// "1.5" everywhere else is a field whose text no parser agrees about.
+std::string formatStepValue(double v)
+{
+    char buf[64];
+    if (v == std::floor(v) && std::fabs(v) < 1e15)
+    {
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+        return buf;
+    }
+    std::snprintf(buf, sizeof(buf), "%.6f", v);
+    std::string s = buf;
+    while (!s.empty() && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    return s;
+}
+
+} // namespace
+
+bool UITextInput::applyStep(int dir)
+{
+    if (!steppers || multiline || dir == 0) return false;
+    // What is in the field, read as a number. Empty or unreadable counts as 0:
+    // a field nobody has filled in yet has to step from somewhere, and refusing
+    // to move at all teaches nothing about why.
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double parsed = std::strtod(begin, &end);
+    const double cur = (end && end != begin) ? parsed : 0.0;
+
+    double nv = cur + static_cast<double>(dir) * static_cast<double>(step);
+    if (minValue < maxValue)
+        nv = std::clamp(nv, static_cast<double>(minValue), static_cast<double>(maxValue));
+    const std::string s = formatStepValue(nv);
+    if (s == text) return false;   // already at the limit
+    text = s;
+    // The caret goes to the end and the selection with it. A number that has
+    // just been replaced whole has no interesting place to stand in the middle
+    // of, and a caret left at byte 4 of a two-character number is out of bounds.
+    caret = selAnchor = text.size();
+    return true;
+}
+
 // ── TextInput ────────────────────────────────────────────────────────────────
 
 void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
@@ -1427,9 +1499,36 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // this type's own answer to "the caret is in here", and it survives being
     // clipped, which a ring drawn outside the box does not.
     const float pad = 6.0f;
+    // The arrows take their column out of the text's width, not off the top of
+    // it: a number running underneath its own stepper is the first thing a
+    // field with one gets wrong.
+    UIWidgetRect upR{}, downR{};
+    const bool hasSteppers = stepperRects(px, upR, downR);
+    const float rightPad = hasSteppers ? pad + (px.x + px.w - upR.x) : pad;
     const glm::vec2 tp{ px.x + pad, px.y };
-    const glm::vec2 ts{ px.w - 2 * pad, px.h };
+    const glm::vec2 ts{ px.w - pad - rightPad, px.h };
     const float sizePx = fontSize * pxScaleY;
+    if (hasSteppers)
+    {
+        // A chevron out of three rows rather than a glyph: the field draws with
+        // quads, and an arrow that needed the icon font would tie a number
+        // field to a font being loaded.
+        const glm::vec4 ink(glm::vec3(textColor) * 0.75f, textColor.a);
+        auto chevron = [&](const UIWidgetRect& r, bool up)
+        {
+            const float unit = std::max(1.0f, std::min(r.w, r.h) * 0.16f);
+            const float cx = r.x + r.w * 0.5f;
+            const float cy = r.y + r.h * 0.5f;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float rowW = unit * (5.0f - 2.0f * static_cast<float>(i));
+                const float dy   = (up ? -1.0f : 1.0f) * (static_cast<float>(i) - 1.0f) * unit;
+                quad(out, cx - rowW * 0.5f, cy + dy - unit * 0.5f, rowW, unit, ink, {}, 0.0f);
+            }
+        };
+        chevron(upR, true);
+        chevron(downR, false);
+    }
 
     // The placeholder goes away when somebody starts EDITING, not when the tab
     // order walks past: a hint that vanishes because the focus went by leaves an
@@ -2030,6 +2129,15 @@ void UITextInput::writeJson(nlohmann::json& j) const
     // filter existed still saves byte-identically.
     if (inputFilter != FilterAny)  j["inputFilter"] = inputFilter;
     if (!allowedChars.empty())     j["allowedChars"] = allowedChars;
+    // …and the number field. The step is written along with the switch rather
+    // than on its own, because a stepper of 1 and a stepper of 0.25 are two
+    // different controls and the file has to say which.
+    if (steppers)
+    {
+        j["steppers"] = true;
+        j["step"] = step;
+        if (minValue < maxValue) { j["minValue"] = minValue; j["maxValue"] = maxValue; }
+    }
 }
 void UITextInput::readJson(const nlohmann::json& j)
 {
@@ -2046,6 +2154,10 @@ void UITextInput::readJson(const nlohmann::json& j)
     wrapText   = j.value("wrapText", false);
     inputFilter  = j.value("inputFilter", static_cast<int>(FilterAny));
     allowedChars = j.value("allowedChars", std::string());
+    steppers = j.value("steppers", false);
+    step     = j.value("step", 1.0f);
+    minValue = j.value("minValue", 0.0f);
+    maxValue = j.value("maxValue", 0.0f);
     // The authored text decides where the caret starts, not a stale offset.
     caret = selAnchor = text.size();
 }

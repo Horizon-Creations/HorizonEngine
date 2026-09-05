@@ -190,7 +190,11 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Multiline", UIPropType::Bool },
             { "Wrap Text", UIPropType::Bool },
             { "Input Filter", UIPropType::Int },
-            { "Allowed Characters", UIPropType::String } } },
+            { "Allowed Characters", UIPropType::String },
+            { "Steppers", UIPropType::Bool },
+            { "Step", UIPropType::Float },
+            { "Min Value", UIPropType::Float },
+            { "Max Value", UIPropType::Float } } },
         { UIWidgetType::ComboBox, {
             { "Options", UIPropType::StringList },
             { "Selected Index", UIPropType::Int },
@@ -7332,6 +7336,70 @@ TEST_CASE("WidgetManager: the wheel scrolls the box under the cursor")
     // Scrolled to the end, the wheel stops being consumed too.
     for (int i = 0; i < 20; ++i) wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f);
     CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f));
+}
+
+// ── B9: the number field ─────────────────────────────────────────────────────
+
+TEST_CASE("TextInput: the steppers step, clamp, and stay out of the text's way")
+{
+    HE::UITextInput ti;
+    ti.sizeX = 120.0f; ti.sizeY = 24.0f;
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 120.0f, 24.0f };
+    HE::UIWidgetRect up{}, down{};
+
+    // Off by default, and off means there is nothing there to click.
+    CHECK_FALSE(ti.stepperRects(px, up, down));
+    CHECK_FALSE(ti.applyStep(1));
+
+    ti.steppers = true;
+    REQUIRE(ti.stepperRects(px, up, down));
+    // Stacked, at the right edge, inside the field.
+    CHECK(up.y < down.y);
+    CHECK(up.x == doctest::Approx(down.x));
+    CHECK(up.x + up.w <= 120.0f);
+    CHECK(up.x > 60.0f);
+
+    // An empty field steps from zero rather than refusing to move.
+    CHECK(ti.applyStep(1));
+    CHECK(ti.text == "1");
+    CHECK(ti.caret == ti.text.size());
+    ti.step = 0.25f;
+    CHECK(ti.applyStep(1));
+    CHECK(ti.text == "1.25");      // no trailing zeros, and no locale comma
+    CHECK(ti.applyStep(-1));
+    CHECK(ti.text == "1");         // …and no decimal tail on a whole number
+
+    // A range clamps, and a step that would not move it reports nothing.
+    ti.step = 10.0f; ti.minValue = 0.0f; ti.maxValue = 5.0f;
+    CHECK(ti.applyStep(1));
+    CHECK(ti.text == "5");
+    CHECK_FALSE(ti.applyStep(1));
+
+    // Text that is not a number steps from zero too, rather than being kept.
+    ti.text = "abc"; ti.step = 1.0f; ti.minValue = ti.maxValue = 0.0f;
+    CHECK(ti.applyStep(1));
+    CHECK(ti.text == "1");
+
+    // A number field has one line, so a multiline one has no arrows.
+    ti.multiline = true;
+    CHECK_FALSE(ti.stepperRects(px, up, down));
+    CHECK_FALSE(ti.applyStep(1));
+    ti.multiline = false;
+
+    // Written only when it is on, like every other switch on this type.
+    nlohmann::json j;
+    HE::UITextInput plain;
+    plain.writeJson(j);
+    CHECK_FALSE(j.contains("steppers"));
+    j = nlohmann::json{};
+    ti.step = 0.5f; ti.minValue = -2.0f; ti.maxValue = 2.0f;
+    ti.writeJson(j);
+    HE::UITextInput back;
+    back.readJson(j);
+    CHECK(back.steppers);
+    CHECK(back.step == doctest::Approx(0.5f));
+    CHECK(back.minValue == doctest::Approx(-2.0f));
+    CHECK(back.maxValue == doctest::Approx(2.0f));
 }
 
 // ── B9: a bar with no end to report ──────────────────────────────────────────

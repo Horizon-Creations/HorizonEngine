@@ -2649,6 +2649,10 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				w.scrollVel.erase(thumb);   // a hand on the bar stops the glide
 			}
 			w.pressedElem = thumb != 0 ? 0 : hot;
+			// A press one of the number field's arrows has already answered.
+			// Its own flag rather than an early exit, because the rest of this
+			// widget's frame still has to run.
+			bool stepperTook = false;
 			if (thumb == 0 && hot != 0)
 			{
 				const HE::UIElement* e = w.tree.find(hot);
@@ -2669,6 +2673,46 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					    splitterDividerAt(w.tree, *sp, canvas,
 					                      mouseX / canvas.scaleX, mouseY / canvas.scaleY))
 						w.draggingSplit = hot;
+				}
+				// A number field: the two arrows step it, the rest of the field
+				// takes the caret as it always did. Same shape as the tab strip
+				// below — the geometry is asked of the ELEMENT, so what is
+				// clicked and what is drawn cannot come apart.
+				if (const auto* ti = dynamic_cast<const HE::UITextInput*>(e))
+				{
+					const HE::UIWidgetCanvas canvas =
+						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ti, &canvas);
+					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					HE::UIWidgetRect upR{}, downR{};
+					if (ti->stepperRects(pxr, upR, downR))
+					{
+						auto inside = [&](const HE::UIWidgetRect& q)
+						{
+							return mouseX >= q.x && mouseX <= q.x + q.w &&
+							       mouseY >= q.y && mouseY <= q.y + q.h;
+						};
+						const int dir = inside(upR) ? 1 : (inside(downR) ? -1 : 0);
+						if (dir != 0)
+							if (auto* live = dynamic_cast<HE::UITextInput*>(w.tree.find(hot)))
+							{
+								// A read-only field shows its number and does
+								// not let anyone change it — by the arrows any
+								// more than by the keyboard.
+								if (live->editable && live->applyStep(dir))
+								{
+									m_visualDirty = true;
+									const ScriptTarget t2 = scriptTargetFor(w, hot);
+									rt().fireOnTextChanged(t2.scriptId, t2.elem, live->text);
+								}
+								// Taken either way: an arrow that also put the
+								// caret in the text would select the digit under
+								// it on every click.
+								w.pressedElem = 0;
+								stepperTook = true;
+							}
+					}
 				}
 				// A Tab Box: the strip switches pages, the rest is the page.
 				if (const auto* tb = dynamic_cast<const HE::UITabBox*>(e))
@@ -2704,7 +2748,13 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				}
 				// TextInput: focus it, and put the caret where the click was —
 				// a field you can only ever append to is not a field.
-				if (e && e->type() == HE::UIWidgetType::TextInput)
+				if (stepperTook)
+				{
+					// The arrow answered it. Not the field's focus and not the
+					// caret: a click on a stepper is a click on a button that
+					// happens to live inside a text box.
+				}
+				else if (e && e->type() == HE::UIWidgetType::TextInput)
 				{
 					if (w.focusedElem != hot)
 					{

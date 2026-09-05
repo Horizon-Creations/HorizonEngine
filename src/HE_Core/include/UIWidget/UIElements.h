@@ -491,6 +491,32 @@ public:
     float  maxScrollAmount() const override
     { return multiline ? std::max(0.0f, contentHeightPx - viewHeightPx) : 0.0f; }
 
+    // ── A number field (docs/he-apps-plan.md B9) ─────────────────────────────
+    // Two arrows at the right edge that step the value, plus what a step is and
+    // how far it may go. Built on the text field rather than beside it: a
+    // number field IS a text field somebody can also type into, and every
+    // toolkit that made it a separate control ended up reimplementing selection,
+    // the clipboard and the caret to get there.
+    //
+    // Off by default, so every field authored before this draws and saves
+    // exactly as it did. Ignored while `multiline`: a number has one line.
+    bool        steppers = false;
+    float       step     = 1.0f;
+    // The range. min >= max means unbounded, which is also the default — a
+    // spinner with no ceiling is a legitimate thing to want, and 0..0 is the
+    // only pair that could not mean anything else.
+    float       minValue = 0.0f;
+    float       maxValue = 0.0f;
+
+    // The two arrows, in the field's own pixel space, up first. False when
+    // there are none to draw. ONE sum for the drawing and the press, the same
+    // rule the scrollbar thumb follows: an arrow that is clicked somewhere
+    // other than where it is drawn is worse than no arrow.
+    bool stepperRects(const UIWidgetRect& px, UIWidgetRect& up, UIWidgetRect& down) const;
+    // Step the value by `dir` steps and write it back as text, clamped to the
+    // range. False when nothing changed — at a limit, or with steppers off.
+    bool applyStep(int dir);
+
     bool   hasSelection() const { return caret != selAnchor; }
     size_t selMin() const { return caret < selAnchor ? caret : selAnchor; }
     size_t selMax() const { return caret < selAnchor ? selAnchor : caret; }
