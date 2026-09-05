@@ -705,6 +705,8 @@ HE_HC_VALUE_EVENT(fireOnMenuItem, "OnMenuItem", const std::string&,
                   onMenuItem(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnHttpResponse, "OnHttpResponse", int,
                   onHttpResponse(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnFileChanged, "OnFileChanged", const std::string&,
+                  onFileChanged(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnLinkClicked, "OnLinkClicked", const std::string&,
                   onLinkClicked(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnDrop, "OnDrop", const std::string&,

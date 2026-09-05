@@ -975,6 +975,15 @@ namespace
 	  "Copies a file. It will NOT overwrite: if something is already at the "
 	  "destination it does nothing and Ok is false. This is the one file call that "
 	  "could destroy something you did not name, so it refuses instead." },
+	{ "fs.watch",
+	  "Keeps an eye on a file or a folder. From now on On File Changed fires "
+	  "with the path whenever it appears, disappears or changes; for a folder "
+	  "that means its immediate contents, one level deep. Returns a handle for "
+	  "Stop Watching, or 0 when the path is out of reach. Checked about once a "
+	  "second, so it is for reacting, not for timing." },
+	{ "fs.unwatch",
+	  "Stops a watch, using the handle Watch File gave you. Watches also all end "
+	  "when the application does." },
 
 	// ── Process ──────────────────────────────────────────────────────────────
 	// All three need the project's "Run other programs" permission except Find

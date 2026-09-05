@@ -144,6 +144,10 @@ public:
     // say what the answer was.
     virtual void onHttpResponse(int elem, int ticket)
     { fireEvent("OnHttpResponse", elem, Value::ofInt(ticket)); }
+    // A watched file or folder moved; the argument is the path, spelled the way
+    // the watch was.
+    virtual void onFileChanged(int elem, const std::string& path)
+    { fireEvent("OnFileChanged", elem, Value::ofString(path)); }
     // A link in a rich-text label. The argument is the link's id.
     virtual void onLinkClicked(int elem, const std::string& id)
     { fireEvent("OnLinkClicked", elem, Value::ofString(id)); }

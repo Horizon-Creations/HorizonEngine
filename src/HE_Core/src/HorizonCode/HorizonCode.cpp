@@ -2203,6 +2203,12 @@ const std::vector<EngineEventDesc>& engineEvents()
         // payload: the TICKET http.get/http.post handed back, because an event
         // carries one value and a response is four — the readers say the rest.
         { "OnHttpResponse",       "onHttpResponse",       P::Int,    true  },
+        // A path this application watched has appeared, vanished or changed.
+        // String payload: the path, spelled the way fs.watch was called — an
+        // absolute one would be exactly what the sandbox refuses to reopen.
+        // Which of the three happened is fs.exists/fs.size's answer, not the
+        // event's: an event carries one value.
+        { "OnFileChanged",        "onFileChanged",        P::String, true  },
         // The gesture inside the application: this element was picked up, a
         // payload was let go over this one, and the carry is over. OnDrop's
         // String is the SOURCE's payload (its Drag Payload, or its name) — the

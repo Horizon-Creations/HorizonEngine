@@ -238,6 +238,12 @@ public:
     // an event carries one value and a response is four, so the readers
     // (http.status, http.body, …) say what came back.
     void fireOnHttpResponse(InstanceId id, int elem, int ticket);
+    // A path this application asked fs.watch about has appeared, vanished or
+    // changed (elem 0: it belongs to the application). The payload is the PATH
+    // in the spelling the watch used, so the graph can hand it straight back to
+    // fs.readText; whether it now exists, and how big it is, are the readers'
+    // job for the same reason the HTTP ticket leaves that to its own.
+    void fireOnFileChanged(InstanceId id, int elem, const std::string& path);
     // A link in a rich-text label — the payload is the id the markup gave it.
     void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
     // Dragging inside the application. OnDrop's payload is what the SOURCE said

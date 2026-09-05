@@ -1051,6 +1051,57 @@ namespace fs {
     // destination would be the one row here that can destroy data the caller
     // never named.
     bool        copy(const std::string& from, const std::string& to);
+
+    // ── Watching (plan C, the last open row of the fs line) ──────────────────
+    // `watch` names a file or a directory and hands back a handle; from then on
+    // the application fires OnFileChanged with the PATH whenever that file, or
+    // an immediate child of that directory, appears, disappears or changes. 0
+    // means it did not start — an unreachable path (the same refusal every row
+    // here gives) or too many watches already.
+    //
+    // The path comes back in the CALLER'S spelling. A script that watched the
+    // relative "docs" is told about "docs/notes.txt", never about the absolute
+    // path underneath: an absolute path is exactly what `resolved` would refuse
+    // to open again unless the project granted files, so the event would carry
+    // a name its own receiver could not read.
+    //
+    // The event carries one value, and "what happened" is three (appeared,
+    // vanished, changed). The path is the one that fits, and `exists`, `size`
+    // and `modified` answer the rest — the same trade the HTTP ticket makes.
+    //
+    // Polling, not an OS notifier, and not on a thread. The sandbox root, the
+    // grants and the permission bits are process-wide statics that no lock
+    // guards; a watcher thread calling `resolved` would race every dialog. The
+    // frame already wakes on its own heartbeat (100 ms), so the scan sits there
+    // and costs a stat per watch every `kWatchIntervalSeconds`.
+    //
+    // A directory watch is ONE level deep. Recursion would turn a watch on a
+    // home folder into a full-disk walk every second, and a script that wants a
+    // tree can watch the branches it cares about.
+    int         watch(const std::string& path);
+    void        unwatch(int handle);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // Called once per frame by the application. Does the actual stat work at
+    // most every kWatchIntervalSeconds; everything else is an early return.
+    void        pollWatches(double dtSeconds);
+    // The frame loop drains this and fires OnFileChanged, for the same reason it
+    // drains finished HTTP tickets: firing a graph belongs in the frame.
+    bool        takeChange(std::string& path);
+    // Drop every watch. Belongs wherever clearGrants() is called — a watch that
+    // outlived its grant would keep reporting a path the script may no longer
+    // open.
+    void        clearWatches();
+    // Longest a change may go unnoticed. One second is the editor's own file
+    // cadence rounded down, and the number the plan's stopgap ("fs.modified in a
+    // Delay loop") already taught scripts to expect.
+    inline constexpr double kWatchIntervalSeconds = 1.0;
+    // Beyond this many watches the row refuses instead of quietly scanning
+    // forever, and beyond this many entries a directory is watched for its own
+    // existence only. Both are the same bargain: a script cannot turn a
+    // one-line call into an unbounded per-second cost.
+    inline constexpr int    kMaxWatches   = 32;
+    inline constexpr size_t kMaxWatchEntries = 4096;
 }
 
 // ── Running another program (process) ────────────────────────────────────────

@@ -2000,6 +2000,25 @@ void GameApplication::OnRender(float deltaTime)
 				m_gameInstance.runtime().fireOnHttpResponse(gi, 0, ticket);
 	}
 
+	// Watched files. The scan itself happens HERE and not on a thread: the
+	// sandbox root, the granted paths and the permission bits are process-wide
+	// statics that no lock guards, so a watcher thread resolving a path would
+	// race every file dialog. It costs a stat per watch per second, and an idle
+	// application still reaches this line because the event-driven loop keeps a
+	// 100 ms heartbeat.
+	{
+		HE::api::fs::pollWatches(deltaTime);
+		std::string changed;
+		while (HE::api::fs::takeChange(changed))
+		{
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnFileChanged(gi, 0, changed);
+			// Nothing about a file arriving is an OS event for this window, so
+			// the frame that would draw the reaction has to be asked for.
+			requestRedraw();
+		}
+	}
+
 #ifdef __APPLE__
 	// ── The same menu bar, in the system bar (plan A6) ───────────────────────
 	// Whether there IS one is asked here and not at startup: it is SDL's answer,
@@ -2377,6 +2396,9 @@ void GameApplication::OnShutdown()
 	// flight is waited out (up to its own timeout), which is why that timeout is
 	// five seconds and not ten.
 	HE::api::http::shutdown();
+	// The watches are this file's statics too, and one left standing would keep
+	// stat-ing a path for an application that has stopped listening.
+	HE::api::fs::clearWatches();
 #ifdef __APPLE__
 	// Ours out of the system bar again, SDL's own left standing. One application
 	// per process, and this file's statics outlive the object that filled them.

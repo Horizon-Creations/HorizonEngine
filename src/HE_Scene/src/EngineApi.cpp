@@ -1921,6 +1921,218 @@ bool copy(const std::string& from, const std::string& to)
     return std::filesystem::copy_file(
         a, b, std::filesystem::copy_options::skip_existing, ec) && !ec;
 }
+
+// ── Watching ─────────────────────────────────────────────────────────────────
+namespace {
+// What "unchanged" means here. Not the timestamp alone: several filesystems
+// carry it at one-second resolution, which is exactly the poll interval, so a
+// file written twice inside one second would look untouched. Existence, kind
+// and size answer the cases the timestamp sleeps through.
+struct WatchStamp
+{
+    bool      exists = false;
+    bool      isDir  = false;
+    uintmax_t size   = 0;
+    int64_t   mtime  = 0;
+    bool operator!=(const WatchStamp& o) const
+    {
+        return exists != o.exists || isDir != o.isDir || size != o.size || mtime != o.mtime;
+    }
+};
+
+WatchStamp stampOf(const std::filesystem::path& p)
+{
+    WatchStamp s;
+    std::error_code ec;
+    const auto st = std::filesystem::status(p, ec);
+    if (ec || !std::filesystem::exists(st)) return s;
+    s.exists = true;
+    s.isDir  = std::filesystem::is_directory(st);
+    if (std::filesystem::is_regular_file(st))
+    {
+        const auto n = std::filesystem::file_size(p, ec);
+        if (!ec) s.size = n;
+        ec.clear();
+    }
+    // The file clock's own ticks, never converted to wall time: this number is
+    // only ever compared with the previous one, and `fs.modified` already owns
+    // the conversion (and its rounding) for the callers who need a date.
+    const auto ft = std::filesystem::last_write_time(p, ec);
+    if (!ec) s.mtime = static_cast<int64_t>(ft.time_since_epoch().count());
+    return s;
+}
+
+struct WatchEntry
+{
+    int                               handle = 0;
+    std::string                       spelling;  // exactly what the caller typed
+    std::filesystem::path             path;      // …and what it meant on disk
+    WatchStamp                        self;
+    std::map<std::string, WatchStamp> children;  // while `path` is a directory
+    bool                              tooBig = false;  // see kMaxWatchEntries
+};
+
+std::vector<WatchEntry>&  watches()     { static std::vector<WatchEntry> w;  return w; }
+std::vector<std::string>& changeQueue() { static std::vector<std::string> q; return q; }
+int&    nextWatchHandle() { static int h = 0;      return h; }
+double& watchAccum()      { static double a = 0.0; return a; }
+
+// A child's name appended to the caller's spelling, so the event names the file
+// the way `fs.list` and `fs.readText` would.
+std::string joinSpelling(const std::string& base, const std::string& name)
+{
+    if (base.empty()) return name;
+    const char last = base.back();
+    return (last == '/' || last == '\\') ? base + name : base + "/" + name;
+}
+
+void queueChange(std::string p)
+{
+    auto& q = changeQueue();
+    // One event per path per drain. A save that rewrites a file twice inside a
+    // poll interval is one change to whoever asked, not two.
+    for (const std::string& s : q) if (s == p) return;
+    if (q.size() >= 256) q.erase(q.begin());
+    q.push_back(std::move(p));
+}
+
+// False when the directory holds more entries than kMaxWatchEntries — the
+// caller then degrades instead of comparing a list that costs more every second
+// than the answer is worth.
+bool readChildren(const std::filesystem::path& dir, std::map<std::string, WatchStamp>& out)
+{
+    out.clear();
+    std::error_code ec;
+    size_t n = 0;
+    for (std::filesystem::directory_iterator it(
+             dir, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec))
+    {
+        if (++n > kMaxWatchEntries) { out.clear(); return false; }
+        WatchStamp s = stampOf(it->path());
+        // A child DIRECTORY is watched for its coming and going, never for its
+        // timestamp. That stamp moves when something is created inside it, on
+        // some filesystems and not on others — so honouring it would make "one
+        // level deep" mean one thing on Linux and another on Windows, and would
+        // report a subfolder for a change the caller was told it would not hear
+        // about.
+        if (s.isDir) { s.size = 0; s.mtime = 0; }
+        out.emplace(it->path().filename().string(), s);
+    }
+    return true;
+}
+} // namespace
+
+int watch(const std::string& path)
+{
+    // "" is the sandbox root, exactly as in `list` and for the same reason:
+    // "tell me when anything at the top of my sandbox moves" has no second
+    // spelling, and validRel rightly refuses the empty string everywhere else.
+    const auto p = path.empty() ? std::filesystem::path(root()) : resolved(path);
+    if (p.empty()) return 0;
+    if (static_cast<int>(watches().size()) >= kMaxWatches)
+    {
+        HE_LOG_WARN(Config, "fs.watch: already watching %d paths, refusing '%s'.",
+                    kMaxWatches, path.c_str());
+        return 0;
+    }
+    // The same path twice is two watches with two handles, deliberately: one
+    // caller's unwatch must not switch off another's. The queue's per-path
+    // dedupe is what keeps that from doubling the events.
+    WatchEntry w;
+    w.handle   = ++nextWatchHandle();
+    w.spelling = path;
+    w.path     = p;
+    // Seeded now, so the first poll reports what happened AFTER the watch began
+    // and not the state the file was already in.
+    w.self     = stampOf(p);
+    if (w.self.isDir) w.tooBig = !readChildren(p, w.children);
+    watches().push_back(std::move(w));
+    return watches().back().handle;
+}
+
+void unwatch(int handle)
+{
+    auto& w = watches();
+    for (size_t i = 0; i < w.size(); ++i)
+        if (w[i].handle == handle) { w.erase(w.begin() + static_cast<ptrdiff_t>(i)); return; }
+}
+
+void clearWatches() { watches().clear(); changeQueue().clear(); watchAccum() = 0.0; }
+
+bool takeChange(std::string& path)
+{
+    auto& q = changeQueue();
+    if (q.empty()) return false;
+    path = std::move(q.front());
+    q.erase(q.begin());
+    return true;
+}
+
+void pollWatches(double dtSeconds)
+{
+    if (watches().empty()) return;
+    watchAccum() += dtSeconds > 0.0 ? dtSeconds : 0.0;
+    if (watchAccum() < kWatchIntervalSeconds) return;
+    watchAccum() = 0.0;
+
+    for (WatchEntry& w : watches())
+    {
+        const WatchStamp now = stampOf(w.path);
+        const bool selfChanged = now != w.self;
+        const bool wasDir      = w.self.isDir;
+        w.self = now;
+
+        if (!now.isDir)
+        {
+            // A file, or a directory that has just stopped being one. Either way
+            // its children are no longer anybody's business, and the one event
+            // is about the path itself — reporting every vanished child of a
+            // deleted folder would bury the fact that the folder is gone.
+            w.children.clear();
+            w.tooBig = false;
+            if (selfChanged) queueChange(w.spelling);
+            continue;
+        }
+
+        std::map<std::string, WatchStamp> fresh;
+        if (!readChildren(w.path, fresh))
+        {
+            if (!w.tooBig)
+                HE_LOG_WARN(Config, "fs.watch: '%s' holds more than %zu entries — reporting "
+                                    "the directory itself instead of its children.",
+                            w.spelling.c_str(), kMaxWatchEntries);
+            w.tooBig = true;
+            w.children.clear();
+            // The directory's own timestamp still moves when a child comes or
+            // goes, so this degradation still answers "something in there".
+            if (selfChanged) queueChange(w.spelling);
+            continue;
+        }
+        if (w.tooBig)  // it shrank back under the cap: reseed, report nothing
+        {
+            w.tooBig = false;
+            w.children.swap(fresh);
+            continue;
+        }
+        // The directory itself is only reported when it APPEARED (it was not a
+        // directory a moment ago). Its timestamp moves whenever a child does,
+        // and reporting both would fire twice for one save.
+        if (selfChanged && !wasDir) queueChange(w.spelling);
+        for (const auto& [name, st] : fresh)
+        {
+            const auto it = w.children.find(name);
+            if (it == w.children.end() || it->second != st)
+                queueChange(joinSpelling(w.spelling, name));
+        }
+        for (const auto& [name, st] : w.children)
+        {
+            (void)st;
+            if (fresh.find(name) == fresh.end()) queueChange(joinSpelling(w.spelling, name));
+        }
+        w.children.swap(fresh);
+    }
+}
 } // namespace fs
 
 // ── Running another program ──────────────────────────────────────────────────
@@ -4236,6 +4448,12 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::rename(aS(a, 0), aS(a, 1))) }; } });
         t.push_back({ "fs.copy", "File", true, {{"from", P::String}, {"to", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::copy",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::copy(aS(a, 0), aS(a, 1))) }; } });
+        // Watching. The handle is what turns it off again; 0 means it never
+        // started, the same shape http.get's ticket has.
+        t.push_back({ "fs.watch", "File", true, {{"path", P::String}}, {{"handle", P::Int}}, "HE::api::fs::watch",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(fs::watch(aS(a, 0))) }; } });
+        t.push_back({ "fs.unwatch", "File", true, {{"handle", P::Int}}, {}, "HE::api::fs::unwatch",
+            [](Ctx&, const VV& a){ fs::unwatch(aI(a, 0)); return VV{}; } });
 
         // ── Running another program ──────────────────────────────────────────
         // run() returns FOUR values rather than one: a caller that only wanted
@@ -4625,6 +4843,7 @@ const std::vector<ApiFn>& registry()
             { "fs.isDir", "Is Directory" },        { "fs.size", "File Size" },
             { "fs.modified", "File Modified Time" },{ "fs.list", "List Directory" },
             { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
+            { "fs.watch", "Watch File" },          { "fs.unwatch", "Stop Watching File" },
             { "process.run", "Run Program" },      { "process.openUrl", "Open URL" },
             { "process.which", "Find Program" },
             { "http.get", "HTTP Get" },              { "http.post", "HTTP Post" },

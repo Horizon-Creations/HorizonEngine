@@ -1733,8 +1733,24 @@ namespace
         {
             HE::api::perm::set(HE::api::perm::Grants{});
             HE::api::fs::clearGrants();
+            // Watches are process-wide statics for the same reason and with the
+            // same hazard: one left standing would keep reporting into the next
+            // case's queue, and a watch that outlived its grant would name a
+            // path the sandbox no longer opens.
+            HE::api::fs::clearWatches();
         }
     };
+
+    // Everything the poll queued, in order. The watcher hands out one path per
+    // call, exactly as the frame loop drains it.
+    std::vector<std::string> drainChanges()
+    {
+        std::vector<std::string> out;
+        std::string p;
+        while (HE::api::fs::takeChange(p)) out.push_back(p);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
 }
 
 TEST_CASE("fs: an absolute path needs either a permission or somebody's choice")
@@ -1837,6 +1853,135 @@ TEST_CASE("fs: listing, measuring, renaming and copying")
     CHECK_FALSE(HE::api::fs::copy("b.txt", "/tmp/he_api_escaped.txt"));
 
     std::filesystem::remove_all(root, ec);
+}
+
+// ─── The watcher ─────────────────────────────────────────────────────────────
+// The last open row of the plan's `fs` line. Everything here drives the poll by
+// hand rather than sleeping: the interval is a second, and a test that waited
+// one out would be the slowest and the flakiest in the file at the same time.
+TEST_CASE("fs: a watch reports what moved, spelled the way it was asked")
+{
+    PermReset restore;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_watch_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    REQUIRE(HE::api::fs::writeText("a.txt", "hello"));
+    REQUIRE(HE::api::fs::makeDir("sub"));
+
+    const int hFile = HE::api::fs::watch("a.txt");
+    const int hDir  = HE::api::fs::watch("sub");
+    REQUIRE(hFile != 0);
+    REQUIRE(hDir  != 0);
+    REQUIRE(hFile != hDir);
+
+    // Seeded at the watch, so the first poll is about what happened AFTER it and
+    // not about the state the file was already in.
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+
+    // A rewrite. The SIZE changes, deliberately: several filesystems carry the
+    // timestamp at one-second resolution, which is the poll interval itself, so
+    // a stamp that watched the clock alone could sleep through this.
+    REQUIRE(HE::api::fs::writeText("a.txt", "hello again"));
+    // …but not before the interval is up. The scan costs a stat per watch, and
+    // doing it every frame is the thing this accumulator exists to prevent.
+    HE::api::fs::pollWatches(0.1);
+    CHECK(drainChanges().empty());
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "a.txt" });
+
+    // A file appearing inside a watched directory is named with the directory's
+    // own spelling in front — "sub/new.txt", never the absolute path, which is
+    // exactly what the sandbox would refuse to open again.
+    REQUIRE(HE::api::fs::writeText("sub/new.txt", "x"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "sub/new.txt" });
+
+    // Changing and removing a child are both "something moved here".
+    REQUIRE(HE::api::fs::writeText("sub/new.txt", "xxxxxx"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "sub/new.txt" });
+    REQUIRE(HE::api::fs::remove("sub/new.txt"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "sub/new.txt" });
+
+    // A file that vanishes is reported, and so is one that comes back: the event
+    // says WHICH path, and fs.exists answers which of the three happened.
+    REQUIRE(HE::api::fs::remove("a.txt"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "a.txt" });
+    REQUIRE(HE::api::fs::writeText("a.txt", "back"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "a.txt" });
+
+    // Off again, by the handle the watch handed back.
+    HE::api::fs::unwatch(hFile);
+    REQUIRE(HE::api::fs::writeText("a.txt", "and nobody is listening"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+
+    HE::api::fs::unwatch(hDir);
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("fs: a watch is the sandbox's business too")
+{
+    PermReset restore;
+    const auto root    = std::filesystem::temp_directory_path() / "he_api_watch_perm";
+    const auto outside = std::filesystem::temp_directory_path() / "he_api_watch_out";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::create_directories(outside, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    REQUIRE(HE::api::fs::makeDir("here"));
+
+    // The row resolves like every other one, so it cannot be the hole the others
+    // are not: no escape, and no absolute path without a permission or a choice.
+    CHECK(HE::api::fs::watch("../elsewhere") == 0);
+    CHECK(HE::api::fs::watch(outside.string()) == 0);
+    HE::api::fs::grantPath(outside.string());
+    const int granted = HE::api::fs::watch(outside.string());
+    CHECK(granted != 0);
+    HE::api::fs::unwatch(granted);
+
+    // "" is the sandbox root, the one spelling `list` also allows and for the
+    // same reason: "what is at the top of my sandbox" has no second wording.
+    const int hRoot = HE::api::fs::watch("");
+    REQUIRE(hRoot != 0);
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+    REQUIRE(HE::api::fs::writeText("top.txt", "hi"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "top.txt" });
+    // One level deep, on purpose: a watch on a home folder must not become a
+    // full-disk walk every second.
+    REQUIRE(HE::api::fs::writeText("here/deep.txt", "hi"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+    HE::api::fs::unwatch(hRoot);
+
+    // A ceiling, so a script cannot turn a one-line call into an unbounded
+    // per-second cost. The row refuses rather than quietly scanning on.
+    std::vector<int> many;
+    for (int i = 0; i < HE::api::fs::kMaxWatches; ++i)
+    {
+        const int h = HE::api::fs::watch("here");
+        CHECK(h != 0);
+        many.push_back(h);
+    }
+    CHECK(HE::api::fs::watch("here") == 0);
+    // The same path twice is two watches: switching one off must not switch off
+    // somebody else's. And one change is still ONE event, because the queue is
+    // what dedupes, not the watch list.
+    REQUIRE(HE::api::fs::writeText("here/x.txt", "hi"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "here/x.txt" });
+    for (const int h : many) HE::api::fs::unwatch(h);
+
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
 }
 
 TEST_CASE("process: shut by default, and asking is not running")
