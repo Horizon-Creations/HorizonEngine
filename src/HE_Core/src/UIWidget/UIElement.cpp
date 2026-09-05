@@ -812,6 +812,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
     if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
     if (n == "Transition")   { out = UIPropValue::ofFloat(e.transition);        return true; }
+    if (n == "Tab Index")    { out = UIPropValue::ofInt(e.tabIndex);            return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
     if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
     if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
@@ -871,6 +872,7 @@ const std::vector<UIPropDesc>& uiBaseProperties()
         { "Enabled",             UIPropType::Bool },
         { "Render Opacity",      UIPropType::Float, 0.0f, 1.0f },
         { "Transition",          UIPropType::Float, 0.0f, 2.0f },
+        { "Tab Index",           UIPropType::Int },
         { "Slot Fill",           UIPropType::Float },
         { "Grid Column",         UIPropType::Int },
         { "Grid Row",            UIPropType::Int },
@@ -923,6 +925,8 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // A negative transition is a state change running backwards, which is
     // nothing; it lands on 0, the value that means "at once".
     if (n == "Transition")   { e.transition = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // No clamp: all three ranges mean something (see UIElement::tabIndex).
+    if (n == "Tab Index")    { e.tabIndex = v.i; return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
     // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
     if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
@@ -984,6 +988,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     // and a row that appears and disappears depending on the widget type is a
     // row nobody trusts. What each type does with it is the renderer's business.
     out.push_back({ "Transition",   UIPropType::Float, 0.0f, 2.0f });
+    out.push_back({ "Tab Index",    UIPropType::Int });
     out.push_back({ "Slot Fill",    UIPropType::Float });
     out.push_back({ "Grid Column",  UIPropType::Int });
     out.push_back({ "Grid Row",     UIPropType::Int });

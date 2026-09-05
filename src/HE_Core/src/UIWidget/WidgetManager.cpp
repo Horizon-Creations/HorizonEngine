@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>      // std::abs — the border stamp compares rects
 #include <functional> // std::function — the tab order walks the tree recursively
+#include <limits>     // the sort key an un-indexed element gets in the tab order
 
 namespace
 {
@@ -4325,6 +4326,25 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 		}
 	};
 	walk(0);
+
+	// …and then whatever the author said instead. Tab Index is an override ON TOP
+	// of the tree order, not a replacement for it: a positive index comes first
+	// in ascending order, everything at 0 keeps the place the walk above gave
+	// it, and a stable sort is the whole implementation — "keeps its place" is
+	// exactly what stability means.
+	//
+	// A NEGATIVE index stays in this list on purpose. It is not on the route, but
+	// Tab can still be pressed while standing on one (a click and the arrow keys
+	// reach it), and the answer to that has to be "the next one along from HERE",
+	// not "back to the top of the form". It is skipped when stepping, below.
+	const auto key = [&](int id)
+	{
+		const HE::UIElement* e = w->tree.find(id);
+		return (e && e->tabIndex > 0) ? e->tabIndex : (std::numeric_limits<int>::max)();
+	};
+	std::stable_sort(order.begin(), order.end(),
+		[&](int a, int b){ return key(a) < key(b); });
+
 	if (order.empty()) return false;
 
 	// Where we are now. An element that is no longer focusable (hidden, or
@@ -4337,9 +4357,20 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	const int n = static_cast<int>(order.size());
 	// Wrapping is right here where it was wrong in the dropdown: a form is a
 	// ring you cycle through, a list is a range you run along.
-	const int next = at < 0 ? (backwards ? n - 1 : 0)
-	                        : ((at + (backwards ? -1 : 1)) % n + n) % n;
-	return setFocus(w->id, order[next]);
+	//
+	// One step per turn of the loop, skipping whatever is off the route, and at
+	// most n of them: a form in which EVERY element is skipped has no route, and
+	// the loop must say so rather than spin.
+	const int step = backwards ? -1 : 1;
+	int next = at < 0 ? (backwards ? n - 1 : 0) : ((at + step) % n + n) % n;
+	for (int guard = 0; guard < n; ++guard)
+	{
+		const HE::UIElement* e = w->tree.find(order[next]);
+		if (!e || e->tabIndex >= 0) return setFocus(w->id, order[next]);
+		next = (next + step) % n;
+		if (next < 0) next += n;
+	}
+	return false;
 }
 
 int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeight,

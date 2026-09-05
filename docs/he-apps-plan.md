@@ -3139,3 +3139,86 @@ Widget byteweise dasselbe wie gestern — dieselbe Regel wie B8s „Transition".
 Typ, gemessen am Splitter) und gehören als eigener Schritt verteilt; der Entwurf steht: eingebaut
 statt als Popup, der Kalender zeichnet sein Monatsraster selbst, der Farbwähler Hue-Streifen plus
 SV-Feld aus Quads, und wer sie schwebend will, stellt sie in ein Modal aus B4.
+
+---
+
+### B10 Zugänglichkeit und Lokalisierung, erster Teil (05.09.2026)
+
+Fünf Punkte standen im Plan. Zwei sind hier gebaut, einer war schon da, zwei sind offen und
+brauchen einen eigenen Schritt (unten).
+
+**Die Tab-Reihenfolge war nicht mehr räumlich.** Der Plan sagt „die Reihenfolge ist heute
+räumlich", und das stimmte, als er geschrieben wurde. `WidgetManager::focusNext` läuft längst
+den BAUM ab, Eltern vor ihren Kindern, in genau der Reihenfolge, die der Designer links
+anzeigt. Nicht den Elementvektor: der ist nach Id sortiert, also nach Entstehungszeit, und
+eine umgehängte Zeile bliebe in der Reihenfolge dort stehen, wo sie einmal war.
+
+Was fehlte, war die Ausnahme. `Tab Index` ist eine neue Basiseigenschaft mit drei Bedeutungen:
+
+* `0` — die Vorgabe, und die einzige, die nichts kostet: nimm deinen Platz aus dem Baum.
+  Nur bei ungleich 0 wird überhaupt etwas gespeichert, also schreibt jedes ältere Widget
+  byteweise dasselbe wie gestern.
+* `> 0` — nach vorn, aufsteigend, vor alle 0. Damit tabt ein Raster, das man spaltenweise
+  liest, auch spaltenweise.
+* `< 0` — nicht auf der Route. **Nur** nicht auf der Route: ein Klick, die Pfeiltasten und
+  `setFocus` erreichen das Element weiterhin. „Nicht auf dem Weg" und „nicht fokussierbar"
+  sind zwei verschiedene Behauptungen, und sie zu vermengen macht einen Werkzeugknopf auch
+  für die Maus unerreichbar.
+
+Die Umsetzung ist eine **stabile** Sortierung über die Baumreihenfolge, denn „behält seinen
+Platz" ist genau das, was Stabilität heißt. Übersprungene Elemente bleiben in der Liste und
+werden erst beim Weiterschalten ausgelassen — sonst wäre die Antwort auf „Tab, während ich auf
+einem übersprungenen Element stehe" der Anfang des Formulars statt der nächste Halt von hier.
+
+**Kontrastprüfung** (`uiRelativeLuminance`, `uiContrastRatio`, `uiCheckContrast`). Die Zahlen
+sind WCAG 2.1, nicht Geschmack. Drei Entscheidungen, die die Prüfung erst brauchbar machen:
+
+1. **Gemessen wird gegen das, worauf der Text wirklich steht.** Ein Feld malt seinen eigenen
+   Hintergrund, ein Label nicht, und die Beschriftung eines Knopfes ist ein Text-KIND auf dem
+   Knopf. Also: die eigene Fläche, sonst die nächste darüber, sonst die Seite. Welche
+   Eigenschaft die Fläche eines Typs ist, steht als Tabelle pro Typ da und nicht als Liste
+   wahrscheinlicher Namen — „Track Color" und „Box Color" sind Flächen eines TEILS, und ein
+   Label dagegen zu messen ergäbe eine Zahl über einen Ort, an dem nie Text steht.
+2. **Durchsichtigkeit wird verrechnet, nicht ignoriert.** Ein gedämpftes Label ist meistens
+   durch sein Alpha gedämpft; wer den geschriebenen Wert liest, sieht 21:1 und der Mensch
+   sieht 2:1.
+3. **Große Schrift wird an 3.0 gemessen**, WCAG's eigene Ausnahme, ab 24 px — skaliert
+   mit, wenn ein Projekt die Latte auf AAA legt.
+
+Die Prüfung läuft als ctest über **die ganze ausgelieferte Bauteil-Bibliothek in beiden
+Modi**, und sie hat beim ersten Lauf neun echte Befunde gehabt, keinen davon erfunden:
+
+* **Fünfmal `MutedText` in Hell**, 4.30 statt 4.5, auf der Seitenfarbe (Hinweis unter einer
+  Formularzeile, Untertitel einer Liste, Wert einer Zeile). **Gefixt**: die Rolle steht jetzt
+  auf 0.43 statt 0.45, der kleinste Schritt, der auf Background UND Surface reicht.
+* **Viermal Text auf einer Accent-Fläche** (die OK-Beschriftung im Dialog, die Zahl im Badge),
+  3.7 in Hell und 2.5 in Dunkel. **Nicht gefixt, und das ist Absicht:** die Bindung ist nicht
+  falsch, `Text` ist die einzige Lesefarbe, die das Vokabular hat. Weiß auf demselben Blau
+  wäre 4.4 und damit auch durchgefallen. Es fehlt eine Rolle „die Farbe, die man AUF den
+  Akzent schreibt", und der Akzent selbst ist ein mittleres Blau, auf dem beide Richtungen
+  knapp scheitern. Das Rollenvokabular ist ein Dateiformat und die Palette eine
+  Gestaltungsentscheidung — beides gehört in einen eigenen Schritt. Der Test lässt genau
+  diesen Fall durch, erkannt an der ROLLE der Fläche und nicht am Dateinamen, damit ein neues
+  Bauteil, das denselben Fehler macht, auffliegt.
+
+**Offen aus B10, als eigener Schritt zu verteilen:**
+
+* **Textkatalog mit Sprachumschaltung.** Der Entwurf steht und ist eine Spiegelung von
+  `themeRoles`: eine Zuordnung Eigenschaft → Schlüssel am Element, ein `UITextCatalog`
+  (Sprache → Schlüssel → Text), ein `uiApplyTextCatalog(tree, catalog, lang)`, das wie
+  `uiApplyTheme` per ZUWEISUNG auflöst, und `WidgetManager::setLanguage` an denselben sechs
+  Stellen, an denen heute `uiApplyTheme` steht. Fehlender Schlüssel fällt auf die
+  Vorgabesprache zurück und lässt den Wert sonst stehen.
+* **Schriftgrößenskalierung.** Nicht über `pxScaleY` — der skaliert auch Eckenradien und
+  Reiterhöhen. Träger wäre ein Feld an `UIElementRenderState`, gefüllt vom WidgetManager. Die
+  Bedingung, an der es hängt: **jede Stelle, an der `fontSize` zu Pixeln wird oder gemessen
+  wird, muss den Faktor sehen**, sonst sagen Bild und Zeiger etwas Verschiedenes. Die zwei
+  stillen Brecher sind `UITextInput::caretAtPoint` (der Cursor landet auf dem falschen
+  Zeichen) und `applyAutoSize` (Beschriftungen schneiden bei 150 % ab).
+* **Tastenkürzel als Asset.** Die natürliche Heimat ist die Menüleiste aus A6 („zu bis auf
+  Tastenkürzel"): ein Akkord am Menüeintrag, ein Parser (`Ctrl+Shift+S`, `Cmd` auf dem Mac
+  auf Ctrl abgebildet), ein Abgleich im Tastenpfad vor der Widget-Verteilung, der das
+  vorhandene `OnMenuItem(id)` auslöst — kein zweites Ereignis, aus demselben Grund, aus dem
+  „Öffnen mit" durch dieselbe Tür kommt wie ein Drop. Zwei Fallen: auf dem Mac feuert es
+  doppelt, wenn die native Leiste ein `keyEquivalent` bekommt UND die Engine mit abgleicht,
+  und ein Kürzel ohne Modifikator darf nicht losgehen, während ein Textfeld getippt wird.

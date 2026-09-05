@@ -144,7 +144,13 @@ const UITheme& uiDefaultTheme()
         set(UIThemeRole::Surface,    { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.15f, 0.15f, 0.18f, 1.0f });
         set(UIThemeRole::Border,     { 0.80f, 0.80f, 0.83f, 1.0f }, { 0.28f, 0.28f, 0.33f, 1.0f });
         set(UIThemeRole::Text,       { 0.10f, 0.10f, 0.12f, 1.0f }, { 0.93f, 0.93f, 0.95f, 1.0f });
-        set(UIThemeRole::MutedText,  { 0.45f, 0.45f, 0.50f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
+        // Light muted text was 0.45 and did not reach WCAG's 4.5:1 on the
+        // BACKGROUND role — 4.30, which is the ratio uiCheckContrast reported
+        // for five of the shipped components at once (a hint under a form row,
+        // a list's subtitle). It clears 4.5 on Surface (white) either way; the
+        // page it usually sits on is the darker of the two, and that is the one
+        // that decides. 0.43 is the smallest step that passes both.
+        set(UIThemeRole::MutedText,  { 0.43f, 0.43f, 0.48f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
         set(UIThemeRole::Accent,     { 0.16f, 0.44f, 0.85f, 1.0f }, { 0.36f, 0.60f, 0.96f, 1.0f });
         set(UIThemeRole::Warning,    { 0.85f, 0.60f, 0.10f, 1.0f }, { 0.95f, 0.72f, 0.24f, 1.0f });
         set(UIThemeRole::Error,      { 0.80f, 0.22f, 0.20f, 1.0f }, { 0.93f, 0.40f, 0.36f, 1.0f });

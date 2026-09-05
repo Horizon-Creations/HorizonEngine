@@ -412,4 +412,48 @@ HE_API void uiUpdateScrollExtents(UIWidgetTree& tree);
 // which is how a caller knows the wheel was NOT consumed.
 HE_API bool uiScrollBy(UIWidgetTree& tree, int id, float delta);
 
+// ── Contrast (WCAG 2.1) ──────────────────────────────────────────────────────
+// Whether the text in this widget can actually be read on what is behind it.
+// The numbers are the accessibility standard's, not a taste: relative luminance
+// of an sRGB colour, and the ratio (L_lighter + 0.05) / (L_darker + 0.05), which
+// runs from 1 (the same colour twice, invisible) to 21 (black on white).
+//
+// The colours in this tree ARE sRGB — the software rasterizer writes them out
+// as `c * 255` with no transfer function anywhere — so the standard's
+// linearisation applies to them directly and nothing has to be undone first.
+HE_API float uiRelativeLuminance(const glm::vec4& srgb);
+HE_API float uiContrastRatio(const glm::vec4& a, const glm::vec4& b);
+
+// One pair the check could not read.
+struct UIContrastFinding
+{
+    int         elementId = 0;      // whose text it is
+    std::string textProp;           // the property carrying that text's colour
+    int         againstId = 0;      // what it is standing on (0 = the backdrop)
+    std::string againstProp;        // …and which property of it
+    glm::vec4   textColor{ 1.0f };  // as composited: an alpha below 1 is mixed
+    glm::vec4   backColor{ 1.0f };  // into the background before the comparison
+    float       ratio = 0.0f;
+    float       required = 4.5f;    // 3.0 for large text, which is WCAG's rule
+    float       fontSize = 0.0f;    // why `required` is what it is
+};
+
+// Every text in `tree` that does not reach the standard, in element order.
+//
+// `backdrop` is the page BEHIND the widget — pass the theme's Background role.
+// It is what a text lands on when nothing between it and the root has a surface
+// of its own, which is the common case: a label in a plain vertical box.
+//
+// An element's text is measured against the nearest surface AT OR ABOVE it — a
+// field draws its own background, a label does not, and a button's caption is a
+// Text child sitting on the button. Transparency is composited rather than
+// ignored, because a muted label is usually muted by its alpha and the whole
+// question is what the eye ends up seeing.
+//
+// `minRatio` is the bar for ordinary text; large text (24 px and up, WCAG's
+// threshold) is held to 3.0 instead, scaled down in step if the bar is lowered.
+HE_API std::vector<UIContrastFinding> uiCheckContrast(const UIWidgetTree& tree,
+                                                      const glm::vec4& backdrop,
+                                                      float minRatio = 4.5f);
+
 } // namespace HE

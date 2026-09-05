@@ -2011,6 +2011,10 @@ void drawDetails(State& st, AppContext& ctx)
 	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
 	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
 	if (EditorWidgets::checkbox("Focus frame", &n->focusFrame)) committed = true;
+	// Beside the focus frame, because both are about the keyboard and this is
+	// the one row that says where Tab goes next. 0 = the order of the tree on
+	// the left, which is what an author reads anyway.
+	if (EditorWidgets::Row::inputInt("Tab index", &n->tabIndex)) committed = true;
 	if (EditorWidgets::checkbox("Accepts drop", &n->acceptsDrop)) committed = true;
 	if (EditorWidgets::checkbox("Draggable", &n->draggable)) committed = true;
 	if (n->draggable)

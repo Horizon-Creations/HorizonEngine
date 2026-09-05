@@ -1316,6 +1316,9 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     // 0 is the old behaviour, so a widget that never asked for a transition
     // saves byte-identical.
     if (e.transition > 0.0f) o["transition"] = e.transition;
+    // Same rule, and here it matters twice over: 0 means "take my place from the
+    // tree", which is what every element authored before Tab Index existed does.
+    if (e.tabIndex != 0)     o["tabIndex"] = e.tabIndex;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
     // Written only when the element really sits in a named cell, so every widget
@@ -1437,6 +1440,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->dragPayload   = o.value("dragPayload", std::string{});
     e->renderOpacity = o.value("renderOpacity", 1.0f);
     e->transition    = std::max(0.0f, o.value("transition", 0.0f));
+    e->tabIndex      = o.value("tabIndex", 0);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
     e->gridColumn     = o.value("gridColumn", -1);
@@ -1760,6 +1764,142 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
 
     out = std::move(t);
     return true;
+}
+
+// ── Contrast (WCAG 2.1) ──────────────────────────────────────────────────────
+namespace
+{
+float srgbToLinear(float c)
+{
+    c = std::clamp(c, 0.0f, 1.0f);
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+// Which property of an element is its SURFACE — the thing anything drawn on it
+// stands on. Null for the types that paint no pixel: a vertical box, a spacer,
+// a label. They are transparent, so the question passes straight through them
+// to whatever is behind, which is exactly what the walk below wants.
+//
+// A per-type answer rather than a list of likely names, because the wrong guess
+// is silent: a Slider's "Track Color" and a CheckBox's "Box Color" are surfaces
+// of a PART, not of the element, and measuring a label against one of them
+// would report a number about a place no text ever appears.
+const char* surfacePropOf(const UIElement& e)
+{
+    switch (e.type())
+    {
+    case UIWidgetType::Panel:       return "Color";
+    case UIWidgetType::Image:       return "Tint";
+    case UIWidgetType::Button:      return "Normal Color";
+    case UIWidgetType::TextInput:   return "Back Color";
+    case UIWidgetType::ComboBox:    return "Back Color";
+    case UIWidgetType::ListView:    return "Back Color";
+    case UIWidgetType::ProgressBar: return "Back Color";
+    case UIWidgetType::TabBox:      return "Tab Color";
+    default:                        return nullptr;
+    }
+}
+
+// …and which one carries text that has to be read.
+const char* textPropOf(const UIElement& e)
+{
+    switch (e.type())
+    {
+    case UIWidgetType::Text:      return "Color";
+    case UIWidgetType::CheckBox:  return "Text Color";
+    case UIWidgetType::TextInput: return "Text Color";
+    case UIWidgetType::ComboBox:  return "Text Color";
+    case UIWidgetType::TabBox:    return "Text Color";
+    default:                      return nullptr;
+    }
+}
+
+glm::vec4 colorProp(const UIElement& e, const char* name)
+{
+    const UIPropValue v = e.getPropAny(name);
+    return v.type == UIPropType::Color ? v.col : glm::vec4(0.0f);
+}
+
+// `src` laid over `dst`. Both sRGB, and the mix is done in sRGB on purpose:
+// this asks what an 8-bit framebuffer ends up holding, and that is what every
+// backend's "over" blend writes into it.
+glm::vec4 over(const glm::vec4& src, const glm::vec4& dst)
+{
+    const float a = std::clamp(src.a, 0.0f, 1.0f);
+    return glm::vec4(glm::mix(glm::vec3(dst), glm::vec3(src), a), 1.0f);
+}
+} // namespace
+
+float uiRelativeLuminance(const glm::vec4& srgb)
+{
+    return 0.2126f * srgbToLinear(srgb.r)
+         + 0.7152f * srgbToLinear(srgb.g)
+         + 0.0722f * srgbToLinear(srgb.b);
+}
+
+float uiContrastRatio(const glm::vec4& a, const glm::vec4& b)
+{
+    const float la = uiRelativeLuminance(a), lb = uiRelativeLuminance(b);
+    const float hi = std::max(la, lb), lo = std::min(la, lb);
+    return (hi + 0.05f) / (lo + 0.05f);
+}
+
+std::vector<UIContrastFinding> uiCheckContrast(const UIWidgetTree& tree,
+                                               const glm::vec4& backdrop,
+                                               float minRatio)
+{
+    std::vector<UIContrastFinding> out;
+    for (const auto& ep : tree.elements)
+    {
+        if (!ep) continue;
+        const UIElement& e = *ep;
+        const char* tp = textPropOf(e);
+        if (!tp) continue;
+
+        // What this text stands on. Its own surface when it has one (a field
+        // paints its own background), else the nearest ancestor that has one,
+        // else the page. Everything between is transparent and composited in
+        // order, so a tinted overlay over a dark panel is measured as what the
+        // eye gets and not as either of the two.
+        int againstId = 0;
+        const char* againstProp = nullptr;
+        std::vector<const UIElement*> chain;
+        int guard = 0;
+        for (const UIElement* c = &e;
+             c && guard++ <= static_cast<int>(tree.elements.size());)
+        {
+            if (const char* sp = surfacePropOf(*c))
+            {
+                chain.push_back(c);
+                // The lowest one is what the finding names: the surface the
+                // text is actually written on, whatever is stacked behind it.
+                if (!againstProp) { againstId = c->id; againstProp = sp; }
+                // Opaque: nothing behind it can show through, so stop.
+                if (colorProp(*c, sp).a >= 0.999f) break;
+            }
+            c = c->parentId != 0 ? tree.find(c->parentId) : nullptr;
+        }
+        glm::vec4 back = backdrop;
+        back.a = 1.0f;
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+            back = over(colorProp(**it, surfacePropOf(**it)), back);
+
+        const glm::vec4 authored = colorProp(e, tp);
+        const glm::vec4 text = over(authored, back);
+        const float ratio = uiContrastRatio(text, back);
+
+        // WCAG's own exception: large text is legible at a lower ratio, and 24
+        // px is where it puts the line. Scaled rather than hard-coded to 3, so
+        // a project that asks for AAA (7) gets AAA's large-text bar (4.5) too.
+        const UIPropValue fs = e.getPropAny("FontSize");
+        const float fontSize = fs.type == UIPropType::Float ? fs.f : 0.0f;
+        const float required = fontSize >= 24.0f ? minRatio * (3.0f / 4.5f) : minRatio;
+        if (ratio >= required) continue;
+
+        out.push_back({ e.id, tp, againstId, againstProp ? againstProp : "",
+                        text, back, ratio, required, fontSize });
+    }
+    return out;
 }
 
 // ── Item-level JSON, public (collaboration addresses single elements) ───────

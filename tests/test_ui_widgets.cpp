@@ -7108,6 +7108,99 @@ TEST_CASE("Navigation: Tab walks the form in hierarchy order and wraps")
     CHECK(wm.focusedElement() != box);
 }
 
+// Tab Index is the override on top of that order, for the two cases the tree
+// cannot express: "this one first, whatever the tree says" and "skip this on the
+// way through". Both are checked against the SAME tree as the test above, so a
+// difference here can only be the index.
+TEST_CASE("Navigation: Tab Index reorders the route and takes elements off it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    {
+        HE::UIElement& e = *t.find(box);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f;
+    }
+    const int loose = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(loose);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 300.0f; e.sizeX = 100.0f; e.sizeY = 40.0f;
+    }
+    const int first  = t.add(HE::UIWidgetType::Button);
+    const int second = t.add(HE::UIWidgetType::CheckBox);
+    const int third  = t.add(HE::UIWidgetType::Button);
+    for (int c : { first, second, third }) t.find(c)->parentId = box;
+
+    // The loose button is LAST in the tree and asked to be first; the third
+    // child asks to be second, though the tree puts it behind both its
+    // siblings; the check box asks to be left out. `first` stays at 0 and keeps
+    // the place the tree gave it, which is now the back of the route.
+    t.find(loose)->tabIndex  = 1;
+    t.find(third)->tabIndex  = 2;
+    t.find(second)->tabIndex = -1;
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Ahead of every 0, so the first Tab lands on it and not on the box's child.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == loose);
+    // Two positives sort against each other, ascending, and that beats the tree.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == third);
+    // Then the un-indexed remainder, in tree order.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == first);
+    // …and round again: the check box behind it is off the route, so the ring
+    // wraps past it rather than stopping there.
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == loose);
+    // Backwards skips it too, rather than sticking on it.
+    CHECK(wm.focusNext(true, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == first);
+
+    // Off the route is not out of reach: setFocus (and a click, which is the
+    // same door) still gets there, and Tab from there carries on from HERE
+    // rather than starting the form over.
+    CHECK(wm.setFocus(id, second));
+    CHECK(wm.focusedElement() == second);
+    CHECK(wm.focusNext(false, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == loose);
+}
+
+// A base property that is not saved when it is at its default is a base property
+// that costs nothing: every widget authored before it existed writes the same
+// bytes it always did.
+TEST_CASE("Tab Index: written only once set, read back as authored")
+{
+    HE::UIWidgetTree t;
+    const int b = t.add(HE::UIWidgetType::Button);
+    const std::string plain = HE::uiWidgetTreeToJson(t);
+    CHECK(plain.find("tabIndex") == std::string::npos);
+
+    t.find(b)->tabIndex = -1;
+    const std::string withIt = HE::uiWidgetTreeToJson(t);
+    CHECK(withIt.find("tabIndex") != std::string::npos);
+
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(withIt, back));
+    CHECK(back.find(b)->tabIndex == -1);
+
+    // …and through the property table, which is how a script and a theme reach
+    // it. Negative on purpose: nothing clamps it, all three ranges mean something.
+    back.find(b)->setPropAny("Tab Index", HE::UIPropValue::ofInt(3));
+    CHECK(back.find(b)->getPropAny("Tab Index").i == 3);
+    CHECK(back.find(b)->clone()->tabIndex == 3);
+}
+
 TEST_CASE("Navigation: Tab shuts an open list, and stays inside a dialog")
 {
     TempWidgetDir dir;
@@ -10066,7 +10159,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 42);
+    CHECK(HE::uiBaseProperties().size() == 43);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -12433,3 +12526,213 @@ TEST_CASE("Transition: a hover travels to its colour instead of jumping there")
     CHECK(face() == 1.0f);
     CHECK_FALSE(wm.isAnimating());
 }
+
+// ═══ B10: contrast ═══════════════════════════════════════════════════════════
+// The numbers here are WCAG 2.1's, and they are checked against the values the
+// standard itself publishes rather than against what the code happens to
+// produce — a luminance formula that is self-consistent and wrong is exactly
+// the bug a round-trip test cannot see.
+TEST_CASE("Contrast: the ratio is the standard's, not a resemblance of it")
+{
+    const glm::vec4 black{ 0.0f, 0.0f, 0.0f, 1.0f };
+    const glm::vec4 white{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+    CHECK(HE::uiRelativeLuminance(black) == doctest::Approx(0.0f));
+    CHECK(HE::uiRelativeLuminance(white) == doctest::Approx(1.0f));
+    // The extremes of the scale, and its floor: a colour against itself is 1.
+    CHECK(HE::uiContrastRatio(black, white) == doctest::Approx(21.0f));
+    CHECK(HE::uiContrastRatio(white, black) == doctest::Approx(21.0f));   // symmetric
+    CHECK(HE::uiContrastRatio(white, white) == doctest::Approx(1.0f));
+
+    // Mid grey (#808080): luminance 0.2159, so 3.95 against white and 5.32
+    // against black. Worth pinning because it is the value people expect to be
+    // 0.5 and is not — the transfer function is the whole difference between
+    // this check and a wrong one that averages the channels.
+    const glm::vec4 grey{ 128.0f / 255.0f, 128.0f / 255.0f, 128.0f / 255.0f, 1.0f };
+    CHECK(HE::uiRelativeLuminance(grey) == doctest::Approx(0.2159f).epsilon(0.01));
+    CHECK(HE::uiContrastRatio(grey, white) == doctest::Approx(3.95f).epsilon(0.01));
+    CHECK(HE::uiContrastRatio(grey, black) == doctest::Approx(5.32f).epsilon(0.01));
+
+    // Green weighs more than blue by a factor of ten in the eye, and that is
+    // the whole reason luminance is not the average of the channels.
+    CHECK(HE::uiRelativeLuminance({ 0.0f, 1.0f, 0.0f, 1.0f })
+          > HE::uiRelativeLuminance({ 0.0f, 0.0f, 1.0f, 1.0f }) * 9.0f);
+}
+
+TEST_CASE("Contrast: a label is measured against what it actually stands on")
+{
+    HE::UIWidgetTree t;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    static_cast<HE::UIPanel*>(t.find(panel))->color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->parentId = panel;
+    HE::UIText* lab = static_cast<HE::UIText*>(t.find(label));
+    lab->fontSize = 16.0f;
+
+    // White on white: the worst there is, and it is the label that is named,
+    // not the panel.
+    lab->color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    auto bad = HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f });
+    REQUIRE(bad.size() == 1);
+    CHECK(bad[0].elementId == label);
+    CHECK(bad[0].textProp == "Color");
+    CHECK(bad[0].againstId == panel);
+    CHECK(bad[0].againstProp == "Color");
+    CHECK(bad[0].ratio == doctest::Approx(1.0f));
+    CHECK(bad[0].required == doctest::Approx(4.5f));
+
+    // Black on the same white panel is fine — and note the BACKDROP is black,
+    // so a check that ignored the panel would have called this one legible too.
+    // The panel is what decides, which is the claim.
+    lab->color = { 0.0f, 0.0f, 0.0f, 1.0f };
+    CHECK(HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f }).empty());
+
+    // A container between them changes nothing: a vertical box paints no pixel,
+    // so the question passes through it to the panel.
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(box)->parentId = panel;
+    t.find(label)->parentId = box;
+    lab->color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    REQUIRE(HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f }).size() == 1);
+
+    // Large text is held to 3.0 instead of 4.5 — WCAG's own exception, and the
+    // reason the finding carries the font size that decided it.
+    lab->color = { 0.537f, 0.537f, 0.537f, 1.0f };   // 4.0 against white
+    lab->fontSize = 16.0f;
+    REQUIRE(HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f }).size() == 1);
+    lab->fontSize = 24.0f;
+    CHECK(HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f }).empty());
+}
+
+TEST_CASE("Contrast: transparency is composited, not ignored")
+{
+    HE::UIWidgetTree t;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    static_cast<HE::UIPanel*>(t.find(panel))->color = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->parentId = panel;
+    HE::UIText* lab = static_cast<HE::UIText*>(t.find(label));
+    lab->fontSize = 16.0f;
+
+    // The usual way a label is made "muted": white, turned down. At full alpha
+    // it is 21:1 on black; at 0.2 the eye sees a very dark grey and the ratio
+    // collapses. A check that read the authored colour would pass both.
+    lab->color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    CHECK(HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f }).empty());
+    lab->color.a = 0.2f;
+    auto bad = HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f });
+    REQUIRE(bad.size() == 1);
+    CHECK(bad[0].ratio < 4.5f);
+    CHECK(bad[0].textColor.a == doctest::Approx(1.0f));   // reported as composited
+
+    // …and a see-through panel does not hide what is behind it either: the same
+    // white-on-white as before, arrived at through a panel that is half there
+    // over a white page.
+    static_cast<HE::UIPanel*>(t.find(panel))->color = { 1.0f, 1.0f, 1.0f, 0.5f };
+    lab->color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    bad = HE::uiCheckContrast(t, { 1.0f, 1.0f, 1.0f, 1.0f });
+    REQUIRE(bad.size() == 1);
+    CHECK(bad[0].backColor.r == doctest::Approx(1.0f));
+    CHECK(bad[0].ratio == doctest::Approx(1.0f));
+}
+
+TEST_CASE("Contrast: a field's text stands on the field, a button's on the button")
+{
+    HE::UIWidgetTree t;
+    // A dark page. The field is light and its text is dark: legible on the
+    // field, and it would look unreadable to anything that measured it against
+    // the page instead.
+    const int field = t.add(HE::UIWidgetType::TextInput);
+    HE::UITextInput* fi = static_cast<HE::UITextInput*>(t.find(field));
+    fi->backColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    fi->textColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+    CHECK(HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f }).empty());
+    fi->textColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    auto bad = HE::uiCheckContrast(t, { 0.0f, 0.0f, 0.0f, 1.0f });
+    REQUIRE(bad.size() == 1);
+    CHECK(bad[0].againstId == field);
+    CHECK(bad[0].againstProp == "Back Color");
+
+    // A button's caption is a Text CHILD (there is no built-in label), so the
+    // surface it stands on is the button's normal colour — found by the walk
+    // upwards, not by a rule about buttons.
+    HE::UIWidgetTree b;
+    const int btn = b.add(HE::UIWidgetType::Button);
+    static_cast<HE::UIButton*>(b.find(btn))->color = { 0.95f, 0.95f, 0.95f, 1.0f };
+    const int cap = b.add(HE::UIWidgetType::Text);
+    b.find(cap)->parentId = btn;
+    static_cast<HE::UIText*>(b.find(cap))->color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    static_cast<HE::UIText*>(b.find(cap))->fontSize = 16.0f;
+    auto bb = HE::uiCheckContrast(b, { 0.0f, 0.0f, 0.0f, 1.0f });
+    REQUIRE(bb.size() == 1);
+    CHECK(bb[0].elementId == cap);
+    CHECK(bb[0].againstId == btn);
+    CHECK(bb[0].againstProp == "Normal Color");
+}
+
+// The check exists to be RUN over what ships, not only over trees a test built.
+// This is the run: every component in the engine library, dressed by the
+// default theme, in both modes.
+#ifdef HE_EDITOR_DEPS_DIR
+TEST_CASE("Contrast: every shipped component is legible in both modes")
+{
+    const std::filesystem::path dir =
+        std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent" / "Widgets";
+    REQUIRE(std::filesystem::is_directory(dir));
+    ContentManager cm(dir.string());
+
+    for (const HE::UIThemeMode mode : { HE::UIThemeMode::Light, HE::UIThemeMode::Dark })
+    {
+        CAPTURE(HE::uiThemeModeName(mode));
+        // The page a component sits on is the theme's Background — the same
+        // colour an application paints behind everything, which is what makes
+        // this the real question and not a hypothetical one.
+        const glm::vec4 page =
+            HE::uiDefaultTheme().colorFor(HE::UIThemeRole::Background, mode);
+
+        for (const auto& entry : std::filesystem::directory_iterator(dir))
+        {
+            if (entry.path().extension() != ".hasset") continue;
+            const std::string file = entry.path().filename().string();
+            CAPTURE(file);
+            const HE::UUID id = cm.loadAsset(file);
+            REQUIRE(id != HE::UUID{});
+            const UIWidgetAsset* asset = cm.getWidget(id);
+            REQUIRE(asset);
+
+            HE::UIWidgetTree t;
+            REQUIRE(HE::uiWidgetTreeFromJson(asset->treeJson, t));
+            HE::uiApplyTheme(t, HE::uiDefaultTheme(), mode);
+
+            for (const HE::UIContrastFinding& f : HE::uiCheckContrast(t, page))
+            {
+                const HE::UIElement* e = t.find(f.elementId);
+                // ── The one KNOWN gap, named rather than hidden ──────────────
+                // Text on an Accent surface: the OK button's caption and the
+                // badge's number. Both are bound to the Text role, which is the
+                // only reading colour the vocabulary has, and Text is dark in
+                // light mode — dark on blue is 3.7, and white on that same blue
+                // would be 4.4, so it is not the binding that is wrong, it is
+                // that there is no "the colour to write ON the accent" and the
+                // accent itself is a middling blue. Both halves of that are a
+                // decision about the ROLE VOCABULARY (an on-disk format) and
+                // about the default palette, and they belong in their own step.
+                //
+                // Listed by the surface it stands on and not by file, so a new
+                // component that repeats the mistake is caught, and any other
+                // finding anywhere fails at once.
+                const HE::UIElement* on = t.find(f.againstId);
+                const bool onAccent = on &&
+                    on->themeRoleFor(f.againstProp) == "Accent";
+                if (onAccent) continue;
+
+                CAPTURE(e ? e->name : std::string("?"));
+                CAPTURE(f.textProp);
+                CAPTURE(f.ratio);
+                CAPTURE(f.required);
+                CHECK_MESSAGE(false, "text is not legible on what it stands on");
+            }
+        }
+    }
+}
+#endif

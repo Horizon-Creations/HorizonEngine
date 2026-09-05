@@ -349,6 +349,20 @@ public:
     // for a whole application.
     float   transition = 0.0f;
 
+    // Where this element sits in the TAB order, when the tree order is not what
+    // the author means. Tab already walks the hierarchy depth-first (the order
+    // the designer's tree shows), and that is right for nearly everything; this
+    // is the escape hatch for the two cases it is not.
+    //
+    //   0  — the default: take my place from the tree. Byte-identical files.
+    //   >0 — come first, in ascending order, ahead of every 0. Two fields side
+    //        by side in a grid that reads down the columns, say.
+    //   <0 — skipped by Tab. Only by Tab: a click, an arrow key (navigate) and
+    //        setFocus still reach it, because "not on the tab route" and "not
+    //        focusable" are different claims and conflating them would make a
+    //        toolbar button unreachable to a pointer as well.
+    int     tabIndex = 0;
+
     // Off = greyed out and inert: the element (and its subtree) still draws,
     // dimmed, but nothing in it hovers, clicks, drags or takes the keyboard.
     // A disabled button that still reacts is the classic UI lie, so this is
@@ -759,6 +773,7 @@ protected:
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.renderOpacity = renderOpacity; dst.transition = transition;
+        dst.tabIndex = tabIndex;
         dst.enabled = enabled;
         dst.slotFill = slotFill; dst.rotation = rotation;
         dst.gridColumn = gridColumn; dst.gridRow = gridRow;

@@ -2716,6 +2716,15 @@ namespace
 	  "sees as the control, and a ring around the field alone is a small "
 	  "rectangle floating inside a pill. Set it on the frame.",
 	  "", "ui#widgets" },
+	{ "UI Widget/Tab index", "",
+	  "Where Tab goes next. Left at 0 the route follows the tree on the left, "
+	  "parents before their children, which is the order you arranged and the "
+	  "only one you can predict. A number above 0 pulls the element to the front "
+	  "of the route, ahead of every 0, in ascending order: that is how a grid "
+	  "that reads down its columns gets tabbed down its columns. A number below "
+	  "0 takes it off the route altogether, and only off the route — a click and "
+	  "the arrow keys still reach it.",
+	  "", "ui#widgets" },
 	{ "UI Widget/Accepts drop", "",
 	  "Makes this element a drop zone: a file dragged in from the desktop and let "
 	  "go over it fires On File Dropped, once per file, with the file's path. The "
