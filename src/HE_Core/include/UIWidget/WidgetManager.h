@@ -1000,6 +1000,15 @@ private:
     // the system" exists to avoid.
     HE::UIThemeMode       m_systemMode = HE::UIThemeMode::Dark;
     bool m_visualDirty = true;     // see consumeVisualDirty
+    // The clock every indeterminate progress bar reads (UIElementRenderState::
+    // time). Wrapped rather than left to grow: a float that has been counting
+    // for a day has lost the resolution a 1.4-second cycle is made of.
+    float m_uiClock = 0.0f;
+    // …and whether any bar is actually spinning. Worked out ONCE per tick, by
+    // the same pass that moves the clock, because two things need the answer —
+    // "ask for another frame" and isAnimating() — and a scan per question would
+    // be the same walk over every element twice.
+    bool m_spinning = false;
     int  m_focusWidget = 0;        // widget id owning the focused element
     // …and whether that element, being a text field, currently owns the
     // KEYBOARD. Cleared by every focus change, so it can only ever be true for

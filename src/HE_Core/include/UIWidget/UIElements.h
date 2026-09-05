@@ -206,6 +206,14 @@ public:
     glm::vec4   boxColor{ 0.20f, 0.20f, 0.20f, 1.0f };
     glm::vec4   checkColor{ 0.30f, 0.80f, 0.40f, 1.0f };
     glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    // Drawn as a sliding switch instead of a ticked box. A property and not a
+    // type of its own, because it is the same VALUE with a second picture: a
+    // switch has nothing a checkbox does not — one bool, one label, one event —
+    // and a second type would have copied all of it to change nine lines of
+    // drawing. It is the picture that says which of the two a control is:
+    // a box means "this will be true when I press OK", a switch means "this is
+    // in effect now", and both of those are one bool underneath.
+    bool        switchStyle = false;
 
     UICheckBox() { sizeX = 200.0f; sizeY = 28.0f; }
     UIWidgetType type() const override { return UIWidgetType::CheckBox; }
@@ -267,6 +275,16 @@ public:
     float     value = 0.5f; // 0..1
     glm::vec4 backColor{ 0.15f, 0.15f, 0.15f, 1.0f };
     glm::vec4 fillColor{ 0.30f, 0.70f, 0.40f, 1.0f };
+    // "Working on it" as opposed to "this far along". The bar stops reporting a
+    // fraction and slides a segment across its track instead, which is the one
+    // honest picture of a job whose length nobody knows — a determinate bar
+    // that has to be invented ends up at 90% for a minute, and everyone who
+    // has waited on one has stopped believing it.
+    //
+    // Value is left alone rather than ignored away: switching back has to show
+    // what it showed before, and a graph writing progress into a bar it has not
+    // taken off indeterminate yet must not lose the writes.
+    bool      indeterminate = false;
 
     UIProgressBar() { sizeX = 240.0f; sizeY = 20.0f; cornerRadius = glm::vec4(4.0f); }
     // The TRACK is the surface; the fill drawn on top of it keeps its own colour.

@@ -274,6 +274,15 @@ struct UIElementRenderState
 
     float hoverAmount() const { return hoverT >= 0.0f ? hoverT : (hovered ? 1.0f : 0.0f); }
     float pressAmount() const { return pressT >= 0.0f ? pressT : (pressed ? 1.0f : 0.0f); }
+
+    // Seconds since the manager started, for the one thing that moves without
+    // anybody asking it to: an indeterminate progress bar. ONE clock on the
+    // manager rather than a phase on every element — a spinner has no state of
+    // its own, it is a function of the time, and a phase per element would be a
+    // number to keep, to serialize by accident, and to get out of step with the
+    // spinner beside it. A caller that builds its own state (the designer's
+    // preview, the tests) leaves it at 0 and sees the first frame of the cycle.
+    float time = 0.0f;
 };
 
 struct UIWidgetRect { float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f; };

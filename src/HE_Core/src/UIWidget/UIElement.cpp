@@ -609,6 +609,7 @@ const UIPropTable& UICheckBox::propTable() const
         uiprop::slot<&UICheckBox::boxColor>  ({ "Box Color", UIPropType::Color }),
         uiprop::slot<&UICheckBox::checkColor>({ "Check Color", UIPropType::Color }),
         uiprop::slot<&UICheckBox::textColor> ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UICheckBox::switchStyle>({ "Switch", UIPropType::Bool }),
     };
     return t;
 }
@@ -630,6 +631,7 @@ const UIPropTable& UIProgressBar::propTable() const
 {
     static const UIPropTable t = {
         uiprop::slot<&UIProgressBar::value>    ({ "Value", UIPropType::Float, 0.0f, 1.0f }),
+        uiprop::slot<&UIProgressBar::indeterminate>({ "Indeterminate", UIPropType::Bool }),
         uiprop::slot<&UIProgressBar::backColor>({ "Back Color", UIPropType::Color }),
         uiprop::slot<&UIProgressBar::fillColor>({ "Fill Color", UIPropType::Color }),
     };
@@ -1321,16 +1323,40 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float by  = px.y + (px.h - box) * 0.5f;
     const glm::vec4 bcHover = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
     glm::vec4 bc = glm::mix(boxColor, bcHover, st.hoverAmount());
-    quad(out, px.x, by, box, box, bc, {}, roundedR(box, box, 4.0f));
-    if (checked)
+    // How wide the control is, which is the only thing the label needs to know
+    // about which of the two pictures was drawn.
+    const float ctrl = switchStyle ? box * 1.8f : box;
+    if (switchStyle)
     {
-        const float inset = box * 0.22f;
-        const float cb = box - 2 * inset;
-        quad(out, px.x + inset, by + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
+        // The track carries the state, not a mark inside it: a switch that is
+        // on is a coloured track with the knob at the far end, and that reads
+        // from across the room where a tick does not. Fully rounded, always —
+        // this radius is a SHAPE, and a square switch is a checkbox that has
+        // been stretched.
+        const glm::vec4 track = checked ? checkColor : bc;
+        quad(out, px.x, by, ctrl, box, track, {}, box * 0.5f);
+        const float inset = box * 0.14f;
+        const float knob  = box - 2.0f * inset;
+        const float kx = px.x + inset + (checked ? ctrl - box : 0.0f);
+        // The knob is the one part that is the same colour in both states: it
+        // is the handle, and a handle that changes colour reads as a second
+        // piece of information there is nothing to say with.
+        quad(out, kx, by + inset, knob, knob, glm::vec4(1.0f, 1.0f, 1.0f, 0.95f),
+             {}, knob * 0.5f);
+    }
+    else
+    {
+        quad(out, px.x, by, box, box, bc, {}, roundedR(box, box, 4.0f));
+        if (checked)
+        {
+            const float inset = box * 0.22f;
+            const float cb = box - 2 * inset;
+            quad(out, px.x + inset, by + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
+        }
     }
     const float gap = 0.4f * box;   // scales with the box, not a fixed 8 px
-    const float lx = px.x + box + gap;
-    emitText(*this, label, { lx, px.y }, { px.w - box - gap, px.h },
+    const float lx = px.x + ctrl + gap;
+    emitText(*this, label, { lx, px.y }, { px.w - ctrl - gap, px.h },
              fontSize * pxScaleY, textColor, /*centerH=*/false, out);
 }
 
@@ -1355,14 +1381,35 @@ void UISlider::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
 // ── ProgressBar ──────────────────────────────────────────────────────────────
 
-void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState&,
+void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState& st,
                            const HE::UUID&, float, std::vector<UIRenderObject>& out) const
 {
-    const float t = std::clamp(value, 0.0f, 1.0f);
     // The track's radius is stamped (authored property); the FILL keeps its own,
     // because it is a part drawn on the surface rather than the surface itself.
-    quad(out, px.x, px.y, px.w,     px.h, backColor, {}, 0.0f);
-    quad(out, px.x, px.y, px.w * t, px.h, fillColor, {}, roundedR(px.w * t, px.h, 4.0f));
+    quad(out, px.x, px.y, px.w, px.h, backColor, {}, 0.0f);
+    if (!indeterminate)
+    {
+        const float t = std::clamp(value, 0.0f, 1.0f);
+        quad(out, px.x, px.y, px.w * t, px.h, fillColor, {}, roundedR(px.w * t, px.h, 4.0f));
+        return;
+    }
+    // A segment of a third of the track, sliding across it and starting again.
+    // It runs from fully off the left to fully off the right, so the cycle has
+    // no moment where the bar is empty and no moment where it snaps back — the
+    // segment leaves as the next one arrives.
+    constexpr float kPeriod = 1.4f;    // seconds for one pass
+    constexpr float kSegFrac = 0.33f;
+    const float seg = px.w * kSegFrac;
+    const float f = kPeriod > 0.0f
+        ? (st.time - std::floor(st.time / kPeriod) * kPeriod) / kPeriod : 0.0f;
+    const float x = px.x - seg + f * (px.w + 2.0f * seg);
+    // Clipped to the track BY HAND: an element's own quads are not covered by
+    // clipChildren, so the part hanging over the edge would paint outside the
+    // bar (the list view's row highlights do the same, for the same reason).
+    const float x0 = std::max(x, px.x);
+    const float x1 = std::min(x + seg, px.x + px.w);
+    if (x1 > x0)
+        quad(out, x0, px.y, x1 - x0, px.h, fillColor, {}, roundedR(x1 - x0, px.h, 4.0f));
 }
 
 // ── TextInput ────────────────────────────────────────────────────────────────
@@ -1924,10 +1971,12 @@ void UICheckBox::writeJson(nlohmann::json& j) const
     j["checked"] = checked; j["label"] = label; j["fontSize"] = fontSize;
     j["boxColor"] = colJson(boxColor); j["checkColor"] = colJson(checkColor);
     j["textColor"] = colJson(textColor);
+    if (switchStyle) j["switch"] = true;   // byte-identical for every older file
 }
 void UICheckBox::readJson(const nlohmann::json& j)
 {
     checked = j.value("checked", checked); label = j.value("label", label);
+    switchStyle = j.value("switch", switchStyle);
     fontSize = j.value("fontSize", fontSize);
     boxColor = colFrom(j.value("boxColor", nlohmann::json()), boxColor);
     checkColor = colFrom(j.value("checkColor", nlohmann::json()), checkColor);
@@ -1952,10 +2001,14 @@ void UISlider::readJson(const nlohmann::json& j)
 void UIProgressBar::writeJson(nlohmann::json& j) const
 {
     j["value"] = value; j["backColor"] = colJson(backColor); j["fillColor"] = colJson(fillColor);
+    // Only when it is on, so every bar authored before this saves byte for byte
+    // what it saved yesterday — the same rule B8's "Transition" follows.
+    if (indeterminate) j["indeterminate"] = true;
 }
 void UIProgressBar::readJson(const nlohmann::json& j)
 {
     value = j.value("value", value);
+    indeterminate = j.value("indeterminate", indeterminate);
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
     fillColor = colFrom(j.value("fillColor", nlohmann::json()), fillColor);
 }

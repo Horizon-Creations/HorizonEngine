@@ -1726,6 +1726,8 @@ int WidgetManager::stopAnimationsNamed(int widgetId, const std::string& elemName
 
 bool WidgetManager::isAnimating() const
 {
+	// A bar that has no end to report is the one thing here that moves forever.
+	if (m_spinning) return true;
 	for (const Instance& w : m_instances)
 		// The state blends belong here with the tweens and the clips: a button
 		// fading from its resting colour to its hovered one changes the picture
@@ -1921,6 +1923,33 @@ void WidgetManager::tick(float dt)
 			// the same thing the tooltip's wait has to say about itself.
 			if (moved) m_visualDirty = true;
 		}
+
+	// ── The clock the spinners read ──────────────────────────────────────────
+	// An indeterminate bar moves with nobody touching the machine, so it has to
+	// ask for its frames the way the tooltip's wait does. Whether one is up is
+	// settled here and remembered, because isAnimating() needs the same answer
+	// and a second walk over every element would be the same walk twice.
+	if (dt > 0.0f)
+	{
+		constexpr float kClockWrap = 3600.0f;
+		m_uiClock += dt;
+		if (m_uiClock >= kClockWrap) m_uiClock -= kClockWrap;
+		m_spinning = false;
+		for (const auto& w : m_instances)
+		{
+			if (!w.visible) continue;
+			for (const auto& ep : w.tree.elements)
+			{
+				const auto* pb = dynamic_cast<const HE::UIProgressBar*>(ep.get());
+				if (!pb || !pb->indeterminate) continue;
+				if (!HE::uiElementEffectiveVisible(w.tree, *pb)) continue;
+				m_spinning = true;
+				break;
+			}
+			if (m_spinning) break;
+		}
+		if (m_spinning) m_visualDirty = true;
+	}
 
 	// ── The glide the wheel left behind ──────────────────────────────────────
 	// Scrolling stops where the wheel stopped only on a machine; on paper it
@@ -4453,6 +4482,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			st.editing = st.focused && m_focusEditing && m_focusWidget == w.id;
 			st.dropTarget = (e.id == m_dropElem && m_dropWidget == w.id);
 			st.dragging   = (m_dragActive && e.id == m_dragElem && m_dragWidget == w.id);
+			st.time       = m_uiClock;
 			// The blend, eased on the way out. Stored linear (see Instance::
 			// Blend) so a hover that turns round halfway carries on from where
 			// it is; shaped here, because a curve is how it should LOOK and the

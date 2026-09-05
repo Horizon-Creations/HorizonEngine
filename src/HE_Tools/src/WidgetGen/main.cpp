@@ -268,6 +268,68 @@ Comp formRowChoice()
 }
 
 // A heading with a rule under it. What turns a long form into a settings page.
+// ── Divider ──────────────────────────────────────────────────────────────────
+// A hairline with air around it. It is a component and not "a Panel one unit
+// tall" because that Panel was being built again on every page, each with its
+// own idea of how much air a rule needs — and the day the theme's border colour
+// changes, one of them is always missed.
+//
+// The AIR is the parameter, not the line. A divider that is too thick is a
+// mistake nobody makes; a divider crammed against the thing above it is the
+// mistake everybody makes.
+Comp divider()
+{
+    Comp c(480.0f, 17.0f);
+    const int root = c.add(UIWidgetType::VerticalBox, 0, "Divider");
+    c.fill(root);
+    c.num(root, "Padding", 8.0f);
+    c.num(root, "Spacing", 0.0f);
+
+    const int line = c.add(UIWidgetType::Panel, root, "Line");
+    c.at(line).sizeY = 1.0f;
+    c.role(line, "Color", UIThemeRole::Border);
+
+    c.param("Inset", root, "Padding",
+            "How much air there is above and below the line. The line itself is "
+            "one unit tall; make it taller in the designer if you want a rule "
+            "rather than a hairline.");
+    c.param("Color", line, "Color", "The line's colour. The theme's border by default.");
+    c.bake();
+    return c;
+}
+
+// ── Badge ────────────────────────────────────────────────────────────────────
+// The little count on a tab, an inbox, a status. Text on a pill, and the whole
+// of its job is that it is the same pill everywhere.
+Comp badge()
+{
+    Comp c(28.0f, 20.0f);
+    const int root = c.add(UIWidgetType::Panel, 0, "Badge");
+    c.fill(root);
+    c.role(root, "Color", UIThemeRole::Accent);
+    // Half the height, so it is a pill at the authored size and stays one for
+    // anything shorter. Not a theme step, for the same reason the search
+    // field's is not: this radius is a SHAPE, and a theme that made its corners
+    // 4 would turn the pill into a box.
+    c.at(root).cornerRadius = glm::vec4(10.0f);
+
+    const int label = c.add(UIWidgetType::Text, root, "Label");
+    c.fill(label, 7.0f, 0.0f, 7.0f, 0.0f);
+    c.str(label, "Text", "3");
+    c.whole(label, "Align H", 1); c.whole(label, "Align V", 1);
+    c.textLevel(label, UIThemeTextLevel::Small);
+    c.at(label).hitTestable = false;
+
+    c.param("Text", label, "Text", "What it says. A number, usually.");
+    c.param("Color", root, "Color", "The pill. The accent by default; Error for a warning count.");
+    c.param("Text Color", label, "Color", "The text on the pill.");
+    c.param("Shown", root, "Visible",
+            "Whether it is there at all. A badge showing 0 is a badge that "
+            "should not be drawn — switch this off rather than write a zero.");
+    c.bake();
+    return c;
+}
+
 Comp sectionHeader()
 {
     Comp c(480.0f, 40.0f);
@@ -756,6 +818,11 @@ int main(int argc, char** argv)
     entries.push_back({ "SearchField",   searchField(),   nullptr });
     entries.push_back({ "EmptyState",    emptyState(),    nullptr });
     entries.push_back({ "DialogFrame",   dialogFrame(dialogLogic), &dialogLogic });
+    // Appended, never inserted: the index IS the UUID (kWidgetBaseHi + index),
+    // so moving a line up here renames two assets at once and every project
+    // that referenced them points at the wrong one.
+    entries.push_back({ "Divider",       divider(),       nullptr });
+    entries.push_back({ "Badge",         badge(),         nullptr });
 
     int ok = 0, index = 0;
     for (const Entry& e : entries)

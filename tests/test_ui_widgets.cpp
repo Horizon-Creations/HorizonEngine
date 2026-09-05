@@ -162,7 +162,8 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "FontSize", UIPropType::Float },
             { "Box Color", UIPropType::Color },
             { "Check Color", UIPropType::Color },
-            { "Text Color", UIPropType::Color } } },
+            { "Text Color", UIPropType::Color },
+            { "Switch", UIPropType::Bool } } },
         { UIWidgetType::Slider, {
             { "Value", UIPropType::Float },
             { "Min", UIPropType::Float },
@@ -172,6 +173,7 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Handle Color", UIPropType::Color } } },
         { UIWidgetType::ProgressBar, {
             { "Value", UIPropType::Float },
+            { "Indeterminate", UIPropType::Bool },
             { "Back Color", UIPropType::Color },
             { "Fill Color", UIPropType::Color } } },
         { UIWidgetType::TextInput, {
@@ -7332,6 +7334,111 @@ TEST_CASE("WidgetManager: the wheel scrolls the box under the cursor")
     CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f));
 }
 
+// ── B9: a bar with no end to report ──────────────────────────────────────────
+
+TEST_CASE("ProgressBar: indeterminate slides instead of filling")
+{
+    HE::UIProgressBar pb;
+    pb.sizeX = 200.0f; pb.sizeY = 20.0f;
+    pb.value = 0.25f;
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 200.0f, 20.0f };
+
+    // Determinate: the track, then a fill that IS the fraction.
+    HE::UIElementRenderState st;
+    std::vector<UIRenderObject> det;
+    pb.render(px, st, {}, 1.0f, det);
+    REQUIRE(det.size() == 2);
+    CHECK(det[1].size.x == doctest::Approx(50.0f));
+    CHECK(det[1].position.x == doctest::Approx(0.0f));
+
+    // Indeterminate: a segment a third of the track wide, and where it is
+    // depends on the clock and on nothing else.
+    pb.indeterminate = true;
+    std::vector<UIRenderObject> early, later;
+    st.time = 0.5f;
+    pb.render(px, st, {}, 1.0f, early);
+    st.time = 0.9f;
+    pb.render(px, st, {}, 1.0f, later);
+    REQUIRE(early.size() == 2);
+    REQUIRE(later.size() == 2);
+    CHECK(early[1].size.x == doctest::Approx(200.0f * 0.33f));
+    CHECK(later[1].position.x > early[1].position.x);
+    // Never outside its own track, at any moment of the cycle: an element's own
+    // quads are not covered by clipChildren.
+    for (float t = 0.0f; t < 3.0f; t += 0.05f)
+    {
+        std::vector<UIRenderObject> o;
+        st.time = t;
+        pb.render(px, st, {}, 1.0f, o);
+        for (const UIRenderObject& q : o)
+        {
+            CHECK(q.position.x >= -0.001f);
+            CHECK(q.position.x + q.size.x <= 200.001f);
+        }
+    }
+
+    // The value it was showing before is still there when it comes back: a
+    // graph writing progress into a bar nobody has switched over yet must not
+    // lose the writes.
+    CHECK(pb.value == doctest::Approx(0.25f));
+    // And it only reaches the file when it is on, so every bar authored before
+    // this saves byte for byte what it saved yesterday.
+    nlohmann::json j;
+    HE::UIProgressBar plain;
+    plain.writeJson(j);
+    CHECK_FALSE(j.contains("indeterminate"));
+    j = nlohmann::json{};
+    pb.writeJson(j);
+    CHECK(j.value("indeterminate", false));
+    HE::UIProgressBar back;
+    back.readJson(j);
+    CHECK(back.indeterminate);
+}
+
+TEST_CASE("CheckBox: the switch is the same value with a second picture")
+{
+    HE::UICheckBox cb;
+    cb.sizeX = 200.0f; cb.sizeY = 28.0f; cb.label.clear();
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 200.0f, 28.0f };
+    const HE::UIElementRenderState st;
+
+    // A box is a square; a switch is a track and a knob, and the track is
+    // wider than the box would have been.
+    std::vector<UIRenderObject> box;
+    cb.render(px, st, {}, 1.0f, box);
+    REQUIRE(box.size() == 1);            // unchecked box: no tick
+    const float boxW = box[0].size.x;
+
+    cb.switchStyle = true;
+    std::vector<UIRenderObject> off;
+    cb.render(px, st, {}, 1.0f, off);
+    REQUIRE(off.size() == 2);            // track + knob, in both states
+    CHECK(off[0].size.x == doctest::Approx(boxW * 1.8f));
+    CHECK(off[0].cornerRadius.x == doctest::Approx(off[0].size.y * 0.5f));
+
+    cb.checked = true;
+    std::vector<UIRenderObject> on;
+    cb.render(px, st, {}, 1.0f, on);
+    REQUIRE(on.size() == 2);
+    // The knob is at the far end and the track has taken the check colour: the
+    // TRACK carries the state, which reads from across the room.
+    CHECK(on[1].position.x > off[1].position.x);
+    CHECK(on[0].color.g == doctest::Approx(cb.checkColor.g));
+    // The knob is the one part that does not change colour.
+    CHECK(on[1].color.r == doctest::Approx(off[1].color.r));
+
+    // Same rule as the spinner's: only written when it is on.
+    nlohmann::json j;
+    HE::UICheckBox plain;
+    plain.writeJson(j);
+    CHECK_FALSE(j.contains("switch"));
+    j = nlohmann::json{};
+    cb.writeJson(j);
+    HE::UICheckBox back;
+    back.readJson(j);
+    CHECK(back.switchStyle);
+}
+
 // ── B9: the glide, and the bar as a handle ───────────────────────────────────
 // Four buttons of 100 in a box of 200: the content is 400 units tall, so it can
 // be scrolled by 200. The same shape as the wheel test above, and the two things
@@ -10693,9 +10800,10 @@ TEST_CASE("Engine components: every shipped one loads, draws, and means what it 
         if (entry.path().extension() == ".hasset")
             names.push_back(entry.path().filename().string());
     std::sort(names.begin(), names.end());
-    // The plan's first twelve. A thirteenth is welcome and has to be looked at:
-    // this number is the prompt to check it against the list, not a cap.
-    CHECK(names.size() == 12);
+    // The plan's first twelve, plus B9's Divider and Badge. A fifteenth is
+    // welcome and has to be looked at: this number is the prompt to check it
+    // against the list, not a cap.
+    CHECK(names.size() == 14);
 
     ContentManager cm(dir.string());
     for (const std::string& file : names)
