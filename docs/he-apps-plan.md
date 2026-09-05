@@ -682,8 +682,59 @@ Texturen und Materialien zugleich, ein abgerundeter Knopf ist dort ein Rechteck.
 Für Apps ist das seit A0 gleichgültig, sie zielen auf Metal und GL. Der Punkt wandert damit
 in die **Spiel-Spur**, zur ohnehin offenen Backend-Parität, und blockiert hier nichts mehr.
 
-**F2 HiDPI.** Die Pixel-Größe kennt das Fenster schon. Ob der Canvas-Skalierungsmodus die
-Systemskalierung auf Windows und Linux korrekt aufnimmt, ist ungeprüft.
+**F2 HiDPI** ist geprüft, und die Prüfung hat zwei Fehler gefunden — einen davon auch auf
+macOS, wo nichts erwartet wurde.
+
+Eine Skalierung von 200% ist **zwei** Dinge, und SDL hält sie auseinander
+(`docs/README-highdpi.md`): das Fenster kann doppelt so viele Pixel *haben* (macOS Retina,
+Pixeldichte 2), oder es hat dieselben Pixel und eine *Content Scale* von 2, die der Anwendung
+sagt, sie solle größer zeichnen (Windows, X11). `SDL_GetWindowDisplayScale` ist das Produkt aus
+beidem, und es ist die einzige Zahl, die ein Layout braucht. Genau darum ist die Antwort
+plattformunabhängig: auf macOS und Wayland ist die Content Scale immer 1,0, der Fix ist dort ein
+No-op, und auf Windows und X11 ist er die ganze Sache.
+
+**Die Pixeldichte war schon verdrahtet, die Content Scale nirgends.** Zeiger, Drop-Position und
+Renderziel rechnen überall mit `pw/ww` (`GameApplication.cpp`), also mit der Dichte. Weder
+`SDL_GetDisplayContentScale` noch `SDL_GetWindowDisplayScale` kam außerhalb des mitgelieferten
+ImGui vor.
+
+**Fehler 1, der Skalierungsmodus.** Fünf der sechs Modi messen gegen den Viewport in Pixeln:
+ein Bildschirm, der einfach mehr davon hat, wird vom Skalierungsfaktor aufgesogen, und ihnen
+die Systemskalierung *zusätzlich* zu geben würde sie doppelt anwenden. **ConstantPixel** ist der
+eine Modus, den die Systemskalierung wirklich erreicht — „eine Einheit ist ein Pixel" zeichnete
+bei 200% alles halb so groß, also genau der Fall, vor dem SDLs eigenes README warnt. Die Einheit
+ist jetzt ein **geräteunabhängiges Pixel**: `s = displayScale`, und die Leinwand wird
+`Viewport / displayScale` groß, damit Anker weiter den echten Rand treffen. Das war auf jeder
+Plattform falsch, auf einem Retina-Mac genauso wie auf einem Windows-Laptop bei 200%.
+
+Ein **eingebettetes** Widget (`WidgetRef`) bekommt die Skalierung bewusst *nicht*: sein Slot
+misst in den Leinwand-Einheiten des Wirts, nicht in Pixeln, also heißt ConstantPixel dort
+„unskaliert relativ zu dem, der mich einbettet". Der Faktor des Wirts trägt die Systemskalierung
+schon; ihn erneut zu multiplizieren gäbe bei 200% das Vierfache.
+
+**Fehler 2, die Fenstergröße — der eigentliche Windows/Linux-Defekt.** „1280x720" in den
+Projekteinstellungen ist eine Größe, die jemand auf seinem Bildschirm gesehen hat.
+`SDL_CreateWindow` nimmt Fensterkoordinaten, und was die *sind*, hängt an der Plattform: Punkte
+auf macOS und Wayland (Skalierung schon eingerechnet), physische **Pixel** auf Windows und X11.
+Dasselbe 1280x720 ergab dort bei 200% ein halb so breites Fenster, und jeder Skalierungsmodus
+hat brav in dieses zu kleine Fenster hinein gelayoutet — kein Modus kann das ausgleichen.
+`Window::Init` multipliziert die gewünschte Größe deshalb mit `SDL_GetDisplayContentScale` und
+klemmt sie an `SDL_GetDisplayUsableBounds`, damit aus einem Fenster, das bei 100% auf den
+Schirm passte, bei 200% keins wird, das darüber hinaussteht. `m_width/m_height` werden danach
+aus SDL zurückgelesen statt angenommen. Das ändert auch windowed **Spiel**-Fenster auf
+Windows/X11 mit Skalierung, und zwar zum Richtigen: sie sind dort ab jetzt so groß wie auf einem
+Mac schon immer.
+
+**Der Software-Renderer stimmt ohne Zutun.** Sein Fenster hat kein
+`SDL_WINDOW_HIGH_PIXEL_DENSITY`: auf macOS sind Pixel gleich Punkte und die Display Scale 1, das
+System skaliert selbst hoch; auf Windows sind die Punkte Pixel und die Display Scale 2, also
+skaliert der Modus. Beide Wege enden bei derselben physischen Größe.
+
+**Was nicht geprüft ist.** Kein Lauf auf echter Windows- oder Linux-Hardware mit gesetzter
+Skalierung — dieser Rechner ist ein Mac. Belegt sind die SDL-Semantik (die Tabelle in
+`README-highdpi.md`), Unit-Tests, die die Display Scale simulieren, und dass es auf allen drei
+Plattformen baut. Der Editor selbst und seine Widget-Vorschau bleiben bei Display Scale 1: die
+Vorschau ist ein *simulierter* Bildschirm, und ImGui bringt seine eigene DPI-Behandlung mit.
 
 **F3 Randlose Fenster mit eigener Titelleiste**, inklusive Ziehen, Größenänderung an den
 Rändern und Snap-Verhalten auf Windows.

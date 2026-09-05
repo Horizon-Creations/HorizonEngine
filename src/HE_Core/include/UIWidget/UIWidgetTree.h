@@ -29,6 +29,19 @@ namespace HE {
 // and the layout canvas becomes viewport / scale. That is what keeps an
 // element anchored to the right edge on the right edge instead of somewhere in
 // a letterbox — the anchor rectangles resolve against the real screen.
+//
+// ── The system scaling (HiDPI, docs/he-apps-plan.md F2) ─────────────────────
+// Every mode above measures against the viewport in PIXELS, so a display that
+// simply has more of them (a Retina panel, a 4K screen) is absorbed by the
+// scale factor and nothing has to be told about it. ConstantPixel is the one
+// exception, and it is the mode the system scaling actually reaches: "one unit
+// is one pixel" makes a 200% display draw everything at half its intended
+// size, which is exactly the "ignoring the content scale makes graphics appear
+// tiny" case SDL's README-highdpi warns about. So the unit is a
+// device-independent pixel, and `displayScale` below (SDL's
+// `SDL_GetWindowDisplayScale`: pixel density × the display's content scale) is
+// how many real pixels one of them is worth. 1.0 means an unscaled display,
+// and every other mode ignores the value because the viewport already told it.
 enum class UICanvasScaleMode : uint8_t
 {
     Stretch = 0,     // per-axis fit, the canvas IS the reference (distorts)
@@ -36,14 +49,14 @@ enum class UICanvasScaleMode : uint8_t
     FillOutside,     // uniform max(sx, sy): no empty space, edges may be cut off
     MatchWidth,      // uniform, the authored WIDTH is what fits
     MatchHeight,     // uniform, the authored HEIGHT is what fits
-    ConstantPixel,   // no scaling: one canvas unit is one pixel
+    ConstantPixel,   // uniform, one canvas unit is one DEVICE-INDEPENDENT pixel
 };
 HE_API const char* uiCanvasScaleModeName(UICanvasScaleMode m);
 
 // The canvas a widget actually lays out in, for one particular viewport.
-// `width`/`height` are canvas units (they are the authored size for Stretch and
-// ConstantPixel, and viewport/scale otherwise); `scaleX`/`scaleY` convert a
-// canvas unit to a pixel and are equal for every uniform mode.
+// `width`/`height` are canvas units (they are the authored size for Stretch,
+// and viewport/scale otherwise); `scaleX`/`scaleY` convert a canvas unit to a
+// pixel and are equal for every uniform mode.
 struct UIWidgetCanvas
 {
     float scaleX = 1.0f, scaleY = 1.0f;
@@ -227,13 +240,23 @@ HE_API int  uiAnchorLegacyPointOf(const UIElement& e); // -1 = not a 9-point anc
 // mode above turned into concrete numbers. Passing the result to the layout
 // calls below is what makes anchors resolve against the REAL screen; leaving it
 // out lays out on the authored canvas, which is what the designer wants.
-HE_API UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight);
+// `displayScale` is the system scaling of the screen this viewport is on (see
+// the enum above); only ConstantPixel reads it, and 1.0 is an unscaled display.
+HE_API UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight,
+                                      float displayScale = 1.0f);
 // The same rule without a tree: an authored canvas, a mode, and the pixel size
 // it has to meet. Used for the tree above and for a WidgetRef's slot, which is
 // the embedded widget's screen and follows exactly the same rule.
+//
+// A WidgetRef's slot deliberately passes NO display scale: its rect is in the
+// HOST's canvas units, not in pixels, so a nested ConstantPixel widget means
+// "unscaled relative to whoever embedded me" and inherits the host's factor —
+// which already carries the system scaling. Handing it the scale a second time
+// would apply it twice.
 HE_API UIWidgetCanvas uiResolveCanvasFor(float authoredW, float authoredH,
                                          UICanvasScaleMode mode,
-                                         float vpWidth, float vpHeight);
+                                         float vpWidth, float vpHeight,
+                                         float displayScale = 1.0f);
 
 // How much an element's OWN numbers (position, size, padding, spacing) are
 // scaled before they are used. 1 everywhere except inside an embedded widget:

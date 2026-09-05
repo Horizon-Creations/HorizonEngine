@@ -1,4 +1,5 @@
 #include "Window/Window.h"
+#include <algorithm>
 #include <cstdint>
 #include <iterator>
 #include <SDL3/SDL.h>
@@ -111,34 +112,77 @@ namespace
             break;
         }
 
+        // ── The requested size is in DIPs, SDL wants window coordinates ──────
+        // "1280x720" in a project's settings is a size the author saw on their
+        // screen, not a count of pixels. SDL takes window coordinates, and what
+        // those ARE differs by platform (docs/README-highdpi.md): points on
+        // macOS and Wayland, where the system scaling is already baked in and
+        // the content scale reads 1.0 — but physical PIXELS on Windows and X11,
+        // where the scaling only shows up as a content scale of 1.5 or 2.0. So
+        // the same 1280x720 gives a window half as wide on a Windows laptop at
+        // 200% as on any Mac, and every canvas scale mode faithfully lays out
+        // into that too-small window. Multiplying by the content scale is a
+        // no-op on the platforms that need none and the whole fix on the two
+        // that do.
+        const float contentScale = m_isPrimary
+            ? SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()) : 1.0f;
+        uint32_t createW = props.width, createH = props.height;
+        if (contentScale > 1.0f)
+        {
+            createW = static_cast<uint32_t>(props.width  * contentScale + 0.5f);
+            createH = static_cast<uint32_t>(props.height * contentScale + 0.5f);
+            // A size that fit the screen at 100% must still fit it at 200%:
+            // without this a 1600x900 default becomes 3200x1800 and hangs off
+            // a 2560x1440 panel, which reads as a broken app, not as a scaled
+            // one. Usable bounds, so the taskbar keeps its strip.
+            SDL_Rect usable{};
+            if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) &&
+                usable.w > 0 && usable.h > 0)
+            {
+                createW = std::min(createW, static_cast<uint32_t>(usable.w));
+                createH = std::min(createH, static_cast<uint32_t>(usable.h));
+            }
+            HE_LOG_INFO(Window, "Display content scale %.2f — requested %ux%u scaled to %ux%u",
+                        static_cast<double>(contentScale), props.width, props.height,
+                        createW, createH);
+        }
+
         m_window = SDL_CreateWindow(
             props.title.c_str(),
-            static_cast<int>(props.width),
-            static_cast<int>(props.height),
+            static_cast<int>(createW),
+            static_cast<int>(createH),
             flags);
         if (!m_window)
         {
             HE_LOG_CRIT(Window, "SDL_CreateWindow('%s', %ux%u, flags 0x%llx) failed: %s",
-                        props.title.c_str(), props.width, props.height,
+                        props.title.c_str(), createW, createH,
                         static_cast<unsigned long long>(flags), SDL_GetError());
             throw std::runtime_error("SDL_CreateWindow failed: " + std::string(SDL_GetError()));
         }
 
-        // m_width/m_height are the logical (points) size by construction — that is what
-        // SDL_CreateWindow was given. The drawable size only equals it when HiDPI is off,
-        // so seed it from SDL instead of assuming.
+        // m_width/m_height are the logical (points) size — asked for above, but
+        // read back rather than assumed: the scaling and the clamp both changed
+        // it, and a window manager may have had a further opinion. The drawable
+        // size only equals it when HiDPI is off, so seed that from SDL too.
         {
-            int pw = 0, ph = 0;
+            int lw = 0, lh = 0, pw = 0, ph = 0;
+            SDL_GetWindowSize(m_window, &lw, &lh);
             SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
+            if (lw > 0) m_width  = static_cast<uint32_t>(lw);
+            if (lh > 0) m_height = static_cast<uint32_t>(lh);
             m_pixelWidth  = pw > 0 ? static_cast<uint32_t>(pw) : m_width;
             m_pixelHeight = ph > 0 ? static_cast<uint32_t>(ph) : m_height;
         }
         // The logical-vs-pixel pair is the first thing to check for "everything is
-        // blurry" or "the viewport is half the window" reports.
-        HE_LOG_INFO(Window, "%s window created: %ux%u logical, %ux%u pixels, backend %d, "
-                            "vsync %s, display '%s'",
+        // blurry" or "the viewport is half the window" reports; the display scale
+        // beside it is the first thing to check for "everything is tiny", which is
+        // the same report one platform further along.
+        HE_LOG_INFO(Window, "%s window created: %ux%u logical, %ux%u pixels, display scale %.2f, "
+                            "backend %d, vsync %s, display '%s'",
                     m_isPrimary ? "Primary" : "Secondary", m_width, m_height,
-                    m_pixelWidth, m_pixelHeight, static_cast<int>(props.api),
+                    m_pixelWidth, m_pixelHeight,
+                    static_cast<double>(SDL_GetWindowDisplayScale(m_window)),
+                    static_cast<int>(props.api),
                     props.vsync ? "on" : "off",
                     SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window))
                         ? SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window)) : "?");

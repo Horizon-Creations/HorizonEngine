@@ -1483,6 +1483,15 @@ void GameApplication::updateUIInput()
 	const float sx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
 	const float sy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
 
+	// The system scaling, asked fresh every frame rather than watched for
+	// SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: it is one cheap call, and it is
+	// right the frame the window is dragged onto a second monitor with a
+	// different setting. This is what a ConstantPixel canvas lays out in, and
+	// it is NOT the sx/sy above — that pair converts window points to pixels
+	// (macOS Retina), this one also carries what Windows and X11 call the
+	// content scale, where the points ARE pixels and only the scale says 200%.
+	m_widgets.setDisplayScale(w ? SDL_GetWindowDisplayScale(w) : 1.0f);
+
 	// While the fly-look holds the mouse captive there is no visible cursor —
 	// hover states clear and nothing is clickable (Esc releases the mouse).
 	//

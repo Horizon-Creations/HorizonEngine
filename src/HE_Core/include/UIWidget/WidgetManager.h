@@ -629,7 +629,26 @@ public:
     // for standalone use / tests.
     void setRuntime(HorizonCode::Runtime* r) { m_runtime = r; }
 
+    // ── The system scaling of the screen these widgets are on ────────────────
+    // How many real pixels one device-independent pixel is worth: SDL's
+    // `SDL_GetWindowDisplayScale`, which is the window's pixel density times
+    // the display's content scale, so 200% on Windows and a Retina panel on
+    // macOS both arrive here as 2. The host sets it once per frame (a display
+    // scale can change while the window is open — dragging it to a second
+    // monitor is enough), and only the ConstantPixel canvas mode reads it: the
+    // other modes measure against the viewport, which already counted the
+    // pixels. 1 is an unscaled display and the default, which is what a
+    // headless test and the editor's simulated screen both want.
+    void  setDisplayScale(float s) { m_displayScale = s > 0.0f ? s : 1.0f; }
+    float displayScale() const { return m_displayScale; }
+
 private:
+    // Every canvas in here goes through this, so the display scale is applied
+    // in ONE place instead of at forty call sites that each have to remember.
+    HE::UIWidgetCanvas resolveCanvas(const HE::UIWidgetTree& t, float vpW, float vpH) const
+    { return HE::uiResolveCanvas(t, vpW, vpH, m_displayScale); }
+    float m_displayScale = 1.0f;
+
     struct Instance
     {
         int id = 0;

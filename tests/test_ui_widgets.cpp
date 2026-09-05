@@ -2554,6 +2554,103 @@ TEST_CASE("uiResolveCanvas: the uniform modes never distort")
     CHECK(c.width  > 0.0f);
 }
 
+// ── HiDPI (docs/he-apps-plan.md F2) ─────────────────────────────────────────
+// A display at 200% is two things at once, and SDL keeps them apart: the window
+// may simply HAVE twice the pixels (macOS Retina, pixel density 2), or it may
+// have the same pixels and a content scale of 2 telling the app to draw bigger
+// (Windows, X11). SDL_GetWindowDisplayScale is the product, and it is the only
+// number a layout needs.
+//
+// Five of the six modes measure against the viewport, so more pixels is all
+// they ever see and the scaling arrives on its own. ConstantPixel is the one
+// that has to be told — and it was the one that was wrong on EVERY platform,
+// macOS included: "one unit is one pixel" drew a 200% display's UI at half
+// size, which is the "ignoring the content scale makes graphics appear tiny"
+// case SDL's own README-highdpi warns about.
+TEST_CASE("Canvas scale: only ConstantPixel reads the display scale")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+    const float vw = 3840.0f, vh = 2160.0f;   // a 4K panel at 200%
+
+    // The five viewport-relative modes are byte-identical either way: they
+    // already counted the pixels, and counting the scaling too would double it.
+    for (const HE::UICanvasScaleMode m : { HE::UICanvasScaleMode::Stretch,
+                                           HE::UICanvasScaleMode::FitInside,
+                                           HE::UICanvasScaleMode::FillOutside,
+                                           HE::UICanvasScaleMode::MatchWidth,
+                                           HE::UICanvasScaleMode::MatchHeight })
+    {
+        t.scaleMode = m;
+        const HE::UIWidgetCanvas a = HE::uiResolveCanvas(t, vw, vh, 1.0f);
+        const HE::UIWidgetCanvas b = HE::uiResolveCanvas(t, vw, vh, 2.0f);
+        CHECK(a.scaleX == doctest::Approx(b.scaleX));
+        CHECK(a.scaleY == doctest::Approx(b.scaleY));
+        CHECK(a.width  == doctest::Approx(b.width));
+        CHECK(a.height == doctest::Approx(b.height));
+    }
+
+    // ConstantPixel: one unit is one DEVICE-INDEPENDENT pixel. At 200% it is
+    // worth two real ones, so a 100-unit button covers 200 pixels and keeps the
+    // width the author drew instead of shrinking to half of it.
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    HE::UIWidgetCanvas c = HE::uiResolveCanvas(t, vw, vh, 2.0f);
+    CHECK(c.scaleX == doctest::Approx(2.0f));
+    CHECK(c.scaleY == doctest::Approx(2.0f));
+    CHECK(c.width  == doctest::Approx(1920.0f));   // …and the canvas is in DIPs,
+    CHECK(c.height == doctest::Approx(1080.0f));   // so anchors still reach the edge
+
+    // Windows' 150% is the common case, not the tidy 2×.
+    c = HE::uiResolveCanvas(t, 2880.0f, 1620.0f, 1.5f);
+    CHECK(c.scaleX == doctest::Approx(1.5f));
+    CHECK(c.width  == doctest::Approx(1920.0f));
+
+    // An unscaled display is what the default argument means, and it has to be
+    // exactly what the mode did before any of this existed.
+    c = HE::uiResolveCanvas(t, vw, vh);
+    CHECK(c.scaleX == doctest::Approx(1.0f));
+    CHECK(c.width  == doctest::Approx(vw));
+
+    // A platform that answers 0 (or worse) must not collapse the layout into a
+    // single point: the clamp is the difference between a wrong size and a
+    // division that takes the canvas with it.
+    c = HE::uiResolveCanvas(t, vw, vh, 0.0f);
+    CHECK(c.scaleX > 0.0f);
+    CHECK(c.width  > 0.0f);
+    CHECK(std::isfinite(c.width));
+}
+
+TEST_CASE("Canvas scale: an embedded ConstantPixel widget inherits, it does not re-apply")
+{
+    // A WidgetRef's slot is measured in the HOST's canvas units, not in pixels,
+    // so a nested ConstantPixel widget means "unscaled relative to whoever
+    // embedded me". The host's own factor already carries the display scale;
+    // handing it to the slot as well would apply 200% twice and draw the
+    // embedded component at four times its size.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 1920.0f; page.canvasHeight = 1080.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+
+    const int refId = page.add(HE::UIWidgetType::WidgetRef);
+    auto* r = dynamic_cast<HE::UIWidgetRef*>(page.find(refId));
+    REQUIRE(r != nullptr);
+    HE::uiSetAnchorPreset(*r, 0); r->pivotX = r->pivotY = 0.0f;
+    r->posX = 0.0f; r->posY = 0.0f; r->sizeX = 400.0f; r->sizeY = 200.0f;
+    r->contentW = 400.0f; r->contentH = 200.0f;
+    r->contentMode = HE::UICanvasScaleMode::ConstantPixel;
+
+    const int childId = page.add(HE::UIWidgetType::Button);
+    page.find(childId)->parentId = refId;
+
+    const HE::UIWidgetCanvas hostAt2 = HE::uiResolveCanvas(page, 3840.0f, 2160.0f, 2.0f);
+    float us = 0.0f, vs = 0.0f;
+    HE::uiElementUnitScale(page, *page.find(childId), us, vs, &hostAt2);
+    CHECK(us == doctest::Approx(1.0f));   // one sub-unit is one HOST unit…
+    CHECK(vs == doctest::Approx(1.0f));
+    // …and the host unit is worth two pixels, so the composition is 2, not 4.
+    CHECK(us * hostAt2.scaleX == doctest::Approx(2.0f));
+}
+
 TEST_CASE("Canvas scale: a square stays square, and the edge stays the edge")
 {
     HE::UIWidgetTree t;

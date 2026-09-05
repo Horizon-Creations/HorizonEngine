@@ -825,7 +825,7 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 	// breaks; re-anchoring the roots makes the placement the same for every
 	// popup that was ever drawn.
 	const HE::UIWidgetCanvas canvas =
-		HE::uiResolveCanvas(w->tree, m_lastViewportW, m_lastViewportH);
+		resolveCanvas(w->tree, m_lastViewportW, m_lastViewportH);
 	const float sx = canvas.scaleX > 0.0f ? canvas.scaleX : 1.0f;
 	const float sy = canvas.scaleY > 0.0f ? canvas.scaleY : 1.0f;
 	for (auto& ep : w->tree.elements)
@@ -2159,7 +2159,7 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 		if (!takesInput(w.id)) continue;
 		// Same resolution the draw uses (see extract) — a hit test on a
 		// differently-scaled canvas is a button that is not where it looks.
-		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 		const float sx = canvas.scaleX;
 		const float sy = canvas.scaleY;
 		for (const auto& ep : w.tree.elements)
@@ -2342,7 +2342,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		if (!w || !cb) popGrab(/*notify=*/false);   // it went away under us
 		else
 		{
-			const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+			const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
 			const int over = valid
 				? comboOptionAtPointer(w->tree, *cb, canvas, mouseX, mouseY) : -1;
 			// Only a pointer that MOVED takes the highlight. Without that the
@@ -2629,7 +2629,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			lv->hoveredRow = (isTop && topHit != 0 &&
 			                  isSelfOrDescendant(w.tree, lv->id, topHit))
 				? listRowAtPointer(w.tree, *lv,
-				                   HE::uiResolveCanvas(w.tree, vpWidth, vpHeight), mouseY)
+				                   resolveCanvas(w.tree, vpWidth, vpHeight), mouseY)
 				: -1;
 			if (lv->hoveredRow != was) m_visualDirty = true;
 		}
@@ -2668,7 +2668,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* sp = dynamic_cast<const HE::UISplitter*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, vpWidth, vpHeight);
 					if (canvas.scaleX > 0.0f && canvas.scaleY > 0.0f &&
 					    splitterDividerAt(w.tree, *sp, canvas,
 					                      mouseX / canvas.scaleX, mouseY / canvas.scaleY))
@@ -2681,7 +2681,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* ti = dynamic_cast<const HE::UITextInput*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ti, &canvas);
 					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -2718,7 +2718,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* tb = dynamic_cast<const HE::UITabBox*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *tb, &canvas);
 					float us = 1.0f, vs = 1.0f;
 					HE::uiElementUnitScale(w.tree, *tb, us, vs, &canvas);
@@ -2803,7 +2803,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 								setFocus(w.id, lv->id);
 								selectListRow(w, *lv,
 									listRowAtPointer(w.tree, *lv,
-										HE::uiResolveCanvas(w.tree, vpWidth, vpHeight), mouseY));
+										resolveCanvas(w.tree, vpWidth, vpHeight), mouseY));
 								break;
 							}
 							if (le->parentId == 0) break;
@@ -2840,7 +2840,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (auto* s = dynamic_cast<HE::UISlider*>(w.tree.find(w.draggingSlider)))
 			{
-				const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *s, &canvas);
 				const float mouseCanvasX = mouseX / canvas.scaleX;
 				float t = r.w > 0.0f ? (mouseCanvasX - r.x) / r.w : 0.0f;
@@ -2869,7 +2869,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// band on any fast pull — and a cursor that flickers back to
 				// the arrow mid-drag says the grab was lost when it was not.
 				m_hoverCursor = splitterCursor(*sp);
-				const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *sp, &canvas);
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
@@ -2903,7 +2903,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (float* off = e->scrollOffsetPtr())
 				{
 					const HE::UIWidgetCanvas canvas =
-						HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *e, &canvas);
 					const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                           r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -3290,7 +3290,7 @@ bool WidgetManager::focusedFieldRect(float vpWidth, float vpHeight, HE::UIWidget
 	if (!w || w->focusedElem == 0) return false;
 	const HE::UIElement* e = w->tree.find(w->focusedElem);
 	if (!e) return false;
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *e, &canvas);
 	out.x = r.x * canvas.scaleX; out.y = r.y * canvas.scaleY;
 	out.w = r.w * canvas.scaleX; out.h = r.h * canvas.scaleY;
@@ -3566,7 +3566,7 @@ bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight,
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti) return false;
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *ti, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w->tree, *ti, us, vs, &canvas);
@@ -3932,7 +3932,7 @@ std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y
 	const auto* t = dynamic_cast<const HE::UIText*>(w.tree.find(elemId));
 	if (!t || !t->richText) return {};
 	const HE::UIWidgetCanvas canvas =
-		HE::uiResolveCanvas(w.tree, m_lastViewportW, m_lastViewportH);
+		resolveCanvas(w.tree, m_lastViewportW, m_lastViewportH);
 	const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *t, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w.tree, *t, us, vs, &canvas);
@@ -4113,7 +4113,7 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
 	{
 		Instance& w = *wp;
 		if (!takesInput(w.id)) continue;
-		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 		for (auto& ep : w.tree.elements)
 		{
 			auto* lv = dynamic_cast<HE::UIListView*>(ep.get());
@@ -4177,7 +4177,7 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 			if (!w) return false;
 		}
 	}
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
 
 	// A focused list takes up/down as a step through its ITEMS. Falling through
 	// at either end is the point: Down on the last row hands the focus to
@@ -4313,7 +4313,7 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	// and the only one they can predict. Not the element vector: that is keyed
 	// by id, so it is creation order, and re-parenting a row would leave the
 	// tab order where the row used to be.
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
 	std::vector<int> order;
 	const std::function<void(int)> walk = [&](int parent)
 	{
@@ -4345,7 +4345,7 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeight,
                                         float mouseX, float mouseY, float& grabDy) const
 {
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 	int best = 0, bestDepth = -1;
 	for (auto& ep : w.tree.elements)
 	{
@@ -4398,7 +4398,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 		// Same question the pointer asks: while a dialog is up, the list behind
 		// it does not scroll either.
 		if (!takesInput(w.id)) continue;
-		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 		HE::uiUpdateScrollExtents(w.tree);
 
 		int   best = 0;
@@ -4490,7 +4490,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 		// viewport — and how many canvas units the screen is worth. Everything
 		// below (layout, auto-size wrap column, the pixel conversion) has to go
 		// through the SAME resolution, or the picture and the hit test drift.
-		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
 		const float sx = canvas.scaleX;
 		const float sy = canvas.scaleY;
 
@@ -4936,7 +4936,7 @@ void WidgetManager::drawOpenDropdown(float vpWidth, float vpHeight,
 	auto* cb = w ? dynamic_cast<HE::UIComboBox*>(w->tree.find(g.elem)) : nullptr;
 	if (!w || !cb || cb->options.empty()) return;
 
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
 	const HE::UIWidgetRect r = comboListRect(w->tree, *cb, &canvas);
 	const float sx = canvas.scaleX, sy = canvas.scaleY;
 	float eus = 1.0f, evs = 1.0f;

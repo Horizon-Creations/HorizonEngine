@@ -121,14 +121,15 @@ const char* uiCanvasScaleModeName(UICanvasScaleMode m)
     return "Stretch";
 }
 
-UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight)
+UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight,
+                               float displayScale)
 {
     return uiResolveCanvasFor(tree.canvasWidth, tree.canvasHeight, tree.scaleMode,
-                              vpWidth, vpHeight);
+                              vpWidth, vpHeight, displayScale);
 }
 
 UIWidgetCanvas uiResolveCanvasFor(float authoredW, float authoredH, UICanvasScaleMode mode,
-                                  float vpWidth, float vpHeight)
+                                  float vpWidth, float vpHeight, float displayScale)
 {
     const float vw = std::max(1.0f, vpWidth), vh = std::max(1.0f, vpHeight);
     const float rw = std::max(1.0f, authoredW), rh = std::max(1.0f, authoredH);
@@ -151,7 +152,10 @@ UIWidgetCanvas uiResolveCanvasFor(float authoredW, float authoredH, UICanvasScal
     case UICanvasScaleMode::FillOutside:   s = std::max(sx, sy); break;
     case UICanvasScaleMode::MatchWidth:    s = sx; break;
     case UICanvasScaleMode::MatchHeight:   s = sy; break;
-    case UICanvasScaleMode::ConstantPixel: s = 1.0f; break;
+    // One unit is one device-independent pixel: on an unscaled display that is
+    // one real pixel, and on a 200% one it is two, which is what keeps a
+    // 14-unit label 14 units TALL to the eye instead of shrinking it by half.
+    case UICanvasScaleMode::ConstantPixel: s = std::max(0.05f, displayScale); break;
     case UICanvasScaleMode::Stretch:       break; // handled above
     }
     s = std::max(s, 1e-4f);
@@ -686,6 +690,9 @@ void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
             // decides how its canvas meets it — the same call the real screen
             // goes through. Its rect already carries any scaling from a
             // WidgetRef further up, so this one factor is the whole story.
+            // No display scale here on purpose: r is in the HOST's canvas
+            // units, and the host's own factor already carries it (see the
+            // note on uiResolveCanvasFor).
             const UIWidgetRect r = uiElementRect(tree, *ref, canvas);
             const UIWidgetCanvas sub = uiResolveCanvasFor(ref->contentW, ref->contentH,
                                                           ref->contentMode, r.w, r.h);
