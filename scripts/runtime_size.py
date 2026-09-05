@@ -163,9 +163,10 @@ LIMITS = {
 # So the headroom is not slack, it is the width of the recipe. A threshold tight
 # enough to fail on a developer's own Release build would be a threshold that
 # fails on the difference between two honest trees, which is the one thing this
-# check must never report as a regression. It is still far too tight to hide the
-# failures it exists for: glslang coming back into an app runtime, or Jolt and
-# Recast being dragged in behind HorizonScene, are tens of megabytes each.
+# check must never report as a regression. It is still several times too tight
+# to hide the failures it exists for: glslang coming back into an app runtime is
+# roughly 30 MB against the not quite 10 MB of headroom here, and Jolt and Recast
+# dragged in behind HorizonScene are the same order of thing.
 FLAVORS = ("game", "app-advanced", "app-basic")
 DEFAULT_FLAVOR = "game"
 

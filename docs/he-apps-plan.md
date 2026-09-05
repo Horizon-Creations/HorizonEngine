@@ -2774,7 +2774,8 @@ Runner hat ein kleineres CPython und statisches mbedTLS, wo der lokale Baum Home
 mitschleppt (4,8 MB Ladezeit-Kante, A3a). Die Schwellen tragen deshalb rund 10 Prozent
 Luft **plus etwa 5 MB**, und die 5 MB haben einen Namen — sie sind die Breite des Rezepts,
 nicht Schlaffheit. Für die Fehler, um die es geht (glslang zurück im App-Runtime, Jolt und
-Recast hinter `HorizonScene` hereingezogen), sind das immer noch Zehnerpotenzen zu eng.
+Recast hinter `HorizonScene` hereingezogen), ist das immer noch ein Vielfaches zu eng: glslang
+allein wiegt rund 30 MB gegen knapp 10 MB Luft.
 
 **Der erste Lauf hat zwei echte Fehler gefunden**, beide auf einem Mac unsichtbar.
 `GameApplication.cpp` rief im `__linux__`-Zweig `HE::Proc::which("notify-send")`, ohne
