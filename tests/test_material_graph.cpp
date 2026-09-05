@@ -702,6 +702,44 @@ TEST_CASE("Every standard node cross-compiles with all inputs wired")
 	}
 }
 
+TEST_CASE("Decal shaders cross-compile for every backend")
+{
+	// docs/decals-cross-backend-plan.md §7 gate 2. The vertex stage is backend-
+	// agnostic; the SAMPLED fragment is what the GL/Vulkan/D3D ports use, so it
+	// has to survive all four emitters. The framebuffer-fetch fragment is Metal-
+	// only by construction (subpassInput → [[color(3)]]).
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& v = lib.decalVertex(b);
+		CHECK_MESSAGE(v.ok, "decal vertex failed for backend ", (int)b, ": ", v.log);
+		const auto& f = lib.decalFragmentSampled(b);
+		CHECK_MESSAGE(f.ok, "sampled decal fragment failed for backend ", (int)b, ": ", f.log);
+	}
+	const auto& fetch = lib.decalFragment(B::Metal);
+	CHECK_MESSAGE(fetch.ok, fetch.log);
+
+	// The cache key must separate the two fragment variants (it used to be
+	// backend*2 + stage, which collided the moment a second fragment appeared).
+	CHECK(&lib.decalFragment(B::Metal) != &lib.decalFragmentSampled(B::Metal));
+	CHECK(lib.decalFragment(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+
+	// Both stages declare the SAME HeDecal block — a member mismatch is a LINK
+	// error on GL, which no test without a context can catch. Compare the block
+	// text the emitter produced for each stage.
+	auto block = [](const std::string& src) -> std::string {
+		const size_t b = src.find("HeDecal");
+		if (b == std::string::npos) return {};
+		const size_t e = src.find('}', b);
+		if (e == std::string::npos) return {};
+		return src.substr(b, e - b);
+	};
+	const std::string vBlock = block(lib.decalVertex(B::GLSL410).source);
+	CHECK_FALSE(vBlock.empty());
+	CHECK(vBlock == block(lib.decalFragmentSampled(B::GLSL410).source));
+}
+
 TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;

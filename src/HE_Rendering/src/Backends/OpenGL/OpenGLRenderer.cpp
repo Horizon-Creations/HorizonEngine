@@ -7559,6 +7559,18 @@ void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
 		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: G-buffer FBO incomplete");
 
+	// Decal target: GB0 ALONE, no depth attachment. The decal fragment samples
+	// m_gbDepthTex, which hangs on m_gbFBO — writing to an FBO that also has the
+	// sampled texture attached is a feedback loop (same reason the resolve blits
+	// the depth out before reading it).
+	glGenFramebuffers(1, &m_gbDecalFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_gbDecalFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gbColor0, 0);
+	const GLenum decalBufs[1] = { GL_COLOR_ATTACHMENT0 };
+	glDrawBuffers(1, decalBufs);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: decal FBO incomplete");
+
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	m_gbW = width;
@@ -7568,6 +7580,7 @@ void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
 void OpenGLRenderer::DestroyGBufferTargets()
 {
 	if (m_gbFBO)      { glDeleteFramebuffers(1, &m_gbFBO); m_gbFBO = 0; }
+	if (m_gbDecalFBO) { glDeleteFramebuffers(1, &m_gbDecalFBO); m_gbDecalFBO = 0; }
 	if (m_gbColor0)   { glDeleteTextures(1, &m_gbColor0);  m_gbColor0 = 0; }
 	if (m_gbColor1)   { glDeleteTextures(1, &m_gbColor1);  m_gbColor1 = 0; }
 	if (m_gbColor2)   { glDeleteTextures(1, &m_gbColor2);  m_gbColor2 = 0; }
@@ -7722,6 +7735,75 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 		HE_LOG_WARN(RHI, "%s",
 			"OpenGLRenderer: deferred render path unavailable — staying on forward");
 	return ok;
+#endif
+}
+
+// ─── Deferred decals (docs/decals-cross-backend-plan.md checkpoint A) ─────────
+// The same two stages the Metal path uses, only with the SAMPLED depth variant:
+// GL has no framebuffer fetch, so heGBDepth is a sampler2D on m_gbDepthTex.
+// Built lazily on the first frame that actually has a decal; a build failure
+// logs once and the frame simply draws no decals.
+bool OpenGLRenderer::EnsureDecalProgram()
+{
+	if (m_decalProgram) return true;
+	if (m_decalProgramTried) return false;
+	m_decalProgramTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.decalVertex(Backend::GLSL410);
+	const auto& f = m_matShaderLib.decalFragmentSampled(Backend::GLSL410);
+	if (!(v.ok && f.ok))
+	{
+		HE_LOG_ERROR(RHI, "%s",
+			(std::string("OpenGLRenderer: decal shader compile failed\n") + v.log + f.log).c_str());
+		return false;
+	}
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+	GLuint prog = 0;
+	if (vs && fs)
+	{
+		prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+		if (!linked)
+		{
+			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "%s",
+				(std::string("OpenGLRenderer: decal program link failed: ") + log).c_str());
+			glDeleteProgram(prog);
+			prog = 0;
+		}
+	}
+	if (vs) glDeleteShader(vs);
+	if (fs) glDeleteShader(fs);
+	if (!prog) return false;
+	m_decalProgram = prog;
+
+	// HeDecal → UBO binding point 4. 0/1/2/3/8 are taken (HeLighting, U,
+	// HeParams, HeResolve, HeUI), so the decal draw does not disturb any of the
+	// per-frame binds the material and resolve programs rely on.
+	if (const GLuint dIdx = glGetUniformBlockIndex(m_decalProgram, "HeDecal");
+	    dIdx != GL_INVALID_INDEX)
+		glUniformBlockBinding(m_decalProgram, dIdx, 4);
+	glUseProgram(m_decalProgram);
+	// heDecalTex on unit 0 (free while the decal program is the active one),
+	// heGBDepth on unit 3 — the same unit the resolve reads m_gbDepthTex from.
+	if (GLint l = glGetUniformLocation(m_decalProgram, "heDecalTex"); l >= 0) glUniform1i(l, 0);
+	if (GLint l = glGetUniformLocation(m_decalProgram, "heGBDepth");  l >= 0) glUniform1i(l, 3);
+	glUseProgram(0);
+
+	glGenBuffers(1, &m_decalUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_decalUBO);
+	glBufferData(GL_UNIFORM_BUFFER,
+		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::DecalUniforms)),
+		nullptr, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	return true;
 #endif
 }
 
@@ -9417,6 +9499,9 @@ void OpenGLRenderer::Shutdown()
 	if (m_deferredResolveProgram)  { glDeleteProgram(m_deferredResolveProgram);  m_deferredResolveProgram = 0; }
 	if (m_resolveUBO)      { glDeleteBuffers(1, &m_resolveUBO);      m_resolveUBO = 0; }
 	if (m_resolveLightUBO) { glDeleteBuffers(1, &m_resolveLightUBO); m_resolveLightUBO = 0; }
+	if (m_decalProgram)    { glDeleteProgram(m_decalProgram);        m_decalProgram = 0; }
+	if (m_decalUBO)        { glDeleteBuffers(1, &m_decalUBO);        m_decalUBO = 0; }
+	m_decalProgramTried      = false;
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyCloudTarget();
@@ -10959,6 +11044,94 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			}
 		}
+
+#if defined(HE_HAVE_SHADERC)
+		// ── Deferred decals ─────────────────────────────────────────────────
+		// docs/decals-cross-backend-plan.md checkpoint A, the GL counterpart of
+		// MetalRenderer::EncodeDecals. Unit-cube projectors blended into GB0.rgb
+		// AFTER the geometry and BEFORE the resolve reads the attributes, so the
+		// decal colour is BaseColor and gets lit like everything else — one
+		// shading source, no second lighting path.
+		if (deferredActive && !m_renderWorld.decals.empty() && EnsureDecalProgram())
+		{
+			GpuPassScope _decalTimer(this, "Decals");
+			// GB0 alone, without the depth attachment the fragment samples.
+			glBindFramebuffer(GL_FRAMEBUFFER, m_gbDecalFBO);
+			glViewport(0, 0, pw, ph);
+			// GB0 is SRGB8_ALPHA8: the encode-on-write is still on from the
+			// G-buffer pass, and it is also what makes the blend happen in LINEAR
+			// space — the same thing Metal's RGBA8Unorm_sRGB target does.
+			glEnable(GL_FRAMEBUFFER_SRGB);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE); // metallic in GB0.a survives
+			glDisable(GL_DEPTH_TEST);
+			glDepthMask(GL_FALSE);                            // the box clip decides coverage
+			// Cull the FRONT faces so the projector still rasterizes with the
+			// camera inside its box. GL's default GL_CCW front-face selects the
+			// SAME triangles as Metal's default MTLWindingClockwise: winding is
+			// evaluated in framebuffer coordinates, and Metal's framebuffer origin
+			// is top-left where GL's is bottom-left, so the two conventions cancel
+			// (the decal shader's params.y, -1 on Metal and +1 here, is the same
+			// y-flip seen from the reconstruction side). Exactly one triangle
+			// layer must survive — both would blend the decal twice.
+			glEnable(GL_CULL_FACE);
+			glCullFace(GL_FRONT);
+
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+			glActiveTexture(GL_TEXTURE0);
+			glUseProgram(m_decalProgram);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 4, m_decalUBO);
+			glBindVertexArray(m_fsVAO); // buffer-less draw still needs SOME VAO
+
+			const glm::mat4 ivp = glm::inverse(viewProj);
+			for (const DecalData& dcl : m_renderWorld.decals)
+			{
+				HE::MaterialShaderLibrary::DecalUniforms du;
+				const glm::mat4 invModel = glm::inverse(dcl.transform);
+				std::memcpy(du.viewProj,    &viewProj[0][0],      16 * sizeof(float));
+				std::memcpy(du.model,       &dcl.transform[0][0], 16 * sizeof(float));
+				std::memcpy(du.invModel,    &invModel[0][0],      16 * sizeof(float));
+				std::memcpy(du.invViewProj, &ivp[0][0],           16 * sizeof(float));
+				du.color[0] = dcl.color.r; du.color[1] = dcl.color.g;
+				du.color[2] = dcl.color.b; du.color[3] = dcl.color.a;
+				const unsigned int dtex = dcl.textureId != HE::UUID{}
+					? ResolveGraphTexture(dcl.textureId, {}) : 0u;
+				du.params[0] = dtex ? 1.0f : 0.0f;
+				// GL depth conventions, copied from the resolve's depthParams
+				// (ndc-y sign +1, depth [0,1] → ndc z = d*2-1) rather than
+				// re-derived. Metal's are (-1, 1, 0).
+				du.params[1] =  1.0f;
+				du.params[2] =  2.0f;
+				du.params[3] = -1.0f;
+				du.vp[0] = static_cast<float>(pw);
+				du.vp[1] = static_cast<float>(ph);
+				glBindBuffer(GL_UNIFORM_BUFFER, m_decalUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(du), &du);
+				glBindBuffer(GL_UNIFORM_BUFFER, 0);
+				glBindTexture(GL_TEXTURE_2D, dtex ? dtex : m_whiteTex); // unit 0 is active
+				glDrawArrays(GL_TRIANGLES, 0, 36);
+				++m_counters.draws;
+				m_counters.tris += 12;
+			}
+
+			// Back to what the G-buffer pass had set, so the resolve below and
+			// the forward tail find the state they assume.
+			glBindVertexArray(0);
+			glUseProgram(0);
+			glDisable(GL_CULL_FACE);
+			glDisable(GL_BLEND);
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			glEnable(GL_DEPTH_TEST);
+			glDepthFunc(GL_LESS);
+			glDepthMask(GL_TRUE);
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			glActiveTexture(GL_TEXTURE0);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+		}
+#endif
 
 		// ── Deferred: fullscreen lighting resolve + forward-routed replay ────
 		if (deferredActive)

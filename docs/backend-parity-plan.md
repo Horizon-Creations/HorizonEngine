@@ -211,7 +211,7 @@ geschrieben; er läuft nicht.
 | G-Buffer-Variante für Graph-Materials | JA | -- | -- | -- |
 | RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
-| Deferred Decals | -- | -- | -- | -- |
+| Deferred Decals | JA | -- | -- | -- |
 | Clustered-Lighting-Build | -- | -- | -- | -- |
 | SSR deferred / SSR forward | -- | -- | -- | -- |
 

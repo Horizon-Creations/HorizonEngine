@@ -1737,10 +1737,22 @@ void main() {
 }
 )";
 
-constexpr const char* kDecalFS = R"(#version 450
+// The fragment exists in two variants that differ in ONE thing: where the scene
+// depth comes from. Metal's tile mode framebuffer-fetches it out of G-buffer
+// attachment 3; every other backend (and Metal's two-pass fallback) samples the
+// stored depth texture. Everything after that read is identical, so both are
+// generated from this one template rather than kept as two constants that drift.
+constexpr const char* kDecalFSHead = R"(#version 450
 layout(location = 0) out vec4 oGB0; // alpha-blended, writeMask RGB (metallic in .a stays)
-layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;
-layout(set = 0, binding = 19) uniform sampler2D heDecalTex;
+)";
+constexpr const char* kDecalDepthFetchDecl =
+    "layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;\n";
+constexpr const char* kDecalDepthSampledDecl =
+    "layout(set = 0, binding = 22) uniform sampler2D heGBDepth;\n";
+// `uv` is computed BEFORE the depth read (the sampled variant needs it as the
+// coordinate; the fetch variant does not care, and it depends only on
+// gl_FragCoord and the UBO, so hoisting it changes nothing semantically).
+constexpr const char* kDecalFSBodyPre = R"(layout(set = 0, binding = 19) uniform sampler2D heDecalTex;
 layout(std140, set = 0, binding = 23) uniform HeDecal {
     mat4 viewProj;
     mat4 model;
@@ -1751,9 +1763,10 @@ layout(std140, set = 0, binding = 23) uniform HeDecal {
     vec4 vp;      // xy viewport
 } heDecal;
 void main() {
-    float d = subpassLoad(heGBDepth).r;
-    if (d >= 1.0) discard;                       // background
     vec2 uv = gl_FragCoord.xy / max(heDecal.vp.xy, vec2(1.0));
+    float d = )";
+constexpr const char* kDecalFSBodyPost = R"(;
+    if (d >= 1.0) discard;                       // background
     vec4 clip = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * heDecal.params.y,
                      d * heDecal.params.z + heDecal.params.w, 1.0);
     vec4 wp = heDecal.invViewProj * clip;
@@ -1767,11 +1780,22 @@ void main() {
     oGB0 = c;
 }
 )";
+
+// sampled=false → the Metal tile-mode framebuffer-fetch variant (kDecalFS),
+// sampled=true  → the portable variant that reads a depth TEXTURE.
+std::string makeDecalFS(bool sampled)
+{
+    return std::string(kDecalFSHead)
+         + (sampled ? kDecalDepthSampledDecl : kDecalDepthFetchDecl)
+         + kDecalFSBodyPre
+         + (sampled ? "texture(heGBDepth, uv).r" : "subpassLoad(heGBDepth).r")
+         + kDecalFSBodyPost;
+}
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2;
+    const int key = static_cast<int>(backend) * 4 + 0;
     if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
     using namespace he::shaderc;
     Compiled out;
@@ -1785,7 +1809,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backen
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 1;
+    const int key = static_cast<int>(backend) * 4 + 1;
     if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
     using namespace he::shaderc;
     Compiled out;
@@ -1793,12 +1817,33 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Back
     {
         MslOptions opts;
         opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
-        out = toCompiled(compileMslPinned(kDecalFS, Stage::Fragment,
+        out = toCompiled(compileMslPinned(makeDecalFS(/*sampled=*/false), Stage::Fragment,
             { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
               { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
             opts));
     }
-    // Non-Metal backends have no framebuffer-fetch decal path in v1.
+    // Non-Metal backends have no framebuffer-fetch decal path — they use
+    // decalFragmentSampled() instead.
+    return m_decalCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentSampled(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 2;
+    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
+    using namespace he::shaderc;
+    const std::string src = makeDecalFS(/*sampled=*/true);
+    Compiled out;
+    if (backend == Backend::Metal)
+        // Metal's TWO-PASS fallback has no tile storage to fetch from: the depth
+        // is a stored texture like everywhere else. Pinned so a hand-written
+        // pipeline can bind it (UBO → buffer 0, decal tex → 0, depth → 1).
+        out = toCompiled(compileMslPinned(src, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+              { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
+              { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
+    else
+        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     return m_decalCache.emplace(key, std::move(out)).first->second;
 }
 
