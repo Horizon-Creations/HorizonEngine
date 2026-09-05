@@ -786,8 +786,72 @@ Skalierung — dieser Rechner ist ein Mac. Belegt sind die SDL-Semantik (die Tab
 Plattformen baut. Der Editor selbst und seine Widget-Vorschau bleiben bei Display Scale 1: die
 Vorschau ist ein *simulierter* Bildschirm, und ImGui bringt seine eigene DPI-Behandlung mit.
 
-**F3 Randlose Fenster mit eigener Titelleiste**, inklusive Ziehen, Größenänderung an den
-Rändern und Snap-Verhalten auf Windows.
+**F3 Randlose Fenster mit eigener Titelleiste** ist gebaut. Der Fenstermodus
+`Borderless` einer Anwendung heißt ab jetzt: die Anwendung zeichnet ihre Titelleiste
+selbst, und der Widget-Baum beantwortet, was der Rahmen sonst beantwortet hätte.
+
+**Ein Kontrollpunkt, nicht zwei.** SDL fragt über `SDL_SetWindowHitTest` bei jeder
+Mausbewegung, wozu ein Punkt gehört: Fensterrand, Titelleiste oder gewöhnlicher Inhalt.
+Genau das ist die ganze Schnittstelle. `WidgetManager::windowHitAt` antwortet, `Window::SetHitTest`
+reicht es durch, und die Reihenfolge der Antwort ist die ganze Regel:
+
+1. **Ein Druck, der schon auf einem Bedienelement liegt, bleibt dort.** Wer einen Regler in
+   der Titelleiste zieht und dabei ein paar Pixel nach oben rutscht, zieht weiter am Regler
+   und nicht am Fenster.
+2. **Der Rand schlägt das Bild.** Die obersten sechs Punkte einer Titelleiste, die bis an den
+   Fensterrand reicht, sind der obere Rand: es gibt keinen anderen Platz für dieses Band.
+3. **Alles Anklickbare behält seinen Klick.** Der Schließen-Knopf in der eigenen Titelleiste
+   schließt, er verschiebt nicht.
+4. **Erst dann: ist das hier ein Griff?** Neue Basiseigenschaft `Window Drag`, geprüft
+   **geometrisch** statt über den Treffertest — eine Titelleiste ist ein Container, und
+   Container sind per Konstruktion `hitTestable = false`. Sie treffertestbar zu machen, damit
+   sie ziehbar wird, würde jeden Klick darin schlucken. Deshalb sind die beiden Schalter
+   ausdrücklich nicht das Gegenteil voneinander.
+
+**Snap auf Windows kostet keine Zeile.** Die Antwort `Drag` wird zu `HTCAPTION`, und ab da
+macht Windows alles selbst: ziehen, an den Bildschirmrand schnappen (halbe Seite), nach oben
+maximieren, Doppelklick auf die Leiste. Das funktioniert nur, weil `Window::Init` seit jeher
+`SDL_WINDOW_RESIZABLE` setzt — ohne `WS_THICKFRAME`/`WS_MAXIMIZEBOX` gäbe es kein Aero Snap.
+X11 (`_NET_WM_MOVERESIZE`) und Wayland nehmen dieselbe Antwort genauso ab.
+
+**Und dann macht macOS die Hälfte nicht.** SDLs Cocoa-Backend liest aus dem Treffertest
+**ausschließlich** `SDL_HITTEST_DRAGGABLE` (`SDL_cocoawindow.m`, `processHitTest`); jedes
+`RESIZE_*` fällt dort auf den Boden, und ein randloses `NSWindow` hat auch keine eigenen
+Griffe. Ziehen geht, Größenänderung nicht. Also macht die Anwendung sie selbst:
+`UIWindowResizer` (reine ganzzahlige Rechnung in HorizonCore, deshalb prüfbar) bekommt den
+Druck, die Bewegung und das Loslassen.
+
+**Das Schöne daran: kein einziges `#ifdef` an dieser Stelle.** Windows, X11 und Wayland
+nehmen den Druck auf einem Rand aus dem Ereignisstrom heraus, während sie selbst die Größe
+ändern — dort kommt der `SDL_EVENT_MOUSE_BUTTON_DOWN` also gar nicht erst an, und derselbe
+Code ist per Konstruktion tot statt per Plattformweiche, die veralten kann. Nur der
+Mauszeiger auf einem Rand ist ein `#ifdef __APPLE__` wert: die drei anderen setzen ihn
+selbst, ein zweites Setzen von uns würde mit ihnen streiten.
+
+**Die Untergrenze steht an beiden Enden.** `SDL_SetWindowMinimumSize` für die Plattformen,
+die selbst ziehen, dieselben 320x200 im `UIWindowResizer` für die, die es nicht tun. Und die
+Grenze beißt in die Kante, die **stillsteht**: wer das Fenster von links unter die Grenze
+schiebt, hält die linke Kante an, statt das ganze Fenster nach links wandern zu lassen.
+
+**Die Falle, die F2 zweimal gefunden hat, gilt hier auch.** SDL fragt den Treffertest in
+Fenster**punkten**, der Widget-Baum rechnet in zeichenbaren **Pixeln**. Auf einem Retina-Display
+ist das der Faktor zwei, und ohne die Umrechnung in `GameApplication::frameHitAt` wäre die
+Titelleiste halb so hoch wie sie aussieht.
+
+**`UIWindowHit` ist `SDL_HitTestResult` mit eigenen Namen**, Wert für Wert, damit der Rückruf
+eine Umdeutung ist und keine Fallunterscheidung. Zehn `static_assert` in `Window.cpp` halten
+das fest; umsortieren darf das niemand.
+
+**Zwei neue Cursor**, `ResizeNWSE` und `ResizeNESW`: eine Ecke, die die waagerechten Pfeile
+zeigt, verspricht eine Achse und bewegt zwei. Hinten angehängt, weil der Wert das ist, was in
+einem gespeicherten Widget steht.
+
+**Was nicht geprüft ist.** Kein Lauf auf echter Windows- oder Linux-Hardware — dieser Rechner
+ist ein Mac. Belegt sind SDLs Quelltext (welche Plattform welche Antwort abnimmt), Unit-Tests
+für Randbänder, Ecken, Untergrenze und die Trefferregeln, und dass alle drei Ziele bauen.
+**Offen und ein eigener Schritt: Minimieren/Maximieren/Wiederherstellen als Skript-API.** Eine
+eigene Titelleiste braucht ihre drei Knöpfe; `app.quit` gibt es schon, die anderen beiden
+nicht, und sie sind eine Registry-Zeile plus ein Wirt-Rückruf, kein Randthema dieses Schritts.
 
 **F4 Systemcursor** ist verdrahtet. `UICursor` ist die Absicht, `WidgetManager::hoverCursor()`
 liefert sie pro Frame, und die Anwendung setzt sie: das ausgelieferte Programm über

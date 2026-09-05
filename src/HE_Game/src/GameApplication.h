@@ -14,6 +14,7 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
+#include <UIWidget/UIWindowFrame.h>   // the borderless window's own frame (F3)
 #include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
 
 class ScriptContext;
@@ -83,6 +84,13 @@ private:
     // In-game UI pointer input: hit-test the (uncaptured) mouse against UI
     // elements, drive button states and dispatch onClick/onHover* to scripts.
     void updateUIInput();
+
+    // What SDL's hit test asks, for a window without a system title bar
+    // (docs/he-apps-plan.md F3). The point arrives in WINDOW POINTS; everything
+    // the widget tree knows is in drawable pixels, and converting between the
+    // two is this function's only job besides asking. Returns Normal — "this is
+    // ordinary content" — whenever there is no window or no custom frame.
+    HE::UIWindowHit frameHitAt(int pointX, int pointY);
 
     // Ensure a camera the free-fly controller can drive. A scene authored without
     // one otherwise renders through the extractor's fixed fallback camera, which
@@ -192,6 +200,18 @@ private:
     // no ECS systems tick. The world object itself still exists — it is what
     // routes the widget API — it is simply empty.
     bool m_appMode       = false;
+
+    // ── The frame of a borderless window (docs/he-apps-plan.md F3) ───────────
+    // True once the hit test is installed: this build is an application, it
+    // asked for a window without a system title bar, and the widget tree is now
+    // what answers "where can this window be picked up, where are its edges".
+    bool m_customFrame   = false;
+    // The manual edge resize, for the one platform that needs it. SDL's Cocoa
+    // backend reads only SDL_HITTEST_DRAGGABLE and ignores every RESIZE_*
+    // result; Windows, X11 and Wayland resize the window themselves AND swallow
+    // the press while doing it, which is why this needs no platform switch —
+    // there, the button-down that would start it never arrives.
+    HE::UIWindowResizer m_frameResize;
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance

@@ -10149,7 +10149,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 45);
+    CHECK(HE::uiBaseProperties().size() == 46);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -13001,4 +13001,206 @@ TEST_CASE("Layout: Min and Max Size hold the rect, whoever computed it")
         CHECK(cl->minSizeX == doctest::Approx(10.0f));
         CHECK(cl->maxSizeX == doctest::Approx(30.0f));
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F3: the frame a borderless window does not have (docs/he-apps-plan.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("Window frame: the edge bands, and the corners that reach further")
+{
+    using HE::UIWindowHit;
+    const float W = 800.0f, H = 600.0f, B = 6.0f;   // corner defaults to 2*B = 12
+
+    // The middle is content, and that is the answer that has to be cheap and
+    // right: it is what every pixel of an application is.
+    CHECK(HE::uiWindowEdgeAt(W, H, 400.0f, 300.0f, B) == UIWindowHit::Normal);
+
+    // Each edge, taken well away from the corners.
+    CHECK(HE::uiWindowEdgeAt(W, H,   2.0f, 300.0f, B) == UIWindowHit::ResizeLeft);
+    CHECK(HE::uiWindowEdgeAt(W, H, 798.0f, 300.0f, B) == UIWindowHit::ResizeRight);
+    CHECK(HE::uiWindowEdgeAt(W, H, 400.0f,   1.0f, B) == UIWindowHit::ResizeTop);
+    CHECK(HE::uiWindowEdgeAt(W, H, 400.0f, 599.0f, B) == UIWindowHit::ResizeBottom);
+
+    // …and one pixel further in is already content.
+    CHECK(HE::uiWindowEdgeAt(W, H,   7.0f, 300.0f, B) == UIWindowHit::Normal);
+    CHECK(HE::uiWindowEdgeAt(W, H, 400.0f,   7.0f, B) == UIWindowHit::Normal);
+
+    // The corners are the reason for the second radius: a point 10 in from the
+    // left is not on the left edge at all, but 2 down from the top it is the
+    // top-LEFT corner, because the corner reaches along both edges.
+    CHECK(HE::uiWindowEdgeAt(W, H,  10.0f,   2.0f, B) == UIWindowHit::ResizeTopLeft);
+    CHECK(HE::uiWindowEdgeAt(W, H,   2.0f,  10.0f, B) == UIWindowHit::ResizeTopLeft);
+    CHECK(HE::uiWindowEdgeAt(W, H, 790.0f,   2.0f, B) == UIWindowHit::ResizeTopRight);
+    CHECK(HE::uiWindowEdgeAt(W, H,   2.0f, 590.0f, B) == UIWindowHit::ResizeBottomLeft);
+    CHECK(HE::uiWindowEdgeAt(W, H, 798.0f, 598.0f, B) == UIWindowHit::ResizeBottomRight);
+
+    // Border 0 is what a window that may not be resized asks for, and it must
+    // not leave a single grabbable pixel behind.
+    CHECK(HE::uiWindowEdgeAt(W, H, 0.0f, 0.0f, 0.0f) == UIWindowHit::Normal);
+    CHECK(HE::uiWindowEdgeAt(W, H, 799.0f, 599.0f, 0.0f) == UIWindowHit::Normal);
+
+    // Outside is not an edge. A manual resize asks with a pointer that has left
+    // the window every time it makes the window smaller.
+    CHECK(HE::uiWindowEdgeAt(W, H, -40.0f, 300.0f, B) == UIWindowHit::Normal);
+    CHECK(HE::uiWindowEdgeAt(W, H, 400.0f, 900.0f, B) == UIWindowHit::Normal);
+
+    // A window narrower than two borders: each side keeps its own half, and no
+    // point answers both.
+    CHECK(HE::uiWindowEdgeAt(8.0f, 400.0f, 1.0f, 200.0f, B) == UIWindowHit::ResizeLeft);
+    CHECK(HE::uiWindowEdgeAt(8.0f, 400.0f, 7.0f, 200.0f, B) == UIWindowHit::ResizeRight);
+
+    // The cursors: the diagonals exist so a corner does not promise one axis.
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::ResizeLeft)        == HE::UICursor::ResizeWE);
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::ResizeTop)         == HE::UICursor::ResizeNS);
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::ResizeTopLeft)     == HE::UICursor::ResizeNWSE);
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::ResizeBottomRight) == HE::UICursor::ResizeNWSE);
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::ResizeTopRight)    == HE::UICursor::ResizeNESW);
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::ResizeBottomLeft)  == HE::UICursor::ResizeNESW);
+    CHECK(HE::uiWindowHitCursor(UIWindowHit::Drag)              == HE::UICursor::Default);
+    CHECK(!HE::uiWindowHitIsResize(UIWindowHit::Drag));
+    CHECK(!HE::uiWindowHitIsResize(UIWindowHit::Normal));
+    CHECK(HE::uiWindowHitIsResize(UIWindowHit::ResizeBottomLeft));
+}
+
+TEST_CASE("Window frame: the minimum bites into the edge that is standing still")
+{
+    using HE::UIWindowHit;
+    const HE::UIWindowRect start{ 100, 100, 800, 600 };
+
+    {   // Right edge: only the width moves.
+        HE::UIWindowResizer r;
+        CHECK(!r.active());
+        r.begin(UIWindowHit::ResizeRight, start, 900, 400);
+        REQUIRE(r.active());
+        const HE::UIWindowRect grown = r.update(1000, 400, 320, 200);
+        CHECK(grown.x == 100); CHECK(grown.y == 100);
+        CHECK(grown.w == 900); CHECK(grown.h == 600);
+        // Pulled far past the minimum, the width stops and the origin does not
+        // move: the left edge was never the one being dragged.
+        const HE::UIWindowRect tiny = r.update(0, 400, 320, 200);
+        CHECK(tiny.x == 100); CHECK(tiny.w == 320);
+        r.end();
+        CHECK(!r.active());
+    }
+    {   // Left edge: the window moves AND changes width, and the right edge —
+        // the one nobody is touching — has to end up exactly where it started.
+        HE::UIWindowResizer r;
+        r.begin(UIWindowHit::ResizeLeft, start, 100, 400);
+        const HE::UIWindowRect pulled = r.update(40, 400, 320, 200);
+        CHECK(pulled.x == 40);
+        CHECK(pulled.w == 860);
+        CHECK(pulled.x + pulled.w == start.x + start.w);
+        // …and the minimum pins the LEFT edge instead of walking the window.
+        const HE::UIWindowRect clamped = r.update(2000, 400, 320, 200);
+        CHECK(clamped.w == 320);
+        CHECK(clamped.x == start.x + start.w - 320);
+        CHECK(clamped.x + clamped.w == start.x + start.w);
+    }
+    {   // A corner is both at once, each axis with its own minimum.
+        HE::UIWindowResizer r;
+        r.begin(UIWindowHit::ResizeTopLeft, start, 100, 100);
+        const HE::UIWindowRect c = r.update(200, 200, 320, 200);
+        CHECK(c.x == 200); CHECK(c.y == 200);
+        CHECK(c.w == 700); CHECK(c.h == 500);
+        const HE::UIWindowRect cl = r.update(5000, 5000, 320, 200);
+        CHECK(cl.w == 320); CHECK(cl.h == 200);
+        CHECK(cl.x + cl.w == start.x + start.w);
+        CHECK(cl.y + cl.h == start.y + start.h);
+    }
+    {   // Drag and Normal start nothing: moving a window is the window
+        // manager's job even here, and update() then answers with the window
+        // unchanged rather than with nonsense.
+        HE::UIWindowResizer r;
+        r.begin(UIWindowHit::Drag, start, 100, 100);
+        CHECK(!r.active());
+        r.begin(UIWindowHit::Normal, start, 100, 100);
+        CHECK(!r.active());
+    }
+}
+
+TEST_CASE("Window frame: what the title bar answers, and what keeps its click")
+{
+    using HE::UIWindowHit;
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A window: a 40-tall title bar across the top, with a button in its right
+    // corner, and a plain panel filling the rest.
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int bar = t.add(HE::UIWidgetType::HorizontalBox);
+    { HE::UIElement& e = *t.find(bar);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 800.0f; e.sizeY = 40.0f;
+      e.windowDrag = true; }
+    const int close = t.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *t.find(close);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 760.0f; e.posY = 4.0f; e.sizeX = 32.0f; e.sizeY = 32.0f; }
+    const int body = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(body);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 40.0f; e.sizeX = 800.0f; e.sizeY = 560.0f; }
+    registerWidget(cm, t, nullptr, "mem://frame.hasset");
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://frame.hasset");
+    REQUIRE(id != 0);
+
+    // The bar carries the window — even though a horizontal box is not
+    // hit-testable, which is exactly why this is asked geometrically.
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 300.0f, 20.0f, 6.0f) == UIWindowHit::Drag);
+    // The button on it keeps its click. A close button that moved the window
+    // instead of closing it is the whole failure this rule exists for.
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 776.0f, 20.0f, 6.0f) == UIWindowHit::Normal);
+    // Below the bar there is nothing to carry the window by.
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 300.0f, 300.0f, 6.0f) == UIWindowHit::Normal);
+
+    // The edges outrank the picture: the top two pixels of the bar are the top
+    // edge, not the caption, because there is nowhere else to put that band.
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 300.0f, 2.0f, 6.0f) == UIWindowHit::ResizeTop);
+    // …and with resizing off, those same pixels are the caption again.
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 300.0f, 2.0f, 0.0f) == UIWindowHit::Drag);
+    // An edge wins even over the button, which is what makes the corner of a
+    // window grabbable at all.
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 776.0f, 2.0f, 6.0f) == UIWindowHit::ResizeTop);
+
+    // A press already in flight on a widget can never turn into a window move:
+    // press the button, then let the pointer wander onto the caption.
+    wm.processPointer(800.0f, 600.0f, 776.0f, 20.0f, true, true);
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 300.0f, 20.0f, 6.0f) == UIWindowHit::Drag);
+    wm.processPointer(800.0f, 600.0f, 776.0f, 20.0f, false, true);
+
+    // A hidden bar carries nothing. Same rule the hit test follows, and the
+    // reason it is not enough to look the element up by id.
+    const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(bar)->visible = false;
+    CHECK(wm.windowHitAt(800.0f, 600.0f, 300.0f, 20.0f, 6.0f) == UIWindowHit::Normal);
+}
+
+TEST_CASE("Window drag: a base property that costs nothing when it is off")
+{
+    HE::UIWidgetTree t;
+    const int p = t.add(HE::UIWidgetType::Panel);
+    // Off by default, and not written: every widget authored before F3 stays
+    // byte-identical on disk.
+    CHECK(!t.find(p)->windowDrag);
+    CHECK(HE::uiWidgetTreeToJson(t).find("windowDrag") == std::string::npos);
+
+    t.find(p)->setPropAny("Window Drag", HE::UIPropValue::ofBool(true));
+    CHECK(t.find(p)->windowDrag);
+    CHECK(t.find(p)->getPropAny("Window Drag").b);
+    CHECK(HE::uiWidgetTreeToJson(t).find("windowDrag") != std::string::npos);
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(r.find(p)->windowDrag);
+    // …and a clone carries it, which is what a component copy is.
+    CHECK(r.find(p)->clone()->windowDrag);
+
+    // It is offered on every type, through the shared base list.
+    const auto& base = HE::uiBaseProperties();
+    CHECK(std::any_of(base.begin(), base.end(),
+                      [](const HE::UIPropDesc& d) { return d.name == "Window Drag"; }));
 }

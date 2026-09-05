@@ -2031,6 +2031,9 @@ void drawDetails(State& st, AppContext& ctx)
 	// Pointer interaction: hit-testability + the cursor shown on hover.
 	ImGui::SeparatorText("Interaction");
 	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
+	// Directly under it, and deliberately not phrased as its opposite: this is
+	// the other thing a press here can mean, and the two are independent.
+	if (EditorWidgets::checkbox("Window drag", &n->windowDrag)) committed = true;
 	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
 	if (EditorWidgets::checkbox("Focus frame", &n->focusFrame)) committed = true;
 	// Beside the focus frame, because both are about the keyboard and this is

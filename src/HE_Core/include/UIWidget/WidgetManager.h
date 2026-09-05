@@ -4,6 +4,7 @@
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
 #include <UIWidget/AppMenu.h>        // the application's menu bar (plan A6)
+#include <UIWidget/UIWindowFrame.h>  // UIWindowHit — windowHitAt (plan F3)
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Renderer/UIRenderObject.h>
@@ -550,6 +551,24 @@ public:
     // The cursor the currently-hovered element requests (set by processPointer;
     // Default when nothing is hovered). The app maps it to a system cursor.
     HE::UICursor hoverCursor() const { return m_hoverCursor; }
+
+    // ── What a borderless window's frame answers (docs/he-apps-plan.md F3) ───
+    // An application without a system title bar has to tell the OS which parts
+    // of its own picture stand in for the frame. This is that answer, for ONE
+    // point, and it is the whole contract: the host installs it as SDL's hit
+    // test and does nothing else.
+    //
+    // x, y, vpWidth and vpHeight are DRAWABLE PIXELS — the same space
+    // processPointer works in, not the window points SDL hands the hit test.
+    // Converting is the host's job because the host is where sx/sy already live.
+    // `borderPx` is in that same space; 0 turns edge resizing off.
+    //
+    // Three rules, in this order: anything interactive keeps its click (a button
+    // in the title bar is a button first), an edge band beats everything else,
+    // and a press that is already in flight on a widget can never turn into a
+    // window move halfway through.
+    HE::UIWindowHit windowHitAt(float vpWidth, float vpHeight,
+                                float x, float y, float borderPx);
 
     // ── Keyboard / gamepad navigation ────────────────────────────────────────
     // A menu has to be usable without a mouse. The focus moves SPATIALLY: from

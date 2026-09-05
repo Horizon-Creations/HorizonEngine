@@ -164,6 +164,11 @@ const char* uiCursorName(UICursor c)
         case UICursor::Move:      return "Move";
         case UICursor::No:        return "No";
         case UICursor::Wait:      return "Wait";
+        // Spelled out rather than drawn: the diagonal double arrows (U+2921/2922)
+        // are not in the editor's font, and a property row that reads as a box
+        // is worse than one that reads as two letters.
+        case UICursor::ResizeNWSE:return "Resize NW-SE";
+        case UICursor::ResizeNESW:return "Resize NE-SW";
         default:                  return "Default";
     }
 }
@@ -796,6 +801,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
 {
     if (n == "Visible")      { out = UIPropValue::ofBool(e.visible);            return true; }
     if (n == "Hit Testable") { out = UIPropValue::ofBool(e.hitTestable);        return true; }
+    if (n == "Window Drag")  { out = UIPropValue::ofBool(e.windowDrag);         return true; }
     if (n == "Clip Children"){ out = UIPropValue::ofBool(e.clipChildren);       return true; }
     if (n == "Focus Frame")  { out = UIPropValue::ofBool(e.focusFrame);         return true; }
     if (n == "Accepts Drop") { out = UIPropValue::ofBool(e.acceptsDrop);        return true; }
@@ -860,6 +866,7 @@ const std::vector<UIPropDesc>& uiBaseProperties()
     static const std::vector<UIPropDesc> t = {
         { "Visible",             UIPropType::Bool },
         { "Hit Testable",        UIPropType::Bool },
+        { "Window Drag",         UIPropType::Bool },
         { "Clip Children",       UIPropType::Bool },
         { "Focus Frame",         UIPropType::Bool },
         { "Accepts Drop",        UIPropType::Bool },
@@ -915,6 +922,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
 {
     if (n == "Visible")      { e.visible     = v.b; return true; }
     if (n == "Hit Testable") { e.hitTestable = v.b; return true; }
+    if (n == "Window Drag")  { e.windowDrag = v.b; return true; }
     if (n == "Clip Children"){ e.clipChildren = v.b; return true; }
     if (n == "Focus Frame")  { e.focusFrame = v.b; return true; }
     if (n == "Accepts Drop") { e.acceptsDrop = v.b; return true; }
@@ -986,6 +994,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     std::vector<UIPropDesc> out = properties();
     out.push_back({ "Visible",      UIPropType::Bool });
     out.push_back({ "Hit Testable", UIPropType::Bool });
+    out.push_back({ "Window Drag",  UIPropType::Bool });
     out.push_back({ "Clip Children",UIPropType::Bool });
     out.push_back({ "Focus Frame",  UIPropType::Bool });
     out.push_back({ "Enabled",      UIPropType::Bool });

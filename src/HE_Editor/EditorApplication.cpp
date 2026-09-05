@@ -3012,6 +3012,8 @@ void EditorApplication::OnRender(float dt)
 					case HE::UICursor::Text:      mc = ImGuiMouseCursor_TextInput; break;
 					case HE::UICursor::ResizeWE:  mc = ImGuiMouseCursor_ResizeEW;  break;
 					case HE::UICursor::ResizeNS:  mc = ImGuiMouseCursor_ResizeNS;  break;
+					case HE::UICursor::ResizeNWSE:mc = ImGuiMouseCursor_ResizeNWSE;break;
+					case HE::UICursor::ResizeNESW:mc = ImGuiMouseCursor_ResizeNESW;break;
 					case HE::UICursor::Move:      mc = ImGuiMouseCursor_ResizeAll; break;
 					case HE::UICursor::No:        mc = ImGuiMouseCursor_NotAllowed;break;
 					case HE::UICursor::Wait:      mc = ImGuiMouseCursor_Wait;      break;

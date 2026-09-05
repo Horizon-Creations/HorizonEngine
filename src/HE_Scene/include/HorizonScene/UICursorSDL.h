@@ -27,6 +27,8 @@ inline void applyUICursor(UICursor c)
         case UICursor::Crosshair: sys = SDL_SYSTEM_CURSOR_CROSSHAIR;   break;
         case UICursor::ResizeWE:  sys = SDL_SYSTEM_CURSOR_EW_RESIZE;   break;
         case UICursor::ResizeNS:  sys = SDL_SYSTEM_CURSOR_NS_RESIZE;   break;
+        case UICursor::ResizeNWSE:sys = SDL_SYSTEM_CURSOR_NWSE_RESIZE; break;
+        case UICursor::ResizeNESW:sys = SDL_SYSTEM_CURSOR_NESW_RESIZE; break;
         case UICursor::Move:      sys = SDL_SYSTEM_CURSOR_MOVE;        break;
         case UICursor::No:        sys = SDL_SYSTEM_CURSOR_NOT_ALLOWED; break;
         case UICursor::Wait:      sys = SDL_SYSTEM_CURSOR_WAIT;        break;

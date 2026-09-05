@@ -10,6 +10,11 @@ struct SDL_Window;
 
 namespace HE
 {
+    // Declared, not included: UIWindowFrame.h drags the whole widget model in,
+    // and a window only ever passes this value through. Scoped enums with a
+    // fixed underlying type are complete enough to be forward declared.
+    enum class UIWindowHit : uint8_t;
+
     struct WindowProps
     {
         std::string     title  = "HorizonEngine";
@@ -59,6 +64,19 @@ namespace HE
         void        SetVSync(bool enabled);
         void        SetFullscreen(bool fullscreen);
         void        SetBorderless(bool borderless);
+
+        // ── The frame a borderless window has to answer for (plan F3) ───────
+        // Without a system title bar the OS still asks, on every mouse move,
+        // which part of the window a point belongs to: the caption it can be
+        // dragged by, an edge it can be resized at, or ordinary content. This
+        // installs that answer; a null callback takes it away again.
+        //
+        // The point handed to the callback is in WINDOW POINTS, which on a
+        // Retina display is not what the UI lays out in — the caller converts.
+        // Called from inside the event pump on every motion, so it must not
+        // allocate, log, or take a lock.
+        using HitTestCallback = std::function<UIWindowHit(int x, int y)>;
+        void        SetHitTest(HitTestCallback cb);
         // Reveal a window created with WindowProps::startHidden, and put it in
         // front — the splash it was hiding behind was always-on-top.
         void        Show();
@@ -102,5 +120,6 @@ namespace HE
         uint32_t        m_eventsLastPoll = 0;  // events handled by the last PollEvents()
         RendererBackend m_api           = RendererBackend::OpenGL;
         EventCallback   m_eventCallback;
+        HitTestCallback m_hitTest;
     };
 }

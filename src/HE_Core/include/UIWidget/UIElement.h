@@ -23,7 +23,13 @@ struct UIWidgetTree;
 // maps it to a system cursor). Default = leave the cursor unchanged.
 enum class UICursor : uint8_t
 {
-    Default = 0, Arrow, Hand, Text, Crosshair, ResizeWE, ResizeNS, Move, No, Wait, COUNT
+    Default = 0, Arrow, Hand, Text, Crosshair, ResizeWE, ResizeNS, Move, No, Wait,
+    // The two diagonals came with the borderless window frame (F3): a corner
+    // grip that shows the horizontal arrows is a corner that promises one axis
+    // and moves two. Appended rather than sorted in beside their neighbours,
+    // because the value is what a saved widget holds.
+    ResizeNWSE, ResizeNESW,
+    COUNT
 };
 HE_API const char* uiCursorName(UICursor c);
 
@@ -605,6 +611,16 @@ public:
     // shows while this element is hovered (Default = unchanged).
     bool        hitTestable = true;
 
+    // ── The title bar of a borderless window (docs/he-apps-plan.md F3) ───────
+    // windowDrag true = pressing here moves the WINDOW, the way the title bar
+    // the application asked the OS to leave off would have. It is deliberately
+    // NOT hitTestable's opposite: a container that a click passes through can
+    // still be the thing the window is carried by, and that is the normal case —
+    // a title bar is a horizontal box with a caption and a few buttons in it.
+    // Anything interactive on top of it keeps its click; see
+    // WidgetManager::windowHitAt, which is the only reader.
+    bool        windowDrag = false;
+
     // ── Tooltip (docs/he-apps-plan.md B4) ────────────────────────────────────
     // What this element says about itself when the pointer rests on it. Empty =
     // nothing to say, which is the case for almost every element, so it is a
@@ -840,6 +856,7 @@ protected:
         dst.textureW = textureW; dst.textureH = textureH;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
+        dst.windowDrag = windowDrag;
         dst.tooltip = tooltip;
         dst.clipChildren = clipChildren;
         dst.focusFrame = focusFrame;

@@ -63,6 +63,17 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The frame of a borderless window (docs/he-apps-plan.md F3) ──────────────
+// The grab band along the edges, in window POINTS, so it is the same physical
+// thickness on a Retina screen as on a plain one. Six is what the desktops
+// settle around; below four it is a band nobody can hit, above eight it starts
+// eating the clicks of what is drawn at the edge of the window.
+constexpr float kFrameBorderPoints = 6.0f;
+// …and the smallest window an edge drag may leave behind. Handed to SDL as well
+// as used by the manual resizer, so the platform that resizes for us and the
+// platform we resize ourselves stop at the same place.
+constexpr struct { int w, h; } kFrameMinPoints{ 320, 200 };
+
 // ── The host half of every HE::api::Ctx this file builds ─────────────────────
 // Everything a Ctx carries that belongs to the APPLICATION rather than to the
 // current scene: it is filled once in OnInit and outlives every world, physics
@@ -563,6 +574,30 @@ void GameApplication::OnInit()
 		setMouseCaptured(false);
 		// A2: draw on events, not on a clock.
 		setEventDriven(true);
+
+		// ── F3: the frame this window asked the OS to leave off ──────────────
+		// Borderless plus an application means "I draw my own title bar", and
+		// from that moment the OS has to be told what its picture means: which
+		// part carries the window, which parts are its edges. The widget tree
+		// answers both, through one callback, and the whole rest of the feature
+		// is that answer being right.
+		//
+		// Only for an application, and only for Borderless: a game that goes
+		// borderless means "fullscreen without the mode switch", and a fullscreen
+		// window with draggable regions in it would be a window the user could
+		// pull off their screen.
+		if (m_windowMode == HE::WindowMode::Borderless && window())
+		{
+			// The same floor the manual resizer clamps to, given to SDL as well:
+			// on Windows and Linux the window manager does the resizing and would
+			// otherwise let the window shrink to nothing.
+			if (SDL_Window* fw = window()->GetNativeWindow())
+				SDL_SetWindowMinimumSize(fw, kFrameMinPoints.w, kFrameMinPoints.h);
+			window()->SetHitTest([this](int px, int py) { return frameHitAt(px, py); });
+			m_customFrame = true;
+			HE_LOG_INFO(Core, "%s", "GameApplication: borderless window — the widget tree "
+			                        "owns the title bar and the resize edges (plan F3)");
+		}
 	}
 
 	// Override content root set by Application base (it uses argv[0] + "Content")
@@ -1464,6 +1499,27 @@ void GameApplication::updateScripts(float dt)
 		m_scriptContext->callOnUpdate(instId, dt);
 }
 
+HE::UIWindowHit GameApplication::frameHitAt(int pointX, int pointY)
+{
+	if (!m_customFrame) return HE::UIWindowHit::Normal;
+	SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr;
+	if (!w) return HE::UIWindowHit::Normal;
+
+	// SDL asks in window points; the widget tree lays out and hit-tests in
+	// drawable pixels. On a Retina display those differ by two, and skipping
+	// this line would put the title bar at half its height — the same class of
+	// mistake F2 found twice.
+	int ww = 1, wh = 1, pw = 1, ph = 1;
+	SDL_GetWindowSize(w, &ww, &wh);
+	SDL_GetWindowSizeInPixels(w, &pw, &ph);
+	const float sx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
+	const float sy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
+
+	return m_widgets.windowHitAt(static_cast<float>(pw), static_cast<float>(ph),
+	                             pointX * sx, pointY * sy,
+	                             kFrameBorderPoints * sx);
+}
+
 void GameApplication::updateUIInput()
 {
 	if (!m_world) return;
@@ -1500,7 +1556,12 @@ void GameApplication::updateUIInput()
 	// what clears a hover the UI is already showing. Returning early would leave
 	// the last hovered button lit for as long as the mode lasts.
 	const bool uiTakesInput = HE::api::input::mode() != HE::api::input::Mode::GameOnly;
-	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput;
+	// …and an edge drag owns the pointer while it lasts, the same way the
+	// fly-look does: the mouse is sizing the window, not pointing at anything in
+	// it, and a slider under the edge that starts following it would be the UI
+	// answering a gesture that was never aimed at it.
+	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput &&
+	                          !m_frameResize.active();
 
 	// Widget pointer input first — widgets draw on top of entity UI. The answer
 	// ("the pointer is on something clickable") is kept, not dropped: it is what
@@ -1566,6 +1627,24 @@ void GameApplication::updateUIInput()
 
 	// Show the cursor the hovered widget element requested (default = arrow).
 	if (pointerValid) HE::applyUICursor(m_world->widgets().hoverCursor());
+
+	// ── …and the edge cursors of a borderless window, on the one platform ────
+	// Windows, X11 and Wayland set the resize cursor themselves the moment the
+	// hit test names an edge — doing it a second time from here would fight
+	// them. macOS reads only SDL_HITTEST_DRAGGABLE and never touches the cursor,
+	// so an edge there would look like ordinary content right up until it moved.
+	// AFTER applyUICursor, because on an edge the frame outranks whatever the
+	// element under it wanted.
+#if defined(__APPLE__)
+	if (m_customFrame && w && !m_mouseCaptured)
+	{
+		const HE::UIWindowHit fh = m_frameResize.active()
+			? m_frameResize.edge()
+			: frameHitAt(static_cast<int>(mx), static_cast<int>(my));
+		if (HE::uiWindowHitIsResize(fh))
+			HE::applyUICursor(HE::uiWindowHitCursor(fh));
+	}
+#endif
 
 	// ── Keyboard / gamepad menu navigation ───────────────────────────────────
 	// A menu has to be usable without a mouse. Arrow keys and the pad's D-Pad
@@ -1731,6 +1810,70 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
+	// ── Resizing a borderless window at its edges (plan F3) ──────────────────
+	// First in this function, and consuming: a press on an edge is a press on
+	// the window's frame, and nothing behind the frame may see it.
+	//
+	// This runs on macOS and nowhere else, without a single #ifdef. Windows,
+	// X11 and Wayland take the RESIZE_* answer out of the hit test, size the
+	// window themselves and swallow the press while doing it — so on those three
+	// the button-down below simply never arrives, and the same code is dead by
+	// construction rather than by a platform switch that could go stale.
+	if (m_customFrame)
+	{
+		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT)
+		{
+			const HE::UIWindowHit hit = frameHitAt(static_cast<int>(event.button.x),
+			                                       static_cast<int>(event.button.y));
+			if (HE::uiWindowHitIsResize(hit))
+			{
+				SDL_Window* fw = window() ? window()->GetNativeWindow() : nullptr;
+				if (fw)
+				{
+					HE::UIWindowRect r{};
+					SDL_GetWindowPosition(fw, &r.x, &r.y);
+					SDL_GetWindowSize(fw, &r.w, &r.h);
+					// The DESKTOP position, not the one in the event: the whole
+					// point of dragging the left edge is that the pointer leaves
+					// the window, and a window-relative position stops moving
+					// exactly when the window starts to.
+					float gx = 0.0f, gy = 0.0f;
+					SDL_GetGlobalMouseState(&gx, &gy);
+					m_frameResize.begin(hit, r, static_cast<int>(gx), static_cast<int>(gy));
+					// A double-click on the edge is a resize that started twice,
+					// not a word being selected somewhere behind it.
+					m_uiClickCount = 0;
+					return true;
+				}
+			}
+		}
+		else if (m_frameResize.active())
+		{
+			if (event.type == SDL_EVENT_MOUSE_MOTION)
+			{
+				float gx = 0.0f, gy = 0.0f;
+				SDL_GetGlobalMouseState(&gx, &gy);
+				const HE::UIWindowRect r = m_frameResize.update(
+					static_cast<int>(gx), static_cast<int>(gy),
+					kFrameMinPoints.w, kFrameMinPoints.h);
+				if (SDL_Window* fw = window() ? window()->GetNativeWindow() : nullptr)
+				{
+					// Position first, then size: growing to the left is the
+					// window moving AND growing, and doing it the other way
+					// round makes the far edge jitter by one frame's delta.
+					SDL_SetWindowPosition(fw, r.x, r.y);
+					SDL_SetWindowSize(fw, r.w, r.h);
+				}
+				return true;
+			}
+			if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT)
+			{
+				m_frameResize.end();
+				return true;
+			}
+		}
+	}
+
 	// A double- or triple-click on a text field selects a word or the line.
 	// Only the COUNT is taken here; where the pointer was is worked out in
 	// updateUIInput, which already does that arithmetic once.

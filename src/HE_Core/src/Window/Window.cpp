@@ -1,4 +1,5 @@
 #include "Window/Window.h"
+#include "UIWidget/UIWindowFrame.h"   // UIWindowHit — the hit test speaks it
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
@@ -335,6 +336,36 @@ namespace
     void Window::SetBorderless(bool borderless)
     {
         if (m_window) SDL_SetWindowBordered(m_window, !borderless);
+    }
+
+    // UIWindowHit is SDL_HitTestResult with names of its own — the callback
+    // below is a cast, and these are what keeps that true. Written out one by
+    // one rather than as "first and last match", because a value swapped in the
+    // middle is exactly the mistake that would otherwise survive.
+    static_assert((int)UIWindowHit::Normal            == SDL_HITTEST_NORMAL);
+    static_assert((int)UIWindowHit::Drag              == SDL_HITTEST_DRAGGABLE);
+    static_assert((int)UIWindowHit::ResizeTopLeft     == SDL_HITTEST_RESIZE_TOPLEFT);
+    static_assert((int)UIWindowHit::ResizeTop         == SDL_HITTEST_RESIZE_TOP);
+    static_assert((int)UIWindowHit::ResizeTopRight    == SDL_HITTEST_RESIZE_TOPRIGHT);
+    static_assert((int)UIWindowHit::ResizeRight       == SDL_HITTEST_RESIZE_RIGHT);
+    static_assert((int)UIWindowHit::ResizeBottomRight == SDL_HITTEST_RESIZE_BOTTOMRIGHT);
+    static_assert((int)UIWindowHit::ResizeBottom      == SDL_HITTEST_RESIZE_BOTTOM);
+    static_assert((int)UIWindowHit::ResizeBottomLeft  == SDL_HITTEST_RESIZE_BOTTOMLEFT);
+    static_assert((int)UIWindowHit::ResizeLeft        == SDL_HITTEST_RESIZE_LEFT);
+
+    void Window::SetHitTest(HitTestCallback cb)
+    {
+        m_hitTest = std::move(cb);
+        if (!m_window) return;
+        if (!m_hitTest) { SDL_SetWindowHitTest(m_window, nullptr, nullptr); return; }
+        SDL_SetWindowHitTest(m_window,
+            [](SDL_Window*, const SDL_Point* area, void* data) -> SDL_HitTestResult
+            {
+                auto* self = static_cast<Window*>(data);
+                if (!self || !self->m_hitTest || !area) return SDL_HITTEST_NORMAL;
+                return (SDL_HitTestResult)(int)self->m_hitTest(area->x, area->y);
+            },
+            this);
     }
 
     void Window::Show()

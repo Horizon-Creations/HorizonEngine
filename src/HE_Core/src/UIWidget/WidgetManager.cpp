@@ -2264,6 +2264,74 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 	return hit;
 }
 
+// ── The frame of a window that has none (docs/he-apps-plan.md F3) ───────────
+HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
+                                           float x, float y, float borderPx)
+{
+	// A press that is already on a widget owns the pointer until it is let go.
+	// Without this, dragging a slider that sits in the title bar and wandering a
+	// few pixels upwards would hand the window to the window manager mid-drag —
+	// the value would stop following the mouse and the window would start.
+	if (m_dragArmed || m_dragActive) return HE::UIWindowHit::Normal;
+	for (const auto& w : m_instances)
+		if (w.draggingSlider || w.draggingText || w.draggingSplit || w.draggingScroll)
+			return HE::UIWindowHit::Normal;
+
+	// The edges come before the picture: a title bar that runs to the very top
+	// of the window would otherwise cover the band the top edge is grabbed by,
+	// and there is nowhere else to put that band.
+	const HE::UIWindowHit edge = HE::uiWindowEdgeAt(vpWidth, vpHeight, x, y, borderPx);
+	if (edge != HE::UIWindowHit::Normal) return edge;
+
+	// Anything that takes clicks itself keeps them. This is why the close button
+	// on a custom title bar still closes instead of moving the window.
+	const PointerHit hit = topmostHit(vpWidth, vpHeight, x, y);
+	if (hit.interactive) return HE::UIWindowHit::Normal;
+
+	// …and only now, is this part of the window a handle? Asked GEOMETRICALLY
+	// rather than through the hit test above: a title bar is a container, and
+	// containers are hitTestable = false by construction (UIElements.h) — the
+	// one scan would never see it, and making it hit-testable to be draggable
+	// would swallow the clicks of everything inside it.
+	bool drag = false;
+	long topKey = 0;
+	for (auto& w : m_instances)
+	{
+		if (!w.visible || !takesInput(w.id)) continue;
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+		const float sx = canvas.scaleX, sy = canvas.scaleY;
+		for (const auto& ep : w.tree.elements)
+		{
+			const HE::UIElement& e = *ep;
+			if (!e.windowDrag) continue;
+			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
+			if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) continue;
+			HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+			float mcx = x / sx, mcy = y / sy;
+			if (HE::UIRotation rot; HE::uiElementRotation(w.tree, e, rot, &canvas))
+				HE::uiUnrotatePoint(rot, mcx, mcy, mcx, mcy);
+			HE::UIWidgetRect clip{};
+			if (HE::uiElementClipRect(w.tree, e, clip, &canvas))
+			{
+				const float cx0 = std::max(r.x, clip.x), cy0 = std::max(r.y, clip.y);
+				const float cx1 = std::min(r.x + r.w, clip.x + clip.w);
+				const float cy1 = std::min(r.y + r.h, clip.y + clip.h);
+				if (cx1 <= cx0 || cy1 <= cy0) continue;
+				r.x = cx0; r.y = cy0; r.w = cx1 - cx0; r.h = cy1 - cy0;
+			}
+			const float testX = mcx * sx, testY = mcy * sy;
+			if (testX < r.x * sx || testX > (r.x + r.w) * sx ||
+			    testY < r.y * sy || testY > (r.y + r.h) * sy)
+				continue;
+			// Topmost wins, the same key the draw and the hit test rank by: a
+			// dialog laid over the title bar is not a handle for the window.
+			const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
+			if (!drag || key >= topKey) { drag = true; topKey = key; }
+		}
+	}
+	return drag ? HE::UIWindowHit::Drag : HE::UIWindowHit::Normal;
+}
+
 bool WidgetManager::processPointer(float vpWidth, float vpHeight,
                                    float mouseX, float mouseY,
                                    bool primaryDown, bool valid,

@@ -2713,6 +2713,13 @@ namespace
 	  "through it to whatever is behind. For decoration that must not swallow "
 	  "input.",
 	  "", "ui#runtime" },
+	{ "UI Widget/Window drag", "",
+	  "Pressing here moves the WINDOW, the way a title bar does. For an "
+	  "application that draws its own title bar and asked the system for a "
+	  "window without one (window mode Borderless). Independent of hit-testable: "
+	  "a title bar is usually a container the pointer passes through, and "
+	  "anything clickable sitting on it — a close button — keeps its click.",
+	  "", "ui#runtime" },
 	{ "UI Widget/Clip children", "",
 	  "Cuts everything inside this widget off at its own edge. Clipped pixels are "
 	  "neither drawn nor clickable — it is what makes a list longer than its box "

@@ -1360,6 +1360,7 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (!e.texture.empty())  o["texture"]  = e.texture;
     if (!e.font.empty())     o["font"]     = e.font;
     if (!e.hitTestable)      o["hitTestable"] = false;
+    if (e.windowDrag)        o["windowDrag"] = true;
     // Written only when it says something, so every widget authored before
     // tooltips existed saves byte-identical.
     if (!e.tooltip.empty())  o["tooltip"] = e.tooltip;
@@ -1503,6 +1504,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->texture  = o.value("texture", std::string());
     e->font     = o.value("font", std::string());
     e->hitTestable   = o.value("hitTestable", true);
+    e->windowDrag    = o.value("windowDrag", false);
     e->tooltip       = o.value("tooltip", std::string());
     e->clipChildren  = o.value("clipChildren", false);
     e->focusFrame    = o.value("focusFrame", false);
