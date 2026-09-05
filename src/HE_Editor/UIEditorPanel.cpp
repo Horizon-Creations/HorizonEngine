@@ -5266,7 +5266,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// panel); dragging the button onto the canvas/hierarchy places it there.
 				const bool clicked = ImGui::Button(typeName(t), ImVec2(-1.0f, 0));
 				// What this element IS. The scan that audits tooltip coverage
-				// only reads literal labels, so it never saw these nineteen
+				// only reads literal labels, so it never saw one of these
 				// buttons at all — third gap of that kind. A runtime test asks
 				// the registry instead (test_editor_help.cpp).
 				EditorWidgets::helpForLabel(typeName(t));
