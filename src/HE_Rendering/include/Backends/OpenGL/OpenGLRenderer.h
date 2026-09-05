@@ -698,6 +698,19 @@ private:
 	void DestroyGBufferTargets();
 	bool EnsureDeferredPipelines(); // true when the G-buffer + resolve programs exist
 
+	// ── Deferred decals (docs/decals-cross-backend-plan.md §3) ───────────────
+	// Unit-cube projectors, drawn after the G-buffer loop and before the
+	// resolve: the fragment SAMPLES m_gbDepthTex, reconstructs the world
+	// position and alpha-blends its colour into GB0.rgb. GB0 hangs on m_gbFBO
+	// together with that depth texture, and attachment + sampled input of ONE
+	// FBO is a feedback loop — hence m_gbDecalFBO, which carries GB0 alone with
+	// no depth attachment. Lifetime is tied to EnsureGBufferTargets.
+	unsigned int m_gbDecalFBO   = 0;
+	unsigned int m_decalProgram = 0; // decalVertex + decalFragmentSampled(GLSL410)
+	unsigned int m_decalUBO     = 0; // HeDecal block (binding point 4)
+	bool         m_decalProgramTried = false;
+	bool EnsureDecalProgram();
+
 	// ── Anti-aliasing resolve (docs/anti-aliasing-plan.md) ───────────────────
 	// The tonemap pass writes its LDR result into m_ldrColor instead of straight
 	// to the output; this pass reads that texture and writes the final image to

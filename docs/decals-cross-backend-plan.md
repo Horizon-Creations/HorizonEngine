@@ -221,6 +221,32 @@ Unit 0 ist während seines Draws frei.
 **Ergebnis A:** GL rendert Decals, `docs/backend-parity-plan.md` Zeile 253 wird
 für GL zu `JA`.
 
+### Stand nach Schritt 2 (Checkpoint A gebaut)
+
+Gebaut, mit zwei Abweichungen vom Text oben:
+
+- **A1** — die Variante ist kein zweiter Shader-Konstant, sondern ein Template:
+  `makeDecalFS(bool sampled)` in `MaterialShaderLibrary.cpp` erzeugt beide
+  Fassungen aus einem Rumpf. Der Unterschied sind exakt zwei eingesetzte
+  Stellen (Deklaration + Leseausdruck), damit die 25 Zeilen dahinter nicht in
+  zwei Kopien auseinanderlaufen können. `uv` steht dafür jetzt **vor** dem
+  Tiefenlesen — die gesampelte Fassung braucht es als Koordinate, und es hängt
+  nur von `gl_FragCoord` und dem UBO ab, ist also frei verschiebbar.
+  Cache-Schlüssel ist `backend*4 + (0 vertex / 1 fetch / 2 sampled)`.
+- **A5** — die Cull-Seite ist *keine* Differenz. GLs Vorgabe `GL_CCW` wählt
+  dieselben Dreiecke wie Metals Vorgabe `MTLWindingClockwise`: die Windung wird
+  in Framebuffer-Koordinaten ausgewertet, und Metals Ursprung liegt oben links
+  wo GLs unten links liegt — die beiden Konventionen heben sich auf. (Dasselbe
+  y, das der Shader über `params.y` mit -1 auf Metal und +1 auf GL wieder
+  geradezieht.) GL bekommt daher `glCullFace(GL_FRONT)` bei unveränderter
+  Front-Face-Vorgabe. Der Prüfpunkt aus A5 bleibt trotzdem der erste, den ein
+  Nutzer auf echter Hardware anschauen sollte.
+
+Nicht gebaut, weil nicht in diesem Schritt: **Checkpoint B**. Er bleibt aber die
+einzige Stelle, an der sich `decalFragmentSampled` auf dieser Maschine gegen
+echte Hardware beweisen lässt — der GL-Pfad ist bis dahin nur kompiliert, nie
+rasterisiert.
+
 ---
 
 ## 4. Checkpoint B — Metal-Zwei-Pass-Fallback (Beifang, klein)
