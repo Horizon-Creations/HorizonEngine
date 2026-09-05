@@ -1005,6 +1005,100 @@ std::vector<UITextLineRange> uiTextLineRanges(const std::string& text)
     return lines;
 }
 
+std::vector<UITextVisualLine> uiTextVisualLines(const std::string& text)
+{
+    const std::vector<UITextLineRange> hard = uiTextLineRanges(text);
+    std::vector<UITextVisualLine> out;
+    out.reserve(hard.size());
+    for (std::size_t i = 0; i < hard.size(); ++i)
+        // The row below starts where the next authored line does; the last one
+        // has nothing after it, so `next` is its own end. That is what makes
+        // `byte < next` a usable question at every row including the last.
+        out.push_back({ hard[i].begin, hard[i].end,
+                        i + 1 < hard.size() ? hard[i + 1].begin : hard[i].end, true });
+    return out;
+}
+
+std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font, const std::string& text,
+                                               float sizePx, float wrapWidth)
+{
+    if (!font.ok || sizePx <= 0.0f || wrapWidth <= 0.0f) return uiTextVisualLines(text);
+    const float scale = sizePx / font.bakePx;
+    auto isBlank = [](char c) { return c == ' ' || c == '\t'; };
+    // Width of a byte run, measured exactly the way the glyphs are emitted.
+    auto widthOf = [&](std::size_t from, std::size_t to)
+    { return lineWidth(font, text.substr(from, to - from), scale); };
+
+    const std::vector<UITextLineRange> hard = uiTextLineRanges(text);
+    std::vector<UITextVisualLine> out;
+    for (std::size_t li = 0; li < hard.size(); ++li)
+    {
+        const UITextLineRange& ln = hard[li];
+        const std::size_t e = ln.end;
+        std::size_t segStart = ln.begin;   // where this row starts
+        std::size_t visEnd   = ln.begin;   // …and how far its text reaches so far
+        std::size_t cur      = ln.begin;   // the scan
+        while (cur < e)
+        {
+            // One word, then the run of blanks behind it. A row that begins on
+            // blanks takes one of them as its "word" so the scan cannot stall.
+            std::size_t wEnd = cur;
+            while (wEnd < e && !isBlank(text[wEnd])) ++wEnd;
+            if (wEnd == cur) ++wEnd;
+            std::size_t sEnd = wEnd;
+            while (sEnd < e && isBlank(text[sEnd])) ++sEnd;
+
+            // Measured to the end of the WORD, never past it: the blanks behind
+            // it are what the break eats, and counting them would wrap a line
+            // that fits.
+            const float w = widthOf(segStart, wEnd);
+            if (w > wrapWidth && visEnd > segStart)
+            {
+                // Something is on the row already — send the word down and
+                // measure it again there, alone.
+                out.push_back({ segStart, visEnd, cur, false });
+                segStart = visEnd = cur;
+                continue;
+            }
+            if (w > wrapWidth && uiUtf8Next(text, segStart) < wEnd)
+            {
+                // Alone and still too wide. Break inside it, at the longest
+                // prefix that fits and never at less than one CHARACTER — a
+                // break by bytes would leave half an umlaut on each row, and
+                // neither half is anything.
+                std::size_t k = uiUtf8Next(text, segStart), fit = k;
+                while (k < wEnd)
+                {
+                    if (widthOf(segStart, k) > wrapWidth) break;
+                    fit = k;
+                    k = uiUtf8Next(text, k);
+                }
+                out.push_back({ segStart, fit, fit, false });
+                segStart = visEnd = cur = fit;
+                continue;
+            }
+            visEnd = wEnd;
+            cur    = sEnd;
+        }
+        // The row the authored line ends on reaches that line's end, trailing
+        // blanks and all: the caret has to be able to sit behind what somebody
+        // typed, even when it is a space. Where the row below begins is the
+        // NEXT authored line's own answer rather than "one past the '\n'" —
+        // a CRLF has two bytes there, and this way nobody has to remember it.
+        out.push_back({ segStart, e,
+                        li + 1 < hard.size() ? hard[li + 1].begin : e, true });
+    }
+    return out;
+}
+
+std::size_t uiVisualLineOfOffset(const std::vector<UITextVisualLine>& lines, std::size_t byte)
+{
+    if (lines.empty()) return 0;
+    for (std::size_t i = 0; i + 1 < lines.size(); ++i)
+        if (byte < lines[i].next) return i;
+    return lines.size() - 1;
+}
+
 std::size_t uiLineOfOffset(const std::vector<UITextLineRange>& lines, std::size_t byte)
 {
     if (lines.empty()) return 0;

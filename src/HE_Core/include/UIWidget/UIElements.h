@@ -327,6 +327,23 @@ public:
     //   an eleventh.
     bool        multiline = false;
 
+    // ── …and breaking those lines at the field's own edge ────────────────────
+    // On, a paragraph too wide for the box carries on the row below instead of
+    // running off to the right. Only meaningful while `multiline`, and off by
+    // default so a field that was authored before this existed keeps breaking
+    // exactly where somebody pressed Enter and nowhere else.
+    //
+    // A wrapped row is not an authored line, and every part of the field that
+    // thinks in lines knows it: Down goes to the ROW below (which may be the
+    // same paragraph), End stops at the row's edge, and a click lands on the
+    // row it was aimed at. That is why there is one line source and not three
+    // (see visualLines()).
+    //
+    // A password field ignores this. Its dots are drawn from the text's bytes,
+    // so wrapping measured on the dots and addressed in the bytes would be two
+    // answers to "where does row two start" — and a password is one line.
+    bool        wrapText = false;
+
     // ── What may be typed into it ────────────────────────────────────────────
     // A field that asks for a number should not accept letters, and finding that
     // out when the value is parsed is one round trip too late. Filtering happens
@@ -390,6 +407,13 @@ public:
     mutable float scrollPxY = 0.0f;
     mutable float contentHeightPx = 0.0f;   // what render() last measured
     mutable float viewHeightPx    = 0.0f;
+    // The width the text has to fit into and the pixel size it is measured at —
+    // both only knowable while drawing, and both needed by an arrow key, which
+    // arrives without a viewport. Same reasoning and same mutability as the two
+    // above; before the first draw they are zero and visualLines() falls back to
+    // hard breaks, which is what the field did before wrapping existed.
+    mutable float wrapWidthPx = 0.0f;
+    mutable float wrapSizePx  = 0.0f;
 
     // ── Which column an up/down arrow is aiming for ──────────────────────────
     // Moving down through a SHORT line and on again has to come back to the
@@ -480,6 +504,12 @@ public:
     // real argument rather than defaulting to 0 on purpose, because a defaulted
     // zero would quietly mean "the first line" at every call site that forgot.
     size_t caretAtPoint(float localX, float localY, float pxScaleY) const;
+    // The rows the field shows, wrapping included. THE line source: drawing,
+    // clicking and Home/End/Up/Down all ask this, because a field where the
+    // caret disagrees with the glyphs about where row two starts is a field
+    // that is wrong in the way nobody can describe. Uses the width render() last
+    // measured; before the first draw, hard breaks only.
+    std::vector<HE::UITextVisualLine> visualLines() const;
     // Characters (not bytes) currently in the field — what maxLength counts.
     int    charCount() const
     {

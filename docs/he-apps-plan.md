@@ -2037,7 +2037,48 @@ dann gäbe es zwei Antworten darauf, wo Zeile sieben steht.
 Der Umbruch-Splitter verwirft Bytes (siehe oben), ein Editor braucht aber einen, der jedes
 behält. Das ist ein eigener Splitter, und ihn in den Label-Pfad zu mischen würde jede
 Beschriftung im Baum verändern. Bis dahin bricht ein mehrzeiliges Feld dort um, wo jemand Enter
-gedrückt hat.
+gedrückt hat. *(Nachgereicht, siehe unten.)*
+
+### B1b, der Rest: umbrechen, wo niemand Enter gedrückt hat (05.09.2026)
+
+Der eine Punkt, den der Abschnitt darüber ausdrücklich offen gelassen hat. Alles andere von B1b
+stand schon und wurde nachgeprüft statt neu gebaut: Enter fügt um, Cursor hoch und runter mit
+Zielspalte, Auswahl über Zeilen, senkrechtes Scrollen, Klick auf die gemeinte Zeile.
+
+**Eine umgebrochene Zeile ist keine geschriebene Zeile, und der Cursor kann die beiden nicht von
+selbst auseinanderhalten.** Genau daran hängt der ganze Umbau. `uiTextLineRanges` beantwortet
+„wo hat jemand Enter gedrückt"; sobald ein Feld umbricht, ist das nicht mehr, was ein Pfeil nach
+unten meint. Also ein zweites Modell, `uiTextVisualLines` und `uiTextWrapRanges`, und **alles was
+in Zeilen denkt liest dieses**: Zeichnen, Klicken, Pos1/Ende/Hoch/Runter. Drei Antworten auf „wo
+beginnt Zeile zwei" wären ein Feld, in dem der Cursor neben seinen eigenen Buchstaben steht.
+
+**Der Umbruch frisst die Leerzeichen, und deshalb hat eine Zeile drei Zahlen statt zwei.** `end`
+ist, was gezeichnet wird und wo die Ende-Taste landet; `next` ist, wo die Zeile darunter anfängt.
+Die Bytes dazwischen sind die Leerzeichen der Bruchstelle: nicht gezeichnet, aber erreichbar. Mit
+nur `begin`/`end` gäbe es Bytes zwischen zwei Zeilen, und ein Byte, das das Zeilenmodell nicht
+benennen kann, ist ein Byte, das der Cursor nicht erreicht — dieselbe Lehre, die den Splitter
+überhaupt erst nötig gemacht hat, eine Ebene tiefer.
+
+**Und deshalb ist die Ende-Taste eine Entscheidung und keine Nebenwirkung.** Sie hält auf `end`
+an, vor den gefressenen Leerzeichen. Auf `next` wäre der Cursor optisch schon eine Zeile weiter
+unten, und Ende-dann-Runter würde eine Zeile überspringen — ein Fehler, den man der Ende-Taste
+nicht ansieht, weil er sich erst beim nächsten Tastendruck zeigt. Als Zusicherung festgenagelt,
+nicht als Kommentar.
+
+**Die Breite weiß nur das Zeichnen, gebraucht wird sie von einer Pfeiltaste.** `editFocusedText`
+bekommt keinen Viewport, kann den Rahmen des Feldes also nicht ausrechnen. Also merkt sich
+`render` `wrapWidthPx`/`wrapSizePx` genau wie es sich `scrollPxY` und `viewHeightPx` schon merkt.
+Vor dem ersten Bild sind sie null und `visualLines()` liefert die harten Umbrüche — nicht als
+Notnagel, sondern weil eine geratene Breite ein Layout wäre, das sich beim ersten Anzeigen ändert.
+
+**Ein Passwortfeld bricht nicht um.** Es wird aus Punkten gezeichnet und in Bytes adressiert; ein
+Umbruch, der an den Punkten gemessen und in den Bytes geschnitten wird, sind zwei Antworten auf
+dieselbe Frage. Ein Passwort ist eine Zeile.
+
+**Wrap Text ist ein eigener Schalter und steht auf aus.** Ein Feld, das vor diesem Absatz verfasst
+wurde, bricht weiter genau dort um, wo jemand Enter gedrückt hat. Der Label-Splitter ist
+unangetastet geblieben, wie es der Abschnitt darüber verlangt hat: der neue Splitter steht daneben
+und die Doppelung ist der Preis dafür, dass keine Beschriftung im Baum sich verschiebt.
 
 ### B5: Reiter und Splitter (01.09.2026)
 

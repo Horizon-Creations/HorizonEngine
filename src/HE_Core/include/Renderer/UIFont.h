@@ -210,6 +210,44 @@ HE_API std::vector<UITextLineRange> uiTextLineRanges(const std::string& text);
 // so a caret that outlived an edit still lands somewhere real.
 HE_API std::size_t uiLineOfOffset(const std::vector<UITextLineRange>& lines, std::size_t byte);
 
+// ── …and the lines a field actually SHOWS, wrapping included ────────────────
+// The ranges above are where the author pressed Enter. Once a field wraps, that
+// is no longer what an arrow key means: Down goes to the row below, and the row
+// below may well be the same authored line. So a second model, and everything
+// that thinks in lines — drawing, clicking, Home/End/Up/Down — reads THIS one.
+//
+// It is not `layoutUITextLines` with byte ranges bolted on, and that is
+// deliberate: the label splitter drops the spaces at a break and swallows every
+// '\r', which is right for a label and fatal here (see above). Mixing the two
+// would change how every label in the tree is drawn to serve a text box.
+//
+// A soft break happens AFTER the run of spaces, so no byte is ever between two
+// lines — `next` says where the following row starts, and the bytes in
+// [`end`, `next`) are the spaces the break ate. They stay reachable by the
+// caret; they are simply not drawn, and End stops in front of them rather than
+// on a column that renders past the right edge.
+struct UITextVisualLine
+{
+    std::size_t begin = 0;   // first byte of the row
+    std::size_t end   = 0;   // one past the last byte drawn — where End puts the caret
+    std::size_t next  = 0;   // first byte of the row below (== end when nothing was eaten)
+    bool        hard  = true; // did this row end at a '\n' (or at the text's end)?
+};
+// Hard breaks only — the same split as uiTextLineRanges, in the shape above.
+// What a field that does not wrap uses, and what a wrapping one falls back to
+// before it has been drawn once (nothing knows its pixel width until then).
+HE_API std::vector<UITextVisualLine> uiTextVisualLines(const std::string& text);
+// …and with greedy word wrapping at `wrapWidth`, a word wider than the line
+// broken inside rather than allowed to overflow. wrapWidth <= 0, an unusable
+// font or a zero size all answer exactly like the function above.
+HE_API std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font,
+                                                      const std::string& text,
+                                                      float sizePx, float wrapWidth);
+// Which row `byte` is on. A byte inside the spaces a soft break ate belongs to
+// the row ABOVE them — that is the row it was typed on.
+HE_API std::size_t uiVisualLineOfOffset(const std::vector<UITextVisualLine>& lines,
+                                        std::size_t byte);
+
 // ── Rich text: one label with more than one voice ────────────────────────────
 // A markup STRING rather than a structured list of runs, and that is a decision
 // rather than a shortcut: a script produces text with Set Property, so anything

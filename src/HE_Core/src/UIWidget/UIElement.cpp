@@ -585,6 +585,7 @@ const UIPropTable& UITextInput::propTable() const
         uiprop::slot<&UITextInput::editable>   ({ "Editable", UIPropType::Bool }),
         uiprop::slot<&UITextInput::selectable> ({ "Selectable", UIPropType::Bool }),
         uiprop::slot<&UITextInput::multiline>  ({ "Multiline", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::wrapText>   ({ "Wrap Text", UIPropType::Bool }),
         // 0 anything, 1 whole numbers, 2 decimals, 3 the characters in Allowed
         // Characters. See UITextInput::Filter.
         uiprop::slot<&UITextInput::inputFilter>({ "Input Filter", UIPropType::Int, 0.0f, 3.0f }),
@@ -1357,7 +1358,11 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // every field authored so far — has to keep drawing exactly as it did.
     if (multiline)
     {
-        const std::vector<HE::UITextLineRange> lines = HE::uiTextLineRanges(text);
+        // Measured BEFORE the lines are asked for, because the lines depend on
+        // them: this is the one place that knows how wide the text may be.
+        wrapWidthPx = ts.x;
+        wrapSizePx  = sizePx;
+        const std::vector<HE::UITextVisualLine> lines = visualLines();
         HE::UITextLayout lopts;                 // alignH left, alignV TOP
         lopts.alignV = 0;
         const float step = sizePx * lopts.lineSpacing;
@@ -1368,7 +1373,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         // Keep the caret in view. Only while focused: a reader who scrolled up
         // to look at something should not be yanked back by a caret they are not
         // moving.
-        const size_t caretLine = HE::uiLineOfOffset(lines, caret);
+        const size_t caretLine = HE::uiVisualLineOfOffset(lines, caret);
         if (st.editing)
         {
             const float top = static_cast<float>(caretLine) * step;
@@ -1384,7 +1389,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         const float x0   = tp.x;
         const float yTop = px.y + pad - scrollPxY;
         auto lineY = [&](size_t i) { return yTop + static_cast<float>(i) * step; };
-        auto shownUpTo = [&](const HE::UITextLineRange& ln, size_t byte)
+        auto shownUpTo = [&](const HE::UITextVisualLine& ln, size_t byte)
         {
             const size_t b = std::min(std::max(byte, ln.begin), ln.end);
             return runWidth(shownFor(text.substr(ln.begin, b - ln.begin)));
@@ -1398,7 +1403,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
             const size_t a = selMin(), b = selMax();
             for (size_t i = 0; i < lines.size(); ++i)
             {
-                const HE::UITextLineRange& ln = lines[i];
+                const HE::UITextVisualLine& ln = lines[i];
                 if (ln.end < a || ln.begin > b) continue;
                 const float xa = shownUpTo(ln, a), xb = shownUpTo(ln, b);
                 // A line whose newline is inside the selection gets a small stub
@@ -1420,7 +1425,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         {
             const float y = lineY(i);
             if (y + sizePx < px.y || y > px.y + px.h) continue;
-            const HE::UITextLineRange& ln = lines[i];
+            const HE::UITextVisualLine& ln = lines[i];
             const std::string run = shownFor(text.substr(ln.begin, ln.end - ln.begin));
             if (run.empty()) continue;
             emitTextL(*this, run, { x0, y }, { ts.x, sizePx }, sizePx, textColor, lopts, out);
@@ -1535,6 +1540,21 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     }
 }
 
+// The rows the field shows. One function, three callers — render, caretAtPoint
+// and the manager's arrow keys — because the alternative is three answers to
+// "where does row two begin", and the caret ends up beside its own glyphs.
+std::vector<HE::UITextVisualLine> UITextInput::visualLines() const
+{
+    // Wrapping needs a width, and the width is only known once the field has
+    // been drawn. Not yet drawn, not wrapping, not multiline, or a password
+    // (see the header): the authored breaks, exactly as before.
+    if (!multiline || !wrapText || password || wrapWidthPx <= 0.0f || wrapSizePx <= 0.0f)
+        return HE::uiTextVisualLines(text);
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+    return HE::uiTextWrapRanges(font, text, wrapSizePx, wrapWidthPx);
+}
+
 // Byte offset in `text` nearest to a point `localX` pixels into the field's
 // text area — what a click has to answer to put the caret where it was aimed.
 size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY) const
@@ -1561,7 +1581,7 @@ size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY) con
     size_t lo = 0, hi = text.size();
     if (multiline)
     {
-        const std::vector<HE::UITextLineRange> lines = HE::uiTextLineRanges(text);
+        const std::vector<HE::UITextVisualLine> lines = visualLines();
         const float step = sizePx * opts.lineSpacing;
         // Undo the vertical scroll and the top padding the same way render() put
         // them in. A click above the first line lands on it, below the last on
@@ -1902,6 +1922,7 @@ void UITextInput::writeJson(nlohmann::json& j) const
     if (!editable)     j["editable"] = false;
     if (!selectable)   j["selectable"] = false;
     if (multiline)     j["multiline"] = true;
+    if (wrapText)      j["wrapText"] = true;
     if (selectionColor != glm::vec4(0.25f, 0.45f, 0.80f, 0.75f))
         j["selectionColor"] = colJson(selectionColor);
     // Same rule: written only when set, so every field authored before the
@@ -1921,6 +1942,7 @@ void UITextInput::readJson(const nlohmann::json& j)
     editable   = j.value("editable", true);
     selectable = j.value("selectable", true);
     multiline  = j.value("multiline", false);
+    wrapText   = j.value("wrapText", false);
     inputFilter  = j.value("inputFilter", static_cast<int>(FilterAny));
     allowedChars = j.value("allowedChars", std::string());
     // The authored text decides where the caret starts, not a stale offset.

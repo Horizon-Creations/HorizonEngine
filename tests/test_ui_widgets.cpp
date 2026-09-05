@@ -186,6 +186,7 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Editable", UIPropType::Bool },
             { "Selectable", UIPropType::Bool },
             { "Multiline", UIPropType::Bool },
+            { "Wrap Text", UIPropType::Bool },
             { "Input Filter", UIPropType::Int },
             { "Allowed Characters", UIPropType::String } } },
         { UIWidgetType::ComboBox, {
@@ -3648,6 +3649,204 @@ TEST_CASE("Multiline: the caret is reachable on the empty line a trailing Enter 
     // …and typing there lands on the new line rather than on the old one.
     f.wm.inputText("c");
     CHECK(f.text() == "ab\nc");
+}
+
+// ═══ B1b, the rest: breaking a line the author did not break ═════════════════
+// A wrapped row is not an authored line, and the whole difficulty is that a
+// caret cannot tell the two apart by itself. Every case below is about a byte
+// staying reachable across a break the author never typed.
+
+TEST_CASE("Wrapped rows: the break eats the spaces and leaves no byte between rows")
+{
+    const HE::BakedUIFont& font = HE::sharedUIFont();
+    REQUIRE(font.ok);
+    HE::UITextLayout opts;
+    const float sizePx = 16.0f;
+    const std::string text = "alpha beta gamma";
+    // A width that takes two of the three words. Measured with the same
+    // function the splitter measures with, so this cannot drift with the font.
+    const float w2 = HE::measureUIText(font, "alpha beta", sizePx, 0.0f, opts).x;
+    const float w3 = HE::measureUIText(font, text, sizePx, 0.0f, opts).x;
+    REQUIRE(w3 > w2);
+    const float wrapAt = (w2 + w3) * 0.5f;
+
+    const auto rows = HE::uiTextWrapRanges(font, text, sizePx, wrapAt);
+    REQUIRE(rows.size() == 2);
+    // The row stops IN FRONT of the space the break ate, and the next one
+    // starts behind it. That is the whole contract: `end` is what gets drawn,
+    // `next` is where the row below begins, and the bytes in between are still
+    // addressable rather than lost at a seam.
+    CHECK(rows[0].begin == 0);
+    CHECK(rows[0].end   == 10);              // "alpha beta"
+    CHECK(rows[0].next  == 11);              // past the one space
+    CHECK_FALSE(rows[0].hard);               // nobody typed this break
+    CHECK(rows[1].begin == 11);
+    CHECK(rows[1].end   == text.size());
+    CHECK(rows[1].hard);                     // …but the end of the text is hard
+
+    // Said as a rule rather than as three numbers: every offset in the text,
+    // the one past the end included, lands on a row that actually contains it.
+    for (std::size_t b = 0; b <= text.size(); ++b)
+    {
+        const std::size_t r = HE::uiVisualLineOfOffset(rows, b);
+        CHECK(b >= rows[r].begin);
+        CHECK((b <= rows[r].end || b < rows[r].next));
+    }
+    // The row a caret at the break belongs to is the one it was typed on…
+    CHECK(HE::uiVisualLineOfOffset(rows, 10) == 0);
+    // …and the row below starts one byte later.
+    CHECK(HE::uiVisualLineOfOffset(rows, 11) == 1);
+}
+
+TEST_CASE("Wrapped rows: a word wider than the field breaks INSIDE, by characters")
+{
+    const HE::BakedUIFont& font = HE::sharedUIFont();
+    REQUIRE(font.ok);
+    HE::UITextLayout opts;
+    const float sizePx = 16.0f;
+    const std::string text = "unbrechbaresmonsterwort";
+    const float wrapAt = HE::measureUIText(font, "unbre", sizePx, 0.0f, opts).x;
+
+    const auto rows = HE::uiTextWrapRanges(font, text, sizePx, wrapAt);
+    REQUIRE(rows.size() > 2);
+    // Nothing is dropped and nothing is duplicated: the rows follow one another
+    // without a gap. A word broken by bytes rather than by rows is the way this
+    // goes wrong, and it goes wrong silently.
+    CHECK(rows.front().begin == 0);
+    CHECK(rows.back().end == text.size());
+    for (std::size_t i = 0; i + 1 < rows.size(); ++i)
+    {
+        CHECK(rows[i].end > rows[i].begin);      // never an empty row
+        CHECK(rows[i].next == rows[i + 1].begin);
+    }
+
+    // A two-byte character is never split down the middle — neither half is
+    // anything, and the atlas draws a box for both.
+    const std::string umlauts = "ääääääääääääääää";
+    const auto urows = HE::uiTextWrapRanges(font, umlauts, sizePx,
+                                            HE::measureUIText(font, "ää", sizePx, 0.0f, opts).x);
+    REQUIRE(urows.size() > 1);
+    for (const auto& r : urows)
+    {
+        CHECK(r.begin % 2 == 0);
+        CHECK(r.end % 2 == 0);
+    }
+}
+
+TEST_CASE("Wrapped rows: an authored break stays an authored break")
+{
+    const HE::BakedUIFont& font = HE::sharedUIFont();
+    REQUIRE(font.ok);
+    // Wide enough that nothing wraps: what comes back has to be exactly the
+    // authored lines, or turning Wrap Text on would move text in a field that
+    // is not too narrow for anything.
+    const auto rows = HE::uiTextWrapRanges(font, "ab\ncd", 16.0f, 10000.0f);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].end == 2); CHECK(rows[0].next == 3); CHECK(rows[0].hard);
+    CHECK(rows[1].begin == 3); CHECK(rows[1].end == 5);
+
+    // CRLF: two bytes sit between the rows, and `next` knows it.
+    const auto crlf = HE::uiTextWrapRanges(font, "ab\r\ncd", 16.0f, 10000.0f);
+    REQUIRE(crlf.size() == 2);
+    CHECK(crlf[0].end == 2);          // without the '\r'
+    CHECK(crlf[0].next == 4);
+    CHECK(crlf[1].begin == 4);
+
+    // An unusable width answers like the plain splitter rather than by
+    // wrapping everything into nothing.
+    CHECK(HE::uiTextWrapRanges(font, "ab\ncd", 16.0f, 0.0f).size() == 2);
+    // …and the trailing empty line survives here too, for the same reason it
+    // does in uiTextLineRanges: Enter at the end needs somewhere to stand.
+    REQUIRE(HE::uiTextVisualLines("ab\n").size() == 2);
+    CHECK(HE::uiTextVisualLines("ab\n")[1].begin == 3);
+}
+
+TEST_CASE("Wrapping field: Down walks the ROW below, inside one paragraph")
+{
+    TextFieldFixture f("");
+    f.live()->multiline = true;
+    f.live()->sizeY = 120.0f;
+    // One paragraph and not a single newline in it: without wrapping this is
+    // one line, and there is no row for Down to go to.
+    f.live()->text = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+                     " lambda mu nu xi omicron pi rho sigma tau upsilon";
+    f.live()->caret = f.live()->selAnchor = 0;
+
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+    // Wrap Text off: one row, and the text runs off the right edge as before.
+    CHECK(f.live()->visualLines().size() == 1);
+
+    f.live()->wrapText = true;
+    out.clear();
+    f.wm.extract(400.0f, 200.0f, out);      // …this is where the width is learnt
+    const std::size_t rowCount = f.live()->visualLines().size();
+    REQUIRE(rowCount > 1);
+
+    // Down moves, and it moves WITHIN the paragraph — the text is untouched.
+    REQUIRE(f.wm.editFocusedText(WidgetManager::TextEdit::Down, false));
+    CHECK(f.caret() > 0);
+    CHECK(f.text().find('\n') == std::string::npos);
+    CHECK(HE::uiVisualLineOfOffset(f.live()->visualLines(), f.caret()) == 1);
+    // …and back up again lands on the row it started from.
+    REQUIRE(f.wm.editFocusedText(WidgetManager::TextEdit::Up, false));
+    CHECK(HE::uiVisualLineOfOffset(f.live()->visualLines(), f.caret()) == 0);
+
+    // End is the ROW's edge, not the paragraph's. If it overshot onto the row
+    // below, End-then-Down would skip a row — which is how this goes wrong
+    // without anybody noticing the End itself was wrong.
+    f.live()->caret = f.live()->selAnchor = 0;
+    REQUIRE(f.wm.editFocusedText(WidgetManager::TextEdit::End, false));
+    const auto rows = f.live()->visualLines();
+    CHECK(f.caret() == rows[0].end);
+    CHECK(f.caret() < f.text().size());
+    CHECK(HE::uiVisualLineOfOffset(rows, f.caret()) == 0);
+    // Home comes back to the row's start, which for row zero is the text's.
+    REQUIRE(f.wm.editFocusedText(WidgetManager::TextEdit::Home, false));
+    CHECK(f.caret() == 0);
+}
+
+TEST_CASE("Wrapping field: a click lands on the row it was aimed at")
+{
+    TextFieldFixture f("");
+    f.live()->multiline = true;
+    f.live()->wrapText  = true;
+    f.live()->sizeY = 120.0f;
+    f.live()->text = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+                     " lambda mu nu xi omicron pi rho sigma tau upsilon";
+    f.live()->caret = f.live()->selAnchor = 0;
+
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+    REQUIRE(f.live()->visualLines().size() > 1);
+
+    const float step = f.live()->fontSize * 1.15f;
+    // The middle of the second row, near its left edge. 6 is the field's own
+    // padding, the same number render() draws with.
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 8.0f, 6.0f + step * 1.5f));
+    CHECK(HE::uiVisualLineOfOffset(f.live()->visualLines(), f.caret()) == 1);
+    // …and the first row, so this is not simply "wherever the last one was".
+    REQUIRE(f.wm.setCaretFromPointer(400.0f, 200.0f, 8.0f, 6.0f + step * 0.5f));
+    CHECK(HE::uiVisualLineOfOffset(f.live()->visualLines(), f.caret()) == 0);
+}
+
+TEST_CASE("Wrapping field: a password field and a field never drawn keep the old answer")
+{
+    // Before the first draw nothing knows the field's pixel width, and a guess
+    // would be a layout that changes the moment it is actually shown.
+    TextFieldFixture f("alpha beta gamma delta epsilon zeta eta theta iota kappa"
+                       " lambda mu nu xi omicron pi rho sigma tau upsilon");
+    f.live()->multiline = true;
+    f.live()->wrapText  = true;
+    CHECK(f.live()->visualLines().size() == 1);
+
+    // A password is drawn as dots and addressed in bytes; wrapping measured on
+    // the one and cut in the other would be two answers to where row two is.
+    std::vector<UIRenderObject> out;
+    f.wm.extract(400.0f, 200.0f, out);
+    REQUIRE(f.live()->visualLines().size() > 1);
+    f.live()->password = true;
+    CHECK(f.live()->visualLines().size() == 1);
 }
 
 TEST_CASE("uiUtf8: cursor movement never lands inside a character")

@@ -3269,8 +3269,12 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 		// Where the lines are. Cheap and only asked for by the four operations
 		// below that mean something per line; a single-line field gets one range
 		// covering everything, so Home and End keep their old answers exactly.
-		const std::vector<HE::UITextLineRange> lines = HE::uiTextLineRanges(ti->text);
-		const size_t li = HE::uiLineOfOffset(lines, ti->caret);
+		//
+		// The rows the field SHOWS, not the ones somebody typed: in a wrapping
+		// field Down means the row below, and that is regularly the same
+		// paragraph. Without wrapping the two are the same list.
+		const std::vector<HE::UITextVisualLine> lines = ti->visualLines();
+		const size_t li = HE::uiVisualLineOfOffset(lines, ti->caret);
 
 		switch (op)
 		{
