@@ -1991,6 +1991,12 @@ const char* surfacePropOf(const UIElement& e)
     case UIWidgetType::ListView:    return "Back Color";
     case UIWidgetType::ProgressBar: return "Back Color";
     case UIWidgetType::TabBox:      return "Tab Color";
+    case UIWidgetType::DatePicker:  return "Back Color";
+    // The ColorPicker's background is a surface, but nothing READABLE stands on
+    // it: its field and its strips are the colour under test, and measuring a
+    // marker ring against them would report a number about a colour the author
+    // did not choose.
+    case UIWidgetType::ColorPicker: return "Back Color";
     default:                        return nullptr;
     }
 }
@@ -2005,6 +2011,7 @@ const char* textPropOf(const UIElement& e)
     case UIWidgetType::TextInput: return "Text Color";
     case UIWidgetType::ComboBox:  return "Text Color";
     case UIWidgetType::TabBox:    return "Text Color";
+    case UIWidgetType::DatePicker: return "Text Color";
     default:                      return nullptr;
     }
 }

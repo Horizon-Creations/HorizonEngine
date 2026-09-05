@@ -122,6 +122,13 @@ public:
     { fireEvent("OnCheckChanged", elem, Value::ofBool(checked)); }
     virtual void onSelectionChanged(int elem, int index)
     { fireEvent("OnSelectionChanged", elem, Value::ofInt(index)); }
+    // A day was picked in a calendar. The payload is the date as "YYYY-MM-DD".
+    virtual void onDateChanged(int elem, const std::string& isoDate)
+    { fireEvent("OnDateChanged", elem, Value::ofString(isoDate)); }
+    // A colour was picked. Four numbers, so it carries a Color rather than
+    // being squeezed through OnValueChanged.
+    virtual void onColorChanged(int elem, const glm::vec4& color)
+    { fireEvent("OnColorChanged", elem, Value::ofColor(color)); }
     // List rows — the argument is the ITEM index in both cases.
     virtual void onRowBind(int elem, int index)
     { fireEvent("OnRowBind", elem, Value::ofInt(index)); }

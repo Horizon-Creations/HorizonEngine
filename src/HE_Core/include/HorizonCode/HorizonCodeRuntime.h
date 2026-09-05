@@ -246,6 +246,13 @@ public:
     void fireOnFileChanged(InstanceId id, int elem, const std::string& path);
     // A link in a rich-text label — the payload is the id the markup gave it.
     void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
+    // A day was picked in a calendar. The payload is "YYYY-MM-DD": the one
+    // spelling of a date that no locale disagrees about, and the only one a
+    // parser on the other end can be sure of.
+    void fireOnDateChanged(InstanceId id, int elem, const std::string& isoDate);
+    // A colour was picked. Its own event rather than OnValueChanged, because a
+    // colour is four numbers and the pin type for it already exists.
+    void fireOnColorChanged(InstanceId id, int elem, const glm::vec4& color);
     // Dragging inside the application. OnDrop's payload is what the SOURCE said
     // it was; OnDragEnded's bool is whether anything took it.
     void fireOnDragStarted(InstanceId id, int elem);

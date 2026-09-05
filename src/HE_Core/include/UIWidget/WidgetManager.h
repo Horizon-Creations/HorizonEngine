@@ -782,6 +782,13 @@ private:
         // reason as the two above: one pointer stream, three different things
         // it can be doing, and a shared flag would make them fight.
         int draggingSplit  = 0;
+        // ColorPicker being dragged, and WHICH of its three parts took hold:
+        // 0 = the saturation/value field, 1 = the hue strip, 2 = alpha. The part
+        // is decided once, at the press, and held for the whole drag — pulling
+        // the pointer off the hue strip and across the field must keep changing
+        // the hue, the same rule the slider and the divider already follow.
+        int draggingColor = 0;
+        int colorPart     = 0;
         // The scrollbar thumb being dragged, and how far below its TOP edge the
         // pointer took hold of it. Without the grab offset the thumb jumps so
         // its middle is under the pointer the moment it is touched, which reads

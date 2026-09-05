@@ -3106,6 +3106,94 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
 		break;
 	}
+	case UIWidgetType::DatePicker:
+	{
+		// The SAME layout the runtime clicks against, so an author cannot see
+		// the 12th where a click would land on the 13th.
+		const auto* dp = dynamic_cast<const HE::UIDatePicker*>(&n);
+		if (!dp) break;
+		const HE::UIWidgetRect r{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y };
+		const auto L = HE::UIDatePicker::layoutIn(r);
+		dl->AddRectFilled(mn, mx, C(themedColor(n, "Back Color", dp->backColor)));
+		dl->AddRectFilled(ImVec2(L.header.x, L.header.y),
+		                  ImVec2(L.header.x + L.header.w, L.header.y + L.header.h),
+		                  C(themedColor(n, "Header Color", dp->headerColor)));
+		const float fs = dp->fontSize * s;
+		const ImU32 tc = C(themedColor(n, "Text Color", dp->textColor));
+		const ImU32 mc = C(themedColor(n, "Muted Color", dp->mutedColor));
+		const std::string cap = dp->caption();
+		dl->AddText(nullptr, fs,
+		            ImVec2(L.header.x + L.header.w * 0.5f - fs * 0.28f * cap.size(),
+		                   L.header.y + (L.header.h - fs) * 0.5f), tc, cap.c_str());
+		for (int c = 0; c < HE::UIDatePicker::kCols; ++c)
+			dl->AddText(nullptr, fs * 0.85f,
+			            ImVec2(L.weekdays.x + L.cellW * (c + 0.5f) - fs * 0.25f,
+			                   L.weekdays.y + (L.weekdays.h - fs * 0.85f) * 0.5f),
+			            mc, HE::UIDatePicker::weekdayInitial(c, dp->mondayFirst));
+		const int sel = dp->selectedCell();
+		for (int i = 0; i < HE::UIDatePicker::kCells; ++i)
+		{
+			const float cx = L.grid.x + L.cellW * (i % HE::UIDatePicker::kCols);
+			const float cy = L.grid.y + L.cellH * (i / HE::UIDatePicker::kCols);
+			if (i == sel)
+				dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + L.cellW, cy + L.cellH),
+				                  C(themedColor(n, "Selected Color", dp->selectedColor)),
+				                  std::min(L.cellW, L.cellH) * 0.5f);
+			int dy = 0, dm = 0, dd = 0;
+			dp->dateAtCell(i, dy, dm, dd);
+			char num[4];
+			std::snprintf(num, sizeof(num), "%d", dd);
+			dl->AddText(nullptr, fs,
+			            ImVec2(cx + L.cellW * 0.5f - fs * 0.28f * std::strlen(num),
+			                   cy + (L.cellH - fs) * 0.5f),
+			            dp->cellInMonth(i) ? tc : mc, num);
+		}
+		break;
+	}
+	case UIWidgetType::ColorPicker:
+	{
+		// The field and the strip out of ImGui's own vertex colours: a designer
+		// has to see WHICH colour is picked, and a flat rectangle would show a
+		// picker that looks the same whatever it holds.
+		const auto* cp = dynamic_cast<const HE::UIColorPicker*>(&n);
+		if (!cp) break;
+		const HE::UIWidgetRect r{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y };
+		const auto p = HE::UIColorPicker::partsIn(r, cp->barWidth * s, cp->gap * s,
+		                                          cp->showAlpha);
+		dl->AddRectFilled(mn, mx, C(themedColor(n, "Back Color", cp->backColor)));
+		const glm::vec3 pure = HE::uiHsvToRgb(cp->hueOf(), 1.0f, 1.0f);
+		const ImU32 white = IM_COL32_WHITE;
+		const ImU32 hueC  = IM_COL32((int)(pure.r * 255), (int)(pure.g * 255),
+		                             (int)(pure.b * 255), 255);
+		dl->AddRectFilledMultiColor(ImVec2(p.sv.x, p.sv.y),
+		                            ImVec2(p.sv.x + p.sv.w, p.sv.y + p.sv.h),
+		                            white, hueC, hueC, white);
+		dl->AddRectFilledMultiColor(ImVec2(p.sv.x, p.sv.y),
+		                            ImVec2(p.sv.x + p.sv.w, p.sv.y + p.sv.h),
+		                            IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0),
+		                            IM_COL32(0, 0, 0, 255), IM_COL32(0, 0, 0, 255));
+		const float segH = p.hue.h / 6.0f;
+		for (int i = 0; i < 6; ++i)
+		{
+			const glm::vec3 a = HE::uiHsvToRgb(i * 60.0f, 1.0f, 1.0f);
+			const glm::vec3 b = HE::uiHsvToRgb((i + 1) * 60.0f, 1.0f, 1.0f);
+			const ImU32 ca = IM_COL32((int)(a.r * 255), (int)(a.g * 255), (int)(a.b * 255), 255);
+			const ImU32 cb = IM_COL32((int)(b.r * 255), (int)(b.g * 255), (int)(b.b * 255), 255);
+			dl->AddRectFilledMultiColor(ImVec2(p.hue.x, p.hue.y + segH * i),
+			                            ImVec2(p.hue.x + p.hue.w, p.hue.y + segH * (i + 1)),
+			                            ca, ca, cb, cb);
+		}
+		if (p.hasAlpha)
+			dl->AddRectFilledMultiColor(
+				ImVec2(p.alpha.x, p.alpha.y),
+				ImVec2(p.alpha.x + p.alpha.w, p.alpha.y + p.alpha.h),
+				C(glm::vec4(glm::vec3(cp->color), 1.0f)), C(glm::vec4(glm::vec3(cp->color), 1.0f)),
+				IM_COL32(180, 180, 180, 255), IM_COL32(180, 180, 180, 255));
+		dl->AddCircle(ImVec2(p.sv.x + p.sv.w * cp->saturationOf(),
+		                     p.sv.y + p.sv.h * (1.0f - cp->valueOf())),
+		              std::max(3.0f, p.hue.w * 0.22f), IM_COL32_WHITE);
+		break;
+	}
 	case UIWidgetType::WrapBox:
 	case UIWidgetType::VerticalBox:
 	case UIWidgetType::HorizontalBox:

@@ -2294,6 +2294,18 @@ namespace
 	  "a splitter inside a splitter, which says the same thing with the "
 	  "arithmetic already solved.",
 	  "", "ui#elements" },
+	{ "UI Palette/DatePicker", "",
+	  "A month at a time, as a grid of days you can click. Built in rather than "
+	  "hanging out of its own frame: put it in a form, or — if it should float — "
+	  "in a modal, which is the same thing without a second mechanism. Six rows "
+	  "always, so paging through the months does not move what is under it.",
+	  "", "ui#elements" },
+	{ "UI Palette/ColorPicker", "",
+	  "A saturation/value field with a hue strip beside it, and an alpha strip "
+	  "when Show Alpha is on. The field and the strip are ordinary gradient "
+	  "quads and are EXACT, not an approximation: the hue wheel runs straight in "
+	  "RGB across every 60 degrees.",
+	  "", "ui#elements" },
 	{ "UI Palette/WidgetRef", "",
 	  "Another widget, used here as one element. Not offered in the palette as a "
 	  "bare type — you pick the widget itself from Components or User Defined, "

@@ -2170,6 +2170,12 @@ const std::vector<EngineEventDesc>& engineEvents()
         { "OnValueChanged",       "onValueChanged",       P::Float,  true  },
         { "OnCheckChanged",       "onCheckChanged",       P::Bool,   true  },
         { "OnSelectionChanged",   "onSelectionChanged",   P::Int,    true  },
+        // A day was picked in a calendar. String payload, "YYYY-MM-DD": a date
+        // written any other way is a date the far end has to guess the order of.
+        { "OnDateChanged",        "onDateChanged",        P::String, true  },
+        // A colour was picked. Colour payload, because one exists and squeezing
+        // four numbers through a float would make every graph unpack them again.
+        { "OnColorChanged",       "onColorChanged",       P::Color,  true  },
         // An animation reached its target. String payload: WHICH property, so
         // "fade it, then hide it" can tell the fade from the slide beside it.
         { "OnAnimationFinished",  "onAnimationFinished",  P::String, true  },

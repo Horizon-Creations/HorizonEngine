@@ -92,6 +92,16 @@ enum class UIWidgetType : uint8_t
     // Two panes and a divider you can drag. The other half of "an app with a
     // sidebar": a Tab Box says which page, a Splitter says how much room.
     Splitter,
+    // A month at a time, as a grid of days you can click. Built IN rather than
+    // as a popup: a picker that has to hang out of its own rect is the manager's
+    // business (see the ComboBox's open list), and a calendar that is simply an
+    // element can be put in a form, in a panel, or — if somebody wants it
+    // floating — in a modal from B4, which is the same thing without a second
+    // mechanism.
+    DatePicker,
+    // A hue strip and a saturation/value field, out of the one shape this
+    // system has. Same reason for being embedded as the calendar above.
+    ColorPicker,
     COUNT
 };
 

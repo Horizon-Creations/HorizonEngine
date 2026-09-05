@@ -1274,4 +1274,212 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── The calendar arithmetic ──────────────────────────────────────────────────
+// Free functions rather than members: they are about the Gregorian calendar and
+// not about a widget, a test can pin them without building an element, and the
+// day a second thing needs "how many days has February" it must not have to
+// reach into a UI type to ask.
+HE_API bool uiIsLeapYear(int year);
+HE_API int  uiDaysInMonth(int year, int month);   // month 1..12
+// Sakamoto's rule. 0 = Sunday … 6 = Saturday, proleptic Gregorian, which is what
+// every calendar in a UI shows.
+HE_API int  uiDayOfWeek(int year, int month, int day);
+
+// ── DatePicker (docs/he-apps-plan.md B9) ─────────────────────────────────────
+// A month at a time: a caption with an arrow either side, a weekday strip, and
+// SIX rows of seven days. Six always, even for a February that fits in four —
+// a control that changes height when you page through it moves everything below
+// it, and a calendar is the one widget people page through fast.
+//
+// The grid is scale-free on purpose. Its rows are FRACTIONS of the element's
+// own rect (a caption of 1.25 rows, a weekday strip of 0.75, six day rows =
+// eight in all), so `cellAt` and the draw share one sum without either of them
+// having to convert canvas units into pixels first. The lesson is the scroll
+// thumb's and the tab strip's: the day drawing and grabbing are two sums is the
+// day a click lands on the wrong date.
+class HE_API UIDatePicker final : public UIElement
+{
+public:
+    // The date shown AND picked. Three ints rather than one string, because a
+    // property is written by a script and by the editor's number rows, and a
+    // string would have to be parsed on every one of those writes.
+    //
+    // NOT clamped on write — deliberately. A property that changes the value it
+    // was given is a property the editor and HorizonCode cannot round-trip, so
+    // the clamp lives at every READ (clampedMonth/clampedDay), the way a
+    // Slider's normalized() guards min == max instead of the setter doing it.
+    int   year = 2026, month = 1, day = 1;
+    // Which column the week starts in. Monday by default: the calendar this
+    // engine's users read starts there, and the American Sunday is the setting.
+    bool  mondayFirst = true;
+    float fontSize = 14.0f;
+    glm::vec4 backColor{ 0.13f, 0.13f, 0.15f, 1.0f };
+    glm::vec4 headerColor{ 0.18f, 0.18f, 0.21f, 1.0f };
+    glm::vec4 textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    // The days that belong to the month before or after this one. They are
+    // shown rather than left blank so the grid reads as a continuous calendar,
+    // and clicking one pages to that month — which is the shortest way there.
+    glm::vec4 mutedColor{ 0.55f, 0.55f, 0.60f, 1.0f };
+    glm::vec4 selectedColor{ 0.30f, 0.60f, 0.90f, 1.0f };
+    glm::vec4 hoverColor{ 0.25f, 0.25f, 0.30f, 1.0f };
+
+    // Runtime state, like a ComboBox's hoverIndex and for the same reason: the
+    // pointer stays on the same ELEMENT while it travels from day to day, so
+    // nothing in the hover machinery notices. -1 = none.
+    int hoverCell = -1;
+
+    UIDatePicker() { sizeX = 240.0f; sizeY = 220.0f; cornerRadius = glm::vec4(4.0f); }
+    UIWidgetType type() const override { return UIWidgetType::DatePicker; }
+    const char*  typeName() const override { return "DatePicker"; }
+    bool interactive() const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIDatePicker>(*this); }
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnDateChanged", UIPropType::String, true } }; }
+
+    // ── The clamps, applied where the value is READ ──────────────────────────
+    int clampedMonth() const { return month < 1 ? 1 : (month > 12 ? 12 : month); }
+    int clampedYear()  const { return year  < 1 ? 1 : (year  > 9999 ? 9999 : year); }
+    int clampedDay()   const
+    {
+        const int n = uiDaysInMonth(clampedYear(), clampedMonth());
+        return day < 1 ? 1 : (day > n ? n : day);
+    }
+    // "YYYY-MM-DD" — the one form of a date nobody's locale disagrees about,
+    // and the payload OnDateChanged carries. The same reason the number field
+    // writes its value without a locale: a string a parser cannot read back is
+    // not an answer.
+    std::string isoDate() const;
+
+    static const int kCols = 7, kRows = 6, kCells = 42;
+
+    // Which cell the 1st of the shown month falls in, 0..6.
+    int firstCell() const
+    {
+        const int dow = uiDayOfWeek(clampedYear(), clampedMonth(), 1);
+        return (dow - (mondayFirst ? 1 : 0) + 7) % 7;
+    }
+    // The date cell `index` (0..41) shows, which may belong to the month before
+    // or after. Out-of-range index yields the shown month's 1st.
+    void dateAtCell(int index, int& outYear, int& outMonth, int& outDay) const;
+    // True when that cell belongs to the month the caption names.
+    bool cellInMonth(int index) const;
+    // …and which cell holds the picked day, or -1 (never, in practice: the
+    // picked day is always in the shown month).
+    int selectedCell() const;
+
+    // ── The one sum ──────────────────────────────────────────────────────────
+    // Everything the draw and the hit test need, in whatever units `r` is in.
+    struct Layout
+    {
+        UIWidgetRect header, weekdays, grid;
+        UIWidgetRect prevArrow, nextArrow;
+        float cellW = 0.0f, cellH = 0.0f;
+    };
+    static Layout layoutIn(const UIWidgetRect& r);
+    // The cell a point is on, or -1. Same units as `r`.
+    static int    cellAt(const UIWidgetRect& r, float x, float y);
+    // -1 = the left arrow, +1 = the right one, 0 = neither.
+    static int    arrowAt(const UIWidgetRect& r, float x, float y);
+    // The caption, e.g. "September 2026". English month names: the catalog (B10)
+    // is what translates a widget's text, and it works on properties, so a name
+    // baked into the draw would be the one string nobody can reach. It is here
+    // as the readable default, and a localized calendar is its own feature.
+    std::string caption() const;
+    // The seven weekday initials, in the order this picker's columns run.
+    static const char* weekdayInitial(int column, bool mondayFirst);
+
+    // Page by whole months, keeping the day where it can be kept — the 31st of
+    // March goes back to the 28th of February, not forward into March again.
+    void addMonths(int delta);
+
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
+// ── HSV ⇄ RGB ────────────────────────────────────────────────────────────────
+// Free, like the calendar arithmetic above, and for the same reasons. Both work
+// on the sRGB-encoded numbers this UI actually blends, which is what HSV has
+// always been defined over — a conversion through linear light would be a
+// different colour space wearing the same name.
+HE_API glm::vec3 uiHsvToRgb(float hueDeg, float sat, float val);
+HE_API void      uiRgbToHsv(const glm::vec3& rgb, float& hueDeg, float& sat, float& val);
+
+// ── ColorPicker (docs/he-apps-plan.md B9) ────────────────────────────────────
+// A saturation/value field, a hue strip beside it, and an alpha strip when it is
+// asked for. Out of ordinary quads, and EXACTLY so — this is not an
+// approximation that looks close enough:
+//
+//   * At S = V = 1 the hue wheel is piecewise LINEAR in RGB across each 60°
+//     segment, so six gradient quads are the hue strip, not a picture of it.
+//   * HSV at V = 1 is mix(white, hue, S) exactly, which is one horizontal
+//     gradient.
+//   * Multiplying by V is the same as laying black over it at alpha 1 - V,
+//     which is one vertical gradient with alpha in it. The blend is "over" in
+//     sRGB, which is the space the arithmetic above is in.
+//
+// So the field is two quads and the strip is six, and no backend needs to learn
+// anything about colour pickers.
+class HE_API UIColorPicker final : public UIElement
+{
+public:
+    // The colour IS the truth, kept verbatim: what a script writes is what it
+    // reads back, bit for bit. Storing H/S/V instead and deriving the colour
+    // would round-trip through two conversions and hand back something a hair
+    // off — which is the sort of thing that shows up as a value drifting every
+    // time a panel is reopened.
+    glm::vec4 color{ 0.30f, 0.60f, 0.90f, 1.0f };
+    // …with ONE exception, and it is why this field exists. A grey has no hue —
+    // rgbToHsv can only answer 0 — so dragging the value down to black and back
+    // up again would land on red. This remembers the hue the drag came from and
+    // is only ever consulted while the saturation is nothing.
+    float hue = 210.0f;
+    // The fourth channel, off by default: most colours in an app are opaque and
+    // a strip for a number nobody sets is a strip in the way.
+    bool  showAlpha = false;
+    float barWidth = 18.0f;   // canvas units, the hue (and alpha) strip's width
+    float gap      = 8.0f;    // between the field and the strips
+    glm::vec4 backColor{ 0.13f, 0.13f, 0.15f, 1.0f };
+
+    UIColorPicker() { sizeX = 240.0f; sizeY = 180.0f; cornerRadius = glm::vec4(4.0f); }
+    UIWidgetType type() const override { return UIWidgetType::ColorPicker; }
+    const char*  typeName() const override { return "ColorPicker"; }
+    bool interactive() const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIColorPicker>(*this); }
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnColorChanged", UIPropType::Color, true } }; }
+
+    // The picked colour as H, S and V. `hueOf` is the only one that consults the
+    // remembered hue, and only where the colour cannot answer.
+    float saturationOf() const;
+    float valueOf() const;
+    float hueOf() const;
+    // Write H/S/V, keep alpha, and remember the hue. This is what a drag calls.
+    void setHsv(float hueDeg, float sat, float val);
+    // Write a colour and keep `hue` in step with it — the setter behind the
+    // "Color" property, so a script writing a colour and a hand dragging the
+    // field leave the element in the same state.
+    void setColor(const glm::vec4& c);
+
+    // ── The one sum, again ───────────────────────────────────────────────────
+    struct Parts { UIWidgetRect sv, hue, alpha; bool hasAlpha = false; };
+    // `barPx`/`gapPx` are the two properties already converted into whatever
+    // units `r` is in — the caller knows the scale, this does not.
+    static Parts partsIn(const UIWidgetRect& r, float barPx, float gapPx, bool withAlpha);
+
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 } // namespace HE

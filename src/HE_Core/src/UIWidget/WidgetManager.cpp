@@ -723,6 +723,7 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 	auto forget = [&](int& elem){ if (elem == rootElem || (elem > lo && elem <= hi)) elem = 0; };
 	forget(w->hoveredElem); forget(w->pressedElem); forget(w->focusedElem);
 	forget(w->draggingSlider); forget(w->draggingText); forget(w->draggingSplit);
+	forget(w->draggingColor);
 	if (w->focusedElem == 0 && m_focusWidget == w->id) m_focusWidget = 0;
 
 	m_visualDirty = true;
@@ -2274,7 +2275,8 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 	// the value would stop following the mouse and the window would start.
 	if (m_dragArmed || m_dragActive) return HE::UIWindowHit::Normal;
 	for (const auto& w : m_instances)
-		if (w.draggingSlider || w.draggingText || w.draggingSplit || w.draggingScroll)
+		if (w.draggingSlider || w.draggingText || w.draggingSplit || w.draggingScroll ||
+		    w.draggingColor)
 			return HE::UIWindowHit::Normal;
 
 	// The edges come before the picture: a title bar that runs to the very top
@@ -2733,6 +2735,25 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			if (lv->hoveredRow != was) m_visualDirty = true;
 		}
 
+		// …and the hovered DAY of every calendar, for exactly the same reason:
+		// the pointer never leaves the picker while it travels from day to day.
+		for (auto& ep : w.tree.elements)
+		{
+			auto* dp = dynamic_cast<HE::UIDatePicker*>(ep.get());
+			if (!dp) continue;
+			const int was = dp->hoverCell;
+			dp->hoverCell = -1;
+			if (isTop && topHit == dp->id)
+			{
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
+				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+				dp->hoverCell = HE::UIDatePicker::cellAt(pxr, mouseX, mouseY);
+			}
+			if (dp->hoverCell != was) m_visualDirty = true;
+		}
+
 		// ── Press ────────────────────────────────────────────────────────────
 		if (pressEdge)
 		{
@@ -2812,6 +2833,54 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 								stepperTook = true;
 							}
 					}
+				}
+				// A calendar: the two arrows page the month, the grid is
+				// answered by the RELEASE (activateElement) like every other
+				// click. The arrows are here for the same reason the number
+				// field's are — pressing one and holding must not also drop a
+				// selection on the day behind it.
+				if (const auto* dp = dynamic_cast<const HE::UIDatePicker*>(e))
+				{
+					const HE::UIWidgetCanvas canvas =
+						resolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
+					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const int dir = HE::UIDatePicker::arrowAt(pxr, mouseX, mouseY);
+					if (dir != 0)
+						if (auto* live = dynamic_cast<HE::UIDatePicker*>(w.tree.find(hot)))
+						{
+							live->addMonths(dir);
+							m_visualDirty = true;
+							// Paging is not picking: the date the owner holds is
+							// unchanged, so nothing is fired. The release must
+							// not land on the day now under the arrow either.
+							w.pressedElem = 0;
+						}
+				}
+				// A colour picker: which of its three parts took hold is
+				// decided HERE, once, and held for the whole drag.
+				if (const auto* cp = dynamic_cast<const HE::UIColorPicker*>(e))
+				{
+					const HE::UIWidgetCanvas canvas =
+						resolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
+					float us = 1.0f, vs = 1.0f;
+					HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
+					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const auto parts = HE::UIColorPicker::partsIn(
+						pxr, cp->barWidth * canvas.scaleY * vs,
+						cp->gap * canvas.scaleY * vs, cp->showAlpha);
+					auto in = [&](const HE::UIWidgetRect& q)
+					{
+						return mouseX >= q.x && mouseX <= q.x + q.w &&
+						       mouseY >= q.y && mouseY <= q.y + q.h;
+					};
+					const int part = in(parts.hue) ? 1
+					               : (parts.hasAlpha && in(parts.alpha)) ? 2
+					               : (in(parts.sv) ? 0 : -1);
+					if (part >= 0) { w.draggingColor = hot; w.colorPart = part; }
 				}
 				// A Tab Box: the strip switches pages, the rest is the page.
 				if (const auto* tb = dynamic_cast<const HE::UITabBox*>(e))
@@ -2925,7 +2994,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			// The three drags above get first claim: a slider's handle inside a
 			// draggable card belongs to the slider, and the card would otherwise
 			// steal every value change made on it.
-			if (hot != 0 && !w.draggingSlider && !w.draggingText && !w.draggingSplit)
+			if (hot != 0 && !w.draggingSlider && !w.draggingText && !w.draggingSplit &&
+			    !w.draggingColor)
 				if (const int src = draggableAt(w, hot))
 				{
 					m_dragWidget = w.id; m_dragElem = src;
@@ -2992,6 +3062,45 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			}
 		}
 
+		// ── Colour picker drag ───────────────────────────────────────────────
+		// Same shape as the slider and the divider: no hit test, because the
+		// part was chosen at the press and letting go is what ends a grab. The
+		// pointer is turned into a fraction of the PART's own rect, so a picker
+		// inside a scaled canvas measures against itself.
+		if (w.draggingColor != 0 && primaryDown)
+		{
+			if (auto* cp = dynamic_cast<HE::UIColorPicker*>(w.tree.find(w.draggingColor)))
+			{
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
+				float us = 1.0f, vs = 1.0f;
+				HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
+				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+				const auto parts = HE::UIColorPicker::partsIn(
+					pxr, cp->barWidth * canvas.scaleY * vs,
+					cp->gap * canvas.scaleY * vs, cp->showAlpha);
+				auto frac = [](float v, float lo, float len)
+				{ return len > 0.0f ? std::clamp((v - lo) / len, 0.0f, 1.0f) : 0.0f; };
+				const glm::vec4 before = cp->color;
+				if (w.colorPart == 1)
+					cp->setHsv(frac(mouseY, parts.hue.y, parts.hue.h) * 360.0f,
+					           cp->saturationOf(), cp->valueOf());
+				else if (w.colorPart == 2 && parts.hasAlpha)
+					cp->color.a = 1.0f - frac(mouseY, parts.alpha.y, parts.alpha.h);
+				else
+					cp->setHsv(cp->hueOf(), frac(mouseX, parts.sv.x, parts.sv.w),
+					           1.0f - frac(mouseY, parts.sv.y, parts.sv.h));
+				if (cp->color != before)
+				{
+					m_visualDirty = true;
+					const ScriptTarget t2 = scriptTargetFor(w, w.draggingColor);
+					rt().fireOnColorChanged(t2.scriptId, t2.elem, cp->color);
+				}
+			}
+			else w.draggingColor = 0;   // the element went away under the hand
+		}
+
 		// ── Scrollbar drag ───────────────────────────────────────────────────
 		// No hit test, like the two above: dragging the pointer off the side of
 		// the bar must keep scrolling, because letting go is what ends a grab.
@@ -3038,6 +3147,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			w.draggingSlider = 0;
 			w.draggingText   = 0;
 			w.draggingSplit  = 0;
+			w.draggingColor  = 0;
 			// Let go of the bar and it STAYS: a thumb has been put exactly
 			// where it was wanted, and throwing it on afterwards would undo the
 			// aim the drag just took.
@@ -3759,10 +3869,17 @@ const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
 	// text in a field follows.
 	static const std::vector<std::string> kTab    = { "Active Tab" };
 	static const std::vector<std::string> kSplit  = { "Ratio" };
+	// A picked date and a picked colour are things a PERSON put there, so a
+	// reload must carry them across — the same rule the text in a field follows.
+	// The calendar's three, because the date is three properties.
+	static const std::vector<std::string> kDate   = { "Year", "Month", "Day" };
+	static const std::vector<std::string> kColor  = { "Color" };
 	switch (t)
 	{
 		case HE::UIWidgetType::TabBox:      return &kTab;
 		case HE::UIWidgetType::Splitter:    return &kSplit;
+		case HE::UIWidgetType::DatePicker:  return &kDate;
+		case HE::UIWidgetType::ColorPicker: return &kColor;
 		case HE::UIWidgetType::TextInput:   return &kText;
 		case HE::UIWidgetType::CheckBox:    return &kCheck;
 		case HE::UIWidgetType::Slider:      return &kSlider;
@@ -4007,6 +4124,35 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 				m_grabs.push_back(g);
 				m_visualDirty = true;
 			}
+		break;
+	case HE::UIWidgetType::DatePicker:
+		// Which day, asked at the pointer's LAST position — the release just
+		// happened there, and the press/release pairing above has already made
+		// sure the press was on this element too.
+		if (auto* dp = dynamic_cast<HE::UIDatePicker*>(e))
+		{
+			const HE::UIWidgetCanvas canvas =
+				resolveCanvas(w.tree, m_lastViewportW, m_lastViewportH);
+			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
+			const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+			                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+			const int cell = HE::UIDatePicker::cellAt(pxr, m_pointerX, m_pointerY);
+			if (cell >= 0)
+			{
+				int cy = 0, cm = 0, cd = 0;
+				dp->dateAtCell(cell, cy, cm, cd);
+				// A day from the month before or after PAGES there and picks it.
+				// Every calendar does this, and it is the shortest way to the
+				// 1st of next month there is.
+				const std::string was = dp->isoDate();
+				dp->year = cy; dp->month = cm; dp->day = cd;
+				if (dp->isoDate() != was)
+				{
+					m_visualDirty = true;
+					rt().fireOnDateChanged(target.scriptId, target.elem, dp->isoDate());
+				}
+			}
+		}
 		break;
 	case HE::UIWidgetType::Text:
 		// A link, and only a link: the rest of a label is not a button. Which one

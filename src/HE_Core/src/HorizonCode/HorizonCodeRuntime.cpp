@@ -709,6 +709,10 @@ HE_HC_VALUE_EVENT(fireOnFileChanged, "OnFileChanged", const std::string&,
                   onFileChanged(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnLinkClicked, "OnLinkClicked", const std::string&,
                   onLinkClicked(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDateChanged, "OnDateChanged", const std::string&,
+                  onDateChanged(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnColorChanged, "OnColorChanged", const glm::vec4&,
+                  onColorChanged(elem, v), Value::ofColor(v))
 HE_HC_VALUE_EVENT(fireOnDrop, "OnDrop", const std::string&,
                   onDrop(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnDragEnded, "OnDragEnded", bool,

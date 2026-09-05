@@ -102,6 +102,8 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::Grid:          return std::make_unique<UIGrid>();
         case UIWidgetType::TabBox:        return std::make_unique<UITabBox>();
         case UIWidgetType::Splitter:      return std::make_unique<UISplitter>();
+        case UIWidgetType::DatePicker:    return std::make_unique<UIDatePicker>();
+        case UIWidgetType::ColorPicker:   return std::make_unique<UIColorPicker>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -115,7 +117,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
         UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
         UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid,
-        UIWidgetType::TabBox, UIWidgetType::Splitter };
+        UIWidgetType::TabBox, UIWidgetType::Splitter,
+        UIWidgetType::DatePicker, UIWidgetType::ColorPicker };
     return kAll;
 }
 
@@ -131,7 +134,8 @@ const char* uiWidgetTypeName(UIWidgetType t)
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
         "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
-        "ListView", "WrapBox", "Grid", "TabBox", "Splitter" };
+        "ListView", "WrapBox", "Grid", "TabBox", "Splitter",
+        "DatePicker", "ColorPicker" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -2399,6 +2403,531 @@ void UISplitter::readJson(const nlohmann::json& j)
     minFirst = j.value("minFirst", minFirst);
     minSecond = j.value("minSecond", minSecond);
     dividerColor = colFrom(j.value("dividerColor", nlohmann::json()), dividerColor);
+}
+
+// ── The Gregorian calendar, and nothing else ─────────────────────────────────
+
+bool uiIsLeapYear(int year)
+{
+    // The full rule, not the divisible-by-four half of it: 1900 was not a leap
+    // year and 2000 was, and a picker that gets February 2100 wrong is a picker
+    // that is wrong about a date somebody will type.
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+int uiDaysInMonth(int year, int month)
+{
+    static const int kDays[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month < 1 || month > 12) return 30;
+    if (month == 2 && uiIsLeapYear(year)) return 29;
+    return kDays[month - 1];
+}
+
+int uiDayOfWeek(int year, int month, int day)
+{
+    // Sakamoto's. The table shifts each month's start so that a year counted
+    // from March (where the leap day is at the END and stops mattering) can be
+    // read off with one division apiece.
+    static const int kShift[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (month < 1 || month > 12) return 0;
+    int y = year;
+    if (month < 3) y -= 1;
+    // + 7 * 400 so a negative proleptic year still lands in range; the modulo of
+    // a negative number is negative in C++ and that would index off the front.
+    y += 2800;
+    return (y + y / 4 - y / 100 + y / 400 + kShift[month - 1] + day) % 7;
+}
+
+// ── DatePicker ───────────────────────────────────────────────────────────────
+
+std::string UIDatePicker::isoDate() const
+{
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+                  clampedYear(), clampedMonth(), clampedDay());
+    return buf;
+}
+
+void UIDatePicker::dateAtCell(int index, int& outYear, int& outMonth, int& outDay) const
+{
+    const int y = clampedYear(), m = clampedMonth();
+    outYear = y; outMonth = m; outDay = 1;
+    if (index < 0 || index >= kCells) return;
+    // How far this cell is from the 1st. Negative reaches back into the month
+    // before, past the length of this one into the month after — which is what
+    // makes the grid a continuous calendar rather than a month in a box.
+    const int offset = index - firstCell();
+    const int n = uiDaysInMonth(y, m);
+    if (offset < 0)
+    {
+        const int pm = m == 1 ? 12 : m - 1;
+        const int py = m == 1 ? y - 1 : y;
+        outYear = py; outMonth = pm;
+        outDay = uiDaysInMonth(py, pm) + offset + 1;
+    }
+    else if (offset >= n)
+    {
+        outYear = m == 12 ? y + 1 : y;
+        outMonth = m == 12 ? 1 : m + 1;
+        outDay = offset - n + 1;
+    }
+    else outDay = offset + 1;
+}
+
+bool UIDatePicker::cellInMonth(int index) const
+{
+    if (index < 0 || index >= kCells) return false;
+    const int offset = index - firstCell();
+    return offset >= 0 && offset < uiDaysInMonth(clampedYear(), clampedMonth());
+}
+
+int UIDatePicker::selectedCell() const
+{
+    const int c = firstCell() + clampedDay() - 1;
+    return c >= 0 && c < kCells ? c : -1;
+}
+
+UIDatePicker::Layout UIDatePicker::layoutIn(const UIWidgetRect& r)
+{
+    Layout L;
+    // Eight rows' worth of height, split 1.25 / 0.75 / 6. Fractions of the rect
+    // rather than authored heights: it is one sum for the draw and the hit test
+    // and it needs no unit conversion, which is the whole reason a click cannot
+    // land on a different day than the one it is over.
+    const float unit = r.h / 8.0f;
+    L.header   = { r.x, r.y, r.w, unit * 1.25f };
+    L.weekdays = { r.x, L.header.y + L.header.h, r.w, unit * 0.75f };
+    L.grid     = { r.x, L.weekdays.y + L.weekdays.h, r.w,
+                   std::max(0.0f, r.h - L.header.h - L.weekdays.h) };
+    L.cellW = r.w / static_cast<float>(kCols);
+    L.cellH = L.grid.h / static_cast<float>(kRows);
+    // The arrows are square, at the caption's two ends.
+    const float a = L.header.h;
+    L.prevArrow = { r.x, r.y, a, a };
+    L.nextArrow = { r.x + r.w - a, r.y, a, a };
+    return L;
+}
+
+int UIDatePicker::cellAt(const UIWidgetRect& r, float x, float y)
+{
+    const Layout L = layoutIn(r);
+    if (L.cellW <= 0.0f || L.cellH <= 0.0f) return -1;
+    if (x < L.grid.x || x >= L.grid.x + L.grid.w) return -1;
+    if (y < L.grid.y || y >= L.grid.y + L.grid.h) return -1;
+    const int col = std::clamp(static_cast<int>((x - L.grid.x) / L.cellW), 0, kCols - 1);
+    const int row = std::clamp(static_cast<int>((y - L.grid.y) / L.cellH), 0, kRows - 1);
+    return row * kCols + col;
+}
+
+int UIDatePicker::arrowAt(const UIWidgetRect& r, float x, float y)
+{
+    const Layout L = layoutIn(r);
+    auto in = [&](const UIWidgetRect& q)
+    { return x >= q.x && x < q.x + q.w && y >= q.y && y < q.y + q.h; };
+    if (in(L.prevArrow)) return -1;
+    if (in(L.nextArrow)) return 1;
+    return 0;
+}
+
+std::string UIDatePicker::caption() const
+{
+    static const char* kMonths[12] = {
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December" };
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s %d", kMonths[clampedMonth() - 1], clampedYear());
+    return buf;
+}
+
+const char* UIDatePicker::weekdayInitial(int column, bool mondayFirst)
+{
+    static const char* kSun[7] = { "S", "M", "T", "W", "T", "F", "S" };
+    static const char* kMon[7] = { "M", "T", "W", "T", "F", "S", "S" };
+    if (column < 0 || column > 6) return "";
+    return mondayFirst ? kMon[column] : kSun[column];
+}
+
+void UIDatePicker::addMonths(int delta)
+{
+    int y = clampedYear(), m = clampedMonth(), d = clampedDay();
+    // Months since year 0, so paging across a December needs no special case.
+    long long total = static_cast<long long>(y) * 12 + (m - 1) + delta;
+    if (total < 0) total = 0;
+    y = static_cast<int>(total / 12);
+    m = static_cast<int>(total % 12) + 1;
+    year = y < 1 ? 1 : (y > 9999 ? 9999 : y);
+    month = m;
+    // The 31st of a month with 30 days is the 30th, not the 1st of the next —
+    // paging forward and back again must not walk the date away from where it
+    // started any further than the short month forces.
+    const int n = uiDaysInMonth(clampedYear(), clampedMonth());
+    day = d > n ? n : d;
+}
+
+const UIPropTable& UIDatePicker::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIDatePicker::year>         ({ "Year", UIPropType::Int }),
+        uiprop::slot<&UIDatePicker::month>        ({ "Month", UIPropType::Int }),
+        uiprop::slot<&UIDatePicker::day>          ({ "Day", UIPropType::Int }),
+        uiprop::slot<&UIDatePicker::mondayFirst>  ({ "Monday First", UIPropType::Bool }),
+        uiprop::slot<&UIDatePicker::fontSize>     ({ "FontSize", UIPropType::Float, 6.0f, 72.0f }),
+        uiprop::slot<&UIDatePicker::backColor>    ({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::headerColor>  ({ "Header Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::textColor>    ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::mutedColor>   ({ "Muted Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::selectedColor>({ "Selected Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::hoverColor>   ({ "Hover Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UIDatePicker::render(const UIWidgetRect& px, const UIElementRenderState&,
+                          const HE::UUID&, float pxScaleY,
+                          std::vector<UIRenderObject>& out) const
+{
+    // The full-rect background FIRST: that is the quad the border, the rounding
+    // and the gradient are stamped onto (WidgetManager::extract).
+    quad(out, px.x, px.y, px.w, px.h, backColor);
+
+    const Layout L = layoutIn(px);
+    const float sizePx = fontSize * pxScaleY;
+    if (headerColor.a > 0.0f)
+        quad(out, L.header.x, L.header.y, L.header.w, L.header.h, headerColor);
+
+    emitText(*this, caption(), { L.header.x + L.prevArrow.w, L.header.y },
+             { std::max(0.0f, L.header.w - 2.0f * L.prevArrow.w), L.header.h },
+             sizePx, textColor, /*centerH=*/true, out);
+
+    // The two arrows, out of the same rows-of-quads triangle the ComboBox uses —
+    // a chevron of two turned bars would lose its angle inside a rotated panel
+    // (see triangle() above), and a calendar in a tilted card is not a special
+    // case anyone should have to think about.
+    auto sideArrow = [&](const UIWidgetRect& box, bool pointLeft)
+    {
+        const float halfH = std::max(2.0f, box.h * 0.17f);
+        const int rows = std::clamp(static_cast<int>(std::ceil(halfH * 2.0f)), 3, 32);
+        const float step = (halfH * 2.0f) / static_cast<float>(rows);
+        const float top  = box.y + box.h * 0.5f - halfH;
+        const float depth = halfH * 1.15f;
+        const float cx = box.x + box.w * 0.5f;
+        for (int i = 0; i < rows; ++i)
+        {
+            // Distance from the middle row: full depth at the point, nothing at
+            // the base, which is a triangle lying on its side.
+            const float f = std::abs((static_cast<float>(i) + 0.5f) / rows - 0.5f) * 2.0f;
+            const float w = depth * (1.0f - f);
+            if (w <= 0.0f) continue;
+            const float x = pointLeft ? cx - depth * 0.5f : cx + depth * 0.5f - w;
+            const float rh = step + 0.5f;
+            quad(out, x, top + step * static_cast<float>(i), w, rh, textColor,
+                 HE::UUID{}, roundedR(w, rh, rh * 0.5f));
+        }
+    };
+    sideArrow(L.prevArrow, true);
+    sideArrow(L.nextArrow, false);
+
+    // The weekday strip.
+    const float wdSize = sizePx * 0.85f;
+    for (int c = 0; c < kCols; ++c)
+        emitText(*this, weekdayInitial(c, mondayFirst),
+                 { L.weekdays.x + L.cellW * static_cast<float>(c), L.weekdays.y },
+                 { L.cellW, L.weekdays.h }, wdSize, mutedColor, /*centerH=*/true, out);
+
+    // The days. The highlight goes down first so the number reads on top of it.
+    const int sel = selectedCell();
+    for (int i = 0; i < kCells; ++i)
+    {
+        const float cx = L.grid.x + L.cellW * static_cast<float>(i % kCols);
+        const float cy = L.grid.y + L.cellH * static_cast<float>(i / kCols);
+        if (i == sel && selectedColor.a > 0.0f)
+            quad(out, cx, cy, L.cellW, L.cellH, selectedColor, HE::UUID{},
+                 roundedR(L.cellW, L.cellH, std::min(L.cellW, L.cellH) * 0.5f));
+        else if (i == hoverCell && hoverColor.a > 0.0f)
+            quad(out, cx, cy, L.cellW, L.cellH, hoverColor, HE::UUID{},
+                 roundedR(L.cellW, L.cellH, std::min(L.cellW, L.cellH) * 0.5f));
+
+        int dy = 0, dm = 0, dd = 0;
+        dateAtCell(i, dy, dm, dd);
+        char num[4];
+        std::snprintf(num, sizeof(num), "%d", dd);
+        emitText(*this, num, { cx, cy }, { L.cellW, L.cellH }, sizePx,
+                 cellInMonth(i) ? textColor : mutedColor, /*centerH=*/true, out);
+    }
+}
+
+void UIDatePicker::writeJson(nlohmann::json& j) const
+{
+    j["year"] = year; j["month"] = month; j["day"] = day;
+    j["mondayFirst"] = mondayFirst;
+    j["fontSize"] = fontSize;
+    j["backColor"] = colJson(backColor);
+    j["headerColor"] = colJson(headerColor);
+    j["textColor"] = colJson(textColor);
+    j["mutedColor"] = colJson(mutedColor);
+    j["selectedColor"] = colJson(selectedColor);
+    j["hoverColor"] = colJson(hoverColor);
+}
+
+void UIDatePicker::readJson(const nlohmann::json& j)
+{
+    year = j.value("year", year); month = j.value("month", month);
+    day = j.value("day", day);
+    mondayFirst = j.value("mondayFirst", mondayFirst);
+    fontSize = j.value("fontSize", fontSize);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
+    headerColor = colFrom(j.value("headerColor", nlohmann::json()), headerColor);
+    textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    mutedColor = colFrom(j.value("mutedColor", nlohmann::json()), mutedColor);
+    selectedColor = colFrom(j.value("selectedColor", nlohmann::json()), selectedColor);
+    hoverColor = colFrom(j.value("hoverColor", nlohmann::json()), hoverColor);
+}
+
+// ── HSV ⇄ RGB ────────────────────────────────────────────────────────────────
+
+glm::vec3 uiHsvToRgb(float hueDeg, float sat, float val)
+{
+    float h = std::fmod(hueDeg, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    const float s = std::clamp(sat, 0.0f, 1.0f);
+    const float v = std::clamp(val, 0.0f, 1.0f);
+    const float c = v * s;
+    const float seg = h / 60.0f;
+    const float x = c * (1.0f - std::abs(std::fmod(seg, 2.0f) - 1.0f));
+    const float m = v - c;
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    switch (static_cast<int>(seg) % 6)
+    {
+        case 0: r = c; g = x; break;
+        case 1: r = x; g = c; break;
+        case 2: g = c; b = x; break;
+        case 3: g = x; b = c; break;
+        case 4: r = x; b = c; break;
+        default: r = c; b = x; break;
+    }
+    return { r + m, g + m, b + m };
+}
+
+void uiRgbToHsv(const glm::vec3& rgb, float& hueDeg, float& sat, float& val)
+{
+    const float r = std::clamp(rgb.r, 0.0f, 1.0f);
+    const float g = std::clamp(rgb.g, 0.0f, 1.0f);
+    const float b = std::clamp(rgb.b, 0.0f, 1.0f);
+    const float mx = std::max(r, std::max(g, b));
+    const float mn = std::min(r, std::min(g, b));
+    const float d = mx - mn;
+    val = mx;
+    sat = mx > 0.0f ? d / mx : 0.0f;
+    // A grey has no hue to report, and answering 0 (red) would be a lie the
+    // caller cannot tell from an answer. UIColorPicker::hueOf is the one place
+    // that knows what to do about it.
+    if (d <= 0.0f) { hueDeg = 0.0f; return; }
+    float h;
+    if (mx == r)      h = 60.0f * std::fmod((g - b) / d, 6.0f);
+    else if (mx == g) h = 60.0f * ((b - r) / d + 2.0f);
+    else              h = 60.0f * ((r - g) / d + 4.0f);
+    if (h < 0.0f) h += 360.0f;
+    hueDeg = h;
+}
+
+// ── ColorPicker ──────────────────────────────────────────────────────────────
+
+float UIColorPicker::saturationOf() const
+{
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(color), h, s, v);
+    return s;
+}
+
+float UIColorPicker::valueOf() const
+{
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(color), h, s, v);
+    return v;
+}
+
+float UIColorPicker::hueOf() const
+{
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(color), h, s, v);
+    // Below that, the colour genuinely has no hue and `hue` is the memory of
+    // the one the drag came from. The threshold is not zero because a colour
+    // that came back out of eight bits per channel is never exactly grey.
+    return s > 0.001f ? h : hue;
+}
+
+void UIColorPicker::setHsv(float hueDeg, float sat, float val)
+{
+    float h = std::fmod(hueDeg, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    hue = h;
+    const glm::vec3 rgb = uiHsvToRgb(h, sat, val);
+    color = glm::vec4(rgb, color.a);
+}
+
+void UIColorPicker::setColor(const glm::vec4& c)
+{
+    color = c;
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(c), h, s, v);
+    // Only when the colour HAS a hue: writing grey must not throw away the hue
+    // the strip is standing on, or the next drag of the value would come back
+    // as red instead of as the colour it was.
+    if (s > 0.001f) hue = h;
+}
+
+UIColorPicker::Parts UIColorPicker::partsIn(const UIWidgetRect& r, float barPx,
+                                            float gapPx, bool withAlpha)
+{
+    Parts p;
+    p.hasAlpha = withAlpha;
+    const float bar = std::max(1.0f, barPx);
+    const float gap = std::max(0.0f, gapPx);
+    const int   bars = withAlpha ? 2 : 1;
+    // The strips take what they need from the right and the field takes the
+    // rest, floored at a pixel: a picker squeezed narrower than its own strips
+    // is a picker with no field, not one with a negative one.
+    const float used = static_cast<float>(bars) * (bar + gap);
+    const float svW  = std::max(1.0f, r.w - used);
+    p.sv = { r.x, r.y, svW, r.h };
+    p.hue = { r.x + svW + gap, r.y, bar, r.h };
+    if (withAlpha) p.alpha = { p.hue.x + bar + gap, r.y, bar, r.h };
+    return p;
+}
+
+namespace
+{
+    // A quad that fades from one colour to another along `angleDeg` (clockwise
+    // from "down", the same convention the authored gradient uses). The alpha
+    // travels with it, which is what makes the value overlay one quad.
+    void gradQuad(std::vector<UIRenderObject>& out, const UIWidgetRect& r,
+                  const glm::vec4& from, const glm::vec4& to, float angleDeg)
+    {
+        UIRenderObject ro;
+        ro.position = { r.x, r.y };
+        ro.size     = { r.w, r.h };
+        ro.color    = from;
+        ro.gradient = true;
+        ro.gradientColor = to;
+        ro.gradientAngleDeg = angleDeg;
+        out.push_back(std::move(ro));
+    }
+
+    // The marker every picker draws: a ring, which is an empty quad with a
+    // border on it. Two of them, light over dark, so it stays visible on both
+    // ends of the field it is standing on.
+    void ring(std::vector<UIRenderObject>& out, float cx, float cy, float radius)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            const float rr = radius + static_cast<float>(i);
+            UIRenderObject ro;
+            ro.position = { cx - rr, cy - rr };
+            ro.size     = { rr * 2.0f, rr * 2.0f };
+            ro.color    = glm::vec4(0.0f);           // the fill shows what is under it
+            ro.cornerRadius = glm::vec4(rr);
+            ro.borderWidth  = 1.0f;
+            ro.borderColor  = i == 0 ? glm::vec4(0.0f, 0.0f, 0.0f, 0.65f)
+                                     : glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
+            out.push_back(std::move(ro));
+        }
+    }
+}
+
+const UIPropTable& UIColorPicker::propTable() const
+{
+    static const UIPropTable t = {
+        // Custom rather than a plain slot on `color`, for one reason: writing a
+        // colour has to keep `hue` in step, or a script that sets grey costs
+        // the strip its position. The GETTER hands the stored colour back
+        // verbatim, so the round trip is exact.
+        uiprop::custom({ "Color", UIPropType::Color },
+            [](const UIElement& e) {
+                return UIPropValue::ofColor(static_cast<const UIColorPicker&>(e).color); },
+            [](UIElement& e, const UIPropValue& v) {
+                static_cast<UIColorPicker&>(e).setColor(v.col); }),
+        uiprop::slot<&UIColorPicker::showAlpha>({ "Show Alpha", UIPropType::Bool }),
+        uiprop::slot<&UIColorPicker::barWidth> ({ "Bar Width", UIPropType::Float, 4.0f, 80.0f }),
+        uiprop::slot<&UIColorPicker::gap>      ({ "Gap", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIColorPicker::backColor>({ "Back Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UIColorPicker::render(const UIWidgetRect& px, const UIElementRenderState&,
+                           const HE::UUID&, float pxScaleY,
+                           std::vector<UIRenderObject>& out) const
+{
+    quad(out, px.x, px.y, px.w, px.h, backColor);
+
+    // The strips are lengths across the element, so they take the same factor
+    // the font does — one number, because a strip that is wide on one axis and
+    // narrow on the other is not a strip anybody authored.
+    const Parts p = partsIn(px, barWidth * pxScaleY, gap * pxScaleY, showAlpha);
+    const float h = hueOf();
+    const glm::vec3 pure = uiHsvToRgb(h, 1.0f, 1.0f);
+
+    // ── The saturation/value field, in two quads and exactly ────────────────
+    // White → the pure hue, left to right, IS HSV at V = 1; black laid over it
+    // at alpha 1 - V is the multiply by V. See the class comment.
+    gradQuad(out, p.sv, glm::vec4(1.0f), glm::vec4(pure, 1.0f), 90.0f);
+    gradQuad(out, p.sv, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f), glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), 0.0f);
+
+    // ── The hue strip, in six ───────────────────────────────────────────────
+    // One quad per 60° segment, because that is exactly how far the wheel runs
+    // straight in RGB. Seven stops, six gaps.
+    const float segH = p.hue.h / 6.0f;
+    for (int i = 0; i < 6; ++i)
+    {
+        const glm::vec3 a = uiHsvToRgb(static_cast<float>(i) * 60.0f, 1.0f, 1.0f);
+        const glm::vec3 b = uiHsvToRgb(static_cast<float>(i + 1) * 60.0f, 1.0f, 1.0f);
+        // Half a pixel of overlap so no seam shows between the segments.
+        const UIWidgetRect seg{ p.hue.x, p.hue.y + segH * static_cast<float>(i),
+                                p.hue.w, segH + 0.5f };
+        gradQuad(out, seg, glm::vec4(a, 1.0f), glm::vec4(b, 1.0f), 0.0f);
+    }
+
+    if (p.hasAlpha)
+    {
+        // A light backing so the transparent end is something rather than the
+        // panel behind it, then the colour fading out over it, top to bottom.
+        quad(out, p.alpha.x, p.alpha.y, p.alpha.w, p.alpha.h,
+             glm::vec4(0.72f, 0.72f, 0.72f, 1.0f));
+        gradQuad(out, p.alpha, glm::vec4(glm::vec3(color), 1.0f),
+                 glm::vec4(glm::vec3(color), 0.0f), 0.0f);
+    }
+
+    // ── The three markers ───────────────────────────────────────────────────
+    const float s = saturationOf(), v = valueOf();
+    const float mr = std::max(3.0f, std::min(p.hue.w, p.sv.h) * 0.22f);
+    ring(out, p.sv.x + p.sv.w * s, p.sv.y + p.sv.h * (1.0f - v), mr);
+    ring(out, p.hue.x + p.hue.w * 0.5f, p.hue.y + p.hue.h * (h / 360.0f), p.hue.w * 0.42f);
+    if (p.hasAlpha)
+        ring(out, p.alpha.x + p.alpha.w * 0.5f,
+             p.alpha.y + p.alpha.h * (1.0f - std::clamp(color.a, 0.0f, 1.0f)),
+             p.alpha.w * 0.42f);
+}
+
+void UIColorPicker::writeJson(nlohmann::json& j) const
+{
+    j["color"] = colJson(color);
+    // The remembered hue travels with the file, or reopening a widget whose
+    // colour is grey would put the strip back on red.
+    j["hue"] = hue;
+    j["showAlpha"] = showAlpha;
+    j["barWidth"] = barWidth;
+    j["gap"] = gap;
+    j["backColor"] = colJson(backColor);
+}
+
+void UIColorPicker::readJson(const nlohmann::json& j)
+{
+    color = colFrom(j.value("color", nlohmann::json()), color);
+    hue = j.value("hue", hue);
+    showAlpha = j.value("showAlpha", showAlpha);
+    barWidth = j.value("barWidth", barWidth);
+    gap = j.value("gap", gap);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
 }
 
 } // namespace HE

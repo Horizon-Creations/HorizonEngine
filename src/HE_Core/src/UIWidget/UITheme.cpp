@@ -296,6 +296,19 @@ const UITheme& uiAmberTheme()
 
         d.styleMut("ScrollBox").set("Bar Color", col(borderL, borderD));
         d.styleMut("Splitter").set("Divider Color", col(borderL, borderD));
+
+        UIThemeStyle& date = d.styleMut("DatePicker");
+        date.set("Back Color",     col(surfaceL, surfaceD));
+        date.set("Header Color",   col({ 0.90f, 0.87f, 0.82f, 1.0f }, { 0.11f, 0.10f, 0.09f, 1.0f }));
+        date.set("Text Color",     col(textL, textD));
+        date.set("Muted Color",    col(mutedL, mutedD));
+        date.set("Selected Color", col(accentL, accentD));
+        date.set("Hover Color",    col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
+
+        // Only its BACKGROUND is the theme's business. The field and the strip
+        // are the colour space itself — a theme that could tint those would be
+        // a theme that lies about what is being picked.
+        d.styleMut("ColorPicker").set("Back Color", col(surfaceL, surfaceD));
         return d;
     }();
     return t;

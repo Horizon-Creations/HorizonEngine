@@ -3253,6 +3253,58 @@ SV-Feld aus Quads, und wer sie schwebend will, stellt sie in ein Modal aus B4.
 
 ---
 
+### B9 Rest: Datumswähler und Farbwähler (06.09.2026)
+
+Die beiden Punkte, die der Entwurf oben offen gelassen hat. Beide sind gebaut, beide genau so
+wie er es vorgezeichnet hat: eingebaut statt als Popup, aus den Quads die es schon gibt.
+
+**Das Raster ist eine Bruchrechnung, keine Größe.** `UIDatePicker::layoutIn` teilt das eigene
+Rechteck in acht Reihen, 1,25 für die Überschrift, 0,75 für die Wochentage, sechs für die Tage,
+und `cellAt` liest dieselbe Rechnung zurück. Der Vorteil ist nicht Kürze: eine Höhe in
+Canvas-Einheiten müsste vor jedem Treffertest in Pixel umgerechnet werden, und der Tag an dem
+Zeichnen und Greifen zwei Rechnungen sind, ist der Tag an dem der Klick auf einem anderen Datum
+landet als der Finger. Dieselbe Lehre wie `tabLayout`, `stepperRects` und `uiScrollThumbRect`.
+
+**Sechs Reihen, immer.** Ein Februar der in vier passt bekommt trotzdem sechs, weil ein
+Bedienelement das beim Blättern seine Höhe ändert alles darunter verschiebt, und ein Kalender ist
+das eine Widget durch das Leute schnell blättern. Die Tage davor und danach werden mitgezeichnet
+statt leer gelassen, und ein Klick darauf blättert dorthin UND wählt: der kürzeste Weg zum
+Ersten des nächsten Monats den es gibt.
+
+**Der Wert wird beim LESEN geklemmt, nicht beim Schreiben.** Jahr, Monat und Tag sind drei
+gewöhnliche Int-Eigenschaften; wer 99 als Monat schreibt liest 99 zurück, und `clampedMonth()`
+macht 12 daraus. Andersherum ginge nicht: eine Eigenschaft die den Wert ändert den sie bekommen
+hat, ist eine die der Editor und HorizonCode nicht zurücklesen können — genau das prüft der
+Probe-Durchlauf in test_ui_widgets. Dieselbe Form wie `normalized()` am Slider.
+
+**Der Farbwähler ist exakt, nicht ungefähr.** Das ist der Teil der überrascht hat. Bei S = V = 1
+läuft der Farbkreis über jedes 60°-Segment stückweise LINEAR in RGB, also sind sechs
+Gradienten-Quads der Hue-Streifen und kein Bild davon. `mix(weiß, hue, S)` ist HSV bei V = 1
+exakt, und Schwarz mit Alpha 1 − V darüber ist die Multiplikation mit V exakt — das SV-Feld sind
+zwei Quads. Kein Backend muss irgendetwas über Farbwähler lernen, und der Alphakanal des
+Gradienten, den es für den Schlagschatten schon gab, ist die ganze Zutat.
+
+**Die Farbe ist die Wahrheit, der Farbton ist ein Gedächtnis.** H, S und V zu speichern und die
+Farbe abzuleiten hätte jeden Schreibvorgang durch zwei Umrechnungen geschickt und etwas
+zurückgegeben das eine Haaresbreite daneben liegt. Also steht `color` wörtlich da, und `hue`
+existiert für den einen Fall den die Farbe nicht beantworten kann: ein Grau hat keinen Farbton,
+also würde ein Zug des Werts nach Schwarz und zurück auf Rot landen. Gelesen wird `hue` nur
+solange die Sättigung nichts ist.
+
+**Was neu ist außerhalb der beiden Typen:** zwei Ereignisse, `OnDateChanged` (String, "YYYY-MM-DD",
+weil kein Gebietsschema über diese Schreibweise streitet) und `OnColorChanged` (Color, weil der
+Pin-Typ dafür längst existiert und vier Zahlen durch einen Float zu quetschen jeden Graphen zum
+Auspacken zwingen würde). Und ein Zugfeld am Instance: welcher der drei Teile des Farbwählers
+angefasst wurde, wird EINMAL beim Druck entschieden und den ganzen Zug lang gehalten — dieselbe
+Regel der der Schieber und der Trennsteg schon folgen.
+
+**Offen und bewusst:** Tastaturbedienung (Pfeiltasten im Kalender, Zahlenfelder am Farbwähler)
+und eine Lokalisierung der Monatsnamen. Der Textkatalog aus B10 arbeitet auf Eigenschaften, die
+Monatsnamen stehen in der Zeichenroutine, also ist ein übersetzter Kalender ein eigenes Feature
+und keine Zeile.
+
+---
+
 ### B10 Zugänglichkeit und Lokalisierung, erster Teil (05.09.2026)
 
 Fünf Punkte standen im Plan. Zwei sind hier gebaut, einer war schon da, zwei sind offen und

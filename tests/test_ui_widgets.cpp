@@ -274,6 +274,27 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Min First", UIPropType::Float },
             { "Min Second", UIPropType::Float },
             { "Divider Color", UIPropType::Color } } },
+        // Three ints rather than one date string: a property is written by the
+        // editor's number rows and by scripts, and a string would be parsed on
+        // every one of those writes. The ISO form is the EVENT's payload.
+        { UIWidgetType::DatePicker, {
+            { "Year", UIPropType::Int },
+            { "Month", UIPropType::Int },
+            { "Day", UIPropType::Int },
+            { "Monday First", UIPropType::Bool },
+            { "FontSize", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Header Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "Muted Color", UIPropType::Color },
+            { "Selected Color", UIPropType::Color },
+            { "Hover Color", UIPropType::Color } } },
+        { UIWidgetType::ColorPicker, {
+            { "Color", UIPropType::Color },
+            { "Show Alpha", UIPropType::Bool },
+            { "Bar Width", UIPropType::Float },
+            { "Gap", UIPropType::Float },
+            { "Back Color", UIPropType::Color } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -4351,6 +4372,10 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         // (even fully transparent) so the border and the rounding have something
         // to land on.
         UIWidgetType::ListView,
+        // Both pickers draw their own rectangle first, for the same reason: a
+        // calendar and a colour field are cards, and a card without a rounding
+        // or a border is not what anybody puts in a dialog.
+        UIWidgetType::DatePicker, UIWidgetType::ColorPicker,
     };
 
     for (int t = 0; t < static_cast<int>(UIWidgetType::COUNT); ++t)
@@ -13203,4 +13228,363 @@ TEST_CASE("Window drag: a base property that costs nothing when it is off")
     const auto& base = HE::uiBaseProperties();
     CHECK(std::any_of(base.begin(), base.end(),
                       [](const HE::UIPropDesc& d) { return d.name == "Window Drag"; }));
+}
+
+// ── DatePicker / ColorPicker (docs/he-apps-plan.md B9) ───────────────────────
+
+TEST_CASE("The Gregorian calendar, and the century rule nobody remembers")
+{
+    CHECK(HE::uiIsLeapYear(2024));
+    CHECK(HE::uiIsLeapYear(2000));
+    CHECK_FALSE(HE::uiIsLeapYear(1900));   // the rule the divisible-by-four half gets wrong
+    CHECK_FALSE(HE::uiIsLeapYear(2100));
+    CHECK_FALSE(HE::uiIsLeapYear(2026));
+
+    CHECK(HE::uiDaysInMonth(2026, 2) == 28);
+    CHECK(HE::uiDaysInMonth(2024, 2) == 29);
+    CHECK(HE::uiDaysInMonth(1900, 2) == 28);
+    CHECK(HE::uiDaysInMonth(2026, 1) == 31);
+    CHECK(HE::uiDaysInMonth(2026, 4) == 30);
+    CHECK(HE::uiDaysInMonth(2026, 12) == 31);
+
+    // Dates anybody can check: 0 = Sunday.
+    CHECK(HE::uiDayOfWeek(2026, 9, 6) == 0);    // Sunday
+    CHECK(HE::uiDayOfWeek(2026, 9, 7) == 1);    // Monday
+    CHECK(HE::uiDayOfWeek(2000, 1, 1) == 6);    // Saturday
+    CHECK(HE::uiDayOfWeek(1970, 1, 1) == 4);    // Thursday, the epoch
+    CHECK(HE::uiDayOfWeek(2024, 2, 29) == 4);   // a leap day, Thursday
+    // Every day of a fortnight walks forward by one and wraps.
+    for (int d = 1; d <= 14; ++d)
+        CHECK(HE::uiDayOfWeek(2026, 9, d) == (HE::uiDayOfWeek(2026, 9, 1) + d - 1) % 7);
+}
+
+TEST_CASE("DatePicker: the grid is a continuous calendar, and it clamps at READ")
+{
+    HE::UIDatePicker dp;
+    dp.year = 2026; dp.month = 9; dp.day = 6; dp.mondayFirst = true;
+
+    // 1 September 2026 is a Tuesday, so with Monday first it sits in column 1
+    // and August's 31st fills the one before it.
+    CHECK(dp.firstCell() == 1);
+    int y = 0, m = 0, d = 0;
+    dp.dateAtCell(0, y, m, d);
+    CHECK(y == 2026); CHECK(m == 8); CHECK(d == 31);
+    CHECK_FALSE(dp.cellInMonth(0));
+    dp.dateAtCell(1, y, m, d);
+    CHECK(m == 9); CHECK(d == 1);
+    CHECK(dp.cellInMonth(1));
+    // September has 30 days, so cell 1 + 30 = 31 is the 1st of October.
+    dp.dateAtCell(31, y, m, d);
+    CHECK(y == 2026); CHECK(m == 10); CHECK(d == 1);
+    CHECK_FALSE(dp.cellInMonth(31));
+    // Every cell of the grid is one day after the one before it.
+    for (int i = 1; i < HE::UIDatePicker::kCells; ++i)
+    {
+        int ay = 0, am = 0, ad = 0, by = 0, bm = 0, bd = 0;
+        dp.dateAtCell(i - 1, ay, am, ad);
+        dp.dateAtCell(i, by, bm, bd);
+        const int next = ad + 1 > HE::uiDaysInMonth(ay, am) ? 1 : ad + 1;
+        CHECK(bd == next);
+    }
+    // Sunday first shifts the whole grid by one column.
+    dp.mondayFirst = false;
+    CHECK(dp.firstCell() == 2);
+
+    // The picked day is the cell it is drawn in, and the caption says so.
+    dp.mondayFirst = true;
+    CHECK(dp.selectedCell() == 1 + 6 - 1);
+    CHECK(dp.isoDate() == "2026-09-06");
+    CHECK(dp.caption() == "September 2026");
+
+    // A property may be written out of range — the editor and HorizonCode have
+    // to round-trip what they wrote — and every READ clamps instead.
+    dp.setProp("Month", HE::UIPropValue::ofInt(99));
+    CHECK(dp.getProp("Month").i == 99);      // stored verbatim
+    CHECK(dp.clampedMonth() == 12);
+    dp.month = 2; dp.year = 2026; dp.day = 31;
+    CHECK(dp.getProp("Day").i == 31);
+    CHECK(dp.clampedDay() == 28);            // February does not have a 31st
+    CHECK(dp.isoDate() == "2026-02-28");
+}
+
+TEST_CASE("DatePicker: paging keeps the day where a short month lets it")
+{
+    HE::UIDatePicker dp;
+    dp.year = 2026; dp.month = 1; dp.day = 31;
+    dp.addMonths(1);
+    CHECK(dp.month == 2);
+    CHECK(dp.day == 28);                     // the 31st of February is the 28th
+    dp.addMonths(1);
+    CHECK(dp.month == 3);
+    CHECK(dp.day == 28);                     // …and it does NOT grow back
+    dp.year = 2026; dp.month = 12; dp.day = 15;
+    dp.addMonths(1);
+    CHECK(dp.year == 2027); CHECK(dp.month == 1);
+    dp.addMonths(-1);
+    CHECK(dp.year == 2026); CHECK(dp.month == 12);
+}
+
+TEST_CASE("DatePicker: the grid is drawn and grabbed by ONE sum")
+{
+    const HE::UIWidgetRect r{ 100.0f, 50.0f, 280.0f, 240.0f };
+    const auto L = HE::UIDatePicker::layoutIn(r);
+    // Eight rows' worth: 1.25 caption + 0.75 weekdays + six day rows.
+    CHECK(L.header.h == doctest::Approx(240.0f / 8.0f * 1.25f));
+    CHECK(L.weekdays.y == doctest::Approx(L.header.y + L.header.h));
+    CHECK(L.grid.y == doctest::Approx(L.weekdays.y + L.weekdays.h));
+    CHECK(L.grid.y + L.grid.h == doctest::Approx(r.y + r.h));
+    CHECK(L.cellW == doctest::Approx(280.0f / 7.0f));
+    CHECK(L.cellH * 6.0f == doctest::Approx(L.grid.h));
+
+    // Every cell answers where it is drawn, and only there.
+    for (int i = 0; i < HE::UIDatePicker::kCells; ++i)
+    {
+        const float cx = L.grid.x + L.cellW * (i % 7 + 0.5f);
+        const float cy = L.grid.y + L.cellH * (i / 7 + 0.5f);
+        CHECK(HE::UIDatePicker::cellAt(r, cx, cy) == i);
+    }
+    CHECK(HE::UIDatePicker::cellAt(r, r.x + 4.0f, L.header.y + 2.0f) == -1);   // the caption
+    CHECK(HE::UIDatePicker::cellAt(r, r.x - 5.0f, L.grid.y + 5.0f) == -1);     // outside
+
+    // The arrows are the two ends of the caption and nothing in between.
+    CHECK(HE::UIDatePicker::arrowAt(r, L.prevArrow.x + 2.0f, L.prevArrow.y + 2.0f) == -1);
+    CHECK(HE::UIDatePicker::arrowAt(r, L.nextArrow.x + 2.0f, L.nextArrow.y + 2.0f) == 1);
+    CHECK(HE::UIDatePicker::arrowAt(r, r.x + r.w * 0.5f, L.header.y + 2.0f) == 0);
+    CHECK(HE::UIDatePicker::arrowAt(r, r.x + r.w * 0.5f, L.grid.y + 2.0f) == 0);
+}
+
+TEST_CASE("DatePicker: clicking a day picks it, an arrow pages, and the edge days do both")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 280.0f; t.canvasHeight = 240.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int dpId = t.add(HE::UIWidgetType::DatePicker);
+    { HE::UIElement& e = *t.find(dpId);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 280.0f; e.sizeY = 240.0f; }
+    { auto* d = dynamic_cast<HE::UIDatePicker*>(t.find(dpId));
+      d->year = 2026; d->month = 9; d->day = 6; d->mondayFirst = true; }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto* live = dynamic_cast<HE::UIDatePicker*>(
+        const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(dpId));
+    REQUIRE(live);
+
+    const HE::UIWidgetRect r{ 0.0f, 0.0f, 280.0f, 240.0f };
+    const auto L = HE::UIDatePicker::layoutIn(r);
+    auto centreOf = [&](int cell, float& x, float& y)
+    {
+        x = L.grid.x + L.cellW * (cell % 7 + 0.5f);
+        y = L.grid.y + L.cellH * (cell / 7 + 0.5f);
+    };
+    auto click = [&](float x, float y)
+    {
+        wm.processPointer(280.0f, 240.0f, x, y, true, true);
+        wm.processPointer(280.0f, 240.0f, x, y, false, true);
+    };
+
+    // Cell 1 is the 1st of September; cell 15 is the 15th.
+    float x = 0.0f, y = 0.0f;
+    centreOf(15, x, y);
+    click(x, y);
+    CHECK(live->isoDate() == "2026-09-15");
+
+    // Cell 0 is August's 31st, and clicking it PAGES to August as well as
+    // picking it — which is the shortest way to the month before there is.
+    centreOf(0, x, y);
+    click(x, y);
+    CHECK(live->isoDate() == "2026-08-31");
+    CHECK(live->month == 8);
+
+    // The right arrow pages forward WITHOUT changing the picked date, and the
+    // release must not then land on whatever day is under the arrow.
+    live->year = 2026; live->month = 9; live->day = 6;
+    click(L.nextArrow.x + 2.0f, L.nextArrow.y + 2.0f);
+    CHECK(live->month == 10);
+    CHECK(live->day == 6);
+    click(L.prevArrow.x + 2.0f, L.prevArrow.y + 2.0f);
+    CHECK(live->month == 9);
+    CHECK(live->day == 6);
+}
+
+TEST_CASE("HSV and RGB are each other's inverse, and grey keeps its hue")
+{
+    // Round trip through every corner of the cube plus a scatter of the inside.
+    const glm::vec3 kProbes[] = {
+        { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f },
+        { 1.0f, 1.0f, 0.0f }, { 0.0f, 1.0f, 1.0f }, { 1.0f, 0.0f, 1.0f },
+        { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f }, { 0.5f, 0.5f, 0.5f },
+        { 0.30f, 0.60f, 0.90f }, { 0.87f, 0.42f, 0.11f }, { 0.02f, 0.55f, 0.31f } };
+    for (const glm::vec3& c : kProbes)
+    {
+        float h = 0.0f, s = 0.0f, v = 0.0f;
+        HE::uiRgbToHsv(c, h, s, v);
+        const glm::vec3 back = HE::uiHsvToRgb(h, s, v);
+        INFO("rgb ", c.r, " ", c.g, " ", c.b);
+        CHECK(back.r == doctest::Approx(c.r).epsilon(0.0005));
+        CHECK(back.g == doctest::Approx(c.g).epsilon(0.0005));
+        CHECK(back.b == doctest::Approx(c.b).epsilon(0.0005));
+    }
+    // The six pure hues, where the strip's segment boundaries are.
+    for (int i = 0; i <= 6; ++i)
+    {
+        const glm::vec3 rgb = HE::uiHsvToRgb(i * 60.0f, 1.0f, 1.0f);
+        CHECK(std::max(rgb.r, std::max(rgb.g, rgb.b)) == doctest::Approx(1.0f));
+        CHECK(std::min(rgb.r, std::min(rgb.g, rgb.b)) == doctest::Approx(0.0f));
+    }
+    // 360 is 0.
+    const glm::vec3 a = HE::uiHsvToRgb(0.0f, 1.0f, 1.0f);
+    const glm::vec3 b = HE::uiHsvToRgb(360.0f, 1.0f, 1.0f);
+    CHECK(a.r == doctest::Approx(b.r));
+    CHECK(a.g == doctest::Approx(b.g));
+
+    // The grey trap: dragging the value to black must not lose the hue, or
+    // coming back up would land on red.
+    HE::UIColorPicker cp;
+    cp.setHsv(210.0f, 0.8f, 0.9f);
+    CHECK(cp.hueOf() == doctest::Approx(210.0f).epsilon(0.01));
+    cp.setHsv(cp.hueOf(), 0.0f, 0.0f);           // black
+    CHECK(cp.saturationOf() == doctest::Approx(0.0f));
+    CHECK(cp.hueOf() == doctest::Approx(210.0f).epsilon(0.01));
+    cp.setHsv(cp.hueOf(), 1.0f, 1.0f);
+    CHECK(cp.hueOf() == doctest::Approx(210.0f).epsilon(0.01));
+}
+
+TEST_CASE("ColorPicker: the Color property round-trips verbatim and keeps the hue in step")
+{
+    HE::UIColorPicker cp;
+    // What is written is what is read back, bit for bit — no trip through HSV.
+    const glm::vec4 want{ 0.123f, 0.456f, 0.789f, 0.5f };
+    cp.setProp("Color", HE::UIPropValue::ofColor(want));
+    CHECK(cp.getProp("Color").col == want);
+    // …and the hue followed it.
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    HE::uiRgbToHsv(glm::vec3(want), h, s, v);
+    CHECK(cp.hueOf() == doctest::Approx(h));
+    // Writing a GREY leaves the remembered hue alone, which is the whole point
+    // of the field existing.
+    const float was = cp.hueOf();
+    cp.setProp("Color", HE::UIPropValue::ofColor(glm::vec4(0.4f, 0.4f, 0.4f, 1.0f)));
+    CHECK(cp.getProp("Color").col == glm::vec4(0.4f, 0.4f, 0.4f, 1.0f));
+    CHECK(cp.hueOf() == doctest::Approx(was));
+    // Alpha is the colour's own and setHsv does not touch it.
+    cp.color.a = 0.25f;
+    cp.setHsv(90.0f, 1.0f, 1.0f);
+    CHECK(cp.color.a == doctest::Approx(0.25f));
+}
+
+TEST_CASE("ColorPicker: the field, the strip and the alpha bar are one sum")
+{
+    const HE::UIWidgetRect r{ 20.0f, 10.0f, 240.0f, 180.0f };
+    {
+        const auto p = HE::UIColorPicker::partsIn(r, 18.0f, 8.0f, false);
+        CHECK_FALSE(p.hasAlpha);
+        CHECK(p.sv.w == doctest::Approx(240.0f - 26.0f));
+        CHECK(p.hue.x == doctest::Approx(p.sv.x + p.sv.w + 8.0f));
+        CHECK(p.hue.x + p.hue.w == doctest::Approx(r.x + r.w));
+        CHECK(p.sv.h == doctest::Approx(r.h));
+    }
+    {
+        const auto p = HE::UIColorPicker::partsIn(r, 18.0f, 8.0f, true);
+        CHECK(p.hasAlpha);
+        CHECK(p.alpha.x + p.alpha.w == doctest::Approx(r.x + r.w));
+        CHECK(p.alpha.x == doctest::Approx(p.hue.x + p.hue.w + 8.0f));
+        CHECK(p.sv.w == doctest::Approx(240.0f - 2.0f * 26.0f));
+    }
+    // Squeezed narrower than its own strips, the field is a pixel rather than a
+    // negative width — a picker nobody can use, not one that draws backwards.
+    const auto tiny = HE::UIColorPicker::partsIn({ 0.0f, 0.0f, 10.0f, 40.0f },
+                                                 18.0f, 8.0f, true);
+    CHECK(tiny.sv.w >= 1.0f);
+}
+
+TEST_CASE("ColorPicker: a drag on the field is saturation and value, on the strip the hue")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 240.0f; t.canvasHeight = 180.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int cpId = t.add(HE::UIWidgetType::ColorPicker);
+    { HE::UIElement& e = *t.find(cpId);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 240.0f; e.sizeY = 180.0f; }
+    { auto* c = dynamic_cast<HE::UIColorPicker*>(t.find(cpId));
+      c->showAlpha = true; c->setHsv(0.0f, 1.0f, 1.0f); }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto* live = dynamic_cast<HE::UIColorPicker*>(
+        const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(cpId));
+    REQUIRE(live);
+
+    const auto p = HE::UIColorPicker::partsIn({ 0.0f, 0.0f, 240.0f, 180.0f },
+                                              live->barWidth, live->gap, true);
+
+    // Halfway down the hue strip is 180°, cyan.
+    wm.processPointer(240.0f, 180.0f, p.hue.x + p.hue.w * 0.5f,
+                      p.hue.y + p.hue.h * 0.5f, true, true);
+    CHECK(live->hueOf() == doctest::Approx(180.0f).epsilon(0.02));
+    // Dragging OFF the strip and across the field keeps changing the hue: the
+    // part was chosen at the press and a grab is only ended by letting go.
+    wm.processPointer(240.0f, 180.0f, p.sv.x + 4.0f, p.hue.y + p.hue.h * 0.25f, true, true);
+    CHECK(live->hueOf() == doctest::Approx(90.0f).epsilon(0.02));
+    wm.processPointer(240.0f, 180.0f, p.sv.x + 4.0f, p.hue.y + p.hue.h * 0.25f, false, true);
+
+    // The field's top-right corner is S = 1, V = 1 — the pure hue.
+    wm.processPointer(240.0f, 180.0f, p.sv.x + p.sv.w - 1.0f, p.sv.y + 1.0f, true, true);
+    CHECK(live->saturationOf() == doctest::Approx(1.0f).epsilon(0.02));
+    CHECK(live->valueOf() == doctest::Approx(1.0f).epsilon(0.02));
+    // …its bottom edge is black, and the hue survives that.
+    wm.processPointer(240.0f, 180.0f, p.sv.x + p.sv.w - 1.0f,
+                      p.sv.y + p.sv.h - 0.5f, true, true);
+    CHECK(live->valueOf() == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK(live->hueOf() == doctest::Approx(90.0f).epsilon(0.02));
+    // …and its left edge is grey, whatever the hue says.
+    wm.processPointer(240.0f, 180.0f, p.sv.x, p.sv.y + 1.0f, true, true);
+    CHECK(live->saturationOf() == doctest::Approx(0.0f).epsilon(0.02));
+    wm.processPointer(240.0f, 180.0f, p.sv.x, p.sv.y + 1.0f, false, true);
+
+    // The alpha strip runs opaque at the top to nothing at the bottom.
+    wm.processPointer(240.0f, 180.0f, p.alpha.x + p.alpha.w * 0.5f,
+                      p.alpha.y + p.alpha.h * 0.5f, true, true);
+    CHECK(live->color.a == doctest::Approx(0.5f).epsilon(0.02));
+    wm.processPointer(240.0f, 180.0f, p.alpha.x + p.alpha.w * 0.5f,
+                      p.alpha.y + 1.0f, true, true);
+    CHECK(live->color.a == doctest::Approx(1.0f).epsilon(0.02));
+    wm.processPointer(240.0f, 180.0f, p.alpha.x + p.alpha.w * 0.5f,
+                      p.alpha.y + 1.0f, false, true);
+}
+
+TEST_CASE("Both pickers draw a full-rect surface first, so the border finds it")
+{
+    // The rule WidgetManager::extract enforces: the style is stamped onto the
+    // FIRST quad and only when it covers the whole rect. A picker whose first
+    // quad were a part would silently lose its rounding and its border.
+    const HE::UIWidgetRect px{ 10.0f, 20.0f, 240.0f, 200.0f };
+    HE::UIElementRenderState st;
+    for (HE::UIWidgetType ty : { HE::UIWidgetType::DatePicker, HE::UIWidgetType::ColorPicker })
+    {
+        auto e = HE::makeUIElement(ty);
+        REQUIRE(e);
+        INFO(e->typeName());
+        CHECK(e->hasSurfaceStyle());
+        std::vector<UIRenderObject> out;
+        e->render(px, st, HE::UUID{}, 1.0f, out);
+        REQUIRE(!out.empty());
+        CHECK(out[0].type == 0);
+        CHECK(out[0].position.x == doctest::Approx(px.x));
+        CHECK(out[0].position.y == doctest::Approx(px.y));
+        CHECK(out[0].size.x == doctest::Approx(px.w));
+        CHECK(out[0].size.y == doctest::Approx(px.h));
+    }
 }
