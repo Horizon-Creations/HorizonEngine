@@ -710,7 +710,28 @@ public:
 
     // Append draw quads for all visible widgets, sorted by (zOrder, layer,
     // depth). Called AFTER the entity-UI extraction, so widgets draw on top.
-    void extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
+    //
+    // The windowless overload means window 0 — the main window, and the only
+    // one most applications have. Every caller that has no second window stays
+    // exactly as it was written; the parameterised one is what a secondary
+    // window's render path asks, and it emits ONLY the widgets that live there.
+    void extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)
+    { extract(0u, vpWidth, vpHeight, out); }
+    void extract(uint32_t windowId, float vpWidth, float vpHeight,
+                 std::vector<UIRenderObject>& out);
+
+    // ── Which window a widget hangs in ───────────────────────────────────────
+    // 0 = the main window. Moving one is a real move: it leaves the old
+    // window's focus, hover and grab stack behind, because a dialog that keeps
+    // a window it is no longer in modal is a window nobody can click again.
+    void     setWidgetWindow(int widgetId, uint32_t windowId);
+    uint32_t widgetWindow(int widgetId) const;
+    // Every widget of this window, gone — what a closing window does to its
+    // contents. Returns how many were destroyed.
+    int      destroyWidgetsOfWindow(uint32_t windowId);
+    // Is there anything at all to draw there? The host asks before it spends a
+    // frame on a window.
+    bool     hasVisibleWidgetsIn(uint32_t windowId) const;
 
     void clear();
 
@@ -844,6 +865,12 @@ private:
         // framework separates the two. Flipped by showWidget/hideWidget and by
         // the ShowSelf/HideSelf nodes.
         bool visible = false;
+        // Which window this widget hangs in — 0 is the main one and the only
+        // one a single-window application ever has. RUNTIME state, not part of
+        // the .hwidget asset: a widget class does not belong to a window, an
+        // instance of it does, and the graph that opened the window is what
+        // decides. Nothing serializes it, so no file changes shape.
+        uint32_t windowId = 0;
         // Transient interaction state (element ids; 0 = none).
         int hoveredElem   = 0;
         int pressedElem   = 0;

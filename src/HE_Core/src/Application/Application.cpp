@@ -421,12 +421,17 @@ namespace HE
 						m_renderer->Render();
 					}
 
-					// Secondary windows
-					for (auto& [id, win] : m_secondaryWindows)
-					{
-						if (m_renderer) m_renderer->RenderWindow(win.get());
-						win->SwapBuffers();
-					}
+					// Secondary windows, on the SAME decision as the primary.
+					// In event-driven mode a frame that is not worth showing is
+					// not worth showing in a tool window either, and redrawing
+					// them anyway would keep a sleeping application busy — which
+					// is the one thing event-driven drawing exists to avoid.
+					if (present)
+						for (auto& [id, win] : m_secondaryWindows)
+						{
+							if (m_renderer) m_renderer->RenderWindow(win.get());
+							win->SwapBuffers();
+						}
 				}
 			catch (const std::exception& e)
 			{
@@ -564,7 +569,25 @@ namespace HE
             HE_LOG_WARN(Core, "%s", "createSecondaryWindow called before Run() — ignoring");
             return {};
         }
-        auto win = std::make_unique<Window>(props, /*isPrimary=*/false);
+        if (m_renderer && !m_renderer->GetCapabilities().supportsSecondaryWindows)
+        {
+            // Refused in ONE place rather than four backends each inventing an
+            // excuse: GL clears the window black, Vulkan would redraw the whole
+            // scene into it, D3D has no path at all. A window that opens onto
+            // any of those is worse than one that does not open.
+            HE_LOG_WARN(Core, "%s",
+                "createSecondaryWindow: this renderer has no second-window path "
+                "(Software and Metal do) — no window opened");
+            return {};
+        }
+        WindowProps sp = props;
+        // The graphics API is NOT the caller's to choose. The SDL flags follow
+        // from it and cannot be changed afterwards, and one renderer draws into
+        // both windows: a secondary created for the default (OpenGL) under a
+        // software renderer has a GL flag and no SDL surface to blit into, which
+        // fails inside the backend with nothing pointing back at here.
+        sp.api = m_window->GetApi();
+        auto win = std::make_unique<Window>(sp, /*isPrimary=*/false);
         uint32_t id = win->GetWindowId();
         if (m_renderer) m_renderer->AttachWindow(win.get());
         m_secondaryWindows[id] = std::move(win);

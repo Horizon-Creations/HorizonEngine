@@ -5429,9 +5429,14 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 	return false;
 }
 
-void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)
+void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
+                            std::vector<UIRenderObject>& out)
 {
-	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
+	// Only the main window's size is remembered. The remembered pair answers
+	// "where would a popup go" for calls that carry no viewport at all, and a
+	// tool window that is 300 pixels wide must not be the answer the main
+	// window's context menu is placed against.
+	if (windowId == 0) { m_lastViewportW = vpWidth; m_lastViewportH = vpHeight; }
 	// Every list's rows, for the size the view has NOW: a window that just grew
 	// shows more rows in the frame it grew in, not in the one after it.
 	syncLists();
@@ -5440,7 +5445,7 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 	std::vector<Instance*> sorted;
 	sorted.reserve(m_instances.size());
 	for (auto& w : m_instances)
-		if (w.visible) sorted.push_back(&w);
+		if (w.visible && w.windowId == windowId) sorted.push_back(&w);
 	std::stable_sort(sorted.begin(), sorted.end(),
 		[](const Instance* a, const Instance* b){ return a->zOrder < b->zOrder; });
 
@@ -5449,9 +5454,17 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 	// this class and not by any element, because it belongs to no widget — it is
 	// what everything else is behind. Which is also why pointerOverUI has to
 	// answer for it by hand: there is no element there to be hit.
+	// …and only a modal that is IN THIS WINDOW: grabs are window-modal, so a
+	// dialog in a tool window must not dim the main window behind it.
 	int lowestModal = 0;
 	for (const Grab& g : m_grabs)
-		if (g.kind == Grab::Kind::Modal) { lowestModal = g.widget; break; }
+		if (g.kind == Grab::Kind::Modal)
+		{
+			const Instance* mw = find(g.widget);
+			if (mw && mw->windowId != windowId) continue;
+			lowestModal = g.widget;
+			break;
+		}
 
 	for (Instance* wp : sorted)
 	{
@@ -5815,11 +5828,83 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 	// to, and both have to be on top of every widget rather than of their own.
 	// That makes them the manager's to draw, exactly like the scrim and the
 	// focus ring — appended after the loop, so they land last.
-	drawOpenDropdown(vpWidth, vpHeight, out);
+	// Both follow the widget they belong to into ITS window — an open combo
+	// drawn over the main window while its list lives in a tool window is a
+	// list that cannot be clicked, because the pointer scan looks in the other
+	// one.
+	{
+		Instance* ddOwner = nullptr;
+		if (openDropdown(&ddOwner) && (!ddOwner || ddOwner->windowId == windowId))
+			drawOpenDropdown(vpWidth, vpHeight, out);
+	}
 	// The menu bar is above the widgets and below the tooltip: it belongs to the
-	// application rather than to any page, and a tooltip still explains it.
-	drawMenuBar(vpWidth, vpHeight, out);
-	drawTooltip(vpWidth, vpHeight, out);
+	// application rather than to any page, and a tooltip still explains it. It
+	// stays on the MAIN window — on a Mac there is exactly one bar anyway, and a
+	// drawn strip in every tool window is what nobody asked for.
+	if (windowId == 0)
+		drawMenuBar(vpWidth, vpHeight, out);
+	{
+		const Instance* tw = m_tooltipWidget != 0 ? find(m_tooltipWidget) : nullptr;
+		// A tooltip on the menu bar has no widget (id 0) and belongs to window 0.
+		const uint32_t tipWindow = tw ? tw->windowId : 0u;
+		if (tipWindow == windowId) drawTooltip(vpWidth, vpHeight, out);
+	}
+}
+
+// ── Which window a widget hangs in ───────────────────────────────────────────
+void WidgetManager::setWidgetWindow(int widgetId, uint32_t windowId)
+{
+	Instance* w = find(widgetId);
+	if (!w)
+	{
+		HE_LOG_WARN(Widget, "setWidgetWindow(%d): no such widget", widgetId);
+		return;
+	}
+	if (w->windowId == windowId) return;
+	// It is leaving, so everything the OLD window still believes about it goes
+	// with it: a grab it holds there would keep that window modal forever, and
+	// a focus or hover left behind points at a widget that is no longer drawn.
+	releaseGrabsOf(widgetId);
+	if (m_focusWidget == widgetId) { m_focusWidget = 0; m_focusEditing = false; }
+	if (m_tooltipWidget == widgetId)
+	{
+		m_tooltipWidget = m_tooltipElem = 0;
+		m_tooltipHeld = 0.0f; m_tooltipUp = false;
+	}
+	if (m_dropWidget == widgetId) m_dropWidget = m_dropElem = 0;
+	if (m_dragWidget == widgetId)
+	{
+		m_dragWidget = m_dragElem = 0;
+		m_dragArmed = m_dragActive = m_dragAteClick = false;
+	}
+	w->hoveredElem = w->pressedElem = 0;
+	w->windowId = windowId;
+	m_visualDirty = true;
+}
+
+uint32_t WidgetManager::widgetWindow(int widgetId) const
+{
+	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	return w ? w->windowId : 0u;
+}
+
+int WidgetManager::destroyWidgetsOfWindow(uint32_t windowId)
+{
+	// Ids first: destroyWidget fires Destruct, which is user graph code and may
+	// create or destroy widgets — iterating m_instances across that is how the
+	// vector moves out from under the loop.
+	std::vector<int> ids;
+	for (const Instance& w : m_instances)
+		if (w.windowId == windowId) ids.push_back(w.id);
+	for (const int id : ids) destroyWidget(id);
+	return static_cast<int>(ids.size());
+}
+
+bool WidgetManager::hasVisibleWidgetsIn(uint32_t windowId) const
+{
+	for (const Instance& w : m_instances)
+		if (w.visible && w.windowId == windowId) return true;
+	return false;
 }
 
 // The strip and, when one is open, its menu. Every rectangle comes from the same

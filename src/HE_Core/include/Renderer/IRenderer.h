@@ -176,6 +176,14 @@ public:
         // MetalFX temporal scaling (A5). Metal on Apple Silicon with a macOS
         // that has MTLFXTemporalScaler; implies supportsTemporalAA (same inputs).
         bool supportsMetalFX = false;
+        // A second window with its own widget tree (docs/he-apps-plan.md §13.3).
+        // Reported by the backends that actually DRAW into one: Software (its own
+        // SDL surface per window) and Metal (a layer per window). OpenGL, Vulkan
+        // and D3D leave it false — their RenderWindow either clears black or
+        // redraws the scene, and a window that opens onto that is worse than a
+        // window that refuses to open. `window.open` refuses in one place from
+        // this flag rather than each backend inventing its own excuse.
+        bool supportsSecondaryWindows = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the

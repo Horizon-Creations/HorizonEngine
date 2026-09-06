@@ -105,6 +105,12 @@ namespace HE
         // until the user resolves a prompt (e.g. unsaved-changes confirmation).
         void        CancelClose()       { m_shouldClose = false; }
         bool        IsPrimary()   const { return m_isPrimary; }
+        // The graphics API this window was CREATED for — the SDL flags follow
+        // from it and cannot be changed afterwards. A secondary window has to
+        // agree with the primary here: the one renderer that draws into both
+        // asks the window for a GL context or a Metal layer, and a window
+        // created without the matching flag has neither.
+        RendererBackend GetApi()  const { return m_api; }
         uint32_t    GetWindowId() const;
         // Logical size in points — what SDL_CreateWindow / SetSize were given.
         // Kept current by PollEvents (SDL_EVENT_WINDOW_RESIZED).

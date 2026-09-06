@@ -15872,3 +15872,108 @@ TEST_CASE("Leaf AutoSize round-trips, and an older widget saves byte-identical")
     combo->setProp("AutoSize", HE::UIPropValue::ofBool(false));
     CHECK_FALSE(combo->getProp("AutoSize").b);
 }
+
+// ── A5, mehrere Fenster (docs/he-apps-plan.md §13.3) ─────────────────────────
+
+TEST_CASE("A5: a widget draws only in the window it hangs in")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.add(HE::UIWidgetType::Button);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int main = createShown(wm, cm, "mem://w.hasset");
+    const int tool = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(main != 0);
+    REQUIRE(tool != 0);
+    // Everything starts in window 0, which is what a single-window application
+    // is: the same numbers it always had, without anyone asking for a window.
+    CHECK(wm.widgetWindow(main) == 0u);
+    CHECK(wm.widgetWindow(tool) == 0u);
+
+    std::vector<UIRenderObject> both;
+    wm.extract(1920.0f, 1080.0f, both);
+    const std::size_t twoWidgets = both.size();
+    REQUIRE(twoWidgets > 0);
+
+    wm.setWidgetWindow(tool, 7);
+    CHECK(wm.widgetWindow(tool) == 7u);
+
+    std::vector<UIRenderObject> w0;
+    wm.extract(0u, 1920.0f, 1080.0f, w0);
+    std::vector<UIRenderObject> w7;
+    wm.extract(7u, 400.0f, 300.0f, w7);
+    CHECK(!w0.empty());
+    CHECK(!w7.empty());
+    // Each window drew a part, and the two parts together are the whole — the
+    // second window did not get a copy of the first one's page.
+    CHECK(w0.size() + w7.size() == twoWidgets);
+    // A window nobody put anything in draws nothing at all.
+    std::vector<UIRenderObject> w9;
+    wm.extract(9u, 400.0f, 300.0f, w9);
+    CHECK(w9.empty());
+
+    CHECK(wm.hasVisibleWidgetsIn(0u));
+    CHECK(wm.hasVisibleWidgetsIn(7u));
+    CHECK_FALSE(wm.hasVisibleWidgetsIn(9u));
+
+    // Closing a window takes its widgets with it and leaves the other alone.
+    CHECK(wm.destroyWidgetsOfWindow(7u) == 1);
+    CHECK_FALSE(wm.isAlive(tool));
+    CHECK(wm.isAlive(main));
+}
+
+TEST_CASE("A5: moving a widget to another window drops what the old one held")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setFocus(id, btn));
+    CHECK(wm.focusedWidget() == id);
+    // A dialog holds the input while it is up…
+    wm.showModal(id);
+    CHECK(wm.hasLayer());
+
+    // …and taking it to another window means it no longer holds THIS one. A
+    // grab left behind is a window nobody can click again with nothing on
+    // screen to blame for it.
+    wm.setWidgetWindow(id, 3);
+    CHECK_FALSE(wm.hasLayer());
+    CHECK(wm.focusedWidget() == 0);
+    CHECK(wm.widgetWindow(id) == 3u);
+}
+
+TEST_CASE("A5: a modal in another window does not dim this one")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.add(HE::UIWidgetType::Button);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int page   = createShown(wm, cm, "mem://w.hasset");
+    const int dialog = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(page != 0);
+    REQUIRE(dialog != 0);
+    wm.setWidgetWindow(dialog, 5);
+    wm.showModal(dialog);
+
+    // The scrim is the manager's own full-viewport quad, emitted in front of
+    // whatever the modal covers. Window 0 has no modal of its own, so its quad
+    // count must be the same as before the dialog ever opened.
+    std::vector<UIRenderObject> w0;
+    wm.extract(0u, 1920.0f, 1080.0f, w0);
+    std::vector<UIRenderObject> w5;
+    wm.extract(5u, 800.0f, 600.0f, w5);
+    // One extra quad in window 5 (the scrim), none in window 0.
+    CHECK(w5.size() == w0.size() + 1);
+}
