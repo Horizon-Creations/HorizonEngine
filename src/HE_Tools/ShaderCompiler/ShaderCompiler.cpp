@@ -210,6 +210,52 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
     return r;
 }
 
+Result compileHlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<HlslPin>& pins)
+{
+    Result r;
+    std::lock_guard<std::mutex> lock(g_glslangMutex);
+    glslang::InitializeProcess();
+    if (glslToSpirv(glsl, stage, r.spirv, r.log))
+    {
+        try
+        {
+            spirv_cross::CompilerHLSL c(r.spirv);
+            spirv_cross::CompilerHLSL::Options o;
+            o.shader_model = 50;
+            c.set_hlsl_options(o);
+            for (const HlslPin& p : pins)
+            {
+                spirv_cross::HLSLResourceBinding b{};
+                b.stage = (p.stage == Stage::Vertex)   ? spv::ExecutionModelVertex
+                        : (p.stage == Stage::Fragment) ? spv::ExecutionModelFragment
+                                                       : spv::ExecutionModelGLCompute;
+                b.desc_set = p.set;
+                b.binding  = p.binding;
+                // One binding can be several HLSL resources at once (a GLSL
+                // sampler2D is an SRV *and* a sampler), so every kind gets the
+                // index; only the ones the resource actually has are consumed.
+                b.cbv.register_binding     = p.reg;
+                b.srv.register_binding     = p.reg;
+                b.sampler.register_binding = p.reg;
+                b.uav.register_binding     = p.reg;
+                c.add_hlsl_resource_binding(b);
+            }
+            r.source = c.compile();
+            r.ok = true;
+        }
+        catch (const std::exception& e)
+        {
+            r.log += "SPIRV-Cross(HLSL pinned): ";
+            r.log += e.what();
+            r.log += '\n';
+        }
+    }
+    glslang::FinalizeProcess();
+    reportShaderResult("Pinned-HLSL shader compile", r.ok, r.log, glsl.size());
+    return r;
+}
+
 MultiResult compileMany(const std::string& glsl, Stage stage,
                         const std::vector<Target>& targets)
 {

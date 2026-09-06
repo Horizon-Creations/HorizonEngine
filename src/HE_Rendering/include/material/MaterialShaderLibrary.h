@@ -255,6 +255,12 @@ public:
     //                          at all: Vulkan, D3D11, D3D12. No shadows, no
     //                          point/spot lights, no GI on the decal — the
     //                          deliberate optical deviation of those backends.
+    //
+    // Backend::HLSL is emitted with PINNED registers, because SPIRV-Cross turns
+    // layout(binding = N) into register(bN/tN/sN) and the canonical decal
+    // bindings would land past D3D11's hard limits (14 constant-buffer and 16
+    // sampler slots per stage). The contract both D3D backends bind against:
+    //   b13 HeDecal (VS+PS) | t14/s14 heDecalTex | t15/s15 heGBDepth
     const Compiled& decalVertex(Backend backend);
     const Compiled& decalFragment(Backend backend);
     const Compiled& decalFragmentSampled(Backend backend);

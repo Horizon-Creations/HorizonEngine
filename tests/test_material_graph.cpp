@@ -754,6 +754,44 @@ TEST_CASE("Decal shaders cross-compile for every backend")
 	CHECK(vBlock == block(fwGlsl));
 }
 
+TEST_CASE("Decal HLSL registers stay inside D3D11's bindable range")
+{
+	// docs/decals-cross-backend-plan.md §6b. SPIRV-Cross turns layout(binding = N)
+	// into register(bN/tN/sN) one-for-one, and the canonical decal bindings are
+	// 19/22/23 — past D3D11's hard limits of 14 constant-buffer and 16 sampler
+	// slots per stage. A shader emitted that way cannot be bound at all, and no
+	// D3D11 header exists on the build machine to catch it, so the pins are
+	// checked here on the emitted text. This is the ONLY automatic net under the
+	// D3D11 decal pass; the numbers are the contract D3D12 inherits.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string vs = lib.decalVertex(B::HLSL).source;
+	CHECK(vs.find("register(b13)") != std::string::npos);
+	CHECK(vs.find("register(b23)") == std::string::npos);
+	CHECK(vs.find("SV_VertexID")   != std::string::npos); // bufferless cube, no VB
+
+	for (const std::string& ps : { lib.decalFragmentSampled(B::HLSL).source,
+	                               lib.decalFragmentForward(B::HLSL).source })
+	{
+		CHECK(ps.find("register(b13)") != std::string::npos); // HeDecal
+		CHECK(ps.find("register(t14)") != std::string::npos); // heDecalTex
+		CHECK(ps.find("register(s14)") != std::string::npos);
+		CHECK(ps.find("register(t15)") != std::string::npos); // heGBDepth
+		CHECK(ps.find("register(s15)") != std::string::npos);
+		// The canonical numbers must be gone, not merely joined by the pinned ones.
+		CHECK(ps.find("register(b23)") == std::string::npos);
+		CHECK(ps.find("register(s19)") == std::string::npos);
+		CHECK(ps.find("register(s22)") == std::string::npos);
+	}
+
+	// Pinning must not change what the shader computes: the GLSL emitter is the
+	// unpinned reference, and both still carry the same box clip and the same
+	// coverage rule.
+	CHECK(lib.decalFragmentForward(B::HLSL).source.find("discard") == std::string::npos);
+	CHECK(lib.decalFragmentSampled(B::HLSL).source.find("discard") != std::string::npos);
+}
+
 TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;
