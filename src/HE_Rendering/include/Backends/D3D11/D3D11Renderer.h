@@ -37,6 +37,10 @@ public:
     void SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
     // Software ray-traced DDGI (CPU BVH + CS 5.0) — mirrors the GL 4.3/Vulkan port.
     void SetGISettings(const GISettings& settings) override;
+    // Forward screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint C).
+    // Editor-viewport only: the trace reads the previous frame's HDR colour, and
+    // the swapchain path has no HDR target (C6).
+    void SetSSRSettings(const SSRSettings& settings) override;
 
     // Editor material/mesh hot-reload: drop the cached override-material texture / mesh
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).

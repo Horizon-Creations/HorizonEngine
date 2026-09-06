@@ -179,6 +179,25 @@ static constexpr MTLPixelFormat kSceneColorFormat = MTLPixelFormatRGBA16Float; /
 static constexpr MTLPixelFormat kGBuf0Format    = MTLPixelFormatRGBA8Unorm_sRGB;
 static constexpr MTLPixelFormat kGBufAttrFormat = MTLPixelFormatRGBA16Float;
 
+// GPU instancing (A3 contract, docs/gpu-instancing-cross-backend-plan.md §3):
+// the same capacity and the same 128-byte {mvp, model} stride D3D11/D3D12/Vulkan
+// use, so the layout is one decision rather than four.
+static constexpr uint32_t k_maxInstances = 65536; // per-batch instance ceiling
+static constexpr size_t   k_instStride   = 128;   // bytes per instance = 2 × float4x4
+
+// HE_MTL_INSTANCING=0 forces every batch back onto the per-instance loop. The
+// fallback is the pre-A3 code path unchanged, so this is the A/B that answers
+// "does the instanced draw put the pixels where the loop did?" — the one
+// question a screenshot alone cannot settle. Read once.
+static bool metalInstancingEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_MTL_INSTANCING");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
 static const char* kUnlitMSL = R"MSL(
@@ -300,6 +319,43 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
 	out.position   = u.mvp * float4(float3(verts[vid].position), 1.0);
 	out.worldPos   = world.xyz;
 	float3x3 m3    = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+	out.normal     = m3 * float3(verts[vid].normal);
+	out.uv         = float2(verts[vid].uv);
+	out.color      = u.color.rgb;
+	out.hasTexture = u.flags.x;
+	out.metallic   = u.pbr.x;
+	out.roughness  = u.pbr.y;
+	out.opacity    = u.pbr.z;
+	out.noShadow   = u.flags.y;
+	return out;
+}
+
+// GPU instancing (docs/gpu-instancing-cross-backend-plan.md §4): one transform
+// pair per instance in a device array at buffer 5, indexed by [[instance_id]].
+// 128 bytes per instance, {mvp, model}, column-major — byte-identical to the
+// D3D11/D3D12/Vulkan instance stride (k_instStride), so the layout is one
+// contract across all four backends.
+struct InstXform {
+	float4x4 mvp;
+	float4x4 model;
+};
+
+// vertexMain with the two per-object matrices taken from the instance array
+// instead of Uniforms. Everything else — color, flags, pbr — stays in `u`,
+// because GeometryPass only batches draws over which those are constant.
+// VSOut is unchanged, so fragmentMain and gbufferMain are reused as they are.
+vertex VSOut vertexMainInstanced(uint vid [[vertex_id]],
+                                 uint iid [[instance_id]],
+                                 const device VertexIn*  verts [[buffer(0)]],
+                                 constant Uniforms&      u     [[buffer(1)]],
+                                 const device InstXform* inst  [[buffer(5)]])
+{
+	VSOut out;
+	float4x4 model = inst[iid].model;
+	float4 world   = model * float4(float3(verts[vid].position), 1.0);
+	out.position   = inst[iid].mvp * float4(float3(verts[vid].position), 1.0);
+	out.worldPos   = world.xyz;
+	float3x3 m3    = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
 	out.normal     = m3 * float3(verts[vid].normal);
 	out.uv         = float2(verts[vid].uv);
 	out.color      = u.color.rgb;
@@ -1343,45 +1399,14 @@ fragment float4 ssaoPosFragment(SSAOPosOut in [[stage_in]])
 	return float4(in.viewPos, 1.0); // a = 1 → valid geometry
 }
 
-// FORWARD-reflections variant of the pre-pass (MRT): additionally writes the
-// G-buffer-compatible attribute pair the SSR trace / GI-reflection kernels
-// consume — oct-encoded WORLD normal (+ roughness 0: the prepass has no
-// material data; the shading pass applies the per-pixel roughness fade) and
-// the NDC depth exactly as gbufferMain stores it (in.position.z), so the
-// reconstruction maths (heWorldAt / invViewProj) is shared verbatim.
-struct ReflPosOut { float4 position [[position]]; float3 viewPos; float3 worldNormal; };
-struct ReflPosFrag {
-	float4 viewPos [[color(0)]];
-	float4 attr    [[color(1)]]; // rg oct normal *0.5+0.5, b roughness (0), a unused
-	float  ndc     [[color(2)]]; // NDC depth (same value gbufferMain writes)
-};
-static float2 octEncodePre(float3 n)
-{
-	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
-	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
-	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
-}
-vertex ReflPosOut reflPosVertex(uint vid [[vertex_id]],
-                                const device VertexIn*    verts [[buffer(0)]],
-                                constant SSAOPosUniforms& u     [[buffer(1)]])
-{
-	ReflPosOut o;
-	float4 p      = float4(float3(verts[vid].position), 1.0);
-	o.position    = u.mvp * p;
-	o.viewPos     = (u.modelView * p).xyz;
-	o.worldNormal = (u.model * float4(float3(verts[vid].normal), 0.0)).xyz;
-	return o;
-}
-fragment ReflPosFrag reflPosFragment(ReflPosOut in [[stage_in]])
-{
-	ReflPosFrag o;
-	o.viewPos = float4(in.viewPos, 1.0);
-	float3 n = in.worldNormal;
-	n = (dot(n, n) > 1e-12) ? normalize(n) : float3(0.0, 0.0, 1.0);
-	o.attr = float4(octEncodePre(n) * 0.5 + 0.5, 0.0, 0.0);
-	o.ndc  = in.position.z;
-	return o;
-}
+// The FORWARD-reflections variant of this pre-pass (MRT: view position + oct
+// world normal + NDC depth) used to live here as reflPosVertex/reflPosFragment.
+// It moved into the shared MaterialShaderLibrary — every backend porting SSR
+// needs the identical encoding, and the trace decodes it with the preamble's
+// heOctDecode (docs/ssr-cross-backend-plan.md §3.2 way (a)). See
+// MaterialShaderLibrary::reflPrepassVertex / reflPrepassFragment; the pipeline
+// is built from those in CreateScenePipeline, with the SSBO vertex-pull pinned
+// to the same buffer(0)/buffer(1) this pass's encoder has always used.
 
 struct SSAOOut { float4 position [[position]]; float2 uv; };
 vertex SSAOOut ssaoVertex(uint vid [[vertex_id]])
@@ -5649,6 +5674,9 @@ void MetalRenderer::Shutdown()
 	DestroyHDRTarget();
 	DestroyGBufferTargets();
 	if (m_gbufferPipeline)             { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
+	// Dropped with its twin: EnsureDeferredPipelines keys "already built" off
+	// m_gbufferPipeline, so a surviving instanced PSO would be a stale descriptor.
+	if (m_gbufferInstancedPipeline)    { CFBridgingRelease(m_gbufferInstancedPipeline);    m_gbufferInstancedPipeline = nullptr; }
 	if (m_deferredResolvePipeline)     { CFBridgingRelease(m_deferredResolvePipeline);     m_deferredResolvePipeline = nullptr; }
 	if (m_deferredResolveTilePipeline) { CFBridgingRelease(m_deferredResolveTilePipeline); m_deferredResolveTilePipeline = nullptr; }
 	if (m_decalPipeline) { CFBridgingRelease(m_decalPipeline); m_decalPipeline = nullptr; }
@@ -5755,6 +5783,7 @@ void MetalRenderer::Shutdown()
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
 	if (m_scenePipeline)        { CFBridgingRelease(m_scenePipeline);        m_scenePipeline = nullptr; }
+	if (m_sceneInstancedPipeline) { CFBridgingRelease(m_sceneInstancedPipeline); m_sceneInstancedPipeline = nullptr; }
 	if (m_sceneBlendPipeline)   { CFBridgingRelease(m_sceneBlendPipeline);   m_sceneBlendPipeline = nullptr; }
 	if (m_skinnedPipeline)      { CFBridgingRelease(m_skinnedPipeline);      m_skinnedPipeline = nullptr; }
 	if (m_particleSimPipeline)  { CFBridgingRelease(m_particleSimPipeline);  m_particleSimPipeline = nullptr; }
@@ -5775,6 +5804,7 @@ void MetalRenderer::Shutdown()
 	if (m_ssaoPointSampler) { CFBridgingRelease(m_ssaoPointSampler); m_ssaoPointSampler = nullptr; }
 	if (m_ssaoNoiseSampler)  { CFBridgingRelease(m_ssaoNoiseSampler);  m_ssaoNoiseSampler = nullptr; }
 	if (m_debugLinePipeline) { CFBridgingRelease(m_debugLinePipeline); m_debugLinePipeline = nullptr; }
+	ReleaseRibbonBuffers();
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -5880,6 +5910,108 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 	}
 }
 
+void MetalRenderer::ReleaseRibbonBuffers()
+{
+	for (void* b : m_ribbonBuffers)
+		if (b) CFBridgingRelease(b);
+	m_ribbonBuffers.clear();
+}
+
+// ─── Motion trails → collected blended draws ─────────────────────────────────
+// The whole point of RibbonBatch is that this costs no pipeline: the vertices
+// arrive in the cooked layout the scene vertex shader already reads (pos3 +
+// norm3 + uv2) and in WORLD space, so the model matrix is the identity and the
+// draw is just another entry in the list EncodeScene's transparency pass sorts
+// and replays. A trail whose material carries a node graph gets that material's
+// blended pipeline, which is what makes the age in uv.v drive colour and fade
+// without a single trail-specific uniform.
+void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
+                                       const glm::vec3& cameraPos)
+{
+	if (m_renderWorld.ribbonBatches.empty()) return;
+	// Last frame's staging buffers go now, not at the end of the frame that used
+	// them: the draws below hold bare pointers and are replayed much later.
+	ReleaseRibbonBuffers();
+
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		for (const RibbonBatch& rb : m_renderWorld.ribbonBatches)
+		{
+			if (rb.vertices.empty() || rb.indices.empty()) continue;
+
+			// Material first, buffers after: every Resolve* below can LOAD, and a
+			// load moves the ContentManager's dense pools out from under any
+			// pointer taken before it.
+			void* tex = nullptr;
+			const bool hasTex = ResolveMaterialTexture(rb.materialAssetId, tex);
+			glm::vec3 baseColor(1.0f);
+			float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
+			if (!ResolveMaterialParams(rb.materialAssetId, baseColor, metallic, roughness, opacity))
+				baseColor = hasTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+
+			TPDraw t{};
+			t.u.mvp   = viewProj;              // world vertices ⇒ model = identity
+			t.u.model = glm::mat4(1.0f);
+			t.u.color = glm::vec4(baseColor, 1.0f);
+			t.u.flags = glm::vec4(hasTex ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+			t.u.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+			t.tex     = tex ? tex : m_dummyTexture;
+			t.indexCount = static_cast<NSUInteger>(rb.indices.size());
+			// Sort key from the band's own centre. RenderSorter::backToFrontKey on
+			// an identity transform would measure every trail's distance to the
+			// WORLD ORIGIN instead, and they would all sort the same.
+			const glm::vec3 c = rb.worldBounds.isValid() ? rb.worldBounds.center() : cameraPos;
+			t.distSq  = glm::dot(c - cameraPos, c - cameraPos);
+
+#if defined(HE_HAVE_SHADERC)
+			// Custom material: the BLENDED pipeline variant, same as a translucent
+			// mesh takes in the opaque loop. Null pipeline = the built-in blend PSO.
+			uint64_t shKey = 0; std::string shFrag, shVert;
+			if (ResolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
+			{
+				std::vector<HE::UUID>    gtexIds;
+				std::vector<std::string> gtexPaths;
+				const MaterialShaderVariant* pre = nullptr;
+				if (const MaterialAsset* ma = m_contentManager
+					? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+				{
+					for (const auto& var : ma->precompiledShaders)
+						if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
+					if (!ma->shaderParamData.empty()) t.params = ma->shaderParamData;
+					// Snapshot the graph texture slots BEFORE resolving any of them —
+					// ResolveGraphTexture loads, and `ma` would not survive it.
+					const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+						std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+					for (size_t i = 0; i < nTex; ++i)
+					{
+						gtexIds.push_back(i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{});
+						gtexPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{});
+					}
+				}
+				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+				t.wpo      = !shVert.empty();
+				for (size_t i = 0; i < gtexIds.size(); ++i)
+					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i]);
+			}
+#endif
+
+			id<MTLBuffer> vbuf = [device newBufferWithBytes:rb.vertices.data()
+			                                         length:rb.vertices.size() * sizeof(float)
+			                                        options:MTLResourceStorageModeShared];
+			id<MTLBuffer> ibuf = [device newBufferWithBytes:rb.indices.data()
+			                                         length:rb.indices.size() * sizeof(uint32_t)
+			                                        options:MTLResourceStorageModeShared];
+			if (!vbuf || !ibuf) continue;
+			m_ribbonBuffers.push_back((void*)CFBridgingRetain(vbuf));
+			m_ribbonBuffers.push_back((void*)CFBridgingRetain(ibuf));
+			t.vbuf = (__bridge void*)vbuf;
+			t.ibuf = (__bridge void*)ibuf;
+			out.push_back(std::move(t));
+		}
+	}
+}
+
 void MetalRenderer::CreateScenePipeline()
 {
 	@autoreleasepool
@@ -5904,6 +6036,23 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: pipeline creation failed: ")
 				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
 		m_scenePipeline = (void*)CFBridgingRetain(pso);
+
+		// GPU-instanced variant: identical target/depth formats, only the vertex
+		// function differs. Not fatal if it fails — instanced batches then simply
+		// keep taking the per-instance loop.
+		desc.vertexFunction = [lib newFunctionWithName:@"vertexMainInstanced"];
+		NSError* iErr = nil;
+		id<MTLRenderPipelineState> instPso =
+			[device newRenderPipelineStateWithDescriptor:desc error:&iErr];
+		if (instPso) m_sceneInstancedPipeline = (void*)CFBridgingRetain(instPso);
+		else
+			HE_LOG_WARN(RHI, "%s",
+				(std::string("MetalRenderer: instanced scene pipeline build failed — "
+				             "batches stay on the per-instance loop: ")
+				 + (iErr ? iErr.localizedDescription.UTF8String : "?")).c_str());
+		// Back to vertexMain BEFORE the blend PSO: the descriptor is reused, and
+		// the transparency pass binds nothing at vertex buffer 5.
+		desc.vertexFunction = [lib newFunctionWithName:@"vertexMain"];
 
 		// Alpha-blended variant of the scene pipeline for the transparency pass
 		// (same shaders, src-alpha / one-minus-src-alpha over the HDR target).
@@ -6248,18 +6397,56 @@ void MetalRenderer::CreateScenePipeline()
 		// FORWARD-reflections MRT variant of the pre-pass (view-pos + oct
 		// normal/rough + NDC depth) — used instead of the plain pre-pass when
 		// the forward path runs SSR / GI reflections.
-		MTLRenderPipelineDescriptor* rpDesc = [[MTLRenderPipelineDescriptor alloc] init];
-		rpDesc.vertexFunction   = [ssLib newFunctionWithName:@"reflPosVertex"];
-		rpDesc.fragmentFunction = [ssLib newFunctionWithName:@"reflPosFragment"];
-		rpDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // view position
-		rpDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // oct normal + rough
-		rpDesc.colorAttachments[2].pixelFormat = MTLPixelFormatR32Float;    // NDC depth
-		rpDesc.depthAttachmentPixelFormat      = kDepthFormat;
-		id<MTLRenderPipelineState> rpPso = [device newRenderPipelineStateWithDescriptor:rpDesc error:&ssError];
-		if (!rpPso)
-			throw std::runtime_error(std::string("MetalRenderer: refl pos pipeline failed: ")
-				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
-		m_reflPosPipeline = (void*)CFBridgingRetain(rpPso);
+		//
+		// Cross-compiled from the SHARED library rather than from kSSAOMSL
+		// above: every backend porting SSR needs the identical encoding, and
+		// four hand-kept copies of that contract drift
+		// (docs/ssr-cross-backend-plan.md §3.2 way (a)). The vertex is the SSBO
+		// pull variant, pinned so the mesh buffer stays at [[buffer(0)]] and the
+		// matrices at [[buffer(1)]] — the exact bind points the pre-pass encoder
+		// already issues, so EncodeSSAO is untouched by this.
+		//
+		// A failure here is NOT fatal: the MRT branch checks m_reflPosPipeline
+		// and falls back to the plain view-position pre-pass, which costs the
+		// forward path its reflections and nothing else. (The embedded-MSL
+		// version threw, but it could not fail for a reason the shipping build
+		// would ever see; a cross-compile can.)
+#if defined(HE_HAVE_SHADERC)
+		{
+			using LibBackend = HE::MaterialShaderLibrary::Backend;
+			const auto& rpv = m_matShaderLib.reflPrepassVertex(LibBackend::Metal);
+			const auto& rpf = m_matShaderLib.reflPrepassFragment(LibBackend::Metal);
+			if (!(rpv.ok && rpf.ok))
+				HE_LOG_ERROR(RHI, "%s",
+					(std::string("MetalRenderer: refl pre-pass cross-compile failed\n")
+					 + rpv.log + rpf.log).c_str());
+			else
+			{
+				NSError* rpErr = nil;
+				id<MTLLibrary> rpvLib = [device newLibraryWithSource:
+					[NSString stringWithUTF8String:rpv.source.c_str()] options:nil error:&rpErr];
+				id<MTLLibrary> rpfLib = rpErr ? nil : [device newLibraryWithSource:
+					[NSString stringWithUTF8String:rpf.source.c_str()] options:nil error:&rpErr];
+				if (rpvLib && rpfLib)
+				{
+					MTLRenderPipelineDescriptor* rpDesc = [[MTLRenderPipelineDescriptor alloc] init];
+					rpDesc.vertexFunction   = [rpvLib newFunctionWithName:@"main0"];
+					rpDesc.fragmentFunction = [rpfLib newFunctionWithName:@"main0"];
+					rpDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // view position
+					rpDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // oct normal + rough
+					rpDesc.colorAttachments[2].pixelFormat = MTLPixelFormatR32Float;    // NDC depth
+					rpDesc.depthAttachmentPixelFormat      = kDepthFormat;
+					id<MTLRenderPipelineState> rpPso =
+						[device newRenderPipelineStateWithDescriptor:rpDesc error:&rpErr];
+					if (rpPso) m_reflPosPipeline = (void*)CFBridgingRetain(rpPso);
+				}
+				if (!m_reflPosPipeline)
+					HE_LOG_ERROR(RHI, "%s",
+						(std::string("MetalRenderer: refl pos pipeline failed: ")
+						 + (rpErr ? rpErr.localizedDescription.UTF8String : "unknown")).c_str());
+			}
+		}
+#endif
 
 		// Deferred P5 variant: view-pos reconstructed from the G-buffer depth by a
 		// fullscreen draw — no depth attachment, no geometry.
@@ -9734,6 +9921,20 @@ bool MetalRenderer::EnsureDeferredPipelines()
 			desc.depthAttachmentPixelFormat      = kDepthFormat;
 			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
 			if (pso) m_gbufferPipeline = (void*)CFBridgingRetain(pso);
+
+			// GPU-instanced twin, built from the SAME descriptor — so the tile
+			// mode's fifth attachment above is carried over rather than
+			// duplicated, and Metal accepts the bind inside the running encoder.
+			desc.vertexFunction = [lib newFunctionWithName:@"vertexMainInstanced"];
+			NSError* iErr = nil;
+			id<MTLRenderPipelineState> instPso =
+				[device newRenderPipelineStateWithDescriptor:desc error:&iErr];
+			if (instPso) m_gbufferInstancedPipeline = (void*)CFBridgingRetain(instPso);
+			else
+				HE_LOG_WARN(RHI, "%s",
+					(std::string("MetalRenderer: instanced G-buffer pipeline build failed — "
+					             "batches stay on the per-instance loop: ")
+					 + (iErr ? iErr.localizedDescription.UTF8String : "?")).c_str());
 		}
 
 		// Fullscreen lighting resolve: cross-compiled from the SAME lighting
@@ -11405,7 +11606,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// total still comes from the exact stage-boundary pair on the encoder.
 	m_counters.total = static_cast<uint32_t>(m_renderWorld.objects.size());
 
-	if (m_renderWorld.objects.empty())
+	// Trails are not in `objects` (they are their own per-frame band list), so an
+	// otherwise empty scene that has one still has something to draw.
+	if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty())
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky();
@@ -11423,7 +11626,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_culler.cull(m_renderWorld, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	m_counters.visible = static_cast<uint32_t>(m_sortedIndices.size());
-	if (m_sortedIndices.empty())
+	if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty())
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky(); // nothing visible — fill the whole background with sky
@@ -11606,7 +11809,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// unchanged — they are forward in both paths.
 	if (deferred)
 	{
-		if (!deferred->resolveDone)
+		// Nothing visible means EncodeGBuffer wrote nothing this frame, so there is
+		// no G-buffer to resolve — the sky fills the frame and a trail (the only
+		// reason we got past the early returns above) draws over it. Before ribbons
+		// this case simply returned early, so the gate reproduces that exactly.
+		if (!deferred->resolveDone && !m_sortedIndices.empty())
 		{
 		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_deferredResolvePipeline];
 		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
@@ -11968,7 +12175,63 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			};
-			if (dc.instanceTransforms.empty())
+			// A3 on Metal (plan §4): one draw for the whole batch, every instance's
+			// {mvp, model} in a device array at vertex buffer 5. `fits` is decided
+			// once per DrawCall because every input to it is constant over the batch —
+			// that is exactly the condition under which GeometryPass batched at all.
+			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
+			const size_t instCount = dc.instanceTransforms.size();
+			const bool fits = instCount > 0
+			               && metalInstancingEnabled()
+			               && m_sceneInstancedPipeline
+			               && instCount <= k_maxInstances
+			               // Only built-in PBR is instanced. A node-graph material has
+			               // its own pipeline and its own vertex stage; instancing it
+			               // would silently swap the look (the GL path's open bug,
+			               // plan §2/§6.4). Optics before draw-call savings.
+			               && cMaterialPipeline == nullptr
+			               && dc.paramOverride.empty()
+			               // Translucent batches must reach the sorted back-to-front
+			               // replay the loop feeds — the instanced draw cannot sort.
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (fits)
+			{
+				if (m_sceneInstancedPipeline != boundPipeline)
+				{
+					[encoder setRenderPipelineState:
+						(__bridge id<MTLRenderPipelineState>)m_sceneInstancedPipeline];
+					boundPipeline = m_sceneInstancedPipeline;
+				}
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				// Fresh buffer per batch, same convention as the particle path: the
+				// encoder holds every bound resource until its command buffer
+				// completes, so there is nothing to hand-synchronise. A per-frame ring
+				// would need frame-in-flight tracking this backend does not have.
+				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
+					length:xf.size() * sizeof(glm::mat4)
+					options:MTLResourceStorageModeShared];
+				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
+				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setFragmentTexture:texture atIndex:0];
+				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                    indexCount:indexCount
+				                     indexType:MTLIndexTypeUInt32
+				                   indexBuffer:indexBuf
+				             indexBufferOffset:0
+				                 instanceCount:(NSUInteger)instCount];
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
+				                 * static_cast<uint32_t>(instCount);
+			}
+			else if (dc.instanceTransforms.empty())
 				drawInstance(dc.transform);
 			else
 				for (const glm::mat4& t : dc.instanceTransforms)
@@ -11984,6 +12247,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();
 	SamplePoint(renderEncoder, "Sky+Clouds");
+
+	// Motion trails join the blended list here rather than getting a pass of
+	// their own: same vertex layout, same sort, same state. Collected AFTER the
+	// opaque loop so they cannot influence the shadow fit or the sort of anything
+	// else, and before the sort below so they take part in it.
+	CollectRibbonDraws(transparent, viewProj, camPos);
 
 	// ── Transparency pass: sorted, alpha-blended draws over the opaque scene +
 	// sky. Back-to-front; depth-tested against the opaque geometry but no depth
@@ -13757,7 +14026,54 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			};
-			if (dc.instanceTransforms.empty())
+			// The forward pass's twin (plan §4), with one criterion of its own:
+			// cMaterialCustom. A custom material without a G-buffer variant leaves
+			// this loop as a forwardOpaque re-route, which an instanced draw has no
+			// way to perform — and one WITH a variant carries its own vertex stage.
+			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
+			const size_t instCount = dc.instanceTransforms.size();
+			const bool fits = instCount > 0
+			               && metalInstancingEnabled()
+			               && m_gbufferInstancedPipeline
+			               && instCount <= k_maxInstances
+			               && !cMaterialCustom
+			               && cMaterialPipelineGB == nullptr
+			               && dc.paramOverride.empty()
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (fits)
+			{
+				if (m_gbufferInstancedPipeline != boundPipeline)
+				{
+					[encoder setRenderPipelineState:
+						(__bridge id<MTLRenderPipelineState>)m_gbufferInstancedPipeline];
+					boundPipeline = m_gbufferInstancedPipeline;
+				}
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
+					length:xf.size() * sizeof(glm::mat4)
+					options:MTLResourceStorageModeShared];
+				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
+				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setFragmentTexture:texture atIndex:0];
+				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                    indexCount:indexCount
+				                     indexType:MTLIndexTypeUInt32
+				                   indexBuffer:indexBuf
+				             indexBufferOffset:0
+				                 instanceCount:(NSUInteger)instCount];
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
+				                 * static_cast<uint32_t>(instCount);
+			}
+			else if (dc.instanceTransforms.empty())
 				drawInstance(dc.transform);
 			else
 				for (const glm::mat4& t : dc.instanceTransforms)

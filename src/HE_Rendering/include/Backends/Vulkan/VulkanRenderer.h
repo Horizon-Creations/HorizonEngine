@@ -52,6 +52,7 @@ public:
 	void SetBloomSettings(const BloomSettings& s) override;
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
+	void SetSSRSettings(const SSRSettings& s) override;
 
 	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
@@ -552,13 +553,46 @@ private:
 	VkPipeline            m_debugPipelineHDR     = VK_NULL_HANDLE;
 	std::vector<DebugLine> m_debugLines;
 
+	// ── Motion trails (RenderWorld::ribbonBatches) ───────────────────────────
+	// A ribbon needs no pipeline and no shader of its own: it arrives as CPU
+	// geometry in the ordinary cooked layout (pos3 + norm3 + uv2), so it is
+	// uploaded into a per-frame staging mesh and then handed to drawDCVk as a
+	// perfectly normal blended DrawCall — same PBR path, same graph-material
+	// pipelines, same sort (docs/rope-trail-plan.md §6.2). One pool slot per
+	// band per frame in flight; the frame fence waited at Render() entry is what
+	// makes re-uploading (and growing) this slot's buffers safe.
+	struct RibbonMeshVk
+	{
+		VkBuffer       vbuf    = VK_NULL_HANDLE;
+		VkDeviceMemory vmem    = VK_NULL_HANDLE;
+		void*          vmapped = nullptr;
+		VkDeviceSize   vcap    = 0;
+		VkBuffer       ibuf    = VK_NULL_HANDLE;
+		VkDeviceMemory imem    = VK_NULL_HANDLE;
+		void*          imapped = nullptr;
+		VkDeviceSize   icap    = 0;
+	};
+	std::vector<RibbonMeshVk> m_ribbonMeshes[2];   // [frame in flight][band]
+	// Fill `out` with the pool slot's buffers after uploading `verts`/`indices`
+	// into it. False = the buffers could not be created; the caller skips the band.
+	bool uploadRibbon(uint32_t frame, size_t index, const std::vector<float>& verts,
+	                  const std::vector<uint32_t>& indices, GpuMesh& out);
+	void destroyRibbonMeshes();
+
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Three render passes: (1) view-space position prepass, (2) SSAO compute,
 	// (3) box blur.  All run before the scene HDR pass each frame.
 	void createSSAOPipeline();
 	void createSSAOTargets(uint32_t w, uint32_t h);
 	void destroySSAOTargets();
-	void runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	// `reflMrt` draws pass 1 through the SHARED reflection pre-pass shader into
+	// three attachments instead of one (forward SSR, plan B2) — attachment 0 is
+	// the same view-space position either way, so passes 2/3 do not notice.
+	// `aoWanted = false` runs pass 1 ALONE: SSR needs the pre-pass on frames
+	// where SSAO is off or the GI probes replaced it, and m_ssaoRanThisFrame
+	// then stays false so scene.frag keeps its white AO fallback.
+	void runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
+	             bool reflMrt = false, bool aoWanted = true);
 
 	// Render-target bundle: color image + optional depth + framebuffer.
 	struct SSAORenderTarget {
@@ -620,6 +654,110 @@ private:
 	float    m_ssaoIntensity= 1.5f;
 	int      m_ssaoMethod   = 0;
 	uint32_t m_ssaoW = 0, m_ssaoH = 0;
+
+	// ── Screen-space reflections, FORWARD path ───────────────────────────────
+	// docs/ssr-cross-backend-plan.md checkpoint B. The same shape OpenGL got in
+	// checkpoint A and Metal has had all along (EncodeForwardSSR): the SHARED
+	// trace shader runs at half resolution over a reflection MRT pre-pass and
+	// LAST frame's HDR copy (Option A — one frame of content lag), the shared
+	// blur chain smooths it, and the scene shaders sample the one result. No
+	// composite and no glossy wide/mix stage: this backend has no G-buffer, and
+	// Metal's forward path has neither either.
+	//
+	// Vulkan's own constraints, none of which GL had:
+	//  * The pre-pass shares SSAO's position attachment and depth, so it lives
+	//    and dies with createSSAOTargets/destroySSAOTargets — a framebuffer
+	//    holds views, and SSAO's views are recreated on every resize.
+	//  * Every trace/blur target must be transitioned once at creation: the
+	//    trace SAMPLES the previous history pair even on the first frame (the
+	//    blend weight is zero, the read is not), and sampling an image still in
+	//    UNDEFINED is invalid however the value is used afterwards.
+	//  * SSR exists ONLY in the editor-viewport HDR path, because that is the
+	//    only place m_hdrImage exists (§2.2 of the plan). The swapchain branch
+	//    draws straight into the backbuffer and has no radiance source.
+	bool        EnsureSSRPipelines();
+	void        destroySSRPipelines();
+	void        createSSRTargets(uint32_t w, uint32_t h);
+	void        destroySSRTargets();
+	// The two extra pre-pass attachments + the framebuffer that ties them to
+	// SSAO's position and depth images. Built on the first SSR frame at the
+	// current m_ssaoW/H and released by destroySSAOTargets, because it holds
+	// views SSAO owns.
+	bool        ensureReflPrepassTargets();
+	void        destroyReflPrepassTargets();
+	// True when the settings, the pipelines and the pre-pass inputs all line up
+	// this frame — the single gate Render() gives to runSSAO and RenderForwardSSR.
+	bool        ssrWantedThisFrame() const;
+	// Trace + blur chain over the reflection pre-pass. Runs OUTSIDE any render
+	// pass; returns the view the scene shaders sample (null when it could not
+	// run — the first frame has no colour history yet).
+	VkImageView RenderForwardSSR(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	// Copy of the finished HDR frame for NEXT frame's trace. Called after the
+	// scene render pass ends, while m_hdrImage is still COLOR_ATTACHMENT_OPTIMAL.
+	void        CaptureSSRColorHistory(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	// One-time submit that parks a freshly created image in SHADER_READ_ONLY.
+	void        ssrPrimeLayout(VkImage img);
+
+	// Reflection MRT pre-pass: two extra attachments on SSAO's position pass.
+	SSAORenderTarget m_reflAttrRT;   // RGBA16F: rg = oct world normal *0.5+0.5, b = roughness (0)
+	SSAORenderTarget m_reflNdcRT;    // R32F: NDC depth, the G-buffer's own convention
+	VkFramebuffer    m_reflPrepassFB = VK_NULL_HANDLE; // {ssaoPos, attr, ndc, ssaoPosDepth}
+	VkRenderPass     m_reflPrepassRP = VK_NULL_HANDLE; // 3 color + D16
+	VkPipeline       m_reflPrepassPipeline   = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_reflPrepassSetLayout  = VK_NULL_HANDLE; // binding 1: U (dynamic)
+	VkPipelineLayout      m_reflPrepassPipeLayout = VK_NULL_HANDLE;
+	VkDescriptorPool      m_reflPrepassPool       = VK_NULL_HANDLE;
+	VkDescriptorSet       m_reflPrepassSet[2]     = {};  // one per frame in flight
+	struct SSRFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
+	SSRFrameBuf           m_reflPrepassUBO[2];           // ring of ReflPrepassUniforms slots
+	static constexpr uint32_t k_ssrMaxPrepassDraws = 4096;
+	static constexpr uint32_t k_ssrPrepassStride   = 256; // 192 B block, ≥ minUniformBufferOffsetAlignment
+
+	// Trace + blur.
+	VkRenderPass     m_ssrTraceRP = VK_NULL_HANDLE;  // 2 × RGBA16F (radiance + receiver pos)
+	VkRenderPass     m_ssrBlurRP  = VK_NULL_HANDLE;  // 1 × RGBA16F
+	VkPipeline       m_ssrTracePipeline = VK_NULL_HANDLE;
+	VkPipeline       m_ssrBlurPipeline  = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_ssrTraceSetLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_ssrBlurSetLayout  = VK_NULL_HANDLE;
+	VkPipelineLayout      m_ssrTracePipeLayout = VK_NULL_HANDLE;
+	VkPipelineLayout      m_ssrBlurPipeLayout  = VK_NULL_HANDLE;
+	VkDescriptorPool      m_ssrPool[2] = {};   // per frame in flight, reset whole
+	SSRFrameBuf           m_ssrUBO[2];         // slot 0 = trace, 1..4 = the blur passes
+	static constexpr uint32_t k_ssrUboSlots  = 5;
+	static constexpr uint32_t k_ssrUboStride = 512; // SSRTraceUniforms is 288 B (72 floats)
+	VkSampler m_ssrLinearSampler = VK_NULL_HANDLE;  // colour history, blur inputs, scene read
+	VkSampler m_ssrPointSampler  = VK_NULL_HANDLE;  // oct normals, NDC depth, receiver positions
+	// Half-res chain. The history pair is one framebuffer (MRT) per parity.
+	SSAORenderTarget m_ssrHistRad[2];  // radiance + confidence (attachment 0)
+	SSAORenderTarget m_ssrHistPos[2];  // receiver world position, w = 1 (attachment 1)
+	VkFramebuffer    m_ssrHistFB[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+	SSAORenderTarget m_ssrPingRT;
+	SSAORenderTarget m_ssrReflRT;
+	uint32_t  m_ssrW = 0, m_ssrH = 0;
+	int       m_ssrHistIdx   = 0;
+	bool      m_ssrHistValid = false;
+	glm::mat4 m_ssrPrevViewProj{ 1.0f };
+	float     m_ssrFrameSeed = 0.0f;
+	// Full-res copy of the PREVIOUS frame's HDR colour — the forward trace's
+	// radiance source (Metal's m_ssrColorHist, GL's m_ssrColorHistTex).
+	SSAORenderTarget m_ssrColorHist;
+	uint32_t m_ssrColorHistW = 0, m_ssrColorHistH = 0;
+	bool     m_ssrColorHistValid = false;
+	// 1×1 transparent black bound wherever a reflection texture is expected but
+	// no pass ran. m_dummyImage cannot serve: it is transitioned but never
+	// written, so its contents are undefined.
+	SSAORenderTarget m_ssrBlackRT;
+	bool  m_ssrPipelinesTried = false;
+	bool  m_ssrReady          = false;
+	bool  m_ssrRanThisFrame   = false; // cleared at the top of Render()
+	VkImageView m_ssrResultView = VK_NULL_HANDLE; // this frame's trace output, or null
+	bool  m_ssrEnabled      = false;
+	float m_ssrIntensity    = 1.0f;
+	float m_ssrMaxRoughness = 0.6f;
+	float m_ssrMaxDistance  = 30.0f;
+	float m_ssrThickness    = 0.5f;
+	int   m_ssrQuality      = 1;   // 0 = 16 steps, 1 = 32, 2 = 64 + temporal
 
 	// ── Global Illumination (software ray tracing, Checkpoint VK-A) ──────────
 	// The CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port and

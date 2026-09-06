@@ -119,6 +119,66 @@ struct DecalData {
     HE::UUID  textureId;
 };
 
+// One TrailComponent's band, already triangulated, in WORLD coordinates.
+//
+// Deliberately NOT an asset, and that is the whole point of the split between a
+// rope and a trail (docs/rope-trail-plan.md §2 / §6.2): a trail's geometry
+// changes every frame, and replacing a runtime StaticMeshAsset every frame would
+// free and rebuild the mesh's BLAS *and* throw away the scene's entire software
+// BVH each time (MetalRenderer.mm's InvalidateMesh drain — the SW-RT ranges live
+// in concatenated arrays and a single mesh cannot be cut out of them). A rope
+// pays that only when somebody moves it; a trail would pay it sixty times a
+// second, for the whole scene.
+//
+// So the backends treat this like the debug lines: CPU vertices into a dynamic
+// buffer, one draw, no UUID and no cache invalidation. The vertex layout is
+// deliberately identical to the cooked mesh format (pos3 + norm3 + uv2), so the
+// ordinary material path — the same vertex shader, the same PBR/graph pipelines,
+// the same alpha-blended transparency pass — draws it with no shader of its own.
+// The AGE rides in uv.v (0 at the tip, 1 at the tail); a material graph reads it
+// there, which is why TrailComponent has no colour-over-life fields.
+//
+// World coordinates mean the model matrix is the identity. Trails never enter
+// the shadow pass, the SSAO prepass or an acceleration structure — same reason
+// as the precipitation billboards.
+struct RibbonBatch {
+    HE::UUID              materialAssetId;
+    std::vector<float>    vertices;   // vertexCount * 8: pos3 + norm3 + uv2
+    std::vector<uint32_t> indices;
+    uint32_t              entityId = 0;
+    HE::AABB              worldBounds;
+};
+
+// Move a ribbon's WORLD-space positions onto their own centre and return that
+// centre — the translation the caller then draws them with as the model matrix.
+//
+// Only the DrawCall backends (Vulkan, D3D11, D3D12) need this, and the reason is
+// worth spelling out because Metal and GL deliberately do it differently: those
+// two replay ribbons through a draw list of their own, so they compute the
+// blended pass's sort key themselves and can keep the identity model. The
+// DrawCall backends hand ribbons to the SHARED blended pass, which sorts with
+// RenderSorter::backToFrontKey — the model matrix's translation column. An
+// identity model there puts every trail in the scene at the world origin, and
+// they all sort the same.
+//
+// translate(c) * (p - c) == p, so the world position the shader reconstructs is
+// bit-for-bit the intent, and a pure translation leaves normals — and therefore
+// the shading — untouched. Positions are the first 3 of every 8 floats; normals
+// and UVs are copied through.
+inline glm::vec3 rebaseRibbonVertices(const RibbonBatch& batch, std::vector<float>& out)
+{
+    out = batch.vertices;
+    if (!batch.worldBounds.isValid()) return glm::vec3(0.0f);
+    const glm::vec3 c = batch.worldBounds.center();
+    for (size_t i = 0; i + 8 <= out.size(); i += 8)
+    {
+        out[i + 0] -= c.x;
+        out[i + 1] -= c.y;
+        out[i + 2] -= c.z;
+    }
+    return c;
+}
+
 class RenderWorld {
 public:
     void clear();
@@ -159,6 +219,10 @@ public:
     std::vector<DecalData>           decals;
     std::vector<UIRenderObject>      uiObjects;
     std::vector<ParticleBatch>       particleBatches;
+    // Motion trails, retriangulated every frame — see RibbonBatch above. Drawn
+    // by the backends in the transparency pass, after the opaque scene and the
+    // sky, with the identity model matrix.
+    std::vector<RibbonBatch>         ribbonBatches;
     // Painted landscapes, referenced by RenderObject::landscapeIndex. Only the GI
     // reflection kernels read these (to sample the paint per ray hit) — see
     // GiLandscape.h. Empty in scenes without a terrain.

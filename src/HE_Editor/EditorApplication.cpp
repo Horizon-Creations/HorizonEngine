@@ -46,6 +46,9 @@
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/WeatherSystem.h>
+#include <HorizonScene/RopeTrailSystem.h>
+#include <HorizonScene/Components/RopeComponent.h>
+#include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
@@ -2987,6 +2990,37 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// ── Rope & trail guides, for the SELECTED entity only ────────────
+			// A rope is authored as a handful of points in a list, and until one
+			// of them is on screen the list is a set of numbers nobody can aim.
+			// Drawn only for the selection, because these are authoring handles
+			// rather than a scene overlay — every rope in a level showing its
+			// control points at once would bury the level.
+			//
+			// The world matrix comes from worldMatrixOf, not from
+			// TransformComponent::worldMatrix: this block runs right after
+			// tickWorld, which propagates nothing, so the stored matrix is a
+			// frame old and plain identity for anything created this frame.
+			if (m_selectedEntity != entt::null &&
+			    m_editorWorld->registry().valid(m_selectedEntity))
+			{
+				// Not gated on `visible`. A hidden rope is the one that most needs
+				// its handles: with nothing drawn and nothing to grab, the only way
+				// back to it is the Outliner, and switching Visible off would have
+				// meant losing the thing you were in the middle of shaping.
+				auto& reg = m_editorWorld->registry();
+				if (const auto* rope = reg.try_get<RopeComponent>(m_selectedEntity))
+				{
+					RopeTrailSystem::appendRopeGuides(
+						*rope,
+						RopeTrailSystem::resolveControlPoints(*m_editorWorld,
+						                                      m_selectedEntity, *rope),
+						HE::worldMatrixOf(*m_editorWorld, m_selectedEntity), dbg);
+				}
+				if (const auto* trail = reg.try_get<TrailComponent>(m_selectedEntity))
+					RopeTrailSystem::appendTrailGuides(*trail, dbg);
+			}
+
 			// NavMesh wireframe(s): baked polygons, per-component toggle
 			{
 				auto& reg = m_editorWorld->registry();
@@ -4307,6 +4341,39 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_DECALTEST witness scene added");
 	}
 
+	// ── GPU-instancing witness (HE_DUMP_INSTANCETEST=<n>, default 8): n default
+	// cubes in a row, same mesh, no material — exactly the run GeometryPass folds
+	// into ONE DrawCall carrying n transforms. The image must show n cubes at n
+	// distinct places (all of them stacked at the origin is the signature of a
+	// wrong instance-matrix layout); the "dump counters" line below must show the
+	// row costing one draw, not n. See docs/gpu-instancing-cross-backend-plan.md §5.
+	if (const char* it = std::getenv("HE_DUMP_INSTANCETEST"); it && *it && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const int n = std::clamp(std::atoi(it), 2, 64);
+		for (int i = 0; i < n; ++i)
+		{
+			auto e = m_editorWorld->createEntity("InstCube" + std::to_string(i));
+			TransformComponent tc;
+			// A row along X, staggered in Y so a collapsed batch cannot be mistaken
+			// for a correct one seen edge-on.
+			tc.position = glm::vec3(-(n - 1) * 1.5f * 0.5f + i * 1.5f,
+			                        1.0f + (i % 2) * 1.2f, -10.0f);
+			tc.scale    = glm::vec3(1.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+		auto floorE = m_editorWorld->createEntity("InstFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, -0.6f, -10.0f);
+		ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_INSTANCETEST witness scene added ("
+			 + std::to_string(n) + " cubes)").c_str());
+	}
+
 	// ── Local-light shadow witness (HE_DUMP_LOCALSHADOW=point|spot): a floor
 	// slab + caster cube + ONE shadow-casting local light. Shot at midnight
 	// (TOD=0) the local light dominates: the cube must throw a visible shadow
@@ -4971,6 +5038,162 @@ void EditorApplication::dumpFrameHeadless()
 			 + "° -> " + std::to_string(endDeg) + "°").c_str());
 	}
 
+	// ── Rope & trail witness (HE_DUMP_ROPETEST) ──────────────────────────────
+	// Puts a tube rope, a ribbon rope and a motion trail in front of the camera
+	// and DRIVES THE REAL SYSTEM over a handful of ticks, because that is the
+	// only way either half becomes visible: a rope has no runtime mesh until
+	// RopeTrailSystem::update registers one, and a trail has no points at all
+	// until the entity has moved. The capture loop below only calls Render(), so
+	// without this the whole feature is invisible to a headless dump.
+	//
+	// The trail's material is a node graph reading uv.v — the AGE channel from
+	// docs/rope-trail-plan.md §3.2 — into both the colour and the opacity, so
+	// the picture shows not just "a band arrived" but that the band's own
+	// parametrisation reached the shader.
+	if (const char* rt = std::getenv("HE_DUMP_ROPETEST"); rt && *rt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 right = glm::normalize(glm::cross(camFwd, glm::vec3(0.0f, 1.0f, 0.0f)));
+		const glm::vec3 origin = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto plainMaterial = [&](const char* name, glm::vec3 rgb) {
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = name;
+			m.baseColor[0] = rgb.r; m.baseColor[1] = rgb.g; m.baseColor[2] = rgb.b;
+			m.roughness = 0.6f;
+			return contentManager().registerMaterial(std::move(m));
+		};
+
+		// Tube: a slack line between two posts, sag on, so the curve, the rings
+		// and the arc-length UV all show at once.
+		Entity tubeEntity = entt::null;
+		{
+			auto e = tubeEntity = m_editorWorld->createEntity("RopeTestTube");
+			TransformComponent tc; tc.position = origin - right * 3.0f;
+			reg.emplace<TransformComponent>(e, tc);
+			RopeComponent rope;
+			rope.controlPoints = { { -2.5f, 1.5f, 0.0f }, { 0.0f, 1.2f, 0.8f }, { 2.5f, 1.5f, 0.0f } };
+			rope.shape           = RopeShape::Tube;
+			rope.radius          = 0.12f;
+			rope.radialSegments  = 12;
+			rope.samplesPerSpan  = 16;
+			rope.sag             = 0.8f;
+			rope.materialAssetId = plainMaterial("RopeTestTubeMat", { 0.85f, 0.45f, 0.15f });
+			reg.emplace<RopeComponent>(e, rope);
+		}
+		// Ribbon: the same spline as a flat band, frame-aligned so its orientation
+		// is the rotation-minimising frame's and not the camera's.
+		{
+			auto e = m_editorWorld->createEntity("RopeTestRibbon");
+			TransformComponent tc; tc.position = origin + right * 3.0f;
+			reg.emplace<TransformComponent>(e, tc);
+			RopeComponent rope;
+			rope.controlPoints = { { -2.5f, 1.5f, 0.0f }, { 0.0f, 2.2f, -0.8f }, { 2.5f, 1.5f, 0.0f } };
+			rope.shape           = RopeShape::Ribbon;
+			rope.radius          = 0.35f;   // half width
+			rope.samplesPerSpan  = 16;
+			rope.twoSidedGeometry = true;   // lit from both faces
+			rope.materialAssetId = plainMaterial("RopeTestRibbonMat", { 0.20f, 0.75f, 0.35f });
+			reg.emplace<RopeComponent>(e, rope);
+		}
+
+		// Trail material: uv.v → colour AND opacity, translucent.
+		HE::UUID trailMat;
+		{
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			g.findNode(out)->p[0] = 0.0f;               // unlit: trails are self-lit
+			g.findNode(out)->p[1] = 2.0f;               // Translucent
+			const int uv  = g.addNode(HE::MatNodeType::UV);
+			const int spl = g.addNode(HE::MatNodeType::SplitRGBA);
+			g.connect(uv, 0, spl, 0);                   // G = uv.v = age
+			const int tip  = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(tip)->p[0] = 0.10f; g.findNode(tip)->p[1] = 0.75f; g.findNode(tip)->p[2] = 0.95f;
+			const int tail = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(tail)->p[0] = 0.90f; g.findNode(tail)->p[1] = 0.05f; g.findNode(tail)->p[2] = 0.25f;
+			const int mix = g.addNode(HE::MatNodeType::Lerp);
+			g.connect(tip,  0, mix, 0);
+			g.connect(tail, 0, mix, 1);
+			g.connect(spl,  1, mix, 2);                 // A→B by age
+			g.connect(mix,  0, out, 0);                 // BaseColor
+			const int fade = g.addNode(HE::MatNodeType::OneMinus);
+			g.connect(spl,  1, fade, 0);
+			// Output pin 5 is Opacity — 4 is Emissive, and wiring the fade there
+			// ADDS it to the colour instead of fading it (the band comes out white).
+			g.connect(fade, 0, out,  5);                // 1 at the tip, 0 at the tail
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = "TrailTestMat";
+			m.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			m.customShaderFragGlsl = gen.glsl;
+			m.customShaderGBufGlsl = gen.glslGBuffer;
+			m.customShaderVertGlsl = gen.vertexBody;
+			m.blendMode            = gen.blendMode;
+			m.domain               = gen.domain;
+			for (const auto& slot : gen.params)
+			{
+				m.shaderParamData.insert(m.shaderParamData.end(), slot.value, slot.value + 4);
+				m.graphParamNames.push_back(slot.name);
+				m.graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+			}
+			trailMat = contentManager().registerMaterial(std::move(m));
+		}
+		auto trailEntity = m_editorWorld->createEntity("TrailTest");
+		{
+			TransformComponent tc; tc.position = origin + glm::vec3(0.0f, -1.0f, 0.0f);
+			reg.emplace<TransformComponent>(trailEntity, tc);
+			TrailComponent tr;
+			// Matched to the sweep below (48 × 16 ms ≈ 0.77 s). uv.v is age/lifetime,
+			// so a lifetime far longer than the sweep pins the whole band at v ≈ 0 —
+			// one flat colour, full width, and nothing to see.
+			tr.lifetime          = 0.80f;
+			tr.minVertexDistance = 0.05f;
+			tr.maxPoints         = 64;
+			tr.startWidth        = 0.6f;
+			tr.endWidth          = 0.05f;
+			tr.alignment         = TrailAlignment::Camera;
+			tr.materialAssetId   = trailMat;
+			reg.emplace<TrailComponent>(trailEntity, tr);
+		}
+
+		// Sweep the trail entity along an arc so it actually lays a band down.
+		const int kTicks = 48;
+		for (int i = 0; i < kTicks; ++i)
+		{
+			const float t = static_cast<float>(i) / static_cast<float>(kTicks - 1);
+			const float a = (t * 2.0f - 1.0f) * 2.6f;
+			reg.get<TransformComponent>(trailEntity).position =
+				origin + right * (a * 1.6f) + glm::vec3(0.0f, -1.2f + std::sin(a * 1.5f) * 0.9f, 0.0f);
+			RopeTrailSystem::update(*m_editorWorld, contentManager(), r,
+			                        m_editorCamera.position(), 0.016f);
+		}
+		// HE_DUMP_ROPETEST=guides: the editor's AUTHORING preview on top of the
+		// geometry — the curve through the control points and a handle box on
+		// each of them, plus the trail's dropped points. It is pushed by hand
+		// here because the guides normally ride the ordinary frame's debug-line
+		// channel, and a headless dump never runs that loop: without this the one
+		// thing the preview is for cannot be looked at.
+		if (std::string(rt).find("guides") != std::string::npos)
+		{
+			DebugDrawBuffer guides;
+			if (const auto* rope = reg.try_get<RopeComponent>(tubeEntity))
+				RopeTrailSystem::appendRopeGuides(
+					*rope,
+					RopeTrailSystem::resolveControlPoints(*m_editorWorld, tubeEntity, *rope),
+					HE::worldMatrixOf(*m_editorWorld, tubeEntity), guides);
+			if (const auto* trail = reg.try_get<TrailComponent>(trailEntity))
+				RopeTrailSystem::appendTrailGuides(*trail, guides);
+			r->SetDebugLines(guides.lines());
+		}
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
+	}
+
 	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal
 	// features (GI-reflection glossy accumulation, probe convergence) need more
 	// frames to settle than the default — headless A/Bs raise this.
@@ -4983,9 +5206,20 @@ void EditorApplication::dumpFrameHeadless()
 	std::vector<uint8_t> rgba;
 	uint32_t w = 0, h = 0;
 	if (r->CaptureViewport(rgba, w, h) && w > 0 && h > 0 && writeBMP(m_dumpPath, rgba, w, h))
+	{
 		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: frame dumped (" + std::to_string(w) + "x" +
 			 std::to_string(h) + ") → " + m_dumpPath).c_str());
+		// The captured frame's draw counters. A picture shows WHAT was drawn, not
+		// how many draws it took — and that is the difference an instanced batch
+		// makes: same image, fewer draws. Cheap enough to log on every capture.
+		const IRenderer::FrameGpuStats st = r->GetFrameGpuStats();
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: dump counters — draws=" + std::to_string(st.drawCalls) +
+			 " tris=" + std::to_string(st.triangles) +
+			 " visible=" + std::to_string(st.visibleObjects) +
+			 "/" + std::to_string(st.totalObjects)).c_str());
+	}
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());

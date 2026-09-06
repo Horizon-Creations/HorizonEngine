@@ -54,6 +54,16 @@ namespace
 	  "Projects a texture onto whatever geometry is underneath — bullet holes, "
 	  "puddles, painted markings — without touching the surface's own material.",
 	  "", "rendering#postfx" },
+	{ "Component/Rope", "Rope",
+	  "Turns a handful of control points into a tube or a flat band — a rope, a "
+	  "chain, a cable, a grapple line. It is geometry, not simulation: the points "
+	  "are where you put them, or where the entities its ends are attached to are.",
+	  "", "scenes#components" },
+	{ "Component/Trail", "Trail",
+	  "Leaves a band behind the entity as it moves: a weapon swipe, a tyre mark in "
+	  "the air, a projectile streak. Points are dropped as it travels and fade out "
+	  "again after their lifetime.",
+	  "", "systems#particles" },
 	{ "Component/Rigid Body", "Rigid Body",
 	  "Hands the entity to the physics solver. Without a Collider it uses a box "
 	  "derived from the transform.",
@@ -957,6 +967,102 @@ namespace
 	{ "Decal/Color", "",
 	  "Tints the projected texture; the alpha channel fades the whole decal.",
 	  "", "rendering#postfx" },
+	{ "Rope/Visible", "",
+	  "Off hides the rope without losing its shape. The control-point handles "
+	  "still show in the viewport while it is selected.",
+	  "", "scenes#components" },
+	{ "Rope/Shape", "",
+	  "A tube is a round rope or cable, closed all the way round. A ribbon is a "
+	  "flat band of the same width — a strap, a belt, a length of tape.",
+	  "", "scenes#components" },
+	{ "Rope/Radius", "",
+	  "How thick the rope is: the radius of the tube, or half the width of the "
+	  "ribbon.",
+	  "", "scenes#components" },
+	{ "Rope/Radial Segments", "",
+	  "How many sides the tube's cross-section has. Eight looks round at arm's "
+	  "length; raise it for a rope the camera gets close to, lower it for one that "
+	  "is only ever seen across a room.",
+	  "", "rendering#performance" },
+	{ "Rope/Two Sided", "",
+	  "Builds the band a second time facing the other way, so a LIT ribbon is "
+	  "shaded correctly from behind instead of going dark. Unnecessary for a "
+	  "glowing or unlit material, and it doubles the triangles.",
+	  "", "rendering#pipeline" },
+	{ "Rope/Samples Per Span", "",
+	  "How finely the curve is sampled between each pair of control points. Higher "
+	  "is smoother and costs more triangles; a straight run needs almost none.",
+	  "", "rendering#performance" },
+	{ "Rope/Sag", "",
+	  "How far the middle of the rope droops below the straight line between its "
+	  "ends. This is a shape, not a physics solve — a taut cable is 0.",
+	  "", "scenes#components" },
+	{ "Rope/UV Tile Length", "",
+	  "How many metres of rope one repeat of the texture covers, so a braid or a "
+	  "chain link keeps its real size however long the rope is. 0 stretches a "
+	  "single repeat over the whole length instead.",
+	  "", "materials#concept" },
+	{ "Rope/Casts Shadow", "",
+	  "Whether the rope appears in the shadow maps. A thin cable's shadow is often "
+	  "more noise than it is worth at a distance.",
+	  "", "rendering#shadows" },
+	{ "Rope/Attach Start", "",
+	  "An entity whose position takes over the FIRST control point, so the rope "
+	  "follows it as it moves. This is how a grapple line stays fastened to what "
+	  "it was fired at.",
+	  "", "scenes#components" },
+	{ "Rope/Attach End", "",
+	  "The same for the LAST control point. With both ends attached the rope hangs "
+	  "between two moving objects and rebuilds itself as either of them travels.",
+	  "", "scenes#components" },
+	{ "Rope/Point", "",
+	  "One control point, in the entity's own space. The curve passes through every "
+	  "one of them; drag a handle in the viewport or type the numbers here.",
+	  "", "scenes#components" },
+	{ "Rope/+ Point", "",
+	  "Adds a control point at the far end, carrying on in the direction the last "
+	  "two describe, so it lands somewhere you can see and grab.",
+	  "", "scenes#components" },
+	{ "Trail/Visible", "",
+	  "Off hides the band. Points keep being dropped and keep ageing, so switching "
+	  "it back on shows the trail as it would have been.",
+	  "", "systems#particles" },
+	{ "Trail/Emitting", "",
+	  "Off stops NEW points; the ones already laid down still fade out. That is "
+	  "what stopping a trail has to mean — clearing it instead would leave a band "
+	  "vanishing in mid-air.",
+	  "", "systems#particles" },
+	{ "Trail/Lifetime", "",
+	  "How long a dropped point survives. It is also the length of the band in "
+	  "time: a fast entity with a short lifetime leaves a short streak.",
+	  "", "systems#particles" },
+	{ "Trail/Min Vertex Distance", "",
+	  "How far the entity has to travel before the next point is dropped. Larger "
+	  "spends fewer points on a long trail; smaller follows a tight curve without "
+	  "cutting the corner.",
+	  "", "systems#particles" },
+	{ "Trail/Max Points", "",
+	  "The most points the trail keeps at once. When it is full the oldest one "
+	  "goes, however much lifetime it had left — the ceiling on what one trail can "
+	  "cost.",
+	  "", "rendering#performance" },
+	{ "Trail/Start Width", "",
+	  "How wide the band is at the tip, where the entity is now.",
+	  "", "systems#particles" },
+	{ "Trail/End Width", "",
+	  "How wide the band is at the tail, the oldest end. Zero tapers the trail to "
+	  "a point as it dies.",
+	  "", "systems#particles" },
+	{ "Trail/Alignment", "",
+	  "Camera turns the band to face the viewer, which is what a weapon swipe "
+	  "wants — it never disappears edge-on. Frame keeps it in a fixed orientation "
+	  "in the world, for something that is really a flat strap.",
+	  "", "systems#particles" },
+	{ "Trail/Points", "",
+	  "How many points the trail is holding right now, against its cap. Two are "
+	  "needed before there is any band at all, so a reading of 0 or 1 is the answer "
+	  "to \"why do I see nothing\": the entity has not moved.",
+	  "", "systems#particles" },
 	{ "Script/Enabled", "",
 	  "Off leaves the script attached but never calls it — neither onStart nor "
 	  "onUpdate. The way to take one out of the picture without losing its "
@@ -1441,6 +1547,15 @@ namespace
 	{ "New Entity/Spot", "",
 	  "A light shining in a cone — a torch, a headlight, a stage light.",
 	  "", "rendering#lighting" },
+	{ "New Entity/Rope", "",
+	  "A line of rope hanging straight down, ready to be shaped: drag its control "
+	  "points where you want them, or point its ends at two other entities and let "
+	  "it hang between them.",
+	  "", "scenes#components" },
+	{ "New Entity/Trail", "",
+	  "An entity that leaves a band behind itself as it moves — a weapon swipe, a "
+	  "projectile streak. It shows nothing until something moves it.",
+	  "", "systems#particles" },
 
 	// ── The viewport and its toolbar ─────────────────────────────────────────
 	{ "viewport.play", "Play",
@@ -3413,7 +3528,7 @@ namespace
 	// editor.
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
-		"Decal", "Rigid Body", "Collider", "Character Controller", "Movement",
+		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Character Controller", "Movement",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Property Animator", "Particle System",

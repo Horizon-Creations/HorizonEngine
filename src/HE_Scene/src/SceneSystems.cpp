@@ -9,6 +9,7 @@
 #include "HorizonScene/MovementSystem.h"
 #include "HorizonScene/WeatherSystem.h"
 #include "HorizonScene/ParticleSystem.h"
+#include "HorizonScene/RopeTrailSystem.h"
 #include "HorizonScene/FoliageSystem.h"
 #include "HorizonScene/LODSystem.h"
 #include "HorizonScene/HorizonWorld.h"
@@ -28,6 +29,8 @@
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "ContentManager/ContentManager.h"
@@ -131,6 +134,10 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     }
     { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, physics); } // entity-bound emitters only — precipitation is WeatherSystem's own pool
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
+    // Effect geometry like the particles above it, and ahead of LOD for the same
+    // reason everything else is: LOD swaps meshes, and nothing that produces one
+    // should run after it.
+    { HE_PROFILE_SCOPE_N("RopeTrail");      RopeTrailSystem::update(world, cm, renderer, cameraPos, dt); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
 
     pushProfilerSceneCounters(world, cm, gpuParticles);
@@ -216,6 +223,11 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
     for (auto [e, c] : reg.view<AudioSourceComponent>().each())     add(c.assetId);
     for (auto [e, c] : reg.view<UIImageComponent>().each())         add(c.materialAssetId);
     for (auto [e, c] : reg.view<TerrainComponent>().each())         add(c.heightmapTexture);
+    // Only the MATERIAL of a rope or a trail. RopeComponent::runtimeMeshId is
+    // the UUID of a procedural mesh that exists in memory and nowhere else — put
+    // it in here and the packer would go looking for a file that was never written.
+    for (auto [e, c] : reg.view<RopeComponent>().each())            add(c.materialAssetId);
+    for (auto [e, c] : reg.view<TrailComponent>().each())           add(c.materialAssetId);
     for (auto [e, c] : reg.view<WeatherComponent>().each())         add(c.thunderSound);
     for (auto [e, c] : reg.view<LODComponent>().each())             for (const auto& lvl : c.levels) add(lvl.meshId);
     for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) add(c.stateMachineAssetId);

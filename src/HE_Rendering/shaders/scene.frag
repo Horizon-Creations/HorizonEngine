@@ -43,10 +43,15 @@
 // one source, a change to the GL scene shader is NOT automatically visible on
 // Vulkan.
 //
-// Known drift (ssr-plan P4, 2026-07-31): heLitP/GL/Metal/D3D11/D3D12 weight the
-// specular IBL with a roughness-aware Schlick Fresnel (fresnelSpec = F0 +
-// (max(1-rough, F0) - F0) * (1-NdV)^5) instead of the flat F0 below. Vulkan
-// still uses flat F0 until this shader is regenerated from one source.
+// CLOSED drift (ssr-plan P4, reversed 2026-09-06 by
+// docs/ssr-cross-backend-plan.md §3.3 / checkpoint B5): this file used to weight
+// the specular IBL with a flat F0 while heLitP/GL/Metal/D3D11/D3D12 used the
+// roughness-aware Schlick Fresnel, and the banner said "document, do not port".
+// The SSR cascade below mixes INTO that specular term, so leaving the weight
+// different would have made the same mirror change appearance between a
+// built-in material and a graph material standing next to it. Both the Fresnel
+// and the cascade are ported now — a DELIBERATE change to Vulkan's built-in
+// shading, visible even with SSR switched off.
 // ─────────────────────────────────────────────────────────────────────────────
 
 layout(location = 0) in vec3 vWorldPos;
@@ -69,6 +74,10 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
     vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
     vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
+    // Forward SSR (docs/ssr-cross-backend-plan.md B5): x = 1 → a trace ran and
+    // uSSRFwd holds it, y = intensity, z = max roughness, w = 0. Same four lanes
+    // heLitP reads out of Lighting::ssr — must match FrameUBOData exactly.
+    vec4  ssrParams;
 } uf;
 
 layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
@@ -104,6 +113,12 @@ layout(set = 0, binding = 6) uniform sampler2D uGIVis;
 // Per-pixel local (point/spot) light visibility mask — 1 channel per light
 // (first 4, counter over non-directional lights), written by the shadow kernel.
 layout(set = 0, binding = 7) uniform sampler2D uGILocal;
+
+// ── Forward screen-space reflections ─────────────────────────────────────────
+// The half-res trace result (rgb = reflected radiance, a = confidence), sampled
+// per gl_FragCoord like uAO. Bound to a 1x1 TRANSPARENT BLACK when no trace ran
+// — ssrParams.x is 0 then, and even a stray sample would add nothing.
+layout(set = 0, binding = 8) uniform sampler2D uSSRFwd;
 
 // Signed-octahedral mapping (direction → texel UV) — must match gi_probe.comp's
 // octDecode and the GL/Metal octEncode byte-for-byte.
@@ -280,7 +295,28 @@ void main()
     vec3 F0     = mix(vec3(0.04), base, met);
     vec3 kd     = (1.0 - F0) * (1.0 - met);
     vec3 ambDiff = skyColor(Nup,    uf.sunDir.xyz) * base * kd;
-    vec3 ambSpec = skyColor(Rrough, uf.sunDir.xyz) * F0;
+    // FORWARD reflection cascade (sky → SSR). SYNC: this is the heLitP twin in
+    // MaterialShaderLibrary.cpp and the same stage GL's kUnlitFS and Metal's
+    // fragmentMain carry — a graph material next to a built-in one must mix the
+    // sources identically, or the same mirror changes appearance with the
+    // material type. There is no ray-traced-GI-reflection stage between the two
+    // here: this backend has none, and its gate would be a constant zero.
+    // The trace carries no per-pixel roughness (the half-res pre-pass has no
+    // material data), so the roughness fade lives HERE, with the exact shading
+    // value.
+    vec3 envSpec = skyColor(Rrough, uf.sunDir.xyz);
+    if (uf.ssrParams.x > 0.5)
+    {
+        vec4  sr   = texture(uSSRFwd, gl_FragCoord.xy / uf.viewport.xy);
+        float fade = 1.0 - smoothstep(uf.ssrParams.z * 0.7, uf.ssrParams.z, rough);
+        envSpec = mix(envSpec, sr.rgb, sr.a * uf.ssrParams.y * fade);
+    }
+    // Fresnel (Schlick, roughness-aware, ssr-plan P4): grazing views boost the
+    // specular IBL toward max(1-rough, F0) instead of the flat F0. See the
+    // banner at the top — this replaced the documented drift.
+    float NdV = clamp(dot(N, V), 0.0, 1.0);
+    vec3  fresnelSpec = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NdV, 5.0);
+    vec3 ambSpec = envSpec * fresnelSpec;
     // AO only darkens the ambient (sky IBL) terms; direct BRDF lights are unaffected.
     // When SSAO is disabled, uf.viewport.z == 0 and we use a 1x1 white fallback texture
     // so ao = 1.0 and the ambient result is unchanged.

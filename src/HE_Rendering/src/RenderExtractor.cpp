@@ -21,6 +21,10 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/Components/RopeComponent.h>
+#include <HorizonScene/Components/TrailComponent.h>
+#include <HorizonScene/RopeTrailSystem.h>                   // buildTrailGeometry
+#include <HorizonScene/SplineGeometry.h>                    // interleave
 #include <HorizonScene/UISystem.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/ContentManager.h>
@@ -458,6 +462,66 @@ namespace
 		}
 	}
 
+	// ── Ropes ───────────────────────────────────────────────────────────────
+	// A rope is an ordinary mesh draw. RopeTrailSystem already built the tube or
+	// the band into a runtime StaticMeshAsset during the world tick and put its
+	// UUID in `runtimeMeshId`; all that is left is to push one RenderObject that
+	// points at it, so the rope goes through the whole normal path — PBR, the
+	// material graph, shadows, SSAO, GI — without a line of backend code.
+	//
+	// Deliberately NOT a MeshComponent on the same entity (docs/rope-trail-plan.md
+	// §6.1): that would put this extractor, the LOD swaps and the inspector's
+	// mesh slot in a fight over one entity's geometry.
+	void extractRopes(entt::registry& reg, RenderWorld& out)
+	{
+		for (auto [e, t, rope] : reg.view<TransformComponent, RopeComponent>().each())
+		{
+			if (!rope.visible) continue;
+			// Empty until the first RopeTrailSystem::update — and permanently so
+			// for a rope with fewer than two control points, which has no geometry.
+			if (rope.runtimeMeshId == HE::UUID{}) continue;
+
+			RenderObject obj;
+			obj.meshAssetId     = rope.runtimeMeshId;
+			obj.materialAssetId = rope.materialAssetId;
+			obj.transform       = t.worldMatrix;
+			// Left invalid on purpose, exactly as for foliage: the backends refine
+			// bounds from the resolved mesh, and culling a not-yet-resident rope
+			// against a proxy box would make it blink out while plainly in view.
+			obj.worldBounds     = HE::AABB{};
+			obj.entityId        = static_cast<uint32_t>(e);
+			obj.castsShadow     = rope.castsShadow;
+			out.objects.push_back(obj);
+		}
+	}
+
+	// ── Trails ──────────────────────────────────────────────────────────────
+	// The opposite choice, for the opposite data rate. RopeTrailSystem only ages
+	// and emits the points; the band itself is retriangulated HERE, every frame,
+	// because it depends on the camera (a camera-aligned trail turns to face the
+	// viewer) and because it must never become an asset — see RibbonBatch.
+	//
+	// The points are already world-space, so there is no transform to apply and
+	// the entity needs no TransformComponent for this to work.
+	void extractTrails(entt::registry& reg, RenderWorld& out)
+	{
+		for (auto [e, trail] : reg.view<TrailComponent>().each())
+		{
+			if (!trail.visible) continue;
+			const HE::spline::MeshData band =
+				RopeTrailSystem::buildTrailGeometry(trail, out.camera.position);
+			if (band.empty()) continue;   // fewer than two live points
+
+			RibbonBatch rb;
+			rb.materialAssetId = trail.materialAssetId;
+			rb.vertices        = HE::spline::interleave(band);
+			rb.indices         = band.indices;
+			rb.entityId        = static_cast<uint32_t>(e);
+			rb.worldBounds     = band.bounds;
+			out.ribbonBatches.push_back(std::move(rb));
+		}
+	}
+
 	// ── Lights ──────────────────────────────────────────────────────────────
 	void extractLights(entt::registry& reg, RenderWorld& out)
 	{
@@ -756,6 +820,11 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractFoliage(reg, out);
 	extractSkinnedMeshes(reg, out);
 	extractDecals(reg, out);
+	// Ropes are ordinary mesh objects and must land in out.objects before the
+	// shadow fit below; trails are their own per-frame band list and need the
+	// camera position extractCamera resolved above.
+	extractRopes(reg, out);
+	extractTrails(reg, out);
 	// Lights, then the day-night pass that overrides the sun/moon among them.
 	extractLights(reg, out);
 	applyDayNight(out);
