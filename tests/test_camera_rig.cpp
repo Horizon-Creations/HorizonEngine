@@ -779,12 +779,12 @@ TEST_CASE("CameraShake: the same shake at the same elapsed gives the same offset
     for (int i = 0; i < 20; ++i)
         last = HE::evaluateShakes(a, 1.0f / 60.0f);
 
-    // The second run in ONE step of the same total time would land on a
-    // different elapsed only if the evaluation carried hidden state. It does
-    // not, so twenty sixtieths and the same twenty sixtieths agree exactly.
-    HE::ShakeOffset again;
-    for (int i = 0; i < 20; ++i)
-        again = HE::evaluateShakes(b, 1.0f / 60.0f);
+    // The other one is put straight at that elapsed and evaluated once, with
+    // dt = 0 so nothing advances. Twenty frames of history and none at all agree
+    // exactly — which is the claim: the offset is a function of `elapsed`, and
+    // no state accumulates along the way.
+    b[0].elapsed = a[0].elapsed;
+    const HE::ShakeOffset again = HE::evaluateShakes(b, 0.0f);
 
     CHECK(again.position.x == last.position.x);
     CHECK(again.position.y == last.position.y);
