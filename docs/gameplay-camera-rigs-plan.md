@@ -258,6 +258,15 @@ bit-identisch zum heutigen Verhalten.
 
 ## 5. Camera Shake
 
+> **Gebaut (Schritt 3/5).** `HE_Scene/CameraShake.h/.cpp` trägt die Mathematik
+> und kennt weder Rig noch Entity noch Welt; der Zustand (`shakes[8]`,
+> `nextShakeId`) liegt in `CameraRigComponent`, das Auswerten in `solveRig()`
+> nach dem Sweep und auf `collisionRadius` geklemmt. Tests 7–11 aus §10 stehen.
+>
+> Eine Abweichung vom Entwurf oben: `evaluateShakes` nimmt Zeiger und Länge
+> statt `std::span`, mit einem Inline-Wrapper auf `std::array`, den jeder
+> Aufrufer im Baum benutzt.
+
 ### 5.1 Modell
 
 Ein Shake ist ein additiver Pose-Offset mit Hüllkurve:
@@ -325,6 +334,26 @@ mit der geringsten Restenergie.
 
 ## 6. Blending zwischen Rigs
 
+> **Gebaut (Schritt 3/5).** `CameraRigController::blendTo` / `isBlending`,
+> `CameraRigComponent::Blend`, die Interpolation zwischen Solve und Schreiben in
+> `update()`. Tests 12–16 aus §10 stehen.
+>
+> Zwei Dinge, die der Entwurf unten so nicht sagt und die Test 16 herausgeholt
+> hat:
+>
+> * Die gezeigte (interpolierte) Pose hält das **ausgehende** Rig in
+>   `lastWritten`, nicht das eingehende. Das eingehende zu fragen ist nie wahr:
+>   ein Rig, das nicht treibt, bekommt `hasLastWritten` in `update()` gelöscht,
+>   und eines, das treibt, ist `from == toCamera` und schon vorher ein Schnitt.
+> * Ein Rig, das mitten im Blend `isMain` verliert, gibt seinen Blend ab.
+>   Sonst stünde `remaining` eingefroren da und ein von Hand zurückgesetztes
+>   `isMain` würde ihn aus einer weitergezogenen Quelle fortsetzen — wo §6.1
+>   sagt, dass ein von Hand gesetztes `isMain` immer ein Schnitt ist.
+>
+> Zusätzlich zu §6.3: eine Quell-Kamera **ohne eigenes Rig** (die gewöhnliche
+> Cutscene-Kamera) kann nicht neu gelöst werden, also wird ihre Weltpose in
+> `blendTo` einmal eingefroren (`snapshotCameraPose`).
+
 ### 6.1 Nur auf Ansage
 
 Ein Blend startet **ausschließlich** über `camera.blendTo(entityId, seconds, curve)`.
@@ -367,15 +396,21 @@ ein linearer Blend hat an beiden Enden einen sichtbaren Knick.
 * Ziel der Quell-Kamera nicht mehr auflösbar → dasselbe.
 * Neues `blendTo` während eines laufenden Blends → das neue gewinnt, Quelle ist
   die **aktuell angezeigte (interpolierte)** Pose. Sonst springt es.
-  Das braucht eine Kopie der zuletzt geschriebenen Pose auf dem eingehenden Rig
-  (`lastWritten`, Laufzeit) — der einzige Fall, in dem das Rig eine ausgegebene
-  Pose behält, und ausdrücklich als Kopie im Bauteil, nicht als Rücklesen aus
-  dem Transform.
+  Das braucht eine Kopie der zuletzt geschriebenen Pose (`lastWritten`,
+  Laufzeit) — der einzige Fall, in dem das Rig eine ausgegebene Pose behält, und
+  ausdrücklich als Kopie im Bauteil, nicht als Rücklesen aus dem Transform. Sie
+  liegt auf dem **ausgehenden** Rig, nicht wie hier ursprünglich geschrieben auf
+  dem eingehenden: geschrieben hat sie die Kamera, die das Bild bisher hatte.
+  Siehe den Vermerk am Anfang von §6.
 * `seconds <= 0` → Schnitt, kein Blend.
 
 ---
 
 ## 7. FOV-Kick
+
+> **Gebaut (Schritt 3/5).** `HE::FovKick` + `evaluateFovKick` in `CameraShake.h`,
+> ein Slot auf dem Rig, `CameraComponent::fovOffset` als additives Laufzeitfeld,
+> der eine Verbraucher in `RenderExtractor.cpp`. Tests 17–19 aus §10 stehen.
 
 `CameraComponent.fovDegrees` bleibt der **gesetzte** Wert: der Inspector zeigt
 ihn, der Serializer speichert ihn, `camera.getFov`/`setFov` meinen ihn. Ein Kick
@@ -416,6 +451,15 @@ bleibt ein Kick stehen, nachdem das Rig die Kamera abgegeben hat.
 ---
 
 ## 8. Skript-API
+
+> **Gebaut (Schritt 5), alle zehn Zeilen** — auch die vier Lag-Zeilen, die §4
+> mit „kommt später" liegengelassen hat. Dazu die Buchhaltung aus §9: Registry,
+> Anzeigename und `HcNodeDocs`-Beschreibung pro Zeile.
+>
+> `camera.blendTo` nennt seinen ersten Pin `camera` und nicht `entity`, und das
+> ist Absicht: der Self-Default-Nachlauf am Ende von `registry()` ersetzt eine
+> leere `entity` durch das aufrufende Objekt, und das ist eine Figur, keine
+> Kamera.
 
 Neue Registry-Zeilen (`EngineApi.cpp`, Kategorie „Camera"), jede automatisch in
 Lua, Python, HorizonCode und C++-Codegen:
@@ -460,6 +504,16 @@ Test erzwungen wird:
 
 Zu `tests/test_camera_rig.cpp` (die 27 bestehenden Fälle müssen unverändert
 grün bleiben — das ist die Zusicherung, dass §3 nichts am Verhalten dreht):
+
+> **Stand: 1–19 stehen** (49 Fälle in `test_camera_rig.cpp`, 433 Zusicherungen).
+> Offen ist nur Punkt 20, der Serialisierungs-Roundtrip — der gehört zu
+> `test_scene_serializer.cpp` und damit zu Schritt 4.
+>
+> Die Falle, die 7–19 fast alle vakuum grün gemacht hätte: die
+> `MouseFrame`-Bequemlichkeitsüberladung von `update()` setzt `look.dt = 0`, und
+> Shake, Kick und Blend rücken ausschließlich um `look.dt` vor. Ein Fall mit
+> `kNoMouse` steht still und ist grün, weil er nichts misst. Umgekehrt ist
+> `dt = 0` genau das Werkzeug für die `t == 0`-Zusicherungen in 12 und 16.
 
 **Lag**
 1. Framerate-Unabhängigkeit: 1 Sekunde in 60 Schritten und in 120 Schritten
