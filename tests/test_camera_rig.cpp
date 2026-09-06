@@ -8,6 +8,8 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/CameraShake.h>
+#include <HorizonScene/EngineApi.h>   // the script rows, exercised as scripts reach them
 #include <Application/Input.h>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -22,6 +24,14 @@ struct Rig {
     CameraRigComponent& rig()      { return world.registry().get<CameraRigComponent>(camera); }
     TransformComponent& camXform() { return world.registry().get<TransformComponent>(camera); }
     TransformComponent& tgtXform() { return world.registry().get<TransformComponent>(target); }
+
+    // The context a script call arrives with. Going through HE::api rather than
+    // straight at the component is deliberate for a handful of cases below: the
+    // registry rows are what Lua, Python and HorizonCode actually reach, and
+    // glue that nothing exercises is glue that rots. It lives here rather than
+    // in a helper because api::Ctx is taken by non-const reference.
+    HE::api::Ctx ctx;
+    HE::api::Ctx& api() { ctx.world = &world; return ctx; }
 };
 
 // A target at the origin and a rig camera pointed straight ahead. pitch is zeroed
@@ -719,4 +729,197 @@ TEST_CASE("CameraRig: lag is off by default and off means today's pose exactly")
     HE::CameraRigController::update(r->world, m);
     CHECK(r->rig().armYaw   == doctest::Approx(r->rig().yaw));
     CHECK(r->rig().armPitch == doctest::Approx(r->rig().pitch));
+}
+
+// ─── Camera shake ─────────────────────────────────────────────────────────────
+
+namespace {
+
+// A rig sitting on its own pivot, so the camera's position IS the shake offset
+// and every assertion below is about the shake rather than about a boom.
+std::unique_ptr<Rig> makeShakeRig()
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 0.0f;
+    return r;
+}
+
+// A shake with everything spelled out, so a test that cares about one number
+// does not silently inherit a default for the other five.
+HE::ShakeInstance shakeOf(float pos, float rot, float frequency, float duration)
+{
+    HE::ShakeInstance s;
+    s.posAmplitude = glm::vec3(pos);
+    s.rotAmplitude = glm::vec3(rot);
+    s.frequency    = frequency;
+    s.duration     = duration;
+    s.blendIn      = 0.0f;   // no fade, so an amplitude means that amplitude
+    s.blendOut     = 0.0f;
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("CameraShake: the same shake at the same elapsed gives the same offset")
+{
+    // The property that makes a shake testable at all, and the reason it is
+    // value noise off an integer hash rather than a random number generator:
+    // no state travels between the two runs below except `elapsed`.
+    std::array<HE::ShakeInstance, HE::kMaxCameraShakes> a{};
+    std::array<HE::ShakeInstance, HE::kMaxCameraShakes> b{};
+    HE::ShakeInstance s = shakeOf(0.5f, 3.0f, 11.0f, 10.0f);
+    s.id   = 1;
+    s.seed = 4242u;
+    a[0] = s;
+    b[0] = s;
+
+    HE::ShakeOffset last;
+    for (int i = 0; i < 20; ++i)
+        last = HE::evaluateShakes(a, 1.0f / 60.0f);
+
+    // The second run in ONE step of the same total time would land on a
+    // different elapsed only if the evaluation carried hidden state. It does
+    // not, so twenty sixtieths and the same twenty sixtieths agree exactly.
+    HE::ShakeOffset again;
+    for (int i = 0; i < 20; ++i)
+        again = HE::evaluateShakes(b, 1.0f / 60.0f);
+
+    CHECK(again.position.x == last.position.x);
+    CHECK(again.position.y == last.position.y);
+    CHECK(again.position.z == last.position.z);
+    CHECK(again.rotationDegrees.x == last.rotationDegrees.x);
+    CHECK(again.rotationDegrees.z == last.rotationDegrees.z);
+
+    // And it was actually shaking, not sitting at zero and agreeing about that.
+    CHECK(glm::length(last.position) > 1e-4f);
+
+    // Same elapsed, different seed: a different offset. Otherwise the seed is
+    // decoration and every shake in a scene moves in lockstep.
+    CHECK(HE::shakeNoise(1u, 3.25f) != HE::shakeNoise(2u, 3.25f));
+}
+
+TEST_CASE("CameraShake: a finished shake contributes exactly zero and frees its slot")
+{
+    // "Exactly", not "almost": the slot is freed BEFORE the sum, so the last
+    // frame of a shake is 0.0f and not the final epsilon of its fade-out. An
+    // epsilon left standing is a camera permanently a hair off centre.
+    auto r = makeShakeRig();
+    const uint32_t h = r->rig().playShake(shakeOf(0.5f, 5.0f, 12.0f, 0.25f));
+    REQUIRE(h != 0);
+
+    stepTime(*r, 1.0f / 60.0f, 5);            // 0.083 s — well inside
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+
+    // Generously past the end: float steps do not land on 0.25 exactly, and the
+    // assertion is about what happens AFTER the end, not about the last frame.
+    stepTime(*r, 1.0f / 60.0f, 30);
+
+    CHECK(r->camXform().position.x == 0.0f);
+    CHECK(r->camXform().position.y == 0.0f);
+    CHECK(r->camXform().position.z == 0.0f);
+    CHECK(r->camXform().rotation.z == 0.0f);
+    for (const auto& s : r->rig().shakes)
+        CHECK(s.id == 0);
+}
+
+TEST_CASE("CameraShake: an endless shake runs until it is stopped")
+{
+    // duration <= 0 is the "engine rumble while the vehicle is running" case,
+    // and it is the whole reason playShake hands back a handle.
+    auto r = makeShakeRig();
+    const int h = HE::api::camera::playShake(r->api(), 0.5f, 5.0f, 12.0f, 0.0f);
+    REQUIRE(h > 0);
+
+    stepTime(*r, 1.0f / 60.0f, 600);          // ten seconds
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+
+    HE::api::camera::stopShake(r->api(), h);
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.x == 0.0f);
+    CHECK(r->camXform().position.z == 0.0f);
+
+    // A handle that has already been spent is a no-op, not a crash — a script
+    // that keeps one across a level load needs it to be.
+    HE::api::camera::stopShake(r->api(), h);
+    HE::api::camera::stopShake(r->api(), 9999);
+
+    // And Stop All takes the ones nobody kept a handle for.
+    HE::api::camera::playShake(r->api(), 0.5f, 5.0f, 12.0f, 0.0f);
+    HE::api::camera::playShake(r->api(), 0.5f, 5.0f, 12.0f, 0.0f);
+    stepTime(*r, 1.0f / 60.0f, 5);
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+    HE::api::camera::stopAllShakes(r->api());
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.x == 0.0f);
+    CHECK(r->camXform().position.z == 0.0f);
+}
+
+TEST_CASE("CameraShake: in a shortened frame the shake spends the clearance and no more")
+{
+    // The sweep stops the boom one collision radius short of the wall, and that
+    // radius is the only room the shake has to spend before it pushes the near
+    // plane through the surface.
+    const float kRadius = 0.25f;
+    const float kWallZ  = 4.0f, kWallHalf = 0.5f;
+    const glm::vec3 stopped{ 0.0f, 0.0f, kWallZ - kWallHalf - kRadius };
+
+    auto walled = makeRig();
+    walled->rig().pivotOffset     = {};
+    walled->rig().armOffset       = {};
+    walled->rig().armLength       = 8.0f;
+    walled->rig().collisionRadius = kRadius;
+    addWall(walled->world, { 0.0f, 0.0f, kWallZ }, { 4.0f, 4.0f, kWallHalf });
+    PhysicsWorld phys;
+    phys.initialize(walled->world);
+
+    // The twin: the same rig and the same shake with no wall in front of it, to
+    // prove the amplitude really was big enough to break the clamp if nothing
+    // held it. Without this the test passes on a shake that never moved.
+    auto open = makeRig();
+    open->rig().pivotOffset     = {};
+    open->rig().armOffset       = {};
+    open->rig().armLength       = 8.0f;
+    open->rig().collisionRadius = kRadius;
+
+    // Amplitude far larger than the clearance, so the clamp has real work.
+    const HE::ShakeInstance s = shakeOf(2.0f, 0.0f, 15.0f, 0.0f);
+    REQUIRE(walled->rig().playShake(s) == open->rig().playShake(s));  // same handle → same seed
+
+    bool openBrokeOut = false;
+    for (int i = 0; i < 120; ++i)
+    {
+        HE::CameraLookInput look; look.dt = 1.0f / 60.0f;
+        HE::CameraRigController::update(walled->world, look, entt::null, &phys);
+        HE::CameraRigController::update(open->world,   look);
+
+        // A hair of tolerance for the sweep's own precision, not for the clamp.
+        CHECK(glm::distance(walled->camXform().position, stopped) <= kRadius + 0.02f);
+
+        if (glm::distance(open->camXform().position, glm::vec3(0.0f, 0.0f, 8.0f)) > kRadius)
+            openBrokeOut = true;
+    }
+    CHECK(openBrokeOut);
+}
+
+TEST_CASE("CameraShake: a shake moves the camera without touching the rig's input state")
+{
+    // yaw and pitch are the LOOK direction and the value the Follow coupling
+    // writes to the character. A shake that leaked into them would turn the
+    // player's aim, and — being additive — would wind them up frame after frame.
+    auto r = makeShakeRig();
+    r->rig().yaw   = 30.0f;
+    r->rig().pitch = -12.0f;
+    r->rig().playShake(shakeOf(0.4f, 8.0f, 14.0f, 0.0f));
+
+    stepTime(*r, 1.0f / 60.0f, 300);
+
+    CHECK(r->rig().yaw   == doctest::Approx(30.0f));
+    CHECK(r->rig().pitch == doctest::Approx(-12.0f));
+
+    // But the camera itself did move and did roll — roll being the axis the rig
+    // never otherwise uses, so a non-zero one can only have come from the shake.
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+    CHECK(r->camXform().rotation.z != doctest::Approx(0.0f));
 }
