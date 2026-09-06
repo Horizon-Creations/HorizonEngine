@@ -784,6 +784,13 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
 
+	// A scene must not inherit the last one's time controls. Whoever loaded a
+	// level in slow motion, or from behind a pause menu, meant to leave it —
+	// nothing in the new scene knows to lift a scale it never set. elapsed() and
+	// frameCount() deliberately keep running: they are session clocks, and a
+	// session clock that restarts at every door is not one.
+	HE::api::time::resetControls();
+
 	// Swap + bring the new scene up exactly like OnInit does for the startup scene.
 	m_world = std::move(newWorld);
 	m_world->setWidgetManager(&m_widgets);   // keep the app-level UI on the new world
@@ -1421,21 +1428,13 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && m_physicsWorld)
 	{
 		HE_PROFILE_SCOPE_N("PhysicsStep");
-		m_physicsAccum += gameDt;
-		// Bounded so a long stall (a streaming hitch, a breakpoint) cannot
-		// spiral into ever more catch-up steps. The bound RIDES the time scale:
-		// at scale 5 a single frame legitimately owes ~5× the steps, and a fixed
-		// cap of 5 would saturate every frame and dump the remainder below —
-		// fast-forward would silently decay into slow motion. The rate itself
-		// stays fixed; only the number of steps per frame moves.
-		const int maxSteps = 5 * std::max(1, (int)std::ceil(HE::api::time::timeScale()));
-		int steps = 0;
-		while (m_physicsAccum >= PhysicsWorld::kFixedDt && steps++ < maxSteps)
-		{
-			m_physicsWorld->step(*m_world, PhysicsWorld::kFixedDt);
-			m_physicsAccum -= PhysicsWorld::kFixedDt;
-		}
-		if (m_physicsAccum > PhysicsWorld::kFixedDt) m_physicsAccum = 0.0f;
+		// Bounded so a long stall (a streaming hitch, a breakpoint) cannot spiral
+		// into ever more catch-up steps, with the bound riding the time scale —
+		// the rule lives in HE::advanceFixedSteps so the editor's preview cannot
+		// pace differently from the game it is previewing.
+		HE::advanceFixedSteps(m_physicsAccum, gameDt, PhysicsWorld::kFixedDt,
+		                      HE::api::time::timeScale(),
+		                      [&](float step){ m_physicsWorld->step(*m_world, step); });
 
 		// ONE dispatch for both frontends: polling drains the queues, so a
 		// second call would find nothing left and it would look like the

@@ -12,6 +12,7 @@
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
 #include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
@@ -34,6 +35,8 @@ protected:
     bool            OnEvent(const SDL_Event& event) override;
     void            OnRender(float dt)     override;
     void            OnShutdown()           override;
+    // C++ game logic runs on the same clock as everything else that IS the game.
+    float           GameLogicDeltaTime(float) override { return HE::api::time::deltaTime(); }
 
     std::unique_ptr<IRenderer> CreateRenderer()      override;
 

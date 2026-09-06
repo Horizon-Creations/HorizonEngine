@@ -289,7 +289,11 @@ namespace HE
 			if (m_world)
 			{
 				HE_PROFILE_SCOPE_N("GameLogicTick");
-				m_loop.tick(*m_world, m_logicLoader.logic(), dt);
+				// GAME time, not the raw frame time: C++ game logic obeys the
+				// same pause and slow motion as scripts, physics and the ECS
+				// systems do. Ticking it on the wall clock is how a paused game
+				// kept moving in exactly the one language that could not see it.
+				m_loop.tick(*m_world, m_logicLoader.logic(), GameLogicDeltaTime(dt));
 			}
 
 			{

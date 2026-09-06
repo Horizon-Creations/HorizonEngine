@@ -75,6 +75,18 @@ namespace HE
 		// Called every frame between PollEvents() and SwapBuffers().
 		virtual void OnRender(float deltaTime) { (void)deltaTime; }
 
+		// How much GAME time the frame just rendered was worth, for the
+		// fixed-step tick that drives the C++ game-logic module (IGameLogic).
+		//
+		// It is a hook rather than a straight read of the engine clock because
+		// that clock lives in HorizonScene, which sits ABOVE this layer — and
+		// because the two applications answer differently: the packaged game
+		// hands back the scaled delta, the editor hands back zero unless play
+		// mode is running, so C++ game logic no longer ticks in edit mode. The
+		// raw dt stays the loop's own pacing; only what the accumulator is fed
+		// with moves. Called after OnRender(), so the clock is already advanced.
+		virtual float GameLogicDeltaTime(float rawDeltaTime) { return rawDeltaTime; }
+
 		// Called once after the loop exits, before the window is destroyed.
 		virtual void OnShutdown() {}
 

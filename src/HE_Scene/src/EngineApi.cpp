@@ -2005,25 +2005,66 @@ namespace time {
 namespace {
 struct Clock
 {
-    float    delta         = 0.0f;   // scaled — what deltaTime() answers
-    float    unscaledDelta = 0.0f;   // as the app measured it
-    double   elapsed       = 0.0;    // sum of the SCALED deltas
-    uint64_t frame         = 0;
-    float    scale         = 1.0f;
+    float    delta           = 0.0f;   // scaled — what deltaTime() answers
+    float    unscaledDelta   = 0.0f;   // as the app measured it
+    double   elapsed         = 0.0;    // sum of the SCALED deltas
+    double   unscaledElapsed = 0.0;    // sum of the RAW deltas — runs through a pause
+    uint64_t frame           = 0;
+    float    scale           = 1.0f;   // AUTHORED scale; a pause never overwrites it
+    uint32_t pauseReasons    = 0;      // bitset of PauseReason
+    float    hitStop         = 0.0f;   // real-time seconds of freeze left
 };
 Clock& clk() { static Clock c; return c; }
+
+float effectiveScaleOf(const Clock& c)
+{
+    return (c.pauseReasons != 0 || c.hitStop > 0.0f) ? 0.0f : c.scale;
+}
 }
 // The scale is applied ONCE, here: elapsed accumulates the scaled delta, so a
 // paused game's clock stands still and a script that integrates elapsed() sees
 // the same time base as one integrating deltaTime().
-void  advance(float dt)          { Clock& c = clk(); c.unscaledDelta = dt; c.delta = dt * c.scale; c.elapsed += c.delta; ++c.frame; }
+//
+// The hit-stop countdown burns REAL seconds and is decremented BEFORE the delta
+// is formed — it has to be, because a window that counted down in game time
+// could never end: it is the thing holding game time at zero.
+void  advance(float dt)
+{
+    Clock& c = clk();
+    c.unscaledDelta    = dt;
+    c.unscaledElapsed += dt;
+    if (c.hitStop > 0.0f) c.hitStop = std::max(0.0f, c.hitStop - dt);
+    c.delta    = dt * effectiveScaleOf(c);
+    c.elapsed += c.delta;
+    ++c.frame;
+}
 void  reset()                    { clk() = Clock{}; }  // scale 1 again: play never starts paused
+void  resetControls()
+{
+    Clock& c = clk();
+    c.scale   = 1.0f;
+    c.hitStop = 0.0f;
+    // FocusLost survives: it belongs to the WINDOW, not to the scene. Clearing it
+    // here would let a scene load resume a game whose window is still in the
+    // background, and nothing would ever put the reason back — the focus event
+    // that set it is long gone.
+    c.pauseReasons &= (uint32_t)PauseReason::FocusLost;
+}
 float deltaTime()                { return clk().delta; }
 float unscaledDeltaTime()        { return clk().unscaledDelta; }
 float elapsed()                  { return (float)clk().elapsed; }
+float unscaledElapsed()          { return (float)clk().unscaledElapsed; }
 int   frameCount()               { return (int)clk().frame; }
 void  setTimeScale(float scale)  { clk().scale = std::clamp(scale, 0.0f, kMaxTimeScale); }
 float timeScale()                { return clk().scale; }
+void  pause (PauseReason reason) { clk().pauseReasons |=  (uint32_t)reason; }
+void  resume(PauseReason reason) { clk().pauseReasons &= ~(uint32_t)reason; }
+bool  isPaused()                 { return clk().pauseReasons != 0; }
+// Non-positive is a no-op rather than a clear: hitStop(0) from a graph that
+// computed its duration should not cancel a freeze somebody else just started.
+void  hitStop(float seconds)     { if (seconds > 0.0f) { Clock& c = clk(); c.hitStop = std::max(c.hitStop, seconds); } }
+bool  isFrozen()                 { return clk().hitStop > 0.0f; }
+float effectiveScale()           { return effectiveScaleOf(clk()); }
 } // namespace time
 
 // ── Player possession ────────────────────────────────────────────────────────
