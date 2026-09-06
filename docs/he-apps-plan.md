@@ -4193,6 +4193,57 @@ Zeichnung und Treffer kommen aus derselben Arithmetik (bei Maßstab ≠ 1 geprü
 
 ---
 
+### 13.2a Was beim Bauen dazukam (07.09.2026)
+
+Gebaut wie zugeschnitten, ohne Abweichung an einer Entscheidung. Was der Plan
+nicht wusste:
+
+**1. Die Maske muss beim LESEN normalisiert werden, nicht beim Klicken.** Der
+Plan sagt „`Allow Multiple` aus heißt: das Aufklappen eines Abschnitts klappt die
+anderen zu" — das klingt nach einer Regel im Klick und ist eine im Zugriff. Ein
+`Set Property` aus einem Graphen schreibt die Zahl direkt, und ein Deckel, der
+nur im Klick sitzt, lässt danach zwei Bits stehen. Also `normalizedMask` (Bits
+über der Abschnittszahl weg, bei `Allow Multiple` aus nur das unterste) und
+`effectiveMask` als der einzige Weg an die Zahl — `hidesChild`, das Layout,
+`render` und der Druck gehen alle da durch.
+
+**2. `1u << 32` ist undefiniert, und es fällt nicht auf.** Der Deckel von 32
+verführt zu `(1u << n) - 1`; bei genau 32 Abschnitten ist das keine volle Maske,
+sondern das, was der Übersetzer gerade daraus macht. Ausgeschrieben als
+`0xFFFFFFFF`, und der 33.-Abschnitt-Test prüft genau diese Zahl.
+
+**3. Die Zeichen-Zwischenspeicher gehören in `uiUpdateScrollExtents`, nicht in
+`uiApplyAutoSize`.** Beide Läufe kennen den Baum, aber der Inhalt eines
+Akkordeons IST seine Körperhöhen: derselbe Durchgang, der `contentExtent`
+ausrechnet, füllt auch `sectionLabels` und `sectionBodies`. In `uiApplyAutoSize`
+wären die Höhen einen Frame alt für jeden Körper, der sich selbst misst — genau
+der Fall, in dem sie sich ändern.
+
+**4. Kein Zeichen für „offen", sondern eine Farbe.** Die Schrift des Editors hat
+keine Pfeile (dieselbe Lehre wie beim Sortier-Dreieck der Liste, das aus drei
+Quads besteht). Ein gezeichnetes Winkelchen wäre möglich, aber `Open Header
+Color` sagt dasselbe für null Geometrie — und es ist genau die Rolle, die die Tab
+Box mit `Active Tab Color` schon hat.
+
+**5. Kein Rand, kein `padding`.** Bewusst weggelassen: `render()` bekommt nur
+`pxScaleY`, ein waagerechter Einzug bräuchte also entweder einen zweiten Faktor
+oder `px.w / sizeX` — und das ist nicht dieselbe Zahl wie `canvas.scaleX * us`,
+sobald das Element über Anker gestreckt ist. Überschriften und Körper nehmen die
+volle Breite, der einzige Einzug ist `Text Indent` für die Schrift. Die
+Bildlaufleiste sitzt damit bündig an der rechten Kante.
+
+**6. Ein unsichtbares Kind behält seine Überschrift.** `boxSlotRect` überspringt
+`!visible`; hier wäre das eine Überschrift, die verschwindet, sobald ein Skript
+den Körper versteckt — der Stapel springt. Jedes Kind ist ein Abschnitt, die
+Maske bleibt stabil, und `visible=false` blendet nur den Inhalt aus.
+
+**Offen bleibt:** die Warnung beim 33. Abschnitt ist über das Flag geprüft
+(`warnedOverflow` rastet ein), nicht über eine abgefangene Logzeile — dafür gibt
+es hier keine Senke. Und `Size To Content` kann ein Akkordeon nicht: seine Höhe
+bleibt die authorierte und der Stapel scrollt, wenn er darüber hinauswächst.
+
+---
+
 ### 13.3 Mehrere Fenster (A5) — Größe L, und es hängt am Renderer
 
 **Ziel.** Ein zweites Fenster mit eigenem Widget-Baum. Ein Werkzeugfenster neben dem
