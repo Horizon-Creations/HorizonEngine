@@ -1606,9 +1606,26 @@ void GameApplication::updateUIInput()
 {
 	if (!m_world) return;
 
-	SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr;
+	SDL_Window* const primary = window() ? window()->GetNativeWindow() : nullptr;
 	float mx = 0.0f, my = 0.0f;
 	const SDL_MouseButtonFlags buttons = SDL_GetMouseState(&mx, &my);
+
+	// ── Which window are those coordinates in? ───────────────────────────────
+	// SDL_GetMouseState reports relative to the window the mouse is OVER, so
+	// the size and the scale have to come from that window too — on a second
+	// monitor with a different setting, taking the main window's numbers puts
+	// every click somewhere else entirely. Off every window of ours (or no
+	// second window at all) means the main one, which is what it always was.
+	SDL_Window* w = SDL_GetMouseFocus();
+	uint32_t uiWindow = 0;
+	if (w && w != primary)
+	{
+		const uint32_t sid = SDL_GetWindowID(w);
+		if (getWindow(HE::WindowHandle{ sid })) uiWindow = sid;
+		else                                    w = primary;   // not one of ours
+	}
+	else
+		w = primary;
 
 	// The UI pass renders at drawable resolution; SDL reports the mouse in
 	// window points — rescale (HiDPI).
@@ -1628,7 +1645,9 @@ void GameApplication::updateUIInput()
 	// it is NOT the sx/sy above — that pair converts window points to pixels
 	// (macOS Retina), this one also carries what Windows and X11 call the
 	// content scale, where the points ARE pixels and only the scale says 200%.
-	m_widgets.setDisplayScale(w ? SDL_GetWindowDisplayScale(w) : 1.0f);
+	// …for THIS window. Two windows on two monitors have two of these, and the
+	// one that matters is the one the pointer is in.
+	m_widgets.setDisplayScale(uiWindow, w ? SDL_GetWindowDisplayScale(w) : 1.0f);
 
 	// While the fly-look holds the mouse captive there is no visible cursor —
 	// hover states clear and nothing is clickable (Esc releases the mouse).
@@ -1650,7 +1669,8 @@ void GameApplication::updateUIInput()
 	// masks the mouse buttons out of gameplay next frame, so pressing a menu
 	// button does not also fire the weapon behind it.
 	m_uiWantsPointer =
-		m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
+		m_world->widgets().processPointer(uiWindow,
+		                                  static_cast<float>(pw), static_cast<float>(ph),
 		                                  mx * sx, my * sy,
 		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
 		                                  (buttons & SDL_BUTTON_RMASK) != 0);
@@ -1659,7 +1679,8 @@ void GameApplication::updateUIInput()
 	// candidate list beside it instead of in the corner of the screen. Pushed
 	// every frame a field is focused: the field can move (a scrolled list, a
 	// resized window), and SDL only remembers what it was last told.
-	if (SDL_Window* win = window() ? window()->GetNativeWindow() : nullptr)
+	// The window the field is IN, which is the one the pointer just wrote to.
+	if (SDL_Window* win = w)
 	{
 		HE::UIWidgetRect fieldRect{};
 		if (m_world->widgets().focusedFieldRect(static_cast<float>(pw),
@@ -1718,7 +1739,9 @@ void GameApplication::updateUIInput()
 	// AFTER applyUICursor, because on an edge the frame outranks whatever the
 	// element under it wanted.
 #if defined(__APPLE__)
-	if (m_customFrame && w && !m_mouseCaptured)
+	// Main window only: the borderless frame is the application's own chrome,
+	// and a tool window has the system's title bar like everything else.
+	if (m_customFrame && uiWindow == 0 && w && !m_mouseCaptured)
 	{
 		const HE::UIWindowHit fh = m_frameResize.active()
 			? m_frameResize.edge()
@@ -2714,6 +2737,21 @@ void GameApplication::OnRender(float deltaTime)
 			}
 		}
 	}
+}
+
+void GameApplication::OnWindowClosing(HE::WindowHandle handle)
+{
+	// Everything that hung in it goes with it. Not hidden — destroyed: the
+	// window is about to stop existing, and a widget that still names it would
+	// be drawn by nothing and clicked by nobody. destroyWidget also lets go of
+	// any grab it held, which is what keeps the OTHER window clickable.
+	const int gone = m_widgets.destroyWidgetsOfWindow(handle.id);
+	if (gone > 0)
+		HE_LOG_INFO(Widget, "Window %u closed — %d widget(s) destroyed with it",
+		            handle.id, gone);
+	// The pointer cannot still be in a window that is gone.
+	if (m_widgets.pointerWindow() == handle.id)
+		m_widgets.processPointer(0u, 1.0f, 1.0f, 0.0f, 0.0f, false, false);
 }
 
 void GameApplication::OnShutdown()

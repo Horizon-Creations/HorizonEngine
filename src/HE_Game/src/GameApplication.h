@@ -41,6 +41,9 @@ protected:
     // the widget layer, which is where an app's picture lives.
     bool            WantsPresent()         override;
     void            OnShutdown()           override;
+    // A second window is going (A5, docs/he-apps-plan.md §13.3): its widgets go
+    // with it and the graph is told, while the window still exists.
+    void            OnWindowClosing(HE::WindowHandle handle) override;
     // C++ game logic runs on the same clock as everything else that IS the game.
     float           GameLogicDeltaTime(float) override { return HE::api::time::deltaTime(); }
 

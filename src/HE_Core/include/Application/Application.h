@@ -102,6 +102,14 @@ namespace HE
 		// Called once after the loop exits, before the window is destroyed.
 		virtual void OnShutdown() {}
 
+		// A secondary window is about to go — closed by the user, by
+		// destroyWindow, or by the shutdown that takes them all. It still
+		// EXISTS while this runs, which is the whole point: the host tears down
+		// what it put in there (its widgets, and the graph event that says so)
+		// before the renderer detaches and the Window object is deleted.
+		// Without it a WidgetManager keeps naming a window that is gone.
+		virtual void OnWindowClosing(WindowHandle handle) { (void)handle; }
+
 		// Override to supply a concrete renderer. Called once before OnInit().
 		// Link against HorizonRendering and use RendererFactory::Create() here.
 		virtual std::unique_ptr<IRenderer> CreateRenderer() { return nullptr; }

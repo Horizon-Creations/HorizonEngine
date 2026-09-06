@@ -136,11 +136,11 @@ namespace HE
 			// Forward window-close events for secondary windows
 			if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 			{
-				auto it = m_secondaryWindows.find(e.window.windowID);
-				if (it != m_secondaryWindows.end())
+				if (m_secondaryWindows.count(e.window.windowID))
 				{
-					if (m_renderer) m_renderer->DetachWindow(it->second.get());
-					m_secondaryWindows.erase(it);
+					// Through the same door destroyWindow uses, so the host is
+					// told exactly once however the window came to close.
+					destroyWindow(WindowHandle{ e.window.windowID });
 					return;
 				}
 			}
@@ -544,9 +544,16 @@ namespace HE
 
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
-		// Detach and destroy secondary windows first
-		for (auto& [id, win] : m_secondaryWindows)
-			if (m_renderer) m_renderer->DetachWindow(win.get());
+		// Detach and destroy secondary windows first — each through the same
+		// door a user's click takes, so the host gets its OnWindowClosing for
+		// every one of them and nothing is torn down behind its back. Ids
+		// snapshotted: destroyWindow erases from the map it would iterate.
+		{
+			std::vector<uint32_t> ids;
+			ids.reserve(m_secondaryWindows.size());
+			for (const auto& [id, win] : m_secondaryWindows) ids.push_back(id);
+			for (const uint32_t id : ids) destroyWindow(WindowHandle{ id });
+		}
 		m_secondaryWindows.clear();
 		if (m_renderer)
 			m_renderer->Shutdown();
@@ -599,8 +606,15 @@ namespace HE
     {
         auto it = m_secondaryWindows.find(handle.id);
         if (it == m_secondaryWindows.end()) return;
-        if (m_renderer) m_renderer->DetachWindow(it->second.get());
+        // The host first, while the window is still there: it destroys the
+        // widgets that hang in it and fires OnWindowClosed at the graph. A
+        // handler that closes the window AGAIN would recurse, so the entry is
+        // taken out of the map before the call and destroyed after it.
+        auto win = std::move(it->second);
         m_secondaryWindows.erase(it);
+        OnWindowClosing(handle);
+        if (m_renderer) m_renderer->DetachWindow(win.get());
+        win.reset();
         HE_LOG_INFO(Core, "%s", ("Secondary window destroyed (id=" + std::to_string(handle.id) + ")").c_str());
     }
 
