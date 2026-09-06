@@ -281,11 +281,12 @@ für die Swapchain-Tiefe **und** die Viewport-Tiefe. Der Decal-Pass löst den DS
 für die Dauer seiner Draws — das war der ganze Aufwand, den Vulkan mit einem
 Vorpass bezahlen musste.
 
-**C2 · D3D12** — Haupt-Tiefe ist `D32_FLOAT`, DSV-only (`:2548..2554`); das
+**C2 · D3D12** — ~~Haupt-Tiefe ist `D32_FLOAT`, DSV-only (`:2548..2554`); das
 Vorbild steht drei Zeilen tiefer: die Shadow-Tiefe ist bereits
 `R32_TYPELESS` mit DSV **und** SRV (`:2556..2565`). Dasselbe Muster auf die
 Haupt-Tiefe anwenden, plus die Barriere `DEPTH_WRITE` →
-`PIXEL_SHADER_RESOURCE` und zurück.
+`PIXEL_SHADER_RESOURCE` und zurück.~~ **Erledigt in Schritt 5** (§6c), genau so
+wie hier vorgezeichnet — für die Swapchain-Tiefe **und** die Viewport-Tiefe.
 
 **C3 · Vulkan** — ~~`m_depthImage` hat nur
 `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` (`:6075`). Zwei Wege:
@@ -538,6 +539,144 @@ heißt „aus", das Gegenteil der GL/Vulkan-Vorgabe.
 
 ---
 
+## 6c. Checkpoint G — D3D12 (Schritt 5, gebaut)
+
+### Die erste Frage: D3D11-Weg oder Vulkan-Vorpass?
+
+D3D12 hat explizite Render-Pass- und Barrieren-Semantik und liegt darin näher an
+Vulkan als an D3D11. Trotzdem ist der **D3D11-Weg der richtige**, und zwar aus
+demselben Grund wie dort: Vulkans Kamera-Tiefen-Vorpass löst ein Problem, das nur
+Vulkan hat.
+
+Vulkan brauchte ihn, weil eine am **aktiven Render-Pass** hängende Tiefe nicht
+gesampelt werden darf und der Swapchain-Pass sich nicht aufschneiden ließ (UI-Canvas
+und ImGui hängen darin, Endlayout `PRESENT_SRC_KHR`). **D3D12 benutzt gar keine
+Render-Pass-Objekte** — `D3D12Renderer` bindet Ziele mit `OMSetRenderTargets`, nicht
+mit `BeginRenderPass`. Der DSV zu lösen ist also auch hier ein einzelner Aufruf
+mitten im Frame, kein Umbau der Pass-Struktur. Der Vorpass wäre ein zusätzlicher
+Geometriedurchlauf und obendrein **schlechter**: Vulkan zeichnet darin nur opake
+statische Meshes, D3D12 liest den echten Szenen-Tiefenpuffer und projiziert damit
+auch auf Skinned Meshes, Partikel und WPO-verschobene Geometrie.
+
+Der einzige Unterschied zu D3D11 ist die Lautstärke. D3D11 verbietet DSV und SRV
+auf derselben Ressource und löst den Verstoß **still** auf, indem es eine Bindung
+fallen lässt. D3D12 verlangt stattdessen eine explizite `ResourceBarrier` — dieselbe
+Reihenfolge, nur dass ein Fehler hier ein Debug-Layer-Fehler ist und kein
+schweigend leerer Pass.
+
+### Die Bausteine
+
+| Baustein | Ort |
+|---|---|
+| Sampelbare Tiefe (C2) | `D3D12RendererImpl::createDepth` + `createViewportRT`, beide über `createDepthSrv` |
+| Root-Signature + PSOs (lazy) | `D3D12RendererImpl::EnsureDecalPipeline` |
+| Textur | `D3D12RendererImpl::resolveDecalTexture` (Cache nach Textur-UUID) |
+| Zeichnen | `D3D12RendererImpl::EncodeDecals` |
+| Aufrufstelle | `D3D12Renderer::DrawScene`, nach den opaken/skinned Draws, vor den transparenten |
+
+**C2 konkret:** `DXGI_FORMAT_D32_FLOAT` → `R32_TYPELESS` mit
+`ALLOW_DEPTH_STENCIL`, DSV `D32_FLOAT`, SRV `R32_FLOAT`. Vorbild ist die Shadow-Map
+drei Zeilen tiefer, die das seit jeher so macht. **Ein typeless Resource lehnt einen
+Null-View-Desc ab** — beide DSV-Descs sind deshalb explizit, die alten
+`nullptr`-Aufrufe mussten weg. Der `D3D12_CLEAR_VALUE` bleibt `D32_FLOAT`: er nennt
+die *View*-Format-Sicht, nicht die der Ressource.
+
+### Die Reihenfolge, an der alles hängt
+
+```
+OMSetRenderTargets(1, &rtv, FALSE, nullptr)          // DSV ZUERST lösen
+barrier12(depth, DEPTH_WRITE → PIXEL_SHADER_RESOURCE) // dann lesbar machen
+… 36-Vertex-Draw pro Decal …
+barrier12(depth, PIXEL_SHADER_RESOURCE → DEPTH_WRITE) // wieder beschreibbar …
+OMSetRenderTargets(1, &rtv, FALSE, &dsv)              // … erst danach zurück ans OM
+```
+
+Die Invariante ist „kein Draw, solange eine als DSV gebundene Ressource in
+`PIXEL_SHADER_RESOURCE` steht". Beide Tiefen (`depthBuffer`, `viewportDepth`) liegen
+sonst dauerhaft in `DEPTH_WRITE` — es gibt im ganzen Renderer keine andere Barriere
+auf sie, der Vorher-Zustand ist also nicht geraten.
+
+### Was D3D12 im Gegensatz zu D3D11 selbst mitbringen muss
+
+**Es gibt kein `OMGetRenderTargets`.** Ein D3D12-Command-List hat keine Getter, der
+Zeigervergleich, mit dem D3D11 seinen Tiefen-SRV wählt, ist hier unmöglich. Das
+aktive Ziel wird deshalb aus **derselben Dreiteilung** rekonstruiert, die schon die
+SSAO- und GI-Restore-Blöcke in `DrawScene` benutzen (`usingHDR && hdrRtvHeap` →
+`viewportRtvHeap` → Swapchain). Das ist die einzige Wahrheit darüber, worein
+`DrawScene` zeichnet; wer einen vierten Zielpfad einbaut, muss sie an allen drei
+Stellen erweitern.
+
+**Root-Signature statt freier Slots.** D3D11 bindet Ressourcen an Registernummern,
+D3D12 an Root-Parameter. Der Decal-Pass hat deshalb eine **eigene Root-Signature**:
+Root-CBV `b13` (beide Stufen), zwei Ein-Deskriptor-Tabellen `t14` und `t15`, zwei
+statische Sampler `s14` (linear-wrap) und `s15` (point-clamp). Die Registernummern
+sind unverändert die aus §6b — D3D12 hätte D3D11s Grenze von 14 CB- und 16
+Sampler-Slots nicht, nimmt die Zahlen aber trotzdem, damit die beiden D3D-Backends
+einen Vertrag teilen statt zweier.
+
+**Beide Tabellen zeigen in `sceneSrvHeap`**, den Heap, den der Geometriepass
+ohnehin gebunden hat. Die Tiefe bekommt dafür zwei Slots, die **hinten an den Heap
+angehängt** sind (`k_decalSceneDepthSlot`, `k_decalViewportDepthSlot`) — nicht vorne
+in die statische Region, weil dort jede Zahl von `[0..7]` in Kommentaren und
+Range-Offsets steht. Die Decal-Textur liegt in der Mesh-Textur-Region, vergeben von
+`allocAlbedoSlot`; eine untexturierte Decal zeigt auf `k_albedoNullSlot`, dessen
+Null-View als (0,0,0,0) sampelt und den das `hasTexture`-Flag ohnehin ausblendet.
+
+**Zwei PSOs statt einer Pipeline.** Das Farbziel ist `RGBA8` (Swapchain und
+Viewport) oder `RGBA16F` (Viewport-HDR), und ein PSO nagelt sein RTV-Format fest —
+dieselbe LDR/HDR-Paarung, die Sky, Debug-Linien und Graph-Materials hier schon
+haben. `DSVFormat` bleibt `UNKNOWN` und `DepthEnable` `FALSE`: der Pass läuft mit
+**ungebundener** Tiefe, und die Deckung entscheidet der Box-Clip, nicht der Z-Test.
+Ein Vertex-Buffer wird nicht gelöst — das PSO trägt ein leeres Input-Layout, also
+ignoriert es, was der Geometriepass hinterlassen hat (D3D11 musste, dort ist das
+Input-Layout eigener Zustand, den die Runtime gegen die gebundenen Buffer prüft).
+
+**Eine Root-Signature-Umschaltung löscht alle Root-Argumente.** Nach dem Pass wird
+der Szenenzustand deshalb genau so wieder aufgebaut, wie der Skinned-Pass es zwei
+Blöcke höher tut: Root-Signature, Topologie, Per-Frame-CBV, Deskriptor-Heap,
+Tabelle 2, Szenen-PSO.
+
+### Die Zahlen
+
+`params = (hasTex, -1, 1, 0)` — **identisch zu D3D11 und Metal**, dieselbe
+Begründung: `SV_Position.y` zählt von oben, NDC-y zeigt nach oben, also fällt
+`uv.y = 0` auf `clip.y = +1` → Vorzeichen -1; die Tiefe liegt in Textur und NDC
+bereits in `0..1` → Skalierung 1, Bias 0. (Vulkan: `+1, 1, 0`. GL: `+1, 2, -1`.)
+
+**Die Cull-Seite** ist wie überall keine Differenz, nur anders buchstabiert:
+`FrontCounterClockwise = FALSE` + `CULL_FRONT`. Anders als in D3D11 muss
+`DepthClipEnable` hier nicht gegen eine Vorgabe verteidigt werden — es wird
+trotzdem ausdrücklich gesetzt, damit die beiden D3D-Pfade Zeile für Zeile
+vergleichbar bleiben.
+
+### Grenzen, bewusst und zu melden
+
+- **Nie kompiliert, nirgends.** Wie bei D3D11: auf diesem Mac gibt es keine
+  D3D12-Header und kein `fxc`/`dxc`, `D3D12Renderer.cpp` wird hier nicht übersetzt.
+  Was wirklich läuft, ist der Register-ctest aus Schritt 4 — er prüft den
+  emittierten HLSL-Text und deckt D3D12 mit ab, weil beide Backends **denselben
+  Shader mit denselben Pins** benutzen. Ein eigener D3D12-Testfall wäre eine Kopie
+  ohne zusätzliche Aussage und wurde deshalb nicht geschrieben.
+- **Ein Deckel bei 256 Decals pro Frame.** Anders als D3D11 (`Map(WRITE_DISCARD)`
+  auf einen Constant-Buffer) hat D3D12 einen Upload-Ring fester Größe, dessen Slots
+  innerhalb eines Frames nicht wiederverwendet werden dürfen. Alles ab dem 257.
+  Decal fällt still weg. Vulkan hat aus demselben Grund eine Obergrenze.
+- **Jede Decal-Textur belegt einen Slot der Mesh-Textur-Region** (1024 Slots, geteilt
+  mit den Mesh-Basisfarben). Kein realistisches Projekt kommt dort hin, aber es ist
+  derselbe Topf.
+- **Decal-Texturen werden nicht hot-reloaded**, wie auf Vulkan und D3D11:
+  `decalTexCache` hängt an der Textur-UUID, `InvalidateMaterial` an der
+  Material-UUID.
+- **Kein Frustum-Cull, keine Sortierung** — wie auf allen anderen Backends.
+- **Die Kamera-Projektion trägt `kD3DClipFix` nicht**, genau wie auf D3D11 (§6b).
+  Bestehender Cross-Backend-Befund, kein Decal-Befund, hier nicht angefasst; der
+  Decal-Pfad ist davon unabhängig richtig, weil er dieselbe `viewProj` invertiert,
+  die der Rasterizer benutzt hat.
+- **Kein GI, keine Schatten, keine Punktlichter auf dem Decal** — die Abweichung
+  aus §6, unverändert.
+
+---
+
 ## 7. Prüfungen und ihre Grenzen
 
 Dieser Mac kann GL, Vulkan und D3D **nicht** laufen lassen (kein Display für GL,
@@ -563,10 +702,10 @@ Gates sind deshalb dieselben wie beim GI- und Deferred-Port:
 3. **Metal-Zwei-Pass real** (Checkpoint B): per `scripts/he_shot.py` headless
    sichtbar, mit `HE_RENDER_PATH=deferred` und ohne Tile-Modus.
 4. **GL/VK/D3D: Nutzer-Verify auf echter Hardware.** Wird als offen gemeldet,
-   nicht als erledigt. Für D3D11 gilt zusätzlich: es gibt hier **keinen
-   Syntax-Check** — weder Header noch `fxc`/`dxc` liegen auf dieser Maschine, und
-   `D3D11Renderer.cpp` wird auf macOS nicht übersetzt. Der erste Windows-Build ist
-   die erste Prüfung.
+   nicht als erledigt. Für **D3D11 und D3D12** gilt zusätzlich: es gibt hier
+   **keinen Syntax-Check** — weder Header noch `fxc`/`dxc` liegen auf dieser
+   Maschine, und `D3D11Renderer.cpp`/`D3D12Renderer.cpp` werden auf macOS nicht
+   übersetzt. Der erste Windows-Build ist die erste Prüfung.
 
 `ctest` bleibt in jedem Schritt grün; Schritt 1 ändert keinen Code, es gibt
 hier also nichts zu brechen.
@@ -595,9 +734,9 @@ nach GL geht.
 | 1 | Kartierung + Plan (`00ad406b`) | fertig |
 | 2 | A komplett: Sampled-Variante + GL-Decal-Pass + ctest (`ae579089`) | fertig |
 | 3 | **E: Vulkan** (Tiefen-Vorpass + Forward-Decal-Pass) und **D: `decalFragmentForward`** | fertig |
-| — | B Metal-Zwei-Pass-Fallback | offen, nie gebaut |
 | 4 | **F: D3D11** (C1 sampelbare Tiefe + Decal-Pass + HLSL-Register-Pins) | fertig |
-| — | C2 + Decal-Pass für D3D12 | offen (Schritt 32) |
+| 5 | **G: D3D12** (C2 sampelbare Tiefe + Decal-Pass, Register aus Schritt 4 geerbt) | fertig |
+| — | B Metal-Zwei-Pass-Fallback | offen, nie gebaut |
 
 Schritt 3 hat B und D getauscht: die Entscheidung des Leitstands zu §2.1 (Weg 2)
 kam vor Checkpoint B, und weil D für drei Backends derselbe Shader ist, gehörte er
