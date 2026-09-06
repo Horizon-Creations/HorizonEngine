@@ -245,11 +245,19 @@ void update(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
         const std::vector<glm::vec3> pts = resolveControlPoints(world, e, rope);
         const uint64_t hash = geometryHash(rope, pts);
 
+        // The MAP decides ownership, not the component. A rope's component can be
+        // replaced wholesale on an entity that keeps its handle — a collaboration
+        // sync and an undo both go through emplace_or_replace — and the fresh
+        // component arrives with an empty runtimeMeshId. Trusting the component
+        // there would register a second mesh and orphan the first: a leak, and
+        // the very pool reallocation the register-once rule exists to avoid.
         const auto it = owned.find(entityKey(e));
-        const bool ours = (it != owned.end())
-                       && !(rope.runtimeMeshId == HE::UUID{})
-                       && it->second == rope.runtimeMeshId
-                       && cm.getStaticMesh(rope.runtimeMeshId) != nullptr;
+        const bool ours = (it != owned.end()) && cm.getStaticMesh(it->second) != nullptr;
+        if (ours && !(rope.runtimeMeshId == it->second))
+        {
+            rope.runtimeMeshId = it->second;   // hand the mesh back to its rope
+            rope.builtHash     = 0;            // and rebuild: the parameters may differ
+        }
 
         if (ours && hash == rope.builtHash) continue;
 

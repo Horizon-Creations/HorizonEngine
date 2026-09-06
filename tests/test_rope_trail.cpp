@@ -500,6 +500,37 @@ TEST_CASE("A rope registers its runtime mesh exactly once, however often it chan
     RopeTrailSystem::releaseWorld(world, cm);
 }
 
+TEST_CASE("Replacing the whole component does not register a second mesh")
+{
+    // A collaboration sync and an undo both put a FRESH component on the same
+    // entity (emplace_or_replace), so runtimeMeshId comes back empty. If that
+    // were taken at face value the rope would register a second mesh and orphan
+    // the first — a leak, and exactly the pool reallocation the register-once
+    // rule is there to prevent.
+    HorizonWorld world;
+    ContentManager cm;
+    auto& reg = world.registry();
+
+    const Entity e = world.createEntity("Rope");
+    reg.emplace<RopeComponent>(e, RopeComponent{});
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+
+    const HE::UUID first = reg.get<RopeComponent>(e).runtimeMeshId;
+    REQUIRE(cm.getStaticMesh(first) != nullptr);
+    const size_t before = cm.getStaticMesh(first)->vertices.size();
+
+    RopeComponent replacement;                       // no runtimeMeshId, no builtHash
+    replacement.radialSegments = 16;
+    reg.emplace_or_replace<RopeComponent>(e, replacement);
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+
+    CHECK(reg.get<RopeComponent>(e).runtimeMeshId == first);
+    REQUIRE(cm.getStaticMesh(first) != nullptr);
+    CHECK(cm.getStaticMesh(first)->vertices.size() != before);   // rebuilt into the same asset
+
+    RopeTrailSystem::releaseWorld(world, cm);
+}
+
 TEST_CASE("A destroyed rope gives its runtime mesh back")
 {
     HorizonWorld world;
