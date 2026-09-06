@@ -102,6 +102,12 @@ enum class UIWidgetType : uint8_t
     // A hue strip and a saturation/value field, out of the one shape this
     // system has. Same reason for being embedded as the calendar above.
     ColorPicker,
+    // A stack of sections you can fold open, several at once. Not a Tab Box
+    // with a different skin: a tab strip shows exactly one page and its height
+    // is the tallest of them, an accordion shows any number and its height is
+    // the sum of the open ones. Its CHILDREN are the sections and each child's
+    // NAME is its heading, the same design as the Tab Box's pages.
+    Accordion,
     COUNT
 };
 

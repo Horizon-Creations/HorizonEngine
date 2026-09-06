@@ -1537,6 +1537,165 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── Accordion ────────────────────────────────────────────────────────────────
+// A stack of foldable sections (docs/he-apps-plan.md B5, §13.2).
+//
+// ITS CHILDREN ARE THE SECTIONS, and each child's NAME is its heading — the Tab
+// Box's design, for the Tab Box's reason: a parallel array of titles beside a
+// list of children is two things that have to be kept in step by hand, and the
+// first reorder puts every title on the wrong section.
+//
+// What makes it NOT a Tab Box with another skin: several sections may be open
+// at once, the headings sit BETWEEN the bodies rather than in one strip, and a
+// closed body is zero high — so the stack's height is the sum of what is open
+// and everything below an opened section moves down. That is also why it lays
+// its children out itself instead of letting the ordinary box walk do it.
+//
+// A section's body is as tall as the CHILD's own Height. Slot Fill is not
+// consulted: "fill what is left over" in a stack whose length is the sum of its
+// parts is circular, and the one honest answer would be to ignore the fill
+// anyway. A section whose child is invisible still has a heading — a heading
+// that vanishes when a script hides the body is a stack that jumps.
+class HE_API UIAccordion final : public UIElement
+{
+public:
+    // At most this many sections, because `expanded` is a 32-bit mask. A 33rd
+    // child is always closed and takes no click; the runtime says so once.
+    static constexpr int kMaxSections = 32;
+
+    // ── Which sections are open, as a BITMASK ────────────────────────────────
+    // Bit i = section i is open. A flag per child would read better but has no
+    // way into the preview's state snapshot: statePropsOf is per ELEMENT TYPE
+    // and names property names, not children. A number goes through there in
+    // one line, the way Active Tab and Ratio already do — and the editor draws
+    // it as a row of tick boxes labelled with the section names, so nobody has
+    // to read it as a number.
+    //
+    // 1 = the first section open, matching the Tab Box's "the first page shows
+    // rather than none": a control that opens as an empty column of headings is
+    // a mistake that hides itself.
+    int   expanded = 1;
+    // Off makes it a Tab Box that stacks: opening one section closes the rest.
+    bool  allowMultiple = true;
+    float headerHeight = 28.0f;
+    float fontSize     = 14.0f;
+    // The gap after a section, before the next heading. Between only, so n
+    // sections have n-1 of them.
+    float spacing = 2.0f;
+    // Room left of the heading text inside its band. Scaled by the vertical
+    // factor like the Tab Box's Tab Padding is — the same call, for the same
+    // reason it has never mattered: a canvas that scales the axes differently
+    // is a stretched picture either way.
+    float textIndent = 10.0f;
+    glm::vec4 headerColor    { 0.18f, 0.18f, 0.21f, 1.0f };
+    // What an OPEN section's heading is filled with. The one thing that says
+    // open from closed, because the UI font has no triangles in it — the same
+    // reason the list's sort marker is three quads.
+    glm::vec4 openHeaderColor{ 0.26f, 0.26f, 0.31f, 1.0f };
+    glm::vec4 textColor      { 0.92f, 0.92f, 0.95f, 1.0f };
+    glm::vec4 bodyColor      { 0.0f, 0.0f, 0.0f, 0.0f };
+    float barWidth = 6.0f;
+    glm::vec4 barColor{ 0.75f, 0.75f, 0.80f, 0.65f };
+
+    // ── Runtime ──────────────────────────────────────────────────────────────
+    // How far the stack is scrolled, in the element's own units. Not saved: an
+    // accordion that reopened halfway down is showing a picture of last time.
+    float scrollOffset  = 0.0f;
+    float contentExtent = 0.0f;
+    // What the headings SAY and how tall each body is, refreshed by the layout
+    // pass (uiUpdateScrollExtents) because render() has no tree to ask.
+    //
+    // A cache, and only for the DRAWING: where a section sits and which heading
+    // a click hit are both worked out from the tree (accordionSlotRect, the
+    // manager's press), so the worst a stale entry can cost is a heading one
+    // frame old.
+    mutable std::vector<std::string> sectionLabels;
+    mutable std::vector<float>       sectionBodies;   // own units, per section
+    // The 33rd section is a thing to say once and not once a frame.
+    mutable bool warnedOverflow = false;
+
+    UIAccordion()
+    {
+        sizeX = 320.0f; sizeY = 300.0f;
+        clipChildren = true;      // a section past the bottom stops at the edge
+        cornerRadius = glm::vec4(4.0f);
+    }
+    UIWidgetType type() const override { return UIWidgetType::Accordion; }
+    const char*  typeName() const override { return "Accordion"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIAccordion>(*this); }
+
+    bool acceptsChildren() const override { return true; }
+    bool laysOutChildren() const override { return true; }
+    bool stacksVertically() const override { return true; }
+    // Like the Tab Box: a container that is not transparent to the pointer,
+    // because its headings are a column of things to click. The bodies are
+    // deeper in the tree, so they still win where they are.
+    bool interactive() const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
+    // Every section whose bit is clear, and everything past the 32nd. THE
+    // reason this is the parent's question: the picture and the pointer both
+    // come through uiElementEffectiveVisible, so a button in a folded section
+    // cannot answer a click at its coordinates.
+    bool hidesChild(const UIWidgetTree& tree, const UIElement& child) const override;
+
+    // ── One mask, four consumers ─────────────────────────────────────────────
+    // The authored number held to what it can mean: bits past the section count
+    // dropped, and — when Allow Multiple is off — everything but the lowest one.
+    // hidesChild, the layout, render() and the press all go through here, which
+    // is what makes "Allow Multiple off leaves exactly one bit" true after a
+    // PROPERTY is set and not only after a click.
+    static uint32_t normalizedMask(uint32_t mask, int sections, bool allowMultiple);
+    uint32_t effectiveMask(int sections) const
+    { return normalizedMask(static_cast<uint32_t>(expanded), sections, allowMultiple); }
+    // What the mask becomes when section `i` is clicked. Closing the last open
+    // section is allowed even with Allow Multiple off: a stack of headings is a
+    // legitimate thing to want, and refusing would make a heading you cannot
+    // un-press.
+    static uint32_t toggledMask(uint32_t mask, int section, int sections,
+                                bool allowMultiple);
+
+    // ── One arithmetic, three consumers ──────────────────────────────────────
+    // Where the headings and the bodies sit, measured DOWN from `top`. Unit
+    // agnostic: hand it element units and it answers in element units, hand it
+    // pixels and it answers in pixels — which is how the slot rect (canvas
+    // units), render() (pixels) and the press (element units) can share it
+    // without any of them converting twice.
+    //
+    // `bodyHeights` is each section's natural body height, `mask` the NORMALIZED
+    // mask. A closed section contributes a heading and nothing else.
+    struct Slot { float headerY = 0.0f; float bodyY = 0.0f; float bodyH = 0.0f; };
+    static void sectionLayout(float top, float headerH, float gap,
+                              const std::vector<float>& bodyHeights, uint32_t mask,
+                              std::vector<Slot>& out);
+    // The total the layout above adds up to — headings, open bodies and gaps.
+    static float contentHeight(float headerH, float gap,
+                               const std::vector<float>& bodyHeights, uint32_t mask);
+    // Which HEADING a point `y` (same unit, measured from the same `top`) is
+    // on, or -1 for none. A point on a body is deliberately nothing: the body
+    // belongs to whatever the author put in it.
+    static int headerAt(float top, float headerH, float gap,
+                        const std::vector<float>& bodyHeights, uint32_t mask, float y);
+
+    float maxScroll() const
+    {
+        const float over = contentExtent - sizeY;
+        return over > 0.0f ? over : 0.0f;
+    }
+    float* scrollOffsetPtr() override { return &scrollOffset; }
+    float  maxScrollAmount() const override { return maxScroll(); }
+    bool   scrollBar(UIScrollBarStyle& s) const override
+    { s = { barWidth, 0.0f, contentExtent, barColor }; return true; }
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnSectionToggled", UIPropType::Int, true } }; }
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 // ── The calendar arithmetic ──────────────────────────────────────────────────
 // Free functions rather than members: they are about the Gregorian calendar and
 // not about a widget, a test can pin them without building an element, and the

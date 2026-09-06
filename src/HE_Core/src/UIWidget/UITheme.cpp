@@ -312,6 +312,14 @@ const UITheme& uiAmberTheme()
         tabs.set("Text Color",       col(textL, textD));
         tabs.set("Page Color",       col(surfaceL, surfaceD));
 
+        // An accordion's two heading colours are the tab strip's two, because
+        // they say the same thing: this one is the one you are looking at.
+        UIThemeStyle& acc = d.styleMut("Accordion");
+        acc.set("Header Color",      col({ 0.85f, 0.82f, 0.77f, 1.0f }, { 0.18f, 0.17f, 0.14f, 1.0f }));
+        acc.set("Open Header Color", col(surfaceL, surfaceD));
+        acc.set("Text Color",        col(textL, textD));
+        acc.set("Bar Color",         col(borderL, borderD));
+
         UIThemeStyle& list = d.styleMut("ListView");
         list.set("Back Color",          col(surfaceL, surfaceD));
         list.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));

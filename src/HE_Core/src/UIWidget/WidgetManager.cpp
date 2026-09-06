@@ -3307,6 +3307,45 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 							                        static_cast<float>(hit));
 						}
 				}
+				// An Accordion: the headings fold, the rest is the section's own.
+				if (const auto* ac = dynamic_cast<const HE::UIAccordion*>(e))
+				{
+					const HE::UIWidgetCanvas canvas =
+						resolveCanvas(w.tree, vpWidth, vpHeight);
+					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ac, &canvas);
+					float us = 1.0f, vs = 1.0f;
+					HE::uiElementUnitScale(w.tree, *ac, us, vs, &canvas);
+					// The body heights come from the TREE, not from the drawing
+					// cache: what a click hits must never depend on whether a
+					// frame has been drawn yet.
+					std::vector<float> bodies;
+					for (const auto& cp : w.tree.elements)
+						if (cp && cp->parentId == ac->id) bodies.push_back(cp->sizeY);
+					// Into the element's OWN units, which is the space the slot
+					// rect answers in — one conversion, the same factors, so a
+					// heading is grabbable exactly where it was drawn.
+					if (canvas.scaleY > 0.0f && vs > 0.0f)
+					{
+						const float localY =
+							(mouseY / canvas.scaleY - r.y) / vs + ac->scrollOffset;
+						const int n = static_cast<int>(bodies.size());
+						const int hit = HE::UIAccordion::headerAt(
+							0.0f, ac->headerHeight, ac->spacing, bodies,
+							ac->effectiveMask(n), localY);
+						if (hit >= 0)
+							if (auto* live = dynamic_cast<HE::UIAccordion*>(w.tree.find(hot)))
+							{
+								live->expanded = static_cast<int>(
+									HE::UIAccordion::toggledMask(
+										static_cast<uint32_t>(live->expanded), hit, n,
+										live->allowMultiple));
+								m_visualDirty = true;
+								const ScriptTarget t2 = scriptTargetFor(w, hot);
+								rt().fireOnValueChanged(t2.scriptId, t2.elem,
+								                        static_cast<float>(hit));
+							}
+					}
+				}
 				// TextInput: focus it, and put the caret where the click was —
 				// a field you can only ever append to is not a field.
 				if (stepperTook)
@@ -4480,6 +4519,10 @@ const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
 	// text in a field follows.
 	static const std::vector<std::string> kTab    = { "Active Tab" };
 	static const std::vector<std::string> kSplit  = { "Ratio" };
+	// Which sections are folded open is the same kind of thing: a person put it
+	// there by clicking headings, and a reload that threw it away would fold the
+	// stack back to whatever the author left.
+	static const std::vector<std::string> kAcc    = { "Expanded" };
 	// A picked date and a picked colour are things a PERSON put there, so a
 	// reload must carry them across — the same rule the text in a field follows.
 	// The calendar's three, because the date is three properties.
@@ -4489,6 +4532,7 @@ const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
 	{
 		case HE::UIWidgetType::TabBox:      return &kTab;
 		case HE::UIWidgetType::Splitter:    return &kSplit;
+		case HE::UIWidgetType::Accordion:   return &kAcc;
 		case HE::UIWidgetType::DatePicker:  return &kDate;
 		case HE::UIWidgetType::ColorPicker: return &kColor;
 		case HE::UIWidgetType::TextInput:   return &kText;

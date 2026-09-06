@@ -108,6 +108,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::Splitter:      return std::make_unique<UISplitter>();
         case UIWidgetType::DatePicker:    return std::make_unique<UIDatePicker>();
         case UIWidgetType::ColorPicker:   return std::make_unique<UIColorPicker>();
+        case UIWidgetType::Accordion:     return std::make_unique<UIAccordion>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -122,7 +123,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
         UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid,
         UIWidgetType::TabBox, UIWidgetType::Splitter,
-        UIWidgetType::DatePicker, UIWidgetType::ColorPicker };
+        UIWidgetType::DatePicker, UIWidgetType::ColorPicker,
+        UIWidgetType::Accordion };
     return kAll;
 }
 
@@ -139,7 +141,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
         "Slider", "ProgressBar", "TextInput", "ComboBox",
         "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
         "ListView", "WrapBox", "Grid", "TabBox", "Splitter",
-        "DatePicker", "ColorPicker" };
+        "DatePicker", "ColorPicker", "Accordion" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -3088,6 +3090,201 @@ void UISplitter::readJson(const nlohmann::json& j)
     minFirst = j.value("minFirst", minFirst);
     minSecond = j.value("minSecond", minSecond);
     dividerColor = colFrom(j.value("dividerColor", nlohmann::json()), dividerColor);
+}
+
+// ── Accordion ────────────────────────────────────────────────────────────────
+
+uint32_t UIAccordion::normalizedMask(uint32_t mask, int sections, bool allowMultiple)
+{
+    const int n = std::clamp(sections, 0, kMaxSections);
+    // A shift of 32 on a 32-bit value is undefined, so the full mask is spelled
+    // out rather than computed. This is the bug the "33rd section" test exists
+    // to catch, and it does not announce itself — it just works on one compiler.
+    const uint32_t keep = n >= kMaxSections ? 0xFFFFFFFFu
+                                            : ((1u << static_cast<unsigned>(n)) - 1u);
+    uint32_t m = mask & keep;
+    if (!allowMultiple && m != 0u)
+        m &= ~(m - 1u);        // the lowest set bit, and nothing else
+    return m;
+}
+
+uint32_t UIAccordion::toggledMask(uint32_t mask, int section, int sections,
+                                  bool allowMultiple)
+{
+    if (section < 0 || section >= std::clamp(sections, 0, kMaxSections)) return mask;
+    const uint32_t bit = 1u << static_cast<unsigned>(section);
+    uint32_t m = normalizedMask(mask, sections, allowMultiple);
+    if (m & bit) m &= ~bit;                        // closing is always allowed
+    else         m = allowMultiple ? (m | bit) : bit;
+    return m;
+}
+
+void UIAccordion::sectionLayout(float top, float headerH, float gap,
+                                const std::vector<float>& bodyHeights, uint32_t mask,
+                                std::vector<Slot>& out)
+{
+    out.clear();
+    out.reserve(bodyHeights.size());
+    const float h = std::max(0.0f, headerH);
+    float y = top;
+    for (std::size_t i = 0; i < bodyHeights.size(); ++i)
+    {
+        Slot s;
+        s.headerY = y;
+        y += h;
+        s.bodyY = y;
+        // Past the 32nd there is no bit to read, so the section is closed —
+        // which is also what hidesChild answers for the same child.
+        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
+                          (mask & (1u << static_cast<unsigned>(i))) != 0u;
+        s.bodyH = open ? std::max(0.0f, bodyHeights[i]) : 0.0f;
+        y += s.bodyH;
+        if (i + 1 < bodyHeights.size()) y += std::max(0.0f, gap);
+        out.push_back(s);
+    }
+}
+
+float UIAccordion::contentHeight(float headerH, float gap,
+                                 const std::vector<float>& bodyHeights, uint32_t mask)
+{
+    std::vector<Slot> slots;
+    sectionLayout(0.0f, headerH, gap, bodyHeights, mask, slots);
+    if (slots.empty()) return 0.0f;
+    return slots.back().bodyY + slots.back().bodyH;
+}
+
+int UIAccordion::headerAt(float top, float headerH, float gap,
+                          const std::vector<float>& bodyHeights, uint32_t mask, float y)
+{
+    if (headerH <= 0.0f) return -1;
+    std::vector<Slot> slots;
+    sectionLayout(top, headerH, gap, bodyHeights, mask, slots);
+    for (std::size_t i = 0; i < slots.size(); ++i)
+        if (y >= slots[i].headerY && y < slots[i].headerY + headerH)
+            return static_cast<int>(i);
+    return -1;
+}
+
+bool UIAccordion::hidesChild(const UIWidgetTree& tree, const UIElement& child) const
+{
+    const int idx = uiChildIndexOf(tree, id, child.id);
+    if (idx < 0) return false;                 // not one of my children
+    if (idx >= kMaxSections) return true;      // no bit to read: always folded
+    const uint32_t m = effectiveMask(uiChildCountOf(tree, id));
+    return (m & (1u << static_cast<unsigned>(idx))) == 0u;
+}
+
+const UIPropTable& UIAccordion::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIAccordion::expanded>       ({ "Expanded", UIPropType::Int }),
+        uiprop::slot<&UIAccordion::allowMultiple>  ({ "Allow Multiple", UIPropType::Bool }),
+        uiprop::slot<&UIAccordion::headerHeight>   ({ "Header Height", UIPropType::Float, 8.0f, 200.0f }),
+        uiprop::slot<&UIAccordion::fontSize>       ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIAccordion::spacing>        ({ "Spacing", UIPropType::Float, 0.0f, 100.0f }),
+        uiprop::slot<&UIAccordion::textIndent>     ({ "Text Indent", UIPropType::Float, 0.0f, 100.0f }),
+        uiprop::slot<&UIAccordion::headerColor>    ({ "Header Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::openHeaderColor>({ "Open Header Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::textColor>      ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::bodyColor>      ({ "Body Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::barWidth>       ({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIAccordion::barColor>       ({ "Bar Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UIAccordion::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                         const HE::UUID& mat, float pxScaleY,
+                         std::vector<UIRenderObject>& out) const
+{
+    // The element's own rectangle, always emitted so the surface style has a
+    // quad to be applied to — the same reason the list view emits its own.
+    quad(out, px.x, px.y, px.w, px.h, glm::vec4(0.0f), mat, 0.0f, textureAssetId);
+
+    // ONE factor for everything vertical, and it is the one handed in: canvas
+    // units → pixels, an embedded widget's scale already folded into it. The
+    // press converts the other way with the same number, which is what keeps a
+    // heading clickable where it is drawn on a canvas that scales.
+    const float k       = pxScaleY;
+    const float headPx  = std::max(0.0f, headerHeight) * k;
+    const float gapPx   = std::max(0.0f, spacing) * k;
+    const float sizePx  = st.fontPx(fontSize, pxScaleY);
+    const float indent  = std::max(0.0f, textIndent) * k;
+
+    std::vector<float> bodies;
+    bodies.reserve(sectionBodies.size());
+    for (const float h : sectionBodies) bodies.push_back(std::max(0.0f, h) * k);
+
+    std::vector<Slot> slots;
+    sectionLayout(px.y - scrollOffset * k, headPx, gapPx, bodies,
+                  effectiveMask(static_cast<int>(bodies.size())), slots);
+
+    // Cut by hand at the element's own edges: clipChildren governs the CHILDREN,
+    // and these quads are the element's own, so a heading scrolled halfway out
+    // would otherwise paint over the border.
+    const float top = px.y, bottom = px.y + px.h;
+    auto band = [&](float y, float h, const glm::vec4& c, bool rounded)
+    {
+        if (c.a <= 0.001f || h <= 0.0f || px.w <= 0.0f) return;
+        const float y0 = std::max(y, top), y1 = std::min(y + h, bottom);
+        if (y1 <= y0) return;
+        quad(out, px.x, y0, px.w, y1 - y0, c, HE::UUID{},
+             rounded ? roundedR(px.w, y1 - y0, 3.0f) : 0.0f);
+    };
+
+    const uint32_t m = effectiveMask(static_cast<int>(bodies.size()));
+    for (std::size_t i = 0; i < slots.size(); ++i)
+    {
+        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
+                          (m & (1u << static_cast<unsigned>(i))) != 0u;
+        band(slots[i].bodyY, slots[i].bodyH, bodyColor, false);
+        band(slots[i].headerY, headPx, open ? openHeaderColor : headerColor, true);
+        // The label only where the band is actually on screen: a glyph run is
+        // not clipped by the band's own trimming above.
+        if (i < sectionLabels.size() && headPx > 0.0f &&
+            slots[i].headerY + headPx > top && slots[i].headerY < bottom)
+            emitText(*this, sectionLabels[i], { px.x + indent, slots[i].headerY },
+                     { std::max(0.0f, px.w - 2.0f * indent), headPx },
+                     sizePx, textColor, false, out);
+    }
+
+    UIWidgetRect th;
+    if (uiScrollThumbRect(*this, px, th))
+        quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
+}
+
+// The offset is runtime state (like the scroll box's), the mask is not: which
+// sections an author left open is part of what the widget IS.
+void UIAccordion::writeJson(nlohmann::json& j) const
+{
+    j["expanded"]      = expanded;
+    j["allowMultiple"] = allowMultiple;
+    j["headerHeight"]  = headerHeight;
+    j["fontSize"]      = fontSize;
+    j["spacing"]       = spacing;
+    j["textIndent"]    = textIndent;
+    j["headerColor"]     = colJson(headerColor);
+    j["openHeaderColor"] = colJson(openHeaderColor);
+    j["textColor"]       = colJson(textColor);
+    j["bodyColor"]       = colJson(bodyColor);
+    j["barWidth"]        = barWidth;
+    j["barColor"]        = colJson(barColor);
+}
+
+void UIAccordion::readJson(const nlohmann::json& j)
+{
+    expanded      = j.value("expanded", expanded);
+    allowMultiple = j.value("allowMultiple", allowMultiple);
+    headerHeight  = j.value("headerHeight", headerHeight);
+    fontSize      = j.value("fontSize", fontSize);
+    spacing       = j.value("spacing", spacing);
+    textIndent    = j.value("textIndent", textIndent);
+    headerColor     = colFrom(j.value("headerColor", nlohmann::json()), headerColor);
+    openHeaderColor = colFrom(j.value("openHeaderColor", nlohmann::json()), openHeaderColor);
+    textColor       = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    bodyColor       = colFrom(j.value("bodyColor", nlohmann::json()), bodyColor);
+    barWidth        = j.value("barWidth", barWidth);
+    barColor        = colFrom(j.value("barColor", nlohmann::json()), barColor);
 }
 
 // ── The Gregorian calendar, and nothing else ─────────────────────────────────

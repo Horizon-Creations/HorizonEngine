@@ -1936,6 +1936,46 @@ void drawDetails(State& st, AppContext& ctx)
 				EditorWidgets::helpForLabel("Selection");
 				continue;
 			}
+			// A bitmask is a number nobody can read. One tick box per section,
+			// labelled with the section's own name — the same move the list's
+			// three named modes are, for the same reason: what the author means
+			// is "open this one", not "set bit 2".
+			if (pd.name == "Expanded" && n->type() == UIWidgetType::Accordion)
+			{
+				const auto* ac = dynamic_cast<const HE::UIAccordion*>(n);
+				std::vector<std::string> names;
+				for (const auto& cp : st.tree.elements)
+					if (cp && cp->parentId == n->id)
+						names.push_back(cp->name.empty() ? std::string("Section") : cp->name);
+				ImGui::TextUnformatted("Expanded");
+				EditorWidgets::helpForLabel("Expanded");
+				if (names.empty())
+					ImGui::TextDisabled("Drop something in: its children are the sections.");
+				const int shown = std::min<int>(static_cast<int>(names.size()),
+				                                HE::UIAccordion::kMaxSections);
+				for (int i = 0; i < shown; ++i)
+				{
+					const uint32_t bit = 1u << static_cast<unsigned>(i);
+					bool on = (static_cast<uint32_t>(n->getProp("Expanded").i) & bit) != 0u;
+					// Through the SAME toggle the runtime uses, so Allow
+					// Multiple behaves here exactly as it does when the heading
+					// is clicked in the running application.
+					if (ImGui::Checkbox((names[i] + "##acc" + std::to_string(i)).c_str(), &on))
+					{
+						const uint32_t next = HE::UIAccordion::toggledMask(
+							static_cast<uint32_t>(n->getProp("Expanded").i), i,
+							static_cast<int>(names.size()),
+							ac ? ac->allowMultiple : true);
+						n->setProp("Expanded", HE::UIPropValue::ofInt(static_cast<int>(next)));
+						edit = committed = true;
+					}
+				}
+				if (static_cast<int>(names.size()) > HE::UIAccordion::kMaxSections)
+					ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+						"%d sections; everything past the 32nd stays folded.",
+						static_cast<int>(names.size()));
+				continue;
+			}
 			drawPropertyWidget(*n, pd, edit, committed);
 		}
 	}
@@ -3126,6 +3166,48 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			dl->AddRectFilled(ImVec2(mn.x, mn.y + first), ImVec2(mx.x, mn.y + first + div), c);
 		else
 			dl->AddRectFilled(ImVec2(mn.x + first, mn.y), ImVec2(mn.x + first + div, mx.y), c);
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
+	case UIWidgetType::Accordion:
+	{
+		// The SAME layout the runtime folds with (UIAccordion::sectionLayout),
+		// so a heading is where the author sees it. The heights come from the
+		// tree and not from the element's drawing cache: the designer's preview
+		// has not necessarily drawn a frame yet.
+		const auto* ac = dynamic_cast<const HE::UIAccordion*>(&n);
+		if (!ac) break;
+		std::vector<std::string> labels;
+		std::vector<float> bodies;
+		if (tree)
+			for (const auto& cp : tree->elements)
+				if (cp && cp->parentId == n.id)
+				{
+					labels.push_back(cp->name.empty() ? std::string("Section") : cp->name);
+					bodies.push_back(cp->sizeY * s);
+				}
+		const float headH = ac->headerHeight * s;
+		const uint32_t m  = ac->effectiveMask(static_cast<int>(bodies.size()));
+		std::vector<HE::UIAccordion::Slot> slots;
+		HE::UIAccordion::sectionLayout(mn.y - ac->scrollOffset * s, headH,
+		                               ac->spacing * s, bodies, m, slots);
+		for (std::size_t i = 0; i < slots.size(); ++i)
+		{
+			if (slots[i].headerY >= mx.y) break;
+			const bool open = i < 32 && (m & (1u << static_cast<unsigned>(i))) != 0u;
+			const float y1 = std::min(slots[i].headerY + headH, mx.y);
+			if (y1 <= slots[i].headerY) continue;
+			dl->AddRectFilled(ImVec2(mn.x, slots[i].headerY), ImVec2(mx.x, y1),
+			                  C(themedColor(n, open ? "Open Header Color" : "Header Color",
+			                                open ? ac->openHeaderColor : ac->headerColor)));
+			const float fs = ac->fontSize * s;
+			dl->AddText(nullptr, fs,
+			            ImVec2(mn.x + ac->textIndent * s,
+			                   slots[i].headerY + (headH - fs) * 0.5f),
+			            C(themedColor(n, "Text Color", ac->textColor)), labels[i].c_str());
+		}
+		// …and the frame, so an accordion with nothing in it is something you
+		// can aim a drop at rather than an empty rectangle.
 		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
 		break;
 	}

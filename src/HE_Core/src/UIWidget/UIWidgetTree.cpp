@@ -1,4 +1,5 @@
 #include <UIWidget/UIWidgetTree.h>
+#include <Diagnostics/Logger.h>
 #include <cstdint>
 #include <GraphCommon/GraphJson.h>
 #include <GraphCommon/GraphModel.h>
@@ -526,6 +527,41 @@ namespace
         return { b.x, b.y + strip, b.w, std::max(0.0f, b.h - strip) };
     }
 
+    // ── A section's body, under its own heading ──────────────────────────────
+    // Not boxSlotRect: the headings sit BETWEEN the bodies and a folded body is
+    // zero high, which the box walk (own size, gaps, slot fill) cannot say. The
+    // heights come straight out of the tree here rather than out of the
+    // element's drawing cache, so a rect is right on the frame a child was
+    // added — the cache is one frame behind by construction.
+    UIWidgetRect accordionSlotRect(const UIWidgetTree& tree, const UIAccordion& acc,
+                                   const UIElement& child, const UIWidgetCanvas* canvas)
+    {
+        const UIWidgetRect b = uiElementRect(tree, acc, canvas);
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, acc, us, vs, canvas);
+
+        std::vector<float> bodies;
+        int idx = -1, i = 0;
+        for (const auto& cp : tree.elements)
+        {
+            if (!cp || cp->parentId != acc.id) continue;
+            if (cp->id == child.id) idx = i;
+            bodies.push_back(cp->sizeY);
+            ++i;
+        }
+        // Not one of mine, or past the 32nd section: an empty slot at the top
+        // rather than the whole rect, so an element that ended up in here is
+        // invisible instead of a full-size sheet over the stack.
+        if (idx < 0 || idx >= UIAccordion::kMaxSections) return { b.x, b.y, 0.0f, 0.0f };
+
+        std::vector<UIAccordion::Slot> slots;
+        UIAccordion::sectionLayout(0.0f, acc.headerHeight, acc.spacing, bodies,
+                                   acc.effectiveMask(static_cast<int>(bodies.size())),
+                                   slots);
+        const UIAccordion::Slot& s = slots[static_cast<std::size_t>(idx)];
+        return { b.x, b.y + (s.bodyY - acc.scrollOffset) * vs, b.w, s.bodyH * vs };
+    }
+
     // ── Two panes and the gap between them ───────────────────────────────────
     UIWidgetRect splitSlotRect(const UIWidgetTree& tree, const UISplitter& sp,
                                const UIElement& child, const UIWidgetCanvas* canvas)
@@ -784,6 +820,8 @@ UIWidgetRect uiElementRectUnbounded(const UIWidgetTree& tree, const UIElement& e
                 return tabSlotRect(tree, *tb, e, canvas);
             if (const auto* sp = dynamic_cast<const UISplitter*>(p))
                 return splitSlotRect(tree, *sp, e, canvas);
+            if (const auto* ac = dynamic_cast<const UIAccordion*>(p))
+                return accordionSlotRect(tree, *ac, e, canvas);
             return boxSlotRect(tree, *p, e, canvas);
         }
 
@@ -1281,6 +1319,38 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         {
             lv->contentExtent = lv->measuredExtent();
             lv->scrollOffset  = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
+            continue;
+        }
+        // An accordion measures the same walk twice over: what its headings say
+        // and how tall its bodies are is exactly what its content extent is
+        // made of, so the caches render() draws from are filled HERE — after
+        // auto-size, so a body that measured itself this frame is already the
+        // right height, and before any rect is asked for.
+        if (auto* acc = dynamic_cast<UIAccordion*>(bp.get()))
+        {
+            acc->sectionLabels.clear();
+            acc->sectionBodies.clear();
+            for (const auto& cp : tree.elements)
+            {
+                if (!cp || cp->parentId != acc->id) continue;
+                // An unnamed section still needs something on its heading, or
+                // the stack grows a band nobody can aim at with any confidence.
+                acc->sectionLabels.push_back(cp->name.empty() ? std::string("Section")
+                                                              : cp->name);
+                acc->sectionBodies.push_back(cp->sizeY);
+            }
+            const int n = static_cast<int>(acc->sectionBodies.size());
+            if (n > UIAccordion::kMaxSections && !acc->warnedOverflow)
+            {
+                acc->warnedOverflow = true;
+                HE_LOG_WARN(Widget, "Accordion '%s' has %d sections and Expanded is a "
+                                    "32-bit mask: everything past the 32nd stays folded.",
+                            acc->name.c_str(), n);
+            }
+            acc->contentExtent = UIAccordion::contentHeight(
+                acc->headerHeight, acc->spacing, acc->sectionBodies,
+                acc->effectiveMask(n));
+            acc->scrollOffset = std::clamp(acc->scrollOffset, 0.0f, acc->maxScroll());
             continue;
         }
         auto* sb = dynamic_cast<UIScrollBox*>(bp.get());
@@ -2093,6 +2163,10 @@ const char* surfacePropOf(const UIElement& e)
     case UIWidgetType::ListView:    return "Back Color";
     case UIWidgetType::ProgressBar: return "Back Color";
     case UIWidgetType::TabBox:      return "Tab Color";
+    // The heading band, not the body: the body is whatever the author put in
+    // the section and has its own surface, and the only text an accordion draws
+    // itself is the heading.
+    case UIWidgetType::Accordion:   return "Header Color";
     case UIWidgetType::DatePicker:  return "Back Color";
     // The ColorPicker's background is a surface, but nothing READABLE stands on
     // it: its field and its strips are the colour under test, and measuring a
@@ -2113,6 +2187,7 @@ const char* textPropOf(const UIElement& e)
     case UIWidgetType::TextInput: return "Text Color";
     case UIWidgetType::ComboBox:  return "Text Color";
     case UIWidgetType::TabBox:    return "Text Color";
+    case UIWidgetType::Accordion: return "Text Color";
     case UIWidgetType::DatePicker: return "Text Color";
     default:                      return nullptr;
     }

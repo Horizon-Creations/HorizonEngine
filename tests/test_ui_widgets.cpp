@@ -315,6 +315,22 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Bar Width", UIPropType::Float },
             { "Gap", UIPropType::Float },
             { "Back Color", UIPropType::Color } } },
+        // An Accordion's SECTIONS are its children and their names are the
+        // headings, so there is no list property here either — the Tab Box's
+        // design, and the whole point of it.
+        { UIWidgetType::Accordion, {
+            { "Expanded", UIPropType::Int },
+            { "Allow Multiple", UIPropType::Bool },
+            { "Header Height", UIPropType::Float },
+            { "FontSize", UIPropType::Float },
+            { "Spacing", UIPropType::Float },
+            { "Text Indent", UIPropType::Float },
+            { "Header Color", UIPropType::Color },
+            { "Open Header Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "Body Color", UIPropType::Color },
+            { "Bar Width", UIPropType::Float },
+            { "Bar Color", UIPropType::Color } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -1054,7 +1070,9 @@ TEST_CASE("Exactly the container types accept children")
         HE::UIWidgetType::Grid,
         // A Tab Box takes children because its children ARE its pages, and a
         // Splitter because its two are its panes.
-        HE::UIWidgetType::TabBox, HE::UIWidgetType::Splitter };
+        // …and an Accordion because its children are its sections.
+        HE::UIWidgetType::TabBox, HE::UIWidgetType::Splitter,
+        HE::UIWidgetType::Accordion };
     for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
     {
         auto e = HE::makeUIElement(ty);
@@ -4933,6 +4951,9 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         // calendar and a colour field are cards, and a card without a rounding
         // or a border is not what anybody puts in a dialog.
         UIWidgetType::DatePicker, UIWidgetType::ColorPicker,
+        // An accordion, for the list's reason: it emits its own rectangle first
+        // so the heading bands have a card to sit on.
+        UIWidgetType::Accordion,
     };
 
     for (int t = 0; t < static_cast<int>(UIWidgetType::COUNT); ++t)
@@ -12288,6 +12309,271 @@ TEST_CASE("TabBox and Splitter: they round-trip")
     CHECK(rs->vertical);
     CHECK(rs->ratio == doctest::Approx(0.25f));
     CHECK(rs->minFirst == doctest::Approx(77.0f));
+}
+
+// ═══ Accordion (plan §13.2) ══════════════════════════════════════════════════
+
+namespace
+{
+    struct AccCase
+    {
+        HE::UIWidgetTree t;
+        int box = 0;
+        std::vector<int> sections;
+    };
+
+    // `n` sections, each `bodyH` tall, in an accordion filling the canvas.
+    AccCase makeAccordion(int n, float bodyH = 60.0f,
+                          float w = 400.0f, float h = 300.0f)
+    {
+        AccCase c;
+        c.t.canvasWidth = w; c.t.canvasHeight = h;
+        c.t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        c.box = c.t.add(HE::UIWidgetType::Accordion);
+        HE::UIElement& b = *c.t.find(c.box);
+        HE::uiSetAnchorPreset(b, 0); b.pivotX = b.pivotY = 0.0f;
+        b.posX = b.posY = 0.0f; b.sizeX = w; b.sizeY = h;
+        for (int i = 0; i < n; ++i)
+        {
+            const int p = c.t.add(HE::UIWidgetType::Panel);
+            HE::UIElement& s = *c.t.find(p);
+            s.parentId = c.box;
+            s.name = "Section " + std::to_string(i + 1);
+            s.sizeY = bodyH;
+            c.sections.push_back(p);
+        }
+        HE::uiApplyAutoSize(c.t, nullptr);
+        HE::uiUpdateScrollExtents(c.t);
+        return c;
+    }
+}
+
+TEST_CASE("Accordion: opening a section pushes the ones below it down")
+{
+    AccCase c = makeAccordion(3, 60.0f);
+    auto* ac = dynamic_cast<HE::UIAccordion*>(c.t.find(c.box));
+    REQUIRE(ac);
+    ac->headerHeight = 30.0f;
+    ac->spacing = 0.0f;
+    HE::uiUpdateScrollExtents(c.t);
+
+    // Only the first is open (the default mask), so section two's heading is at
+    // 30 + 60 and section three's straight after it.
+    auto bodyTop = [&](int i)
+    { return HE::uiElementRect(c.t, *c.t.find(c.sections[i])).y; };
+    CHECK(bodyTop(0) == doctest::Approx(30.0f));
+    CHECK(bodyTop(1) == doctest::Approx(30.0f + 60.0f + 30.0f));
+    CHECK(bodyTop(2) == doctest::Approx(150.0f));
+    // A folded body is ZERO high, which is the whole difference from a Tab Box.
+    CHECK(HE::uiElementRect(c.t, *c.t.find(c.sections[0])).h == doctest::Approx(60.0f));
+    CHECK(HE::uiElementRect(c.t, *c.t.find(c.sections[1])).h == doctest::Approx(0.0f));
+
+    // Open the second one as well: the third moves down by exactly its height.
+    const float wasThird = bodyTop(2);
+    ac->expanded = 0b011;
+    HE::uiUpdateScrollExtents(c.t);
+    // Its own body has not moved (the heading above it did not change height);
+    // everything AFTER it has, by exactly the height that opened up.
+    CHECK(bodyTop(1) == doctest::Approx(120.0f));
+    CHECK(bodyTop(2) == doctest::Approx(wasThird + 60.0f));
+    CHECK(HE::uiElementRect(c.t, *c.t.find(c.sections[1])).h == doctest::Approx(60.0f));
+
+    // …and the content extent is the sum of what is showing, which is what the
+    // scrollbar and the wheel clamp against.
+    CHECK(ac->contentExtent == doctest::Approx(3 * 30.0f + 2 * 60.0f));
+}
+
+TEST_CASE("Accordion: Allow Multiple off leaves exactly one bit, however it was set")
+{
+    AccCase c = makeAccordion(4);
+    auto* ac = dynamic_cast<HE::UIAccordion*>(c.t.find(c.box));
+    REQUIRE(ac);
+
+    // A CLICK closes the others…
+    CHECK(HE::UIAccordion::toggledMask(0b0001u, 2, 4, false) == 0b0100u);
+    // …and so does a stray Set Property, which is the half a toggle-only rule
+    // would miss: the mask is normalized wherever it is READ.
+    ac->allowMultiple = false;
+    ac->expanded = 0b1010;
+    CHECK(ac->effectiveMask(4) == 0b0010u);
+    CHECK_FALSE(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.sections[3])));
+    CHECK(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.sections[1])));
+
+    // On, several at once is the point.
+    ac->allowMultiple = true;
+    CHECK(ac->effectiveMask(4) == 0b1010u);
+    CHECK(HE::UIAccordion::toggledMask(0b0001u, 2, 4, true) == 0b0101u);
+    // Closing the last open one is allowed either way: a heading you cannot
+    // un-press is worse than an empty stack.
+    CHECK(HE::UIAccordion::toggledMask(0b0100u, 2, 4, false) == 0u);
+}
+
+TEST_CASE("Accordion: a 33rd section is always folded, and the warning latches")
+{
+    AccCase c = makeAccordion(33, 10.0f);
+    auto* ac = dynamic_cast<HE::UIAccordion*>(c.t.find(c.box));
+    REQUIRE(ac);
+    ac->expanded = -1;                       // every bit there is
+
+    // Thirty-two open, and the thirty-third folded — there is no bit for it.
+    CHECK(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.sections[31])));
+    CHECK_FALSE(HE::uiElementEffectiveVisible(c.t, *c.t.find(c.sections[32])));
+    // A shift of 32 is undefined behaviour, so the full mask is spelled out.
+    // This is the assertion that catches it going back to (1u << n) - 1.
+    CHECK(ac->effectiveMask(33) == 0xFFFFFFFFu);
+
+    // Said once and not once a frame: the flag latches, so a second pass is
+    // silent. (The log line itself is not capturable here; the guard is.)
+    ac->warnedOverflow = false;
+    HE::uiUpdateScrollExtents(c.t);
+    CHECK(ac->warnedOverflow);
+    HE::uiUpdateScrollExtents(c.t);
+    CHECK(ac->warnedOverflow);
+}
+
+// The half geometry cannot answer: what the POINTER does — and at a scale that
+// is not 1, which is where the picture and the hit test have gone through
+// different resolutions in this codebase before.
+TEST_CASE("Accordion: headings fold where they are drawn, and a folded body takes no click")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    // Authored at 200×150, shown at 400×300: every canvas unit is two pixels.
+    t.canvasWidth = 200.0f; t.canvasHeight = 150.0f;
+    t.scaleMode = HE::UICanvasScaleMode::Stretch;
+    const int box = t.add(HE::UIWidgetType::Accordion);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 200.0f; e.sizeY = 150.0f; }
+    int buttons[2] = {};
+    for (int i = 0; i < 2; ++i)
+    {
+        const int sec = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement& s = *t.find(sec);
+        s.parentId = box;
+        s.name = i == 0 ? "First" : "Second";
+        s.sizeY = 40.0f;
+        buttons[i] = t.add(HE::UIWidgetType::Button);
+        HE::UIElement& b = *t.find(buttons[i]);
+        b.parentId = sec;
+        HE::uiSetAnchorPreset(b, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(b, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(b, 0.0f, 0.0f);
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto* live = dynamic_cast<HE::UIAccordion*>(
+        const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(box));
+    REQUIRE(live);
+    live->headerHeight = 20.0f;
+    live->spacing = 0.0f;
+    live->allowMultiple = true;
+    live->expanded = 0b01;
+
+    // Which button a press landed on — the same probe the Tab Box test uses.
+    auto pressedAt = [&](float x, float y)
+    {
+        wm.processPointer(400.0f, 300.0f, x, y, true, true);
+        const HE::UIWidgetTree* tr = wm.tree(id);
+        int found = 0;
+        for (const auto& ep : tr->elements)
+            if (ep && ep->type() == HE::UIWidgetType::Button &&
+                HE::uiElementEffectiveVisible(*tr, *ep)) found = ep->id;
+        wm.processPointer(400.0f, 300.0f, x, y, false, true);
+        return found;
+    };
+    // The first section's body runs 20..60 in canvas units = 40..120 in pixels.
+    CHECK(pressedAt(200.0f, 80.0f) == buttons[0]);
+    // The second is folded, so the button in it answers nothing anywhere.
+    live->expanded = 0b01;
+    wm.processPointer(400.0f, 300.0f, 200.0f, 160.0f, true, true);
+    CHECK_FALSE(HE::uiElementEffectiveVisible(*wm.tree(id), *wm.tree(id)->find(buttons[1])));
+    wm.processPointer(400.0f, 300.0f, 200.0f, 160.0f, false, true);
+
+    // ── And the headings, at scale 2 ─────────────────────────────────────────
+    // The second heading sits at canvas y 60..80 (20 heading + 40 body), which
+    // is 120..160 in pixels. A press at 130 must fold it open; a press ten
+    // pixels above that is still the first body and must not.
+    wm.processPointer(400.0f, 300.0f, 100.0f, 130.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 100.0f, 130.0f, false, true);
+    CHECK(live->expanded == 0b11);
+    CHECK(HE::uiElementEffectiveVisible(*wm.tree(id), *wm.tree(id)->find(buttons[1])));
+
+    // The first heading (canvas 0..20 = pixels 0..40) folds the first shut.
+    wm.processPointer(400.0f, 300.0f, 100.0f, 20.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 100.0f, 20.0f, false, true);
+    CHECK(live->expanded == 0b10);
+    CHECK_FALSE(HE::uiElementEffectiveVisible(*wm.tree(id), *wm.tree(id)->find(buttons[0])));
+
+    // A press in a BODY is not a heading: it belongs to what the author put
+    // there, and folding on it would make a section you cannot use.
+    const int before = live->expanded;
+    wm.processPointer(400.0f, 300.0f, 100.0f, 80.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 100.0f, 80.0f, false, true);
+    CHECK(live->expanded == before);
+}
+
+TEST_CASE("Accordion: the mask survives a preview state round-trip")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 300.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = t.add(HE::UIWidgetType::Accordion);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.sizeX = 400.0f; e.sizeY = 300.0f; }
+    for (int i = 0; i < 3; ++i)
+    {
+        const int sec = t.add(HE::UIWidgetType::Panel);
+        t.find(sec)->parentId = box;
+        t.find(sec)->name = "S" + std::to_string(i);
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(box)
+        ->setPropAny("Expanded", HE::UIPropValue::ofInt(0b101));
+
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    wm.clear();
+    const int again = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(again != 0);
+    // Freshly built, so it holds what the ASSET says — the authored default.
+    CHECK(wm.tree(again)->find(box)->getPropAny("Expanded").i == 1);
+    CHECK(wm.restoreState(snap) > 0);
+    CHECK(wm.tree(again)->find(box)->getPropAny("Expanded").i == 0b101);
+}
+
+TEST_CASE("Accordion: it round-trips")
+{
+    HE::UIWidgetTree t;
+    const int ac = t.add(HE::UIWidgetType::Accordion);
+    { auto* a = dynamic_cast<HE::UIAccordion*>(t.find(ac));
+      a->expanded = 0b1011; a->allowMultiple = false; a->headerHeight = 33.0f;
+      a->spacing = 7.0f; a->textIndent = 21.0f; a->barWidth = 9.0f;
+      a->openHeaderColor = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f); }
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    const auto* ra = dynamic_cast<const HE::UIAccordion*>(r.find(ac));
+    REQUIRE(ra);
+    CHECK(ra->expanded == 0b1011);
+    CHECK_FALSE(ra->allowMultiple);
+    CHECK(ra->headerHeight == doctest::Approx(33.0f));
+    CHECK(ra->spacing == doctest::Approx(7.0f));
+    CHECK(ra->textIndent == doctest::Approx(21.0f));
+    CHECK(ra->barWidth == doctest::Approx(9.0f));
+    CHECK(ra->openHeaderColor.g == doctest::Approx(1.0f));
 }
 
 // ═══ The shipped component library ═══════════════════════════════════════════

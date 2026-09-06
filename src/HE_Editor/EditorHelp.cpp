@@ -2450,6 +2450,13 @@ namespace
 	  "a splitter inside a splitter, which says the same thing with the "
 	  "arithmetic already solved.",
 	  "", "ui#elements" },
+	{ "UI Palette/Accordion", "",
+	  "A stack of sections you fold open, several at once. Its CHILDREN are the "
+	  "sections and each child's NAME is its heading, the same design the Tab Box "
+	  "uses. Not a Tab Box with another skin: a folded section is zero high, so "
+	  "everything below an opened one moves down, and the stack scrolls when it "
+	  "outgrows its frame.",
+	  "", "ui#elements" },
 	{ "UI Palette/DatePicker", "",
 	  "A month at a time, as a grid of days you can click. Built in rather than "
 	  "hanging out of its own frame: put it in a form, or — if it should float — "
@@ -2771,6 +2778,38 @@ namespace
 	{ "UI Widget/Sort Ascending", "",
 	  "Which way the sort marker points. Like Sort Column it is a picture of what "
 	  "the owner did, not an instruction to the list.",
+	  "", "ui#elements" },
+	{ "UI Widget/Expanded", "",
+	  "Which sections of an accordion are folded open, as a bitmask — one bit per "
+	  "child, the first section is bit 1. The tick boxes above set it; a graph can "
+	  "set the number directly to open a set of sections at once. At most 32 "
+	  "sections, because that is how many bits there are.",
+	  "", "ui#elements" },
+	{ "UI Widget/Allow Multiple", "",
+	  "On, any number of sections can be open at the same time. Off, opening one "
+	  "folds the rest — which is a Tab Box that stacks, and sometimes exactly what "
+	  "is wanted. Closing the last open one is allowed either way.",
+	  "", "ui#elements" },
+	{ "UI Widget/Open Header Color", "",
+	  "What the heading band of an OPEN section is filled with. It is the one "
+	  "thing that says open from closed, so it should not be the same colour as "
+	  "Header Color.",
+	  "", "ui#elements" },
+	{ "UI Widget/Body Color", "",
+	  "What is drawn behind an open section's content, under whatever the section "
+	  "itself draws. Fully transparent by default: the section is usually a panel "
+	  "with its own background.",
+	  "", "ui#elements" },
+	{ "UI Widget/Text Indent", "",
+	  "How far in from the left edge a heading's text starts, in canvas units.",
+	  "", "ui#elements" },
+	{ "UI Widget/Bar Width", "",
+	  "How wide the scrollbar on the right edge is, in canvas units. Zero hides "
+	  "it; the wheel still scrolls.",
+	  "", "ui#elements" },
+	{ "UI Widget/Bar Color", "",
+	  "What the scrollbar's thumb is filled with. There is no track behind it — "
+	  "an empty groove is furniture nobody reads.",
 	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
