@@ -1567,6 +1567,74 @@ TEST_CASE("project.hcfg: defaultSaveTemplate round-trips as v3, empty stays v2-c
     he_test::removeAllQuiet(dir);
 }
 
+// ─── What a project inherits that it never asked for ─────────────────────────
+// Two defaults from the application work reached game projects as well, and the
+// merge analysis (6.1 #7 and #8) says they should not: a new GAME still draws
+// bold body text, and a project written before the icon field existed still
+// exports without an icon instead of acquiring a generated one.
+
+TEST_CASE("A new game keeps bold body text, a new application does not")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_weightproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "WeightGame", ProjectPreset::Empty));
+    // BEFORE THE FIX: false — every new project was written regular, so a game
+    // author's next project looked different from every one already on disk.
+    // Checked twice on purpose: what the editor is holding, and what it wrote.
+    CHECK(pm.currentProject().fontWeightBold);
+    {
+        ProjectManager reopened;
+        REQUIRE(reopened.loadProject(pm.currentProject().path));
+        CHECK(reopened.currentProject().fontWeightBold);
+    }
+
+    const auto appDir = std::filesystem::temp_directory_path() / "he_test_weightapp";
+    he_test::removeAllQuiet(appDir);
+    ProjectManager app;
+    REQUIRE(app.createNewProject(appDir.string(), "WeightApp", ProjectPreset::Application,
+                                 ProjectScriptLanguage::HorizonCode, /*appProject=*/true));
+    CHECK_FALSE(app.currentProject().fontWeightBold);
+    {
+        ProjectManager reopened;
+        REQUIRE(reopened.loadProject(app.currentProject().path));
+        CHECK_FALSE(reopened.currentProject().fontWeightBold);
+    }
+
+    he_test::removeAllQuiet(dir);
+    he_test::removeAllQuiet(appDir);
+}
+
+TEST_CASE("A project written before appIconName loads with no icon, not with one")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_iconproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "OldGame", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+
+    // Take the key back out — this is what every .heproj written before the
+    // field existed looks like.
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        j.erase("appIconName");
+        std::ofstream out(heproj, std::ios::trunc);
+        out << j.dump(4);
+    }
+    ProjectManager reopened;
+    REQUIRE(reopened.loadProject(heproj));
+    // BEFORE THE FIX: "widgets" — and the exporter draws an icon for any name
+    // that is not empty, so the next export of an existing game acquired a
+    // generated plate nobody had chosen.
+    CHECK(reopened.currentProject().appIconName.empty());
+
+    he_test::removeAllQuiet(dir);
+}
+
 // ─── Application template ────────────────────────────────────────────────────
 // An app project that opens with an empty preview is indistinguishable from a
 // broken one, so the template has to lay down BOTH halves: the root widget, and

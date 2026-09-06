@@ -1340,10 +1340,12 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["allowNetwork"]   = false;
 	// The base set, for the same reason: the file says what it gets from day one.
 	j["fontScripts"]    = 0;
-	// …and regular body text, which is the one place this differs from an older
-	// project: those keep the bold the engine always drew, a new one starts where
-	// text should start and can use <b> for emphasis.
-	j["fontWeightBold"] = false;
+	// …and regular body text for an APPLICATION: ordinary body text is regular,
+	// and <b> then has something to be bolder than. A game keeps the bold the
+	// engine has always drawn, because that is what its author is comparing
+	// against — a new game project whose text looked different from every
+	// existing one would be a change nobody asked for (merge analysis 6.1 #7).
+	j["fontWeightBold"] = isApp ? false : true;
 	// An application with an icon from the first day. A game gets one too — it
 	// is the same "this is what you are in the Dock" problem.
 	j["appIconName"]    = isApp ? "widgets" : "sports_esports";
@@ -1413,6 +1415,12 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	m_currentProject.scriptLanguage      = scriptLanguage;
 	m_currentProject.appProject            = isApp;
 	m_currentProject.advancedShaderEffects = advancedShaderEffects;
+	// The two the manifest above chose by kind. Mirrored here as well, or the
+	// project the editor is holding disagrees with the file it just wrote until
+	// somebody closes and reopens it — and the editor applies the text weight
+	// from THIS copy, so a new application would draw bold for its first session.
+	m_currentProject.fontWeightBold        = !isApp;
+	m_currentProject.appIconName           = isApp ? "widgets" : "sports_esports";
 	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
 	                    "%zu export profile(s), startup scene '%s', kind %s, "
 	                    "advanced shader effects %s",
@@ -1510,10 +1518,13 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// Absent means bold, which is what every project written before this was
 	// getting. New projects say false explicitly (see the template below).
 	m_currentProject.fontWeightBold = jsonBool(j, "fontWeightBold", true);
-	// The application's identity. Absent icon name means the default one rather
-	// than none: a project made before this had no icon at all, and the generated
-	// one is strictly better than the engine placeholder.
-	m_currentProject.appIconName  = jsonString(j, "appIconName", "widgets");
+	// The application's identity. Absent icon name means NO icon, not a default
+	// one: a project written before this field existed shipped without an icon,
+	// and filling the gap here would put a generated "widgets" plate on the next
+	// export of every existing game — a picture nobody chose, replacing nothing
+	// (merge analysis 6.1 #8). The exporter already skips an empty name, so an
+	// absent key stays absent all the way to the build.
+	m_currentProject.appIconName  = jsonString(j, "appIconName");
 	m_currentProject.appIconColor = jsonString(j, "appIconColor", "#1e70c8");
 	m_currentProject.bundleId     = jsonString(j, "bundleId");
 	m_currentProject.appVersion   = jsonString(j, "appVersion", "1.0");

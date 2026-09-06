@@ -300,17 +300,21 @@ struct ProjectData
 
 	// The weight the UI text is drawn in, ".heproj \"fontWeightBold\"". True is
 	// what the engine has always drawn, so an ABSENT key means true and no
-	// existing project changes its look. A NEW project is written with false:
-	// ordinary body text is regular, and `<b>` then has something to be bolder
-	// than. Same asymmetry as `themeStyled` on an element, for the same reason.
+	// existing project changes its look. A new APPLICATION is written with
+	// false: ordinary body text is regular, and `<b>` then has something to be
+	// bolder than. A new GAME keeps the bold, because a game author compares a
+	// new project against the ones already on disk. Same asymmetry as
+	// `themeStyled` on an element, for the same reason.
 	bool fontWeightBold = true;
 
 	// ── What the application IS, to the system around it (plan A7) ───────────
 	// The icon is GENERATED from one of the engine's built-in icons on a plate
 	// of `appIconColor`, so a project has an icon on the day it is created and
 	// nobody has to produce a .icns, an .ico and a .png of the same picture.
-	// Empty name = no icon written, and the runtime's default stands.
-	std::string appIconName  = "widgets";
+	// Empty name = no icon written, and the runtime's default stands — which is
+	// also what a project that predates the field loads as, so its next export
+	// does not acquire a picture nobody chose.
+	std::string appIconName;
 	std::string appIconColor = "#1e70c8";   // "#RRGGBB", as everywhere else
 	// Empty = derived from the project name, which is what every export did
 	// before this field existed. Set it and the export says exactly this.
