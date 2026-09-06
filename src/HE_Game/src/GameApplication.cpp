@@ -120,6 +120,10 @@ struct HostCtxParts
 	                   const std::string&)> addMenuItem;
 	std::function<void(const std::string&)>                     addMenuSeparator;
 	std::function<void()>                                       clearMenuBar;
+	std::function<void(const std::string&, bool)>               setMenuItemEnabled;
+	std::function<void(const std::string&, bool)>               setMenuItemChecked;
+	std::function<bool(const std::string&)>                     menuItemEnabled;
+	std::function<bool(const std::string&)>                     menuItemChecked;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
@@ -316,6 +320,10 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.addMenuItem      = g_host.addMenuItem;
 	c.addMenuSeparator = g_host.addMenuSeparator;
 	c.clearMenuBar     = g_host.clearMenuBar;
+	c.setMenuItemEnabled = g_host.setMenuItemEnabled;
+	c.setMenuItemChecked = g_host.setMenuItemChecked;
+	c.menuItemEnabled    = g_host.menuItemEnabled;
+	c.menuItemChecked    = g_host.menuItemChecked;
 	// Not through g_host: notifications need nothing from the application object,
 	// so they are the platform function itself and there is no state to capture.
 	c.notify          = [](const std::string& t, const std::string& b) { return notifyShow(t, b); };
@@ -910,6 +918,28 @@ void GameApplication::OnInit()
 				}
 		};
 		g_host.clearMenuBar = [this] { m_widgets.setMenuBar({}); g_menuDirty = true; };
+		// The two rows that change while the program runs. Straight through to
+		// the manager rather than round the copy-modify-setMenuBar dance the
+		// four above do: setMenuBar closes an open menu, and this is the call a
+		// graph makes precisely while one is open.
+		g_host.setMenuItemEnabled = [this](const std::string& id, bool on) {
+			if (!m_widgets.setMenuItemEnabled(id, on))
+				HE_LOG_WARN(Core, "app.setMenuItemEnabled: no menu entry called '%s'",
+				            id.c_str());
+			else g_menuDirty = true;
+		};
+		g_host.setMenuItemChecked = [this](const std::string& id, bool on) {
+			if (!m_widgets.setMenuItemChecked(id, on))
+				HE_LOG_WARN(Core, "app.setMenuItemChecked: no menu entry called '%s'",
+				            id.c_str());
+			else g_menuDirty = true;
+		};
+		g_host.menuItemEnabled = [this](const std::string& id) {
+			return m_widgets.menuItemEnabled(id);
+		};
+		g_host.menuItemChecked = [this](const std::string& id) {
+			return m_widgets.menuItemChecked(id);
+		};
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives

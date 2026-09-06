@@ -1182,6 +1182,48 @@ void addMenuSeparator(Ctx& c, const std::string& menuId)
     c.addMenuSeparator(menuId);
 }
 
+void setMenuItemEnabled(Ctx& c, const std::string& id, bool enabled)
+{
+    if (!c.setMenuItemEnabled)
+    {
+        HE_LOG_WARN(Script, "%s",
+                    "app.setMenuItemEnabled: no menu bar bound by the host — ignored");
+        return;
+    }
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.setMenuItemEnabled: which entry? — ignored");
+        return;
+    }
+    c.setMenuItemEnabled(id, enabled);
+}
+
+void setMenuItemChecked(Ctx& c, const std::string& id, bool checked)
+{
+    if (!c.setMenuItemChecked)
+    {
+        HE_LOG_WARN(Script, "%s",
+                    "app.setMenuItemChecked: no menu bar bound by the host — ignored");
+        return;
+    }
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.setMenuItemChecked: which entry? — ignored");
+        return;
+    }
+    c.setMenuItemChecked(id, checked);
+}
+
+bool menuItemEnabled(Ctx& c, const std::string& id)
+{
+    // Silent, like every other getter here: a graph that reads this to decide
+    // what to draw reads it every frame.
+    return c.menuItemEnabled ? c.menuItemEnabled(id) : false;
+}
+
+bool menuItemChecked(Ctx& c, const std::string& id)
+{ return c.menuItemChecked ? c.menuItemChecked(id) : false; }
+
 void clearMenuBar(Ctx& c)
 {
     if (!c.clearMenuBar)
@@ -4226,6 +4268,22 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ app::addMenuSeparator(c, aS(a, 0)); return VV{}; } });
         t.push_back({ "app.clearMenuBar", "App", true, {}, {}, "HE::api::app::clearMenuBar",
             [](Ctx& c, const VV&){ app::clearMenuBar(c); return VV{}; } });
+        // The two things about a row that change while the program runs. By the
+        // ENTRY's id — the id OnMenuItem carries — not by menu and position.
+        t.push_back({ "app.setMenuItemEnabled", "App", true,
+            {{"id", P::String}, {"enabled", P::Bool}}, {},
+            "HE::api::app::setMenuItemEnabled",
+            [](Ctx& c, const VV& a){ app::setMenuItemEnabled(c, aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "app.setMenuItemChecked", "App", true,
+            {{"id", P::String}, {"checked", P::Bool}}, {},
+            "HE::api::app::setMenuItemChecked",
+            [](Ctx& c, const VV& a){ app::setMenuItemChecked(c, aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "app.menuItemEnabled", "App", false, {{"id", P::String}},
+            {{"enabled", P::Bool}}, "HE::api::app::menuItemEnabled",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(app::menuItemEnabled(c, aS(a, 0))) }; } });
+        t.push_back({ "app.menuItemChecked", "App", false, {{"id", P::String}},
+            {{"checked", P::Bool}}, "HE::api::app::menuItemChecked",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(app::menuItemChecked(c, aS(a, 0))) }; } });
         // A notification is exec (it does something out there) and answers
         // whether the system took it, not whether anybody read it.
         t.push_back({ "app.notify", "App", true,
@@ -4986,6 +5044,10 @@ const std::vector<ApiFn>& registry()
             { "app.notify", "Notify" },
             { "app.notifyAvailable", "Notifications Available" },
             { "app.clearMenuBar", "Clear Menu Bar" },
+            { "app.setMenuItemEnabled", "Set Menu Item Enabled" },
+            { "app.setMenuItemChecked", "Set Menu Item Checked" },
+            { "app.menuItemEnabled", "Is Menu Item Enabled" },
+            { "app.menuItemChecked", "Is Menu Item Checked" },
             { "app.setAutostart", "Set Start at Login" },
             { "app.autostart", "Starts at Login" },
             { "clipboard.getText", "Get Clipboard Text" },

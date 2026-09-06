@@ -968,6 +968,60 @@ void WidgetManager::setMenuBar(std::vector<HE::AppMenu> menus)
 	m_visualDirty = true;
 }
 
+bool WidgetManager::setMenuItemEnabled(const std::string& id, bool enabled)
+{
+	if (id.empty()) return false;
+	bool found = false;
+	for (HE::AppMenu& m : m_menuBar)
+		for (HE::AppMenuItem& it : m.items)
+			if (!it.separator && it.id == id)
+			{
+				found = true;
+				if (it.enabled == enabled) continue;
+				it.enabled = enabled;
+				m_visualDirty = true;
+			}
+	// No closeMenu() here, unlike setMenuBar: this is the call a graph makes
+	// WHILE a menu is open — greying out Paste as the clipboard empties — and
+	// shutting the menu under the reader's pointer would be the cure being worse
+	// than the disease.
+	return found;
+}
+
+bool WidgetManager::setMenuItemChecked(const std::string& id, bool checked)
+{
+	if (id.empty()) return false;
+	bool found = false;
+	for (HE::AppMenu& m : m_menuBar)
+		for (HE::AppMenuItem& it : m.items)
+			if (!it.separator && it.id == id)
+			{
+				found = true;
+				if (it.checked == checked) continue;
+				it.checked = checked;
+				m_visualDirty = true;
+			}
+	return found;
+}
+
+bool WidgetManager::menuItemEnabled(const std::string& id) const
+{
+	if (id.empty()) return false;
+	for (const HE::AppMenu& m : m_menuBar)
+		for (const HE::AppMenuItem& it : m.items)
+			if (!it.separator && it.id == id) return it.enabled;
+	return false;
+}
+
+bool WidgetManager::menuItemChecked(const std::string& id) const
+{
+	if (id.empty()) return false;
+	for (const HE::AppMenu& m : m_menuBar)
+		for (const HE::AppMenuItem& it : m.items)
+			if (!it.separator && it.id == id) return it.checked;
+	return false;
+}
+
 // ── The reader's text size (docs/he-apps-plan.md B10) ───────────────────────
 void WidgetManager::setFontScale(float s)
 {
@@ -992,27 +1046,45 @@ void WidgetManager::setMenuBarNative(bool on)
 	m_visualDirty = true;
 }
 
-std::string WidgetManager::menuShortcutTarget(const std::string& keyName, bool ctrl,
-                                              bool shift, bool alt) const
+// The row a chord belongs to, or null. One walk for both public answers: "whose
+// chord is this" and "what happens when it is pressed" have to name the same
+// entry, and two loops with the same condition are two chances to drift.
+const HE::AppMenuItem* WidgetManager::menuItemForShortcut(const std::string& keyName, bool ctrl,
+                                                          bool shift, bool alt) const
 {
-	if (keyName.empty()) return {};
+	if (keyName.empty()) return nullptr;
 	for (const HE::AppMenu& m : m_menuBar)
 		for (const HE::AppMenuItem& it : m.items)
 		{
 			// A separator has no id to fire and a row without one could not be
-			// heard even if it matched, so neither is asked.
+			// heard even if it matched, so neither is asked. A DISABLED row is
+			// asked: it still owns its chord (see AppMenuItem::enabled), it just
+			// does nothing with it.
 			if (it.separator || it.id.empty() || it.shortcut.empty()) continue;
 			if (HE::uiShortcutMatchesText(it.shortcut, keyName, ctrl, shift, alt))
-				return it.id;
+				return &it;
 		}
-	return {};
+	return nullptr;
+}
+
+std::string WidgetManager::menuShortcutTarget(const std::string& keyName, bool ctrl,
+                                              bool shift, bool alt) const
+{
+	const HE::AppMenuItem* it = menuItemForShortcut(keyName, ctrl, shift, alt);
+	return it ? it->id : std::string();
 }
 
 bool WidgetManager::fireMenuShortcut(const std::string& keyName, bool ctrl,
                                      bool shift, bool alt)
 {
-	const std::string id = menuShortcutTarget(keyName, ctrl, shift, alt);
-	if (id.empty()) return false;
+	const HE::AppMenuItem* item = menuItemForShortcut(keyName, ctrl, shift, alt);
+	if (!item) return false;
+	// A greyed-out entry swallows its key and does nothing with it. True, not
+	// false: the chord belongs to a menu that has just said it cannot act, and
+	// letting it fall through would fire whatever the game binds to the same
+	// keys at exactly that moment.
+	if (!item->enabled) return true;
+	const std::string id = item->id;
 	// ── The macOS half, and the whole of it ─────────────────────────────────
 	// One owner per CHORD, not per platform. While the system draws the bar,
 	// AppKit carries the chords that have Command in them: it has already fired
@@ -1119,7 +1191,11 @@ int WidgetManager::menuItemAt(float x, float y) const
 	{
 		const float hgt = m.items[i].separator ? mm.sepH : mm.itemH;
 		if (y >= row && y < row + hgt)
-			return m.items[i].separator ? -1 : static_cast<int>(i);
+			// A disabled row answers like a separator: not choosable, and not
+			// hovered either, since the hover highlight is what promises a click
+			// will do something.
+			return (m.items[i].separator || !m.items[i].enabled)
+			           ? -1 : static_cast<int>(i);
 		row += hgt;
 	}
 	return -1;
@@ -5320,11 +5396,35 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 				hl.color    = hotColor;
 				out.push_back(hl);
 			}
+			// A row that cannot be chosen is drawn dimmer, and that is the whole
+			// of it: the mark, the label and the chord all fade together, so
+			// there is one thing to read rather than a grey word beside a bright
+			// tick.
+			const glm::vec4 rowColor =
+				it.enabled ? textColor
+				           : glm::vec4(textColor.r, textColor.g, textColor.b, 0.38f);
+			if (it.checked)
+			{
+				// A filled square, not a tick: the shipped font has no check
+				// glyph — the same reason the title bar's buttons say "X" — and
+				// this is the mark UICheckBox already draws, so a menu and a
+				// checkbox saying the same thing look alike. It sits in the left
+				// padding, which is why the label does not move: a bar whose
+				// entries shifted sideways the first time one of them was
+				// ticked would be a bar that never stands still.
+				const float mk = std::min(8.0f, hgt * 0.34f);
+				UIRenderObject tick;
+				tick.position = { px + (mm.itemPad - mk) * 0.5f, row + (hgt - mk) * 0.5f };
+				tick.size     = { mk, mk };
+				tick.color    = rowColor;
+				tick.cornerRadius = glm::vec4(2.0f);
+				out.push_back(tick);
+			}
 			HE::UITextLayout opts;
 			opts.alignV = 1;
 			HE::emitUITextGlyphs(HE::sharedUIFont(), 0, it.label,
 			                     { px + mm.itemPad, row }, { pw - 2.0f * mm.itemPad, hgt },
-			                     mm.fontPx, textColor, 0, opts, out);
+			                     mm.fontPx, rowColor, 0, opts, out);
 			// The chord against the right edge, dimmer than the label: it says
 			// what this row ALSO answers to, and a reader looking for the entry
 			// is looking at the words on the left.
@@ -5336,7 +5436,8 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 				ropts.alignV = 1;
 				HE::emitUITextGlyphs(HE::sharedUIFont(), 0, chord,
 				                     { px + mm.itemPad, row }, { pw - 2.0f * mm.itemPad, hgt },
-				                     mm.fontPx, { textColor.r, textColor.g, textColor.b, 0.55f },
+				                     mm.fontPx,
+				                     { rowColor.r, rowColor.g, rowColor.b, rowColor.a * 0.55f },
 				                     0, ropts, out);
 			}
 		}

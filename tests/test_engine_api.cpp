@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <map>
 #include <set>
 #include <HorizonScene/EngineApi.h>
 #include <Net/HttpsClient.h>   // http.available must answer what the backend says
@@ -766,6 +767,50 @@ TEST_CASE("App: minimize, maximize and isMaximized reach the host's window")
     HE::api::app::maximize(c, false);
     CHECK_FALSE(maximized);
     CHECK_FALSE(HE::api::app::isMaximized(c));
+}
+
+TEST_CASE("App: a menu row can be greyed out and ticked by its own id")
+{
+    const auto* setEn = HE::api::find("app.setMenuItemEnabled");
+    const auto* setCh = HE::api::find("app.setMenuItemChecked");
+    const auto* getEn = HE::api::find("app.menuItemEnabled");
+    const auto* getCh = HE::api::find("app.menuItemChecked");
+    REQUIRE(setEn != nullptr);
+    REQUIRE(setCh != nullptr);
+    REQUIRE(getEn != nullptr);
+    REQUIRE(getCh != nullptr);
+    CHECK(setEn->isExec);
+    REQUIRE(setEn->params.size() == 2);
+    CHECK(setEn->params[0].type == P::String);
+    CHECK(setEn->params[1].type == P::Bool);
+    CHECK_FALSE(getCh->isExec);
+    REQUIRE(getCh->params.size() == 1);
+    REQUIRE(getCh->results.size() == 1);
+    CHECK(getCh->results[0].type == P::Bool);
+
+    Ctx unbound{};
+    CHECK_NOTHROW(setEn->invoke(unbound, { Value::ofString("save"), Value::ofBool(false) }));
+    CHECK(getEn->invoke(unbound, { Value::ofString("save") })[0].b == false);
+
+    std::map<std::string, bool> enabled, checked;
+    Ctx c{};
+    c.setMenuItemEnabled = [&enabled](const std::string& id, bool on) { enabled[id] = on; };
+    c.setMenuItemChecked = [&checked](const std::string& id, bool on) { checked[id] = on; };
+    c.menuItemEnabled = [&enabled](const std::string& id) {
+        const auto it = enabled.find(id); return it != enabled.end() ? it->second : true; };
+    c.menuItemChecked = [&checked](const std::string& id) {
+        const auto it = checked.find(id); return it != checked.end() ? it->second : false; };
+
+    setEn->invoke(c, { Value::ofString("save"), Value::ofBool(false) });
+    CHECK(getEn->invoke(c, { Value::ofString("save") })[0].b == false);
+    CHECK(getEn->invoke(c, { Value::ofString("open") })[0].b == true);
+    setCh->invoke(c, { Value::ofString("toolbar"), Value::ofBool(true) });
+    CHECK(getCh->invoke(c, { Value::ofString("toolbar") })[0].b == true);
+
+    // Which entry? is a question with no sensible default, so an empty id is
+    // refused rather than aimed at whatever the first row happens to be.
+    HE::api::app::setMenuItemChecked(c, "", true);
+    CHECK(checked.size() == 1);
 }
 
 TEST_CASE("UI: pointerOverUI answers the last widget hit test")

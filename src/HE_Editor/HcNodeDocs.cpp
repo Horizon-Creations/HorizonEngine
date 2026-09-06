@@ -608,6 +608,25 @@ namespace
 	  "Can this program show notifications at all? False in the editor preview, "
 	  "and on a Linux without notify-send. Ask once instead of finding out per "
 	  "notification." },
+	{ "app.setMenuItemEnabled",
+	  "Greys a menu entry out, or brings it back. Addressed by the ENTRY's id — "
+	  "the same id On Menu Item carries — so an id used in two menus is one "
+	  "command offered twice and both rows follow. A disabled row cannot be "
+	  "chosen and its shortcut does nothing either, which is the half that "
+	  "matters: a greyed-out Save whose Ctrl+S still saves has said one thing "
+	  "and done another." },
+	{ "app.setMenuItemChecked",
+	  "Puts a mark beside a menu entry, or takes it away — for a row that names "
+	  "a state (\"Show Toolbar\") rather than an action. Choosing the row still "
+	  "fires On Menu Item and nothing else: whether the mark then moves is the "
+	  "application's decision, because a menu that ticked itself would be wrong "
+	  "the moment the command it named failed." },
+	{ "app.menuItemEnabled",
+	  "Whether that menu entry can be chosen right now. False for an id no row "
+	  "carries." },
+	{ "app.menuItemChecked",
+	  "Whether that menu entry carries its mark right now — what a row bound to "
+	  "a setting reads to flip it instead of remembering it." },
 	{ "app.clearMenuBar",
 	  "Removes the whole menu bar. A menu usually changes as a set, so the way "
 	  "to change one is to clear it and build the new one." },

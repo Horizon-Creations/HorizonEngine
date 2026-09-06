@@ -158,6 +158,15 @@ struct Ctx
     std::function<void()>     minimizeWindow;
     std::function<void(bool)> setWindowMaximized;
     std::function<bool()>     windowMaximized;
+    // What a menu row can do right now, and what it says (AppMenu.h). Four
+    // callbacks rather than a wider addMenuItem: a graph drawn before this
+    // existed keeps its four pins, and these are the two things that change
+    // WHILE the application runs — Paste greys out when the clipboard empties,
+    // and a view option ticks when the view changes.
+    std::function<void(const std::string& id, bool)> setMenuItemEnabled;
+    std::function<void(const std::string& id, bool)> setMenuItemChecked;
+    std::function<bool(const std::string& id)>       menuItemEnabled;
+    std::function<bool(const std::string& id)>       menuItemChecked;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -791,6 +800,25 @@ namespace app {
                      const std::string& label, const std::string& shortcut = "");
     void addMenuSeparator(Ctx&, const std::string& menuId);
     void clearMenuBar(Ctx&);
+
+    // ── The two things about a row that change while the program runs ───────
+    // Greying an entry out and ticking it. By the ENTRY's id, the same id
+    // OnMenuItem carries — so a row is addressed by what it DOES, and an id
+    // used in two menus is one command offered twice and is set in both.
+    //
+    // Not part of addMenuItem, and not a rebuild: replacing the bar closes an
+    // open menu, so greying out Paste as the clipboard empties would shut the
+    // menu somebody is reading. These change the one row and leave the rest
+    // standing, open menu included.
+    //
+    // Disabling stops the CHORD as well as the click. A greyed-out Save whose
+    // Ctrl+S still saves is the bug nobody finds by hand.
+    void setMenuItemEnabled(Ctx&, const std::string& id, bool enabled);
+    void setMenuItemChecked(Ctx&, const std::string& id, bool checked);
+    // …and what it says now, so a tick can be flipped rather than remembered.
+    // False for an id no row carries.
+    bool menuItemEnabled(Ctx&, const std::string& id);
+    bool menuItemChecked(Ctx&, const std::string& id);
 
     // ── Notifications (plan C, Welle 3) ─────────────────────────────────────
     // A banner in the system's notification centre — what an application says

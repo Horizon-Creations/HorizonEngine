@@ -155,9 +155,11 @@ void set(const std::vector<HE::AppMenu>& menus)
 			                                        keyEquivalent:@""];
 			NSMenu* sub = [[NSMenu alloc] initWithTitle:label];
 			// The same rule the editor's bar follows: we say what is enabled, not
-			// the responder chain. Nothing is disabled yet, but a bar that decides
-			// that for itself would answer differently from the drawn one the day
-			// `enabled` lands, and one of the two would be wrong.
+			// the responder chain. This is the line that makes AppMenuItem's
+			// `enabled` mean anything here — with validation on, AppKit asks the
+			// responder chain whether anything answers `fire:` and turns every
+			// row back on behind us, and the system bar would then disagree with
+			// the drawn one about the same menu.
 			sub.autoenablesItems = NO;
 
 			for (const HE::AppMenuItem& item : m.items)
@@ -200,7 +202,12 @@ void set(const std::vector<HE::AppMenu>& menus)
 				// would have to be rebuilt in lockstep with the menu, and the tray
 				// already showed what that costs.
 				row.representedObject = heStr(item.id);
-				row.enabled = YES;
+				// What the entry says about itself, said in AppKit's words. The
+				// bar above turned validation off, so this is the whole truth:
+				// a disabled row is greyed out AND its key equivalent stops
+				// firing, which is the half that would otherwise be missed.
+				row.enabled = item.enabled ? YES : NO;
+				row.state = item.checked ? NSControlStateValueOn : NSControlStateValueOff;
 				[sub addItem:row];
 			}
 

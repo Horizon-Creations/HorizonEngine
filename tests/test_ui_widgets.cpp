@@ -12108,6 +12108,114 @@ TEST_CASE("A separator is a line, not a row that can be chosen")
     CHECK(wm.openMenu() == 0);
 }
 
+// ── enabled / checked (plan A6, nachgereicht) ────────────────────────────────
+TEST_CASE("A greyed-out entry cannot be chosen, by click or by chord")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.add(HE::UIWidgetType::Panel);
+    registerWidget(cm, tree, nullptr);
+
+    HorizonCode::Runtime rt;
+    HorizonCode::Graph app;
+    {
+        HorizonCode::Variable chosen;
+        chosen.name = "chosen"; chosen.type = PinType::String;
+        app.variables.push_back(chosen);
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnMenuItem";
+        ev.elem = 0; ev.hasArg = true; ev.propType = PinType::String;
+        const int evId = app.addNode(ev);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "chosen";
+        set.propType = PinType::String;
+        const int setId = app.addNode(set);
+        REQUIRE(app.connect(evId, 0, setId, 0));
+        REQUIRE(app.connect(evId, 1, setId, 2));
+    }
+    const HorizonCode::InstanceId gi = rt.setGameInstance(app);
+    REQUIRE(gi != 0);
+
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+
+    std::vector<HE::AppMenu> bar = sampleMenuBar();
+    bar[0].items[1].shortcut = "Ctrl+O";     // "Open…", which is about to go grey
+    wm.setMenuBar(bar);
+    REQUIRE(wm.setMenuItemEnabled("open", false));
+    CHECK_FALSE(wm.menuItemEnabled("open"));
+    CHECK(wm.menuItemEnabled("new"));
+    // An id nothing carries is not an entry that exists and is off.
+    CHECK_FALSE(wm.setMenuItemEnabled("nosuch", false));
+
+    // Releasing on it chooses nothing and leaves the menu open — exactly what a
+    // separator does, because neither can be chosen.
+    const float barMid = wm.menuBarHeight() * 0.5f;
+    wm.processPointer(400.0f, 300.0f, 20.0f, barMid, true, true);
+    REQUIRE(wm.openMenu() == 0);
+    const float rowY = wm.menuBarHeight() + 24.0f * 1.5f;   // the middle of "Open…"
+    wm.processPointer(400.0f, 300.0f, 30.0f, rowY, true, true);
+    wm.processPointer(400.0f, 300.0f, 30.0f, rowY, false, true);
+    CHECK(wm.openMenu() == 0);
+    CHECK(rt.getVariable(gi, "chosen").s.empty());
+
+    // …and the chord is swallowed rather than passed on. TRUE with nothing
+    // fired: the key belonged to a menu that has just said it cannot act, and
+    // letting it through would fire whatever the game binds to Ctrl+O at
+    // exactly that moment.
+    CHECK(wm.fireMenuShortcut("O", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s.empty());
+    // Whose chord it is does not change with the state of the entry — that
+    // question is about the bar, not about what the row can do today.
+    CHECK(wm.menuShortcutTarget("O", true, false, false) == "open");
+
+    // Switched back on, both doors work again.
+    REQUIRE(wm.setMenuItemEnabled("open", true));
+    CHECK(wm.fireMenuShortcut("O", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "open");
+}
+
+TEST_CASE("A tick is drawn, and setting one leaves an open menu open")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.add(HE::UIWidgetType::Panel);
+    registerWidget(cm, tree, nullptr);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    wm.setMenuBar(sampleMenuBar());
+
+    wm.processPointer(400.0f, 300.0f, 20.0f, wm.menuBarHeight() * 0.5f, true, true);
+    REQUIRE(wm.openMenu() == 0);
+    std::vector<UIRenderObject> plain;
+    wm.extract(400.0f, 300.0f, plain);
+
+    CHECK_FALSE(wm.menuItemChecked("new"));
+    REQUIRE(wm.setMenuItemChecked("new", true));
+    CHECK(wm.menuItemChecked("new"));
+    // The menu the person is reading stays open. This is the whole reason these
+    // two do not go through setMenuBar: greying out Paste as the clipboard
+    // empties must not shut the menu it is being read in.
+    CHECK(wm.openMenu() == 0);
+
+    std::vector<UIRenderObject> ticked;
+    wm.extract(400.0f, 300.0f, ticked);
+    // Exactly one more quad: the mark. Not a glyph — the shipped font has no
+    // check — so it is the same filled square UICheckBox draws.
+    CHECK(ticked.size() == plain.size() + 1);
+
+    REQUIRE(wm.setMenuItemChecked("new", false));
+    std::vector<UIRenderObject> unticked;
+    wm.extract(400.0f, 300.0f, unticked);
+    CHECK(unticked.size() == plain.size());
+}
+
 // ── Shortcuts (plan B10) ─────────────────────────────────────────────────────
 TEST_CASE("A chord is a set of modifiers and one key, however it is spelled")
 {

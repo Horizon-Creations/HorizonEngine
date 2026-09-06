@@ -35,6 +35,24 @@ struct AppMenuItem
     // beside the key handler: the entry owns its chord, so a bar rebuilt by a
     // graph brings its shortcuts with it and nothing has to be kept in step.
     std::string shortcut;
+
+    // ── What the entry can do right now, and what it says ────────────────────
+    // Off = the row is drawn dimmed and cannot be chosen: not by clicking it,
+    // and not by its chord either. That second half is the one that is easy to
+    // forget and impossible to notice by hand — a greyed-out Save whose Ctrl+S
+    // still saves is worse than one that was never greyed out, because the
+    // application has said one thing and done another.
+    //
+    // A disabled entry still OWNS its chord. The key belonged to a menu, and
+    // letting it fall through to whatever is behind the window would fire the
+    // game's own Ctrl+S at the moment the application said it could not save.
+    bool enabled = true;
+    // On = the row carries a mark, saying it names a state that is currently
+    // true ("Show Toolbar"). Only a picture: choosing the entry fires
+    // OnMenuItem exactly as it always did, and whether the mark then moves is
+    // the application's decision, not the menu's. A menu that flipped its own
+    // marks would be lying whenever the command it named failed.
+    bool checked = false;
 };
 
 struct AppMenu

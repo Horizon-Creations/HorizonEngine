@@ -195,6 +195,24 @@ public:
     // wants to sit clear of the bar asks how tall it is.
     void setMenuBar(std::vector<HE::AppMenu> menus);
     const std::vector<HE::AppMenu>& menuBar() const { return m_menuBar; }
+    // ── Changing ONE row without rebuilding the bar ──────────────────────────
+    // Greying an entry out and ticking it are the two things that change while
+    // the application runs, and they are the two that must not go through
+    // setMenuBar: replacing the bar closes an open menu, so a graph that greys
+    // out Paste when the clipboard empties would shut the menu the person is
+    // reading it in.
+    //
+    // Addressed by the ENTRY's id, in every menu at once. Two rows may share
+    // one id — that is one command offered in two places, and OnMenuItem cannot
+    // tell them apart either — so both are set, and false means no row of that
+    // id exists at all.
+    bool setMenuItemEnabled(const std::string& id, bool enabled);
+    bool setMenuItemChecked(const std::string& id, bool checked);
+    // What the row says now — what a graph reads to toggle a tick rather than
+    // remember one. False when no row carries that id: an entry that is not
+    // there can neither be chosen nor be ticked.
+    bool menuItemEnabled(const std::string& id) const;
+    bool menuItemChecked(const std::string& id) const;
     // Render-target pixels; 0 when there is no bar. Fixed, like the tooltip's
     // metrics: the bar is chrome, not content, and it does not scale with a
     // canvas it is not part of.
@@ -1019,8 +1037,14 @@ private:
     // The open menu's popup, and one of its rows.
     bool  menuPopupRect(float& x, float& y, float& w, float& h) const;
     // Which title is at this point (-1 = none), and which row of the open menu.
+    // menuItemAt answers -1 for a separator AND for a disabled row: neither can
+    // be chosen, and neither should light up under the pointer.
     int   menuTitleAt(float x, float y) const;
     int   menuItemAt(float x, float y) const;
+    // The row a chord belongs to, disabled ones included — the one walk behind
+    // both menuShortcutTarget and fireMenuShortcut.
+    const HE::AppMenuItem* menuItemForShortcut(const std::string& keyName, bool ctrl,
+                                               bool shift, bool alt) const;
     // Open / switch / close, keeping the grab stack in step.
     void  openMenuAt(int index);
     void  closeMenu();

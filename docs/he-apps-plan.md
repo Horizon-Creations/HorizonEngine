@@ -3668,3 +3668,41 @@ demselben Grund: das Spiel besitzt sein Fenster. Der Editor bindet sie **nicht**
 demselben Grund wie dort — ein Graph in der Vorschau darf das Editorfenster nicht wegklappen.
 Ungebunden warnt die Zeile einmal und tut nichts; der Lesezugriff antwortet still `false`, weil
 eine Titelleiste das pro Bild fragt.
+
+### A6 nachgereicht: ein Eintrag, der nicht kann, und einer, der etwas sagt (06.09.2026)
+
+Die Menüleiste konnte Einträge hinzufügen und nichts über sie sagen. Zwei Felder an
+`AppMenuItem` schließen das: `enabled` und `checked`.
+
+**Die Hälfte, die man von Hand nie findet.** Ein ausgegrautes „Speichern", dessen Strg+S
+weiterhin speichert, ist schlimmer als eines, das nie ausgegraut war: die Anwendung hat eines
+gesagt und ein anderes getan. Der Abgleich im Tastenpfad überspringt deshalb gesperrte Zeilen —
+aber er antwortet trotzdem **true**. Der Akkord gehört einem Menü, das gerade gesagt hat, es könne
+nicht handeln; ließe man die Taste durch, feuerte genau in diesem Moment, was das Spiel auf
+dieselben Tasten legt. Besitzen und Feuern kommen hier ein zweites Mal auseinander, nach demselben
+Muster wie beim nativen Mac-Balken. `menuShortcutTarget` antwortet unverändert mit der Id: „wem
+gehört dieser Akkord" ist eine Frage über die Leiste, nicht über den Zustand einer Zeile.
+
+**Gesetzt wird die eine Zeile, nicht die Leiste.** `setMenuBar` schließt ein offenes Menü — das
+muss es, sonst zeigt der offene Index auf etwas anderes. Genau deshalb gehen `setMenuItemEnabled`
+und `setMenuItemChecked` **nicht** darüber: das ist der Aufruf, den ein Graph macht, WÄHREND ein
+Menü offen ist (Einfügen wird grau, weil die Zwischenablage leer ist), und das gelesene Menü unter
+dem Zeiger zuzuklappen wäre schlimmer als das Problem. Adressiert wird über die Id des EINTRAGS,
+dieselbe, die `OnMenuItem` trägt: eine Id in zwei Menüs ist ein Befehl, der zweimal angeboten wird,
+und beide Zeilen folgen.
+
+**Das Häkchen ist ein gefülltes Quadrat.** Die ausgelieferte Schrift hat kein Häkchen-Zeichen — der
+Grund, aus dem die Titelleiste „X" sagt und nicht „✕" —, und `UICheckBox` malt für dasselbe
+Ja/Nein schon ein gefülltes Rechteck. Es sitzt im linken Innenabstand, damit die Beschriftungen
+nicht wandern, sobald zum ersten Mal etwas angehakt wird. Eine gesperrte Zeile verblasst als
+GANZES: Marke, Wort und Akkord zusammen, sonst steht ein graues Wort neben einem hellen Haken.
+
+**Ein Menü hakt sich nicht selbst an.** Die Auswahl feuert `OnMenuItem` wie immer; ob die Marke
+danach umspringt, entscheidet die Anwendung. Eine Leiste, die das selbst täte, löge in dem Moment,
+in dem der benannte Befehl fehlschlägt.
+
+**macOS.** `setEnabled:` und `setState:` an der `NSMenuItem`. Möglich ist das nur, weil
+`autoenablesItems = NO` schon dastand: mit AppKits eigener Prüfung fragt der Balken die
+Responder-Kette, ob jemand `fire:` beantwortet, und schaltet hinter uns jede Zeile wieder an. Ein
+gesperrter Eintrag feuert dort auch sein Tastenäquivalent nicht mehr, was die Engine-Hälfte
+spiegelt.
