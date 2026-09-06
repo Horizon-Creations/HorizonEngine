@@ -1262,6 +1262,33 @@ glm::vec2 size(Ctx& c)
     return c.windowSize ? c.windowSize() : glm::vec2(0.0f);
 }
 
+void minimize(Ctx& c)
+{
+    if (!c.minimizeWindow)
+    {
+        HE_LOG_WARN(Script, "%s", "app.minimize: no window bound by the host — ignored");
+        return;
+    }
+    c.minimizeWindow();
+}
+
+void maximize(Ctx& c, bool maximized)
+{
+    if (!c.setWindowMaximized)
+    {
+        HE_LOG_WARN(Script, "%s", "app.maximize: no window bound by the host — ignored");
+        return;
+    }
+    c.setWindowMaximized(maximized);
+}
+
+bool isMaximized(Ctx& c)
+{
+    // Silent like size(): a title bar asks this to decide which of two icons to
+    // draw, which is every frame.
+    return c.windowMaximized ? c.windowMaximized() : false;
+}
+
 void requestRedraw(Ctx& c)
 {
     // Deliberately silent when unbound: a game host binds nothing here because a
@@ -4160,6 +4187,16 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV&){ return VV{ Value::ofVec2(app::size(c)) }; } });
         t.push_back({ "app.requestRedraw", "App", true, {}, {}, "HE::api::app::requestRedraw",
             [](Ctx& c, const VV&){ app::requestRedraw(c); return VV{}; } });
+        // The other two title-bar buttons (plan F3). One bool covers maximise
+        // and restore, because one button does both.
+        t.push_back({ "app.minimize", "App", true, {}, {}, "HE::api::app::minimize",
+            [](Ctx& c, const VV&){ app::minimize(c); return VV{}; } });
+        t.push_back({ "app.maximize", "App", true, {{"maximized", P::Bool}}, {},
+            "HE::api::app::maximize",
+            [](Ctx& c, const VV& a){ app::maximize(c, aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.isMaximized", "App", false, {}, {{"maximized", P::Bool}},
+            "HE::api::app::isMaximized",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::isMaximized(c)) }; } });
         // The tray. Bound by the packaged application and by nothing else, so a
         // graph previewed in the editor logs once and leaves the menu bar alone.
         t.push_back({ "app.showTray", "App", true, {{"tooltip", P::String}}, {},
@@ -4940,6 +4977,8 @@ const std::vector<ApiFn>& registry()
             { "app.quit", "Quit Game" },
             { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },
             { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
+            { "app.minimize", "Minimize Window" },   { "app.maximize", "Maximize Window" },
+            { "app.isMaximized", "Is Window Maximized" },
             { "app.showTray", "Show Tray Icon" },    { "app.hideTray", "Hide Tray Icon" },
             { "app.addTrayItem", "Add Tray Item" },  { "app.clearTrayMenu", "Clear Tray Menu" },
             { "app.addMenu", "Add Menu" },           { "app.addMenuItem", "Add Menu Item" },

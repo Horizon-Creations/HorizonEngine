@@ -3643,3 +3643,28 @@ Stelle, und der vierte kommt leer an, was genau „kein Kürzel" ist.
 **Offen und bewusst:** Kürzel für etwas anderes als Menüeinträge (ein Knopf irgendwo im Baum) und
 eine Editor-Oberfläche, die den Akkord an einer Menüzeile einstellt. Beides braucht einen Ort, an
 dem eine Anwendung ihre Kürzel als Ganzes sieht, und den gibt es noch nicht.
+
+### F3 vollständig: die anderen zwei Fensterknöpfe (06.09.2026)
+
+Eine Titelleiste, die eine Anwendung selbst zeichnet, hat drei Knöpfe. Einer davon konnte etwas:
+Schließen ist `app.quit` und war es von Anfang an. Die anderen zwei hatten nichts zum Aufrufen —
+das Bauteil `TitleBar` liefert sie seit dem ersten Tag mit, und wer sie verdrahten wollte, fand
+keine Zeile dafür.
+
+**Drei Zeilen, nicht vier.** `app.minimize`, `app.maximize(maximized)`, `app.isMaximized`.
+Maximieren nimmt einen Wahrheitswert und deckt damit auch das Zurücksetzen ab, denn genau das tut
+der Knopf: `maximize(nicht isMaximized())` ist der ganze Handler. Eine vierte Zeile `restore`
+hätte dieselbe Sache zweimal gesagt und den Graphen zu einer Verzweigung gezwungen, wo eine
+Negation reicht. Darunter liegen trotzdem die drei SDL-Aufrufe, weil SDL drei hat:
+`SDL_MinimizeWindow`, `SDL_MaximizeWindow`, `SDL_RestoreWindow`.
+
+**Gefragt wird das System, nicht das Gedächtnis.** `Window::IsMaximized` liest bei jedem Aufruf
+`SDL_GetWindowFlags`. Ein gemerktes `bool` wäre falsch, sobald jemand die Leiste doppelklickt oder
+den Griff des Betriebssystems benutzt, und eine Titelleiste, die dann das falsche Symbol zeichnet,
+ist genau der Fehler, den ein selbstgezeichneter Rahmen vermeiden soll.
+
+**Wer sie bindet.** Der ausgelieferte Wirt, an derselben Stelle wie `setWindowSize` und aus
+demselben Grund: das Spiel besitzt sein Fenster. Der Editor bindet sie **nicht**, ebenfalls aus
+demselben Grund wie dort — ein Graph in der Vorschau darf das Editorfenster nicht wegklappen.
+Ungebunden warnt die Zeile einmal und tut nichts; der Lesezugriff antwortet still `false`, weil
+eine Titelleiste das pro Bild fragt.

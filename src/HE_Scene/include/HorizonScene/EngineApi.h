@@ -146,6 +146,18 @@ struct Ctx
     // banner on the screen of somebody who is working.
     std::function<bool(const std::string& title, const std::string& body)>     notify;
     std::function<bool()>                                                      notifyAvailable;
+    // The other two buttons on a window's own title bar (plan F3). Close was
+    // requestQuit from the start; these are the ones the bar had nothing to
+    // call, which is why a borderless window could be shipped with three
+    // buttons of which two did nothing.
+    //
+    // Maximised is a BOOL and not two rows, because that is what a button on a
+    // title bar toggles — and it is asked of the platform rather than
+    // remembered, since somebody can maximise a window by double-clicking its
+    // bar without any of this being told.
+    std::function<void()>     minimizeWindow;
+    std::function<void(bool)> setWindowMaximized;
+    std::function<bool()>     windowMaximized;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -718,6 +730,19 @@ namespace app {
     void      setSize(Ctx&, int width, int height);
     glm::vec2 size(Ctx&);                 // logical points; (0,0) when unbound
     void      requestRedraw(Ctx&);        // draw one more frame (event-driven apps)
+
+    // ── The other two title-bar buttons (plan F3) ───────────────────────────
+    // A window that draws its own frame draws three buttons. Close has been
+    // app.quit since the beginning; these are the two that had nothing behind
+    // them, so a borderless window shipped with two buttons that did nothing.
+    //
+    // maximize takes a BOOL and covers restoring, because that is the one thing
+    // the button does: `maximize(not isMaximized())` is the whole handler. Ask
+    // isMaximized rather than remembering — a window can be maximised by
+    // double-clicking its bar, and nothing tells the graph.
+    void      minimize(Ctx&);
+    void      maximize(Ctx&, bool maximized);
+    bool      isMaximized(Ctx&);          // false when unbound, silently
 
     // ── The tray (plan A7) ──────────────────────────────────────────────────
     // An icon in the system's tray / menu bar, with a menu of the application's

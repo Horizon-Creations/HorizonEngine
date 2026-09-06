@@ -338,6 +338,29 @@ namespace
         if (m_window) SDL_SetWindowBordered(m_window, !borderless);
     }
 
+    void Window::Minimize()
+    {
+        if (m_window) SDL_MinimizeWindow(m_window);
+    }
+
+    void Window::Maximize()
+    {
+        if (m_window) SDL_MaximizeWindow(m_window);
+    }
+
+    void Window::Restore()
+    {
+        if (m_window) SDL_RestoreWindow(m_window);
+    }
+
+    bool Window::IsMaximized() const
+    {
+        // Asked of SDL every time rather than tracked: the person at the keyboard
+        // maximises windows too, by double-clicking the bar or hitting the OS's
+        // own chord, and none of that comes through here.
+        return m_window && (SDL_GetWindowFlags(m_window) & SDL_WINDOW_MAXIMIZED) != 0;
+    }
+
     // UIWindowHit is SDL_HitTestResult with names of its own — the callback
     // below is a cast, and these are what keeps that true. Written out one by
     // one rather than as "first and last match", because a value swapped in the

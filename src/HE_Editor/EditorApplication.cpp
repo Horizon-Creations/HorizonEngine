@@ -188,11 +188,12 @@ struct HostCtxParts
 	// how big its surface is deserves a number rather than a silent zero, and
 	// asking for a frame is what an event-driven app does (A2).
 	//
-	// setWindowTitle and setWindowSize stay UNBOUND on purpose. A graph running
-	// in the preview must not rename or resize the editor — that is not the
-	// window it thinks it is talking to. Unbound is an ordinary state here: the
-	// row logs once and does nothing, which is the honest answer to "this host
-	// will not do that".
+	// setWindowTitle and setWindowSize stay UNBOUND on purpose, and so do
+	// minimize/maximize (plan F3). A graph running in the preview must not
+	// rename, resize, minimise or maximise the editor — that is not the window
+	// it thinks it is talking to. Unbound is an ordinary state here: the row
+	// logs once and does nothing, which is the honest answer to "this host will
+	// not do that".
 	std::function<glm::vec2()> windowSize;
 	std::function<void()>      requestRedraw;
 };

@@ -583,6 +583,23 @@ namespace HE
         if (m_window) m_window->SetSize(width, height);
     }
 
+    void Application::setWindowMinimized()
+    {
+        if (m_window) m_window->Minimize();
+    }
+
+    void Application::setWindowMaximized(bool maximized)
+    {
+        if (!m_window) return;
+        if (maximized) m_window->Maximize();
+        else           m_window->Restore();
+    }
+
+    bool Application::windowMaximized() const
+    {
+        return m_window && m_window->IsMaximized();
+    }
+
     void Application::setVSync(bool enabled)
     {
         m_vsyncEnabled = enabled;

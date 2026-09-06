@@ -103,6 +103,11 @@ struct HostCtxParts
 	std::function<void(uint32_t, uint32_t)> setWindowSize;
 	std::function<glm::vec2()>              windowSize;
 	std::function<void()>                   requestRedraw;
+	// The other two title-bar buttons (plan F3), bound here for the reason the
+	// three rows above are: a Lua script and a graph must reach the same window.
+	std::function<void()>     minimizeWindow;
+	std::function<void(bool)> setWindowMaximized;
+	std::function<bool()>     windowMaximized;
 	// The tray rows, bound for the same reason and in the same place.
 	std::function<void(const std::string&)>                     showTray;
 	std::function<void()>                                       hideTray;
@@ -298,6 +303,9 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.setWindowSize  = g_host.setWindowSize;
 	c.windowSize     = g_host.windowSize;
 	c.requestRedraw  = g_host.requestRedraw;
+	c.minimizeWindow     = g_host.minimizeWindow;
+	c.setWindowMaximized = g_host.setWindowMaximized;
+	c.windowMaximized    = g_host.windowMaximized;
 	c.showTray       = g_host.showTray;
 	c.hideTray       = g_host.hideTray;
 	c.addTrayItem    = g_host.addTrayItem;
@@ -841,6 +849,12 @@ void GameApplication::OnInit()
 			         : glm::vec2(0.0f);
 		};
 		g_host.requestRedraw  = [this] { requestRedraw(); };
+		// The two title-bar buttons that had nothing to call (plan F3). Bound
+		// wherever setWindowSize is bound and for the same reason: the shipped
+		// game owns its window, so a graph that minimises it means it.
+		g_host.minimizeWindow     = [this] { setWindowMinimized(); };
+		g_host.setWindowMaximized = [this](bool on) { setWindowMaximized(on); };
+		g_host.windowMaximized    = [this] { return windowMaximized(); };
 		g_host.showTray       = [](const std::string& tip) { trayShow(tip); };
 		g_host.hideTray       = [] { destroyTray(); };
 		g_host.addTrayItem    = [](const std::string& id, const std::string& label)

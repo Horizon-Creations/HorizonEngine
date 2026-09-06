@@ -141,6 +141,13 @@ namespace HE
 		// ── Runtime window changes ─────────────────────────────────────────
 		void setWindowTitle(const std::string& title);
 		void setWindowSize(uint32_t width, uint32_t height);
+		// The other two title-bar buttons (plan F3). setWindowMaximized(false)
+		// is "restore", which is why this is one bool and not two calls at this
+		// level: the application's answer to a title bar is a state, and the
+		// two SDL calls behind it are Window's business.
+		void setWindowMinimized();
+		void setWindowMaximized(bool maximized);
+		bool windowMaximized() const;
 		void setVSync(bool enabled);
 		void setWindowMode(WindowMode mode);
 		// Optional frame-rate ceiling applied only when VSync is OFF (0 = unlimited).

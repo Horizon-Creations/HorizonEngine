@@ -65,6 +65,24 @@ namespace HE
         void        SetFullscreen(bool fullscreen);
         void        SetBorderless(bool borderless);
 
+        // ── The other two title-bar buttons (plan F3) ───────────────────────
+        // A window without a system frame draws its own three buttons, and two
+        // of them had nothing to call. These are that: minimise puts it in the
+        // dock or the taskbar, maximise fills the work area, restore puts it
+        // back where it was.
+        //
+        // Maximise and restore are two calls rather than one toggle because SDL
+        // has two, and because a title bar is not the only caller: a graph that
+        // says "start maximised" means it, whatever the window is doing now.
+        // Whether it IS maximised is the question that turns them into a
+        // toggle, and it is asked of the platform rather than remembered here —
+        // a person can maximise a window by double-clicking its bar, and a
+        // cached bool would then be wrong until the next click.
+        void        Minimize();
+        void        Maximize();
+        void        Restore();
+        bool        IsMaximized() const;
+
         // ── The frame a borderless window has to answer for (plan F3) ───────
         // Without a system title bar the OS still asks, on every mouse move,
         // which part of the window a point belongs to: the caption it can be

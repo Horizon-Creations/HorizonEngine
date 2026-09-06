@@ -548,6 +548,18 @@ namespace
 	{ "app.size",
 	  "The window's current size in logical points, as X and Y. On a high-DPI "
 	  "display this is the points size, not the pixel count behind it." },
+	{ "app.minimize",
+	  "Puts the window away into the dock or the taskbar. The other half of a "
+	  "title bar a window draws itself: without a system frame there is no "
+	  "minimise button but the one you drew." },
+	{ "app.maximize",
+	  "Fills the screen's work area with the window, or puts it back where it "
+	  "was when this is off. One call for both, because one button on a title "
+	  "bar does both: wire it to Is Window Maximized inverted." },
+	{ "app.isMaximized",
+	  "Whether the window is maximised right now. Asked of the system rather "
+	  "than remembered, so it stays right after somebody double-clicked the "
+	  "title bar or used the platform's own shortcut." },
 	{ "app.requestRedraw",
 	  "Draws one more frame. An application sleeps until something happens, so "
 	  "anything that changes the screen without an input event behind it — a "

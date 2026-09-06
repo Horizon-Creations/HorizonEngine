@@ -722,6 +722,52 @@ TEST_CASE("App: quit calls the host's handler, and only warns without one")
     CHECK(quits == 2);
 }
 
+// The other two buttons a window that draws its own frame has to answer for
+// (plan F3). Close was app.quit from the start; these were the two that had
+// nothing behind them.
+TEST_CASE("App: minimize, maximize and isMaximized reach the host's window")
+{
+    const auto* mini = HE::api::find("app.minimize");
+    const auto* maxi = HE::api::find("app.maximize");
+    const auto* isMax = HE::api::find("app.isMaximized");
+    REQUIRE(mini != nullptr);
+    REQUIRE(maxi != nullptr);
+    REQUIRE(isMax != nullptr);
+    CHECK(mini->isExec);
+    CHECK(mini->params.empty());
+    CHECK(maxi->isExec);
+    REQUIRE(maxi->params.size() == 1);
+    CHECK(maxi->params[0].type == P::Bool);
+    CHECK_FALSE(isMax->isExec);
+    REQUIRE(isMax->results.size() == 1);
+    CHECK(isMax->results[0].type == P::Bool);
+
+    // Unbound is an ordinary state — an editor preview binds none of these, and
+    // the getter answers false rather than warning once per frame.
+    Ctx unbound{};
+    CHECK_NOTHROW(mini->invoke(unbound, {}));
+    CHECK_NOTHROW(maxi->invoke(unbound, { Value::ofBool(true) }));
+    CHECK(isMax->invoke(unbound, {})[0].b == false);
+
+    int  minimized = 0;
+    bool maximized = false;
+    Ctx c{};
+    c.minimizeWindow     = [&minimized]{ ++minimized; };
+    c.setWindowMaximized = [&maximized](bool on) { maximized = on; };
+    c.windowMaximized    = [&maximized]{ return maximized; };
+
+    mini->invoke(c, {});
+    CHECK(minimized == 1);
+    maxi->invoke(c, { Value::ofBool(true) });
+    CHECK(maximized);
+    CHECK(isMax->invoke(c, {})[0].b == true);
+    // The same bool restores it — one call for both, because one button does
+    // both, and a title bar wires it to the inverse of isMaximized.
+    HE::api::app::maximize(c, false);
+    CHECK_FALSE(maximized);
+    CHECK_FALSE(HE::api::app::isMaximized(c));
+}
+
 TEST_CASE("UI: pointerOverUI answers the last widget hit test")
 {
     ContentManager cm;
