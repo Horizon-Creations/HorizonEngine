@@ -79,6 +79,28 @@ InstanceId Runtime::addLevels(std::vector<Graph> levels, HostBindings bindings, 
     for (const Graph& g : inst.levels)
         for (const auto& var : g.variables)
             if (var.scope == 0) inst.vars[var.name] = variableDefaultValue(var);
+
+    // The migration hint for graphs written while Create Widget still showed
+    // its widget by itself (docs/he-apps-release-notes.md). Deliberately a
+    // warning and not a repair: rewriting a graph as it loads is a change to
+    // somebody's project that nobody watched happen. Said ONCE per class — a
+    // class spawned two hundred times has one thing wrong with it, not two
+    // hundred. An instance with no class key (the level script, the
+    // GameInstance) is registered by the host and arrives once anyway, so it
+    // is not deduplicated: there is no name to file it under, and filing them
+    // all under the empty one would silence every host graph but the first.
+    if (inst.cls.key.empty() || m_unshownWidgetWarned.insert(inst.cls.key).second)
+        for (const Graph& g : inst.levels)
+            for (int nodeId : widgetCreatorsWithoutShow(g))
+            {
+                const Node* n = g.findNode(nodeId);
+                hcWarn("'" + (inst.cls.key.empty() ? std::string("<graph>") : inst.cls.key)
+                       + "': Create Widget (node " + std::to_string(nodeId) + ", "
+                       + (n && !n->s.empty() ? n->s : std::string("no asset"))
+                       + ") creates a HIDDEN widget and nothing shows it - wire its "
+                         "Widget output into a Show Widget");
+            }
+
     m_insts.emplace(id, std::move(inst));
     return id;
 }

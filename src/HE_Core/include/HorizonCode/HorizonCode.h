@@ -628,6 +628,21 @@ HE_API int inputActionChainFor(const Node& n, const std::string& eventName);
 HE_API std::string toJson(const Graph& g);
 HE_API bool        fromJson(const std::string& json, Graph& out);
 
+// ── Migration hint: Create Widget makes a HIDDEN widget ──────────────────────
+// Create Widget used to put its widget on screen by itself; it does not any
+// more (docs/he-apps-plan.md), and Show Widget is what makes one visible. There
+// is deliberately NO automatic migration — rewriting somebody's graph while
+// loading it is a change nobody can see happening — so the answer is a warning,
+// and this is what it is built from: the ids of the Create Widget nodes whose
+// widget never reaches anything that could show it.
+//
+// It stays QUIET wherever it cannot follow the reference: a widget handed to a
+// function, to an engine row, or to any node this does not know about counts as
+// shown. A hint that fires on a working graph is a hint people learn to skip.
+// Followed: the direct wire, and one variable name (Set Variable → Get Variable),
+// which is how a graph keeps a widget between two events.
+HE_API std::vector<int> widgetCreatorsWithoutShow(const Graph& g);
+
 // ── Item-level JSON ─────────────────────────────────────────────────────────
 // One node / one variable, in EXACTLY the form toJson() puts into the document's
 // arrays — toJson/fromJson are implemented on top of these. Collaboration

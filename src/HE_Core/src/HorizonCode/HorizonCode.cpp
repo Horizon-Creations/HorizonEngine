@@ -1964,6 +1964,63 @@ bool fromJson(const std::string& json, Graph& out)
     return true;
 }
 
+std::vector<int> widgetCreatorsWithoutShow(const Graph& g)
+{
+    std::vector<int> out;
+    for (const Node& c : g.nodes)
+    {
+        if (c.type != T::CreateWidget) continue;
+
+        // The frontier is data-OUT pins the widget reference has reached. It
+        // starts at the one Create Widget has, and grows through the pass-
+        // throughs below.
+        std::vector<std::pair<int, int>> frontier;   // (node id, absolute out pin)
+        std::unordered_set<long long>    seen;
+        const auto push = [&](int node, int pin) {
+            const long long k = ((long long)node << 32) | (unsigned)pin;
+            if (seen.insert(k).second) frontier.push_back({ node, pin });
+        };
+        push(c.id, pinRanges(c).dataOut0);
+
+        bool shown = false;
+        while (!frontier.empty() && !shown)
+        {
+            const auto [srcNode, srcPin] = frontier.back();
+            frontier.pop_back();
+            for (const Link& l : g.links)
+            {
+                if (l.srcNode != srcNode || l.srcPin != srcPin) continue;
+                const Node* d = g.findNode(l.dstNode);
+                if (!d) continue;
+                if (d->type == T::ShowWidget) { shown = true; break; }
+                // Hide and Destroy consume the reference without showing it —
+                // they are the whole reason a graph can look wired and still
+                // draw nothing.
+                if (d->type == T::HideWidget || d->type == T::DestroyWidget) continue;
+                if (d->type == T::SetVariable)
+                {
+                    // Set Variable passes its value through, AND parks it under
+                    // a name every Get Variable of that name can pick up again —
+                    // including one in another function's sub-graph.
+                    push(d->id, pinRanges(*d).dataOut0);
+                    for (const Node& r : g.nodes)
+                        if (r.type == T::GetVariable && r.s == d->s)
+                            push(r.id, pinRanges(r).dataOut0);
+                    continue;
+                }
+                // Anything else: the reference left the part of the graph this
+                // can read (a function call, an engine row like Show Modal
+                // Widget, a node added after this was written). Assume it is
+                // shown and say nothing.
+                shown = true;
+                break;
+            }
+        }
+        if (!shown) out.push_back(c.id);
+    }
+    return out;
+}
+
 // ── Item-level JSON, public (collaboration addresses single items) ──────────
 std::string nodeToJson(const Node& n)     { return nodeToJsonObj(n).dump(); }
 std::string variableToJson(const Variable& v) { return variableToJsonObj(v).dump(); }

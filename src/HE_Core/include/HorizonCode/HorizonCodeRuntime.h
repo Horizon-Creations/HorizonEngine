@@ -424,6 +424,11 @@ private:
     std::unordered_map<InstanceId, std::unordered_map<EventId, std::vector<InstanceId>>> m_listeners;
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
+    // Which classes have already had their "Create Widget without a Show
+    // Widget" hint printed (see widgetCreatorsWithoutShow). Keyed by class, not
+    // by instance: a class spawned two hundred times has one thing wrong with
+    // it, not two hundred.
+    std::unordered_set<std::string> m_unshownWidgetWarned;
     // The same instance as an object, when it is a compiled one. Kept beside the
     // id so generated code can reach the GameInstance without the map lookup
     // every other reference needs — it is the one target whose class is known at

@@ -2007,3 +2007,148 @@ TEST_CASE("one dt means one clock: a caller with no time scale keeps the old beh
 	CHECK(rt.getVariable(id, "real").b);
 	CHECK(rt.getVariable(id, "game").b);
 }
+
+// ─── Migration hint: Create Widget makes a HIDDEN widget ─────────────────────
+// Create Widget used to put its widget on screen by itself. It does not any
+// more, and there is deliberately no automatic migration — so the analysis
+// behind the warning has to be right about BOTH halves: it must find the graph
+// that draws nothing, and it must stay quiet on every graph that works.
+
+TEST_CASE("widgetCreatorsWithoutShow finds the Create Widget nobody shows")
+{
+	// Pins: CreateWidget execIn 0 / execOut 1 / Widget dataOut 2.
+	//       ShowWidget  execIn 0 / execOut 1 / Widget dataIn  2.
+	//       SetVariable execIn 0 / execOut 1 / Value dataIn 2 / Value dataOut 3.
+	//       GetVariable Value dataOut 0.
+	SUBCASE("wired straight into Show Widget: silent")
+	{
+		Graph g;
+		Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+		const int c = g.addNode(cw);
+		Node sw; sw.type = NodeType::ShowWidget;
+		const int s = g.addNode(sw);
+		REQUIRE(g.connect(c, 1, s, 0));
+		REQUIRE(g.connect(c, 2, s, 2));
+		CHECK(widgetCreatorsWithoutShow(g).empty());
+	}
+	SUBCASE("Widget output goes nowhere: reported")
+	{
+		Graph g;
+		Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+		const int c = g.addNode(cw);
+		// BEFORE THE CHANGE: this graph put its widget on screen. Now it draws
+		// nothing, which is exactly what the hint has to say out loud.
+		const auto found = widgetCreatorsWithoutShow(g);
+		REQUIRE(found.size() == 1);
+		CHECK(found[0] == c);
+	}
+	SUBCASE("parked in a variable and shown from another event: silent")
+	{
+		Graph g;
+		Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+		const int c = g.addNode(cw);
+		Node sv; sv.type = NodeType::SetVariable; sv.s = "panel"; sv.propType = PinType::Ref;
+		const int v = g.addNode(sv);
+		Node gv; gv.type = NodeType::GetVariable; gv.s = "panel"; gv.propType = PinType::Ref;
+		const int r = g.addNode(gv);
+		Node sw; sw.type = NodeType::ShowWidget;
+		const int s = g.addNode(sw);
+		REQUIRE(g.connect(c, 2, v, 2));   // Create → Set Variable
+		REQUIRE(g.connect(r, 0, s, 2));   // Get Variable → Show Widget
+		CHECK(widgetCreatorsWithoutShow(g).empty());
+	}
+	SUBCASE("only hidden and destroyed: reported")
+	{
+		Graph g;
+		Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+		const int c = g.addNode(cw);
+		Node hw; hw.type = NodeType::HideWidget;    const int h = g.addNode(hw);
+		Node dw; dw.type = NodeType::DestroyWidget; const int d = g.addNode(dw);
+		REQUIRE(g.connect(c, 2, h, 2));
+		REQUIRE(g.connect(c, 2, d, 2));
+		const auto found = widgetCreatorsWithoutShow(g);
+		REQUIRE(found.size() == 1);
+		CHECK(found[0] == c);
+	}
+	SUBCASE("handed to something this cannot read: silent")
+	{
+		// A widget passed to a function (or to Show Modal Widget, or to a node
+		// added after this was written) has left the part of the graph the
+		// analysis can follow. A hint that fires on a working graph is a hint
+		// people learn to skip, so silence is the answer.
+		Graph g;
+		Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+		const int c = g.addNode(cw);
+		Node fc; fc.type = NodeType::FunctionCall; fc.s = "Present";
+		FuncParam p; p.name = "Widget"; p.type = PinType::Ref;
+		fc.params.push_back(p);
+		const int f = g.addNode(fc);
+		// FunctionCall: execIn 0 / execOut 1 / first param dataIn 2.
+		REQUIRE(g.connect(c, 2, f, 2));
+		CHECK(widgetCreatorsWithoutShow(g).empty());
+	}
+}
+
+namespace {
+	std::vector<std::string> g_hcWarnings;
+	void hcWarnSink(HE::LogLevel level, const char* msg, void*)
+	{ if (level == HE::LogLevel::Warning) g_hcWarnings.emplace_back(msg ? msg : ""); }
+
+	int unshownWidgetWarnings()
+	{
+		int n = 0;
+		for (const auto& m : g_hcWarnings)
+			if (m.find("creates a HIDDEN widget") != std::string::npos) ++n;
+		return n;
+	}
+}
+
+TEST_CASE("Registering a graph warns once per class about an unshown Create Widget")
+{
+	// The decision was a hint, not a repair: the runtime says what is wrong when
+	// the graph arrives, and leaves the graph alone. Said once per class — a
+	// class spawned a hundred times has one thing wrong with it.
+	g_hcWarnings.clear();
+	Logger::setSink(&hcWarnSink, nullptr);
+
+	Graph g;
+	Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+	g.addNode(cw);
+
+	Runtime rt;
+	ClassIdentity cls; cls.key = "Content/Menu.hasset";
+	rt.add(g, {}, cls);
+	rt.add(g, {}, cls);          // a second instance of the SAME class
+	rt.add(g, {}, cls);
+
+	Logger::setSink(nullptr, nullptr);
+	CHECK(unshownWidgetWarnings() == 1);
+	bool named = false;
+	for (const auto& m : g_hcWarnings)
+		if (m.find("Content/Menu.hasset") != std::string::npos
+		    && m.find("UI/Root.hasset") != std::string::npos) named = true;
+	// The message has to say WHICH graph and WHICH widget, or it is a riddle in
+	// a project with forty of them.
+	CHECK(named);
+}
+
+TEST_CASE("A graph that shows its widget registers without a word")
+{
+	g_hcWarnings.clear();
+	Logger::setSink(&hcWarnSink, nullptr);
+
+	Graph g;
+	Node cw; cw.type = NodeType::CreateWidget; cw.s = "UI/Root.hasset";
+	const int c = g.addNode(cw);
+	Node sw; sw.type = NodeType::ShowWidget;
+	const int s = g.addNode(sw);
+	REQUIRE(g.connect(c, 1, s, 0));
+	REQUIRE(g.connect(c, 2, s, 2));
+
+	Runtime rt;
+	ClassIdentity cls; cls.key = "Content/Good.hasset";
+	rt.add(g, {}, cls);
+
+	Logger::setSink(nullptr, nullptr);
+	CHECK(unshownWidgetWarnings() == 0);
+}
