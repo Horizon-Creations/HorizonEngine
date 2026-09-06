@@ -186,6 +186,11 @@ sich keine HDR-Radianz lesen lässt.
 > zeichnet direkt in den Backbuffer. Dort gibt es keine HDR-Farbe und damit
 > keine SSR-Quelle, solange das so bleibt. Ehrlich melden, nicht heimlich
 > umbauen.
+>
+> **So gemeldet, seit Schritt 6:** das Gate ist ein `OMGetRenderTargets`-Vergleich
+> gegen `p.hdrRTV` am Kopf des Backbuffer-Passes. Im Swapchain-Zweig ist `hdrRTV`
+> nie gebunden, SSR läuft dort also nicht — kein Umbau am Frame-Aufbau des
+> gepackten Spiels.
 
 ### 2.3 Der Konsument ist zweiköpfig — und beide Köpfe fehlen
 
@@ -220,7 +225,9 @@ grep -c "uGIRefl|reflCfg|heGIRefl|SSRFwd"
 
 Metals `fragmentMain` und GLs Szenen-GLSL haben die Reflexions-Kaskade
 (Sky → GI-Refl → SSR). `kSceneHLSL` in beiden D3D-Backends und Vulkans
-`scene.frag` haben **keine einzige Zeile davon**. Für sie ist P2d keine
+`scene.frag` haben **keine einzige Zeile davon**. (Stand der Kartierung;
+`scene.frag` hat sie seit Schritt 5, D3D11s `kSceneHLSL` seit Schritt 6.
+D3D12 fehlt sie weiter.) Für sie ist P2d keine
 ABI-Füllung, sondern eine Handportierung des Composite-Ausdrucks samt
 per-Pixel-Roughness-Fade in drei weitere Kopien der Shading-Mathematik.
 
@@ -303,8 +310,12 @@ dem diese Phase kippt oder trägt.**
 
 > **Umgedreht in Schritt 5** (§5, Checkpoint B): `scene.frag` hat jetzt die
 > Kaskade und den rauheitsabhängigen Schlick-Fresnel, das Banner in Zeile 46
-> trägt eine „geschlossen"-Notiz. Für D3D11/D3D12 (`kSceneHLSL`) steht dieselbe
-> Umkehr noch aus — sie gehört in C5/D.
+> trägt eine „geschlossen"-Notiz.
+>
+> **Für D3D11 in Schritt 6** (§6, C5): `kSceneHLSL` hat die Kaskade. Dort war
+> nur die eine Stufe zu ergänzen — den rauheitsabhängigen Schlick trug dieses
+> Backend schon, es hatte den Drift von `scene.frag` nie. Für D3D12 steht die
+> Umkehr noch aus (Checkpoint D erbt sie wörtlich).
 
 ---
 
@@ -500,6 +511,79 @@ HDR **nur im Viewport-Pfad** (§2.2).
   melden oder ein HDR-Ziel dort nachziehen. **Vorlagepflichtig**, weil es den
   Frame-Aufbau des gepackten Spiels ändert.
 
+> **Erledigt in Schritt 6 (C1–C5).** C6 ist wie beauftragt **nur gemeldet**, nicht
+> gebaut. Vier Stellen, an denen der Weg vom Text oben abweicht — jede bewusst:
+>
+> 1. **C2 wurde Weg (a) ohne zweiten Geometriedurchlauf**, wie auf Vulkan.
+>    Durchgang 1 von `runSSAO` tauscht auf SSR-Frames nur Shader, Input-Layout
+>    und Attachments: **Attachment 0 bleibt `ssaoPosRTV`**, weil der geteilte
+>    Prepass-Fragment dort exakt das schreibt, was `kSSAOPosHLSL` schreibt
+>    (`vec4(vViewPos, 1.0)`) — die Verdeckungs- und Blurstufe merken nichts.
+>    `runSSAO` bekommt dafür `reflMrt` und `aoWanted`; mit `aoWanted = false`
+>    läuft NUR Durchgang 1 und die Funktion gibt weiter `whiteSRV` zurück, damit
+>    die `aoSRV != whiteSRV`-Prüfung des Aufrufers weiter stimmt.
+> 2. **Kein RoughMix**, wie auf GL und Vulkan: Metals Forward-Pfad hat die breite
+>    Stufe nicht, und der Vorpass schreibt `roughness = 0`. `ssrRoughMix` wird
+>    trotzdem gepinnt, damit eine spätere breite Stufe (oder D3D12) nicht eigene
+>    Nummern erfindet.
+> 3. **Der Prepass-VS braucht ein eigenes Input-Layout.** Der Cross-Compiler
+>    benennt GLSL-Vertexeingänge nach ihrer Location als `TEXCOORD{n}`, nicht
+>    `POSITION`/`NORMAL` — dieselbe Falle, die der Graph-Material-Pfad schon
+>    kennt. Derselbe 32-Byte-Vertexpuffer, nur zwei Elemente.
+> 4. **`heSSRFwd` liegt auf `t16`, nicht im gepinnten Block.** SRVs sind auf
+>    D3D11 nicht knapp (128 Slots), Sampler (16) und Konstantenpuffer (14) sind
+>    es. Der Szenenshader teilt sich deshalb `uGISampler` (s2) und nimmt ein
+>    SRV-Register oberhalb von allem anderen.
+>
+> **Die Register (C3), das Erbe für Checkpoint D:** `kSSRHlslPins()` in
+> `MaterialShaderLibrary.cpp`, eine Liste für alle drei Shader (ein Pin auf eine
+> Bindung, die ein Shader nicht führt, ignoriert SPIRV-Cross):
+>
+> | GLSL-Binding | Register | Ressource |
+> |---|---|---|
+> | 23 | `b12` | `HeSSRTrace` / `HeSSRBlur` |
+> | 19 | `t8/s8`   | `heSceneColor` / `heSSRIn` / `heNarrow` |
+> | 20 | `t9/s9`   | `heGB1` / `heWide` |
+> | 21 | `t10/s10` | `heAttr` (nur RoughMix) |
+> | 22 | `t11/s11` | `heGBDepth` |
+> | 24 | `t12/s12` | `heSSRHistRad` |
+> | 25 | `t13/s13` | `heSSRHistPos` |
+>
+> `b12` und `t12/s12` sind verschiedene Registerräume, das ist kein Konflikt. Der
+> Block sitzt direkt unter dem Decal-Block (13/14/15); die zwei Slots, die sich
+> mit Graph-Material-Zustand überschneiden (t10/s10, t11/s11 = die GI-Masken),
+> sind unkritisch, weil die SSR-Pässe **vor** jedem Szenen-Bind laufen und der
+> Szenen-Setup-Block sie danach ohnehin neu setzt.
+>
+> **Zwei Grenzen, gemeldet statt versteckt:**
+>
+> - **C6: SSR gibt es auf D3D11 nur im Editor-Viewport.** `hdrRTV` entsteht in
+>   `createViewportRT` und wird nur im `useViewport`-Zweig von `Render()`
+>   gebunden; der Swapchain-Zweig (das gepackte Spiel) zeichnet direkt in den
+>   Backbuffer und hat keine Radianzquelle. Das Gate ist genau ein Vergleich in
+>   `DrawScene` (`OMGetRenderTargets` gegen `p.hdrRTV`), und
+>   `supportsScreenSpaceReflections` meldet `postFxReady` — dasselbe Loch, das
+>   Vulkan in Schritt 5 gemeldet hat.
+> - **Graph-Materialien bekommen auf D3D11 KEINE SSR.** `lit.ssr` bleibt null,
+>   und das ist Absicht: ihr Konsument ist `heSSRFwd` auf Bindung 31, die
+>   Preamble wird ungepinnt emittiert, `register(s31)` ist jenseits der 16
+>   Sampler-Slots. Das Gate zu füllen, ohne den Deskriptor liefern zu können,
+>   hieße einen ungebundenen Sampler zu sampeln. Das ist §2.3 Kopf 1 / C5s
+>   „eigener, größerer Vorgang", nicht eine Lücke, die dieser Schnitt aufgemacht
+>   hat. Built-in-Materialien spiegeln, Graph-Materialien nicht.
+>
+> Dazu die geerbten Grenzen: der Vorpass zeichnet `opaqueDCs_`, also was der
+> Positions-Vorpass schon immer zeichnete — keine Skinned Meshes, keine Partikel,
+> keinen Niederschlag; und seine Tiefe ist das vorhandene **D16** des
+> SSAO-Vorpasses, also grob für weit entfernte Flächen.
+>
+> **Was hier wirklich lief:** der neue ctest **„SSR HLSL registers stay inside
+> D3D11's bindable range"** auf dem emittierten HLSL-Text (Vorbild: der
+> Decal-Registerfall), der Drift-Fall in `tests/test_culling.cpp` jetzt über
+> **fünf** Kopien der Kaskade, und die volle Suite. Übersetzt wurde die
+> `.cpp` **nicht** — auf diesem Mac gibt es weder `d3d11.h` noch `fxc`. Der erste
+> Windows-Build ist die erste Prüfung, echte Hardware bleibt offen.
+
 ---
 
 ## 7. Checkpoint D — D3D12
@@ -530,9 +614,12 @@ GI-Port:
    `SpirV`, jeweils `.ok` geprüft; Vorbild `tests/test_material_graph.cpp:715`
    (der Decal-Fall). Nach §2.4 gab es **keinen einzigen SSR-Test** — das ist das
    erste Netz unter dem Feature und das Einzige, was hier wirklich läuft.
-   **Steht** (Schritt 2, alle vier Shader × vier Backends grün). Sobald C3 steht,
-   kommt ein zweiter Fall dazu: **die HLSL-Register müssen im bedienbaren
-   Bereich von D3D11 liegen** (dasselbe Muster wie der Decal-Registertest).
+   **Steht** (Schritt 2, alle vier Shader × vier Backends grün). Der zweite
+   Fall, den C3 verlangt hat, **steht seit Schritt 6**: „SSR HLSL registers stay
+   inside D3D11's bindable range" prüft auf dem emittierten Text, dass das UBO
+   auf `b12` liegt, jeder Sampler unter 16, und dass die kanonischen Nummern
+   verschwunden und nicht bloß ergänzt sind (dasselbe Muster wie der
+   Decal-Registertest). Er ist das einzige Netz unter dem D3D11-Pfad.
    Seit Schritt 4 steht ein zweiter GL-Fall: **„GL binds the SSR shaders by name,
    so the names must survive emission"**. GLSL 410 kommt ohne 420pack aus dem
    Cross-Compiler, also ohne `layout(binding)` — jede SSR-Ressource wird im
@@ -608,10 +695,10 @@ also nichts zu brechen.
 | 3 | §3.2 (a): Prepass-Shader nach kanonischem GLSL in die geteilte Library, Metal darauf umstellen — **erledigt** | ja, visuell (A/B gegen den Referenzshot) |
 | 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) — **A1–A5 erledigt, A6 offen** | nur offline + ctest |
 | 5 | Checkpoint B — Vulkan (B1–B5, inkl. §3.3) — **erledigt** | Syntaxprüfung + `glslc` auf `scene.frag` + Drift-ctest |
-| 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) | nur ctest auf dem HLSL-Text |
+| 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) — **C1–C5 erledigt, C6 gemeldet** | nur ctest auf dem HLSL-Text |
 | 7 | Checkpoint D — D3D12 (Register aus 6 geerbt) | dito |
-| — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang |
-| — | §2.2: HDR im D3D11-Swapchain-Pfad | vorlagepflichtig |
+| — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang, **jetzt der Grund, warum SSR dort nur Built-ins erreicht** |
+| — | §2.2: HDR im D3D11-Swapchain-Pfad (C6) | vorlagepflichtig, **gemeldet in Schritt 6** |
 | — | GL-Deferred-Composite (A6) | optional |
 
 Schritte 2 und 3 gehören zusammen und in eine Hand: Schritt 3 ist die **einzige**

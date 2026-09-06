@@ -877,6 +877,63 @@ TEST_CASE("GL binds the SSR shaders by name, so the names must survive emission"
 	CHECK(pvs.find("uniform U")      != std::string::npos);
 }
 
+TEST_CASE("SSR HLSL registers stay inside D3D11's bindable range")
+{
+	// docs/ssr-cross-backend-plan.md C3, the decal register test's twin one
+	// feature over. The canonical SSR bindings are 19..25; emitted one-for-one
+	// they become register(b23)/register(s19..s25), and D3D11 caps a stage at 14
+	// constant buffers and 16 samplers — those shaders could not be bound at all.
+	// There is no D3D11 header and no fxc on the build machine, so this check on
+	// the emitted text is the ONLY automatic net under the D3D11 SSR pass, and
+	// the numbers are the contract checkpoint D inherits.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string trace = lib.ssrTrace(B::HLSL).source;
+	CHECK(trace.find("register(b12)") != std::string::npos); // HeSSRTrace  (23)
+	CHECK(trace.find("register(t8)")  != std::string::npos); // heSceneColor(19)
+	CHECK(trace.find("register(s8)")  != std::string::npos);
+	CHECK(trace.find("register(t9)")  != std::string::npos); // heGB1       (20)
+	CHECK(trace.find("register(s9)")  != std::string::npos);
+	CHECK(trace.find("register(t11)") != std::string::npos); // heGBDepth   (22)
+	CHECK(trace.find("register(s11)") != std::string::npos);
+	CHECK(trace.find("register(t12)") != std::string::npos); // heSSRHistRad(24)
+	CHECK(trace.find("register(s12)") != std::string::npos);
+	CHECK(trace.find("register(t13)") != std::string::npos); // heSSRHistPos(25)
+	CHECK(trace.find("register(s13)") != std::string::npos);
+
+	const std::string blur = lib.ssrBlur(B::HLSL).source;
+	CHECK(blur.find("register(b12)") != std::string::npos);
+	CHECK(blur.find("register(t8)")  != std::string::npos);
+	CHECK(blur.find("register(s8)")  != std::string::npos);
+
+	// Not drawn on D3D11 today, pinned so a later wide stage cannot invent its
+	// own numbers. heAttr (21) is the only binding that appears here and nowhere
+	// else, and it must be the same t10/s10 the shared list assigns.
+	const std::string mix = lib.ssrRoughMix(B::HLSL).source;
+	CHECK(mix.find("register(b12)") != std::string::npos);
+	CHECK(mix.find("register(t10)") != std::string::npos);
+	CHECK(mix.find("register(s10)") != std::string::npos);
+
+	// The canonical numbers must be GONE, not merely joined by the pinned ones —
+	// and every sampler has to be under 16, which is the whole point.
+	for (const std::string& ps : { trace, blur, mix })
+	{
+		CHECK(ps.find("register(b23)") == std::string::npos);
+		for (const char* dead : { "register(s19)", "register(s20)", "register(s21)",
+		                          "register(s22)", "register(s24)", "register(s25)",
+		                          "register(s16)", "register(s17)" })
+			CHECK_MESSAGE(ps.find(dead) == std::string::npos,
+			              "an SSR sampler landed outside D3D11's 16 slots: ", dead);
+	}
+
+	// Pinning must not change what the shader computes: the trace still writes
+	// both attachments, and the rough mix still lerps narrow against wide.
+	CHECK(trace.find("SV_Target0") != std::string::npos);
+	CHECK(trace.find("SV_Target1") != std::string::npos);
+	CHECK(mix.find("lerp(") != std::string::npos);
+}
+
 TEST_CASE("Decal HLSL registers stay inside D3D11's bindable range")
 {
 	// docs/decals-cross-backend-plan.md §6b. SPIRV-Cross turns layout(binding = N)

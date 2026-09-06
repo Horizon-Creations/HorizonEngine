@@ -1312,18 +1312,18 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		CHECK(lib.find(needle, first + 1) != std::string::npos);
 	}
 
-	SUBCASE("The forward SSR cascade is one mix in all four hand-kept copies")
+	SUBCASE("The forward SSR cascade is one mix in all five hand-kept copies")
 	{
-		// docs/ssr-cross-backend-plan.md B5. The forward reflection cascade is
-		// written out four times: once in the shared preamble (graph materials,
+		// docs/ssr-cross-backend-plan.md B5/C5. The forward reflection cascade is
+		// written out five times: once in the shared preamble (graph materials,
 		// every backend), once in GL's built-in scene shader, once in Metal's
-		// MSL and — since checkpoint B — once in Vulkan's scene.frag. All four
-		// mix the SAME half-res trace into the SAME specular-IBL term, and the
-		// roughness fade has to happen with the same knee and off the same
-		// uniform lanes. Drift is invisible: nothing fails to build, a graph
-		// material and a built-in one beside it simply stop agreeing about what
-		// the mirror looks like — the exact failure this file already guards for
-		// GI and specular AA.
+		// MSL, since checkpoint B once in Vulkan's scene.frag and since
+		// checkpoint C once in D3D11's kSceneHLSL. All five mix the SAME
+		// half-res trace into the SAME specular-IBL term, and the roughness fade
+		// has to happen with the same knee and off the same uniform lanes. Drift
+		// is invisible: nothing fails to build, a graph material and a built-in
+		// one beside it simply stop agreeing about what the mirror looks like —
+		// the exact failure this file already guards for GI and specular AA.
 		//
 		// The `.z * 0.7, .z` shape is what pins this to the SSR stage: the
 		// GI-reflection stage one line above uses `.y` for its max-roughness
@@ -1334,18 +1334,31 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		                                 "Backends" / "OpenGL" / "OpenGLRenderer.cpp");
 		const std::string mtl = readFile(root / "src" / "HE_Rendering" / "src" /
 		                                 "Backends" / "Metal" / "MetalRenderer.mm");
+		const std::string dx11 = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                  "Backends" / "D3D11" / "D3D11Renderer.cpp");
 		const std::vector<const char*> names = { "kLightingPreamble", "kUnlitFS (GL)",
-		                                         "fragmentMain (Metal)", "scene.frag (Vulkan)" };
+		                                         "fragmentMain (Metal)", "scene.frag (Vulkan)",
+		                                         "kSceneHLSL (D3D11)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib), stripLineComments(gl), stripLineComments(mtl),
-			stripLineComments(readFile(sh / "scene.frag")),
+			stripLineComments(readFile(sh / "scene.frag")), stripLineComments(dx11),
 		};
 		checkGroup(names, src, {
 			// Captures the fade knee (0.7) and the intensity lane (y) in one go,
 			// so a copy that keeps the knee but reads the wrong lane still fails.
+			// HLSL spells the mix `lerp` — canonicalise() rewrites that, but only
+			// AFTER the regex has run, so this copy needs its own pattern.
 			{ "SSR fade knee + intensity lane",
 			  { R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
-			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)" } },
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = lerp\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)" } },
 		});
 		// And the Fresnel the mixed envSpec is weighted by. Vulkan carried a flat
 		// F0 here until B5 reversed that drift banner — with the cascade mixing
