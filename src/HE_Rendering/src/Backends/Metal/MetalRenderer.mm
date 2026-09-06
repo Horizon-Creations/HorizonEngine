@@ -5804,6 +5804,7 @@ void MetalRenderer::Shutdown()
 	if (m_ssaoPointSampler) { CFBridgingRelease(m_ssaoPointSampler); m_ssaoPointSampler = nullptr; }
 	if (m_ssaoNoiseSampler)  { CFBridgingRelease(m_ssaoNoiseSampler);  m_ssaoNoiseSampler = nullptr; }
 	if (m_debugLinePipeline) { CFBridgingRelease(m_debugLinePipeline); m_debugLinePipeline = nullptr; }
+	ReleaseRibbonBuffers();
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -5906,6 +5907,108 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 		[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 		[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertCount];
+	}
+}
+
+void MetalRenderer::ReleaseRibbonBuffers()
+{
+	for (void* b : m_ribbonBuffers)
+		if (b) CFBridgingRelease(b);
+	m_ribbonBuffers.clear();
+}
+
+// ─── Motion trails → collected blended draws ─────────────────────────────────
+// The whole point of RibbonBatch is that this costs no pipeline: the vertices
+// arrive in the cooked layout the scene vertex shader already reads (pos3 +
+// norm3 + uv2) and in WORLD space, so the model matrix is the identity and the
+// draw is just another entry in the list EncodeScene's transparency pass sorts
+// and replays. A trail whose material carries a node graph gets that material's
+// blended pipeline, which is what makes the age in uv.v drive colour and fade
+// without a single trail-specific uniform.
+void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
+                                       const glm::vec3& cameraPos)
+{
+	if (m_renderWorld.ribbonBatches.empty()) return;
+	// Last frame's staging buffers go now, not at the end of the frame that used
+	// them: the draws below hold bare pointers and are replayed much later.
+	ReleaseRibbonBuffers();
+
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		for (const RibbonBatch& rb : m_renderWorld.ribbonBatches)
+		{
+			if (rb.vertices.empty() || rb.indices.empty()) continue;
+
+			// Material first, buffers after: every Resolve* below can LOAD, and a
+			// load moves the ContentManager's dense pools out from under any
+			// pointer taken before it.
+			void* tex = nullptr;
+			const bool hasTex = ResolveMaterialTexture(rb.materialAssetId, tex);
+			glm::vec3 baseColor(1.0f);
+			float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
+			if (!ResolveMaterialParams(rb.materialAssetId, baseColor, metallic, roughness, opacity))
+				baseColor = hasTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+
+			TPDraw t{};
+			t.u.mvp   = viewProj;              // world vertices ⇒ model = identity
+			t.u.model = glm::mat4(1.0f);
+			t.u.color = glm::vec4(baseColor, 1.0f);
+			t.u.flags = glm::vec4(hasTex ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+			t.u.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+			t.tex     = tex ? tex : m_dummyTexture;
+			t.indexCount = static_cast<NSUInteger>(rb.indices.size());
+			// Sort key from the band's own centre. RenderSorter::backToFrontKey on
+			// an identity transform would measure every trail's distance to the
+			// WORLD ORIGIN instead, and they would all sort the same.
+			const glm::vec3 c = rb.worldBounds.isValid() ? rb.worldBounds.center() : cameraPos;
+			t.distSq  = glm::dot(c - cameraPos, c - cameraPos);
+
+#if defined(HE_HAVE_SHADERC)
+			// Custom material: the BLENDED pipeline variant, same as a translucent
+			// mesh takes in the opaque loop. Null pipeline = the built-in blend PSO.
+			uint64_t shKey = 0; std::string shFrag, shVert;
+			if (ResolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
+			{
+				std::vector<HE::UUID>    gtexIds;
+				std::vector<std::string> gtexPaths;
+				const MaterialShaderVariant* pre = nullptr;
+				if (const MaterialAsset* ma = m_contentManager
+					? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+				{
+					for (const auto& var : ma->precompiledShaders)
+						if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
+					if (!ma->shaderParamData.empty()) t.params = ma->shaderParamData;
+					// Snapshot the graph texture slots BEFORE resolving any of them —
+					// ResolveGraphTexture loads, and `ma` would not survive it.
+					const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+						std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+					for (size_t i = 0; i < nTex; ++i)
+					{
+						gtexIds.push_back(i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{});
+						gtexPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{});
+					}
+				}
+				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+				t.wpo      = !shVert.empty();
+				for (size_t i = 0; i < gtexIds.size(); ++i)
+					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i]);
+			}
+#endif
+
+			id<MTLBuffer> vbuf = [device newBufferWithBytes:rb.vertices.data()
+			                                         length:rb.vertices.size() * sizeof(float)
+			                                        options:MTLResourceStorageModeShared];
+			id<MTLBuffer> ibuf = [device newBufferWithBytes:rb.indices.data()
+			                                         length:rb.indices.size() * sizeof(uint32_t)
+			                                        options:MTLResourceStorageModeShared];
+			if (!vbuf || !ibuf) continue;
+			m_ribbonBuffers.push_back((void*)CFBridgingRetain(vbuf));
+			m_ribbonBuffers.push_back((void*)CFBridgingRetain(ibuf));
+			t.vbuf = (__bridge void*)vbuf;
+			t.ibuf = (__bridge void*)ibuf;
+			out.push_back(std::move(t));
+		}
 	}
 }
 
@@ -11503,7 +11606,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// total still comes from the exact stage-boundary pair on the encoder.
 	m_counters.total = static_cast<uint32_t>(m_renderWorld.objects.size());
 
-	if (m_renderWorld.objects.empty())
+	// Trails are not in `objects` (they are their own per-frame band list), so an
+	// otherwise empty scene that has one still has something to draw.
+	if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty())
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky();
@@ -11521,7 +11626,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_culler.cull(m_renderWorld, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	m_counters.visible = static_cast<uint32_t>(m_sortedIndices.size());
-	if (m_sortedIndices.empty())
+	if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty())
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky(); // nothing visible — fill the whole background with sky
@@ -11704,7 +11809,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// unchanged — they are forward in both paths.
 	if (deferred)
 	{
-		if (!deferred->resolveDone)
+		// Nothing visible means EncodeGBuffer wrote nothing this frame, so there is
+		// no G-buffer to resolve — the sky fills the frame and a trail (the only
+		// reason we got past the early returns above) draws over it. Before ribbons
+		// this case simply returned early, so the gate reproduces that exactly.
+		if (!deferred->resolveDone && !m_sortedIndices.empty())
 		{
 		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_deferredResolvePipeline];
 		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
@@ -12138,6 +12247,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();
 	SamplePoint(renderEncoder, "Sky+Clouds");
+
+	// Motion trails join the blended list here rather than getting a pass of
+	// their own: same vertex layout, same sort, same state. Collected AFTER the
+	// opaque loop so they cannot influence the shadow fit or the sort of anything
+	// else, and before the sort below so they take part in it.
+	CollectRibbonDraws(transparent, viewProj, camPos);
 
 	// ── Transparency pass: sorted, alpha-blended draws over the opaque scene +
 	// sky. Back-to-front; depth-tested against the opaque geometry but no depth

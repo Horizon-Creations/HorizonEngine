@@ -2096,6 +2096,73 @@ struct D3D12RendererImpl
     std::vector<DebugLine>       m_debugLines;
     float                        m_wallTime   = 0.0f;
 
+    // ── Motion trails (RenderWorld::ribbonBatches) ────────────────────────────
+    // A ribbon needs neither a PSO nor a pass of its own: it arrives as CPU
+    // geometry in the ordinary cooked layout (pos3 + norm3 + uv2), so it goes into
+    // a per-frame upload buffer pair and is then handed to drawDC12 as a perfectly
+    // normal blended DrawCall — same PBR path, same graph-material PSOs, same sort
+    // (docs/rope-trail-plan.md §6.2). One pool slot per band per frame in flight;
+    // waitForFrame(frameIndex) at Render() entry is what makes refilling (and
+    // growing) this slot safe.
+    struct RibbonMesh12
+    {
+        ComPtr<ID3D12Resource> vbuf;
+        uint8_t*               vptr = nullptr;
+        UINT64                 vcap = 0;
+        ComPtr<ID3D12Resource> ibuf;
+        uint8_t*               iptr = nullptr;
+        UINT64                 icap = 0;
+    };
+    std::vector<RibbonMesh12> ribbonPool[k_frameCount];
+    // Fill `out` with the pool slot's buffers after uploading the band into it.
+    // False = the buffers could not be created; the caller skips the band.
+    bool uploadRibbon(UINT frame, size_t index, const std::vector<float>& verts,
+                      const std::vector<uint32_t>& indices, GpuMesh& out)
+    {
+        if (frame >= k_frameCount || verts.empty() || indices.empty()) return false;
+        auto& pool = ribbonPool[frame];
+        if (pool.size() <= index) pool.resize(index + 1);
+        RibbonMesh12& rm = pool[index];
+
+        auto ensure = [&](UINT64 needed, ComPtr<ID3D12Resource>& buf,
+                          uint8_t*& ptr, UINT64& cap) -> bool {
+            if (buf && ptr && cap >= needed) return true;
+            buf.Reset(); ptr = nullptr; cap = 0;
+            // Head-room so a trail that grows a point per frame does not
+            // reallocate every frame while it fills up.
+            const UINT64 size = needed + needed / 2 + 256;
+            void* mapped = nullptr;
+            buf = createUploadBuffer(size, &mapped);
+            if (!buf || !mapped) { buf.Reset(); return false; }
+            ptr = static_cast<uint8_t*>(mapped);
+            cap = size;
+            return true;
+        };
+        const UINT64 vbytes = static_cast<UINT64>(verts.size())   * sizeof(float);
+        const UINT64 ibytes = static_cast<UINT64>(indices.size()) * sizeof(uint32_t);
+        if (!ensure(vbytes, rm.vbuf, rm.vptr, rm.vcap)) return false;
+        if (!ensure(ibytes, rm.ibuf, rm.iptr, rm.icap)) return false;
+        std::memcpy(rm.vptr, verts.data(),   static_cast<size_t>(vbytes));
+        std::memcpy(rm.iptr, indices.data(), static_cast<size_t>(ibytes));
+
+        out = GpuMesh{};
+        out.vbuf = rm.vbuf;
+        out.ibuf = rm.ibuf;
+        out.vbv.BufferLocation = rm.vbuf->GetGPUVirtualAddress();
+        out.vbv.SizeInBytes    = static_cast<UINT>(vbytes);
+        out.vbv.StrideInBytes  = 8 * sizeof(float);   // pos3 + norm3 + uv2
+        out.ibv.BufferLocation = rm.ibuf->GetGPUVirtualAddress();
+        out.ibv.SizeInBytes    = static_cast<UINT>(ibytes);
+        out.ibv.Format         = DXGI_FORMAT_R32_UINT;
+        out.indexCount         = static_cast<UINT>(indices.size());
+        // No baked material to resolve a texture from: mark the one-shot albedo
+        // resolve done so ensureMeshAlbedo does not chase a null asset id every
+        // frame. The material's own texture still arrives via resolveMaterialAlbedo.
+        out.albedoTried = true;
+        out.albedoSlot  = -1;
+        return true;
+    }
+
     // ── Two additional scene PSOs for RGBA16F HDR target ─────────────────────
     // The base pso/transparentPSO use RGBA8 (fallback/swapchain path).
     // hdrPso/hdrTransparentPso use RGBA16F (PostFX path).
@@ -7302,6 +7369,8 @@ void D3D12Renderer::Shutdown()
     }
     m_impl->decalReady  = false;
     m_impl->decalFailed = false;
+    // Motion-trail staging pools (one per frame in flight).
+    for (UINT f = 0; f < k_frameCount; ++f) m_impl->ribbonPool[f].clear();
     // Forward SSR: the trace/blur pipelines, the half-res ping-pong, the colour
     // history and the reflection pre-pass (its targets hang off the SSAO ones).
     for (int i = 0; i < 2; ++i) { m_impl->ssrHistRad[i].Reset(); m_impl->ssrHistPos[i].Reset(); }
@@ -7445,7 +7514,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         p.drawSky(cl, p.frameIndex, glm::inverse(svp), p.m_renderWorld.sunDirection, m_environment);
     }
 
-    if (p.m_renderWorld.objects.empty()) return;
+    // Trails live in their own per-frame band list, not in `objects`, so a scene
+    // that has nothing BUT a trail still has something to draw past here.
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     for (RenderObject& obj : p.m_renderWorld.objects)
     {
@@ -7476,7 +7547,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     if (p.m_renderGraph.empty())
     {
@@ -7825,6 +7896,67 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
             cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot)); // t16 forward SSR
         }
+        // ── Motion trails join the blended list ──────────────────────────────
+        // A RibbonBatch is per-frame CPU geometry in the cooked vertex layout, so
+        // it needs no pass and no PSO of its own: upload it into this frame's pool
+        // and append a perfectly ordinary DrawCall, which then takes part in the
+        // sort below and goes through drawDC12 exactly like a translucent mesh —
+        // including the graph-material path, which is what lets the age in uv.v
+        // drive colour and fade (docs/rope-trail-plan.md §6.2). Appended AFTER the
+        // partition on purpose: a trail is blended by nature, never opaque, so it
+        // bypasses partitionByOpacity the way Metal and GL do.
+        std::vector<DrawCall> ribbonDCs;
+        std::vector<GpuMesh>  ribbonMeshes;
+        std::unordered_map<const DrawCall*, GpuMesh*> ribbonMeshByDC;
+        if (!p.m_renderWorld.ribbonBatches.empty())
+        {
+            // Reserve BOTH before taking any address: transparentDCs below holds
+            // bare pointers into ribbonDCs, and a growth reallocation kills them.
+            ribbonDCs.reserve(p.m_renderWorld.ribbonBatches.size());
+            ribbonMeshes.reserve(p.m_renderWorld.ribbonBatches.size());
+            std::vector<float> rebased;
+            for (size_t rbi = 0; rbi < p.m_renderWorld.ribbonBatches.size(); ++rbi)
+            {
+                const RibbonBatch& rb = p.m_renderWorld.ribbonBatches[rbi];
+                if (rb.vertices.empty() || rb.indices.empty()) continue;
+                const glm::vec3 pivot = rebaseRibbonVertices(rb, rebased);
+                GpuMesh rmesh{};
+                if (!p.uploadRibbon(p.frameIndex, rbi, rebased, rb.indices, rmesh)) continue;
+
+                DrawCall dc{};
+                dc.materialAssetId = rb.materialAssetId;
+                dc.transform       = glm::mat4(1.0f);
+                dc.transform[3]    = glm::vec4(pivot, 1.0f);   // pure translation, see rebaseRibbonVertices
+                dc.entityId        = rb.entityId;
+                dc.contributesAO   = false;   // trails never enter the AO prepass
+                // receivesShadow stays TRUE: Metal and GL leave the shadow flag at its
+                // default for a ribbon, and a trail that is shadowed on two backends
+                // and unshadowed on three is exactly the kind of split this port exists
+                // to avoid. Trails do not CAST a shadow (they are not in `objects`).
+                if (const MaterialAsset* mat = (m_contentManager && rb.materialAssetId != HE::UUID{})
+                        ? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+                {
+                    dc.baseColor = { mat->baseColor[0], mat->baseColor[1], mat->baseColor[2] };
+                    dc.metallic  = mat->metallic;
+                    dc.roughness = mat->roughness;
+                    dc.opacity   = mat->opacity;
+                }
+                else
+                    dc.baseColor = glm::vec3(0.55f);   // material not loaded yet — flat grey, as Metal/GL
+                // Force the blended class. RenderSorter::isTransparent decides both
+                // which pass a draw belongs to and which graph-material PSO variant
+                // it gets, so a trail at opacity 1 would otherwise pick the
+                // depth-WRITING variant inside the blended pass. This is the same
+                // clamp ResolveMaterialParams applies to blendMode == 2 materials.
+                dc.opacity = std::min(dc.opacity, 0.998f);
+
+                ribbonMeshes.push_back(rmesh);
+                ribbonDCs.push_back(std::move(dc));
+                ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                transparentDCs.push_back(&ribbonDCs.back());
+            }
+        }
+
         RenderSorter::sortBackToFront(transparentDCs, camPos);
 
         // Real GPU instancing (A3) applies to the opaque pass only; the transparent
@@ -7839,7 +7971,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         ID3D12PipelineState* activeScenePso = nullptr;
         auto drawDC12 = [&](const DrawCall& dc) {
             if (drawIdx >= k_maxDraws) return;
-            GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            // A trail carries no mesh asset — its geometry sits in this frame's
+            // ribbon pool, looked up by the DrawCall that was synthesised for it.
+            GpuMesh* mesh = nullptr;
+            if (!ribbonMeshByDC.empty())
+            {
+                if (auto it = ribbonMeshByDC.find(&dc); it != ribbonMeshByDC.end())
+                    mesh = it->second;
+            }
+            if (!mesh) mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.indexCount) return;
 

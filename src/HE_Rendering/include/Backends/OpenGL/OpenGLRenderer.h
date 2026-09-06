@@ -643,6 +643,20 @@ private:
 	void CreateDebugLinePipeline();
 	void DrawDebugLines(const glm::mat4& viewProj);
 
+	// ── Motion trails (RenderWorld::ribbonBatches) ───────────────────────────
+	// A ribbon is CPU geometry in WORLD space carrying the ordinary cooked
+	// vertex layout, so it needs no program of its own: it is uploaded into a
+	// small pool of stream buffers and then joins the same sorted, alpha-blended
+	// replay every translucent mesh goes through (docs/rope-trail-plan.md §6.2).
+	// A pool rather than one shared buffer because a VAO remembers its element
+	// buffer, and one draw per batch is the whole budget here.
+	struct RibbonMesh { unsigned int vao = 0, vbo = 0, ebo = 0; };
+	std::vector<RibbonMesh> m_ribbonMeshes;
+	// Upload one band into pool slot `index` (growing the pool) and return its
+	// VAO, or 0 if the band is empty or the buffers could not be created.
+	unsigned int UploadRibbon(size_t index, const RibbonBatch& batch);
+	void DestroyRibbonMeshes();
+
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
 	// GeometryPass renders into an RGBA16F target; PostProcessPass tonemaps it
 	// to the backbuffer/viewport. Sized to the current output, recreated on resize.

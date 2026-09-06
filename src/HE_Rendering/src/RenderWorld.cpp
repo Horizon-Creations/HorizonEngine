@@ -8,6 +8,7 @@ void RenderWorld::clear()
 	decals.clear();
 	uiObjects.clear();
 	particleBatches.clear();
+	ribbonBatches.clear();
 	landscapes.clear();
 	camera = CameraData{};
 	shadow = ShadowData{};

@@ -10029,6 +10029,61 @@ void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
 	glBindVertexArray(0);
 }
 
+// ─── Motion trails ───────────────────────────────────────────────────────────
+// One pool slot per band, re-uploaded every frame with GL_STREAM_DRAW. The
+// attribute layout is the mesh layout verbatim (pos3 + norm3 + uv2, stride 32),
+// which is exactly why a trail needs no program of its own: the scene's own
+// vertex shader reads these buffers unchanged.
+unsigned int OpenGLRenderer::UploadRibbon(size_t index, const RibbonBatch& batch)
+{
+	if (batch.vertices.empty() || batch.indices.empty()) return 0;
+	if (m_ribbonMeshes.size() <= index) m_ribbonMeshes.resize(index + 1);
+	RibbonMesh& rm = m_ribbonMeshes[index];
+	if (!rm.vao)
+	{
+		glGenVertexArrays(1, &rm.vao);
+		glGenBuffers(1, &rm.vbo);
+		glGenBuffers(1, &rm.ebo);
+		if (!rm.vao || !rm.vbo || !rm.ebo) return 0;
+		glBindVertexArray(rm.vao);
+		glBindBuffer(GL_ARRAY_BUFFER, rm.vbo);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, rm.ebo);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+	}
+	else
+	{
+		glBindVertexArray(rm.vao);
+		glBindBuffer(GL_ARRAY_BUFFER, rm.vbo);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, rm.ebo);
+	}
+	// Whole-buffer orphaning: the band changes size as points are dropped and
+	// added, so there is no fixed allocation to fill in place.
+	glBufferData(GL_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(batch.vertices.size() * sizeof(float)),
+	             batch.vertices.data(), GL_STREAM_DRAW);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+	             static_cast<GLsizeiptr>(batch.indices.size() * sizeof(uint32_t)),
+	             batch.indices.data(), GL_STREAM_DRAW);
+	glBindVertexArray(0);
+	return rm.vao;
+}
+
+void OpenGLRenderer::DestroyRibbonMeshes()
+{
+	for (RibbonMesh& rm : m_ribbonMeshes)
+	{
+		if (rm.vao) glDeleteVertexArrays(1, &rm.vao);
+		if (rm.vbo) glDeleteBuffers(1, &rm.vbo);
+		if (rm.ebo) glDeleteBuffers(1, &rm.ebo);
+	}
+	m_ribbonMeshes.clear();
+}
+
 void OpenGLRenderer::Shutdown()
 {
 	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: shutdown");
@@ -10158,6 +10213,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
 	if (m_debugLineVAO)     { glDeleteVertexArrays(1, &m_debugLineVAO); m_debugLineVAO = 0; }
 	if (m_debugLineVBO)     { glDeleteBuffers(1, &m_debugLineVBO);      m_debugLineVBO = 0; }
+	DestroyRibbonMeshes();
 
 	// Destroy secondary contexts (secondary windows' SDL_GLContexts are owned by us)
 	for (auto& [sdlWin, ctx] : m_secondaryContexts)
@@ -12038,6 +12094,75 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
 		GpuTimerEndPass();                 // end "Sky+Clouds"
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
+
+		// ── Motion trails join the blended list ─────────────────────────────
+		// A RibbonBatch is world-space CPU geometry in the cooked vertex layout,
+		// so it gets no pass and no program of its own: upload, resolve the
+		// material exactly as a translucent mesh does, and hand it to the same
+		// replay below (docs/rope-trail-plan.md §6.2). The model matrix is the
+		// identity — the vertices are already in world space.
+		for (size_t rbi = 0; rbi < m_renderWorld.ribbonBatches.size(); ++rbi)
+		{
+			const RibbonBatch& rb = m_renderWorld.ribbonBatches[rbi];
+			// Material before the upload: every Resolve* below can LOAD, and a
+			// load moves the ContentManager's dense pools.
+			unsigned int rbTex = 0;
+			const bool   rbHasTex = ResolveMaterialTexture(rb.materialAssetId, rbTex);
+			glm::vec3 rbBase(1.0f);
+			float rbMetal = 0.0f, rbRough = 0.5f, rbOpacity = 1.0f;
+			if (!ResolveMaterialParams(rb.materialAssetId, rbBase, rbMetal, rbRough, rbOpacity))
+				rbBase = rbHasTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+
+			unsigned int rbProg = 0; std::vector<float> rbParams;
+			unsigned int rbGtex[4] = { 0, 0, 0, 0 }; int rbGtexCount = 0;
+#if defined(HE_HAVE_SHADERC)
+			{
+				uint64_t shKey = 0; std::string shFrag, shVert;
+				if (resolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
+				{
+					std::vector<HE::UUID>    gIds;
+					std::vector<std::string> gPaths;
+					const MaterialShaderVariant* pre = nullptr;
+					const MaterialAsset* ma = m_contentManager
+						? m_contentManager->getMaterial(rb.materialAssetId) : nullptr;
+					if (ma)
+					{
+						for (const auto& var : ma->precompiledShaders)
+							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+						rbParams = ma->shaderParamData;
+						// Snapshot the graph texture slots BEFORE resolving any of
+						// them — ResolveGraphTexture loads, and `ma` would not survive.
+						const size_t nTex = std::min<size_t>(4,
+							std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+						for (size_t i = 0; i < nTex; ++i)
+						{
+							gIds.push_back(i < ma->graphTextureIds.size()     ? ma->graphTextureIds[i]     : HE::UUID{});
+							gPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i]   : std::string{});
+						}
+					}
+					rbProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					if (rbProg)
+						for (size_t i = 0; i < gIds.size(); ++i)
+							rbGtex[rbGtexCount++] = ResolveGraphTexture(gIds[i], gPaths[i]);
+					else
+						rbParams.clear();
+				}
+			}
+#endif
+			const unsigned int rbVao = UploadRibbon(rbi, rb);
+			if (!rbVao) continue;
+			// Sort key from the band's own centre: backToFrontKey on an identity
+			// transform would measure every trail's distance to the WORLD ORIGIN.
+			const glm::vec3 rbC = rb.worldBounds.isValid() ? rb.worldBounds.center() : camPos;
+			TPDraw tp{ viewProj, glm::mat4(1.0f), rbBase, rbMetal, rbRough, rbOpacity,
+			           rbTex, rbVao, static_cast<int>(rb.indices.size()),
+			           glm::dot(rbC - camPos, rbC - camPos) };
+			tp.matProg = rbProg;
+			tp.params  = std::move(rbParams);
+			for (int i = 0; i < rbGtexCount; ++i) tp.gtex[i] = rbGtex[i];
+			tp.gtexCount = rbGtexCount;
+			transparent.push_back(std::move(tp));
+		}
 
 		// ── Transparency pass: sorted alpha-blended draws over the opaque scene +
 		// sky. Back-to-front so the blend order is correct; depth-tested against the

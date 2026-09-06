@@ -553,6 +553,32 @@ private:
 	VkPipeline            m_debugPipelineHDR     = VK_NULL_HANDLE;
 	std::vector<DebugLine> m_debugLines;
 
+	// ── Motion trails (RenderWorld::ribbonBatches) ───────────────────────────
+	// A ribbon needs no pipeline and no shader of its own: it arrives as CPU
+	// geometry in the ordinary cooked layout (pos3 + norm3 + uv2), so it is
+	// uploaded into a per-frame staging mesh and then handed to drawDCVk as a
+	// perfectly normal blended DrawCall — same PBR path, same graph-material
+	// pipelines, same sort (docs/rope-trail-plan.md §6.2). One pool slot per
+	// band per frame in flight; the frame fence waited at Render() entry is what
+	// makes re-uploading (and growing) this slot's buffers safe.
+	struct RibbonMeshVk
+	{
+		VkBuffer       vbuf    = VK_NULL_HANDLE;
+		VkDeviceMemory vmem    = VK_NULL_HANDLE;
+		void*          vmapped = nullptr;
+		VkDeviceSize   vcap    = 0;
+		VkBuffer       ibuf    = VK_NULL_HANDLE;
+		VkDeviceMemory imem    = VK_NULL_HANDLE;
+		void*          imapped = nullptr;
+		VkDeviceSize   icap    = 0;
+	};
+	std::vector<RibbonMeshVk> m_ribbonMeshes[2];   // [frame in flight][band]
+	// Fill `out` with the pool slot's buffers after uploading `verts`/`indices`
+	// into it. False = the buffers could not be created; the caller skips the band.
+	bool uploadRibbon(uint32_t frame, size_t index, const std::vector<float>& verts,
+	                  const std::vector<uint32_t>& indices, GpuMesh& out);
+	void destroyRibbonMeshes();
+
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Three render passes: (1) view-space position prepass, (2) SSAO compute,
 	// (3) box blur.  All run before the scene HDR pass each frame.
