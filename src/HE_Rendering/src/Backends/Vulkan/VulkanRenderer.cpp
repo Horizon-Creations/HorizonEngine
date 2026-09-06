@@ -8726,6 +8726,10 @@ void VulkanRenderer::destroyReflPrepassTargets()
     }
 }
 
+// Destroying and rebuilding the half-res chain mid-frame is safe for exactly one
+// reason: the only thing that changes its size is a viewport resize, and
+// createViewportResources runs behind a vkDeviceWaitIdle. Nothing here waits on
+// its own — do not "fix" that by dropping the wait upstream.
 void VulkanRenderer::createSSRTargets(uint32_t w, uint32_t h)
 {
     if (!m_ssrTraceRP || !m_ssrBlurRP) return;

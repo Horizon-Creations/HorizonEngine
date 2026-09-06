@@ -699,7 +699,7 @@ private:
 	VkDescriptorPool      m_ssrPool[2] = {};   // per frame in flight, reset whole
 	SSRFrameBuf           m_ssrUBO[2];         // slot 0 = trace, 1..4 = the blur passes
 	static constexpr uint32_t k_ssrUboSlots  = 5;
-	static constexpr uint32_t k_ssrUboStride = 512; // SSRTraceUniforms is 336 B
+	static constexpr uint32_t k_ssrUboStride = 512; // SSRTraceUniforms is 288 B (72 floats)
 	VkSampler m_ssrLinearSampler = VK_NULL_HANDLE;  // colour history, blur inputs, scene read
 	VkSampler m_ssrPointSampler  = VK_NULL_HANDLE;  // oct normals, NDC depth, receiver positions
 	// Half-res chain. The history pair is one framebuffer (MRT) per parity.
