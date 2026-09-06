@@ -475,12 +475,41 @@ namespace
 	{ "time.frameCount",
 	  "How many frames have been drawn. For \"every Nth frame\" work; frames are "
 	  "not a unit of time, so do not pace anything with it." },
+	{ "time.unscaledElapsed",
+	  "Real seconds since the game started — it keeps counting through slow "
+	  "motion, a pause and a hit stop, which is what a pause menu needs to time "
+	  "anything at all." },
 	{ "time.setTimeScale",
-	  "Slows down or speeds up game time: 0.5 is half speed, 0 freezes everything "
-	  "that uses Delta Time, 1 is normal. Real-time Delay nodes and Unscaled Delta "
-	  "Time are deliberately unaffected." },
+	  "Slows down or speeds up game time: 0.5 is half speed, 0 is slow motion "
+	  "down to a standstill, 1 is normal. This is the scale you asked for; a "
+	  "Pause Game or a Hit Stop overrides it without erasing it. Real-time Delay "
+	  "nodes and Unscaled Delta Time are deliberately unaffected." },
 	{ "time.timeScale",
-	  "The current time scale." },
+	  "The time scale that was asked for — what Set Time Scale last wrote, even "
+	  "while a pause or a hit stop is holding the clock at zero. Effective Time "
+	  "Scale is the one actually in effect." },
+	{ "time.pause",
+	  "Pauses the game: Delta Time goes to zero and the player's input stops "
+	  "being delivered, which is what makes a pause menu a pause menu. The time "
+	  "scale is left alone, so resuming returns to the slow motion it came from." },
+	{ "time.resume",
+	  "Lifts the pause this script asked for. It cannot lift the one the window "
+	  "put in place when the game lost focus — those are separate reasons, and "
+	  "the game runs again only once none of them is left." },
+	{ "time.isPaused",
+	  "True while the game is paused. Note it stays FALSE during a hit stop: a "
+	  "freeze stops the world, it does not stop the player being heard." },
+	{ "time.hitStop",
+	  "Freezes the game for a moment of real time — 0.08 to 0.12 seconds is the "
+	  "usual weight for a landed hit. It returns to exactly the speed it came "
+	  "from, slow motion included, and input is never swallowed. Triggering it "
+	  "again takes the longer of the two windows rather than adding them up." },
+	{ "time.isFrozen",
+	  "True while a Hit Stop is still running. For the effect that spawned it, "
+	  "not for gameplay logic." },
+	{ "time.effectiveScale",
+	  "What actually multiplies Delta Time this frame: the time scale, or zero "
+	  "while a pause or a hit stop is on. The number to put on a debug HUD." },
 
 	// ── Player ───────────────────────────────────────────────────────────────
 	{ "player.possess",

@@ -311,3 +311,72 @@ TEST_CASE("FixedStep: every step gets the fixed rate, never the frame's own dt")
     for (float s : seen) CHECK(s == doctest::Approx(kRate));
     CHECK(accum == doctest::Approx(0.005f));
 }
+
+// ═══ The way in from a script ═════════════════════════════════════════════════
+// Everything above is the C++ API. Lua, Python and HorizonCode never see it —
+// they see the HE::api registry, and a channel with no row in it is a channel no
+// game can reach. These go through `invoke` rather than calling the functions, so
+// a row wired to the wrong callee fails here rather than in a shipped game.
+
+TEST_CASE("Time registry: every channel of the clock has a way in from a script")
+{
+    using HE::api::Value;
+    HE::api::Ctx c{};
+    auto call = [&](const char* id, std::vector<Value> args = {})
+    {
+        const HE::api::ApiFn* fn = HE::api::find(id);
+        REQUIRE_MESSAGE(fn != nullptr, "missing registry row: ", id);
+        return fn->invoke(c, args);
+    };
+
+    hetime::reset();
+
+    // Pause and resume take no reason: PauseReason stays a C++ type and every
+    // frontend shares the Script channel. That is deliberate — see below.
+    CHECK_FALSE(call("time.isPaused")[0].b);
+    call("time.pause");
+    CHECK(call("time.isPaused")[0].b);
+    CHECK(call("time.effectiveScale")[0].f == doctest::Approx(0.0f));
+    // …while the scale it was asked for is still readable underneath.
+    CHECK(call("time.timeScale")[0].f == doctest::Approx(1.0f));
+    call("time.resume");
+    CHECK_FALSE(call("time.isPaused")[0].b);
+
+    // Hit-stop. Frozen, but NOT paused: the predicate PlayerHost gates input on
+    // has to stay false, or a 100 ms freeze eats the button press that caused it.
+    CHECK_FALSE(call("time.isFrozen")[0].b);
+    call("time.hitStop", { Value::ofFloat(0.1f) });
+    CHECK(call("time.isFrozen")[0].b);
+    CHECK_FALSE(call("time.isPaused")[0].b);
+    CHECK(call("time.effectiveScale")[0].f == doctest::Approx(0.0f));
+    hetime::advance(0.2f);
+    CHECK_FALSE(call("time.isFrozen")[0].b);
+
+    // The session clock a pause menu times itself with: real seconds, and they
+    // kept running through the freeze above while the scaled one did not.
+    hetime::reset();
+    call("time.pause");
+    hetime::advance(0.5f);
+    CHECK(call("time.unscaledElapsed")[0].f == doctest::Approx(0.5f));
+    CHECK(call("time.elapsed")[0].f         == doctest::Approx(0.0f));
+    call("time.resume");
+}
+
+TEST_CASE("Time registry: a script's resume cannot lift the window's pause")
+{
+    // The reason the rows take no argument. A script that could name FocusLost
+    // would be able to un-pause a game whose window is still in the background,
+    // and the pause-on-focus-loss switch would be a suggestion rather than a
+    // rule. Scripts share one channel, with each other and with nobody else.
+    using HE::api::Value;
+    HE::api::Ctx c{};
+    auto call = [&](const char* id){ return HE::api::find(id)->invoke(c, {}); };
+
+    hetime::reset();
+    hetime::pause(PauseReason::FocusLost);     // the window, on alt-tab
+    call("time.pause");                        // a script, for its menu
+    call("time.resume");                       // the script closes its menu again
+    CHECK(call("time.isPaused")[0].b);         // still paused — the window has not come back
+    hetime::resume(PauseReason::FocusLost);
+    CHECK_FALSE(call("time.isPaused")[0].b);
+}

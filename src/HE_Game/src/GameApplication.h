@@ -150,6 +150,10 @@ private:
     HE::WindowMode      m_windowMode   = HE::WindowMode::Fullscreen;
     HE::RendererBackend m_backend      = HE::RendererBackend::OpenGL;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
+    // config.json "PauseOnFocusLoss". Only the packaged game reads it — the
+    // editor window loses focus constantly, and a PIE session that froze every
+    // time you clicked the Details panel would be unusable.
+    bool m_pauseOnFocusLoss = true;
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance

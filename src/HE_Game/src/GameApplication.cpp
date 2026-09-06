@@ -235,6 +235,12 @@ void GameApplication::applyShippedConfig()
 		HE_LOG_WARN(Core, "GameApplication: unknown window mode '%s' — keeping the default",
 		            mode.c_str());
 	m_vsyncOn = gs.getCustomConfigBool("GameVSync", m_vsyncOn);
+	// Alt-tabbing out of a single-player game and coming back to a corpse is a
+	// complaint, not a feature, so this is on by default. It is still a switch
+	// and not an automatism: a game with its own pause menu wants to open THAT
+	// on focus loss, and a multiplayer client must not freeze at all. Read once
+	// here rather than per event — the file does not change mid-session.
+	m_pauseOnFocusLoss = gs.getCustomConfigBool("PauseOnFocusLoss", m_pauseOnFocusLoss);
 
 	if (const std::string name = gs.getCustomConfigString("GameBackend"); !name.empty())
 	{
@@ -1241,9 +1247,27 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
-	// OS window focus → GameInstance OnWindowFocusChanged (while running).
-	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
-	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
+	// OS window focus → GameInstance OnWindowFocusChanged (while running), and —
+	// when the project asks for it — the FocusLost pause reason.
+	//
+	// The event stays regardless of the switch: a project that already built a
+	// graph on OnWindowFocusChanged keeps it, and gets to do more than freeze
+	// (open its own menu, mute the mixer). The reason is its own channel, so a
+	// script that resumes while the window is still in the background does not
+	// accidentally lift this one, and this one does not lift the script's.
+	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)
+	{
+		m_gameInstance.setWindowFocus(true);
+		// Resumed unconditionally, not only when m_pauseOnFocusLoss is set:
+		// resuming a reason nobody set is a no-op, and the alternative is a game
+		// stuck paused forever if the switch is ever flipped off mid-flight.
+		HE::api::time::resume(HE::api::time::PauseReason::FocusLost);
+	}
+	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+	{
+		m_gameInstance.setWindowFocus(false);
+		if (m_pauseOnFocusLoss) HE::api::time::pause(HE::api::time::PauseReason::FocusLost);
+	}
 
 	// A focused in-game text field owns the keyboard: route text + edit keys to
 	// the widget and swallow them so they don't drive the camera/gameplay.

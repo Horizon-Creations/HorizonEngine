@@ -1424,6 +1424,14 @@ namespace
 	  "Advances a paused session by exactly one frame — the way to watch a bug "
 	  "happen instead of catching it afterwards.",
 	  "", "editor#play-mode" },
+	{ "viewport.time-scale", "Game time",
+	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
+	  "the Pause button next to it: this reads the scale a script set with Set "
+	  "Time Scale, \"Paused\" while the game itself is paused, and \"Freeze\" "
+	  "during a hit stop. Amber means the clock is not running normally — so a "
+	  "preview that has stopped moving says here whether the editor stopped it or "
+	  "the game did.",
+	  "", "editor#play-mode" },
 	{ "viewport.translate", "Move",
 	  "Drag the arrows to move the selection along an axis, or a square to slide "
 	  "it in a plane.",

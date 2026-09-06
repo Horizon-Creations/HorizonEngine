@@ -336,3 +336,60 @@ Damit niemand sie für vergessen hält:
   ausdrücklich.
 * **Zeitskala pro Entity oder pro Welt.** Eine globale Uhr, wie heute. Lokale
   Zeitblasen wären ein anderer Entwurf.
+
+---
+
+## 8. Umgesetzt
+
+Nachgetragen, als das Vorhaben durch war. Der Entwurf oben bleibt stehen, wie er
+geschrieben wurde — was davon abweicht, steht hier.
+
+### Schritt 2 (`9693e77b`) — die Uhr
+
+Wie in §4.1 bis §4.3 entworfen, ohne Abweichung. Die Rückfallposition aus §4.2
+(`isPaused()` bleibt abgeleitet) wurde **nicht** gebraucht: `isPaused()` ist eine
+eigene Aussage über die Pausengründe, und `test_engine_api.cpp:938-966` läuft
+unverändert weiter. Dazu, über den Entwurf hinaus: `HE::advanceFixedSteps` als
+die eine Regel hinter beiden Physik-Accumulatoren (§1.3 hatte sie
+auseinanderlaufen sehen), und `Application::GameLogicDeltaTime` als der Haken,
+mit dem §4.5.2 gelöst wurde, ohne dass `HE_Core` die Uhr in `HE_Scene` sieht.
+
+### Schritt 3 — der Weg hinein
+
+* **Registry.** Die sieben Zeilen aus §5, dazu die Anzeigenamen und die Einträge
+  in `HcNodeDocs.cpp`. Lua, Python und HorizonCode laufen alle drei über die
+  Registry, es gab also nichts, was pro Frontend zu verdrahten gewesen wäre.
+  Eine Abweichung von §5: **`time.pause` und `time.resume` nehmen keinen
+  Grund.** `PauseReason` bleibt ein C++-Typ, jedes Frontend teilt sich den
+  `Script`-Kanal. Sonst könnte ein Skript `FocusLost` benennen und damit ein
+  Spiel entpausieren, dessen Fenster noch im Hintergrund liegt — der Schalter
+  aus §4.4 wäre dann eine Empfehlung. Festgenagelt in
+  `tests/test_time_control.cpp`, „a script's resume cannot lift the window's
+  pause".
+* **Editor-Anzeige.** Ein Lesefeld in der Viewport-Leiste, gleich neben Play:
+  Skala, `Paused` oder `Freeze`, bernstein sobald die Uhr des **Spiels** nicht
+  normal läuft. Bewusst getrennt von der Bandfärbung, die die Pause des
+  **Editors** meldet — genau diese zwei Ursachen waren an einer stehenden
+  Vorschau nicht auseinanderzuhalten. Die Zelle wird immer in ihrer breitesten
+  Beschriftung vermessen, sonst rutscht der Play-Knopf zur Seite, wenn die Szene
+  in Zeitlupe geht.
+* **Fokusverlust-Pause** (§4.4) wie entworfen: `PauseOnFocusLoss` in der
+  `config.json`, standardmäßig an, nur vom gepackten Spiel gelesen.
+  `OnWindowFocusChanged` bleibt daneben bestehen. `FOCUS_GAINED` nimmt den Grund
+  **bedingungslos** zurück, auch bei ausgeschaltetem Schalter — ein Grund, den
+  niemand gesetzt hat, zurückzunehmen kostet nichts, und die Alternative wäre
+  ein Spiel, das für immer pausiert bleibt, wenn der Schalter zur Laufzeit
+  umfällt.
+* **Klammer auf dem rohen dt** (§3.g): `Application::kMaxFrameSeconds`, 0.25 s,
+  dieselbe Zahl wie die Hitch-Schwelle. Zwei Zahlen statt einer, das ist der
+  Punkt: `measuredDt` ist, wie lange der Frame gedauert hat — davon leben der
+  Hitch-Melder und der Profiler, und eine Klammer darauf würde genau die Stockung
+  verstecken, die sie melden sollen. `dt` ist, wie weit die Welt bewegt wird.
+
+### Offen
+
+* Die Website-Doku (`scripting-api#api` im Geschwister-Repo `Website`) kennt die
+  neuen Aufrufe noch nicht. `EditorDeps/Docs/he-docs.json` ist daraus generiert
+  und wird nicht von Hand angefasst.
+* Die Fokusverlust-Pause ist nur über den Konfigurationsschalter getestet, nicht
+  über ein echtes SDL-Fokusereignis — das gepackte Spiel läuft in keinem Test.

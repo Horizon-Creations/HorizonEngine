@@ -9,6 +9,8 @@
 #include "EditorWidgets.h"        // helpForKey — the bar's controls explain themselves
 #include "EditorHelp.h"          // the options popup's scope
 
+#include <HorizonScene/EngineApi.h>   // HE::api::time — the GAME's clock, next to the editor's transport
+
 #include <imgui.h>
 #include <imgui_internal.h>      // dock node: the hidden-tab-bar "unhide" corner
 #include <algorithm>
@@ -210,6 +212,50 @@ void snapText(const State& st, ImGuizmo::OPERATION op, char* buf, size_t n)
 	else                            std::snprintf(buf, n, "%g m",       st.snapTranslate);
 }
 
+// ── What the GAME's clock is doing ───────────────────────────────────────────
+// Distinct from the band wash, which reports the EDITOR's pause — the button in
+// this bar. This reports the other clock: the one the running scene sets with
+// Set Time Scale, Pause Game and Hit Stop. Without it those three are invisible
+// from the editor, and "the preview is frozen" has two possible causes with no
+// way to tell them apart.
+//
+// Highest-priority state wins: a hit stop and a pause both hold the clock at
+// zero, and reporting the scale underneath them would say "1×" about a scene
+// that is not moving.
+struct ClockState
+{
+	char  text[16] = "1\xc3\x97";
+	ImU32 fg       = kFgDim;   // dim = nothing to see; amber = the clock is not normal
+};
+
+ClockState gameClockState(bool playing)
+{
+	ClockState s;
+	// Outside play mode the clock is not running at all, so whatever it last
+	// held says nothing about anything. Show the resting state, dimmed.
+	if (!playing) return s;
+
+	if (HE::api::time::isFrozen())
+	{
+		std::snprintf(s.text, sizeof(s.text), "Freeze");
+		s.fg = kWarn;
+	}
+	else if (HE::api::time::isPaused())
+	{
+		std::snprintf(s.text, sizeof(s.text), "Paused");
+		s.fg = kWarn;
+	}
+	else
+	{
+		const float scale = HE::api::time::timeScale();
+		std::snprintf(s.text, sizeof(s.text), "%g\xc3\x97", scale);
+		// Not an exact compare against 1: the scale is a float somebody typed or
+		// a script computed, and 0.9999 is not worth shouting about.
+		if (std::fabs(scale - 1.0f) > 1e-3f) { s.fg = kWarn; }
+	}
+	return s;
+}
+
 // The snap presets a viewport actually wants, per operation.
 void snapPresets(State& st, ImGuizmo::OPERATION op)
 {
@@ -367,10 +413,20 @@ void render(AppContext& ctx, State& st)
 	const float snapValW    = std::floor(ImGui::CalcTextSize("88.88\xc2\xb0").x + kCellPadX * 2.0f);
 	const float camValW     = std::floor(ImGui::CalcTextSize("88.8 u/s").x + kCellPadX * 2.0f);
 	const float playW       = std::floor(m.cell * 2.0f);
-	// Play/Stop, Pause, Step in one well. Pause and Step are measured in even
-	// while the scene is stopped — they dim rather than vanish, so the button the
-	// eye looks for first does not move on the press that happens most.
-	const float centreW     = kWellPad * 2.0f + playW + (kSegGap + m.cell) * 2.0f;
+	// The game-clock readout is measured at its WIDEST wording, not at the one
+	// currently showing: a cell that grew when the scene entered slow motion
+	// would shift Play sideways at exactly the moment somebody is reaching for
+	// it. Same reason the orientation cell is measured with the longer label.
+	const float clockW      = std::floor(std::max({ ImGui::CalcTextSize("0.25\xc3\x97").x,
+	                                                ImGui::CalcTextSize("Paused").x,
+	                                                ImGui::CalcTextSize("Freeze").x })
+	                                     + kCellPadX * 2.0f);
+	// Play/Stop, Pause, Step and the clock readout in one well. All three of the
+	// trailing cells are measured in even while the scene is stopped — they dim
+	// rather than vanish, so the button the eye looks for first does not move on
+	// the press that happens most.
+	const float centreW     = kWellPad * 2.0f + playW + (kSegGap + m.cell) * 2.0f
+	                                          + kSegGap + clockW;
 
 	auto leftWidth = [&](bool labels, bool snap)
 	{
@@ -553,6 +609,26 @@ void render(AppContext& ctx, State& st)
 		         "Step — advance one frame, then pause", "viewport.step") &&
 		    ctx.stepFrame)
 			ctx.stepFrame();
+
+		// The game's own clock, read only. It sits in the transport well because
+		// that is where somebody looks when the preview stops moving — and the
+		// answer is often that nothing in the editor stopped it.
+		//
+		// A hit box but no hover fill: the fill would promise a click that never
+		// comes, while the box is what carries the tooltip and F1, and "why is
+		// this frozen" is a question worth a paragraph.
+		tx += m.cell + kSegGap;
+		{
+			const ClockState clock = gameClockState(playing);
+			ImGui::SetCursorScreenPos(ImVec2(tx, m.y + kWellPad));
+			ImGui::InvisibleButton("##vpClock", ImVec2(clockW, m.cell));
+			EditorWidgets::helpForKey("viewport.time-scale");
+			const ImU32 fg = playing ? clock.fg : kFgDim;
+			const float tw = ImGui::CalcTextSize(clock.text).x;
+			dl->AddText(ImVec2(std::floor(tx + (clockW - tw) * 0.5f),
+			                   std::floor(m.cy - ImGui::GetFontSize() * 0.5f)),
+			            fg, clock.text);
+		}
 	}
 
 	// ── Right zone: how the viewport looks ──────────────────────────────────

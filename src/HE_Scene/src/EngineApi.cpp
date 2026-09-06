@@ -2573,14 +2573,37 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::elapsed()) }; } });
         t.push_back({ "time.frameCount", "Time", false, {}, {{"frame", P::Int}}, "HE::api::time::frameCount",
             [](Ctx&, const VV&){ return VV{ Value::ofInt(time::frameCount()) }; } });
-        // Time control. setTimeScale is the only stateful one (isExec) — the two
-        // getters are constant within a frame like the rest of the group.
+        // Time control: three independent channels, one row each way in.
+        // setTimeScale/pause/resume/hitStop change the clock and are therefore
+        // exec nodes; everything that only asks it a question is a pure data
+        // node, constant within a frame like the rest of the group.
         t.push_back({ "time.setTimeScale", "Time", true, {{"scale", P::Float}}, {}, "HE::api::time::setTimeScale",
             [](Ctx&, const VV& a){ time::setTimeScale(aF(a, 0)); return VV{}; } });
         t.push_back({ "time.timeScale", "Time", false, {}, {{"scale", P::Float}}, "HE::api::time::timeScale",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::timeScale()) }; } });
         t.push_back({ "time.unscaledDeltaTime", "Time", false, {}, {{"dt", P::Float}}, "HE::api::time::unscaledDeltaTime",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::unscaledDeltaTime()) }; } });
+        t.push_back({ "time.unscaledElapsed", "Time", false, {}, {{"seconds", P::Float}}, "HE::api::time::unscaledElapsed",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::unscaledElapsed()) }; } });
+        // Pause and resume take no reason from a script: PauseReason stays a C++
+        // type, and every frontend shares the one Script channel. That is the
+        // point of the channel — a script's pause must not lift the one the
+        // window put in place when it lost focus, and a script that could name
+        // FocusLost could do exactly that.
+        t.push_back({ "time.pause", "Time", true, {}, {}, "HE::api::time::pause",
+            [](Ctx&, const VV&){ time::pause(); return VV{}; } });
+        t.push_back({ "time.resume", "Time", true, {}, {}, "HE::api::time::resume",
+            [](Ctx&, const VV&){ time::resume(); return VV{}; } });
+        // Not `timeScale() <= 0`: a hit-stop stops the clock without being a
+        // pause, and this is the predicate that decides whether input is heard.
+        t.push_back({ "time.isPaused", "Time", false, {}, {{"paused", P::Bool}}, "HE::api::time::isPaused",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(time::isPaused()) }; } });
+        t.push_back({ "time.hitStop", "Time", true, {{"seconds", P::Float}}, {}, "HE::api::time::hitStop",
+            [](Ctx&, const VV& a){ time::hitStop(aF(a, 0)); return VV{}; } });
+        t.push_back({ "time.isFrozen", "Time", false, {}, {{"frozen", P::Bool}}, "HE::api::time::isFrozen",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(time::isFrozen()) }; } });
+        t.push_back({ "time.effectiveScale", "Time", false, {}, {{"scale", P::Float}}, "HE::api::time::effectiveScale",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::effectiveScale()) }; } });
 
         // Player possession. The two that TAKE a controller are also the
         // PlayerController base class's member surface (HorizonCode.h
@@ -2969,6 +2992,13 @@ const std::vector<ApiFn>& registry()
             { "time.frameCount", "Frame Count" },
             { "time.setTimeScale", "Set Time Scale" }, { "time.timeScale", "Get Time Scale" },
             { "time.unscaledDeltaTime", "Unscaled Delta Time" },
+            { "time.unscaledElapsed", "Unscaled Elapsed Time" },
+            // "Pause Game", not "Pause": in a palette next to Delay and Play
+            // Animation the bare word reads as "pause this chain".
+            { "time.pause", "Pause Game" }, { "time.resume", "Resume Game" },
+            { "time.isPaused", "Is Paused" },
+            { "time.hitStop", "Hit Stop" }, { "time.isFrozen", "Is Frozen" },
+            { "time.effectiveScale", "Effective Time Scale" },
             { "player.possess", "Possess" },          { "player.unpossess", "Un Possess" },
             { "player.possessed", "Get Possessed Character" },
             { "player.controllerOf", "Get Controller" },

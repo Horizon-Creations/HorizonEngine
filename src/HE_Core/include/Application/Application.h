@@ -161,6 +161,18 @@ namespace HE
 		// exempt: startup legitimately blocks on shader/asset warmup.
 		static constexpr float     kHitchSeconds      = 0.25f;
 		static constexpr uint64_t  kHitchWarmupFrames = 10;
+		// The longest dt the frame is allowed to BE, as opposed to the longest it
+		// is allowed to take. A breakpoint, an alt-tab or a synchronous asset load
+		// hands back a span of seconds or minutes, and the world is then advanced
+		// by it in one go: bodies tunnel through walls, timers fire in a burst,
+		// the day-night cycle jumps. The physics accumulator already caps its own
+		// catch-up steps and throws the rest away (HE::advanceFixedSteps) — this
+		// is the same protection for everything that is not the physics. The lost
+		// time is deliberate: the alternative is simulating a stall nobody saw.
+		//
+		// Same number as the hitch threshold, and not by accident: a frame worth
+		// warning about is a frame worth not believing.
+		static constexpr float     kMaxFrameSeconds   = 0.25f;
 
 	private:
 		// Takes the splash down and puts the engine's own GL context back —
