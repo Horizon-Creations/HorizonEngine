@@ -403,7 +403,13 @@ namespace
 	{ "Camera Rig/Target Rotation", "",
 	  "Free lets the character face where it walks while the camera looks "
 	  "elsewhere. Follow turns the character with the camera, which is what makes "
-	  "strafing and walking backwards work.",
+	  "strafing and walking backwards work. Follow Smoothed does the same but "
+	  "swings the body after the camera instead of snapping it around.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Turn Rate", "",
+	  "Follow Smoothed only: how fast the character turns towards the camera, in "
+	  "degrees per second. Low values let the body trail the view visibly; high "
+	  "ones are indistinguishable from plain Follow.",
 	  "", "rendering#cameras" },
 	{ "Camera Rig/Sensitivity", "",
 	  "Mouse look, in degrees per pixel of motion.",
@@ -435,6 +441,32 @@ namespace
 	{ "Camera Rig/Collide With World", "",
 	  "Pull the camera in when something solid is between it and the target, "
 	  "instead of letting the wall fill the screen.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Camera Lag", "",
+	  "Let the camera trail the character instead of being welded to it, which "
+	  "is what gives movement weight. Off by default: switching it on shifts "
+	  "every shot in the scene by a fraction of a second, and that is a choice, "
+	  "not a fix. Only the knobs are saved — where the camera happens to be "
+	  "trailing at the moment is play state.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Position Catch-Up", "",
+	  "How briskly the camera catches up to the character, in units per second. "
+	  "High is tight and barely visible, low is a long lazy drift. The same at "
+	  "any frame rate.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Rotation Catch-Up", "",
+	  "Third person: how briskly the boom swings round behind the character "
+	  "after you turn. The view itself turns instantly either way — only the arm "
+	  "trails, which is what lets the character slide out of the middle of the "
+	  "picture during a fast turn.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Max Trail", "",
+	  "The furthest the camera may fall behind, in metres. A character faster "
+	  "than the catch-up speed would otherwise leave it arbitrarily far back.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Snap Distance", "",
+	  "A jump bigger than this is set, not smoothed. Teleports, respawns and "
+	  "cuts, where easing in would send the camera sailing across the level.",
 	  "", "rendering#cameras" },
 
 	// ── Script ───────────────────────────────────────────────────────────────

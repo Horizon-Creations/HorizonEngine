@@ -88,7 +88,9 @@ namespace
 				out.camera.projection = cam.orthographic
 					? glm::ortho(-aspectRatio * 5.0f, aspectRatio * 5.0f, -5.0f, 5.0f,
 					             cam.nearPlane, cam.farPlane)
-					: glm::perspective(glm::radians(cam.fovDegrees), aspectRatio,
+					// fovOffset is the rig's FOV kick and the FOV part of a camera
+					// blend — runtime only, zero on every camera no rig drives.
+					: glm::perspective(glm::radians(cam.fovDegrees + cam.fovOffset), aspectRatio,
 					                   cam.nearPlane, cam.farPlane);
 				cameraFound = true;
 				if (cam.isMain) break;

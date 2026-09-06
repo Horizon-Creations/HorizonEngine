@@ -283,9 +283,19 @@ namespace
 				{ "pitchMin",       rig->pitchMin },
 				{ "pitchMax",       rig->pitchMax },
 				{ "targetYaw",       static_cast<uint8_t>(rig->targetYaw) },
+				{ "targetTurnRate",  rig->targetTurnRate },
 				{ "hideTargetMesh",  rig->hideTargetMesh },
 				{ "collision",       rig->collision },
 				{ "collisionRadius", rig->collisionRadius },
+				// The lag KNOBS are scene data. The smoothed pose behind them
+				// (pivotLagged, armYaw, armPitch) is not, for the same reason
+				// meshHiddenEntity is not: PIE writes a stop snapshot, and a
+				// saved lag pose would become authored content from then on.
+				{ "lagEnabled",       rig->lag.enabled },
+				{ "lagPositionSpeed", rig->lag.positionSpeed },
+				{ "lagRotationSpeed", rig->lag.rotationSpeed },
+				{ "lagMaxDistance",   rig->lag.maxDistance },
+				{ "lagSnapDistance",  rig->lag.snapDistance },
 			};
 		}
 		if (auto* l = registry.try_get<LightComponent>(entity))
@@ -865,9 +875,18 @@ namespace
 			rig.pitchMax       = c.value("pitchMax",       rig.pitchMax);
 			rig.targetYaw      = static_cast<CameraRigComponent::TargetYaw>(
 			                         c.value("targetYaw", static_cast<uint8_t>(rig.targetYaw)));
+			rig.targetTurnRate = c.value("targetTurnRate", rig.targetTurnRate);
 			rig.hideTargetMesh  = c.value("hideTargetMesh",  rig.hideTargetMesh);
 			rig.collision       = c.value("collision",       rig.collision);
 			rig.collisionRadius = c.value("collisionRadius", rig.collisionRadius);
+			// Absent in every scene saved before lag existed, and the defaults
+			// are what those scenes meant: lag off, so they load as the camera
+			// their author saw.
+			rig.lag.enabled       = c.value("lagEnabled",       rig.lag.enabled);
+			rig.lag.positionSpeed = c.value("lagPositionSpeed", rig.lag.positionSpeed);
+			rig.lag.rotationSpeed = c.value("lagRotationSpeed", rig.lag.rotationSpeed);
+			rig.lag.maxDistance   = c.value("lagMaxDistance",   rig.lag.maxDistance);
+			rig.lag.snapDistance  = c.value("lagSnapDistance",  rig.lag.snapDistance);
 			registry.emplace_or_replace<CameraRigComponent>(entity, rig);
 		}
 		if (comps.contains("light"))

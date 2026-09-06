@@ -1152,10 +1152,18 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Rotation coupling. Free lets the character turn on its own; Follow
 			// makes it face where the camera looks, which is what allows strafing
 			// and backing up.
-			static const char* kTargetYaw[] = { "Free", "Follow Camera" };
+			static const char* kTargetYaw[] = { "Free", "Follow Camera", "Follow Smoothed" };
 			int yawMode = static_cast<int>(rig->targetYaw);
-			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 2))
+			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 3))
 			{ rig->targetYaw = static_cast<CameraRigComponent::TargetYaw>(yawMode); trackEdit(); }
+			// Only Follow Smoothed reads it: Free leaves the target's rotation
+			// alone and Follow sets it outright, so showing the rate there would
+			// be a knob that does nothing.
+			if (rig->targetYaw == CameraRigComponent::TargetYaw::FollowSmoothed)
+			{
+				Row::dragFloat("Turn Rate", &rig->targetTurnRate, 5.0f, 0.0f, 3600.0f, "%.0f \xc2\xb0/s");
+				trackEdit();
+			}
 
 			Row::dragFloat("Sensitivity", &rig->sensitivity, 0.005f, 0.005f, 2.0f, "%.3f"); trackEdit();
 			// Separate knob on purpose: mouse is degrees per PIXEL, the stick
@@ -1167,6 +1175,28 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Pitch",       &rig->pitch, 0.5f, rig->pitchMin, rig->pitchMax, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch Min",   &rig->pitchMin, 0.5f, -89.0f, 0.0f, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch Max",   &rig->pitchMax, 0.5f, 0.0f, 89.0f, "%.1f"); trackEdit();
+
+			// ── Lag ──────────────────────────────────────────────────────────
+			// Only the KNOBS live here. The smoothed pose behind them is play
+			// state, is not saved, and has nothing an author could set.
+			ImGui::SeparatorText("Lag");
+			EditorWidgets::checkbox("Camera Lag", &rig->lag.enabled); trackEdit();
+			if (rig->lag.enabled)
+			{
+				Row::dragFloat("Position Catch-Up", &rig->lag.positionSpeed, 0.1f, 0.5f, 50.0f, "%.1f");
+				trackEdit();
+				// Third person only: rotation lag moves the BOOM, and a boom of
+				// length 0 has no direction to trail.
+				if (rig->mode == CameraRigComponent::Mode::ThirdPerson)
+				{
+					Row::dragFloat("Rotation Catch-Up", &rig->lag.rotationSpeed, 0.1f, 0.5f, 50.0f, "%.1f");
+					trackEdit();
+				}
+				Row::dragFloat("Max Trail", &rig->lag.maxDistance, 0.05f, 0.0f, 20.0f, "%.2f m");
+				trackEdit();
+				Row::dragFloat("Snap Distance", &rig->lag.snapDistance, 0.1f, 0.0f, 100.0f, "%.2f m");
+				trackEdit();
+			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraRigComponent>(entity); }
 	}

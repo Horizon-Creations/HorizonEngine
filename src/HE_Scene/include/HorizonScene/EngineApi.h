@@ -597,6 +597,38 @@ namespace camera {
     float getRigYaw(Ctx&);
     float getRigPitch(Ctx&);
     void  addYawPitch(Ctx&, float dYaw, float dPitch);
+
+    // ── Lag ──────────────────────────────────────────────────────────────────
+    // The knobs are scene data; these set them from a script. snapRig is the
+    // one that is not a knob: it tells the rig to SET its pose on the next
+    // frame instead of easing into it, which is what a teleport, a respawn or a
+    // cut needs — the script knows before the rig could possibly work it out.
+    void  setLagEnabled(Ctx&, bool enabled);
+    bool  getLagEnabled(Ctx&);
+    void  setLagSpeeds(Ctx&, float position, float rotation);
+    void  snapRig(Ctx&);
+
+    // ── Shake ────────────────────────────────────────────────────────────────
+    // Returns a handle. `duration <= 0` runs until it is stopped — that is the
+    // "engine rumble while the vehicle is on" case, and it is the reason the
+    // handle exists at all. A one-shot may drop it. 0 means there was no rig.
+    int   playShake(Ctx&, float posAmplitude, float rotAmplitude,
+                    float frequency, float duration);
+    void  stopShake(Ctx&, int handle);
+    void  stopAllShakes(Ctx&);
+
+    // ── FOV kick ─────────────────────────────────────────────────────────────
+    // An additive offset with an attack/hold/decay envelope. Negative degrees
+    // zoom in. It never touches the camera's own fovDegrees, so getFov/setFov
+    // keep meaning the value the author set.
+    void  kickFov(Ctx&, float degrees, float attack, float hold, float decay);
+
+    // ── Blending between cameras ─────────────────────────────────────────────
+    // Hand the view to another camera over `seconds`, curve 0 linear,
+    // 1 smoothstep, 2 ease-out. `seconds <= 0` is a cut. This is the only way a
+    // blend starts: setting isMain by hand stays a hard cut.
+    void  blendTo(Ctx&, Entity camera, float seconds, int curve);
+    bool  isBlending(Ctx&);
 }
 
 // ── Environment (the world's EnvironmentComponent) ───────────────────────────

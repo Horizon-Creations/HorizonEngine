@@ -1,6 +1,9 @@
 #pragma once
 #include <entt/entt.hpp>
-#include <Application/Input.h>   // MouseFrame — embedded in CameraLookInput
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <Application/Input.h>          // MouseFrame — embedded in CameraLookInput
+#include <HorizonScene/CameraPose.h>    // SolvedPose, BlendCurve
 
 class HorizonWorld;
 class PhysicsWorld;
@@ -88,6 +91,29 @@ public:
     // The camera this controller drives: an entity with both CameraComponent and
     // CameraRigComponent, preferring isMain. entt::null when there is none.
     static entt::entity findRigCamera(entt::registry& reg);
+
+    // ── Switching cameras, with a blend ──────────────────────────────────────
+    // Hand the view to `toCamera` over `seconds`. This is the ONLY way a blend
+    // starts: setting isMain by hand stays a hard cut, the way it always was.
+    // Detecting the switch instead would need a "which camera was main last
+    // frame" somewhere, and this controller is deliberately stateless.
+    //
+    // It also carries a duty that is not decoration: it clears isMain on EVERY
+    // other camera. Uniqueness of isMain has so far been a convention, and both
+    // findRigCamera and RenderExtractor take the FIRST isMain they meet in
+    // entt view order — an order that shifts as pools grow. Two main cameras
+    // during a blend means the picture flicking between two poses in
+    // irregular frames, so this is the precondition for blending being
+    // reproducible at all, not a nicety.
+    //
+    // Returns false only when `toCamera` is not a usable camera entity.
+    // `seconds <= 0`, no source, or blending to the camera that is already
+    // showing are all cuts, and all return true.
+    static bool blendTo(HorizonWorld& world, entt::entity toCamera, float seconds,
+                        BlendCurve curve = BlendCurve::SmoothStep);
+
+    // Is the camera currently on screen easing in from another one?
+    static bool isBlending(entt::registry& reg);
 };
 
 } // namespace HE
