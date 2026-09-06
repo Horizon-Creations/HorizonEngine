@@ -15915,10 +15915,6 @@ TEST_CASE("A5: a widget draws only in the window it hangs in")
     wm.extract(9u, 400.0f, 300.0f, w9);
     CHECK(w9.empty());
 
-    CHECK(wm.hasVisibleWidgetsIn(0u));
-    CHECK(wm.hasVisibleWidgetsIn(7u));
-    CHECK_FALSE(wm.hasVisibleWidgetsIn(9u));
-
     // Closing a window takes its widgets with it and leaves the other alone.
     CHECK(wm.destroyWidgetsOfWindow(7u) == 1);
     CHECK_FALSE(wm.isAlive(tool));
@@ -16052,6 +16048,12 @@ TEST_CASE("A5: a dialog seals its own window and no other")
     // Window 0 has no layer of its own, so its page is still live — the modal
     // next door is window-modal, not application-modal.
     CHECK(wm.processPointer(0u, 1920.0f, 1080.0f, 100.0f, 25.0f, true, true));
+    // …and the scrim next door does not swallow window 0's clicks either. The
+    // dim is per window (extract emits it only in the modal's own), so claiming
+    // the pointer is on it would make the game behind window 0 unclickable.
+    CHECK(wm.pointerOverUI());
+    CHECK_FALSE(wm.processPointer(0u, 1920.0f, 1080.0f, 1900.0f, 1000.0f, false, true));
+    CHECK_FALSE(wm.pointerOverUI());
 
     // Escape belongs to the window it was pressed in. The keyboard is in
     // window 6 (showModal focused the dialog), so it closes THAT layer.

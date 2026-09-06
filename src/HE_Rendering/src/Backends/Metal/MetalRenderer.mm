@@ -15590,6 +15590,15 @@ void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uin
 			if ((int)size.width != pw || (int)size.height != ph)
 				layer.drawableSize = CGSizeMake(pw, ph);
 		}
+		// The UI pipelines are built with depthAttachmentPixelFormat =
+		// kDepthFormat (MetalRenderer.mm:6282, and every per-material UI
+		// pipeline with it), and Metal requires the pass to match: a pass
+		// WITHOUT a depth attachment fails validation, which in a release build
+		// is a silent dropped draw and a window that stays near-black. So the
+		// depth texture exists for the format's sake and for nothing else —
+		// nothing here tests against it, the widget tree is painter-ordered.
+		// RenderWidgetThumbnail makes its own for the same reason.
+		EnsureDepthTexture(target, pw, ph);
 
 		// This window's widgets, into the list EncodeUIPass reads. Saved and
 		// put back so the primary's frame is untouched by ours.
@@ -15613,9 +15622,13 @@ void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uin
 			// does not change colour with its renderer.
 			pass.colorAttachments[0].clearColor =
 				MTLClearColorMake(18.0 / 255.0, 18.0 / 255.0, 22.0 / 255.0, 1.0);
-			// No depth attachment on purpose: a widget tree is painter-ordered
-			// (zOrder, layer, depth) and a depth test would only be a second,
-			// disagreeing opinion about what is in front.
+			// Depth attached only to satisfy the pipelines' declared format (see
+			// EnsureDepthTexture above): cleared, never stored, never read. What
+			// is in front is decided by the painter order EncodeUIPass draws in.
+			pass.depthAttachment.texture     = (__bridge id<MTLTexture>)target.depthTexture;
+			pass.depthAttachment.loadAction  = MTLLoadActionClear;
+			pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			pass.depthAttachment.clearDepth  = 1.0;
 
 			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
 			// May hand back a SECOND encoder — a Backdrop material cuts the pass

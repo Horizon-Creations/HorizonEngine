@@ -746,9 +746,6 @@ public:
     // Every widget of this window, gone — what a closing window does to its
     // contents. Returns how many were destroyed.
     int      destroyWidgetsOfWindow(uint32_t windowId);
-    // Is there anything at all to draw there? The host asks before it spends a
-    // frame on a window.
-    bool     hasVisibleWidgetsIn(uint32_t windowId) const;
 
     void clear();
 

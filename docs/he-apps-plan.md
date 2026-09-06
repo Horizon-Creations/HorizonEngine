@@ -4391,9 +4391,24 @@ zusätzlich einmal im Log, für einen Wirt, der doch eines angehängt hat.
 zeichnete dieselbe Welt aus derselben Kamera noch einmal. Der neue
 `EncodeWindowUI` ist ein Pass: Drawable, Clear, `EncodeUIPass`, Present. Er
 borgt sich `m_renderWorld.uiObjects` genau so aus wie `RenderWidgetThumbnail`
-(getauscht und zurückgetauscht), und **keinen Tiefenpuffer** — ein Widget-Baum
-ist Maler-sortiert, ein Tiefentest wäre nur eine zweite, widersprechende Meinung
-darüber, was vorne ist.
+(getauscht und zurückgetauscht).
+
+**Und einen Tiefenpuffer, den niemand liest.** Der erste Entwurf ließ ihn weg —
+ein Widget-Baum ist Maler-sortiert, ein Tiefentest wäre eine zweite,
+widersprechende Meinung darüber, was vorne ist. Metal sieht das anders: die
+UI-Pipeline ist mit `depthAttachmentPixelFormat = kDepthFormat` gebaut
+(`MetalRenderer.mm:6282`, und jede Material-UI-Pipeline mit ihr), und ein Pass
+ohne Tiefenanhang passt dann nicht zur Pipeline. Das ist ein
+Validierungsfehler, und im Release-Build heißt das: der Draw fällt still aus
+und das Fenster bleibt fast schwarz. `RenderWidgetThumbnail` legt sich aus
+genau diesem Grund eine eigene Tiefentextur an — das war der Beleg, der im Baum
+schon stand. Also `EnsureDepthTexture`, geleert, nie gespeichert, nie gelesen.
+
+**7b. `pointerOverUI` musste denselben Weg gehen wie der Schleier.** Es
+antwortete `topW != nullptr || hasModal()` — global. Mit einem Dialog in einem
+Werkzeugfenster hätte das Hauptfenster gemeldet, der Zeiger sei auf der
+Oberfläche, und jeder Klick ins Spiel dahinter wäre in einer Verdunklung
+verschwunden, die dort gar nicht gezeichnet wird. Jetzt `hasModalIn(fenster)`.
 
 **8. Der Wirt erfährt vom Schließen, solange das Fenster noch da ist.**
 `OnWindowClosing(handle)` ist die Tür, und alle drei Wege gehen hindurch: der

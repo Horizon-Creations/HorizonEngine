@@ -3786,7 +3786,11 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	// A modal's dim covers the whole screen and is drawn by THIS class, not by
 	// any element — so nothing but this line can say that a click on it belongs
 	// to the UI. Without it, clicking beside a pause dialog fires into the game.
-	m_pointerOverUI = topW != nullptr || hasModal();
+	// …a modal IN THIS WINDOW, though. The scrim is drawn per window (see
+	// extract), so a dialog in a tool window does not cover the main window's
+	// game, and saying it did would make the main window's clicks vanish into a
+	// dim that is not there.
+	m_pointerOverUI = topW != nullptr || hasModalIn(windowId);
 	return m_pointerOverUI;
 }
 
@@ -6007,13 +6011,6 @@ int WidgetManager::destroyWidgetsOfWindow(uint32_t windowId)
 		if (w.windowId == windowId) ids.push_back(w.id);
 	for (const int id : ids) destroyWidget(id);
 	return static_cast<int>(ids.size());
-}
-
-bool WidgetManager::hasVisibleWidgetsIn(uint32_t windowId) const
-{
-	for (const Instance& w : m_instances)
-		if (w.visible && w.windowId == windowId) return true;
-	return false;
 }
 
 // The strip and, when one is open, its menu. Every rectangle comes from the same
