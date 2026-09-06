@@ -6296,7 +6296,19 @@ struct D3D12RendererImpl
         albedoRange.RegisterSpace                     = 0;
         albedoRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER params[5]{};
+        // t16, the forward SSR trace. NOT optional here: this root signature
+        // carries the SAME PSMain as the scene one, and D3D12 rejects a PSO
+        // whose pixel shader names a register the root signature does not cover
+        // — the branch on uSSRParams.x is a runtime test, so fxc keeps uSSRFwd
+        // in the blob either way. Skipping this makes every skinned mesh vanish.
+        D3D12_DESCRIPTOR_RANGE ssrRange{};
+        ssrRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ssrRange.NumDescriptors                    = 1;
+        ssrRange.BaseShaderRegister                = 16; // t16
+        ssrRange.RegisterSpace                     = 0;
+        ssrRange.OffsetInDescriptorsFromTableStart = 0;
+
+        D3D12_ROOT_PARAMETER params[6]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0 per-object
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -6314,6 +6326,12 @@ struct D3D12RendererImpl
         params[4].DescriptorTable.NumDescriptorRanges = 1; // t1 (albedo)
         params[4].DescriptorTable.pDescriptorRanges   = &albedoRange;
         params[4].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        // Same index the scene root signature uses for it, so the two do not
+        // drift apart when a later pass copies the wrong number.
+        params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[5].DescriptorTable.NumDescriptorRanges = 1; // t16 (forward SSR)
+        params[5].DescriptorTable.pDescriptorRanges   = &ssrRange;
+        params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // Same static samplers as the scene root sig: s0 shadow linear-clamp, s1 AO point-clamp,
         // s2 base-color linear-wrap, s3 GI linear-clamp. The shared PS references all four.
@@ -6336,7 +6354,7 @@ struct D3D12RendererImpl
         samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 5;
+        rsd.NumParameters     = 6; // params[5] = the t16 SSR table added in checkpoint D
         rsd.pParameters       = params;
         rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
@@ -8033,7 +8051,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(activeSkinnedPso);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
+            {
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                // Its own root signature, same param index — the skinned PSO
+                // carries the scene PSMain, so it reads t16 through this table.
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+            }
 
             for (const SkinnedDrawCall& sdc : cmds.skinnedDrawCalls())
             {

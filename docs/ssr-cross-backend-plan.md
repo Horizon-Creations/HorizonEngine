@@ -650,6 +650,14 @@ Render-Pass-Objekte, der DSV zu lösen ist ein Aufruf. Zusätzlich zu C1–C5:
 >    läuft genau einer der beiden Shader. Eigen sind nur Root-Signature (Root-CBV
 >    auf **b1**, dort liegt der `U`-Block ungepinnt) und Input-Layout
 >    (**TEXCOORD0/1**, nicht POSITION/NORMAL — dieselbe Falle wie auf D3D11).
+> 7. **`skinnedRootSig` braucht t16 genauso.** Die Skinned-Pipeline übersetzt
+>    denselben `PSMain` gegen ihre eigene Root-Signature. D3D12 lehnt ein PSO ab,
+>    dessen Pixelshader ein Register nennt, das die Root-Signature nicht deckt —
+>    und der Zweig auf `uSSRParams.x` ist eine Laufzeitprüfung, `uSSRFwd` bleibt
+>    also im Blob. Ohne den zweiten Eintrag entsteht das Skinned-PSO auf dem
+>    ersten Windows-Build gar nicht erst und jedes animierte Mesh verschwindet.
+>    Es sind mithin **zwei** Root-Signatures zu erweitern, nicht eine; beide
+>    tragen die Tabelle auf Parameter 5, damit die Nummer nicht auseinanderläuft.
 >
 > **Die geerbten Grenzen, unverändert:** SSR gibt es auf D3D12 nur im
 > Editor-Viewport (`usingHDR`; C6), Graph-Materialien bekommen kein SSR, weil
