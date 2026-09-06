@@ -24,6 +24,8 @@
 4. **Neue Spielprojekte bekommen regulären statt fetten UI-Text** (`fontWeightBold = false` für jedes neue Projekt), alte Projekte bleiben Bold. Eine Zeile, aber eine sichtbare.
 5. **Bestehende Spiele bekommen beim nächsten Export ein generiertes „widgets"-Icon**, weil der Loader den fehlenden Icon-Namen mit einem Default füllt und der Exporter das Icon unabhängig vom Projekttyp erzeugt.
 
+**Und ein Befund gegen den Plan:** Der Plan verspricht, jede Registry-Gruppe „leuchtet danach in HorizonCode, Lua und Python gleichzeitig auf". Das stimmt für `app`, `http`, `string.equals` und `fs`, aber **nicht für `widget`, `theme`, `dialog`, `clipboard`, `process`, `json`, `prefs`, `datetime`**: `isScriptGroup` in `EngineApi.cpp` kennt sie nicht, und Lua wie Python spiegeln nur die Gruppen dieser Liste. Listen, Dialoge, Ebenen, Animationen und Themes sind heute HorizonCode-only. Kein Merge-Blocker, aber eine Lücke in der Parität, die das Handbuch und die HorizonCode-Vision anders darstellen (Details 6.1 #9).
+
 **Empfehlung:** Den Branch als Ganzes mergen, nicht in Teilen. Die Abhängigkeitskette (HE_Core-Widgets, HE_Tools-Projektfelder, HE_Scene-Registry, Editor) lässt sich nicht sauber trennen, und der Trocken-Merge zeigt, dass es technisch nichts zu trennen gibt. Vorher die drei Punkte oben abarbeiten (Punkt 1 ist eine Zeile im Exporter, Punkt 2 eine Entscheidung zwischen Migration und Release-Note, Punkt 3 eine Kenntnisnahme). Die Merge-Reihenfolge, die der Mensch am 05.09. festgelegt hat, bleibt: **dieser Branch geht als letzter**, nach jedem Engine-Thema, und zieht main vorher noch einmal nach.
 
 ---
@@ -83,7 +85,11 @@ Der App-Modus ist in `GameApplication` ein einziges Bit, das an zwei Stellen gel
 
 Der Editor kennt denselben Schalter als Projektattribut (`ProjectData::appProject`, gesetzt über das Preset beim Anlegen, nicht nachträglich änderbar) und liest ihn an einer Stelle (`AppContext::appLivePreview`). Im App-Projekt gibt es keinen Play-Modus: die UI läuft permanent, der Viewport ist die App, der Play-Knopf heißt „Restart Live Preview", Details-Panel und Viewport-Toolbar entfallen, der Outliner zeigt Widget-Instanzen, die Szenenmenüs sind weg (ImGui und macOS-Leiste in Gleichschritt). Regel aus dem Code: „The editor is gated by the SAME block as the shipped app on purpose", die drei Berechtigungen binden also auch den Editor.
 
-**Zustellungs-Asymmetrie, geprüft:** `fireOnMenuItem`, `fireOnTrayItem` und `fireOnHttpResponse` werden nur in `GameApplication.cpp` aufgerufen (Zeilen 2191, 2201, 2241). In der Editor-Vorschau kommen Menü-, Tray- und HTTP-Ereignisse nicht an. Der Plan sagt das so; es ist eine bewusste Lücke, keine vergessene.
+**Zustellungs-Asymmetrie, geprüft:** `fireOnMenuItem`, `fireOnTrayItem` und `fireOnHttpResponse` werden nur in `GameApplication.cpp` aufgerufen (Zeilen 2191, 2201, 2241). In der Editor-Vorschau kommen Menü-, Tray- und HTTP-Ereignisse nicht an. Der Plan sagt das so; es ist eine bewusste Lücke, keine vergessene. Der Grund steht im Code: „a previewed graph must not put an icon in the menu bar of the machine somebody is working on."
+
+**Was der Spiel-Host für alle bindet:** Die neuen Host-Callbacks am `Ctx` (Fenster, Tray, Autostart, Menüleiste, Notify) bindet `GameApplication` unabhängig von `m_appMode`. Regel für ungebundene Zeilen: „Unset = the row logs once and does nothing." Ein Spiel-Graph kann also eine Menüleiste zeichnen oder ein Tray-Icon setzen; nur `app.requestRedraw` ist im Spiel stumm, „because a game already draws every frame". Ob das ein Feature oder ein Versehen ist, steht in 6.2 #34.
+
+Ebenfalls für alle Spiele aktiv sind die neuen Eingabepfade in `OnEvent` und `updateUIInput`: Datei-Drop, Systemthema-Wechsel, IME (`SDL_EVENT_TEXT_EDITING`), Wort-Navigation, Undo/Redo, Doppel- und Dreifachklick, rechte Maustaste, Tab, Gamepad-East, Menü-Kürzel. Ohne Menüleiste und Ebenen sind das Leerläufe, aber sie stehen vor der bisherigen Logik (6.1 #10, 6.2 #31 bis #33).
 
 ### 3.4 Die drei Runtime-Ausprägungen
 
@@ -95,9 +101,21 @@ Gemessen (Release, macOS/arm64): app-advanced 22,2 MB ohne Python (Rendering 1,1
 
 Der Ein-Satz-Vertrag aus Block C, wörtlich aus dem Plan: „**Die Berechtigung sagt, was ein SKRIPT von sich aus benennen darf. Sie sagt nie, was ein MENSCH auswählen darf.** Ein Pfad, den jemand in einem Dateidialog gewählt hat, ist danach frei, das Auswählen IST die Erlaubnis." Drei Türen (`allowFiles`, `allowProcesses`, `allowNetwork`), alle zu, gespeichert „gerade" (fehlend heißt zu), im Gegensatz zu `advancedShaderEffects` und `fontWeightBold`, die negiert gespeichert werden, weil ihr ehrlicher Default „an" ist. Drop und „Öffnen mit" gehen durch dieselbe Tür wie der Dateidialog (`fs::grantPath` im Host). Die Flags stehen in jedem Projekt, auch in Spielen; ein Spiel, das `fs` außerhalb von `Saved/` will, kann sie setzen.
 
+Was gegated ist und was nicht, jeweils mit Begründung im Code: `process.run`, `process.openUrl` und `app.setAutostart` über `processes` („it asks the SYSTEM to run a program at every login, which is a bigger thing than running one now"), `http.get`/`http.post` über `network`, jeder absolute Pfad in `fs` über `files` oder eine Laufzeit-Freigabe. Nicht gegated: `dialog.*` („The choosing IS the permission"), `clipboard`, `json`, `prefs`, `datetime`, `app.notify` („A notification cannot read anything, reach anywhere or start anything"), `process.which` („asking whether a tool is installed runs nothing"). Die Fenster-, Tray- und Menüzeilen haben keine Berechtigung; ihr Gate ist, ob der Host sie gebunden hat. Zwei Gates also, `perm::allowed` in der Registry und „ist der Callback gebunden" im Host.
+
+**Lua und Python** sehen von alldem nur die Gruppen aus `isScriptGroup`: `app`, `http`, `fs`, `string`, `ui` ja, `widget`, `theme`, `dialog`, `clipboard`, `process`, `json`, `prefs`, `datetime` nein (6.1 #9).
+
 ### 3.6 Wo die Cocoa-Dateien liegen
 
-`AppMacMenu.mm` und `AppNotify.mm` liegen in HE_Game, nicht in HE_Core: „Cocoa dort zöge AppKit in he_tests, hc_codegen, widget_gen und die Windows-CI." Die Editor-Menüleiste (`HE_Editor/MacMenuBar.mm`) ist davon unabhängig und teilt keinen Code.
+`AppMacMenu.mm` und `AppNotify.mm` liegen in HE_Game, nicht in HE_Core: „Cocoa dort zöge AppKit in he_tests, hc_codegen, widget_gen und die Windows-CI." Die Editor-Menüleiste (`HE_Editor/MacMenuBar.mm`) ist davon unabhängig und teilt keinen Code. Der Preis: jedes macOS-Spiel linkt Cocoa und UserNotifications (6.1 #11).
+
+### 3.7 Der UI-Pass in den Backends
+
+`UIRenderObject` ist das geteilte Vokabular zwischen Widget-Baum, ECS-UI und allen sechs Backends. Metal und GL implementieren die Schicht-0-Felder mit derselben `heRoundedBoxSDF` („one rule, two languages"), dazu pro Quad einen `HeUI`-Block (GL UBO-Bindung 8, Metal Fragment-Buffer 3) und den `heBackdrop`-Schnappschuss für Milchglas (GL `glCopyTexSubImage2D`, Metal teilt den Pass, `EncodeUIPass` gibt jetzt den Encoder zurück). D3D11, D3D12 und Vulkan sind unverändert; sie kompilieren, weil sie `cornerRadius` nie gelesen haben, und ignorieren Rundungen, Ränder, Verläufe und Schatten (7.4).
+
+Der Software-Renderer ist zweigeteilt: `SoftwareRaster` (Quads rein, Pixel raus, kein SDL, testbar) und `SoftwareRenderer` (IRenderer-Hülle, blittet per `SDL_GetWindowSurface`, Dirty-Rectangles). `GetCapabilities()` gibt alles `false` zurück, „and that is the honest answer rather than a limitation". Er kennt keine Materialien auf Quads (Schicht 0 plus Farbton), keine Gammakorrektur, keine komprimierten Texturen und nichts Dreidimensionales. Er sitzt trotzdem in der geteilten Factory und wird auch in der `game`-Ausprägung gelinkt (6.1 #13).
+
+Alle `HE_HAVE_SHADERC`-Guards in Metal und GL sind entfernt; der Materialpfad ist immer kompiliert, `he_materialshader` wird immer gebaut, und die UI-Pipelines lesen zuerst die vorkompilierten Varianten (`uiVertex`). Deferred, SSR, Decals und GI-Resolve bleiben bewusst hinter `HE_HAVE_SHADERC`.
 
 ---
 
@@ -172,28 +190,42 @@ Das ist der Abschnitt, an dem die Entscheidung hängt. Eine Zeile pro Punkt: was
 | 6 | Der Shader-Stub-Block im Root-`CMakeLists.txt` (Zeile 628) greift auf `src/HE_Tools/` zu, bevor `add_subdirectory(src/HE_Tools)` (Zeile 783) läuft | Wer den glslang-Block auf main umbaut | eigenes Target mit absolutem Pfad, funktioniert | Kein Fehler, nur textuelle Nähe. |
 | 7 | `createNewProject` schreibt `fontWeightBold = false` für **jedes** neue Projekt, Spiele eingeschlossen; ältere Projekte lesen „fehlt heißt Bold" | Neue Spielprojekte zeichnen Fließtext regular, alte bleiben Bold | `ProjectManager.cpp:1346` (schreibt `false`), `:1512` (liest Default `true`) | Entscheiden, ob Spiele weiter Bold bekommen sollen (`isApp ? false : true`, eine Zeile). |
 | 8 | `appIconName` fehlt in alten `.heproj`, der Loader nimmt `"widgets"`; neue Spiele bekommen `"sports_esports"`; der Exporter erzeugt das Icon, sobald der Name nicht leer ist, unabhängig von `appProject` | Ein bestehendes Spiel exportiert nach dem Merge mit einem generierten „widgets"-Icon, wo es vorher keins hatte | `ProjectManager.cpp:1349,1516` | Beim Laden leer lassen und das Icon nur erzeugen, wenn der Name gesetzt ist. |
+| 9 | Lua und Python erreichen `widget`, `theme`, `dialog`, `clipboard`, `process`, `json`, `prefs`, `datetime` nicht; die Registry wird nur für Gruppen aus `isScriptGroup` gespiegelt (auf HEAD: math, random, time, input, string, camera, env, entity, audio, debug, fs, save, scene, player, animator, movement, locomotion, particle, nav, physics, http, ui, app) | Jedes Lua-/Python-Projekt, Spiele und Apps, das Listen, Dialoge, Ebenen, Animationen oder Themes aus Textskripten steuern will | `EngineApi.cpp:5046-5083`, `ScriptContext.cpp:842`, `PyScriptBackend.cpp:326`; in `ScriptApi.cpp` gibt es zwar Durchreichungen (`setListCount`, `showModalWidget`), aber kein Lua-/Python-Binding ruft sie | Acht Namen in die Liste aufnehmen (je ein Kommentar, wie bei `http`), oder im Handbuch und im Plan als HorizonCode-only kennzeichnen. Kein Merge-Blocker. |
+| 10 | Drop-Ereignisse und `SDL_EVENT_SYSTEM_THEME_CHANGED` werden in `OnEvent` verschluckt (`return true`), unabhängig vom Modus; jeder gedroppte Pfad wird per `grantPath` für Skripte freigegeben | Alle Spiele; was in `OnEvent` danach käme, sieht die Events nicht mehr | `GameApplication.cpp:1919-1975` | Nur verschlucken, wenn ein Widget den Drop genommen hat; sonst Kenntnisnahme. |
+| 11 | Cocoa und UserNotifications werden in **jedes** macOS-Spiel gelinkt (`AppMacMenu.mm`, `AppNotify.mm` in HE_Game) | Jedes macOS-Spiel bekommt zwei Framework-Abhängigkeiten, die es nie ruft | `HE_Game/CMakeLists.txt:23-33` | Klein, hinnehmen; der Ort ist richtig (Cocoa darf nicht in HorizonCore). |
+| 12 | `layer.framebufferOnly = NO` für jedes Metal-Fenster, damit Milchglas den UI-Pass lesen kann | Jedes Metal-Spiel; der Treiber darf das kompakteste Swapchain-Layout nicht mehr wählen | `MetalRenderer.mm:9468` | Messen, oder an „Backdrop-Material im Pak" knüpfen. |
+| 13 | `RendererSoftware` wird auch in der `game`-Ausprägung gebaut und gelinkt, und `GameBackend = "Software"` in `config.json` ist für Spiele gültig | Ein Spiel mit dieser Einstellung lädt und tickt seine Welt, zeichnet aber nur die UI | `HE_Rendering/CMakeLists.txt:64`, `GameApplication.cpp:339` | Im Spiel-Host `Software` nur bei `appMode` zulassen, oder als Feature erklären (ein reines UI-Spiel ohne GPU ist denkbar). |
 
 ### 6.2 Aus den Berichten (nicht selbst nachgelesen)
 
 | # | Was | Wen trifft es | Empfehlung |
 |---|---|---|---|
-| 9 | `saveProject` schreibt die neuen Schlüssel bedingungslos | Jede `.heproj` ändert sich beim ersten Speichern (Churn in Git/Collab) | Hinnehmen oder nur bei Nicht-Default schreiben, wie es die `.hasset`-Serialisierung durchgehend tut. |
-| 10 | Jedes `.hpak` wächst um die 23 neuen Engine-Assets (14 Widgets, 9 Material-Functions), weil `addDirectories` den ganzen `Engine/`-Baum packt | Alle Exporte | Hinnehmen (klein) oder später nur referenzierte Engine-Assets packen. |
-| 11 | `UIRenderObject`-ABI: `cornerRadius` ist `vec4`, plus rund 100 Byte neue Felder; `BakedUIFont::glyphs` ist ein Vektor mit `glyph(cp)`-Zugriff statt `std::array<96>` | D3D11, D3D12, Vulkan lesen die neuen Felder nicht (der UI-Pass steht deshalb jetzt als P6 im Paritätsplan, `396e3faa`); jeder `glyphs[c-32]`-Zugriff außerhalb des Branches kompiliert nicht mehr | Kompiliert es auf Windows-CI? Der Branch hat Windows-CI grün (`runtime-flavors.yml`, Lauf 33968204444), also ja. Optische Parität auf D3D/Vulkan bleibt offen. |
-| 12 | Button-Beschriftung wird beim Laden in ein Text-Kind migriert (am JSON-Schlüssel `text`, nicht an einer Version), einseitig | Ein auf dem Branch gespeichertes Widget lädt auf main ohne Beschriftung | Nur relevant, wenn jemand nach dem Merge zurückgeht. |
-| 13 | `HorizonCodeCompiled.h` bekommt rund 17 neue virtuelle Methoden; `Context` wächst um zwei `std::function` | Per `HcCompiledLoader` geladene Game-Logic-Module, die gegen den alten Header gebaut wurden, haben ein anderes vtable-Layout | Release-Note: Game-Logic-Module neu bauen. Das war bei jeder HC-Erweiterung so. |
-| 14 | Shader-Varianten-Codec v2 (führende 0 als Versionsmarke); ein alter Runtime liest 0 Varianten und übersetzt zur Laufzeit | Alte Runtimes mit neuen Paks | Gleicher Fall wie #1, gleiche Lösung. |
-| 15 | Rund 450 KB eingebettete Fonts (Roboto Regular, Material Icons) in jedem Runtime, keine CMake-Option zum Ausschließen | Alle Builds | Hinnehmen; das Baken ist faul, nur die Bytes sind da. |
-| 16 | Native macOS-Menüleiste **fügt ein** statt zu ersetzen, damit SDLs Leiste in Spielen bleibt | Nur bei `setMenuBar`-Aufruf; ohne Aufruf unverändert | Kenntnisnahme. Der Thread-Beitrag warnt ausdrücklich, dass ein `NSApp.mainMenu = eigenes` „auch in jedem ausgelieferten Spiel" SDLs Leiste wegwerfen würde. |
-| 17 | `strip -x` plus Re-Sign auf jeder kopierten Runtime-Binary; Re-Sign-Fehler bricht den Export ab | Alle macOS/Linux-Exporte | Behalten (spart Dutzende MB), Fehlerfall im Build-Log sichtbar. |
-| 18 | Labels lassen genau einen abschließenden Zeilenumbruch fallen (Designer und Engine) | Ein Label „Text\n" war doppelt so hoch wie es aussah | Bugfix, behalten. |
-| 19 | `SplashScreen.cpp` verliert `STB_IMAGE_STATIC`, `stbi_*` bekommt Default-Sichtbarkeit in `libHorizonCore`; `HE_Editor/stb_image_impl.cpp` definiert dieselben Symbole | Interposition-Risiko, falls die stb-Versionen auseinanderlaufen | Beobachten; heute identische Version. |
-| 20 | `ConstantPixel`-Skalierungsmodus bedeutet jetzt „ein Canvas-Pixel ist ein geräteunabhängiger Pixel"; wirkt nur, wenn der Host `setDisplayScale` ruft | Spiele mit ConstantPixel, deren Host das ruft (`GameApplication` tut es) | Auf HiDPI größer als vorher. Behalten, ist die richtige Bedeutung. |
-| 21 | `themeStyled` ist für konstruierte Elemente `true`, für aus Datei gelesene ohne Schlüssel `false` | Neue Elemente im Designer bekommen Theme-Stile, sobald ein Theme Stile hat; `uiDefaultTheme()` hat keine, also zunächst kein optischer Unterschied | Behalten. |
-| 22 | `hasFocusedTextField()` antwortet nicht mehr „irgendetwas ist fokussiert", `setCaretFromPointer` bekommt `mouseY`, `TextEdit`-Enum ist verlängert (positional in Key-Tabellen benutzt) | C++-Hosts außerhalb des Repos | Keine bekannt. |
-| 23 | `he_shadercompiler` linkt als Stub, wenn glslang fehlt | Ein Game-Build ohne glslang-Fetch linkt jetzt statt zu scheitern | Andere Fehlerart, eher besser; in die Doku. |
-| 24 | `UIText::align` wird `alignH`/`alignV` (JSON-Schlüssel `align` bleibt, `alignV` default Middle); `UIBoxBase::minSize` wandert auf die Basis (JSON-Schlüssel bleibt) | C++-Code, der `align` liest | Keiner außerhalb des Branches. |
-| 25 | `Equals` bleibt Float-Vergleich, `String Equals` ist neu | Bestehende Graphen, die `Equals` auf Strings benutzten, waren schon vorher kaputt (alles gleich) | Release-Note. |
+| 14 | `saveProject` schreibt die neuen Schlüssel bedingungslos | Jede `.heproj` ändert sich beim ersten Speichern (Churn in Git/Collab) | Hinnehmen oder nur bei Nicht-Default schreiben, wie es die `.hasset`-Serialisierung durchgehend tut. |
+| 15 | Jedes `.hpak` wächst um die 23 neuen Engine-Assets (14 Widgets, 9 Material-Functions), weil `addDirectories` den ganzen `Engine/`-Baum packt | Alle Exporte | Hinnehmen (klein) oder später nur referenzierte Engine-Assets packen. Dazu 6.1 #11 und #12 zu Cocoa-Link und `framebufferOnly`. |
+| 16 | `UIRenderObject`-ABI: `cornerRadius` ist `vec4`, plus rund 100 Byte neue Felder; `BakedUIFont::glyphs` ist ein Vektor mit `glyph(cp)`-Zugriff statt `std::array<96>` | D3D11, D3D12, Vulkan lesen die neuen Felder nicht (der UI-Pass steht deshalb jetzt als P6 im Paritätsplan, `396e3faa`); jeder `glyphs[c-32]`-Zugriff außerhalb des Branches kompiliert nicht mehr | Kompiliert es auf Windows-CI? Der Branch hat Windows-CI grün (`runtime-flavors.yml`, Lauf 33968204444), also ja. Optische Parität auf D3D/Vulkan bleibt offen. |
+| 17 | Button-Beschriftung wird beim Laden in ein Text-Kind migriert (am JSON-Schlüssel `text`, nicht an einer Version), einseitig | Ein auf dem Branch gespeichertes Widget lädt auf main ohne Beschriftung | Nur relevant, wenn jemand nach dem Merge zurückgeht. |
+| 18 | `HorizonCodeCompiled.h` bekommt rund 17 neue virtuelle Methoden; `Context` wächst um zwei `std::function` | Per `HcCompiledLoader` geladene Game-Logic-Module, die gegen den alten Header gebaut wurden, haben ein anderes vtable-Layout | Release-Note: Game-Logic-Module neu bauen. Das war bei jeder HC-Erweiterung so. |
+| 19 | Shader-Varianten-Codec v2 (führende 0 als Versionsmarke); ein alter Runtime liest 0 Varianten und übersetzt zur Laufzeit | Alte Runtimes mit neuen Paks | Gleicher Fall wie #1, gleiche Lösung. |
+| 20 | Rund 450 KB eingebettete Fonts (Roboto Regular, Material Icons) in jedem Runtime, keine CMake-Option zum Ausschließen | Alle Builds | Hinnehmen; das Baken ist faul, nur die Bytes sind da. |
+| 21 | Native macOS-Menüleiste **fügt ein** statt zu ersetzen, damit SDLs Leiste in Spielen bleibt | Nur bei `setMenuBar`-Aufruf; ohne Aufruf unverändert | Kenntnisnahme. Der Thread-Beitrag warnt ausdrücklich, dass ein `NSApp.mainMenu = eigenes` „auch in jedem ausgelieferten Spiel" SDLs Leiste wegwerfen würde. |
+| 22 | `strip -x` plus Re-Sign auf jeder kopierten Runtime-Binary; Re-Sign-Fehler bricht den Export ab | Alle macOS/Linux-Exporte | Behalten (spart Dutzende MB), Fehlerfall im Build-Log sichtbar. |
+| 23 | Labels lassen genau einen abschließenden Zeilenumbruch fallen (Designer und Engine) | Ein Label „Text\n" war doppelt so hoch wie es aussah | Bugfix, behalten. |
+| 24 | `SplashScreen.cpp` verliert `STB_IMAGE_STATIC`, `stbi_*` bekommt Default-Sichtbarkeit in `libHorizonCore`; `HE_Editor/stb_image_impl.cpp` definiert dieselben Symbole | Interposition-Risiko, falls die stb-Versionen auseinanderlaufen | Beobachten; heute identische Version. |
+| 25 | `ConstantPixel`-Skalierungsmodus bedeutet jetzt „ein Canvas-Pixel ist ein geräteunabhängiger Pixel"; wirkt nur, wenn der Host `setDisplayScale` ruft | Spiele mit ConstantPixel, deren Host das ruft (`GameApplication` tut es) | Auf HiDPI größer als vorher. Behalten, ist die richtige Bedeutung. |
+| 26 | `themeStyled` ist für konstruierte Elemente `true`, für aus Datei gelesene ohne Schlüssel `false` | Neue Elemente im Designer bekommen Theme-Stile, sobald ein Theme Stile hat; `uiDefaultTheme()` hat keine, also zunächst kein optischer Unterschied | Behalten. |
+| 27 | `hasFocusedTextField()` antwortet nicht mehr „irgendetwas ist fokussiert", `setCaretFromPointer` bekommt `mouseY`, `TextEdit`-Enum ist verlängert (positional in Key-Tabellen benutzt) | C++-Hosts außerhalb des Repos | Keine bekannt. |
+| 28 | `he_shadercompiler` linkt als Stub, wenn glslang fehlt | Ein Game-Build ohne glslang-Fetch linkt jetzt statt zu scheitern | Andere Fehlerart, eher besser; in die Doku. |
+| 29 | `UIText::align` wird `alignH`/`alignV` (JSON-Schlüssel `align` bleibt, `alignV` default Middle); `UIBoxBase::minSize` wandert auf die Basis (JSON-Schlüssel bleibt) | C++-Code, der `align` liest | Keiner außerhalb des Branches. |
+| 30 | `Equals` bleibt Float-Vergleich, `String Equals` ist neu | Bestehende Graphen, die `Equals` auf Strings benutzten, waren schon vorher kaputt (alles gleich) | Release-Note. |
+| 31 | Fokus und Tippen sind zwei Zustände: `setFocus(feld)` startet kein Tippen mehr, erst Enter, Leertaste oder Klick (`isEditingText`); Pfeiltasten-Navigation läuft jetzt auch bei offener Liste | Ein Spiel, das ein Namensfeld programmatisch fokussiert, braucht `activateFocused` | Release-Note. Die alte Antwort „ein Button hat die Tastatur" war falsch. |
+| 32 | Positionale Startargumente werden im ersten Frame als `OnFileDropped` zugestellt und per `grantPath` freigegeben | Spiele, die mit Argumenten gestartet werden | An `appMode` binden oder als Feature erklären. |
+| 33 | Tab → `focusNext`, Gamepad-East → `closeTopLayer`, Escape-Reihenfolge (Feld verlassen, Ebene schließen, dann Maus), `menuShortcutFromKey` als Erstes in jedem Key-Down | Alle Spiele; ohne Menüleiste und Ebenen Leerläufe, aber vor der bisherigen Logik | Akzeptabel, dokumentieren. |
+| 34 | `app.*` Menü-, Tray- und Fensterzeilen sind im Spiel-Host gebunden (nur `requestRedraw` ist stumm); ein Spiel-Graph kann eine Menüleiste zeichnen, ein Tray-Icon setzen, das Fenster umbenennen. Der Editor bindet Tray, Menü, Notify bewusst nicht | Spiele | Entweder an `appMode` binden oder als Feature für Spiele erklären. Autostart ist gegated, der Rest nicht. |
+| 35 | `dialog.*` blockiert bis zu fünf Minuten und pumpt SDL-Events, ohne sie zu dispatchen; im Spiel friert das die Welt ein | Spiele, die Dateidialoge rufen | Gewollt für modale Dialoge; ein Spiel hatte sie bisher nicht. |
+| 36 | Veraltete Kommentare: `EngineApi.h:1007` und `ProjectConfig.h:74` nennen `network` „reserved, nothing reads it yet", `http::start` liest es | Leser | Zwei Kommentare korrigieren. |
+| 37 | `heBackdrop` (GLSL-Bindung 9) und die GI-Schattenmaske (Bindung 10) sind auf Metal beide auf Textur 5 gepinnt (`MaterialShaderLibrary.cpp:1855-1863`); Slot-Wiederverwendung im Sinne der Tabelle, kritisch nur, wenn ein Shader beide referenziert | Metal, UI-Materialien | Der Milchglas-Commit lief auf Hardware; einen Test mit beiden Referenzen in einem Shader nachziehen. |
+| 38 | `HcCodegen` kennt nur `Get/Set Property (Ref)` neu; ob die übrigen neuen Registry-Zeilen über `cppCall` automatisch im Codegen landen, hat kein Bericht geprüft | Packaged Builds mit kompiliertem HorizonCode | Paritäts-Harness (Interpreter gegen Codegen) für die neuen Zeilen laufen lassen. |
+| 39 | `UICursorSDL.h` merkt sich den zuletzt gesetzten Cursor in einer statischen Variable; eine andere Stelle, die `SDL_SetCursor` direkt ruft, wird nicht gesehen | Hosts, die den Cursor selbst setzen | Kenntnisnahme. |
 
 ---
 
@@ -218,9 +250,9 @@ Keine. Der Trocken-Merge ist konfliktfrei. Die drei überlappenden Dateien (`ci.
 |---|---|---|
 | `project.hcfg` | v4 (Theme), v5 (Bundle-Id), neue Flag-Bits (appMode, ¬advancedShaderEffects, drei Berechtigungen, zwei Font-Bits, ¬fontWeightBold) | v2/v3 ja, v4/v5 **nein** (siehe 6.1 #1). Flag-Bits ignoriert ein alter Runtime. |
 | `.heproj` | rund 14 neue Schlüssel, unbedingt geschrieben | ja, unbekannte Schlüssel werden ignoriert |
-| `.hasset` (Widget) | rund 30 neue Schlüssel, alle nur bei Nicht-Default geschrieben („byte-gleich" ist die durchgehende Regel); Button-Caption-Migration einseitig | ja, bis auf Button-Beschriftung (#12) |
+| `.hasset` (Widget) | rund 30 neue Schlüssel, alle nur bei Nicht-Default geschrieben („byte-gleich" ist die durchgehende Regel); Button-Caption-Migration einseitig | ja, bis auf Button-Beschriftung (6.2 #17) |
 | `.hasset` (Theme) | neuer Asset-Typ, `AssetType::Theme` angehängt, `CHUNK_THEM` | main kennt den Typ nicht |
-| Material-Varianten-Blob | v2 mit `uiVertex` | alter Runtime liest 0 Varianten (#14) |
+| Material-Varianten-Blob | v2 mit `uiVertex` | alter Runtime liest 0 Varianten (6.2 #19) |
 | Material-Graph | `FnInput` mit `p[1]` Default, `p[2]` Flag; sechs Knoten angehängt | alte Graphen behalten 0.5 |
 | Enums | `RendererBackend::Software = 5`, `ProjectPreset::Application…COUNT`, `UICursor` +2, `AssetType::Theme`, `UIElementType` +8, `UIEase`, `UIThemeRole` | alles angehängt, gespeicherte Werte bleiben gültig |
 
@@ -258,14 +290,17 @@ Vor dem Merge:
 2. 6.1 #1 fixen: `project.hcfg` v5 nur bei nicht ableitbarer Bundle-Id oder nur bei `appMode`.
 3. 6.1 #2 entscheiden: Graph-Migration für Create Widget oder Release-Note.
 4. 6.1 #7 und #8 entscheiden: Schriftgewicht und Icon-Default für Spielprojekte.
-5. main noch einmal hereinholen, voller ctest (Release, seriell wegen `runtime_size`), `he_tests` komplett.
-6. Branch-Filter in `runtime-flavors.yml` bereinigen (braucht das gh-Token).
-7. PR statt direktem Push, CI auf allen drei Plattformen abwarten (die Windows- und Linux-Fehler dieses Branches wurden alle nur dort gefunden).
+5. 6.1 #13 und 6.2 #34 entscheiden: Software-Backend und `app.*`-Menü/Tray im Spiel-Host an `appMode` binden oder als Feature erklären.
+6. 6.1 #9 entscheiden: acht Gruppen in `isScriptGroup` aufnehmen oder als HorizonCode-only dokumentieren.
+7. Zwei veraltete `network`-Kommentare korrigieren (6.2 #36).
+8. main noch einmal hereinholen, voller ctest (Release, seriell wegen `runtime_size`), `he_tests` komplett, Paritäts-Harness für die neuen Registry-Zeilen (6.2 #38).
+9. Branch-Filter in `runtime-flavors.yml` bereinigen (braucht das gh-Token).
+10. PR statt direktem Push, CI auf allen drei Plattformen abwarten (die Windows- und Linux-Fehler dieses Branches wurden alle nur dort gefunden).
 
 Nach dem Merge:
 
-8. Release-Note mit: Show Widget Pflicht, Fixed-Step-Verwurf, Game-Logic-Module neu bauen, Runtime-Bundles neu bauen, `String Equals`, Fenstergröße auf Windows/X11 mit Skalierung.
-9. Verifikationsliste auf echter Hardware: Windows-Fenstergröße, GL-Schicht-0, D3D/Vulkan-UI-Parität (P6), Autostart Windows/Linux.
-10. Entscheidung zum ECS-UI (abbilden oder entfernen) als eigenes Thema aufmachen.
-11. EngineContent-Binärdateien: Repo oder SFTP.
-12. Gedächtnis und Masterplan-Logbuch nachziehen (Kurzstand-Register Block A/E).
+11. Release-Note mit: Show Widget Pflicht, Fokus ist nicht Tippen, Fixed-Step-Verwurf, Game-Logic-Module neu bauen, Runtime-Bundles neu bauen, `String Equals`, Fenstergröße auf Windows/X11 mit Skalierung, Startargumente als `OnFileDropped`, Drop-Events werden verschluckt.
+12. Verifikationsliste auf echter Hardware: Windows-Fenstergröße, GL-Schicht-0, D3D/Vulkan-UI-Parität (P6), Autostart Windows/Linux, `framebufferOnly`-Kosten auf Metal.
+13. Entscheidung zum ECS-UI (abbilden oder entfernen) als eigenes Thema aufmachen.
+14. EngineContent-Binärdateien: Repo oder SFTP.
+15. Gedächtnis und Masterplan-Logbuch nachziehen (Kurzstand-Register Block A/E).
