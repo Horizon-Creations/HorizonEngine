@@ -3004,9 +3004,12 @@ void EditorApplication::OnRender(float dt)
 			if (m_selectedEntity != entt::null &&
 			    m_editorWorld->registry().valid(m_selectedEntity))
 			{
+				// Not gated on `visible`. A hidden rope is the one that most needs
+				// its handles: with nothing drawn and nothing to grab, the only way
+				// back to it is the Outliner, and switching Visible off would have
+				// meant losing the thing you were in the middle of shaping.
 				auto& reg = m_editorWorld->registry();
-				if (const auto* rope = reg.try_get<RopeComponent>(m_selectedEntity);
-				    rope && rope->visible)
+				if (const auto* rope = reg.try_get<RopeComponent>(m_selectedEntity))
 				{
 					RopeTrailSystem::appendRopeGuides(
 						*rope,
@@ -3014,8 +3017,7 @@ void EditorApplication::OnRender(float dt)
 						                                      m_selectedEntity, *rope),
 						HE::worldMatrixOf(*m_editorWorld, m_selectedEntity), dbg);
 				}
-				if (const auto* trail = reg.try_get<TrailComponent>(m_selectedEntity);
-				    trail && trail->visible)
+				if (const auto* trail = reg.try_get<TrailComponent>(m_selectedEntity))
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
