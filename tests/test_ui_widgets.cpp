@@ -149,6 +149,11 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             // Reads Text as markup instead of as words — off, so every label
             // written before it still shows the '<' it was given.
             { "RichText", UIPropType::Bool },
+            // A reader may pick the words up and copy them — off, so nothing
+            // written before it starts swallowing the presses meant for what it
+            // sits on. Named the way the field names them.
+            { "Selectable", UIPropType::Bool },
+            { "Selection Color", UIPropType::Color },
             { "Align H", UIPropType::Int },
             { "Align V", UIPropType::Int } } },
         // Three state colours and nothing else: a Button is a surface, and its
@@ -1735,6 +1740,343 @@ TEST_CASE("Rich text: clicking a link fires with its id, clicking the words besi
     CHECK(wm.hoverCursor() == HE::UICursor::Hand);
     wm.processPointer(400.0f, 200.0f, 2.0f, ly, false, true);
     CHECK(wm.hoverCursor() != HE::UICursor::Hand);
+}
+
+// ── A label somebody may select in (plan B6, the rest) ───────────────────────
+
+TEST_CASE("Selectable label: off is off, and off is what every existing label is")
+{
+    HE::UIText t;
+    t.text = "Hello world";
+    CHECK_FALSE(t.selectable);
+    CHECK_FALSE(t.selectionEnabled());
+    // Not interactive: a caption on a button must not eat the press meant for
+    // the button, and a heading must not take the keyboard focus.
+    CHECK_FALSE(t.interactive());
+    // …and it has no rows to select in, so nothing downstream can act as if it
+    // did.
+    CHECK(t.selectRows({ 0.0f, 0.0f, 400.0f, 40.0f }, 1.0f).empty());
+
+    // The file it saves is the file it always saved: neither key is written.
+    nlohmann::json j;
+    t.writeJson(j);
+    CHECK_FALSE(j.contains("selectable"));
+    CHECK_FALSE(j.contains("selectionColor"));
+
+    // On, it is interactive — and that is the ONLY thing the flag changes about
+    // what a label is.
+    t.selectable = true;
+    CHECK(t.selectionEnabled());
+    CHECK(t.interactive());
+    nlohmann::json j2;
+    t.writeJson(j2);
+    CHECK(j2.value("selectable", false));
+    HE::UIText back;
+    back.readJson(j2);
+    CHECK(back.selectable);
+    CHECK(back.selectionColor.r == doctest::Approx(t.selectionColor.r));
+
+    // Rich text WINS. Markup lays out in runs of several sizes and a hit test
+    // over those is a different problem; half-built it would highlight one word
+    // and copy another.
+    t.richText = true;
+    CHECK(t.selectable);            // the flag is still what the author set
+    CHECK_FALSE(t.selectionEnabled());
+    CHECK(t.selectRows({ 0.0f, 0.0f, 400.0f, 40.0f }, 1.0f).empty());
+}
+
+TEST_CASE("Selectable label: the rows the glyphs are drawn from are the rows the caret is found in")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    HE::UIText t;
+    t.selectable = true;
+    t.autoSize   = false;
+    t.fontSize   = 20.0f;
+    t.alignV     = 0;                  // top, so row 0 starts at the rect's top
+    t.text = "one two three four five six seven eight nine";
+    t.wordWrap = true;
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 160.0f, 200.0f };
+
+    const std::vector<HE::UITextSelectRow> rows = t.selectRows(px, 1.0f);
+    REQUIRE(rows.size() > 1);          // it really did wrap
+    // The rows partition the text: no gap and no overlap, and the last one ends
+    // at the end. A split that lost a byte is a word you cannot select.
+    CHECK(rows.front().begin == 0);
+    CHECK(rows.back().end == t.text.size());
+    for (size_t i = 1; i < rows.size(); ++i)
+        CHECK(rows[i].begin == rows[i - 1].next);
+
+    // Aiming at the middle of a character on row 1 lands INSIDE row 1 — the
+    // whole point of one split: with two, the caret would come from a row the
+    // glyphs were never drawn on.
+    const HE::UITextSelectRow& r1 = rows[1];
+    const float midY = r1.top + t.fontSize * 0.5f;
+    const size_t at = t.caretAtPoint(px, 1.0f, r1.x + 1.0f, midY);
+    CHECK(at >= r1.begin);
+    CHECK(at <= r1.end);
+
+    // Far left of a row is its start, far right its end.
+    CHECK(t.caretAtPoint(px, 1.0f, -50.0f, midY) == r1.begin);
+    CHECK(t.caretAtPoint(px, 1.0f, 1000.0f, midY) == r1.end);
+    // Above the first row lands on it, below the last on that one: dragging off
+    // the edge of a paragraph must not drop the selection.
+    CHECK(t.caretAtPoint(px, 1.0f, -50.0f, -500.0f) == rows.front().begin);
+    CHECK(t.caretAtPoint(px, 1.0f, 1000.0f, 5000.0f) == rows.back().end);
+}
+
+TEST_CASE("Selectable label: a centred label is hit where it is drawn, not where it would start")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    // The trap alignment brings: the glyphs of a centred or right-aligned label
+    // do not begin at the rect's left edge, so a hit test that assumed they did
+    // would answer several characters out on every label that is not left-aligned.
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 40.0f };
+    for (int align : { 0, 1, 2 })
+    {
+        HE::UIText t;
+        t.selectable = true;
+        t.autoSize   = false;
+        t.fontSize   = 20.0f;
+        t.alignH     = align;
+        t.text       = "abcdef";
+        const std::vector<HE::UITextSelectRow> rows = t.selectRows(px, 1.0f);
+        REQUIRE(rows.size() == 1);
+        const float y = rows[0].top + 1.0f;
+        // Left of the glyphs is offset 0 whatever the alignment, and one pixel
+        // into them is still 0 — the midpoint rule.
+        CHECK(t.caretAtPoint(px, 1.0f, rows[0].x - 5.0f, y) == 0u);
+        // Past the last glyph is the end of the text, and the x that means
+        // "past" moves with the alignment. Asking at the rect's right edge is
+        // what a right-aligned label would fail if x were ignored.
+        CHECK(t.caretAtPoint(px, 1.0f, rows[0].x + rows[0].width + 5.0f, y) == t.text.size());
+        // A centred label really is centred: its glyphs start away from 0.
+        if (align == 1) CHECK(rows[0].x > 1.0f);
+        if (align == 2) CHECK(rows[0].x > 1.0f);
+        if (align == 0) CHECK(rows[0].x == doctest::Approx(0.0f));
+    }
+}
+
+TEST_CASE("Selectable label: drawing it is drawing the same glyphs, plus a selection behind them")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 60.0f };
+    HE::UIText plain, sel;
+    for (HE::UIText* t : { &plain, &sel })
+    {
+        t->autoSize = false; t->fontSize = 20.0f;
+        t->text = "Hello world";
+    }
+    sel.selectable = true;
+
+    std::vector<UIRenderObject> a, b;
+    plain.render(px, {}, {}, 1.0f, a);
+    sel.render(px, {}, {}, 1.0f, b);
+    // Same glyphs in the same places: the row path exists to agree with the
+    // block path, not to move the text.
+    REQUIRE(a.size() == b.size());
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        CHECK(a[i].position.x == doctest::Approx(b[i].position.x));
+        CHECK(a[i].position.y == doctest::Approx(b[i].position.y));
+    }
+
+    // With something selected there is one quad more, and it is BEHIND the
+    // glyphs — a highlight drawn over the words is a highlight that hides them.
+    sel.selAnchor = 0; sel.caret = 5;
+    std::vector<UIRenderObject> c;
+    sel.render(px, {}, {}, 1.0f, c);
+    CHECK(c.size() == b.size() + 1);
+    CHECK(c.front().type != 2);          // the quad, before any glyph
+    CHECK(c.front().color.a == doctest::Approx(sel.selectionColor.a));
+}
+
+TEST_CASE("Selectable label: a multi-line selection is one run, not several unrelated ones")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    HE::UIText t;
+    t.selectable = true; t.autoSize = false; t.fontSize = 18.0f; t.alignV = 0;
+    t.text = "first\n\nthird";
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 120.0f };
+    const std::vector<HE::UITextSelectRow> rows = t.selectRows(px, 1.0f);
+    REQUIRE(rows.size() == 3);           // the blank line in the middle is a row
+
+    t.selAnchor = 0; t.caret = t.text.size();
+    std::vector<UIRenderObject> out;
+    t.render(px, {}, {}, 1.0f, out);
+    int quads = 0;
+    for (const UIRenderObject& o : out) if (o.type != 2) ++quads;
+    // One per row INCLUDING the empty one: a selected blank line drawn as
+    // nothing makes a run read as two.
+    CHECK(quads == 3);
+}
+
+TEST_CASE("Selectable label: a trailing newline does not push the text half a line up")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    // layoutUITextLines drops exactly one trailing empty line, because an empty
+    // last row is half the block's height. The row split has to drop the same
+    // one, or ticking Selectable would move a centred label.
+    HE::UIText a, b;
+    for (HE::UIText* t : { &a, &b })
+    { t->selectable = true; t->autoSize = false; t->fontSize = 18.0f; }
+    a.text = "Option 2";
+    b.text = "Option 2\n";
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 300.0f, 60.0f };
+    CHECK(a.selectRows(px, 1.0f).size() == 1);
+    CHECK(b.selectRows(px, 1.0f).size() == 1);
+    CHECK(a.selectRows(px, 1.0f)[0].top == doctest::Approx(b.selectRows(px, 1.0f)[0].top));
+    // …but a DELIBERATE blank line survives: only one is dropped.
+    HE::UIText c;
+    c.selectable = true; c.autoSize = false; c.fontSize = 18.0f;
+    c.text = "a\n\n";
+    CHECK(c.selectRows(px, 1.0f).size() == 2);
+}
+
+TEST_CASE("Selectable label: what a reader selects with the pointer is what lands in the clipboard")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int label = t.add(HE::UIWidgetType::Text);
+    {
+        auto* e = dynamic_cast<HE::UIText*>(t.find(label));
+        e->name = "Label"; e->selectable = true; e->autoSize = false;
+        e->fontSize = 20.0f; e->alignV = 0;
+        e->setProp("Text", HE::UIPropValue::ofString("alpha beta gamma"));
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 400.0f; e->sizeY = 60.0f;
+    }
+    registerWidget(cm, t);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto* live = dynamic_cast<const HE::UIText*>(wm.tree(id)->find(label));
+    REQUIRE(live);
+
+    // Where the row actually is, asked of the same list the draw uses.
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 60.0f };
+    const std::vector<HE::UITextSelectRow> rows = live->selectRows(px, 1.0f);
+    REQUIRE(rows.size() == 1);
+    const float y = rows[0].top + live->fontSize * 0.5f;
+    const float xEnd = rows[0].x + rows[0].width;
+
+    // Press at the start, drag to the end: that is a selection, and it is what
+    // a copy would take.
+    wm.processPointer(400.0f, 200.0f, rows[0].x, y, true, true);
+    CHECK(wm.isSelectingText());
+    CHECK(wm.focusedElement() == label);
+    // …and NOT "editing": a label has nothing to type into, and a host that
+    // routed every key here would let it swallow Return.
+    CHECK_FALSE(wm.isEditingText());
+    wm.processPointer(400.0f, 200.0f, xEnd, y, true, true);
+    wm.processPointer(400.0f, 200.0f, xEnd, y, false, true);
+    CHECK(wm.focusedSelection() == "alpha beta gamma");
+
+    // The pointer says so before the press does.
+    wm.processPointer(400.0f, 200.0f, rows[0].x + 5.0f, y, false, true);
+    CHECK(wm.hoverCursor() == HE::UICursor::Text);
+
+    // A double-click takes the word under it, not the line.
+    wm.processPointer(400.0f, 200.0f, rows[0].x + 2.0f, y, true, true);
+    wm.processPointer(400.0f, 200.0f, rows[0].x + 2.0f, y, false, true);
+    CHECK(wm.selectWordAtPointer(400.0f, 200.0f, rows[0].x + 2.0f, y));
+    CHECK(wm.focusedSelection() == "alpha");
+
+    // Ctrl+A takes all of it; the caret keys move without changing a character.
+    CHECK(wm.selectAllFocused());
+    CHECK(wm.focusedSelection() == "alpha beta gamma");
+    CHECK(wm.editFocusedText(WidgetManager::TextEdit::Home, false));
+    CHECK(wm.focusedSelection().empty());
+    CHECK(wm.editFocusedText(WidgetManager::TextEdit::WordRight, true));
+    CHECK(wm.focusedSelection() == "alpha");
+    CHECK(wm.editFocusedText(WidgetManager::TextEdit::End, true));
+    CHECK(wm.focusedSelection() == "alpha beta gamma");
+    // The text itself never moved.
+    CHECK(live->text == "alpha beta gamma");
+    // …and nothing that would edit it answers at all.
+    CHECK_FALSE(wm.editFocusedText(WidgetManager::TextEdit::Delete, false));
+    CHECK_FALSE(wm.deleteFocusedSelection());
+    CHECK(live->text == "alpha beta gamma");
+}
+
+TEST_CASE("Selectable label: static text is not on the Tab route")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 300.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    auto place = [&](int id, float y, float h)
+    {
+        HE::UIElement* e = t.find(id);
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = y; e->sizeX = 380.0f; e->sizeY = h;
+    };
+    const int f1 = t.add(HE::UIWidgetType::TextInput);
+    place(f1, 0.0f, 30.0f);
+    const int para = t.add(HE::UIWidgetType::Text);
+    {
+        auto* e = dynamic_cast<HE::UIText*>(t.find(para));
+        e->selectable = true; e->autoSize = false;
+        e->setProp("Text", HE::UIPropValue::ofString("a paragraph between two fields"));
+        place(para, 40.0f, 40.0f);
+    }
+    const int f2 = t.add(HE::UIWidgetType::TextInput);
+    place(f2, 90.0f, 30.0f);
+    registerWidget(cm, t);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Tab walks the two FIELDS and steps over the paragraph — no toolkit puts
+    // static text in a form's tab order, and paying a Tab per paragraph is what
+    // makes a keyboard user give up on a page.
+    REQUIRE(wm.setFocus(id, f1));
+    CHECK(wm.focusNext(false, 400.0f, 300.0f));
+    CHECK(wm.focusedElement() == f2);
+
+    // But it is still reachable — by a click, and by setFocus, which is the
+    // difference between "not on the route" and "not focusable".
+    CHECK(wm.setFocus(id, para));
+    CHECK(wm.isSelectingText());
+    // …and Tab from there goes on to the next field rather than back to the top.
+    CHECK(wm.focusNext(false, 400.0f, 300.0f));
+    CHECK(wm.focusedElement() == f2);
+}
+
+TEST_CASE("Selectable label: the up arrow keeps the column it left from")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    HE::UIText t;
+    t.selectable = true; t.autoSize = false; t.fontSize = 18.0f; t.alignV = 0;
+    t.text = "aaaaaaaaaa\nbb\ncccccccccc";
+    // Never drawn: nothing has been measured, so the arrows say so rather than
+    // jumping to the start of the row above.
+    CHECK(t.rowSizePx == doctest::Approx(0.0f));
+    CHECK(t.rowRanges().size() == 3);
+
+    // Drawn once — that is what remembers the width and the size.
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 120.0f };
+    std::vector<UIRenderObject> out;
+    t.render(px, {}, {}, 1.0f, out);
+    CHECK(t.rowSizePx == doctest::Approx(18.0f));
+
+    const std::vector<HE::UITextVisualLine> rows = t.rowRanges();
+    REQUIRE(rows.size() == 3);
+    // Column eight of row one, down through the SHORT row, and back up: a walk
+    // that forgot the column would come back at the end of "bb" instead.
+    const float col = t.caretXInRow(rows[0], 8);
+    CHECK(t.byteAtRowX(rows[2], col) == rows[2].begin + 8);
+    // The short row has nowhere near that column and clamps to its own end.
+    CHECK(t.byteAtRowX(rows[1], col) == rows[1].end);
 }
 
 // ── Multi-line text ───────────────────────────────────────────────────────────

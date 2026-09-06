@@ -73,6 +73,21 @@ public:
 };
 
 // ── Text ──────────────────────────────────────────────────────────────────────
+// One drawn row of a selectable label: which bytes it shows and where it shows
+// them, in pixels. The draw, the hit test and the arrow keys all read the same
+// list — the reason richLayoutOf exists one screen further down, and the reason
+// this does. Two answers to "where does row two start" is a selection that
+// highlights a different word than the one under the pointer.
+struct UITextSelectRow
+{
+    std::size_t begin = 0;   // first byte drawn on the row
+    std::size_t end   = 0;   // one past the last byte drawn — where End sits
+    std::size_t next  = 0;   // first byte of the row below (past what a break ate)
+    float       x     = 0.0f;   // left edge of the row's glyphs
+    float       top   = 0.0f;   // top of the row's line box
+    float       width = 0.0f;   // width of the drawn run
+};
+
 class HE_API UIText final : public UIElement
 {
 public:
@@ -109,6 +124,42 @@ public:
     // literal '<' — and the element becomes clickable exactly when the markup
     // declares a link, not before (see interactive()).
     bool        richText = false;
+
+    // ── A label a reader may select and copy (plan B6, the rest) ─────────────
+    // Off, and off is what every label authored so far means: a caption on a
+    // button must not eat the press meant for the button, and a heading that
+    // takes the keyboard focus is a heading that swallowed Tab. With it on the
+    // label is still not editable — it takes a caret, a selection, Ctrl+A and
+    // Ctrl+C, and nothing that would change a character of it.
+    //
+    // RICH TEXT WINS. A markup label lays out in runs of different sizes and
+    // colours, and a hit test over those is a different problem from a hit test
+    // over one font; half-built it would highlight one word and copy another.
+    // So `selectionEnabled()` and not `selectable` is what everything asks.
+    bool        selectable = false;
+    // The same default the text field carries, so a selection looks like a
+    // selection wherever the reader made it.
+    glm::vec4   selectionColor{ 0.25f, 0.45f, 0.80f, 0.75f };
+
+    // ── Selection state (runtime, never serialized) ──────────────────────────
+    // Byte offsets into `text`, always on character boundaries — `caret` is the
+    // end the reader is dragging, `selAnchor` the end they started at. Equal
+    // means nothing is selected. On the element rather than in the manager for
+    // the same reason the field keeps its own: a widget holds a live copy, and
+    // two instances of the same label select independently.
+    std::size_t caret = 0;
+    std::size_t selAnchor = 0;
+    // The width the words break against and the size they are measured at, both
+    // only knowable while drawing and both needed by an arrow key, which arrives
+    // without a viewport. Same reasoning and same mutability as the field's
+    // wrapWidthPx/wrapSizePx; before the first draw they are zero and rowRanges()
+    // falls back to the authored breaks.
+    mutable float rowWidthPx = 0.0f;
+    mutable float rowSizePx  = 0.0f;
+    // The column Up and Down are aiming for, in pixels, or -1 for "none yet".
+    // Walking a paragraph must come back to the same place it left rather than
+    // creep left on every short line — the field learned this the same way.
+    mutable float preferredCaretX = -1.0f;
 
     UIText() { sizeX = 200.0f; sizeY = 30.0f; }
     UIWidgetType type() const override { return UIWidgetType::Text; }
@@ -151,7 +202,50 @@ public:
     // A label is inert; a label with a link in it is not. Asking the MARKUP
     // rather than the flag is what keeps a rich label that happens to have no
     // link from swallowing the clicks meant for whatever is behind it.
-    bool interactive() const override { return richText && parsed().hasLinks; }
+    // A label is inert; one with a link in it, or one a reader may select in,
+    // is not. Both halves are opt-in, so nothing that exists today starts
+    // swallowing the presses meant for what it sits on.
+    bool interactive() const override
+    { return selectionEnabled() || (richText && parsed().hasLinks); }
+
+    // ── Selecting and copying ────────────────────────────────────────────────
+    // May this label be selected in at all? Everything asks THIS and not the
+    // flag, so the rich-text exception lives in one place (see `selectable`).
+    bool selectionEnabled() const { return selectable && !richText; }
+    bool hasSelection() const { return caret != selAnchor; }
+    std::size_t selMin() const { return caret < selAnchor ? caret : selAnchor; }
+    std::size_t selMax() const { return caret < selAnchor ? selAnchor : caret; }
+    std::string selectedText() const;
+    // The text can be rewritten under a selection by a script, an animation or
+    // a component parameter, so every entry point re-clamps rather than trusting
+    // offsets taken before the last frame.
+    void clampCaret();
+    void selectAllText() { selAnchor = 0; caret = text.size(); }
+    void clearSelection() { selAnchor = caret; }
+
+    // The rows this label draws, laid out in `px`. Empty when the label is not
+    // selectable, has no usable font or no size — the callers all treat that as
+    // "no selection to be had", which is exactly what it is.
+    std::vector<UITextSelectRow> selectRows(const UIWidgetRect& px, float pxScaleY,
+                                            float fontScale = 1.0f) const;
+    // Byte offset nearest to a point, in the same pixel space `selectRows` uses.
+    // A point above the first row lands on it and one below the last on that —
+    // dragging off the top of a paragraph must not drop the selection.
+    std::size_t caretAtPoint(const UIWidgetRect& px, float pxScaleY, float x, float y,
+                             float fontScale = 1.0f) const;
+
+    // The rows as byte ranges only, without geometry — what Home, End and the
+    // up/down arrows need, and they arrive without a viewport. Comes out of the
+    // width and size the last draw remembered, so it is the SAME split the
+    // glyphs were laid out with; before the first draw it is the authored
+    // breaks, which is what a label that has never been on screen has.
+    std::vector<HE::UITextVisualLine> rowRanges() const;
+    // Where a byte sits across its own row, and which byte is nearest a column
+    // — the two halves of walking up and down a paragraph. Both answer 0 and
+    // the row's start while the label has never been drawn (no measured size),
+    // which is what makes the arrows a no-op there rather than a wrong jump.
+    float       caretXInRow(const HE::UITextVisualLine& row, std::size_t byte) const;
+    std::size_t byteAtRowX(const HE::UITextVisualLine& row, float x) const;
 
 private:
     mutable std::string      m_parsedFrom;   // the markup m_parsed was built from

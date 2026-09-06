@@ -7425,6 +7425,40 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 		}
 	}
 
+	// A focused selectable label (PIE) takes only the keys that select and copy.
+	// The packaged game's twin says why this is its own block and not a wider
+	// version of the one below.
+	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().isSelectingText() &&
+	    event.type == SDL_EVENT_KEY_DOWN)
+	{
+		WidgetManager& wm = m_editorWorld->widgets();
+		using TE = WidgetManager::TextEdit;
+		const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+		const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+		const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
+		switch (event.key.key)
+		{
+		case SDLK_LEFT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);  return true;
+		case SDLK_RIGHT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift); return true;
+		case SDLK_HOME: wm.editFocusedText(TE::Home, shift); return true;
+		case SDLK_END:  wm.editFocusedText(TE::End,  shift); return true;
+		case SDLK_UP:   wm.editFocusedText(TE::Up,   shift); return true;
+		case SDLK_DOWN: wm.editFocusedText(TE::Down, shift); return true;
+		case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+		case SDLK_C:
+			if (ctrl)
+			{
+				const std::string sel = wm.focusedSelection();
+				if (!sel.empty()) SDL_SetClipboardText(sel.c_str());
+				return true;
+			}
+			break;
+		default: break;
+		}
+	}
+
 	// A focused in-game text field (PIE) owns the keyboard: route text + edit keys
 	// to the widget. Checked before Esc so typing works, but Esc still releases.
 	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().isEditingText())

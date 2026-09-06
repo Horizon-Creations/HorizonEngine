@@ -3775,3 +3775,54 @@ verschiebt keine Zuordnung.
 **Angeschaltet ist es genau in einem Bauteil**, dem Suchfeld, mit einem Parameter zum Abschalten.
 Überall sonst aus, byte-gleich für jede vorhandene Datei: `clearButton` wird nur geschrieben, wenn
 es gesetzt ist.
+
+### B6 der Rest: ein Text, den man mitnehmen kann (06.09.2026)
+
+Eine Fehlermeldung, die man nicht kopieren kann, ist eine Fehlermeldung, die man abtippt.
+`UIText::selectable`, Vorgabe aus, und aus ist, was jedes bisher geschriebene Label meint: eine
+Aufschrift auf einem Knopf darf den Druck nicht fressen, und eine Überschrift, die den
+Tastaturfokus nimmt, ist eine Überschrift, die Tab verschluckt hat. Beide JSON-Schlüssel werden
+nur geschrieben, wenn der Schalter an ist, jede vorhandene Datei bleibt also byte-gleich.
+
+**Ein Umbruch, nicht zwei, und das ist der ganze Grund für den eigenen Zeichenpfad.** `render`
+gab den ganzen String an die Textschicht, die ihn mit `layoutUITextLines` teilt; der Trefferpunkt
+muss Bytes benennen und hätte `uiTextWrapRanges` gefragt. Das sind zwei greedy-Implementierungen
+desselben Gedankens, und wo sie auseinanderlaufen, sitzt die Auswahlfläche ein Wort neben den
+Glyphen, unter denen sie liegen soll. Ein auswählbares Label zeichnet deshalb **Zeile für Zeile
+aus derselben Liste**, aus der sein Caret kommt (`selectRows`), und diese Liste rechnet die drei
+Zeilen von `emitUITextGlyphs` nach, mit denen ein Block platziert wird. Der Test prüft genau das:
+dieselben Glyphen an denselben Stellen wie vorher, nur ein Quad mehr dahinter.
+
+**Kein Umbau von `UITextInput`.** Ein gemeinsamer Basistyp wäre die sauberere Zeichnung gewesen
+und hätte das eine riskiert, was in diesem Thema jede Meldung verspricht: dass vorhandene Felder
+unverändert zeichnen. Der Manager hat stattdessen einen zweiten, kleinen Pfad
+(`focusedSelectableLabel`, `labelCaretAtPointer`, `editFocusedLabel`) neben dem des Feldes, und
+die gemeinsamen Eingänge (`setCaretFromPointer`, `dragCaretFromPointer`, `selectWordAtPointer`,
+`focusedSelection`, `editFocusedText`) fallen auf ihn zurück, wenn kein Feld den Fokus hat.
+
+**`RichText` schlägt `Selectable`.** Markup läuft in Runs verschiedener Größen, und ein Treffer
+darüber ist ein anderes Problem; halb gebaut markierte es ein Wort und kopierte ein anderes.
+Deshalb fragt alles `selectionEnabled()` und nie den Schalter selbst.
+
+**Statischer Text steht nicht auf der Tab-Route.** Er ist fokussierbar (Klick, Pfeiltasten,
+`setFocus`), aber Tab geht daran vorbei: kein Werkzeugkasten stellt Fließtext in die Tab-Reihenfolge
+eines Formulars, und ein Absatz zwischen zwei Feldern kostet sonst einen Tastendruck pro Absatz.
+Wer es anders will, sagt es mit einem positiven `Tab Index`. Im Element bleibt es trotzdem stehen,
+aus demselben Grund wie ein negativer Index: Tab kann gedrückt werden, während man darauf steht,
+und die Antwort darauf muss „der nächste von HIER" sein.
+
+**Ein Label ist nicht am Bearbeiten.** `isEditingText()` bleibt dem Feld, `isSelectingText()` ist
+die zweite, kleinere Frage — und beide Wirte leiten dafür einen **eigenen, kürzeren Tastensatz**
+weiter (Pfeile, Pos1/Ende, Umschalt, Ctrl+A, Ctrl+C). Hätte man den Block darunter nur breiter
+gemacht, würde ein Absatz das Return des Formulars schlucken, in dem er steht.
+
+**Die Pfeile hoch und runter merken sich ihre Spalte** (`preferredCaretX`), sonst wandert ein Weg
+durch einen Absatz bei jeder kurzen Zeile nach links. Sie brauchen dafür eine gemessene Breite,
+die es erst nach dem ersten Zeichnen gibt (`rowWidthPx`/`rowSizePx`, dieselbe Veränderlichkeit und
+derselbe Rückfall wie beim mehrzeiligen Feld); vorher antworten sie mit „nein" statt mit einem
+Sprung an den Zeilenanfang.
+
+**Ehrlich offen:** ein einzelnes `\r` mitten in einer Zeile bleibt in einem auswählbaren Label
+stehen, wo der alte Pfad es schluckt — die Bereichsteilung kann kein Byte aus der Mitte entfernen,
+ohne dass Offsets und Text auseinanderfallen. CRLF ist abgedeckt (das `\r` vor einem `\n` liegt
+außerhalb des Bereichs), ein einsames nicht.

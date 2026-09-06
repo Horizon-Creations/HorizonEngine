@@ -2057,6 +2057,42 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 	// Not under game-only routing: there the UI receives nothing, and a field
 	// that still held focus from before the switch would otherwise keep eating
 	// the movement keys with no way for the player to take them back.
+	// A focused selectable LABEL owns a much smaller grammar than a field: it
+	// can be selected in and copied out of, and nothing else. Its own block
+	// rather than a widening of the one below, so a paragraph cannot swallow
+	// Return, Backspace or a letter the application bound to something.
+	if (m_world && HE::api::input::mode() != HE::api::input::Mode::GameOnly &&
+	    m_world->widgets().isSelectingText() && event.type == SDL_EVENT_KEY_DOWN)
+	{
+		WidgetManager& wm = m_world->widgets();
+		using TE = WidgetManager::TextEdit;
+		const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+		const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+		const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
+		switch (event.key.key)
+		{
+		case SDLK_LEFT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);  return true;
+		case SDLK_RIGHT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift); return true;
+		case SDLK_HOME: wm.editFocusedText(TE::Home, shift); return true;
+		case SDLK_END:  wm.editFocusedText(TE::End,  shift); return true;
+		case SDLK_UP:   wm.editFocusedText(TE::Up,   shift); return true;
+		case SDLK_DOWN: wm.editFocusedText(TE::Down, shift); return true;
+		case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+		case SDLK_C:
+			if (ctrl)
+			{
+				const std::string sel = wm.focusedSelection();
+				if (!sel.empty()) SDL_SetClipboardText(sel.c_str());
+				return true;
+			}
+			break;
+		// Everything else belongs to whatever the application does with it. A
+		// label is not a text box and must not act like one.
+		default: break;
+		}
+	}
 	if (m_world && HE::api::input::mode() != HE::api::input::Mode::GameOnly &&
 	    m_world->widgets().isEditingText())
 	{

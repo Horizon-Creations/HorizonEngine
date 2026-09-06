@@ -581,6 +581,10 @@ const UIPropTable& UIText::propTable() const
         uiprop::slot<&UIText::wordWrap>({ "WordWrap", UIPropType::Bool }),
         uiprop::slot<&UIText::autoSize>({ "AutoSize", UIPropType::Bool }),
         uiprop::slot<&UIText::richText>({ "RichText", UIPropType::Bool }),
+        // Named the way the field names them, so a theme binding written for one
+        // resolves the same way on the other.
+        uiprop::slot<&UIText::selectable>    ({ "Selectable", UIPropType::Bool }),
+        uiprop::slot<&UIText::selectionColor>({ "Selection Color", UIPropType::Color }),
         // 0/1/2 each. The details panel draws these two as ONE 3×3 grid (see
         // UIEditorPanel) rather than as two number fields — the first attribute
         // that needed a hand-built editor, because "which of nine positions" is
@@ -1328,12 +1332,236 @@ void UIText::render(const UIWidgetRect& px, const UIElementRenderState& st,
                            richLayoutOf(*this, px, pxScaleY, st.fontScale), color, layer, out);
         return;
     }
+    // ── A label somebody can select in ───────────────────────────────────────
+    // Its own path, and that is the whole point of it. The path below hands the
+    // WHOLE string to the text layer, which splits it with layoutUITextLines;
+    // the hit test has to address bytes and therefore asks uiTextWrapRanges.
+    // Those are two greedy word-wraps, and where they disagree the highlight
+    // sits a word away from the glyphs it is supposed to be under. So a
+    // selectable label draws row by row out of the SAME list its caret is
+    // computed from. A label without the flag keeps the old path untouched, so
+    // every label authored so far emits byte for byte what it always did.
+    if (selectionEnabled())
+    {
+        const float sizePx = st.fontPx(fontSize, pxScaleY);
+        const std::vector<UITextSelectRow> rows = selectRows(px, pxScaleY, st.fontScale);
+        if (!rows.empty())
+        {
+            const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+            HE::UITextLayout mopts;
+            auto widthOf = [&](size_t from, size_t to)
+            {
+                if (to <= from) return 0.0f;
+                const std::string run = text.substr(from, to - from);
+                return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, mopts)
+                          : HE::measureUIText(run, sizePx, 0.0f, mopts)).x;
+            };
+
+            // The selection first, behind the glyphs, so the words stay readable
+            // on top of it. Same three shapes as the multiline field: the first
+            // row from the anchor to its end, whole rows between, the last from
+            // its start to the caret.
+            if (hasSelection())
+            {
+                const size_t a = std::min(selMin(), text.size());
+                const size_t b = std::min(selMax(), text.size());
+                for (const UITextSelectRow& r : rows)
+                {
+                    if (r.end < a || r.begin > b) continue;
+                    const size_t ra = std::min(std::max(a, r.begin), r.end);
+                    const size_t rb = std::min(std::max(b, r.begin), r.end);
+                    const float xa = widthOf(r.begin, ra), xb = widthOf(r.begin, rb);
+                    // A row whose break is inside the selection gets a small stub
+                    // past its last character; without it a selected blank line is
+                    // invisible and one run reads as several unrelated ones.
+                    const float stub = (r.end < b) ? sizePx * 0.35f : 0.0f;
+                    quad(out, r.x + xa, r.top, std::max(1.0f, xb - xa + stub), sizePx,
+                         selectionColor);
+                }
+            }
+
+            // The glyphs, a row at a time. Each row goes into its OWN one-row
+            // rect at the position selectRows worked out, so the text layer has
+            // nothing left to align or re-split.
+            HE::UITextLayout ropts;   // alignH left, alignV middle: the row IS the box
+            for (const UITextSelectRow& r : rows)
+            {
+                if (r.end <= r.begin) continue;
+                emitTextL(*this, text.substr(r.begin, r.end - r.begin), { r.x, r.top },
+                          { r.width, sizePx }, sizePx, color, ropts, out);
+            }
+            return;
+        }
+        // No usable font or no size: fall through and draw the way a label
+        // always did rather than draw nothing.
+    }
+
     HE::UITextLayout opts;
     opts.alignH = alignH;
     opts.alignV = alignV;
     opts.wrap   = wordWrap;
     emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, st.fontPx(fontSize, pxScaleY),
               color, opts, out);
+}
+
+// ── Selecting and copying a label ────────────────────────────────────────────
+
+std::string UIText::selectedText() const
+{
+    if (!hasSelection()) return {};
+    const size_t a = std::min(selMin(), text.size());
+    const size_t b = std::min(selMax(), text.size());
+    return text.substr(a, b - a);
+}
+
+void UIText::clampCaret()
+{
+    if (caret > text.size())     caret = text.size();
+    if (selAnchor > text.size()) selAnchor = text.size();
+    // Off a character boundary is what a rewritten text leaves behind, and half
+    // a letter in the clipboard is worse than a caret that moved.
+    while (caret > 0 && caret < text.size() &&
+           (static_cast<unsigned char>(text[caret]) & 0xC0) == 0x80) --caret;
+    while (selAnchor > 0 && selAnchor < text.size() &&
+           (static_cast<unsigned char>(text[selAnchor]) & 0xC0) == 0x80) --selAnchor;
+}
+
+std::vector<HE::UITextVisualLine> UIText::rowRanges() const
+{
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    const HE::BakedUIFont& font = fp ? *fp : HE::sharedUIFont();
+    std::vector<HE::UITextVisualLine> lines =
+        (wordWrap && font.ok && rowWidthPx > 0.0f && rowSizePx > 0.0f)
+            ? HE::uiTextWrapRanges(font, text, rowSizePx, rowWidthPx)
+            : HE::uiTextVisualLines(text);
+    // A trailing break does not start a row. The same rule layoutUITextLines
+    // follows, and for the same reason: an empty last row is half the block's
+    // height, so a centred label whose author pressed Enter to mean "done"
+    // would sit half a line too high the moment it became selectable. Exactly
+    // one is dropped, so a deliberate blank line still leaves one.
+    if (lines.size() > 1 && lines.back().end <= lines.back().begin) lines.pop_back();
+    return lines;
+}
+
+float UIText::caretXInRow(const HE::UITextVisualLine& row, size_t byte) const
+{
+    if (rowSizePx <= 0.0f) return 0.0f;
+    const size_t to = std::min(std::max(byte, row.begin), row.end);
+    if (to <= row.begin) return 0.0f;
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout opts;
+    const std::string run = text.substr(row.begin, to - row.begin);
+    return (fp ? HE::measureUIText(*fp, run, rowSizePx, 0.0f, opts)
+               : HE::measureUIText(run, rowSizePx, 0.0f, opts)).x;
+}
+
+size_t UIText::byteAtRowX(const HE::UITextVisualLine& row, float x) const
+{
+    if (rowSizePx <= 0.0f || x <= 0.0f) return row.begin;
+    // The same midpoint rule the pointer follows, so an arrow key and a click
+    // land on the same character when they are aimed at the same column.
+    size_t best = row.begin;
+    for (size_t i = row.begin; i < row.end; )
+    {
+        const size_t nx = HE::uiUtf8Next(text, i);
+        if (x < (caretXInRow(row, i) + caretXInRow(row, nx)) * 0.5f) return i;
+        best = nx;
+        i = nx;
+    }
+    return best;
+}
+
+std::vector<UITextSelectRow> UIText::selectRows(const UIWidgetRect& px, float pxScaleY,
+                                                float fontScale) const
+{
+    std::vector<UITextSelectRow> rows;
+    if (!selectionEnabled()) return rows;
+    const float sizePx = fontSize * pxScaleY * fontScale;
+    if (sizePx <= 0.0f) return rows;
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    const HE::BakedUIFont& font = fp ? *fp : HE::sharedUIFont();
+    if (!font.ok) return rows;
+
+    // Remembered BEFORE the rows are asked for, because the rows come out of
+    // them: this is the one place that knows how wide the words may run, and an
+    // arrow key arrives later with no viewport to work it out from.
+    rowWidthPx = px.w;
+    rowSizePx  = sizePx;
+    std::vector<HE::UITextVisualLine> lines = rowRanges();
+    if (lines.empty()) return rows;
+
+    HE::UITextLayout opts;   // for the line spacing, which nothing here changes
+    const float step = sizePx * opts.lineSpacing;
+    const float n    = static_cast<float>(lines.size());
+    const float blockHeight = (n - 1.0f) * step + sizePx;
+    // The same three lines emitUITextGlyphs uses to place a block, because the
+    // rows have to land where that function would have put them.
+    float blockCentre = px.y + px.h * 0.5f;                       // 1 = middle
+    if (alignV == 0)      blockCentre = px.y + blockHeight * 0.5f;
+    else if (alignV == 2) blockCentre = px.y + px.h - blockHeight * 0.5f;
+    const float firstCentre = blockCentre - (n - 1.0f) * step * 0.5f;
+
+    HE::UITextLayout mopts;
+    rows.reserve(lines.size());
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        const HE::UITextVisualLine& ln = lines[i];
+        const std::string run = text.substr(ln.begin, ln.end - ln.begin);
+        const float w = run.empty() ? 0.0f
+                                    : HE::measureUIText(font, run, sizePx, 0.0f, mopts).x;
+        // Per ROW, not per block — centring a paragraph centres each of its
+        // lines, which is what centring text means (emitUITextGlyphs again).
+        const float slack = std::max(0.0f, px.w - w);
+        const float x = px.x + (alignH == 1 ? slack * 0.5f
+                              : alignH == 2 ? slack
+                                            : 0.0f);
+        rows.push_back({ ln.begin, ln.end, ln.next, x,
+                         firstCentre + static_cast<float>(i) * step - sizePx * 0.5f, w });
+    }
+    return rows;
+}
+
+size_t UIText::caretAtPoint(const UIWidgetRect& px, float pxScaleY, float x, float y,
+                            float fontScale) const
+{
+    const std::vector<UITextSelectRow> rows = selectRows(px, pxScaleY, fontScale);
+    if (rows.empty()) return 0;
+    const float sizePx = fontSize * pxScaleY * fontScale;
+    HE::UITextLayout opts;
+    const float step = sizePx * opts.lineSpacing;
+
+    // Which row the point is on. Above the first lands on it, below the last on
+    // that one: dragging off the edge of a paragraph extends the selection to
+    // the end rather than dropping it.
+    long idx = 0;
+    if (step > 0.0f)
+        idx = static_cast<long>(std::floor((y - rows.front().top) / step));
+    if (idx < 0) idx = 0;
+    if (idx >= static_cast<long>(rows.size())) idx = static_cast<long>(rows.size()) - 1;
+    const UITextSelectRow& r = rows[static_cast<size_t>(idx)];
+
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout mopts;
+    auto widthTo = [&](size_t to)
+    {
+        if (to <= r.begin) return 0.0f;
+        const std::string run = text.substr(r.begin, to - r.begin);
+        return (fp ? HE::measureUIText(*fp, run, sizePx, 0.0f, mopts)
+                   : HE::measureUIText(run, sizePx, 0.0f, mopts)).x;
+    };
+    const float local = x - r.x;
+    if (local <= 0.0f) return r.begin;
+    // Walk the boundaries and take the one whose midpoint the point passed —
+    // aiming at the left half of a character puts the caret in front of it.
+    size_t best = r.begin;
+    for (size_t i = r.begin; i < r.end; )
+    {
+        const size_t nx = HE::uiUtf8Next(text, i);
+        if (local < (widthTo(i) + widthTo(nx)) * 0.5f) return i;
+        best = nx;
+        i = nx;
+    }
+    return best;
 }
 
 // ── Button ───────────────────────────────────────────────────────────────────
@@ -2224,7 +2452,10 @@ void UIText::writeJson(nlohmann::json& j) const
   // before there was a vertical alignment still loads with its text where it was.
   j["align"] = alignH; j["alignV"] = alignV;
   // Only when it is on: a label that never heard of markup saves byte-identically.
-  if (richText) j["richText"] = true; }
+  if (richText) j["richText"] = true;
+  // …and the same bargain for selecting: an existing label writes neither key,
+  // so every .hasset in the tree stays byte for byte what it was.
+  if (selectable) { j["selectable"] = true; j["selectionColor"] = colJson(selectionColor); } }
 void UIText::readJson(const nlohmann::json& j)
 { text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
   color = colFrom(j.value("color", nlohmann::json()), color);
@@ -2237,7 +2468,11 @@ void UIText::readJson(const nlohmann::json& j)
   alignV   = j.value("alignV", alignV);
   // Absent = off, which is the only safe default: a label authored before this
   // may hold a literal '<' that markup would eat.
-  richText = j.value("richText", false); }
+  richText = j.value("richText", false);
+  // Absent = off, like markup: a label nobody marked selectable must not start
+  // taking the focus and the presses of whatever it sits on.
+  selectable = j.value("selectable", false);
+  selectionColor = colFrom(j.value("selectionColor", nlohmann::json()), selectionColor); }
 
 void UIButton::writeJson(nlohmann::json& j) const
 {

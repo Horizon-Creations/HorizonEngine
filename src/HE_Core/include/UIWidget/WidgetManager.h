@@ -598,6 +598,13 @@ public:
     // started SDL text input, and swallowed every key from gameplay, for a
     // focused button.
     bool hasFocusedTextField() const;
+    // True while a selectable LABEL has the focus (plan B6, the rest). Its own
+    // question and not folded into the one above, because the two own different
+    // amounts of the keyboard: a field takes every key including Return and the
+    // letters, a label takes only the ones that move a caret, select and copy.
+    // A host that routed everything here would let a paragraph swallow the Enter
+    // meant for the form it sits in.
+    bool isSelectingText() const;
 
     // The cursor the currently-hovered element requests (set by processPointer;
     // Default when nothing is hovered). The app maps it to a system cursor.
@@ -936,6 +943,15 @@ private:
     // double-click all need — three copies of it would drift.
     bool caretOffsetAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY,
                               size_t& outOffset);
+    // …and the same two for a selectable label. Apart from the field's pair
+    // rather than folded into them: a field's text starts six pixels in from
+    // its left edge and nowhere else, a label sits in one of nine positions and
+    // wraps against its own width, so there is no shared arithmetic to have.
+    HE::UIText* focusedSelectableLabel(Instance*& outWidget);
+    bool labelCaretAtPointer(float vpWidth, float vpHeight, float mouseX, float mouseY,
+                             size_t& outOffset);
+    // What editFocusedText does when the focus is on a label instead of a field.
+    bool editFocusedLabel(TextEdit op, bool extendSelection);
     // Undo and redo differ by one bool and nothing else, so they share a body.
     bool stepFocusedTextHistory(bool redo);
     // Close the open undo group of whatever field currently has the focus. Used

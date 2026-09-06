@@ -2444,6 +2444,12 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 				    e.type() == HE::UIWidgetType::Text &&
 				    !linkAtPoint(w, e.id, x, y).empty())
 					hit.cursor = HE::UICursor::Hand;
+				// …and a label somebody may select in asks for the I-beam, for
+				// the same reason the field does: the shape is what tells a
+				// reader that the words can be picked up at all.
+				if (hit.cursor == HE::UICursor::Default)
+					if (const auto* lb = dynamic_cast<const HE::UIText*>(&e))
+						if (lb->selectionEnabled()) hit.cursor = HE::UICursor::Text;
 				// …and a splitter asks for the arrows only where it can be
 				// GRABBED. Its rect covers both panes, so asking by type alone
 				// would put a resize cursor over the whole thing and promise a
@@ -3159,6 +3165,25 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					// extends the selection instead of moving the caret.
 					w.draggingText = hot;
 				}
+				// A label somebody may select in: focus it and drop the caret,
+				// exactly like the field above minus the one thing a label does
+				// not have. m_focusEditing stays where it is — nothing here is
+				// being edited, and a label that claimed to be would take the
+				// keyboard away from a form it happens to sit in.
+				else if (const auto* lb = dynamic_cast<const HE::UIText*>(e);
+				         lb && lb->selectionEnabled())
+				{
+					if (w.focusedElem != hot)
+					{
+						if (w.focusedElem != 0)
+							fireP(&HorizonCode::Runtime::fireOnUnfocused, w.focusedElem);
+						w.focusedElem = hot;
+						m_focusWidget = w.id;
+						fireP(&HorizonCode::Runtime::fireOnFocused, hot);
+					}
+					setCaretFromPointer(vpWidth, vpHeight, mouseX, mouseY);
+					w.draggingText = hot;
+				}
 				else
 				{
 					if (w.focusedElem != 0 && w.focusedElem != hot)
@@ -3793,7 +3818,7 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 	m_visualDirty = true;   // see inputText
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
-	if (!ti) return false;
+	if (!ti) return editFocusedLabel(op, extendSelection);
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
 
 	// Selection off: the caret still moves, it just never drags an anchor
@@ -3936,11 +3961,123 @@ bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
 	return false;
 }
 
+// The same keys on a label, and only the ones that mean something there. A
+// label cannot be typed into, so Delete and DeleteWordLeft answer false rather
+// than quietly doing nothing that looks like something; everything else moves a
+// caret and drags an anchor behind it exactly as it does in a field. No undo
+// run to seal and no OnTextChanged to fire: nothing here changes a character.
+bool WidgetManager::editFocusedLabel(TextEdit op, bool extendSelection)
+{
+	Instance* w = nullptr;
+	HE::UIText* lb = focusedSelectableLabel(w);
+	if (!lb) return false;
+	const std::string& s = lb->text;
+	const size_t wasCaret = lb->caret, wasAnchor = lb->selAnchor;
+	const std::vector<HE::UITextVisualLine> rows = lb->rowRanges();
+	const size_t li = HE::uiVisualLineOfOffset(rows, lb->caret);
+
+	switch (op)
+	{
+	case TextEdit::SelectAll:
+		if (s.empty()) return false;
+		lb->selectAllText();
+		break;
+	case TextEdit::Left:
+		// A plain Left over a selection collapses it to its left edge rather
+		// than stepping from the caret — the convention every text control on
+		// every platform shares, and the field's own rule.
+		if (!extendSelection && lb->hasSelection()) lb->caret = lb->selMin();
+		else                                        lb->caret = HE::uiUtf8Prev(s, lb->caret);
+		break;
+	case TextEdit::Right:
+		if (!extendSelection && lb->hasSelection()) lb->caret = lb->selMax();
+		else if (lb->caret < s.size())              lb->caret = HE::uiUtf8Next(s, lb->caret);
+		break;
+	case TextEdit::WordLeft:  lb->caret = wordStartBefore(s, lb->caret); break;
+	case TextEdit::WordRight: lb->caret = wordEndAfter(s, lb->caret);    break;
+	// Per ROW, which for a label without word wrap is the authored line — the
+	// same answer the field gives, arrived at the same way.
+	case TextEdit::Home: lb->caret = rows.empty() ? 0        : rows[li].begin; break;
+	case TextEdit::End:  lb->caret = rows.empty() ? s.size() : rows[li].end;   break;
+	case TextEdit::Up:
+	case TextEdit::Down:
+	{
+		if (rows.size() < 2) return false;
+		const bool up = (op == TextEdit::Up);
+		if ((up && li == 0) || (!up && li + 1 >= rows.size())) return false;
+		// The column stays the one the FIRST arrow left from, or a walk down a
+		// paragraph creeps left every time it passes a short line.
+		if (lb->preferredCaretX < 0.0f)
+			lb->preferredCaretX = lb->caretXInRow(rows[li], lb->caret);
+		// Never drawn, nothing measured: no column to aim at, so the arrows say
+		// so instead of jumping to the start of the row above.
+		if (lb->rowSizePx <= 0.0f) return false;
+		lb->caret = lb->byteAtRowX(rows[up ? li - 1 : li + 1], lb->preferredCaretX);
+		break;
+	}
+	// Delete and DeleteWordLeft: a label is not editable, and that is the whole
+	// of the answer.
+	default: return false;
+	}
+
+	if (op != TextEdit::Up && op != TextEdit::Down) lb->preferredCaretX = -1.0f;
+	// Selection off (a plain arrow) means the anchor follows the caret, which is
+	// what turns a move into "nothing is selected any more".
+	if (!extendSelection && op != TextEdit::SelectAll) lb->selAnchor = lb->caret;
+	return lb->caret != wasCaret || lb->selAnchor != wasAnchor;
+}
+
+// The focused selectable LABEL, or nullptr — the second, much smaller half of
+// focusedTextField. A label has no editing state, so there is no m_focusEditing
+// test here: focus IS the whole of it, and everything a label answers to
+// (select, copy, move the caret) is harmless on one that was merely tabbed to.
+HE::UIText* WidgetManager::focusedSelectableLabel(Instance*& outWidget)
+{
+	outWidget = nullptr;
+	if (m_focusWidget == 0) return nullptr;
+	Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return nullptr;
+	auto* lb = dynamic_cast<HE::UIText*>(w->tree.find(w->focusedElem));
+	if (!lb || !lb->selectionEnabled()) return nullptr;
+	// Same reason the field re-clamps: a script, an animation or a component
+	// parameter may have rewritten the text since the last keystroke.
+	lb->clampCaret();
+	outWidget = w;
+	return lb;
+}
+
+// Byte offset in the focused label that a pointer names. The label's own
+// arithmetic, not the field's: a field draws its text six pixels in from the
+// left and never anywhere else, a label is aligned in nine positions and wraps
+// against its own width, so the rect goes in whole and UIText::caretAtPoint
+// does the rest out of the same row list its glyphs came from.
+bool WidgetManager::labelCaretAtPointer(float vpWidth, float vpHeight,
+                                        float mouseX, float mouseY, size_t& outOffset)
+{
+	Instance* w = nullptr;
+	HE::UIText* lb = focusedSelectableLabel(w);
+	if (!lb) return false;
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *lb, &canvas);
+	float us = 1.0f, vs = 1.0f;
+	HE::uiElementUnitScale(w->tree, *lb, us, vs, &canvas);
+	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
+	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+	outOffset = lb->caretAtPoint(px, canvas.scaleY * vs, mouseX, mouseY, m_fontScale);
+	return true;
+}
+
 std::string WidgetManager::focusedSelection() const
 {
 	const Instance* w = find(m_focusWidget);
 	if (!w || w->focusedElem == 0) return {};
-	const auto* ti = dynamic_cast<const HE::UITextInput*>(w->tree.find(w->focusedElem));
+	const HE::UIElement* e = w->tree.find(w->focusedElem);
+	// A label answers this too — copying out of one is the whole point of the
+	// flag, and the clipboard key must not have to ask which of the two it is
+	// standing on.
+	if (const auto* lb = dynamic_cast<const HE::UIText*>(e))
+		return lb->selectionEnabled() ? lb->selectedText() : std::string();
+	const auto* ti = dynamic_cast<const HE::UITextInput*>(e);
 	return ti ? ti->selectedText() : std::string();
 }
 
@@ -4014,7 +4151,19 @@ bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight,
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	size_t at = 0;
-	if (!ti || !caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
+	if (!ti)
+	{
+		// Not a field: a selectable label, where a press puts the caret and
+		// drops whatever was selected before it.
+		if (HE::UIText* lb = focusedSelectableLabel(w))
+			if (labelCaretAtPointer(vpWidth, vpHeight, mouseX, mouseY, at))
+			{
+				lb->caret = lb->selAnchor = at;
+				return true;
+			}
+		return false;
+	}
+	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
 	ti->caret = ti->selAnchor = at;
 	// Any move that is not an up/down arrow forgets the column those arrows were
 	// aiming for — see UITextInput::preferredCaretX.
@@ -4029,7 +4178,18 @@ bool WidgetManager::dragCaretFromPointer(float vpWidth, float vpHeight,
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	size_t at = 0;
-	if (!ti || !ti->selectable) return false;
+	if (!ti)
+	{
+		if (HE::UIText* lb = focusedSelectableLabel(w))
+			if (labelCaretAtPointer(vpWidth, vpHeight, mouseX, mouseY, at))
+			{
+				if (at == lb->caret) return false;
+				lb->caret = at;   // the anchor stays where the press put it
+				return true;
+			}
+		return false;
+	}
+	if (!ti->selectable) return false;
 	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
 	if (at == ti->caret) return false;
 	// The ANCHOR stays where the press put it — that is what makes this a drag
@@ -4046,7 +4206,19 @@ bool WidgetManager::selectWordAtPointer(float vpWidth, float vpHeight,
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	size_t at = 0;
-	if (!ti || !ti->selectable || ti->text.empty()) return false;
+	if (!ti)
+	{
+		HE::UIText* lb = focusedSelectableLabel(w);
+		if (!lb || lb->text.empty()) return false;
+		if (!labelCaretAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
+		size_t lfrom = 0, lto = 0;
+		wordAround(lb->text, at, lfrom, lto);
+		if (lfrom == lto) return false;
+		lb->selAnchor = lfrom;
+		lb->caret     = lto;
+		return true;
+	}
+	if (!ti->selectable || ti->text.empty()) return false;
 	if (!caretOffsetAtPointer(vpWidth, vpHeight, mouseX, mouseY, at)) return false;
 	size_t from = 0, to = 0;
 	wordAround(ti->text, at, from, to);
@@ -4473,6 +4645,14 @@ bool WidgetManager::isEditingText() const
 	return m_focusEditing && hasFocusedTextField();
 }
 
+bool WidgetManager::isSelectingText() const
+{
+	const Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return false;
+	const auto* lb = dynamic_cast<const HE::UIText*>(w->tree.find(w->focusedElem));
+	return lb && lb->selectionEnabled();
+}
+
 bool WidgetManager::stopEditingText()
 {
 	if (!m_focusEditing) return false;
@@ -4826,10 +5006,27 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	// the loop must say so rather than spin.
 	const int step = backwards ? -1 : 1;
 	int next = at < 0 ? (backwards ? n - 1 : 0) : ((at + step) % n + n) % n;
+	// What is on the route, as opposed to what is merely focusable. Two things
+	// are off it, and for the same reason both stay in the LIST: Tab can be
+	// pressed while standing on one, and the answer to that has to be "the next
+	// one along from here" rather than "back to the top of the form".
+	const auto onTabRoute = [](const HE::UIElement& e)
+	{
+		if (e.tabIndex < 0) return false;
+		// A label a reader may select in is reachable by pointer and by the
+		// arrow keys, but it is not a form control — no toolkit puts static
+		// text on the Tab route, and a paragraph between two fields would
+		// otherwise cost a keyboard user one Tab per paragraph. An author who
+		// says otherwise with a positive Tab Index gets what they asked for.
+		if (e.tabIndex == 0)
+			if (const auto* lb = dynamic_cast<const HE::UIText*>(&e))
+				if (lb->selectionEnabled()) return false;
+		return true;
+	};
 	for (int guard = 0; guard < n; ++guard)
 	{
 		const HE::UIElement* e = w->tree.find(order[next]);
-		if (!e || e->tabIndex >= 0) return setFocus(w->id, order[next]);
+		if (!e || onTabRoute(*e)) return setFocus(w->id, order[next]);
 		next = (next + step) % n;
 		if (next < 0) next += n;
 	}
