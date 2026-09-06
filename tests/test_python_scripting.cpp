@@ -838,4 +838,43 @@ class Bagger(horizon.Behavior):
     std::filesystem::remove_all(root, ec);
 }
 
+// The Python half of "the eight application groups reach both text languages"
+// (the Lua half lives in test_scripting_binding.cpp). Same eight, same one
+// function each, same reason for checking presence rather than effect.
+static const char* kPyAppGroups = R"py(
+import horizon
+
+class AppGroups(horizon.Behavior):
+    def on_start(self):
+        names = [('widget', 'setListCount'), ('theme', 'getMode'),
+                 ('dialog', 'confirm'),      ('clipboard', 'hasText'),
+                 ('process', 'which'),       ('json', 'getNumber'),
+                 ('prefs', 'has'),           ('datetime', 'year')]
+        found = 0
+        for g, f in names:
+            ns = getattr(horizon, g, None)
+            if ns is not None and callable(getattr(ns, f, None)):
+                found += 1
+        horizon.setPosition(self.entity_id, found,
+                            horizon.json.getNumber('{"a":42}', 'a', 0), 0)
+)py";
+
+TEST_CASE("ScriptContext: the eight application groups reach Python")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pygroups", kPyAppGroups, HE::ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "GroupHero");
+    auto id = ctx.createInstance("pygroups", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    // BEFORE THE CHANGE: 0 — bootstrapEngineApiGroups skipped every row of the
+    // eight, exactly as the Lua side did.
+    CHECK(t.position.x == doctest::Approx(8.0f));
+    CHECK(t.position.y == doctest::Approx(42.0f));   // …and one of them dispatches
+}
+
 #endif // HE_HAVE_PYTHON

@@ -5079,7 +5079,40 @@ bool isScriptGroup(std::string_view group)
                                                     // network, which is the state
                                                     // Welle 3 exists to end.
                                                     "http",
-                                                    "ui", "app" };
+                                                    "ui", "app",
+                                                    // The eight groups the application work
+                                                    // (docs/he-apps-plan.md) added. They were
+                                                    // HorizonCode-only until the merge analysis
+                                                    // found the gap: the plan promises every
+                                                    // registry group "lights up in HorizonCode,
+                                                    // Lua and Python at the same time", and for
+                                                    // these it did not. Nothing else was needed —
+                                                    // a widget travels as a Ref, which is an
+                                                    // integer on both sides, and the two frontends
+                                                    // build their tables from this list alone.
+                                                    //
+                                                    // "widget" is lists, layers, animation and
+                                                    // live children; without it a text script can
+                                                    // show a widget and never fill it.
+                                                    "widget",
+                                                    // "theme" is the light/dark switch and the
+                                                    // text size, which an application's own
+                                                    // settings screen is expected to offer.
+                                                    "theme",
+                                                    // "dialog", "clipboard" and "process" are
+                                                    // gated by the project's permissions either
+                                                    // way (perm::allowed), so listing them here
+                                                    // opens no door the project did not open.
+                                                    "dialog", "clipboard", "process",
+                                                    // "json" and "prefs" are pure text and a
+                                                    // key/value store — the two things every
+                                                    // application script reaches for first.
+                                                    "json", "prefs",
+                                                    // "datetime" has no flat twin at all: without
+                                                    // it a text script can read the clock as a
+                                                    // number of seconds and never say what day
+                                                    // that is.
+                                                    "datetime" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

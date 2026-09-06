@@ -3175,6 +3175,28 @@ TEST_CASE("EngineApi: particle rows are safe on an entity with no emitter, and d
     CHECK(HE::api::isScriptGroup("particle"));
 }
 
+// MUTATION: remove any of the eight names from isScriptGroup's list in
+// EngineApi.cpp — the group vanishes from horizon.<group> in Lua AND Python at
+// once, because both frontends build their tables from this one predicate.
+TEST_CASE("EngineApi: the eight application groups are script groups")
+{
+    // The merge analysis found the gap: the plan promises every registry group
+    // lights up in HorizonCode, Lua and Python at the same time, and these eight
+    // were HorizonCode-only. The language halves are in test_scripting_binding
+    // and test_python_scripting; this is the predicate they both hang on.
+    for (const char* g : { "widget", "theme", "dialog", "clipboard",
+                           "process", "json", "prefs", "datetime" })
+    {
+        CHECK(HE::api::isScriptGroup(g));
+        // …and the group is not empty, or listing it would expose nothing.
+        bool any = false;
+        const std::string prefix = std::string(g) + ".";
+        for (const HE::api::ApiFn& fn : HE::api::registry())
+            if (std::string_view(fn.id).substr(0, prefix.size()) == prefix) { any = true; break; }
+        CHECK(any);
+    }
+}
+
 // MUTATION: in EngineApi.cpp's self-default post-pass, delete the two lines that
 // build `withSelf` and return `inner(c, a)` unchanged instead — the jump is then
 // asked of the world root, the character never leaves the floor, and the row
