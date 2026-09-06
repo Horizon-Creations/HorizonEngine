@@ -350,6 +350,39 @@ haben den echten Instance-Buffer; Metal zeichnet noch per Schleife. **Nicht in
 diesem Schritt ändern** — die Korrektur gehört zu dem Commit, der den
 Metal-Port landet, und ein Deploy wird vorher bestätigt.
 
+### Stand 06.09.2026 (nach Checkpoint M, `ce6f368c`): angewandt
+
+Mit dem Metal-Port stimmt die vertauschte Fassung gleich doppelt nicht mehr,
+denn jetzt hat *jedes* der fünf Backends den echten Instance-Buffer. Der
+Eintrag `gpu-instancing` steht seitdem lokal auf `progress: 90`
+(`status: in-progress` unverändert) und liest sich:
+
+> „Same-mesh + same-material runs are batched into a single instanced draw call
+> on all five backends. OpenGL, D3D11, D3D12, Vulkan and Metal each upload the
+> run's transforms into a real per-instance buffer and issue one draw for the
+> whole batch, in the same instance layout everywhere, so a field of repeated
+> objects costs one draw call instead of one per object. Transparent objects
+> stay out of this by design, they have to be sorted back to front one by one,
+> and a batch whose meshes use a node-graph material falls back to the
+> per-object loop so it keeps its look. Still to come: shadow passes and the
+> depth-only prepasses for SSAO and GI issue one draw per object, which is where
+> the next large saving sits."
+
+Die letzten zehn Prozent sind bewusst die Restliste aus §6: Schattenpass und
+die Tiefen-Vorpässe (SSAO, GI) schleifen weiterhin, und Graph-Materialien
+werden nirgends instanziert. Der zweite und dritte Satz nennen die beiden
+Ausnahmen als Absicht, damit „Transparenz zeichnet einzeln" nicht als Lücke
+gelesen wird. **Was der Text nicht behauptet:** dass D3D11/D3D12/Vulkan auf
+echter Hardware nachgemessen wurden — das war schon bei A3 nicht der Fall
+(§5).
+
+`site_check` ist sauber (0 Probleme, 41 Einträge). Die Datei liegt im
+Geschwister-Repo `/Users/connorjansen/VSCode/Website` und ist dort **nur lokal
+geändert, nicht committet**: parallel liegt dort eine fremde, ebenfalls
+uncommittete Änderung am Eintrag `HorizonCode`, die nicht mitgenommen werden
+soll. **Der Deploy steht aus** und braucht die Bestätigung des Menschen
+(`deploy.py`, SFTP, live).
+
 ---
 
 ## 8. Vorgeschlagene Schnittfolge
