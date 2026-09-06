@@ -1134,6 +1134,84 @@ bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
     return any;
 }
 
+// ── Snapping and alignment guides (docs/he-apps-plan.md D4) ──────────────────
+
+std::vector<UISnapLine> uiSnapCandidates(const UIWidgetTree& tree, const UIElement& e,
+                                         const UIWidgetCanvas* canvas)
+{
+    std::vector<UISnapLine> out;
+    // Three lines per axis for every rect that offers itself: the two edges and
+    // the middle. Six per neighbour, and the same six for the parent — an
+    // element centred in its panel is as much an alignment as one flush to a
+    // sibling's edge, and both fall out of the same push.
+    const auto push = [&out](const UIWidgetRect& r, int id)
+    {
+        out.push_back({ r.x,                 true,  false, id });
+        out.push_back({ r.x + r.w * 0.5f,    true,  true,  id });
+        out.push_back({ r.x + r.w,           true,  false, id });
+        out.push_back({ r.y,                 false, false, id });
+        out.push_back({ r.y + r.h * 0.5f,    false, true,  id });
+        out.push_back({ r.y + r.h,           false, false, id });
+    };
+
+    // The frame around it: the parent's rect, or the canvas when it is a root.
+    if (e.parentId != 0)
+    {
+        if (const UIElement* p = tree.find(e.parentId))
+            push(uiElementRect(tree, *p, canvas), 0);
+    }
+    else
+    {
+        UIWidgetRect c{};
+        c.w = canvas ? canvas->width  : tree.canvasWidth;
+        c.h = canvas ? canvas->height : tree.canvasHeight;
+        push(c, 0);
+    }
+
+    for (const auto& sp : tree.elements)
+    {
+        if (!sp || sp->id == e.id || sp->parentId != e.parentId) continue;
+        // Only what is on screen. The designer paints the same set, and a guide
+        // snapping to a hidden page would be the editor lining an element up
+        // with something nobody can see.
+        if (!uiElementEffectiveVisible(tree, *sp)) continue;
+        push(uiElementRect(tree, *sp, canvas), sp->id);
+    }
+    return out;
+}
+
+UISnapResult uiSnapDelta(const UIWidgetRect& rect, const std::vector<UISnapLine>& candidates,
+                         float threshold, int maskX, int maskY)
+{
+    UISnapResult res;
+    if (threshold <= 0.0f) return res;
+
+    // The rect's own three lines per axis, in mask-bit order.
+    const float ownX[3] = { rect.x, rect.x + rect.w * 0.5f, rect.x + rect.w };
+    const float ownY[3] = { rect.y, rect.y + rect.h * 0.5f, rect.y + rect.h };
+    const int   bits[3] = { kUISnapMin, kUISnapCenter, kUISnapMax };
+
+    float bestX = threshold, bestY = threshold;
+    for (std::size_t i = 0; i < candidates.size(); ++i)
+    {
+        const UISnapLine& L = candidates[i];
+        const float* own = L.vertical ? ownX : ownY;
+        const int    m   = L.vertical ? maskX : maskY;
+        for (int k = 0; k < 3; ++k)
+        {
+            if (!(m & bits[k])) continue;
+            const float d = L.pos - own[k];
+            const float a = std::abs(d);
+            // Strictly nearer, so the first candidate in the list wins a tie —
+            // and the parent's lines come first, which is the frame an author
+            // means when a neighbour happens to sit on the same coordinate.
+            if (L.vertical) { if (a < bestX) { bestX = a; res.dx = d; res.lineX = static_cast<int>(i); } }
+            else            { if (a < bestY) { bestY = a; res.dy = d; res.lineY = static_cast<int>(i); } }
+        }
+    }
+    return res;
+}
+
 int uiChildIndexOf(const UIWidgetTree& tree, int parentId, int childId)
 {
     int i = 0;

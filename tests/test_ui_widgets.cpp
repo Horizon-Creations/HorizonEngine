@@ -13506,6 +13506,128 @@ TEST_CASE("Layout: Min and Max Size hold the rect, whoever computed it")
     }
 }
 
+TEST_CASE("Snapping: the lines an element may line itself up with")
+{
+    HE::UIWidgetCanvas canvas{};
+    canvas.width = 800.0f; canvas.height = 600.0f;
+    canvas.scaleX = canvas.scaleY = 1.0f;
+
+    // Two panels side by side under the canvas itself, laid out top-left so the
+    // numbers below are the rects and not a pivot puzzle.
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int a = t.add(HE::UIWidgetType::Panel);
+    const int b = t.add(HE::UIWidgetType::Panel);
+    for (int id : { a, b })
+    {
+        HE::UIElement* e = t.find(id);
+        e->pivotX = e->pivotY = 0.0f;
+        HE::uiSetAnchorPreset(*e, 0);          // top-left
+        e->sizeX = 100.0f; e->sizeY = 50.0f;
+    }
+    t.find(a)->posX = 100.0f; t.find(a)->posY = 100.0f;
+    t.find(b)->posX = 400.0f; t.find(b)->posY = 300.0f;
+
+    SUBCASE("a sibling's edges and middle, the frame's, and never its own")
+    {
+        const std::vector<HE::UISnapLine> c = HE::uiSnapCandidates(t, *t.find(a), &canvas);
+        const auto has = [&c](float pos, bool vertical, bool center)
+        {
+            for (const HE::UISnapLine& L : c)
+                if (L.vertical == vertical && L.center == center &&
+                    std::abs(L.pos - pos) < 0.001f) return true;
+            return false;
+        };
+        // The sibling: left, middle, right — and the same three lying down.
+        CHECK(has(400.0f, true,  false));
+        CHECK(has(450.0f, true,  true));
+        CHECK(has(500.0f, true,  false));
+        CHECK(has(300.0f, false, false));
+        CHECK(has(325.0f, false, true));
+        CHECK(has(350.0f, false, false));
+        // The frame around it: no parent, so the canvas.
+        CHECK(has(0.0f,   true,  false));
+        CHECK(has(400.0f, true,  true));       // the canvas middle, as a middle
+        CHECK(has(800.0f, true,  false));
+        CHECK(has(300.0f, false, true));
+        // Its own edges are not offered: an element cannot align to itself.
+        CHECK_FALSE(has(100.0f, true,  false));
+        CHECK_FALSE(has(200.0f, true,  false));
+        // A hidden sibling offers nothing — the designer does not draw it either.
+        t.find(b)->visible = false;
+        const std::vector<HE::UISnapLine> c2 = HE::uiSnapCandidates(t, *t.find(a), &canvas);
+        CHECK(c2.size() == c.size() - 6);
+    }
+
+    SUBCASE("the nearest catch inside the threshold wins, and only inside it")
+    {
+        const std::vector<HE::UISnapLine> c = HE::uiSnapCandidates(t, *t.find(a), &canvas);
+        // Four short of the line at 400 — where the canvas's middle and the
+        // sibling's left edge both lie — and the rect's left edge catches it.
+        HE::UIWidgetRect r{ 396.0f, 100.0f, 100.0f, 50.0f };
+        HE::UISnapResult s = HE::uiSnapDelta(r, c, 6.0f);
+        CHECK(s.lineX >= 0);
+        CHECK(s.dx == doctest::Approx(4.0f));
+        CHECK(c[s.lineX].pos == doctest::Approx(400.0f));
+        // …its top is on nothing, so that axis stays where it is.
+        CHECK(s.lineY == -1);
+        CHECK(s.dy == doctest::Approx(0.0f));
+
+        // Eight short is out of reach: nothing at all, not a smaller nudge.
+        r.x = 392.0f;
+        s = HE::uiSnapDelta(r, c, 6.0f);
+        CHECK(s.lineX == -1);
+        CHECK(s.dx == doctest::Approx(0.0f));
+
+        // A threshold of zero is snapping switched off, not "snap exactly".
+        r.x = 400.0f;
+        CHECK(HE::uiSnapDelta(r, c, 0.0f).lineX == -1);
+    }
+
+    SUBCASE("a resize offers only the edge under the cursor")
+    {
+        const std::vector<HE::UISnapLine> c = HE::uiSnapCandidates(t, *t.find(a), &canvas);
+        // One rect with a catch waiting on EACH side, four units away: its left
+        // edge under the canvas middle at 400, its right edge under the
+        // sibling's middle at 450. Which one is taken says whether the mask is
+        // being read, because the distance cannot decide it.
+        const HE::UIWidgetRect r{ 396.0f, 100.0f, 50.0f, 50.0f };
+        HE::UISnapResult s = HE::uiSnapDelta(r, c, 6.0f, HE::kUISnapMin, 0);
+        REQUIRE(s.lineX >= 0);
+        CHECK(s.dx == doctest::Approx(4.0f));
+        CHECK(c[s.lineX].pos == doctest::Approx(400.0f));
+        // The other edge takes the other line, and moves by the same four.
+        s = HE::uiSnapDelta(r, c, 6.0f, HE::kUISnapMax, 0);
+        REQUIRE(s.lineX >= 0);
+        CHECK(s.dx == doctest::Approx(4.0f));
+        CHECK(c[s.lineX].pos == doctest::Approx(450.0f));
+        // A mask of nothing on an axis is that axis standing still.
+        CHECK(HE::uiSnapDelta(r, c, 6.0f, 0, 0).lineX == -1);
+    }
+
+    SUBCASE("a child of a box offers its box, not the canvas")
+    {
+        HE::UIWidgetTree bt;
+        bt.canvasWidth = 800.0f; bt.canvasHeight = 600.0f;
+        const int panel = bt.add(HE::UIWidgetType::Panel);
+        { HE::UIElement* p = bt.find(panel);
+          p->pivotX = p->pivotY = 0.0f; HE::uiSetAnchorPreset(*p, 0);
+          p->posX = 200.0f; p->posY = 50.0f; p->sizeX = 200.0f; p->sizeY = 100.0f; }
+        const int kid = bt.add(HE::UIWidgetType::Button);
+        { HE::UIElement* k = bt.find(kid);
+          k->parentId = panel; k->pivotX = k->pivotY = 0.0f;
+          HE::uiSetAnchorPreset(*k, 0); k->sizeX = 40.0f; k->sizeY = 20.0f; }
+        const std::vector<HE::UISnapLine> c = HE::uiSnapCandidates(bt, *bt.find(kid), &canvas);
+        // A lone child: six lines, and they are the panel's, not the canvas's.
+        REQUIRE(c.size() == 6);
+        CHECK(c[0].pos == doctest::Approx(200.0f));   // the panel's left
+        CHECK(c[1].pos == doctest::Approx(300.0f));   // its middle
+        CHECK(c[2].pos == doctest::Approx(400.0f));   // its right
+        CHECK(c[1].center);
+        CHECK(c[0].fromId == 0);                      // the frame, not a neighbour
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // F3: the frame a borderless window does not have (docs/he-apps-plan.md)
 // ─────────────────────────────────────────────────────────────────────────────

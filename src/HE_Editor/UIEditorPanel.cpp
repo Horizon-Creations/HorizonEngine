@@ -144,6 +144,19 @@ struct State
 	// this is what it would have selected.
 	int    pendingPick = 0;
 	bool   hasPendingPick = false;
+	// Snapping (docs/he-apps-plan.md D4). On by default — an editor that lines
+	// nothing up is one where every layout is hand-typed numbers — and held off
+	// for one drag with ALT. Alt rather than Ctrl because on the Mac ImGui's
+	// Ctrl IS the command key, and Ctrl+click is a right click there.
+	//
+	// View state, like the zoom and the theme preview beside it: whether
+	// somebody wants help while dragging is not part of the widget.
+	bool   snapOn = true;
+	// The lines the last snap caught, in canvas units, drawn for the length of
+	// the drag. Filled by the drag block itself so the guide is the line the
+	// element actually sat on, not one recomputed a frame later.
+	HE::UISnapLine snapGuide[2];
+	bool   hasSnapGuide[2] = { false, false };
 	// Details panel: is the corner radius shown as one number or as four? A
 	// display mode, not a value — an element whose corners already differ is
 	// always shown as four whatever this says.
@@ -3942,33 +3955,118 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			const ImVec2 d((mouse.x - st.dragStartMouse.x) / s,
 			               (mouse.y - st.dragStartMouse.y) / s);
 			st.dragDidEdit = true;
-			if (st.dragMode == 1)
+			// Always written from the values the drag STARTED at, never from the
+			// fields as they stand: this runs twice per frame — once to see where
+			// the plain drag lands, once with the snap correction folded in — and
+			// a second incremental pass would apply the delta twice.
+			const auto applyDrag = [&](const ImVec2& dd)
 			{
-				n2->posX = st.dragStartPos[0] + d.x;
-				n2->posY = st.dragStartPos[1] + d.y;
-			}
-			else if (st.dragMode == 2)
+				if (st.dragMode == 1)
+				{
+					n2->posX = st.dragStartPos[0] + dd.x;
+					n2->posY = st.dragStartPos[1] + dd.y;
+				}
+				else if (st.dragMode == 2)
+				{
+					// Per-axis: dragging the min edge shifts pos by d*(1-pivot) and
+					// shrinks size; the max edge grows size and shifts pos by d*pivot.
+					ImVec2 dMin, dMax;
+					handleDelta(st.resizeHandle, dd, dMin, dMax);
+					float nx = st.dragStartSize[0] - dMin.x + dMax.x;
+					float ny = st.dragStartSize[1] - dMin.y + dMax.y;
+					// The floor is on the RESULTING rect, not on the field: on a
+					// stretched axis the field is the difference to the anchored
+					// span and is normally negative (an inset), so clamping it at 1
+					// would make those handles unusable.
+					const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2, layoutCanvas);
+					nx = std::max(1.0f - ar.w, nx);
+					ny = std::max(1.0f - ar.h, ny);
+					n2->sizeX = nx;
+					n2->sizeY = ny;
+					n2->posX = st.dragStartPos[0] + dMin.x * (1.0f - n2->pivotX) + dMax.x * n2->pivotX;
+					n2->posY = st.dragStartPos[1] + dMin.y * (1.0f - n2->pivotY) + dMax.y * n2->pivotY;
+				}
+			};
+			applyDrag(d);
+
+			// ── Snapping ─────────────────────────────────────────────────────
+			// The correction is measured on the RESOLVED rect and then added
+			// back to `d`, which works for both gestures for the same reason:
+			// handleDelta routes d.x into whichever of dMin/dMax the handle
+			// owns, and a rect's moving edge follows that component 1:1.
+			st.hasSnapGuide[0] = st.hasSnapGuide[1] = false;
+			if (st.snapOn && !ImGui::GetIO().KeyAlt)
 			{
-				// Per-axis: dragging the min edge shifts pos by d*(1-pivot) and
-				// shrinks size; the max edge grows size and shifts pos by d*pivot.
-				ImVec2 dMin, dMax;
-				handleDelta(st.resizeHandle, d, dMin, dMax);
-				float nx = st.dragStartSize[0] - dMin.x + dMax.x;
-				float ny = st.dragStartSize[1] - dMin.y + dMax.y;
-				// The floor is on the RESULTING rect, not on the field: on a
-				// stretched axis the field is the difference to the anchored
-				// span and is normally negative (an inset), so clamping it at 1
-				// would make those handles unusable.
-				const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2, layoutCanvas);
-				nx = std::max(1.0f - ar.w, nx);
-				ny = std::max(1.0f - ar.h, ny);
-				n2->sizeX = nx;
-				n2->sizeY = ny;
-				n2->posX = st.dragStartPos[0] + dMin.x * (1.0f - n2->pivotX) + dMax.x * n2->pivotX;
-				n2->posY = st.dragStartPos[1] + dMin.y * (1.0f - n2->pivotY) + dMax.y * n2->pivotY;
+				// A resize offers only the edge under the cursor. The other one
+				// is standing still, and snapping it would move a side nobody
+				// took hold of. Handles: 0..3 corners TL/TR/BL/BR, 4..7 T/B/L/R.
+				int maskX = HE::kUISnapAll, maskY = HE::kUISnapAll;
+				if (st.dragMode == 2)
+				{
+					static const int kMaskX[8] = { HE::kUISnapMin, HE::kUISnapMax,
+						HE::kUISnapMin, HE::kUISnapMax, 0, 0, HE::kUISnapMin, HE::kUISnapMax };
+					static const int kMaskY[8] = { HE::kUISnapMin, HE::kUISnapMin,
+						HE::kUISnapMax, HE::kUISnapMax, HE::kUISnapMin, HE::kUISnapMax, 0, 0 };
+					const int h = std::clamp(st.resizeHandle, 0, 7);
+					maskX = kMaskX[h]; maskY = kMaskY[h];
+				}
+				const std::vector<HE::UISnapLine> cands =
+					HE::uiSnapCandidates(st.tree, *n2, layoutCanvas);
+				const HE::UIWidgetRect r0 = HE::uiElementRect(st.tree, *n2, layoutCanvas);
+				const HE::UISnapResult sn =
+					HE::uiSnapDelta(r0, cands, 6.0f / s, maskX, maskY);
+				if (sn.lineX >= 0 || sn.lineY >= 0)
+				{
+					applyDrag(ImVec2(d.x + sn.dx, d.y + sn.dy));
+					// Only claim a guide the element actually reached. A Min/Max
+					// bound that bites stops the rect short of the line, and a
+					// guide drawn there would promise an alignment that is not
+					// on screen.
+					const HE::UIWidgetRect r1 = HE::uiElementRect(st.tree, *n2, layoutCanvas);
+					const float ownX[3] = { r1.x, r1.x + r1.w * 0.5f, r1.x + r1.w };
+					const float ownY[3] = { r1.y, r1.y + r1.h * 0.5f, r1.y + r1.h };
+					const auto reached = [](const float (&own)[3], float pos)
+					{
+						for (float v : own) if (std::abs(v - pos) < 0.5f) return true;
+						return false;
+					};
+					if (sn.lineX >= 0 && reached(ownX, cands[sn.lineX].pos))
+						{ st.snapGuide[0] = cands[sn.lineX]; st.hasSnapGuide[0] = true; }
+					if (sn.lineY >= 0 && reached(ownY, cands[sn.lineY].pos))
+						{ st.snapGuide[1] = cands[sn.lineY]; st.hasSnapGuide[1] = true; }
+				}
 			}
 			st.dirty = true;
 		}
+	}
+
+	// The guides, drawn after the canvas so they lie over what they align to and
+	// clipped to it so they stop at its edge. A middle reads dashed, an edge
+	// solid: the two are different promises and the picture should say which.
+	if (st.dragMode != 0 && (st.hasSnapGuide[0] || st.hasSnapGuide[1]))
+	{
+		dl->PushClipRect(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y), true);
+		for (int a = 0; a < 2; ++a)
+		{
+			if (!st.hasSnapGuide[a]) continue;
+			const HE::UISnapLine& L = st.snapGuide[a];
+			const ImU32 col = L.center ? IM_COL32(120, 220, 255, 200)
+			                           : IM_COL32(255, 90, 160, 220);
+			const ImVec2 p0 = L.vertical ? toScreen(ImVec2(L.pos, 0.0f))
+			                             : toScreen(ImVec2(0.0f, L.pos));
+			const ImVec2 p1 = L.vertical ? toScreen(ImVec2(L.pos, canvasH))
+			                             : toScreen(ImVec2(canvasW, L.pos));
+			if (!L.center) { dl->AddLine(p0, p1, col, 1.0f); continue; }
+			const float len = L.vertical ? (p1.y - p0.y) : (p1.x - p0.x);
+			for (float t = 0.0f; t < len; t += 10.0f)
+			{
+				const float t2 = std::min(len, t + 5.0f);
+				dl->AddLine(L.vertical ? ImVec2(p0.x, p0.y + t) : ImVec2(p0.x + t, p0.y),
+				            L.vertical ? ImVec2(p0.x, p0.y + t2) : ImVec2(p0.x + t2, p0.y),
+				            col, 1.0f);
+			}
+		}
+		dl->PopClipRect();
 	}
 	if (st.dragMode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 	{
@@ -3979,6 +4077,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		st.hasPendingPick = false;
 		st.dragMode = 0;
 		st.resizeHandle = -1;
+		st.hasSnapGuide[0] = st.hasSnapGuide[1] = false;
 	}
 
 	// ── Palette drop onto the canvas (new element; nested when over a container) ──
@@ -5104,6 +5203,20 @@ void render(AppContext& ctx, const std::string& assetPath,
 			else                  { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
 		}
 		bar.endGroup();
+
+		// Snapping sits beside the view controls because that is what it is: a
+		// way of DRAGGING, not a property of the widget. Nothing here is saved.
+		if (st.viewMode == 0)
+		{
+			bar.group();
+			if (bar.item("##uisnap", T::iconGrid, "Snap", st.snapOn, true,
+			             "Line elements up while dragging (hold Alt to ignore)",
+			             "ui.snap"))
+			{
+				st.snapOn = !st.snapOn;
+			}
+			bar.endGroup();
+		}
 
 		// Which theme the canvas draws with. In the bar rather than in Details
 		// because it is a way of LOOKING at the widget, like the zoom beside it,

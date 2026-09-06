@@ -364,6 +364,54 @@ HE_API bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
 HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = nullptr,
                             float fontScale = 1.0f);
 
+// ── Snapping and alignment guides (docs/he-apps-plan.md D4) ──────────────────
+// The GEOMETRY of the designer's snapping lives here rather than in the panel,
+// for the reason every other layout answer does: the editor draws what these
+// two functions decide, so what a drag does can be pinned by a test instead of
+// only being watched.
+//
+// One line an element may line itself up with, in canvas units.
+struct UISnapLine
+{
+    float pos      = 0.0f;   // x of a vertical line, y of a horizontal one
+    bool  vertical = true;   // true = a line at x = pos
+    bool  center   = false;  // it is a middle, not an edge
+    int   fromId   = 0;      // the element it came from; 0 = the parent or canvas
+};
+
+// Every line `e` may line itself up with: the two edges and the middle of each
+// VISIBLE sibling under the same parent, on both axes, plus the edges and the
+// middle of the parent's own rect — the canvas rect when it has no parent.
+// `e` itself is never among them, and neither is anything inside it: an element
+// cannot align to its own children, they follow it.
+HE_API std::vector<UISnapLine> uiSnapCandidates(const UIWidgetTree& tree,
+                                                const UIElement& e,
+                                                const UIWidgetCanvas* canvas = nullptr);
+
+// What a rect has to move by to sit on the nearest line, per axis.
+struct UISnapResult
+{
+    float dx = 0.0f, dy = 0.0f;      // add this to the rect
+    int   lineX = -1, lineY = -1;    // index into the candidates, -1 = nothing caught
+};
+
+// Which of the rect's own lines are allowed to catch, as a bit mask per axis:
+// 1 = its min edge, 2 = its middle, 4 = its max edge. A move offers all three
+// (kUISnapAll); a resize offers only the edge being dragged, because the other
+// one is standing still and snapping it would move a side nobody touched.
+inline constexpr int kUISnapMin    = 1;
+inline constexpr int kUISnapCenter = 2;
+inline constexpr int kUISnapMax    = 4;
+inline constexpr int kUISnapAll    = kUISnapMin | kUISnapCenter | kUISnapMax;
+
+// The nearest catch within `threshold` (canvas units) wins on each axis, and
+// the two axes are decided independently: an element may sit on a neighbour's
+// left edge and on the parent's middle at the same time.
+HE_API UISnapResult uiSnapDelta(const UIWidgetRect& rect,
+                                const std::vector<UISnapLine>& candidates,
+                                float threshold,
+                                int maskX = kUISnapAll, int maskY = kUISnapAll);
+
 // ── Resolve theme roles into ordinary colours ────────────────────────────────
 // Every property an element bound to a role (see UIElement::themeRoles) is
 // ASSIGNED the role's colour for `mode`. Called when a widget is created, when

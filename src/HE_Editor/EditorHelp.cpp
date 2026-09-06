@@ -2312,6 +2312,17 @@ namespace
 	  "which is the same thing without an empty slot to point somewhere first.",
 	  "", "ui#elements" },
 
+	// ── Lining elements up while dragging ────────────────────────────────────
+	{ "ui.snap", "Snap",
+	  "While you drag or resize an element, its edges and its middle catch on "
+	  "the edges and middles of its neighbours and of the frame around it — the "
+	  "parent, or the canvas for an element that has none. A line shows what it "
+	  "caught: solid for an edge, dashed for a middle. Hold ALT to ignore it for "
+	  "one drag, which is quicker than turning it off and back on. A resize only "
+	  "snaps the edge you have hold of; the other side stands still. Nothing "
+	  "here is stored in the widget — it is a way of dragging, not a property.",
+	  "", "ui#designer" },
+
 	// ── Looking at the widget under another theme ────────────────────────────
 	// The toolbar cell and the six entries of its popup. All of it is a way of
 	// LOOKING: nothing here is stored in the widget, and nothing reaches the

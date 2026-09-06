@@ -619,6 +619,41 @@ schreiben, wenn gesetzt". Im ausgelieferten `EngineContent` trägt kein Widget e
 Verhaltensänderung (eine Box mit Untergrenze und ausgeschaltetem „Size To Content" wächst jetzt)
 trifft dort also nichts.
 
+*Dritter Teil: Einrasten und Ausrichtungshilfen im Designer.* Davon gab es nichts, `grep -i snap`
+traf in `UIEditorPanel.cpp` nur „snapshot". Die Geometrie liegt trotzdem nicht im Panel, sondern
+in `UIWidgetTree`: `uiSnapCandidates` sammelt die Linien, `uiSnapDelta` sagt, welche fängt. Der
+Grund ist derselbe wie bei jeder anderen Layout-Antwort hier, nämlich dass `test_ui_widgets` sie
+festnageln kann; der Editor zeichnet nur noch, was die beiden entschieden haben.
+
+**Angeboten wird, was daneben liegt, und der Rahmen darum.** Von jedem sichtbaren Geschwister
+unter demselben Elternteil die zwei Kanten und die Mitte, auf beiden Achsen, dazu dieselben sechs
+vom Elternteil selbst, beziehungsweise von der Leinwand, wenn es keines gibt. Das Element selbst
+ist nie dabei, und unsichtbare Geschwister sind es auch nicht: der Designer zeichnet sie nicht,
+und an etwas einzurasten, das niemand sieht, wäre eine Ausrichtung, die man nicht nachvollziehen
+kann.
+
+**Die Korrektur wird am fertigen Rechteck gemessen und auf `d` zurückaddiert.** Das ist der
+Trick, an dem beide Gesten dieselbe Zeile teilen: `handleDelta` leitet `d.x` in genau die Hälfte
+(`dMin` oder `dMax`), die der angefasste Griff besitzt, und die bewegte Kante folgt dieser
+Komponente 1:1. Deshalb läuft der Ziehblock zweimal pro Frame — einmal ohne, einmal mit der
+Korrektur — und schreibt dabei immer aus `dragStartPos/Size`, nie aus den Feldern, wie sie gerade
+stehen. Ein zweiter inkrementeller Durchgang würde den Weg doppelt anwenden.
+
+**Beim Größenändern rastet nur die gezogene Kante ein.** Die andere steht still, und sie zu
+verschieben wäre eine Seite, die niemand angefasst hat. Das sagt eine Maske pro Achse
+(`kUISnapMin/Center/Max`); Verschieben bietet alle drei an. Unterdrückt wird mit **Alt**, nicht
+mit Ctrl: auf dem Mac ist ImGuis Ctrl die Befehlstaste, und Ctrl+Klick ist dort ein Rechtsklick.
+
+**Eine Hilfslinie behauptet nur, was das Element erreicht hat.** Nach der zweiten Anwendung wird
+nachgemessen, und die Linie wird nur gezeichnet, wenn eine der drei eigenen Linien wirklich
+darauf sitzt. Sonst zöge eine beißende Min-/Max-Grenze eine Linie, an der das Rechteck nie
+angekommen ist. Kante durchgezogen, Mitte gestrichelt, weil das zwei verschiedene Versprechen
+sind.
+
+Der Schalter steht in der Werkzeugleiste neben Zoom und Theme-Vorschau, dort, wo die anderen
+Arten zu SCHAUEN stehen. Nichts davon wird gespeichert: `snapOn` ist Ansichtszustand wie der
+Zoom, und die Widget-Dateien sind byte-gleich wie vorher.
+
 ---
 
 ## 7. Block E: Editor- und Projektseite
