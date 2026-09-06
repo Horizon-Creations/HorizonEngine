@@ -542,6 +542,28 @@ namespace
 	  "Sets the text in the window's title bar. Only an application owns its "
 	  "window outright — in the editor this is ignored rather than renaming the "
 	  "editor itself." },
+	{ "window.open",
+	  "Opens a SECOND window with its own widget tree, and answers its id. A "
+	  "tool window beside the main one, a document per window, a panel off to "
+	  "the side. Answers 0 when it was refused: in the editor, and on a renderer "
+	  "with no path into a second window (Software and Metal have one)." },
+	{ "window.close",
+	  "Closes a window this application opened. Everything that hung in it is "
+	  "destroyed with it and On Window Closed fires — the same event its own "
+	  "close button gives you, because it is the same thing happening. Ending "
+	  "the whole application is Quit Game, not this." },
+	{ "window.setTitle",
+	  "Sets the title of one window by its id. Window 0 is the main one, and "
+	  "for it this does exactly what Set Window Title does." },
+	{ "window.setSize",
+	  "Resizes one window by its id, in logical points. Window 0 is the main "
+	  "one. Both sides must be positive." },
+	{ "window.show",
+	  "Puts a widget in a window and shows it there. A real move: anything the "
+	  "widget was holding in the window it came from — a dialog's grab, the "
+	  "keyboard focus — stays behind, because a dialog that keeps its old window "
+	  "sealed is a window nobody can click again. Window 0 brings it back to the "
+	  "main window." },
 	{ "app.setSize",
 	  "Resizes the window, in logical points. Both sides must be positive; a zero "
 	  "or negative size is refused rather than passed on to the platform." },

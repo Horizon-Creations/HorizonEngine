@@ -727,6 +727,8 @@ HE_HC_VALUE_EVENT(fireOnTrayItem, "OnTrayItem", const std::string&,
                   onTrayItem(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnMenuItem, "OnMenuItem", const std::string&,
                   onMenuItem(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnWindowClosed, "OnWindowClosed", int,
+                  onWindowClosed(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnHttpResponse, "OnHttpResponse", int,
                   onHttpResponse(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnTimer, "OnTimer", int,

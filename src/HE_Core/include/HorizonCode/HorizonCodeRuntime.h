@@ -235,6 +235,9 @@ public:
     void fireOnTrayItem(InstanceId id, int elem, const std::string& itemId);
     // …and one in the menu bar (elem 0 for the same reason).
     void fireOnMenuItem(InstanceId id, int elem, const std::string& itemId);
+    // A second window has closed (elem 0: a window belongs to the application,
+    // not to any element). The payload is the id window.open handed back.
+    void fireOnWindowClosed(InstanceId id, int elem, int windowId);
     // An HTTP request this application started has been answered (elem 0: it
     // belongs to the application). The payload is the TICKET, not the answer —
     // an event carries one value and a response is four, so the readers

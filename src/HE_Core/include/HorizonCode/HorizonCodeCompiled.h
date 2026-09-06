@@ -152,6 +152,9 @@ public:
     // An entry in the menu bar was chosen; the argument is its id.
     virtual void onMenuItem(int elem, const std::string& id)
     { fireEvent("OnMenuItem", elem, Value::ofString(id)); }
+    // A second window closed; the argument is the id window.open handed back.
+    virtual void onWindowClosed(int elem, int windowId)
+    { fireEvent("OnWindowClosed", elem, Value::ofInt(windowId)); }
     // An HTTP request came back; the argument is its ticket, and the readers
     // say what the answer was.
     virtual void onHttpResponse(int elem, int ticket)

@@ -1450,7 +1450,10 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 		// element on any page.
 		static const std::vector<std::string> kEvents = {
 			"OnInit", "OnShutdown", "OnWindowFocusChanged", "OnFileDropped",
-			"OnTrayItem", "OnMenuItem", "OnHttpResponse", "OnFileChanged", "OnTimer" };
+			"OnTrayItem", "OnMenuItem", "OnHttpResponse", "OnFileChanged", "OnTimer",
+			// A second window this application opened has closed. It belongs to
+			// the application for the same reason the tray does: no page owns it.
+			"OnWindowClosed" };
 		bool edited = false;
 		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);

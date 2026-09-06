@@ -167,6 +167,9 @@ namespace ScriptApi
 	// A modal dims the screen and has to be answered; a popup dismisses itself
 	// on a click somewhere else. closeTopLayer is what Escape does.
 	void showModalWidget(HorizonWorld& world, int widgetId);
+	// Put a widget in a window and show it there (0 = the main window). A real
+	// move: whatever it held in the window it left stays behind.
+	void showWidgetInWindow(HorizonWorld& world, int widgetId, uint32_t windowId);
 	void openWidgetPopup(HorizonWorld& world, int widgetId, float x, float y);
 	void openWidgetPopupAtPointer(HorizonWorld& world, int widgetId);
 	bool closeTopLayer(HorizonWorld& world);

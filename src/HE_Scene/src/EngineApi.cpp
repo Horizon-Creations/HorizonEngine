@@ -1343,6 +1343,89 @@ void requestRedraw(Ctx& c)
 }
 } // namespace app
 
+// ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────────────
+namespace window {
+
+int open(Ctx& c, const std::string& title, int width, int height)
+{
+    if (!c.openWindow)
+    {
+        // Loud, because "my tool window never appears" is unexplainable from
+        // the graph otherwise: the row is bound, the HOST is what has no
+        // windows to give (the editor, a test rig) — or the renderer has no
+        // path to draw into one, which is where the host's own warning names
+        // the backend.
+        HE_LOG_WARN(Script, "%s",
+            "window.open: no window service bound by the host — nothing opened");
+        return 0;
+    }
+    // A window of no size is a window nobody can find again. Clamped rather
+    // than refused: the graph asked for a window, and the smallest useful one
+    // is a better answer than none.
+    const uint32_t w = static_cast<uint32_t>(width  > 0 ? width  : 640);
+    const uint32_t h = static_cast<uint32_t>(height > 0 ? height : 480);
+    return static_cast<int>(c.openWindow(title, w, h));
+}
+
+void close(Ctx& c, int id)
+{
+    if (id <= 0)
+    {
+        // 0 is the main window, and closing THAT is app.quit — a different
+        // thing with a different name, and not something to reach by accident.
+        HE_LOG_WARN(Script, "%s",
+            "window.close: 0 is the main window — use app.quit to end the application");
+        return;
+    }
+    if (!c.closeWindow)
+    {
+        HE_LOG_WARN(Script, "%s",
+            "window.close: no window service bound by the host — ignored");
+        return;
+    }
+    c.closeWindow(static_cast<uint32_t>(id));
+}
+
+void setTitle(Ctx& c, int id, const std::string& title)
+{
+    // The main window keeps its own row, so a graph that says window.setTitle(0)
+    // lands where it expects rather than being told off for it.
+    if (id <= 0) { app::setTitle(c, title); return; }
+    if (!c.setWindowTitleOf)
+    {
+        HE_LOG_WARN(Script, "%s",
+            "window.setTitle: no window service bound by the host — ignored");
+        return;
+    }
+    c.setWindowTitleOf(static_cast<uint32_t>(id), title);
+}
+
+void setSize(Ctx& c, int id, int width, int height)
+{
+    if (id <= 0) { app::setSize(c, width, height); return; }
+    if (!c.setWindowSizeOf)
+    {
+        HE_LOG_WARN(Script, "%s",
+            "window.setSize: no window service bound by the host — ignored");
+        return;
+    }
+    if (width <= 0 || height <= 0)
+    {
+        HE_LOG_WARN(Script, "window.setSize: %dx%d is not a size — ignored", width, height);
+        return;
+    }
+    c.setWindowSizeOf(static_cast<uint32_t>(id),
+                      static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+}
+
+void show(Ctx& c, int id, int widgetId)
+{
+    if (c.world) ScriptApi::showWidgetInWindow(*c.world, widgetId,
+                                               id > 0 ? static_cast<uint32_t>(id) : 0u);
+}
+
+} // namespace window
+
 // ── Clipboard ────────────────────────────────────────────────────────────────
 namespace clipboard {
 std::string getText(Ctx&)
@@ -4855,6 +4938,28 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ app::addTrayItem(c, aS(a, 0), aS(a, 1)); return VV{}; } });
         t.push_back({ "app.clearTrayMenu", "App", true, {}, {}, "HE::api::app::clearTrayMenu",
             [](Ctx& c, const VV&){ app::clearTrayMenu(c); return VV{}; } });
+        // A SECOND window (A5). Its own group and not more pins on app.*: pin
+        // indices are what a saved graph holds on to. Unbound in the editor and
+        // on a renderer that cannot draw into one — open answers 0 there.
+        t.push_back({ "window.open", "Window", true,
+            {{"title", P::String}, {"width", P::Int}, {"height", P::Int}},
+            {{"window", P::Int}}, "HE::api::window::open",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofInt(window::open(c, aS(a, 0), aI(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "window.close", "Window", true, {{"window", P::Int}}, {},
+            "HE::api::window::close",
+            [](Ctx& c, const VV& a){ window::close(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "window.setTitle", "Window", true,
+            {{"window", P::Int}, {"title", P::String}}, {}, "HE::api::window::setTitle",
+            [](Ctx& c, const VV& a){ window::setTitle(c, aI(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "window.setSize", "Window", true,
+            {{"window", P::Int}, {"width", P::Int}, {"height", P::Int}}, {},
+            "HE::api::window::setSize",
+            [](Ctx& c, const VV& a){ window::setSize(c, aI(a, 0), aI(a, 1), aI(a, 2));
+                                     return VV{}; } });
+        t.push_back({ "window.show", "Window", true,
+            {{"window", P::Int}, {"widget", P::Ref}}, {}, "HE::api::window::show",
+            [](Ctx& c, const VV& a){ window::show(c, aI(a, 0), (int)aR(a, 1)); return VV{}; } });
         // The menu bar, built row by row from a graph.
         t.push_back({ "app.addMenu", "App", true,
             {{"id", P::String}, {"label", P::String}}, {}, "HE::api::app::addMenu",
@@ -5729,6 +5834,10 @@ const std::vector<ApiFn>& registry()
             { "app.menuItemChecked", "Is Menu Item Checked" },
             { "app.setAutostart", "Set Start at Login" },
             { "app.autostart", "Starts at Login" },
+            { "window.open", "Open Window" },        { "window.close", "Close Window" },
+            { "window.setTitle", "Set Title Of Window" },
+            { "window.setSize", "Set Size Of Window" },
+            { "window.show", "Show Widget In Window" },
             { "clipboard.getText", "Get Clipboard Text" },
             { "clipboard.setText", "Set Clipboard Text" },
             { "clipboard.hasText", "Has Clipboard Text" },
@@ -6097,7 +6206,12 @@ bool isScriptGroup(std::string_view group)
                                                     "db",
                                                     // "print" likewise: writing a PDF by hand from
                                                     // Lua is not a workaround, it is a project.
-                                                    "print" };
+                                                    "print",
+                                                    // "window" is the second window (A5). No flat
+                                                    // twin either: without it a Lua application can
+                                                    // build a tool panel and never put it anywhere
+                                                    // but on top of its own main page.
+                                                    "window" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

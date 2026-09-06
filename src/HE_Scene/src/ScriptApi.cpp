@@ -402,6 +402,13 @@ bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& list
 
 void showModalWidget(HorizonWorld& world, int widgetId)
 { world.widgets().showModal(widgetId); }
+void showWidgetInWindow(HorizonWorld& world, int widgetId, uint32_t windowId)
+{
+	// Move first, then show. The other way round would draw it for one frame in
+	// the window it is leaving.
+	world.widgets().setWidgetWindow(widgetId, windowId);
+	world.widgets().showWidget(widgetId);
+}
 void openWidgetPopup(HorizonWorld& world, int widgetId, float x, float y)
 { world.widgets().openPopupAt(widgetId, x, y); }
 void openWidgetPopupAtPointer(HorizonWorld& world, int widgetId)

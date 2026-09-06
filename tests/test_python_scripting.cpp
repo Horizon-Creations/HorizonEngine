@@ -851,7 +851,7 @@ class AppGroups(horizon.Behavior):
                  ('process', 'which'),       ('json', 'getNumber'),
                  ('prefs', 'has'),           ('datetime', 'year'),
                  ('timer', 'cancel'),        ('db', 'lastError'),
-                 ('print', 'available')]
+                 ('print', 'available'),     ('window', 'open')]
         found = 0
         for g, f in names:
             ns = getattr(horizon, g, None)
@@ -875,7 +875,7 @@ TEST_CASE("ScriptContext: the application groups reach Python")
     const auto& t = world.registry().get<TransformComponent>(e);
     // BEFORE THE CHANGE: 0 — bootstrapEngineApiGroups skipped every one of
     // their rows, exactly as the Lua side did.
-    CHECK(t.position.x == doctest::Approx(11.0f));
+    CHECK(t.position.x == doctest::Approx(12.0f));
     CHECK(t.position.y == doctest::Approx(42.0f));   // …and one of them dispatches
 }
 

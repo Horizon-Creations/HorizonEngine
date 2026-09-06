@@ -124,6 +124,12 @@ struct HostCtxParts
 	std::function<void(const std::string&, bool)>               setMenuItemChecked;
 	std::function<bool(const std::string&)>                     menuItemEnabled;
 	std::function<bool(const std::string&)>                     menuItemChecked;
+	// The SECOND window (A5), bound here for the reason every row above is:
+	// a Lua script, a Python script and a graph must all reach the same windows.
+	std::function<uint32_t(const std::string&, uint32_t, uint32_t)> openWindow;
+	std::function<void(uint32_t)>                                   closeWindow;
+	std::function<void(uint32_t, const std::string&)>               setWindowTitleOf;
+	std::function<void(uint32_t, uint32_t, uint32_t)>               setWindowSizeOf;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
@@ -324,6 +330,10 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.setMenuItemChecked = g_host.setMenuItemChecked;
 	c.menuItemEnabled    = g_host.menuItemEnabled;
 	c.menuItemChecked    = g_host.menuItemChecked;
+	c.openWindow         = g_host.openWindow;
+	c.closeWindow        = g_host.closeWindow;
+	c.setWindowTitleOf   = g_host.setWindowTitleOf;
+	c.setWindowSizeOf    = g_host.setWindowSizeOf;
 	// Not through g_host: notifications need nothing from the application object,
 	// so they are the platform function itself and there is no state to capture.
 	c.notify          = [](const std::string& t, const std::string& b) { return notifyShow(t, b); };
@@ -939,6 +949,32 @@ void GameApplication::OnInit()
 		};
 		g_host.menuItemChecked = [this](const std::string& id) {
 			return m_widgets.menuItemChecked(id);
+		};
+		// ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────
+		// The shipped application owns its windows outright, so a graph that
+		// opens one means it. createSecondaryWindow refuses on a renderer with
+		// no path into a second window and says so there; 0 comes back here and
+		// the graph reads it as "no window", which is the only honest answer.
+		g_host.openWindow = [this](const std::string& title, uint32_t w, uint32_t h) -> uint32_t
+		{
+			HE::WindowProps p;
+			p.title  = title.empty() ? "Window" : title;
+			p.width  = w;
+			p.height = h;
+			// api is NOT set here on purpose: createSecondaryWindow forces the
+			// main window's, because the SDL flags follow from it.
+			return createSecondaryWindow(p).id;
+		};
+		g_host.closeWindow = [this](uint32_t id) { destroyWindow(HE::WindowHandle{ id }); };
+		g_host.setWindowTitleOf = [this](uint32_t id, const std::string& t)
+		{
+			if (HE::Window* w = getWindow(HE::WindowHandle{ id })) w->SetTitle(t);
+			else HE_LOG_WARN(Script, "window.setTitle: no window with id %u", id);
+		};
+		g_host.setWindowSizeOf = [this](uint32_t id, uint32_t w, uint32_t h)
+		{
+			if (HE::Window* win = getWindow(HE::WindowHandle{ id })) win->SetSize(w, h);
+			else HE_LOG_WARN(Script, "window.setSize: no window with id %u", id);
 		};
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
@@ -2752,6 +2788,10 @@ void GameApplication::OnWindowClosing(HE::WindowHandle handle)
 	// The pointer cannot still be in a window that is gone.
 	if (m_widgets.pointerWindow() == handle.id)
 		m_widgets.processPointer(0u, 1.0f, 1.0f, 0.0f, 0.0f, false, false);
+	// …and the graph is told, LAST: a handler that opens the next window must
+	// land in a world where this one is already finished with.
+	if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+		m_gameInstance.runtime().fireOnWindowClosed(gi, 0, static_cast<int>(handle.id));
 }
 
 void GameApplication::OnShutdown()

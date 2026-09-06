@@ -3793,7 +3793,10 @@ TEST_CASE("EngineApi: the application groups are script groups")
     // test_python_scripting; this is the predicate they both hang on.
     for (const char* g : { "widget", "theme", "dialog", "clipboard",
                            "process", "json", "prefs", "datetime",
-                           "timer", "db", "print" })
+                           "timer", "db", "print",
+                           // …and the second window (A5), which arrived with
+                           // the same promise attached.
+                           "window" })
     {
         CHECK(HE::api::isScriptGroup(g));
         // …and the group is not empty, or listing it would expose nothing.
@@ -3803,6 +3806,67 @@ TEST_CASE("EngineApi: the application groups are script groups")
             if (std::string_view(fn.id).substr(0, prefix.size()) == prefix) { any = true; break; }
         CHECK(any);
     }
+}
+
+// MUTATION: drop the `if (!c.openWindow)` guard in EngineApi.cpp's
+// window::open — a graph run in the editor (nothing bound) then calls through
+// an empty std::function and the whole editor goes down on a bad_function_call.
+TEST_CASE("EngineApi: the window group answers honestly when nothing is bound")
+{
+    HE::api::Ctx c{};
+    // No host: no window, and the id says so. 0 is the answer a graph can test.
+    CHECK(HE::api::window::open(c, "Tools", 400, 300) == 0);
+    // …and none of the others reaches into an unbound callback.
+    HE::api::window::close(c, 3);
+    HE::api::window::setTitle(c, 3, "x");
+    HE::api::window::setSize(c, 3, 100, 100);
+
+    // Bound: the title and the size arrive, and a size of nothing is refused
+    // rather than passed on to the platform.
+    std::string openedTitle;
+    uint32_t    openedW = 0, openedH = 0;
+    int         closed  = -1;
+    std::string titleOf;
+    uint32_t    sizeW = 0, sizeH = 0;
+    c.openWindow = [&](const std::string& t, uint32_t w, uint32_t h) -> uint32_t
+    { openedTitle = t; openedW = w; openedH = h; return 7; };
+    c.closeWindow      = [&](uint32_t id) { closed = static_cast<int>(id); };
+    c.setWindowTitleOf = [&](uint32_t, const std::string& t) { titleOf = t; };
+    c.setWindowSizeOf  = [&](uint32_t, uint32_t w, uint32_t h) { sizeW = w; sizeH = h; };
+
+    CHECK(HE::api::window::open(c, "Tools", 400, 300) == 7);
+    CHECK(openedTitle == "Tools");
+    CHECK(openedW == 400u);
+    CHECK(openedH == 300u);
+    // A window of no size is a window nobody finds again — clamped, not
+    // refused: the graph asked for a window.
+    CHECK(HE::api::window::open(c, "T", 0, -5) == 7);
+    CHECK(openedW == 640u);
+    CHECK(openedH == 480u);
+
+    HE::api::window::close(c, 7);
+    CHECK(closed == 7);
+    // 0 is the MAIN window, and closing that is app.quit — a different thing
+    // with a different name. It must not reach the callback.
+    closed = -1;
+    HE::api::window::close(c, 0);
+    CHECK(closed == -1);
+
+    HE::api::window::setTitle(c, 7, "Palette");
+    CHECK(titleOf == "Palette");
+    HE::api::window::setSize(c, 7, 800, 600);
+    CHECK(sizeW == 800u);
+    CHECK(sizeH == 600u);
+    sizeW = sizeH = 0;
+    HE::api::window::setSize(c, 7, 0, 600);
+    CHECK(sizeW == 0u);   // refused
+
+    // Window 0 falls through to the main-window rows, so a graph that says
+    // window.setTitle(0, …) lands where it expects.
+    std::string mainTitle;
+    c.setWindowTitle = [&](const std::string& t) { mainTitle = t; };
+    HE::api::window::setTitle(c, 0, "Main");
+    CHECK(mainTitle == "Main");
 }
 
 // MUTATION: in EngineApi.cpp's self-default post-pass, delete the two lines that

@@ -785,7 +785,7 @@ local names = { { 'widget', 'setListCount' }, { 'theme', 'getMode' },
                 { 'process', 'which' },       { 'json', 'getNumber' },
                 { 'prefs', 'has' },           { 'datetime', 'year' },
                 { 'timer', 'cancel' },        { 'db', 'lastError' },
-                { 'print', 'available' } }
+                { 'print', 'available' },     { 'window', 'open' } }
 local found = 0
 for _, n in ipairs(names) do
     local t = horizon[n[1]]
@@ -803,7 +803,7 @@ TEST_CASE("ScriptContext: the application groups reach Lua")
     REQUIRE(engine.exec(kLuaAppGroups));
     // BEFORE THE CHANGE: 0 — isScriptGroup knew none of them, so
     // registerEngineApiGroups skipped every one of their rows.
-    CHECK(engine.getGlobalNumber("_found") == doctest::Approx(11.0));
+    CHECK(engine.getGlobalNumber("_found") == doctest::Approx(12.0));
     // …and one of them actually dispatches, not just exists.
     CHECK(engine.getGlobalNumber("_json") == doctest::Approx(42.0));
 }

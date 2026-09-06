@@ -2267,6 +2267,12 @@ const std::vector<EngineEventDesc>& engineEvents()
         // An entry in the application's MENU BAR was chosen. Same shape as the
         // tray, for the same reason: the id comes back, never the label.
         { "OnMenuItem",           "onMenuItem",           P::String, true  },
+        // A second window this application opened has closed — by its own close
+        // button, or because window.close was called. Int payload: the id
+        // window.open handed back, because that is the one thing a graph cannot
+        // work out for itself when it has two of them open. It fires while the
+        // window still exists; the widgets that hung in it are already gone.
+        { "OnWindowClosed",       "onWindowClosed",       P::Int,    true  },
         // An HTTP request this application started has been answered. Int
         // payload: the TICKET http.get/http.post handed back, because an event
         // carries one value and a response is four — the readers say the rest.

@@ -167,6 +167,20 @@ struct Ctx
     std::function<void(const std::string& id, bool)> setMenuItemChecked;
     std::function<bool(const std::string& id)>       menuItemEnabled;
     std::function<bool(const std::string& id)>       menuItemChecked;
+    // ── A SECOND window (A5, docs/he-apps-plan.md §13.3) ────────────────────
+    // Separate rows from the four above rather than a window id added to them:
+    // pin indices are what a saved graph holds on to, so a widened setWindowSize
+    // would rewire every call anybody had already drawn. The four above keep
+    // meaning the MAIN window, always.
+    //
+    // openWindow answers 0 when it refused — no host, or a renderer with no
+    // second-window path (Capabilities::supportsSecondaryWindows). Unbound in
+    // the editor, like the tray and the menu bar and for the same reason: a
+    // previewed graph must not open windows on the screen of somebody working.
+    std::function<uint32_t(const std::string& title, uint32_t w, uint32_t h)> openWindow;
+    std::function<void(uint32_t id)>                                closeWindow;
+    std::function<void(uint32_t id, const std::string& title)>      setWindowTitleOf;
+    std::function<void(uint32_t id, uint32_t w, uint32_t h)>        setWindowSizeOf;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -838,6 +852,38 @@ namespace app {
     // bound), and on a Linux without notify-send. Worth asking once rather than
     // discovering it per notification.
     bool notifyAvailable(Ctx&);
+}
+
+// ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────────────
+// A tool window beside the main one, a document per window, a panel taken off
+// to the side. Its own widget tree, its own dialogs: a modal here seals THIS
+// window and the one next to it carries on.
+//
+// A group of its own rather than more parameters on app.*: pin indices are what
+// a saved graph holds on to, and widening app.setSize would rewire every call
+// anybody had already drawn. So app.* keeps meaning the main window, always,
+// and everything here takes the id open() handed back.
+//
+// Not every renderer can do it. Software can (a window's own surface is all it
+// draws into anyway) and Metal can; OpenGL, Vulkan and D3D cannot, and open()
+// answers 0 there with one warning rather than putting an empty black window on
+// the screen. It answers 0 in the editor too, where nothing is bound — the
+// pattern the tray and the menu bar already follow.
+namespace window {
+    // Open one. Answers its id, or 0 when it was refused. The size is in the
+    // same logical points app.setSize takes.
+    int  open(Ctx&, const std::string& title, int width, int height);
+    // Close it. Everything that hung in it is destroyed with it and the graph
+    // gets OnWindowClosed — the same event the window's own close button fires,
+    // because it is the same thing happening.
+    void close(Ctx&, int id);
+    void setTitle(Ctx&, int id, const std::string& title);
+    void setSize(Ctx&, int id, int width, int height);
+    // Put a widget in it and show it. A real move: whatever the widget held in
+    // the window it came from (a grab, the focus) stays behind, because a
+    // dialog that keeps its old window modal is a window nobody can click.
+    // id 0 brings it back to the main window.
+    void show(Ctx&, int id, int widgetId);
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────────────
