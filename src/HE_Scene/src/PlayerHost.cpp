@@ -208,6 +208,11 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 	// the keyboard. The mapping is still ticked (above) either way — dropping
 	// its tick would make a key held across the pause look like a fresh press on
 	// resume. Events that fall in a pause are dropped, never queued.
+	//
+	// This is the reason isPaused() asks about PAUSE REASONS rather than about
+	// the clock standing still: a hit-stop also holds the clock at zero, and a
+	// 100 ms freeze that swallows the player's button press is a bug. A freeze
+	// stops the world; it does not stop the player being heard.
 	const bool paused = HE::api::time::isPaused();
 
 	// UI-only routing silences gameplay input for the same reason a pause does,

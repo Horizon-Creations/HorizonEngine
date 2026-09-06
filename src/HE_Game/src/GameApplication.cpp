@@ -235,6 +235,12 @@ void GameApplication::applyShippedConfig()
 		HE_LOG_WARN(Core, "GameApplication: unknown window mode '%s' — keeping the default",
 		            mode.c_str());
 	m_vsyncOn = gs.getCustomConfigBool("GameVSync", m_vsyncOn);
+	// Alt-tabbing out of a single-player game and coming back to a corpse is a
+	// complaint, not a feature, so this is on by default. It is still a switch
+	// and not an automatism: a game with its own pause menu wants to open THAT
+	// on focus loss, and a multiplayer client must not freeze at all. Read once
+	// here rather than per event — the file does not change mid-session.
+	m_pauseOnFocusLoss = gs.getCustomConfigBool("PauseOnFocusLoss", m_pauseOnFocusLoss);
 
 	if (const std::string name = gs.getCustomConfigString("GameBackend"); !name.empty())
 	{
@@ -784,6 +790,13 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
 
+	// A scene must not inherit the last one's time controls. Whoever loaded a
+	// level in slow motion, or from behind a pause menu, meant to leave it —
+	// nothing in the new scene knows to lift a scale it never set. elapsed() and
+	// frameCount() deliberately keep running: they are session clocks, and a
+	// session clock that restarts at every door is not one.
+	HE::api::time::resetControls();
+
 	// Swap + bring the new scene up exactly like OnInit does for the startup scene.
 	m_world = std::move(newWorld);
 	m_world->setWidgetManager(&m_widgets);   // keep the app-level UI on the new world
@@ -1234,9 +1247,27 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
-	// OS window focus → GameInstance OnWindowFocusChanged (while running).
-	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
-	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
+	// OS window focus → GameInstance OnWindowFocusChanged (while running), and —
+	// when the project asks for it — the FocusLost pause reason.
+	//
+	// The event stays regardless of the switch: a project that already built a
+	// graph on OnWindowFocusChanged keeps it, and gets to do more than freeze
+	// (open its own menu, mute the mixer). The reason is its own channel, so a
+	// script that resumes while the window is still in the background does not
+	// accidentally lift this one, and this one does not lift the script's.
+	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)
+	{
+		m_gameInstance.setWindowFocus(true);
+		// Resumed unconditionally, not only when m_pauseOnFocusLoss is set:
+		// resuming a reason nobody set is a no-op, and the alternative is a game
+		// stuck paused forever if the switch is ever flipped off mid-flight.
+		HE::api::time::resume(HE::api::time::PauseReason::FocusLost);
+	}
+	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+	{
+		m_gameInstance.setWindowFocus(false);
+		if (m_pauseOnFocusLoss) HE::api::time::pause(HE::api::time::PauseReason::FocusLost);
+	}
 
 	// A focused in-game text field owns the keyboard: route text + edit keys to
 	// the widget and swallow them so they don't drive the camera/gameplay.
@@ -1421,21 +1452,13 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && m_physicsWorld)
 	{
 		HE_PROFILE_SCOPE_N("PhysicsStep");
-		m_physicsAccum += gameDt;
-		// Bounded so a long stall (a streaming hitch, a breakpoint) cannot
-		// spiral into ever more catch-up steps. The bound RIDES the time scale:
-		// at scale 5 a single frame legitimately owes ~5× the steps, and a fixed
-		// cap of 5 would saturate every frame and dump the remainder below —
-		// fast-forward would silently decay into slow motion. The rate itself
-		// stays fixed; only the number of steps per frame moves.
-		const int maxSteps = 5 * std::max(1, (int)std::ceil(HE::api::time::timeScale()));
-		int steps = 0;
-		while (m_physicsAccum >= PhysicsWorld::kFixedDt && steps++ < maxSteps)
-		{
-			m_physicsWorld->step(*m_world, PhysicsWorld::kFixedDt);
-			m_physicsAccum -= PhysicsWorld::kFixedDt;
-		}
-		if (m_physicsAccum > PhysicsWorld::kFixedDt) m_physicsAccum = 0.0f;
+		// Bounded so a long stall (a streaming hitch, a breakpoint) cannot spiral
+		// into ever more catch-up steps, with the bound riding the time scale —
+		// the rule lives in HE::advanceFixedSteps so the editor's preview cannot
+		// pace differently from the game it is previewing.
+		HE::advanceFixedSteps(m_physicsAccum, gameDt, PhysicsWorld::kFixedDt,
+		                      HE::api::time::timeScale(),
+		                      [&](float step){ m_physicsWorld->step(*m_world, step); });
 
 		// ONE dispatch for both frontends: polling drains the queues, so a
 		// second call would find nothing left and it would look like the

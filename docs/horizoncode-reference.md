@@ -401,16 +401,52 @@ Notes:
   `stats.hp`, `stats.tags[1]` — so field access needs no API. Packed builds load the
   definitions eagerly from the pak's `__type_index__` before any script runs.
 - **Time** is the game's clock, not the app's. `time.setTimeScale(s)` dilates it —
-  `0` pauses, `1` is normal, up to `5` (clamped in the engine, so every frontend
-  gets the same bounds); `time.deltaTime` and `time.elapsed` are already scaled, so
-  a script that integrates against them slows, speeds up and freezes for free.
-  Everything that *is* the game runs on that clock: scripts, physics (fixed rate,
-  more steps per frame — never a bigger step), cameras, animation, the ECS systems
-  and the day-night cycle. Two things deliberately keep the real frame time —
-  **widget ticks** (a pause menu frozen at scale 0 could never unpause itself) and
-  timed debug lines; `time.unscaledDeltaTime` gives anything else the same
-  exemption. Play-start resets the scale to 1, so a session never inherits a pause.
-- **Pausing is not silence.** Two switches decide what still runs at scale 0:
+  `0.5` is half speed, `1` is normal, up to `5` (clamped in the engine, so every
+  frontend gets the same bounds); `time.deltaTime` and `time.elapsed` are already
+  scaled, so a script that integrates against them slows, speeds up and freezes
+  for free. Everything that *is* the game runs on that clock: scripts, physics
+  (fixed rate, more steps per frame — never a bigger step), C++ game logic,
+  cameras, animation, the ECS systems and the day-night cycle. Two things
+  deliberately keep the real frame time — **widget ticks** (a pause menu frozen at
+  scale 0 could never unpause itself) and timed debug lines;
+  `time.unscaledDeltaTime` and `time.unscaledElapsed` give anything else the same
+  exemption. Play-start resets the scale to 1, so a session never inherits a
+  pause.
+- **Three things hold the clock, and they do not overwrite each other.** The scale
+  above is only one of them; a pause and a hit stop are their own channels, and
+  what actually multiplies `deltaTime` is `time.effectiveScale` — zero while
+  either of the other two is on, the scale otherwise. That separation is the whole
+  point: a hit effect whose slow motion ends by writing `1` used to silently lift
+  a pause menu somebody else had put up, and `time.timeScale` still reads back
+  what was *asked for* rather than what is in effect, so a script can take its own
+  slow motion back without guessing.
+  - `time.pause` / `time.resume` are the pause. `time.isPaused` answers "the game
+    is paused", not "the clock stands still" — `setTimeScale(0)` alone is slow
+    motion down to a standstill and is deliberately **not** a pause. A pause also
+    stops input being delivered to the PlayerController (below); a standstill does
+    not. Pauses are held by *reason*, and a script only ever holds its own: it
+    cannot resume the one the window put up when the game lost focus, and that one
+    cannot resume the script's. The game runs again once no reason is left.
+  - `time.hitStop(seconds)` is the impact freeze — 0.08 to 0.12 s is the usual
+    weight. It counts REAL seconds (otherwise it could never end, being the thing
+    holding game time at zero), returns to exactly the speed it came from, slow
+    motion included, and does **not** read as paused, so the button press that
+    caused it is never swallowed. Triggering it again takes the longer of the two
+    remaining windows rather than adding them up, so a burst of hits cannot stack
+    into a half-second stall. `time.isFrozen` reports it.
+  - **Pause on focus loss** is a project switch, `PauseOnFocusLoss` in
+    `config.json`, on by default and read only by the packaged game — the editor
+    window loses focus constantly. It sets its own pause reason, so it composes
+    with the game's own pause rather than fighting it. The
+    `OnWindowFocusChanged` event still fires either way, for a game that wants to
+    open its menu or duck the mixer instead of just freezing.
+  - The editor shows all of this next to the Play button: the scale, `Paused` or
+    `Freeze`, amber whenever the game's clock is not running normally. It is a
+    separate readout from the editor's own Pause, which freezes the world tick
+    without touching any of these channels.
+- **Pausing is not silence.** Two switches decide what still runs while the game
+  is paused (the pause proper — a hit stop never silences anything, and a scale of
+  0 without a pause reason is not a pause, so neither switch applies to either):
   - An **InputAction** asset has *"Fires while the game is paused"* (JSON
     `runWhilePaused`). **Off by default** — otherwise the player keeps shooting
     through the pause menu — so switch it on for the few actions that must get

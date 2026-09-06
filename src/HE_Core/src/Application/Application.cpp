@@ -5,6 +5,7 @@
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/EngineProfiler.h"
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -220,8 +221,15 @@ namespace HE
 		{
 			const Uint64 nowTick = SDL_GetTicksNS();
 			const Uint64 delta   = nowTick - lastTick;
-			const float  dt      = delta > 0 ? static_cast<float>(delta) * 1e-9f
-											 : (1.0f / 60.0f);
+			// Two numbers, on purpose. `measuredDt` is how long the last frame
+			// actually took — that is what the hitch detector and the profiler are
+			// asking about, and clamping it would hide exactly the stalls they
+			// exist to report. `dt` is how far the world is advanced, capped at
+			// kMaxFrameSeconds so a breakpoint or an alt-tab does not teleport
+			// everything on the frame after it. See kMaxFrameSeconds.
+			const float  measuredDt = delta > 0 ? static_cast<float>(delta) * 1e-9f
+			                                    : (1.0f / 60.0f);
+			const float  dt         = std::min(measuredDt, kMaxFrameSeconds);
 			lastTick = nowTick;
 
 			// Stamp every log record produced this frame with the frame index, so a
@@ -232,14 +240,14 @@ namespace HE
 			// usually a synchronous asset load, a shader compile or a GC-like stall in
 			// a script. Throttled so a systematically slow scene logs once a second
 			// instead of every frame.
-			if (dt > kHitchSeconds && m_frameIndex > kHitchWarmupFrames)
+			if (measuredDt > kHitchSeconds && m_frameIndex > kHitchWarmupFrames)
 				HE_LOG_THROTTLE(Core, Warning, 1.0,
-				                "Frame hitch: %.1f ms (frame %llu)", dt * 1000.0f,
+				                "Frame hitch: %.1f ms (frame %llu)", measuredDt * 1000.0f,
 				                static_cast<unsigned long long>(m_frameIndex));
 
 			// Applies any pending start/stop (from F9) on the frame boundary so a
 			// frame is always recorded whole or not at all.
-			profiler.beginFrame(static_cast<double>(dt) * 1000.0);
+			profiler.beginFrame(static_cast<double>(measuredDt) * 1000.0);
 
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");
@@ -289,7 +297,11 @@ namespace HE
 			if (m_world)
 			{
 				HE_PROFILE_SCOPE_N("GameLogicTick");
-				m_loop.tick(*m_world, m_logicLoader.logic(), dt);
+				// GAME time, not the raw frame time: C++ game logic obeys the
+				// same pause and slow motion as scripts, physics and the ECS
+				// systems do. Ticking it on the wall clock is how a paused game
+				// kept moving in exactly the one language that could not see it.
+				m_loop.tick(*m_world, m_logicLoader.logic(), GameLogicDeltaTime(dt));
 			}
 
 			{
@@ -330,7 +342,7 @@ namespace HE
 			if (profilerLive)
 			{
 				ProfLiveFrame lf;
-				lf.deltaMs    = static_cast<double>(dt) * 1000.0;
+				lf.deltaMs    = static_cast<double>(measuredDt) * 1000.0;
 				lf.cpuFrameMs = profiler.lastCpuFrameMs();
 				if (gsPulled)
 				{

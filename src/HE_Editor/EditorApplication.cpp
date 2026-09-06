@@ -2618,12 +2618,12 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("PhysicsStep");
-			m_physicsAccum += gameDt;
-			while (m_physicsAccum >= kPhysicsFixedDt)
-			{
-				m_physicsWorld->step(*m_editorWorld, kPhysicsFixedDt);
-				m_physicsAccum -= kPhysicsFixedDt;
-			}
+			// Same bounded accumulator as the shipped game, from the same helper:
+			// this loop used to have no cap at all, so a stall that the game
+			// shrugged off turned a preview into catch-up steps forever.
+			HE::advanceFixedSteps(m_physicsAccum, gameDt, kPhysicsFixedDt,
+			                      HE::api::time::timeScale(),
+			                      [&](float step){ m_physicsWorld->step(*m_editorWorld, step); });
 		}
 
 		// The PIE camera runs AFTER physics: a rig following a target it updated
@@ -6777,6 +6777,16 @@ void EditorApplication::newScene()
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
 	HE_LOG_INFO(Editor, "%s", "EditorApplication: new empty scene");
+}
+
+// The gate on m_isPlaying is the load-bearing half: outside play mode the editor
+// never calls time::advance at all, so deltaTime() would hand back whatever the
+// last play session left behind and C++ game logic would tick through edit mode
+// on a stale number.
+float EditorApplication::GameLogicDeltaTime(float rawDt)
+{
+	(void)rawDt;
+	return m_isPlaying ? HE::api::time::deltaTime() : 0.0f;
 }
 
 void EditorApplication::OnShutdown()

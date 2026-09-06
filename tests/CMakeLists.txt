@@ -50,6 +50,7 @@ add_executable(he_tests
     test_scripting.cpp
     test_scripting_binding.cpp
     test_engine_api.cpp
+    test_time_control.cpp
     test_type_registry.cpp
     test_horizoncode_types.cpp
     test_horizoncode_containers.cpp

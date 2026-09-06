@@ -12,6 +12,7 @@
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
 #include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
@@ -34,6 +35,8 @@ protected:
     bool            OnEvent(const SDL_Event& event) override;
     void            OnRender(float dt)     override;
     void            OnShutdown()           override;
+    // C++ game logic runs on the same clock as everything else that IS the game.
+    float           GameLogicDeltaTime(float) override { return HE::api::time::deltaTime(); }
 
     std::unique_ptr<IRenderer> CreateRenderer()      override;
 
@@ -147,6 +150,10 @@ private:
     HE::WindowMode      m_windowMode   = HE::WindowMode::Fullscreen;
     HE::RendererBackend m_backend      = HE::RendererBackend::OpenGL;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
+    // config.json "PauseOnFocusLoss". Only the packaged game reads it — the
+    // editor window loses focus constantly, and a PIE session that froze every
+    // time you clicked the Details panel would be unusable.
+    bool m_pauseOnFocusLoss = true;
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
