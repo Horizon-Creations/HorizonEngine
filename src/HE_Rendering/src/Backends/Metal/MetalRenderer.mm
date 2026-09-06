@@ -1343,45 +1343,14 @@ fragment float4 ssaoPosFragment(SSAOPosOut in [[stage_in]])
 	return float4(in.viewPos, 1.0); // a = 1 → valid geometry
 }
 
-// FORWARD-reflections variant of the pre-pass (MRT): additionally writes the
-// G-buffer-compatible attribute pair the SSR trace / GI-reflection kernels
-// consume — oct-encoded WORLD normal (+ roughness 0: the prepass has no
-// material data; the shading pass applies the per-pixel roughness fade) and
-// the NDC depth exactly as gbufferMain stores it (in.position.z), so the
-// reconstruction maths (heWorldAt / invViewProj) is shared verbatim.
-struct ReflPosOut { float4 position [[position]]; float3 viewPos; float3 worldNormal; };
-struct ReflPosFrag {
-	float4 viewPos [[color(0)]];
-	float4 attr    [[color(1)]]; // rg oct normal *0.5+0.5, b roughness (0), a unused
-	float  ndc     [[color(2)]]; // NDC depth (same value gbufferMain writes)
-};
-static float2 octEncodePre(float3 n)
-{
-	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
-	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
-	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
-}
-vertex ReflPosOut reflPosVertex(uint vid [[vertex_id]],
-                                const device VertexIn*    verts [[buffer(0)]],
-                                constant SSAOPosUniforms& u     [[buffer(1)]])
-{
-	ReflPosOut o;
-	float4 p      = float4(float3(verts[vid].position), 1.0);
-	o.position    = u.mvp * p;
-	o.viewPos     = (u.modelView * p).xyz;
-	o.worldNormal = (u.model * float4(float3(verts[vid].normal), 0.0)).xyz;
-	return o;
-}
-fragment ReflPosFrag reflPosFragment(ReflPosOut in [[stage_in]])
-{
-	ReflPosFrag o;
-	o.viewPos = float4(in.viewPos, 1.0);
-	float3 n = in.worldNormal;
-	n = (dot(n, n) > 1e-12) ? normalize(n) : float3(0.0, 0.0, 1.0);
-	o.attr = float4(octEncodePre(n) * 0.5 + 0.5, 0.0, 0.0);
-	o.ndc  = in.position.z;
-	return o;
-}
+// The FORWARD-reflections variant of this pre-pass (MRT: view position + oct
+// world normal + NDC depth) used to live here as reflPosVertex/reflPosFragment.
+// It moved into the shared MaterialShaderLibrary — every backend porting SSR
+// needs the identical encoding, and the trace decodes it with the preamble's
+// heOctDecode (docs/ssr-cross-backend-plan.md §3.2 way (a)). See
+// MaterialShaderLibrary::reflPrepassVertex / reflPrepassFragment; the pipeline
+// is built from those in CreateScenePipeline, with the SSBO vertex-pull pinned
+// to the same buffer(0)/buffer(1) this pass's encoder has always used.
 
 struct SSAOOut { float4 position [[position]]; float2 uv; };
 vertex SSAOOut ssaoVertex(uint vid [[vertex_id]])
@@ -6248,18 +6217,56 @@ void MetalRenderer::CreateScenePipeline()
 		// FORWARD-reflections MRT variant of the pre-pass (view-pos + oct
 		// normal/rough + NDC depth) — used instead of the plain pre-pass when
 		// the forward path runs SSR / GI reflections.
-		MTLRenderPipelineDescriptor* rpDesc = [[MTLRenderPipelineDescriptor alloc] init];
-		rpDesc.vertexFunction   = [ssLib newFunctionWithName:@"reflPosVertex"];
-		rpDesc.fragmentFunction = [ssLib newFunctionWithName:@"reflPosFragment"];
-		rpDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // view position
-		rpDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // oct normal + rough
-		rpDesc.colorAttachments[2].pixelFormat = MTLPixelFormatR32Float;    // NDC depth
-		rpDesc.depthAttachmentPixelFormat      = kDepthFormat;
-		id<MTLRenderPipelineState> rpPso = [device newRenderPipelineStateWithDescriptor:rpDesc error:&ssError];
-		if (!rpPso)
-			throw std::runtime_error(std::string("MetalRenderer: refl pos pipeline failed: ")
-				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
-		m_reflPosPipeline = (void*)CFBridgingRetain(rpPso);
+		//
+		// Cross-compiled from the SHARED library rather than from kSSAOMSL
+		// above: every backend porting SSR needs the identical encoding, and
+		// four hand-kept copies of that contract drift
+		// (docs/ssr-cross-backend-plan.md §3.2 way (a)). The vertex is the SSBO
+		// pull variant, pinned so the mesh buffer stays at [[buffer(0)]] and the
+		// matrices at [[buffer(1)]] — the exact bind points the pre-pass encoder
+		// already issues, so EncodeSSAO is untouched by this.
+		//
+		// A failure here is NOT fatal: the MRT branch checks m_reflPosPipeline
+		// and falls back to the plain view-position pre-pass, which costs the
+		// forward path its reflections and nothing else. (The embedded-MSL
+		// version threw, but it could not fail for a reason the shipping build
+		// would ever see; a cross-compile can.)
+#if defined(HE_HAVE_SHADERC)
+		{
+			using LibBackend = HE::MaterialShaderLibrary::Backend;
+			const auto& rpv = m_matShaderLib.reflPrepassVertex(LibBackend::Metal);
+			const auto& rpf = m_matShaderLib.reflPrepassFragment(LibBackend::Metal);
+			if (!(rpv.ok && rpf.ok))
+				HE_LOG_ERROR(RHI, "%s",
+					(std::string("MetalRenderer: refl pre-pass cross-compile failed\n")
+					 + rpv.log + rpf.log).c_str());
+			else
+			{
+				NSError* rpErr = nil;
+				id<MTLLibrary> rpvLib = [device newLibraryWithSource:
+					[NSString stringWithUTF8String:rpv.source.c_str()] options:nil error:&rpErr];
+				id<MTLLibrary> rpfLib = rpErr ? nil : [device newLibraryWithSource:
+					[NSString stringWithUTF8String:rpf.source.c_str()] options:nil error:&rpErr];
+				if (rpvLib && rpfLib)
+				{
+					MTLRenderPipelineDescriptor* rpDesc = [[MTLRenderPipelineDescriptor alloc] init];
+					rpDesc.vertexFunction   = [rpvLib newFunctionWithName:@"main0"];
+					rpDesc.fragmentFunction = [rpfLib newFunctionWithName:@"main0"];
+					rpDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // view position
+					rpDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // oct normal + rough
+					rpDesc.colorAttachments[2].pixelFormat = MTLPixelFormatR32Float;    // NDC depth
+					rpDesc.depthAttachmentPixelFormat      = kDepthFormat;
+					id<MTLRenderPipelineState> rpPso =
+						[device newRenderPipelineStateWithDescriptor:rpDesc error:&rpErr];
+					if (rpPso) m_reflPosPipeline = (void*)CFBridgingRetain(rpPso);
+				}
+				if (!m_reflPosPipeline)
+					HE_LOG_ERROR(RHI, "%s",
+						(std::string("MetalRenderer: refl pos pipeline failed: ")
+						 + (rpErr ? rpErr.localizedDescription.UTF8String : "unknown")).c_str());
+			}
+		}
+#endif
 
 		// Deferred P5 variant: view-pos reconstructed from the G-buffer depth by a
 		// fullscreen draw — no depth attachment, no geometry.
