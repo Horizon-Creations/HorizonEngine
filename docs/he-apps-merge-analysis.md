@@ -50,7 +50,7 @@
 
 **Zu prüfen für den Menschen:** Der Leitstand hat gemeldet, dass `claude/decals-cross-backend` versehentlich von diesem Branch abgezweigt war. Geprüft: seine Merge-Base mit diesem Branch ist `6a8ca1f8`, ein Commit dieses Branches, seine Merge-Base mit main nur `e38eabfa`. Der Nachfolger `claude/decals-cross-backend-v2` hat seine Merge-Base auf `af05e59b`, also sauber auf main. Der alte Decals-Branch sollte nicht mehr verwendet werden.
 
-**Bekannte Restbaustellen aus dem Thema** (nicht Teil der 23 Schritte, siehe Abschnitt 8): `app.minimize`, `app.maximize`, `isMaximized` fehlen (eine eigene Titelleiste hat damit nur einen von drei Knöpfen), auswählbarer statischer Text, Menü `enabled`/`checked`, `db` und `print` aus Block C, vier bewusst offene Kontrastbefunde, Lösch-Kreuz im Suchfeld.
+**Bekannte Restbaustellen aus dem Thema** (nicht Teil der 23 Schritte, siehe Abschnitt 8): auswählbarer statischer Text, `db` und `print` aus Block C. Vier Punkte von hier sind seit dem 06.09.2026 erledigt (Abschnitt 8): die Fensterzeilen, Menü `enabled`/`checked`, die Kontrastbefunde und das Lösch-Kreuz.
 
 ---
 
@@ -271,12 +271,12 @@ Schicht 0, Texturen und UI-Materialien existieren im UI-Pass nur auf Metal und G
 
 Aus der Abschlussbilanz und den Warnungen im Thema:
 
-- `app.minimize`, `app.maximize`, `app.isMaximized` fehlen. Die eigene Titelleiste (F3) hat damit nur einen von drei Knöpfen (`app.quit`). Der Bearbeiter von Schritt 21 nannte es „die nächste Hälfte derselben Sache".
-- Menü-Einträge ohne `enabled`/`checked`.
+- ~~`app.minimize`, `app.maximize`, `app.isMaximized` fehlen~~ **erledigt am 06.09.2026** (`4c1a46b6`): drei Registry-Zeilen, `Window::Minimize/Maximize/Restore/IsMaximized`, gebunden im ausgelieferten Wirt und bewusst nicht im Editor. `maximize` nimmt einen Wahrheitswert und deckt damit auch das Zurücksetzen ab.
+- ~~Menü-Einträge ohne `enabled`/`checked`~~ **erledigt am 06.09.2026** (`bf03b40b`): zwei Felder an `AppMenuItem`, gezeichnete Leiste und macOS-Systemleiste, vier Skriptzeilen. Gesperrt heißt auch: der Akkord feuert nicht mehr, wird aber geschluckt.
 - Auswählbarer statischer Text (B6-Rest).
 - `db` und `print` aus Block C, `timer` bewusst nicht gebaut.
-- Vier Kontrastbefunde absichtlich offen: Text auf Akzentfläche (3.7 hell, 2.5 dunkel), weil dem Vokabular eine Theme-Rolle für Text auf Akzent fehlt.
-- Lösch-Kreuz im Suchfeld („braucht Logik, die eine Komponente heute nicht trägt").
+- ~~Vier Kontrastbefunde absichtlich offen~~ **erledigt am 06.09.2026** (`729a19f5`): `UIThemeRole::AccentText` als zehnte Rolle, in beiden mitgelieferten Themes belegt, OK-Beschriftung und Badge daran gebunden, Ausnahme im ctest entfernt. Die Zahl im Plan war falsch: Weiß auf dem hellen Akzent ist 4,75, nicht 4,4.
+- ~~Lösch-Kreuz im Suchfeld~~ **erledigt am 06.09.2026**: `UITextInput::clearButton` — die „Logik, die eine Komponente nicht trägt", gehört dem Feld, nicht einem Element daneben.
 - Akkordeon (B5), Tabelle mit Kopfzeile (B2b), mehrere Fenster (A5), Datei-Watcher ist gebaut (`fs.watch`, `bfb3f28e`), aber die Zustellung läuft nur im Spiel-Host.
 - Nie auf echter Hardware geprüft: Window-DIP-Skalierung auf Windows/X11, GL-Runtime der Schicht 0, Autostart auf Windows und Linux (blind gebaut), `notify` auf Windows (nur Warnung).
 - `docs/ui-theme-css.md` ist eine Bewertung, „Nothing here is built."

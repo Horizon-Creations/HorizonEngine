@@ -193,6 +193,7 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Wrap Text", UIPropType::Bool },
             { "Input Filter", UIPropType::Int },
             { "Allowed Characters", UIPropType::String },
+            { "Clear Button", UIPropType::Bool },
             { "Steppers", UIPropType::Bool },
             { "Step", UIPropType::Float },
             { "Min Value", UIPropType::Float },
@@ -7760,6 +7761,143 @@ TEST_CASE("TextInput: the steppers step, clamp, and stay out of the text's way")
     CHECK(back.step == doctest::Approx(0.5f));
     CHECK(back.minValue == doctest::Approx(-2.0f));
     CHECK(back.maxValue == doctest::Approx(2.0f));
+}
+
+// ── B9: the cross that empties a field ───────────────────────────────────────
+
+TEST_CASE("TextInput: the clear cross appears only when there is something to clear")
+{
+    HE::UITextInput ti;
+    ti.sizeX = 200.0f; ti.sizeY = 28.0f;
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 200.0f, 28.0f };
+    HE::UIWidgetRect cr{};
+
+    // Off by default, and off means nothing to click even with text in it.
+    ti.text = "hello";
+    CHECK_FALSE(ti.clearButtonRect(px, cr));
+
+    ti.clearButton = true;
+    REQUIRE(ti.clearButtonRect(px, cr));
+    CHECK(cr.x + cr.w <= 200.0f);
+    CHECK(cr.x > 100.0f);              // at the right edge, out of the way
+    CHECK(cr.y >= 0.0f);
+    CHECK(cr.y + cr.h <= 28.0f);
+
+    // The three states in which there is none, each for its own reason: an
+    // empty field has nothing to clear, a read-only one cannot be emptied by
+    // anybody, and a multiline field is a little document.
+    ti.text.clear();
+    CHECK_FALSE(ti.clearButtonRect(px, cr));
+    ti.text = "hello";
+    ti.editable = false;
+    CHECK_FALSE(ti.clearButtonRect(px, cr));
+    ti.editable = true;
+    ti.multiline = true;
+    CHECK_FALSE(ti.clearButtonRect(px, cr));
+    ti.multiline = false;
+
+    // With arrows as well, the cross sits to their LEFT rather than on them.
+    ti.steppers = true;
+    HE::UIWidgetRect up{}, down{};
+    REQUIRE(ti.stepperRects(px, up, down));
+    REQUIRE(ti.clearButtonRect(px, cr));
+    CHECK(cr.x + cr.w <= up.x);
+    ti.steppers = false;
+
+    // Clearing is ONE undo step, and it gives the whole sentence back rather
+    // than its last letter.
+    ti.caret = ti.selAnchor = 3;
+    CHECK(ti.applyClear());
+    CHECK(ti.text.empty());
+    CHECK(ti.caret == 0);
+    CHECK_FALSE(ti.applyClear());      // nothing left to clear
+    CHECK(ti.undoEdit());
+    CHECK(ti.text == "hello");
+
+    // The text ends where the cross begins: a word running underneath it is the
+    // first thing a field with one gets wrong.
+    HE::UIElementRenderState st;
+    std::vector<UIRenderObject> without, with;
+    ti.clearButton = false;
+    ti.render(px, st, {}, 1.0f, without);
+    ti.clearButton = true;
+    ti.render(px, st, {}, 1.0f, with);
+    CHECK(with.size() > without.size());     // the cross is drawn
+    // Every glyph in the version with a cross stops short of it.
+    REQUIRE(ti.clearButtonRect(px, cr));
+    for (const UIRenderObject& o : with)
+        if (o.type == 2) CHECK(o.position.x + o.size.x <= cr.x + 0.001f);
+
+    // Written only when it is on, like every other switch on this type.
+    nlohmann::json j;
+    HE::UITextInput plain;
+    plain.writeJson(j);
+    CHECK_FALSE(j.contains("clearButton"));
+    j = nlohmann::json{};
+    ti.writeJson(j);
+    HE::UITextInput back;
+    back.readJson(j);
+    CHECK(back.clearButton);
+}
+
+TEST_CASE("A click on the clear cross empties the field and does not move the caret")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    const int field = tree.add(HE::UIWidgetType::TextInput);
+    {
+        auto* ti = dynamic_cast<HE::UITextInput*>(tree.find(field));
+        REQUIRE(ti);
+        ti->posX = 40.0f; ti->posY = 40.0f; ti->sizeX = 200.0f; ti->sizeY = 28.0f;
+        ti->text = "search term";
+        ti->clearButton = true;
+    }
+    registerWidget(cm, tree, nullptr);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // Asked of the tree rather than assumed: the field's rect is what the
+    // anchors made of the numbers above, and a click aimed at a guess would
+    // pass for the wrong reason.
+    HE::UIWidgetRect pxr{};
+    HE::UIWidgetRect cr{};
+    {
+        const auto* ti = dynamic_cast<const HE::UITextInput*>(
+            wm.tree(id)->find(field));
+        REQUIRE(ti);
+        pxr = HE::uiElementRect(*wm.tree(id), *ti, nullptr);
+        REQUIRE(ti->clearButtonRect(pxr, cr));
+    }
+    // A press somewhere in the TEXT puts the caret there, as it always did.
+    wm.processPointer(400.0f, 300.0f, 60.0f, 54.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 60.0f, 54.0f, false, true);
+    {
+        const auto* ti = dynamic_cast<const HE::UITextInput*>(
+            wm.tree(id)->find(field));
+        CHECK(ti->text == "search term");
+    }
+    // …and a press on the cross empties it instead.
+    wm.processPointer(400.0f, 300.0f, cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f, true, true);
+    wm.processPointer(400.0f, 300.0f, cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f, false, true);
+    {
+        const auto* ti = dynamic_cast<const HE::UITextInput*>(
+            wm.tree(id)->find(field));
+        REQUIRE(ti);
+        CHECK(ti->text.empty());
+        // The caret went with the text. Left where it was it would point past
+        // the end of a field that no longer has one.
+        CHECK(ti->caret == 0);
+        CHECK(ti->selAnchor == 0);
+        // …and there is no cross any more, because there is nothing to clear.
+        HE::UIWidgetRect gone{};
+        CHECK_FALSE(ti->clearButtonRect(pxr, gone));
+    }
 }
 
 // ── B9: a bar with no end to report ──────────────────────────────────────────

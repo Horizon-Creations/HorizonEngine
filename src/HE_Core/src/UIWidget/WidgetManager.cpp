@@ -2998,14 +2998,32 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ti, &canvas);
 					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
-					HE::UIWidgetRect upR{}, downR{};
-					if (ti->stepperRects(pxr, upR, downR))
+					auto inside = [&](const HE::UIWidgetRect& q)
 					{
-						auto inside = [&](const HE::UIWidgetRect& q)
-						{
-							return mouseX >= q.x && mouseX <= q.x + q.w &&
-							       mouseY >= q.y && mouseY <= q.y + q.h;
-						};
+						return mouseX >= q.x && mouseX <= q.x + q.w &&
+						       mouseY >= q.y && mouseY <= q.y + q.h;
+					};
+					// The cross that empties it, before the arrows: they never
+					// overlap (clearButtonRect sits to their left), and asking
+					// in one order rather than none is what keeps that true if
+					// the geometry ever moves.
+					HE::UIWidgetRect clearR{};
+					if (ti->clearButtonRect(pxr, clearR) && inside(clearR))
+						if (auto* live = dynamic_cast<HE::UITextInput*>(w.tree.find(hot)))
+							if (live->applyClear())
+							{
+								m_visualDirty = true;
+								const ScriptTarget t2 = scriptTargetFor(w, hot);
+								rt().fireOnTextChanged(t2.scriptId, t2.elem, live->text);
+								// Taken, for the arrows' reason: a cross that
+								// also put the caret in the text would leave the
+								// field focused on a spot that no longer exists.
+								w.pressedElem = 0;
+								stepperTook = true;
+							}
+					HE::UIWidgetRect upR{}, downR{};
+					if (!stepperTook && ti->stepperRects(pxr, upR, downR))
+					{
 						const int dir = inside(upR) ? 1 : (inside(downR) ? -1 : 0);
 						if (dir != 0)
 							if (auto* live = dynamic_cast<HE::UITextInput*>(w.tree.find(hot)))

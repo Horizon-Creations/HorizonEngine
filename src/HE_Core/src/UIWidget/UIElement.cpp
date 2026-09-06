@@ -665,6 +665,7 @@ const UIPropTable& UITextInput::propTable() const
         // Characters. See UITextInput::Filter.
         uiprop::slot<&UITextInput::inputFilter>({ "Input Filter", UIPropType::Int, 0.0f, 3.0f }),
         uiprop::slot<&UITextInput::allowedChars>({ "Allowed Characters", UIPropType::String }),
+        uiprop::slot<&UITextInput::clearButton>({ "Clear Button", UIPropType::Bool }),
         uiprop::slot<&UITextInput::steppers>   ({ "Steppers", UIPropType::Bool }),
         uiprop::slot<&UITextInput::step>       ({ "Step", UIPropType::Float }),
         uiprop::slot<&UITextInput::minValue>   ({ "Min Value", UIPropType::Float }),
@@ -1509,6 +1510,45 @@ bool UITextInput::stepperRects(const UIWidgetRect& px, UIWidgetRect& up,
     return true;
 }
 
+bool UITextInput::clearButtonRect(const UIWidgetRect& px, UIWidgetRect& out) const
+{
+    // Four reasons there is none, and each of them is a state, not a setting:
+    // an empty field has nothing to clear (a cross that clears nothing is a
+    // button that does nothing), a read-only field cannot be emptied by anybody
+    // — by the cross any more than by the keyboard — and a multiline field is a
+    // little document, where "throw all of it away" is not a thing to offer
+    // beside the first line.
+    if (!clearButton || multiline || !editable || text.empty()) return false;
+    constexpr float kInset = 2.0f;
+    const float side = std::min(px.w * 0.33f, std::max(10.0f, px.h * 0.62f));
+    if (side <= 0.0f) return false;
+    // To the LEFT of the arrows when there are arrows, rather than on top of
+    // them. A number field with a cross is a strange thing to author, but a
+    // strange thing to author must still be drawn where it is clicked.
+    UIWidgetRect upR{}, downR{};
+    const float rightEdge = stepperRects(px, upR, downR) ? upR.x : px.x + px.w - kInset;
+    out = { rightEdge - side, px.y + (px.h - side) * 0.5f, side, side };
+    return out.x >= px.x;
+}
+
+bool UITextInput::applyClear()
+{
+    if (text.empty()) return false;
+    const EditState before{ text, caret, selAnchor };
+    text.clear();
+    caret = selAnchor = 0;
+    // The same three pieces of runtime state a click resets: where the arrows
+    // were aiming and how far the text was pushed sideways. Neither means
+    // anything about an empty field, and a scroll left over from the sentence
+    // that was there would draw the caret off the left edge.
+    preferredCaretX = -1.0f;
+    scrollPx = 0.0f;
+    // A group of its own, never merged into the typing before it: taking back a
+    // clear has to give the whole sentence back, not its last letter.
+    recordEdit(before, EditKind::Replace, /*coalesce=*/false);
+    return true;
+}
+
 namespace {
 
 // A number the way a person writes it: no decimal tail on a whole number, and
@@ -1576,7 +1616,13 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // field with one gets wrong.
     UIWidgetRect upR{}, downR{};
     const bool hasSteppers = stepperRects(px, upR, downR);
-    const float rightPad = hasSteppers ? pad + (px.x + px.w - upR.x) : pad;
+    // …and so does the cross, for the same reason. It is asked for BEFORE the
+    // width is worked out, so the text ends where the cross begins rather than
+    // running under it.
+    UIWidgetRect clearR{};
+    const bool hasClear = clearButtonRect(px, clearR);
+    const float takenFrom = hasClear ? clearR.x : (hasSteppers ? upR.x : px.x + px.w);
+    const float rightPad = (hasClear || hasSteppers) ? pad + (px.x + px.w - takenFrom) : pad;
     const glm::vec2 tp{ px.x + pad, px.y };
     const glm::vec2 ts{ px.w - pad - rightPad, px.h };
     const float sizePx = st.fontPx(fontSize, pxScaleY);
@@ -1600,6 +1646,33 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         };
         chevron(upR, true);
         chevron(downR, false);
+    }
+    if (hasClear)
+    {
+        // Two diagonals out of small squares, like the chevron above and for
+        // its reason: the field draws with quads, and a cross that needed a
+        // glyph would tie every search box to a font having been loaded — the
+        // same rule the title bar's ASCII buttons follow. Rotating two bars
+        // would have been shorter and would not survive the element itself
+        // being rotated: the manager stamps ITS rotation over every quad a type
+        // emits (see the fold in WidgetManager::extract).
+        const glm::vec4 ink(glm::vec3(textColor) * 0.75f, textColor.a);
+        const float unit = std::max(1.0f, clearR.h * 0.11f);
+        const float cx = clearR.x + clearR.w * 0.5f;
+        const float cy = clearR.y + clearR.h * 0.5f;
+        quad(out, cx - unit * 0.5f, cy - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+        for (int i = 1; i <= 2; ++i)
+        {
+            const float d = static_cast<float>(i) * unit;
+            // The four arms, two squares each. The middle belongs to both
+            // diagonals and is drawn once, above — twice would be a second quad
+            // in exactly the same place, which costs a draw and shows in the
+            // alpha where the two overlap.
+            quad(out, cx - d - unit * 0.5f, cy - d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+            quad(out, cx + d - unit * 0.5f, cy + d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+            quad(out, cx - d - unit * 0.5f, cy + d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+            quad(out, cx + d - unit * 0.5f, cy - d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+        }
     }
 
     // The placeholder goes away when somebody starts EDITING, not when the tab
@@ -2252,6 +2325,7 @@ void UITextInput::writeJson(nlohmann::json& j) const
     // filter existed still saves byte-identically.
     if (inputFilter != FilterAny)  j["inputFilter"] = inputFilter;
     if (!allowedChars.empty())     j["allowedChars"] = allowedChars;
+    if (clearButton)               j["clearButton"] = true;
     // …and the number field. The step is written along with the switch rather
     // than on its own, because a stepper of 1 and a stepper of 0.25 are two
     // different controls and the file has to say which.
@@ -2277,6 +2351,7 @@ void UITextInput::readJson(const nlohmann::json& j)
     wrapText   = j.value("wrapText", false);
     inputFilter  = j.value("inputFilter", static_cast<int>(FilterAny));
     allowedChars = j.value("allowedChars", std::string());
+    clearButton  = j.value("clearButton", false);
     steppers = j.value("steppers", false);
     step     = j.value("step", 1.0f);
     minValue = j.value("minValue", 0.0f);

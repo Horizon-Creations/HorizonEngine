@@ -549,6 +549,29 @@ public:
     // rule the scrollbar thumb follows: an arrow that is clicked somewhere
     // other than where it is drawn is worse than no arrow.
     bool stepperRects(const UIWidgetRect& px, UIWidgetRect& up, UIWidgetRect& down) const;
+
+    // ── The cross that empties it (docs/he-apps-plan.md B9) ──────────────────
+    // A search field with three letters in it needs a way back to none that is
+    // not eight presses of Backspace. On by default nowhere: every field
+    // authored before this keeps its whole width, and a form field with a cross
+    // beside it is a form field that looks like it can be dismissed.
+    //
+    // It is a property of the FIELD and not a component drawn beside one,
+    // because it needs two things a sibling element cannot have: the text, to
+    // know whether to appear at all, and the field itself, to clear it with an
+    // undo step. That is the "logic a component does not carry" the search
+    // component was left without.
+    bool        clearButton = false;
+
+    // Where it sits, in the field's own pixel space. False when there is none
+    // to draw — and it is NOT drawn on an empty field, on a read-only one, or
+    // on a multiline one, so this answers the "is there one" question as well.
+    // The same sum for the drawing and the press, like stepperRects; when a
+    // field has arrows too, the cross sits to their left rather than under them.
+    bool clearButtonRect(const UIWidgetRect& px, UIWidgetRect& out) const;
+    // Empty it, recording one undo step so Ctrl+Z brings the text back. False
+    // when there was nothing to clear.
+    bool applyClear();
     // Step the value by `dir` steps and write it back as text, clamped to the
     // range. False when nothing changed — at a limit, or with steppers off.
     bool applyStep(int dir);

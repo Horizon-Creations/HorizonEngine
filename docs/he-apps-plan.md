@@ -3739,3 +3739,39 @@ eingebackenen Vorschauwerte stammten noch von `MutedText` = 0,45, das beim erste
 auf 0,43 gesenkt wurde, ohne die Bauteile neu zu erzeugen. Am Laufzeitbild ändert das nichts —
 `uiApplyTheme` löst jede gebundene Rolle beim Erzeugen neu auf —, aber der Designer zeigte die alte
 Farbe. Jetzt nicht mehr.
+
+### B9 nachgereicht: das Kreuz, das ein Feld leert (06.09.2026)
+
+Das Suchfeld war ausgeliefert, das Kreuz zum Leeren fehlte, und der Grund stand in der Liste der
+offenen Punkte: „braucht Logik, die eine Komponente heute nicht trägt". Das stimmte, und es sagt
+auch schon, wo es hingehört.
+
+**Es ist eine Eigenschaft des FELDES, kein Element daneben.** Ein Geschwisterknopf hätte zwei
+Dinge gebraucht, die er nicht haben kann: den Text, um zu wissen, ob er überhaupt da sein soll, und
+das Feld selbst, um es mit einem Rückgängig-Schritt zu leeren. `UITextInput::clearButton`, nach dem
+Vorbild der Stepper: `clearButtonRect` ist EINE Rechnung für das Bild und für den Druck, weil ein
+Kreuz, das woanders geklickt wird als es gemalt ist, schlimmer ist als keines.
+
+**Drei Zustände, in denen es keines gibt**, jeder aus eigenem Grund: ein leeres Feld hat nichts zu
+leeren, ein nur lesbares kann von niemandem geleert werden (vom Kreuz so wenig wie von der
+Tastatur), und ein mehrzeiliges ist ein kleines Dokument, neben dessen erster Zeile „wirf alles
+weg" nichts zu suchen hat. Sind auch Pfeile da, sitzt das Kreuz LINKS davon, nicht darauf.
+
+**Gezeichnet aus kleinen Quadraten, nicht aus zwei gedrehten Balken.** Zwei gedrehte Rechtecke
+wären kürzer gewesen und hätten das erste gedrehte Element nicht überlebt: `WidgetManager::extract`
+stempelt die Drehung des Elements über JEDEN Quad, den ein Typ ausgibt, und die eigene Drehung wäre
+damit weg. Also dieselbe Treppe wie beim Chevron des Zahlenfeldes, aus demselben Grund wie dort:
+kein Zeichen, keine Schrift, keine Abhängigkeit von einem geladenen Icon-Font.
+
+**Leeren ist ein Schritt, kein Buchstabe.** `applyClear` merkt sich den Zustand davor als eigene
+Gruppe (`coalesce=false`), also gibt Strg+Z den ganzen Satz zurück und nicht dessen letzten
+Buchstaben. Der Klick nimmt den Druck außerdem für sich, wie es die Pfeile tun: ein Kreuz, das
+zusätzlich den Cursor setzt, ließe das Feld auf einer Stelle stehen, die es nicht mehr gibt.
+
+**Der Text endet, wo das Kreuz anfängt.** Die Breite wird vor dem Zeichnen abgezogen, wie beim
+Stepper. `caretAtPoint` bleibt unangetastet: der misst von LINKS, und ein Einzug am rechten Rand
+verschiebt keine Zuordnung.
+
+**Angeschaltet ist es genau in einem Bauteil**, dem Suchfeld, mit einem Parameter zum Abschalten.
+Überall sonst aus, byte-gleich für jede vorhandene Datei: `clearButton` wird nur geschrieben, wenn
+es gesetzt ist.

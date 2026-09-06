@@ -611,6 +611,13 @@ Comp searchField()
     const int field = c.add(UIWidgetType::TextInput, frame, "Field");
     c.fill(field, 14.0f, 2.0f, 12.0f, 2.0f);
     c.str(field, "Placeholder", "Search");
+    // The cross that empties it. On here and nowhere else: this is the one
+    // component where "back to everything" is a thing somebody asks for
+    // constantly, and eight presses of Backspace is not the way to offer it. It
+    // appears only while there is something to clear, which is why it is a
+    // property of the FIELD and not an element beside it — a sibling button
+    // could not see the text.
+    c.flag(field, "Clear Button", true);
     // Transparent: the frame around it is what is being seen, and a second
     // filled rectangle inside a pill shows its own square corners.
     c.prop(field, "Back Color", UIPropValue::ofColor(glm::vec4(0.0f)));
@@ -624,6 +631,10 @@ Comp searchField()
             "A picture to put on the left. Switch Show Icon on as well, and move "
             "the field's left inset if yours is a different size.");
     c.param("Show Icon", icon, "Visible", "Whether the icon takes up its place.");
+    c.param("Clear Button", field, "Clear Button",
+            "The cross at the right that empties the field. It is only there "
+            "while there is something to clear, and clearing it is one undo "
+            "step, so Ctrl+Z brings the words back.");
     c.bake();
     return c;
 }
