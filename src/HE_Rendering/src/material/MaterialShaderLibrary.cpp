@@ -1711,6 +1711,134 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrBlur(Backend ba
 
 namespace
 {
+// ─── Reflection pre-pass (forward path) ──────────────────────────────────────
+// docs/ssr-cross-backend-plan.md §3.2 way (a). The forward path has no
+// G-buffer, so the SSR trace (and the GI-reflection kernel) get their normals
+// and depth from one extra rasterisation of the scene — the same pass the SSAO
+// position pre-pass already runs, widened to three attachments.
+//
+// This was hand-written MSL inside MetalRenderer.mm. It lives here because
+// every backend that ports SSR needs the identical encoding: the trace decodes
+// attachment 1 with heOctDecode and reconstructs world space from attachment 2
+// with the same invViewProj maths the G-buffer path uses. Four hand-kept copies
+// of that contract would drift, and the drift shows up as reflections pointing
+// somewhere the geometry is not.
+//
+// The vertex data follows standardVertex's split for the same reason it does:
+// Metal pulls the mesh out of an SSBO bound at index 0, everything else uses
+// attributes, because macOS-GL is 4.1 and has no SSBO.
+constexpr const char* kReflPrepassVSSsbo = R"(#version 450
+layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
+)";
+constexpr const char* kReflPrepassVSAttr = R"(#version 450
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+)";
+// Three mat4 = 192 bytes std140 — byte-identical to the SSAOPosUniforms the
+// Metal encoder has always written with setVertexBytes at index 1.
+constexpr const char* kReflPrepassVSTail = R"(layout(std140, set = 0, binding = 1) uniform U {
+    mat4 mvp;
+    mat4 modelView;
+    mat4 model;
+} u;
+layout(location = 0) out vec3 vViewPos;
+layout(location = 1) out vec3 vWorldNormal;
+void main() {
+)";
+constexpr const char* kReflPrepassVSBodySsbo = R"(    int b = gl_VertexIndex * 8;
+    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
+    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
+)";
+constexpr const char* kReflPrepassVSBodyAttr = R"(    vec3 pos = aPos;
+    vec3 nrm = aNormal;
+)";
+constexpr const char* kReflPrepassVSEnd = R"(    vec4 p       = vec4(pos, 1.0);
+    gl_Position  = u.mvp * p;
+    vViewPos     = (u.modelView * p).xyz;
+    vWorldNormal = (u.model * vec4(nrm, 0.0)).xyz;
+}
+)";
+
+// The fragment's three outputs are the pre-pass's whole contract:
+//   0  view-space position, w = 1 → valid geometry (the SSAO kernel's input)
+//   1  rg = oct world normal *0.5+0.5, b = roughness, a = unused — the GB1
+//      encoding, so the trace's heOctDecode(g1.rg * 2.0 - 1.0) is shared
+//      verbatim between the deferred and the forward path
+//   2  NDC depth exactly as the G-buffer pass stores it (gl_FragCoord.z)
+//
+// Roughness is a constant 0: the pre-pass rasterises geometry, not materials,
+// so it has none. The trace's roughFade is therefore a no-op on this path and
+// the scene shader applies the per-pixel fade instead (docs/ssr-cross-backend-plan.md §1.3).
+//
+// The oct encoder is character-for-character the lighting preamble's
+// heOctEncode; a second, subtly different one is the kind of bug that compiles
+// everywhere and only shows as reflections aimed the wrong way.
+constexpr const char* kReflPrepassFS = R"(#version 450
+layout(location = 0) in vec3 vViewPos;
+layout(location = 1) in vec3 vWorldNormal;
+layout(location = 0) out vec4 oViewPos;
+layout(location = 1) out vec4 oAttr;
+layout(location = 2) out float oNdc;
+vec2 heOctEncode(vec3 n) {
+    vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+void main() {
+    oViewPos = vec4(vViewPos, 1.0);
+    vec3 n = vWorldNormal;
+    n = (dot(n, n) > 1e-12) ? normalize(n) : vec3(0.0, 0.0, 1.0);
+    oAttr = vec4(heOctEncode(n) * 0.5 + 0.5, 0.0, 0.0);
+    oNdc  = gl_FragCoord.z;
+}
+)";
+
+std::string reflPrepassVS(bool ssbo)
+{
+    return std::string(ssbo ? kReflPrepassVSSsbo : kReflPrepassVSAttr)
+         + kReflPrepassVSTail
+         + (ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr)
+         + kReflPrepassVSEnd;
+}
+} // namespace
+
+const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
+{
+    static const std::string s = kReflPrepassFS;
+    return s;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertex(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2 + 0;
+    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        // Pinned to the bind points the MRT pre-pass encoder already issues per
+        // draw: the mesh vertex buffer at 0, the per-object matrices at 1.
+        out = toCompiled(compileMslPinned(reflPrepassVS(/*ssbo=*/true), Stage::Vertex,
+            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+              { Stage::Vertex, 0, 1, 1 } }));  // U matrices → vertex buffer 1
+    else
+        out = toCompiled(compile(reflPrepassVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassFragment(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2 + 1;
+    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
+    using namespace he::shaderc;
+    // No resources at all — three attachments and two varyings, nothing to pin.
+    Compiled out = toCompiled(backend == Backend::Metal
+        ? compileMslPinned(kReflPrepassFS, Stage::Fragment, {})
+        : compile(kReflPrepassFS, Stage::Fragment, toTarget(backend)));
+    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+}
+
+namespace
+{
 // ─── Deferred decals (Metal tile mode) ───────────────────────────────────────
 // Unit-cube projector, rasterized inside the G-buffer pass. Front faces are
 // culled by the encoder (camera-inside-box safe) and there is no depth test —

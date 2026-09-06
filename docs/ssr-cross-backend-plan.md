@@ -63,7 +63,7 @@ sich in Eingangsdaten und Composite unterscheiden.
 | Deferred-Pfad | `:12703` `EncodeSSRPasses`, Aufruf `:14187` |
 | Forward-Pfad | `:12928` `EncodeForwardSSR`, Aufruf `:14225` |
 | MRT-Prepass (Forward) | `:10097` `EnsureSSAOTargets` (legt `m_reflNormTex`/`m_reflDepthTex` mit an, `:10125-10131`), `:10151` `EncodeSSAO`, MRT-Zweig `:10215-10233`, Gate `:14073` |
-| Prepass-Shader | `MetalRenderer.mm:1364` `reflPosVertex`, `:1375` `reflPosFragment` — **eingebettetes MSL, nicht in der geteilten Library** |
+| Prepass-Shader | ~~`MetalRenderer.mm:1364` `reflPosVertex`, `:1375` `reflPosFragment`, eingebettetes MSL~~ — **seit Schritt 3 in der geteilten Library**: `MaterialShaderLibrary.cpp` `kReflPrepassVS*`/`kReflPrepassFS`, Accessoren `reflPrepassVertex`/`reflPrepassFragment` |
 | Vorframe-Farbkopie (Forward) | `MetalRenderer.h:255` `m_ssrColorHist` |
 | Witness-Szenen | `EditorApplication.cpp:3509` (`HE_DUMP_SSR`, `HE_DUMP_SSRQUALITY`), `:4009` (`HE_DUMP_SSRTEST`), `:4022` (`HE_DUMP_SSRTESTROUGH`), `:4048` (`HE_DUMP_SSRTESTWALL`) |
 
@@ -141,10 +141,18 @@ belastbarste Einzelaussage, die dieses Thema hat.
 **SSR auf D3D/Vulkan ist Verdrahtungsarbeit, keine Shader-Entwicklung.** Der
 Aufwand liegt im C++-Rahmen.
 
-Ein Nachtrag zu §1.3, den sie nicht macht: der **Prepass-Shader ist nicht
-portabel.** `reflPosVertex`/`reflPosFragment` (`MetalRenderer.mm:1364-1384`)
-sind eingebettetes MSL. Der Trace ist portabel, das, was ihn füttert, ist es
-nicht.
+Ein Nachtrag zu §1.3, den sie nicht macht: der **Prepass-Shader war nicht
+portabel.** `reflPosVertex`/`reflPosFragment` waren eingebettetes MSL in
+`MetalRenderer.mm`; der Trace war portabel, das, was ihn füttert, nicht.
+
+> **Erledigt in Schritt 3.** Beide sind als kanonisches GLSL 450 in der
+> geteilten Library (`reflPrepassVertex`/`reflPrepassFragment`), Metal baut
+> seine Pipeline daraus, das MSL im Backend ist gelöscht. Der Vertex folgt
+> derselben Aufteilung wie `standardVertex` — SSBO-Pull auf Metal (an
+> `buffer(0)`/`buffer(1)` gepinnt, also genau die Bindepunkte, die der
+> Prepass-Encoder ohnehin schon setzt), Attribute überall sonst, weil macOS-GL
+> bei 4.1 kein SSBO hat. Der Oktaeder-Encoder ist zeichengleich der der
+> Lighting-Preamble, damit `heOctDecode` im Trace beide Pfade bedient.
 
 ### 2.2 Kein G-Buffer außerhalb von Metal und GL — nur der Forward-Pfad ist portabel
 
@@ -218,13 +226,18 @@ portieren." Diese Phase würde das umdrehen. Genau wie bei P3 im Parity-Plan gil
 **bewusste Änderung, keine Übersehung** — und sie gehört vor den Code, nicht
 hinein.
 
-### 2.4 Es gibt keinen einzigen SSR-Test
+### 2.4 Es gab keinen einzigen SSR-Test
 
-`grep -l "ssrTrace\|ssrBlur\|ssrComposite\|ssrRoughMix" tests/` findet **nichts**.
-Die vier Accessoren sind heute durch keinen automatischen Test gedeckt; der
+`grep -l "ssrTrace\|ssrBlur\|ssrComposite\|ssrRoughMix" tests/` fand **nichts**.
+Die vier Accessoren waren durch keinen automatischen Test gedeckt; der
 generische `else`-Zweig wurde außerhalb der Handprüfung in
 `docs/backend-parity-plan.md` §1.3 nie ausgeführt. Dasselbe Loch, das der
 Decal-Port vorfand (§7 dort: „Vor Schritt 2 gab es keinen einzigen Decal-Test").
+
+> **Geschlossen in Schritt 2.** `tests/test_material_graph.cpp`, „SSR shaders
+> cross-compile for every backend" (vier Accessoren × Metal/GLSL410/HLSL/SpirV,
+> alle vier grün) und „The reflection pre-pass is one shader for all backends".
+> Der generische `else`-Zweig läuft damit zum ersten Mal automatisch.
 
 ---
 
@@ -402,11 +415,11 @@ GI-Port:
 1. **Cross-Compile-ctest — die erste Lieferung von Schritt 2.** `ssrTrace`,
    `ssrComposite`, `ssrBlur`, `ssrRoughMix` für `Metal`, `GLSL410`, `HLSL`,
    `SpirV`, jeweils `.ok` geprüft; Vorbild `tests/test_material_graph.cpp:715`
-   (der Decal-Fall). Nach §2.4 gibt es **heute keinen einzigen SSR-Test** — das
-   ist das erste Netz unter dem Feature und das Einzige, was hier wirklich läuft.
-   Sobald C3 steht, kommt ein zweiter Fall dazu: **die HLSL-Register müssen im
-   bedienbaren Bereich von D3D11 liegen** (dasselbe Muster wie der
-   Decal-Registertest).
+   (der Decal-Fall). Nach §2.4 gab es **keinen einzigen SSR-Test** — das ist das
+   erste Netz unter dem Feature und das Einzige, was hier wirklich läuft.
+   **Steht** (Schritt 2, alle vier Shader × vier Backends grün). Sobald C3 steht,
+   kommt ein zweiter Fall dazu: **die HLSL-Register müssen im bedienbaren
+   Bereich von D3D11 liegen** (dasselbe Muster wie der Decal-Registertest).
 2. **Offline-Shaderprüfung.** `glslangValidator` ohne `-G` für Desktop-GLSL,
    `xcrun metal` für MSL.
 3. **Metal bleibt die Referenz und ist hier real prüfbar.**
@@ -417,6 +430,22 @@ GI-Port:
    Änderung blind nach GL/VK/D3D geht — genau die Reihenfolge-Warnung, deren
    Missachtung im Decal-Port dazu geführt hat, dass der Sampled-Pfad bis heute
    nirgends rasterisiert wurde.
+
+   > **Das Rezept, aus Schritt 3, damit es niemand zweimal herleiten muss.**
+   > `HE_DUMP_SSRTEST` behauptet in seinem Kommentar den deferred Tile-Pfad —
+   > der Prepass läuft aber **nur forward** (`m_fwdReflPrepassWanted =
+   > !deferredActive && …`). Ohne `HE_DUMP_RENDERPATH=0` ist ein Prepass-A/B
+   > also leer. Der Aufruf, der die Spiegelung zeigt:
+   > `python3 scripts/he_shot.py OUT.png SSRTEST=1 SSR=1 RENDERPATH=0 TOD=0.5
+   > PITCH=-8 CAMY=2.5 CAMZ=2 COVERAGE=0.2` (Wand: zusätzlich `SSRTESTWALL=1`,
+   > `PITCH=-4 CAMY=3`).
+   >
+   > Und: **der Dump ist nicht bitgenau wiederholbar.** Die Wolken laufen auf
+   > der Uhr, der Himmelsstreifen (oben ~270 px) driftet zwischen zwei Läufen
+   > desselben Binaries um bis zu ~30/255. Der A/B wird deshalb **bandweise**
+   > gelesen — der Geometriestreifen darunter ist bei einer richtigen Änderung
+   > pixelgleich — und braucht einen Kontrollshot mit demselben Binary als
+   > Rauschmaß.
 4. **Vulkan:** `clang++ -fsyntax-only` gegen die von SDL mitgelieferten
    Vulkan-Header. **D3D11/D3D12: gar nichts** — auf diesem Mac gibt es weder
    Header noch `fxc`/`dxc`, die beiden Übersetzungseinheiten werden hier nicht
@@ -434,8 +463,8 @@ also nichts zu brechen.
 | # | Inhalt | Hier verifizierbar |
 |---|---|---|
 | 1 | (dieser Schritt) Kartierung + Plan | — |
-| 2 | Cross-Compile-ctest über alle vier SSR-Shader × vier Backends | ja |
-| 3 | §3.2 (a): Prepass-Shader nach kanonischem GLSL in die geteilte Library, Metal darauf umstellen | ja, visuell (A/B gegen den Referenzshot) |
+| 2 | Cross-Compile-ctest über alle vier SSR-Shader × vier Backends — **erledigt** | ja |
+| 3 | §3.2 (a): Prepass-Shader nach kanonischem GLSL in die geteilte Library, Metal darauf umstellen — **erledigt** | ja, visuell (A/B gegen den Referenzshot) |
 | 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) | nur offline + ctest |
 | 5 | Checkpoint B — Vulkan | nur Syntaxprüfung |
 | 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) | nur ctest auf dem HLSL-Text |

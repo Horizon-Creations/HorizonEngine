@@ -754,6 +754,89 @@ TEST_CASE("Decal shaders cross-compile for every backend")
 	CHECK(vBlock == block(fwGlsl));
 }
 
+TEST_CASE("SSR shaders cross-compile for every backend")
+{
+	// docs/ssr-cross-backend-plan.md §8 gate 1. Before this case there was not a
+	// single automatic test under SSR (§2.4 there): the four accessors ran only
+	// on Metal, and their generic `else` branch — the one every non-Metal port
+	// will take — had never been executed outside a hand-check.
+	//
+	// ssrComposite is deliberately in the list even though §2.2 puts it out of
+	// reach for the G-buffer-less backends: it splices the shared lighting
+	// preamble, so it is the one SSR shader that breaks when the preamble grows
+	// something an emitter cannot spell.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& trace = lib.ssrTrace(b);
+		CHECK_MESSAGE(trace.ok, "ssrTrace failed for backend ", (int)b, ": ", trace.log);
+		const auto& comp = lib.ssrComposite(b);
+		CHECK_MESSAGE(comp.ok, "ssrComposite failed for backend ", (int)b, ": ", comp.log);
+		const auto& blur = lib.ssrBlur(b);
+		CHECK_MESSAGE(blur.ok, "ssrBlur failed for backend ", (int)b, ": ", blur.log);
+		const auto& mix = lib.ssrRoughMix(b);
+		CHECK_MESSAGE(mix.ok, "ssrRoughMix failed for backend ", (int)b, ": ", mix.log);
+	}
+
+	// Four shaders share one cache map keyed backend*4 + variant. A key collision
+	// would hand a caller someone else's shader and still report ok — exactly the
+	// bug the decal cache had (backend*2 + stage) the moment a second fragment
+	// appeared. Compare the emitted text, not just the addresses.
+	const std::string t = lib.ssrTrace(B::GLSL410).source;
+	const std::string c = lib.ssrComposite(B::GLSL410).source;
+	const std::string bl = lib.ssrBlur(B::GLSL410).source;
+	const std::string m = lib.ssrRoughMix(B::GLSL410).source;
+	CHECK(t != c); CHECK(t != bl); CHECK(t != m);
+	CHECK(c != bl); CHECK(c != m); CHECK(bl != m);
+
+	// Two contract details a cross-compile alone would not notice. The trace
+	// writes TWO attachments (radiance + receiver position) — a port that
+	// attaches only one gets undefined content in the history buffer — and the
+	// composite is the only one carrying the lighting preamble's UBO.
+	CHECK(t.find("oHistPos") != std::string::npos);
+	CHECK(c.find("HeLighting") != std::string::npos);
+	CHECK(t.find("HeLighting") == std::string::npos);
+}
+
+TEST_CASE("The reflection pre-pass is one shader for all backends")
+{
+	// docs/ssr-cross-backend-plan.md §3.2 way (a). The pre-pass that feeds the
+	// SSR trace on the forward path used to be hand-written MSL inside
+	// MetalRenderer.mm; every backend that ports SSR needs the same three
+	// outputs, so it lives in the library now and each backend gets its own
+	// emitter output from ONE source.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& v = lib.reflPrepassVertex(b);
+		CHECK_MESSAGE(v.ok, "refl pre-pass vertex failed for backend ", (int)b, ": ", v.log);
+		const auto& f = lib.reflPrepassFragment(b);
+		CHECK_MESSAGE(f.ok, "refl pre-pass fragment failed for backend ", (int)b, ": ", f.log);
+	}
+
+	// Metal pulls its vertices out of an SSBO (the mesh buffer bound at index 0),
+	// every other backend uses vertex attributes — the same split standardVertex
+	// makes, and for the same reason (macOS-GL 4.1 has no SSBO).
+	CHECK(lib.reflPrepassVertex(B::Metal).source != lib.reflPrepassVertex(B::GLSL410).source);
+	CHECK(lib.reflPrepassVertex(B::GLSL410).source.find("aPos") != std::string::npos);
+
+	// Three attachments, in the order the Metal MRT pre-pass writes them:
+	// view position, oct normal + roughness, NDC depth. A port that drops the
+	// third one silently feeds the trace a depth of zero.
+	const std::string fs = lib.reflPrepassFragment(B::GLSL410).source;
+	CHECK(fs.find("location = 0") != std::string::npos);
+	CHECK(fs.find("location = 1") != std::string::npos);
+	CHECK(fs.find("location = 2") != std::string::npos);
+
+	// The oct encoder must be the preamble's, character for character — the SSR
+	// trace decodes GB1 with heOctDecode, and a second, subtly different encoder
+	// is a bug that only shows up as reflections pointing the wrong way.
+	CHECK(HE::MaterialShaderLibrary::reflPrepassFragmentGlsl().find(
+		"vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));") != std::string::npos);
+}
+
 TEST_CASE("Decal HLSL registers stay inside D3D11's bindable range")
 {
 	// docs/decals-cross-backend-plan.md §6b. SPIRV-Cross turns layout(binding = N)
