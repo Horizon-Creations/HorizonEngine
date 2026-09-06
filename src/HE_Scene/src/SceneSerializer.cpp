@@ -11,6 +11,8 @@
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
+#include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
@@ -305,6 +307,45 @@ namespace
 				{ "color",     { d->color.r, d->color.g, d->color.b, d->color.a } },
 				{ "roughness", d->roughness },
 				{ "texture",   uuidToJson(d->textureId) },
+			};
+		}
+		if (auto* rope = registry.try_get<RopeComponent>(entity))
+		{
+			// runtimeMeshId and builtHash are deliberately absent: the mesh is
+			// generated at runtime and its UUID means nothing in another session.
+			json pts = json::array();
+			for (const glm::vec3& p : rope->controlPoints) pts.push_back(vec3ToJson(p));
+			comps["rope"] = {
+				{ "visible",        rope->visible },
+				{ "points",         pts },
+				{ "attachStart",    uuidToJson(rope->attachStart) },
+				{ "attachEnd",      uuidToJson(rope->attachEnd) },
+				{ "sag",            rope->sag },
+				{ "shape",          static_cast<uint8_t>(rope->shape) },
+				{ "radius",         rope->radius },
+				{ "radialSegments", rope->radialSegments },
+				{ "samplesPerSpan", rope->samplesPerSpan },
+				{ "uvTileLength",   rope->uvTileLength },
+				{ "twoSided",       rope->twoSidedGeometry },
+				{ "castsShadow",    rope->castsShadow },
+				{ "material",       uuidToJson(rope->materialAssetId) },
+			};
+		}
+		if (auto* tr = registry.try_get<TrailComponent>(entity))
+		{
+			// The point ring buffer stays out for the same reason a particle pool
+			// does: it is one moment of a running effect, and restoring it would
+			// hang a stale band in the air the instant the scene loads.
+			comps["trail"] = {
+				{ "visible",           tr->visible },
+				{ "emitting",          tr->emitting },
+				{ "lifetime",          tr->lifetime },
+				{ "minVertexDistance", tr->minVertexDistance },
+				{ "maxPoints",         tr->maxPoints },
+				{ "startWidth",        tr->startWidth },
+				{ "endWidth",          tr->endWidth },
+				{ "alignment",         static_cast<uint8_t>(tr->alignment) },
+				{ "material",          uuidToJson(tr->materialAssetId) },
 			};
 		}
 		if (auto* r = registry.try_get<RigidBodyComponent>(entity))
@@ -853,6 +894,47 @@ namespace
 			d.roughness = c.value("roughness", d.roughness);
 			d.textureId = jsonToUuid(c.value("texture", json()));
 			registry.emplace_or_replace<DecalComponent>(entity, d);
+		}
+		if (comps.contains("rope"))
+		{
+			const json& c = comps["rope"];
+			RopeComponent rope;
+			if (auto pts = c.find("points"); pts != c.end() && pts->is_array())
+			{
+				rope.controlPoints.clear();
+				for (const json& p : *pts)
+					rope.controlPoints.push_back(jsonToVec3(p, glm::vec3(0.0f)));
+			}
+			rope.visible          = c.value("visible",        rope.visible);
+			rope.attachStart      = jsonToUuid(c.value("attachStart", json()));
+			rope.attachEnd        = jsonToUuid(c.value("attachEnd",   json()));
+			rope.sag              = c.value("sag",            rope.sag);
+			rope.shape            = static_cast<RopeShape>(
+			                            c.value("shape", static_cast<uint8_t>(rope.shape)));
+			rope.radius           = c.value("radius",         rope.radius);
+			rope.radialSegments   = c.value("radialSegments", rope.radialSegments);
+			rope.samplesPerSpan   = c.value("samplesPerSpan", rope.samplesPerSpan);
+			rope.uvTileLength     = c.value("uvTileLength",   rope.uvTileLength);
+			rope.twoSidedGeometry = c.value("twoSided",       rope.twoSidedGeometry);
+			rope.castsShadow      = c.value("castsShadow",    rope.castsShadow);
+			rope.materialAssetId  = jsonToUuid(c.value("material", json()));
+			registry.emplace_or_replace<RopeComponent>(entity, rope);
+		}
+		if (comps.contains("trail"))
+		{
+			const json& c = comps["trail"];
+			TrailComponent tr;
+			tr.visible           = c.value("visible",           tr.visible);
+			tr.emitting          = c.value("emitting",          tr.emitting);
+			tr.lifetime          = c.value("lifetime",          tr.lifetime);
+			tr.minVertexDistance = c.value("minVertexDistance", tr.minVertexDistance);
+			tr.maxPoints         = c.value("maxPoints",         tr.maxPoints);
+			tr.startWidth        = c.value("startWidth",        tr.startWidth);
+			tr.endWidth          = c.value("endWidth",          tr.endWidth);
+			tr.alignment         = static_cast<TrailAlignment>(
+			                           c.value("alignment", static_cast<uint8_t>(tr.alignment)));
+			tr.materialAssetId   = jsonToUuid(c.value("material", json()));
+			registry.emplace_or_replace<TrailComponent>(entity, tr);
 		}
 		if (comps.contains("rigidbody"))
 		{
@@ -1747,7 +1829,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"movement",
 		"decal", "environment", "foliage", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem", "propertyanimator",
-		"rigidbody", "saveState", "script", "skeletalmesh", "terrain",
+		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
+		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",
 		// Not a component: serializeEntityComponents carries the display name

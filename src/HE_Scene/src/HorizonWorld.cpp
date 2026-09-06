@@ -8,6 +8,8 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/EntityIdComponent.h"
+#include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/TrailComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -52,6 +54,15 @@ void HorizonWorld::reserveComponentStorage()
     // therefore guaranteed to be the kind of pool a hot-loaded game-logic dylib
     // must never create first.
     (void)m_registry.storage<EntityIdComponent>();
+    // Ropes and trails are reserved for a narrower reason than the pools above:
+    // they are the component types a GAME is most likely to add first at runtime
+    // (a grapple line, a weapon trail) rather than the editor placing one in a
+    // scene — and "added first by the dlopen'd game logic" is exactly the case
+    // that dangles the pool when that library unloads. Every other component
+    // type reaches the registry through the editor or a scene load long before
+    // any game code runs, which is why the list is not simply all of them.
+    (void)m_registry.storage<RopeComponent>();
+    (void)m_registry.storage<TrailComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const
