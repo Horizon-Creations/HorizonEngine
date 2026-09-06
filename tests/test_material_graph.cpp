@@ -716,14 +716,27 @@ TEST_CASE("Decal shaders cross-compile for every backend")
 		CHECK_MESSAGE(v.ok, "decal vertex failed for backend ", (int)b, ": ", v.log);
 		const auto& f = lib.decalFragmentSampled(b);
 		CHECK_MESSAGE(f.ok, "sampled decal fragment failed for backend ", (int)b, ": ", f.log);
+		// The forward variant is what Vulkan/D3D11/D3D12 draw with; it carries
+		// ddx/ddy and faceforward, which not every emitter spells the same way.
+		const auto& fw = lib.decalFragmentForward(b);
+		CHECK_MESSAGE(fw.ok, "forward decal fragment failed for backend ", (int)b, ": ", fw.log);
 	}
 	const auto& fetch = lib.decalFragment(B::Metal);
 	CHECK_MESSAGE(fetch.ok, fetch.log);
 
-	// The cache key must separate the two fragment variants (it used to be
+	// The cache key must separate the fragment variants (it used to be
 	// backend*2 + stage, which collided the moment a second fragment appeared).
 	CHECK(&lib.decalFragment(B::Metal) != &lib.decalFragmentSampled(B::Metal));
 	CHECK(lib.decalFragment(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+	CHECK(lib.decalFragmentForward(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+
+	// The forward variant must contain NO discard: its normal comes from
+	// derivatives, which are undefined in non-uniform control flow. Coverage is
+	// folded into the alpha instead. Checked on the GLSL emitter, which keeps
+	// the keyword verbatim.
+	const std::string fwGlsl = lib.decalFragmentForward(B::GLSL410).source;
+	CHECK(fwGlsl.find("discard") == std::string::npos);
+	CHECK(lib.decalFragmentSampled(B::GLSL410).source.find("discard") != std::string::npos);
 
 	// Both stages declare the SAME HeDecal block — a member mismatch is a LINK
 	// error on GL, which no test without a context can catch. Compare the block
@@ -738,6 +751,7 @@ TEST_CASE("Decal shaders cross-compile for every backend")
 	const std::string vBlock = block(lib.decalVertex(B::GLSL410).source);
 	CHECK_FALSE(vBlock.empty());
 	CHECK(vBlock == block(lib.decalFragmentSampled(B::GLSL410).source));
+	CHECK(vBlock == block(fwGlsl));
 }
 
 TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
