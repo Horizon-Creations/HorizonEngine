@@ -15460,6 +15460,10 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	c.supportsPostProcessing     = true;
 	c.supportsHDR                = true;
 	c.supportsGpuParticles       = true;
+	// A second window with its own widget tree (A5): a CAMetalLayer per window
+	// was already there (m_secondaryTargets), and EncodeWindowUI is the path
+	// that actually draws something into it.
+	c.supportsSecondaryWindows   = true;
 	// Cached at Initialize() by EnsureRaytracingSupport(): true only on devices +
 	// OS versions that actually support Metal ray tracing.
 	c.supportsGlobalIllumination = m_giSupported;
@@ -15557,7 +15561,75 @@ void MetalRenderer::RenderWindow(HE::Window* window)
 {
 	auto it = m_secondaryTargets.find(window->GetNativeWindow());
 	if (it == m_secondaryTargets.end()) return;
-	EncodeFrame(window->GetNativeWindow(), it->second, /*isPrimary=*/false);
+	// UI ONLY, and not EncodeFrame(isPrimary=false) as it used to be. That path
+	// drew the whole SCENE a second time into the second window — the same
+	// world, from the same camera, minus the primary-only work. A5
+	// (docs/he-apps-plan.md §13.3) is about a window with its own WIDGET TREE,
+	// which is a different thing and a far cheaper one: no shadows, no
+	// G-buffer, no post, one render pass.
+	EncodeWindowUI(window->GetNativeWindow(), it->second, window->GetWindowId());
+}
+
+// ── One window's widgets, and nothing else ───────────────────────────────────
+// The whole secondary-window render path. It borrows two things from the
+// primary: m_renderWorld.uiObjects (swapped out and back, exactly as
+// RenderWidgetThumbnail does — the extractor rebuilds that list per call and
+// the primary's must survive it) and EncodeUIPass, which is where every UI quad
+// this engine draws comes from, so the two windows cannot look different.
+void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uint32_t windowId)
+{
+	if (!m_world || !target.metalLayer) return;
+	@autoreleasepool
+	{
+		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;
+		int pw = 0, ph = 0;
+		SDL_GetWindowSizeInPixels(sdlWin, &pw, &ph);
+		if (pw <= 0 || ph <= 0) return;   // minimised
+		{
+			CGSize size = layer.drawableSize;
+			if ((int)size.width != pw || (int)size.height != ph)
+				layer.drawableSize = CGSizeMake(pw, ph);
+		}
+
+		// This window's widgets, into the list EncodeUIPass reads. Saved and
+		// put back so the primary's frame is untouched by ours.
+		std::vector<UIRenderObject> saved;
+		saved.swap(m_renderWorld.uiObjects);
+		m_extractor.setContentManager(m_contentManager);
+		m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
+		                      m_renderWorld, windowId);
+
+		id<CAMetalDrawable> drawable = [layer nextDrawable];
+		if (drawable)
+		{
+			id<MTLCommandQueue>  queue  = (__bridge id<MTLCommandQueue>)m_commandQueue;
+			id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+
+			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+			pass.colorAttachments[0].texture     = drawable.texture;
+			pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			// The same near-black every other backend starts from, so a window
+			// does not change colour with its renderer.
+			pass.colorAttachments[0].clearColor =
+				MTLClearColorMake(18.0 / 255.0, 18.0 / 255.0, 22.0 / 255.0, 1.0);
+			// No depth attachment on purpose: a widget tree is painter-ordered
+			// (zOrder, layer, depth) and a depth test would only be a second,
+			// disagreeing opinion about what is in front.
+
+			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+			// May hand back a SECOND encoder — a Backdrop material cuts the pass
+			// in two to blit the drawable. That is why cmdBuf and pass go in.
+			enc = (__bridge id<MTLRenderCommandEncoder>)
+				EncodeUIPass((__bridge void*)enc, pw, ph,
+				             (__bridge void*)cmdBuf, (__bridge void*)pass);
+			[enc endEncoding];
+			[cmdBuf presentDrawable:drawable];
+			[cmdBuf commit];
+		}
+
+		m_renderWorld.uiObjects.swap(saved);
+	}
 }
 
 // ─── ImGui texture helpers ────────────────────────────────────────────────────

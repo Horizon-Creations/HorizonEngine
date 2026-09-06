@@ -13116,10 +13116,24 @@ void OpenGLRenderer::RenderWindow(HE::Window* window)
 	auto it = m_secondaryContexts.find(window->GetNativeWindow());
 	if (it == m_secondaryContexts.end()) return;
 
+	// It says so, once, instead of painting a black rectangle (A5,
+	// docs/he-apps-plan.md §13.3). There is no UI-only path here yet: Metal and
+	// the software rasterizer have one, this backend has a cleared buffer and a
+	// TODO, and a window that opens onto that is worse than one that does not
+	// open. GetCapabilities().supportsSecondaryWindows is false for exactly that
+	// reason, so createSecondaryWindow refuses before anything gets this far —
+	// this is the second line of defence, for a host that attached one anyway.
+	static bool warned = false;
+	if (!warned)
+	{
+		warned = true;
+		HE_LOG_WARN(RHI, "%s",
+			"OpenGLRenderer: no second-window draw path — nothing is drawn there "
+			"(Software and Metal have one)");
+	}
 	SDL_GL_MakeCurrent(window->GetNativeWindow(), static_cast<SDL_GLContext>(it->second));
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	// TODO: secondary-window draw calls
 	// SwapBuffers is called by Application::Run after this method returns
 }
 

@@ -4323,3 +4323,96 @@ Fensterrand).
 wird er gebraucht), dann `WindowState` im Manager, dann Wirt und Eingabe, dann die Skriptzeilen,
 zuletzt Metal. OpenGL, Vulkan und D3D bleiben ausdrücklich offen und melden es, statt schwarz zu
 zeichnen.
+
+### 13.3a Was beim Bauen dazukam (07.09.2026)
+
+Gebaut in der Reihenfolge, die der Zuschnitt nennt, und in fünf Commits, von
+denen jeder für sich grün ist. **Eine Entscheidung ist anders ausgefallen als
+geplant** (Punkt 2), zwei Befunde des Zuschnitts waren falsch (Punkt 1).
+
+**1. `RenderWindow` ruft doch jemand auf.** Der Zuschnitt sagt „wird von
+*niemandem* aufgerufen, im ganzen Baum nicht" — `Application.cpp:425` tut es,
+seit es die Funktion gibt, samt `SwapBuffers` dahinter. Was fehlte, war nicht
+der Aufruf, sondern der Inhalt. Nebenbefund an derselben Stelle: die Schleife
+lief **außerhalb** der `present`-Entscheidung, ein ereignisgetriebenes Programm
+hätte also jedes Werkzeugfenster sechzigmal in der Sekunde neu gezeichnet,
+während es selbst schlief. Jetzt drin.
+
+**2. Kein `WindowState`-Struct. Der Fensterzustand hängt am Widget.** Der
+Zuschnitt zählt rund zwanzig Felder auf, die „von einem Feld zu einem pro
+Fenster" werden sollen. Beim Nachzählen zerfällt die Liste in zwei Hälften:
+
+- **Es gibt eine Maus.** Zeiger-Position, das laufende Ziehen, die Drop-Marke,
+  der Tooltip samt Uhr und die zwei Maustasten-Flanken gehören dem *einen*
+  Zeiger, nicht einem Fenster. Zwei Kopien davon wären zwei Zustände, von denen
+  immer einer falsch ist.
+- **Es gibt eine Tastatur.** Das Betriebssystem fokussiert genau ein Fenster.
+  Ein Fokus pro Fenster wäre ein Gedächtnis („wo war ich, als ich hier zuletzt
+  war"), und das ist ein anderes Feature als das, was A5 braucht.
+
+Wirklich pro Fenster sind zwei Dinge: **der Grab-Stapel** und **der
+Anzeigemaßstab**. Beide hängen jetzt am `windowId` des Widgets selbst
+(`topGrabOf(fenster)`, `displayScale(fenster)`), nicht an einem „aktuellen
+Fenster" der Klasse — und genau das ist der Grund, warum ein Skript-Rückruf
+mitten in einem Aufruf nichts unter jemandem wegziehen kann. Die 40
+Überladungen mit `windowId = 0`, die der Zuschnitt vorsah, sind damit drei
+geworden: `extract`, `processPointer`, `setDisplayScale`.
+
+Was das kostet, ehrlich: **ein Fenster merkt sich seinen Fokus nicht.** Klickt
+man von Fenster A nach B und zurück, steht der Fokus in A nicht mehr da, wo er
+war. Das ist eine Zeile mehr, wenn es jemand vermisst, und keine Umkehr dieser
+Entscheidung.
+
+**3. `m_pointerWindow` ist geschrieben, `keyboardWindow()` abgeleitet.** Der
+Zeiger meldet sein Fenster einmal in `processPointer`, und jeder Scan, den er
+danach im selben Bild auslöst (Rad, Drop, Caret, Doppelklick), erbt es von dort.
+Die Tastatur dagegen *fragt* jedes Mal das Fenster des fokussierten Widgets —
+gespeichert könnte sie auf ein Fenster zeigen, das inzwischen zu ist.
+
+**4. Escape gehört dem Fenster, in dem es gedrückt wurde.** `popGrab` konnte nur
+hinten poppen. Mit zwei Fenstern ist das Ende des gemeinsamen Stapels nicht mehr
+der gemeinte Eintrag: das Werkzeugfenster, das *danach* ein Popup geöffnet hat,
+liegt oben. Also `popGrabAt(index)`.
+
+**5. Die Grafik-API ist nicht die des Aufrufers.** `WindowProps::api` steht auf
+OpenGL, und die SDL-Flags folgen daraus und sind danach nicht mehr änderbar. Ein
+Zweitfenster mit GL-Flag unter einem Software-Renderer hat keine Oberfläche zum
+Blitten und scheitert *im Backend*, ohne dass etwas auf den Aufruf zurückzeigt.
+`createSecondaryWindow` überschreibt die API deshalb mit der des Hauptfensters.
+
+**6. Die Absage steht an EINER Stelle.** Statt dass GL, Vulkan und D3D sich je
+eine eigene Ausrede in `RenderWindow` ausdenken:
+`Capabilities::supportsSecondaryWindows` (Software und Metal wahr),
+`createSecondaryWindow` lehnt daran ab, und `window.open` gibt 0 zurück — die
+einzige Antwort, die ein Graph prüfen kann. Die drei Backends melden es
+zusätzlich einmal im Log, für einen Wirt, der doch eines angehängt hat.
+
+**7. Metals Zweitfenster war die Szene.** `EncodeFrame(…, isPrimary=false)`
+zeichnete dieselbe Welt aus derselben Kamera noch einmal. Der neue
+`EncodeWindowUI` ist ein Pass: Drawable, Clear, `EncodeUIPass`, Present. Er
+borgt sich `m_renderWorld.uiObjects` genau so aus wie `RenderWidgetThumbnail`
+(getauscht und zurückgetauscht), und **keinen Tiefenpuffer** — ein Widget-Baum
+ist Maler-sortiert, ein Tiefentest wäre nur eine zweite, widersprechende Meinung
+darüber, was vorne ist.
+
+**8. Der Wirt erfährt vom Schließen, solange das Fenster noch da ist.**
+`OnWindowClosing(handle)` ist die Tür, und alle drei Wege gehen hindurch: der
+Klick des Benutzers, `window.close` und das Herunterfahren. Der Eintrag wird
+*vor* dem Rückruf aus der Karte genommen, sonst rekursiert ein Handler, der
+dasselbe Fenster noch einmal schließt.
+
+**Offen bleibt:**
+
+- **Nie auf echter Hardware gesehen.** Kein Test dieses Baums öffnet ein zweites
+  Fenster — es gibt hier keinen Bildschirm dafür. Der Software-Pfad und der
+  Metal-Pfad sind gebaut und übersetzt, geprüft ist die Logik darunter
+  (`extract` pro Fenster, Fenstermodalität, Zeiger-Scoping), nicht das Bild.
+  Metals Zweitfenster kann der Headless-Dump auch nicht, der ist primär-only.
+- **Der Fokus wird beim Fensterwechsel nicht gemerkt** (Punkt 2).
+- **App-modal gibt es nicht**, nur fenstermodal. Das war so zugeschnitten und
+  ist eine Zeile in `topGrabOf`, wenn es jemand braucht.
+- **Der Tabulator endet am Fensterrand**, wie zugeschnitten.
+- **`Instance::windowId` wird nicht serialisiert** und soll es nicht: eine
+  Widget-*Klasse* gehört keinem Fenster, eine Instanz davon schon.
+- **OpenGL, Vulkan, D3D11 und D3D12 bleiben draußen.** Kein UI-only-Pfad, und
+  deshalb sagt die Fähigkeit nein statt ein leeres Fenster aufzumachen.

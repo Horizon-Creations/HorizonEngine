@@ -183,6 +183,9 @@ private:
 	void EnsureDepthTexture(WindowTarget& target, int width, int height);
 	void CreateScenePipeline();
 	void EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary);
+	// A secondary window's whole render path (A5, docs/he-apps-plan.md §13.3):
+	// that window's widget tree into its drawable, one render pass, no scene.
+	void EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uint32_t windowId);
 	// Encodes the scene draw calls into the given encoder (any render pass
 	// whose attachments match the scene pipeline formats). When `deferred` is
 	// non-null the opaque geometry was already rasterized into the G-buffer by

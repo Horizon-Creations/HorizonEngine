@@ -103,3 +103,9 @@ HorizonCode-Erweiterung so und ist es hier wieder: **einmal neu bauen.**
   `horizon.<gruppe>.<funktion>`, nicht mehr nur aus HorizonCode.
 - Auf macOS fügt eine gesetzte Menüleiste sich in SDLs Leiste ein, statt sie zu
   ersetzen: ein Spiel behält seine.
+- Neu: die Gruppe `window` (`open`, `close`, `setTitle`, `setSize`, `show`) und das
+  Ereignis `OnWindowClosed` — ein zweites Fenster mit eigenem Widget-Baum. `app.*`
+  meint weiterhin das Hauptfenster, kein vorhandener Aufruf ändert sich. `window.open`
+  antwortet **0**, wenn es nicht geht: im Editor, und auf OpenGL, Vulkan und D3D, die
+  keinen Zeichenweg in ein Zweitfenster haben (Software und Metal haben einen). Ein
+  Dialog in einem Zweitfenster sperrt nur dieses Fenster.
