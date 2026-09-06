@@ -44,7 +44,7 @@ Lag) + Tests") ist zu drei Vierteln bereits Code auf `main`. Was übrig bleibt:
 |---|---|---|
 | 2 | Core: Komponente + System + Spring-Arm + Lag | **Solved-Pose-Umbau (§3) + Lag (§4) + Tests** |
 | 3 | Shake, Blending, FOV-Kick + Tests | unverändert (§5, §6, §7) |
-| 4 | Editor-Integration + Doku | unverändert, Umfang siehe §9 |
+| 4 | Editor-Integration + Doku | **gebaut**: §4.4, die Lag-Regler im Inspector, sechs Handbucheinträge, Testpunkt 20 |
 
 ---
 
@@ -154,9 +154,11 @@ Szenendaten und wandern durch Serializer, Inspector und Handbuch.
 > `CameraRigComponent::snap()` (die Skript-Zeile aus §8 kommt später). Die
 > Regler wandern durch den Serializer, die geglättete Pose ausdrücklich nicht.
 >
-> **`TargetYaw::FollowSmoothed` (§4.4) ist NICHT gebaut** — weiches Nachdrehen
-> der Kopplung ist ein neuer Enum-Wert plus ein `turnRate`-Regler und damit
-> Serializer, Inspector und Handbuch, also Schritt 4.
+> **`TargetYaw::FollowSmoothed` (§4.4) ist gebaut (Schritt 4).** Der Regler
+> heißt in der Komponente `targetTurnRate`, im Inspector „Turn Rate" und im
+> Serializer `targetTurnRate`; der Enum-Wert ist **angehängt**, nie umsortiert,
+> weil er als `uint8_t` auf der Platte liegt. `camera.setTargetYawMode` kennt
+> jetzt die 2, alles außerhalb des Enums landet weiter auf `Follow`.
 >
 > Zu Testpunkt 1 in §10: die dort genannte Sekunde entlarvt `lerp` nicht. Nach
 > 1 s bei `speed = 10` sind beide Formeln auskonvergiert (Restfehler ~1e-5, weit
@@ -234,6 +236,18 @@ Der Rest aus `camera-rig-plan.md` §5: `TargetYaw::FollowSmoothed` dreht das Zie
 mit `turnRate` (°/s) auf `rig.yaw` zu, statt es hart zu setzen. Gleiche
 Kürzester-Weg-Regel wie oben. Die bestehende Regel bleibt: geschrieben wird
 **genau ein Float** (`tt.rotation.y`), nie ein Quaternion-Roundtrip.
+
+Gebaut mit einem **geklemmten Schritt**, nicht mit dem Exponentialglätter aus
+§4.3, und das ist der einzige Ort in diesem Plan, wo die beiden auseinandergehen:
+ein Exponentialglätter kommt nie ganz an, und eine Figur, die dauerhaft ein
+Zehntelgrad neben der Blickrichtung steht, sieht an einer Wand wie ein Defekt
+aus. `clamp(remainder(yaw - rotation.y, 360), ±turnRate*dt)` kommt exakt an,
+schwingt nie über und nimmt trotzdem den kurzen Weg.
+
+**Kein Snap-Fall.** §4.3 braucht ihn, weil der geglättete Pivot eine Kopie einer
+Weltposition ist, die bei einem Teleport veraltet. Hier gibt es nichts, was
+veralten könnte: die Rotation des Ziels ist das Ziel selbst, und wo es hinspringt,
+nimmt es sie mit.
 
 ### 4.5 Felder
 
@@ -483,6 +497,17 @@ Rig auf der Hauptkamera → No-op bzw. Null.
 
 ## 9. Was jede neue Zeile sonst noch kostet
 
+> **Abgearbeitet (Schritt 4).** Im Inspector stehen jetzt „Turn Rate" (nur bei
+> Follow Smoothed) und der Block „Lag" mit „Camera Lag", „Position Catch-Up",
+> „Rotation Catch-Up" (nur Third Person, der Regler bewegt den Boom), „Max
+> Trail" und „Snap Distance". Dazu sechs neue `EditorHelp`-Zeilen und eine
+> umgeschriebene („Target Rotation" nannte zwei Modi, es sind drei). Die
+> Deckung steht bei **612/612**, `editor_help_audit` grün.
+>
+> Was der Inspector bewusst NICHT zeigt: Shake, FOV-Kick und Blend. Sie haben
+> keine Regler, nur Laufzeitzustand und Skript-Aufrufe — ein Bedienelement dafür
+> wäre ein Knopf, der etwas auslöst, das beim nächsten Frame vorbei ist.
+
 Die Buchhaltung, die in Schritt 3 und 4 gerne vergessen wird und die von einem
 Test erzwungen wird:
 
@@ -505,9 +530,13 @@ Test erzwungen wird:
 Zu `tests/test_camera_rig.cpp` (die 27 bestehenden Fälle müssen unverändert
 grün bleiben — das ist die Zusicherung, dass §3 nichts am Verhalten dreht):
 
-> **Stand: 1–19 stehen** (49 Fälle in `test_camera_rig.cpp`, 433 Zusicherungen).
-> Offen ist nur Punkt 20, der Serialisierungs-Roundtrip — der gehört zu
-> `test_scene_serializer.cpp` und damit zu Schritt 4.
+> **Stand: 1–20 stehen.** 1–19 in `test_camera_rig.cpp`, dazu drei Fälle für
+> §4.4 (Rate, ±180-Naht, hohe Rate = harte Kopplung). Punkt 20 sitzt in
+> `test_scene_serializer.cpp`: der große Roundtrip prüft jetzt auch
+> `targetTurnRate` und hält Shake, FOV-Kick, Blend und `lastWritten` dagegen,
+> und ein zweiter Fall schneidet die neuen Schlüssel aus einer gespeicherten
+> Szene wieder heraus — so handelt er von den fehlenden Schlüsseln und nicht
+> vom übrigen Format.
 >
 > Die Falle, die 7–19 fast alle vakuum grün gemacht hätte: die
 > `MouseFrame`-Bequemlichkeitsüberladung von `update()` setzt `look.dt = 0`, und
@@ -560,6 +589,14 @@ grün bleiben — das ist die Zusicherung, dass §3 nichts am Verhalten dreht):
 * **Website-Roadmap ist veraltet.** `docs/gap-audit-2026-08-25.md:65`: „Gameplay
   Camera Rigs" steht dort auf `planned`, existiert aber seit `7ad81c48`.
   Gehört mit dieser Runde zusammen aktualisiert (`Website/HorizonEngine/roadmap.json`).
+  **Nicht in dieser Runde erledigt:** das ist ein Geschwister-Repo, kein Zweig
+  dieses Features, und die Änderung geht zusammen mit dem Merge raus.
+* **Die Handbuchseite kennt das Rig nicht.** `rendering.html#cameras`
+  (`EditorDeps/Docs/he-docs.json`, generiert am 26.08.2026) beschreibt nur die
+  Camera-Komponente — kein Wort über Rig, Spring-Arm, Lag, Shake oder Blending,
+  obwohl jeder Tooltip dorthin verlinkt. Die Quelle liegt in `HorizonEngineDocs`,
+  also ebenfalls im Geschwister-Repo. Der Abschnitt braucht einen Absatz über
+  das Rig und die neuen Skript-Zeilen aus §8.
 * **`camera-rig-plan.md` §5** liest sich als aktueller Stand („bewusst nicht in
   v1") — bekommt einen Verweis hierher, damit niemand daraus schließt, dass Lag
   und Shake nicht kommen.

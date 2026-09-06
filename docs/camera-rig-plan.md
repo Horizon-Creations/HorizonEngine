@@ -22,7 +22,8 @@ inklusive der Option, die Ziel-Entity mit der Kamera mitzudrehen.
 **Nicht verifiziert:** kein Durchlauf im echten Editor/Spiel — bisher nur durch
 Tests abgedeckt. Optik, Maus-Gefühl, Kollisions-Popping und PIE-Capture stehen aus.
 
-**Offen:** der Rest von §5, plus der Nebenfund in §6. Dazu ein Nachbar-Befund:
+**Offen:** der Nebenfund in §6 — §5 ist abgearbeitet, in
+[`gameplay-camera-rigs-plan.md`](gameplay-camera-rigs-plan.md). Dazu ein Nachbar-Befund:
 die eingefrorenen kinematischen Proxys ANDERER Figuren bleiben unsichtbare
 Hindernisse an deren Spawnpunkten — der Arm ignoriert nur sein eigenes Ziel.
 Erledigt sich mit dem Transform→`MoveKinematic`-Push aus §2.4.
@@ -253,9 +254,12 @@ Aufwand: rund 2–3 Personentage, deckt sich mit der MASTERPLAN-Schätzung für 
   Default mit (sphereCast filtert sie, raycast bewusst nicht — Skripte hängen am
   alten Verhalten), und ignoriert werden muss die **Ziel-Entity**, was zugleich
   den eingefrorenen kinematischen Proxy am Spawnpunkt abdeckt.
-* **Weiches Nachdrehen** (`FollowSmoothed` + `turnRate` °/s) — sinnvolle
-  Erweiterung, aber Tuning-Fläche; erst wenn die harte Kopplung steht.
-* **Positions-Lag / Kamera-Glättung**, Blending zwischen Rigs, Shake, FOV-Kick.
+* ~~**Weiches Nachdrehen**~~ **Erledigt** — `TargetYaw::FollowSmoothed` plus
+  `targetTurnRate` (°/s), mit geklemmtem Schritt statt Glätter, damit die Figur
+  exakt ankommt. Siehe `gameplay-camera-rigs-plan.md` §4.4.
+* ~~**Positions-Lag / Kamera-Glättung**, Blending zwischen Rigs, Shake,
+  FOV-Kick.~~ **Erledigt** — alle vier, siehe `gameplay-camera-rigs-plan.md`
+  §4 bis §7.
 * **Gamepad** (MASTERPLAN E4) — es gibt keinen SDL-Gamepad-Code in der Engine.
 * **Shape-Casts** statt Rays für den Boom.
 
