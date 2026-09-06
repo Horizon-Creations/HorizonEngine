@@ -1630,6 +1630,49 @@ void main() {
     oMix = mix(texture(heNarrow, uv), texture(heWide, uv), t);
 }
 )";
+
+// ─── D3D11 register pins for the three SSR passes ────────────────────────────
+// docs/ssr-cross-backend-plan.md C3, the same problem kDecalHlslPins solves one
+// screen down: SPIRV-Cross turns layout(binding = N) into register(bN/tN/sN)
+// one-for-one, and the canonical SSR bindings are 19..25 — past D3D11's hard
+// limits of 14 constant-buffer and 16 sampler slots per stage. Emitted that way
+// the API could never bind them.
+//
+// SRVs are NOT the scarce resource here (128 slots); the samplers and the
+// constant buffer are, and a pin gives one binding the same index in all three
+// register spaces. So the block sits at 8..13, just under the decal block
+// (13/14/15) and above everything the scene path holds (t0..t7 built-in + graph
+// materials). The SSR passes run BEFORE any scene binding, so the two slots that
+// overlap graph-material state (t10/s10, t11/s11 — the GI masks) are re-bound by
+// the scene setup block that follows anyway.
+//
+//   b12      HeSSRTrace / HeSSRBlur (binding 23) — b and t/s are separate
+//            register spaces, so b12 and t12 are not the same slot
+//   t8/s8    heSceneColor | heSSRIn | heNarrow  (19)
+//   t9/s9    heGB1        | heWide              (20)
+//   t10/s10  heAttr                             (21)
+//   t11/s11  heGBDepth                          (22)
+//   t12/s12  heSSRHistRad                       (24)
+//   t13/s13  heSSRHistPos                       (25)
+//
+// D3D12 has no such limit but inherits the same numbers, so the two D3D backends
+// share ONE contract instead of two (docs/decals-cross-backend-plan.md §6b/§6c).
+constexpr uint32_t kSSRHlslUboReg = 12; // HeSSRTrace / HeSSRBlur (binding 23)
+
+// One list for all three fragment shaders. A pin whose binding the shader does
+// not declare is ignored by SPIRV-Cross, so the blur (19/23) and the rough mix
+// (19/20/21/23) can share the trace's map and no binding ever means two things.
+std::vector<he::shaderc::HlslPin> kSSRHlslPins()
+{
+    using he::shaderc::Stage;
+    return { { Stage::Fragment, 0, 23, kSSRHlslUboReg },
+             { Stage::Fragment, 0, 19,  8 },
+             { Stage::Fragment, 0, 20,  9 },
+             { Stage::Fragment, 0, 21, 10 },
+             { Stage::Fragment, 0, 22, 11 },
+             { Stage::Fragment, 0, 24, 12 },
+             { Stage::Fragment, 0, 25, 13 } };
+}
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrRoughMix(Backend backend)
@@ -1644,6 +1687,11 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrRoughMix(Backen
               { Stage::Fragment, 0, 19, 0 },     // narrow → texture/sampler 0
               { Stage::Fragment, 0, 20, 1 },     // wide   → texture/sampler 1
               { Stage::Fragment, 0, 21, 2 } })); // attr   → texture/sampler 2
+    else if (backend == Backend::HLSL)
+        // Pinned even though no D3D backend draws this stage today (the forward
+        // path has no wide blur — see the GL and Vulkan checkpoints): the moment
+        // one does, it must land on the same numbers as the trace.
+        out = toCompiled(compileHlslPinned(kSSRRoughMixFS, Stage::Fragment, kSSRHlslPins()));
     else
         out = toCompiled(compile(kSSRRoughMixFS, Stage::Fragment, toTarget(backend)));
     return m_ssrCache.emplace(key, std::move(out)).first->second;
@@ -1663,6 +1711,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend b
               { Stage::Fragment, 0, 22, 2 },    // depth → 2
               { Stage::Fragment, 0, 24, 3 },    // history radiance (prev) → 3
               { Stage::Fragment, 0, 25, 4 } }));// history receiver pos (prev) → 4
+    else if (backend == Backend::HLSL)
+        // The variant D3D11 actually draws with, moved into its bindable
+        // register range (see kSSRHlslPins).
+        out = toCompiled(compileHlslPinned(kSSRTraceFS, Stage::Fragment, kSSRHlslPins()));
     else
         out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
     return m_ssrCache.emplace(key, std::move(out)).first->second;
@@ -1704,9 +1756,139 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrBlur(Backend ba
         out = toCompiled(compileMslPinned(kSSRBlurFS, Stage::Fragment,
             { { Stage::Fragment, 0, 23, 0 },    // HeSSRBlur UBO → fragment buffer 0
               { Stage::Fragment, 0, 19, 0 } }));// trace result → texture/sampler 0
+    else if (backend == Backend::HLSL)
+        out = toCompiled(compileHlslPinned(kSSRBlurFS, Stage::Fragment, kSSRHlslPins()));
     else
         out = toCompiled(compile(kSSRBlurFS, Stage::Fragment, toTarget(backend)));
     return m_ssrCache.emplace(key, std::move(out)).first->second;
+}
+
+namespace
+{
+// ─── Reflection pre-pass (forward path) ──────────────────────────────────────
+// docs/ssr-cross-backend-plan.md §3.2 way (a). The forward path has no
+// G-buffer, so the SSR trace (and the GI-reflection kernel) get their normals
+// and depth from one extra rasterisation of the scene — the same pass the SSAO
+// position pre-pass already runs, widened to three attachments.
+//
+// This was hand-written MSL inside MetalRenderer.mm. It lives here because
+// every backend that ports SSR needs the identical encoding: the trace decodes
+// attachment 1 with heOctDecode and reconstructs world space from attachment 2
+// with the same invViewProj maths the G-buffer path uses. Four hand-kept copies
+// of that contract would drift, and the drift shows up as reflections pointing
+// somewhere the geometry is not.
+//
+// The vertex data follows standardVertex's split for the same reason it does:
+// Metal pulls the mesh out of an SSBO bound at index 0, everything else uses
+// attributes, because macOS-GL is 4.1 and has no SSBO.
+constexpr const char* kReflPrepassVSSsbo = R"(#version 450
+layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
+)";
+constexpr const char* kReflPrepassVSAttr = R"(#version 450
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+)";
+// Three mat4 = 192 bytes std140 — byte-identical to the SSAOPosUniforms the
+// Metal encoder has always written with setVertexBytes at index 1.
+constexpr const char* kReflPrepassVSTail = R"(layout(std140, set = 0, binding = 1) uniform U {
+    mat4 mvp;
+    mat4 modelView;
+    mat4 model;
+} u;
+layout(location = 0) out vec3 vViewPos;
+layout(location = 1) out vec3 vWorldNormal;
+void main() {
+)";
+constexpr const char* kReflPrepassVSBodySsbo = R"(    int b = gl_VertexIndex * 8;
+    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
+    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
+)";
+constexpr const char* kReflPrepassVSBodyAttr = R"(    vec3 pos = aPos;
+    vec3 nrm = aNormal;
+)";
+constexpr const char* kReflPrepassVSEnd = R"(    vec4 p       = vec4(pos, 1.0);
+    gl_Position  = u.mvp * p;
+    vViewPos     = (u.modelView * p).xyz;
+    vWorldNormal = (u.model * vec4(nrm, 0.0)).xyz;
+}
+)";
+
+// The fragment's three outputs are the pre-pass's whole contract:
+//   0  view-space position, w = 1 → valid geometry (the SSAO kernel's input)
+//   1  rg = oct world normal *0.5+0.5, b = roughness, a = unused — the GB1
+//      encoding, so the trace's heOctDecode(g1.rg * 2.0 - 1.0) is shared
+//      verbatim between the deferred and the forward path
+//   2  NDC depth exactly as the G-buffer pass stores it (gl_FragCoord.z)
+//
+// Roughness is a constant 0: the pre-pass rasterises geometry, not materials,
+// so it has none. The trace's roughFade is therefore a no-op on this path and
+// the scene shader applies the per-pixel fade instead (docs/ssr-cross-backend-plan.md §1.3).
+//
+// The oct encoder is character-for-character the lighting preamble's
+// heOctEncode; a second, subtly different one is the kind of bug that compiles
+// everywhere and only shows as reflections aimed the wrong way.
+constexpr const char* kReflPrepassFS = R"(#version 450
+layout(location = 0) in vec3 vViewPos;
+layout(location = 1) in vec3 vWorldNormal;
+layout(location = 0) out vec4 oViewPos;
+layout(location = 1) out vec4 oAttr;
+layout(location = 2) out float oNdc;
+vec2 heOctEncode(vec3 n) {
+    vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+void main() {
+    oViewPos = vec4(vViewPos, 1.0);
+    vec3 n = vWorldNormal;
+    n = (dot(n, n) > 1e-12) ? normalize(n) : vec3(0.0, 0.0, 1.0);
+    oAttr = vec4(heOctEncode(n) * 0.5 + 0.5, 0.0, 0.0);
+    oNdc  = gl_FragCoord.z;
+}
+)";
+
+std::string reflPrepassVS(bool ssbo)
+{
+    return std::string(ssbo ? kReflPrepassVSSsbo : kReflPrepassVSAttr)
+         + kReflPrepassVSTail
+         + (ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr)
+         + kReflPrepassVSEnd;
+}
+} // namespace
+
+const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
+{
+    static const std::string s = kReflPrepassFS;
+    return s;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertex(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2 + 0;
+    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        // Pinned to the bind points the MRT pre-pass encoder already issues per
+        // draw: the mesh vertex buffer at 0, the per-object matrices at 1.
+        out = toCompiled(compileMslPinned(reflPrepassVS(/*ssbo=*/true), Stage::Vertex,
+            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+              { Stage::Vertex, 0, 1, 1 } }));  // U matrices → vertex buffer 1
+    else
+        out = toCompiled(compile(reflPrepassVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassFragment(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 2 + 1;
+    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
+    using namespace he::shaderc;
+    // No resources at all — three attachments and two varyings, nothing to pin.
+    Compiled out = toCompiled(backend == Backend::Metal
+        ? compileMslPinned(kReflPrepassFS, Stage::Fragment, {})
+        : compile(kReflPrepassFS, Stage::Fragment, toTarget(backend)));
+    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
 }
 
 namespace

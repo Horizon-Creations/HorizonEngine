@@ -4341,6 +4341,39 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_DECALTEST witness scene added");
 	}
 
+	// ── GPU-instancing witness (HE_DUMP_INSTANCETEST=<n>, default 8): n default
+	// cubes in a row, same mesh, no material — exactly the run GeometryPass folds
+	// into ONE DrawCall carrying n transforms. The image must show n cubes at n
+	// distinct places (all of them stacked at the origin is the signature of a
+	// wrong instance-matrix layout); the "dump counters" line below must show the
+	// row costing one draw, not n. See docs/gpu-instancing-cross-backend-plan.md §5.
+	if (const char* it = std::getenv("HE_DUMP_INSTANCETEST"); it && *it && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const int n = std::clamp(std::atoi(it), 2, 64);
+		for (int i = 0; i < n; ++i)
+		{
+			auto e = m_editorWorld->createEntity("InstCube" + std::to_string(i));
+			TransformComponent tc;
+			// A row along X, staggered in Y so a collapsed batch cannot be mistaken
+			// for a correct one seen edge-on.
+			tc.position = glm::vec3(-(n - 1) * 1.5f * 0.5f + i * 1.5f,
+			                        1.0f + (i % 2) * 1.2f, -10.0f);
+			tc.scale    = glm::vec3(1.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+		auto floorE = m_editorWorld->createEntity("InstFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, -0.6f, -10.0f);
+		ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_INSTANCETEST witness scene added ("
+			 + std::to_string(n) + " cubes)").c_str());
+	}
+
 	// ── Local-light shadow witness (HE_DUMP_LOCALSHADOW=point|spot): a floor
 	// slab + caster cube + ONE shadow-casting local light. Shot at midnight
 	// (TOD=0) the local light dominates: the cube must throw a visible shadow
@@ -5173,9 +5206,20 @@ void EditorApplication::dumpFrameHeadless()
 	std::vector<uint8_t> rgba;
 	uint32_t w = 0, h = 0;
 	if (r->CaptureViewport(rgba, w, h) && w > 0 && h > 0 && writeBMP(m_dumpPath, rgba, w, h))
+	{
 		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: frame dumped (" + std::to_string(w) + "x" +
 			 std::to_string(h) + ") → " + m_dumpPath).c_str());
+		// The captured frame's draw counters. A picture shows WHAT was drawn, not
+		// how many draws it took — and that is the difference an instanced batch
+		// makes: same image, fewer draws. Cheap enough to log on every capture.
+		const IRenderer::FrameGpuStats st = r->GetFrameGpuStats();
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: dump counters — draws=" + std::to_string(st.drawCalls) +
+			 " tris=" + std::to_string(st.triangles) +
+			 " visible=" + std::to_string(st.visibleObjects) +
+			 "/" + std::to_string(st.totalObjects)).c_str());
+	}
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());

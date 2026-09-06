@@ -422,6 +422,11 @@ cbuffer PerFrame : register(b1)
     float4   uGIParams;     // x = GI enabled (0/1), y = indirect intensity
     float4   uGIGridOrigin; // xyz = probe grid origin, w = spacing
     float4   uGIGridCounts; // xyz = probe counts, w = probesPerRow
+    // Forward SSR (docs/ssr-cross-backend-plan.md C5/D): x = 1 → a trace ran this
+    // frame and uSSRFwd holds it, y = intensity, z = max roughness, w = 0. The
+    // same four lanes heLitP reads out of Lighting::ssr — must stay in step with
+    // PerFrameCB, which is memcpy'd into this cbuffer whole.
+    float4   uSSRParams;
 };
 Texture2D    uShadowMap : register(t0);
 Texture2D    uAlbedo    : register(t1); // base-color texture (bound per draw; null when untextured)
@@ -430,6 +435,13 @@ Texture2D    uGIShadow  : register(t4); // half-res ray-traced sun-shadow mask
 Texture2D    uGIIrr     : register(t5); // DDGI irradiance atlas (RGBA16F)
 Texture2D    uGIVis     : register(t6); // DDGI visibility atlas (RG16F)
 Texture2D    uGILocal   : register(t7); // half-res local-light visibility mask (1 channel per light, first 4)
+// Half-res screen-space reflection trace (rgb = reflected radiance, a =
+// confidence). t16 on purpose, the register D3D11 already picked: the low SRV
+// registers are all spoken for (t0..t7 here and in the graph materials, t8..t13
+// the pinned SSR pass block, t14/t15 the decals), and the two D3D backends
+// share ONE register contract. Its descriptor is its own root table, so the
+// table can be pointed at whichever half-res texture the chain ended on.
+Texture2D    uSSRFwd    : register(t16);
 SamplerState uShadowSamp : register(s0);
 SamplerState uAOSampler  : register(s1);
 SamplerState uAlbedoSamp : register(s2); // linear + wrap, for tiling base-color textures
@@ -587,11 +599,29 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 F0     = lerp(float3(0.04f,0.04f,0.04f), base, met);
     float3 kd     = (1.0f - F0) * (1.0f - met);
     float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
+    // FORWARD reflection cascade (sky → SSR). SYNC: this is the heLitP twin in
+    // MaterialShaderLibrary.cpp and the same stage GL's kUnlitFS, Metal's
+    // fragmentMain, Vulkan's scene.frag and D3D11's kSceneHLSL carry — a graph
+    // material next to a built-in one must mix the sources identically, or the
+    // same mirror changes appearance with the material type. There is no
+    // ray-traced-GI-reflection stage between the two here: D3D12 has none, and
+    // its gate would be a constant zero. The trace carries no per-pixel
+    // roughness (the half-res pre-pass has no material data), so the roughness
+    // fade lives HERE, with the exact shading value. No `f` suffixes on the two
+    // constants below — the cross-copy drift test in tests/test_culling.cpp
+    // matches this text.
+    float3 envSpec = skyColor(Rrough, uSunDir.xyz);
+    if (uSSRParams.x > 0.5)
+    {
+        float4 sr   = uSSRFwd.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0);
+        float fade = 1.0 - smoothstep(uSSRParams.z * 0.7, uSSRParams.z, rough);
+        envSpec = lerp(envSpec, sr.rgb, sr.a * uSSRParams.y * fade);
+    }
     // Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
     float  NdV = saturate(dot(N, V));
     float3 fresnelSpec = F0
         + (max(float3(1.0f - rough, 1.0f - rough, 1.0f - rough), F0) - F0) * pow(1.0f - NdV, 5.0f);
-    float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * fresnelSpec;
+    float3 ambSpec = envSpec * fresnelSpec;
     float  ao      = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
     // GI replaces the AO-gated IBL diffuse with probe-grid indirect (spec IBL
     // stays in both branches) — mirrors the GL/Metal/D3D11 gi.enabled branch.
@@ -883,6 +913,7 @@ namespace
         glm::vec4  giParams;     // x = GI enabled (0/1), y = indirect intensity
         glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
+        glm::vec4  ssrParams;    // x = SSR gate, y = intensity, z = max roughness
     };
 
     struct SkyCB {
@@ -1369,6 +1400,26 @@ struct D3D12RendererImpl
         bloomState[1] = D3D12_RESOURCE_STATE_RENDER_TARGET;
         ldrState      = D3D12_RESOURCE_STATE_RENDER_TARGET;
         postFxW = w; postFxH = h;
+
+        // Forward SSR's radiance source: a full-res copy of the PREVIOUS frame's
+        // hdrRT. Built here, with the target it copies, so the two can never
+        // disagree about size or format after a resize — and the "valid" flag
+        // drops with them, because the first frame at a new size has no history.
+        ssrColorHist.Reset();
+        ssrColorHistValid = false;
+        if (hdrRT)
+        {
+            D3D12_RESOURCE_DESC rd = hdrRT->GetDesc();
+            rd.Flags = D3D12_RESOURCE_FLAG_NONE; // CopyResource target, never an RTV
+            if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ssrColorHist))))
+                ssrColorHist.Reset();
+            ssrColorHistState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        writeSSRDescriptors();
+        // The half-res ping-pong follows the new size lazily; dropping it here
+        // also drops the history, which a resized frame could not reproject.
+        if (ssrRtvHeap) destroySSRTargets();
     }
 
     // Compiles and creates all PostFX root signatures + PSOs.
@@ -2258,7 +2309,22 @@ struct D3D12RendererImpl
     // pass binds one of them at t15 and a mesh-region slot at t14.
     static constexpr UINT k_decalSceneDepthSlot    = k_sceneStaticSrvs + k_maxMeshTextures;     // swapchain depth
     static constexpr UINT k_decalViewportDepthSlot = k_sceneStaticSrvs + k_maxMeshTextures + 1; // viewport depth
-    static constexpr UINT k_sceneSrvHeapSize       = k_sceneStaticSrvs + k_maxMeshTextures + 2;
+    // SSR region (plan D2), appended for the same reason the decal slots were:
+    // nothing above moves. Every slot here is written ONLY while the GPU is idle
+    // (createSSRTargets / ensureReflTargets / createPostFXResources all flush
+    // first) — a shader-visible heap must never be rewritten under a frame in
+    // flight, so the per-frame ping-pong picks a different GPU HANDLE instead of
+    // rewriting a descriptor.
+    //   trace block p (p = the history parity the trace READS, 5 descriptors):
+    //     +0 t8  heSceneColor (prev-frame HDR copy)   +1 t9  heGB1 (refl attr)
+    //     +2 t11 heGBDepth (refl NDC)                 +3 t12 heSSRHistRad[p]
+    //     +4 t13 heSSRHistPos[p]
+    //   blur inputs: histRad[0], histRad[1], ping, refl — the last four double
+    //   as the scene shader's t16 source, so no slot is spent twice.
+    static constexpr UINT k_ssrTraceBlockSlot = k_sceneStaticSrvs + k_maxMeshTextures + 2;  // 2 × 5
+    static constexpr UINT k_ssrBlurInSlot     = k_sceneStaticSrvs + k_maxMeshTextures + 12; // 4
+    static constexpr UINT k_ssrNullSlot       = k_sceneStaticSrvs + k_maxMeshTextures + 16; // t16 when SSR is off
+    static constexpr UINT k_sceneSrvHeapSize  = k_sceneStaticSrvs + k_maxMeshTextures + 17;
     ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible
     UINT                         sceneSrvDescSize = 0;
     UINT                         meshTexNextSlot  = k_sceneStaticSrvs; // running allocator
@@ -2599,6 +2665,82 @@ struct D3D12RendererImpl
     bool  ssaoReady     = false;
     int   ssaoW         = 0;
     int   ssaoH         = 0;
+
+    // ── Reflection MRT pre-pass (forward SSR, plan §3.2 way (a) / C2) ───────
+    // Two extra attachments hung off the SSAO position pre-pass, so the trace
+    // sees exactly the format it would read out of GB1/GBDepth in a deferred
+    // path. Attachment 0 stays the view-space position the occlusion stage
+    // already consumes — the shared pre-pass fragment writes the identical
+    // vec4(vViewPos, 1.0) there, so pass 2 never notices which shader drew it.
+    // Created lazily on the first SSR frame, torn down with the SSAO targets.
+    ComPtr<ID3D12Resource>       reflAttrRT;   // RGBA16F: rg oct normal, b roughness (= 0)
+    ComPtr<ID3D12Resource>       reflNdcRT;    // R32F: NDC depth, gbufferMain convention
+    ComPtr<ID3D12RootSignature>  reflPrepassRS;
+    ComPtr<ID3D12PipelineState>  reflPrepassPSO;
+    D3D12_RESOURCE_STATES        reflAttrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES        reflNdcState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    bool reflPrepassReady  = false;
+    bool reflPrepassFailed = false;
+
+    // ── Screen-space reflections, forward path (plan checkpoint D) ──────────
+    // The D3D12 twin of D3D11's RenderForwardSSR / Metal's EncodeForwardSSR,
+    // built from the SAME shared shaders (ssrTrace / ssrBlur) and pinned into
+    // the register block D3D11 established (kSSRHlslPins, plan C3):
+    //   b12 HeSSRTrace/HeSSRBlur | t8/s8 colour-or-input | t9/s9 GB1
+    //   t11/s11 depth | t12/s12 hist radiance | t13/s13 hist position
+    // There is no composite pass (§2.2: no G-buffer here) and no wide/rough-mix
+    // stage (the forward path has none on Metal, GL, Vulkan or D3D11 either, and
+    // the pre-pass writes roughness = 0) — the scene shader samples ONE texture.
+    ComPtr<ID3D12RootSignature>  ssrTraceRS, ssrBlurRS;
+    ComPtr<ID3D12PipelineState>  ssrTracePSO, ssrBlurPSO;
+    ComPtr<ID3D12Resource>       ssrTraceCB[k_frameCount];  uint8_t* ssrTraceCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       ssrBlurCB[k_frameCount];   uint8_t* ssrBlurCBPtr[k_frameCount]{};
+    // Four blur passes at quality Medium, so four CB slots per frame in flight:
+    // unlike D3D11's Map/WRITE_DISCARD, the GPU reads this mapped memory at
+    // execute time and a reused slot would give every pass the last one's dir.
+    static constexpr UINT        k_ssrBlurCBSlots = 4;
+    // Half-res ping-pong. hist[2] is the temporal pair the trace reads and
+    // writes (radiance + receiver world position, two attachments in one draw);
+    // ping/refl are the separable blur chain's two ends.
+    ComPtr<ID3D12Resource>       ssrHistRad[2], ssrHistPos[2], ssrPing, ssrRefl;
+    D3D12_RESOURCE_STATES        ssrHistRadState[2] = { D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
+    D3D12_RESOURCE_STATES        ssrHistPosState[2] = { D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
+    D3D12_RESOURCE_STATES        ssrPingState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_RESOURCE_STATES        ssrReflState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // RTV heap for everything the two SSR passes and the MRT pre-pass draw into.
+    // [0]=reflAttr [1]=reflNdc [2]=histRad0 [3]=histPos0 [4]=histRad1
+    // [5]=histPos1 [6]=ping [7]=refl
+    ComPtr<ID3D12DescriptorHeap> ssrRtvHeap;
+    UINT                         ssrRtvDescSize = 0;
+    // Full-res copy of the PREVIOUS frame's finished HDR colour — the forward
+    // path's radiance source (one frame of content lag, Option A of
+    // docs/ssr-plan.md §2). Lives with the HDR target so a resize can never
+    // leave the two disagreeing.
+    ComPtr<ID3D12Resource>       ssrColorHist;
+    D3D12_RESOURCE_STATES        ssrColorHistState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    bool      ssrColorHistValid = false;
+    int       ssrW = 0, ssrH = 0;
+    int       ssrHistIdx   = 0;
+    bool      ssrHistValid = false;
+    float     ssrFrameSeed = 0.0f;
+    glm::mat4 ssrPrevViewProj{1.0f};
+    bool  ssrReady        = false;
+    bool  ssrFailed       = false;
+    bool  ssrEnabled      = false;
+    float ssrIntensity    = 1.0f;
+    float ssrMaxRoughness = 0.6f;
+    float ssrMaxDistance  = 30.0f;
+    float ssrThickness    = 0.5f;
+    int   ssrQuality      = 1;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE ssrRtv(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = ssrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * ssrRtvDescSize;
+        return h;
+    }
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle(UINT index) const
     {
@@ -2983,7 +3125,18 @@ struct D3D12RendererImpl
         albedoRange.RegisterSpace                     = 0;
         albedoRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER params[5]{};
+        // Forward SSR result (t16). Its OWN single-descriptor table, like the
+        // albedo one and for the same reason: the chain ends on a different
+        // half-res texture depending on quality and history parity, and a table
+        // handle may move per frame where a descriptor may not be rewritten.
+        D3D12_DESCRIPTOR_RANGE ssrRange{};
+        ssrRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ssrRange.NumDescriptors                    = 1;
+        ssrRange.BaseShaderRegister                = 16; // t16
+        ssrRange.RegisterSpace                     = 0;
+        ssrRange.OffsetInDescriptorsFromTableStart = 0;
+
+        D3D12_ROOT_PARAMETER params[6]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3003,6 +3156,14 @@ struct D3D12RendererImpl
         params[4].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
         params[4].Descriptor       = { 3, 0 }; // t3, space0
         params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        // param[5]: t16 = the forward SSR trace. EVERY site that rebinds rootSig
+        // after another root signature ran must set this table too — a root
+        // signature switch wipes all root arguments (plan D4), and an
+        // uninitialised table is not a thing the runtime forgives.
+        params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[5].DescriptorTable.NumDescriptorRanges = 1;
+        params[5].DescriptorTable.pDescriptorRanges   = &ssrRange;
+        params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // s0 = shadow sampler (linear-clamp), s1 = AO sampler (point-clamp),
         // s2 = base-color sampler (linear-wrap, for tiling textures),
@@ -3026,7 +3187,7 @@ struct D3D12RendererImpl
         samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 5;
+        rsd.NumParameters     = 6; // params[5] = the t16 SSR table added in checkpoint D
         rsd.pParameters       = params;
         rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
@@ -3103,6 +3264,10 @@ struct D3D12RendererImpl
             // createViewportRT() may run later and fills its own then.
             createDepthSrv(depthBuffer.Get(),   k_decalSceneDepthSlot);
             createDepthSrv(viewportDepth.Get(), k_decalViewportDepthSlot);
+            // SSR region: null views until the pass builds its targets. The t16
+            // table is bound on EVERY scene draw, SSR frame or not, so its
+            // fallback descriptor has to be valid from the very first frame.
+            writeSSRDescriptors();
         }
 
         UINT flags = 0;
@@ -3671,6 +3836,10 @@ struct D3D12RendererImpl
     {
         waitForAllFrames();
         ssaoPosRT.Reset(); ssaoPosDepth.Reset(); ssaoRT.Reset(); ssaoBlurRT.Reset();
+        // The reflection attachments share this pre-pass's size and depth, so
+        // they die with it and are rebuilt by the next SSR frame (plan C2).
+        reflAttrRT.Reset(); reflNdcRT.Reset();
+        writeSSRDescriptors();
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -3757,15 +3926,661 @@ struct D3D12RendererImpl
         ssaoW = w; ssaoH = h;
     }
 
+    // ── SSR descriptor region (plan D2) ─────────────────────────────────────
+    // Rewrites EVERY appended SSR slot from whatever exists right now, null SRVs
+    // for the rest. Called only from places that have already flushed the GPU
+    // (createPipeline's heap setup, createPostFXResources, ensureReflTargets,
+    // createSSRTargets) — a shader-visible descriptor may not be overwritten
+    // while a frame in flight can still read it.
+    void writeSSRDescriptors()
+    {
+        if (!sceneSrvHeap) return;
+        auto srv = [&](ID3D12Resource* res, DXGI_FORMAT fmt, UINT slot)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format                  = fmt;
+            sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels     = 1;
+            device->CreateShaderResourceView(res, &sv, sceneSrvCpu(slot));
+        };
+        constexpr DXGI_FORMAT kHalf4 = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        for (UINT p = 0; p < 2; ++p)
+        {
+            const UINT b = k_ssrTraceBlockSlot + p * 5;
+            srv(ssrColorHist.Get(), kHalf4,                  b + 0); // t8  heSceneColor
+            srv(reflAttrRT.Get(),   kHalf4,                  b + 1); // t9  heGB1
+            srv(reflNdcRT.Get(),    DXGI_FORMAT_R32_FLOAT,   b + 2); // t11 heGBDepth
+            srv(ssrHistRad[p].Get(), kHalf4,                 b + 3); // t12 heSSRHistRad
+            srv(ssrHistPos[p].Get(), kHalf4,                 b + 4); // t13 heSSRHistPos
+        }
+        srv(ssrHistRad[0].Get(), kHalf4, k_ssrBlurInSlot + 0);
+        srv(ssrHistRad[1].Get(), kHalf4, k_ssrBlurInSlot + 1);
+        srv(ssrPing.Get(),       kHalf4, k_ssrBlurInSlot + 2);
+        srv(ssrRefl.Get(),       kHalf4, k_ssrBlurInSlot + 3);
+        srv(nullptr,             kHalf4, k_ssrNullSlot);
+    }
+
+    // The heap slot the scene shader's t16 table points at. The blur-input block
+    // already holds an SRV for each of the three textures the chain can end on,
+    // so the per-frame choice costs a handle, never a descriptor write.
+    UINT ssrResultSlot(ID3D12Resource* res) const
+    {
+        if (res == ssrRefl.Get())       return k_ssrBlurInSlot + 3;
+        if (res == ssrHistRad[0].Get()) return k_ssrBlurInSlot + 0;
+        if (res == ssrHistRad[1].Get()) return k_ssrBlurInSlot + 1;
+        return k_ssrNullSlot;
+    }
+
+    // The two extra pre-pass attachments (plan C2). Separate from
+    // createSSAOTargets because a project that never switches SSR on must not
+    // pay for them, and because they must be rebuilt whenever the SSAO pass is
+    // resized — createSSAOTargets drops them, this puts them back.
+    bool ensureReflTargets(int w, int h)
+    {
+        if (reflAttrRT && reflNdcRT) return true;
+        if (!ssrRtvHeap) return false; // EnsureSSRPipelines builds it, and runs first
+        waitForAllFrames();
+        reflAttrRT.Reset(); reflNdcRT.Reset();
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D12Resource>& res) -> bool
+        {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width            = static_cast<UINT64>(w);
+            rd.Height           = static_cast<UINT>(h);
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels        = 1;
+            rd.Format           = fmt;
+            rd.SampleDesc.Count = 1;
+            rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_CLEAR_VALUE cv{}; cv.Format = fmt;
+            return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&res)));
+        };
+        // RGBA16F because the oct normal needs the precision (the trace decodes
+        // it), R32F because the NDC depth is compared against ray-marched depths
+        // — an 8-bit or half copy of either shows as reflections drifting.
+        if (!makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, reflAttrRT) ||
+            !makeRT(DXGI_FORMAT_R32_FLOAT,          reflNdcRT))
+        {
+            reflAttrRT.Reset(); reflNdcRT.Reset();
+            writeSSRDescriptors();
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: reflection pre-pass targets failed");
+            return false;
+        }
+        reflAttrState = reflNdcState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        device->CreateRenderTargetView(reflAttrRT.Get(), nullptr, ssrRtv(0));
+        device->CreateRenderTargetView(reflNdcRT.Get(),  nullptr, ssrRtv(1));
+        writeSSRDescriptors();
+        return true;
+    }
+
+    void destroySSRTargets()
+    {
+        waitForAllFrames();
+        for (int i = 0; i < 2; ++i) { ssrHistRad[i].Reset(); ssrHistPos[i].Reset(); }
+        ssrPing.Reset(); ssrRefl.Reset();
+        ssrW = ssrH = 0;
+        ssrHistValid = false;
+        writeSSRDescriptors();
+    }
+
+    // Half-resolution RGBA16F ping-pong, the same set Metal's EnsureSSRTarget,
+    // GL's EnsureSSRTargets and D3D11's createSSRTargets build. NOT the colour
+    // history — that one lives with the HDR target and outlives a resize here.
+    bool createSSRTargets(int w, int h)
+    {
+        if (ssrHistRad[0] && w == ssrW && h == ssrH) return true;
+        if (!ssrRtvHeap) return false;
+        destroySSRTargets();
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        auto makeRT = [&](ComPtr<ID3D12Resource>& res, UINT rtvSlot) -> bool
+        {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width            = static_cast<UINT64>(w);
+            rd.Height           = static_cast<UINT>(h);
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels        = 1;
+            rd.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_CLEAR_VALUE cv{}; cv.Format = rd.Format;
+            if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&res))))
+                return false;
+            device->CreateRenderTargetView(res.Get(), nullptr, ssrRtv(rtvSlot));
+            return true;
+        };
+        bool ok = makeRT(ssrHistRad[0], 2) && makeRT(ssrHistPos[0], 3)
+               && makeRT(ssrHistRad[1], 4) && makeRT(ssrHistPos[1], 5)
+               && makeRT(ssrPing,       6) && makeRT(ssrRefl,       7);
+        if (!ok)
+        {
+            destroySSRTargets();
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: SSR target creation failed");
+            return false;
+        }
+        for (int i = 0; i < 2; ++i)
+            ssrHistRadState[i] = ssrHistPosState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ssrPingState = ssrReflState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ssrW = w; ssrH = h;
+        // Frame 1 has no history: the pair is undefined until the trace has
+        // written it once, so the blend factor stays 0 until then.
+        ssrHistIdx   = 0;
+        ssrHistValid = false;
+        writeSSRDescriptors();
+        return true;
+    }
+
+    // ─── Reflection pre-pass pipeline (forward SSR, plan C2) ────────────────
+    // One shader for every backend (MaterialShaderLibrary reflPrepassVertex /
+    // reflPrepassFragment) so the encoding the trace decodes cannot drift.
+    // Built lazily on the first SSR frame; a failure is remembered and SSR then
+    // simply never runs.
+    bool EnsureReflPrepassPipeline()
+    {
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        if (reflPrepassReady)  return true;
+        if (reflPrepassFailed) return false;
+        reflPrepassFailed = true; // cleared only on full success below
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.reflPrepassVertex(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.reflPrepassFragment(Backend::HLSL);
+        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: reflection pre-pass cross-compile failed");
+            return false;
+        }
+        // Root signature: ONE root CBV at b1 — the pre-pass's `U` block sits on
+        // GLSL binding 1 and is emitted unpinned, so SPIRV-Cross spells it b1.
+        {
+            D3D12_ROOT_PARAMETER p0{};
+            p0.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            p0.Descriptor       = { 1, 0 }; // b1
+            p0.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = 1; rsd.pParameters = &p0;
+            rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            ComPtr<ID3DBlob> sig, err;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+                FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                       IID_PPV_ARGS(&reflPrepassRS))))
+            {
+                HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: refl pre-pass root signature failed");
+                return false;
+            }
+        }
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        // SPIRV-Cross emits the GLSL-sourced entry point as `main`.
+        ComPtr<ID3DBlob> vsb, psb, cerr;
+        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "reflPrepassVS", nullptr, nullptr,
+                              "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: refl pre-pass VS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "reflPrepassPS", nullptr, nullptr,
+                              "main", "ps_5_0", cflags, 0, &psb, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: refl pre-pass PS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        // TEXCOORD0/1, not POSITION/NORMAL: the cross-compiler names GLSL vertex
+        // inputs by location (the same split the graph-material path makes for
+        // the same reason). Same interleaved 32-byte pos/normal/uv buffer the
+        // scene meshes use; the UV is unread.
+        const D3D12_INPUT_ELEMENT_DESC layout[] = {
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        };
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature        = reflPrepassRS.Get();
+        pd.VS                    = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
+        pd.PS                    = { psb->GetBufferPointer(), psb->GetBufferSize() };
+        pd.InputLayout           = { layout, 2 };
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets      = 3;
+        pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // view-space position (= ssaoPosRT)
+        pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // oct normal + roughness
+        pd.RTVFormats[2]         = DXGI_FORMAT_R32_FLOAT;          // NDC depth
+        pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;          // the SSAO pre-pass's own depth
+        pd.SampleDesc.Count      = 1;
+        pd.SampleMask            = UINT_MAX;
+        pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.BlendState.RenderTarget[2].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.DepthStencilState.DepthEnable    = TRUE;
+        pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+        if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&reflPrepassPSO))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: refl pre-pass PSO creation failed");
+            reflPrepassRS.Reset();
+            return false;
+        }
+        reflPrepassFailed = false;
+        reflPrepassReady  = true;
+        return true;
+#endif
+    }
+
+    // ─── Forward screen-space reflections (plan D1/D3) ──────────────────────
+    bool EnsureSSRPipelines()
+    {
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        if (ssrReady)  return true;
+        if (ssrFailed) return false;
+        ssrFailed = true;
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& tc = m_matShaderLib.ssrTrace(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& bc = m_matShaderLib.ssrBlur(Backend::HLSL);
+        if (!tc.ok || !bc.ok || tc.source.empty() || bc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: SSR shader cross-compile failed");
+            return false;
+        }
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> fsVS, tracePS, blurPS, cerr;
+        auto compile = [&](const char* src, size_t len, const char* name, const char* entry,
+                           const char* profile, ComPtr<ID3DBlob>& out) -> bool
+        {
+            if (SUCCEEDED(D3DCompile(src, len, name, nullptr, nullptr, entry, profile,
+                                     cflags, 0, &out, &cerr)))
+                return true;
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: SSR ") + name + " compile failed: "
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        };
+        if (!compile(kFSTriangleVS, strlen(kFSTriangleVS), "ssrFsVS", "main", "vs_5_0", fsVS)) return false;
+        if (!compile(tc.source.c_str(), tc.source.size(), "ssrTracePS", "main", "ps_5_0", tracePS)) return false;
+        if (!compile(bc.source.c_str(), bc.source.size(), "ssrBlurPS",  "main", "ps_5_0", blurPS))  return false;
+
+        // CLAMP everywhere, not the SSAO noise sampler's WRAP: a ray that walks
+        // off the screen must fetch the edge texel, not the opposite edge —
+        // wrapping turns an off-screen miss into a confident hit somewhere else.
+        auto staticSamp = [](UINT reg, bool linear)
+        {
+            D3D12_STATIC_SAMPLER_DESC s{};
+            s.Filter           = linear ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
+                                        : D3D12_FILTER_MIN_MAG_MIP_POINT;
+            s.AddressU = s.AddressV = s.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            s.ShaderRegister   = reg;
+            s.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            s.MaxLOD           = D3D12_FLOAT32_MAX;
+            return s;
+        };
+        auto makeRS = [&](const D3D12_ROOT_PARAMETER* params, UINT numParams,
+                          const D3D12_STATIC_SAMPLER_DESC* samps, UINT numSamps,
+                          ComPtr<ID3D12RootSignature>& out) -> bool
+        {
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters     = numParams;
+            rsd.pParameters       = params;
+            rsd.NumStaticSamplers = numSamps;
+            rsd.pStaticSamplers   = samps;
+            // No input-assembler flag: both passes are the buffer-less
+            // SV_VertexID fullscreen triangle.
+            rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+            ComPtr<ID3DBlob> sig, err;
+            return SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err))
+                && SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(),
+                                                         sig->GetBufferSize(), IID_PPV_ARGS(&out)));
+        };
+        // Trace: root CBV b12 + ONE descriptor table over the five SRVs the
+        // shader declares (t10 is not among them — kSSRTraceFS never names
+        // binding 21). The table's offsets are the trace block's layout, so
+        // swapping the history parity is a different GPU handle, not a rewrite.
+        {
+            D3D12_DESCRIPTOR_RANGE r[4]{};
+            r[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r[0].NumDescriptors = 2;
+            r[0].BaseShaderRegister = 8;  r[0].OffsetInDescriptorsFromTableStart = 0; // t8, t9
+            r[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r[1].NumDescriptors = 1;
+            r[1].BaseShaderRegister = 11; r[1].OffsetInDescriptorsFromTableStart = 2; // t11
+            r[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r[2].NumDescriptors = 2;
+            r[2].BaseShaderRegister = 12; r[2].OffsetInDescriptorsFromTableStart = 3; // t12, t13
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[0].Descriptor       = { 12, 0 }; // b12 HeSSRTrace
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[1].DescriptorTable.NumDescriptorRanges = 3;
+            params[1].DescriptorTable.pDescriptorRanges   = r;
+            params[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+            // s8 linear (the scene colour is upsampled along the ray), the rest
+            // POINT: a lerped oct normal, a lerped NDC depth or a lerped stored
+            // receiver position decodes to nonsense at every silhouette. s12 is
+            // POINT too and that is safe at every quality tier — the shader
+            // reads heSSRHistRad only inside `if (cfg2.y > 0.0)`, which the CPU
+            // sets non-zero only for the temporal tier.
+            const D3D12_STATIC_SAMPLER_DESC samps[5] = {
+                staticSamp(8,  true),  staticSamp(9,  false), staticSamp(11, false),
+                staticSamp(12, false), staticSamp(13, false) };
+            if (!makeRS(params, 2, samps, 5, ssrTraceRS))
+            {
+                HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: SSR trace root signature failed");
+                return false;
+            }
+        }
+        // Blur: root CBV b12 + one SRV at t8 + s8 linear.
+        {
+            D3D12_DESCRIPTOR_RANGE r{};
+            r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r.NumDescriptors = 1;
+            r.BaseShaderRegister = 8; r.OffsetInDescriptorsFromTableStart = 0;
+            D3D12_ROOT_PARAMETER params[2]{};
+            params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[0].Descriptor       = { 12, 0 }; // b12 HeSSRBlur
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[1].DescriptorTable.NumDescriptorRanges = 1;
+            params[1].DescriptorTable.pDescriptorRanges   = &r;
+            params[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+            const D3D12_STATIC_SAMPLER_DESC samps[1] = { staticSamp(8, true) };
+            if (!makeRS(params, 2, samps, 1, ssrBlurRS))
+            {
+                HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: SSR blur root signature failed");
+                ssrTraceRS.Reset();
+                return false;
+            }
+        }
+        // No LDR/HDR PSO pair here (plan D3): unlike sky, debug lines and decals,
+        // neither pass draws into the scene colour target. Both render into the
+        // half-res RGBA16F ping-pong; the consumer is kSceneHLSL, which already
+        // carries its own LDR/HDR pair.
+        auto buildPso = [&](ID3D12RootSignature* rs, ID3DBlob* ps, UINT numRTs,
+                            ComPtr<ID3D12PipelineState>& out) -> bool
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature        = rs;
+            pd.VS                    = { fsVS->GetBufferPointer(), fsVS->GetBufferSize() };
+            pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+            pd.InputLayout           = { nullptr, 0 };
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets      = numRTs;
+            for (UINT i = 0; i < numRTs; ++i)
+            {
+                pd.RTVFormats[i] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                pd.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            }
+            pd.DSVFormat        = DXGI_FORMAT_UNKNOWN;
+            pd.SampleDesc.Count = 1;
+            pd.SampleMask       = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            // Blending OFF: the trace blends against its own history INSIDE the
+            // shader, and a blend state carried over would apply it twice.
+            pd.DepthStencilState.DepthEnable   = FALSE;
+            pd.DepthStencilState.StencilEnable = FALSE;
+            return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+        };
+        if (!buildPso(ssrTraceRS.Get(), tracePS.Get(), 2, ssrTracePSO) ||
+            !buildPso(ssrBlurRS.Get(),  blurPS.Get(),  1, ssrBlurPSO))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: SSR PSO creation failed");
+            ssrTracePSO.Reset(); ssrBlurPSO.Reset();
+            ssrTraceRS.Reset();  ssrBlurRS.Reset();
+            return false;
+        }
+        // Constant rings. The trace writes one set per frame; the blur writes up
+        // to four (k_ssrBlurCBSlots), one per pass of the chain.
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            ssrTraceCB[f] = createUploadBuffer(
+                alignUp(static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::SSRTraceUniforms)), k_cbSlot),
+                reinterpret_cast<void**>(&ssrTraceCBPtr[f]));
+            ssrBlurCB[f] = createUploadBuffer(static_cast<UINT64>(k_ssrBlurCBSlots) * k_cbSlot,
+                reinterpret_cast<void**>(&ssrBlurCBPtr[f]));
+            if (!ssrTraceCB[f] || !ssrTraceCBPtr[f] || !ssrBlurCB[f] || !ssrBlurCBPtr[f])
+            {
+                HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: SSR constant ring allocation failed");
+                return false;
+            }
+        }
+        // The RTV heap the pre-pass attachments and the ping-pong draw into.
+        // Built here rather than with the SSAO heaps so a project that never
+        // switches SSR on allocates nothing.
+        {
+            ssrRtvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.NumDescriptors = 8;
+            hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&ssrRtvHeap))))
+            {
+                HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: SSR RTV heap creation failed");
+                return false;
+            }
+        }
+        ssrFailed = false;
+        ssrReady  = true;
+        HE_LOG_INFO(RHI, "%s", "D3D12Renderer: screen-space reflection pipeline created");
+        return true;
+#endif
+    }
+
+    // Full-res copy of the finished HDR frame (opaque + sky + transparency),
+    // taken at the end of the scene pass. NEXT frame's trace reprojects its hits
+    // into it — the one frame of content lag is the accepted forward trade.
+    // The caller has already released the colour target from the output merger:
+    // a copy may not race a bound RTV, and D3D12 says so out loud.
+    void captureSSRColorHistory(ID3D12GraphicsCommandList* cl)
+    {
+        if (!ssrColorHist || !hdrRT || !cl) return;
+        barrier12(cl, hdrRT.Get(), hdrState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        barrier12(cl, ssrColorHist.Get(), ssrColorHistState, D3D12_RESOURCE_STATE_COPY_DEST);
+        cl->CopyResource(ssrColorHist.Get(), hdrRT.Get());
+        // Straight back: Render() assumes hdrRT is RENDER_TARGET the moment
+        // DrawScene returns, and runPostFX transitions out of exactly that.
+        barrier12(cl, hdrRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, hdrState);
+        barrier12(cl, ssrColorHist.Get(), D3D12_RESOURCE_STATE_COPY_DEST, ssrColorHistState);
+        ssrColorHistValid = true;
+    }
+
+    // Trace + blur chain. Returns the resource the scene shader should sample as
+    // uSSRFwd (t16), or null when SSR could not run this frame. The caller has
+    // already put the scene render target aside and rebuilds the whole scene
+    // root state afterwards — a root-signature switch wipes every root argument.
+    ID3D12Resource* RenderForwardSSR(ID3D12GraphicsCommandList* cl, UINT fi, int pw, int ph,
+                                     const glm::mat4& viewProj, const glm::mat4& view)
+    {
+#if !defined(HE_HAVE_SHADERC)
+        (void)cl; (void)fi; (void)pw; (void)ph; (void)viewProj; (void)view;
+        return nullptr;
+#else
+        if (!ssrReady || !reflAttrRT || !reflNdcRT || !sceneSrvHeap) return nullptr;
+        if (!ssrColorHist || !ssrColorHistValid) return nullptr; // frame 1 seeds the copy
+        const int tw = std::max(1, pw / 2), th = std::max(1, ph / 2);
+        if (!createSSRTargets(tw, th)) return nullptr;
+
+        const glm::vec3 camFwd = -glm::normalize(glm::vec3(glm::inverse(view)[2]));
+        const int curIdx  = ssrHistIdx;
+        const int prevIdx = 1 - curIdx;
+
+        D3D12_VIEWPORT vp{ 0, 0, (float)tw, (float)th, 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, tw, th };
+        ID3D12DescriptorHeap* heaps[] = { sceneSrvHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        // ── 1. Trace (MRT: blended radiance + receiver position) ────────────
+        {
+            const bool temporal = ssrQuality >= 2;
+            float hist = 0.0f;
+            if (temporal && ssrHistValid)
+            {
+                // Camera-motion damping, the same measure Metal, GL, Vulkan and
+                // D3D11 take: a moved view means the un-reprojected reflection
+                // CONTENT is stale.
+                float delta = 0.0f;
+                for (int c = 0; c < 4; ++c)
+                    for (int r = 0; r < 4; ++r)
+                        delta = std::max(delta, std::abs(viewProj[c][r] - ssrPrevViewProj[c][r]));
+                hist = delta > 1e-5f ? 0.55f : 0.85f;
+            }
+            ssrFrameSeed += 1.0f;
+
+            HE::MaterialShaderLibrary::SSRTraceUniforms tu;
+            const glm::mat4 ivp = glm::inverse(viewProj);
+            std::memcpy(tu.viewProj,     glm::value_ptr(viewProj),        16 * sizeof(float));
+            std::memcpy(tu.invViewProj,  glm::value_ptr(ivp),             16 * sizeof(float));
+            std::memcpy(tu.prevViewProj, glm::value_ptr(ssrPrevViewProj), 16 * sizeof(float));
+            tu.cfg2[0] = ssrFrameSeed;
+            tu.cfg2[1] = hist;
+            tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+            tu.cfg2[3] = temporal ? 1.0f : 0.0f;
+            tu.camPos[0] = m_renderWorld.camera.position.x;
+            tu.camPos[1] = m_renderWorld.camera.position.y;
+            tu.camPos[2] = m_renderWorld.camera.position.z;
+            tu.camFwd[0] = camFwd.x; tu.camFwd[1] = camFwd.y; tu.camFwd[2] = camFwd.z;
+            tu.cfg[0] = ssrMaxDistance;
+            tu.cfg[1] = ssrThickness;
+            tu.cfg[2] = ssrMaxRoughness;
+            tu.cfg[3] = static_cast<float>(ssrQuality <= 0 ? 16 : ssrQuality == 1 ? 32 : 64);
+            // D3D conventions, identical to D3D11's and to what the decal pass
+            // already derives (docs/ssr-cross-backend-plan.md §1.4):
+            // SV_Position.y counts from the TOP while NDC y points up → sign -1;
+            // depth is 0..1 in both the texture and NDC → scale 1, bias 0.
+            tu.conv[0] = -1.0f;
+            tu.conv[1] =  1.0f;
+            tu.conv[2] =  0.0f;
+            tu.conv[3] =  0.1f;
+            tu.vp[0] = static_cast<float>(tw);
+            tu.vp[1] = static_cast<float>(th);
+            if (ssrTraceCBPtr[fi]) std::memcpy(ssrTraceCBPtr[fi], &tu, sizeof(tu));
+
+            barrier12(cl, ssrHistRad[curIdx].Get(), ssrHistRadState[curIdx],
+                      D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ssrHistRadState[curIdx] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            barrier12(cl, ssrHistPos[curIdx].Get(), ssrHistPosState[curIdx],
+                      D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ssrHistPosState[curIdx] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = { ssrRtv(2 + static_cast<UINT>(curIdx) * 2),
+                                                    ssrRtv(3 + static_cast<UINT>(curIdx) * 2) };
+            cl->OMSetRenderTargets(2, rtvs, FALSE, nullptr);
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sc);
+            cl->SetGraphicsRootSignature(ssrTraceRS.Get());
+            cl->SetPipelineState(ssrTracePSO.Get());
+            cl->SetGraphicsRootConstantBufferView(0, ssrTraceCB[fi]->GetGPUVirtualAddress());
+            // The block whose t12/t13 name the PREVIOUS frame's pair — a handle,
+            // not a descriptor write, so nothing in flight is disturbed.
+            cl->SetGraphicsRootDescriptorTable(1,
+                sceneSrvGpu(k_ssrTraceBlockSlot + static_cast<UINT>(prevIdx) * 5));
+            cl->DrawInstanced(3, 1, 0, 0);
+            ++statDraws;
+
+            barrier12(cl, ssrHistRad[curIdx].Get(), ssrHistRadState[curIdx],
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            ssrHistRadState[curIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier12(cl, ssrHistPos[curIdx].Get(), ssrHistPosState[curIdx],
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            ssrHistPosState[curIdx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+            ssrHistIdx      = prevIdx;
+            ssrHistValid    = true;
+            ssrPrevViewProj = viewProj;
+        }
+
+        ID3D12Resource* result = ssrHistRad[curIdx].Get();
+
+        // ── 2. Blur chain — the same tier policy as Metal's forward variant.
+        // No wide / roughness-mix stage: the forward path has none there either
+        // (that shader serves the GI reflections), and the pre-pass carries no
+        // roughness, so there would be nothing to lerp against.
+        if (ssrQuality >= 1)
+        {
+            cl->SetGraphicsRootSignature(ssrBlurRS.Get());
+            cl->SetPipelineState(ssrBlurPSO.Get());
+            UINT blurIdx = 0;
+            // The source is named by its heap SLOT, not its resource: the SRVs
+            // were written once when the targets were built, so a pass only
+            // moves the table handle.
+            auto blurPass = [&](UINT srcSlot, ID3D12Resource* dst, UINT dstRtv,
+                                D3D12_RESOURCE_STATES& dstState, float dx, float dy)
+            {
+                if (blurIdx >= k_ssrBlurCBSlots) return;
+                HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+                bu.dir[0] = dx;
+                bu.dir[1] = dy;
+                bu.dir[2] = 1.0f / static_cast<float>(tw);
+                bu.dir[3] = 1.0f / static_cast<float>(th);
+                if (ssrBlurCBPtr[fi])
+                    std::memcpy(ssrBlurCBPtr[fi] + static_cast<size_t>(blurIdx) * k_cbSlot,
+                                &bu, sizeof(bu));
+                barrier12(cl, dst, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                dstState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                D3D12_CPU_DESCRIPTOR_HANDLE rtv = ssrRtv(dstRtv);
+                cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                cl->RSSetViewports(1, &vp);
+                cl->RSSetScissorRects(1, &sc);
+                cl->SetGraphicsRootConstantBufferView(0,
+                    ssrBlurCB[fi]->GetGPUVirtualAddress() + static_cast<UINT64>(blurIdx) * k_cbSlot);
+                cl->SetGraphicsRootDescriptorTable(1, sceneSrvGpu(srcSlot));
+                cl->DrawInstanced(3, 1, 0, 0);
+                ++statDraws;
+                barrier12(cl, dst, dstState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                dstState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                ++blurIdx;
+            };
+            const float sx = 1.0f / static_cast<float>(tw);
+            const float sy = 1.0f / static_cast<float>(th);
+            const UINT  traceSlot = k_ssrBlurInSlot + static_cast<UINT>(curIdx); // histRad[cur]
+            const UINT  pingSlot  = k_ssrBlurInSlot + 2;
+            const UINT  reflSlot  = k_ssrBlurInSlot + 3;
+            blurPass(traceSlot, ssrPing.Get(), 6, ssrPingState, sx,   0.0f);
+            blurPass(pingSlot,  ssrRefl.Get(), 7, ssrReflState, 0.0f, sy);
+            if (ssrQuality == 1)
+            {
+                blurPass(reflSlot, ssrPing.Get(), 6, ssrPingState, sx,   0.0f);
+                blurPass(pingSlot, ssrRefl.Get(), 7, ssrReflState, 0.0f, sy);
+            }
+            result = ssrRefl.Get();
+        }
+
+        D3D12_VIEWPORT full{ 0, 0, (float)pw, (float)ph, 0.0f, 1.0f };
+        D3D12_RECT     fullSc{ 0, 0, pw, ph };
+        cl->RSSetViewports(1, &full);
+        cl->RSSetScissorRects(1, &fullSc);
+        return result;
+#endif
+    }
+
     // ── SSAO 3-pass execution (called each frame before geometry) ────────────
     void runSSAO(ID3D12GraphicsCommandList* cl, UINT fi,
                  const std::vector<const DrawCall*>& opaqueDCs,
                  const glm::mat4& view, const glm::mat4& proj,
                  const glm::mat4& viewProj,
                  int w, int h,
-                 ContentManager* cm)
+                 ContentManager* cm,
+                 bool reflMrt = false, bool aoWanted = true)
     {
+        // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
+        // GL, Vulkan and D3D11 grew). SSR needs pass 1 on frames where SSAO is
+        // off or the GI probes replaced it, and it needs it with three
+        // attachments instead of one; the occlusion and blur stages then simply
+        // do not run, and the caller keeps its white AO fallback.
         if (!ssaoReady || !ssaoPosRT) return;
+        if (reflMrt && !(reflPrepassReady && ensureReflTargets(w, h))) reflMrt = false;
+        if (!reflMrt && !aoWanted) return;
 
         // ── Pass 1: position prepass ────────────────────────────────────────
         barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -3775,13 +4590,33 @@ struct D3D12RendererImpl
         const float clearWhite[4] = { 1,1,1,1 };
         cl->ClearRenderTargetView(ssaoPosRtvCpu, clearBlack, 0, nullptr);
         cl->ClearDepthStencilView(ssaoDsvCpu, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        cl->OMSetRenderTargets(1, &ssaoPosRtvCpu, FALSE, &ssaoDsvCpu);
+        if (reflMrt)
+        {
+            // Attachment 0 is still ssaoPosRT and the shared pre-pass fragment
+            // writes exactly what kSSAOPosHLSL writes into it (vec4(vViewPos,
+            // 1.0)), so pass 2 below cannot tell which shader ran.
+            barrier12(cl, reflAttrRT.Get(), reflAttrState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            reflAttrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            barrier12(cl, reflNdcRT.Get(), reflNdcState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            reflNdcState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            D3D12_CPU_DESCRIPTOR_HANDLE mrt[3] = { ssaoPosRtvCpu, ssrRtv(0), ssrRtv(1) };
+            cl->ClearRenderTargetView(mrt[1], clearBlack, 0, nullptr);
+            cl->ClearRenderTargetView(mrt[2], clearBlack, 0, nullptr);
+            cl->OMSetRenderTargets(3, mrt, FALSE, &ssaoDsvCpu);
+        }
+        else
+        {
+            cl->OMSetRenderTargets(1, &ssaoPosRtvCpu, FALSE, &ssaoDsvCpu);
+        }
         D3D12_VIEWPORT vp{ 0, 0, (float)w, (float)h, 0.0f, 1.0f };
         D3D12_RECT     sc{ 0, 0, w, h };
         cl->RSSetViewports(1, &vp);
         cl->RSSetScissorRects(1, &sc);
-        cl->SetPipelineState(ssaoPosPSO.Get());
-        cl->SetGraphicsRootSignature(ssaoPosRS.Get());
+        // The shared pre-pass VS is cross-compiled GLSL, so its inputs are
+        // TEXCOORD0/1 and its `U` block is b1 — a different input layout AND a
+        // different root signature, hence a second PSO rather than a variant.
+        cl->SetPipelineState(reflMrt ? reflPrepassPSO.Get() : ssaoPosPSO.Get());
+        cl->SetGraphicsRootSignature(reflMrt ? reflPrepassRS.Get() : ssaoPosRS.Get());
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         UINT posDrawIdx = 0;
@@ -3792,15 +4627,20 @@ struct D3D12RendererImpl
             const GpuMesh& m    = mesh ? *mesh : cube;
             if (!m.indexCount) continue;
 
-            auto drawPosOne = [&](const glm::mat4& model) {
+            auto drawPosOne = [&](const glm::mat4& modelMat) {
                 if (posDrawIdx >= k_maxDraws) return;
-                struct PosCB { glm::mat4 mvp; glm::mat4 modelView; };
+                // Three matrices for the MRT pre-pass (it also needs `model` for
+                // the world normal), two for the position-only one; the first
+                // two are the same bytes in both layouts, and both fit the
+                // 256-byte ring slot, so the ring is shared.
+                struct PosCB { glm::mat4 mvp; glm::mat4 modelView; glm::mat4 model; };
                 PosCB pcb{};
-                pcb.mvp       = viewProj * model;
-                pcb.modelView = view     * model;
+                pcb.mvp       = viewProj * modelMat;
+                pcb.modelView = view     * modelMat;
+                pcb.model     = modelMat;
                 if (ssaoPosPerObjPtr[fi])
                     std::memcpy(ssaoPosPerObjPtr[fi] + static_cast<size_t>(posDrawIdx) * k_cbSlot,
-                                &pcb, sizeof(pcb));
+                                &pcb, reflMrt ? sizeof(pcb) : sizeof(glm::mat4) * 2);
                 cl->SetGraphicsRootConstantBufferView(0,
                     ssaoPosPerObjRing[fi]->GetGPUVirtualAddress()
                     + static_cast<UINT64>(posDrawIdx) * k_cbSlot);
@@ -3819,6 +4659,17 @@ struct D3D12RendererImpl
         // ── Transition pos RT to SRV, bind ssaoSrvHeap ─────────────────────
         barrier12(cl, ssaoPosRT.Get(), ssaoPosRTState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ssaoPosRTState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (reflMrt)
+        {
+            barrier12(cl, reflAttrRT.Get(), reflAttrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            reflAttrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier12(cl, reflNdcRT.Get(), reflNdcState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            reflNdcState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+
+        // SSR-only frame: the occlusion and blur stages have nothing to do, and
+        // the caller must keep reporting "no AO" for this frame.
+        if (!aoWanted) return;
 
         // ── Pass 2: SSAO ────────────────────────────────────────────────────
         barrier12(cl, ssaoRT.Get(), ssaoRTState, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -5512,7 +6363,19 @@ struct D3D12RendererImpl
         albedoRange.RegisterSpace                     = 0;
         albedoRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER params[5]{};
+        // t16, the forward SSR trace. NOT optional here: this root signature
+        // carries the SAME PSMain as the scene one, and D3D12 rejects a PSO
+        // whose pixel shader names a register the root signature does not cover
+        // — the branch on uSSRParams.x is a runtime test, so fxc keeps uSSRFwd
+        // in the blob either way. Skipping this makes every skinned mesh vanish.
+        D3D12_DESCRIPTOR_RANGE ssrRange{};
+        ssrRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ssrRange.NumDescriptors                    = 1;
+        ssrRange.BaseShaderRegister                = 16; // t16
+        ssrRange.RegisterSpace                     = 0;
+        ssrRange.OffsetInDescriptorsFromTableStart = 0;
+
+        D3D12_ROOT_PARAMETER params[6]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0 per-object
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -5530,6 +6393,12 @@ struct D3D12RendererImpl
         params[4].DescriptorTable.NumDescriptorRanges = 1; // t1 (albedo)
         params[4].DescriptorTable.pDescriptorRanges   = &albedoRange;
         params[4].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        // Same index the scene root signature uses for it, so the two do not
+        // drift apart when a later pass copies the wrong number.
+        params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[5].DescriptorTable.NumDescriptorRanges = 1; // t16 (forward SSR)
+        params[5].DescriptorTable.pDescriptorRanges   = &ssrRange;
+        params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // Same static samplers as the scene root sig: s0 shadow linear-clamp, s1 AO point-clamp,
         // s2 base-color linear-wrap, s3 GI linear-clamp. The shared PS references all four.
@@ -5552,7 +6421,7 @@ struct D3D12RendererImpl
         samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 5;
+        rsd.NumParameters     = 6; // params[5] = the t16 SSR table added in checkpoint D
         rsd.pParameters       = params;
         rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
@@ -6502,6 +7371,26 @@ void D3D12Renderer::Shutdown()
     m_impl->decalFailed = false;
     // Motion-trail staging pools (one per frame in flight).
     for (UINT f = 0; f < k_frameCount; ++f) m_impl->ribbonPool[f].clear();
+    // Forward SSR: the trace/blur pipelines, the half-res ping-pong, the colour
+    // history and the reflection pre-pass (its targets hang off the SSAO ones).
+    for (int i = 0; i < 2; ++i) { m_impl->ssrHistRad[i].Reset(); m_impl->ssrHistPos[i].Reset(); }
+    m_impl->ssrPing.Reset(); m_impl->ssrRefl.Reset();
+    m_impl->ssrRtvHeap.Reset();
+    m_impl->ssrColorHist.Reset();
+    m_impl->ssrColorHistValid = false;
+    m_impl->ssrW = m_impl->ssrH = 0;
+    m_impl->ssrHistValid = false;
+    m_impl->ssrTracePSO.Reset(); m_impl->ssrBlurPSO.Reset();
+    m_impl->ssrTraceRS.Reset();  m_impl->ssrBlurRS.Reset();
+    for (UINT f = 0; f < k_frameCount; ++f)
+    {
+        m_impl->ssrTraceCB[f].Reset(); m_impl->ssrTraceCBPtr[f] = nullptr;
+        m_impl->ssrBlurCB[f].Reset();  m_impl->ssrBlurCBPtr[f]  = nullptr;
+    }
+    m_impl->ssrReady = false; m_impl->ssrFailed = false;
+    m_impl->reflAttrRT.Reset(); m_impl->reflNdcRT.Reset();
+    m_impl->reflPrepassPSO.Reset(); m_impl->reflPrepassRS.Reset();
+    m_impl->reflPrepassReady = false; m_impl->reflPrepassFailed = false;
     m_impl->m_pendingMatInval.clear();
     m_impl->m_pendingMeshInval.clear();
     m_impl->m_freeSlotPending.clear();
@@ -6675,7 +7564,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // REWRITTEN there with the final giActive/aoActive flags. The GPU reads it
     // at execute time, so the last CPU write before submission wins for every
     // draw of the frame (single buffer per slot, unlike the per-draw rings).
-    auto fillPerFrame = [&](bool giActive, bool aoActive)
+    auto fillPerFrame = [&](bool giActive, bool aoActive, bool ssrActive = false)
     {
         PerFrameCB f{};
         f.cameraPos     = glm::vec4(p.m_renderWorld.camera.position, 1.0f);
@@ -6697,6 +7586,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
         f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D12RendererImpl::kGIProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
+        // x is the gate the built-in scene shader's reflection cascade tests;
+        // the roughness fade happens there, with the exact shading roughness,
+        // because the half-res pre-pass carries none.
+        f.ssrParams    = glm::vec4(ssrActive ? 1.0f : 0.0f, p.ssrIntensity,
+                                   p.ssrMaxRoughness, 0.0f);
         if (p.perFramePtr[p.frameIndex])
             std::memcpy(p.perFramePtr[p.frameIndex], &f, sizeof(f));
     };
@@ -6750,9 +7644,21 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     fillMatLight(false);
 #endif
 
+    // The heap slot the scene shader's t16 SSR table points at this frame. Set
+    // once the trace has run; until then (and on every non-SSR frame) it names
+    // the null descriptor, because param 5 is bound on EVERY scene draw and an
+    // unset root table is not something the runtime forgives (plan D4).
+    UINT ssrFwdSlot = D3D12RendererImpl::k_ssrNullSlot;
+
     cl->SetGraphicsRootSignature(p.rootSig.Get());
     cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+    if (p.sceneSrvHeap)
+    {
+        ID3D12DescriptorHeap* preHeaps[] = { p.sceneSrvHeap.Get() };
+        cl->SetDescriptorHeaps(1, preHeaps);
+        cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+    }
 
     const D3D12_GPU_VIRTUAL_ADDRESS ringBase = p.perObjectRing[p.frameIndex]->GetGPUVirtualAddress();
     uint8_t* ringPtr = p.perObjectPtr[p.frameIndex];
@@ -6886,15 +7792,41 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->RSSetScissorRects(1, &gsc);
         }
 
+        // ── Forward screen-space reflections (plan checkpoint D) ─────────────
+        // The radiance source is the previous frame's HDR colour, so SSR runs
+        // only where Render() actually bound hdrRT — `usingHDR`. That is the C6
+        // hole inherited from D3D11, stated as one gate: the swapchain branch
+        // (the packaged game, no editor viewport) draws straight into the
+        // backbuffer, has no HDR target, and therefore no SSR. Deliberately not
+        // fixed here — giving the swapchain path an HDR target changes the
+        // packaged game's frame layout and needs its own decision.
+        bool ssrFrameActive = false;
+#if defined(HE_HAVE_SHADERC)
+        ssrFrameActive = p.ssrEnabled && p.usingHDR && p.hdrRT
+                      && p.EnsureReflPrepassPipeline() && p.EnsureSSRPipelines();
+#endif
         // ── SSAO: run 3-pass (pos prepass → ssao → blur) before sky/geometry ─
         // Skipped entirely when GI shades this frame (probe indirect replaces AO).
-        if (!giShadingActive && p.ssaoEnabled && p.ssaoReady)
+        // The reflection MRT pre-pass is the trace's only geometry input, so it
+        // runs whenever SSR does — including on frames where SSAO is off or the
+        // GI probes replaced it, which is exactly what this block used to skip.
+        const bool aoWanted = !giShadingActive && p.ssaoEnabled && p.ssaoReady;
+        ID3D12Resource* ssrResult = nullptr;
+        if (aoWanted || ssrFrameActive)
         {
             if (p.ssaoW != width || p.ssaoH != height)
                 p.createSSAOTargets(width, height);
             p.runSSAO(cl, p.frameIndex, opaqueDCs,
                       p.m_renderWorld.camera.view, p.m_renderWorld.camera.projection,
-                      viewProj, width, height, m_contentManager);
+                      viewProj, width, height, m_contentManager,
+                      /*reflMrt=*/ssrFrameActive, aoWanted);
+            if (ssrFrameActive)
+            {
+                ssrResult = p.RenderForwardSSR(cl, p.frameIndex, width, height,
+                                               viewProj, p.m_renderWorld.camera.view);
+                if (ssrResult && p.ssrIntensity > 0.0f) ssrFwdSlot = p.ssrResultSlot(ssrResult);
+                else                                    ssrResult  = nullptr;
+            }
             // Restore the scene RTV + depth after SSAO changed them.
             // (The RTV that was active before depends on HDR vs LDR path;
             //  Render() will have already called OMSetRenderTargets to the correct one.
@@ -6944,7 +7876,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // GPU only reads the mapped memory at execute time, so this write
         // applies to every draw of the frame). SSAO counts as active only when
         // GI is not shading — GI replaces AO entirely.
-        fillPerFrame(giShadingActive, !giShadingActive && p.ssaoEnabled && p.ssaoReady);
+        // Same gate shape as GL's and D3D11's: a real trace result AND a
+        // non-zero intensity. Off → t16 names the null descriptor and the
+        // cascade folds away on uSSRParams.x.
+        fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
 #if defined(HE_HAVE_SHADERC)
         fillMatLight(giShadingActive);
 #endif
@@ -6959,6 +7894,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // The descriptor table's ranges all offset from heap slot 0, so one
             // SetGraphicsRootDescriptorTable covers shadow + AO + GI.
             cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot)); // t16 forward SSR
         }
         // ── Motion trails join the blended list ──────────────────────────────
         // A RibbonBatch is per-frame CPU geometry in the cooked vertex layout, so
@@ -7144,6 +8080,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             ID3D12DescriptorHeap* sheaps[] = { p.sceneSrvHeap.Get() };
                             cl->SetDescriptorHeaps(1, sheaps);
                             cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                            cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
                         }
                         cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
                         if (activeScenePso) cl->SetPipelineState(activeScenePso);
@@ -7254,7 +8191,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(activeSkinnedPso);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
+            {
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                // Its own root signature, same param index — the skinned PSO
+                // carries the scene PSMain, so it reads t16 through this table.
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+            }
 
             for (const SkinnedDrawCall& sdc : cmds.skinnedDrawCalls())
             {
@@ -7313,7 +8255,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
+            {
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+            }
             cl->SetPipelineState(scenePso);
         }
 
@@ -7334,6 +8279,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 ID3D12DescriptorHeap* dheaps[] = { p.sceneSrvHeap.Get() };
                 cl->SetDescriptorHeaps(1, dheaps);
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
             }
             cl->SetPipelineState(scenePso);
         }
@@ -7356,6 +8302,22 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetGraphicsRootSignature(p.rootSig.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+        }
+
+        // Forward SSR: keep a full-res copy of the finished HDR frame (opaque +
+        // sky + transparency) — NEXT frame's trace reprojects its hits into it.
+        // Taken here, at the very end of the geometry pass, for the same reason
+        // Metal takes it after its scene encoder: earlier and the reflection
+        // would show a half-drawn world. The colour target comes off the output
+        // merger first — a copy must not race a bound RTV — and goes straight
+        // back on, because Render() and runPostFX both assume it is still there.
+        if (ssrFrameActive)
+        {
+            cl->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+            p.captureSSRColorHistory(cl);
+            auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+            cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
         }
     });
 }
@@ -7631,7 +8593,26 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // Software ray-traced DDGI via CS 5.0/5.1 (FL 11.0 baseline) — same
     // CPU-BVH path as GL 4.3/D3D11; cleared if the GI pipelines fail to build.
     c.supportsGlobalIllumination = m_impl->giSupported;
+    // Forward SSR needs an HDR scene target to read radiance out of, and D3D12
+    // only has one in the editor viewport path (docs/ssr-cross-backend-plan.md
+    // C6/D). postFxReady is the honest answer: in the swapchain path the switch
+    // exists but does nothing, exactly as on Vulkan and D3D11.
+    c.supportsScreenSpaceReflections = m_impl->postFxReady;
     return c;
+}
+
+// Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint D). The
+// forward path only — D3D12 has no G-buffer, so kSSRCompositeFS is out of reach
+// and the scene shader mixes the one traced texture itself.
+void D3D12Renderer::SetSSRSettings(const SSRSettings& s)
+{
+    auto& p = *m_impl;
+    p.ssrEnabled      = s.enabled;
+    p.ssrIntensity    = std::clamp(s.intensity, 0.0f, 1.0f);
+    p.ssrMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
+    p.ssrMaxDistance  = std::max(1.0f, s.maxDistance);
+    p.ssrThickness    = std::max(1e-3f, s.thickness);
+    p.ssrQuality      = std::clamp(s.quality, 0, 2);
 }
 
 void D3D12Renderer::SetGISettings(const GISettings& s)

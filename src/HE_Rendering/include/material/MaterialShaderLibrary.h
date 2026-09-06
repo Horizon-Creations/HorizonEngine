@@ -214,6 +214,36 @@ public:
     // samples only one). See kSSRRoughMixFS.
     const Compiled& ssrRoughMix(Backend backend);
 
+    // ── Reflection pre-pass (forward path) ───────────────────────────────────
+    // The backends without a G-buffer cannot hand the SSR trace a GB1/GBDepth
+    // pair, so the forward path rasterises the scene once more and writes the
+    // two channels the trace reads, in exactly the G-buffer's encoding:
+    //   attachment 0  vec4 view-space position (w = 1 → valid geometry)
+    //   attachment 1  rg = oct world normal *0.5+0.5, b = roughness (always 0 —
+    //                 the pre-pass has no material data, the scene shader
+    //                 applies the roughness fade), a = unused
+    //   attachment 2  NDC depth, the same value the G-buffer pass stores
+    // Uniform block (binding 1) is three mat4 — mvp, modelView, model — 192
+    // bytes std140, the layout the Metal/GL encoders already send per draw.
+    // Vertex data follows standardVertex's split: SSBO pull on Metal (mesh
+    // buffer at index 0), attributes everywhere else (macOS-GL 4.1 has no SSBO).
+    // Was hand-written MSL in MetalRenderer.mm until the cross-backend port
+    // (docs/ssr-cross-backend-plan.md §3.2 way (a)).
+    const Compiled& reflPrepassVertex(Backend backend);
+    const Compiled& reflPrepassFragment(Backend backend);
+    // The canonical fragment text, for tests that compare it against the
+    // preamble's oct encoder rather than against a compiled result.
+    static const std::string& reflPrepassFragmentGlsl();
+
+    // std140 layout of the pre-pass's uniform block (binding 1). Byte-identical
+    // to the SSAOPosUniforms the Metal backend has always sent.
+    struct ReflPrepassUniforms
+    {
+        float mvp[16]       = {};
+        float modelView[16] = {};
+        float model[16]     = {};
+    };
+
     // std140 layout of the blur shader's HeSSRBlur UBO (binding 23).
     struct SSRBlurUniforms
     {
@@ -322,7 +352,8 @@ public:
 
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
-                   m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear(); }
+                   m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
+                   m_reflPrepassCache.clear(); }
 
 private:
     std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
@@ -331,8 +362,12 @@ private:
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
-    std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*4 + (0 trace / 1 composite / 2 blur)
+    std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*4 + (0 trace / 1 composite / 2 blur / 3 roughMix)
     std::unordered_map<int, Compiled>      m_decalCache;   // key = (int)backend*4 + (0 vertex / 1 fetch / 2 sampled / 3 forward)
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
+    // Own map, not a fifth slot in m_ssrCache: that key space is backend*4 and
+    // full, and a collision there hands a caller someone else's shader while
+    // still reporting ok.
+    std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment)
 };
 } // namespace HE

@@ -1312,6 +1312,74 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		CHECK(lib.find(needle, first + 1) != std::string::npos);
 	}
 
+	SUBCASE("The forward SSR cascade is one mix in all six hand-kept copies")
+	{
+		// docs/ssr-cross-backend-plan.md B5/C5/D. The forward reflection cascade
+		// is written out six times: once in the shared preamble (graph
+		// materials, every backend), once in GL's built-in scene shader, once in
+		// Metal's MSL, since checkpoint B once in Vulkan's scene.frag, since
+		// checkpoint C once in D3D11's kSceneHLSL and since checkpoint D once in
+		// D3D12's own kSceneHLSL. All six mix the SAME
+		// half-res trace into the SAME specular-IBL term, and the roughness fade
+		// has to happen with the same knee and off the same uniform lanes. Drift
+		// is invisible: nothing fails to build, a graph material and a built-in
+		// one beside it simply stop agreeing about what the mirror looks like —
+		// the exact failure this file already guards for GI and specular AA.
+		//
+		// The `.z * 0.7, .z` shape is what pins this to the SSR stage: the
+		// GI-reflection stage one line above uses `.y` for its max-roughness
+		// lane, and the trace's own roughFade is not called `fade`.
+		const std::string lib = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "material" / "MaterialShaderLibrary.cpp");
+		const std::string gl  = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "Backends" / "OpenGL" / "OpenGLRenderer.cpp");
+		const std::string mtl = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "Backends" / "Metal" / "MetalRenderer.mm");
+		const std::string dx11 = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                  "Backends" / "D3D11" / "D3D11Renderer.cpp");
+		const std::string dx12 = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                  "Backends" / "D3D12" / "D3D12Renderer.cpp");
+		const std::vector<const char*> names = { "kLightingPreamble", "kUnlitFS (GL)",
+		                                         "fragmentMain (Metal)", "scene.frag (Vulkan)",
+		                                         "kSceneHLSL (D3D11)", "kSceneHLSL (D3D12)" };
+		const std::vector<std::string> src = {
+			stripLineComments(lib), stripLineComments(gl), stripLineComments(mtl),
+			stripLineComments(readFile(sh / "scene.frag")), stripLineComments(dx11),
+			stripLineComments(dx12),
+		};
+		checkGroup(names, src, {
+			// Captures the fade knee (0.7) and the intensity lane (y) in one go,
+			// so a copy that keeps the knee but reads the wrong lane still fails.
+			// HLSL spells the mix `lerp` — canonicalise() rewrites that, but only
+			// AFTER the regex has run, so the two D3D copies need their own
+			// pattern (identical to each other; the two backends share the text).
+			{ "SSR fade knee + intensity lane",
+			  { R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = lerp\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = lerp\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)" } },
+		});
+		// And the Fresnel the mixed envSpec is weighted by. Vulkan carried a flat
+		// F0 here until B5 reversed that drift banner — with the cascade mixing
+		// INTO this term, a different weight would have made the same mirror look
+		// different on a built-in material than on a graph one. checkGroup cannot
+		// carry this comparison: MaterialShaderLibrary.cpp holds TWO copies of the
+		// line (heLitP and the deferred composite, guarded by the subcase above)
+		// against one everywhere else, and extract() joins matches.
+		CHECK_MESSAGE(src[3].find("(max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NdV, 5.0)")
+		              != std::string::npos,
+		              "scene.frag lost the roughness-aware Schlick weight - back to the "
+		              "flat-F0 drift docs/ssr-cross-backend-plan.md B5 reversed");
+	}
+
 	SUBCASE("specular AA (A6) is the same widening in every copy")
 	{
 		// docs/anti-aliasing-plan.md A6. Four hand-kept copies of one formula:
