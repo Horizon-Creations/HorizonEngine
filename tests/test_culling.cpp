@@ -1312,13 +1312,14 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		CHECK(lib.find(needle, first + 1) != std::string::npos);
 	}
 
-	SUBCASE("The forward SSR cascade is one mix in all five hand-kept copies")
+	SUBCASE("The forward SSR cascade is one mix in all six hand-kept copies")
 	{
-		// docs/ssr-cross-backend-plan.md B5/C5. The forward reflection cascade is
-		// written out five times: once in the shared preamble (graph materials,
-		// every backend), once in GL's built-in scene shader, once in Metal's
-		// MSL, since checkpoint B once in Vulkan's scene.frag and since
-		// checkpoint C once in D3D11's kSceneHLSL. All five mix the SAME
+		// docs/ssr-cross-backend-plan.md B5/C5/D. The forward reflection cascade
+		// is written out six times: once in the shared preamble (graph
+		// materials, every backend), once in GL's built-in scene shader, once in
+		// Metal's MSL, since checkpoint B once in Vulkan's scene.frag, since
+		// checkpoint C once in D3D11's kSceneHLSL and since checkpoint D once in
+		// D3D12's own kSceneHLSL. All six mix the SAME
 		// half-res trace into the SAME specular-IBL term, and the roughness fade
 		// has to happen with the same knee and off the same uniform lanes. Drift
 		// is invisible: nothing fails to build, a graph material and a built-in
@@ -1336,18 +1337,22 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		                                 "Backends" / "Metal" / "MetalRenderer.mm");
 		const std::string dx11 = readFile(root / "src" / "HE_Rendering" / "src" /
 		                                  "Backends" / "D3D11" / "D3D11Renderer.cpp");
+		const std::string dx12 = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                  "Backends" / "D3D12" / "D3D12Renderer.cpp");
 		const std::vector<const char*> names = { "kLightingPreamble", "kUnlitFS (GL)",
 		                                         "fragmentMain (Metal)", "scene.frag (Vulkan)",
-		                                         "kSceneHLSL (D3D11)" };
+		                                         "kSceneHLSL (D3D11)", "kSceneHLSL (D3D12)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib), stripLineComments(gl), stripLineComments(mtl),
 			stripLineComments(readFile(sh / "scene.frag")), stripLineComments(dx11),
+			stripLineComments(dx12),
 		};
 		checkGroup(names, src, {
 			// Captures the fade knee (0.7) and the intensity lane (y) in one go,
 			// so a copy that keeps the knee but reads the wrong lane still fails.
 			// HLSL spells the mix `lerp` — canonicalise() rewrites that, but only
-			// AFTER the regex has run, so this copy needs its own pattern.
+			// AFTER the regex has run, so the two D3D copies need their own
+			// pattern (identical to each other; the two backends share the text).
 			{ "SSR fade knee + intensity lane",
 			  { R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
 			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
@@ -1357,6 +1362,8 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
 			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
 			    R"(envSpec = mix\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
+			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
+			    R"(envSpec = lerp\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)",
 			    R"(float fade = 1\.0 - smoothstep\(\S+\.z \* ([0-9.]+), \S+\.z, w?[Rr]ough\);\s*)"
 			    R"(envSpec = lerp\(envSpec, \w+\.rgb, \w+\.a \* \S+\.(\w) \* fade\);)" } },
 		});

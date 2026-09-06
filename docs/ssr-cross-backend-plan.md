@@ -601,6 +601,69 @@ Render-Pass-Objekte, der DSV zu lösen ist ein Aufruf. Zusätzlich zu C1–C5:
 - **D4** — nach dem Pass den Szenenzustand vollständig wiederherstellen: eine
   Root-Signature-Umschaltung löscht alle Root-Argumente.
 
+> **Erledigt in Schritt 7 (D1–D4 plus C1–C5 in der D3D12-Ausprägung).** Der
+> Forward-Pfad, wie auf GL, Vulkan und D3D11: Reflexions-MRT-Vorpass, Trace,
+> Blurkette, Konsument im eingebauten Szenenshader. Kein Composite, kein
+> RoughMix. Die HLSL-Register sind **unverändert aus C3 geerbt** — es gab hier
+> keine einzige neue Nummer zu erfinden, was der ganze Zweck des geteilten
+> Vertrags war.
+>
+> **Wo der Weg vom Text oben abweicht, jedes Mal bewusst:**
+>
+> 1. **D3 (LDR/HDR-PSO-Paar) entfällt.** Sky, Debug-Linien und Decals brauchen
+>    es, weil sie in das Szenen-Farbziel zeichnen, das mal RGBA8 und mal RGBA16F
+>    ist. Trace und Blur zeichnen ausschließlich in ihre eigene halbauflösende
+>    RGBA16F-Kette; der Konsument ist `kSceneHLSL`, das sein LDR/HDR-Paar längst
+>    hat. Ein zweites PSO wäre ein Duplikat ohne Unterschied.
+> 2. **D2 hängt sechs Slot-Gruppen an, nicht zwei.** Der Deskriptor-Anhang hinter
+>    den Mesh-Texturen wächst um zwei Trace-Blöcke à fünf Deskriptoren (einer je
+>    History-Parität), vier Blur-Eingänge und einen Null-Slot. Grund: eine
+>    shader-sichtbare Deskriptor-Zelle darf **nicht** überschrieben werden,
+>    solange ein Frame in Flight sie lesen kann. Der Frame-Wechsel der Parität
+>    verschiebt deshalb einen **Tabellen-Handle**, er schreibt keinen Deskriptor
+>    um. Alle Slots werden nur geschrieben, wenn die GPU steht
+>    (`writeSSRDescriptors`, gerufen aus Stellen, die vorher `waitForAllFrames`
+>    machen).
+> 3. **`heSSRFwd` bekommt eine EIGENE Root-Tabelle (Parameter 5), nicht einen
+>    Bereich in der Szenentabelle.** Der Bereichs-Offset in einer Root-Signature
+>    ist fest; die Kette endet aber je nach Qualitätsstufe und Parität auf einer
+>    anderen halbauflösenden Textur. Eine eigene Tabelle kostet ein
+>    Root-Argument und macht die Wahl zu einem Handle. Das ist zugleich der
+>    ganze Inhalt von **D4**: Parameter 5 wird bei **jedem** Szenen-Draw
+>    gebraucht, also muss ihn jede Stelle mitsetzen, die nach einem fremden
+>    Root-Signature-Wechsel wieder auf `rootSig` schaltet — Hauptaufbau,
+>    Graph-Material-Rückkehr, Skinned-Rückkehr, Decal-Rückkehr.
+> 4. **Alle Sampler des Trace sind statisch, `s12` ist POINT auf jeder Stufe.**
+>    D3D11 wählt dort je nach Qualität POINT oder LINEAR. Auf D3D12 wäre das ein
+>    zweites Root-Signature/PSO-Paar oder ein Sampler-Heap — und beides ohne
+>    Wirkung: `kSSRTraceFS` liest `heSSRHistRad` ausschließlich innerhalb von
+>    `if (heSSR.cfg2.y > 0.0)`, und die CPU setzt `cfg2.y` nur auf der
+>    temporalen Stufe ungleich null. Unterhalb davon wird der Sampler nie
+>    benutzt.
+> 5. **Der Blur braucht vier Konstanten-Slots pro Frame, nicht einen.** D3D11
+>    bekommt mit `Map`/`WRITE_DISCARD` implizit für jeden der vier Durchgänge
+>    frischen Speicher; auf D3D12 liest die GPU den gemappten Ring erst beim
+>    Ausführen, ein wiederbenutzter Slot gäbe jedem Durchgang die Richtung des
+>    letzten (`k_ssrBlurCBSlots = 4`).
+> 6. **Der Vorpass teilt sich `ssaoPosPerObjRing`** mit dem Positions-Vorpass:
+>    192 Byte `ReflPrepassUniforms` passen in den 256-Byte-Slot, und pro Frame
+>    läuft genau einer der beiden Shader. Eigen sind nur Root-Signature (Root-CBV
+>    auf **b1**, dort liegt der `U`-Block ungepinnt) und Input-Layout
+>    (**TEXCOORD0/1**, nicht POSITION/NORMAL — dieselbe Falle wie auf D3D11).
+>
+> **Die geerbten Grenzen, unverändert:** SSR gibt es auf D3D12 nur im
+> Editor-Viewport (`usingHDR`; C6), Graph-Materialien bekommen kein SSR, weil
+> ihr Konsument auf Bindung 31 sitzt und die Preamble ungepinnt emittiert wird
+> (§2.3 Kopf 1), und der Vorpass zeichnet `opaqueDCs` gegen die vorhandene
+> **D16**-Tiefe des SSAO-Vorpasses — keine Skinned Meshes, keine Partikel.
+>
+> **Was hier wirklich lief:** der Drift-Fall in `tests/test_culling.cpp` jetzt
+> über **sechs** Kopien der Kaskade, der Registerfall aus Schritt 6 unverändert
+> (er prüft denselben emittierten Text, den D3D12 bindet), und die volle Suite.
+> Übersetzt wurde die `.cpp` **nicht** — auf diesem Mac gibt es weder `d3d12.h`
+> noch `fxc`. Der erste Windows-Build ist die erste Prüfung, echte Hardware
+> bleibt offen.
+
 ---
 
 ## 8. Prüfungen und ihre Grenzen
@@ -619,7 +682,9 @@ GI-Port:
    inside D3D11's bindable range" prüft auf dem emittierten Text, dass das UBO
    auf `b12` liegt, jeder Sampler unter 16, und dass die kanonischen Nummern
    verschwunden und nicht bloß ergänzt sind (dasselbe Muster wie der
-   Decal-Registertest). Er ist das einzige Netz unter dem D3D11-Pfad.
+   Decal-Registertest). Er ist das einzige Netz unter **beiden** D3D-Pfaden:
+   Schritt 7 hat für D3D12 keine einzige neue Nummer vergeben, sondern denselben
+   emittierten Text gebunden, also deckt derselbe Fall auch ihn ab.
    Seit Schritt 4 steht ein zweiter GL-Fall: **„GL binds the SSR shaders by name,
    so the names must survive emission"**. GLSL 410 kommt ohne 420pack aus dem
    Cross-Compiler, also ohne `layout(binding)` — jede SSR-Ressource wird im
@@ -696,7 +761,7 @@ also nichts zu brechen.
 | 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) — **A1–A5 erledigt, A6 offen** | nur offline + ctest |
 | 5 | Checkpoint B — Vulkan (B1–B5, inkl. §3.3) — **erledigt** | Syntaxprüfung + `glslc` auf `scene.frag` + Drift-ctest |
 | 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) — **C1–C5 erledigt, C6 gemeldet** | nur ctest auf dem HLSL-Text |
-| 7 | Checkpoint D — D3D12 (Register aus 6 geerbt) | dito |
+| 7 | Checkpoint D — D3D12 (Register aus 6 geerbt) — **D1–D4 erledigt, D3 entfällt begründet** | nur ctest (Drift über sechs Kopien) |
 | — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang, **jetzt der Grund, warum SSR dort nur Built-ins erreicht** |
 | — | §2.2: HDR im D3D11-Swapchain-Pfad (C6) | vorlagepflichtig, **gemeldet in Schritt 6** |
 | — | GL-Deferred-Composite (A6) | optional |
