@@ -613,7 +613,7 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 
 	// ── Globals ──────────────────────────────────────────────────────────────
 	// What a colour MEANS, rather than what any one control looks like. Since
-	// every element type now carries its own style below, the nine roles are no
+	// every element type now carries its own style below, the ten roles are no
 	// longer where an interface is coloured — three of them are still worth
 	// having in one place, because "this went wrong" has to look the same on a
 	// label, a banner and a border, and no per-type style can say that.
@@ -625,6 +625,9 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	roleRow(st, HE::UIThemeRole::Warning);
 	roleRow(st, HE::UIThemeRole::Error);
 	roleRow(st, HE::UIThemeRole::Accent);
+	// Directly under the accent, because it is the other half of the same
+	// decision: change one and the pair has to be looked at again.
+	roleRow(st, HE::UIThemeRole::AccentText);
 
 	// The remaining five are still a stored format: an element bound to
 	// "Surface" by hand resolves against this and would otherwise hold a value

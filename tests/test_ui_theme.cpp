@@ -49,7 +49,7 @@ TEST_CASE("Theme: the role names are pinned")
     // ╚══════════════════════════════════════════════════════════════════════╝
     const std::vector<std::string> kRoles = {
         "Background", "Surface", "Border", "Text", "MutedText",
-        "Accent", "Warning", "Error", "Success" };
+        "Accent", "AccentText", "Warning", "Error", "Success" };
     REQUIRE(kRoles.size() == static_cast<std::size_t>(HE::UIThemeRole::COUNT));
     for (std::size_t i = 0; i < kRoles.size(); ++i)
     {
@@ -83,7 +83,24 @@ TEST_CASE("Theme: light and dark are two values of one decision")
     CHECK(t.colorFor(HE::UIThemeRole::Text, HE::UIThemeMode::Dark).r >
           t.colorFor(HE::UIThemeRole::Background, HE::UIThemeMode::Dark).r);
 
-    // The amber theme is a curation of the same nine roles, not a second model.
+    // The tenth role is the one pair that goes the other way round, and it has
+    // to: the light accent is a deep blue you write white on, the dark one a
+    // pale blue you write near-black on. Pinned here because "every role is
+    // lighter in dark mode" is the assumption a later palette edit would make.
+    CHECK(t.colorFor(HE::UIThemeRole::AccentText, HE::UIThemeMode::Light).r >
+          t.colorFor(HE::UIThemeRole::AccentText, HE::UIThemeMode::Dark).r);
+    // …and each of them is actually legible on the accent it belongs to, which
+    // is the whole reason the role exists.
+    for (const HE::UIThemeMode m : { HE::UIThemeMode::Light, HE::UIThemeMode::Dark })
+    {
+        CAPTURE(HE::uiThemeModeName(m));
+        CHECK(HE::uiContrastRatio(t.colorFor(HE::UIThemeRole::AccentText, m),
+                                  t.colorFor(HE::UIThemeRole::Accent, m)) >= 4.5f);
+        CHECK(HE::uiContrastRatio(HE::uiAmberTheme().colorFor(HE::UIThemeRole::AccentText, m),
+                                  HE::uiAmberTheme().colorFor(HE::UIThemeRole::Accent, m)) >= 4.5f);
+    }
+
+    // The amber theme is a curation of the same ten roles, not a second model.
     CHECK(std::string(HE::uiAmberTheme().name) == "Amber");
     CHECK(HE::uiAmberTheme().colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Dark) !=
           t.colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Dark));

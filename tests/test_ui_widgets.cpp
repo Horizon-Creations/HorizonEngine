@@ -13310,25 +13310,13 @@ TEST_CASE("Contrast: every shipped component is legible in both modes")
             for (const HE::UIContrastFinding& f : HE::uiCheckContrast(t, page))
             {
                 const HE::UIElement* e = t.find(f.elementId);
-                // ── The one KNOWN gap, named rather than hidden ──────────────
-                // Text on an Accent surface: the OK button's caption and the
-                // badge's number. Both are bound to the Text role, which is the
-                // only reading colour the vocabulary has, and Text is dark in
-                // light mode — dark on blue is 3.7, and white on that same blue
-                // would be 4.4, so it is not the binding that is wrong, it is
-                // that there is no "the colour to write ON the accent" and the
-                // accent itself is a middling blue. Both halves of that are a
-                // decision about the ROLE VOCABULARY (an on-disk format) and
-                // about the default palette, and they belong in their own step.
-                //
-                // Listed by the surface it stands on and not by file, so a new
-                // component that repeats the mistake is caught, and any other
-                // finding anywhere fails at once.
-                const HE::UIElement* on = t.find(f.againstId);
-                const bool onAccent = on &&
-                    on->themeRoleFor(f.againstProp) == "Accent";
-                if (onAccent) continue;
-
+                // No exemptions. There used to be one — text on an Accent
+                // surface, four findings across the OK caption and the badge's
+                // number — and it was not a rule about contrast but a gap in the
+                // vocabulary: `Text` is the reading colour of the PAGE, and
+                // there was no role meaning "the colour to write ON the accent".
+                // UIThemeRole::AccentText is that role, the two components are
+                // bound to it, and the check is strict again.
                 CAPTURE(e ? e->name : std::string("?"));
                 CAPTURE(f.textProp);
                 CAPTURE(f.ratio);

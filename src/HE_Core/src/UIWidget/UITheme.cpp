@@ -17,7 +17,7 @@ namespace
 
     constexpr const char* kRoleNames[kRoles] = {
         "Background", "Surface", "Border", "Text", "MutedText",
-        "Accent", "Warning", "Error", "Success" };
+        "Accent", "AccentText", "Warning", "Error", "Success" };
     constexpr const char* kModeNames[kModes] = { "Light", "Dark" };
     constexpr const char* kSizeNames[kSizes] = { "Small", "Medium", "Large" };
     constexpr const char* kLevelNames[kLevels] = {
@@ -168,6 +168,18 @@ const UITheme& uiDefaultTheme()
         // that decides. 0.43 is the smallest step that passes both.
         set(UIThemeRole::MutedText,  { 0.43f, 0.43f, 0.48f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
         set(UIThemeRole::Accent,     { 0.16f, 0.44f, 0.85f, 1.0f }, { 0.36f, 0.60f, 0.96f, 1.0f });
+        // The colour to write ON that accent, and the one pair in this palette
+        // that goes the OTHER way round from every other: white in light mode,
+        // near-black in dark. That is not a slip — it follows from the accent
+        // itself. The light theme's accent is a deep blue (luminance 0.17), so
+        // white reaches 4.75:1 on it and the page's own near-black manages only
+        // 4.01; the dark theme's is a pale blue (0.32), where white falls to
+        // 2.87 and near-black climbs to 6.08. A role that flipped with the mode
+        // like the others would fail on both.
+        //
+        // The dark value is the light theme's Text on purpose: the colour to
+        // write on a pale blue IS the colour to write on a pale page.
+        set(UIThemeRole::AccentText, { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.10f, 0.10f, 0.12f, 1.0f });
         set(UIThemeRole::Warning,    { 0.85f, 0.60f, 0.10f, 1.0f }, { 0.95f, 0.72f, 0.24f, 1.0f });
         set(UIThemeRole::Error,      { 0.80f, 0.22f, 0.20f, 1.0f }, { 0.93f, 0.40f, 0.36f, 1.0f });
         set(UIThemeRole::Success,    { 0.16f, 0.60f, 0.32f, 1.0f }, { 0.34f, 0.78f, 0.48f, 1.0f });
@@ -201,6 +213,12 @@ const UITheme& uiAmberTheme()
         set(UIThemeRole::Text,       { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.94f, 0.92f, 0.88f, 1.0f });
         set(UIThemeRole::MutedText,  { 0.47f, 0.44f, 0.38f, 1.0f }, { 0.62f, 0.59f, 0.52f, 1.0f });
         set(UIThemeRole::Accent,     { 0.85f, 0.55f, 0.12f, 1.0f }, { 1.00f, 0.67f, 0.16f, 1.0f });
+        // Amber is a bright colour in BOTH modes, so what you write on it is
+        // dark in both: white on this orange is 2.7:1 in light and 1.9:1 in
+        // dark, which is not text, it is a suggestion of text. Nearly the same
+        // value twice, and that is the palette being honest rather than a role
+        // that was half filled in.
+        set(UIThemeRole::AccentText, { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.10f, 0.09f, 0.07f, 1.0f });
 
         // ── …and what each KIND of element looks like in it ──────────────────
         // The roles above are the palette; these are the answers. A theme that

@@ -19,7 +19,7 @@
 //
 // Deliberately small and closed, for the same reason "Schicht 0" is: a fixed
 // vocabulary can be offered in a dropdown, checked by a test, and understood
-// without documentation. Nine colours is what interfaces actually use.
+// without documentation. Ten colours is what interfaces actually use.
 namespace HE
 {
 
@@ -39,6 +39,18 @@ enum class UIThemeRole : uint8_t
     Text,           // ordinary reading text
     MutedText,      // secondary text: hints, placeholders, disabled labels
     Accent,         // the one colour the eye is meant to go to
+    // …and the colour to write ON it. The tenth role, added because the
+    // contrast check kept failing on the same four texts and the binding was
+    // never wrong: `Text` is the reading colour of the PAGE, and a page's
+    // reading colour standing on the accent is a coincidence at best — dark on
+    // a mid blue is 3.7, and it gets worse the moment somebody changes the
+    // accent. So this is its own decision, and it is allowed to flip with the
+    // mode independently of Text: on a light theme's deep accent you write
+    // white, on a dark theme's pale accent you write near-black.
+    //
+    // For text and for anything else that lands on an accent surface — an icon
+    // tint, a spinner, a divider inside a filled button.
+    AccentText,
     Warning,
     Error,
     Success,
@@ -118,8 +130,8 @@ HE_API const char* uiThemeElevationName(UIThemeElevation e);
 // which style it follows (UIElement::themeStyled / themeStyle) and that is ONE
 // decision for its whole look.
 //
-// Deliberately open where the roles are closed. The roles are nine because a
-// dropdown of nine can be understood; a style's keys come from the element in
+// Deliberately open where the roles are closed. The roles are ten because a
+// dropdown of ten can be understood; a style's keys come from the element in
 // front of you, and its NAME may be anything, which is what lets a project
 // theme its own components ("Card", "Danger Button") and not only the built-in
 // types.

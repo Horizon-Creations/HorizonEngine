@@ -318,6 +318,10 @@ Comp badge()
     c.str(label, "Text", "3");
     c.whole(label, "Align H", 1); c.whole(label, "Align V", 1);
     c.textLevel(label, UIThemeTextLevel::Small);
+    // The number stands on the pill, so it takes the colour meant for writing
+    // ON an accent rather than the white it was left at — which the contrast
+    // check read as 2.5:1 against the dark theme's pale blue.
+    c.role(label, "Color", UIThemeRole::AccentText);
     c.at(label).hitTestable = false;
 
     c.param("Text", label, "Text", "What it says. A number, usually.");
@@ -772,6 +776,11 @@ Comp dialogFrame(HorizonCode::Graph& graphOut)
     c.role(ok, "Hovered Color", UIThemeRole::Accent);
     c.role(ok, "Pressed Color", UIThemeRole::Accent);
     const int okCap = c.caption(ok, "Caption", "OK");
+    // A caption binds to Text, which is the reading colour of the PAGE. This
+    // one is not on the page, it is on the accent — 3.7:1 in light and 2.5:1 in
+    // dark, which is the finding the contrast check made and could not fix,
+    // because the role to write on an accent did not exist yet. It does now.
+    c.role(okCap, "Color", UIThemeRole::AccentText);
 
     c.param("Title", title, "Text", "The question, in one line.");
     c.param("Message", msg, "Text", "The consequence, under it. Wraps on its own.");

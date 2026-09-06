@@ -3706,3 +3706,36 @@ in dem der benannte Befehl fehlschlägt.
 Responder-Kette, ob jemand `fire:` beantwortet, und schaltet hinter uns jede Zeile wieder an. Ein
 gesperrter Eintrag feuert dort auch sein Tastenäquivalent nicht mehr, was die Engine-Hälfte
 spiegelt.
+
+### D1 nachgereicht: eine zehnte Rolle, und vier Befunde weniger (06.09.2026)
+
+Die Kontrastprüfung hatte vier Befunde absichtlich offen gelassen: Text auf einer Accent-Fläche,
+die OK-Beschriftung im Dialog und die Zahl im Badge, je in beiden Modi. Der Kommentar im Test sagte
+schon, woran es liegt, und er hatte recht: die Bindung war nicht falsch, dem Vokabular fehlte eine
+Rolle.
+
+**`UIThemeRole::AccentText`.** „Die Farbe, die man AUF den Akzent schreibt", eingefügt hinter
+`Accent` — sicher, weil Rollen als NAMEN gespeichert werden, in der Themedatei wie am Element, und
+weil `uiThemeFromJson` von `uiDefaultTheme()` ausgeht: eine Datei ohne die neue Rolle erbt den
+Vorgabewert statt durchsichtigem Schwarz.
+
+**Sie dreht sich um, und das muss sie.** Jede andere Rolle ist im Dunkelmodus die hellere von zwei
+Fassungen. Diese nicht: der helle Akzent ist ein tiefes Blau (Leuchtdichte 0,17), auf dem Weiß
+4,75:1 erreicht und das Seiten-Schwarz nur 4,01; der dunkle ist ein blasses Blau (0,32), auf dem
+Weiß auf 2,87 fällt und Schwarz auf 6,08 steigt. Eine Rolle, die mit dem Modus mitginge wie die
+anderen, fiele in BEIDEN durch. Beim Amber-Theme steht in beiden Modi fast derselbe dunkle Wert,
+weil Amber in beiden Modi hell ist — Weiß darauf wäre 2,7 beziehungsweise 1,9, und das ist keine
+Schrift mehr, das ist die Andeutung einer.
+
+**Korrektur an einer Zahl im Plan.** Oben stand, Weiß auf demselben Blau wäre 4,4 und fiele damit
+auch durch. Nachgerechnet sind es 4,75, und die Rolle allein reicht deshalb: die Palette musste
+nicht angefasst werden.
+
+**Der Test hat keine Ausnahme mehr.** Die Zeile, die Befunde auf einer Accent-Fläche durchließ, ist
+weg; die Prüfung läuft wieder streng über die ganze ausgelieferte Bauteil-Bibliothek in beiden Modi.
+
+**Nebenbefund beim Neuerzeugen.** Zehn der vierzehn `.hasset` haben sich geändert, nicht zwei: die
+eingebackenen Vorschauwerte stammten noch von `MutedText` = 0,45, das beim ersten Kontrastdurchgang
+auf 0,43 gesenkt wurde, ohne die Bauteile neu zu erzeugen. Am Laufzeitbild ändert das nichts —
+`uiApplyTheme` löst jede gebundene Rolle beim Erzeugen neu auf —, aber der Designer zeigte die alte
+Farbe. Jetzt nicht mehr.

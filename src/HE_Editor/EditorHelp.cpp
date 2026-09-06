@@ -1370,8 +1370,9 @@ namespace
 	  "own graph for what its buttons do.",
 	  "", "ui#designer" },
 	{ "New Asset/Theme", "",
-	  "What the whole application looks like: nine colour ROLES — background, "
-	  "surface, border, text, muted text, accent, warning, error, success — each "
+	  "What the whole application looks like: ten colour ROLES — background, "
+	  "surface, border, text, muted text, accent, accent text, warning, error, "
+	  "success — each "
 	  "in a light and a dark value, plus the size steps and the shadows. Elements "
 	  "point at a role instead of carrying a colour, so one edit here changes "
 	  "every one of them, and light/dark becomes a switch instead of a second set "
@@ -2325,7 +2326,7 @@ namespace
 	  "", "ui#elements" },
 	{ "UI Widget/Literal (type it here)", "",
 	  "Where this colour comes from. \"Literal\" means you typed it and it is "
-	  "yours; picking one of the nine theme ROLES instead means the theme decides "
+	  "yours; picking one of the ten theme ROLES instead means the theme decides "
 	  "it, every element with that role changes together, and light/dark switches "
 	  "it for you. A bound colour's swatch is read-only, because editing it would "
 	  "be overwritten the next time the theme or the mode changes.",
