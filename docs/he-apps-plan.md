@@ -3951,3 +3951,45 @@ damals.
 
 **Nicht geprüft, mit Absicht:** dass wirklich etwas aus einem Drucker kommt. Ein Test, der einen
 Auftrag auf der Maschine einreiht, auf der er läuft, ist ein Test, der jemanden Papier kostet.
+
+### Nachgereicht zu B6 und Block C: fünf Löcher aus dem eigenen Review (06.09.2026)
+
+Fünf Sachen, die in den vier Commits davor falsch oder offen waren. Sie stehen hier, weil vier
+davon genau die Art Fehler sind, die kein Test findet, den man beim Bauen schreibt.
+
+**1. Ein zweites `resolved()`-Loch, das ATTACH nicht heißt.** Der Authorizer verweigert ATTACH
+und DETACH — und `VACUUM INTO '<pfad>'` schreibt eine Kopie der ganzen Datenbank irgendwohin,
+ohne das Wort ATTACH zu benutzen. Nachgemessen statt vermutet: SQLite fährt es intern über ein
+Attach, der Riegel greift also. Der Test sagt das jetzt, nicht die Dokumentation. **`PRAGMA
+temp_store_directory` ging aber durch** und verschiebt, wohin SQLite seine eigenen Dateien
+schreibt — ein Pragma, kein Statement, und deshalb an einem Riegel vorbei, der nur auf ATTACH
+zielt. Jetzt verweigert, zusammen mit `data_store_directory`; alle anderen Pragmas bleiben offen,
+denn so fragt man nach Fremdschlüsseln oder dem Journal-Modus.
+
+**2. Die Pfeiltasten liefen auf das Label und kamen nicht mehr herunter.** Tab war ausgenommen,
+`navigate()` nicht — und `navigate` fragt `isFocusable`, das durch `interactive()` jetzt wahr
+sagt. Ein Runter aus dem Feld darüber landete also AUF dem Absatz, und der schluckt ab da jede
+Pfeiltaste, um seinen eigenen Caret zu bewegen. Nur Tab kam wieder heraus. **Ein Prädikat für
+beide**: `WidgetManager::onKeyboardRoute`. Zwei getrennte wären zwei, und das vergessene wäre
+genau das, das irgendwohin läuft, wo es nicht wieder wegkommt.
+
+**3. Die Markierung blieb stehen, nachdem der Fokus weg war.** Das Feld zeichnet seine Auswahl
+unter `st.editing`, das Label zeichnete unter `hasSelection()` allein — also für immer, und zwei
+Absätze konnten gleichzeitig blau sein, was dem Leser zwei Auswahlen behauptet, wo er eine hat.
+Jetzt `st.focused && hasSelection()`. Die Offsets bleiben, wer zurückkommt, findet vor, was er
+liegen ließ.
+
+**4. Jeder PIE-Lauf hat geleakt.** `timer::cancelAll`, `fs::clearWatches` und `db::closeAll`
+standen nur in `GameApplication::OnShutdown`. Im Editor ist eine Spielsitzung aber das ganze Leben
+dieses Wirts: die Timer des letzten Laufs zählten weiter, seine Watches stateten weiter, und nach
+sechzehn Läufen mit einer Datenbank verweigert `db.open`, bis jemand den Editor neu startet. Die
+drei Zeilen stehen jetzt dort, wo `save::close()` schon stand.
+
+**5. `Last Insert Id` fuhr auf einem Float-Pin.** Eine Zeilennummer ist eine ganze Zahl, und ein
+32-Bit-Float hört bei 2^24 auf zu zählen — die Nummer wäre dann um eins daneben und sähe richtig
+aus. Jetzt ein Int-Pin, wie `Rows Changed`.
+
+**Dazu zwei Kleinigkeiten:** `Selection Color` steht jetzt auch im `Text`-Stil beider mitgelieferter
+Themes (sonst ist die Markierung das eine blaue Ding in einer bernsteinfarbenen Anwendung), und
+die Tests decken den Trefferpunkt bei Maßstab 2 und 0,75 ab — bei Maßstab 1 zu prüfen ist genau
+die Lücke, in der F2 echte Fehler gefunden hat.

@@ -271,6 +271,11 @@ const UITheme& uiAmberTheme()
         d.styleMut("Panel").set("Color", col(surfaceL, surfaceD));
         d.styleMut("Panel").set("Corner Radius", num(8.0f));
         d.styleMut("Text").set("Color", col(textL, textD));
+        // The same highlight the field uses, under the same name — a selection
+        // is a selection wherever the reader made it, and a label left on its
+        // own default would be the one blue thing in an amber application.
+        d.styleMut("Text").set("Selection Color",
+                               col({ 0.95f, 0.78f, 0.45f, 1.0f }, { 0.45f, 0.32f, 0.10f, 1.0f }));
         d.styleMut(uiThemeSelector("Text", "muted")).set("Color", col(mutedL, mutedD));
 
         UIThemeStyle& check = d.styleMut("CheckBox");

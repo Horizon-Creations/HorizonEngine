@@ -4577,6 +4577,27 @@ std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y
 	return t->linkAt(px, canvas.scaleY * vs, x, y, m_fontScale);
 }
 
+// May the KEYBOARD walk onto this, as opposed to may it be focused at all? One
+// answer for Tab and for the arrow keys, because two would be two, and the one
+// that got forgotten would be the one that walks somewhere it cannot walk out
+// of again.
+//
+// Only a selectable label is off the route today. It is a paragraph, not a form
+// control: no toolkit puts static text in a tab order, a keyboard user would
+// pay one keystroke per paragraph, and the arrow keys are worse than Tab there
+// because a focused label swallows them to move its own caret — arriving on one
+// with the keyboard would be arriving somewhere only Tab gets you out of. Click
+// and setFocus still reach it, which is what "not on the route" means and "not
+// focusable" would not. An author who disagrees says so with a positive Tab
+// Index.
+bool WidgetManager::onKeyboardRoute(const HE::UIElement& e) const
+{
+	if (e.tabIndex > 0) return true;
+	if (const auto* lb = dynamic_cast<const HE::UIText*>(&e))
+		if (lb->selectionEnabled()) return false;
+	return true;
+}
+
 bool WidgetManager::isFocusable(const Instance& w, const HE::UIElement& e,
                                 const HE::UIWidgetCanvas& canvas) const
 {
@@ -4888,6 +4909,10 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 		const HE::UIElement& e = *ep;
 		if (e.id == w->focusedElem) continue;
 		if (!isFocusable(*w, e, canvas)) continue;
+		// …and the arrow keys follow the same route Tab does. Without this a
+		// Down from the field above a paragraph lands ON the paragraph, which
+		// then swallows every further arrow to move its own caret.
+		if (!onKeyboardRoute(e)) continue;
 
 		float cx = 0.0f, cy = 0.0f;
 		centre(e, cx, cy);
@@ -5006,27 +5031,15 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	// the loop must say so rather than spin.
 	const int step = backwards ? -1 : 1;
 	int next = at < 0 ? (backwards ? n - 1 : 0) : ((at + step) % n + n) % n;
-	// What is on the route, as opposed to what is merely focusable. Two things
-	// are off it, and for the same reason both stay in the LIST: Tab can be
-	// pressed while standing on one, and the answer to that has to be "the next
-	// one along from here" rather than "back to the top of the form".
-	const auto onTabRoute = [](const HE::UIElement& e)
-	{
-		if (e.tabIndex < 0) return false;
-		// A label a reader may select in is reachable by pointer and by the
-		// arrow keys, but it is not a form control — no toolkit puts static
-		// text on the Tab route, and a paragraph between two fields would
-		// otherwise cost a keyboard user one Tab per paragraph. An author who
-		// says otherwise with a positive Tab Index gets what they asked for.
-		if (e.tabIndex == 0)
-			if (const auto* lb = dynamic_cast<const HE::UIText*>(&e))
-				if (lb->selectionEnabled()) return false;
-		return true;
-	};
+	// What is on the route, as opposed to what is merely focusable. A negative
+	// Tab Index stays in the LIST all the same: Tab can be pressed while
+	// standing on one, and the answer to that has to be "the next one along
+	// from here" rather than "back to the top of the form".
 	for (int guard = 0; guard < n; ++guard)
 	{
 		const HE::UIElement* e = w->tree.find(order[next]);
-		if (!e || onTabRoute(*e)) return setFocus(w->id, order[next]);
+		if (!e || (e->tabIndex >= 0 && onKeyboardRoute(*e)))
+			return setFocus(w->id, order[next]);
 		next = (next + step) % n;
 		if (next < 0) next += n;
 	}

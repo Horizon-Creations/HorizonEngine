@@ -1361,7 +1361,14 @@ void UIText::render(const UIWidgetRect& px, const UIElementRenderState& st,
             // on top of it. Same three shapes as the multiline field: the first
             // row from the anchor to its end, whole rows between, the last from
             // its start to the caret.
-            if (hasSelection())
+            //
+            // Only while FOCUSED, which is the label's version of the rule the
+            // field's caret follows. Without it, a paragraph somebody selected
+            // in and then clicked away from stays highlighted for the rest of
+            // the run — and two of them can be highlighted at once, which says
+            // the reader has two selections when they have one. The offsets are
+            // kept either way, so coming back finds what was left.
+            if (st.focused && hasSelection())
             {
                 const size_t a = std::min(selMin(), text.size());
                 const size_t b = std::min(selMax(), text.size());

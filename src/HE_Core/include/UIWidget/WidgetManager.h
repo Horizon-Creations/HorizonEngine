@@ -933,6 +933,10 @@ private:
     // and not clipped entirely out of sight.
     bool isFocusable(const Instance& w, const HE::UIElement& e,
                      const HE::UIWidgetCanvas& canvas) const;
+    // …and may the keyboard WALK onto it? Focusable and reachable-by-keyboard
+    // are two claims (see the .cpp), and Tab and the arrow keys both ask this
+    // one so they cannot drift apart.
+    bool onKeyboardRoute(const HE::UIElement& e) const;
 
     // The focused text field (nullptr when none), with its caret re-clamped: a
     // script may have rewritten the text since the last keystroke and left the

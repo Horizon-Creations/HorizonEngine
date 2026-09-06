@@ -1883,11 +1883,51 @@ TEST_CASE("Selectable label: drawing it is drawing the same glyphs, plus a selec
     // With something selected there is one quad more, and it is BEHIND the
     // glyphs — a highlight drawn over the words is a highlight that hides them.
     sel.selAnchor = 0; sel.caret = 5;
+    HE::UIElementRenderState focused; focused.focused = true;
     std::vector<UIRenderObject> c;
-    sel.render(px, {}, {}, 1.0f, c);
+    sel.render(px, focused, {}, 1.0f, c);
     CHECK(c.size() == b.size() + 1);
     CHECK(c.front().type != 2);          // the quad, before any glyph
     CHECK(c.front().color.a == doctest::Approx(sel.selectionColor.a));
+
+    // …and NOT while the focus is somewhere else. A paragraph somebody selected
+    // in and then clicked away from would otherwise stay highlighted for the
+    // rest of the run, and two of them at once would claim the reader has two
+    // selections. The offsets survive, so coming back finds what was left.
+    std::vector<UIRenderObject> d;
+    sel.render(px, {}, {}, 1.0f, d);
+    CHECK(d.size() == b.size());
+    CHECK(sel.hasSelection());
+}
+
+TEST_CASE("Selectable label: the hit test holds up when the canvas is not 1:1")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    // Every other case here runs at scale 1, and step 20 found real bugs in
+    // exactly this gap: the glyphs are laid out at the scaled size and a hit
+    // test that measured at the authored one lands several characters short.
+    HE::UIText t;
+    t.selectable = true; t.autoSize = false; t.fontSize = 20.0f; t.alignH = 1;
+    t.text = "alpha beta";
+
+    for (float scale : { 1.0f, 2.0f, 0.75f })
+    {
+        // The rect arrives in PIXELS, so it scales with everything else.
+        const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f * scale, 40.0f * scale };
+        const std::vector<HE::UITextSelectRow> rows = t.selectRows(px, scale);
+        REQUIRE(rows.size() == 1);
+        const float y = rows[0].top + t.fontSize * scale * 0.5f;
+        // The whole run, from in front of the first glyph to past the last.
+        CHECK(t.caretAtPoint(px, scale, rows[0].x - 4.0f, y) == 0u);
+        CHECK(t.caretAtPoint(px, scale, rows[0].x + rows[0].width + 4.0f, y) == t.text.size());
+        // …and the boundary between the two words is where the words meet,
+        // whatever the scale: measured, not assumed.
+        const float mid = rows[0].x + t.caretXInRow({ 0, t.text.size(), t.text.size(), true }, 5);
+        CHECK(t.caretAtPoint(px, scale, mid + 1.0f, y) == 5u);
+        // The row really did grow with the scale, or the check above proves
+        // nothing about scaling.
+        CHECK(rows[0].width == doctest::Approx(t.fontSize * scale * 0.5f * 10.0f).epsilon(0.6));
+    }
 }
 
 TEST_CASE("Selectable label: a multi-line selection is one run, not several unrelated ones")
@@ -1901,8 +1941,9 @@ TEST_CASE("Selectable label: a multi-line selection is one run, not several unre
     REQUIRE(rows.size() == 3);           // the blank line in the middle is a row
 
     t.selAnchor = 0; t.caret = t.text.size();
+    HE::UIElementRenderState focused; focused.focused = true;
     std::vector<UIRenderObject> out;
-    t.render(px, {}, {}, 1.0f, out);
+    t.render(px, focused, {}, 1.0f, out);
     int quads = 0;
     for (const UIRenderObject& o : out) if (o.type != 2) ++quads;
     // One per row INCLUDING the empty one: a selected blank line drawn as
@@ -2041,6 +2082,13 @@ TEST_CASE("Selectable label: static text is not on the Tab route")
     // makes a keyboard user give up on a page.
     REQUIRE(wm.setFocus(id, f1));
     CHECK(wm.focusNext(false, 400.0f, 300.0f));
+    CHECK(wm.focusedElement() == f2);
+
+    // …and so do the ARROW keys, which matters more than Tab does. A focused
+    // label swallows them to move its own caret, so landing on one with Down
+    // would be landing somewhere only Tab gets you out of again.
+    REQUIRE(wm.setFocus(id, f1));
+    CHECK(wm.navigate(WidgetManager::NavDir::Down, 400.0f, 300.0f));
     CHECK(wm.focusedElement() == f2);
 
     // But it is still reachable — by a click, and by setFocus, which is the

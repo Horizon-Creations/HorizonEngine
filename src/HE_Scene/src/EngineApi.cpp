@@ -2822,16 +2822,38 @@ Conn* find(int handle)
 
 // SQL can name files that no `resolved()` ever sees: `ATTACH DATABASE '/etc/x'`
 // is one statement away from reading anything on the disk, and it arrives as a
-// string rather than as a path argument. This is where that door is shut. The
-// extension loader is compiled out as well (SQLITE_OMIT_LOAD_EXTENSION), so it
-// is refused here only for the case where somebody turns that back on.
-int authorize(void*, int action, const char*, const char*, const char*, const char*)
+// string rather than as a path argument. This is where those doors are shut.
+//
+// There are THREE of them, and only the first has the word ATTACH in it:
+//   ATTACH/DETACH, the obvious one;
+//   `VACUUM INTO '<path>'`, which writes a copy of the whole database anywhere
+//     a string can spell — SQLite runs it through an internal attach, so the
+//     same case catches it (the test is what says so, not the documentation);
+//   `PRAGMA temp_store_directory` / `data_store_directory`, which move where
+//     SQLite writes its own files. Deprecated by SQLite, still accepted, and a
+//     pragma rather than a statement — which is why a lock aimed only at ATTACH
+//     would have walked straight past them.
+//
+// The extension loader is compiled out as well (SQLITE_OMIT_LOAD_EXTENSION); it
+// is refused here for the case where somebody turns that back on.
+int authorize(void*, int action, const char* a1, const char*, const char*, const char*)
 {
     switch (action)
     {
     case SQLITE_ATTACH:
     case SQLITE_DETACH:
         return SQLITE_DENY;
+    case SQLITE_PRAGMA:
+    {
+        // Pragmas as a whole stay open: they are how a caller asks for foreign
+        // keys, a journal mode or the schema. Only the two that name a
+        // DIRECTORY are refused.
+        if (!a1) return SQLITE_OK;
+        const std::string_view p(a1);
+        if (p == "temp_store_directory" || p == "data_store_directory")
+            return SQLITE_DENY;
+        return SQLITE_OK;
+    }
     default:
         return SQLITE_OK;
     }
@@ -5379,10 +5401,13 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "db.changes", "Database", false, {{"handle", P::Int}}, {{"rows", P::Int}},
             "HE::api::db::changes",
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(db::changes(c, aI(a, 0))) }; } });
-        t.push_back({ "db.lastInsertId", "Database", false, {{"handle", P::Int}}, {{"id", P::Float}},
+        // An Int pin, not a Float one: a row id is a whole number, and a 32-bit
+        // float stops counting exactly at 2^24 — a table with more rows than
+        // that would hand back an id that is off by one and looks fine.
+        t.push_back({ "db.lastInsertId", "Database", false, {{"handle", P::Int}}, {{"id", P::Int}},
             "HE::api::db::lastInsertId",
             [](Ctx& c, const VV& a){
-                return VV{ Value::ofFloat(static_cast<float>(db::lastInsertId(c, aI(a, 0)))) }; } });
+                return VV{ Value::ofInt(static_cast<int>(db::lastInsertId(c, aI(a, 0)))) }; } });
         t.push_back({ "db.lastError", "Database", false, {{"handle", P::Int}}, {{"error", P::String}},
             "HE::api::db::lastError",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(db::lastError(c, aI(a, 0))) }; } });

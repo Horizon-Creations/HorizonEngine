@@ -2275,6 +2275,18 @@ TEST_CASE("db: SQL can name files too, and ATTACH is where that is stopped")
     CHECK_FALSE(std::filesystem::exists(outside / "elsewhere.db"));
     CHECK_FALSE(HE::api::db::exec(c, h, "DETACH DATABASE other", ""));
 
+    // …and the SECOND door of the same kind, which is easy to miss because it
+    // does not have ATTACH in its name: `VACUUM INTO` writes a copy of the whole
+    // database to any path a string can spell.
+    CHECK_FALSE(HE::api::db::exec(
+        c, h, "VACUUM INTO '" + (outside / "vacuumed.db").string() + "'", ""));
+    CHECK_FALSE(std::filesystem::exists(outside / "vacuumed.db"));
+
+    // Two pragmas name directories rather than settings, and would move where
+    // SQLite writes its temporary files.
+    CHECK_FALSE(HE::api::db::exec(
+        c, h, "PRAGMA temp_store_directory = '" + outside.string() + "'", ""));
+
     // Ordinary SQL is untouched by the authorizer — a lock that also refused
     // CREATE TABLE would be a lock on the whole group.
     CHECK(HE::api::db::exec(c, h, "CREATE TABLE t(a INTEGER)", ""));

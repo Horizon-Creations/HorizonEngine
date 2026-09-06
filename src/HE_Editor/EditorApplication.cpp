@@ -6710,6 +6710,15 @@ void EditorApplication::setPlayMode(bool play)
 		// across PIE runs and even project switches); the play-mode gate closes.
 		HE::api::save::close();
 		HE::api::save::setPlayMode(false);
+		// …and the three other process-wide tables a play session can fill. They
+		// are statics in EngineApi, so without this every PIE run leaks: the
+		// timers of the last one keep counting, its file watches keep stat-ing,
+		// and after sixteen runs that opened a database `db.open` simply refuses
+		// until the editor is restarted. The packaged host does the same three
+		// at shutdown — a play session IS that host's whole life.
+		HE::api::timer::cancelAll();
+		HE::api::fs::clearWatches();
+		HE::api::db::closeAll();
 
 		// The entity host borrows the physics world and end() deliberately does
 		// not clear that pointer (the apps set it before begin()), so it is
