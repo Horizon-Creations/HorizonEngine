@@ -6,6 +6,7 @@
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
+#include "HorizonScene/CameraShake.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
@@ -206,11 +207,69 @@ namespace {
             }
         }
 
-        p.position     = camPos;
-        p.rotation     = lookRot;
-        p.eulerDegrees = { rig.pitch, rig.yaw, 0.0f };
+        // ── Shake ────────────────────────────────────────────────────────────
+        // AFTER the shortening, never before: a sweep run against a shaking
+        // camera position would land somewhere else every frame, and the
+        // shortened distance itself would jitter.
+        //
+        // The price is that in a shortened frame the shake can push the camera
+        // a little way into the surface the boom just stopped at. The sweep
+        // leaves exactly one radius of clearance in front of that surface, so
+        // the rule is: a shortened frame may spend that clearance and not a
+        // millimetre more. Rotational shake is unbounded — it does not move the
+        // camera.
+        const ShakeOffset shake = evaluateShakes(rig.shakes, dt);
+        glm::vec3 shakePos = shake.position;
+        if (p.occluded && rig.collisionRadius > 0.0f)
+        {
+            if (const float reach = glm::length(shakePos); reach > rig.collisionRadius)
+                shakePos *= rig.collisionRadius / reach;
+        }
+
+        // Camera space, so a shake reads the same whichever way the player is
+        // facing. Built on the unshaken basis on purpose — feeding the shaken
+        // rotation back into the offset would couple the two axes.
+        p.position = camPos + lookRot * shakePos;
+
+        // Shake goes on the ANGLES the rig holds, and the quaternion is rebuilt
+        // from them, so a blend slerps exactly what a non-blending frame writes.
+        // Roll (z) is otherwise always zero — this is the one thing that uses it.
+        p.eulerDegrees = glm::vec3(rig.pitch, rig.yaw, 0.0f) + shake.rotationDegrees;
+        p.rotation     = (shake.rotationDegrees == glm::vec3(0.0f))
+                       ? lookRot
+                       : glm::quat(glm::radians(p.eulerDegrees));
+
+        // ── FOV ──────────────────────────────────────────────────────────────
+        // Base plus kick. The base stays untouched in the component; the sum
+        // lands in CameraComponent::fovOffset, which nothing saves.
         if (const auto* cam = reg.try_get<CameraComponent>(cameraEntity))
-            p.fovDegrees = cam->fovDegrees;
+            p.fovDegrees = cam->fovDegrees + evaluateFovKick(rig.fovKick, dt);
+        p.valid = true;
+        return p;
+    }
+
+    // The world pose of a camera that has no rig of its own, frozen so a blend
+    // can start from it. Used for a source camera the rig cannot re-solve — a
+    // plain cutscene camera is the normal case.
+    SolvedPose snapshotCameraPose(entt::registry& reg, entt::entity e)
+    {
+        SolvedPose p;
+        if (const auto* t = reg.try_get<TransformComponent>(e))
+        {
+            const glm::mat4& m = t->worldMatrix;
+            p.position = glm::vec3(m[3]);
+
+            glm::mat3 basis(m);
+            for (int i = 0; i < 3; ++i)
+            {
+                const float len = glm::length(basis[i]);
+                if (len > 1e-6f) basis[i] /= len;
+            }
+            p.rotation     = glm::normalize(glm::quat_cast(basis));
+            p.eulerDegrees = glm::degrees(glm::eulerAngles(p.rotation));
+        }
+        if (const auto* cam = reg.try_get<CameraComponent>(e))
+            p.fovDegrees = cam->fovDegrees + cam->fovOffset;
         p.valid = true;
         return p;
     }
@@ -269,6 +328,14 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
         // And forget the lag pose, so the camera is placed at the target when
         // one turns up rather than sailing in from where the rig last stood.
         rig.hasLagState = false;
+
+        // A rig that stops driving hands the FOV back. Leaving the kick's
+        // offset standing would leave the camera permanently a few degrees
+        // wrong, with nothing left running to work that off.
+        if (auto* cam = reg.try_get<CameraComponent>(f.camera))
+            cam->fovOffset = 0.0f;
+        rig.blend          = {};
+        rig.hasLastWritten = false;
         return f;
     }
 
@@ -322,18 +389,108 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     // from where it WOULD BE. Every rig therefore keeps solving and keeps its
     // lag state moving; only the sweep and the world writes are the active
     // rig's alone.
+    // The source of a running blend gets the same treatment as the active rig:
+    // a live re-solve and a sweep of its own. That keeps the queries at two per
+    // frame however many cameras the scene carries.
+    const entt::entity blendSource =
+        (rig.isBlending() && !rig.blend.useFromPose) ? rig.blend.from : entt::null;
+
     SolvedPose active;
+    SolvedPose sourcePose;
     for (auto [e, t, cam, other] :
          reg.view<TransformComponent, CameraComponent, CameraRigComponent>().each())
     {
         const bool isActive = (e == f.camera);
+        const bool isSource = (e == blendSource);
         const entt::entity tgt =
             isActive ? f.target : resolveTarget(world, other, fallbackTarget);
-        const SolvedPose p =
-            solveRig(world, e, other, tgt, look.dt, isActive ? physics : nullptr);
-        if (isActive) active = p;
+        const SolvedPose p = solveRig(world, e, other, tgt, look.dt,
+                                      (isActive || isSource) ? physics : nullptr);
+        if (isActive) active     = p;
+        if (isSource) sourcePose = p;
+
+        if (!isActive)
+        {
+            // A rig that is not driving owns nothing on screen. It gives back
+            // the mesh it was hiding — a first-person rig that lost isMain used
+            // to leave its character invisible for good, which blendTo would
+            // otherwise do on purpose every time — and it gives back the FOV.
+            if (other.meshHiddenEntity != entt::null)
+            {
+                applyMeshVisibility(reg, other.meshHiddenEntity, false);
+                other.meshHiddenEntity = entt::null;
+            }
+            cam.fovOffset       = 0.0f;
+            other.hasLastWritten = false;
+        }
     }
     f.occluded = active.occluded;
+
+    // ── Blend ────────────────────────────────────────────────────────────────
+    // Between the solve and the write, so what lands in the transform is the
+    // interpolated pose and nothing downstream has to know a blend is running.
+    SolvedPose shown = active;
+    if (rig.isBlending())
+    {
+        SolvedPose from;
+        bool haveSource = false;
+        if (rig.blend.useFromPose)
+        {
+            from       = rig.blend.fromPose;
+            haveSource = true;
+        }
+        else if (sourcePose.valid)
+        {
+            from       = sourcePose;
+            haveSource = true;
+        }
+
+        if (!haveSource)
+        {
+            // The source camera was destroyed, or its own target went away.
+            // End it here and show the target pose. NOT "carry on from the last
+            // known source pose": that pose is a frame old and the world has
+            // moved on, so it would blend from somewhere nothing is.
+            rig.blend = {};
+        }
+        else
+        {
+            rig.blend.remaining = std::max(0.0f, rig.blend.remaining - look.dt);
+            const float raw = (rig.blend.duration > 0.0f)
+                            ? 1.0f - rig.blend.remaining / rig.blend.duration
+                            : 1.0f;
+            const float t   = applyBlendCurve(raw, rig.blend.curve);
+
+            // The ends are written verbatim rather than interpolated. slerp at
+            // a == 0 or 1 is the same pose only up to rounding, and "the blend
+            // is over" has to mean the target pose exactly.
+            if (rig.blend.remaining <= 0.0f || t >= 1.0f)
+            {
+                rig.blend = {};
+            }
+            else if (t <= 0.0f)
+            {
+                shown = from;
+            }
+            else
+            {
+                shown.position = glm::mix(from.position, active.position, t);
+                // Slerp, not a lerp of Euler angles: interpolating 170° to
+                // −170° as numbers takes the camera the long way round through
+                // a full turn instead of 20° across the seam.
+                shown.rotation     = glm::slerp(from.rotation, active.rotation, t);
+                shown.eulerDegrees = glm::degrees(glm::eulerAngles(shown.rotation));
+                shown.fovDegrees   = glm::mix(from.fovDegrees, active.fovDegrees, t);
+            }
+        }
+    }
+
+    // The one output the rig keeps: a COPY of what it is about to put on screen,
+    // in world space, so a second blendTo can start from the pose the player is
+    // actually looking at. Taken here, before the parent-space conversion — not
+    // read back out of the transform afterwards.
+    rig.lastWritten     = shown;
+    rig.hasLastWritten  = true;
 
     // Store it in the camera's parent space. Identity for a camera under the
     // world root, which is where cameras normally live.
@@ -341,20 +498,27 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     const glm::mat4 parentWorld = parentWorldMatrix(reg, f.camera);
     if (parentWorld == glm::mat4(1.0f))
     {
-        ct.position = active.position;
+        ct.position = shown.position;
         // The angles the rig holds, not a quaternion round trip — see
         // SolvedPose::eulerDegrees.
-        ct.rotation = active.eulerDegrees;
+        ct.rotation = shown.eulerDegrees;
     }
     else
     {
         const glm::mat4 desired =
-            glm::translate(glm::mat4(1.0f), active.position) * glm::mat4_cast(active.rotation);
+            glm::translate(glm::mat4(1.0f), shown.position) * glm::mat4_cast(shown.rotation);
         const glm::mat4 local   = glm::inverse(parentWorld) * desired;
         ct.position = glm::vec3(local[3]);
         ct.rotation = glm::degrees(glm::eulerAngles(glm::quat_cast(local)));
     }
     ct.dirty = true;
+
+    // The FOV as a DIFFERENCE against the value the author set, so fovDegrees is
+    // never written and the inspector keeps showing what it was given. With no
+    // kick and no blend this is x - x, which is exactly 0.0f — that is what
+    // makes "no rig effect" indistinguishable from "no rig".
+    if (auto* cam = reg.try_get<CameraComponent>(f.camera))
+        cam->fovOffset = shown.fovDegrees - cam->fovDegrees;
 
     const bool firstPerson = (rig.mode == CameraRigComponent::Mode::FirstPerson);
 
@@ -385,6 +549,79 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
 
     f.driven = true;
     return f;
+}
+
+bool CameraRigController::blendTo(HorizonWorld& world, entt::entity toCamera,
+                                  float seconds, BlendCurve curve)
+{
+    entt::registry& reg = world.registry();
+    if (toCamera == entt::null || !reg.valid(toCamera) ||
+        !reg.all_of<CameraComponent>(toCamera))
+        return false;
+
+    // Which camera the picture is coming FROM. Read before isMain is rewritten,
+    // because that is what decides it.
+    entt::entity from = entt::null;
+    for (auto [e, cam] : reg.view<CameraComponent>().each())
+    {
+        if (from == entt::null) from = e;
+        if (cam.isMain) { from = e; break; }
+    }
+
+    // The blend's precondition, not its decoration: exactly one isMain. See the
+    // note on the declaration.
+    for (auto [e, cam] : reg.view<CameraComponent>().each())
+        cam.isMain = (e == toCamera);
+
+    auto* rig = reg.try_get<CameraRigComponent>(toCamera);
+    if (!rig) return true;   // switched; a camera without a rig cannot blend
+
+    if (from == entt::null || from == toCamera || seconds <= 0.0f)
+    {
+        rig->blend = {};     // a cut, which is also what setting isMain by hand does
+        return true;
+    }
+
+    CameraRigComponent::Blend b;
+    b.duration  = seconds;
+    b.remaining = seconds;
+    b.curve     = curve;
+
+    // A blend started while one is already running begins at the pose currently
+    // on screen. That pose is an interpolation between two rigs, which is not
+    // something any entity holds — so it is frozen. The same applies to a source
+    // camera that has no rig of its own: there is nothing to re-solve, so its
+    // world pose is taken once, here.
+    const bool sourceIsLive = reg.all_of<CameraRigComponent>(from);
+    if (rig->isBlending() && rig->hasLastWritten)
+    {
+        b.useFromPose = true;
+        b.fromPose    = rig->lastWritten;
+    }
+    else if (!sourceIsLive)
+    {
+        // World matrices first — a camera's worldMatrix is whatever the last
+        // propagate left there, and for a cutscene camera that was parented or
+        // moved this frame that is not where it is.
+        HE::propagateTransforms(world);
+        b.useFromPose = true;
+        b.fromPose    = snapshotCameraPose(reg, from);
+    }
+    else
+    {
+        b.from = from;
+    }
+
+    rig->blend = b;
+    return true;
+}
+
+bool CameraRigController::isBlending(entt::registry& reg)
+{
+    const entt::entity cam = findRigCamera(reg);
+    if (cam == entt::null) return false;
+    const auto* rig = reg.try_get<CameraRigComponent>(cam);
+    return rig && rig->isBlending();
 }
 
 } // namespace HE

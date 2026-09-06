@@ -2,7 +2,8 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <Application/Input.h>   // MouseFrame — embedded in CameraLookInput
+#include <Application/Input.h>          // MouseFrame — embedded in CameraLookInput
+#include <HorizonScene/CameraPose.h>    // SolvedPose, BlendCurve
 
 class HorizonWorld;
 class PhysicsWorld;
@@ -25,36 +26,6 @@ class PhysicsWorld;
 // already consumes it. The two are independent, so both can exist.
 // The delta is a DISPLACEMENT: never scale it by delta time.
 namespace HE {
-
-// What a rig worked out for this frame — an intermediate VALUE, never state.
-//
-// The rig solves into one of these and only then writes the camera's transform,
-// because lag, shake and blending all need the pose before it lands: a blend
-// interpolates against the source rig's pose, and a shake is an additive offset
-// that would accumulate into infinity if it were written and read back.
-//
-// ── The law ──────────────────────────────────────────────────────────────────
-// The camera's TransformComponent is pure OUTPUT. The rig never reads it back.
-// Everything the rig carries across frames lives in CameraRigComponent — so a
-// gizmo drag, a script's setPosition or an undo snapshot cannot become rig
-// state.
-struct SolvedPose
-{
-    glm::vec3 position{ 0.0f };
-    glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f };
-
-    // The same rotation as the angles the rig actually holds, carried alongside
-    // the quaternion rather than recovered from it. glm::eulerAngles picks an
-    // equivalent-but-different triple (yaw −179° comes back as +181° with pitch
-    // and roll flipped by 180°), and the camera's rotation is authored data that
-    // the inspector shows — it has to survive as the numbers the rig set.
-    // Blending slerps `rotation`; a rig that is not blending writes these.
-    glm::vec3 eulerDegrees{ 0.0f };
-
-    float     fovDegrees = 0.0f;     // the camera's base FOV (plus kick, later)
-    bool      occluded   = false;    // the boom was shortened by geometry
-    bool      valid      = false;    // the rig had a target and could be solved
-};
 
 // What one update() did, for callers that want to log or gate on it.
 struct CameraRigFrame
@@ -120,6 +91,29 @@ public:
     // The camera this controller drives: an entity with both CameraComponent and
     // CameraRigComponent, preferring isMain. entt::null when there is none.
     static entt::entity findRigCamera(entt::registry& reg);
+
+    // ── Switching cameras, with a blend ──────────────────────────────────────
+    // Hand the view to `toCamera` over `seconds`. This is the ONLY way a blend
+    // starts: setting isMain by hand stays a hard cut, the way it always was.
+    // Detecting the switch instead would need a "which camera was main last
+    // frame" somewhere, and this controller is deliberately stateless.
+    //
+    // It also carries a duty that is not decoration: it clears isMain on EVERY
+    // other camera. Uniqueness of isMain has so far been a convention, and both
+    // findRigCamera and RenderExtractor take the FIRST isMain they meet in
+    // entt view order — an order that shifts as pools grow. Two main cameras
+    // during a blend means the picture flicking between two poses in
+    // irregular frames, so this is the precondition for blending being
+    // reproducible at all, not a nicety.
+    //
+    // Returns false only when `toCamera` is not a usable camera entity.
+    // `seconds <= 0`, no source, or blending to the camera that is already
+    // showing are all cuts, and all return true.
+    static bool blendTo(HorizonWorld& world, entt::entity toCamera, float seconds,
+                        BlendCurve curve = BlendCurve::SmoothStep);
+
+    // Is the camera currently on screen easing in from another one?
+    static bool isBlending(entt::registry& reg);
 };
 
 } // namespace HE

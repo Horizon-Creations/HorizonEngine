@@ -1,7 +1,11 @@
 #pragma once
 #include <Types/UUID.h>
+#include <HorizonScene/CameraPose.h>
+#include <HorizonScene/CameraShake.h>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
+#include <algorithm>
+#include <array>
 
 // ── Camera rig ───────────────────────────────────────────────────────────────
 // Puts a camera on a target entity: first person (in its head) or third person
@@ -141,6 +145,112 @@ struct CameraRigComponent {
     // For teleports, respawns and cuts, where the script knows before the rig
     // could possibly tell.
     void snap() { hasLagState = false; }
+
+    // ── Camera shake — runtime, NOT serialised ───────────────────────────────
+    // A shake is an additive pose offset with an envelope, and it belongs to
+    // this play session only. A half-decayed shake saved into a scene by a PIE
+    // stop snapshot would be authored content from then on.
+    //
+    // Fixed capacity so the component stays copyable and allocation-free. A
+    // ninth shake replaces the one with the least energy left in it, which for
+    // an endless shake is never — those only go away when someone stops them.
+    std::array<HE::ShakeInstance, HE::kMaxCameraShakes> shakes{};
+
+    // Handles are dealt out from here. 0 is reserved: it is what a free slot
+    // carries, so it can never be a valid handle.
+    uint32_t nextShakeId = 1;
+
+    // Start a shake and return its handle. `s.elapsed` and `s.id` are the rig's
+    // to fill in; everything else is the caller's description of the shake.
+    uint32_t playShake(HE::ShakeInstance s)
+    {
+        s.elapsed = 0.0f;
+        s.id      = nextShakeId++;
+        if (nextShakeId == 0) nextShakeId = 1;
+        // A caller who did not pick a seed gets one from the handle, so two
+        // shakes fired in the same frame do not move in lockstep.
+        if (s.seed == 0) s.seed = s.id * 2654435761u + 1u;
+
+        HE::ShakeInstance* slot = nullptr;
+        for (auto& e : shakes)
+            if (e.id == 0) { slot = &e; break; }
+
+        if (!slot)
+        {
+            slot = &shakes[0];
+            float least = HE::shakeRemainingEnergy(shakes[0]);
+            for (auto& e : shakes)
+            {
+                const float energy = HE::shakeRemainingEnergy(e);
+                if (energy < least) { least = energy; slot = &e; }
+            }
+        }
+
+        *slot = s;
+        return s.id;
+    }
+
+    // Stop one shake. An unknown or already-finished handle is a no-op, which is
+    // what a script holding a handle across a level load needs it to be.
+    void stopShake(uint32_t handle)
+    {
+        if (handle == 0) return;
+        for (auto& e : shakes)
+            if (e.id == handle) e = HE::ShakeInstance{};
+    }
+
+    void stopAllShakes()
+    {
+        for (auto& e : shakes) e = HE::ShakeInstance{};
+    }
+
+    // ── FOV kick — runtime, NOT serialised ───────────────────────────────────
+    // CameraComponent::fovDegrees stays the value the author set; the kick lands
+    // in CameraComponent::fovOffset, which nothing saves. One slot, because
+    // several kicks at once add up to nonsense.
+    HE::FovKick fovKick;
+
+    void kickFov(float degrees, float attack, float hold, float decay)
+    {
+        fovKick           = HE::FovKick{};
+        fovKick.amplitude = degrees;
+        fovKick.attack    = std::max(0.0f, attack);
+        fovKick.hold      = std::max(0.0f, hold);
+        fovKick.decay     = std::max(0.0f, decay);
+        fovKick.active    = true;
+    }
+
+    // ── Blending — runtime, NOT serialised ───────────────────────────────────
+    // Lives on the INCOMING rig: it is the one that is driving, and the one that
+    // has to know where it is coming from.
+    struct Blend {
+        // The source camera, re-solved every frame so the blend goes from where
+        // the old camera WOULD BE, not from where it stood when the switch
+        // happened. entt::null with `useFromPose` set means the source is not an
+        // entity at all — see below.
+        entt::entity   from      = entt::null;
+
+        // A blend started while another was running has to begin at the pose
+        // currently on screen, and that pose is an interpolation between two
+        // rigs — not something any entity holds. So it is frozen here. Same for
+        // a source camera that carries no rig of its own.
+        bool           useFromPose = false;
+        HE::SolvedPose fromPose{};
+
+        float          remaining = 0.0f;   // s
+        float          duration  = 0.0f;   // s; 0 = not blending
+        HE::BlendCurve curve     = HE::BlendCurve::SmoothStep;
+    };
+    Blend blend;
+
+    bool isBlending() const { return blend.duration > 0.0f && blend.remaining > 0.0f; }
+
+    // The pose this rig last put on screen, in WORLD space — the only output the
+    // rig keeps, and deliberately a copy taken before the transform write rather
+    // than a read-back of the transform. It is what a second blendTo starts
+    // from.
+    HE::SolvedPose lastWritten{};
+    bool           hasLastWritten = false;
 
     // Runtime only, not serialised: WHICH entity the rig is currently holding
     // hidden, entt::null for none. Two things depend on it being an entity
