@@ -1152,10 +1152,18 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Rotation coupling. Free lets the character turn on its own; Follow
 			// makes it face where the camera looks, which is what allows strafing
 			// and backing up.
-			static const char* kTargetYaw[] = { "Free", "Follow Camera" };
+			static const char* kTargetYaw[] = { "Free", "Follow Camera", "Follow Smoothed" };
 			int yawMode = static_cast<int>(rig->targetYaw);
-			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 2))
+			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 3))
 			{ rig->targetYaw = static_cast<CameraRigComponent::TargetYaw>(yawMode); trackEdit(); }
+			// Only Follow Smoothed reads it: Free leaves the target's rotation
+			// alone and Follow sets it outright, so showing the rate there would
+			// be a knob that does nothing.
+			if (rig->targetYaw == CameraRigComponent::TargetYaw::FollowSmoothed)
+			{
+				Row::dragFloat("Turn Rate", &rig->targetTurnRate, 5.0f, 0.0f, 3600.0f, "%.0f \xc2\xb0/s");
+				trackEdit();
+			}
 
 			Row::dragFloat("Sensitivity", &rig->sensitivity, 0.005f, 0.005f, 2.0f, "%.3f"); trackEdit();
 			// Separate knob on purpose: mouse is degrees per PIXEL, the stick

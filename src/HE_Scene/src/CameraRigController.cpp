@@ -376,6 +376,26 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
         tt.rotation.y = rig.yaw;
         tt.dirty      = true;
     }
+    else if (rig.targetYaw == CameraRigComponent::TargetYaw::FollowSmoothed)
+    {
+        // Turn TOWARDS the camera's yaw at a rate instead of setting it. Two
+        // things this is not: it is not the lag smoother (an exponential
+        // approach never quite arrives, and a character that is permanently a
+        // fraction of a degree off looks like a bug at a wall), and it is not a
+        // second smoothed state (rig.yaw stays the raw input — the player aims
+        // with it, the body follows).
+        //
+        // No snap case: a rig that jumps somewhere brings the target with it,
+        // and the target's own yaw is where the author or the movement code
+        // last put it. There is nothing here that could have gone stale.
+        auto& tt = reg.get<TransformComponent>(f.target);
+        // Short way round: 179° to -179° is two degrees, not 358.
+        const float delta = std::remainder(rig.yaw - tt.rotation.y, 360.0f);
+        const float step  = std::max(0.0f, rig.targetTurnRate) * look.dt;
+        // Clamped, so it converges exactly and never swings past.
+        tt.rotation.y += std::clamp(delta, -step, step);
+        tt.dirty       = true;
+    }
 
     // World matrices, so the target's world position is THIS frame's no matter
     // where in the frame the caller sits. Idempotent — the extractor propagating

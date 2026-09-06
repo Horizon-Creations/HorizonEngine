@@ -1078,8 +1078,13 @@ float getArmLength(Ctx& c)
 void setTargetYawMode(Ctx& c, int mode)
 {
     if (auto* r = rigOf(c))
+    {
+        // Anything outside the enum lands on Follow, the way it did when Follow
+        // was the only thing "not 0" could mean.
         r->targetYaw = (mode == 0) ? CameraRigComponent::TargetYaw::Free
+                     : (mode == 2) ? CameraRigComponent::TargetYaw::FollowSmoothed
                                    : CameraRigComponent::TargetYaw::Follow;
+    }
 }
 int getTargetYawMode(Ctx& c)
 {

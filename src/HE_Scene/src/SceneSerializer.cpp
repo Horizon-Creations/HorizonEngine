@@ -281,6 +281,7 @@ namespace
 				{ "pitchMin",       rig->pitchMin },
 				{ "pitchMax",       rig->pitchMax },
 				{ "targetYaw",       static_cast<uint8_t>(rig->targetYaw) },
+				{ "targetTurnRate",  rig->targetTurnRate },
 				{ "hideTargetMesh",  rig->hideTargetMesh },
 				{ "collision",       rig->collision },
 				{ "collisionRadius", rig->collisionRadius },
@@ -833,6 +834,7 @@ namespace
 			rig.pitchMax       = c.value("pitchMax",       rig.pitchMax);
 			rig.targetYaw      = static_cast<CameraRigComponent::TargetYaw>(
 			                         c.value("targetYaw", static_cast<uint8_t>(rig.targetYaw)));
+			rig.targetTurnRate = c.value("targetTurnRate", rig.targetTurnRate);
 			rig.hideTargetMesh  = c.value("hideTargetMesh",  rig.hideTargetMesh);
 			rig.collision       = c.value("collision",       rig.collision);
 			rig.collisionRadius = c.value("collisionRadius", rig.collisionRadius);

@@ -38,9 +38,18 @@ struct CameraRigComponent {
     // faces where the camera looks. That is what makes strafing and walking
     // backwards possible, and it is the normal case for first person, which is
     // why this is not a third-person-only switch.
+    //
+    // FollowSmoothed: the same coupling, but the target turns TOWARDS the
+    // camera's yaw at targetTurnRate instead of being set to it. A body that
+    // snaps around with the mouse reads as weightless; one that swings after it
+    // reads as a body. Not the default, because it puts the character's facing
+    // and the player's aim a few degrees apart, and a shooter wants them equal.
+    //
+    // Appended, never reordered: the serializer stores this as a uint8_t.
     enum class TargetYaw {
         Free,
         Follow,
+        FollowSmoothed,
     };
 
     Mode      mode = Mode::ThirdPerson;
@@ -79,6 +88,13 @@ struct CameraRigComponent {
     float pitchMax    =  75.0f;
 
     TargetYaw targetYaw = TargetYaw::Free;
+
+    // Degrees per second the target turns towards the camera's yaw, and read by
+    // FollowSmoothed alone — Free does not touch the target's rotation and
+    // Follow sets it outright. A rate, so the turn takes the same time at any
+    // frame rate; the step is clamped to it, never overshoots, and takes the
+    // short way round ±180.
+    float targetTurnRate = 720.0f;   // degrees/second
 
     // Third person only. Sweep a sphere from the pivot out to where the camera
     // wants to be and stop it at the first solid thing, so the boom does not put

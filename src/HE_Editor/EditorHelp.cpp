@@ -393,7 +393,13 @@ namespace
 	{ "Camera Rig/Target Rotation", "",
 	  "Free lets the character face where it walks while the camera looks "
 	  "elsewhere. Follow turns the character with the camera, which is what makes "
-	  "strafing and walking backwards work.",
+	  "strafing and walking backwards work. Follow Smoothed does the same but "
+	  "swings the body after the camera instead of snapping it around.",
+	  "", "rendering#cameras" },
+	{ "Camera Rig/Turn Rate", "",
+	  "Follow Smoothed only: how fast the character turns towards the camera, in "
+	  "degrees per second. Low values let the body trail the view visibly; high "
+	  "ones are indistinguishable from plain Follow.",
 	  "", "rendering#cameras" },
 	{ "Camera Rig/Sensitivity", "",
 	  "Mouse look, in degrees per pixel of motion.",

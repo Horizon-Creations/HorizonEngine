@@ -567,10 +567,11 @@ namespace
 	{ "camera.setTargetYawMode",
 	  "Free (0) lets the character face where it walks while the camera looks "
 	  "elsewhere. Follow (1) turns the character with the camera, which is what "
-	  "makes strafing and walking backwards work." },
+	  "makes strafing and walking backwards work. Follow Smoothed (2) does the "
+	  "same, but swings the body after the camera at the rig's turn rate." },
 	{ "camera.getTargetYawMode",
 	  "0 Free (the character faces where it walks), 1 Follow (it turns with the "
-	  "camera)." },
+	  "camera), 2 Follow Smoothed (it swings after the camera)." },
 	{ "camera.getRigYaw",
 	  "Which way the rig is looking, in degrees." },
 	{ "camera.getRigPitch",

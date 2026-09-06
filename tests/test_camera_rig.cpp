@@ -239,6 +239,64 @@ TEST_CASE("CameraRig: Follow writes yaw only, never pitch or roll")
     CHECK(r->tgtXform().rotation.z == -12.25f);
 }
 
+TEST_CASE("CameraRig: Follow Smoothed swings the target after the camera at its rate")
+{
+    auto r = makeRig();
+    r->rig().targetYaw      = CameraRigComponent::TargetYaw::FollowSmoothed;
+    r->rig().targetTurnRate = 90.0f;          // 9 degrees per 0.1 s frame
+    r->rig().yaw            = 90.0f;
+    r->tgtXform().rotation  = { 4.5f, 0.0f, -7.25f };
+
+    // dt has to be real: the MouseFrame overload sets look.dt = 0, and a rate
+    // times zero is a test that measures nothing.
+    HE::CameraLookInput look; look.dt = 0.1f;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(9.0f));
+
+    // The camera's own yaw is the raw input and is never smoothed with it.
+    CHECK(r->rig().yaw == doctest::Approx(90.0f));
+    // One float, still: pitch and roll survive byte for byte.
+    CHECK(r->tgtXform().rotation.x == 4.5f);
+    CHECK(r->tgtXform().rotation.z == -7.25f);
+
+    // It arrives exactly and stops there — a clamped step converges, where an
+    // exponential approach would leave the body a fraction of a degree short
+    // for good.
+    for (int i = 0; i < 20; ++i) HE::CameraRigController::update(r->world, look);
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(90.0f));
+}
+
+TEST_CASE("CameraRig: Follow Smoothed crosses ±180 the short way")
+{
+    auto r = makeRig();
+    r->rig().targetYaw      = CameraRigComponent::TargetYaw::FollowSmoothed;
+    r->rig().targetTurnRate = 10.0f;          // 1 degree per frame: it cannot arrive
+    r->rig().yaw            = -179.0f;
+    r->tgtXform().rotation  = { 0.0f, 179.0f, 0.0f };
+
+    HE::CameraLookInput look; look.dt = 0.1f;
+    HE::CameraRigController::update(r->world, look);
+
+    // Two degrees apart across the seam, not 358: it goes up past 180, not the
+    // long way down through zero.
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(180.0f));
+}
+
+TEST_CASE("CameraRig: Follow Smoothed at a high rate is Follow")
+{
+    // The knob's own upper end: fast enough to cover any gap in one frame is
+    // the hard coupling, which is what makes it a knob and not a mode switch.
+    auto r = makeRig();
+    r->rig().targetYaw      = CameraRigComponent::TargetYaw::FollowSmoothed;
+    r->rig().targetTurnRate = 3600.0f;
+    r->rig().yaw            = 30.0f;
+
+    HE::CameraLookInput look; look.dt = 1.0f / 60.0f;
+    HE::CameraRigController::update(r->world, look);
+
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(30.0f));
+}
+
 // ─── Target resolution ────────────────────────────────────────────────────────
 
 TEST_CASE("CameraRig: an empty target id falls back to the possessed player")
