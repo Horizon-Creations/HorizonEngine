@@ -179,6 +179,25 @@ static constexpr MTLPixelFormat kSceneColorFormat = MTLPixelFormatRGBA16Float; /
 static constexpr MTLPixelFormat kGBuf0Format    = MTLPixelFormatRGBA8Unorm_sRGB;
 static constexpr MTLPixelFormat kGBufAttrFormat = MTLPixelFormatRGBA16Float;
 
+// GPU instancing (A3 contract, docs/gpu-instancing-cross-backend-plan.md §3):
+// the same capacity and the same 128-byte {mvp, model} stride D3D11/D3D12/Vulkan
+// use, so the layout is one decision rather than four.
+static constexpr uint32_t k_maxInstances = 65536; // per-batch instance ceiling
+static constexpr size_t   k_instStride   = 128;   // bytes per instance = 2 × float4x4
+
+// HE_MTL_INSTANCING=0 forces every batch back onto the per-instance loop. The
+// fallback is the pre-A3 code path unchanged, so this is the A/B that answers
+// "does the instanced draw put the pixels where the loop did?" — the one
+// question a screenshot alone cannot settle. Read once.
+static bool metalInstancingEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_MTL_INSTANCING");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
 static const char* kUnlitMSL = R"MSL(
@@ -300,6 +319,43 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
 	out.position   = u.mvp * float4(float3(verts[vid].position), 1.0);
 	out.worldPos   = world.xyz;
 	float3x3 m3    = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+	out.normal     = m3 * float3(verts[vid].normal);
+	out.uv         = float2(verts[vid].uv);
+	out.color      = u.color.rgb;
+	out.hasTexture = u.flags.x;
+	out.metallic   = u.pbr.x;
+	out.roughness  = u.pbr.y;
+	out.opacity    = u.pbr.z;
+	out.noShadow   = u.flags.y;
+	return out;
+}
+
+// GPU instancing (docs/gpu-instancing-cross-backend-plan.md §4): one transform
+// pair per instance in a device array at buffer 5, indexed by [[instance_id]].
+// 128 bytes per instance, {mvp, model}, column-major — byte-identical to the
+// D3D11/D3D12/Vulkan instance stride (k_instStride), so the layout is one
+// contract across all four backends.
+struct InstXform {
+	float4x4 mvp;
+	float4x4 model;
+};
+
+// vertexMain with the two per-object matrices taken from the instance array
+// instead of Uniforms. Everything else — color, flags, pbr — stays in `u`,
+// because GeometryPass only batches draws over which those are constant.
+// VSOut is unchanged, so fragmentMain and gbufferMain are reused as they are.
+vertex VSOut vertexMainInstanced(uint vid [[vertex_id]],
+                                 uint iid [[instance_id]],
+                                 const device VertexIn*  verts [[buffer(0)]],
+                                 constant Uniforms&      u     [[buffer(1)]],
+                                 const device InstXform* inst  [[buffer(5)]])
+{
+	VSOut out;
+	float4x4 model = inst[iid].model;
+	float4 world   = model * float4(float3(verts[vid].position), 1.0);
+	out.position   = inst[iid].mvp * float4(float3(verts[vid].position), 1.0);
+	out.worldPos   = world.xyz;
+	float3x3 m3    = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
 	out.normal     = m3 * float3(verts[vid].normal);
 	out.uv         = float2(verts[vid].uv);
 	out.color      = u.color.rgb;
@@ -5649,6 +5705,9 @@ void MetalRenderer::Shutdown()
 	DestroyHDRTarget();
 	DestroyGBufferTargets();
 	if (m_gbufferPipeline)             { CFBridgingRelease(m_gbufferPipeline);             m_gbufferPipeline = nullptr; }
+	// Dropped with its twin: EnsureDeferredPipelines keys "already built" off
+	// m_gbufferPipeline, so a surviving instanced PSO would be a stale descriptor.
+	if (m_gbufferInstancedPipeline)    { CFBridgingRelease(m_gbufferInstancedPipeline);    m_gbufferInstancedPipeline = nullptr; }
 	if (m_deferredResolvePipeline)     { CFBridgingRelease(m_deferredResolvePipeline);     m_deferredResolvePipeline = nullptr; }
 	if (m_deferredResolveTilePipeline) { CFBridgingRelease(m_deferredResolveTilePipeline); m_deferredResolveTilePipeline = nullptr; }
 	if (m_decalPipeline) { CFBridgingRelease(m_decalPipeline); m_decalPipeline = nullptr; }
@@ -5755,6 +5814,7 @@ void MetalRenderer::Shutdown()
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
 	if (m_scenePipeline)        { CFBridgingRelease(m_scenePipeline);        m_scenePipeline = nullptr; }
+	if (m_sceneInstancedPipeline) { CFBridgingRelease(m_sceneInstancedPipeline); m_sceneInstancedPipeline = nullptr; }
 	if (m_sceneBlendPipeline)   { CFBridgingRelease(m_sceneBlendPipeline);   m_sceneBlendPipeline = nullptr; }
 	if (m_skinnedPipeline)      { CFBridgingRelease(m_skinnedPipeline);      m_skinnedPipeline = nullptr; }
 	if (m_particleSimPipeline)  { CFBridgingRelease(m_particleSimPipeline);  m_particleSimPipeline = nullptr; }
@@ -5904,6 +5964,23 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: pipeline creation failed: ")
 				+ (error ? [[error localizedDescription] UTF8String] : "unknown"));
 		m_scenePipeline = (void*)CFBridgingRetain(pso);
+
+		// GPU-instanced variant: identical target/depth formats, only the vertex
+		// function differs. Not fatal if it fails — instanced batches then simply
+		// keep taking the per-instance loop.
+		desc.vertexFunction = [lib newFunctionWithName:@"vertexMainInstanced"];
+		NSError* iErr = nil;
+		id<MTLRenderPipelineState> instPso =
+			[device newRenderPipelineStateWithDescriptor:desc error:&iErr];
+		if (instPso) m_sceneInstancedPipeline = (void*)CFBridgingRetain(instPso);
+		else
+			HE_LOG_WARN(RHI, "%s",
+				(std::string("MetalRenderer: instanced scene pipeline build failed — "
+				             "batches stay on the per-instance loop: ")
+				 + (iErr ? iErr.localizedDescription.UTF8String : "?")).c_str());
+		// Back to vertexMain BEFORE the blend PSO: the descriptor is reused, and
+		// the transparency pass binds nothing at vertex buffer 5.
+		desc.vertexFunction = [lib newFunctionWithName:@"vertexMain"];
 
 		// Alpha-blended variant of the scene pipeline for the transparency pass
 		// (same shaders, src-alpha / one-minus-src-alpha over the HDR target).
@@ -9734,6 +9811,20 @@ bool MetalRenderer::EnsureDeferredPipelines()
 			desc.depthAttachmentPixelFormat      = kDepthFormat;
 			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
 			if (pso) m_gbufferPipeline = (void*)CFBridgingRetain(pso);
+
+			// GPU-instanced twin, built from the SAME descriptor — so the tile
+			// mode's fifth attachment above is carried over rather than
+			// duplicated, and Metal accepts the bind inside the running encoder.
+			desc.vertexFunction = [lib newFunctionWithName:@"vertexMainInstanced"];
+			NSError* iErr = nil;
+			id<MTLRenderPipelineState> instPso =
+				[device newRenderPipelineStateWithDescriptor:desc error:&iErr];
+			if (instPso) m_gbufferInstancedPipeline = (void*)CFBridgingRetain(instPso);
+			else
+				HE_LOG_WARN(RHI, "%s",
+					(std::string("MetalRenderer: instanced G-buffer pipeline build failed — "
+					             "batches stay on the per-instance loop: ")
+					 + (iErr ? iErr.localizedDescription.UTF8String : "?")).c_str());
 		}
 
 		// Fullscreen lighting resolve: cross-compiled from the SAME lighting
@@ -11968,7 +12059,63 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			};
-			if (dc.instanceTransforms.empty())
+			// A3 on Metal (plan §4): one draw for the whole batch, every instance's
+			// {mvp, model} in a device array at vertex buffer 5. `fits` is decided
+			// once per DrawCall because every input to it is constant over the batch —
+			// that is exactly the condition under which GeometryPass batched at all.
+			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
+			const size_t instCount = dc.instanceTransforms.size();
+			const bool fits = instCount > 0
+			               && metalInstancingEnabled()
+			               && m_sceneInstancedPipeline
+			               && instCount <= k_maxInstances
+			               // Only built-in PBR is instanced. A node-graph material has
+			               // its own pipeline and its own vertex stage; instancing it
+			               // would silently swap the look (the GL path's open bug,
+			               // plan §2/§6.4). Optics before draw-call savings.
+			               && cMaterialPipeline == nullptr
+			               && dc.paramOverride.empty()
+			               // Translucent batches must reach the sorted back-to-front
+			               // replay the loop feeds — the instanced draw cannot sort.
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (fits)
+			{
+				if (m_sceneInstancedPipeline != boundPipeline)
+				{
+					[encoder setRenderPipelineState:
+						(__bridge id<MTLRenderPipelineState>)m_sceneInstancedPipeline];
+					boundPipeline = m_sceneInstancedPipeline;
+				}
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				// Fresh buffer per batch, same convention as the particle path: the
+				// encoder holds every bound resource until its command buffer
+				// completes, so there is nothing to hand-synchronise. A per-frame ring
+				// would need frame-in-flight tracking this backend does not have.
+				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
+					length:xf.size() * sizeof(glm::mat4)
+					options:MTLResourceStorageModeShared];
+				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
+				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setFragmentTexture:texture atIndex:0];
+				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                    indexCount:indexCount
+				                     indexType:MTLIndexTypeUInt32
+				                   indexBuffer:indexBuf
+				             indexBufferOffset:0
+				                 instanceCount:(NSUInteger)instCount];
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
+				                 * static_cast<uint32_t>(instCount);
+			}
+			else if (dc.instanceTransforms.empty())
 				drawInstance(dc.transform);
 			else
 				for (const glm::mat4& t : dc.instanceTransforms)
@@ -13757,7 +13904,54 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			};
-			if (dc.instanceTransforms.empty())
+			// The forward pass's twin (plan §4), with one criterion of its own:
+			// cMaterialCustom. A custom material without a G-buffer variant leaves
+			// this loop as a forwardOpaque re-route, which an instanced draw has no
+			// way to perform — and one WITH a variant carries its own vertex stage.
+			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
+			const size_t instCount = dc.instanceTransforms.size();
+			const bool fits = instCount > 0
+			               && metalInstancingEnabled()
+			               && m_gbufferInstancedPipeline
+			               && instCount <= k_maxInstances
+			               && !cMaterialCustom
+			               && cMaterialPipelineGB == nullptr
+			               && dc.paramOverride.empty()
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (fits)
+			{
+				if (m_gbufferInstancedPipeline != boundPipeline)
+				{
+					[encoder setRenderPipelineState:
+						(__bridge id<MTLRenderPipelineState>)m_gbufferInstancedPipeline];
+					boundPipeline = m_gbufferInstancedPipeline;
+				}
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
+					length:xf.size() * sizeof(glm::mat4)
+					options:MTLResourceStorageModeShared];
+				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
+				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
+				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setFragmentTexture:texture atIndex:0];
+				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                    indexCount:indexCount
+				                     indexType:MTLIndexTypeUInt32
+				                   indexBuffer:indexBuf
+				             indexBufferOffset:0
+				                 instanceCount:(NSUInteger)instCount];
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
+				                 * static_cast<uint32_t>(instCount);
+			}
+			else if (dc.instanceTransforms.empty())
 				drawInstance(dc.transform);
 			else
 				for (const glm::mat4& t : dc.instanceTransforms)
