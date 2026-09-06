@@ -204,6 +204,10 @@ private:
 	void* m_gbDepthLin = nullptr;
 	int   m_gbW = 0, m_gbH = 0;
 	void* m_gbufferPipeline        = nullptr; // id<MTLRenderPipelineState> — built-in PBR G-buffer
+	// GPU-instanced twin of m_gbufferPipeline: same descriptor (tile attachment 4
+	// included), vertexMainInstanced instead of vertexMain. Optional — a null here
+	// only sends instanced batches back through the per-instance loop.
+	void* m_gbufferInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_deferredResolvePipeline = nullptr; // id<MTLRenderPipelineState> — fullscreen heLitP resolve
 	// Tile-memory single pass (plan P6, Apple Silicon): the G-buffer attachments
 	// are MTLStorageModeMemoryless and the resolve runs INSIDE the G-buffer pass
@@ -515,6 +519,10 @@ private:
 
 	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>
+	// GPU-instanced twin of m_scenePipeline (vertexMainInstanced + fragmentMain,
+	// same HDR target). Built alongside it; null only if that build failed, in
+	// which case instanced batches fall back to the per-instance loop.
+	void* m_sceneInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_sceneBlendPipeline   = nullptr; // id<MTLRenderPipelineState> (alpha-blended transparency)
 	void* m_skinnedPipeline      = nullptr; // id<MTLRenderPipelineState> (LBS skinning vertex shader)
 	void* m_sceneDepthState = nullptr; // id<MTLDepthStencilState> (test+write)
