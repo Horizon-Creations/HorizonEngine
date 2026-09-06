@@ -702,6 +702,96 @@ TEST_CASE("Every standard node cross-compiles with all inputs wired")
 	}
 }
 
+TEST_CASE("Decal shaders cross-compile for every backend")
+{
+	// docs/decals-cross-backend-plan.md §7 gate 2. The vertex stage is backend-
+	// agnostic; the SAMPLED fragment is what the GL/Vulkan/D3D ports use, so it
+	// has to survive all four emitters. The framebuffer-fetch fragment is Metal-
+	// only by construction (subpassInput → [[color(3)]]).
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& v = lib.decalVertex(b);
+		CHECK_MESSAGE(v.ok, "decal vertex failed for backend ", (int)b, ": ", v.log);
+		const auto& f = lib.decalFragmentSampled(b);
+		CHECK_MESSAGE(f.ok, "sampled decal fragment failed for backend ", (int)b, ": ", f.log);
+		// The forward variant is what Vulkan/D3D11/D3D12 draw with; it carries
+		// ddx/ddy and faceforward, which not every emitter spells the same way.
+		const auto& fw = lib.decalFragmentForward(b);
+		CHECK_MESSAGE(fw.ok, "forward decal fragment failed for backend ", (int)b, ": ", fw.log);
+	}
+	const auto& fetch = lib.decalFragment(B::Metal);
+	CHECK_MESSAGE(fetch.ok, fetch.log);
+
+	// The cache key must separate the fragment variants (it used to be
+	// backend*2 + stage, which collided the moment a second fragment appeared).
+	CHECK(&lib.decalFragment(B::Metal) != &lib.decalFragmentSampled(B::Metal));
+	CHECK(lib.decalFragment(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+	CHECK(lib.decalFragmentForward(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+
+	// The forward variant must contain NO discard: its normal comes from
+	// derivatives, which are undefined in non-uniform control flow. Coverage is
+	// folded into the alpha instead. Checked on the GLSL emitter, which keeps
+	// the keyword verbatim.
+	const std::string fwGlsl = lib.decalFragmentForward(B::GLSL410).source;
+	CHECK(fwGlsl.find("discard") == std::string::npos);
+	CHECK(lib.decalFragmentSampled(B::GLSL410).source.find("discard") != std::string::npos);
+
+	// Both stages declare the SAME HeDecal block — a member mismatch is a LINK
+	// error on GL, which no test without a context can catch. Compare the block
+	// text the emitter produced for each stage.
+	auto block = [](const std::string& src) -> std::string {
+		const size_t b = src.find("HeDecal");
+		if (b == std::string::npos) return {};
+		const size_t e = src.find('}', b);
+		if (e == std::string::npos) return {};
+		return src.substr(b, e - b);
+	};
+	const std::string vBlock = block(lib.decalVertex(B::GLSL410).source);
+	CHECK_FALSE(vBlock.empty());
+	CHECK(vBlock == block(lib.decalFragmentSampled(B::GLSL410).source));
+	CHECK(vBlock == block(fwGlsl));
+}
+
+TEST_CASE("Decal HLSL registers stay inside D3D11's bindable range")
+{
+	// docs/decals-cross-backend-plan.md §6b. SPIRV-Cross turns layout(binding = N)
+	// into register(bN/tN/sN) one-for-one, and the canonical decal bindings are
+	// 19/22/23 — past D3D11's hard limits of 14 constant-buffer and 16 sampler
+	// slots per stage. A shader emitted that way cannot be bound at all, and no
+	// D3D11 header exists on the build machine to catch it, so the pins are
+	// checked here on the emitted text. This is the ONLY automatic net under the
+	// D3D11 decal pass; the numbers are the contract D3D12 inherits.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string vs = lib.decalVertex(B::HLSL).source;
+	CHECK(vs.find("register(b13)") != std::string::npos);
+	CHECK(vs.find("register(b23)") == std::string::npos);
+	CHECK(vs.find("SV_VertexID")   != std::string::npos); // bufferless cube, no VB
+
+	for (const std::string& ps : { lib.decalFragmentSampled(B::HLSL).source,
+	                               lib.decalFragmentForward(B::HLSL).source })
+	{
+		CHECK(ps.find("register(b13)") != std::string::npos); // HeDecal
+		CHECK(ps.find("register(t14)") != std::string::npos); // heDecalTex
+		CHECK(ps.find("register(s14)") != std::string::npos);
+		CHECK(ps.find("register(t15)") != std::string::npos); // heGBDepth
+		CHECK(ps.find("register(s15)") != std::string::npos);
+		// The canonical numbers must be gone, not merely joined by the pinned ones.
+		CHECK(ps.find("register(b23)") == std::string::npos);
+		CHECK(ps.find("register(s19)") == std::string::npos);
+		CHECK(ps.find("register(s22)") == std::string::npos);
+	}
+
+	// Pinning must not change what the shader computes: the GLSL emitter is the
+	// unpinned reference, and both still carry the same box clip and the same
+	// coverage rule.
+	CHECK(lib.decalFragmentForward(B::HLSL).source.find("discard") == std::string::npos);
+	CHECK(lib.decalFragmentSampled(B::HLSL).source.find("discard") != std::string::npos);
+}
+
 TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;

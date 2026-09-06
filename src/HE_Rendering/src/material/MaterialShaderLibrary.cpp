@@ -1724,6 +1724,10 @@ layout(std140, set = 0, binding = 23) uniform HeDecal {
     vec4 color;
     vec4 params;
     vec4 vp;
+    vec4 sunDir;
+    vec4 sunColor;
+    vec4 ambient;
+    vec4 camPos;
 } heDecal;
 void main() {
     // 36-vertex unit cube [-0.5, 0.5]³ as a triangle list from gl_VertexIndex.
@@ -1737,23 +1741,43 @@ void main() {
 }
 )";
 
-constexpr const char* kDecalFS = R"(#version 450
+// The fragment exists in three variants. Two of them differ in ONE thing: where
+// the scene depth comes from — Metal's tile mode framebuffer-fetches it out of
+// G-buffer attachment 3; every other backend (and Metal's two-pass fallback)
+// samples the stored depth texture. The third is the FORWARD variant for the
+// backends without a G-buffer (Vulkan, D3D11, D3D12): same projection and box
+// clip, but the result is shaded on the spot and blended into the lit colour
+// target instead of into a base-colour attachment. All three are generated from
+// this one template rather than kept as constants that drift apart.
+constexpr const char* kDecalFSHead = R"(#version 450
 layout(location = 0) out vec4 oGB0; // alpha-blended, writeMask RGB (metallic in .a stays)
-layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;
-layout(set = 0, binding = 19) uniform sampler2D heDecalTex;
+)";
+constexpr const char* kDecalDepthFetchDecl =
+    "layout(input_attachment_index = 3, set = 0, binding = 22) uniform subpassInput heGBDepth;\n";
+constexpr const char* kDecalDepthSampledDecl =
+    "layout(set = 0, binding = 22) uniform sampler2D heGBDepth;\n";
+// `uv` is computed BEFORE the depth read (the sampled variant needs it as the
+// coordinate; the fetch variant does not care, and it depends only on
+// gl_FragCoord and the UBO, so hoisting it changes nothing semantically).
+constexpr const char* kDecalFSBodyPre = R"(layout(set = 0, binding = 19) uniform sampler2D heDecalTex;
 layout(std140, set = 0, binding = 23) uniform HeDecal {
     mat4 viewProj;
     mat4 model;
     mat4 invModel;
     mat4 invViewProj;
-    vec4 color;   // rgba tint
-    vec4 params;  // x hasTexture, y ndc-y sign, z depth scale, w depth bias
-    vec4 vp;      // xy viewport
+    vec4 color;    // rgba tint
+    vec4 params;   // x hasTexture, y ndc-y sign, z depth scale, w depth bias
+    vec4 vp;       // xy viewport
+    vec4 sunDir;   // xyz direction TO the sun — forward variant only
+    vec4 sunColor; // rgb sun radiance  — forward variant only
+    vec4 ambient;  // rgb ambient       — forward variant only
+    vec4 camPos;   // xyz camera position — forward variant only
 } heDecal;
 void main() {
-    float d = subpassLoad(heGBDepth).r;
-    if (d >= 1.0) discard;                       // background
     vec2 uv = gl_FragCoord.xy / max(heDecal.vp.xy, vec2(1.0));
+    float d = )";
+constexpr const char* kDecalFSBodyPost = R"(;
+    if (d >= 1.0) discard;                       // background
     vec4 clip = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * heDecal.params.y,
                      d * heDecal.params.z + heDecal.params.w, 1.0);
     vec4 wp = heDecal.invViewProj * clip;
@@ -1767,17 +1791,91 @@ void main() {
     oGB0 = c;
 }
 )";
+
+// The forward tail for the backends with no G-buffer. Same reconstruction and
+// the same box, but the pixel is shaded here and blended into the LIT colour
+// target — so it carries its own, much smaller lighting: one directional term
+// plus ambient. No shadows, no point/spot lights, no GI on the decal; that is
+// the documented optical deviation (docs/decals-cross-backend-plan.md §6).
+//
+// Two things it does differently, both forced by the derivatives: the surface
+// normal comes from ddx/ddy of the reconstructed world position, and those are
+// undefined in non-uniform control flow. So this variant has NO discard at all —
+// background and the outside of the box fold into the alpha, and with a
+// SrcAlpha/OneMinusSrcAlpha blend an alpha of 0 leaves the target untouched.
+constexpr const char* kDecalFSForwardPost = R"(;
+    vec4 clip = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * heDecal.params.y,
+                     d * heDecal.params.z + heDecal.params.w, 1.0);
+    vec4 wp = heDecal.invViewProj * clip;
+    vec3 P  = wp.xyz / max(wp.w, 1e-8);
+    vec3 lp = (heDecal.invModel * vec4(P, 1.0)).xyz;
+    vec4 c = heDecal.color;
+    if (heDecal.params.x > 0.5)
+        c *= texture(heDecalTex, lp.xz + 0.5);   // projected along the box's local Y
+    // Geometric normal of whatever surface the decal landed on. A degenerate
+    // cross product (flat depth) would make this NaN, and NaN survives the
+    // alpha multiply below — hence the explicit fallback instead of normalize().
+    vec3 nr = cross(dFdx(P), dFdy(P));
+    float nl = length(nr);
+    vec3 N  = nl > 1e-12 ? nr / nl : vec3(0.0, 1.0, 0.0);
+    N = faceforward(N, P - heDecal.camPos.xyz, N); // toward the viewer
+    vec3 L = heDecal.sunDir.xyz;
+    float ll = length(L);
+    float ndl = ll > 1e-6 ? max(dot(N, L / ll), 0.0) : 0.0; // no sun → ambient only
+    vec3 lit = c.rgb * (heDecal.ambient.rgb + heDecal.sunColor.rgb * ndl);
+    // Coverage as a factor, never as control flow: background (d >= 1) and
+    // everything outside the projector box multiply the alpha to zero.
+    float inside = (d < 1.0 && all(lessThanEqual(abs(lp), vec3(0.5)))) ? 1.0 : 0.0;
+    oGB0 = vec4(lit, c.a * inside);
+}
+)";
+
+// sampled=false → the Metal tile-mode framebuffer-fetch variant (kDecalFS),
+// sampled=true  → the portable variant that reads a depth TEXTURE.
+// forward=true  → sampled depth AND the self-shading tail above.
+// D3D11 caps a stage at 14 constant-buffer and 16 sampler slots, so the decal
+// shader's canonical bindings (HeDecal 23, heDecalTex 19, heGBDepth 22) cannot
+// become register(b23)/register(s19)/register(s22) — the API could never bind
+// them. These pins move them to the top of the legal range, where the scene path
+// (b0/b1/b3/b8/b9, t0..t7, s0..s7) has nothing, so the decal pass clobbers no
+// binding it would have to restore. D3D12 has no such limit but uses the same
+// numbers, so the two D3D backends share one contract
+// (docs/decals-cross-backend-plan.md §6b).
+constexpr uint32_t kDecalHlslUboReg   = 13; // HeDecal    (binding 23) → b13
+constexpr uint32_t kDecalHlslTexReg   = 14; // heDecalTex (binding 19) → t14/s14
+constexpr uint32_t kDecalHlslDepthReg = 15; // heGBDepth  (binding 22) → t15/s15
+
+// The fragment stage's three resources, for both sampled variants.
+std::vector<he::shaderc::HlslPin> kDecalHlslPins()
+{
+    using he::shaderc::Stage;
+    return { { Stage::Fragment, 0, 23, kDecalHlslUboReg },
+             { Stage::Fragment, 0, 19, kDecalHlslTexReg },
+             { Stage::Fragment, 0, 22, kDecalHlslDepthReg } };
+}
+
+std::string makeDecalFS(bool sampled, bool forward = false)
+{
+    return std::string(kDecalFSHead)
+         + (sampled ? kDecalDepthSampledDecl : kDecalDepthFetchDecl)
+         + kDecalFSBodyPre
+         + (sampled ? "texture(heGBDepth, uv).r" : "subpassLoad(heGBDepth).r")
+         + (forward ? kDecalFSForwardPost : kDecalFSBodyPost);
+}
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2;
+    const int key = static_cast<int>(backend) * 4 + 0;
     if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
     using namespace he::shaderc;
     Compiled out;
     if (backend == Backend::Metal)
         out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
             { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
+    else if (backend == Backend::HLSL)
+        out = toCompiled(compileHlslPinned(kDecalVS, Stage::Vertex,
+            { { Stage::Vertex, 0, 23, kDecalHlslUboReg } })); // HeDecal → b13
     else
         out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
     return m_decalCache.emplace(key, std::move(out)).first->second;
@@ -1785,7 +1883,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backen
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 1;
+    const int key = static_cast<int>(backend) * 4 + 1;
     if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
     using namespace he::shaderc;
     Compiled out;
@@ -1793,12 +1891,58 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Back
     {
         MslOptions opts;
         opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
-        out = toCompiled(compileMslPinned(kDecalFS, Stage::Fragment,
+        out = toCompiled(compileMslPinned(makeDecalFS(/*sampled=*/false), Stage::Fragment,
             { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
               { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
             opts));
     }
-    // Non-Metal backends have no framebuffer-fetch decal path in v1.
+    // Non-Metal backends have no framebuffer-fetch decal path — they use
+    // decalFragmentSampled() instead.
+    return m_decalCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentSampled(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 2;
+    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
+    using namespace he::shaderc;
+    const std::string src = makeDecalFS(/*sampled=*/true);
+    Compiled out;
+    if (backend == Backend::Metal)
+        // Metal's TWO-PASS fallback has no tile storage to fetch from: the depth
+        // is a stored texture like everywhere else. Pinned so a hand-written
+        // pipeline can bind it (UBO → buffer 0, decal tex → 0, depth → 1).
+        out = toCompiled(compileMslPinned(src, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+              { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
+              { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
+    else if (backend == Backend::HLSL)
+        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
+    else
+        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
+    return m_decalCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentForward(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 3;
+    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
+    using namespace he::shaderc;
+    const std::string src = makeDecalFS(/*sampled=*/true, /*forward=*/true);
+    Compiled out;
+    if (backend == Backend::Metal)
+        // Metal never uses this variant in the engine (it has a G-buffer), but it
+        // is cross-compiled anyway so the shared tail cannot rot unnoticed.
+        out = toCompiled(compileMslPinned(src, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },
+              { Stage::Fragment, 0, 19, 0 },
+              { Stage::Fragment, 0, 22, 1 } }));
+    else if (backend == Backend::HLSL)
+        // The variant D3D11 and D3D12 actually draw with — pinned into their
+        // bindable register range (see kDecalHlslPins).
+        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
+    else
+        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     return m_decalCache.emplace(key, std::move(out)).first->second;
 }
 

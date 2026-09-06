@@ -1194,7 +1194,7 @@ struct D3D12RendererImpl
         dd.Height           = h;
         dd.DepthOrArraySize = 1;
         dd.MipLevels        = 1;
-        dd.Format           = DXGI_FORMAT_D32_FLOAT;
+        dd.Format           = DXGI_FORMAT_R32_TYPELESS; // C2, as in createDepth
         dd.SampleDesc.Count = 1;
         dd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         D3D12_CLEAR_VALUE dcv{};
@@ -1206,8 +1206,15 @@ struct D3D12RendererImpl
         dsvHd.NumDescriptors = 1;
         dsvHd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         device->CreateDescriptorHeap(&dsvHd, IID_PPV_ARGS(&viewportDsvHeap));
-        device->CreateDepthStencilView(viewportDepth.Get(), nullptr,
-            viewportDsvHeap->GetCPUDescriptorHandleForHeapStart());
+        {
+            D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+            dvd.Format        = DXGI_FORMAT_D32_FLOAT;
+            dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            device->CreateDepthStencilView(viewportDepth.Get(), &dvd,
+                viewportDsvHeap->GetCPUDescriptorHandleForHeapStart());
+        }
+        // The decal pass's second depth source (viewport + viewport-HDR paths).
+        if (sceneSrvHeap) createDepthSrv(viewportDepth.Get(), k_decalViewportDepthSlot);
 
         // Readback buffer for CaptureViewport (row-aligned width × height × 4 bytes)
         UINT rowPitch    = alignUp(w * 4u, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
@@ -1980,6 +1987,35 @@ struct D3D12RendererImpl
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                const std::string& vertBody, bool hdr, bool transparent);
 
+    // ── Screen-space decals (forward) ───────────────────────────────────────
+    // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
+    // not composited into a base-colour attachment like on Metal/GL — it samples
+    // the scene depth (C2 made it readable), rebuilds the world position, clips it
+    // against the projector box and blends the SELF-SHADED result into the already
+    // lit colour target. Registers are the contract D3D11 established and the
+    // shader library pins for Backend::HLSL:
+    //   b13 HeDecal (VS+PS) | t14/s14 heDecalTex | t15/s15 heGBDepth
+    ComPtr<ID3D12RootSignature>  decalRootSig;
+    ComPtr<ID3D12PipelineState>  decalLdrPso;   // RGBA8 target  (swapchain / viewport)
+    ComPtr<ID3D12PipelineState>  decalHdrPso;   // RGBA16F target (viewport HDR)
+    ComPtr<ID3D12Resource>       decalCBRing[k_frameCount];  uint8_t* decalCBPtr[k_frameCount]{};
+    // textureId → (uploaded texture, sceneSrvHeap slot). Cached even when the
+    // upload failed (slot -1) so a broken decal texture is not retried per frame.
+    // NOT hot-reloaded, exactly like Vulkan/D3D11: InvalidateMaterial carries
+    // material uuids, DecalData::textureId is a TEXTURE uuid.
+    std::unordered_map<HE::UUID, std::pair<ComPtr<ID3D12Resource>, int>> decalTexCache;
+    bool                         decalReady    = false;
+    bool                         decalFailed   = false;
+    static constexpr UINT        k_maxDecals   = 256; // ring slots per frame — unlike D3D11
+                                                      // (Map/WRITE_DISCARD) this is a fixed
+                                                      // upload ring, so it needs a cap
+    static constexpr UINT        k_decalCBSlot = 512; // 256-B aligned stride (DecalUniforms = 368 B)
+
+    bool EnsureDecalPipeline();
+    int  resolveDecalTexture(ID3D12GraphicsCommandList* cl, const HE::UUID& textureId, ContentManager* cm);
+    void EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::mat4& viewProj,
+                      int width, int height, ContentManager* cm);
+
     GpuMesh cube;
 
     // ── Sky pipeline ─────────────────────────────────────────────────────────
@@ -2149,6 +2185,13 @@ struct D3D12RendererImpl
     static constexpr UINT k_sceneStaticSrvs = 8;   // slots [0..7] above (7 = per-pixel local-light mask, t7)
     static constexpr UINT k_albedoNullSlot  = 3;   // t1 fallback for untextured draws
     static constexpr UINT k_maxMeshTextures = 1024;
+    // Decal region, APPENDED after the mesh textures so the static region's slot
+    // numbers (and every [0..7] comment above) stay exactly where they were. Two
+    // depth SRVs, one per depth resource the scene can be drawing into; the decal
+    // pass binds one of them at t15 and a mesh-region slot at t14.
+    static constexpr UINT k_decalSceneDepthSlot    = k_sceneStaticSrvs + k_maxMeshTextures;     // swapchain depth
+    static constexpr UINT k_decalViewportDepthSlot = k_sceneStaticSrvs + k_maxMeshTextures + 1; // viewport depth
+    static constexpr UINT k_sceneSrvHeapSize       = k_sceneStaticSrvs + k_maxMeshTextures + 2;
     ComPtr<ID3D12DescriptorHeap> sceneSrvHeap;    // CBV_SRV_UAV shader-visible
     UINT                         sceneSrvDescSize = 0;
     UINT                         meshTexNextSlot  = k_sceneStaticSrvs; // running allocator
@@ -2187,6 +2230,20 @@ struct D3D12RendererImpl
         D3D12_GPU_DESCRIPTOR_HANDLE h = sceneSrvHeap->GetGPUDescriptorHandleForHeapStart();
         h.ptr += static_cast<UINT64>(slot) * sceneSrvDescSize;
         return h;
+    }
+
+    // An R32_FLOAT view over an R32_TYPELESS depth resource, into a decal heap slot.
+    // `res == nullptr` writes a null view — the descriptor still has to be valid,
+    // because the decal root signature's table covers it unconditionally.
+    void createDepthSrv(ID3D12Resource* res, UINT slot)
+    {
+        if (!sceneSrvHeap) return;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = DXGI_FORMAT_R32_FLOAT; // depth in .r, already 0..1
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(res, &sv, sceneSrvCpu(slot));
     }
 
     // Resolve a mesh/skeletal asset's baked base-color texture (material → textureIds[0]),
@@ -2530,6 +2587,13 @@ struct D3D12RendererImpl
         return res;
     }
 
+    // Checkpoint C2 of docs/decals-cross-backend-plan.md: the scene depth has to be
+    // readable as a texture, not just writable as a depth target — the screen-space
+    // decal pass reconstructs world positions from it. A DEPTH format carries no SRV,
+    // so the resource is R32_TYPELESS and the two views name the concrete formats
+    // (D32_FLOAT for the DSV, R32_FLOAT for the SRV). The shadow map three lines down
+    // has done exactly this all along; precision is unchanged, only reachable from a
+    // pixel shader now.
     void createDepth(int w, int h)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -2545,13 +2609,23 @@ struct D3D12RendererImpl
         rd.Height           = static_cast<UINT>(h);
         rd.DepthOrArraySize = 1;
         rd.MipLevels        = 1;
-        rd.Format           = DXGI_FORMAT_D32_FLOAT;
+        rd.Format           = DXGI_FORMAT_R32_TYPELESS; // C2: DSV *and* SRV
         rd.SampleDesc.Count = 1;
         rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
         device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&depthBuffer));
-        device->CreateDepthStencilView(depthBuffer.Get(), nullptr, dsvHandle(0));
+        // A typeless resource REJECTS a null view desc — the DSV desc is explicit now.
+        {
+            D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+            dvd.Format        = DXGI_FORMAT_D32_FLOAT;
+            dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            device->CreateDepthStencilView(depthBuffer.Get(), &dvd, dsvHandle(0));
+        }
+        // The matching SRV, in the decal region of sceneSrvHeap. createDepth() runs
+        // BEFORE createPipeline() builds that heap on first init (same ordering the
+        // shadow map's slot 0 has), so the heap fill there writes it a second time.
+        if (sceneSrvHeap) createDepthSrv(depthBuffer.Get(), k_decalSceneDepthSlot);
 
         // ── Shadow depth (R32_TYPELESS so it's both a DSV and an SRV) ────────
         D3D12_RESOURCE_DESC sr = rd;
@@ -2908,7 +2982,7 @@ struct D3D12RendererImpl
         {
             sceneSrvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             D3D12_DESCRIPTOR_HEAP_DESC hd{};
-            hd.NumDescriptors = k_sceneStaticSrvs + k_maxMeshTextures; // static slots + per-mesh albedo region
+            hd.NumDescriptors = k_sceneSrvHeapSize; // static slots + per-mesh albedo region + 2 decal-depth slots
             hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&sceneSrvHeap))))
@@ -2957,6 +3031,11 @@ struct D3D12RendererImpl
             giNull(5, DXGI_FORMAT_R16G16B16A16_FLOAT); // DDGI irradiance
             giNull(6, DXGI_FORMAT_R16G16_FLOAT);       // DDGI visibility
             giNull(7, DXGI_FORMAT_R16G16B16A16_FLOAT); // per-pixel local-light mask
+            // Decal region: the two scene-depth SRVs (t15 of the decal pass).
+            // createDepth() already ran and could not fill its slot (no heap yet);
+            // createViewportRT() may run later and fills its own then.
+            createDepthSrv(depthBuffer.Get(),   k_decalSceneDepthSlot);
+            createDepthSrv(viewportDepth.Get(), k_decalViewportDepthSlot);
         }
 
         UINT flags = 0;
@@ -5845,6 +5924,329 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
 #endif
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Screen-space decals (Checkpoint G of docs/decals-cross-backend-plan.md)
+// ─────────────────────────────────────────────────────────────────────────────
+// Built once, lazily, like GL's EnsureDecalProgram / Vulkan's EnsureDecalPipelines
+// / D3D11's EnsureDecalPipeline: a project without a single DecalComponent never
+// pays for it, and a failure is remembered so the frame loop does not retry a
+// D3DCompile per frame.
+bool D3D12RendererImpl::EnsureDecalPipeline()
+{
+#if !defined(HE_HAVE_SHADERC)
+    return false;
+#else
+    if (decalReady)  return true;
+    if (decalFailed) return false;
+    decalFailed = true; // cleared only on full success below
+    if (!sceneSrvHeap) return false;
+
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.decalVertex(Backend::HLSL);
+    // The FORWARD variant, not the sampled one: with no G-buffer the decal has to
+    // bring its own lighting (one directional + ambient, no shadows, no point
+    // lights). That is the documented optical deviation of the three forward
+    // backends — docs/decals-cross-backend-plan.md §6.
+    const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.decalFragmentForward(Backend::HLSL);
+    if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: decal shader cross-compile failed");
+        return false;
+    }
+
+    // Root signature: root CBV b13 (both stages) + two single-descriptor SRV tables
+    // (t14 decal texture, t15 scene depth) + two static samplers. Both tables index
+    // into sceneSrvHeap, which the geometry pass already has bound — the decal
+    // texture lives in its mesh-texture region, the depth in the two appended slots.
+    {
+        D3D12_ROOT_PARAMETER params[3]{};
+        params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[0].Descriptor       = { 13, 0 }; // b13 HeDecal, VS *and* PS
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+        D3D12_DESCRIPTOR_RANGE texRange{};
+        texRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        texRange.NumDescriptors                    = 1;
+        texRange.BaseShaderRegister                = 14; // t14 heDecalTex
+        texRange.OffsetInDescriptorsFromTableStart = 0;
+        params[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable.NumDescriptorRanges = 1;
+        params[1].DescriptorTable.pDescriptorRanges   = &texRange;
+        params[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_DESCRIPTOR_RANGE depthRange{};
+        depthRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        depthRange.NumDescriptors                    = 1;
+        depthRange.BaseShaderRegister                = 15; // t15 heGBDepth
+        depthRange.OffsetInDescriptorsFromTableStart = 0;
+        params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[2].DescriptorTable.NumDescriptorRanges = 1;
+        params[2].DescriptorTable.pDescriptorRanges   = &depthRange;
+        params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        // s14 linear-wrap (the projected texture tiles like any albedo), s15
+        // point-clamp (uv = SV_Position.xy / viewport is texel-exact, and
+        // filtering a depth format is not guaranteed by the hardware).
+        D3D12_STATIC_SAMPLER_DESC samp[2]{};
+        samp[0].Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samp[0].AddressU = samp[0].AddressV = samp[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samp[0].ShaderRegister   = 14;
+        samp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samp[0].MaxLOD           = D3D12_FLOAT32_MAX;
+        samp[1].Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        samp[1].AddressU = samp[1].AddressV = samp[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samp[1].ShaderRegister   = 15;
+        samp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samp[1].MaxLOD           = D3D12_FLOAT32_MAX;
+
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters     = 3;
+        rsd.pParameters       = params;
+        rsd.NumStaticSamplers = 2;
+        rsd.pStaticSamplers   = samp;
+        // No input-assembler flag: the cube is buffer-less, built from SV_VertexID.
+        rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+            FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                   IID_PPV_ARGS(&decalRootSig))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: decal root signature failed");
+            decalRootSig.Reset();
+            return false;
+        }
+    }
+
+    UINT cflags = 0;
+#ifdef _DEBUG
+    cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    // SPIRV-Cross emits the GLSL-sourced entry point as `main`.
+    ComPtr<ID3DBlob> vsb, psb, cerr;
+    if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
+                          "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
+    {
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: decal VS compile failed: ")
+            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
+                          "main", "ps_5_0", cflags, 0, &psb, &cerr)))
+    {
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: decal PS compile failed: ")
+            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+
+    // Two PSOs, one per colour-target format the scene can be drawing into —
+    // swapchain and viewport RT are both RGBA8, the viewport HDR RT is RGBA16F.
+    // DSVFormat stays UNKNOWN and DepthEnable FALSE: the pass runs with the depth
+    // target UNBOUND (it is being read as a texture), and the box-space clip
+    // decides coverage, not the z-test.
+    auto buildPso = [&](bool hdr, ComPtr<ID3D12PipelineState>& out) -> bool
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature        = decalRootSig.Get();
+        pd.VS                    = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
+        pd.PS                    = { psb->GetBufferPointer(), psb->GetBufferSize() };
+        pd.InputLayout           = { nullptr, 0 }; // buffer-less 36-vertex cube
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets      = 1;
+        pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+        pd.DSVFormat             = DXGI_FORMAT_UNKNOWN;
+        pd.SampleDesc.Count      = 1;
+        pd.SampleMask            = UINT_MAX;
+        // FRONT faces culled so the projector still draws with the camera inside the
+        // box. FrontCounterClockwise stays FALSE: D3D's window origin is top left
+        // like Metal's, so its clockwise-is-front default picks the same triangles
+        // GL picks with GL_CCW (plan §3 A5 / §6a / §6b).
+        pd.RasterizerState.FillMode              = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode              = D3D12_CULL_MODE_FRONT;
+        pd.RasterizerState.FrontCounterClockwise = FALSE;
+        pd.RasterizerState.DepthClipEnable       = TRUE;
+        pd.DepthStencilState.DepthEnable   = FALSE;
+        pd.DepthStencilState.StencilEnable = FALSE;
+        auto& rt = pd.BlendState.RenderTarget[0];
+        rt.BlendEnable    = TRUE;
+        rt.SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+        rt.DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp        = D3D12_BLEND_OP_ADD;
+        rt.SrcBlendAlpha  = D3D12_BLEND_ONE;
+        rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+        rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+        // RGB, NOT ALL: in the editor viewport the target's alpha is what ImGui
+        // composites with — same reason Vulkan and D3D11 mask it.
+        rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED
+                                 | D3D12_COLOR_WRITE_ENABLE_GREEN
+                                 | D3D12_COLOR_WRITE_ENABLE_BLUE;
+        return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+    };
+    if (!buildPso(false, decalLdrPso) || !buildPso(true, decalHdrPso))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: decal PSO creation failed");
+        decalLdrPso.Reset(); decalHdrPso.Reset(); decalRootSig.Reset();
+        return false;
+    }
+
+    // Per-frame constant ring: one 512-B slot per decal, k_maxDecals per frame in
+    // flight. The GPU reads the mapped memory at execute time, so a slot may not be
+    // reused within a frame — which is exactly what the cap bounds.
+    for (UINT f = 0; f < k_frameCount; ++f)
+    {
+        decalCBRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxDecals) * k_decalCBSlot,
+                                            reinterpret_cast<void**>(&decalCBPtr[f]));
+        if (!decalCBRing[f] || !decalCBPtr[f])
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: decal constant ring allocation failed");
+            return false;
+        }
+    }
+
+    decalFailed = false;
+    decalReady  = true;
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: screen-space decal pipeline created");
+    return true;
+#endif
+}
+
+// DecalData::textureId is a TEXTURE uuid, not a material uuid, so the albedo /
+// override caches cannot serve it. Returns the sceneSrvHeap slot the texture's SRV
+// sits in, or -1 for "untextured" (the shader's hasTexture flag stays 0 and the
+// null-albedo fallback slot is bound so the table never points at nothing).
+int D3D12RendererImpl::resolveDecalTexture(ID3D12GraphicsCommandList* cl,
+                                           const HE::UUID& textureId, ContentManager* cm)
+{
+    if (textureId == HE::UUID{} || !cl || !cm) return -1;
+    if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
+        return it->second.second;
+    ComPtr<ID3D12Resource> tex;
+    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex);
+    // Cached even on failure (slot -1, null resource): no per-frame retry.
+    decalTexCache.emplace(textureId, std::make_pair(std::move(tex), slot));
+    return slot;
+}
+
+// Draw every decal of the frame into the currently bound colour target, between the
+// opaque and the transparent geometry — the same slot at which Metal and GL put
+// theirs into the G-buffer.
+//
+// THE ORDER BELOW IS THE WHOLE PASS. A resource cannot be a bound depth-stencil view
+// and a pixel-shader resource at the same time, so: unbind the DSV, THEN transition
+// the depth to PIXEL_SHADER_RESOURCE, draw, transition it back, and only then rebind
+// it. D3D12 says so out loud (the barrier is explicit and the debug layer errors);
+// D3D11 dropped one of the two bindings silently, which is why the same order is
+// written down in both backends.
+void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::mat4& viewProj,
+                                     int width, int height, ContentManager* cm)
+{
+#if !defined(HE_HAVE_SHADERC)
+    (void)cl; (void)viewProj; (void)width; (void)height; (void)cm;
+#else
+    if (m_renderWorld.decals.empty() || !cl) return;
+    if (!EnsureDecalPipeline()) return;
+
+    // D3D12 command lists have no OMGetRenderTargets, so the active target is
+    // rebuilt from the same three-way the SSAO/GI restore blocks use — that branch
+    // is the single source of truth for "what DrawScene is drawing into".
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv{}, dsv{};
+    ID3D12Resource*             depthRes = nullptr;
+    UINT                        depthSlot = 0;
+    bool                        hdr = false;
+    if (usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)
+    {
+        rtv = hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        depthRes = viewportDepth.Get(); depthSlot = k_decalViewportDepthSlot; hdr = true;
+    }
+    else if (viewportRtvHeap && viewportDsvHeap && viewportDepth)
+    {
+        rtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        depthRes = viewportDepth.Get(); depthSlot = k_decalViewportDepthSlot;
+    }
+    else if (dsvHeap && depthBuffer)
+    {
+        rtv = rtvHandle(frameIndex);
+        dsv = dsvHandle(0);
+        depthRes = depthBuffer.Get(); depthSlot = k_decalSceneDepthSlot;
+    }
+    else return; // no depth to project onto
+
+    const glm::mat4 invViewProj = glm::inverse(viewProj);
+    // The forward variant shades itself, from the same source the material
+    // HeLighting fill uses: the DOMINANT directional light, not the sky sun.
+    glm::vec3 sunDir(0.0f), sunColor(0.0f);
+    m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+
+    cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);        // release the depth FIRST
+    barrier12(cl, depthRes, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);  // then make it readable
+
+    ID3D12DescriptorHeap* heaps[] = { sceneSrvHeap.Get() };
+    cl->SetDescriptorHeaps(1, heaps);
+    cl->SetGraphicsRootSignature(decalRootSig.Get());
+    cl->SetPipelineState(hdr ? decalHdrPso.Get() : decalLdrPso.Get());
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // No vertex/index buffer is unbound here on purpose: the PSO carries an EMPTY
+    // input layout, so whatever the geometry pass left bound is ignored. (D3D11
+    // had to null them — there the input layout is separate state that the runtime
+    // validates against the bound buffers.)
+    cl->SetGraphicsRootDescriptorTable(2, sceneSrvGpu(depthSlot)); // t15 heGBDepth
+
+    const UINT64 ringBase = decalCBRing[frameIndex]->GetGPUVirtualAddress();
+    uint8_t*     ringPtr  = decalCBPtr[frameIndex];
+    UINT         decalIdx = 0;
+    for (const DecalData& dcl : m_renderWorld.decals)
+    {
+        if (decalIdx >= k_maxDecals) break; // ring exhausted — the rest of the frame's decals drop
+        HE::MaterialShaderLibrary::DecalUniforms du;
+        const glm::mat4 invModel = glm::inverse(dcl.transform);
+        std::memcpy(du.viewProj,    &viewProj[0][0],      16 * sizeof(float));
+        std::memcpy(du.model,       &dcl.transform[0][0], 16 * sizeof(float));
+        std::memcpy(du.invModel,    &invModel[0][0],      16 * sizeof(float));
+        std::memcpy(du.invViewProj, &invViewProj[0][0],   16 * sizeof(float));
+        du.color[0] = dcl.color.r; du.color[1] = dcl.color.g;
+        du.color[2] = dcl.color.b; du.color[3] = dcl.color.a;
+        const int texSlot = resolveDecalTexture(cl, dcl.textureId, cm);
+        du.params[0] = texSlot >= 0 ? 1.0f : 0.0f;
+        // D3D conventions, identical to Metal's and D3D11's: SV_Position.y counts
+        // from the TOP while NDC y points UP, so uv.y = 0 maps to clip.y = +1 →
+        // sign -1; depth is already 0..1 in both the texture and NDC → scale 1,
+        // bias 0. (Vulkan: +1/1/0. GL: +1/2/-1.)
+        du.params[1] = -1.0f;
+        du.params[2] =  1.0f;
+        du.params[3] =  0.0f;
+        du.vp[0] = static_cast<float>(width);
+        du.vp[1] = static_cast<float>(height);
+        du.sunDir[0]   = sunDir.x;   du.sunDir[1]   = sunDir.y;   du.sunDir[2]   = sunDir.z;
+        du.sunColor[0] = sunColor.r; du.sunColor[1] = sunColor.g; du.sunColor[2] = sunColor.b;
+        du.ambient[0]  = m_renderWorld.ambient.r;
+        du.ambient[1]  = m_renderWorld.ambient.g;
+        du.ambient[2]  = m_renderWorld.ambient.b;
+        du.camPos[0]   = m_renderWorld.camera.position.x;
+        du.camPos[1]   = m_renderWorld.camera.position.y;
+        du.camPos[2]   = m_renderWorld.camera.position.z;
+        std::memcpy(ringPtr + static_cast<size_t>(decalIdx) * k_decalCBSlot, &du, sizeof(du));
+        cl->SetGraphicsRootConstantBufferView(0,
+            ringBase + static_cast<UINT64>(decalIdx) * k_decalCBSlot); // b13, VS + PS
+
+        // The shader references heDecalTex unconditionally, so an untextured decal
+        // still needs a valid descriptor — the null-albedo fallback slot, which the
+        // hasTexture flag then makes a no-op.
+        cl->SetGraphicsRootDescriptorTable(1,
+            sceneSrvGpu(texSlot >= 0 ? static_cast<UINT>(texSlot) : k_albedoNullSlot));
+
+        cl->DrawInstanced(36, 1, 0, 0);
+        ++statDraws; statTris += 12;
+        ++decalIdx;
+    }
+
+    barrier12(cl, depthRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+              D3D12_RESOURCE_STATE_DEPTH_WRITE);   // depth writable again …
+    cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv);  // … only THEN back on the OM
+#endif
+}
+
 D3D12Renderer::D3D12Renderer()  : m_impl(new D3D12RendererImpl{}) {}
 D3D12Renderer::~D3D12Renderer() { delete m_impl; }
 
@@ -6018,6 +6420,19 @@ void D3D12Renderer::Shutdown()
     m_impl->meshTexNextSlot = D3D12RendererImpl::k_sceneStaticSrvs; // reset the albedo-slot allocator for a possible re-Initialize
     m_impl->m_materialTexCache.clear(); // override-material textures
     m_impl->m_retiredTextures.clear();  // hot-reload retire list
+    // Screen-space decals. The texture cache holds sceneSrvHeap slots, which the
+    // meshTexNextSlot reset above invalidates — it has to go with them.
+    m_impl->decalTexCache.clear();
+    m_impl->decalRootSig.Reset();
+    m_impl->decalLdrPso.Reset();
+    m_impl->decalHdrPso.Reset();
+    for (UINT f = 0; f < k_frameCount; ++f)
+    {
+        m_impl->decalCBRing[f].Reset();
+        m_impl->decalCBPtr[f] = nullptr;
+    }
+    m_impl->decalReady  = false;
+    m_impl->decalFailed = false;
     m_impl->m_pendingMatInval.clear();
     m_impl->m_pendingMeshInval.clear();
     m_impl->m_freeSlotPending.clear();
@@ -6759,6 +7174,27 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            cl->SetPipelineState(scenePso);
+        }
+
+        // ── Screen-space decals ──────────────────────────────────────────────
+        // After all opaque + skinned geometry (its depth is what the decal projects
+        // onto) and before the transparent draws — the slot Metal and GL use for
+        // their G-buffer decals. A frame without decals costs one empty() check.
+        if (!p.m_renderWorld.decals.empty())
+        {
+            p.EncodeDecals(cl, viewProj, width, height, m_contentManager);
+            // A root-signature switch wipes every root argument, so the scene state
+            // is rebuilt exactly as the skinned pass rebuilds it above.
+            cl->SetGraphicsRootSignature(p.rootSig.Get());
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+            if (p.sceneSrvHeap)
+            {
+                ID3D12DescriptorHeap* dheaps[] = { p.sceneSrvHeap.Get() };
+                cl->SetDescriptorHeaps(1, dheaps);
+                cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+            }
             cl->SetPipelineState(scenePso);
         }
 

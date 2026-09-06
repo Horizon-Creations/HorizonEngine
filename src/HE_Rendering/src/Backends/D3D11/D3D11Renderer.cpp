@@ -941,6 +941,7 @@ struct D3D11RendererImpl
     ComPtr<IDXGISwapChain>         swapchain;
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11DepthStencilView> dsv;
+    ComPtr<ID3D11ShaderResourceView> depthSRV; // C1: the same depth, readable (decals)
     ComPtr<ID3D11Texture2D>        depthTex;
     bool vsync = true;
     int  width = 0, height = 0;
@@ -989,6 +990,28 @@ struct D3D11RendererImpl
     bool m_matHlslLogged = false; // one-time dump of generated HLSL for HW verify
     // createMaterialResources() + GetOrBuildMaterialShaders() are defined inline below.
 
+    // ── Screen-space decals (forward) ───────────────────────────────────────
+    // docs/decals-cross-backend-plan.md §6b. D3D11 has no G-buffer, so a decal is
+    // not composited into a base-colour attachment like on Metal/GL — it samples
+    // the scene depth, rebuilds the world position, clips it against the projector
+    // box and blends the SELF-SHADED result into the already-lit colour target.
+    // Registers are pinned by the shader library into D3D11's bindable range:
+    //   b13 HeDecal | t14/s14 heDecalTex | t15/s15 heGBDepth
+    // (raw binding 23/19/22 would land past the 14 CB / 16 sampler slot limits).
+    ComPtr<ID3D11VertexShader>       decalVS;
+    ComPtr<ID3D11PixelShader>        decalPS;
+    ComPtr<ID3D11Buffer>             decalCB;         // DecalUniforms, WRITE_DISCARD per decal
+    ComPtr<ID3D11SamplerState>       decalTexSampler; // s14: linear wrap
+    ComPtr<ID3D11SamplerState>       decalDepthSampler; // s15: POINT clamp — uv is texel-exact,
+                                                        // and linear filtering of a depth format
+                                                        // is optional hardware support
+    ComPtr<ID3D11RasterizerState>    decalRast;       // cull FRONT: the camera may sit in the box
+    ComPtr<ID3D11DepthStencilState>  decalNoDepth;    // no test, no write — the box decides
+    ComPtr<ID3D11BlendState>         decalBlend;      // SrcAlpha/InvSrcAlpha, write mask RGB
+    std::unordered_map<HE::UUID, ComPtr<ID3D11ShaderResourceView>> decalTexCache;
+    bool decalReady  = false; // resources built
+    bool decalFailed = false; // build failed once — never retried per frame
+
     // ── Shadow map ──────────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
     ComPtr<ID3D11Texture2D>          shadowTex;
@@ -1002,6 +1025,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> viewportSRV;
     ComPtr<ID3D11Texture2D>          viewportDepth;
     ComPtr<ID3D11DepthStencilView>   viewportDSV;
+    ComPtr<ID3D11ShaderResourceView> viewportDepthSRV; // C1, as depthSRV above
     uint32_t viewportW    = 0;
     uint32_t viewportH    = 0;
     uint32_t viewportReqW = 0;
@@ -2369,15 +2393,18 @@ struct D3D11RendererImpl
         device->CreateRenderTargetView(viewportTex.Get(), nullptr, &viewportRTV);
         device->CreateShaderResourceView(viewportTex.Get(), nullptr, &viewportSRV);
 
+        // Typeless + DSV/SRV pair, same reason as createDepth (C1).
+        viewportDSV.Reset();
+        viewportDepthSRV.Reset();
         D3D11_TEXTURE2D_DESC dd{};
         dd.Width = w; dd.Height = h;
         dd.MipLevels = dd.ArraySize = 1;
-        dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.Format = DXGI_FORMAT_R24G8_TYPELESS;
         dd.SampleDesc.Count = 1;
         dd.Usage    = D3D11_USAGE_DEFAULT;
-        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(device->CreateTexture2D(&dd, nullptr, &viewportDepth))) return;
-        device->CreateDepthStencilView(viewportDepth.Get(), nullptr, &viewportDSV);
+        createDepthViews(viewportDepth.Get(), viewportDSV, viewportDepthSRV);
 
         viewportW = w;
         viewportH = h;
@@ -2416,21 +2443,47 @@ struct D3D11RendererImpl
         device->CreateRenderTargetView(bb.Get(), nullptr, &rtv);
     }
 
+    // Checkpoint C1 of docs/decals-cross-backend-plan.md: the scene depth has to be
+    // readable as a texture, not just writable as a depth target — the screen-space
+    // decal pass reconstructs world positions from it. A DEPTH format cannot carry an
+    // SRV, so the resource is TYPELESS and the two views name the concrete formats
+    // (the shadow map two functions down has done exactly this all along). Precision
+    // and stencil are unchanged: the same 24-bit depth + 8-bit stencil bits, only
+    // reachable from a pixel shader now.
     void createDepth(int w, int h)
     {
         dsv.Reset();
+        depthSRV.Reset();
         depthTex.Reset();
         D3D11_TEXTURE2D_DESC dd{};
         dd.Width            = static_cast<UINT>(w);
         dd.Height           = static_cast<UINT>(h);
         dd.MipLevels        = 1;
         dd.ArraySize        = 1;
-        dd.Format           = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.Format           = DXGI_FORMAT_R24G8_TYPELESS;
         dd.SampleDesc.Count = 1;
         dd.Usage            = D3D11_USAGE_DEFAULT;
-        dd.BindFlags        = D3D11_BIND_DEPTH_STENCIL;
+        dd.BindFlags        = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(device->CreateTexture2D(&dd, nullptr, &depthTex))) return;
-        device->CreateDepthStencilView(depthTex.Get(), nullptr, &dsv);
+        createDepthViews(depthTex.Get(), dsv, depthSRV);
+    }
+
+    // The DSV/SRV pair over a typeless R24G8 depth resource. A typeless resource
+    // REJECTS a null view desc, so both descs are explicit.
+    void createDepthViews(ID3D11Texture2D* tex,
+                          ComPtr<ID3D11DepthStencilView>&   outDSV,
+                          ComPtr<ID3D11ShaderResourceView>& outSRV)
+    {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+        dvd.Format        = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        device->CreateDepthStencilView(tex, &dvd, &outDSV);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format              = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // depth in .r, 0..1
+        svd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+        svd.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(tex, &svd, &outSRV);
     }
 
     bool createPipeline()
@@ -2841,6 +2894,263 @@ struct D3D11RendererImpl
 #else
         (void)hash; (void)frag; (void)vertBody; (void)transparent;
         return nullptr;
+#endif
+    }
+
+    // ── Screen-space decals ─────────────────────────────────────────────────
+    // Build the decal shaders + fixed state once, lazily (like GL's
+    // EnsureDecalProgram / Vulkan's EnsureDecalPipelines): a project without a
+    // single DecalComponent never pays for it, and a failure is remembered so the
+    // frame loop does not retry a D3DCompile per frame.
+    bool EnsureDecalPipeline()
+    {
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        if (decalReady)  return true;
+        if (decalFailed) return false;
+        decalFailed = true; // cleared only on full success below
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.decalVertex(Backend::HLSL);
+        // The FORWARD variant, not the sampled one: with no G-buffer the decal has
+        // to bring its own lighting (one directional + ambient, no shadows, no
+        // point lights). That is the documented optical deviation of the three
+        // forward backends — docs/decals-cross-backend-plan.md §6.
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.decalFragmentForward(Backend::HLSL);
+        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: decal shader cross-compile failed");
+            return false;
+        }
+
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> vsb, psb, cerr;
+        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
+                              "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal VS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
+                              "main", "ps_5_0", cflags, 0, &psb, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal PS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &decalVS)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &decalPS)))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: decal shader-object creation failed");
+            return false;
+        }
+
+        {   // 368 B = 4 mat4 + 7 vec4; already a 16-byte multiple.
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::DecalUniforms)) + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &decalCB))) return false;
+        }
+        {   // The projected decal texture: wrapped like every other albedo sampler.
+            D3D11_SAMPLER_DESC sd{};
+            sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+            sd.MaxLOD   = D3D11_FLOAT32_MAX;
+            if (FAILED(device->CreateSamplerState(&sd, &decalTexSampler))) return false;
+        }
+        {   // The depth: point + clamp. uv = SV_Position.xy / viewport is texel-exact,
+            // and filtering a depth format is not guaranteed by the hardware.
+            D3D11_SAMPLER_DESC sd{};
+            sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD   = D3D11_FLOAT32_MAX;
+            if (FAILED(device->CreateSamplerState(&sd, &decalDepthSampler))) return false;
+        }
+        {   // FRONT faces culled so the projector still draws with the camera inside
+            // the box. FrontCounterClockwise stays FALSE: D3D's window origin is top
+            // left like Metal's, so its clockwise-is-front default picks the same
+            // triangles GL picks with GL_CCW (plan §3 A5 / §6a).
+            // DepthClipEnable must be set EXPLICITLY — the zero-initialised desc
+            // means "off", the opposite of the GL/Vulkan default.
+            D3D11_RASTERIZER_DESC rd{};
+            rd.FillMode              = D3D11_FILL_SOLID;
+            rd.CullMode              = D3D11_CULL_FRONT;
+            rd.FrontCounterClockwise = FALSE;
+            rd.DepthClipEnable       = TRUE;
+            if (FAILED(device->CreateRasterizerState(&rd, &decalRast))) return false;
+        }
+        {   D3D11_DEPTH_STENCIL_DESC ds{};
+            ds.DepthEnable = FALSE; // the box-space clip decides, not the z-test
+            if (FAILED(device->CreateDepthStencilState(&ds, &decalNoDepth))) return false;
+        }
+        {   // Write mask RGB, NOT ALL: in the editor viewport the target's alpha is
+            // what ImGui composites with — same reason Vulkan masks it.
+            D3D11_BLEND_DESC bd{};
+            auto& rt = bd.RenderTarget[0];
+            rt.BlendEnable    = TRUE;
+            rt.SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+            rt.DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+            rt.BlendOp        = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+            rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+            rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+            rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED
+                                     | D3D11_COLOR_WRITE_ENABLE_GREEN
+                                     | D3D11_COLOR_WRITE_ENABLE_BLUE;
+            if (FAILED(device->CreateBlendState(&bd, &decalBlend))) return false;
+        }
+
+        decalFailed = false;
+        decalReady  = true;
+        HE_LOG_INFO(RHI, "%s", "D3D11Renderer: screen-space decal pipeline created");
+        return true;
+#endif
+    }
+
+    // DecalData::textureId is a TEXTURE uuid, not a material uuid, so the albedo /
+    // override caches cannot serve it. Null = untextured (the shader's hasTexture
+    // flag stays 0 and the white default is bound so the sampler is never dangling).
+    // Like Vulkan: keyed by texture uuid, and NOT hot-reloaded — InvalidateMaterial
+    // carries material uuids, so an edited decal texture stays stale until restart.
+    ID3D11ShaderResourceView* resolveDecalTexture(const HE::UUID& textureId, ContentManager* cm)
+    {
+        if (textureId == HE::UUID{} || !cm) return nullptr;
+        if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
+            return it->second.Get();
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(textureId, {}));
+        ID3D11ShaderResourceView* raw = srv.Get(); // cached even when null: no per-frame retry
+        decalTexCache.emplace(textureId, std::move(srv));
+        return raw;
+    }
+
+    // Draw every decal of the frame into the currently bound colour target, between
+    // the opaque and the transparent geometry — the same slot at which Metal and GL
+    // put theirs into the G-buffer.
+    //
+    // THE ORDER BELOW IS THE WHOLE TRICK. D3D11 refuses to have one resource bound
+    // as a depth-stencil view and as a shader resource at the same time, and it
+    // resolves the conflict SILENTLY by unbinding one of them (the debug layer only
+    // warns). So the DSV comes off the output merger BEFORE the depth SRV goes on,
+    // and back on only after the SRV is gone. Get that backwards and the pass draws
+    // nothing, with no error anywhere.
+    void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
+                      int width, int height, ContentManager* cm)
+    {
+#if !defined(HE_HAVE_SHADERC)
+        (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm;
+#else
+        if (m_renderWorld.decals.empty()) return;
+        if (!EnsureDecalPipeline()) return;
+
+        ComPtr<ID3D11RenderTargetView> curRTV;
+        ComPtr<ID3D11DepthStencilView> curDSV;
+        ctx->OMGetRenderTargets(1, curRTV.GetAddressOf(), curDSV.GetAddressOf());
+        if (!curRTV || !curDSV) return; // not inside a scene pass
+
+        // The SRV that reads what this pass has been writing depth into.
+        ID3D11ShaderResourceView* depthRead =
+              (curDSV.Get() == dsv.Get())         ? depthSRV.Get()
+            : (curDSV.Get() == viewportDSV.Get()) ? viewportDepthSRV.Get()
+                                                  : nullptr;
+        if (!depthRead) return;
+
+        const glm::mat4 invViewProj = glm::inverse(viewProj);
+        // The forward variant shades itself, from the same source the material
+        // HeLighting fill uses: the DOMINANT directional light, not the sky sun.
+        glm::vec3 sunDir(0.0f), sunColor(0.0f);
+        m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+
+        ID3D11RenderTargetView* rtvOnly = curRTV.Get();
+        ctx->OMSetRenderTargets(1, &rtvOnly, nullptr); // release the depth FIRST
+        ID3D11ShaderResourceView* depthSrvs[1] = { depthRead };
+        ctx->PSSetShaderResources(15, 1, depthSrvs);   // t15 heGBDepth
+
+        ctx->VSSetShader(decalVS.Get(), nullptr, 0);
+        ctx->PSSetShader(decalPS.Get(), nullptr, 0);
+        ctx->IASetInputLayout(nullptr);                 // buffer-less 36-vertex cube
+        ID3D11Buffer* noVB = nullptr; UINT zeroStride = 0, zeroOffset = 0;
+        ctx->IASetVertexBuffers(0, 1, &noVB, &zeroStride, &zeroOffset);
+        ctx->IASetIndexBuffer(nullptr, DXGI_FORMAT_R32_UINT, 0);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->RSSetState(decalRast.Get());
+        ctx->OMSetDepthStencilState(decalNoDepth.Get(), 0);
+        ctx->OMSetBlendState(decalBlend.Get(), nullptr, 0xFFFFFFFF);
+        ID3D11SamplerState* samplers[2] = { decalTexSampler.Get(), decalDepthSampler.Get() };
+        ctx->PSSetSamplers(14, 2, samplers);            // s14 texture, s15 depth
+
+        for (const DecalData& dcl : m_renderWorld.decals)
+        {
+            HE::MaterialShaderLibrary::DecalUniforms du;
+            const glm::mat4 invModel = glm::inverse(dcl.transform);
+            std::memcpy(du.viewProj,    &viewProj[0][0],      16 * sizeof(float));
+            std::memcpy(du.model,       &dcl.transform[0][0], 16 * sizeof(float));
+            std::memcpy(du.invModel,    &invModel[0][0],      16 * sizeof(float));
+            std::memcpy(du.invViewProj, &invViewProj[0][0],   16 * sizeof(float));
+            du.color[0] = dcl.color.r; du.color[1] = dcl.color.g;
+            du.color[2] = dcl.color.b; du.color[3] = dcl.color.a;
+            ID3D11ShaderResourceView* tex = resolveDecalTexture(dcl.textureId, cm);
+            du.params[0] = tex ? 1.0f : 0.0f;
+            // D3D conventions, identical to Metal's: SV_Position.y counts from the
+            // TOP while NDC y points UP, so uv.y = 0 maps to clip.y = +1 → sign -1;
+            // depth is already 0..1 in both the texture and NDC → scale 1, bias 0.
+            // (Vulkan: +1/1/0 — its NDC y points down. GL: +1/2/-1 — its NDC z is
+            // -1..1.)
+            du.params[1] = -1.0f;
+            du.params[2] =  1.0f;
+            du.params[3] =  0.0f;
+            du.vp[0] = static_cast<float>(width);
+            du.vp[1] = static_cast<float>(height);
+            du.sunDir[0]   = sunDir.x;   du.sunDir[1]   = sunDir.y;   du.sunDir[2]   = sunDir.z;
+            du.sunColor[0] = sunColor.r; du.sunColor[1] = sunColor.g; du.sunColor[2] = sunColor.b;
+            du.ambient[0]  = m_renderWorld.ambient.r;
+            du.ambient[1]  = m_renderWorld.ambient.g;
+            du.ambient[2]  = m_renderWorld.ambient.b;
+            du.camPos[0]   = m_renderWorld.camera.position.x;
+            du.camPos[1]   = m_renderWorld.camera.position.y;
+            du.camPos[2]   = m_renderWorld.camera.position.z;
+
+            D3D11_MAPPED_SUBRESOURCE md{};
+            if (FAILED(ctx->Map(decalCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &md))) continue;
+            std::memcpy(md.pData, &du, sizeof(du));
+            ctx->Unmap(decalCB.Get(), 0);
+            ctx->VSSetConstantBuffers(13, 1, decalCB.GetAddressOf()); // b13 HeDecal, both stages
+            ctx->PSSetConstantBuffers(13, 1, decalCB.GetAddressOf());
+
+            // The shader references heDecalTex unconditionally, so an untextured
+            // decal still needs something bound — the 1×1 white default, which the
+            // hasTexture flag then makes a no-op.
+            ID3D11ShaderResourceView* texSrv = tex ? tex : dummyTexture.Get();
+            ctx->PSSetShaderResources(14, 1, &texSrv); // t14 heDecalTex
+
+            ctx->Draw(36, 0);
+            ++counters.draws;
+            counters.tris += 12;
+        }
+
+        // Unbind t14/t15 BEFORE the depth goes back on the output merger.
+        ID3D11ShaderResourceView* nulls2[2] = { nullptr, nullptr };
+        ctx->PSSetShaderResources(14, 2, nulls2);
+        ID3D11RenderTargetView* restoreRTV = curRTV.Get();
+        ctx->OMSetRenderTargets(1, &restoreRTV, curDSV.Get());
+
+        // Restore everything the pass clobbered for the transparent draws that
+        // follow: shaders, input layout, raster/depth/blend state. Constant buffer
+        // slot b13 and t14/t15 are the decal pass's own — nothing else in this
+        // renderer binds them, which is exactly why the shader library pins them
+        // there.
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(ps.Get(), nullptr, 0);
+        ctx->IASetInputLayout(inputLayout.Get());
+        ctx->RSSetState(rasterState.Get());
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
 #endif
     }
 
@@ -3476,6 +3786,13 @@ void D3D11Renderer::Shutdown()
     m_impl->m_matObjCB.Reset();
     m_impl->m_matParamCB.Reset();
     m_impl->m_matSampler.Reset();
+    // Screen-space decals.
+    m_impl->decalTexCache.clear();
+    m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalCB.Reset();
+    m_impl->decalTexSampler.Reset(); m_impl->decalDepthSampler.Reset();
+    m_impl->decalRast.Reset(); m_impl->decalNoDepth.Reset(); m_impl->decalBlend.Reset();
+    m_impl->decalReady = false;
+    m_impl->decalFailed = false;
     m_impl->uiFontAtlases.clear();
     m_impl->uiSampler.Reset();
     m_impl->gpuTimerShutdown();
@@ -3495,7 +3812,11 @@ void D3D11Renderer::Shutdown()
     m_impl->giLinearClamp.Reset();
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
+    m_impl->depthSRV.Reset();
     m_impl->depthTex.Reset();
+    m_impl->viewportDSV.Reset();
+    m_impl->viewportDepthSRV.Reset();
+    m_impl->viewportDepth.Reset();
     m_impl->swapchain.Reset();
     m_impl->context.Reset();
     m_impl->device.Reset();
@@ -4130,6 +4451,13 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->VSSetShader(p.vs.Get(), nullptr, 0);
             ctx->IASetInputLayout(p.inputLayout.Get());
         }
+
+        // ── Screen-space decals ──────────────────────────────────────────────
+        // After all opaque geometry (its depth is what the decal projects onto)
+        // and before the transparent draws — the slot Metal and GL use for their
+        // G-buffer decals. Self-restoring; a frame without decals costs one
+        // empty() check.
+        p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
 
         if (!transparentDCs.empty()) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)

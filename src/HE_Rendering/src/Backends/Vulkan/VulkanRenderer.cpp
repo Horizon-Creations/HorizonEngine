@@ -250,6 +250,7 @@ void VulkanRenderer::Shutdown()
     m_materialTexCache.clear();
     m_pendingMatInval.clear();
     m_pendingMeshInval.clear();
+    destroyDecalPipelines(); // before destroyScenePipeline — it borrows m_albedoSampler
     destroyScenePipeline();
 
     destroyViewportResources();
@@ -345,6 +346,13 @@ void VulkanRenderer::Render()
 
     // Shadow map first, in its own render pass (before the scene/swapchain pass).
     EncodeShadowMap(cmd);
+
+    // Camera-depth pre-pass for screen-space decals. It must run before the scene
+    // pass opens, because the decal draw sits INSIDE that pass and samples this
+    // image — the pass's own depth attachment cannot be sampled while bound.
+    // Skips itself when the frame has no decals.
+    m_decalDepthActive = useViewport ? &m_decalDepthVp : &m_decalDepth;
+    EncodeDecalDepth(cmd, useViewport ? m_decalDepthVp : m_decalDepth);
 
     VkClearValue clears[2]{};
     clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
@@ -995,10 +1003,15 @@ void VulkanRenderer::createDepthResources()
     vci.subresourceRange.levelCount = 1;
     vci.subresourceRange.layerCount = 1;
     vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_depthView), "vkCreateImageView depth");
+
+    // Sampled copy of the same depth for the decal pass (see DecalDepth in the
+    // header). Its lifetime is this depth buffer's — both die on a resize.
+    createDecalDepth(m_decalDepth, m_swapExtent.width, m_swapExtent.height);
 }
 
 void VulkanRenderer::destroyDepthResources()
 {
+    destroyDecalDepth(m_decalDepth);
     if (m_depthView)   { vkDestroyImageView(m_device, m_depthView, nullptr);   m_depthView = VK_NULL_HANDLE; }
     if (m_depthImage)  { vkDestroyImage    (m_device, m_depthImage, nullptr);  m_depthImage = VK_NULL_HANDLE; }
     if (m_depthMemory) { vkFreeMemory      (m_device, m_depthMemory, nullptr); m_depthMemory = VK_NULL_HANDLE; }
@@ -2235,6 +2248,497 @@ void VulkanRenderer::destroyShadowResources()
     if (m_shadowMemory)  { vkFreeMemory        (m_device, m_shadowMemory, nullptr); m_shadowMemory = VK_NULL_HANDLE; }
 }
 
+// ─── Screen-space decals (docs/decals-cross-backend-plan.md checkpoint E) ─────
+// Metal and GL composite decals into the G-buffer's base colour, so the decal is
+// lit by the same resolve as everything else. Vulkan has no G-buffer; here the
+// projector is blended into the already-lit forward colour instead. That is the
+// documented optical deviation of this backend — see the plan and
+// docs/backend-parity-plan.md.
+
+bool VulkanRenderer::createDecalDepth(DecalDepth& d, uint32_t w, uint32_t h)
+{
+    destroyDecalDepth(d);
+    if (!m_device || w == 0 || h == 0) return false;
+#if !defined(HE_HAVE_SHADERC)
+    // No cross-compiler → no decal shader → don't pay for a second full-size
+    // depth image per render target.
+    return false;
+#else
+
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = m_depthFormat;
+    ici.extent        = { w, h, 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &d.image) != VK_SUCCESS) return false;
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, d.image, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &d.mem) != VK_SUCCESS) { destroyDecalDepth(d); return false; }
+    vkBindImageMemory(m_device, d.image, d.mem, 0);
+
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image            = d.image;
+    vci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format           = m_depthFormat;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &d.view) != VK_SUCCESS) { destroyDecalDepth(d); return false; }
+
+    // The framebuffer needs m_shadowPass, which Initialize() creates AFTER the
+    // swapchain (and therefore after createDepthResources) — build it on first use.
+    d.w = w; d.h = h;
+    return true;
+#endif
+}
+
+void VulkanRenderer::destroyDecalDepth(DecalDepth& d)
+{
+    if (!m_device) { d = {}; return; }
+    if (d.fb)    { vkDestroyFramebuffer(m_device, d.fb, nullptr);  }
+    if (d.view)  { vkDestroyImageView  (m_device, d.view, nullptr); }
+    if (d.image) { vkDestroyImage      (m_device, d.image, nullptr); }
+    if (d.mem)   { vkFreeMemory        (m_device, d.mem, nullptr);   }
+    d = {};
+}
+
+const VkImageView* VulkanRenderer::resolveDecalTexture(const HE::UUID& textureId)
+{
+    if (textureId == HE::UUID{} || !m_contentManager) return nullptr;
+    if (auto it = m_decalTexCache.find(textureId); it != m_decalTexCache.end())
+        return it->second.view ? &it->second.view : nullptr;
+    // Not resident yet → retry next frame rather than caching a miss (mirrors
+    // resolveMaterialOverride). resolveTextureRef triggers the load.
+    const TextureAsset* tex = m_contentManager->resolveTextureRef(textureId, std::string{});
+    if (!tex) return nullptr;
+    MaterialTexVk mt;
+    // Unsupported format → cache the failure (view stays null) so we don't retry per frame.
+    uploadTextureImage(tex, mt.image, mt.mem, mt.view);
+    auto res = m_decalTexCache.emplace(textureId, mt);
+    return res.first->second.view ? &res.first->second.view : nullptr;
+}
+
+bool VulkanRenderer::EnsureDecalPipelines()
+{
+#if !defined(HE_HAVE_SHADERC)
+    return false;
+#else
+    if (m_decalPipeline && m_decalPipelineHDR) return true;
+    if (m_decalTried) return m_decalPipeline != VK_NULL_HANDLE;
+    // Both target passes must exist before we build; m_postFxSceneRP appears only
+    // once the editor viewport is sized, so an early frame retries instead of
+    // burning the one attempt (same reasoning as GetOrBuildMaterialPipeline).
+    if (m_renderPass == VK_NULL_HANDLE || m_postFxSceneRP == VK_NULL_HANDLE) return false;
+    m_decalTried = true;
+
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    const auto& v = m_matShaderLib.decalVertex(Backend::SpirV);
+    // The FORWARD variant: it shades the pixel itself, because there is no
+    // G-buffer resolve here that would light it afterwards.
+    const auto& f = m_matShaderLib.decalFragmentForward(Backend::SpirV);
+    if (!v.ok || !f.ok || v.spirv.empty() || f.spirv.empty())
+    {
+        HE_LOG_ERROR(RHI, "%s",
+            (std::string("VulkanRenderer: decal shader cross-compile failed\n") + v.log + f.log).c_str());
+        return false;
+    }
+
+    // Depth sampler: NEAREST. Filtering depth would interpolate ACROSS silhouettes
+    // and reconstruct world positions that exist nowhere in the scene.
+    if (!m_decalDepthSampler)
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter    = VK_FILTER_NEAREST;
+        sci.minFilter    = VK_FILTER_NEAREST;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_decalDepthSampler) != VK_SUCCESS) return false;
+    }
+
+    // Set 0 exactly as the generated SPIR-V declares it: b19 decal texture,
+    // b22 scene depth, b23 HeDecal UBO (read by BOTH stages).
+    if (!m_decalSetLayout)
+    {
+        VkDescriptorSetLayoutBinding binds[3]{};
+        binds[0].binding = 19; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        binds[0].descriptorCount = 1; binds[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        binds[1].binding = 22; binds[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        binds[2].binding = 23; binds[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        binds[2].descriptorCount = 1;
+        binds[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        slci.bindingCount = 3; slci.pBindings = binds;
+        if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_decalSetLayout) != VK_SUCCESS) return false;
+
+        VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plci.setLayoutCount = 1; plci.pSetLayouts = &m_decalSetLayout;
+        if (vkCreatePipelineLayout(m_device, &plci, nullptr, &m_decalPipeLayout) != VK_SUCCESS) return false;
+    }
+
+    // Per-frame descriptor pool + UBO ring, one slot per decal draw.
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_decalPool[i] == VK_NULL_HANDLE)
+        {
+            VkDescriptorPoolSize ps[2] = {
+                { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxDecals * 2 },
+                { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxDecals     },
+            };
+            VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+            dpci.maxSets = k_maxDecals; dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
+            if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_decalPool[i]) != VK_SUCCESS) return false;
+        }
+        if (m_decalUBO[i].buf == VK_NULL_HANDLE)
+        {
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = static_cast<VkDeviceSize>(k_maxDecals) * k_decalSlotStride;
+            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            if (vkCreateBuffer(m_device, &bci, nullptr, &m_decalUBO[i].buf) != VK_SUCCESS) return false;
+            VkMemoryRequirements req{};
+            vkGetBufferMemoryRequirements(m_device, m_decalUBO[i].buf, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (vkAllocateMemory(m_device, &mai, nullptr, &m_decalUBO[i].mem) != VK_SUCCESS) return false;
+            vkBindBufferMemory(m_device, m_decalUBO[i].buf, m_decalUBO[i].mem, 0);
+            vkMapMemory(m_device, m_decalUBO[i].mem, 0, VK_WHOLE_SIZE, 0, &m_decalUBO[i].mapped);
+        }
+    }
+
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(m_device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
+        return mod;
+    };
+    VkShaderModule vs = makeModule(v.spirv);
+    VkShaderModule fs = makeModule(f.spirv);
+    if (!vs || !fs)
+    {
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: decal shader module creation failed");
+        return false;
+    }
+
+    auto buildPipeline = [&](VkRenderPass rp, VkPipeline& out) -> bool {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vs; stages[0].pName = "main";
+        stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+
+        // Buffer-less: the 36 cube vertices come from gl_VertexIndex.
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vps.viewportCount = 1; vps.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        // Cull the FRONT faces so the projector still rasterizes when the camera
+        // sits inside its box — exactly one triangle layer must survive, two would
+        // blend the decal twice. Both GL and Vulkan call a triangle front-facing
+        // when it is counter-clockwise AS SEEN ON SCREEN (Vulkan's signed-area
+        // formula carries the leading minus for its y-down framebuffer precisely
+        // so that this holds), and kVulkanClipFix is what makes the image on
+        // screen identical to GL's. Same picture, same visual winding, same cull:
+        // GL_CCW + GL_FRONT here reads as CCW + FRONT_BIT.
+        rs.cullMode    = VK_CULL_MODE_FRONT_BIT;
+        rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth   = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        // No depth test and no depth write: the box-space clip against the
+        // reconstructed world position is what decides coverage.
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable  = VK_FALSE;
+        ds.depthWriteEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.blendEnable         = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.colorBlendOp        = VK_BLEND_OP_ADD;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.alphaBlendOp        = VK_BLEND_OP_ADD;
+        // RGB only. The viewport image's alpha is what ImGui composites with, and
+        // on Metal/GL the same mask keeps GB0.a (metallic) intact.
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                           | VK_COLOR_COMPONENT_B_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+
+        VkDynamicState dynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount          = 2;
+        pci.pStages             = stages;
+        pci.pVertexInputState   = &vi;
+        pci.pInputAssemblyState = &ia;
+        pci.pViewportState      = &vps;
+        pci.pRasterizationState = &rs;
+        pci.pMultisampleState   = &ms;
+        pci.pDepthStencilState  = &ds;
+        pci.pColorBlendState    = &cb;
+        pci.pDynamicState       = &dyn;
+        pci.layout              = m_decalPipeLayout;
+        pci.renderPass          = rp;
+        pci.subpass             = 0;
+        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+    };
+
+    // Two pipelines, picked by `hdr` exactly like the scene pipelines: the
+    // editor's no-PostFX fallback pass reuses the LDR one, as DrawScene does.
+    const bool okLdr = buildPipeline(m_renderPass,    m_decalPipeline);
+    const bool okHdr = buildPipeline(m_postFxSceneRP, m_decalPipelineHDR);
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+    if (!okLdr || !okHdr)
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: decal pipeline creation failed");
+    else
+        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: decal pipelines created (forward screen-space)");
+    return m_decalPipeline != VK_NULL_HANDLE;
+#endif
+}
+
+void VulkanRenderer::destroyDecalPipelines()
+{
+    if (!m_device) return;
+    for (auto& mt : m_decalTexCache) destroyMaterialTex(mt.second);
+    m_decalTexCache.clear();
+    destroyDecalDepth(m_decalDepth);
+    destroyDecalDepth(m_decalDepthVp);
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_decalUBO[i].mem)  { vkUnmapMemory(m_device, m_decalUBO[i].mem); }
+        if (m_decalUBO[i].buf)  { vkDestroyBuffer(m_device, m_decalUBO[i].buf, nullptr); }
+        if (m_decalUBO[i].mem)  { vkFreeMemory(m_device, m_decalUBO[i].mem, nullptr); }
+        m_decalUBO[i] = {};
+        if (m_decalPool[i])     { vkDestroyDescriptorPool(m_device, m_decalPool[i], nullptr); m_decalPool[i] = VK_NULL_HANDLE; }
+    }
+    if (m_decalPipeline)     { vkDestroyPipeline(m_device, m_decalPipeline, nullptr);     m_decalPipeline = VK_NULL_HANDLE; }
+    if (m_decalPipelineHDR)  { vkDestroyPipeline(m_device, m_decalPipelineHDR, nullptr);  m_decalPipelineHDR = VK_NULL_HANDLE; }
+    if (m_decalPipeLayout)   { vkDestroyPipelineLayout(m_device, m_decalPipeLayout, nullptr); m_decalPipeLayout = VK_NULL_HANDLE; }
+    if (m_decalSetLayout)    { vkDestroyDescriptorSetLayout(m_device, m_decalSetLayout, nullptr); m_decalSetLayout = VK_NULL_HANDLE; }
+    if (m_decalDepthSampler) { vkDestroySampler(m_device, m_decalDepthSampler, nullptr);  m_decalDepthSampler = VK_NULL_HANDLE; }
+    m_decalTried = false;
+}
+
+void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
+{
+    if (!m_world || m_shadowPipeline == VK_NULL_HANDLE || d.image == VK_NULL_HANDLE) return;
+
+    // Cheapest possible exit for the overwhelmingly common decal-free frame:
+    // EncodeShadowMap ran two lines earlier and left a freshly extracted
+    // m_renderWorld behind, so the decal list is already known here — no need to
+    // walk the world a second time just to find out there is nothing to do. (A
+    // decal appearing in a frame where the shadow map did not extract shows up
+    // one frame late; that is invisible.)
+    if (m_renderWorld.decals.empty()) return;
+
+    // Now the real extract: the shadow one ran at aspect 1.0, which is the wrong
+    // frustum for a camera pass. Same reason runSSAO extracts for itself.
+    m_extractor.setContentManager(m_contentManager);
+    m_extractor.extract(*m_world, m_renderWorld,
+                        static_cast<float>(d.w) / static_cast<float>(d.h), &m_editorCamera);
+    if (m_renderWorld.decals.empty() || m_renderWorld.objects.empty()) return;
+
+    for (RenderObject& obj : m_renderWorld.objects)
+    {
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        // The material asset overrides the component's opacity, and DrawScene
+        // splits opaque from transparent AFTER applying it. Without the same
+        // override here a material-driven glass pane would count as opaque in
+        // this pre-pass and transparent in the scene pass — depth where the
+        // scene writes none, and the decal lands on the glass.
+        if (m_contentManager && obj.materialAssetId != HE::UUID{})
+            if (const MaterialAsset* mat = m_contentManager->getMaterial(obj.materialAssetId))
+                obj.opacity = mat->opacity;
+    }
+    m_culler.cull(m_renderWorld, m_visible);
+    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    if (m_sortedIndices.empty()) return;
+
+    if (d.fb == VK_NULL_HANDLE)
+    {
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass      = m_shadowPass;   // depth-only, m_depthFormat → compatible
+        fci.attachmentCount = 1;
+        fci.pAttachments    = &d.view;
+        fci.width           = d.w;
+        fci.height          = d.h;
+        fci.layers          = 1;
+        if (vkCreateFramebuffer(m_device, &fci, nullptr, &d.fb) != VK_SUCCESS) { d.fb = VK_NULL_HANDLE; return; }
+    }
+
+    const glm::mat4 camClip =
+        HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+
+    VkClearValue clear{};
+    clear.depthStencil = { 1.0f, 0 };
+    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rpbi.renderPass        = m_shadowPass;
+    rpbi.framebuffer       = d.fb;
+    rpbi.renderArea.extent = { d.w, d.h };
+    rpbi.clearValueCount   = 1;
+    rpbi.pClearValues      = &clear;
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
+    VkViewport vp{ 0.0f, 0.0f, static_cast<float>(d.w), static_cast<float>(d.h), 0.0f, 1.0f };
+    VkRect2D   sc{ { 0, 0 }, { d.w, d.h } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    for (uint32_t idx : m_sortedIndices)
+    {
+        const RenderObject& obj = m_renderWorld.objects[idx];
+        // Opaque only. Transparent geometry does not write depth in the scene
+        // pass either, so including it would project decals onto glass.
+        if (obj.opacity < 1.0f) continue;
+        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+        const GpuMesh& m    = mesh ? *mesh : m_cube;
+        if (!m.indexCount) continue;
+        PushConstants pc{ camClip * obj.transform, obj.transform };
+        vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
+        vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+    }
+    vkCmdEndRenderPass(cmd); // final layout SHADER_READ_ONLY (m_shadowPass's own dependency)
+}
+
+void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
+                                  uint32_t width, uint32_t height, bool hdr)
+{
+#if !defined(HE_HAVE_SHADERC)
+    (void)cmd; (void)d; (void)width; (void)height; (void)hdr;
+#else
+    if (m_renderWorld.decals.empty() || d.view == VK_NULL_HANDLE) return;
+    if (!EnsureDecalPipelines()) return;
+    const VkPipeline pipe = hdr ? m_decalPipelineHDR : m_decalPipeline;
+    if (pipe == VK_NULL_HANDLE) return;
+
+    const uint32_t fi = m_currentFrame;
+    if (!m_decalPool[fi] || !m_decalUBO[fi].mapped) return;
+    // DrawScene runs at most once per frame (viewport OR swapchain), so resetting
+    // the whole pool here is safe — the frame fence already waited for the GPU.
+    vkResetDescriptorPool(m_device, m_decalPool[fi], 0);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    VkViewport vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+    VkRect2D   sc{ { 0, 0 }, { width, height } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    const glm::mat4 viewProj =
+        HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+    const glm::mat4 invViewProj = glm::inverse(viewProj);
+
+    // The forward variant shades the decal itself. Same source as the material
+    // HeLighting fill: the DOMINANT directional light, not the sky-dome sun —
+    // the night/cloud lesson from the Metal/GL fill sites.
+    glm::vec3 sunDir(0.0f), sunColor(0.0f);
+    m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+
+    uint32_t slot = 0;
+    for (const DecalData& dcl : m_renderWorld.decals)
+    {
+        if (slot >= k_maxDecals)
+        {
+            HE_LOG_ONCE(RHI, Warning,
+                "VulkanRenderer: more than %u decals in a frame — the rest are skipped", k_maxDecals);
+            break;
+        }
+
+        HE::MaterialShaderLibrary::DecalUniforms du;
+        const glm::mat4 invModel = glm::inverse(dcl.transform);
+        std::memcpy(du.viewProj,    &viewProj[0][0],      16 * sizeof(float));
+        std::memcpy(du.model,       &dcl.transform[0][0], 16 * sizeof(float));
+        std::memcpy(du.invModel,    &invModel[0][0],      16 * sizeof(float));
+        std::memcpy(du.invViewProj, &invViewProj[0][0],   16 * sizeof(float));
+        du.color[0] = dcl.color.r; du.color[1] = dcl.color.g;
+        du.color[2] = dcl.color.b; du.color[3] = dcl.color.a;
+        const VkImageView* texView = resolveDecalTexture(dcl.textureId);
+        du.params[0] = texView ? 1.0f : 0.0f;
+        // Vulkan depth conventions: NDC y points DOWN (kVulkanClipFix flips it),
+        // so uv.y = 0 at the top must map to clip.y = -1 → sign +1. Depth is
+        // already 0..1 in both the texture and NDC → scale 1, bias 0. (Metal:
+        // -1/1/0 — its NDC y points up; GL: +1/2/-1 — its NDC z is -1..1.)
+        du.params[1] = 1.0f;
+        du.params[2] = 1.0f;
+        du.params[3] = 0.0f;
+        du.vp[0] = static_cast<float>(width);
+        du.vp[1] = static_cast<float>(height);
+        du.sunDir[0]   = sunDir.x;   du.sunDir[1]   = sunDir.y;   du.sunDir[2]   = sunDir.z;
+        du.sunColor[0] = sunColor.r; du.sunColor[1] = sunColor.g; du.sunColor[2] = sunColor.b;
+        du.ambient[0]  = m_renderWorld.ambient.r;
+        du.ambient[1]  = m_renderWorld.ambient.g;
+        du.ambient[2]  = m_renderWorld.ambient.b;
+        du.camPos[0]   = m_renderWorld.camera.position.x;
+        du.camPos[1]   = m_renderWorld.camera.position.y;
+        du.camPos[2]   = m_renderWorld.camera.position.z;
+
+        const VkDeviceSize off = static_cast<VkDeviceSize>(slot) * k_decalSlotStride;
+        std::memcpy(static_cast<uint8_t*>(m_decalUBO[fi].mapped) + off, &du, sizeof(du));
+
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsai.descriptorPool     = m_decalPool[fi];
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts        = &m_decalSetLayout;
+        if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) break;
+
+        // heDecalTex must be bound even when the decal is untextured — the shader
+        // statically references the sampler; the white default makes it a no-op.
+        VkDescriptorImageInfo texInfo{ m_albedoSampler,
+            texView ? *texView : m_whiteAlbedoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo depthInfo{ m_decalDepthSampler, d.view,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorBufferInfo bufInfo{ m_decalUBO[fi].buf, off, sizeof(du) };
+        VkWriteDescriptorSet w[3]{};
+        w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[0].dstSet = set; w[0].dstBinding = 19;
+        w[0].descriptorCount = 1; w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[0].pImageInfo = &texInfo;
+        w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[1].dstSet = set; w[1].dstBinding = 22;
+        w[1].descriptorCount = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[1].pImageInfo = &depthInfo;
+        w[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[2].dstSet = set; w[2].dstBinding = 23;
+        w[2].descriptorCount = 1; w[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w[2].pBufferInfo = &bufInfo;
+        vkUpdateDescriptorSets(m_device, 3, w, 0, nullptr);
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_decalPipeLayout,
+                                0, 1, &set, 0, nullptr);
+        vkCmdDraw(cmd, 36, 1, 0, 0); // buffer-less unit cube
+        ++m_statDraws;
+        m_statTris += 12;
+        ++slot;
+    }
+#endif
+}
+
 // ─── PostFX pipeline ──────────────────────────────────────────────────────────
 
 void VulkanRenderer::runPostFXBarrier(VkCommandBuffer cmd, VkImage img,
@@ -2672,6 +3176,7 @@ void VulkanRenderer::destroyViewportResources()
 {
     destroySSAOTargets();
     destroyPostFXResources();
+    destroyDecalDepth(m_decalDepthVp);
     if (m_viewportFramebuffer) { vkDestroyFramebuffer(m_device, m_viewportFramebuffer, nullptr); m_viewportFramebuffer = VK_NULL_HANDLE; }
     if (m_viewportRenderPass)  { vkDestroyRenderPass (m_device, m_viewportRenderPass, nullptr);  m_viewportRenderPass = VK_NULL_HANDLE; }
     if (m_viewportSampler)     { vkDestroySampler    (m_device, m_viewportSampler, nullptr);     m_viewportSampler = VK_NULL_HANDLE; }
@@ -2849,6 +3354,7 @@ void VulkanRenderer::createViewportResources(uint32_t w, uint32_t h)
 
     createPostFXResources(w, h);
     createSSAOTargets(w, h);
+    createDecalDepth(m_decalDepthVp, w, h);
 }
 
 void  VulkanRenderer::SetViewportSize(uint32_t w, uint32_t h)
@@ -3954,6 +4460,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
         for (const DrawCall* dc : opaqueDCs) drawDCVk(*dc);
+
+        // Screen-space decals: after the opaque geometry (which is what the depth
+        // pre-pass captured), before the transparent pass — the same slot the
+        // Metal/GL paths use inside their G-buffer pass. Binds its own pipeline
+        // and set 0, so the scene state is restored right after.
+        if (m_decalDepthActive && !m_renderWorld.decals.empty())
+        {
+            EncodeDecals(cmd, *m_decalDepthActive, width, height, hdr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 0, nullptr);
+        }
 
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
             ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;

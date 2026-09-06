@@ -234,14 +234,37 @@ public:
         float cfg2[4]          = {}; // x = frame seed, y = history blend (0 = temporal off), z = forward path, w = glossy cone jitter
     };
 
-    // ── Deferred decals (P7 follow-up, Metal tile mode v1) ───────────────────
-    // A unit-cube projector rasterized INSIDE the G-buffer pass: the fragment
-    // framebuffer-fetches the NDC depth (attachment 3), reconstructs the world
-    // position, clips against the decal box and alpha-blends its colour into
-    // GB0's rgb (metallic in .a stays — writeMask RGB). No depth test: the box
-    // volume decides, so the camera may sit inside the projector.
+    // ── Deferred decals (P7 follow-up) ───────────────────────────────────────
+    // A unit-cube projector rasterized into the G-buffer pass: the fragment
+    // reads the NDC depth, reconstructs the world position, clips against the
+    // decal box and alpha-blends its colour into GB0's rgb (metallic in .a
+    // stays — writeMask RGB). No depth test: the box volume decides, so the
+    // camera may sit inside the projector.
+    //
+    // The first two fragment variants differ ONLY in where the depth comes from
+    // (docs/decals-cross-backend-plan.md §3):
+    //   decalFragment        — subpassInput / framebuffer fetch out of G-buffer
+    //                          attachment 3. Metal single-pass tile mode only.
+    //   decalFragmentSampled — sampler2D heGBDepth on binding 22, the stored
+    //                          depth texture. GL and Metal's two-pass fallback.
+    //   decalFragmentForward — same sampled depth and the same box clip, but it
+    //                          SHADES the pixel (one directional + ambient, from
+    //                          a geometric normal out of ddx/ddy of the recon-
+    //                          structed position) and blends into the already-lit
+    //                          colour target. For the backends with no G-buffer
+    //                          at all: Vulkan, D3D11, D3D12. No shadows, no
+    //                          point/spot lights, no GI on the decal — the
+    //                          deliberate optical deviation of those backends.
+    //
+    // Backend::HLSL is emitted with PINNED registers, because SPIRV-Cross turns
+    // layout(binding = N) into register(bN/tN/sN) and the canonical decal
+    // bindings would land past D3D11's hard limits (14 constant-buffer and 16
+    // sampler slots per stage). The contract both D3D backends bind against:
+    //   b13 HeDecal (VS+PS) | t14/s14 heDecalTex | t15/s15 heGBDepth
     const Compiled& decalVertex(Backend backend);
     const Compiled& decalFragment(Backend backend);
+    const Compiled& decalFragmentSampled(Backend backend);
+    const Compiled& decalFragmentForward(Backend backend);
 
     // std140 layout of the decal shader's HeDecal UBO (binding 23, both stages).
     struct DecalUniforms
@@ -253,6 +276,14 @@ public:
         float color[4]        = {}; // rgba tint (a = opacity)
         float params[4]       = {}; // x hasTexture, y ndc-y sign, z depth scale, w depth bias
         float vp[4]           = {}; // xy viewport in pixels
+        // Read by decalFragmentForward ONLY. The G-buffer backends leave them at
+        // zero and their shaders never look — the block is shared so that vertex
+        // and fragment keep declaring the identical HeDecal (a member mismatch is
+        // a link error on GL).
+        float sunDir[4]       = {}; // xyz direction TO the sun
+        float sunColor[4]     = {}; // rgb sun radiance
+        float ambient[4]      = {}; // rgb ambient
+        float camPos[4]       = {}; // xyz camera position (normal faces the viewer)
     };
 
     // Clustered-lighting variants of the two resolves (plan P7, Metal only):
@@ -301,7 +332,7 @@ private:
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_ssrCache;     // key = (int)backend*4 + (0 trace / 1 composite / 2 blur)
-    std::unordered_map<int, Compiled>      m_decalCache;   // key = (int)backend*2 + (0 vertex / 1 fragment)
+    std::unordered_map<int, Compiled>      m_decalCache;   // key = (int)backend*4 + (0 vertex / 1 fetch / 2 sampled / 3 forward)
     std::unordered_map<int, Compiled>      m_fsVertCache;  // key = (int)backend
 };
 } // namespace HE
