@@ -151,6 +151,14 @@ namespace {
             const float alpha = smoothingAlpha(rig.lag.rotationSpeed, dt);
             smoothAngleDegrees(rig.armYaw,   rig.yaw,   alpha);
             smoothAngleDegrees(rig.armPitch, rig.pitch, alpha);
+
+            // Same fold rig.yaw gets, and for the same reason: chasing the
+            // NEAREST equivalent of a wrapped angle keeps armYaw continuous, so
+            // a player who spins one way all session winds it up unbounded and
+            // out of float precision. Not serialised, so only the mush half of
+            // the argument applies here — but that half applies.
+            if (rig.armYaw > 180.0f || rig.armYaw < -180.0f)
+                rig.armYaw -= 360.0f * std::floor((rig.armYaw + 180.0f) / 360.0f);
         }
         rig.hasLagState = true;
 
@@ -354,6 +362,11 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     // Keyed on the ENTITY, not on a flag: a rig that retargets while hiding has
     // to give the old target back before it hides the new one, or the old one
     // stays invisible for good and the camera sits inside a drawn head.
+    //
+    // Only the ACTIVE rig does this, which leaves a hole that blending will make
+    // real: a first-person rig that hid its target and then loses isMain never
+    // runs this path again, so the character stays invisible. Today that takes a
+    // hand-edited isMain to reach; blendTo will do it on purpose.
     const entt::entity wantHidden =
         (firstPerson && rig.hideTargetMesh) ? f.target : entt::null;
     if (wantHidden != rig.meshHiddenEntity)
