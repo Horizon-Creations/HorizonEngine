@@ -579,6 +579,44 @@ namespace
 	  "Turns the rig by these degrees, clamped to the pitch limits the rig "
 	  "carries. This is what a look input drives — adding to the angles rather "
 	  "than setting them is what keeps two input sources from fighting." },
+	{ "camera.setLagEnabled",
+	  "Switches camera lag on or off. With it on the camera eases after its "
+	  "target instead of being welded to it; off is the default, so an existing "
+	  "scene looks exactly as it did." },
+	{ "camera.getLagEnabled",
+	  "Whether the rig is easing after its target rather than following it "
+	  "rigidly." },
+	{ "camera.setLagSpeeds",
+	  "How quickly the camera catches up, per second: the first number moves the "
+	  "camera to its target, the second swings the boom round to the look "
+	  "direction. Larger is tighter; 0 never catches up at all." },
+	{ "camera.snapRig",
+	  "Puts the camera exactly where it belongs on the next frame instead of "
+	  "easing into it. This is what a teleport, a respawn or a cut needs — "
+	  "without it the camera sails across the level to catch up." },
+	{ "camera.playShake",
+	  "Shakes the camera: a position amplitude in metres, a rotation amplitude "
+	  "in degrees, a frequency in shakes per second and a duration. A duration "
+	  "of 0 or less runs until it is stopped, which is what the handle it "
+	  "returns is for; a one-shot can drop it." },
+	{ "camera.stopShake",
+	  "Ends one running shake by the handle Play Camera Shake gave out. An "
+	  "unknown or already-finished handle does nothing." },
+	{ "camera.stopAllShakes",
+	  "Ends every shake on the camera at once — what a cutscene or a death "
+	  "screen wants, rather than remembering each handle." },
+	{ "camera.kickFov",
+	  "Pushes the field of view by these degrees and lets it fall back: attack, "
+	  "hold and decay in seconds. Negative degrees zoom in. It never changes the "
+	  "camera's own FOV setting, so Get Camera FOV keeps answering what the "
+	  "author set." },
+	{ "camera.blendTo",
+	  "Hands the view to another camera over a number of seconds. Curve 0 is "
+	  "linear, 1 smoothstep, 2 ease-out. 0 seconds is a straight cut, and so is "
+	  "switching the main camera by hand — a blend only ever starts here." },
+	{ "camera.isBlending",
+	  "Whether the picture is currently easing in from another camera. True "
+	  "until the blend has fully arrived." },
 
 	// ── Audio ────────────────────────────────────────────────────────────────
 	{ "audio.play",

@@ -7,6 +7,7 @@
 #include "HorizonScene/AudioEngine.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
+#include "HorizonScene/CameraRigController.h"   // blendTo/isBlending live on the controller
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"   // the parent chain the world/local boundary walks
 #include "HorizonScene/Components/EnvironmentComponent.h"
@@ -1101,6 +1102,84 @@ void addYawPitch(Ctx& c, float dYaw, float dPitch)
     if (!r) return;
     r->yaw   += dYaw;
     r->pitch  = std::clamp(r->pitch + dPitch, r->pitchMin, r->pitchMax);
+}
+
+// ── Lag ──────────────────────────────────────────────────────────────────────
+void setLagEnabled(Ctx& c, bool enabled)
+{
+    if (auto* r = rigOf(c)) r->lag.enabled = enabled;
+}
+bool getLagEnabled(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r && r->lag.enabled;
+}
+void setLagSpeeds(Ctx& c, float position, float rotation)
+{
+    auto* r = rigOf(c);
+    if (!r) return;
+    // Negative would run the exponential smoother the wrong way and throw the
+    // pivot away from its target; 0 is the documented "never catch up".
+    r->lag.positionSpeed = std::max(0.0f, position);
+    r->lag.rotationSpeed = std::max(0.0f, rotation);
+}
+void snapRig(Ctx& c)
+{
+    if (auto* r = rigOf(c)) r->snap();
+}
+
+// ── Shake ────────────────────────────────────────────────────────────────────
+int playShake(Ctx& c, float posAmplitude, float rotAmplitude, float frequency,
+              float duration)
+{
+    auto* r = rigOf(c);
+    if (!r) return 0;
+
+    // One scalar per family rather than six numbers: a script asking for "a
+    // hit" wants a magnitude, and a shake that is stronger on one axis than
+    // another reads as a slide, not as a shake. The component takes vectors so
+    // the editor can go finer later.
+    HE::ShakeInstance s;
+    s.posAmplitude = glm::vec3(std::max(0.0f, posAmplitude));
+    s.rotAmplitude = glm::vec3(std::max(0.0f, rotAmplitude));
+    s.frequency    = std::max(0.0f, frequency);
+    s.duration     = duration;   // <= 0 stays endless on purpose
+    return static_cast<int>(r->playShake(s));
+}
+void stopShake(Ctx& c, int handle)
+{
+    if (handle <= 0) return;
+    if (auto* r = rigOf(c)) r->stopShake(static_cast<uint32_t>(handle));
+}
+void stopAllShakes(Ctx& c)
+{
+    if (auto* r = rigOf(c)) r->stopAllShakes();
+}
+
+// ── FOV kick ─────────────────────────────────────────────────────────────────
+void kickFov(Ctx& c, float degrees, float attack, float hold, float decay)
+{
+    if (auto* r = rigOf(c)) r->kickFov(degrees, attack, hold, decay);
+}
+
+// ── Blending ─────────────────────────────────────────────────────────────────
+void blendTo(Ctx& c, Entity camera, float seconds, int curve)
+{
+    if (!c.world) return;
+    const auto e = static_cast<entt::entity>(camera);
+    if (!c.world->registry().valid(e)) return;
+    // Out of range is not an error worth swallowing the whole call for — a
+    // graph that passes 7 gets the default pacing and a camera that switches.
+    const HE::BlendCurve k =
+        (curve == 0) ? HE::BlendCurve::Linear
+      : (curve == 2) ? HE::BlendCurve::EaseOut
+                     : HE::BlendCurve::SmoothStep;
+    HE::CameraRigController::blendTo(*c.world, e, seconds, k);
+}
+bool isBlending(Ctx& c)
+{
+    if (!c.world) return false;
+    return HE::CameraRigController::isBlending(c.world->registry());
 }
 } // namespace camera
 
@@ -2643,6 +2722,28 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "camera.addYawPitch", "Camera", true, {{"deltaYaw", P::Float}, {"deltaPitch", P::Float}}, {}, "HE::api::camera::addYawPitch",
             [](Ctx& c, const VV& a){ camera::addYawPitch(c, aF(a, 0), aF(a, 1)); return VV{}; } });
 
+        // Rig lag, shake, FOV kick and blending — all runtime, none of it saved.
+        t.push_back({ "camera.setLagEnabled", "Camera", true, {{"enabled", P::Bool}}, {}, "HE::api::camera::setLagEnabled",
+            [](Ctx& c, const VV& a){ camera::setLagEnabled(c, aB(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getLagEnabled", "Camera", false, {}, {{"enabled", P::Bool}}, "HE::api::camera::getLagEnabled",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(camera::getLagEnabled(c)) }; } });
+        t.push_back({ "camera.setLagSpeeds", "Camera", true, {{"position", P::Float}, {"rotation", P::Float}}, {}, "HE::api::camera::setLagSpeeds",
+            [](Ctx& c, const VV& a){ camera::setLagSpeeds(c, aF(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "camera.snapRig", "Camera", true, {}, {}, "HE::api::camera::snapRig",
+            [](Ctx& c, const VV&){ camera::snapRig(c); return VV{}; } });
+        t.push_back({ "camera.playShake", "Camera", true, {{"positionAmplitude", P::Float}, {"rotationAmplitude", P::Float}, {"frequency", P::Float}, {"duration", P::Float}}, {{"handle", P::Int}}, "HE::api::camera::playShake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(camera::playShake(c, aF(a, 0), aF(a, 1), aF(a, 2), aF(a, 3))) }; } });
+        t.push_back({ "camera.stopShake", "Camera", true, {{"handle", P::Int}}, {}, "HE::api::camera::stopShake",
+            [](Ctx& c, const VV& a){ camera::stopShake(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "camera.stopAllShakes", "Camera", true, {}, {}, "HE::api::camera::stopAllShakes",
+            [](Ctx& c, const VV&){ camera::stopAllShakes(c); return VV{}; } });
+        t.push_back({ "camera.kickFov", "Camera", true, {{"degrees", P::Float}, {"attack", P::Float}, {"hold", P::Float}, {"decay", P::Float}}, {}, "HE::api::camera::kickFov",
+            [](Ctx& c, const VV& a){ camera::kickFov(c, aF(a, 0), aF(a, 1), aF(a, 2), aF(a, 3)); return VV{}; } });
+        t.push_back({ "camera.blendTo", "Camera", true, {{"camera", P::Int}, {"seconds", P::Float}, {"curve", P::Int}}, {}, "HE::api::camera::blendTo",
+            [](Ctx& c, const VV& a){ camera::blendTo(c, (Entity)aI(a, 0), aF(a, 1), aI(a, 2)); return VV{}; } });
+        t.push_back({ "camera.isBlending", "Camera", false, {}, {{"blending", P::Bool}}, "HE::api::camera::isBlending",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(camera::isBlending(c)) }; } });
+
         // Environment — EVERY EnvironmentComponent field, generated from the
         // HE_ENV_FIELDS_* X-lists in EngineApi.h (get = pure read, set = exec).
 #define HE_ENV_ROW_FLOAT(m, Name, disp) \
@@ -2958,6 +3059,13 @@ const std::vector<ApiFn>& registry()
             { "camera.getTargetYawMode", "Get Target Rotation Mode" },
             { "camera.getRigYaw", "Get Camera Yaw" },        { "camera.getRigPitch", "Get Camera Pitch" },
             { "camera.addYawPitch", "Turn Camera" },
+            { "camera.setLagEnabled", "Set Camera Lag" },    { "camera.getLagEnabled", "Get Camera Lag" },
+            { "camera.setLagSpeeds", "Set Camera Lag Speeds" },
+            { "camera.snapRig", "Snap Camera" },
+            { "camera.playShake", "Play Camera Shake" },     { "camera.stopShake", "Stop Camera Shake" },
+            { "camera.stopAllShakes", "Stop All Camera Shakes" },
+            { "camera.kickFov", "Kick Camera FOV" },
+            { "camera.blendTo", "Blend To Camera" },         { "camera.isBlending", "Is Camera Blending" },
             // Environment display names — generated from the same X-lists as
             // the functions ("Get "/"Set " + the display string per field).
 #define HE_ENV_NAME_ROW(m, Name, disp) { "env.get" #Name, "Get " disp }, { "env.set" #Name, "Set " disp },
