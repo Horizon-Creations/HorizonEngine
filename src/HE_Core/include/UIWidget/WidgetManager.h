@@ -207,6 +207,31 @@ public:
     // and the band belongs to the page again. Off macOS it stays false.
     void  setMenuBarNative(bool on);
     bool  menuBarNative() const { return m_menuNative; }
+
+    // ── The chord that chooses an entry without opening the menu ─────────────
+    // The whole shortcut path, in one call: the host hands over the key it just
+    // saw (an SDL_GetKeyName string) and the three modifier flags, and the first
+    // entry whose chord that is fires OnMenuItem — the SAME door the click uses,
+    // and for the reason "open with" comes through the same door as a drop. A
+    // second event would be a second thing to keep in step with the first.
+    //
+    // Returns true when an entry OWNS the key, so the caller stops looking and
+    // lets nothing behind it see the press.
+    //
+    // Owning and firing come apart on exactly one platform. While the SYSTEM
+    // draws the bar, AppKit has already chosen the entry off its own key
+    // equivalent, and SDL reports the same press anyway (Cocoa_DispatchEvent
+    // runs before [super sendEvent:]) — so there it answers true and fires
+    // NOTHING. A manager that also fired would choose the entry twice on one
+    // keystroke, and one that answered false would let the key fall through to
+    // the game behind a menu that just acted on it. Both halves of the trap, one
+    // line apart.
+    bool  fireMenuShortcut(const std::string& keyName, bool ctrl, bool shift, bool alt);
+    // Who would take it, without firing anything — the id, or empty. Answers the
+    // same on every platform, native bar or not: this is "whose chord is this",
+    // and the bar is the same bar either way.
+    std::string menuShortcutTarget(const std::string& keyName, bool ctrl,
+                                   bool shift, bool alt) const;
     // Which menu is open (-1 = none). The strip's own state, not a widget's.
     int   openMenu() const { return m_menuOpen; }
     // Where a title sits, for a caller that has to aim at one (a test, and later
@@ -214,6 +239,11 @@ public:
     // never assumed.
     bool  menuTitleBox(std::size_t index, float& x, float& width) const
     { return menuTitleRect(index, x, width); }
+    // …and where the OPEN menu's card sits. False when none is open. Same
+    // reason as the title's: a row is as wide as its label and its chord
+    // together, and a caller that wants to say so has to be able to ask.
+    bool  menuPopupBox(float& x, float& y, float& width, float& height) const
+    { return menuPopupRect(x, y, width, height); }
 
     // Read-only view of a live widget's element tree (nullptr = no such
     // widget). The manager owns a deep copy per widget; this is how a caller

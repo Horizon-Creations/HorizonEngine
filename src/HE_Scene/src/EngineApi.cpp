@@ -19,6 +19,7 @@
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
 #include "HorizonScene/EntityHost.h"
+#include <UIWidget/UIShortcut.h>   // a menu entry's chord is checked where it is taken in
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
@@ -1139,7 +1140,7 @@ void addMenu(Ctx& c, const std::string& id, const std::string& label)
 }
 
 void addMenuItem(Ctx& c, const std::string& menuId, const std::string& id,
-                 const std::string& label)
+                 const std::string& label, const std::string& shortcut)
 {
     if (!c.addMenuItem)
     {
@@ -1151,7 +1152,23 @@ void addMenuItem(Ctx& c, const std::string& menuId, const std::string& id,
         HE_LOG_WARN(Script, "%s", "app.addMenuItem: an entry needs an id — ignored");
         return;
     }
-    c.addMenuItem(menuId, id, label.empty() ? id : label);
+    // A chord that does not parse is dropped and SAID, not carried along: it
+    // would be drawn beside an entry that never answers to it, which is a lie
+    // told to the person reading the menu. The entry itself still arrives —
+    // losing a whole menu row over a typo in its shortcut helps nobody.
+    std::string chord = shortcut;
+    if (!chord.empty())
+    {
+        HE::UIShortcut parsed;
+        if (!HE::uiParseShortcut(chord, parsed))
+        {
+            HE_LOG_WARN(Script, "app.addMenuItem: '%s' is not a shortcut this engine can "
+                                "express — entry '%s' gets none",
+                        chord.c_str(), id.c_str());
+            chord.clear();
+        }
+    }
+    c.addMenuItem(menuId, id, label.empty() ? id : label, chord);
 }
 
 void addMenuSeparator(Ctx& c, const std::string& menuId)
@@ -4035,9 +4052,13 @@ const std::vector<ApiFn>& registry()
             {{"id", P::String}, {"label", P::String}}, {}, "HE::api::app::addMenu",
             [](Ctx& c, const VV& a){ app::addMenu(c, aS(a, 0), aS(a, 1)); return VV{}; } });
         t.push_back({ "app.addMenuItem", "App", true,
-            {{"menu", P::String}, {"id", P::String}, {"label", P::String}}, {},
+            // The chord goes LAST, so every graph that was drawn before it
+            // existed keeps its three pins where they were and the fourth simply
+            // arrives empty, which is exactly what "no shortcut" is.
+            {{"menu", P::String}, {"id", P::String}, {"label", P::String},
+             {"shortcut", P::String}}, {},
             "HE::api::app::addMenuItem",
-            [](Ctx& c, const VV& a){ app::addMenuItem(c, aS(a, 0), aS(a, 1), aS(a, 2)); return VV{}; } });
+            [](Ctx& c, const VV& a){ app::addMenuItem(c, aS(a, 0), aS(a, 1), aS(a, 2), aS(a, 3)); return VV{}; } });
         t.push_back({ "app.addMenuSeparator", "App", true, {{"menu", P::String}}, {},
             "HE::api::app::addMenuSeparator",
             [](Ctx& c, const VV& a){ app::addMenuSeparator(c, aS(a, 0)); return VV{}; } });

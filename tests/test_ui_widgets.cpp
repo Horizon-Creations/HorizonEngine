@@ -12,6 +12,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <UIWidget/WidgetManager.h>
+#include <UIWidget/UIShortcut.h>
 #include <HorizonScene/EngineApi.h>
 #include <Backends/Software/SoftwareRaster.h>
 #include <Hpak/ProjectExporter.h>
@@ -12103,6 +12104,265 @@ TEST_CASE("A separator is a line, not a row that can be chosen")
     wm.processPointer(400.0f, 300.0f, 30.0f, sepY, true, true);
     wm.processPointer(400.0f, 300.0f, 30.0f, sepY, false, true);
     CHECK(wm.openMenu() == 0);
+}
+
+// ── Shortcuts (plan B10) ─────────────────────────────────────────────────────
+TEST_CASE("A chord is a set of modifiers and one key, however it is spelled")
+{
+    HE::UIShortcut s;
+
+    // The plain reading, and the canonical spelling back out of it.
+    REQUIRE(HE::uiParseShortcut("Ctrl+Shift+S", s));
+    CHECK(s.key == "S");
+    CHECK(s.ctrl);
+    CHECK(s.shift);
+    CHECK_FALSE(s.alt);
+    CHECK(HE::uiFormatShortcut(s) == "Ctrl+Shift+S");
+
+    // The modifiers are a SET: a file somebody typed in the other order is the
+    // same chord, and rejecting it would be rejecting a correct file. Case and
+    // spaces go the same way.
+    HE::UIShortcut other;
+    REQUIRE(HE::uiParseShortcut("shift + ctrl + s", other));
+    CHECK(other == s);
+
+    // Cmd IS Ctrl here — one flag, so an application writes the chord once and
+    // gets Ctrl on Windows and Command on a Mac out of the same text.
+    HE::UIShortcut mac;
+    REQUIRE(HE::uiParseShortcut("Cmd+Shift+S", mac));
+    CHECK(mac == s);
+    for (const char* alias : { "Command+S", "Meta+S", "Super+S", "Win+S", "Control+S" })
+    {
+        HE::UIShortcut a;
+        REQUIRE_MESSAGE(HE::uiParseShortcut(alias, a), alias);
+        CHECK_MESSAGE(a.ctrl, alias);
+        CHECK_MESSAGE(a.key == "S", alias);
+    }
+    // …and Option is Alt, from the same platform's vocabulary.
+    HE::UIShortcut opt;
+    REQUIRE(HE::uiParseShortcut("Option+Left", opt));
+    CHECK(opt.alt);
+    CHECK(opt.key == "Left");
+
+    // The named keys, in the spelling SDL_GetKeyName gives back — that string
+    // is what the host compares against, so a table with its own spellings
+    // would match nothing at all.
+    const struct { const char* written; const char* canonical; } kNames[] = {
+        { "Enter", "Return" },   { "Esc", "Escape" },      { "Del", "Delete" },
+        { "PgUp", "Page Up" },   { "pagedown", "Page Down" },
+        { "F5", "F5" },          { "f12", "F12" },         { "Space", "Space" },
+        { "Backspace", "Backspace" }, { "Tab", "Tab" },    { "7", "7" },
+    };
+    for (const auto& n : kNames)
+    {
+        HE::UIShortcut k;
+        REQUIRE_MESSAGE(HE::uiParseShortcut(n.written, k), n.written);
+        CHECK_MESSAGE(k.key == n.canonical, n.written);
+    }
+
+    // What is NOT a chord. Every one of these used to be a way of writing a
+    // shortcut that parses into something plausible and then never fires.
+    for (const char* bad : { "", "   ", "Ctrl", "Ctrl+", "+S", "Ctrl+S+A",
+                             "Ctrl+F13", "Ctrl+Fx", "Ctrl+Nonsense", "Ctrl+;" })
+    {
+        HE::UIShortcut b;
+        b.key = "sentinel";
+        CHECK_MESSAGE(!HE::uiParseShortcut(bad, b), bad);
+        CHECK_MESSAGE(b.key == "sentinel", bad);   // a refusal leaves `out` alone
+    }
+
+    // Matching compares every modifier, the absent ones included: an
+    // application that binds both Ctrl+S and Ctrl+Shift+S must get two
+    // different entries out of them.
+    CHECK(HE::uiShortcutMatchesText("Ctrl+S", "S", true, false, false));
+    CHECK_FALSE(HE::uiShortcutMatchesText("Ctrl+S", "S", true, true, false));
+    CHECK_FALSE(HE::uiShortcutMatchesText("Ctrl+S", "S", false, false, false));
+    CHECK(HE::uiShortcutMatchesText("Ctrl+S", "s", true, false, false));  // name case
+    // A chord that does not parse fires on nothing rather than on everything.
+    CHECK_FALSE(HE::uiShortcutMatchesText("Ctrl+Nonsense", "S", true, false, false));
+}
+
+TEST_CASE("A shortcut chooses the entry through the same door the click uses")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.add(HE::UIWidgetType::Panel);
+    registerWidget(cm, tree, nullptr);
+
+    // The same OnMenuItem graph a clicked entry arrives at — that is the claim:
+    // a shortcut is the entry answered a faster way, not a second event.
+    HorizonCode::Runtime rt;
+    HorizonCode::Graph app;
+    {
+        HorizonCode::Variable chosen;
+        chosen.name = "chosen"; chosen.type = PinType::String;
+        app.variables.push_back(chosen);
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnMenuItem";
+        ev.elem = 0; ev.hasArg = true; ev.propType = PinType::String;
+        const int evId = app.addNode(ev);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "chosen";
+        set.propType = PinType::String;
+        const int setId = app.addNode(set);
+        REQUIRE(app.connect(evId, 0, setId, 0));
+        REQUIRE(app.connect(evId, 1, setId, 2));
+    }
+    const HorizonCode::InstanceId gi = rt.setGameInstance(app);
+    REQUIRE(gi != 0);
+
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+
+    std::vector<HE::AppMenu> bar = sampleMenuBar();
+    bar[0].items[0].shortcut = "Ctrl+N";        // New
+    bar[0].items[1].shortcut = "Ctrl+Shift+O";  // Open…
+    bar[0].items[3].shortcut = "Ctrl+Q";        // Quit
+    bar[1].items[0].shortcut = "F5";            // Undo, a bare key on purpose
+    wm.setMenuBar(bar);
+
+    // The id arrives, not the label — the same thing the click test pins.
+    CHECK(wm.fireMenuShortcut("N", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "new");
+
+    // A chord in a LATER menu is reached too: the bar is searched, not just the
+    // menu that happens to be open.
+    CHECK(wm.fireMenuShortcut("F5", false, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "undo");
+
+    // Ctrl+O and Ctrl+Shift+O are two different chords, and only one of them is
+    // bound. Firing the near miss would make the two impossible to tell apart.
+    rt.setVariable(gi, "chosen", HorizonCode::Value::ofString(""));
+    CHECK_FALSE(wm.fireMenuShortcut("O", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s.empty());
+    CHECK(wm.fireMenuShortcut("O", true, true, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "open");
+
+    // Nothing is bound to this one, and nothing must be invented for it.
+    CHECK_FALSE(wm.fireMenuShortcut("Z", true, false, false));
+
+    // An entry whose chord cannot be read has no chord: it must not fire on the
+    // key it looks like it names, or a typo becomes a shortcut nobody wrote.
+    bar[1].items[0].shortcut = "Ctrl+Nonsense";
+    wm.setMenuBar(bar);
+    rt.setVariable(gi, "chosen", HorizonCode::Value::ofString(""));
+    CHECK_FALSE(wm.fireMenuShortcut("Nonsense", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s.empty());
+
+    // A shortcut is the menu answered without opening it, so an open one is
+    // answered too and does not stay hanging over the page.
+    wm.processPointer(400.0f, 300.0f, 20.0f, wm.menuBarHeight() * 0.5f, true, true);
+    REQUIRE(wm.openMenu() == 0);
+    CHECK(wm.fireMenuShortcut("Q", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "quit");
+    CHECK(wm.openMenu() == -1);
+    CHECK_FALSE(wm.hasLayer());
+}
+
+TEST_CASE("With the system bar up the chord is owned here and fired there")
+{
+    // The macOS double-fire, and the only half of it that can be tested without
+    // Cocoa. AppKit chooses the entry off its own key equivalent, and SDL
+    // reports the very same press anyway — so the manager must answer "yes,
+    // that key belongs to a menu" and fire NOTHING. Answering false instead
+    // would let the key through to the game behind a menu that just acted on
+    // it; firing would choose the entry twice on one keystroke.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree tree;
+    tree.canvasWidth = 400.0f; tree.canvasHeight = 300.0f;
+    tree.add(HE::UIWidgetType::Panel);
+    registerWidget(cm, tree, nullptr);
+
+    HorizonCode::Runtime rt;
+    HorizonCode::Graph app;
+    {
+        HorizonCode::Variable chosen;
+        chosen.name = "chosen"; chosen.type = PinType::String;
+        app.variables.push_back(chosen);
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnMenuItem";
+        ev.elem = 0; ev.hasArg = true; ev.propType = PinType::String;
+        const int evId = app.addNode(ev);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = "chosen";
+        set.propType = PinType::String;
+        const int setId = app.addNode(set);
+        REQUIRE(app.connect(evId, 0, setId, 0));
+        REQUIRE(app.connect(evId, 1, setId, 2));
+    }
+    const HorizonCode::InstanceId gi = rt.setGameInstance(app);
+    REQUIRE(gi != 0);
+
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
+    std::vector<HE::AppMenu> bar = sampleMenuBar();
+    bar[0].items[0].shortcut = "Ctrl+N";
+    wm.setMenuBar(bar);
+    wm.setMenuBarNative(true);
+
+    CHECK(wm.fireMenuShortcut("N", true, false, false));       // owned
+    CHECK(rt.getVariable(gi, "chosen").s.empty());             // …and not fired
+
+    // Who owns a chord is the same question on every platform, and it answers
+    // the same: the bar is the same bar whoever draws it.
+    CHECK(wm.menuShortcutTarget("N", true, false, false) == "new");
+    CHECK(wm.menuShortcutTarget("N", false, false, false).empty());
+
+    // Back to the drawn strip, and it fires again — which is what makes the
+    // line above a statement about the native bar and not about a manager that
+    // has stopped firing altogether.
+    wm.setMenuBarNative(false);
+    CHECK(wm.fireMenuShortcut("N", true, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "new");
+}
+
+TEST_CASE("A row is as wide as its label AND its chord, drawing and hit test together")
+{
+    // The chord is drawn against the right edge of the row, so it is part of
+    // how wide the row is. Painting it over the end of a card measured without
+    // it would put the picture and the click at different sizes — the mistake
+    // the bar's own metrics bundle exists to prevent.
+    WidgetManager plain;
+    std::vector<HE::AppMenu> bare = sampleMenuBar();
+    // A long label, so the card is wider than its 120 px minimum and the growth
+    // below is the chord's doing rather than the floor's.
+    bare[0].items[1].label = "Open a document from somewhere";
+    plain.setMenuBar(bare);
+    plain.processPointer(400.0f, 300.0f, 20.0f, plain.menuBarHeight() * 0.5f, true, true);
+    REQUIRE(plain.openMenu() == 0);
+    float px = 0.0f, py = 0.0f, pw = 0.0f, ph = 0.0f;
+    REQUIRE(plain.menuPopupBox(px, py, pw, ph));
+
+    WidgetManager withChord;
+    std::vector<HE::AppMenu> bound = bare;
+    bound[0].items[1].shortcut = "Ctrl+Shift+O";
+    withChord.setMenuBar(bound);
+    withChord.processPointer(400.0f, 300.0f, 20.0f, withChord.menuBarHeight() * 0.5f, true, true);
+    REQUIRE(withChord.openMenu() == 0);
+    float qx = 0.0f, qy = 0.0f, qw = 0.0f, qh = 0.0f;
+    REQUIRE(withChord.menuPopupBox(qx, qy, qw, qh));
+    CHECK(qw > pw);          // the chord asked for the room
+    CHECK(qh == doctest::Approx(ph));   // …and only sideways: a row is a row
+
+    // And it is really drawn: the same card with the chord emits more glyphs.
+    std::vector<UIRenderObject> a, b;
+    plain.extract(400.0f, 300.0f, a);
+    withChord.extract(400.0f, 300.0f, b);
+    CHECK(b.size() > a.size());
+
+    // An unreadable chord is drawn as nothing at all, because the row would not
+    // answer to it either — a shortcut printed beside an entry that ignores it
+    // is worse than no shortcut.
+    WidgetManager broken;
+    std::vector<HE::AppMenu> bad = bare;
+    bad[0].items[1].shortcut = "Ctrl+Nonsense";
+    broken.setMenuBar(bad);
+    broken.processPointer(400.0f, 300.0f, 20.0f, broken.menuBarHeight() * 0.5f, true, true);
+    REQUIRE(broken.openMenu() == 0);
+    float rx = 0.0f, ry = 0.0f, rw = 0.0f, rh = 0.0f;
+    REQUIRE(broken.menuPopupBox(rx, ry, rw, rh));
+    CHECK(rw == doctest::Approx(pw));
 }
 
 TEST_CASE("With a native bar the strip is gone, band and all")

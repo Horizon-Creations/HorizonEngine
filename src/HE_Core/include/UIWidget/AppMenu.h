@@ -26,6 +26,15 @@ struct AppMenuItem
     std::string label;
     // A line, not a row. It carries no id and cannot be chosen.
     bool separator = false;
+    // The chord that chooses this entry without opening the menu, written the
+    // way people write one: "Ctrl+Shift+S" (UIWidget/UIShortcut.h). Empty means
+    // no shortcut, which is what most entries have.
+    //
+    // Stored as TEXT and not as a parsed pair, because that is what a project
+    // file holds and what a menu row shows. It is also why it sits here and not
+    // beside the key handler: the entry owns its chord, so a bar rebuilt by a
+    // graph brings its shortcuts with it and nothing has to be kept in step.
+    std::string shortcut;
 };
 
 struct AppMenu

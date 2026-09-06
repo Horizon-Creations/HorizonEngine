@@ -92,6 +92,17 @@ private:
     // ordinary content" — whenever there is no window or no custom frame.
     HE::UIWindowHit frameHitAt(int pointX, int pointY);
 
+    // ── A menu bar's shortcut, out of one key press (plan B10) ───────────────
+    // Turns an SDL key event into the name + modifiers the widget layer matches
+    // chords against, and fires the entry that owns it. True = the key belonged
+    // to a menu and nothing else may see it.
+    //
+    // Called from TWO places in OnEvent — once inside the text-editing block and
+    // once outside it — so it is a function rather than a paragraph copied
+    // twice: the two call sites differ only in whether a bare key may fire, and
+    // that difference belongs at the call site where it is decided.
+    bool menuShortcutFromKey(const SDL_KeyboardEvent& key);
+
     // Ensure a camera the free-fly controller can drive. A scene authored without
     // one otherwise renders through the extractor's fixed fallback camera, which
     // can't move — so the game would look frozen. Only added when the scene has no

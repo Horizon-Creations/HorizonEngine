@@ -3460,3 +3460,86 @@ zurück, worauf *geklemmt* wurde (0,5 … 3) und nicht, was gefragt wurde — di
 Eigenschaft eines Baums: nichts serialisiert ihn, jede ältere `.hasset` bleibt byteweise dieselbe,
 und eine Einstellung deckt alle Widgets auf einmal ab — genau das, wonach ein Leser fragt. Der
 Designer zeigt weiter 100 %; ein Schieberegler dort wäre ein eigener Schritt.
+
+---
+
+### B10 Tastenkürzel als Asset (06.09.2026)
+
+Der letzte offene Punkt aus B10. Ein Akkord am Menüeintrag, ein Parser dafür, ein Abgleich im
+Tastenpfad, und die eine Falle, an der das auf dem Mac scheitert.
+
+**Der Akkord gehört dem Eintrag, nicht dem Tastenhandler.** `AppMenuItem::shortcut` ist ein
+STRING, so wie ihn ein Mensch schreibt: `Ctrl+Shift+S`. Das ist, was in einer Projektdatei steht,
+was in einer Menüzeile gezeichnet wird und was ein Graph übergibt, und ein Zahlenpaar wäre in
+keinem der drei etwas. Weil er am Eintrag hängt, bringt eine von einem Graph neu gebaute Leiste
+ihre Kürzel mit und es gibt keine zweite Liste, die mit ihr Schritt halten müsste.
+
+**Der Parser kennt SDL nicht.** `HE::UIShortcut` und `uiParseShortcut` stehen in HorizonCore, die
+Taste ist ein NAME, und die Namen sind genau die, die `SDL_GetKeyName` zurückgibt (`S`, `F5`,
+`Return`, `Page Up`). Damit ist die Wirtsseite ein Aufruf und keine Tabelle; eine Tabelle mit
+eigenen Schreibweisen hätte auf gar nichts gepasst. Drei Entscheidungen:
+
+* **Die Modifikatoren sind eine MENGE.** `shift+ctrl+s` ist derselbe Akkord wie `Ctrl+Shift+S`,
+  Groß- und Kleinschreibung und Leerzeichen sind egal. Eine Datei, die jemand richtig getippt hat,
+  abzulehnen, weil die Teile in der falschen Reihenfolge stehen, ist kein Parser, sondern eine
+  Schikane.
+* **Cmd IST Ctrl**, ein Flag, nicht zwei. Eine Anwendung schreibt den Akkord einmal und bekommt
+  Ctrl unter Windows und Command auf dem Mac. Genau die Regel, der die Textbearbeitungstasten in
+  `GameApplication` schon folgen. `Command`, `Meta`, `Super`, `Win` und `Control` fallen alle
+  darauf, `Option` auf Alt.
+* **Die Menge der Tasten ist bewusst begrenzt**, und zwar auf das, was die native Mac-Leiste auch
+  ausdrücken kann: Buchstaben, Ziffern, F1 bis F12 und eine Handvoll benannter Tasten. Ein Akkord,
+  der hier durchgeht, den AppKit aber nicht zeigen kann, würde auf der einzigen Plattform, deren
+  Leiste das System zeichnet, nirgends feuern. Was nicht parst, ist kein Kürzel: der Eintrag
+  kommt trotzdem an, verliert aber seinen Akkord, mit einer Warnung. Ein Kürzel, das neben einem
+  Eintrag steht, der nicht darauf hört, ist schlimmer als gar keines, und deshalb wird ein
+  unlesbarer Akkord auch nicht gezeichnet.
+
+**Ein Kürzel ist derselbe Eintrag, schneller beantwortet.** `WidgetManager::fireMenuShortcut`
+feuert `OnMenuItem` mit der ID, durch dieselbe Tür wie der Klick — aus demselben Grund, aus dem
+„Öffnen mit" durch dieselbe Tür kommt wie ein Drop. Ein zweites Ereignis wäre eine zweite Sache,
+die mit der ersten Schritt halten muss.
+
+**Die Zeile ist so breit wie ihre Beschriftung UND ihr Akkord.** Der Akkord steht rechtsbündig in
+der Zeile, also geht er in `menuPopupRect` in die Breite ein und nicht erst ins Zeichnen. Dieselbe
+Rechnung liest der Treffertest, also bleiben Bild und Klick von selbst zusammen.
+
+**Die Mac-Falle, und was sie wirklich ist.** Der Entwurf sagte: es feuert doppelt, wenn die native
+Leiste ein `keyEquivalent` bekommt UND die Engine mit abgleicht. Nachgesehen im vendorten SDL3
+(`SDL_cocoaevents.m`): `Cocoa_DispatchEvent` läuft VOR `[super sendEvent:]`. Eine Taste, die AppKit
+als Menükürzel verbraucht, kommt also trotzdem als `SDL_EVENT_KEY_DOWN` an. Die Falle ist real,
+nicht theoretisch.
+
+Der Ausweg ist ein Besitzer pro Plattform, und dass „gehört mir" und „feuert" zwei verschiedene
+Antworten sind. `AppMacMenu` setzt jetzt echte `keyEquivalent` samt Maske (Ctrl → Command,
+kleingeschriebener Buchstabe plus explizites Shift, denn ein großgeschriebenes Äquivalent bedeutet
+AppKit schon von selbst Shift und macht ein schlichtes Cmd+S unausdrückbar). `fireMenuShortcut`
+antwortet bei nativer Leiste **true und feuert nichts**: die Taste gehörte einem Menü, der Aufrufer
+darf sie niemanden dahinter sehen lassen, und gefeuert hat sie AppKit schon. Beide Hälften sind
+nötig. Wer dort false antwortet, lässt die Taste ins Spiel durch, hinter ein Menü, das gerade
+gehandelt hat; wer feuert, wählt den Eintrag zweimal auf einen Tastendruck. `menuShortcutTarget`
+dagegen antwortet überall gleich, denn „wem gehört dieser Akkord" ist dieselbe Frage, egal wer die
+Leiste zeichnet.
+
+**Die zweite Falle, und die Entscheidung, die der Entwurf offen ließ.** Ein Kürzel ohne
+Modifikator darf nicht losgehen, während jemand in einem Textfeld tippt. Aber die Grenze liegt
+nicht dort, wo sie zuerst aussieht: bindet eine Anwendung Ctrl+C an Bearbeiten → Kopieren und der
+Abgleich läuft VOR dem Bearbeitungsblock, dann ist das Kopieren im Feld weg, und zwar ersatzlos —
+die Zwischenablage liegt beim Wirt, und kein Graph kommt an die Auswahl eines Feldes. Also: im
+Feld gewinnen die Tasten des Feldes, wo sie sich überschneiden, jeder andere Akkord MIT
+Modifikator erreicht das Menü, und ohne Modifikator feuert im Feld nichts. Draußen darf auch eine
+nackte Taste feuern, denn F5 heißt F5, wenn niemand tippt.
+
+**Der Name kommt aus dem Scancode, nicht aus dem Keycode.** Der Keycode ist, was das Layout gerade
+aus der Taste macht; Shift+2 kommt auf einer deutschen Tastatur als Anführungszeichen an. Ein
+Akkord `Ctrl+Shift+2` würde auf einer Tastatur passen und auf der nächsten nicht.
+`SDL_GetKeyFromScancode(scancode, SDL_KMOD_NONE, false)` ist die physische Taste, und ihr
+unmodifizierter Name ist der, den ein Mensch aufschreiben würde.
+
+**Skript-Bindung.** `app.addMenuItem` bekommt einen vierten Parameter `shortcut`, und zwar als
+LETZTEN: jeder Graph, der vor diesem Schritt gezeichnet wurde, behält seine drei Pins an Ort und
+Stelle, und der vierte kommt leer an, was genau „kein Kürzel" ist.
+
+**Offen und bewusst:** Kürzel für etwas anderes als Menüeinträge (ein Knopf irgendwo im Baum) und
+eine Editor-Oberfläche, die den Akkord an einer Menüzeile einstellt. Beides braucht einen Ort, an
+dem eine Anwendung ihre Kürzel als Ganzes sieht, und den gibt es noch nicht.

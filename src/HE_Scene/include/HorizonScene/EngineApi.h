@@ -136,7 +136,8 @@ struct Ctx
     // builds anything.
     std::function<void(const std::string& id, const std::string& label)>       addMenu;
     std::function<void(const std::string& menuId, const std::string& id,
-                       const std::string& label)>                              addMenuItem;
+                       const std::string& label,
+                       const std::string& shortcut)>                           addMenuItem;
     std::function<void(const std::string& menuId)>                             addMenuSeparator;
     std::function<void()>                                                      clearMenuBar;
     // A notification in the system's own notification centre. Bound in the host
@@ -752,9 +753,17 @@ namespace app {
     // Same calls, same ids, same event — only WidgetManager::menuBarHeight()
     // tells them apart, and on macOS it is 0 because the bar is not in the
     // window to leave room for.
+    //
+    // An entry may carry a SHORTCUT, written the way people write one
+    // ("Ctrl+Shift+S", UIWidget/UIShortcut.h; Cmd on a Mac is that Ctrl). It
+    // fires the same OnMenuItem the entry fires when it is chosen, because it is
+    // the same entry answered a faster way — not a second event to keep in step.
+    // Empty means no shortcut, and a chord this engine cannot express is
+    // refused with a warning rather than silently shown beside an entry that
+    // would never answer to it.
     void addMenu(Ctx&, const std::string& id, const std::string& label);
     void addMenuItem(Ctx&, const std::string& menuId, const std::string& id,
-                     const std::string& label);
+                     const std::string& label, const std::string& shortcut = "");
     void addMenuSeparator(Ctx&, const std::string& menuId);
     void clearMenuBar(Ctx&);
 

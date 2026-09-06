@@ -3,6 +3,8 @@
 #include "AppMacMenu.h"
 
 #import <Cocoa/Cocoa.h>
+#include <UIWidget/UIShortcut.h>
+#include <cstdlib>   // std::atoi — the function row's number out of "F7"
 #include <deque>
 #include <string>
 #include <vector>
@@ -24,6 +26,78 @@ namespace
 	{
 		NSString* n = [NSString stringWithUTF8String:s.c_str()];
 		return n ? n : @"";
+	}
+
+	// ── A chord, as AppKit spells one (plan B10) ────────────────────────────
+	// The engine's shortcut text becomes a key equivalent, and from then on the
+	// SYSTEM owns that keystroke: it draws it beside the entry, it dims it with
+	// the menu, and it fires the entry through `fire:` above. The widget layer
+	// knows and stays out of the way — WidgetManager::fireMenuShortcut answers
+	// "yes, a menu has this key" and fires nothing while the native bar is up.
+	// Both halves are needed: without the equivalent the shortcut is invisible
+	// on the only platform whose bar the user reads, and without the gate over
+	// there every one of them fires twice.
+	//
+	// The letter goes in LOWERCASE with Shift as an explicit flag. An uppercase
+	// key equivalent means shift to AppKit all by itself, so "S" plus no flag
+	// and "s" plus the flag are the same chord written two ways — and the first
+	// spelling makes a plain Cmd+S impossible to express.
+	//
+	// Empty means "this chord cannot be a key equivalent", and then the row gets
+	// none rather than a wrong one.
+	NSString* heKeyEquivalent(const HE::UIShortcut& sc)
+	{
+		const std::string& k = sc.key;
+		if (k.empty()) return @"";
+		if (k.size() == 1)
+		{
+			const char c = k[0];
+			if (c >= 'A' && c <= 'Z') return [NSString stringWithFormat:@"%c", c - 'A' + 'a'];
+			if (c >= '0' && c <= '9') return [NSString stringWithFormat:@"%c", c];
+			return @"";
+		}
+		if (k[0] == 'F' && k.size() <= 3)
+		{
+			const int n = std::atoi(k.c_str() + 1);
+			if (n >= 1 && n <= 12)
+				return [NSString stringWithFormat:@"%C",
+				                 (unichar)(NSF1FunctionKey + (n - 1))];
+		}
+		struct Named { const char* key; unichar ch; };
+		// NSDeleteCharacter is the backspace key on a Mac keyboard (⌫) and
+		// NSDeleteFunctionKey the forward delete (⌦) — the names read backwards
+		// and getting them the wrong way round puts the wrong glyph in the menu.
+		static const Named kNamed[] = {
+			{ "Return",    (unichar)'\r'                   },
+			{ "Escape",    (unichar)27                     },
+			{ "Backspace", (unichar)NSDeleteCharacter      },
+			{ "Delete",    (unichar)NSDeleteFunctionKey    },
+			{ "Tab",       (unichar)'\t'                   },
+			{ "Space",     (unichar)' '                    },
+			{ "Left",      (unichar)NSLeftArrowFunctionKey },
+			{ "Right",     (unichar)NSRightArrowFunctionKey},
+			{ "Up",        (unichar)NSUpArrowFunctionKey   },
+			{ "Down",      (unichar)NSDownArrowFunctionKey },
+			{ "Home",      (unichar)NSHomeFunctionKey      },
+			{ "End",       (unichar)NSEndFunctionKey       },
+			{ "Page Up",   (unichar)NSPageUpFunctionKey    },
+			{ "Page Down", (unichar)NSPageDownFunctionKey  },
+		};
+		for (const Named& n : kNamed)
+			if (k == n.key) return [NSString stringWithFormat:@"%C", n.ch];
+		return @"";
+	}
+
+	// Ctrl in the engine's vocabulary IS Command here — one flag, so an
+	// application writes "Ctrl+S" once and gets ⌘S on this platform and Ctrl+S
+	// on the others. See UIWidget/UIShortcut.h.
+	NSEventModifierFlags heModifierMask(const HE::UIShortcut& sc)
+	{
+		NSEventModifierFlags m = 0;
+		if (sc.ctrl)  m |= NSEventModifierFlagCommand;
+		if (sc.shift) m |= NSEventModifierFlagShift;
+		if (sc.alt)   m |= NSEventModifierFlagOption;
+		return m;
 	}
 }
 
@@ -93,12 +167,25 @@ void set(const std::vector<HE::AppMenu>& menus)
 					[sub addItem:[NSMenuItem separatorItem]];
 					continue;
 				}
-				// No key equivalents: shortcuts are their own piece of work, and a
-				// native one swallows the keystroke before anything in the window
-				// sees it — the mistake the editor's Edit menu documents.
+				// The entry's own chord, if it has one that AppKit can express.
+				// A native key equivalent swallows the keystroke before anything
+				// in the window sees it, which is exactly what is wanted HERE
+				// and exactly why the widget layer must not match it as well.
+				NSString* eq = @"";
+				NSEventModifierFlags mask = 0;
+				if (!item.shortcut.empty())
+				{
+					HE::UIShortcut sc;
+					if (HE::uiParseShortcut(item.shortcut, sc))
+					{
+						eq   = heKeyEquivalent(sc);
+						mask = heModifierMask(sc);
+					}
+				}
 				NSMenuItem* row = [[NSMenuItem alloc] initWithTitle:heStr(item.label)
 				                                            action:@selector(fire:)
-				                                     keyEquivalent:@""];
+				                                     keyEquivalent:eq];
+				if (eq.length > 0) row.keyEquivalentModifierMask = mask;
 				row.target = s_target;
 				// The ID travels ON the item. A side table indexed by position
 				// would have to be rebuilt in lockstep with the menu, and the tray

@@ -575,7 +575,12 @@ namespace
 	{ "app.addMenuItem",
 	  "Adds an entry to the menu with that id. Choosing it fires On Menu Item "
 	  "with the ENTRY's id — the label is only what somebody reads, so "
-	  "translating the menu leaves what it does alone." },
+	  "translating the menu leaves what it does alone. Shortcut is the chord "
+	  "that chooses it without opening the menu, written the way people write "
+	  "one: \"Ctrl+Shift+S\", \"F5\", \"Alt+Left\". It fires the same On Menu "
+	  "Item, because it is the same entry answered a faster way. Ctrl means "
+	  "Command on a Mac, so a chord is written once and is right on every "
+	  "platform; leave it empty for an entry that has none." },
 	{ "app.addMenuSeparator",
 	  "Adds a dividing line to a menu. It carries no id and cannot be chosen: it "
 	  "is there to group the entries above and below it." },

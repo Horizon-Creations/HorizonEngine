@@ -3,6 +3,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/UIFont.h>
+#include <UIWidget/UIShortcut.h>  // a menu entry's chord, parsed out of its text
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <cmath>      // std::abs — the border stamp compares rects
@@ -918,6 +919,7 @@ namespace
 		float sepH;
 		float itemPad;
 		float minW;
+		float chordGap;  // between the longest label and the chords beside them
 	};
 
 	MenuMetrics menuMetricsFor(float fontScale)
@@ -933,7 +935,20 @@ namespace
 		         std::max(24.0f, f + 9.0f),
 		         7.0f,
 		         14.0f,
-		         120.0f };
+		         120.0f,
+		         24.0f };
+	}
+
+	// What a row's chord is DRAWN as, or empty. Parsed rather than echoed: a
+	// menu written "cmd+shift+s" is shown "Ctrl+Shift+S", and a chord that does
+	// not parse shows nothing at all — the row would not fire on it either, and
+	// a shortcut printed beside an entry that ignores it is worse than none.
+	std::string menuChordText(const HE::AppMenuItem& it)
+	{
+		if (it.separator || it.shortcut.empty()) return {};
+		HE::UIShortcut sc;
+		if (!HE::uiParseShortcut(it.shortcut, sc)) return {};
+		return HE::uiFormatShortcut(sc);
 	}
 
 	float menuTextWidth(const std::string& s, float fontPx)
@@ -977,6 +992,46 @@ void WidgetManager::setMenuBarNative(bool on)
 	m_visualDirty = true;
 }
 
+std::string WidgetManager::menuShortcutTarget(const std::string& keyName, bool ctrl,
+                                              bool shift, bool alt) const
+{
+	if (keyName.empty()) return {};
+	for (const HE::AppMenu& m : m_menuBar)
+		for (const HE::AppMenuItem& it : m.items)
+		{
+			// A separator has no id to fire and a row without one could not be
+			// heard even if it matched, so neither is asked.
+			if (it.separator || it.id.empty() || it.shortcut.empty()) continue;
+			if (HE::uiShortcutMatchesText(it.shortcut, keyName, ctrl, shift, alt))
+				return it.id;
+		}
+	return {};
+}
+
+bool WidgetManager::fireMenuShortcut(const std::string& keyName, bool ctrl,
+                                     bool shift, bool alt)
+{
+	const std::string id = menuShortcutTarget(keyName, ctrl, shift, alt);
+	if (id.empty()) return false;
+	// ── The macOS half, and the whole of it ─────────────────────────────────
+	// While the SYSTEM draws the bar, AppKit has already fired this entry off
+	// its own key equivalent — and SDL still reports the press, because
+	// Cocoa_DispatchEvent runs before [super sendEvent:]. So the answer here is
+	// TRUE and nothing else: the key belonged to a menu, the caller must not let
+	// anything behind it see it, and firing again would be the entry chosen
+	// twice on one keystroke.
+	if (m_menuNative) return true;
+	// A shortcut is the menu answered without opening it, so one that is open
+	// has been answered too and must not stay hanging over the page.
+	closeMenu();
+	if (const HorizonCode::InstanceId gi = rt().gameInstance())
+		rt().fireOnMenuItem(gi, 0, id);
+	// True even with no graph listening: the key was spoken for either way, and
+	// letting it fall through to the camera because nothing was bound yet is the
+	// kind of difference that only shows up in a shipped build.
+	return true;
+}
+
 float WidgetManager::menuBarHeight() const
 {
 	// Native means the bar is not in this window at all, so there is no band to
@@ -1013,8 +1068,16 @@ bool WidgetManager::menuPopupRect(float& x, float& y, float& w, float& h) const
 	{
 		height += it.separator ? mm.sepH : mm.itemH;
 		if (!it.separator)
-			widest = std::max(widest,
-			                  menuTextWidth(it.label, mm.fontPx) + 2.0f * mm.itemPad);
+		{
+			// The chord is part of how wide the row is, not something painted
+			// over its end: this rect is also what the hit test reads, so
+			// measuring it here is what keeps the picture and the click agreed.
+			const std::string chord = menuChordText(it);
+			float w = menuTextWidth(it.label, mm.fontPx) + 2.0f * mm.itemPad;
+			if (!chord.empty())
+				w += mm.chordGap + menuTextWidth(chord, mm.fontPx);
+			widest = std::max(widest, w);
+		}
 	}
 	x = tx;
 	y = mm.barH;
@@ -5253,6 +5316,20 @@ void WidgetManager::drawMenuBar(float vpWidth, float vpHeight,
 			HE::emitUITextGlyphs(HE::sharedUIFont(), 0, it.label,
 			                     { px + mm.itemPad, row }, { pw - 2.0f * mm.itemPad, hgt },
 			                     mm.fontPx, textColor, 0, opts, out);
+			// The chord against the right edge, dimmer than the label: it says
+			// what this row ALSO answers to, and a reader looking for the entry
+			// is looking at the words on the left.
+			const std::string chord = menuChordText(it);
+			if (!chord.empty())
+			{
+				HE::UITextLayout ropts;
+				ropts.alignH = 2;   // right, in the same box the label got
+				ropts.alignV = 1;
+				HE::emitUITextGlyphs(HE::sharedUIFont(), 0, chord,
+				                     { px + mm.itemPad, row }, { pw - 2.0f * mm.itemPad, hgt },
+				                     mm.fontPx, { textColor.r, textColor.g, textColor.b, 0.55f },
+				                     0, ropts, out);
+			}
 		}
 		row += hgt;
 	}

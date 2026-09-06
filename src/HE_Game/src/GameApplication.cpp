@@ -111,7 +111,8 @@ struct HostCtxParts
 	std::function<bool(bool)>                                   setAutostart;
 	std::function<bool()>                                       autostart;
 	std::function<void(const std::string&, const std::string&)> addMenu;
-	std::function<void(const std::string&, const std::string&, const std::string&)> addMenuItem;
+	std::function<void(const std::string&, const std::string&, const std::string&,
+	                   const std::string&)> addMenuItem;
 	std::function<void(const std::string&)>                     addMenuSeparator;
 	std::function<void()>                                       clearMenuBar;
 };
@@ -865,12 +866,12 @@ void GameApplication::OnInit()
 			g_menuDirty = true;
 		};
 		g_host.addMenuItem = [this](const std::string& menuId, const std::string& id,
-		                            const std::string& label) {
+		                            const std::string& label, const std::string& shortcut) {
 			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
 			for (HE::AppMenu& m : menus)
 				if (m.id == menuId)
 				{
-					m.items.push_back({ id, label, false });
+					m.items.push_back({ id, label, false, shortcut });
 					m_widgets.setMenuBar(std::move(menus));
 					g_menuDirty = true;
 					return;
@@ -882,7 +883,7 @@ void GameApplication::OnInit()
 			for (HE::AppMenu& m : menus)
 				if (m.id == menuId)
 				{
-					m.items.push_back({ "", "", true });
+					m.items.push_back({ "", "", true, "" });
 					m_widgets.setMenuBar(std::move(menus));
 					g_menuDirty = true;
 					return;
@@ -1520,6 +1521,30 @@ HE::UIWindowHit GameApplication::frameHitAt(int pointX, int pointY)
 	                             kFrameBorderPoints * sx);
 }
 
+bool GameApplication::menuShortcutFromKey(const SDL_KeyboardEvent& key)
+{
+	if (!m_world) return false;
+
+	// The name comes from the SCANCODE with no modifiers, not from the keycode
+	// in the event. The keycode is what the layout says the key produces right
+	// now, so Shift+2 arrives as "quotedbl" on a German keyboard and Ctrl+Alt+Q
+	// as something else again on the layouts that put a character there — a
+	// chord written "Ctrl+Shift+2" would then match on one keyboard and not on
+	// the next. The scancode is the physical key, and the unmodified keycode is
+	// the name a person would write for it.
+	const SDL_Keycode plain = SDL_GetKeyFromScancode(key.scancode, SDL_KMOD_NONE, false);
+	const char* name = SDL_GetKeyName(plain);
+	if (!name || !*name) return false;
+
+	// Cmd and Ctrl are one flag here, exactly as they are in the text-editing
+	// keys above: an application says Ctrl+S once and gets Cmd+S on a Mac.
+	return m_world->widgets().fireMenuShortcut(
+		name,
+		(key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0,
+		(key.mod & SDL_KMOD_SHIFT) != 0,
+		(key.mod & SDL_KMOD_ALT) != 0);
+}
+
 void GameApplication::updateUIInput()
 {
 	if (!m_world) return;
@@ -2046,12 +2071,33 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				break;
 			default: break;
 			}
+			// ── A menu's shortcut, from inside a field somebody is typing in ──
+			// After the switch above and not before it, and that is the whole
+			// decision: an application that binds Ctrl+C to Edit → Copy must not
+			// take the field's own copy away, because there is nothing left to
+			// copy WITH — the clipboard lives out here and no graph can reach a
+			// field's selection. So the field's chords win where they overlap,
+			// and every other chord reaches the menu.
+			//
+			// Only WITH a modifier. A bare F5 while a form is being filled in is
+			// a person typing, not a person reloading, and a menu that fired on
+			// it would make text fields unusable in any application whose menus
+			// carry plain-key shortcuts.
+			if (!event.key.repeat && (ctrl || alt))
+				if (menuShortcutFromKey(event.key)) return true;
 			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
 		}
 	}
 
 	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
 	{
+		// ── A menu's shortcut, nothing being typed ───────────────────────────
+		// FIRST in this block and ahead of everything the widgets are polled
+		// for: a shortcut is the menu answered without opening it, and a bar
+		// that only answers once its own strip has been clicked open is not a
+		// shortcut at all. Bare keys are allowed here — F5 means F5 when nobody
+		// is in a text field.
+		if (menuShortcutFromKey(event.key)) return true;
 #ifdef HE_GAME_DEV_HOTKEYS
 		// V: static VSync toggle — DEVELOPMENT BUILDS ONLY. A shipped game has no
 		// settings menu yet, and a stray V must not silently flip the player's
