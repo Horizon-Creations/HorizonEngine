@@ -78,8 +78,11 @@ namespace
 			{ "left",      "Left"      }, { "right",   "Right"     },
 			{ "up",        "Up"        }, { "down",    "Down"      },
 			{ "home",      "Home"      }, { "end",     "End"       },
-			{ "pageup",    "Page Up"   }, { "pgup",    "Page Up"   },
-			{ "pagedown",  "Page Down" }, { "pgdn",    "Page Down" },
+			// SDL spells these without a space ("PageUp"), and the canonical
+			// name is whatever SDL_GetKeyName says — the host compares against
+			// that string and a prettier spelling here would match nothing.
+			{ "pageup",    "PageUp"    }, { "pgup",    "PageUp"    },
+			{ "pagedown",  "PageDown"  }, { "pgdn",    "PageDown"  },
 		};
 		for (const Named& n : kNamed)
 			if (tokLower == n.alias) return n.canonical;
@@ -142,7 +145,15 @@ bool uiShortcutMatches(const UIShortcut& s, const std::string& keyName,
 	// Every modifier is compared, the absent ones included: Ctrl+S must not fire
 	// on Ctrl+Shift+S, or an application cannot have both.
 	if (s.ctrl != ctrl || s.shift != shift || s.alt != alt) return false;
-	return lower(s.key) == lower(keyName);
+	// Squeezed on BOTH sides, so a host that hands over "Page Up" is answered
+	// the same as one that hands over SDL's own "PageUp". The one spelling this
+	// engine cannot check at compile time is the one it should not depend on.
+	std::string got = squeeze(lower(keyName));
+	// The keypad's Enter is Enter. It is a different scancode and SDL names it
+	// differently, but nobody writes "Keypad Enter" on a menu and nobody means
+	// a different command by pressing it.
+	if (got == "keypadenter") got = "return";
+	return squeeze(lower(s.key)) == got;
 }
 
 bool uiShortcutMatchesText(const std::string& text, const std::string& keyName,

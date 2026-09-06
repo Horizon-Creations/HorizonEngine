@@ -3476,8 +3476,12 @@ ihre Kürzel mit und es gibt keine zweite Liste, die mit ihr Schritt halten müs
 
 **Der Parser kennt SDL nicht.** `HE::UIShortcut` und `uiParseShortcut` stehen in HorizonCore, die
 Taste ist ein NAME, und die Namen sind genau die, die `SDL_GetKeyName` zurückgibt (`S`, `F5`,
-`Return`, `Page Up`). Damit ist die Wirtsseite ein Aufruf und keine Tabelle; eine Tabelle mit
-eigenen Schreibweisen hätte auf gar nichts gepasst. Drei Entscheidungen:
+`Return`, `PageUp`). Damit ist die Wirtsseite ein Aufruf und keine Tabelle; eine Tabelle mit
+eigenen Schreibweisen hätte auf gar nichts gepasst — und genau das war der erste Entwurf, der
+`Page Up` mit Leerzeichen schrieb, weil das hübscher aussieht. SDL schreibt es ohne. Nachgesehen in
+`SDL_keymap.c` statt geraten, und der Vergleich wirft zusätzlich auf beiden Seiten die Leerzeichen
+weg, damit die eine Schreibweise, die diese Engine nicht selbst prüfen kann, auch nicht beißt.
+Drei Entscheidungen:
 
 * **Die Modifikatoren sind eine MENGE.** `shift+ctrl+s` ist derselbe Akkord wie `Ctrl+Shift+S`,
   Groß- und Kleinschreibung und Leerzeichen sind egal. Eine Datei, die jemand richtig getippt hat,
@@ -3510,16 +3514,26 @@ Leiste ein `keyEquivalent` bekommt UND die Engine mit abgleicht. Nachgesehen im 
 als Menükürzel verbraucht, kommt also trotzdem als `SDL_EVENT_KEY_DOWN` an. Die Falle ist real,
 nicht theoretisch.
 
-Der Ausweg ist ein Besitzer pro Plattform, und dass „gehört mir" und „feuert" zwei verschiedene
-Antworten sind. `AppMacMenu` setzt jetzt echte `keyEquivalent` samt Maske (Ctrl → Command,
-kleingeschriebener Buchstabe plus explizites Shift, denn ein großgeschriebenes Äquivalent bedeutet
-AppKit schon von selbst Shift und macht ein schlichtes Cmd+S unausdrückbar). `fireMenuShortcut`
-antwortet bei nativer Leiste **true und feuert nichts**: die Taste gehörte einem Menü, der Aufrufer
-darf sie niemanden dahinter sehen lassen, und gefeuert hat sie AppKit schon. Beide Hälften sind
-nötig. Wer dort false antwortet, lässt die Taste ins Spiel durch, hinter ein Menü, das gerade
-gehandelt hat; wer feuert, wählt den Eintrag zweimal auf einen Tastendruck. `menuShortcutTarget`
-dagegen antwortet überall gleich, denn „wem gehört dieser Akkord" ist dieselbe Frage, egal wer die
-Leiste zeichnet.
+Der Ausweg ist ein Besitzer pro AKKORD, nicht pro Plattform, und dass „gehört mir" und „feuert"
+zwei verschiedene Antworten sind. `AppMacMenu` setzt echte `keyEquivalent` samt Maske (Ctrl →
+Command, kleingeschriebener Buchstabe plus explizites Shift, denn ein großgeschriebenes Äquivalent
+bedeutet AppKit schon von selbst Shift und macht ein schlichtes Cmd+S unausdrückbar).
+`fireMenuShortcut` antwortet für solche Akkorde bei nativer Leiste **true und feuert nichts**: die
+Taste gehörte einem Menü, der Aufrufer darf sie niemanden dahinter sehen lassen, und gefeuert hat
+sie AppKit schon. Beide Hälften sind nötig. Wer dort false antwortet, lässt die Taste ins Spiel
+durch, hinter ein Menü, das gerade gehandelt hat; wer feuert, wählt den Eintrag zweimal auf einen
+Tastendruck. `menuShortcutTarget` dagegen antwortet überall gleich, denn „wem gehört dieser Akkord"
+ist dieselbe Frage, egal wer die Leiste zeichnet.
+
+**Warum nur die Akkorde MIT Command an AppKit gehen.** `performKeyEquivalent:` vergleicht Taste
+und Maske und fragt niemanden, wer gerade die Tastatur hat. Ein nacktes F5 als Tastenäquivalent
+geht also los, während jemand ein Formular ausfüllt, und ein Shift+S bei jedem großen S, das
+getippt wird. Ein Äquivalent ohne Command ist damit kein Kürzel, sondern ein Tastaturgriff über die
+ganze Anwendung. Alles ohne Command bleibt deshalb bei der Engine, auch auf dem Mac, und dort gilt
+dieselbe Regel über Textfelder wie überall sonst. Was übrig bleibt und bewusst so ist: bindet eine
+Anwendung Ctrl+C an einen Menüeintrag, bekommt sie auf dem Mac beides, das Kopieren im Feld UND
+`OnMenuItem` — AppKit feuert zuerst, das Feld verarbeitet das SDL-Echo. „Im Feld gewinnt das Feld"
+gilt für die gezeichnete Leiste.
 
 **Die zweite Falle, und die Entscheidung, die der Entwurf offen ließ.** Ein Kürzel ohne
 Modifikator darf nicht losgehen, während jemand in einem Textfeld tippt. Aber die Grenze liegt

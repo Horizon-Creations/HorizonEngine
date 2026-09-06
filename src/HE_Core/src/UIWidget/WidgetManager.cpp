@@ -1014,13 +1014,22 @@ bool WidgetManager::fireMenuShortcut(const std::string& keyName, bool ctrl,
 	const std::string id = menuShortcutTarget(keyName, ctrl, shift, alt);
 	if (id.empty()) return false;
 	// ── The macOS half, and the whole of it ─────────────────────────────────
-	// While the SYSTEM draws the bar, AppKit has already fired this entry off
-	// its own key equivalent — and SDL still reports the press, because
-	// Cocoa_DispatchEvent runs before [super sendEvent:]. So the answer here is
-	// TRUE and nothing else: the key belonged to a menu, the caller must not let
-	// anything behind it see it, and firing again would be the entry chosen
-	// twice on one keystroke.
-	if (m_menuNative) return true;
+	// One owner per CHORD, not per platform. While the system draws the bar,
+	// AppKit carries the chords that have Command in them: it has already fired
+	// this entry off its own key equivalent, and SDL reports the press anyway
+	// (Cocoa_DispatchEvent runs before [super sendEvent:]). So the answer is
+	// TRUE and nothing else — the key belonged to a menu, nothing behind it may
+	// see it, and firing would choose the entry twice on one keystroke.
+	//
+	// Everything WITHOUT Command stays here even on macOS, because a key
+	// equivalent is a key grab across the whole application: a bare F5 would go
+	// off while somebody fills in a form, and Shift+S on every capital S they
+	// type. AppMacMenu gives those no equivalent, so the host's own rule about
+	// text fields is the one that decides, exactly as it does everywhere else.
+	//
+	// `ctrl` is the CHORD's Command flag, not just the press's: the match above
+	// only returns an id when every modifier agrees.
+	if (m_menuNative && ctrl) return true;
 	// A shortcut is the menu answered without opening it, so one that is open
 	// has been answered too and must not stay hanging over the page.
 	closeMenu();

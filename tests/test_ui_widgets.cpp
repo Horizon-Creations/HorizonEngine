@@ -12149,7 +12149,7 @@ TEST_CASE("A chord is a set of modifiers and one key, however it is spelled")
     // would match nothing at all.
     const struct { const char* written; const char* canonical; } kNames[] = {
         { "Enter", "Return" },   { "Esc", "Escape" },      { "Del", "Delete" },
-        { "PgUp", "Page Up" },   { "pagedown", "Page Down" },
+        { "PgUp", "PageUp" },    { "page down", "PageDown" },
         { "F5", "F5" },          { "f12", "F12" },         { "Space", "Space" },
         { "Backspace", "Backspace" }, { "Tab", "Tab" },    { "7", "7" },
     };
@@ -12180,6 +12180,13 @@ TEST_CASE("A chord is a set of modifiers and one key, however it is spelled")
     CHECK(HE::uiShortcutMatchesText("Ctrl+S", "s", true, false, false));  // name case
     // A chord that does not parse fires on nothing rather than on everything.
     CHECK_FALSE(HE::uiShortcutMatchesText("Ctrl+Nonsense", "S", true, false, false));
+    // The name a host hands over is squeezed too, so the one spelling this
+    // engine cannot check at compile time cannot bite either.
+    CHECK(HE::uiShortcutMatchesText("Ctrl+PgUp", "PageUp", true, false, false));
+    CHECK(HE::uiShortcutMatchesText("Ctrl+PgUp", "Page Up", true, false, false));
+    // The keypad's Enter is Enter: a different scancode, a different name out of
+    // SDL, and nobody means a different command by pressing it.
+    CHECK(HE::uiShortcutMatchesText("Ctrl+Enter", "Keypad Enter", true, false, false));
 }
 
 TEST_CASE("A shortcut chooses the entry through the same door the click uses")
@@ -12260,7 +12267,7 @@ TEST_CASE("A shortcut chooses the entry through the same door the click uses")
     CHECK_FALSE(wm.hasLayer());
 }
 
-TEST_CASE("With the system bar up the chord is owned here and fired there")
+TEST_CASE("With the system bar up a Command chord is owned here and fired there")
 {
     // The macOS double-fire, and the only half of it that can be tested without
     // Cocoa. AppKit chooses the entry off its own key equivalent, and SDL
@@ -12268,6 +12275,11 @@ TEST_CASE("With the system bar up the chord is owned here and fired there")
     // that key belongs to a menu" and fire NOTHING. Answering false instead
     // would let the key through to the game behind a menu that just acted on
     // it; firing would choose the entry twice on one keystroke.
+    //
+    // …and only for the chords AppKit was actually GIVEN, which is the ones
+    // with Command in them. A key equivalent grabs its key across the whole
+    // application, so a bare F5 handed to AppKit would fire while somebody
+    // fills in a form. Those stay here even under a native bar.
     TempWidgetDir dir;
     ContentManager cm(dir.path.string());
     HE::UIWidgetTree tree;
@@ -12298,11 +12310,18 @@ TEST_CASE("With the system bar up the chord is owned here and fired there")
     REQUIRE(createShown(wm, cm, "mem://w.hasset") != 0);
     std::vector<HE::AppMenu> bar = sampleMenuBar();
     bar[0].items[0].shortcut = "Ctrl+N";
+    bar[1].items[0].shortcut = "F5";     // no Command: AppKit is not given this
     wm.setMenuBar(bar);
     wm.setMenuBarNative(true);
 
     CHECK(wm.fireMenuShortcut("N", true, false, false));       // owned
     CHECK(rt.getVariable(gi, "chosen").s.empty());             // …and not fired
+
+    // The Command-less one still fires here, and that is not a detail: it is
+    // the only place it CAN fire, because it was never handed to AppKit.
+    CHECK(wm.fireMenuShortcut("F5", false, false, false));
+    CHECK(rt.getVariable(gi, "chosen").s == "undo");
+    rt.setVariable(gi, "chosen", HorizonCode::Value::ofString(""));
 
     // Who owns a chord is the same question on every platform, and it answers
     // the same: the bar is the same bar whoever draws it.

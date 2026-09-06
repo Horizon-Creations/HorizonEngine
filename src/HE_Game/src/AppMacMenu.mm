@@ -176,7 +176,16 @@ void set(const std::vector<HE::AppMenu>& menus)
 				if (!item.shortcut.empty())
 				{
 					HE::UIShortcut sc;
-					if (HE::uiParseShortcut(item.shortcut, sc))
+					// Only chords with COMMAND go to AppKit, and that is the
+					// second half of the double-fire trap rather than a taste in
+					// shortcuts. performKeyEquivalent: matches key plus mask and
+					// asks nobody what has the keyboard: a bare F5 as a key
+					// equivalent fires while somebody is filling in a form, and
+					// Shift+S fires on every capital S they type. Command-less
+					// chords therefore stay with the engine, where the text
+					// field gets its say — see WidgetManager::fireMenuShortcut,
+					// which fires exactly those and leaves these to the system.
+					if (HE::uiParseShortcut(item.shortcut, sc) && sc.ctrl)
 					{
 						eq   = heKeyEquivalent(sc);
 						mask = heModifierMask(sc);

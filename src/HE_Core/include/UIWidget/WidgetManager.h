@@ -218,14 +218,17 @@ public:
     // Returns true when an entry OWNS the key, so the caller stops looking and
     // lets nothing behind it see the press.
     //
-    // Owning and firing come apart on exactly one platform. While the SYSTEM
-    // draws the bar, AppKit has already chosen the entry off its own key
-    // equivalent, and SDL reports the same press anyway (Cocoa_DispatchEvent
-    // runs before [super sendEvent:]) — so there it answers true and fires
-    // NOTHING. A manager that also fired would choose the entry twice on one
-    // keystroke, and one that answered false would let the key fall through to
-    // the game behind a menu that just acted on it. Both halves of the trap, one
-    // line apart.
+    // Owning and firing come apart for exactly one kind of chord. While the
+    // SYSTEM draws the bar, AppKit carries the ones with Command in them: it has
+    // already chosen the entry off its own key equivalent, and SDL reports the
+    // same press anyway (Cocoa_DispatchEvent runs before [super sendEvent:]) —
+    // so those answer true and fire NOTHING. A manager that also fired would
+    // choose the entry twice on one keystroke, and one that answered false would
+    // let the key fall through to the game behind a menu that just acted on it.
+    // Chords WITHOUT Command fire here even under a native bar, because AppKit
+    // is given no equivalent for them: a key equivalent grabs its key across the
+    // whole application, and a bare F5 that goes off inside a text field is not
+    // a shortcut but a keyboard nobody can type on.
     bool  fireMenuShortcut(const std::string& keyName, bool ctrl, bool shift, bool alt);
     // Who would take it, without firing anything — the id, or empty. Answers the
     // same on every platform, native bar or not: this is "whose chord is this",
