@@ -121,6 +121,10 @@ public:
     // Element size implied by the current text/font (see autoSize). Callers apply
     // it before layout so the rect the glyphs lay out in already fits them.
     void applyAutoSize(float resolvedWidth, float fontScale = 1.0f) override;
+    // A wrapping label authors its WIDTH — that is the column the words break
+    // against — and only its height follows the text.
+    int  autoSizedAxes() const override
+    { return autoSize ? (((wordWrap ? 0 : kAxisX) | kAxisY) & ~stretchedAxes()) : 0; }
 
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override;
@@ -216,12 +220,43 @@ public:
     // in effect now", and both of those are one bool underneath.
     bool        switchStyle = false;
 
+    // ── Fit the row to the label (docs/he-apps-plan.md D4) ───────────────────
+    // Off, and off is what every checkbox authored before this means: 200×28,
+    // whatever is written on it. On, the element is exactly the control plus the
+    // gap plus the label, so a translated caption cannot run out of its own row
+    // and a bigger font cannot cut it in half.
+    bool        autoSize = false;
+
+    // ── The one set of numbers the box is drawn and measured from ────────────
+    // `render` and `applyAutoSize` ask this, and they have to: a measurement
+    // that used its own idea of how wide the tick box is would size the row to a
+    // control nobody drew. All three come out in the units the font size is
+    // handed in — pixels while drawing, canvas units while measuring.
+    //
+    // `heightLimit` is the element's height where there IS one (drawing), and 0
+    // where the height is what is being computed (measuring): the box is capped
+    // by the row so a deliberately tiny checkbox still fits inside itself.
+    struct BoxMetrics { float box = 0.0f, ctrl = 0.0f, gap = 0.0f; };
+    static BoxMetrics metricsFor(float fontPx, float heightLimit, bool asSwitch)
+    {
+        BoxMetrics m;
+        m.box  = fontPx * 1.15f;
+        if (heightLimit > 0.0f && heightLimit < m.box) m.box = heightLimit;
+        m.ctrl = asSwitch ? m.box * 1.8f : m.box;
+        m.gap  = 0.4f * m.box;   // scales with the box, not a fixed 8 px
+        return m;
+    }
+
     UICheckBox() { sizeX = 200.0f; sizeY = 28.0f; }
     UIWidgetType type() const override { return UIWidgetType::CheckBox; }
     const char*  typeName() const override { return "CheckBox"; }
     bool interactive() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UICheckBox>(*this); }
+
+    void applyAutoSize(float resolvedWidth, float fontScale = 1.0f) override;
+    int  autoSizedAxes() const override
+    { return autoSize ? ((kAxisX | kAxisY) & ~stretchedAxes()) : 0; }
 
     const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
@@ -655,6 +690,14 @@ public:
         return a;
     }
 
+    // ── Fit the box to the options (docs/he-apps-plan.md D4) ─────────────────
+    // Off by default, like every other fit-to-content switch here. On, the
+    // closed box is measured against ALL the options and not against the
+    // selected one: a combo that resized itself every time somebody picked a
+    // different entry would move whatever sits next to it, and the widest entry
+    // has to fit anyway or the list is wider than the thing it drops out of.
+    bool  autoSize = false;
+
     UIComboBox() { sizeX = 220.0f; sizeY = 32.0f; cornerRadius = glm::vec4(4.0f); }
     // The closed box is the surface; the open list draws over it.
     bool hasSurfaceStyle() const override { return true; }
@@ -663,6 +706,10 @@ public:
     bool interactive() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIComboBox>(*this); }
+
+    void applyAutoSize(float resolvedWidth, float fontScale = 1.0f) override;
+    int  autoSizedAxes() const override
+    { return autoSize ? ((kAxisX | kAxisY) & ~stretchedAxes()) : 0; }
 
     const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
@@ -785,6 +832,10 @@ public:
 
     bool laysOutChildren() const override { return true; }
     bool acceptsChildren() const override { return true; }
+    // Both axes come out of the measurement while it is on — see the container
+    // pass in uiApplyAutoSize, which is what actually writes them.
+    int  autoSizedAxes() const override
+    { return sizeToContent ? (kAxisX | kAxisY) : 0; }
     const UIPropTable& propTable() const override;
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override {}
@@ -840,6 +891,8 @@ public:
     // It runs along X and breaks along Y. The flag exists for the boxes' single
     // axis and is answered honestly here: a wrap box's MAIN axis is horizontal.
     bool stacksVertically() const override { return false; }
+    // Only the height, for the reason in the note above this class.
+    int  autoSizedAxes() const override { return sizeToContent ? kAxisY : 0; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIWrapBox>(*this); }
 

@@ -1691,17 +1691,27 @@ void drawDetails(State& st, AppContext& ctx)
 			edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Position");
-			// A container that sizes itself to its content owns those two
-			// numbers: showing them editable would be offering a value that is
-			// overwritten before it is ever drawn.
-			const bool measured = n->getProp("Size To Content").b;
-			ImGui::BeginDisabled(measured);
+			// An element that sizes itself to its content owns those numbers:
+			// showing them editable would be offering a value that is
+			// overwritten before it is ever drawn. The element answers which
+			// axes that is (autoSizedAxes) rather than one property being read
+			// here, because the answer differs per type and per switch — a
+			// wrapping label authors its width and measures only its height.
+			const int measured = n->autoSizedAxes();
+			// Disabled only when BOTH are measured: half a DragFloat2 cannot be
+			// greyed, and greying the pair would take away a number the author
+			// still owns.
+			ImGui::BeginDisabled(measured == (HE::UIElement::kAxisX | HE::UIElement::kAxisY));
 			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Size");
 			ImGui::EndDisabled();
-			if (measured)
+			if (measured == (HE::UIElement::kAxisX | HE::UIElement::kAxisY))
 				ImGui::TextDisabled("Measured from the content (Min/Max Size below).");
+			else if (measured & HE::UIElement::kAxisX)
+				ImGui::TextDisabled("The width is measured from the content.");
+			else if (measured & HE::UIElement::kAxisY)
+				ImGui::TextDisabled("The height is measured from the content.");
 		}
 	}
 	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);

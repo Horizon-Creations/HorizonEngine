@@ -164,7 +164,8 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Box Color", UIPropType::Color },
             { "Check Color", UIPropType::Color },
             { "Text Color", UIPropType::Color },
-            { "Switch", UIPropType::Bool } } },
+            { "Switch", UIPropType::Bool },
+            { "AutoSize", UIPropType::Bool } } },
         { UIWidgetType::Slider, {
             { "Value", UIPropType::Float },
             { "Min", UIPropType::Float },
@@ -202,7 +203,8 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "FontSize", UIPropType::Float },
             { "Back Color", UIPropType::Color },
             { "Text Color", UIPropType::Color },
-            { "Highlight Color", UIPropType::Color } } },
+            { "Highlight Color", UIPropType::Color },
+            { "AutoSize", UIPropType::Bool } } },
         // The layout boxes share one table: the slot algorithm reads these two
         // BY NAME (see boxSlotRect), so renaming them silently un-pads every
         // box in every saved widget.
@@ -14187,4 +14189,224 @@ TEST_CASE("Both pickers draw a full-rect surface first, so the border finds it")
         CHECK(out[0].size.x == doctest::Approx(px.w));
         CHECK(out[0].size.y == doctest::Approx(px.h));
     }
+}
+
+// ═══ "An Inhalt anpassen" for the leaf types (docs/he-apps-plan.md D4) ═══════
+// Until here, fitting to content was a container's trick (Size To Content) and a
+// label's (AutoSize). A checkbox whose caption was translated and a combo whose
+// options came out of a project file were sized by hand, which is a number that
+// is right until somebody changes the words. These pin the two measurements and
+// the rule that decides who owns an axis.
+
+TEST_CASE("CheckBox: AutoSize fits the row to control, gap and label")
+{
+    HE::UIWidgetTree t;
+    const int a = t.add(HE::UIWidgetType::CheckBox);
+    const int b = t.add(HE::UIWidgetType::CheckBox);
+    auto* shortOne = dynamic_cast<HE::UICheckBox*>(t.find(a));
+    auto* longOne  = dynamic_cast<HE::UICheckBox*>(t.find(b));
+    REQUIRE(shortOne); REQUIRE(longOne);
+    shortOne->label = "On";
+    longOne->label  = "Show the grid while dragging";
+
+    // Off is what every checkbox authored before this means: the size it was
+    // given, whatever is written on it.
+    HE::uiApplyAutoSize(t);
+    CHECK(shortOne->sizeX == doctest::Approx(200.0f));
+    CHECK(longOne->sizeX  == doctest::Approx(200.0f));
+
+    shortOne->autoSize = true;
+    longOne->autoSize  = true;
+    HE::uiApplyAutoSize(t);
+    // The longer caption gets the wider row, and both are wider than the tick
+    // box alone — measured against each other, so no font decides the case.
+    CHECK(longOne->sizeX > shortOne->sizeX);
+    const HE::UICheckBox::BoxMetrics m =
+        HE::UICheckBox::metricsFor(shortOne->fontSize, 0.0f, false);
+    CHECK(shortOne->sizeX > m.ctrl + m.gap);
+    // The row is at least as tall as the box drawn in it.
+    CHECK(shortOne->sizeY >= doctest::Approx(m.box));
+}
+
+TEST_CASE("CheckBox: a switch measures wider than a tick box for the same label")
+{
+    HE::UIWidgetTree t;
+    const int a = t.add(HE::UIWidgetType::CheckBox);
+    const int b = t.add(HE::UIWidgetType::CheckBox);
+    auto* box = dynamic_cast<HE::UICheckBox*>(t.find(a));
+    auto* sw  = dynamic_cast<HE::UICheckBox*>(t.find(b));
+    REQUIRE(box); REQUIRE(sw);
+    box->label = sw->label = "Wireframe";
+    box->autoSize = sw->autoSize = true;
+    sw->switchStyle = true;
+    HE::uiApplyAutoSize(t);
+    // The control is 1.8 boxes wide instead of one, and nothing else changed.
+    const HE::UICheckBox::BoxMetrics m =
+        HE::UICheckBox::metricsFor(box->fontSize, 0.0f, false);
+    CHECK(sw->sizeX == doctest::Approx(box->sizeX + m.box * 0.8f));
+}
+
+TEST_CASE("CheckBox: a bigger reader font makes the row bigger, not the label smaller")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::CheckBox);
+    auto* cb = dynamic_cast<HE::UICheckBox*>(t.find(id));
+    REQUIRE(cb);
+    cb->label = "Play sound on completion";
+    cb->autoSize = true;
+    HE::uiApplyAutoSize(t, nullptr, 1.0f);
+    const float w100 = cb->sizeX, h100 = cb->sizeY;
+    HE::uiApplyAutoSize(t, nullptr, 1.5f);
+    // "Fit your content" is a question about the DRAWN size, which is why the
+    // reader's text size reaches this far down at all (B10).
+    CHECK(cb->sizeX > w100);
+    CHECK(cb->sizeY > h100);
+}
+
+TEST_CASE("ComboBox: AutoSize measures every option, not the selected one")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::ComboBox);
+    auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(id));
+    REQUIRE(cb);
+    cb->options = { "Low", "Medium", "Ultra, with every extra turned on" };
+    cb->selectedIndex = 0;
+    cb->autoSize = true;
+    HE::uiApplyAutoSize(t);
+    const float w = cb->sizeX;
+    // A box that resized itself on every pick would move whatever sits next to
+    // it — and the widest entry has to fit anyway, or the open list is wider
+    // than the thing it drops out of.
+    cb->selectedIndex = 2;
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeX == doctest::Approx(w));
+    cb->selectedIndex = 1;
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeX == doctest::Approx(w));
+    // …and it is wider than the same combo with only the short entries in it.
+    cb->options = { "Low", "Medium" };
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeX < w);
+    // The arrow keeps its square: the width always leaves at least the height
+    // free on the right, plus the rounded inset on the left.
+    CHECK(cb->sizeX > cb->sizeY + HE::UIComboBox::contentInset(cb->cornerRadius.x));
+}
+
+TEST_CASE("ComboBox: no options is still a box somebody can click")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::ComboBox);
+    auto* cb = dynamic_cast<HE::UIComboBox*>(t.find(id));
+    REQUIRE(cb);
+    cb->options.clear();
+    cb->autoSize = true;
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeY > 1.0f);
+    CHECK(cb->sizeX > cb->sizeY);   // the arrow's square, and room beside it
+}
+
+TEST_CASE("A measured leaf is held between Min and Max Size, an authored one is not")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::CheckBox);
+    auto* cb = dynamic_cast<HE::UICheckBox*>(t.find(id));
+    REQUIRE(cb);
+    cb->label = "A caption long enough to need more than sixty units of room";
+    cb->autoSize = true;
+    cb->maxSizeX = 60.0f;
+    HE::uiApplyAutoSize(t);
+    // The SIZE FIELD, not just the rect: a parent box adds these up when it
+    // stacks its children, so a leaf that measured itself past its ceiling
+    // would push its siblings by a width it does not have.
+    CHECK(cb->sizeX == doctest::Approx(60.0f));
+
+    cb->maxSizeX = 0.0f;
+    cb->minSizeX = 900.0f;
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeX == doctest::Approx(900.0f));
+
+    // A max under the min loses — "never smaller than that" is the promise a
+    // layout can actually keep (same rule as the containers').
+    cb->maxSizeX = 100.0f;
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeX == doctest::Approx(900.0f));
+
+    // With AutoSize off nothing is measured, so nothing is clamped either: the
+    // authored number survives a bound that would have bitten.
+    cb->autoSize = false;
+    cb->minSizeX = 0.0f;
+    cb->maxSizeX = 10.0f;
+    cb->sizeX = 200.0f;
+    HE::uiApplyAutoSize(t);
+    CHECK(cb->sizeX == doctest::Approx(200.0f));
+}
+
+TEST_CASE("autoSizedAxes: one answer for the clamp and for the designer")
+{
+    HE::UIWidgetTree t;
+    const int textId = t.add(HE::UIWidgetType::Text);
+    auto* tx = dynamic_cast<HE::UIText*>(t.find(textId));
+    REQUIRE(tx);
+    tx->autoSize = true;
+    CHECK(tx->autoSizedAxes() == (HE::UIElement::kAxisX | HE::UIElement::kAxisY));
+    // A wrapping label authors its width: that IS the column the words break
+    // against, so only the height follows the text.
+    tx->wordWrap = true;
+    CHECK(tx->autoSizedAxes() == HE::UIElement::kAxisY);
+    // No axis a stretching anchor owns is ever measured.
+    tx->wordWrap = false;
+    HE::uiSetAnchorPreset(*tx, 15);            // stretched both ways
+    CHECK(tx->autoSizedAxes() == 0);
+    tx->autoSize = false;
+    HE::uiSetAnchorPreset(*tx, 0);
+    CHECK(tx->autoSizedAxes() == 0);
+
+    // The containers answer for the pass that actually writes them.
+    const int wrapId = t.add(HE::UIWidgetType::WrapBox);
+    auto* wb = dynamic_cast<HE::UIWrapBox*>(t.find(wrapId));
+    REQUIRE(wb);
+    CHECK(wb->autoSizedAxes() == 0);
+    wb->sizeToContent = true;
+    CHECK(wb->autoSizedAxes() == HE::UIElement::kAxisY);
+
+    const int boxId = t.add(HE::UIWidgetType::VerticalBox);
+    auto* vb = dynamic_cast<HE::UIBoxBase*>(t.find(boxId));
+    REQUIRE(vb);
+    vb->sizeToContent = true;
+    CHECK(vb->autoSizedAxes() == (HE::UIElement::kAxisX | HE::UIElement::kAxisY));
+
+    // And a type that has no content to measure says so.
+    const int slider = t.add(HE::UIWidgetType::Slider);
+    CHECK(t.find(slider)->autoSizedAxes() == 0);
+}
+
+TEST_CASE("Leaf AutoSize round-trips, and an older widget saves byte-identical")
+{
+    HE::UIWidgetTree t;
+    const int c = t.add(HE::UIWidgetType::CheckBox);
+    const int b = t.add(HE::UIWidgetType::ComboBox);
+    auto* cb = dynamic_cast<HE::UICheckBox*>(t.find(c));
+    auto* combo = dynamic_cast<HE::UIComboBox*>(t.find(b));
+    REQUIRE(cb); REQUIRE(combo);
+
+    // Off by default and never written, so a widget authored before this saves
+    // exactly what it saved yesterday.
+    CHECK_FALSE(cb->autoSize);
+    CHECK_FALSE(combo->autoSize);
+    CHECK(HE::uiWidgetTreeToJson(t).find("autoSize") == std::string::npos);
+
+    cb->autoSize = true;
+    combo->autoSize = true;
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(dynamic_cast<const HE::UICheckBox*>(r.find(c))->autoSize);
+    CHECK(dynamic_cast<const HE::UIComboBox*>(r.find(b))->autoSize);
+
+    // …and through the property table, which is what a graph and the designer
+    // both write it with.
+    cb->setProp("AutoSize", HE::UIPropValue::ofBool(false));
+    CHECK_FALSE(cb->autoSize);
+    CHECK_FALSE(cb->getProp("AutoSize").b);
+    combo->setProp("AutoSize", HE::UIPropValue::ofBool(false));
+    CHECK_FALSE(combo->getProp("AutoSize").b);
 }

@@ -614,6 +614,8 @@ const UIPropTable& UICheckBox::propTable() const
         uiprop::slot<&UICheckBox::checkColor>({ "Check Color", UIPropType::Color }),
         uiprop::slot<&UICheckBox::textColor> ({ "Text Color", UIPropType::Color }),
         uiprop::slot<&UICheckBox::switchStyle>({ "Switch", UIPropType::Bool }),
+        // Same name the label already uses for the same idea (see UIText).
+        uiprop::slot<&UICheckBox::autoSize>({ "AutoSize", UIPropType::Bool }),
     };
     return t;
 }
@@ -766,6 +768,7 @@ const UIPropTable& UIComboBox::propTable() const
         uiprop::slot<&UIComboBox::backColor>     ({ "Back Color", UIPropType::Color }),
         uiprop::slot<&UIComboBox::textColor>     ({ "Text Color", UIPropType::Color }),
         uiprop::slot<&UIComboBox::highlightColor>({ "Highlight Color", UIPropType::Color }),
+        uiprop::slot<&UIComboBox::autoSize>      ({ "AutoSize", UIPropType::Bool }),
     };
     return t;
 }
@@ -1351,6 +1354,37 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
 // ── CheckBox ─────────────────────────────────────────────────────────────────
 
+void UICheckBox::applyAutoSize(float resolvedWidth, float fontScale)
+{
+    (void)resolvedWidth;   // nothing here wraps, so the laid-out width says nothing
+    const int axes = autoSizedAxes();
+    if (axes == 0) return;
+    // The size the reader actually SEES, in canvas units: a row that fits the
+    // label at 100 % cuts it in half at 150 %, which is why the scale reaches
+    // this far down at all (see UIText::applyAutoSize).
+    const float fs = fontSize * fontScale;
+    // No height cap while measuring: the height is what is being computed here,
+    // and capping the box against the size the element happens to carry would
+    // measure the row against yesterday's answer.
+    const BoxMetrics m = metricsFor(fs, 0.0f, switchStyle);
+    HE::UITextLayout opts;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const glm::vec2 lm = label.empty()
+        ? glm::vec2(0.0f)
+        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
+             : HE::measureUIText(label, fs, 0.0f, opts));
+    // The same slack a label gets, and for the same reason: a run measured to
+    // the last pixel of its last glyph has no room for the one that overhangs.
+    if (axes & kAxisX)
+        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
+    // The row is as tall as the taller of the two things in it. The box is
+    // 1.15 of the font and the line is a touch over one, so in practice the box
+    // wins — but a font whose line box is taller than that must not be clipped
+    // by a row sized for a square nobody looks at.
+    if (axes & kAxisY)
+        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+}
+
 void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
@@ -1359,13 +1393,18 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // (to place its label, say) grew a box the size of half the screen. Capped
     // at the element's height so a deliberately tiny one still fits, and
     // centred in it so the box sits with the text rather than above it.
-    const float box = std::min(px.h, st.fontPx(fontSize, pxScaleY) * 1.15f);
+    //
+    // The three numbers come from metricsFor, which applyAutoSize asks too — a
+    // row measured against a control of a different width is a label that ends
+    // somewhere other than where the row does.
+    const BoxMetrics m = metricsFor(st.fontPx(fontSize, pxScaleY), px.h, switchStyle);
+    const float box = m.box;
     const float by  = px.y + (px.h - box) * 0.5f;
     const glm::vec4 bcHover = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
     glm::vec4 bc = glm::mix(boxColor, bcHover, st.hoverAmount());
     // How wide the control is, which is the only thing the label needs to know
     // about which of the two pictures was drawn.
-    const float ctrl = switchStyle ? box * 1.8f : box;
+    const float ctrl = m.ctrl;
     if (switchStyle)
     {
         // The track carries the state, not a mark inside it: a switch that is
@@ -1394,7 +1433,7 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
             quad(out, px.x + inset, by + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
         }
     }
-    const float gap = 0.4f * box;   // scales with the box, not a fixed 8 px
+    const float gap = m.gap;
     const float lx = px.x + ctrl + gap;
     emitText(*this, label, { lx, px.y }, { px.w - ctrl - gap, px.h },
              st.fontPx(fontSize, pxScaleY), textColor, /*centerH=*/false, out);
@@ -1870,6 +1909,48 @@ size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY,
 
 // ── ComboBox ─────────────────────────────────────────────────────────────────
 
+void UIComboBox::applyAutoSize(float resolvedWidth, float fontScale)
+{
+    (void)resolvedWidth;
+    const int axes = autoSizedAxes();
+    if (axes == 0) return;
+    const float fs = fontSize * fontScale;
+    HE::UITextLayout opts;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const auto measure = [&](const std::string& s) -> glm::vec2
+    {
+        if (s.empty()) return glm::vec2(0.0f);
+        return f ? HE::measureUIText(*f, s, fs, 0.0f, opts)
+                 : HE::measureUIText(s, fs, 0.0f, opts);
+    };
+    // Every option, not the selected one: see the note on autoSize. An empty
+    // list still has to be a box somebody can click, so the placeholder for it
+    // is one line of nothing rather than a width of zero.
+    float widest = 0.0f, lineH = 0.0f;
+    for (const std::string& o : options)
+    {
+        const glm::vec2 m = measure(o);
+        widest = std::max(widest, m.x);
+        lineH  = std::max(lineH, m.y);
+    }
+    if (options.empty()) lineH = measure(" ").y;
+    // The height first, because the ARROW is a square as wide as the box is
+    // tall (arrowIn), so the width cannot be known before it.
+    const float h = std::max(lineH + fs * 0.35f, fs * 1.4f);
+    if (axes & kAxisY) sizeY = h;
+    if (axes & kAxisX)
+    {
+        // Left inset, the widest option, and the arrow's square on the right —
+        // the three spans render() lays the closed box out of. contentInset
+        // reads the authored radius here, which is the canvas-unit radius, the
+        // same space this measurement is in.
+        const float pad = contentInset(cornerRadius.x);
+        // `h` and not sizeY: on an axis a stretching anchor owns, sizeY is an
+        // inset and not a height, and the arrow would come out the wrong size.
+        sizeX = pad + widest + fs * 0.25f + h;
+    }
+}
+
 void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
@@ -2109,11 +2190,15 @@ void UICheckBox::writeJson(nlohmann::json& j) const
     j["boxColor"] = colJson(boxColor); j["checkColor"] = colJson(checkColor);
     j["textColor"] = colJson(textColor);
     if (switchStyle) j["switch"] = true;   // byte-identical for every older file
+    if (autoSize)    j["autoSize"] = true; // same rule: only once somebody set it
 }
 void UICheckBox::readJson(const nlohmann::json& j)
 {
     checked = j.value("checked", checked); label = j.value("label", label);
     switchStyle = j.value("switch", switchStyle);
+    // Default off, so a checkbox authored before this keeps the size it was
+    // given instead of shrinking to its label the first time it is loaded.
+    autoSize = j.value("autoSize", false);
     fontSize = j.value("fontSize", fontSize);
     boxColor = colFrom(j.value("boxColor", nlohmann::json()), boxColor);
     checkColor = colFrom(j.value("checkColor", nlohmann::json()), checkColor);
@@ -2205,12 +2290,14 @@ void UIComboBox::writeJson(nlohmann::json& j) const
     j["options"] = options; j["selectedIndex"] = selectedIndex; j["fontSize"] = fontSize;
     j["backColor"] = colJson(backColor); j["textColor"] = colJson(textColor);
     j["highlightColor"] = colJson(highlightColor);
+    if (autoSize) j["autoSize"] = true;    // only once set, like every other switch here
 }
 void UIComboBox::readJson(const nlohmann::json& j)
 {
     if (j.contains("options") && j["options"].is_array())
         options = j["options"].get<std::vector<std::string>>();
     selectedIndex = j.value("selectedIndex", selectedIndex);
+    autoSize = j.value("autoSize", false);
     fontSize = j.value("fontSize", fontSize);
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
     textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);

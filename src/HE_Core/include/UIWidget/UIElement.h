@@ -871,6 +871,30 @@ public:
     virtual void applyAutoSize(float resolvedWidth, float fontScale = 1.0f)
     { (void)resolvedWidth; (void)fontScale; }
 
+    // ── Which axes the element works out for itself ──────────────────────────
+    // Bit 1 = width, bit 2 = height. One answer, given by the type, and two
+    // readers who would otherwise drift apart: `uiApplyAutoSize` holds exactly
+    // these axes between Min and Max Size (the others are authored and must not
+    // be touched), and the designer greys the Size row for them rather than
+    // offering a number that the next frame overwrites.
+    //
+    // The type answers because only the type knows what its own switches leave
+    // to the author: a wrapping label authors its width (that IS the wrap
+    // column) and measures only its height, and no axis a stretching anchor
+    // owns is ever measured — the parent decides those.
+    static constexpr int kAxisX = 1;
+    static constexpr int kAxisY = 2;
+    virtual int autoSizedAxes() const { return 0; }
+
+    // The axes a stretching anchor owns, in the same bits. Used by the types
+    // that measure themselves, so that their answer above and the skip inside
+    // their applyAutoSize come from one place.
+    int stretchedAxes() const
+    {
+        return (anchorMaxX > anchorMinX + 1e-4f ? kAxisX : 0)
+             | (anchorMaxY > anchorMinY + 1e-4f ? kAxisY : 0);
+    }
+
     // Type-specific JSON (base fields are handled by the tree serializer).
     virtual void writeJson(nlohmann::json&) const {}
     virtual void readJson(const nlohmann::json&) {}

@@ -654,6 +654,57 @@ Der Schalter steht in der Werkzeugleiste neben Zoom und Theme-Vorschau, dort, wo
 Arten zu SCHAUEN stehen. Nichts davon wird gespeichert: `snapOn` ist Ansichtszustand wie der
 Zoom, und die Widget-Dateien sind byte-gleich wie vorher.
 
+*Vierter Teil: „an Inhalt anpassen" konnten nur Container und Beschriftungen.* Ein Kästchen mit
+einer übersetzten Aufschrift und eine Auswahlliste, deren Einträge aus einer Projektdatei kommen,
+waren von Hand bemaßt — eine Zahl, die stimmt, bis jemand die Wörter ändert. Beide messen sich
+jetzt selbst, unter demselben Namen, den die Beschriftung schon trägt: `AutoSize`, aus, und aus
+heißt byte-gleich für jede vorhandene Datei (geschrieben wird der Schlüssel erst, wenn er gesetzt
+ist, gelesen wird er mit Vorgabe „aus").
+
+**Ein Kästchen ist Steuerelement plus Abstand plus Aufschrift**, und die drei Zahlen dafür standen
+mitten in `render`. Sie liegen jetzt in `UICheckBox::metricsFor`, die beide fragen: eine Zeile, die
+sich gegen ein Steuerelement anderer Breite bemisst, ist eine Aufschrift, die woanders endet als
+die Zeile. Beim MESSEN gibt es keine Höhengrenze mitzugeben — die Höhe ist das, was gerade
+berechnet wird, und das Kästchen gegen die Größe zu deckeln, die das Element zufällig noch trägt,
+misst gegen die Antwort von gestern. Ein Schalter (`Switch`) ist 1,8 Kästchen breit statt einem,
+und genau um diesen Unterschied fällt die Zeile breiter aus.
+
+**Eine Auswahlliste misst ALLE Einträge, nicht den gewählten.** Eine Liste, die sich bei jeder
+Auswahl neu bemäße, verschöbe, was neben ihr steht; und der breiteste Eintrag muss ohnehin passen,
+sonst ist die aufgeklappte Liste breiter als das, woraus sie fällt. Die Breite ist die Summe der
+drei Strecken, aus denen `render` die geschlossene Box legt: der Einzug, der sich nach der Rundung
+richtet (`contentInset`), der breiteste Eintrag, und das Quadrat des Pfeils, das so breit ist wie
+die Box hoch — deshalb wird die Höhe zuerst bestimmt.
+
+**Wer eine Achse besitzt, sagt der Typ, und er sagt es einmal.** `UIElement::autoSizedAxes()`
+(Bit 1 = Breite, Bit 2 = Höhe) hat zwei Leser, die sonst auseinanderliefen: `uiApplyAutoSize`
+klemmt genau diese Achsen zwischen `Min Size` und `Max Size`, und der Designer graut die
+Größenzeile dafür aus, statt eine Zahl anzubieten, die der nächste Frame überschreibt. Der Typ
+antwortet, weil nur der Typ weiß, was seine eigenen Schalter dem Autor lassen: eine umbrechende
+Beschriftung besitzt ihre Breite selbst (das IST die Umbruchspalte) und misst nur die Höhe, und
+keine Achse, die ein dehnender Anker führt, wird je gemessen.
+
+**Der Boden und die Decke galten für Blätter gar nicht.** Was der zweite Teil für Container
+gerichtet hat — das GRÖSSENFELD und nicht nur das Rechteck zwischen `Min` und `Max` halten, weil
+eine Elternbox die Felder ihrer Kinder addiert — fehlte im Blatt-Durchgang vollständig, also auch
+für jede `AutoSize`-Beschriftung, die es seit B6 gibt. Dieselbe `held`-Regel steht jetzt vor
+beiden Durchgängen und wird auf die gemessenen Achsen angewandt, auf die authored aber nicht: dort
+ist das Feld die Zahl des Autors, unter einem dehnenden Anker sogar ein Einzug statt einer Breite,
+und sie zu klemmen schriebe eine Datei um, die niemand angefasst hat.
+
+**Vier Typen bleiben absichtlich draußen**, und der Grund ist jedes Mal, dass es keinen Inhalt zu
+messen gibt:
+- **Button und Panel.** Was auf einem Knopf steht, sind KINDER (siehe `UIButton`), und ein Kind
+  hängt an einem Anker, der die Elterngröße schon einrechnet — sich danach zu bemessen wäre ein
+  Kreis. Das ist eine eigene Messart (nur punktverankerte Kinder), kein Nebensatz hier.
+- **Image.** Die native Größe einer Textur kennt HE_Core nicht: ein Widget hält eine UUID, die
+  Maße stehen im Renderer. Ohne einen Größenlieferant an dieser Grenze gibt es nichts zu messen.
+- **TextInput.** Die Breite dürfte dem Getippten nicht folgen, sonst springt das Feld unter dem
+  Finger; die Höhe wäre nur mehrzeilig sinnvoll, und dort beantwortet das eigene senkrechte
+  Scrollen die Frage schon.
+- **Slider, ProgressBar, Spacer, Datums- und Farbwähler.** Sie haben keine Eigengröße — ihr Bild
+  ist in jedem Fall ein Bruchteil des Rechtecks, das man ihnen gibt.
+
 ---
 
 ## 7. Block E: Editor- und Projektseite

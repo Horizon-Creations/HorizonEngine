@@ -994,6 +994,19 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
                 tabs->tabLabels.push_back(c->name.empty() ? std::string("Page") : c->name);
     }
 
+    // The measured extent, held between the element's floor and its ceiling. The
+    // rect is bounded anyway (applySizeBounds), but the SIZE FIELD has to be too:
+    // it is what a parent box adds up when it stacks its children, so a box that
+    // measured itself twice as tall as its Max would push its siblings down by a
+    // height it does not have.
+    const auto held = [](const UIElement& e, float v, bool xAxis)
+    {
+        const float hi = xAxis ? e.maxSizeX : e.maxSizeY;
+        const float lo = xAxis ? e.minSizeX : e.minSizeY;
+        if (hi > 0.0f && v > hi) v = hi;
+        return lo > 0.0f ? std::max(lo, v) : v;
+    };
+
     // The width handed over is the one the anchor already decides. Where the
     // anchor is a point that is just the element's own size (nothing changes);
     // where it stretches, it is the span the parent gives it, which is what a
@@ -1007,6 +1020,14 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
         float us = 1.0f, vs = 1.0f;
         uiElementUnitScale(tree, *e, us, vs, canvas);
         e->applyAutoSize(uiElementRect(tree, *e, canvas).w / std::max(1e-4f, us), fontScale);
+        // …and the floor and the ceiling apply to what it just wrote, exactly
+        // as they do to a container that measured itself. ONLY to the axes the
+        // element actually measures: on an authored axis the size field is the
+        // author's number (or, under a stretching anchor, an inset rather than
+        // a width), and clamping that would rewrite a file nobody edited.
+        const int axes = e->autoSizedAxes();
+        if (axes & UIElement::kAxisX) e->sizeX = held(*e, e->sizeX, true);
+        if (axes & UIElement::kAxisY) e->sizeY = held(*e, e->sizeY, false);
     }
 
     // Then the containers that size themselves to what is in them, INNERMOST
@@ -1029,19 +1050,6 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
     }
     std::sort(boxes.begin(), boxes.end(),
               [](const auto& a, const auto& b){ return a.first > b.first; });
-
-    // The measured extent, held between the element's floor and its ceiling. The
-    // rect is bounded anyway (applySizeBounds), but the SIZE FIELD has to be too:
-    // it is what a parent box adds up when it stacks its children, so a box that
-    // measured itself twice as tall as its Max would push its siblings down by a
-    // height it does not have.
-    const auto held = [](const UIElement& e, float v, bool xAxis)
-    {
-        const float hi = xAxis ? e.maxSizeX : e.maxSizeY;
-        const float lo = xAxis ? e.minSizeX : e.minSizeY;
-        if (hi > 0.0f && v > hi) v = hi;
-        return lo > 0.0f ? std::max(lo, v) : v;
-    };
 
     for (auto& [depth, box] : boxes)
     {
