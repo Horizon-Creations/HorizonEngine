@@ -2259,6 +2259,11 @@ bool VulkanRenderer::createDecalDepth(DecalDepth& d, uint32_t w, uint32_t h)
 {
     destroyDecalDepth(d);
     if (!m_device || w == 0 || h == 0) return false;
+#if !defined(HE_HAVE_SHADERC)
+    // No cross-compiler → no decal shader → don't pay for a second full-size
+    // depth image per render target.
+    return false;
+#else
 
     VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ici.imageType     = VK_IMAGE_TYPE_2D;
@@ -2291,6 +2296,7 @@ bool VulkanRenderer::createDecalDepth(DecalDepth& d, uint32_t w, uint32_t h)
     // swapchain (and therefore after createDepthResources) — build it on first use.
     d.w = w; d.h = h;
     return true;
+#endif
 }
 
 void VulkanRenderer::destroyDecalDepth(DecalDepth& d)
@@ -2541,16 +2547,34 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
 {
     if (!m_world || m_shadowPipeline == VK_NULL_HANDLE || d.image == VK_NULL_HANDLE) return;
 
-    // Extract + cull against the CAMERA, like runSSAO does — EncodeShadowMap
-    // leaves m_sortedIndices culled against the light frustum at aspect 1.0.
+    // Cheapest possible exit for the overwhelmingly common decal-free frame:
+    // EncodeShadowMap ran two lines earlier and left a freshly extracted
+    // m_renderWorld behind, so the decal list is already known here — no need to
+    // walk the world a second time just to find out there is nothing to do. (A
+    // decal appearing in a frame where the shadow map did not extract shows up
+    // one frame late; that is invisible.)
+    if (m_renderWorld.decals.empty()) return;
+
+    // Now the real extract: the shadow one ran at aspect 1.0, which is the wrong
+    // frustum for a camera pass. Same reason runSSAO extracts for itself.
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(d.w) / static_cast<float>(d.h), &m_editorCamera);
     if (m_renderWorld.decals.empty() || m_renderWorld.objects.empty()) return;
 
     for (RenderObject& obj : m_renderWorld.objects)
+    {
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+        // The material asset overrides the component's opacity, and DrawScene
+        // splits opaque from transparent AFTER applying it. Without the same
+        // override here a material-driven glass pane would count as opaque in
+        // this pre-pass and transparent in the scene pass — depth where the
+        // scene writes none, and the decal lands on the glass.
+        if (m_contentManager && obj.materialAssetId != HE::UUID{})
+            if (const MaterialAsset* mat = m_contentManager->getMaterial(obj.materialAssetId))
+                obj.opacity = mat->opacity;
+    }
     m_culler.cull(m_renderWorld, m_visible);
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;

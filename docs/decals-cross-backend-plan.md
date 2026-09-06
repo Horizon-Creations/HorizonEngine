@@ -391,7 +391,19 @@ trägt das führende Minus für seinen y-nach-unten-Framebuffer genau dafür —
   Skinned Meshes, Partikel und WPO-verschobene Geometrie stehen nicht im Vorpass,
   also projizieren Decals nicht auf sie — dieselbe Lücke, die die Shadow-Map hat.
 - **Der Vorpass ist ein zusätzlicher Geometriedurchlauf.** Er läuft nur in Frames,
-  die überhaupt ein Decal haben (`m_renderWorld.decals.empty()` → sofort zurück).
+  die überhaupt ein Decal haben: die Prüfung `m_renderWorld.decals.empty()` steht
+  **vor** dem eigenen `extract`, weil `EncodeShadowMap` zwei Zeilen vorher schon
+  eines gemacht hat — ein decal-freier Frame kostet damit gar nichts. (Ein Decal,
+  das in einem Frame ohne Shadow-Extract auftaucht, erscheint einen Frame später.)
+  Ohne `HE_HAVE_SHADERC` legt `createDecalDepth` das Bild erst gar nicht an.
+- **Die Deckkraft aus dem Material zählt im Vorpass mit.** `DrawScene`
+  überschreibt `obj.opacity` aus dem Material-Asset, bevor es opak von
+  transparent trennt; ohne dieselbe Überschreibung im Vorpass wäre eine
+  material-getriebene Glasscheibe hier opak und dort transparent — Tiefe, wo der
+  Szenenpass keine schreibt, und das Decal klebt auf dem Glas.
+- **Decal-Texturen werden nicht hot-reloaded.** `m_decalTexCache` hängt an der
+  Textur-UUID, `InvalidateMaterial` an der Material-UUID — eine im Editor
+  bearbeitete Decal-Textur bleibt bis zum Neustart alt.
 - **Höchstens `k_maxDecals` (256) Decals pro Frame**, danach eine einmalige
   Warnung im Log.
 - **`colorWriteMask` nur RGB** — im Viewport ist die Alpha des Bildes das, womit
