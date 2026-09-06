@@ -273,12 +273,14 @@ Aus der Abschlussbilanz und den Warnungen im Thema:
 
 - ~~`app.minimize`, `app.maximize`, `app.isMaximized` fehlen~~ **erledigt am 06.09.2026** (`4c1a46b6`): drei Registry-Zeilen, `Window::Minimize/Maximize/Restore/IsMaximized`, gebunden im ausgelieferten Wirt und bewusst nicht im Editor. `maximize` nimmt einen Wahrheitswert und deckt damit auch das Zurücksetzen ab.
 - ~~Menü-Einträge ohne `enabled`/`checked`~~ **erledigt am 06.09.2026** (`bf03b40b`): zwei Felder an `AppMenuItem`, gezeichnete Leiste und macOS-Systemleiste, vier Skriptzeilen. Gesperrt heißt auch: der Akkord feuert nicht mehr, wird aber geschluckt.
-- Auswählbarer statischer Text (B6-Rest).
-- `db` und `print` aus Block C, `timer` bewusst nicht gebaut.
+- ~~Auswählbarer statischer Text (B6-Rest)~~ **erledigt am 06.09.2026** (`c1e07676`): `UIText::selectable`, Vorgabe aus, mit eigenem Zeichenpfad, damit Treffer und Glyphen aus EINEM Umbruch kommen. Rich Text schlägt Selectable, und statischer Text steht nicht auf der Tab-Route.
+- ~~`db` und `print` aus Block C, `timer` bewusst nicht gebaut~~ **alle drei erledigt am 06.09.2026**: `timer` (`b06a7cd0`, plus `Application::askWakeWithinMs`, sonst wäre jeder Tick bis zu 100 ms zu spät), `db` (`7e3a5d77`, vendortes SQLite 3.47.2, Ergebnisse als JSON, `sqlite3_set_authorizer` gegen ATTACH), `print` (`03cc7be4`, Text→PDF in Courier plus `lp`; Windows sagt `false` statt zu raten). **Damit ist Block C vollständig.**
 - ~~Vier Kontrastbefunde absichtlich offen~~ **erledigt am 06.09.2026** (`729a19f5`): `UIThemeRole::AccentText` als zehnte Rolle, in beiden mitgelieferten Themes belegt, OK-Beschriftung und Badge daran gebunden, Ausnahme im ctest entfernt. Die Zahl im Plan war falsch: Weiß auf dem hellen Akzent ist 4,75, nicht 4,4.
 - ~~Lösch-Kreuz im Suchfeld~~ **erledigt am 06.09.2026**: `UITextInput::clearButton` — die „Logik, die eine Komponente nicht trägt", gehört dem Feld, nicht einem Element daneben.
 - Akkordeon (B5), Tabelle mit Kopfzeile (B2b), mehrere Fenster (A5), Datei-Watcher ist gebaut (`fs.watch`, `bfb3f28e`), aber die Zustellung läuft nur im Spiel-Host.
-- Nie auf echter Hardware geprüft: Window-DIP-Skalierung auf Windows/X11, GL-Runtime der Schicht 0, Autostart auf Windows und Linux (blind gebaut), `notify` auf Windows (nur Warnung).
+- Nie auf echter Hardware geprüft: Window-DIP-Skalierung auf Windows/X11, GL-Runtime der Schicht 0, Autostart auf Windows und Linux (blind gebaut), `notify` auf Windows (nur Warnung), `print.file` auf Linux (`lp` ist da, ein Auftrag wurde nie eingereiht — ein Test, der das täte, kostet jemanden Papier).
+- **Drucken auf Windows ist NICHT gebaut** (`print.available` antwortet dort `false`). Es braucht das „print"-Verb der Shell oder die Spooler-API, beides kein Programm mit Argumenten — dieselbe Lage wie bei `notify`, und ein eigenes Stück Arbeit.
+- **SQLite ist neu im Baum** (FetchContent, URL + SHA256, 1,6 MB Archiv). Was es in einem fertigen Runtime wiegt, ist hier nicht messbar: `out/deploy` wird in diesem Baum nicht gebaut, `runtime_size` überspringt also. Steht in der Checkliste unten.
 - `docs/ui-theme-css.md` ist eine Bewertung, „Nothing here is built."
 
 ---
@@ -296,6 +298,8 @@ Vor dem Merge:
 7. Zwei veraltete `network`-Kommentare korrigieren (6.2 #36).
 8. main noch einmal hereinholen, voller ctest (Release, seriell wegen `runtime_size`), `he_tests` komplett, Paritäts-Harness für die neuen Registry-Zeilen (6.2 #38).
 9. Branch-Filter in `runtime-flavors.yml` bereinigen (braucht das gh-Token).
+9b. **`runtime_size` auf allen drei Plattformen ansehen, nicht nur grün abhaken.** SQLite ist seit `7e3a5d77` in jedem Runtime, das HorizonScene lädt (~1,6 MB Archiv, weniger nach dem Linken). Der Spielraum in `runtime_size.py` ist 10 % plus 5 MB, das reicht — aber gemessen wurde es hier nie, weil dieser Baum kein `out/deploy` baut. Wenn eine Schwelle fällt, ist es diese Zeile und nicht eine Regression.
+9c. **Die drei neuen Gruppen fahren durch den Paritäts-Harness** (Punkt 8 oben, 6.2 #38): `timer`, `db` und `print` stehen alle in `isScriptGroup`, tauchen also in Lua und Python auf.
 10. PR statt direktem Push, CI auf allen drei Plattformen abwarten (die Windows- und Linux-Fehler dieses Branches wurden alle nur dort gefunden).
 
 Nach dem Merge:

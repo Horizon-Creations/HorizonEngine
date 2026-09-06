@@ -838,9 +838,9 @@ class Bagger(horizon.Behavior):
     std::filesystem::remove_all(root, ec);
 }
 
-// The Python half of "the eight application groups reach both text languages"
-// (the Lua half lives in test_scripting_binding.cpp). Same eight, same one
-// function each, same reason for checking presence rather than effect.
+// The Python half of "the application groups reach both text languages" (the Lua
+// half lives in test_scripting_binding.cpp). Same eleven, same one function
+// each, same reason for checking presence rather than effect.
 static const char* kPyAppGroups = R"py(
 import horizon
 
@@ -849,7 +849,9 @@ class AppGroups(horizon.Behavior):
         names = [('widget', 'setListCount'), ('theme', 'getMode'),
                  ('dialog', 'confirm'),      ('clipboard', 'hasText'),
                  ('process', 'which'),       ('json', 'getNumber'),
-                 ('prefs', 'has'),           ('datetime', 'year')]
+                 ('prefs', 'has'),           ('datetime', 'year'),
+                 ('timer', 'cancel'),        ('db', 'lastError'),
+                 ('print', 'available')]
         found = 0
         for g, f in names:
             ns = getattr(horizon, g, None)
@@ -859,7 +861,7 @@ class AppGroups(horizon.Behavior):
                             horizon.json.getNumber('{"a":42}', 'a', 0), 0)
 )py";
 
-TEST_CASE("ScriptContext: the eight application groups reach Python")
+TEST_CASE("ScriptContext: the application groups reach Python")
 {
     HorizonWorld world;
     ScriptContext ctx(world);
@@ -871,9 +873,9 @@ TEST_CASE("ScriptContext: the eight application groups reach Python")
     REQUIRE(ctx.callOnStart(id));
 
     const auto& t = world.registry().get<TransformComponent>(e);
-    // BEFORE THE CHANGE: 0 — bootstrapEngineApiGroups skipped every row of the
-    // eight, exactly as the Lua side did.
-    CHECK(t.position.x == doctest::Approx(8.0f));
+    // BEFORE THE CHANGE: 0 — bootstrapEngineApiGroups skipped every one of
+    // their rows, exactly as the Lua side did.
+    CHECK(t.position.x == doctest::Approx(11.0f));
     CHECK(t.position.y == doctest::Approx(42.0f));   // …and one of them dispatches
 }
 
