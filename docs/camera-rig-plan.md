@@ -239,6 +239,10 @@ Aufwand: rund 2–3 Personentage, deckt sich mit der MASTERPLAN-Schätzung für 
 
 ## 5. Bewusst nicht in v1
 
+> **Nicht mehr aktuell.** Was hier unten offen bleibt — Lag, Blending, Shake,
+> FOV-Kick und das weiche Nachdrehen — hat einen eigenen Plan:
+> [`gameplay-camera-rigs-plan.md`](gameplay-camera-rigs-plan.md).
+
 * ~~**Spring-Arm-Kollision.**~~ **Erledigt** (`7ad81c48`) — und anders als hier
   geplant: statt eines Rays mit Ignore-Parameter ein **Kugel-Sweep**
   (`PhysicsWorld::sphereCast`). Ein Ray ist eine Linie und rutscht an Wandkanten
