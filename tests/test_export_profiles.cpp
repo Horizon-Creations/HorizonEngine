@@ -1567,6 +1567,72 @@ TEST_CASE("project.hcfg: defaultSaveTemplate round-trips as v3, empty stays v2-c
     he_test::removeAllQuiet(dir);
 }
 
+// The version word after the 4-byte magic of an exported project.hcfg.
+static uint16_t hcfgVersion(const fs::path& dir)
+{
+    std::ifstream f(dir / "project.hcfg", std::ios::binary);
+    REQUIRE(f.is_open());
+    char magic[4]; uint16_t version = 0;
+    f.read(magic, 4);
+    f.read(reinterpret_cast<char*>(&version), 2);
+    return version;
+}
+
+TEST_CASE("Export: a game keeps its project.hcfg readable by an older runtime bundle")
+{
+    const auto dir = fs::temp_directory_path() / "he_bundleid_src";
+    he_test::removeAllQuiet(dir);
+    writeBlob(dir / "a.hasset", tinyHasset({0x11, 0x22}, "a.hasset"));
+
+    const auto run = [&](const fs::path& out, const std::string& bundleId, bool appProject) {
+        he_test::removeAllQuiet(out);
+        ExportSettings s;
+        s.bundleId   = bundleId;
+        s.appProject = appProject;
+        return ProjectExporter::exportProject(dir, "Inc", "", out, s);
+    };
+
+    // A plain game: the id the exporter would derive is the id it has, so the
+    // field stays empty and the file is the v2 every runtime can read.
+    // BEFORE THE FIX: the exporter filled bundleId unconditionally, the writer
+    // chose v5, and a prebuilt runtime under GameRuntimes/<Platform>/ rejected
+    // it and booted without its pak.
+    const auto out1 = fs::temp_directory_path() / "he_bundleid_plain";
+    REQUIRE(run(out1, "", false).success);
+    CHECK(hcfgVersion(out1) == 2);
+    ProjectConfig plain;
+    REQUIRE(ProjectConfigLoader::load(out1, plain));
+    CHECK(plain.bundleId.empty());
+
+    // The same for a game that TYPED the derived id: it says nothing the
+    // runtime could not work out, so it costs nothing to leave out.
+    const auto out2 = fs::temp_directory_path() / "he_bundleid_same";
+    REQUIRE(run(out2, "com.horizonengine.inc", false).success);
+    CHECK(hcfgVersion(out2) == 2);
+
+    // A game with an id of its own has to say it, and pays the version for it.
+    const auto out3 = fs::temp_directory_path() / "he_bundleid_custom";
+    REQUIRE(run(out3, "dev.horizoncreations.inc", false).success);
+    CHECK(hcfgVersion(out3) == 5);
+    ProjectConfig custom;
+    REQUIRE(ProjectConfigLoader::load(out3, custom));
+    CHECK(custom.bundleId == "dev.horizoncreations.inc");
+
+    // An application always says it, derived or not: the autostart entry and
+    // the document types are filed under it, and no older runtime exists for
+    // applications to stay compatible with.
+    const auto out4 = fs::temp_directory_path() / "he_bundleid_app";
+    REQUIRE(run(out4, "", true).success);
+    CHECK(hcfgVersion(out4) == 5);
+    ProjectConfig app;
+    REQUIRE(ProjectConfigLoader::load(out4, app));
+    CHECK(app.bundleId == "com.horizonengine.inc");
+    CHECK(app.appMode);
+
+    he_test::removeAllQuiet(dir);
+    for (const auto& o : { out1, out2, out3, out4 }) he_test::removeAllQuiet(o);
+}
+
 // ─── What a project inherits that it never asked for ─────────────────────────
 // Two defaults from the application work reached game projects as well, and the
 // merge analysis (6.1 #7 and #8) says they should not: a new GAME still draws

@@ -1070,9 +1070,19 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.fontScripts           = settings.fontScripts;
     cfg.fontWeightBold        = settings.fontWeightBold;
     // RESOLVED here, so the runtime never derives it a second time and reaches a
-    // different answer than the bundle around it.
-    cfg.bundleId              = settings.bundleId.empty()
-                                    ? bundleIdentifier(projectName) : settings.bundleId;
+    // different answer than the bundle around it — but only when the answer
+    // could not be derived anyway. A filled bundle id makes the writer choose
+    // v5, and a runtime bundle from an older engine rejects every version it
+    // does not know and boots WITHOUT its pak. Dropping a prebuilt runtime under
+    // GameRuntimes/<Platform>/ is a documented way to work, so a game whose id
+    // is exactly what the name derives to leaves the field empty and keeps
+    // emitting the version that runtime can read. An APPLICATION always writes
+    // it: it is what the autostart entry and the document types are filed under,
+    // and there is no older runtime for applications to be compatible with.
+    const std::string derivedId = bundleIdentifier(projectName);
+    const std::string resolvedId = settings.bundleId.empty() ? derivedId : settings.bundleId;
+    cfg.bundleId              = (settings.appProject || resolvedId != derivedId)
+                                    ? resolvedId : std::string();
     cfg.theme                 = settings.theme;
     cfg.themeMode             = settings.themeMode;
     // Key placement: inside the game executable when the patch succeeded (the

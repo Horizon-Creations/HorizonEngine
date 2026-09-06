@@ -87,7 +87,10 @@ struct HE_API ProjectConfig {
     // What the application calls itself to the system it runs on (the same
     // string as CFBundleIdentifier). Resolved at export, never derived again
     // here: an autostart entry filed under a different name than the bundle is
-    // an entry nobody can find later. Empty in a build made before this existed.
+    // an entry nobody can find later. Empty in a build made before this existed
+    // — and empty on purpose for a GAME whose id is exactly what its name
+    // derives to, because filling it pushes the file to v5 and an older runtime
+    // bundle rejects every version it does not know (see the writer).
     std::string  bundleId;
 };
 
