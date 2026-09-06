@@ -1079,6 +1079,60 @@ struct D3D11RendererImpl
     ComPtr<ID3D11InputLayout>   debugIL;
     bool debugReady = false;
     std::vector<DebugLine> m_debugLines;
+
+    // ── Motion trails (RenderWorld::ribbonBatches) ────────────────────────
+    // A ribbon needs neither a shader nor a pass of its own: it arrives as CPU
+    // geometry in the ordinary cooked layout (pos3 + norm3 + uv2), so it goes
+    // into a dynamic buffer pair and is then handed to drawDC as a perfectly
+    // normal blended DrawCall — same PBR path, same graph-material shaders, same
+    // sort (docs/rope-trail-plan.md §6.2). One pool slot per band; MAP_WRITE_DISCARD
+    // does the versioning, so re-uploading a slot mid-frame is safe.
+    std::vector<ComPtr<ID3D11Buffer>> ribbonVB;
+    std::vector<ComPtr<ID3D11Buffer>> ribbonIB;
+    // Fill `out` with the pool slot's buffers after uploading the band into it.
+    // False = the buffers could not be created; the caller skips the band.
+    bool uploadRibbon(ID3D11DeviceContext* ctx, size_t index,
+                      const std::vector<float>& verts,
+                      const std::vector<uint32_t>& indices, GpuMesh& out)
+    {
+        if (!ctx || verts.empty() || indices.empty()) return false;
+        if (ribbonVB.size() <= index) { ribbonVB.resize(index + 1); ribbonIB.resize(index + 1); }
+
+        auto ensure = [&](UINT needed, UINT bindFlag, ComPtr<ID3D11Buffer>& buf) -> bool {
+            D3D11_BUFFER_DESC existing{};
+            if (buf) buf->GetDesc(&existing);
+            if (buf && existing.ByteWidth >= needed) return true;
+            buf.Reset();
+            D3D11_BUFFER_DESC bd{};
+            // Round up so a trail that grows a point per frame does not reallocate
+            // every frame while it fills up.
+            bd.ByteWidth      = (needed + 0xFFFu) & ~0xFFFu;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = bindFlag;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            device->CreateBuffer(&bd, nullptr, &buf);
+            return buf != nullptr;
+        };
+        const UINT vbytes = static_cast<UINT>(verts.size()   * sizeof(float));
+        const UINT ibytes = static_cast<UINT>(indices.size() * sizeof(uint32_t));
+        if (!ensure(vbytes, D3D11_BIND_VERTEX_BUFFER, ribbonVB[index])) return false;
+        if (!ensure(ibytes, D3D11_BIND_INDEX_BUFFER,  ribbonIB[index])) return false;
+
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(ribbonVB[index].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+        std::memcpy(m.pData, verts.data(), vbytes);
+        ctx->Unmap(ribbonVB[index].Get(), 0);
+        if (FAILED(ctx->Map(ribbonIB[index].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+        std::memcpy(m.pData, indices.data(), ibytes);
+        ctx->Unmap(ribbonIB[index].Get(), 0);
+
+        out = GpuMesh{};
+        out.vbuf       = ribbonVB[index];
+        out.ibuf       = ribbonIB[index];
+        out.indexCount = static_cast<UINT>(indices.size());
+        return true;
+    }
+
     float m_wallTime = 0.0f;
     float bloomStrength  = 0.25f;
     float bloomThreshold = 1.0f;
@@ -3801,6 +3855,7 @@ void D3D11Renderer::Shutdown()
     m_impl->noiseSRV.Reset(); m_impl->noiseTex3D.Reset(); m_impl->skyNoiseSampler.Reset();
     m_impl->debugVS.Reset(); m_impl->debugPS.Reset(); m_impl->debugVB.Reset();
     m_impl->debugCB.Reset(); m_impl->debugIL.Reset();
+    m_impl->ribbonVB.clear(); m_impl->ribbonIB.clear();
     // GI resources (accel buffers, targets, atlases, pipelines).
     m_impl->destroyGiAccel();
     m_impl->destroyGiTargets();
@@ -3849,7 +3904,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment);
     }
 
-    if (p.m_renderWorld.objects.empty()) return;
+    // Trails live in their own per-frame band list, not in `objects`, so a scene
+    // that has nothing BUT a trail still has something to draw past here.
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     for (RenderObject& obj : p.m_renderWorld.objects)
     {
@@ -3879,7 +3936,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     if (p.m_renderGraph.empty())
     {
@@ -4165,6 +4222,69 @@ void D3D11Renderer::DrawScene(int width, int height)
         std::vector<const DrawCall*>& opaqueDCs = opaqueDCs_;
         std::vector<const DrawCall*>& transparentDCs = transparentDCs_;
 
+        // ── Motion trails join the blended list ──────────────────────────────
+        // A RibbonBatch is per-frame CPU geometry in the cooked vertex layout, so
+        // it needs no pass and no shader of its own: upload it into the dynamic
+        // pool and append a perfectly ordinary DrawCall, which then takes part in
+        // the sort below and goes through drawDC exactly like a translucent mesh —
+        // including the graph-material path, which is what lets the age in uv.v
+        // drive colour and fade (docs/rope-trail-plan.md §6.2). Appended AFTER the
+        // partition on purpose: a trail is blended by nature, never opaque, so it
+        // bypasses partitionByOpacity the way Metal and GL do. Appended after the
+        // SSAO/GI prepass too — those read opaqueDCs_ only, and a trail is not in
+        // the AO prepass by design.
+        std::vector<DrawCall> ribbonDCs;
+        std::vector<GpuMesh>  ribbonMeshes;
+        std::unordered_map<const DrawCall*, const GpuMesh*> ribbonMeshByDC;
+        if (!p.m_renderWorld.ribbonBatches.empty())
+        {
+            // Reserve BOTH before taking any address: transparentDCs below holds
+            // bare pointers into ribbonDCs, and a growth reallocation kills them.
+            ribbonDCs.reserve(p.m_renderWorld.ribbonBatches.size());
+            ribbonMeshes.reserve(p.m_renderWorld.ribbonBatches.size());
+            std::vector<float> rebased;
+            for (size_t rbi = 0; rbi < p.m_renderWorld.ribbonBatches.size(); ++rbi)
+            {
+                const RibbonBatch& rb = p.m_renderWorld.ribbonBatches[rbi];
+                if (rb.vertices.empty() || rb.indices.empty()) continue;
+                const glm::vec3 pivot = rebaseRibbonVertices(rb, rebased);
+                GpuMesh rmesh{};
+                if (!p.uploadRibbon(ctx, rbi, rebased, rb.indices, rmesh)) continue;
+
+                DrawCall dc{};
+                dc.materialAssetId = rb.materialAssetId;
+                dc.transform       = glm::mat4(1.0f);
+                dc.transform[3]    = glm::vec4(pivot, 1.0f);   // pure translation, see rebaseRibbonVertices
+                dc.entityId        = rb.entityId;
+                dc.contributesAO   = false;   // trails never enter the AO prepass
+                // receivesShadow stays TRUE: Metal and GL leave the shadow flag at its
+                // default for a ribbon, and a trail that is shadowed on two backends
+                // and unshadowed on three is exactly the kind of split this port exists
+                // to avoid. Trails do not CAST a shadow (they are not in `objects`).
+                if (const MaterialAsset* mat = (m_contentManager && rb.materialAssetId != HE::UUID{})
+                        ? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+                {
+                    dc.baseColor = { mat->baseColor[0], mat->baseColor[1], mat->baseColor[2] };
+                    dc.metallic  = mat->metallic;
+                    dc.roughness = mat->roughness;
+                    dc.opacity   = mat->opacity;
+                }
+                else
+                    dc.baseColor = glm::vec3(0.55f);   // material not loaded yet — flat grey, as Metal/GL
+                // Force the blended class. RenderSorter::isTransparent decides both
+                // which pass a draw belongs to and which graph-material variant it
+                // gets, so a trail at opacity 1 would otherwise pick the
+                // depth-WRITING variant inside the blended pass. This is the same
+                // clamp ResolveMaterialParams applies to blendMode == 2 materials.
+                dc.opacity = std::min(dc.opacity, 0.998f);
+
+                ribbonMeshes.push_back(rmesh);
+                ribbonDCs.push_back(std::move(dc));
+                ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                transparentDCs.push_back(&ribbonDCs.back());
+            }
+        }
+
         // Sort transparent back-to-front by distance.
         RenderSorter::sortBackToFront(transparentDCs, camPos);
 
@@ -4173,7 +4293,15 @@ void D3D11Renderer::DrawScene(int width, int height)
         // per-instance loop (allowInstancing is set false before that pass).
         bool allowInstancing = true;
         auto drawDC = [&](const DrawCall& dc) {
-            const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            // A trail carries no mesh asset — its geometry sits in the ribbon
+            // pool, looked up by the DrawCall that was synthesised for it.
+            const GpuMesh* mesh = nullptr;
+            if (!ribbonMeshByDC.empty())
+            {
+                if (auto it = ribbonMeshByDC.find(&dc); it != ribbonMeshByDC.end())
+                    mesh = it->second;
+            }
+            if (!mesh) mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.vbuf || !m.ibuf) return;
 

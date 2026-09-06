@@ -149,6 +149,36 @@ struct RibbonBatch {
     HE::AABB              worldBounds;
 };
 
+// Move a ribbon's WORLD-space positions onto their own centre and return that
+// centre — the translation the caller then draws them with as the model matrix.
+//
+// Only the DrawCall backends (Vulkan, D3D11, D3D12) need this, and the reason is
+// worth spelling out because Metal and GL deliberately do it differently: those
+// two replay ribbons through a draw list of their own, so they compute the
+// blended pass's sort key themselves and can keep the identity model. The
+// DrawCall backends hand ribbons to the SHARED blended pass, which sorts with
+// RenderSorter::backToFrontKey — the model matrix's translation column. An
+// identity model there puts every trail in the scene at the world origin, and
+// they all sort the same.
+//
+// translate(c) * (p - c) == p, so the world position the shader reconstructs is
+// bit-for-bit the intent, and a pure translation leaves normals — and therefore
+// the shading — untouched. Positions are the first 3 of every 8 floats; normals
+// and UVs are copied through.
+inline glm::vec3 rebaseRibbonVertices(const RibbonBatch& batch, std::vector<float>& out)
+{
+    out = batch.vertices;
+    if (!batch.worldBounds.isValid()) return glm::vec3(0.0f);
+    const glm::vec3 c = batch.worldBounds.center();
+    for (size_t i = 0; i + 8 <= out.size(); i += 8)
+    {
+        out[i + 0] -= c.x;
+        out[i + 1] -= c.y;
+        out[i + 2] -= c.z;
+    }
+    return c;
+}
+
 class RenderWorld {
 public:
     void clear();

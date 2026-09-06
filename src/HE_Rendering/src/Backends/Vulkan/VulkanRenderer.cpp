@@ -122,6 +122,7 @@ void VulkanRenderer::Shutdown()
     m_imguiTextures.clear();
     destroySkyPipeline();
     destroyDebugLinePipeline();
+    destroyRibbonMeshes();
     destroyPostFXResources();
     destroyPostFXPipelines();
     // SSAO viewport-size targets (already freed by destroyViewportResources below,
@@ -3541,6 +3542,85 @@ bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& 
     return true;
 }
 
+// ─── Motion trails ───────────────────────────────────────────────────────────
+// One host-visible vertex/index buffer pair per band per frame in flight, kept
+// mapped and refilled every frame. Growing means destroying and recreating that
+// slot's buffer, which is safe here and only here: Render() waited on this
+// frame slot's fence before recording, so the GPU is done with what the slot
+// held two frames ago.
+bool VulkanRenderer::uploadRibbon(uint32_t frame, size_t index,
+                                  const std::vector<float>& verts,
+                                  const std::vector<uint32_t>& indices, GpuMesh& out)
+{
+    if (frame >= k_maxFramesInFlight || verts.empty() || indices.empty()) return false;
+    auto& pool = m_ribbonMeshes[frame];
+    if (pool.size() <= index) pool.resize(index + 1);
+    RibbonMeshVk& rm = pool[index];
+
+    auto ensure = [&](VkDeviceSize need, VkBufferUsageFlags usage, VkBuffer& buf,
+                      VkDeviceMemory& mem, void*& mapped, VkDeviceSize& cap) -> bool
+    {
+        if (buf != VK_NULL_HANDLE && mapped && cap >= need) return true;
+        if (mapped) { vkUnmapMemory(m_device, mem); mapped = nullptr; }
+        if (buf)    { vkDestroyBuffer(m_device, buf, nullptr); buf = VK_NULL_HANDLE; }
+        if (mem)    { vkFreeMemory(m_device, mem, nullptr);    mem = VK_NULL_HANDLE; }
+        cap = 0;
+        // Head-room so a trail that grows a point per frame does not reallocate
+        // every frame while it fills up.
+        const VkDeviceSize size = need + need / 2 + 256;
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = size;
+        bci.usage = usage;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) { buf = VK_NULL_HANDLE; return false; }
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS)
+        {
+            vkDestroyBuffer(m_device, buf, nullptr); buf = VK_NULL_HANDLE; mem = VK_NULL_HANDLE;
+            return false;
+        }
+        vkBindBufferMemory(m_device, buf, mem, 0);
+        if (vkMapMemory(m_device, mem, 0, size, 0, &mapped) != VK_SUCCESS) { mapped = nullptr; return false; }
+        cap = size;
+        return true;
+    };
+
+    const VkDeviceSize vsize = verts.size()   * sizeof(float);
+    const VkDeviceSize isize = indices.size() * sizeof(uint32_t);
+    if (!ensure(vsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rm.vbuf, rm.vmem, rm.vmapped, rm.vcap)) return false;
+    if (!ensure(isize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,  rm.ibuf, rm.imem, rm.imapped, rm.icap)) return false;
+    std::memcpy(rm.vmapped, verts.data(),   static_cast<size_t>(vsize));
+    std::memcpy(rm.imapped, indices.data(), static_cast<size_t>(isize));
+
+    // The pool owns the memory — `out` only borrows the handles, so its vmem/imem
+    // stay null and nothing downstream can free them.
+    out = GpuMesh{};
+    out.vbuf       = rm.vbuf;
+    out.ibuf       = rm.ibuf;
+    out.indexCount = static_cast<uint32_t>(indices.size());
+    return true;
+}
+
+void VulkanRenderer::destroyRibbonMeshes()
+{
+    for (uint32_t f = 0; f < k_maxFramesInFlight; ++f)
+    {
+        for (RibbonMeshVk& rm : m_ribbonMeshes[f])
+        {
+            if (rm.vmapped) vkUnmapMemory(m_device, rm.vmem);
+            if (rm.vbuf)    vkDestroyBuffer(m_device, rm.vbuf, nullptr);
+            if (rm.vmem)    vkFreeMemory(m_device, rm.vmem, nullptr);
+            if (rm.imapped) vkUnmapMemory(m_device, rm.imem);
+            if (rm.ibuf)    vkDestroyBuffer(m_device, rm.ibuf, nullptr);
+            if (rm.imem)    vkFreeMemory(m_device, rm.imem, nullptr);
+        }
+        m_ribbonMeshes[f].clear();
+    }
+}
+
 bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint32_t height,
                                       VkImage& image, VkDeviceMemory& memory, VkImageView& view)
 {
@@ -4045,7 +4125,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         drawSky(cmd, width, height, hdr);
     }
 
-    if (m_renderWorld.objects.empty()) return;
+    // Trails live in their own per-frame band list, not in `objects`, so a scene
+    // that has nothing BUT a trail still has something to draw past here.
+    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty()) return;
 
     for (RenderObject& obj : m_renderWorld.objects)
     {
@@ -4070,7 +4152,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
     m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
-    if (m_sortedIndices.empty()) return;
+    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) return;
 
     if (m_renderGraph.empty())
         m_renderGraph.addPass(std::make_unique<GeometryPass>());
@@ -4187,6 +4269,68 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // alone, so a particle fading out via its tint was drawn opaque).
         std::vector<const DrawCall*> opaqueDCs, transparentDCs;
         RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs, transparentDCs);
+
+        // ── Motion trails join the blended list ──────────────────────────────
+        // A RibbonBatch is per-frame CPU geometry in the cooked vertex layout, so
+        // it needs no pass and no pipeline of its own: upload it into this frame's
+        // staging pool and append a perfectly ordinary DrawCall, which then takes
+        // part in the sort below and goes through drawDCVk exactly like a
+        // translucent mesh — including the graph-material path, which is what lets
+        // the age in uv.v drive colour and fade (docs/rope-trail-plan.md §6.2).
+        // Appended AFTER the partition on purpose: a trail is blended by nature,
+        // never opaque, so it bypasses partitionByOpacity the way Metal and GL do.
+        std::vector<DrawCall> ribbonDCs;
+        std::vector<GpuMesh>  ribbonMeshes;
+        std::unordered_map<const DrawCall*, const GpuMesh*> ribbonMeshByDC;
+        if (!m_renderWorld.ribbonBatches.empty())
+        {
+            // Reserve BOTH before taking any address: transparentDCs below holds
+            // bare pointers into ribbonDCs, and a growth reallocation kills them.
+            ribbonDCs.reserve(m_renderWorld.ribbonBatches.size());
+            ribbonMeshes.reserve(m_renderWorld.ribbonBatches.size());
+            std::vector<float> rebased;
+            for (size_t rbi = 0; rbi < m_renderWorld.ribbonBatches.size(); ++rbi)
+            {
+                const RibbonBatch& rb = m_renderWorld.ribbonBatches[rbi];
+                if (rb.vertices.empty() || rb.indices.empty()) continue;
+                const glm::vec3 pivot = rebaseRibbonVertices(rb, rebased);
+                GpuMesh rmesh{};
+                if (!uploadRibbon(m_currentFrame, rbi, rebased, rb.indices, rmesh)) continue;
+
+                DrawCall dc{};
+                dc.materialAssetId = rb.materialAssetId;
+                dc.transform       = glm::mat4(1.0f);
+                dc.transform[3]    = glm::vec4(pivot, 1.0f);   // pure translation, see rebaseRibbonVertices
+                dc.entityId        = rb.entityId;
+                dc.contributesAO   = false;   // trails never enter the AO prepass
+                // receivesShadow stays TRUE: Metal and GL leave the shadow flag at its
+                // default for a ribbon, and a trail that is shadowed on two backends
+                // and unshadowed on three is exactly the kind of split this port exists
+                // to avoid. Trails do not CAST a shadow (they are not in `objects`).
+                if (const MaterialAsset* mat = (m_contentManager && rb.materialAssetId != HE::UUID{})
+                        ? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+                {
+                    dc.baseColor = { mat->baseColor[0], mat->baseColor[1], mat->baseColor[2] };
+                    dc.metallic  = mat->metallic;
+                    dc.roughness = mat->roughness;
+                    dc.opacity   = mat->opacity;
+                }
+                else
+                    dc.baseColor = glm::vec3(0.55f);   // material not loaded yet — flat grey, as Metal/GL
+                // Force the blended class. RenderSorter::isTransparent decides both
+                // which pass a draw belongs to and which graph-material pipeline
+                // variant it gets, so a trail at opacity 1 would otherwise pick the
+                // depth-WRITING variant inside the blended pass. This is the same
+                // clamp ResolveMaterialParams applies to blendMode == 2 materials.
+                dc.opacity = std::min(dc.opacity, 0.998f);
+
+                ribbonMeshes.push_back(rmesh);
+                ribbonDCs.push_back(std::move(dc));
+                ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                transparentDCs.push_back(&ribbonDCs.back());
+            }
+        }
+
         RenderSorter::sortBackToFront(transparentDCs, camPos);
 
         // A3: real instancing applies to the opaque pass only (transparent keeps the
@@ -4201,7 +4345,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // to transPipe below.
         VkPipeline activeMatScenePipe = hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline;
         auto drawDCVk = [&](const DrawCall& dc) {
-            const GpuMesh* mesh = resolveMesh(dc.meshAssetId);
+            // A trail carries no mesh asset — its geometry sits in this frame's
+            // ribbon pool, looked up by the DrawCall that was synthesised for it.
+            const GpuMesh* mesh = nullptr;
+            if (!ribbonMeshByDC.empty())
+            {
+                if (auto it = ribbonMeshByDC.find(&dc); it != ribbonMeshByDC.end())
+                    mesh = it->second;
+            }
+            if (!mesh) mesh = resolveMesh(dc.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
             if (!m.indexCount) return;
 

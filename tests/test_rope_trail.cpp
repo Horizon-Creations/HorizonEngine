@@ -734,6 +734,78 @@ TEST_CASE("A trail extracts as a ribbon batch, not as an object")
     CHECK(rw.ribbonBatches.empty());
 }
 
+TEST_CASE("Rebasing a ribbon onto its centre moves nothing but the pivot")
+{
+    // Vulkan, D3D11 and D3D12 hand a trail to the SHARED blended pass, which sorts
+    // on the model matrix's translation column. World vertices with an identity
+    // model would put every trail in the scene at the world origin and they would
+    // all sort the same, so the geometry is moved onto its own centre and the
+    // centre becomes the model translation. The invariant that has to hold:
+    // translate(c) * (p - c) == p, and nothing else changes.
+    RibbonBatch rb;
+    const glm::vec3 world[3] = { { 10.0f, 4.0f, -6.0f },
+                                 { 12.0f, 6.0f, -2.0f },
+                                 { 14.0f, 5.0f,  0.0f } };
+    for (const glm::vec3& p : world)
+    {
+        rb.vertices.insert(rb.vertices.end(), { p.x, p.y, p.z,        // pos
+                                                0.0f, 1.0f, 0.0f,     // normal
+                                                0.25f, 0.75f });      // uv
+        rb.worldBounds.expand(p);
+    }
+
+    std::vector<float> rebased;
+    const glm::vec3 pivot = rebaseRibbonVertices(rb, rebased);
+
+    CHECK(pivot.x == doctest::Approx(rb.worldBounds.center().x));
+    CHECK(pivot.y == doctest::Approx(rb.worldBounds.center().y));
+    CHECK(pivot.z == doctest::Approx(rb.worldBounds.center().z));
+    REQUIRE(rebased.size() == rb.vertices.size());
+
+    glm::mat4 model(1.0f);
+    model[3] = glm::vec4(pivot, 1.0f);
+    for (size_t v = 0; v < rebased.size() / 8; ++v)
+    {
+        const glm::vec4 back = model * glm::vec4(rebased[v * 8 + 0], rebased[v * 8 + 1],
+                                                 rebased[v * 8 + 2], 1.0f);
+        CHECK(back.x == doctest::Approx(world[v].x));
+        CHECK(back.y == doctest::Approx(world[v].y));
+        CHECK(back.z == doctest::Approx(world[v].z));
+        // A pure translation must not touch the normal or the UV — the age rides
+        // in uv.v, and a shifted normal would shade the band differently than on
+        // Metal and GL, which keep the identity model.
+        CHECK(rebased[v * 8 + 3] == doctest::Approx(0.0f));
+        CHECK(rebased[v * 8 + 4] == doctest::Approx(1.0f));
+        CHECK(rebased[v * 8 + 5] == doctest::Approx(0.0f));
+        CHECK(rebased[v * 8 + 6] == doctest::Approx(0.25f));
+        CHECK(rebased[v * 8 + 7] == doctest::Approx(0.75f));
+    }
+
+    // Two bands far apart must come out with DIFFERENT pivots — that is the whole
+    // point, and an identity-model implementation would pass everything above.
+    // NOT called `far`: windef.h defines `far` and `near` as empty macros, and this
+    // test file compiles on the Windows CI job too.
+    RibbonBatch farBand = rb;
+    farBand.worldBounds = HE::AABB{};
+    for (size_t v = 0; v < farBand.vertices.size() / 8; ++v)
+    {
+        farBand.vertices[v * 8 + 0] -= 100.0f;
+        farBand.worldBounds.expand({ farBand.vertices[v * 8 + 0], farBand.vertices[v * 8 + 1],
+                                     farBand.vertices[v * 8 + 2] });
+    }
+    std::vector<float> farRebased;
+    CHECK(rebaseRibbonVertices(farBand, farRebased).x == doctest::Approx(pivot.x - 100.0f));
+
+    // No bounds means no pivot: the caller falls back to the identity model and
+    // the vertices stay exactly where the extractor put them.
+    RibbonBatch unbounded;
+    unbounded.vertices = rb.vertices;
+    std::vector<float> untouched;
+    const glm::vec3 none = rebaseRibbonVertices(unbounded, untouched);
+    CHECK(none == glm::vec3(0.0f));
+    CHECK(untouched == rb.vertices);
+}
+
 TEST_CASE("Ribbon batches do not survive into the next frame's extraction")
 {
     // RenderWorld::clear has to drop them: they are per-frame geometry, and a
