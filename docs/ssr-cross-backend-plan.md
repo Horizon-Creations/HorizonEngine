@@ -29,6 +29,10 @@ Stellen wörtlich:
 > `OpenGLRenderer.cpp:10530` — „`ssr[*]` stays zero — **GL has no screen-space
 > trace**, so that branch of the same cascade folds away."
 
+> **Beide Zeilen sind seit Schritt 4 weg** (Checkpoint A, §4): GL hat den
+> Forward-Trace, `heSSRFwd` liegt auf Unit 20 und `lit.ssr` wird gefüllt. Sie
+> stehen hier nur noch als Beleg dafür, wie der Ausgangsstand aussah.
+
 `docs/backend-parity-plan.md:216` führt die Zeile „SSR deferred / SSR forward"
 für **alle vier** Nicht-Metal-Backends als `--`. Die Roadmap-Zahl von 85 % misst
 also den Metal-Pfad, nicht die Backend-Abdeckung.
@@ -331,6 +335,43 @@ billigsten prüfen lässt, gehört nach vorn.
 Wand ist der schärfere Test: an ihr ist der alte Facing-Gate gescheitert
 (`docs/ssr-plan.md` P4).
 
+> **Erledigt in Schritt 4 (A1–A5).** Drei Punkte, an denen der gebaute Weg vom
+> Text oben abweicht — jeder bewusst, keiner übersehen:
+>
+> 1. **A2 ist NICHT der `m_giGBuf*`-Vorpass geworden.** Der schreibt Weltposition
+>    und rohe Normale auf `m_giShadowW/H`; der geteilte Trace liest `heGB1`
+>    (oktaedrisch, `*0.5+0.5`) und `heGBDepth` (NDC in `gbufferMain`-Konvention).
+>    Statt eine zweite Kodierung in den Trace zu bauen, hängt der
+>    **Prepass-Shader aus Schritt 3** an `m_ssaoPosFBO`: zwei zusätzliche
+>    Attachments (`m_reflAttrTex` RGBA16F, `m_reflNdcTex` R32F), gezeichnet mit
+>    `reflPrepassVertex/Fragment(GLSL410)` statt mit `kSSAOPosVS/FS`. Attachment 0
+>    ist in beiden Fällen dieselbe View-Position, die Occlusion-Stufe merkt also
+>    nichts. **Der Preis, ehrlich benannt:** GI-Reflexionen und SSR gleichzeitig
+>    heißen auf GL **zwei** Geometrie-Vorpässe (Metal teilt sich einen). Das
+>    zusammenzulegen ist eigene Arbeit und hier nicht getan.
+> 2. **A4s „RoughMix" entfällt.** `kSSRRoughMixFS` läuft auch auf Metal **nicht**
+>    im Forward-SSR-Pfad — `EncodeForwardSSR` sagt selbst, dass die breite Stufe
+>    dort fehlt, und die Mix-Pipeline bedient die GI-Reflexionen. Da der Prepass
+>    ohnehin `roughness = 0` schreibt, hätte der Lerp nichts zu lerpen. GL macht
+>    es wie Metal: Trace + Blurkette, Ende.
+> 3. **Grenze wie bei Vulkan (§5):** der Vorpass zeichnet, was `contributesAO`
+>    sagt — also opake Meshes über den Draw-Call-Strom, keine Partikel und keinen
+>    Niederschlag. Was dort fehlt, spiegelt sich nicht.
+>
+> Gebaut: `SetSSRSettings` + `supportsScreenSpaceReflections` (im
+> `HE_HAVE_SHADERC`-Block, die Programme kommen aus dem Cross-Compiler), Ziele
+> und Programme (`EnsureSSRPrograms`/`EnsureSSRTargets`), `RenderForwardSSR`
+> (Trace-MRT + Blurkette, `conv = (+1, 2, −1, 0.1)`),
+> `CaptureSSRColorHistory` am Ende des Geometriepasses, und der Konsument:
+> `uSSRFwd`/`uSSRParams` im Built-in-Szenenshader (Kaskade Sky → GI-Refl → SSR,
+> in derselben Reihenfolge wie `heLitP`), `heSSRFwd` auf **Unit 20** für
+> Graph-Materialien UND den Deferred-Resolve, `lit.ssr[0..2]` gefüllt.
+> UBO-Bindepunkte, als Fortschreibung des Decal-Registers (0/1/2/3/8 belegt,
+> 4 = `HeDecal`): **5 = Prepass-`U`, 6 = `HeSSRTrace`, 7 = `HeSSRBlur`**.
+>
+> **A6 bleibt offen** — der GL-Deferred-Pfad lässt sein Gate auf 0, das Bild dort
+> ist unverändert.
+
 ---
 
 ## 5. Checkpoint B — Vulkan
@@ -420,8 +461,21 @@ GI-Port:
    **Steht** (Schritt 2, alle vier Shader × vier Backends grün). Sobald C3 steht,
    kommt ein zweiter Fall dazu: **die HLSL-Register müssen im bedienbaren
    Bereich von D3D11 liegen** (dasselbe Muster wie der Decal-Registertest).
+   Seit Schritt 4 steht ein zweiter GL-Fall: **„GL binds the SSR shaders by name,
+   so the names must survive emission"**. GLSL 410 kommt ohne 420pack aus dem
+   Cross-Compiler, also ohne `layout(binding)` — jede SSR-Ressource wird im
+   OpenGL-Backend über `glGetUniformLocation`/`glGetUniformBlockIndex` auf den
+   kanonischen Namen aufgelöst. Eine Umbenennung im Shader lässt das Backend ins
+   Leere binden (alle fünf Eingänge auf Unit 0, Spiegel schwarz, **keine
+   Fehlermeldung irgendwo**). Der Fall prüft die Namen im emittierten Text plus
+   „kein `binding =`", `#version 410`, und für den Prepass-VS: Attribut-Locations
+   0/1 und **kein** `gl_VertexIndex`.
 2. **Offline-Shaderprüfung.** `glslangValidator` ohne `-G` für Desktop-GLSL,
-   `xcrun metal` für MSL.
+   `xcrun metal` für MSL. Für Schritt 4 gelaufen: die fünf GLSL-410-Emissionen
+   (`ssrTrace`, `ssrBlur`, `fullscreenVertex`, Prepass-VS/FS) **und** der
+   geänderte Built-in-Szenenshader mit eingespleißtem `//#SKYFUNC#` — alle
+   fehlerfrei. Der Build-Schritt „Validating runtime-compiled shader strings"
+   fährt dieselbe Prüfung über alle 41 eingebetteten GL-Shader bei jedem Build.
 3. **Metal bleibt die Referenz und ist hier real prüfbar.**
    `scripts/he_shot.py` mit `HE_DUMP_SSRTEST=1` / `HE_DUMP_SSRTESTWALL=1` /
    `HE_DUMP_SSRQUALITY` liefert den Vergleichsshot, gegen den jedes portierte
@@ -465,7 +519,7 @@ also nichts zu brechen.
 | 1 | (dieser Schritt) Kartierung + Plan | — |
 | 2 | Cross-Compile-ctest über alle vier SSR-Shader × vier Backends — **erledigt** | ja |
 | 3 | §3.2 (a): Prepass-Shader nach kanonischem GLSL in die geteilte Library, Metal darauf umstellen — **erledigt** | ja, visuell (A/B gegen den Referenzshot) |
-| 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) | nur offline + ctest |
+| 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) — **A1–A5 erledigt, A6 offen** | nur offline + ctest |
 | 5 | Checkpoint B — Vulkan | nur Syntaxprüfung |
 | 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) | nur ctest auf dem HLSL-Text |
 | 7 | Checkpoint D — D3D12 (Register aus 6 geerbt) | dito |

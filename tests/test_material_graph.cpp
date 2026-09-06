@@ -837,6 +837,46 @@ TEST_CASE("The reflection pre-pass is one shader for all backends")
 		"vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));") != std::string::npos);
 }
 
+TEST_CASE("GL binds the SSR shaders by name, so the names must survive emission")
+{
+	// docs/ssr-cross-backend-plan.md checkpoint A. The cross-compiler runs with
+	// 420pack OFF for GLSL 410 (macOS GL is 4.1 and cannot spell layout(binding)
+	// on a uniform block or a sampler), so OpenGLRenderer resolves EVERY SSR
+	// resource through glGetUniformLocation / glGetUniformBlockIndex on the
+	// canonical name. A rename in the shader text — or an emitter that decides to
+	// mangle one — leaves the renderer binding nothing: the trace then samples
+	// unit 0 for all five inputs and the mirror goes black, with no error
+	// anywhere. There is no GL display on the build machine, so this string
+	// contract is the only automatic net under the GL wiring.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string trace = lib.ssrTrace(B::GLSL410).source;
+	for (const char* name : { "heSceneColor", "heGB1", "heGBDepth",
+	                          "heSSRHistRad", "heSSRHistPos", "HeSSRTrace" })
+		CHECK_MESSAGE(trace.find(name) != std::string::npos,
+		              "ssrTrace(GLSL410) lost the name ", name);
+	// No binding qualifiers: one would be a syntax error on a 4.1 driver, which
+	// is a compile failure the renderer only discovers at runtime.
+	CHECK(trace.find("binding =") == std::string::npos);
+	CHECK(trace.find("#version 410") != std::string::npos);
+
+	const std::string blur = lib.ssrBlur(B::GLSL410).source;
+	CHECK(blur.find("heSSRIn")   != std::string::npos);
+	CHECK(blur.find("HeSSRBlur") != std::string::npos);
+	CHECK(blur.find("binding =") == std::string::npos);
+
+	// The pre-pass is a GEOMETRY pass on GL: attributes, not an SSBO pull, and
+	// the uniform block the renderer looks up as "U". Position at location 0 and
+	// normal at location 1 are the mesh VAO's layout — swapped, the pre-pass
+	// would encode positions as normals and every reflection would aim wrong.
+	const std::string pvs = lib.reflPrepassVertex(B::GLSL410).source;
+	CHECK(pvs.find("layout(location = 0) in") != std::string::npos);
+	CHECK(pvs.find("layout(location = 1) in") != std::string::npos);
+	CHECK(pvs.find("gl_VertexIndex") == std::string::npos); // Metal-only SSBO pull
+	CHECK(pvs.find("uniform U")      != std::string::npos);
+}
+
 TEST_CASE("Decal HLSL registers stay inside D3D11's bindable range")
 {
 	// docs/decals-cross-backend-plan.md §6b. SPIRV-Cross turns layout(binding = N)
