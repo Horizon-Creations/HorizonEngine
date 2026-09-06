@@ -3912,3 +3912,42 @@ nicht dasselbe.
 `out/deploy` wird in diesem Baum nicht gebaut, `runtime_size` überspringt hier also. 1,6 MB
 Archiv gegen rund 10 % plus 5 MB Spielraum ist reichlich Luft, aber die Zahl, die zählt, kommt
 aus CI.
+
+### C: `print`, die kleine ehrliche Hälfte (06.09.2026)
+
+Im Plan stand „Drucken/PDF. Ehrlich gesagt: erstmal nicht". Gebaut ist jetzt die Hälfte davon,
+die ohne einen zweiten Renderer auskommt: `Write PDF` macht aus Text ein PDF, `Print File` gibt
+eine Datei an das Drucksystem, `Printing Available` sagt, ob es hier überhaupt eines gibt. **Einen
+Widget-Baum auf Papier zu setzen ist NICHT dabei** — das ist ein zweiter Renderer mit einem
+zweiten Einheitensystem und ein eigenes Stück Arbeit.
+
+**Courier, und das ist eine Entscheidung, kein Geschmack.** Der Umbruch muss wissen, wie breit
+eine Zeile ist, und Courier ist die eine Base-14-Schrift, bei der das eine Multiplikation statt
+einer Tabelle mit 256 Breiten ist: jede Glyphe 0,6 em. Mit einer proportionalen Schrift und ohne
+diese Tabelle läuft eine Zeile aus Großbuchstaben über den Rand — ein Fehler, den man erst auf
+Papier sieht, also am schlechtesten Ort.
+
+**Der Stream ist unkomprimiert, absichtlich.** Es sind ein paar Kilobyte so oder so, und ein
+unkomprimiertes PDF kann ein Test wieder lesen. Genau das macht aus „hat ein PDF geschrieben"
+eine prüfbare Behauptung: die Tests lesen die Wörter zurück, prüfen die Escapes, zählen die
+Seiten und **folgen `startxref` in die Tabelle und von dort auf Objekt 1**. Eine falsche
+xref-Tabelle öffnet in manchen Readern und in anderen nicht, was die unangenehmste Art ist,
+kaputt zu sein.
+
+**Gegengeprüft mit einem echten Reader**, nicht nur mit dem Test: eine Probeseite durch macOS
+Quick Look gerendert und angesehen. Umlaute stehen da, wo sie hingehören, die lange Zeile bricht
+in Spalte 80, und der Gedankenstrich ist ein `?` — genau wie angekündigt.
+
+**Zwei Berechtigungen, weil es zwei Dinge sind.** Ein PDF schreiben ist eine Datei schreiben
+(`perm::files`, durch `resolved()`); eine Datei an den Spooler geben ist ein fremdes Programm
+starten (`perm::processes`), und dass dieses Programm ein Spooler ist, ändert daran nichts.
+`available` ist keins von beidem und deshalb ungegatet, aus demselben Grund wie `process.which`:
+eine Anwendung muss ihren Druckknopf ausblenden können, bevor sie drucken darf.
+
+**„Übergeben", nicht „gedruckt"**, dieselbe Ehrlichkeit wie bei `notify`. Und **Windows bekommt
+ein `false` statt einer Vermutung**: dort geht Drucken über das „print"-Verb der Shell oder über
+die Spooler-API, und beides ist kein Programm mit Argumenten. Eigenes Stück Arbeit, wie der Toast
+damals.
+
+**Nicht geprüft, mit Absicht:** dass wirklich etwas aus einem Drucker kommt. Ein Test, der einen
+Auftrag auf der Maschine einreiht, auf der er läuft, ist ein Test, der jemanden Papier kostet.

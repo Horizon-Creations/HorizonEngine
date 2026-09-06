@@ -1098,6 +1098,22 @@ namespace
 	  "Stops a watch, using the handle Watch File gave you. Watches also all end "
 	  "when the application does." },
 
+	// ── Printing ─────────────────────────────────────────────────────────────
+	{ "print.toPdf",
+	  "Writes text as a PDF, at a path that follows the same rules as the file "
+	  "nodes. It is set in Courier and laid out as a page of text: lines break "
+	  "at your newlines and at the page width, pages break when they are full. "
+	  "Needs the project's \"Read and write files\" permission." },
+	{ "print.file",
+	  "Hands a file to the system's printing. Ok means it was handed over, not "
+	  "that it came out of a printer — what the queue does next is between the "
+	  "user and their printer. Needs the \"Run other programs\" permission, "
+	  "because that is what this is. Not available on Windows yet." },
+	{ "print.available",
+	  "Is there anything here to print with? Check it before offering a Print "
+	  "button. It answers false on Windows, where printing still needs its own "
+	  "piece of work." },
+
 	// ── Database ─────────────────────────────────────────────────────────────
 	// Open needs the project's "Read and write files" permission; a database is
 	// a file. The readers do not.

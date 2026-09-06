@@ -2558,6 +2558,250 @@ void shutdown()
 
 } // namespace http
 
+// ── Printing ─────────────────────────────────────────────────────────────────
+namespace print {
+namespace {
+// A4 in points, and the numbers a page of text is laid out with. Courier at 10
+// with 12 of leading gives 80 columns and 60 rows on a 2 cm margin, which is a
+// page of text as everyone has always known it.
+constexpr float kPageW   = 595.0f;
+constexpr float kPageH   = 842.0f;
+constexpr float kMargin  = 56.0f;
+constexpr float kFontPt  = 10.0f;
+constexpr float kLeading = 12.0f;
+// Courier is 0.6 em wide, every glyph — the whole reason it is the font here.
+constexpr int   kCols = static_cast<int>((kPageW - 2 * kMargin) / (kFontPt * 0.6f));
+constexpr int   kRows = static_cast<int>((kPageH - 2 * kMargin) / kLeading);
+
+// UTF-8 in, WinAnsi out, as a PDF literal string. Three things happen here:
+// the two delimiters and the backslash are escaped, a byte the encoding shares
+// with Latin-1 is written as an octal escape (so the file stays 7-bit and no
+// editor re-encodes it), and anything else becomes '?'.
+//
+// '?' rather than dropping it: a missing character is a word that quietly
+// changed, a '?' is a word that visibly did not survive the encoding.
+std::string pdfString(const std::string& utf8)
+{
+    std::string out;
+    out.reserve(utf8.size() + 8);
+    for (size_t i = 0; i < utf8.size(); )
+    {
+        const unsigned char b = static_cast<unsigned char>(utf8[i]);
+        if (b < 0x80)
+        {
+            if (b == '(' || b == ')' || b == '\\') { out += '\\'; out += static_cast<char>(b); }
+            else if (b >= 0x20 && b < 0x7F)        { out += static_cast<char>(b); }
+            else                                    { out += '?'; }   // control bytes
+            ++i;
+            continue;
+        }
+        // A multi-byte sequence. Only its CODE POINT matters, and only the
+        // Latin-1 range of it survives — WinAnsi and Latin-1 agree from A0 up.
+        uint32_t cp = 0;
+        size_t   len = 1;
+        if      ((b & 0xE0) == 0xC0) { cp = b & 0x1Fu; len = 2; }
+        else if ((b & 0xF0) == 0xE0) { cp = b & 0x0Fu; len = 3; }
+        else if ((b & 0xF8) == 0xF0) { cp = b & 0x07u; len = 4; }
+        else                         { out += '?'; ++i; continue; }
+        if (i + len > utf8.size()) { out += '?'; break; }
+        bool ok = true;
+        for (size_t k = 1; k < len; ++k)
+        {
+            const unsigned char n = static_cast<unsigned char>(utf8[i + k]);
+            if ((n & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (n & 0x3Fu);
+        }
+        if (ok && cp >= 0xA0 && cp <= 0xFF)
+        {
+            char esc[8];
+            std::snprintf(esc, sizeof(esc), "\\%03o", static_cast<unsigned>(cp));
+            out += esc;
+        }
+        else
+            out += '?';
+        i += ok ? len : 1;
+    }
+    return out;
+}
+
+// The text as the rows it will be printed as: '\n' always breaks, and a line
+// longer than the page breaks at the last space that fits (or inside the word,
+// when there is no space to break at — a run that overflowed the margin would
+// simply be lost off the edge of the paper).
+std::vector<std::string> layoutRows(const std::string& text)
+{
+    std::vector<std::string> rows;
+    std::string line;
+    auto flush = [&](std::string s)
+    {
+        // Measured in CHARACTERS, which for Courier is the same thing as points.
+        while (static_cast<int>(s.size()) > kCols)
+        {
+            size_t at = s.rfind(' ', static_cast<size_t>(kCols));
+            if (at == std::string::npos || at == 0) at = static_cast<size_t>(kCols);
+            rows.push_back(s.substr(0, at));
+            // The space the break ate does not start the next row.
+            s.erase(0, at < s.size() && s[at] == ' ' ? at + 1 : at);
+        }
+        rows.push_back(std::move(s));
+    };
+    for (char ch : text)
+    {
+        if (ch == '\n')      { flush(line); line.clear(); }
+        else if (ch != '\r') { line += ch; }
+    }
+    flush(line);
+    return rows;
+}
+} // namespace
+
+bool toPdf(Ctx&, const std::string& path, const std::string& text, const std::string& title)
+{
+    if (!perm::allowed(perm::get().files, "print.toPdf")) return false;
+    const std::filesystem::path p = fs::resolved(path);
+    if (p.empty()) return false;
+
+    const std::vector<std::string> rows = layoutRows(text);
+    const int pages = std::max(1, (static_cast<int>(rows.size()) + kRows - 1) / kRows);
+
+    // Object numbering, fixed up front so the references can be written as the
+    // objects are: 1 catalog, 2 pages, 3 font, then a page and a content stream
+    // each, and the document info last.
+    const int firstPageObj = 4;
+    const int infoObj      = firstPageObj + pages * 2;
+
+    std::string out = "%PDF-1.4\n";
+    std::vector<size_t> offsets(static_cast<size_t>(infoObj) + 1, 0);
+    auto begin = [&](int n) { offsets[static_cast<size_t>(n)] = out.size();
+                              out += std::to_string(n) + " 0 obj\n"; };
+    auto end   = [&]()      { out += "endobj\n"; };
+
+    begin(1);
+    out += "<< /Type /Catalog /Pages 2 0 R >>\n";
+    end();
+
+    begin(2);
+    out += "<< /Type /Pages /Count " + std::to_string(pages) + " /Kids [";
+    for (int i = 0; i < pages; ++i)
+        out += " " + std::to_string(firstPageObj + i * 2) + " 0 R";
+    out += " ] >>\n";
+    end();
+
+    begin(3);
+    // Base-14: no font file to embed and no licence to think about, which is the
+    // other half of why this is Courier.
+    out += "<< /Type /Font /Subtype /Type1 /BaseFont /Courier "
+           "/Encoding /WinAnsiEncoding >>\n";
+    end();
+
+    for (int pg = 0; pg < pages; ++pg)
+    {
+        const int pageObj = firstPageObj + pg * 2;
+        const int contObj = pageObj + 1;
+        begin(pageObj);
+        out += "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " +
+               std::to_string(static_cast<int>(kPageW)) + " " +
+               std::to_string(static_cast<int>(kPageH)) + "]"
+               " /Resources << /Font << /F1 3 0 R >> >> /Contents " +
+               std::to_string(contObj) + " 0 R >>\n";
+        end();
+
+        std::string body = "BT\n/F1 " + std::to_string(static_cast<int>(kFontPt)) + " Tf\n" +
+                           std::to_string(static_cast<int>(kLeading)) + " TL\n" +
+                           std::to_string(static_cast<int>(kMargin)) + " " +
+                           std::to_string(static_cast<int>(kPageH - kMargin - kFontPt)) + " Td\n";
+        for (int r = 0; r < kRows; ++r)
+        {
+            const size_t idx = static_cast<size_t>(pg) * kRows + static_cast<size_t>(r);
+            if (idx >= rows.size()) break;
+            body += "(" + pdfString(rows[idx]) + ") Tj\nT*\n";
+        }
+        body += "ET\n";
+
+        begin(contObj);
+        out += "<< /Length " + std::to_string(body.size()) + " >>\nstream\n";
+        out += body;
+        out += "endstream\n";
+        end();
+    }
+
+    begin(infoObj);
+    out += "<< /Producer (Horizon Engine)";
+    if (!title.empty()) out += " /Title (" + pdfString(title) + ")";
+    out += " >>\n";
+    end();
+
+    // The cross-reference table. Byte offsets, ten digits, and object 0 is the
+    // head of the free list — the shape is fixed by the spec, not by taste.
+    const size_t xref = out.size();
+    out += "xref\n0 " + std::to_string(infoObj + 1) + "\n";
+    out += "0000000000 65535 f \n";
+    for (int n = 1; n <= infoObj; ++n)
+    {
+        char line[32];
+        std::snprintf(line, sizeof(line), "%010zu 00000 n \n", offsets[static_cast<size_t>(n)]);
+        out += line;
+    }
+    out += "trailer\n<< /Size " + std::to_string(infoObj + 1) +
+           " /Root 1 0 R /Info " + std::to_string(infoObj) + " 0 R >>\nstartxref\n" +
+           std::to_string(xref) + "\n%%EOF\n";
+
+    std::error_code ec;
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary);
+    if (!f) return false;
+    f.write(out.data(), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(f);
+}
+
+bool available(Ctx&)
+{
+#if defined(_WIN32)
+    // Windows gets a false rather than a guess. Its printing goes through the
+    // shell's "print" verb or through the spooler API, and neither is a program
+    // to run with arguments — that is its own piece of work, the same answer
+    // `notify` gave on this platform.
+    return false;
+#else
+    // Asking whether a tool is installed runs nothing, so this is ungated for
+    // the reason process::which is: an application should be able to say "there
+    // is no printing here" without first being allowed to print.
+    return HE::Proc::which("lp").has_value();
+#endif
+}
+
+bool file(Ctx& c, const std::string& path)
+{
+    if (!perm::allowed(perm::get().processes, "print.file")) return false;
+    if (!available(c))
+    {
+        HE_LOG_WARN(Config, "%s", "print.file: this build has no spooler to hand a file to.");
+        return false;
+    }
+    // Its own resolved() as well: printing a file is reading it, and the path
+    // arrives from a script exactly like every other one.
+    const std::filesystem::path p = fs::resolved(path);
+    if (p.empty()) return false;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec)) return false;
+#if defined(_WIN32)
+    return false;   // unreachable: available() already said no
+#else
+    // An argv vector and never a command line, so a file called
+    // "; rm -rf ~" is a file name.
+    HE::Proc::Options o;
+    o.exe       = "lp";
+    o.args      = { p.string() };
+    o.timeoutMs = 15000;
+    const HE::Proc::Result res = HE::Proc::run(o);
+    if (!res.ok())
+        HE_LOG_WARN(Config, "print.file: lp returned %d: %s", res.exitCode, res.err.c_str());
+    return res.ok();
+#endif
+}
+
+} // namespace print
+
 // ── SQLite ───────────────────────────────────────────────────────────────────
 namespace db {
 namespace {
@@ -5091,6 +5335,24 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "fs.unwatch", "File", true, {{"handle", P::Int}}, {}, "HE::api::fs::unwatch",
             [](Ctx&, const VV& a){ fs::unwatch(aI(a, 0)); return VV{}; } });
 
+        // ── Printing ─────────────────────────────────────────────────────────
+        // Two permissions, because these are two different things: writing a
+        // PDF is writing a file, handing one to the spooler is running another
+        // program. `available` is neither and is therefore ungated, like
+        // process.which — an application must be able to say "no printing here"
+        // without first being allowed to print.
+        t.push_back({ "print.toPdf", "Print", true,
+            {{"path", P::String}, {"text", P::String}, {"title", P::String}},
+            {{"ok", P::Bool}}, "HE::api::print::toPdf",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofBool(print::toPdf(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "print.file", "Print", true, {{"path", P::String}}, {{"ok", P::Bool}},
+            "HE::api::print::file",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(print::file(c, aS(a, 0))) }; } });
+        t.push_back({ "print.available", "Print", false, {}, {{"available", P::Bool}},
+            "HE::api::print::available",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(print::available(c)) }; } });
+
         // ── SQLite ───────────────────────────────────────────────────────────
         // `open` is behind the project's file permission and goes through the
         // same resolved() every other path does. The readers are ungated for
@@ -5556,6 +5818,8 @@ const std::vector<ApiFn>& registry()
             { "fs.modified", "File Modified Time" },{ "fs.list", "List Directory" },
             { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
             { "fs.watch", "Watch File" },          { "fs.unwatch", "Stop Watching File" },
+            { "print.toPdf", "Write PDF" },        { "print.file", "Print File" },
+            { "print.available", "Printing Available" },
             { "db.open", "Open Database" },        { "db.close", "Close Database" },
             { "db.exec", "Run SQL" },              { "db.query", "Query SQL" },
             { "db.changes", "Rows Changed" },      { "db.lastInsertId", "Last Insert Id" },
@@ -5805,7 +6069,10 @@ bool isScriptGroup(std::string_view group)
                                                     // "db" has no flat twin either, and it is the
                                                     // one group a text script would otherwise have
                                                     // to reimplement rather than route around.
-                                                    "db" };
+                                                    "db",
+                                                    // "print" likewise: writing a PDF by hand from
+                                                    // Lua is not a workaround, it is a project.
+                                                    "print" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

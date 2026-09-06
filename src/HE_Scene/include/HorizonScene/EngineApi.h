@@ -1293,6 +1293,41 @@ namespace http {
 // what a typed-pin graph can carry — an in-memory document type would need a
 // handle, a lifetime and a way to leak one.
 //
+// ── Printing (plan C, the `print` row) ───────────────────────────────────────
+// The plan's own words were "ehrlich gesagt: erstmal nicht", and this is the
+// small honest half of it rather than the whole: text becomes a PDF, and a file
+// is handed to whatever the system prints with. Laying out a WIDGET TREE onto
+// paper is a different piece of work — a second renderer with a second set of
+// units — and is not here.
+//
+// COURIER, and that is a decision rather than a taste. The wrap has to know how
+// wide a line is, and Courier is the one base-14 font where that is a
+// multiplication instead of a table of 256 widths: every glyph is 0.6 em. A
+// proportional font would need that table, and without it a line of capitals
+// runs past the margin — a defect you only see on paper, which is the worst
+// place to find one.
+//
+// The PDF is uncompressed on purpose. It is a few kilobytes either way, and an
+// uncompressed one can be read back by a test (and by a person with an editor),
+// which is what makes "it wrote a PDF" a checkable claim rather than a hope.
+namespace print {
+    // Write `text` as a PDF at `path`. Behind `perm::files` and through
+    // fs::resolved(), like every other row that names a file. Lines break at
+    // '\n' and at the page's own width; pages break by line count. `title` goes
+    // into the document's Info dictionary and may be empty.
+    bool toPdf(Ctx&, const std::string& path, const std::string& text,
+               const std::string& title);
+    // Hand a file to the system's printing. Behind `perm::processes`: this is
+    // running another program, and the fact that the program is a spooler does
+    // not change what the permission is about. True means HANDED OVER, not
+    // printed — what the queue does next is between the user and their printer,
+    // the same honesty `notify` settled on.
+    bool file(Ctx&, const std::string& path);
+    // Can this build reach a spooler at all? False on Windows, where printing
+    // needs its own piece of work rather than a guess (see the .cpp).
+    bool available(Ctx&);
+}
+
 // ── SQLite (plan C, the `db` row) ────────────────────────────────────────────
 // A real database, for the applications that outgrow `prefs`. SQLite, vendored
 // as the amalgamation (see the root CMakeLists) rather than taken from the

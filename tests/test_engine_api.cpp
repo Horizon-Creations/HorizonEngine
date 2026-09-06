@@ -2076,6 +2076,143 @@ TEST_CASE("fs: a watch is the sandbox's business too")
     std::filesystem::remove_all(outside, ec);
 }
 
+// ── Printing ─────────────────────────────────────────────────────────────────
+namespace
+{
+    std::string readWhole(const std::filesystem::path& p)
+    {
+        std::ifstream f(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+}
+
+TEST_CASE("print: it writes a PDF a reader can actually open")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_print";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    // Writing a PDF is writing a file, and the file rules are the file rules.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK_FALSE(HE::api::print::toPdf(c, "out.pdf", "hello", ""));
+    CHECK_FALSE(std::filesystem::exists(root / "out.pdf"));
+
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    REQUIRE(HE::api::print::toPdf(c, "sub/out.pdf", "hello\nworld", "A Title"));
+    const std::string pdf = readWhole(root / "sub" / "out.pdf");
+    REQUIRE(!pdf.empty());
+
+    // The four things that make a file a PDF rather than a file with text in it.
+    CHECK(pdf.rfind("%PDF-1.4", 0) == 0);
+    CHECK(pdf.find("/Type /Catalog") != std::string::npos);
+    CHECK(pdf.find("/BaseFont /Courier") != std::string::npos);
+    CHECK(pdf.find("%%EOF") != std::string::npos);
+    // The uncompressed stream is what lets a test read the words back — the
+    // whole reason it is uncompressed.
+    CHECK(pdf.find("(hello) Tj") != std::string::npos);
+    CHECK(pdf.find("(world) Tj") != std::string::npos);
+    CHECK(pdf.find("/Title (A Title)") != std::string::npos);
+
+    // startxref points at the xref table, and the offsets in it point at real
+    // objects. A PDF whose table is wrong opens in some readers and not others,
+    // which is the worst way to be broken.
+    const size_t sx = pdf.rfind("startxref");
+    REQUIRE(sx != std::string::npos);
+    const size_t at = std::stoul(pdf.substr(sx + 10));
+    CHECK(pdf.compare(at, 4, "xref") == 0);
+    // Object 1 is where its offset says it is.
+    const size_t firstEntry = pdf.find(" 65535 f \n", at);
+    REQUIRE(firstEntry != std::string::npos);
+    const size_t obj1 = std::stoul(pdf.substr(firstEntry + 10, 10));
+    CHECK(pdf.compare(obj1, 7, "1 0 obj") == 0);
+
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("print: the two things that would come out wrong on paper")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_print2";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+
+    // A bracket is a PDF delimiter. Unescaped, one of these ends the string and
+    // the rest of the line becomes operators — a file no reader opens.
+    REQUIRE(HE::api::print::toPdf(c, "esc.pdf", "a (b) c \\ d", ""));
+    const std::string esc = readWhole(root / "esc.pdf");
+    CHECK(esc.find("(a \\(b\\) c \\\\ d) Tj") != std::string::npos);
+
+    // A line wider than the page has to break, or it runs off the edge of the
+    // paper where nobody can see that it happened. Courier is exactly 0.6 em, so
+    // this is countable rather than approximate.
+    std::string wide(500, 'x');
+    REQUIRE(HE::api::print::toPdf(c, "wide.pdf", wide, ""));
+    const std::string w = readWhole(root / "wide.pdf");
+    CHECK(w.find(std::string(81, 'x')) == std::string::npos);   // no row over 80
+    CHECK(w.find("(" + std::string(80, 'x') + ") Tj") != std::string::npos);
+
+    // Enough lines for a second page, and the catalogue has to say so.
+    std::string many;
+    for (int i = 0; i < 130; ++i) many += "line " + std::to_string(i) + "\n";
+    REQUIRE(HE::api::print::toPdf(c, "many.pdf", many, ""));
+    const std::string m = readWhole(root / "many.pdf");
+    CHECK(m.find("/Count 3") != std::string::npos);   // 130 rows at 60 per page
+
+    // Non-ASCII survives as Latin-1 (an umlaut is a letter people's names are
+    // made of); anything beyond it becomes '?' rather than quietly vanishing.
+    REQUIRE(HE::api::print::toPdf(c, "u.pdf", "Grüße \xE2\x98\x85", ""));
+    const std::string u = readWhole(root / "u.pdf");
+    CHECK(u.find("(Gr\\374\\337e ?) Tj") != std::string::npos);
+
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("print: handing a file to the spooler is running a program")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_print3";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    // Asking whether there is a printer runs nothing, so it answers without a
+    // permission — an application must be able to hide its Print button without
+    // first being allowed to print.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    const bool avail = HE::api::print::available(c);
+#if defined(_WIN32)
+    // Windows gets a false rather than a guess, the same answer notify gave.
+    CHECK_FALSE(avail);
+#else
+    (void)avail;   // depends on whether lp is installed; either answer is honest
+#endif
+
+    // …but handing a file over is running another program, and that is shut by
+    // default like every other row that does.
+    HE::api::perm::Grants files; files.files = true;
+    HE::api::perm::set(files);
+    REQUIRE(HE::api::print::toPdf(c, "doc.pdf", "hello", ""));
+    CHECK_FALSE(HE::api::print::file(c, "doc.pdf"));   // no `processes` permission
+
+    // With the permission it still refuses a file that is not there — and it is
+    // NOT actually printed here: a test that queues a job on the machine it runs
+    // on is a test that costs somebody paper.
+    HE::api::perm::Grants both; both.files = true; both.processes = true;
+    HE::api::perm::set(both);
+    CHECK_FALSE(HE::api::print::file(c, "nosuchfile.pdf"));
+
+    std::filesystem::remove_all(root, ec);
+}
+
 // ── SQLite ───────────────────────────────────────────────────────────────────
 
 TEST_CASE("db: a database is a file, and the file rules are the file rules")
