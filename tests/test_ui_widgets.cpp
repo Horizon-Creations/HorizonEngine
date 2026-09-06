@@ -15977,3 +15977,100 @@ TEST_CASE("A5: a modal in another window does not dim this one")
     // One extra quad in window 5 (the scrim), none in window 0.
     CHECK(w5.size() == w0.size() + 1);
 }
+
+TEST_CASE("A5: the pointer only reaches the window it is in")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    const int txt = t.add(HE::UIWidgetType::Text);
+    t.find(txt)->setProp("Text", HE::UIPropValue::ofString(""));
+    const int btn = t.add(HE::UIWidgetType::Button);
+    t.find(btn)->setProp("Text", HE::UIPropValue::ofString(""));
+    HE::uiSetAnchorPreset(*t.find(btn), 0);
+    t.find(btn)->pivotX = 0; t.find(btn)->pivotY = 0;
+    t.find(btn)->posX = 0; t.find(btn)->posY = 0;
+    t.find(btn)->sizeX = 200; t.find(btn)->sizeY = 50;
+
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OK";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = txt; set.s = "Text";
+    set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    wm.setWidgetWindow(id, 4);
+
+    // The very same coordinates, reported for the MAIN window: nothing there.
+    CHECK_FALSE(wm.processPointer(0u, 1920.0f, 1080.0f, 100.0f, 25.0f, true,  true));
+    CHECK_FALSE(wm.processPointer(0u, 1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+    std::vector<UIRenderObject> out;
+    wm.extract(4u, 1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 0);
+
+    // …and reported for window 4, the button is under them.
+    CHECK(wm.processPointer(4u, 1920.0f, 1080.0f, 100.0f, 25.0f, true,  true));
+    CHECK(wm.processPointer(4u, 1920.0f, 1080.0f, 100.0f, 25.0f, false, true));
+    CHECK(wm.pointerWindow() == 4u);
+    out.clear();
+    wm.extract(4u, 1920.0f, 1080.0f, out);
+    CHECK(countGlyphs(out) == 2); // "OK"
+}
+
+TEST_CASE("A5: a dialog seals its own window and no other")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::uiSetAnchorPreset(*t.find(btn), 0);
+    t.find(btn)->pivotX = 0; t.find(btn)->pivotY = 0;
+    t.find(btn)->posX = 0; t.find(btn)->posY = 0;
+    t.find(btn)->sizeX = 200; t.find(btn)->sizeY = 50;
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int page   = createShown(wm, cm, "mem://w.hasset");
+    const int dialog = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(page != 0);
+    REQUIRE(dialog != 0);
+    wm.setWidgetWindow(dialog, 6);
+    wm.showModal(dialog);
+    CHECK(wm.hasModal());
+    CHECK(wm.hasModalIn(6u));
+    CHECK_FALSE(wm.hasModalIn(0u));
+
+    // Window 0 has no layer of its own, so its page is still live — the modal
+    // next door is window-modal, not application-modal.
+    CHECK(wm.processPointer(0u, 1920.0f, 1080.0f, 100.0f, 25.0f, true, true));
+
+    // Escape belongs to the window it was pressed in. The keyboard is in
+    // window 6 (showModal focused the dialog), so it closes THAT layer.
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.hasModal());
+}
+
+TEST_CASE("A5: each window carries its own display scale")
+{
+    WidgetManager wm;
+    CHECK(wm.displayScale() == doctest::Approx(1.0f));
+    wm.setDisplayScale(2.0f);
+    wm.setDisplayScale(8u, 1.5f);
+    CHECK(wm.displayScale() == doctest::Approx(2.0f));
+    CHECK(wm.displayScale(0u) == doctest::Approx(2.0f));
+    CHECK(wm.displayScale(8u) == doctest::Approx(1.5f));
+    // A window nobody ever told anything reads 1 — one monitor costs nothing.
+    CHECK(wm.displayScale(9u) == doctest::Approx(1.0f));
+    // 0 and below are not a smaller screen, they are no screen at all.
+    wm.setDisplayScale(8u, 0.0f);
+    CHECK(wm.displayScale(8u) == doctest::Approx(1.0f));
+}

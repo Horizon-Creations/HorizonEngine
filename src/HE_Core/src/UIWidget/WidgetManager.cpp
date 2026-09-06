@@ -763,16 +763,71 @@ int WidgetManager::clearChildren(int widgetId, const std::string& parentName)
 
 // ── Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ─────────────────
 
+// The layer that holds the input IN ONE WINDOW, or null when that window has
+// none. Grabs are WINDOW-modal (docs/he-apps-plan.md §13.3): a dialog seals the
+// window it stands in, and the window next to it carries on. App-modal — every
+// other window deaf as well — is a later decision and one line here, not a
+// second mechanism.
+//
+// The menu bar's grab holds no widget (id 0) and belongs to the main window,
+// which is also the only window that draws a bar.
+const WidgetManager::Grab* WidgetManager::topGrabOf(uint32_t windowId) const
+{
+	for (auto it = m_grabs.rbegin(); it != m_grabs.rend(); ++it)
+	{
+		const Instance* gw = it->widget != 0
+			? const_cast<WidgetManager*>(this)->find(it->widget) : nullptr;
+		const uint32_t gwin = gw ? gw->windowId : 0u;
+		if (gwin == windowId) return &*it;
+	}
+	return nullptr;
+}
+
 bool WidgetManager::takesInput(int widgetId) const
 {
-	// Nothing is up: everybody hears everything, which is how it was before
-	// layers existed and is still the overwhelmingly common case.
-	if (m_grabs.empty()) return true;
+	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Grab* top = topGrabOf(w ? w->windowId : 0u);
+	// Nothing is up in this widget's window: everybody there hears everything,
+	// which is how it was before layers existed and is still the overwhelmingly
+	// common case.
+	if (!top) return true;
 	// Otherwise exactly one widget does. Not "the modal and everything above
 	// it": a popup opened from a dialog pushes its own grab, so the top of the
 	// stack is always the right answer, and a widget that is merely drawn on top
 	// without having asked for the input does not get it.
-	return widgetId == m_grabs.back().widget;
+	return widgetId == top->widget;
+}
+
+// Is this widget in the window the pointer is currently reported in? Asked
+// beside takesInput by every scan the POINTER drives — one mouse cannot be in
+// two windows at once, and a scan that forgets it would let a click in a tool
+// window land on the main window's button of the same name.
+bool WidgetManager::inPointerWindow(int widgetId) const
+{
+	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	return (w ? w->windowId : 0u) == m_pointerWindow;
+}
+
+void WidgetManager::setDisplayScale(uint32_t windowId, float s)
+{
+	const float v = s > 0.0f ? s : 1.0f;
+	if (windowId == 0) m_displayScale = v;
+	else               m_windowScale[windowId] = v;
+}
+
+float WidgetManager::displayScale(uint32_t windowId) const
+{
+	if (windowId == 0) return m_displayScale;
+	const auto it = m_windowScale.find(windowId);
+	return it != m_windowScale.end() ? it->second : 1.0f;
+}
+
+uint32_t WidgetManager::keyboardWindow() const
+{
+	if (m_focusWidget != 0)
+		if (const Instance* w = const_cast<WidgetManager*>(this)->find(m_focusWidget))
+			return w->windowId;
+	return m_pointerWindow;
 }
 
 bool WidgetManager::hasModal() const
@@ -781,11 +836,33 @@ bool WidgetManager::hasModal() const
 	return false;
 }
 
+bool WidgetManager::hasModalIn(uint32_t windowId) const
+{
+	for (const Grab& g : m_grabs)
+	{
+		if (g.kind != Grab::Kind::Modal) continue;
+		const Instance* gw = g.widget != 0
+			? const_cast<WidgetManager*>(this)->find(g.widget) : nullptr;
+		if ((gw ? gw->windowId : 0u) == windowId) return true;
+	}
+	return false;
+}
+
 void WidgetManager::popGrab(bool notify)
 {
 	if (m_grabs.empty()) return;
-	const Grab g = m_grabs.back();
-	m_grabs.pop_back();
+	popGrabAt(m_grabs.size() - 1, notify);
+}
+
+// The same thing, at a stated place in the stack. It is not the back any more
+// as soon as there are two windows: Escape in the main window closes the main
+// window's dialog, even though the tool window opened its own afterwards and
+// therefore sits on top of the shared stack.
+void WidgetManager::popGrabAt(std::size_t index, bool notify)
+{
+	if (index >= m_grabs.size()) return;
+	const Grab g = m_grabs[index];
+	m_grabs.erase(m_grabs.begin() + static_cast<std::ptrdiff_t>(index));
 	m_visualDirty = true;
 
 	if (g.kind == Grab::Kind::Dropdown)
@@ -866,7 +943,7 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 	// breaks; re-anchoring the roots makes the placement the same for every
 	// popup that was ever drawn.
 	const HE::UIWidgetCanvas canvas =
-		resolveCanvas(w->tree, m_lastViewportW, m_lastViewportH);
+		resolveCanvas(w->tree, w->windowId,m_lastViewportW, m_lastViewportH);
 	const float sx = canvas.scaleX > 0.0f ? canvas.scaleX : 1.0f;
 	const float sy = canvas.scaleY > 0.0f ? canvas.scaleY : 1.0f;
 	for (auto& ep : w->tree.elements)
@@ -1252,9 +1329,18 @@ bool WidgetManager::closeTopLayer()
 	// Putting it back is also cheaper to be wrong about than closing a dialog
 	// somebody was filling in.
 	if (m_dragActive) { cancelDrag(); return true; }
-	if (m_grabs.empty()) return false;
-	popGrab(/*notify=*/true);
-	return true;
+	// The top layer OF THE WINDOW THE KEYBOARD IS IN. Escape belongs to the
+	// window it was pressed in, and the tool window that opened a popup after
+	// this one must not be the thing that closes.
+	const uint32_t kwin = keyboardWindow();
+	for (std::size_t i = m_grabs.size(); i-- > 0; )
+	{
+		const Instance* gw = m_grabs[i].widget != 0 ? find(m_grabs[i].widget) : nullptr;
+		if ((gw ? gw->windowId : 0u) != kwin) continue;
+		popGrabAt(i, /*notify=*/true);
+		return true;
+	}
+	return false;
 }
 
 // ── Lists (docs/he-apps-plan.md B2) ──────────────────────────────────────────
@@ -2538,9 +2624,11 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 		// A layer is up and this is not it: inert, all the way down. The
 		// same question every other way in asks (takesInput).
 		if (!takesInput(w.id)) continue;
+		// …and it has to be in the window the mouse is actually in.
+		if (w.windowId != m_pointerWindow) continue;
 		// Same resolution the draw uses (see extract) — a hit test on a
 		// differently-scaled canvas is a button that is not where it looks.
-		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		const float sx = canvas.scaleX;
 		const float sy = canvas.scaleY;
 		for (const auto& ep : w.tree.elements)
@@ -2666,8 +2754,8 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 	long topKey = 0;
 	for (auto& w : m_instances)
 	{
-		if (!w.visible || !takesInput(w.id)) continue;
-		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+		if (!w.visible || !takesInput(w.id) || w.windowId != m_pointerWindow) continue;
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		const float sx = canvas.scaleX, sy = canvas.scaleY;
 		for (const auto& ep : w.tree.elements)
 		{
@@ -2701,15 +2789,20 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 	return drag ? HE::UIWindowHit::Drag : HE::UIWindowHit::Normal;
 }
 
-bool WidgetManager::processPointer(float vpWidth, float vpHeight,
+bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHeight,
                                    float mouseX, float mouseY,
                                    bool primaryDown, bool valid,
                                    bool secondaryDown)
 {
+	// Where the mouse is, which is one window at a time. Written before any
+	// scan runs, because every one of them asks.
+	m_pointerWindow = windowId;
 	// Remembered for the calls that get no frame with them: a context menu opens
 	// at the pointer, a tooltip is drawn beside it, and a popup is placed in a
-	// canvas that needs the viewport.
-	m_lastViewportW = vpWidth; m_lastViewportH = vpHeight;
+	// canvas that needs the viewport. The MAIN window's, only: a popup placed
+	// against the size of a 300-pixel tool window would be clamped into a
+	// corner of the window it actually opens in.
+	if (windowId == 0) { m_lastViewportW = vpWidth; m_lastViewportH = vpHeight; }
 	// Did the POINTER move, or is this just the next frame? An application calls
 	// this every frame whether the mouse stirred or not, so "where the mouse is"
 	// arrives sixty times a second and would otherwise outvote the keyboard on
@@ -2738,7 +2831,9 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	// Before the dropdown block because the bar is the application's chrome and
 	// sits above every page. It never steals from a dialog, though: the strip
 	// only answers while nothing else holds the input.
-	if (m_menuOpen >= 0 && !m_grabs.empty() && m_grabs.back().kind == Grab::Kind::MenuBar)
+	// …and only in the main window, which is the only one that draws a bar.
+	if (windowId == 0 && m_menuOpen >= 0 && !m_grabs.empty() &&
+	    m_grabs.back().kind == Grab::Kind::MenuBar)
 	{
 		const int overTitle = valid ? menuTitleAt(mouseX, mouseY) : -1;
 		const int overItem  = valid ? menuItemAt(mouseX, mouseY) : -1;
@@ -2787,7 +2882,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		m_pointerOverUI = true;
 		return true;
 	}
-	if (!m_menuBar.empty() && !m_menuNative && m_grabs.empty() && valid &&
+	if (windowId == 0 && !m_menuBar.empty() && !m_menuNative && m_grabs.empty() && valid &&
 	    mouseY < menuBarHeight())
 	{
 		// Closed, but the strip is still there: a click on it opens a menu and a
@@ -2810,7 +2905,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		if (!w || !cb) popGrab(/*notify=*/false);   // it went away under us
 		else
 		{
-			const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+			const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 			const int over = valid
 				? comboOptionAtPointer(w->tree, *cb, canvas, mouseX, mouseY) : -1;
 			// Only a pointer that MOVED takes the highlight. Without that the
@@ -2952,7 +3047,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	{
 		std::vector<Instance*> byZ;
 		for (auto& w : m_instances)
-			if (w.visible && takesInput(w.id)) byZ.push_back(&w);
+			if (w.visible && takesInput(w.id) && w.windowId == m_pointerWindow)
+				byZ.push_back(&w);
 		std::stable_sort(byZ.begin(), byZ.end(),
 			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
 		for (Instance* wp : byZ)
@@ -3097,7 +3193,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			lv->hoveredRow = (isTop && topHit != 0 &&
 			                  isSelfOrDescendant(w.tree, lv->id, topHit))
 				? listRowAtPointer(w.tree, *lv,
-				                   resolveCanvas(w.tree, vpWidth, vpHeight), mouseY)
+				                   resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight), mouseY)
 				: -1;
 			if (lv->hoveredRow != was) m_visualDirty = true;
 		}
@@ -3112,7 +3208,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			dp->hoverCell = -1;
 			if (isTop && topHit == dp->id)
 			{
-				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
 				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -3155,7 +3251,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* sp = dynamic_cast<const HE::UISplitter*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					if (canvas.scaleX > 0.0f && canvas.scaleY > 0.0f &&
 					    splitterDividerAt(w.tree, *sp, canvas,
 					                      mouseX / canvas.scaleX, mouseY / canvas.scaleY))
@@ -3168,7 +3264,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* ti = dynamic_cast<const HE::UITextInput*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ti, &canvas);
 					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -3227,7 +3323,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* dp = dynamic_cast<const HE::UIDatePicker*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
 					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -3248,7 +3344,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* cp = dynamic_cast<const HE::UIColorPicker*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
 					float us = 1.0f, vs = 1.0f;
 					HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
@@ -3271,7 +3367,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* tb = dynamic_cast<const HE::UITabBox*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *tb, &canvas);
 					float us = 1.0f, vs = 1.0f;
 					HE::uiElementUnitScale(w.tree, *tb, us, vs, &canvas);
@@ -3311,7 +3407,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (const auto* ac = dynamic_cast<const HE::UIAccordion*>(e))
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ac, &canvas);
 					float us = 1.0f, vs = 1.0f;
 					HE::uiElementUnitScale(w.tree, *ac, us, vs, &canvas);
@@ -3438,7 +3534,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 								// clear the selection every time somebody
 								// reached for a column title.
 								const HE::UIWidgetCanvas canvas =
-									resolveCanvas(w.tree, vpWidth, vpHeight);
+									resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 								HE::UIWidgetRect pxr{};
 								HE::UIListView::HeaderHit hh;
 								if (listPixelRect(w.tree, *lv, canvas, pxr))
@@ -3501,7 +3597,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (auto* s = dynamic_cast<HE::UISlider*>(w.tree.find(w.draggingSlider)))
 			{
-				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *s, &canvas);
 				const float mouseCanvasX = mouseX / canvas.scaleX;
 				float t = r.w > 0.0f ? (mouseCanvasX - r.x) / r.w : 0.0f;
@@ -3530,7 +3626,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// band on any fast pull — and a cursor that flickers back to
 				// the arrow mid-drag says the grab was lost when it was not.
 				m_hoverCursor = splitterCursor(*sp);
-				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *sp, &canvas);
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
@@ -3564,7 +3660,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(w.draggingColumn)))
 			{
 				m_hoverCursor = HE::UICursor::ResizeWE;
-				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				HE::UIWidgetRect pxr{};
 				if (listPixelRect(w.tree, *lv, canvas, pxr) &&
 				    lv->dragColumnDivider(pxr, w.columnSeam, mouseX))
@@ -3581,7 +3677,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (auto* cp = dynamic_cast<HE::UIColorPicker*>(w.tree.find(w.draggingColor)))
 			{
-				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
@@ -3621,7 +3717,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (float* off = e->scrollOffsetPtr())
 				{
 					const HE::UIWidgetCanvas canvas =
-						resolveCanvas(w.tree, vpWidth, vpHeight);
+						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *e, &canvas);
 					const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 					                           r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -4011,7 +4107,7 @@ bool WidgetManager::focusedFieldRect(float vpWidth, float vpHeight, HE::UIWidget
 	if (!w || w->focusedElem == 0) return false;
 	const HE::UIElement* e = w->tree.find(w->focusedElem);
 	if (!e) return false;
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *e, &canvas);
 	out.x = r.x * canvas.scaleX; out.y = r.y * canvas.scaleY;
 	out.w = r.w * canvas.scaleX; out.h = r.h * canvas.scaleY;
@@ -4325,7 +4421,7 @@ bool WidgetManager::labelCaretAtPointer(float vpWidth, float vpHeight,
 	Instance* w = nullptr;
 	HE::UIText* lb = focusedSelectableLabel(w);
 	if (!lb) return false;
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *lb, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w->tree, *lb, us, vs, &canvas);
@@ -4399,7 +4495,7 @@ bool WidgetManager::caretOffsetAtPointer(float vpWidth, float vpHeight,
 	Instance* w = nullptr;
 	HE::UITextInput* ti = focusedTextField(w);
 	if (!ti) return false;
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *ti, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w->tree, *ti, us, vs, &canvas);
@@ -4799,7 +4895,7 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 		if (auto* dp = dynamic_cast<HE::UIDatePicker*>(e))
 		{
 			const HE::UIWidgetCanvas canvas =
-				resolveCanvas(w.tree, m_lastViewportW, m_lastViewportH);
+				resolveCanvas(w.tree, w.windowId,m_lastViewportW, m_lastViewportH);
 			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
 			const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
 			                            r.w * canvas.scaleX, r.h * canvas.scaleY };
@@ -4844,7 +4940,7 @@ std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y
 	const auto* t = dynamic_cast<const HE::UIText*>(w.tree.find(elemId));
 	if (!t || !t->richText) return {};
 	const HE::UIWidgetCanvas canvas =
-		resolveCanvas(w.tree, m_lastViewportW, m_lastViewportH);
+		resolveCanvas(w.tree, w.windowId,m_lastViewportW, m_lastViewportH);
 	const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *t, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w.tree, *t, us, vs, &canvas);
@@ -5046,7 +5142,10 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
 {
 	syncLists();
 	std::vector<Instance*> sorted;
-	for (auto& w : m_instances) if (w.visible) sorted.push_back(&w);
+	// Only the window the pointer is in — this is a gesture aimed at a place,
+	// and a place is in exactly one window.
+	for (auto& w : m_instances)
+		if (w.visible && w.windowId == m_pointerWindow) sorted.push_back(&w);
 	std::stable_sort(sorted.begin(), sorted.end(),
 		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
 
@@ -5054,7 +5153,7 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
 	{
 		Instance& w = *wp;
 		if (!takesInput(w.id)) continue;
-		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		for (auto& ep : w.tree.elements)
 		{
 			auto* lv = dynamic_cast<HE::UIListView*>(ep.get());
@@ -5100,25 +5199,28 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 		return true;
 	}
 	// The widget the focus is in, else the topmost visible one that has
-	// anything focusable at all.
+	// anything focusable at all — and all of it inside ONE window: the arrows
+	// end at the window's edge, they do not step across into the next one.
+	const uint32_t kwin = keyboardWindow();
 	Instance* w = find(m_focusWidget);
 	if (!w || !w->visible || !takesInput(w->id))
 	{
 		// With a layer up there is exactly one candidate, and it is the layer.
 		// This is the focus TRAP: without it, Tab and the arrows walk out of an
 		// open dialog into the page it is covering.
-		if (!m_grabs.empty()) { w = find(m_grabs.back().widget); if (!w) return false; }
+		if (const Grab* g = topGrabOf(kwin)) { w = find(g->widget); if (!w) return false; }
 		else
 		{
 			std::vector<Instance*> sorted;
-			for (auto& inst : m_instances) if (inst.visible) sorted.push_back(&inst);
+			for (auto& inst : m_instances)
+				if (inst.visible && inst.windowId == kwin) sorted.push_back(&inst);
 			std::stable_sort(sorted.begin(), sorted.end(),
 				[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
 			w = sorted.empty() ? nullptr : sorted.front();
 			if (!w) return false;
 		}
 	}
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 
 	// A focused list takes up/down as a step through its ITEMS. Falling through
 	// at either end is the point: Down on the last row hands the focus to
@@ -5239,14 +5341,18 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	// Whose form is being tabbed through: the layer, else the widget that has
 	// the focus, else the topmost visible one. Same three answers navigate()
 	// gives, and for the same reason — a Tab must not walk out of a dialog.
+	// …and all three answers come from ONE window: Tab ends at the window's
+	// edge rather than continuing in the tool window next to it.
+	const uint32_t kwin = keyboardWindow();
 	Instance* w = nullptr;
-	if (!m_grabs.empty()) w = find(m_grabs.back().widget);
+	if (const Grab* g = topGrabOf(kwin)) w = find(g->widget);
 	if (!w) w = find(m_focusWidget);
 	if (!w || !w->visible || !takesInput(w->id))
 	{
 		std::vector<Instance*> sorted;
-		for (auto& inst : m_instances) if (inst.visible && takesInput(inst.id))
-			sorted.push_back(&inst);
+		for (auto& inst : m_instances)
+			if (inst.visible && inst.windowId == kwin && takesInput(inst.id))
+				sorted.push_back(&inst);
 		std::stable_sort(sorted.begin(), sorted.end(),
 			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
 		w = sorted.empty() ? nullptr : sorted.front();
@@ -5258,7 +5364,7 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	// and the only one they can predict. Not the element vector: that is keyed
 	// by id, so it is creation order, and re-parenting a row would leave the
 	// tab order where the row used to be.
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	std::vector<int> order;
 	const std::function<void(int)> walk = [&](int parent)
 	{
@@ -5325,7 +5431,7 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeight,
                                         float mouseX, float mouseY, float& grabDy) const
 {
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 	int best = 0, bestDepth = -1;
 	for (auto& ep : w.tree.elements)
 	{
@@ -5368,7 +5474,10 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 	// Topmost widget first, and within it the DEEPEST scroll box under the
 	// cursor: a list inside a list scrolls the one the pointer is in.
 	std::vector<Instance*> sorted;
-	for (auto& w : m_instances) if (w.visible) sorted.push_back(&w);
+	// Only the window the pointer is in — this is a gesture aimed at a place,
+	// and a place is in exactly one window.
+	for (auto& w : m_instances)
+		if (w.visible && w.windowId == m_pointerWindow) sorted.push_back(&w);
 	std::stable_sort(sorted.begin(), sorted.end(),
 		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
 
@@ -5378,7 +5487,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 		// Same question the pointer asks: while a dialog is up, the list behind
 		// it does not scroll either.
 		if (!takesInput(w.id)) continue;
-		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		HE::uiUpdateScrollExtents(w.tree);
 
 		int   best = 0;
@@ -5483,7 +5592,7 @@ void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
 		// viewport — and how many canvas units the screen is worth. Everything
 		// below (layout, auto-size wrap column, the pixel conversion) has to go
 		// through the SAME resolution, or the picture and the hit test drift.
-		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		const float sx = canvas.scaleX;
 		const float sy = canvas.scaleY;
 
@@ -6046,7 +6155,7 @@ void WidgetManager::drawOpenDropdown(float vpWidth, float vpHeight,
 	auto* cb = w ? dynamic_cast<HE::UIComboBox*>(w->tree.find(g.elem)) : nullptr;
 	if (!w || !cb || cb->options.empty()) return;
 
-	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	const HE::UIWidgetRect r = comboListRect(w->tree, *cb, &canvas);
 	const float sx = canvas.scaleX, sy = canvas.scaleY;
 	float eus = 1.0f, evs = 1.0f;

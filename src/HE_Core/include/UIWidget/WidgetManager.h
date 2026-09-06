@@ -180,6 +180,9 @@ public:
     // is drawn by this class and is not an element, so nothing else could say so.
     bool hasLayer() const { return !m_grabs.empty(); }
     bool hasModal() const;
+    // …and the same question for ONE window. Grabs are window-modal: a dialog
+    // in a tool window seals that window, and the main window carries on.
+    bool hasModalIn(uint32_t windowId) const;
 
     // ── The application's menu bar (plan A6) ─────────────────────────────────
     // A strip along the top of the render target, drawn by the MANAGER and not
@@ -474,10 +477,24 @@ public:
     // default because every caller that does not care about it should not have
     // to say so — a right-click is one feature (the context menu), not a change
     // to how pointing works.
+    //
+    // windowId says WHICH window the coordinates are in; the overload without
+    // it means the main window, so a single-window host stays as it was
+    // written. Everything the pointer does afterwards in the same frame — the
+    // wheel, the drop, the caret, the double-click — inherits that window from
+    // here, because there is one mouse and it was just told where it is.
     bool processPointer(float vpWidth, float vpHeight,
                         float mouseX, float mouseY,
                         bool primaryDown, bool valid,
+                        bool secondaryDown = false)
+    { return processPointer(0u, vpWidth, vpHeight, mouseX, mouseY,
+                            primaryDown, valid, secondaryDown); }
+    bool processPointer(uint32_t windowId, float vpWidth, float vpHeight,
+                        float mouseX, float mouseY,
+                        bool primaryDown, bool valid,
                         bool secondaryDown = false);
+    // Which window the pointer was last told it is in (0 = the main one).
+    uint32_t pointerWindow() const { return m_pointerWindow; }
 
     // ── Files dragged in from the desktop (docs/he-apps-plan.md B7) ──────────
     // The OS drag is a gesture in three parts and these are two of them: while
@@ -752,8 +769,15 @@ public:
     // other modes measure against the viewport, which already counted the
     // pixels. 1 is an unscaled display and the default, which is what a
     // headless test and the editor's simulated screen both want.
-    void  setDisplayScale(float s) { m_displayScale = s > 0.0f ? s : 1.0f; }
-    float displayScale() const { return m_displayScale; }
+    //
+    // Per WINDOW, because two windows can be on two monitors with two different
+    // settings — which is the whole reason a second window has to carry its own
+    // scale rather than the last one anybody set. The windowless overloads mean
+    // the main window, so a single-window host is unchanged.
+    void  setDisplayScale(float s) { setDisplayScale(0u, s); }
+    float displayScale() const { return displayScale(0u); }
+    void  setDisplayScale(uint32_t windowId, float s);
+    float displayScale(uint32_t windowId) const;
 
     // ── The reader's text size (docs/he-apps-plan.md B10) ────────────────────
     // A factor on every authored font size, and on nothing else: 1.25 is a
@@ -778,7 +802,17 @@ private:
     // in ONE place instead of at forty call sites that each have to remember.
     HE::UIWidgetCanvas resolveCanvas(const HE::UIWidgetTree& t, float vpW, float vpH) const
     { return HE::uiResolveCanvas(t, vpW, vpH, m_displayScale); }
-    float m_displayScale = 1.0f;
+    // …and the same for a tree in a NAMED window, which is what every call
+    // site that has an Instance in hand uses: the scale belongs to the screen
+    // the window is on, and two windows can be on two screens.
+    HE::UIWidgetCanvas resolveCanvas(const HE::UIWidgetTree& t, uint32_t windowId,
+                                     float vpW, float vpH) const
+    { return HE::uiResolveCanvas(t, vpW, vpH, displayScale(windowId)); }
+    float m_displayScale = 1.0f;   // the main window's
+    // …and every other window's, by SDL window id. A map rather than a field
+    // per window: a window that never says anything about its scale (the
+    // overwhelmingly common case — one monitor) costs nothing and reads 1.
+    std::unordered_map<uint32_t, float> m_windowScale;
     float m_fontScale = 1.0f;
 
     struct Instance
@@ -1082,6 +1116,10 @@ private:
     // keyboard navigation, the caret and the double-click all ask this, because
     // the one that does not ask is the one through which a dialog leaks.
     bool takesInput(int widgetId) const;
+    // …and the second half of the same question once there is more than one
+    // window: is this widget in the window the POINTER is in? One mouse cannot
+    // be in two windows at once.
+    bool inPointerWindow(int widgetId) const;
     struct Grab
     {
         // MenuBar holds no widget (widget = 0), which is exactly what makes
@@ -1097,6 +1135,20 @@ private:
         int  prevZOrder = 0;   // Modal only: it was raised to the top
     };
     std::vector<Grab> m_grabs;
+    // The layer holding the input in ONE window (null = that window is free).
+    const Grab* topGrabOf(uint32_t windowId) const;
+    // Which window the pointer was last reported in — written by processPointer
+    // and read by every scan the pointer drives afterwards in the same frame
+    // (the wheel, the drop, the caret, the double-click). It is not a "current
+    // window" the whole class hangs off: the KEYBOARD scopes itself through the
+    // focused widget's own window instead, so a script callback that runs in
+    // the middle of a pointer call cannot move anything under anyone's feet.
+    uint32_t m_pointerWindow = 0;
+    // Which window the KEYBOARD is in: the one the focused widget hangs in,
+    // and the one the pointer was last in when nothing is focused (which is
+    // the window that was last clicked). Derived rather than stored, so it
+    // cannot be left pointing at a window that has since closed.
+    uint32_t keyboardWindow() const;
 
     // ── The menu bar's own state and arithmetic ──────────────────────────────
     // One source for the rectangles, used by the draw AND by the pointer. The
@@ -1126,6 +1178,9 @@ private:
     // Close the top layer WITHOUT firing OnDismissed — for the paths where the
     // widget is going away anyway (destroyed, cleared).
     void popGrab(bool notify);
+    // …and at a stated place in the stack, which is what the back of it stops
+    // being as soon as two windows each have a layer up.
+    void popGrabAt(std::size_t index, bool notify);
     // Let go of every layer this widget holds, as if it had been closed. Hiding
     // a dialog and closing one are the same event from two sides.
     void releaseGrabsOf(int widgetId);
