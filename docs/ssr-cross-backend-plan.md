@@ -301,6 +301,11 @@ nach §2.3 Kopf 1 auf D3D11 ihrerseits an der Registergrenze hängen). Beides
 zusammen hieße: SSR läuft, ist aber nirgends sichtbar. **Das ist der Punkt, an
 dem diese Phase kippt oder trägt.**
 
+> **Umgedreht in Schritt 5** (§5, Checkpoint B): `scene.frag` hat jetzt die
+> Kaskade und den rauheitsabhängigen Schlick-Fresnel, das Banner in Zeile 46
+> trägt eine „geschlossen"-Notiz. Für D3D11/D3D12 (`kSceneHLSL`) steht dieselbe
+> Umkehr noch aus — sie gehört in C5/D.
+
 ---
 
 ## 4. Checkpoint A — OpenGL (die Vorlage)
@@ -394,6 +399,73 @@ Vorbedingungen: Tiefe liegt vor (Decal-Vorpass), HDR liegt vor
 Meshes. Wird die Tiefe daher genommen, spiegeln sich Skinned Meshes, Partikel
 und WPO-Geometrie nicht. Ein MRT-Prepass nach §3.2 (a) hat dieselbe Grenze —
 er ist derselbe Geometriedurchlauf. Melden, nicht verstecken.
+
+> **Erledigt in Schritt 5 (B1–B5).** Gebaut wie oben beschrieben, mit vier
+> Stellen, an denen der Weg vom Text abweicht — jede bewusst.
+>
+> 1. **B2 wurde Weg (a), aber ohne zweiten Geometriedurchlauf.** Der neue
+>    Render-Pass `m_reflPrepassRP` hat vier Attachments, und **Attachment 0 ist
+>    SSAOs eigenes `m_ssaoPosRT`** — dieselbe Beschreibung (RGBA16F, CLEAR/STORE,
+>    final `SHADER_READ_ONLY`), dieselbe Tiefe. `runSSAO` bekommt zwei Flags
+>    (`reflMrt`, `aoWanted`) und tauscht in Durchgang 1 nur Pass, Framebuffer und
+>    Pipeline; die Verdeckungs- und Blurstufe merken nichts, weil der geteilte
+>    Prepass-Shader in Attachment 0 exakt das schreibt, was `ssao_pos.frag`
+>    schreibt (`vec4(vViewPos, 1.0)`). **Damit ist SSR auf Vulkan billiger als auf
+>    GL**, wo die GI-Reflexionen einen eigenen Vorpass mitbringen. Der Preis: der
+>    Framebuffer hält SSAOs Views, also lebt und stirbt er mit
+>    `createSSAOTargets`/`destroySSAOTargets` (`ensureReflPrepassTargets` baut ihn
+>    beim nächsten SSR-Frame neu).
+> 2. **`aoWanted = false` ist ein eigener Zustand.** SSR braucht den Vorpass auch
+>    dann, wenn SSAO aus ist oder GI ihn ersetzt hat. In dem Fall läuft NUR
+>    Durchgang 1, `m_ssaoRanThisFrame` bleibt **false**, und `scene.frag` behält
+>    seinen weißen AO-Ersatz (`viewport.z = 0`).
+> 3. **Kein RoughMix**, wie schon auf GL: Metals Forward-Pfad hat die breite Stufe
+>    nicht, und der Vorpass schreibt `roughness = 0` — es gäbe nichts zu lerpen.
+> 4. **Die Vulkan-eigenen Fallen, die GL nicht hatte** und die im Code benannt
+>    stehen: (a) jedes Trace-/Blur-Ziel wird nach der Erstellung einmal nach
+>    `SHADER_READ_ONLY` überführt, weil der Trace das History-Paar auch im ersten
+>    Frame **liest** (der Blend-Faktor ist 0, der Zugriff nicht) und ein Bild in
+>    `UNDEFINED` zu sampeln ungültig ist; (b) `m_hdrImage` bekommt
+>    `TRANSFER_SRC_BIT`, und die Vorframe-Kopie hängt mit handgeschriebenen
+>    Barrieren direkt hinter dem Szenen-Pass (`runPostFXBarrier` kennt nur das
+>    Farb-/Shader-Read-Paar); (c) `m_ssrColorHist` gehört **nicht** zu
+>    `destroySSRTargets` — `RenderForwardSSR` liest es über den
+>    `createSSRTargets`-Aufruf hinweg.
+>
+> **Bindungen.** Trace/Blur benutzen die kanonischen Nummern unverändert
+> (19/20/22/23/24/25 bzw. 19/23), der Prepass sein `U` auf Binding 1 als
+> **`UNIFORM_BUFFER_DYNAMIC`** (ein Set, ein dynamischer Offset pro Draw, Ring
+> mit 4096 Slots à 256 B und einer `HE_LOG_ONCE`-Grenze). Der Konsument ist
+> zweiköpfig wie überall: `uSSRFwd` auf **Szenen-Set 0, Binding 8** plus
+> `ssrParams` im `Frame`-Block für die Built-ins, und **Binding 31 (`heSSRFwd`)
+> neu im Material-Set** für Graph-Materialien, zusammen mit `lit.ssr[0..3]` —
+> das Gate zu füllen, ohne den Deskriptor zu liefern, hätte einen ungebundenen
+> Sampler gesampelt.
+>
+> **§3.3 ist umgedreht.** `scene.frag` hat die Kaskade (Sky → SSR; die
+> GI-Reflexionsstufe fehlt, weil dieses Backend keine hat) **und** den
+> rauheitsabhängigen Schlick-Fresnel. Das Drift-Banner in Zeile 46 ist durch eine
+> „geschlossen"-Notiz ersetzt. **Das ändert Vulkans Built-in-Shading auch mit SSR
+> aus** — bewusst, weil die Kaskade genau in diesen Specular-Term hineinmischt
+> und ein anderer Gewichtsfaktor denselben Spiegel je nach Materialtyp anders
+> aussehen ließe.
+>
+> **Grenze, die zu melden ist und nicht versteckt wird: SSR gibt es auf Vulkan
+> NUR im Editor-Viewport.** `m_hdrImage` entsteht in `createPostFXResources` und
+> wird nur im `useViewport`-Zweig benutzt; der Swapchain-Zweig (das gepackte
+> Spiel) zeichnet direkt in den Backbuffer und hat keine Radianzquelle. Das ist
+> dasselbe Loch, das der Plan D3D11 als C6 gibt. `supportsScreenSpaceReflections`
+> meldet deshalb `m_postFxReady`, und im Swapchain-Pfad tut der Schalter nichts.
+> Dazu die geerbte Grenze von oben: der Vorpass zeichnet, was `contributesAO`
+> sagt — keine Partikel, kein Niederschlag.
+>
+> **Was hier wirklich lief:** `clang++ -fsyntax-only` über die ganze
+> Übersetzungseinheit gegen SDLs Khronos-Header (warnungsfrei bis auf die zwei
+> Bestandswarnungen der Datei), **`glslc` über das geänderte `scene.frag`** — der
+> Mac hat glslc, der Plan hatte in §8 nur Syntaxprüfung erwartet — und die volle
+> ctest-Suite samt eines neuen Drift-Falls in `tests/test_culling.cpp`, der die
+> SSR-Kaskade über alle **vier** handgepflegten Kopien vergleicht (Preamble, GL,
+> Metal, `scene.frag`). Echte Hardware: ungeprüft.
 
 ---
 
@@ -504,6 +576,21 @@ GI-Port:
    Vulkan-Header. **D3D11/D3D12: gar nichts** — auf diesem Mac gibt es weder
    Header noch `fxc`/`dxc`, die beiden Übersetzungseinheiten werden hier nicht
    gebaut. Der erste Windows-Build ist die erste Prüfung.
+
+   > **Nachtrag aus Schritt 5: es ist mehr, als hier stand.** `glslc` liegt auf
+   > diesem Mac (`/opt/homebrew/bin/glslc`), also lässt sich Vulkans
+   > `scene.frag` — die Datei, in der die Kaskade landet und die CMake sonst
+   > erst auf einem Vulkan-Rechner übersetzt — hier vollständig nach SPIR-V
+   > kompilieren:
+   > `glslc -fshader-stage=frag src/HE_Rendering/shaders/scene.frag -o /dev/null`.
+   > Das fängt genau die Klasse Fehler, für die es sonst keinen Zeugen gäbe: ein
+   > Feld, das im `Frame`-Block anders heißt als in `FrameUBOData`, eine Bindung,
+   > die doppelt vergeben ist, ein Tippfehler in der Kaskade. Für die
+   > *Übereinstimmung* der vier Kopien ist zusätzlich der Drift-Fall in
+   > `tests/test_culling.cpp` da; die Datei-vs-Struktur-Ausrichtung des UBO
+   > bleibt Handarbeit. Der Syntax-Check der `.cpp` läuft mit
+   > `-DHE_HAVE_SHADERC=1` und den Include-Pfaden aus `out/build/*/\_deps`
+   > (SDL3, `sdl3-src/src/video/khronos`, glm, entt, nlohmann_json).
 5. **Nutzer-Verify auf echter Hardware** wird pro Backend als **offen** gemeldet,
    nicht als erledigt.
 
@@ -520,7 +607,7 @@ also nichts zu brechen.
 | 2 | Cross-Compile-ctest über alle vier SSR-Shader × vier Backends — **erledigt** | ja |
 | 3 | §3.2 (a): Prepass-Shader nach kanonischem GLSL in die geteilte Library, Metal darauf umstellen — **erledigt** | ja, visuell (A/B gegen den Referenzshot) |
 | 4 | Checkpoint A — OpenGL (Forward-SSR, Kaskade im Szenenshader) — **A1–A5 erledigt, A6 offen** | nur offline + ctest |
-| 5 | Checkpoint B — Vulkan | nur Syntaxprüfung |
+| 5 | Checkpoint B — Vulkan (B1–B5, inkl. §3.3) — **erledigt** | Syntaxprüfung + `glslc` auf `scene.frag` + Drift-ctest |
 | 6 | Checkpoint C — D3D11 (inkl. HLSL-Register-Pins + Registertest) | nur ctest auf dem HLSL-Text |
 | 7 | Checkpoint D — D3D12 (Register aus 6 geerbt) | dito |
 | — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang |
