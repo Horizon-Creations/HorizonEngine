@@ -41,6 +41,10 @@ public:
     // Ray-traced DDGI (software BVH + CS 5.0 compute) — pushed every frame by
     // the editor prefs / packaged game, mirroring the Metal/GL/D3D11 backends.
     void SetGISettings(const GISettings& settings) override;
+    // Forward screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint D).
+    // Editor-viewport only: the trace reads the previous frame's HDR colour, and
+    // the swapchain path has no HDR target (the C6 hole, inherited from D3D11).
+    void SetSSRSettings(const SSRSettings& settings) override;
 
     // Editor material/mesh hot-reload: drop the cached override-material texture / mesh
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).

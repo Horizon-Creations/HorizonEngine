@@ -2468,6 +2468,60 @@ void ContentManager::scanDirInto(const std::string& rootStr, const std::string& 
 	}
 }
 
+void ContentManager::setContentRoot(std::string root)
+{
+	// Idempotent: re-opening the project that is already open must not throw its
+	// content away and reload it. The editor's project-loaded callback fires on
+	// every load, including a reload of the same project.
+	if (root == m_contentRoot) return;
+	const bool switching = !m_contentRoot.empty();
+	m_contentRoot = std::move(root);
+	if (switching) forgetProjectContent();
+}
+
+void ContentManager::forgetProjectContent()
+{
+	// Every pool, because the DATA is the old project's.
+	m_staticMeshAssets.clear();       m_skeletalMeshAssets.clear();
+	m_textureAssets.clear();          m_materialAssets.clear();
+	m_sceneAssets.clear();            m_scriptAssets.clear();
+	m_materialFunctionAssets.clear(); m_widgetAssets.clear();
+	m_hcClassAssets.clear();          m_inputActionAssets.clear();
+	m_inputMappingAssets.clear();     m_particleGraphAssets.clear();
+	m_animatorStateMachineAssets.clear();
+	m_audioAssets.clear();            m_fontAssets.clear();
+	m_shaderAssets.clear();           m_prefabAssets.clear();
+	m_animClipAssets.clear();         m_propAnimClipAssets.clear();
+	m_structTypeAssets.clear();       m_enumTypeAssets.clear();
+	m_saveTemplateAssets.clear();
+
+	// …and every index that pointed into them. m_pathToUUID is the one that
+	// caused the bug; the rest would merely answer about assets that no longer
+	// exist, which is its own kind of wrong.
+	m_handleToUUID.clear();
+	m_assetTypeIndex.clear();
+	m_pathToUUID.clear();
+	m_pathMtime.clear();
+	// Pins are handles into pools that just went. Nothing can still hold a valid
+	// one: a project switch tears the session down first, and an AssetRef that
+	// outlived it was already dangling.
+	m_pinCounts.clear();
+	m_diskRegistry.clear();
+
+	// Mounted archives belong to a build of a project, so they go too. In
+	// practice this is a no-op both ways round: the editor mounts none, and the
+	// packaged game sets its root once before mounting anything.
+	m_mounts.clear();
+	m_pakResidency.clear();
+	m_pakPathIndex.clear();
+
+	// The built-ins are the MANAGER's, not the project's — the default cube, the
+	// white texture, the default and terrain materials. Scenes reference them by
+	// well-known UUID and nothing on disk backs them, so a reset that forgot them
+	// would replace every built-in reference with a missing asset.
+	initDefaultAssets();
+}
+
 size_t ContentManager::scanContentDirectory()
 {
 	m_diskRegistry.clear();

@@ -77,6 +77,26 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
                         const std::vector<MslPin>& pins,
                         const MslOptions& opts = {});
 
+// The HLSL counterpart of MslPin. Without it SPIRV-Cross turns `layout(binding = N)`
+// straight into `register(bN/tN/sN)`, and the canonical GLSL of this engine uses
+// binding numbers up to 33 — past D3D11's hard API limits of 14 constant-buffer and
+// 16 sampler slots per stage. A shader that a hand-written D3D11 pipeline has to bind
+// therefore needs its high bindings pinned down into range (SRVs are fine either way,
+// 128 slots, but they are pinned along with the sampler so the pair stays together).
+// D3D12 has no such limit; it uses the same pins so both backends share one contract.
+struct HlslPin
+{
+    Stage    stage;     // which shader stage the resource is used in
+    uint32_t set;       // GLSL: layout(set = ...)
+    uint32_t binding;   // GLSL: layout(binding = ...)
+    uint32_t reg;       // target HLSL register index (b/t/s all get this index)
+};
+
+// Compile canonical GLSL to HLSL SM 5.0 with explicit register assignments
+// (Target::HlslSm50).
+Result compileHlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<HlslPin>& pins);
+
 // Convenience: compile once to SPIR-V, then emit several targets from it (cheaper
 // than re-parsing the GLSL per target). Returns SPIR-V + a source per requested target,
 // in the same order as `targets`. `out[i].ok == false` on a per-target failure.

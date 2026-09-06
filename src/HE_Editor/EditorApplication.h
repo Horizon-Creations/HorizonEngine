@@ -13,6 +13,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/ScriptContext.h>
@@ -561,6 +562,10 @@ protected:
 	void OnRender(float dt)                          override;
 	void OnShutdown()                                override;
 	bool OnEvent(const SDL_Event& event)             override;
+	// Zero outside play mode: a C++ game-logic module has no business ticking
+	// while somebody is building the level. Inside it, the game clock — which
+	// the editor's own pause already holds at zero.
+	float GameLogicDeltaTime(float rawDt)            override;
 
 	std::unique_ptr<IRenderer> CreateRenderer()      override;
 

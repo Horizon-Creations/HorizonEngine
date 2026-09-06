@@ -22,6 +22,8 @@
 #include "Components/MovementComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/DecalComponent.h"
+#include "Components/RopeComponent.h"
+#include "Components/TrailComponent.h"
 #include "Components/RigidBodyComponent.h"
 #include "Components/ColliderComponent.h"
 #include "Components/CharacterControllerComponent.h"

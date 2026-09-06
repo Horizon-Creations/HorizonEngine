@@ -395,6 +395,11 @@ cbuffer PerFrame : register(b1)
     float4   uGIParams;        // x = GI enabled (0/1), y = indirect intensity
     float4   uGIGridOrigin;    // xyz = probe grid origin, w = spacing
     float4   uGIGridCounts;    // xyz = probe counts, w = probesPerRow
+    // Forward SSR (docs/ssr-cross-backend-plan.md C5): x = 1 → a trace ran this
+    // frame and uSSRFwd holds it, y = intensity, z = max roughness, w = 0. The
+    // same four lanes heLitP reads out of Lighting::ssr — must stay in step with
+    // PerFrameCB, which is memcpy'd into this cbuffer whole.
+    float4   uSSRParams;
 };
 
 Texture2D    uTexture   : register(t0);
@@ -404,6 +409,12 @@ Texture2D    uGIShadow  : register(t4); // half-res ray-traced sun-shadow mask
 Texture2D    uGIIrr     : register(t5); // DDGI irradiance atlas (RGBA16F)
 Texture2D    uGIVis     : register(t6); // DDGI visibility atlas (RG16F)
 Texture2D    uGILocal   : register(t7); // half-res local-light visibility mask (1 channel per light, first 4)
+// Half-res screen-space reflection trace (rgb = reflected radiance, a =
+// confidence). t16 on purpose: the low SRV registers are all spoken for
+// (t0..t7 here and in the graph materials, t8..t13 the pinned SSR pass block,
+// t14/t15 the decals) and D3D11 has 128 SRV slots — only samplers (16) and
+// constant buffers (14) are scarce, which is why this one shares uGISampler.
+Texture2D    uSSRFwd    : register(t16);
 SamplerState uSampler   : register(s0);
 SamplerState uAOSampler : register(s1);
 SamplerState uGISampler : register(s2); // linear clamp (mask upsample + atlases)
@@ -570,11 +581,28 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 F0     = lerp(float3(0.04f,0.04f,0.04f), base, met);
     float3 kd     = (1.0f - F0) * (1.0f - met);
     float3 ambDiff = skyColor(Nup,    uSunDir.xyz) * base * kd;
+    // FORWARD reflection cascade (sky → SSR). SYNC: this is the heLitP twin in
+    // MaterialShaderLibrary.cpp and the same stage GL's kUnlitFS, Metal's
+    // fragmentMain and Vulkan's scene.frag carry — a graph material next to a
+    // built-in one must mix the sources identically, or the same mirror changes
+    // appearance with the material type. There is no ray-traced-GI-reflection
+    // stage between the two here: D3D11 has none, and its gate would be a
+    // constant zero. The trace carries no per-pixel roughness (the half-res
+    // pre-pass has no material data), so the roughness fade lives HERE, with the
+    // exact shading value. No `f` suffixes on the two constants below — the
+    // cross-copy drift test in tests/test_culling.cpp matches this text.
+    float3 envSpec = skyColor(Rrough, uSunDir.xyz);
+    if (uSSRParams.x > 0.5)
+    {
+        float4 sr   = uSSRFwd.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0);
+        float fade = 1.0 - smoothstep(uSSRParams.z * 0.7, uSSRParams.z, rough);
+        envSpec = lerp(envSpec, sr.rgb, sr.a * uSSRParams.y * fade);
+    }
     // Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
     float  NdV = saturate(dot(N, V));
     float3 fresnelSpec = F0
         + (max(float3(1.0f - rough, 1.0f - rough, 1.0f - rough), F0) - F0) * pow(1.0f - NdV, 5.0f);
-    float3 ambSpec = skyColor(Rrough, uSunDir.xyz) * fresnelSpec;
+    float3 ambSpec = envSpec * fresnelSpec;
     float ao = (uViewport.z > 0.5f) ? uAO.SampleLevel(uAOSampler, i.clip.xy / uViewport.xy, 0).r : 1.0f;
     // GI replaces the AO-gated IBL diffuse with probe-grid indirect (spec IBL
     // stays in both branches) — mirrors the GL/Metal gi.enabled branch.
@@ -922,6 +950,7 @@ namespace
         glm::vec4  giParams;     // x = GI enabled (0/1), y = indirect intensity
         glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
+        glm::vec4  ssrParams;    // x = SSR gate, y = intensity, z = max roughness
     };
 
     struct SkyCB {
@@ -941,6 +970,7 @@ struct D3D11RendererImpl
     ComPtr<IDXGISwapChain>         swapchain;
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11DepthStencilView> dsv;
+    ComPtr<ID3D11ShaderResourceView> depthSRV; // C1: the same depth, readable (decals)
     ComPtr<ID3D11Texture2D>        depthTex;
     bool vsync = true;
     int  width = 0, height = 0;
@@ -989,6 +1019,28 @@ struct D3D11RendererImpl
     bool m_matHlslLogged = false; // one-time dump of generated HLSL for HW verify
     // createMaterialResources() + GetOrBuildMaterialShaders() are defined inline below.
 
+    // ── Screen-space decals (forward) ───────────────────────────────────────
+    // docs/decals-cross-backend-plan.md §6b. D3D11 has no G-buffer, so a decal is
+    // not composited into a base-colour attachment like on Metal/GL — it samples
+    // the scene depth, rebuilds the world position, clips it against the projector
+    // box and blends the SELF-SHADED result into the already-lit colour target.
+    // Registers are pinned by the shader library into D3D11's bindable range:
+    //   b13 HeDecal | t14/s14 heDecalTex | t15/s15 heGBDepth
+    // (raw binding 23/19/22 would land past the 14 CB / 16 sampler slot limits).
+    ComPtr<ID3D11VertexShader>       decalVS;
+    ComPtr<ID3D11PixelShader>        decalPS;
+    ComPtr<ID3D11Buffer>             decalCB;         // DecalUniforms, WRITE_DISCARD per decal
+    ComPtr<ID3D11SamplerState>       decalTexSampler; // s14: linear wrap
+    ComPtr<ID3D11SamplerState>       decalDepthSampler; // s15: POINT clamp — uv is texel-exact,
+                                                        // and linear filtering of a depth format
+                                                        // is optional hardware support
+    ComPtr<ID3D11RasterizerState>    decalRast;       // cull FRONT: the camera may sit in the box
+    ComPtr<ID3D11DepthStencilState>  decalNoDepth;    // no test, no write — the box decides
+    ComPtr<ID3D11BlendState>         decalBlend;      // SrcAlpha/InvSrcAlpha, write mask RGB
+    std::unordered_map<HE::UUID, ComPtr<ID3D11ShaderResourceView>> decalTexCache;
+    bool decalReady  = false; // resources built
+    bool decalFailed = false; // build failed once — never retried per frame
+
     // ── Shadow map ──────────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
     ComPtr<ID3D11Texture2D>          shadowTex;
@@ -1002,6 +1054,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> viewportSRV;
     ComPtr<ID3D11Texture2D>          viewportDepth;
     ComPtr<ID3D11DepthStencilView>   viewportDSV;
+    ComPtr<ID3D11ShaderResourceView> viewportDepthSRV; // C1, as depthSRV above
     uint32_t viewportW    = 0;
     uint32_t viewportH    = 0;
     uint32_t viewportReqW = 0;
@@ -1055,6 +1108,60 @@ struct D3D11RendererImpl
     ComPtr<ID3D11InputLayout>   debugIL;
     bool debugReady = false;
     std::vector<DebugLine> m_debugLines;
+
+    // ── Motion trails (RenderWorld::ribbonBatches) ────────────────────────
+    // A ribbon needs neither a shader nor a pass of its own: it arrives as CPU
+    // geometry in the ordinary cooked layout (pos3 + norm3 + uv2), so it goes
+    // into a dynamic buffer pair and is then handed to drawDC as a perfectly
+    // normal blended DrawCall — same PBR path, same graph-material shaders, same
+    // sort (docs/rope-trail-plan.md §6.2). One pool slot per band; MAP_WRITE_DISCARD
+    // does the versioning, so re-uploading a slot mid-frame is safe.
+    std::vector<ComPtr<ID3D11Buffer>> ribbonVB;
+    std::vector<ComPtr<ID3D11Buffer>> ribbonIB;
+    // Fill `out` with the pool slot's buffers after uploading the band into it.
+    // False = the buffers could not be created; the caller skips the band.
+    bool uploadRibbon(ID3D11DeviceContext* ctx, size_t index,
+                      const std::vector<float>& verts,
+                      const std::vector<uint32_t>& indices, GpuMesh& out)
+    {
+        if (!ctx || verts.empty() || indices.empty()) return false;
+        if (ribbonVB.size() <= index) { ribbonVB.resize(index + 1); ribbonIB.resize(index + 1); }
+
+        auto ensure = [&](UINT needed, UINT bindFlag, ComPtr<ID3D11Buffer>& buf) -> bool {
+            D3D11_BUFFER_DESC existing{};
+            if (buf) buf->GetDesc(&existing);
+            if (buf && existing.ByteWidth >= needed) return true;
+            buf.Reset();
+            D3D11_BUFFER_DESC bd{};
+            // Round up so a trail that grows a point per frame does not reallocate
+            // every frame while it fills up.
+            bd.ByteWidth      = (needed + 0xFFFu) & ~0xFFFu;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = bindFlag;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            device->CreateBuffer(&bd, nullptr, &buf);
+            return buf != nullptr;
+        };
+        const UINT vbytes = static_cast<UINT>(verts.size()   * sizeof(float));
+        const UINT ibytes = static_cast<UINT>(indices.size() * sizeof(uint32_t));
+        if (!ensure(vbytes, D3D11_BIND_VERTEX_BUFFER, ribbonVB[index])) return false;
+        if (!ensure(ibytes, D3D11_BIND_INDEX_BUFFER,  ribbonIB[index])) return false;
+
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(ribbonVB[index].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+        std::memcpy(m.pData, verts.data(), vbytes);
+        ctx->Unmap(ribbonVB[index].Get(), 0);
+        if (FAILED(ctx->Map(ribbonIB[index].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+        std::memcpy(m.pData, indices.data(), ibytes);
+        ctx->Unmap(ribbonIB[index].Get(), 0);
+
+        out = GpuMesh{};
+        out.vbuf       = ribbonVB[index];
+        out.ibuf       = ribbonIB[index];
+        out.indexCount = static_cast<UINT>(indices.size());
+        return true;
+    }
+
     float m_wallTime = 0.0f;
     float bloomStrength  = 0.25f;
     float bloomThreshold = 1.0f;
@@ -1090,6 +1197,25 @@ struct D3D11RendererImpl
     // Resources
     ComPtr<ID3D11Texture2D>          ssaoNoiseTex;      // 4x4 RGBA32F rotation noise
     ComPtr<ID3D11ShaderResourceView> ssaoNoiseSRV;
+    // ── Reflection MRT pre-pass (forward SSR, plan §3.2 way (a) / C2) ───────
+    // Two extra attachments hung off the SSAO position pre-pass, so the trace
+    // sees exactly the format it would read out of GB1/GBDepth in a deferred
+    // path. Attachment 0 stays the view-space position the occlusion stage
+    // already consumes — the shared pre-pass fragment writes the identical
+    // vec4(vViewPos, 1.0) there, so pass 2 never notices which shader drew it.
+    // Created lazily on the first SSR frame, torn down with the SSAO targets.
+    ComPtr<ID3D11Texture2D>          reflAttrTex;  // RGBA16F: rg oct normal, b roughness (= 0)
+    ComPtr<ID3D11RenderTargetView>   reflAttrRTV;
+    ComPtr<ID3D11ShaderResourceView> reflAttrSRV;
+    ComPtr<ID3D11Texture2D>          reflNdcTex;   // R32F: NDC depth, gbufferMain convention
+    ComPtr<ID3D11RenderTargetView>   reflNdcRTV;
+    ComPtr<ID3D11ShaderResourceView> reflNdcSRV;
+    ComPtr<ID3D11VertexShader>       reflPrepassVS;
+    ComPtr<ID3D11PixelShader>        reflPrepassPS;
+    ComPtr<ID3D11InputLayout>        reflPrepassIL; // TEXCOORD0/1 — NOT the scene's POSITION/NORMAL
+    ComPtr<ID3D11Buffer>             reflPrepassCB; // U { mat4 mvp, modelView, model } = 192 B
+    bool reflPrepassReady  = false;
+    bool reflPrepassFailed = false;
     ComPtr<ID3D11Texture2D>          whiteTex;          // 1x1 white, AO fallback when disabled
     ComPtr<ID3D11ShaderResourceView> whiteSRV;
     ComPtr<ID3D11SamplerState>       pointSampler;      // POINT + WRAP for SSAO noise + pos
@@ -1102,6 +1228,51 @@ struct D3D11RendererImpl
     bool  ssaoReady     = false;
     int   ssaoW         = 0;
     int   ssaoH         = 0;
+
+    // ── Screen-space reflections, forward path (plan checkpoint C) ──────────
+    // The D3D11 twin of OpenGLRenderer::RenderForwardSSR and Metal's
+    // EncodeForwardSSR, built from the SAME shared shaders (ssrTrace / ssrBlur),
+    // pinned into D3D11's bindable register range by kSSRHlslPins:
+    //   b12 HeSSRTrace/HeSSRBlur | t8/s8 colour-or-input | t9/s9 GB1
+    //   t11/s11 depth | t12/s12 hist radiance | t13/s13 hist position
+    // There is no composite pass (§2.2: no G-buffer here) and no wide/rough-mix
+    // stage (the forward path has none on Metal or GL either, and the pre-pass
+    // writes roughness = 0) — the scene shader samples ONE reflection texture.
+    ComPtr<ID3D11PixelShader>        ssrTracePS;
+    ComPtr<ID3D11PixelShader>        ssrBlurPS;
+    ComPtr<ID3D11Buffer>             ssrTraceCB;   // SSRTraceUniforms (336 B) → b12
+    ComPtr<ID3D11Buffer>             ssrBlurCB;    // SSRBlurUniforms  (16 B)  → b12
+    ComPtr<ID3D11SamplerState>       ssrPointClamp;  // GB1/depth/history position
+    ComPtr<ID3D11SamplerState>       ssrLinearClamp; // scene colour, blur input
+    // Half-res ping-pong. hist[2] is the temporal pair the trace reads and
+    // writes (radiance + receiver world position, two attachments in one draw);
+    // ping/refl are the separable blur chain's two ends.
+    ComPtr<ID3D11Texture2D>          ssrHistRadTex[2], ssrHistPosTex[2];
+    ComPtr<ID3D11RenderTargetView>   ssrHistRadRTV[2], ssrHistPosRTV[2];
+    ComPtr<ID3D11ShaderResourceView> ssrHistRadSRV[2], ssrHistPosSRV[2];
+    ComPtr<ID3D11Texture2D>          ssrPingTex, ssrReflTex;
+    ComPtr<ID3D11RenderTargetView>   ssrPingRTV, ssrReflRTV;
+    ComPtr<ID3D11ShaderResourceView> ssrPingSRV, ssrReflSRV;
+    // Full-res copy of the PREVIOUS frame's finished HDR colour — the forward
+    // path's radiance source (one frame of content lag, Option A of
+    // docs/ssr-plan.md §2). Lives with the HDR target so a resize can never
+    // leave the two disagreeing.
+    ComPtr<ID3D11Texture2D>          ssrColorHistTex;
+    ComPtr<ID3D11ShaderResourceView> ssrColorHistSRV;
+    bool      ssrColorHistValid = false;
+    int       ssrW = 0, ssrH = 0;
+    int       ssrHistIdx   = 0;
+    bool      ssrHistValid = false;
+    float     ssrFrameSeed = 0.0f;
+    glm::mat4 ssrPrevViewProj{1.0f};
+    bool  ssrReady        = false;
+    bool  ssrFailed       = false;
+    bool  ssrEnabled      = false;
+    float ssrIntensity    = 1.0f;
+    float ssrMaxRoughness = 0.6f;
+    float ssrMaxDistance  = 30.0f;
+    float ssrThickness    = 0.5f;
+    int   ssrQuality      = 1;
 
     // ── Skinned mesh pipeline ─────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader> skinnedVS;
@@ -1316,6 +1487,22 @@ struct D3D11RendererImpl
             makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, bw, bh, bloomTex[i], bloomRTV[i], bloomSRV[i]);
         makeRT(DXGI_FORMAT_R8G8B8A8_UNORM, w, h, ldrTex, ldrRTV, ldrSRV);
         createSSAOTargets((int)w, (int)h);
+
+        // Forward SSR's radiance source: a full-res copy of the PREVIOUS frame's
+        // hdrTex. Built here, with the target it copies, so the two can never
+        // disagree about size or format after a resize — and the "valid" flag
+        // drops with them, because the first frame at a new size has no history.
+        ssrColorHistSRV.Reset(); ssrColorHistTex.Reset();
+        ssrColorHistValid = false;
+        if (hdrTex)
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            hdrTex->GetDesc(&td);
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE; // CopyResource target, never an RTV
+            if (SUCCEEDED(device->CreateTexture2D(&td, nullptr, &ssrColorHistTex)))
+                device->CreateShaderResourceView(ssrColorHistTex.Get(), nullptr, &ssrColorHistSRV);
+        }
+        destroySSRTargets(); // half-res ping-pong follows the new size lazily
     }
 
     bool createSSAOPipeline()
@@ -1422,6 +1609,10 @@ struct D3D11RendererImpl
         ssaoPosDepthDSV.Reset(); ssaoPosDepth.Reset();
         ssaoRTV.Reset(); ssaoSRV.Reset(); ssaoTex.Reset();
         ssaoBlurRTV.Reset(); ssaoBlurSRV.Reset(); ssaoBlurTex.Reset();
+        // The reflection attachments share this pre-pass's size and depth, so
+        // they die with it and are rebuilt by the next SSR frame (C2).
+        reflAttrRTV.Reset(); reflAttrSRV.Reset(); reflAttrTex.Reset();
+        reflNdcRTV.Reset();  reflNdcSRV.Reset();  reflNdcTex.Reset();
 
         auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& t,
                           ComPtr<ID3D11RenderTargetView>& rtv,
@@ -1455,6 +1646,43 @@ struct D3D11RendererImpl
         ssaoW = w; ssaoH = h;
     }
 
+    // The two extra pre-pass attachments (plan C2). Separate from
+    // createSSAOTargets because a project that never switches SSR on must not
+    // pay for them, and because they must be rebuilt whenever the SSAO pass is
+    // resized — createSSAOTargets drops them, this puts them back.
+    bool ensureReflTargets(int w, int h)
+    {
+        if (reflAttrSRV && reflNdcSRV) return true;
+        reflAttrRTV.Reset(); reflAttrSRV.Reset(); reflAttrTex.Reset();
+        reflNdcRTV.Reset();  reflNdcSRV.Reset();  reflNdcTex.Reset();
+        auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& t,
+                          ComPtr<ID3D11RenderTargetView>& rtv,
+                          ComPtr<ID3D11ShaderResourceView>& srv) -> bool {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = (UINT)w; td.Height = (UINT)h;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmt; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &t))) return false;
+            device->CreateRenderTargetView(t.Get(), nullptr, &rtv);
+            device->CreateShaderResourceView(t.Get(), nullptr, &srv);
+            return rtv && srv;
+        };
+        // RGBA16F because the oct normal needs the precision (the trace decodes
+        // it), R32F because the NDC depth is compared against ray-marched depths
+        // — an 8-bit or half copy of either shows as reflections drifting.
+        const bool ok = makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, reflAttrTex, reflAttrRTV, reflAttrSRV)
+                      & makeRT(DXGI_FORMAT_R32_FLOAT,          reflNdcTex,  reflNdcRTV,  reflNdcSRV);
+        if (!ok)
+        {
+            reflAttrRTV.Reset(); reflAttrSRV.Reset(); reflAttrTex.Reset();
+            reflNdcRTV.Reset();  reflNdcSRV.Reset();  reflNdcTex.Reset();
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: reflection pre-pass targets failed");
+        }
+        return ok;
+    }
+
     // Returns the SRV that the scene shader should bind as t2 (AO texture).
     ID3D11ShaderResourceView* runSSAO(ID3D11DeviceContext* ctx,
                                       const std::vector<const DrawCall*>& opaqueDCs,
@@ -1465,10 +1693,18 @@ struct D3D11RendererImpl
                                       const GpuMesh& fallbackMesh,
                                       ID3D11InputLayout* il,
                                       ID3D11DepthStencilState* depthSt,
-                                      ID3D11RasterizerState* rasterSt)
+                                      ID3D11RasterizerState* rasterSt,
+                                      bool reflMrt = false, bool aoWanted = true)
     {
+        // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
+        // GL and Vulkan grew). SSR needs pass 1 on frames where SSAO is off or
+        // the GI probes replaced it, and it needs it with three attachments
+        // instead of one; the occlusion and blur stages then simply do not run,
+        // and the caller keeps its white AO fallback.
         if (!ssaoReady || !ssaoPosRTV || !ssaoRTV || !ssaoBlurRTV) return whiteSRV.Get();
         if (ssaoW != w || ssaoH != h) createSSAOTargets(w, h);
+        if (reflMrt && !(reflPrepassReady && ensureReflTargets(w, h))) reflMrt = false;
+        if (!reflMrt && !aoWanted) return whiteSRV.Get();
 
         const UINT stride = 8 * sizeof(float), off = 0;
         D3D11_VIEWPORT vp{}; vp.Width = float(w); vp.Height = float(h); vp.MaxDepth = 1.0f;
@@ -1478,17 +1714,37 @@ struct D3D11RendererImpl
         {
             ID3D11ShaderResourceView* nullSrv = nullptr;
             ctx->PSSetShaderResources(2, 1, &nullSrv);
-            ctx->OMSetRenderTargets(1, ssaoPosRTV.GetAddressOf(), ssaoPosDepthDSV.Get());
             float clear[4] = {0,0,0,0};
-            ctx->ClearRenderTargetView(ssaoPosRTV.Get(), clear);
+            if (reflMrt)
+            {
+                // Attachment 0 is still ssaoPosRTV and the shared pre-pass
+                // fragment writes exactly what ssao_pos.frag writes into it, so
+                // pass 2 below cannot tell which shader ran.
+                ID3D11RenderTargetView* rtvs[3] = { ssaoPosRTV.Get(), reflAttrRTV.Get(),
+                                                    reflNdcRTV.Get() };
+                ctx->OMSetRenderTargets(3, rtvs, ssaoPosDepthDSV.Get());
+                for (ID3D11RenderTargetView* r : rtvs) ctx->ClearRenderTargetView(r, clear);
+            }
+            else
+            {
+                ctx->OMSetRenderTargets(1, ssaoPosRTV.GetAddressOf(), ssaoPosDepthDSV.Get());
+                ctx->ClearRenderTargetView(ssaoPosRTV.Get(), clear);
+            }
             ctx->ClearDepthStencilView(ssaoPosDepthDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-            ctx->IASetInputLayout(il);
+            // The shared pre-pass VS is cross-compiled GLSL, so its inputs are
+            // TEXCOORD0/1 and it needs its own input layout — the same split the
+            // graph-material path makes for the same reason.
+            ctx->IASetInputLayout(reflMrt ? reflPrepassIL.Get() : il);
             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            ctx->VSSetShader(ssaoPosVS.Get(), nullptr, 0);
-            ctx->PSSetShader(ssaoPosPS.Get(), nullptr, 0);
+            ctx->VSSetShader(reflMrt ? reflPrepassVS.Get() : ssaoPosVS.Get(), nullptr, 0);
+            ctx->PSSetShader(reflMrt ? reflPrepassPS.Get() : ssaoPosPS.Get(), nullptr, 0);
             ctx->OMSetDepthStencilState(depthSt, 0);
             ctx->RSSetState(rasterSt);
-            ctx->VSSetConstantBuffers(0, 1, ssaoPosPerObjCB.GetAddressOf());
+            ID3D11Buffer* posCB = reflMrt ? reflPrepassCB.Get() : ssaoPosPerObjCB.Get();
+            // b1: the pre-pass's U block (binding 1, unpinned). VS b1 is the
+            // scene's perFrameCB, re-bound by the scene setup block after SSAO.
+            if (reflMrt) ctx->VSSetConstantBuffers(1, 1, &posCB);
+            else         ctx->VSSetConstantBuffers(0, 1, &posCB);
 
             for (const DrawCall* dc : opaqueDCs) {
                 const GpuMesh* mesh = resolveMeshFn(dc->meshAssetId);
@@ -1498,13 +1754,18 @@ struct D3D11RendererImpl
                 ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
 
                 auto drawWithTransform = [&](const glm::mat4& modelMat) {
-                    struct { glm::mat4 mvp, modelView; } pcb;
+                    // Three matrices for the MRT pre-pass (it also needs `model`
+                    // for the world normal), two for the position-only one; the
+                    // first two are the same bytes in both layouts.
+                    struct { glm::mat4 mvp, modelView, model; } pcb;
                     pcb.mvp       = viewProj * modelMat;
                     pcb.modelView = view     * modelMat;
+                    pcb.model     = modelMat;
                     D3D11_MAPPED_SUBRESOURCE mapped{};
-                    if (SUCCEEDED(ctx->Map(ssaoPosPerObjCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-                        std::memcpy(mapped.pData, &pcb, sizeof(pcb));
-                        ctx->Unmap(ssaoPosPerObjCB.Get(), 0);
+                    if (SUCCEEDED(ctx->Map(posCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                        std::memcpy(mapped.pData, &pcb,
+                                    reflMrt ? sizeof(pcb) : sizeof(glm::mat4) * 2);
+                        ctx->Unmap(posCB, 0);
                     }
                     ctx->DrawIndexed(m.indexCount, 0, 0);
                 };
@@ -1516,8 +1777,13 @@ struct D3D11RendererImpl
             }
         }
 
-        // Unbind posRTV so it can be read as SRV
+        // Unbind the pre-pass RTVs so they can be read as SRVs. One null at slot
+        // 0 clears slots 1..7 too, so this covers the MRT case as well.
         { ID3D11RenderTargetView* n = nullptr; ctx->OMSetRenderTargets(1, &n, nullptr); }
+
+        // SSR-only frame: the occlusion and blur stages have nothing to do, and
+        // the caller's `aoSRV != whiteSRV` check must keep reporting "no AO".
+        if (!aoWanted) return whiteSRV.Get();
 
         // ── Pass 2: SSAO ──────────────────────────────────────────────────────
         {
@@ -1580,6 +1846,383 @@ struct D3D11RendererImpl
         }
 
         return ssaoBlurSRV.Get();
+    }
+
+    // ─── Reflection pre-pass pipeline (forward SSR, plan C2) ────────────────
+    // One shader for every backend (MaterialShaderLibrary reflPrepassVertex /
+    // reflPrepassFragment) so the encoding the trace decodes cannot drift.
+    // Built lazily on the first SSR frame; a failure is remembered and SSR then
+    // simply never runs.
+    bool EnsureReflPrepassPipeline()
+    {
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        if (reflPrepassReady)  return true;
+        if (reflPrepassFailed) return false;
+        reflPrepassFailed = true; // cleared only on full success below
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.reflPrepassVertex(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.reflPrepassFragment(Backend::HLSL);
+        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: reflection pre-pass cross-compile failed");
+            return false;
+        }
+        ComPtr<ID3DBlob> vsb, psb, err;
+        // SPIRV-Cross emits the GLSL-sourced entry point as `main`.
+        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "reflPrepassVS", nullptr, nullptr,
+                              "main", "vs_5_0", 0, 0, &vsb, &err)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: refl pre-pass VS compile failed: ")
+                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "reflPrepassPS", nullptr, nullptr,
+                              "main", "ps_5_0", 0, 0, &psb, &err)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: refl pre-pass PS compile failed: ")
+                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &reflPrepassVS)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &reflPrepassPS)))
+            return false;
+        // TEXCOORD0/1, not POSITION/NORMAL: the cross-compiler names GLSL vertex
+        // inputs by location (see GetOrBuildMaterialShaders). Same interleaved
+        // 32-byte pos/normal/uv buffer the scene meshes use; the UV is unread.
+        const D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        if (FAILED(device->CreateInputLayout(layout, 2, vsb->GetBufferPointer(), vsb->GetBufferSize(),
+                                             &reflPrepassIL)))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: refl pre-pass input layout creation failed");
+            return false;
+        }
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = (static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::ReflPrepassUniforms)) + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &reflPrepassCB))) return false;
+        }
+        reflPrepassFailed = false;
+        reflPrepassReady  = true;
+        return true;
+#endif
+    }
+
+    // ─── Forward screen-space reflections (plan C1/C3/C4) ───────────────────
+    bool EnsureSSRPipelines()
+    {
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        if (ssrReady)  return true;
+        if (ssrFailed) return false;
+        ssrFailed = true;
+        if (!fsVS) return false; // the fullscreen VS lives with the PostFX resources
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& tc = m_matShaderLib.ssrTrace(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& bc = m_matShaderLib.ssrBlur(Backend::HLSL);
+        if (!tc.ok || !bc.ok || tc.source.empty() || bc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: SSR shader cross-compile failed");
+            return false;
+        }
+        auto makePS = [&](const std::string& src, const char* name,
+                          ComPtr<ID3D11PixelShader>& out) -> bool {
+            ComPtr<ID3DBlob> blob, err;
+            if (FAILED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+                                  "main", "ps_5_0", 0, 0, &blob, &err)))
+            {
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: SSR ") + name
+                    + " compile failed: "
+                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+                return false;
+            }
+            return SUCCEEDED(device->CreatePixelShader(blob->GetBufferPointer(),
+                                                       blob->GetBufferSize(), nullptr, &out));
+        };
+        if (!makePS(tc.source, "ssrTracePS", ssrTracePS)) return false;
+        if (!makePS(bc.source, "ssrBlurPS",  ssrBlurPS))  return false;
+
+        auto makeCB = [&](size_t bytes, ComPtr<ID3D11Buffer>& out) -> bool {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (static_cast<UINT>(bytes) + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            return SUCCEEDED(device->CreateBuffer(&bd, nullptr, &out));
+        };
+        if (!makeCB(sizeof(HE::MaterialShaderLibrary::SSRTraceUniforms), ssrTraceCB)) return false;
+        if (!makeCB(sizeof(HE::MaterialShaderLibrary::SSRBlurUniforms),  ssrBlurCB))  return false;
+
+        // CLAMP, not the SSAO noise sampler's WRAP: a ray that walks off the
+        // screen must fetch the edge texel, not the opposite edge — wrapping
+        // turns an off-screen miss into a confident hit somewhere else entirely.
+        {
+            D3D11_SAMPLER_DESC sd{};
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+            sd.MaxLOD = D3D11_FLOAT32_MAX;
+            sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            if (FAILED(device->CreateSamplerState(&sd, &ssrPointClamp))) return false;
+            sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            if (FAILED(device->CreateSamplerState(&sd, &ssrLinearClamp))) return false;
+        }
+        ssrFailed = false;
+        ssrReady  = true;
+        HE_LOG_INFO(RHI, "%s", "D3D11Renderer: screen-space reflection pipeline created");
+        return true;
+#endif
+    }
+
+    void destroySSRTargets()
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            ssrHistRadRTV[i].Reset(); ssrHistRadSRV[i].Reset(); ssrHistRadTex[i].Reset();
+            ssrHistPosRTV[i].Reset(); ssrHistPosSRV[i].Reset(); ssrHistPosTex[i].Reset();
+        }
+        ssrPingRTV.Reset(); ssrPingSRV.Reset(); ssrPingTex.Reset();
+        ssrReflRTV.Reset(); ssrReflSRV.Reset(); ssrReflTex.Reset();
+        ssrW = ssrH = 0;
+        ssrHistValid = false;
+    }
+
+    // Half-resolution RGBA16F ping-pong, the same set Metal's EnsureSSRTarget
+    // and GL's EnsureSSRTargets build. NOT the colour history — that one lives
+    // with the HDR target and outlives a resize of these.
+    bool createSSRTargets(int w, int h)
+    {
+        if (ssrHistRadRTV[0] && w == ssrW && h == ssrH) return true;
+        destroySSRTargets();
+        auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& t,
+                          ComPtr<ID3D11RenderTargetView>& rtv,
+                          ComPtr<ID3D11ShaderResourceView>& srv) -> bool {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = (UINT)w; td.Height = (UINT)h;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmt; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &t))) return false;
+            device->CreateRenderTargetView(t.Get(), nullptr, &rtv);
+            device->CreateShaderResourceView(t.Get(), nullptr, &srv);
+            return rtv && srv;
+        };
+        bool ok = true;
+        for (int i = 0; i < 2; ++i)
+        {
+            ok &= makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, ssrHistRadTex[i], ssrHistRadRTV[i], ssrHistRadSRV[i]);
+            ok &= makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, ssrHistPosTex[i], ssrHistPosRTV[i], ssrHistPosSRV[i]);
+        }
+        ok &= makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, ssrPingTex, ssrPingRTV, ssrPingSRV);
+        ok &= makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, ssrReflTex, ssrReflRTV, ssrReflSRV);
+        if (!ok)
+        {
+            destroySSRTargets();
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: SSR target creation failed");
+            return false;
+        }
+        ssrW = w; ssrH = h;
+        // Frame 1 has no history: the pair is undefined until the trace has
+        // written it once, so the blend factor stays 0 until then.
+        ssrHistIdx   = 0;
+        ssrHistValid = false;
+        return true;
+    }
+
+    // Full-res copy of the finished HDR frame (opaque + sky + transparency),
+    // taken at the end of the scene pass. NEXT frame's trace reprojects its hits
+    // into it — the one frame of content lag is the accepted forward trade.
+    void captureSSRColorHistory()
+    {
+        if (!ssrColorHistTex || !hdrTex) return;
+        context->CopyResource(ssrColorHistTex.Get(), hdrTex.Get());
+        ssrColorHistValid = true;
+    }
+
+    // Trace + blur chain. Returns the SRV the scene shader samples as uSSRFwd,
+    // or null when SSR could not run this frame. The caller has already put the
+    // scene render target aside; this leaves nothing bound.
+    ID3D11ShaderResourceView* RenderForwardSSR(ID3D11DeviceContext* ctx, int pw, int ph,
+                                               const glm::mat4& viewProj, const glm::mat4& view)
+    {
+#if !defined(HE_HAVE_SHADERC)
+        (void)ctx; (void)pw; (void)ph; (void)viewProj; (void)view;
+        return nullptr;
+#else
+        if (!ssrReady || !reflAttrSRV || !reflNdcSRV) return nullptr;
+        if (!ssrColorHistSRV || !ssrColorHistValid)   return nullptr; // frame 1 seeds the copy
+        const int tw = std::max(1, pw / 2), th = std::max(1, ph / 2);
+        if (!createSSRTargets(tw, th)) return nullptr;
+
+        const glm::vec3 camFwd = -glm::normalize(glm::vec3(glm::inverse(view)[2]));
+        const int curIdx  = ssrHistIdx;
+        const int prevIdx = 1 - curIdx;
+
+        D3D11_VIEWPORT vp{}; vp.Width = float(tw); vp.Height = float(th); vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &vp);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(fsVS.Get(), nullptr, 0);
+        ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
+        ctx->RSSetState(fsRastState.Get());
+        // The trace blends against its own history INSIDE the shader; a blend
+        // state left over from the transparent pass would blend it twice.
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+
+        // ── 1. Trace (MRT: blended radiance + receiver position) ────────────
+        {
+            const bool temporal = ssrQuality >= 2;
+            float hist = 0.0f;
+            if (temporal && ssrHistValid)
+            {
+                // Camera-motion damping, the same measure Metal and GL take: a
+                // moved view means the un-reprojected reflection CONTENT is stale.
+                float delta = 0.0f;
+                for (int c = 0; c < 4; ++c)
+                    for (int r = 0; r < 4; ++r)
+                        delta = std::max(delta, std::abs(viewProj[c][r] - ssrPrevViewProj[c][r]));
+                hist = delta > 1e-5f ? 0.55f : 0.85f;
+            }
+            ssrFrameSeed += 1.0f;
+
+            HE::MaterialShaderLibrary::SSRTraceUniforms tu;
+            const glm::mat4 ivp = glm::inverse(viewProj);
+            std::memcpy(tu.viewProj,     glm::value_ptr(viewProj),        16 * sizeof(float));
+            std::memcpy(tu.invViewProj,  glm::value_ptr(ivp),             16 * sizeof(float));
+            std::memcpy(tu.prevViewProj, glm::value_ptr(ssrPrevViewProj), 16 * sizeof(float));
+            tu.cfg2[0] = ssrFrameSeed;
+            tu.cfg2[1] = hist;
+            tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+            tu.cfg2[3] = temporal ? 1.0f : 0.0f;
+            tu.camPos[0] = m_renderWorld.camera.position.x;
+            tu.camPos[1] = m_renderWorld.camera.position.y;
+            tu.camPos[2] = m_renderWorld.camera.position.z;
+            tu.camFwd[0] = camFwd.x; tu.camFwd[1] = camFwd.y; tu.camFwd[2] = camFwd.z;
+            tu.cfg[0] = ssrMaxDistance;
+            tu.cfg[1] = ssrThickness;
+            tu.cfg[2] = ssrMaxRoughness;
+            tu.cfg[3] = static_cast<float>(ssrQuality <= 0 ? 16 : ssrQuality == 1 ? 32 : 64);
+            // D3D conventions, identical to Metal's and to what the decal pass
+            // already derives (docs/ssr-cross-backend-plan.md §1.4):
+            // SV_Position.y counts from the TOP while NDC y points up → sign -1;
+            // depth is 0..1 in both the texture and NDC → scale 1, bias 0.
+            tu.conv[0] = -1.0f;
+            tu.conv[1] =  1.0f;
+            tu.conv[2] =  0.0f;
+            tu.conv[3] =  0.1f;
+            tu.vp[0] = static_cast<float>(tw);
+            tu.vp[1] = static_cast<float>(th);
+            D3D11_MAPPED_SUBRESOURCE md{};
+            if (SUCCEEDED(ctx->Map(ssrTraceCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &md)))
+            {
+                std::memcpy(md.pData, &tu, sizeof(tu));
+                ctx->Unmap(ssrTraceCB.Get(), 0);
+            }
+            // Render targets FIRST, resources second — the previous frame's
+            // history pair is bound as SRVs here and as RTVs next frame, and
+            // D3D11 resolves that overlap by silently unbinding one of them.
+            ID3D11RenderTargetView* rtvs[2] = { ssrHistRadRTV[curIdx].Get(),
+                                                ssrHistPosRTV[curIdx].Get() };
+            ctx->OMSetRenderTargets(2, rtvs, nullptr);
+            ctx->PSSetShader(ssrTracePS.Get(), nullptr, 0);
+            ctx->PSSetConstantBuffers(12, 1, ssrTraceCB.GetAddressOf()); // b12 HeSSRTrace
+            ID3D11ShaderResourceView* srvs[6] = {
+                ssrColorHistSRV.Get(),      // t8  heSceneColor (prev frame HDR)
+                reflAttrSRV.Get(),          // t9  heGB1
+                nullptr,                    // t10 unused by the trace
+                reflNdcSRV.Get(),           // t11 heGBDepth
+                ssrHistRadSRV[prevIdx].Get(),// t12 heSSRHistRad
+                ssrHistPosSRV[prevIdx].Get()};//t13 heSSRHistPos
+            ctx->PSSetShaderResources(8, 6, srvs);
+            // The radiance history is point-sampled from the temporal tier
+            // upward; at quality 0 the very same texture is what the scene
+            // shader upsamples to full screen, and POINT would show there as
+            // half-res stair-steps in the mirror. GB1, the depth and the
+            // receiver positions are ALWAYS point — a lerped oct normal or a
+            // lerped NDC depth decodes to nonsense at every silhouette.
+            ID3D11SamplerState* histSamp = ssrQuality >= 2 ? ssrPointClamp.Get()
+                                                           : ssrLinearClamp.Get();
+            ID3D11SamplerState* samps[6] = {
+                ssrLinearClamp.Get(), ssrPointClamp.Get(), ssrPointClamp.Get(),
+                ssrPointClamp.Get(),  histSamp,            ssrPointClamp.Get() };
+            ctx->PSSetSamplers(8, 6, samps);
+            ctx->Draw(3, 0);
+            ++counters.draws;
+
+            ID3D11RenderTargetView* nulls[2] = { nullptr, nullptr };
+            ctx->OMSetRenderTargets(2, nulls, nullptr);
+            ssrHistIdx      = prevIdx;
+            ssrHistValid    = true;
+            ssrPrevViewProj = viewProj;
+        }
+
+        ID3D11ShaderResourceView* result = ssrHistRadSRV[curIdx].Get();
+
+        // ── 2. Blur chain — the same tier policy as Metal's forward variant.
+        // No wide / roughness-mix stage: the forward path has none there either
+        // (that shader serves the GI reflections), and the pre-pass carries no
+        // roughness, so there would be nothing to lerp against.
+        if (ssrQuality >= 1)
+        {
+            ctx->PSSetShader(ssrBlurPS.Get(), nullptr, 0);
+            ctx->PSSetConstantBuffers(12, 1, ssrBlurCB.GetAddressOf()); // b12 HeSSRBlur
+            ctx->PSSetSamplers(8, 1, ssrLinearClamp.GetAddressOf());    // s8 heSSRIn
+            auto blurPass = [&](ID3D11ShaderResourceView* src, ID3D11RenderTargetView* dst,
+                                float dx, float dy)
+            {
+                HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+                bu.dir[0] = dx;
+                bu.dir[1] = dy;
+                bu.dir[2] = 1.0f / static_cast<float>(tw);
+                bu.dir[3] = 1.0f / static_cast<float>(th);
+                D3D11_MAPPED_SUBRESOURCE bm{};
+                if (SUCCEEDED(ctx->Map(ssrBlurCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &bm)))
+                {
+                    std::memcpy(bm.pData, &bu, sizeof(bu));
+                    ctx->Unmap(ssrBlurCB.Get(), 0);
+                }
+                // Target on, THEN the source — the chain reads what it wrote one
+                // step earlier, so the order is what keeps the ping-pong legal.
+                ctx->OMSetRenderTargets(1, &dst, nullptr);
+                ctx->PSSetShaderResources(8, 1, &src);
+                ctx->Draw(3, 0);
+                ++counters.draws;
+                ID3D11RenderTargetView* n = nullptr;
+                ctx->OMSetRenderTargets(1, &n, nullptr);
+                ID3D11ShaderResourceView* ns = nullptr;
+                ctx->PSSetShaderResources(8, 1, &ns);
+            };
+            const float sx = 1.0f / static_cast<float>(tw);
+            const float sy = 1.0f / static_cast<float>(th);
+            blurPass(result,           ssrPingRTV.Get(), sx,   0.0f);
+            blurPass(ssrPingSRV.Get(), ssrReflRTV.Get(), 0.0f, sy);
+            if (ssrQuality == 1)
+            {
+                blurPass(ssrReflSRV.Get(), ssrPingRTV.Get(), sx,   0.0f);
+                blurPass(ssrPingSRV.Get(), ssrReflRTV.Get(), 0.0f, sy);
+            }
+            result = ssrReflSRV.Get();
+        }
+
+        // Leave the pass's whole register block clear: `result` goes back on as
+        // t16 for the scene shader, and t8..t13 must not still name a texture
+        // that becomes a render target again next frame.
+        ID3D11ShaderResourceView* nulls6[6] = {};
+        ctx->PSSetShaderResources(8, 6, nulls6);
+        D3D11_VIEWPORT full{}; full.Width = float(pw); full.Height = float(ph); full.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &full);
+        return result;
+#endif
     }
 
     // ─── Ray-traced GI (software BVH) — D3D11 port of the GL-4.3 compute GI ──
@@ -2369,15 +3012,18 @@ struct D3D11RendererImpl
         device->CreateRenderTargetView(viewportTex.Get(), nullptr, &viewportRTV);
         device->CreateShaderResourceView(viewportTex.Get(), nullptr, &viewportSRV);
 
+        // Typeless + DSV/SRV pair, same reason as createDepth (C1).
+        viewportDSV.Reset();
+        viewportDepthSRV.Reset();
         D3D11_TEXTURE2D_DESC dd{};
         dd.Width = w; dd.Height = h;
         dd.MipLevels = dd.ArraySize = 1;
-        dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.Format = DXGI_FORMAT_R24G8_TYPELESS;
         dd.SampleDesc.Count = 1;
         dd.Usage    = D3D11_USAGE_DEFAULT;
-        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(device->CreateTexture2D(&dd, nullptr, &viewportDepth))) return;
-        device->CreateDepthStencilView(viewportDepth.Get(), nullptr, &viewportDSV);
+        createDepthViews(viewportDepth.Get(), viewportDSV, viewportDepthSRV);
 
         viewportW = w;
         viewportH = h;
@@ -2416,21 +3062,47 @@ struct D3D11RendererImpl
         device->CreateRenderTargetView(bb.Get(), nullptr, &rtv);
     }
 
+    // Checkpoint C1 of docs/decals-cross-backend-plan.md: the scene depth has to be
+    // readable as a texture, not just writable as a depth target — the screen-space
+    // decal pass reconstructs world positions from it. A DEPTH format cannot carry an
+    // SRV, so the resource is TYPELESS and the two views name the concrete formats
+    // (the shadow map two functions down has done exactly this all along). Precision
+    // and stencil are unchanged: the same 24-bit depth + 8-bit stencil bits, only
+    // reachable from a pixel shader now.
     void createDepth(int w, int h)
     {
         dsv.Reset();
+        depthSRV.Reset();
         depthTex.Reset();
         D3D11_TEXTURE2D_DESC dd{};
         dd.Width            = static_cast<UINT>(w);
         dd.Height           = static_cast<UINT>(h);
         dd.MipLevels        = 1;
         dd.ArraySize        = 1;
-        dd.Format           = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.Format           = DXGI_FORMAT_R24G8_TYPELESS;
         dd.SampleDesc.Count = 1;
         dd.Usage            = D3D11_USAGE_DEFAULT;
-        dd.BindFlags        = D3D11_BIND_DEPTH_STENCIL;
+        dd.BindFlags        = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(device->CreateTexture2D(&dd, nullptr, &depthTex))) return;
-        device->CreateDepthStencilView(depthTex.Get(), nullptr, &dsv);
+        createDepthViews(depthTex.Get(), dsv, depthSRV);
+    }
+
+    // The DSV/SRV pair over a typeless R24G8 depth resource. A typeless resource
+    // REJECTS a null view desc, so both descs are explicit.
+    void createDepthViews(ID3D11Texture2D* tex,
+                          ComPtr<ID3D11DepthStencilView>&   outDSV,
+                          ComPtr<ID3D11ShaderResourceView>& outSRV)
+    {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+        dvd.Format        = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        device->CreateDepthStencilView(tex, &dvd, &outDSV);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format              = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // depth in .r, 0..1
+        svd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
+        svd.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(tex, &svd, &outSRV);
     }
 
     bool createPipeline()
@@ -2841,6 +3513,263 @@ struct D3D11RendererImpl
 #else
         (void)hash; (void)frag; (void)vertBody; (void)transparent;
         return nullptr;
+#endif
+    }
+
+    // ── Screen-space decals ─────────────────────────────────────────────────
+    // Build the decal shaders + fixed state once, lazily (like GL's
+    // EnsureDecalProgram / Vulkan's EnsureDecalPipelines): a project without a
+    // single DecalComponent never pays for it, and a failure is remembered so the
+    // frame loop does not retry a D3DCompile per frame.
+    bool EnsureDecalPipeline()
+    {
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        if (decalReady)  return true;
+        if (decalFailed) return false;
+        decalFailed = true; // cleared only on full success below
+
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.decalVertex(Backend::HLSL);
+        // The FORWARD variant, not the sampled one: with no G-buffer the decal has
+        // to bring its own lighting (one directional + ambient, no shadows, no
+        // point lights). That is the documented optical deviation of the three
+        // forward backends — docs/decals-cross-backend-plan.md §6.
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.decalFragmentForward(Backend::HLSL);
+        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: decal shader cross-compile failed");
+            return false;
+        }
+
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        ComPtr<ID3DBlob> vsb, psb, cerr;
+        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
+                              "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal VS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
+                              "main", "ps_5_0", cflags, 0, &psb, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal PS compile failed: ")
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &decalVS)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &decalPS)))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: decal shader-object creation failed");
+            return false;
+        }
+
+        {   // 368 B = 4 mat4 + 7 vec4; already a 16-byte multiple.
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::DecalUniforms)) + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &decalCB))) return false;
+        }
+        {   // The projected decal texture: wrapped like every other albedo sampler.
+            D3D11_SAMPLER_DESC sd{};
+            sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+            sd.MaxLOD   = D3D11_FLOAT32_MAX;
+            if (FAILED(device->CreateSamplerState(&sd, &decalTexSampler))) return false;
+        }
+        {   // The depth: point + clamp. uv = SV_Position.xy / viewport is texel-exact,
+            // and filtering a depth format is not guaranteed by the hardware.
+            D3D11_SAMPLER_DESC sd{};
+            sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD   = D3D11_FLOAT32_MAX;
+            if (FAILED(device->CreateSamplerState(&sd, &decalDepthSampler))) return false;
+        }
+        {   // FRONT faces culled so the projector still draws with the camera inside
+            // the box. FrontCounterClockwise stays FALSE: D3D's window origin is top
+            // left like Metal's, so its clockwise-is-front default picks the same
+            // triangles GL picks with GL_CCW (plan §3 A5 / §6a).
+            // DepthClipEnable must be set EXPLICITLY — the zero-initialised desc
+            // means "off", the opposite of the GL/Vulkan default.
+            D3D11_RASTERIZER_DESC rd{};
+            rd.FillMode              = D3D11_FILL_SOLID;
+            rd.CullMode              = D3D11_CULL_FRONT;
+            rd.FrontCounterClockwise = FALSE;
+            rd.DepthClipEnable       = TRUE;
+            if (FAILED(device->CreateRasterizerState(&rd, &decalRast))) return false;
+        }
+        {   D3D11_DEPTH_STENCIL_DESC ds{};
+            ds.DepthEnable = FALSE; // the box-space clip decides, not the z-test
+            if (FAILED(device->CreateDepthStencilState(&ds, &decalNoDepth))) return false;
+        }
+        {   // Write mask RGB, NOT ALL: in the editor viewport the target's alpha is
+            // what ImGui composites with — same reason Vulkan masks it.
+            D3D11_BLEND_DESC bd{};
+            auto& rt = bd.RenderTarget[0];
+            rt.BlendEnable    = TRUE;
+            rt.SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+            rt.DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+            rt.BlendOp        = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+            rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+            rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+            rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED
+                                     | D3D11_COLOR_WRITE_ENABLE_GREEN
+                                     | D3D11_COLOR_WRITE_ENABLE_BLUE;
+            if (FAILED(device->CreateBlendState(&bd, &decalBlend))) return false;
+        }
+
+        decalFailed = false;
+        decalReady  = true;
+        HE_LOG_INFO(RHI, "%s", "D3D11Renderer: screen-space decal pipeline created");
+        return true;
+#endif
+    }
+
+    // DecalData::textureId is a TEXTURE uuid, not a material uuid, so the albedo /
+    // override caches cannot serve it. Null = untextured (the shader's hasTexture
+    // flag stays 0 and the white default is bound so the sampler is never dangling).
+    // Like Vulkan: keyed by texture uuid, and NOT hot-reloaded — InvalidateMaterial
+    // carries material uuids, so an edited decal texture stays stale until restart.
+    ID3D11ShaderResourceView* resolveDecalTexture(const HE::UUID& textureId, ContentManager* cm)
+    {
+        if (textureId == HE::UUID{} || !cm) return nullptr;
+        if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
+            return it->second.Get();
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(textureId, {}));
+        ID3D11ShaderResourceView* raw = srv.Get(); // cached even when null: no per-frame retry
+        decalTexCache.emplace(textureId, std::move(srv));
+        return raw;
+    }
+
+    // Draw every decal of the frame into the currently bound colour target, between
+    // the opaque and the transparent geometry — the same slot at which Metal and GL
+    // put theirs into the G-buffer.
+    //
+    // THE ORDER BELOW IS THE WHOLE TRICK. D3D11 refuses to have one resource bound
+    // as a depth-stencil view and as a shader resource at the same time, and it
+    // resolves the conflict SILENTLY by unbinding one of them (the debug layer only
+    // warns). So the DSV comes off the output merger BEFORE the depth SRV goes on,
+    // and back on only after the SRV is gone. Get that backwards and the pass draws
+    // nothing, with no error anywhere.
+    void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
+                      int width, int height, ContentManager* cm)
+    {
+#if !defined(HE_HAVE_SHADERC)
+        (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm;
+#else
+        if (m_renderWorld.decals.empty()) return;
+        if (!EnsureDecalPipeline()) return;
+
+        ComPtr<ID3D11RenderTargetView> curRTV;
+        ComPtr<ID3D11DepthStencilView> curDSV;
+        ctx->OMGetRenderTargets(1, curRTV.GetAddressOf(), curDSV.GetAddressOf());
+        if (!curRTV || !curDSV) return; // not inside a scene pass
+
+        // The SRV that reads what this pass has been writing depth into.
+        ID3D11ShaderResourceView* depthRead =
+              (curDSV.Get() == dsv.Get())         ? depthSRV.Get()
+            : (curDSV.Get() == viewportDSV.Get()) ? viewportDepthSRV.Get()
+                                                  : nullptr;
+        if (!depthRead) return;
+
+        const glm::mat4 invViewProj = glm::inverse(viewProj);
+        // The forward variant shades itself, from the same source the material
+        // HeLighting fill uses: the DOMINANT directional light, not the sky sun.
+        glm::vec3 sunDir(0.0f), sunColor(0.0f);
+        m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+
+        ID3D11RenderTargetView* rtvOnly = curRTV.Get();
+        ctx->OMSetRenderTargets(1, &rtvOnly, nullptr); // release the depth FIRST
+        ID3D11ShaderResourceView* depthSrvs[1] = { depthRead };
+        ctx->PSSetShaderResources(15, 1, depthSrvs);   // t15 heGBDepth
+
+        ctx->VSSetShader(decalVS.Get(), nullptr, 0);
+        ctx->PSSetShader(decalPS.Get(), nullptr, 0);
+        ctx->IASetInputLayout(nullptr);                 // buffer-less 36-vertex cube
+        ID3D11Buffer* noVB = nullptr; UINT zeroStride = 0, zeroOffset = 0;
+        ctx->IASetVertexBuffers(0, 1, &noVB, &zeroStride, &zeroOffset);
+        ctx->IASetIndexBuffer(nullptr, DXGI_FORMAT_R32_UINT, 0);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->RSSetState(decalRast.Get());
+        ctx->OMSetDepthStencilState(decalNoDepth.Get(), 0);
+        ctx->OMSetBlendState(decalBlend.Get(), nullptr, 0xFFFFFFFF);
+        ID3D11SamplerState* samplers[2] = { decalTexSampler.Get(), decalDepthSampler.Get() };
+        ctx->PSSetSamplers(14, 2, samplers);            // s14 texture, s15 depth
+
+        for (const DecalData& dcl : m_renderWorld.decals)
+        {
+            HE::MaterialShaderLibrary::DecalUniforms du;
+            const glm::mat4 invModel = glm::inverse(dcl.transform);
+            std::memcpy(du.viewProj,    &viewProj[0][0],      16 * sizeof(float));
+            std::memcpy(du.model,       &dcl.transform[0][0], 16 * sizeof(float));
+            std::memcpy(du.invModel,    &invModel[0][0],      16 * sizeof(float));
+            std::memcpy(du.invViewProj, &invViewProj[0][0],   16 * sizeof(float));
+            du.color[0] = dcl.color.r; du.color[1] = dcl.color.g;
+            du.color[2] = dcl.color.b; du.color[3] = dcl.color.a;
+            ID3D11ShaderResourceView* tex = resolveDecalTexture(dcl.textureId, cm);
+            du.params[0] = tex ? 1.0f : 0.0f;
+            // D3D conventions, identical to Metal's: SV_Position.y counts from the
+            // TOP while NDC y points UP, so uv.y = 0 maps to clip.y = +1 → sign -1;
+            // depth is already 0..1 in both the texture and NDC → scale 1, bias 0.
+            // (Vulkan: +1/1/0 — its NDC y points down. GL: +1/2/-1 — its NDC z is
+            // -1..1.)
+            du.params[1] = -1.0f;
+            du.params[2] =  1.0f;
+            du.params[3] =  0.0f;
+            du.vp[0] = static_cast<float>(width);
+            du.vp[1] = static_cast<float>(height);
+            du.sunDir[0]   = sunDir.x;   du.sunDir[1]   = sunDir.y;   du.sunDir[2]   = sunDir.z;
+            du.sunColor[0] = sunColor.r; du.sunColor[1] = sunColor.g; du.sunColor[2] = sunColor.b;
+            du.ambient[0]  = m_renderWorld.ambient.r;
+            du.ambient[1]  = m_renderWorld.ambient.g;
+            du.ambient[2]  = m_renderWorld.ambient.b;
+            du.camPos[0]   = m_renderWorld.camera.position.x;
+            du.camPos[1]   = m_renderWorld.camera.position.y;
+            du.camPos[2]   = m_renderWorld.camera.position.z;
+
+            D3D11_MAPPED_SUBRESOURCE md{};
+            if (FAILED(ctx->Map(decalCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &md))) continue;
+            std::memcpy(md.pData, &du, sizeof(du));
+            ctx->Unmap(decalCB.Get(), 0);
+            ctx->VSSetConstantBuffers(13, 1, decalCB.GetAddressOf()); // b13 HeDecal, both stages
+            ctx->PSSetConstantBuffers(13, 1, decalCB.GetAddressOf());
+
+            // The shader references heDecalTex unconditionally, so an untextured
+            // decal still needs something bound — the 1×1 white default, which the
+            // hasTexture flag then makes a no-op.
+            ID3D11ShaderResourceView* texSrv = tex ? tex : dummyTexture.Get();
+            ctx->PSSetShaderResources(14, 1, &texSrv); // t14 heDecalTex
+
+            ctx->Draw(36, 0);
+            ++counters.draws;
+            counters.tris += 12;
+        }
+
+        // Unbind t14/t15 BEFORE the depth goes back on the output merger.
+        ID3D11ShaderResourceView* nulls2[2] = { nullptr, nullptr };
+        ctx->PSSetShaderResources(14, 2, nulls2);
+        ID3D11RenderTargetView* restoreRTV = curRTV.Get();
+        ctx->OMSetRenderTargets(1, &restoreRTV, curDSV.Get());
+
+        // Restore everything the pass clobbered for the transparent draws that
+        // follow: shaders, input layout, raster/depth/blend state. Constant buffer
+        // slot b13 and t14/t15 are the decal pass's own — nothing else in this
+        // renderer binds them, which is exactly why the shader library pins them
+        // there.
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(ps.Get(), nullptr, 0);
+        ctx->IASetInputLayout(inputLayout.Get());
+        ctx->RSSetState(rasterState.Get());
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
 #endif
     }
 
@@ -3476,6 +4405,27 @@ void D3D11Renderer::Shutdown()
     m_impl->m_matObjCB.Reset();
     m_impl->m_matParamCB.Reset();
     m_impl->m_matSampler.Reset();
+    // Screen-space decals.
+    m_impl->decalTexCache.clear();
+    m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalCB.Reset();
+    m_impl->decalTexSampler.Reset(); m_impl->decalDepthSampler.Reset();
+    m_impl->decalRast.Reset(); m_impl->decalNoDepth.Reset(); m_impl->decalBlend.Reset();
+    m_impl->decalReady = false;
+    m_impl->decalFailed = false;
+    // Forward SSR: the trace/blur pipeline, the half-res ping-pong and the
+    // reflection pre-pass (its targets hang off the SSAO ones and go with them).
+    m_impl->destroySSRTargets();
+    m_impl->ssrColorHistSRV.Reset(); m_impl->ssrColorHistTex.Reset();
+    m_impl->ssrColorHistValid = false;
+    m_impl->ssrTracePS.Reset(); m_impl->ssrBlurPS.Reset();
+    m_impl->ssrTraceCB.Reset(); m_impl->ssrBlurCB.Reset();
+    m_impl->ssrPointClamp.Reset(); m_impl->ssrLinearClamp.Reset();
+    m_impl->ssrReady = false; m_impl->ssrFailed = false;
+    m_impl->reflPrepassVS.Reset(); m_impl->reflPrepassPS.Reset();
+    m_impl->reflPrepassIL.Reset(); m_impl->reflPrepassCB.Reset();
+    m_impl->reflAttrRTV.Reset(); m_impl->reflAttrSRV.Reset(); m_impl->reflAttrTex.Reset();
+    m_impl->reflNdcRTV.Reset();  m_impl->reflNdcSRV.Reset();  m_impl->reflNdcTex.Reset();
+    m_impl->reflPrepassReady = false; m_impl->reflPrepassFailed = false;
     m_impl->uiFontAtlases.clear();
     m_impl->uiSampler.Reset();
     m_impl->gpuTimerShutdown();
@@ -3484,6 +4434,7 @@ void D3D11Renderer::Shutdown()
     m_impl->noiseSRV.Reset(); m_impl->noiseTex3D.Reset(); m_impl->skyNoiseSampler.Reset();
     m_impl->debugVS.Reset(); m_impl->debugPS.Reset(); m_impl->debugVB.Reset();
     m_impl->debugCB.Reset(); m_impl->debugIL.Reset();
+    m_impl->ribbonVB.clear(); m_impl->ribbonIB.clear();
     // GI resources (accel buffers, targets, atlases, pipelines).
     m_impl->destroyGiAccel();
     m_impl->destroyGiTargets();
@@ -3495,7 +4446,11 @@ void D3D11Renderer::Shutdown()
     m_impl->giLinearClamp.Reset();
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
+    m_impl->depthSRV.Reset();
     m_impl->depthTex.Reset();
+    m_impl->viewportDSV.Reset();
+    m_impl->viewportDepthSRV.Reset();
+    m_impl->viewportDepth.Reset();
     m_impl->swapchain.Reset();
     m_impl->context.Reset();
     m_impl->device.Reset();
@@ -3528,7 +4483,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment);
     }
 
-    if (p.m_renderWorld.objects.empty()) return;
+    // Trails live in their own per-frame band list, not in `objects`, so a scene
+    // that has nothing BUT a trail still has something to draw past here.
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     for (RenderObject& obj : p.m_renderWorld.objects)
     {
@@ -3558,7 +4515,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     if (p.m_renderGraph.empty())
     {
@@ -3584,7 +4541,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     // ── Per-frame constants (camera + up to 8 lights) ───────────────────────
     // A lambda because the GI/SSAO decision is only known inside the backbuffer
     // pass — the CB is refilled there with the final giActive/aoActive flags.
-    auto fillPerFrame = [&](bool giActive, bool aoActive)
+    auto fillPerFrame = [&](bool giActive, bool aoActive, bool ssrActive = false)
     {
         PerFrameCB f{};
         f.cameraPos     = glm::vec4(p.m_renderWorld.camera.position, 1.0f);
@@ -3606,6 +4563,11 @@ void D3D11Renderer::DrawScene(int width, int height)
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
         f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D11RendererImpl::kGIProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
+        // x is the gate the built-in scene shader's reflection cascade tests;
+        // the roughness fade happens there, with the exact shading roughness,
+        // because the half-res pre-pass carries none.
+        f.ssrParams    = glm::vec4(ssrActive ? 1.0f : 0.0f, p.ssrIntensity,
+                                   p.ssrMaxRoughness, 0.0f);
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.perFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {
@@ -3656,6 +4618,15 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
         // csmSplits stays 0 — D3D11 has a single shadow map, no cascade array,
         // so the preamble's heCsmShadow() fallback is inert here.
+        // lit.ssr stays 0 as well, and that is NOT an oversight: the built-in
+        // scene shader gets the forward reflection cascade (uSSRParams above),
+        // graph materials do not. Their consumer is heSSRFwd on binding 31, and
+        // the shared lighting preamble is emitted UNPINNED — SPIRV-Cross spells
+        // that register(t31)/register(s31), and D3D11 has 16 sampler slots, so
+        // the API cannot bind it. Setting the gate without the descriptor would
+        // make every graph material sample an unbound sampler. Closing it means
+        // pinning the whole preamble, which is its own, larger job
+        // (docs/ssr-cross-backend-plan.md §2.3 head 1 / C5).
         D3D11_MAPPED_SUBRESOURCE lm{};
         if (SUCCEEDED(ctx->Map(p.m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
         {
@@ -3769,8 +4740,32 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->RSSetViewports(1, &vp);
         }
 
+        // ── Forward screen-space reflections (plan checkpoint C) ─────────────
+        // The radiance source is the previous frame's HDR colour, so SSR runs
+        // only where Render() actually bound hdrRTV. That is the C6 hole, stated
+        // as one gate: the swapchain branch (the packaged game, no editor
+        // viewport) draws straight into the backbuffer, has no HDR target, and
+        // therefore no SSR. Deliberately not fixed here — giving the swapchain
+        // path an HDR target changes the packaged game's frame layout and needs
+        // its own decision.
+        bool ssrFrameActive = false;
+#if defined(HE_HAVE_SHADERC)
+        {
+            ComPtr<ID3D11RenderTargetView> boundRTV;
+            ctx->OMGetRenderTargets(1, boundRTV.GetAddressOf(), nullptr);
+            const bool hdrBound = p.hdrRTV && boundRTV.Get() == p.hdrRTV.Get();
+            ssrFrameActive = p.ssrEnabled && hdrBound
+                          && p.EnsureReflPrepassPipeline() && p.EnsureSSRPipelines();
+        }
+#endif
+        // The reflection MRT pre-pass is the trace's only geometry input, so it
+        // runs whenever SSR does — including on frames where SSAO is off or the
+        // GI probes replaced it, which is exactly the case the block below used
+        // to skip entirely.
+        const bool aoWanted = !giShadingActive && p.ssaoEnabled && p.ssaoReady;
         ID3D11ShaderResourceView* aoSRV = p.whiteSRV.Get(); // default: unoccluded
-        if (!giShadingActive && p.ssaoEnabled && p.ssaoReady) {
+        ID3D11ShaderResourceView* ssrSRV = nullptr;
+        if (aoWanted || ssrFrameActive) {
             // Save and restore render target around SSAO passes
             ComPtr<ID3D11RenderTargetView> savedRTV;
             ComPtr<ID3D11DepthStencilView> savedDSV;
@@ -3778,7 +4773,10 @@ void D3D11Renderer::DrawScene(int width, int height)
 
             aoSRV = p.runSSAO(ctx, opaqueDCs_, viewProj, camView, camProj, width, height,
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
-                p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get());
+                p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get(),
+                /*reflMrt=*/ssrFrameActive, aoWanted);
+            if (ssrFrameActive)
+                ssrSRV = p.RenderForwardSSR(ctx, width, height, viewProj, camView);
 
             // Restore the scene render target and viewport
             ID3D11RenderTargetView* restRTV = savedRTV.Get();
@@ -3786,6 +4784,9 @@ void D3D11Renderer::DrawScene(int width, int height)
             D3D11_VIEWPORT vp{}; vp.Width = float(width); vp.Height = float(height); vp.MaxDepth = 1.0f;
             ctx->RSSetViewports(1, &vp);
         }
+        // Same gate shape as GL's: a real trace result AND a non-zero intensity.
+        // Off → nothing is bound at t16 and the cascade folds away on uSSRParams.x.
+        const bool ssrActive = ssrSRV != nullptr && p.ssrIntensity > 0.0f;
 
         // Re-bind scene shaders after SSAO (SSAO pass changes shaders/samplers)
         ctx->IASetInputLayout(p.inputLayout.Get());
@@ -3820,8 +4821,12 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->PSSetShaderResources(4, 4, giSrvs);
             if (p.giLinearClamp)
                 ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
+            // Forward SSR result on t16 — one bind for the whole pass, sampled
+            // through s2 (linear clamp). Nothing is bound when the trace did not
+            // run; uSSRParams.x is 0 then and the branch is never taken.
+            ctx->PSSetShaderResources(16, 1, &ssrSRV);
             fillPerFrame(giShadingActive,
-                         !giShadingActive && p.ssaoEnabled && p.ssaoReady && aoSRV != p.whiteSRV.Get());
+                         aoWanted && aoSRV != p.whiteSRV.Get(), ssrActive);
 #if defined(HE_HAVE_SHADERC)
             fillMatLight(giShadingActive);
             // heLitP GI masks for graph materials: sun mask on t10, per-light
@@ -3844,6 +4849,69 @@ void D3D11Renderer::DrawScene(int width, int height)
         std::vector<const DrawCall*>& opaqueDCs = opaqueDCs_;
         std::vector<const DrawCall*>& transparentDCs = transparentDCs_;
 
+        // ── Motion trails join the blended list ──────────────────────────────
+        // A RibbonBatch is per-frame CPU geometry in the cooked vertex layout, so
+        // it needs no pass and no shader of its own: upload it into the dynamic
+        // pool and append a perfectly ordinary DrawCall, which then takes part in
+        // the sort below and goes through drawDC exactly like a translucent mesh —
+        // including the graph-material path, which is what lets the age in uv.v
+        // drive colour and fade (docs/rope-trail-plan.md §6.2). Appended AFTER the
+        // partition on purpose: a trail is blended by nature, never opaque, so it
+        // bypasses partitionByOpacity the way Metal and GL do. Appended after the
+        // SSAO/GI prepass too — those read opaqueDCs_ only, and a trail is not in
+        // the AO prepass by design.
+        std::vector<DrawCall> ribbonDCs;
+        std::vector<GpuMesh>  ribbonMeshes;
+        std::unordered_map<const DrawCall*, const GpuMesh*> ribbonMeshByDC;
+        if (!p.m_renderWorld.ribbonBatches.empty())
+        {
+            // Reserve BOTH before taking any address: transparentDCs below holds
+            // bare pointers into ribbonDCs, and a growth reallocation kills them.
+            ribbonDCs.reserve(p.m_renderWorld.ribbonBatches.size());
+            ribbonMeshes.reserve(p.m_renderWorld.ribbonBatches.size());
+            std::vector<float> rebased;
+            for (size_t rbi = 0; rbi < p.m_renderWorld.ribbonBatches.size(); ++rbi)
+            {
+                const RibbonBatch& rb = p.m_renderWorld.ribbonBatches[rbi];
+                if (rb.vertices.empty() || rb.indices.empty()) continue;
+                const glm::vec3 pivot = rebaseRibbonVertices(rb, rebased);
+                GpuMesh rmesh{};
+                if (!p.uploadRibbon(ctx, rbi, rebased, rb.indices, rmesh)) continue;
+
+                DrawCall dc{};
+                dc.materialAssetId = rb.materialAssetId;
+                dc.transform       = glm::mat4(1.0f);
+                dc.transform[3]    = glm::vec4(pivot, 1.0f);   // pure translation, see rebaseRibbonVertices
+                dc.entityId        = rb.entityId;
+                dc.contributesAO   = false;   // trails never enter the AO prepass
+                // receivesShadow stays TRUE: Metal and GL leave the shadow flag at its
+                // default for a ribbon, and a trail that is shadowed on two backends
+                // and unshadowed on three is exactly the kind of split this port exists
+                // to avoid. Trails do not CAST a shadow (they are not in `objects`).
+                if (const MaterialAsset* mat = (m_contentManager && rb.materialAssetId != HE::UUID{})
+                        ? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+                {
+                    dc.baseColor = { mat->baseColor[0], mat->baseColor[1], mat->baseColor[2] };
+                    dc.metallic  = mat->metallic;
+                    dc.roughness = mat->roughness;
+                    dc.opacity   = mat->opacity;
+                }
+                else
+                    dc.baseColor = glm::vec3(0.55f);   // material not loaded yet — flat grey, as Metal/GL
+                // Force the blended class. RenderSorter::isTransparent decides both
+                // which pass a draw belongs to and which graph-material variant it
+                // gets, so a trail at opacity 1 would otherwise pick the
+                // depth-WRITING variant inside the blended pass. This is the same
+                // clamp ResolveMaterialParams applies to blendMode == 2 materials.
+                dc.opacity = std::min(dc.opacity, 0.998f);
+
+                ribbonMeshes.push_back(rmesh);
+                ribbonDCs.push_back(std::move(dc));
+                ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                transparentDCs.push_back(&ribbonDCs.back());
+            }
+        }
+
         // Sort transparent back-to-front by distance.
         RenderSorter::sortBackToFront(transparentDCs, camPos);
 
@@ -3852,7 +4920,15 @@ void D3D11Renderer::DrawScene(int width, int height)
         // per-instance loop (allowInstancing is set false before that pass).
         bool allowInstancing = true;
         auto drawDC = [&](const DrawCall& dc) {
-            const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            // A trail carries no mesh asset — its geometry sits in the ribbon
+            // pool, looked up by the DrawCall that was synthesised for it.
+            const GpuMesh* mesh = nullptr;
+            if (!ribbonMeshByDC.empty())
+            {
+                if (auto it = ribbonMeshByDC.find(&dc); it != ribbonMeshByDC.end())
+                    mesh = it->second;
+            }
+            if (!mesh) mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.vbuf || !m.ibuf) return;
 
@@ -4131,6 +5207,13 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->IASetInputLayout(p.inputLayout.Get());
         }
 
+        // ── Screen-space decals ──────────────────────────────────────────────
+        // After all opaque geometry (its depth is what the decal projects onto)
+        // and before the transparent draws — the slot Metal and GL use for their
+        // G-buffer decals. Self-restoring; a frame without decals costs one
+        // empty() check.
+        p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
+
         if (!transparentDCs.empty()) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);
@@ -4142,8 +5225,22 @@ void D3D11Renderer::DrawScene(int width, int height)
         // Debug lines on top of geometry, before post-process
         if (!p.m_debugLines.empty())
             p.drawDebugLines(ctx, viewProj, p.m_debugLines);
-        // Unbind AO SRV before leaving
-        { ID3D11ShaderResourceView* nullAO = nullptr; ctx->PSSetShaderResources(2, 1, &nullAO); }
+        // Forward SSR: keep a full-res copy of the finished HDR frame (opaque +
+        // sky + transparency) — NEXT frame's trace reprojects its hits into it.
+        // Taken here, at the very end of the geometry pass, for the same reason
+        // Metal takes it after its scene encoder: earlier and the reflection
+        // would show a half-drawn world. The colour target comes off the output
+        // merger first — CopyResource must not race a bound RTV.
+        if (ssrFrameActive)
+        {
+            ID3D11RenderTargetView* n = nullptr;
+            ctx->OMSetRenderTargets(1, &n, nullptr);
+            p.captureSSRColorHistory();
+        }
+        // Unbind the AO and the reflection SRV before leaving: t16 names a
+        // texture that is a render target again in the next frame's trace.
+        { ID3D11ShaderResourceView* nullAO = nullptr; ctx->PSSetShaderResources(2, 1, &nullAO);
+          ctx->PSSetShaderResources(16, 1, &nullAO); }
     });
 }
 
@@ -4277,7 +5374,26 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // Software ray-traced DDGI via CS 5.0 (FL 11.0 baseline) — same CPU-BVH
     // path as GL 4.3/Vulkan; cleared if the GI shaders fail to compile.
     c.supportsGlobalIllumination = m_impl->giSupported;
+    // Forward SSR needs an HDR scene target to read radiance out of, and D3D11
+    // only has one in the editor viewport path (docs/ssr-cross-backend-plan.md
+    // C6). postFxReady is the honest answer: in the swapchain path the switch
+    // exists but does nothing, exactly as on Vulkan.
+    c.supportsScreenSpaceReflections = m_impl->postFxReady;
     return c;
+}
+
+// Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint C). The
+// forward path only — D3D11 has no G-buffer, so kSSRCompositeFS is out of reach
+// and the scene shader mixes the one traced texture itself.
+void D3D11Renderer::SetSSRSettings(const SSRSettings& s)
+{
+    auto& p = *m_impl;
+    p.ssrEnabled      = s.enabled;
+    p.ssrIntensity    = std::clamp(s.intensity, 0.0f, 1.0f);
+    p.ssrMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
+    p.ssrMaxDistance  = std::max(1.0f, s.maxDistance);
+    p.ssrThickness    = std::max(1e-3f, s.thickness);
+    p.ssrQuality      = std::clamp(s.quality, 0, 2);
 }
 
 void D3D11Renderer::SetGISettings(const GISettings& s)

@@ -8,6 +8,8 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/CameraShake.h>
+#include <HorizonScene/EngineApi.h>   // the script rows, exercised as scripts reach them
 #include <Application/Input.h>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -22,6 +24,14 @@ struct Rig {
     CameraRigComponent& rig()      { return world.registry().get<CameraRigComponent>(camera); }
     TransformComponent& camXform() { return world.registry().get<TransformComponent>(camera); }
     TransformComponent& tgtXform() { return world.registry().get<TransformComponent>(target); }
+
+    // The context a script call arrives with. Going through HE::api rather than
+    // straight at the component is deliberate for a handful of cases below: the
+    // registry rows are what Lua, Python and HorizonCode actually reach, and
+    // glue that nothing exercises is glue that rots. It lives here rather than
+    // in a helper because api::Ctx is taken by non-const reference.
+    HE::api::Ctx ctx;
+    HE::api::Ctx& api() { ctx.world = &world; return ctx; }
 };
 
 // A target at the origin and a rig camera pointed straight ahead. pitch is zeroed
@@ -227,6 +237,64 @@ TEST_CASE("CameraRig: Follow writes yaw only, never pitch or roll")
 
     CHECK(r->tgtXform().rotation.x == 87.5f);
     CHECK(r->tgtXform().rotation.z == -12.25f);
+}
+
+TEST_CASE("CameraRig: Follow Smoothed swings the target after the camera at its rate")
+{
+    auto r = makeRig();
+    r->rig().targetYaw      = CameraRigComponent::TargetYaw::FollowSmoothed;
+    r->rig().targetTurnRate = 90.0f;          // 9 degrees per 0.1 s frame
+    r->rig().yaw            = 90.0f;
+    r->tgtXform().rotation  = { 4.5f, 0.0f, -7.25f };
+
+    // dt has to be real: the MouseFrame overload sets look.dt = 0, and a rate
+    // times zero is a test that measures nothing.
+    HE::CameraLookInput look; look.dt = 0.1f;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(9.0f));
+
+    // The camera's own yaw is the raw input and is never smoothed with it.
+    CHECK(r->rig().yaw == doctest::Approx(90.0f));
+    // One float, still: pitch and roll survive byte for byte.
+    CHECK(r->tgtXform().rotation.x == 4.5f);
+    CHECK(r->tgtXform().rotation.z == -7.25f);
+
+    // It arrives exactly and stops there — a clamped step converges, where an
+    // exponential approach would leave the body a fraction of a degree short
+    // for good.
+    for (int i = 0; i < 20; ++i) HE::CameraRigController::update(r->world, look);
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(90.0f));
+}
+
+TEST_CASE("CameraRig: Follow Smoothed crosses ±180 the short way")
+{
+    auto r = makeRig();
+    r->rig().targetYaw      = CameraRigComponent::TargetYaw::FollowSmoothed;
+    r->rig().targetTurnRate = 10.0f;          // 1 degree per frame: it cannot arrive
+    r->rig().yaw            = -179.0f;
+    r->tgtXform().rotation  = { 0.0f, 179.0f, 0.0f };
+
+    HE::CameraLookInput look; look.dt = 0.1f;
+    HE::CameraRigController::update(r->world, look);
+
+    // Two degrees apart across the seam, not 358: it goes up past 180, not the
+    // long way down through zero.
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(180.0f));
+}
+
+TEST_CASE("CameraRig: Follow Smoothed at a high rate is Follow")
+{
+    // The knob's own upper end: fast enough to cover any gap in one frame is
+    // the hard coupling, which is what makes it a knob and not a mode switch.
+    auto r = makeRig();
+    r->rig().targetYaw      = CameraRigComponent::TargetYaw::FollowSmoothed;
+    r->rig().targetTurnRate = 3600.0f;
+    r->rig().yaw            = 30.0f;
+
+    HE::CameraLookInput look; look.dt = 1.0f / 60.0f;
+    HE::CameraRigController::update(r->world, look);
+
+    CHECK(r->tgtXform().rotation.y == doctest::Approx(30.0f));
 }
 
 // ─── Target resolution ────────────────────────────────────────────────────────
@@ -534,4 +602,688 @@ TEST_CASE("CameraRig: hideTargetMesh off leaves the mesh alone")
 
     HE::CameraRigController::update(r->world, kNoMouse);
     CHECK(r->world.registry().get<MeshComponent>(r->target).visible);
+}
+
+// ─── Lag ──────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// A rig whose camera sits exactly ON the pivot — no boom, no shoulder offset —
+// so the camera's position IS the lagged pivot and the assertions below are
+// about the smoother rather than about trigonometry.
+std::unique_ptr<Rig> makeLagRig()
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 0.0f;
+    r->rig().lag.enabled = true;
+    return r;
+}
+
+// n frames of nothing but time passing.
+void stepTime(Rig& r, float dt, int n)
+{
+    HE::CameraLookInput look;
+    look.dt = dt;
+    for (int i = 0; i < n; ++i)
+        HE::CameraRigController::update(r.world, look);
+}
+
+} // namespace
+
+TEST_CASE("CameraRig: lag is framerate-independent")
+{
+    // THE property. `lerp(a, b, speed * dt)` is tuned at one refresh rate and is
+    // a different camera at another; `1 - exp(-speed * dt)` leaves exactly
+    // exp(-speed * T) of the gap after T seconds however that second was cut up.
+    //
+    // Sampled MID-transition, at 0.1 s, on purpose: run it out to a full second
+    // and both formulations have converged to within a hair of the target, and
+    // the test passes for the broken one too.
+    auto run = [](int steps, float dt) {
+        auto r = makeLagRig();
+        r->rig().lag.positionSpeed = 10.0f;
+        r->rig().lag.maxDistance   = 100.0f;   // out of the way of the clamp
+        r->rig().lag.snapDistance  = 100.0f;   // out of the way of the snap
+
+        stepTime(*r, dt, 1);                   // first frame sets, at the origin
+        r->tgtXform().position = { 1.0f, 0.0f, 0.0f };
+        stepTime(*r, dt, steps);
+        return r->camXform().position.x;
+    };
+
+    const float at60  = run(6,  1.0f / 60.0f);    // 0.1 s
+    const float at120 = run(12, 1.0f / 120.0f);   // the same 0.1 s
+
+    // 1 - exp(-10 * 0.1) = 1 - e^-1
+    CHECK(at60  == doctest::Approx(0.63212f).epsilon(0.002));
+    CHECK(at120 == doctest::Approx(0.63212f).epsilon(0.002));
+    CHECK(at60  == doctest::Approx(at120).epsilon(0.002));
+
+    // And it really was mid-flight, not a hard set dressed up as smoothing.
+    CHECK(at60 > 0.1f);
+    CHECK(at60 < 0.9f);
+}
+
+TEST_CASE("CameraRig: the first frame of a rig sets, it does not ease in")
+{
+    // Otherwise every level start opens with the camera flying in from the world
+    // origin.
+    auto r = makeLagRig();
+    r->rig().armLength = 4.0f;
+    r->tgtXform().position = { 0.0f, 0.0f, 10.0f };
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK(r->camXform().position.z == doctest::Approx(14.0f));
+}
+
+TEST_CASE("CameraRig: a jump past snapDistance sets, one just under it smooths")
+{
+    auto r = makeLagRig();
+    r->rig().lag.positionSpeed = 10.0f;
+    r->rig().lag.snapDistance  = 5.0f;
+    r->rig().lag.maxDistance   = 100.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    // A respawn six metres away — the camera must be there, not travelling.
+    r->tgtXform().position = { 0.0f, 0.0f, 6.0f };
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.z == doctest::Approx(6.0f));
+
+    // Four metres is a fast run, not a teleport, and is smoothed.
+    auto s = makeLagRig();
+    s->rig().lag.positionSpeed = 10.0f;
+    s->rig().lag.snapDistance  = 5.0f;
+    s->rig().lag.maxDistance   = 100.0f;
+    stepTime(*s, 1.0f / 60.0f, 1);
+
+    s->tgtXform().position = { 0.0f, 0.0f, 4.0f };
+    stepTime(*s, 1.0f / 60.0f, 1);
+    CHECK(s->camXform().position.z > 0.1f);
+    CHECK(s->camXform().position.z < 3.9f);
+}
+
+TEST_CASE("CameraRig: maxDistance caps how far the camera can be left behind")
+{
+    auto r = makeLagRig();
+    r->rig().lag.positionSpeed = 2.0f;      // deliberately sluggish
+    r->rig().lag.maxDistance   = 2.0f;
+    r->rig().lag.snapDistance  = 1000.0f;   // the cap must hold on its own
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    // A target moving far faster than the smoother could ever follow.
+    for (int i = 1; i <= 30; ++i)
+    {
+        r->tgtXform().position = { 0.0f, 0.0f, static_cast<float>(i) * 5.0f };
+        stepTime(*r, 1.0f / 60.0f, 1);
+        const float trail = r->tgtXform().position.z - r->camXform().position.z;
+        CHECK(trail <= doctest::Approx(2.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("CameraRig: yaw lag crosses ±180 the short way")
+{
+    auto r = makeLagRig();
+    r->rig().lag.rotationSpeed = 10.0f;
+    r->rig().yaw = 179.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);           // sets armYaw to 179
+    REQUIRE(r->rig().armYaw == doctest::Approx(179.0f));
+
+    // Two degrees across the seam. Folding the difference into (-180, 180] makes
+    // that a two-degree move; not folding it sends the boom 358° the other way.
+    r->rig().yaw = -179.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK(r->rig().armYaw > 179.0f);
+    CHECK(r->rig().armYaw < 181.0f);
+
+    // And the LOOK direction is not smoothed at all — that is the whole point of
+    // keeping armYaw separate from yaw. With lag off the two are equal, so this
+    // is the one assertion that can tell them apart.
+    CHECK(r->camXform().rotation.y == doctest::Approx(-179.0f));
+    CHECK(r->rig().yaw             == doctest::Approx(-179.0f));
+}
+
+TEST_CASE("CameraRig: snap() sets on the next frame instead of easing")
+{
+    // The third hard-set case: a script that teleports its character knows
+    // before the rig could possibly work it out.
+    auto r = makeLagRig();
+    r->rig().lag.positionSpeed = 10.0f;
+    r->rig().lag.snapDistance  = 1000.0f;   // would smooth all the way
+    r->rig().lag.maxDistance   = 1000.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    r->tgtXform().position = { 0.0f, 0.0f, 50.0f };
+    r->rig().snap();
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK(r->camXform().position.z == doctest::Approx(50.0f));
+}
+
+TEST_CASE("CameraRig: lag is off by default and off means today's pose exactly")
+{
+    // The guarantee under which the solved-pose rebuild was allowed to happen:
+    // at default settings the rig is bit-for-bit what it was before lag existed.
+    auto r = makeRig();
+    CHECK_FALSE(r->rig().lag.enabled);
+
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    r->rig().sensitivity = 1.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    // A teleport is followed in the very same frame, with no easing anywhere.
+    r->tgtXform().position = { 7.0f, 0.0f, -3.0f };
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.x == doctest::Approx(7.0f));
+    CHECK(r->camXform().position.z == doctest::Approx(1.0f));
+
+    // And the boom direction is the look direction, not a smoothed copy of it.
+    MouseFrame m; m.dx = -45.0f;             // yaw +45°
+    HE::CameraRigController::update(r->world, m);
+    CHECK(r->rig().armYaw   == doctest::Approx(r->rig().yaw));
+    CHECK(r->rig().armPitch == doctest::Approx(r->rig().pitch));
+}
+
+// ─── Camera shake ─────────────────────────────────────────────────────────────
+
+namespace {
+
+// A rig sitting on its own pivot, so the camera's position IS the shake offset
+// and every assertion below is about the shake rather than about a boom.
+std::unique_ptr<Rig> makeShakeRig()
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 0.0f;
+    return r;
+}
+
+// A shake with everything spelled out, so a test that cares about one number
+// does not silently inherit a default for the other five.
+HE::ShakeInstance shakeOf(float pos, float rot, float frequency, float duration)
+{
+    HE::ShakeInstance s;
+    s.posAmplitude = glm::vec3(pos);
+    s.rotAmplitude = glm::vec3(rot);
+    s.frequency    = frequency;
+    s.duration     = duration;
+    s.blendIn      = 0.0f;   // no fade, so an amplitude means that amplitude
+    s.blendOut     = 0.0f;
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("CameraShake: the same shake at the same elapsed gives the same offset")
+{
+    // The property that makes a shake testable at all, and the reason it is
+    // value noise off an integer hash rather than a random number generator:
+    // no state travels between the two runs below except `elapsed`.
+    std::array<HE::ShakeInstance, HE::kMaxCameraShakes> a{};
+    std::array<HE::ShakeInstance, HE::kMaxCameraShakes> b{};
+    HE::ShakeInstance s = shakeOf(0.5f, 3.0f, 11.0f, 10.0f);
+    s.id   = 1;
+    s.seed = 4242u;
+    a[0] = s;
+    b[0] = s;
+
+    HE::ShakeOffset last;
+    for (int i = 0; i < 20; ++i)
+        last = HE::evaluateShakes(a, 1.0f / 60.0f);
+
+    // The other one is put straight at that elapsed and evaluated once, with
+    // dt = 0 so nothing advances. Twenty frames of history and none at all agree
+    // exactly — which is the claim: the offset is a function of `elapsed`, and
+    // no state accumulates along the way.
+    b[0].elapsed = a[0].elapsed;
+    const HE::ShakeOffset again = HE::evaluateShakes(b, 0.0f);
+
+    CHECK(again.position.x == last.position.x);
+    CHECK(again.position.y == last.position.y);
+    CHECK(again.position.z == last.position.z);
+    CHECK(again.rotationDegrees.x == last.rotationDegrees.x);
+    CHECK(again.rotationDegrees.z == last.rotationDegrees.z);
+
+    // And it was actually shaking, not sitting at zero and agreeing about that.
+    CHECK(glm::length(last.position) > 1e-4f);
+
+    // Same elapsed, different seed: a different offset. Otherwise the seed is
+    // decoration and every shake in a scene moves in lockstep.
+    CHECK(HE::shakeNoise(1u, 3.25f) != HE::shakeNoise(2u, 3.25f));
+}
+
+TEST_CASE("CameraShake: a finished shake contributes exactly zero and frees its slot")
+{
+    // "Exactly", not "almost": the slot is freed BEFORE the sum, so the last
+    // frame of a shake is 0.0f and not the final epsilon of its fade-out. An
+    // epsilon left standing is a camera permanently a hair off centre.
+    auto r = makeShakeRig();
+    const uint32_t h = r->rig().playShake(shakeOf(0.5f, 5.0f, 12.0f, 0.25f));
+    REQUIRE(h != 0);
+
+    stepTime(*r, 1.0f / 60.0f, 5);            // 0.083 s — well inside
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+
+    // Generously past the end: float steps do not land on 0.25 exactly, and the
+    // assertion is about what happens AFTER the end, not about the last frame.
+    stepTime(*r, 1.0f / 60.0f, 30);
+
+    CHECK(r->camXform().position.x == 0.0f);
+    CHECK(r->camXform().position.y == 0.0f);
+    CHECK(r->camXform().position.z == 0.0f);
+    CHECK(r->camXform().rotation.z == 0.0f);
+    for (const auto& s : r->rig().shakes)
+        CHECK(s.id == 0);
+}
+
+TEST_CASE("CameraShake: an endless shake runs until it is stopped")
+{
+    // duration <= 0 is the "engine rumble while the vehicle is running" case,
+    // and it is the whole reason playShake hands back a handle.
+    auto r = makeShakeRig();
+    const int h = HE::api::camera::playShake(r->api(), 0.5f, 5.0f, 12.0f, 0.0f);
+    REQUIRE(h > 0);
+
+    stepTime(*r, 1.0f / 60.0f, 600);          // ten seconds
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+
+    HE::api::camera::stopShake(r->api(), h);
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.x == 0.0f);
+    CHECK(r->camXform().position.z == 0.0f);
+
+    // A handle that has already been spent is a no-op, not a crash — a script
+    // that keeps one across a level load needs it to be.
+    HE::api::camera::stopShake(r->api(), h);
+    HE::api::camera::stopShake(r->api(), 9999);
+
+    // And Stop All takes the ones nobody kept a handle for.
+    HE::api::camera::playShake(r->api(), 0.5f, 5.0f, 12.0f, 0.0f);
+    HE::api::camera::playShake(r->api(), 0.5f, 5.0f, 12.0f, 0.0f);
+    stepTime(*r, 1.0f / 60.0f, 5);
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+    HE::api::camera::stopAllShakes(r->api());
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.x == 0.0f);
+    CHECK(r->camXform().position.z == 0.0f);
+}
+
+TEST_CASE("CameraShake: in a shortened frame the shake spends the clearance and no more")
+{
+    // The sweep stops the boom one collision radius short of the wall, and that
+    // radius is the only room the shake has to spend before it pushes the near
+    // plane through the surface.
+    const float kRadius = 0.25f;
+    const float kWallZ  = 4.0f, kWallHalf = 0.5f;
+    const glm::vec3 stopped{ 0.0f, 0.0f, kWallZ - kWallHalf - kRadius };
+
+    auto walled = makeRig();
+    walled->rig().pivotOffset     = {};
+    walled->rig().armOffset       = {};
+    walled->rig().armLength       = 8.0f;
+    walled->rig().collisionRadius = kRadius;
+    addWall(walled->world, { 0.0f, 0.0f, kWallZ }, { 4.0f, 4.0f, kWallHalf });
+    PhysicsWorld phys;
+    phys.initialize(walled->world);
+
+    // The twin: the same rig and the same shake with no wall in front of it, to
+    // prove the amplitude really was big enough to break the clamp if nothing
+    // held it. Without this the test passes on a shake that never moved.
+    auto open = makeRig();
+    open->rig().pivotOffset     = {};
+    open->rig().armOffset       = {};
+    open->rig().armLength       = 8.0f;
+    open->rig().collisionRadius = kRadius;
+
+    // Amplitude far larger than the clearance, so the clamp has real work.
+    const HE::ShakeInstance s = shakeOf(2.0f, 0.0f, 15.0f, 0.0f);
+    REQUIRE(walled->rig().playShake(s) == open->rig().playShake(s));  // same handle → same seed
+
+    bool openBrokeOut = false;
+    for (int i = 0; i < 120; ++i)
+    {
+        HE::CameraLookInput look; look.dt = 1.0f / 60.0f;
+        HE::CameraRigController::update(walled->world, look, entt::null, &phys);
+        HE::CameraRigController::update(open->world,   look);
+
+        // A hair of tolerance for the sweep's own precision, not for the clamp.
+        CHECK(glm::distance(walled->camXform().position, stopped) <= kRadius + 0.02f);
+
+        if (glm::distance(open->camXform().position, glm::vec3(0.0f, 0.0f, 8.0f)) > kRadius)
+            openBrokeOut = true;
+    }
+    CHECK(openBrokeOut);
+}
+
+TEST_CASE("CameraShake: a shake moves the camera without touching the rig's input state")
+{
+    // yaw and pitch are the LOOK direction and the value the Follow coupling
+    // writes to the character. A shake that leaked into them would turn the
+    // player's aim, and — being additive — would wind them up frame after frame.
+    auto r = makeShakeRig();
+    r->rig().yaw   = 30.0f;
+    r->rig().pitch = -12.0f;
+    r->rig().playShake(shakeOf(0.4f, 8.0f, 14.0f, 0.0f));
+
+    stepTime(*r, 1.0f / 60.0f, 300);
+
+    CHECK(r->rig().yaw   == doctest::Approx(30.0f));
+    CHECK(r->rig().pitch == doctest::Approx(-12.0f));
+
+    // But the camera itself did move and did roll — roll being the axis the rig
+    // never otherwise uses, so a non-zero one can only have come from the shake.
+    CHECK(glm::length(r->camXform().position) > 1e-4f);
+    CHECK(r->camXform().rotation.z != doctest::Approx(0.0f));
+}
+
+// ─── Blending between rigs ────────────────────────────────────────────────────
+
+namespace {
+
+struct SecondCamera {
+    Entity camera = entt::null;
+    Entity target = entt::null;
+};
+
+// A second rig camera in the same world, on a target of its own, so the two
+// poses a blend runs between are far apart and no assertion below can be
+// satisfied by accident. It is NOT main — blendTo is what hands it the picture.
+SecondCamera addRigCamera(HorizonWorld& world, glm::vec3 targetPos,
+                          float armLength, float yaw = 0.0f, float fov = 60.0f)
+{
+    SecondCamera s;
+
+    s.target = world.createEntity("Target B");
+    TransformComponent tt; tt.position = targetPos;
+    world.addComponent(s.target, tt);
+
+    s.camera = world.createEntity("Camera B");
+    world.addComponent(s.camera, TransformComponent{});
+    CameraComponent cam; cam.isMain = false; cam.fovDegrees = fov;
+    world.addComponent(s.camera, cam);
+
+    CameraRigComponent rig;
+    rig.target      = world.entityId(s.target);
+    rig.yaw         = yaw;
+    rig.pitch       = 0.0f;
+    rig.pivotOffset = {};
+    rig.armOffset   = {};
+    rig.armLength   = armLength;
+    world.addComponent(s.camera, rig);
+    return s;
+}
+
+int mainCameraCount(HorizonWorld& world)
+{
+    int n = 0;
+    for (auto [e, cam] : world.registry().view<CameraComponent>().each())
+        if (cam.isMain) ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("CameraBlend: t=0 is the source pose and t=1 the target pose, exactly")
+{
+    // "Exactly" at both ends is what makes a blend invisible where it starts and
+    // where it stops: slerp at a == 0 or 1 is the same pose only up to rounding,
+    // so both ends are written verbatim rather than interpolated.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;                      // camera A at (0, 0, 4)
+    r->world.registry().get<CameraComponent>(r->camera).fovDegrees = 60.0f;
+    const SecondCamera b = addRigCamera(r->world, { 100.0f, 0.0f, 0.0f }, 2.0f,
+                                        0.0f, 90.0f); // camera B at (100, 0, 2)
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+
+    // dt = 0: time has not moved, so the blend is at its very start.
+    HE::CameraLookInput look;                          // dt = 0
+    HE::CameraRigController::update(r->world, look);
+    const auto& bx = r->world.registry().get<TransformComponent>(b.camera);
+    CHECK(bx.position.x == doctest::Approx(0.0f));
+    CHECK(bx.position.z == doctest::Approx(4.0f));
+    // FOV rides along: the picture is still the 60° camera's, expressed as an
+    // offset against the 90° camera that now owns it.
+    CHECK(r->world.registry().get<CameraComponent>(b.camera).fovOffset
+              == doctest::Approx(-30.0f));
+    CHECK(HE::CameraRigController::isBlending(r->world.registry()));
+
+    // And out the far end.
+    stepTime(*r, 1.0f, 1);
+    CHECK(bx.position.x == doctest::Approx(100.0f));
+    CHECK(bx.position.z == doctest::Approx(2.0f));
+    CHECK(r->world.registry().get<CameraComponent>(b.camera).fovOffset == 0.0f);
+    CHECK_FALSE(HE::CameraRigController::isBlending(r->world.registry()));
+}
+
+TEST_CASE("CameraBlend: blendTo leaves exactly one main camera")
+{
+    // Not decoration. findRigCamera and the render extractor both take the FIRST
+    // isMain they meet in entt view order, and that order shifts as pools grow —
+    // two main cameras during a blend is the picture flicking between two poses
+    // in irregular frames.
+    auto r = makeRig();
+    const SecondCamera b = addRigCamera(r->world, { 10.0f, 0.0f, 0.0f }, 2.0f);
+
+    // A third camera that someone left flagged main by hand, and a fourth with
+    // no rig at all — blendTo has to clear both.
+    Entity stray = r->world.createEntity("Stray");
+    r->world.addComponent(stray, TransformComponent{});
+    CameraComponent strayCam; strayCam.isMain = true;
+    r->world.addComponent(stray, strayCam);
+
+    REQUIRE(mainCameraCount(r->world) == 2);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 0.5f));
+
+    CHECK(mainCameraCount(r->world) == 1);
+    CHECK(r->world.registry().get<CameraComponent>(b.camera).isMain);
+
+    // A camera that is not one is refused rather than half-applied.
+    CHECK_FALSE(HE::CameraRigController::blendTo(r->world, r->target, 0.5f));
+    CHECK(mainCameraCount(r->world) == 1);
+}
+
+TEST_CASE("CameraBlend: a blend across ±180 yaw takes the short way")
+{
+    // The reason rotation is slerped as a quaternion rather than lerped as three
+    // numbers: 170 to −170 read as numbers is 340 degrees the wrong way round,
+    // and the camera spins a full turn where it should have crossed 20 degrees.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 0.0f;
+    r->rig().yaw         = 170.0f;
+    const SecondCamera b = addRigCamera(r->world, { 0.0f, 0.0f, 0.0f }, 0.0f, -170.0f);
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.5f, 1);                    // smoothstep(0.5) = 0.5, the midpoint
+
+    // The forward vector, not the euler angles: mid-blend the transform carries
+    // whatever triple glm::eulerAngles recovered, which near yaw 180 is a
+    // different — equivalent — set of numbers. The direction is unambiguous.
+    const auto& rigB = r->world.registry().get<CameraRigComponent>(b.camera);
+    const glm::vec3 fwd = rigB.lastWritten.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+    CHECK(fwd.z == doctest::Approx(1.0f).epsilon(0.01));   // through 180
+    CHECK(fwd.z > 0.9f);                                   // and NOT through 0
+}
+
+TEST_CASE("CameraBlend: a source camera destroyed mid-blend ends it cleanly")
+{
+    // Not "carry on from the last known source pose": that pose is a frame old
+    // and the world has moved on, so it would blend from somewhere nothing is.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    const SecondCamera b = addRigCamera(r->world, { 50.0f, 0.0f, 0.0f }, 2.0f);
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.25f, 1);
+    REQUIRE(HE::CameraRigController::isBlending(r->world.registry()));
+
+    r->world.destroyEntity(r->camera);        // the source, mid-flight
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK_FALSE(HE::CameraRigController::isBlending(r->world.registry()));
+    const auto& bx = r->world.registry().get<TransformComponent>(b.camera);
+    CHECK(bx.position.x == doctest::Approx(50.0f));
+    CHECK(bx.position.z == doctest::Approx(2.0f));
+}
+
+TEST_CASE("CameraBlend: a second blend starts at the pose on screen, not at its rig")
+{
+    // The interpolated pose belongs to no entity, so it has to be frozen at the
+    // moment of the call — and it is the OUTGOING rig that holds it, because the
+    // camera that has been showing the picture is the one that wrote it. Read
+    // the incoming rig instead and the picture snaps to the source camera's full
+    // pose before easing back, which is the jump this whole mechanism exists to
+    // prevent.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;                       // A at (0, 0, 4)
+    const SecondCamera b = addRigCamera(r->world, { 100.0f, 0.0f, 0.0f }, 2.0f);  // B at (100, 0, 2)
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.5f, 1);                             // halfway across
+
+    const glm::vec3 onScreen =
+        r->world.registry().get<CameraRigComponent>(b.camera).lastWritten.position;
+    REQUIRE(onScreen.x > 1.0f);                        // genuinely between the two
+    REQUIRE(onScreen.x < 99.0f);
+
+    // Turn around and go back to A. dt = 0, so the new blend is at its start and
+    // what lands in the transform is its source pose verbatim.
+    REQUIRE(HE::CameraRigController::blendTo(r->world, r->camera, 1.0f));
+    HE::CameraLookInput look;                          // dt = 0
+    HE::CameraRigController::update(r->world, look);
+
+    CHECK(r->camXform().position.x == onScreen.x);
+    CHECK(r->camXform().position.y == onScreen.y);
+    CHECK(r->camXform().position.z == onScreen.z);
+}
+
+TEST_CASE("CameraBlend: a rig that loses the picture mid-blend does not resume it")
+{
+    // Its `remaining` would otherwise sit frozen for as long as it is off
+    // screen, and handing isMain back to it by hand would pick the blend up
+    // again from a source that has long moved on. Setting isMain by hand is a
+    // cut, always.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    const SecondCamera b = addRigCamera(r->world, { 100.0f, 0.0f, 0.0f }, 2.0f);
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.25f, 1);
+    REQUIRE(r->world.registry().get<CameraRigComponent>(b.camera).isBlending());
+
+    // Hand it straight back, the crude way.
+    r->world.registry().get<CameraComponent>(b.camera).isMain = false;
+    r->world.registry().get<CameraComponent>(r->camera).isMain = true;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK_FALSE(r->world.registry().get<CameraRigComponent>(b.camera).isBlending());
+    CHECK(r->camXform().position.z == doctest::Approx(4.0f));   // a cut, not an ease
+}
+
+// ─── FOV kick ─────────────────────────────────────────────────────────────────
+
+TEST_CASE("CameraFov: a kick never writes the camera's own FOV")
+{
+    // fovDegrees is what the author set: the inspector shows it, the serialiser
+    // saves it, Get/Set Camera FOV mean it. A kick computed INTO it would be the
+    // shake-in-the-transform mistake with a saved scene on the end of it.
+    auto r = makeShakeRig();
+    auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+    cam.fovDegrees = 72.0f;
+
+    HE::api::camera::kickFov(r->api(), 15.0f, 0.05f, 0.1f, 0.3f);
+    for (int i = 0; i < 100; ++i)
+    {
+        stepTime(*r, 1.0f / 60.0f, 1);
+        REQUIRE(cam.fovDegrees == 72.0f);
+    }
+    // And the value the script surface reports is still the authored one.
+    CHECK(HE::api::camera::getFov(r->api()) == doctest::Approx(72.0f));
+}
+
+TEST_CASE("CameraFov: the kick peaks, comes back and leaves fovOffset at exactly zero")
+{
+    auto r = makeShakeRig();
+    auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+    cam.fovDegrees = 60.0f;
+
+    HE::api::camera::kickFov(r->api(), 20.0f, 0.1f, 0.1f, 0.2f);   // 0.4 s in all
+
+    stepTime(*r, 1.0f / 60.0f, 9);        // 0.15 s — inside the hold, at full
+    CHECK(cam.fovOffset == doctest::Approx(20.0f).epsilon(0.05));
+
+    // Past the end, generously: float steps do not land on 0.4 exactly, and the
+    // claim is about what stands there afterwards. Exactly 0.0f, not an epsilon
+    // of tail — an epsilon left standing is a permanently slightly wrong FOV
+    // with nothing running to work it off.
+    stepTime(*r, 1.0f / 60.0f, 60);
+    CHECK(cam.fovOffset == 0.0f);
+
+    // Negative amplitude zooms IN, and lands back on zero the same way.
+    HE::api::camera::kickFov(r->api(), -12.0f, 0.05f, 0.0f, 0.1f);
+    stepTime(*r, 1.0f / 60.0f, 4);
+    CHECK(cam.fovOffset < 0.0f);
+    stepTime(*r, 1.0f / 60.0f, 30);
+    CHECK(cam.fovOffset == 0.0f);
+}
+
+TEST_CASE("CameraFov: a rig that stops driving hands the FOV back")
+{
+    // Two ways to stop driving, and both have to give it back — otherwise the
+    // camera keeps a few degrees of somebody else's kick for good.
+    SUBCASE("its target goes away")
+    {
+        auto r = makeShakeRig();
+        auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+        cam.fovDegrees = 60.0f;
+
+        HE::api::camera::kickFov(r->api(), 25.0f, 0.05f, 5.0f, 0.2f);  // a long hold
+        stepTime(*r, 1.0f / 60.0f, 6);
+        REQUIRE(cam.fovOffset > 1.0f);
+
+        r->world.destroyEntity(r->target);
+        const auto f = HE::CameraRigController::update(r->world, kNoMouse);
+        CHECK_FALSE(f.driven);
+        CHECK(cam.fovOffset == 0.0f);
+    }
+
+    SUBCASE("another camera takes the picture")
+    {
+        auto r = makeShakeRig();
+        // The second camera first: taking the reference before growing the pool
+        // it lives in is how a test starts reading a moved component.
+        const SecondCamera b = addRigCamera(r->world, { 20.0f, 0.0f, 0.0f }, 0.0f);
+        auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+        cam.fovDegrees = 60.0f;
+
+        HE::api::camera::kickFov(r->api(), 25.0f, 0.05f, 5.0f, 0.2f);
+        stepTime(*r, 1.0f / 60.0f, 6);
+        REQUIRE(cam.fovOffset > 1.0f);
+
+        // A cut, so there is no blend left holding the old FOV in the picture.
+        REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 0.0f));
+        stepTime(*r, 1.0f / 60.0f, 1);
+        CHECK(cam.fovOffset == 0.0f);
+    }
 }

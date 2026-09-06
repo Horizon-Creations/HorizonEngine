@@ -7,6 +7,7 @@
 #include "HorizonScene/AudioEngine.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
+#include "HorizonScene/CameraRigController.h"   // blendTo/isBlending live on the controller
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"   // the parent chain the world/local boundary walks
 #include "HorizonScene/Components/EnvironmentComponent.h"
@@ -1580,8 +1581,13 @@ float getArmLength(Ctx& c)
 void setTargetYawMode(Ctx& c, int mode)
 {
     if (auto* r = rigOf(c))
+    {
+        // Anything outside the enum lands on Follow, the way it did when Follow
+        // was the only thing "not 0" could mean.
         r->targetYaw = (mode == 0) ? CameraRigComponent::TargetYaw::Free
+                     : (mode == 2) ? CameraRigComponent::TargetYaw::FollowSmoothed
                                    : CameraRigComponent::TargetYaw::Follow;
+    }
 }
 int getTargetYawMode(Ctx& c)
 {
@@ -1604,6 +1610,84 @@ void addYawPitch(Ctx& c, float dYaw, float dPitch)
     if (!r) return;
     r->yaw   += dYaw;
     r->pitch  = std::clamp(r->pitch + dPitch, r->pitchMin, r->pitchMax);
+}
+
+// ── Lag ──────────────────────────────────────────────────────────────────────
+void setLagEnabled(Ctx& c, bool enabled)
+{
+    if (auto* r = rigOf(c)) r->lag.enabled = enabled;
+}
+bool getLagEnabled(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r && r->lag.enabled;
+}
+void setLagSpeeds(Ctx& c, float position, float rotation)
+{
+    auto* r = rigOf(c);
+    if (!r) return;
+    // Negative would run the exponential smoother the wrong way and throw the
+    // pivot away from its target; 0 is the documented "never catch up".
+    r->lag.positionSpeed = std::max(0.0f, position);
+    r->lag.rotationSpeed = std::max(0.0f, rotation);
+}
+void snapRig(Ctx& c)
+{
+    if (auto* r = rigOf(c)) r->snap();
+}
+
+// ── Shake ────────────────────────────────────────────────────────────────────
+int playShake(Ctx& c, float posAmplitude, float rotAmplitude, float frequency,
+              float duration)
+{
+    auto* r = rigOf(c);
+    if (!r) return 0;
+
+    // One scalar per family rather than six numbers: a script asking for "a
+    // hit" wants a magnitude, and a shake that is stronger on one axis than
+    // another reads as a slide, not as a shake. The component takes vectors so
+    // the editor can go finer later.
+    HE::ShakeInstance s;
+    s.posAmplitude = glm::vec3(std::max(0.0f, posAmplitude));
+    s.rotAmplitude = glm::vec3(std::max(0.0f, rotAmplitude));
+    s.frequency    = std::max(0.0f, frequency);
+    s.duration     = duration;   // <= 0 stays endless on purpose
+    return static_cast<int>(r->playShake(s));
+}
+void stopShake(Ctx& c, int handle)
+{
+    if (handle <= 0) return;
+    if (auto* r = rigOf(c)) r->stopShake(static_cast<uint32_t>(handle));
+}
+void stopAllShakes(Ctx& c)
+{
+    if (auto* r = rigOf(c)) r->stopAllShakes();
+}
+
+// ── FOV kick ─────────────────────────────────────────────────────────────────
+void kickFov(Ctx& c, float degrees, float attack, float hold, float decay)
+{
+    if (auto* r = rigOf(c)) r->kickFov(degrees, attack, hold, decay);
+}
+
+// ── Blending ─────────────────────────────────────────────────────────────────
+void blendTo(Ctx& c, Entity camera, float seconds, int curve)
+{
+    if (!c.world) return;
+    const auto e = static_cast<entt::entity>(camera);
+    if (!c.world->registry().valid(e)) return;
+    // Out of range is not an error worth swallowing the whole call for — a
+    // graph that passes 7 gets the default pacing and a camera that switches.
+    const HE::BlendCurve k =
+        (curve == 0) ? HE::BlendCurve::Linear
+      : (curve == 2) ? HE::BlendCurve::EaseOut
+                     : HE::BlendCurve::SmoothStep;
+    HE::CameraRigController::blendTo(*c.world, e, seconds, k);
+}
+bool isBlending(Ctx& c)
+{
+    if (!c.world) return false;
+    return HE::CameraRigController::isBlending(c.world->registry());
 }
 } // namespace camera
 
@@ -3383,25 +3467,66 @@ namespace time {
 namespace {
 struct Clock
 {
-    float    delta         = 0.0f;   // scaled — what deltaTime() answers
-    float    unscaledDelta = 0.0f;   // as the app measured it
-    double   elapsed       = 0.0;    // sum of the SCALED deltas
-    uint64_t frame         = 0;
-    float    scale         = 1.0f;
+    float    delta           = 0.0f;   // scaled — what deltaTime() answers
+    float    unscaledDelta   = 0.0f;   // as the app measured it
+    double   elapsed         = 0.0;    // sum of the SCALED deltas
+    double   unscaledElapsed = 0.0;    // sum of the RAW deltas — runs through a pause
+    uint64_t frame           = 0;
+    float    scale           = 1.0f;   // AUTHORED scale; a pause never overwrites it
+    uint32_t pauseReasons    = 0;      // bitset of PauseReason
+    float    hitStop         = 0.0f;   // real-time seconds of freeze left
 };
 Clock& clk() { static Clock c; return c; }
+
+float effectiveScaleOf(const Clock& c)
+{
+    return (c.pauseReasons != 0 || c.hitStop > 0.0f) ? 0.0f : c.scale;
+}
 }
 // The scale is applied ONCE, here: elapsed accumulates the scaled delta, so a
 // paused game's clock stands still and a script that integrates elapsed() sees
 // the same time base as one integrating deltaTime().
-void  advance(float dt)          { Clock& c = clk(); c.unscaledDelta = dt; c.delta = dt * c.scale; c.elapsed += c.delta; ++c.frame; }
+//
+// The hit-stop countdown burns REAL seconds and is decremented BEFORE the delta
+// is formed — it has to be, because a window that counted down in game time
+// could never end: it is the thing holding game time at zero.
+void  advance(float dt)
+{
+    Clock& c = clk();
+    c.unscaledDelta    = dt;
+    c.unscaledElapsed += dt;
+    if (c.hitStop > 0.0f) c.hitStop = std::max(0.0f, c.hitStop - dt);
+    c.delta    = dt * effectiveScaleOf(c);
+    c.elapsed += c.delta;
+    ++c.frame;
+}
 void  reset()                    { clk() = Clock{}; }  // scale 1 again: play never starts paused
+void  resetControls()
+{
+    Clock& c = clk();
+    c.scale   = 1.0f;
+    c.hitStop = 0.0f;
+    // FocusLost survives: it belongs to the WINDOW, not to the scene. Clearing it
+    // here would let a scene load resume a game whose window is still in the
+    // background, and nothing would ever put the reason back — the focus event
+    // that set it is long gone.
+    c.pauseReasons &= (uint32_t)PauseReason::FocusLost;
+}
 float deltaTime()                { return clk().delta; }
 float unscaledDeltaTime()        { return clk().unscaledDelta; }
 float elapsed()                  { return (float)clk().elapsed; }
+float unscaledElapsed()          { return (float)clk().unscaledElapsed; }
 int   frameCount()               { return (int)clk().frame; }
 void  setTimeScale(float scale)  { clk().scale = std::clamp(scale, 0.0f, kMaxTimeScale); }
 float timeScale()                { return clk().scale; }
+void  pause (PauseReason reason) { clk().pauseReasons |=  (uint32_t)reason; }
+void  resume(PauseReason reason) { clk().pauseReasons &= ~(uint32_t)reason; }
+bool  isPaused()                 { return clk().pauseReasons != 0; }
+// Non-positive is a no-op rather than a clear: hitStop(0) from a graph that
+// computed its duration should not cancel a freeze somebody else just started.
+void  hitStop(float seconds)     { if (seconds > 0.0f) { Clock& c = clk(); c.hitStop = std::max(c.hitStop, seconds); } }
+bool  isFrozen()                 { return clk().hitStop > 0.0f; }
+float effectiveScale()           { return effectiveScaleOf(clk()); }
 } // namespace time
 
 // ── Player possession ────────────────────────────────────────────────────────
@@ -4273,14 +4398,37 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::elapsed()) }; } });
         t.push_back({ "time.frameCount", "Time", false, {}, {{"frame", P::Int}}, "HE::api::time::frameCount",
             [](Ctx&, const VV&){ return VV{ Value::ofInt(time::frameCount()) }; } });
-        // Time control. setTimeScale is the only stateful one (isExec) — the two
-        // getters are constant within a frame like the rest of the group.
+        // Time control: three independent channels, one row each way in.
+        // setTimeScale/pause/resume/hitStop change the clock and are therefore
+        // exec nodes; everything that only asks it a question is a pure data
+        // node, constant within a frame like the rest of the group.
         t.push_back({ "time.setTimeScale", "Time", true, {{"scale", P::Float}}, {}, "HE::api::time::setTimeScale",
             [](Ctx&, const VV& a){ time::setTimeScale(aF(a, 0)); return VV{}; } });
         t.push_back({ "time.timeScale", "Time", false, {}, {{"scale", P::Float}}, "HE::api::time::timeScale",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::timeScale()) }; } });
         t.push_back({ "time.unscaledDeltaTime", "Time", false, {}, {{"dt", P::Float}}, "HE::api::time::unscaledDeltaTime",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::unscaledDeltaTime()) }; } });
+        t.push_back({ "time.unscaledElapsed", "Time", false, {}, {{"seconds", P::Float}}, "HE::api::time::unscaledElapsed",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::unscaledElapsed()) }; } });
+        // Pause and resume take no reason from a script: PauseReason stays a C++
+        // type, and every frontend shares the one Script channel. That is the
+        // point of the channel — a script's pause must not lift the one the
+        // window put in place when it lost focus, and a script that could name
+        // FocusLost could do exactly that.
+        t.push_back({ "time.pause", "Time", true, {}, {}, "HE::api::time::pause",
+            [](Ctx&, const VV&){ time::pause(); return VV{}; } });
+        t.push_back({ "time.resume", "Time", true, {}, {}, "HE::api::time::resume",
+            [](Ctx&, const VV&){ time::resume(); return VV{}; } });
+        // Not `timeScale() <= 0`: a hit-stop stops the clock without being a
+        // pause, and this is the predicate that decides whether input is heard.
+        t.push_back({ "time.isPaused", "Time", false, {}, {{"paused", P::Bool}}, "HE::api::time::isPaused",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(time::isPaused()) }; } });
+        t.push_back({ "time.hitStop", "Time", true, {{"seconds", P::Float}}, {}, "HE::api::time::hitStop",
+            [](Ctx&, const VV& a){ time::hitStop(aF(a, 0)); return VV{}; } });
+        t.push_back({ "time.isFrozen", "Time", false, {}, {{"frozen", P::Bool}}, "HE::api::time::isFrozen",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(time::isFrozen()) }; } });
+        t.push_back({ "time.effectiveScale", "Time", false, {}, {{"scale", P::Float}}, "HE::api::time::effectiveScale",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::effectiveScale()) }; } });
 
         // Player possession. The two that TAKE a controller are also the
         // PlayerController base class's member surface (HorizonCode.h
@@ -4383,6 +4531,28 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV&){ return VV{ Value::ofFloat(camera::getRigPitch(c)) }; } });
         t.push_back({ "camera.addYawPitch", "Camera", true, {{"deltaYaw", P::Float}, {"deltaPitch", P::Float}}, {}, "HE::api::camera::addYawPitch",
             [](Ctx& c, const VV& a){ camera::addYawPitch(c, aF(a, 0), aF(a, 1)); return VV{}; } });
+
+        // Rig lag, shake, FOV kick and blending — all runtime, none of it saved.
+        t.push_back({ "camera.setLagEnabled", "Camera", true, {{"enabled", P::Bool}}, {}, "HE::api::camera::setLagEnabled",
+            [](Ctx& c, const VV& a){ camera::setLagEnabled(c, aB(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getLagEnabled", "Camera", false, {}, {{"enabled", P::Bool}}, "HE::api::camera::getLagEnabled",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(camera::getLagEnabled(c)) }; } });
+        t.push_back({ "camera.setLagSpeeds", "Camera", true, {{"position", P::Float}, {"rotation", P::Float}}, {}, "HE::api::camera::setLagSpeeds",
+            [](Ctx& c, const VV& a){ camera::setLagSpeeds(c, aF(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "camera.snapRig", "Camera", true, {}, {}, "HE::api::camera::snapRig",
+            [](Ctx& c, const VV&){ camera::snapRig(c); return VV{}; } });
+        t.push_back({ "camera.playShake", "Camera", true, {{"positionAmplitude", P::Float}, {"rotationAmplitude", P::Float}, {"frequency", P::Float}, {"duration", P::Float}}, {{"handle", P::Int}}, "HE::api::camera::playShake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(camera::playShake(c, aF(a, 0), aF(a, 1), aF(a, 2), aF(a, 3))) }; } });
+        t.push_back({ "camera.stopShake", "Camera", true, {{"handle", P::Int}}, {}, "HE::api::camera::stopShake",
+            [](Ctx& c, const VV& a){ camera::stopShake(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "camera.stopAllShakes", "Camera", true, {}, {}, "HE::api::camera::stopAllShakes",
+            [](Ctx& c, const VV&){ camera::stopAllShakes(c); return VV{}; } });
+        t.push_back({ "camera.kickFov", "Camera", true, {{"degrees", P::Float}, {"attack", P::Float}, {"hold", P::Float}, {"decay", P::Float}}, {}, "HE::api::camera::kickFov",
+            [](Ctx& c, const VV& a){ camera::kickFov(c, aF(a, 0), aF(a, 1), aF(a, 2), aF(a, 3)); return VV{}; } });
+        t.push_back({ "camera.blendTo", "Camera", true, {{"camera", P::Int}, {"seconds", P::Float}, {"curve", P::Int}}, {}, "HE::api::camera::blendTo",
+            [](Ctx& c, const VV& a){ camera::blendTo(c, (Entity)aI(a, 0), aF(a, 1), aI(a, 2)); return VV{}; } });
+        t.push_back({ "camera.isBlending", "Camera", false, {}, {{"blending", P::Bool}}, "HE::api::camera::isBlending",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(camera::isBlending(c)) }; } });
 
         // Environment — EVERY EnvironmentComponent field, generated from the
         // HE_ENV_FIELDS_* X-lists in EngineApi.h (get = pure read, set = exec).
@@ -4821,6 +4991,13 @@ const std::vector<ApiFn>& registry()
             { "time.frameCount", "Frame Count" },
             { "time.setTimeScale", "Set Time Scale" }, { "time.timeScale", "Get Time Scale" },
             { "time.unscaledDeltaTime", "Unscaled Delta Time" },
+            { "time.unscaledElapsed", "Unscaled Elapsed Time" },
+            // "Pause Game", not "Pause": in a palette next to Delay and Play
+            // Animation the bare word reads as "pause this chain".
+            { "time.pause", "Pause Game" }, { "time.resume", "Resume Game" },
+            { "time.isPaused", "Is Paused" },
+            { "time.hitStop", "Hit Stop" }, { "time.isFrozen", "Is Frozen" },
+            { "time.effectiveScale", "Effective Time Scale" },
             { "player.possess", "Possess" },          { "player.unpossess", "Un Possess" },
             { "player.possessed", "Get Possessed Character" },
             { "player.controllerOf", "Get Controller" },
@@ -4851,6 +5028,13 @@ const std::vector<ApiFn>& registry()
             { "camera.getTargetYawMode", "Get Target Rotation Mode" },
             { "camera.getRigYaw", "Get Camera Yaw" },        { "camera.getRigPitch", "Get Camera Pitch" },
             { "camera.addYawPitch", "Turn Camera" },
+            { "camera.setLagEnabled", "Set Camera Lag" },    { "camera.getLagEnabled", "Get Camera Lag" },
+            { "camera.setLagSpeeds", "Set Camera Lag Speeds" },
+            { "camera.snapRig", "Snap Camera" },
+            { "camera.playShake", "Play Camera Shake" },     { "camera.stopShake", "Stop Camera Shake" },
+            { "camera.stopAllShakes", "Stop All Camera Shakes" },
+            { "camera.kickFov", "Kick Camera FOV" },
+            { "camera.blendTo", "Blend To Camera" },         { "camera.isBlending", "Is Camera Blending" },
             // Environment display names — generated from the same X-lists as
             // the functions ("Get "/"Set " + the display string per field).
 #define HE_ENV_NAME_ROW(m, Name, disp) { "env.get" #Name, "Get " disp }, { "env.set" #Name, "Set " disp },

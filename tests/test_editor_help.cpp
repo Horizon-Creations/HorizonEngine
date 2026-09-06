@@ -164,6 +164,17 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Help",            "Documentation" },
 		{ "World Outliner",  "Save as Prefab" },
 		{ "New Entity",      "Cube" },
+		{ "New Entity",      "Rope" },
+		{ "New Entity",      "Trail" },
+		// The two Details sections whose rows are NOT one control per field: the
+		// control-point list draws one fixed label per row and the attachment
+		// pickers are combos, both of which resolve only if the scope is right.
+		{ "Rope",            "Point" },
+		{ "Rope",            "+ Point" },
+		{ "Rope",            "Attach Start" },
+		{ "Rope",            "Shape" },
+		{ "Trail",           "Alignment" },
+		{ "Trail",           "Points" },
 		{ "Content Browser", "Find References" },
 		{ "New Asset",       "Input Action" },
 		{ "Console",         "Auto-scroll" },

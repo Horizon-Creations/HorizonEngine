@@ -39,6 +39,7 @@ namespace
         Empty, Cube,
         CameraThirdPerson, CameraFirstPerson, CameraPlain,
         LightDirectional, LightPoint, LightSpot,
+        Rope, Trail,
     };
 
     Entity createPreset(HorizonWorld& world, Preset p)
@@ -53,6 +54,8 @@ namespace
             case Preset::LightDirectional:  name = "Directional Light"; break;
             case Preset::LightPoint:        name = "Point Light";       break;
             case Preset::LightSpot:         name = "Spot Light";        break;
+            case Preset::Rope:              name = "Rope";              break;
+            case Preset::Trail:             name = "Trail";             break;
             default:                                                    break;
         }
 
@@ -96,6 +99,14 @@ namespace
                 world.addComponent(e, l);
                 break;
             }
+            // A rope arrives with the two control points its component defaults
+            // to — a metre of line hanging straight down — so it is visible in
+            // the viewport the moment it is made, and the first thing to do with
+            // it is drag an end somewhere. A trail arrives emitting and lays a
+            // band as soon as the entity is moved, which is the only way to see
+            // one at all.
+            case Preset::Rope:  world.addComponent(e, RopeComponent{});  break;
+            case Preset::Trail: world.addComponent(e, TrailComponent{}); break;
             default: break;
         }
         return e;
@@ -130,6 +141,9 @@ namespace
             item("Spot",        Preset::LightSpot);
             ImGui::EndMenu();
         }
+        ImGui::Separator();
+        item("Rope",  Preset::Rope);
+        item("Trail", Preset::Trail);
         return picked;
     }
 }

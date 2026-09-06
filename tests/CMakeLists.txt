@@ -50,6 +50,7 @@ add_executable(he_tests
     test_scripting.cpp
     test_scripting_binding.cpp
     test_engine_api.cpp
+    test_time_control.cpp
     test_type_registry.cpp
     test_horizoncode_types.cpp
     test_horizoncode_containers.cpp
@@ -100,6 +101,7 @@ add_executable(he_tests
     test_ui_shot.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
+    test_rope_trail.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
     test_crypto_x25519.cpp

@@ -391,7 +391,11 @@ public:
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
 	// editor opens a project). Previously loaded assets stay registered.
-	void setContentRoot(std::string root) { m_contentRoot = std::move(root); }
+	// Point the manager at a project's Content folder. Changing it FORGETS
+	// everything the previous project had loaded — see forgetProjectContent()
+	// for why that is not optional. Setting the same root again is a no-op, so
+	// re-opening the project that is already open costs nothing.
+	void setContentRoot(std::string root);
 
 	// The engine-wide default-content root (EditorDeps/EngineContent, next to
 	// the editor executable — NOT project-specific). Empty when unset (e.g. in
@@ -620,6 +624,23 @@ private:
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
 	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset
+
+	// Drop everything that belonged to the project we were pointing at, then
+	// re-seed the built-ins. Called only from setContentRoot, and only when the
+	// root actually changed.
+	//
+	// It exists because the path→UUID map is keyed by the CONTENT-RELATIVE path,
+	// and two projects made from the same template share every one of those keys.
+	// Without this, opening a second project left the first project's entries in
+	// place: loadAsset("Gameplay/PlayerCharacter.hasset") found one, returned the
+	// OLD project's UUID, and handed back the OLD project's data — with the new
+	// project's file sitting unread on disk. The content browser listed the new
+	// project's files and showed the old project's contents.
+	//
+	// The engine-content side is deliberately kept: m_remoteAssets and the async
+	// sinks are shared across projects and outlive one, and the rescan that
+	// follows re-registers the Engine/ tree anyway.
+	void forgetProjectContent();
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

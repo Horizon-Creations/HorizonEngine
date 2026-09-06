@@ -12,6 +12,7 @@
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
 #include <UIWidget/UIWindowFrame.h>   // the borderless window's own frame (F3)
@@ -40,6 +41,8 @@ protected:
     // the widget layer, which is where an app's picture lives.
     bool            WantsPresent()         override;
     void            OnShutdown()           override;
+    // C++ game logic runs on the same clock as everything else that IS the game.
+    float           GameLogicDeltaTime(float) override { return HE::api::time::deltaTime(); }
 
     std::unique_ptr<IRenderer> CreateRenderer()      override;
 
@@ -223,6 +226,11 @@ private:
     // the press while doing it, which is why this needs no platform switch —
     // there, the button-down that would start it never arrives.
     HE::UIWindowResizer m_frameResize;
+
+    // config.json "PauseOnFocusLoss". Only the packaged game reads it — the
+    // editor window loses focus constantly, and a PIE session that froze every
+    // time you clicked the Details panel would be unusable.
+    bool m_pauseOnFocusLoss = true;
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance

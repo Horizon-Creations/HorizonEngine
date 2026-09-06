@@ -1152,10 +1152,18 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Rotation coupling. Free lets the character turn on its own; Follow
 			// makes it face where the camera looks, which is what allows strafing
 			// and backing up.
-			static const char* kTargetYaw[] = { "Free", "Follow Camera" };
+			static const char* kTargetYaw[] = { "Free", "Follow Camera", "Follow Smoothed" };
 			int yawMode = static_cast<int>(rig->targetYaw);
-			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 2))
+			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 3))
 			{ rig->targetYaw = static_cast<CameraRigComponent::TargetYaw>(yawMode); trackEdit(); }
+			// Only Follow Smoothed reads it: Free leaves the target's rotation
+			// alone and Follow sets it outright, so showing the rate there would
+			// be a knob that does nothing.
+			if (rig->targetYaw == CameraRigComponent::TargetYaw::FollowSmoothed)
+			{
+				Row::dragFloat("Turn Rate", &rig->targetTurnRate, 5.0f, 0.0f, 3600.0f, "%.0f \xc2\xb0/s");
+				trackEdit();
+			}
 
 			Row::dragFloat("Sensitivity", &rig->sensitivity, 0.005f, 0.005f, 2.0f, "%.3f"); trackEdit();
 			// Separate knob on purpose: mouse is degrees per PIXEL, the stick
@@ -1167,6 +1175,28 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Pitch",       &rig->pitch, 0.5f, rig->pitchMin, rig->pitchMax, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch Min",   &rig->pitchMin, 0.5f, -89.0f, 0.0f, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch Max",   &rig->pitchMax, 0.5f, 0.0f, 89.0f, "%.1f"); trackEdit();
+
+			// ── Lag ──────────────────────────────────────────────────────────
+			// Only the KNOBS live here. The smoothed pose behind them is play
+			// state, is not saved, and has nothing an author could set.
+			ImGui::SeparatorText("Lag");
+			EditorWidgets::checkbox("Camera Lag", &rig->lag.enabled); trackEdit();
+			if (rig->lag.enabled)
+			{
+				Row::dragFloat("Position Catch-Up", &rig->lag.positionSpeed, 0.1f, 0.5f, 50.0f, "%.1f");
+				trackEdit();
+				// Third person only: rotation lag moves the BOOM, and a boom of
+				// length 0 has no direction to trail.
+				if (rig->mode == CameraRigComponent::Mode::ThirdPerson)
+				{
+					Row::dragFloat("Rotation Catch-Up", &rig->lag.rotationSpeed, 0.1f, 0.5f, 50.0f, "%.1f");
+					trackEdit();
+				}
+				Row::dragFloat("Max Trail", &rig->lag.maxDistance, 0.05f, 0.0f, 20.0f, "%.2f m");
+				trackEdit();
+				Row::dragFloat("Snap Distance", &rig->lag.snapDistance, 0.1f, 0.0f, 100.0f, "%.2f m");
+				trackEdit();
+			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraRigComponent>(entity); }
 	}
@@ -1212,6 +1242,166 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				     "Renders in the Deferred path (Metal).");
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<DecalComponent>(entity); }
+	}
+
+	// ── Rope ────────────────────────────────────────────────────────────────
+	// A rope is authored here and nowhere else: the control points, the profile
+	// threaded onto them, and optionally the two entities its ends follow. The
+	// geometry is rebuilt by RopeTrailSystem the moment any of these changes —
+	// nothing in this section has to ask for it, because the system hashes what
+	// it built and compares.
+	if (auto* rope = registry.try_get<RopeComponent>(entity))
+	{
+		if (componentHeader("Rope", true, removed))
+		{
+			EditorWidgets::checkbox("Visible##rope", &rope->visible); trackEdit();
+
+			static const char* kRopeShapes[] = { "Tube", "Ribbon" };
+			int shape = static_cast<int>(rope->shape);
+			if (Row::combo("Shape##rope", &shape, kRopeShapes, 2))
+			{
+				if (undo) undo->snapshotNow();
+				rope->shape = static_cast<RopeShape>(shape);
+			}
+			Row::dragFloat("Radius##rope", &rope->radius, 0.005f, 0.001f, 10.0f, "%.3f m");
+			trackEdit();
+			if (rope->shape == RopeShape::Tube)
+			{
+				Row::dragInt("Radial Segments", &rope->radialSegments, 1.0f, 3, 64); trackEdit();
+			}
+			else
+			{
+				EditorWidgets::checkbox("Two Sided", &rope->twoSidedGeometry); trackEdit();
+			}
+			Row::dragInt("Samples Per Span", &rope->samplesPerSpan, 1.0f, 1, 64); trackEdit();
+			Row::dragFloat("Sag", &rope->sag, 0.01f, 0.0f, 100.0f, "%.2f m"); trackEdit();
+			Row::dragFloat("UV Tile Length", &rope->uvTileLength, 0.05f, 0.0f, 100.0f, "%.2f m");
+			trackEdit();
+			EditorWidgets::checkbox("Casts Shadow##rope", &rope->castsShadow); trackEdit();
+			EditorWidgets::assetDropSlot(ctx, "Material##rope", rope->materialAssetId,
+			                             HE::AssetType::Material, "ropemat",
+			                             "(none — drop a material here)", "material", true);
+
+			// ── Attachments ─────────────────────────────────────────────────
+			// Same picker the Camera Rig's target uses, and for the same reason:
+			// a component refers to another entity by its EntityIdComponent UUID,
+			// which is the only handle that survives a save.
+			{
+				std::vector<const char*> names{ "(none)" };
+				std::vector<HE::UUID>    ids{ HE::UUID{} };
+				for (auto [e, name] : registry.view<NameComponent>().each())
+				{
+					if (e == entity || e == world.rootEntity()) continue;
+					if (!registry.all_of<TransformComponent>(e))  continue;
+					const HE::UUID id = world.entityId(e);
+					if (id == HE::UUID{}) continue;
+					names.push_back(name.name.c_str());
+					ids.push_back(id);
+				}
+				auto picker = [&](const char* label, HE::UUID& slot)
+				{
+					int current = 0;
+					for (size_t i = 1; i < ids.size(); ++i)
+						if (ids[i] == slot) { current = static_cast<int>(i); break; }
+					if (Row::combo(label, &current, names.data(), static_cast<int>(names.size())))
+					{
+						// A picker commits on the click that closes the popup, and
+						// that click leaves no deactivated item behind — trackEdit
+						// would never see it, so the snapshot is taken by hand.
+						if (undo) undo->snapshotNow();
+						slot = ids[static_cast<size_t>(current)];
+					}
+				};
+				picker("Attach Start", rope->attachStart);
+				picker("Attach End",   rope->attachEnd);
+			}
+
+			// ── Control points ──────────────────────────────────────────────
+			// One fixed label for every row, so the tooltip lookup and the help
+			// audit both see a single control rather than "Point 0", "Point 1"
+			// and so on, none of which could ever have an entry.
+			ImGui::Spacing();
+			EditorWidgets::subHeading("Control Points");
+			hint("In the entity's own space. Fewer than two build nothing at all — "
+			     "the viewport still shows the handles so an empty rope can be found.");
+			for (int i = 0; i < static_cast<int>(rope->controlPoints.size()); ++i)
+			{
+				ImGui::PushID(i);
+				Row::dragFloat3("Point", &rope->controlPoints[static_cast<size_t>(i)].x,
+				                0.05f, -10000.0f, 10000.0f);
+				trackEdit();
+				// Removing one is a structural edit on a click, which is exactly
+				// what trackEdit cannot see — snapshot before the erase.
+				if (rope->controlPoints.size() > 2 &&
+				    EditorWidgets::dangerSmallButton("Remove##ropept"))
+				{
+					if (undo) undo->snapshotNow();
+					rope->controlPoints.erase(rope->controlPoints.begin() + i);
+					--i;
+				}
+				ImGui::PopID();
+			}
+			if (ImGui::Button("+ Point"))
+			{
+				if (undo) undo->snapshotNow();
+				// The new point continues the line the last two describe, so it
+				// lands somewhere visible instead of on top of its predecessor,
+				// where it would neither be draggable nor change the curve.
+				const size_t n = rope->controlPoints.size();
+				const glm::vec3 tail = n ? rope->controlPoints[n - 1] : glm::vec3(0.0f);
+				const glm::vec3 step = (n >= 2) ? (tail - rope->controlPoints[n - 2])
+				                               : glm::vec3(0.0f, -1.0f, 0.0f);
+				rope->controlPoints.push_back(tail + step);
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RopeComponent>(entity); }
+	}
+
+	// ── Trail ───────────────────────────────────────────────────────────────
+	// The other half of the same feature and the opposite data rate: nothing here
+	// is geometry, it is the rule by which the entity drops points behind itself.
+	// The band is triangulated from them every frame at extraction time.
+	if (auto* trail = registry.try_get<TrailComponent>(entity))
+	{
+		if (componentHeader("Trail", true, removed))
+		{
+			EditorWidgets::checkbox("Visible##trail",  &trail->visible);  trackEdit();
+			EditorWidgets::checkbox("Emitting", &trail->emitting); trackEdit();
+			Row::dragFloat("Lifetime", &trail->lifetime, 0.01f, 0.0f, 60.0f, "%.2f s");
+			trackEdit();
+			Row::dragFloat("Min Vertex Distance", &trail->minVertexDistance,
+			               0.005f, 0.0f, 10.0f, "%.3f m");
+			trackEdit();
+			Row::dragInt("Max Points", &trail->maxPoints, 1.0f, 2, 1024); trackEdit();
+			Row::dragFloat("Start Width", &trail->startWidth, 0.01f, 0.0f, 50.0f, "%.2f m");
+			trackEdit();
+			Row::dragFloat("End Width",   &trail->endWidth,   0.01f, 0.0f, 50.0f, "%.2f m");
+			trackEdit();
+
+			static const char* kTrailAlign[] = { "Camera", "Frame" };
+			int align = static_cast<int>(trail->alignment);
+			if (Row::combo("Alignment", &align, kTrailAlign, 2))
+			{
+				if (undo) undo->snapshotNow();
+				trail->alignment = static_cast<TrailAlignment>(align);
+			}
+
+			EditorWidgets::assetDropSlot(ctx, "Material##trail", trail->materialAssetId,
+			                             HE::AssetType::Material, "trailmat",
+			                             "(none — drop a material here)", "material", true);
+			{
+				EditorWidgets::WrapText wrap;
+				hint("The band carries its AGE in uv.v — 0 at the tip, 1 at the tail. "
+				     "Colour, opacity and fade come from the material graph reading "
+				     "that, not from fields here.");
+			}
+
+			// Read-only, and the one thing in this section that is not a setting:
+			// a trail with no points is invisible, and this is what tells the
+			// difference between "not emitting" and "the entity has not moved".
+			Row::labelText("Points", "%zu / %d", trail->points.size(), trail->maxPoints);
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TrailComponent>(entity); }
 	}
 
 	// ── Rigid Body ──────────────────────────────────────────────────────────
@@ -1846,6 +2036,8 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			}
 			addItem("Light",        LightComponent{});
 			addItem("Decal",        DecalComponent{});
+			addItem("Rope",         RopeComponent{});
+			addItem("Trail",        TrailComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
 			addItem("Save State",          SaveStateComponent{});

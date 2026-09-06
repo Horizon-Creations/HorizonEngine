@@ -250,9 +250,43 @@ geschrieben; er läuft nicht.
 | G-Buffer-Variante für Graph-Materials | JA | -- | -- | -- |
 | RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
-| Deferred Decals | -- | -- | -- | -- |
+| Deferred Decals | JA | ~ ¹ | ~ ¹ | ~ ¹ |
 | Clustered-Lighting-Build | -- | -- | -- | -- |
 | SSR deferred / SSR forward | -- | -- | -- | -- |
+
+¹ **Vulkan zeichnet Decals, aber nicht deferred.** Vulkan hat keinen G-Buffer, also
+gibt es dort kein Base-Color-Ziel, in das ein Decal *vor* der Beleuchtung blenden
+könnte. Statt auf den Deferred-Port (P4) zu warten, zeichnet Vulkan
+**Forward-Screen-Space-Decals**: Kamera-Tiefen-Vorpass, Weltposition rekonstruieren,
+Box clippen, in die bereits beleuchtete Farbe blenden. Der Projektor bringt seine
+eigene, viel kleinere Beleuchtung mit (ein Richtungslicht + Ambient, Normale aus
+`ddx/ddy` der rekonstruierten Position) — **keine Schatten, keine Punkt-/Spotlichter,
+kein GI auf dem Decal**. Das ist eine bewusste, dokumentierte Abweichung derselben
+Art wie Single-Map statt CSM bei den Schatten. Details und Grenzen:
+`docs/decals-cross-backend-plan.md` §6.
+
+**D3D11 zeichnet seit 06.09.2026 dieselben Decals**, mit demselben Shader
+(`MaterialShaderLibrary::decalFragmentForward`) und derselben Abweichung. Nur die
+Tiefe kommt anders zustande: D3D11 kennt keine Render-Pass-Objekte, also braucht es
+keinen Vorpass — die Szenentiefe liegt jetzt als `R24G8_TYPELESS` mit DSV **und** SRV
+vor (Checkpoint C1), und der Decal-Pass nimmt den DSV kurz vom Output-Merger, liest
+die Tiefe als Textur und hängt ihn danach zurück. Das deckt mehr ab als Vulkans
+Vorpass: Skinned Meshes, Partikel und WPO-Geometrie stehen im echten Tiefenpuffer.
+Details: `docs/decals-cross-backend-plan.md` §6b.
+
+**D3D12 zeichnet sie seit dem 06.09.2026 auch**, mit demselben Shader, denselben
+Registern (`b13`, `t14/s14`, `t15/s15`) und derselben Abweichung. Der Weg ist der
+von D3D11, nicht der von Vulkan: die Haupt-Tiefe ist jetzt `R32_TYPELESS` mit DSV
+(`D32_FLOAT`) **und** SRV (`R32_FLOAT`, Checkpoint C2), Swapchain wie Viewport. Was
+D3D11 still auflöst, sagt D3D12 laut: der DSV kommt per `OMSetRenderTargets` vom
+Output-Merger, eine Resource-Barrier stellt die Tiefe auf `PIXEL_SHADER_RESOURCE`,
+nach den Draws geht beides zurück. Kein Vorpass, also dieselbe Deckung wie D3D11
+(Skinned Meshes, Partikel, WPO-Geometrie). Details: `…-plan.md` §6c.
+
+**Damit zeichnen alle fünf Backends Decals**, und zwar aus einer einzigen
+Shader-Quelle in drei Fassungen: Metal per Framebuffer-Fetch in den G-Buffer, GL aus
+einer gesampelten Tiefe in den G-Buffer, Vulkan/D3D11/D3D12 forward ins Farbziel.
+Der Roadmap-Punkt ist damit nicht mehr „nur Metal".
 
 ### Himmel & Wetter
 
@@ -343,6 +377,9 @@ Render-Passes — aber das ist ein eigener Entwurf, kein Port. Nicht in diesem P
 am offenen Tile-G-Buffer-Pass. Der *Algorithmus* ist portabel (Clustered braucht nur
 Structured Buffers/SSBOs, siehe §1.4), die *Einbettung* nicht. Sie stehen deshalb erst nach
 P4 an, nicht darin.
+→ **Decals sind seit 06.09.2026 vorgezogen** (`docs/decals-cross-backend-plan.md`): GL hat
+den echten Port bekommen, Vulkan und D3D11 einen Forward-Ersatz mit eigener kleiner Beleuchtung.
+Nur der *deferred* Decal-Pfad wartet auf P4; Decals als Feature nicht mehr.
 
 **Echte Hit-Normalen über Tier-2-Argument-Buffer** (`refl-true-hit-normals-argbuffer`) ist
 ein Metal-Ressourcenmodell-Merkmal. Auf D3D12/Vulkan wäre das Bindless — anderer Entwurf.

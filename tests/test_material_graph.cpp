@@ -708,6 +708,276 @@ TEST_CASE("Every standard node cross-compiles with all inputs wired")
 	}
 }
 
+TEST_CASE("Decal shaders cross-compile for every backend")
+{
+	// docs/decals-cross-backend-plan.md §7 gate 2. The vertex stage is backend-
+	// agnostic; the SAMPLED fragment is what the GL/Vulkan/D3D ports use, so it
+	// has to survive all four emitters. The framebuffer-fetch fragment is Metal-
+	// only by construction (subpassInput → [[color(3)]]).
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& v = lib.decalVertex(b);
+		CHECK_MESSAGE(v.ok, "decal vertex failed for backend ", (int)b, ": ", v.log);
+		const auto& f = lib.decalFragmentSampled(b);
+		CHECK_MESSAGE(f.ok, "sampled decal fragment failed for backend ", (int)b, ": ", f.log);
+		// The forward variant is what Vulkan/D3D11/D3D12 draw with; it carries
+		// ddx/ddy and faceforward, which not every emitter spells the same way.
+		const auto& fw = lib.decalFragmentForward(b);
+		CHECK_MESSAGE(fw.ok, "forward decal fragment failed for backend ", (int)b, ": ", fw.log);
+	}
+	const auto& fetch = lib.decalFragment(B::Metal);
+	CHECK_MESSAGE(fetch.ok, fetch.log);
+
+	// The cache key must separate the fragment variants (it used to be
+	// backend*2 + stage, which collided the moment a second fragment appeared).
+	CHECK(&lib.decalFragment(B::Metal) != &lib.decalFragmentSampled(B::Metal));
+	CHECK(lib.decalFragment(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+	CHECK(lib.decalFragmentForward(B::Metal).source != lib.decalFragmentSampled(B::Metal).source);
+
+	// The forward variant must contain NO discard: its normal comes from
+	// derivatives, which are undefined in non-uniform control flow. Coverage is
+	// folded into the alpha instead. Checked on the GLSL emitter, which keeps
+	// the keyword verbatim.
+	const std::string fwGlsl = lib.decalFragmentForward(B::GLSL410).source;
+	CHECK(fwGlsl.find("discard") == std::string::npos);
+	CHECK(lib.decalFragmentSampled(B::GLSL410).source.find("discard") != std::string::npos);
+
+	// Both stages declare the SAME HeDecal block — a member mismatch is a LINK
+	// error on GL, which no test without a context can catch. Compare the block
+	// text the emitter produced for each stage.
+	auto block = [](const std::string& src) -> std::string {
+		const size_t b = src.find("HeDecal");
+		if (b == std::string::npos) return {};
+		const size_t e = src.find('}', b);
+		if (e == std::string::npos) return {};
+		return src.substr(b, e - b);
+	};
+	const std::string vBlock = block(lib.decalVertex(B::GLSL410).source);
+	CHECK_FALSE(vBlock.empty());
+	CHECK(vBlock == block(lib.decalFragmentSampled(B::GLSL410).source));
+	CHECK(vBlock == block(fwGlsl));
+}
+
+TEST_CASE("SSR shaders cross-compile for every backend")
+{
+	// docs/ssr-cross-backend-plan.md §8 gate 1. Before this case there was not a
+	// single automatic test under SSR (§2.4 there): the four accessors ran only
+	// on Metal, and their generic `else` branch — the one every non-Metal port
+	// will take — had never been executed outside a hand-check.
+	//
+	// ssrComposite is deliberately in the list even though §2.2 puts it out of
+	// reach for the G-buffer-less backends: it splices the shared lighting
+	// preamble, so it is the one SSR shader that breaks when the preamble grows
+	// something an emitter cannot spell.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& trace = lib.ssrTrace(b);
+		CHECK_MESSAGE(trace.ok, "ssrTrace failed for backend ", (int)b, ": ", trace.log);
+		const auto& comp = lib.ssrComposite(b);
+		CHECK_MESSAGE(comp.ok, "ssrComposite failed for backend ", (int)b, ": ", comp.log);
+		const auto& blur = lib.ssrBlur(b);
+		CHECK_MESSAGE(blur.ok, "ssrBlur failed for backend ", (int)b, ": ", blur.log);
+		const auto& mix = lib.ssrRoughMix(b);
+		CHECK_MESSAGE(mix.ok, "ssrRoughMix failed for backend ", (int)b, ": ", mix.log);
+	}
+
+	// Four shaders share one cache map keyed backend*4 + variant. A key collision
+	// would hand a caller someone else's shader and still report ok — exactly the
+	// bug the decal cache had (backend*2 + stage) the moment a second fragment
+	// appeared. Compare the emitted text, not just the addresses.
+	const std::string t = lib.ssrTrace(B::GLSL410).source;
+	const std::string c = lib.ssrComposite(B::GLSL410).source;
+	const std::string bl = lib.ssrBlur(B::GLSL410).source;
+	const std::string m = lib.ssrRoughMix(B::GLSL410).source;
+	CHECK(t != c); CHECK(t != bl); CHECK(t != m);
+	CHECK(c != bl); CHECK(c != m); CHECK(bl != m);
+
+	// Two contract details a cross-compile alone would not notice. The trace
+	// writes TWO attachments (radiance + receiver position) — a port that
+	// attaches only one gets undefined content in the history buffer — and the
+	// composite is the only one carrying the lighting preamble's UBO.
+	CHECK(t.find("oHistPos") != std::string::npos);
+	CHECK(c.find("HeLighting") != std::string::npos);
+	CHECK(t.find("HeLighting") == std::string::npos);
+}
+
+TEST_CASE("The reflection pre-pass is one shader for all backends")
+{
+	// docs/ssr-cross-backend-plan.md §3.2 way (a). The pre-pass that feeds the
+	// SSR trace on the forward path used to be hand-written MSL inside
+	// MetalRenderer.mm; every backend that ports SSR needs the same three
+	// outputs, so it lives in the library now and each backend gets its own
+	// emitter output from ONE source.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& v = lib.reflPrepassVertex(b);
+		CHECK_MESSAGE(v.ok, "refl pre-pass vertex failed for backend ", (int)b, ": ", v.log);
+		const auto& f = lib.reflPrepassFragment(b);
+		CHECK_MESSAGE(f.ok, "refl pre-pass fragment failed for backend ", (int)b, ": ", f.log);
+	}
+
+	// Metal pulls its vertices out of an SSBO (the mesh buffer bound at index 0),
+	// every other backend uses vertex attributes — the same split standardVertex
+	// makes, and for the same reason (macOS-GL 4.1 has no SSBO).
+	CHECK(lib.reflPrepassVertex(B::Metal).source != lib.reflPrepassVertex(B::GLSL410).source);
+	CHECK(lib.reflPrepassVertex(B::GLSL410).source.find("aPos") != std::string::npos);
+
+	// Three attachments, in the order the Metal MRT pre-pass writes them:
+	// view position, oct normal + roughness, NDC depth. A port that drops the
+	// third one silently feeds the trace a depth of zero.
+	const std::string fs = lib.reflPrepassFragment(B::GLSL410).source;
+	CHECK(fs.find("location = 0") != std::string::npos);
+	CHECK(fs.find("location = 1") != std::string::npos);
+	CHECK(fs.find("location = 2") != std::string::npos);
+
+	// The oct encoder must be the preamble's, character for character — the SSR
+	// trace decodes GB1 with heOctDecode, and a second, subtly different encoder
+	// is a bug that only shows up as reflections pointing the wrong way.
+	CHECK(HE::MaterialShaderLibrary::reflPrepassFragmentGlsl().find(
+		"vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));") != std::string::npos);
+}
+
+TEST_CASE("GL binds the SSR shaders by name, so the names must survive emission")
+{
+	// docs/ssr-cross-backend-plan.md checkpoint A. The cross-compiler runs with
+	// 420pack OFF for GLSL 410 (macOS GL is 4.1 and cannot spell layout(binding)
+	// on a uniform block or a sampler), so OpenGLRenderer resolves EVERY SSR
+	// resource through glGetUniformLocation / glGetUniformBlockIndex on the
+	// canonical name. A rename in the shader text — or an emitter that decides to
+	// mangle one — leaves the renderer binding nothing: the trace then samples
+	// unit 0 for all five inputs and the mirror goes black, with no error
+	// anywhere. There is no GL display on the build machine, so this string
+	// contract is the only automatic net under the GL wiring.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string trace = lib.ssrTrace(B::GLSL410).source;
+	for (const char* name : { "heSceneColor", "heGB1", "heGBDepth",
+	                          "heSSRHistRad", "heSSRHistPos", "HeSSRTrace" })
+		CHECK_MESSAGE(trace.find(name) != std::string::npos,
+		              "ssrTrace(GLSL410) lost the name ", name);
+	// No binding qualifiers: one would be a syntax error on a 4.1 driver, which
+	// is a compile failure the renderer only discovers at runtime.
+	CHECK(trace.find("binding =") == std::string::npos);
+	CHECK(trace.find("#version 410") != std::string::npos);
+
+	const std::string blur = lib.ssrBlur(B::GLSL410).source;
+	CHECK(blur.find("heSSRIn")   != std::string::npos);
+	CHECK(blur.find("HeSSRBlur") != std::string::npos);
+	CHECK(blur.find("binding =") == std::string::npos);
+
+	// The pre-pass is a GEOMETRY pass on GL: attributes, not an SSBO pull, and
+	// the uniform block the renderer looks up as "U". Position at location 0 and
+	// normal at location 1 are the mesh VAO's layout — swapped, the pre-pass
+	// would encode positions as normals and every reflection would aim wrong.
+	const std::string pvs = lib.reflPrepassVertex(B::GLSL410).source;
+	CHECK(pvs.find("layout(location = 0) in") != std::string::npos);
+	CHECK(pvs.find("layout(location = 1) in") != std::string::npos);
+	CHECK(pvs.find("gl_VertexIndex") == std::string::npos); // Metal-only SSBO pull
+	CHECK(pvs.find("uniform U")      != std::string::npos);
+}
+
+TEST_CASE("SSR HLSL registers stay inside D3D11's bindable range")
+{
+	// docs/ssr-cross-backend-plan.md C3, the decal register test's twin one
+	// feature over. The canonical SSR bindings are 19..25; emitted one-for-one
+	// they become register(b23)/register(s19..s25), and D3D11 caps a stage at 14
+	// constant buffers and 16 samplers — those shaders could not be bound at all.
+	// There is no D3D11 header and no fxc on the build machine, so this check on
+	// the emitted text is the ONLY automatic net under the D3D11 SSR pass, and
+	// the numbers are the contract checkpoint D inherits.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string trace = lib.ssrTrace(B::HLSL).source;
+	CHECK(trace.find("register(b12)") != std::string::npos); // HeSSRTrace  (23)
+	CHECK(trace.find("register(t8)")  != std::string::npos); // heSceneColor(19)
+	CHECK(trace.find("register(s8)")  != std::string::npos);
+	CHECK(trace.find("register(t9)")  != std::string::npos); // heGB1       (20)
+	CHECK(trace.find("register(s9)")  != std::string::npos);
+	CHECK(trace.find("register(t11)") != std::string::npos); // heGBDepth   (22)
+	CHECK(trace.find("register(s11)") != std::string::npos);
+	CHECK(trace.find("register(t12)") != std::string::npos); // heSSRHistRad(24)
+	CHECK(trace.find("register(s12)") != std::string::npos);
+	CHECK(trace.find("register(t13)") != std::string::npos); // heSSRHistPos(25)
+	CHECK(trace.find("register(s13)") != std::string::npos);
+
+	const std::string blur = lib.ssrBlur(B::HLSL).source;
+	CHECK(blur.find("register(b12)") != std::string::npos);
+	CHECK(blur.find("register(t8)")  != std::string::npos);
+	CHECK(blur.find("register(s8)")  != std::string::npos);
+
+	// Not drawn on D3D11 today, pinned so a later wide stage cannot invent its
+	// own numbers. heAttr (21) is the only binding that appears here and nowhere
+	// else, and it must be the same t10/s10 the shared list assigns.
+	const std::string mix = lib.ssrRoughMix(B::HLSL).source;
+	CHECK(mix.find("register(b12)") != std::string::npos);
+	CHECK(mix.find("register(t10)") != std::string::npos);
+	CHECK(mix.find("register(s10)") != std::string::npos);
+
+	// The canonical numbers must be GONE, not merely joined by the pinned ones —
+	// and every sampler has to be under 16, which is the whole point.
+	for (const std::string& ps : { trace, blur, mix })
+	{
+		CHECK(ps.find("register(b23)") == std::string::npos);
+		for (const char* dead : { "register(s19)", "register(s20)", "register(s21)",
+		                          "register(s22)", "register(s24)", "register(s25)",
+		                          "register(s16)", "register(s17)" })
+			CHECK_MESSAGE(ps.find(dead) == std::string::npos,
+			              "an SSR sampler landed outside D3D11's 16 slots: ", dead);
+	}
+
+	// Pinning must not change what the shader computes: the trace still writes
+	// both attachments, and the rough mix still lerps narrow against wide.
+	CHECK(trace.find("SV_Target0") != std::string::npos);
+	CHECK(trace.find("SV_Target1") != std::string::npos);
+	CHECK(mix.find("lerp(") != std::string::npos);
+}
+
+TEST_CASE("Decal HLSL registers stay inside D3D11's bindable range")
+{
+	// docs/decals-cross-backend-plan.md §6b. SPIRV-Cross turns layout(binding = N)
+	// into register(bN/tN/sN) one-for-one, and the canonical decal bindings are
+	// 19/22/23 — past D3D11's hard limits of 14 constant-buffer and 16 sampler
+	// slots per stage. A shader emitted that way cannot be bound at all, and no
+	// D3D11 header exists on the build machine to catch it, so the pins are
+	// checked here on the emitted text. This is the ONLY automatic net under the
+	// D3D11 decal pass; the numbers are the contract D3D12 inherits.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+
+	const std::string vs = lib.decalVertex(B::HLSL).source;
+	CHECK(vs.find("register(b13)") != std::string::npos);
+	CHECK(vs.find("register(b23)") == std::string::npos);
+	CHECK(vs.find("SV_VertexID")   != std::string::npos); // bufferless cube, no VB
+
+	for (const std::string& ps : { lib.decalFragmentSampled(B::HLSL).source,
+	                               lib.decalFragmentForward(B::HLSL).source })
+	{
+		CHECK(ps.find("register(b13)") != std::string::npos); // HeDecal
+		CHECK(ps.find("register(t14)") != std::string::npos); // heDecalTex
+		CHECK(ps.find("register(s14)") != std::string::npos);
+		CHECK(ps.find("register(t15)") != std::string::npos); // heGBDepth
+		CHECK(ps.find("register(s15)") != std::string::npos);
+		// The canonical numbers must be gone, not merely joined by the pinned ones.
+		CHECK(ps.find("register(b23)") == std::string::npos);
+		CHECK(ps.find("register(s19)") == std::string::npos);
+		CHECK(ps.find("register(s22)") == std::string::npos);
+	}
+
+	// Pinning must not change what the shader computes: the GLSL emitter is the
+	// unpinned reference, and both still carry the same box clip and the same
+	// coverage rule.
+	CHECK(lib.decalFragmentForward(B::HLSL).source.find("discard") == std::string::npos);
+	CHECK(lib.decalFragmentSampled(B::HLSL).source.find("discard") != std::string::npos);
+}
+
 TEST_CASE("v5 graph (logic + If + new params) cross-compiles for Metal and GL")
 {
 	MaterialGraph g;

@@ -864,6 +864,38 @@ namespace camera {
     float getRigYaw(Ctx&);
     float getRigPitch(Ctx&);
     void  addYawPitch(Ctx&, float dYaw, float dPitch);
+
+    // ── Lag ──────────────────────────────────────────────────────────────────
+    // The knobs are scene data; these set them from a script. snapRig is the
+    // one that is not a knob: it tells the rig to SET its pose on the next
+    // frame instead of easing into it, which is what a teleport, a respawn or a
+    // cut needs — the script knows before the rig could possibly work it out.
+    void  setLagEnabled(Ctx&, bool enabled);
+    bool  getLagEnabled(Ctx&);
+    void  setLagSpeeds(Ctx&, float position, float rotation);
+    void  snapRig(Ctx&);
+
+    // ── Shake ────────────────────────────────────────────────────────────────
+    // Returns a handle. `duration <= 0` runs until it is stopped — that is the
+    // "engine rumble while the vehicle is on" case, and it is the reason the
+    // handle exists at all. A one-shot may drop it. 0 means there was no rig.
+    int   playShake(Ctx&, float posAmplitude, float rotAmplitude,
+                    float frequency, float duration);
+    void  stopShake(Ctx&, int handle);
+    void  stopAllShakes(Ctx&);
+
+    // ── FOV kick ─────────────────────────────────────────────────────────────
+    // An additive offset with an attack/hold/decay envelope. Negative degrees
+    // zoom in. It never touches the camera's own fovDegrees, so getFov/setFov
+    // keep meaning the value the author set.
+    void  kickFov(Ctx&, float degrees, float attack, float hold, float decay);
+
+    // ── Blending between cameras ─────────────────────────────────────────────
+    // Hand the view to another camera over `seconds`, curve 0 linear,
+    // 1 smoothstep, 2 ease-out. `seconds <= 0` is a cut. This is the only way a
+    // blend starts: setting isMain by hand stays a hard cut.
+    void  blendTo(Ctx&, Entity camera, float seconds, int curve);
+    bool  isBlending(Ctx&);
 }
 
 // ── Environment (the world's EnvironmentComponent) ───────────────────────────
@@ -1509,22 +1541,67 @@ namespace random {
 // the app loops read this ONE value for every gameplay tick. Anything that must
 // keep running while the game is paused (a pause menu, debug primitives) uses
 // the app's raw frame dt or unscaledDeltaTime() instead.
+//
+// The effective scale is COMPOSED from three independent channels rather than
+// being one float that every effect overwrites — with a single variable, a hit
+// effect's slow motion ending at scale 1 also lifts the pause menu somebody else
+// had set, and two simultaneous effects cannot layer at all:
+//
+//     effective = (any pause reason || hit-stop running) ? 0 : authored scale
+//     delta     = unscaledDelta * effective
+//
 namespace time {
     void  advance(float dtSeconds);      // app hook: called once per rendered frame (RAW dt)
     void  reset();                       // app hook: zero on play-start (also restores scale 1)
+    // Scene-swap hook: clears the CONTROLS (scale, pause reasons, hit-stop) but
+    // leaves elapsed/frameCount running. A scene load must not strand the new
+    // scene in the old one's slow motion, but elapsed() is a session clock and
+    // throwing it away at every door would make it useless for one.
+    void  resetControls();
     float deltaTime();                   // last frame's dt (seconds), SCALED
     float unscaledDeltaTime();           // last frame's dt as the app measured it
     float elapsed();                     // scaled seconds since reset
+    float unscaledElapsed();             // raw seconds since reset — runs through pause and hit-stop
     int   frameCount();                  // frames since reset
     // 0 = paused, 1 = normal, up to kMaxTimeScale. Clamped HERE so every
     // frontend (Lua, Python, HorizonCode, C++) inherits the same bounds.
+    // This is the AUTHORED scale — what somebody asked for, not necessarily what
+    // is in effect: a pause or a hit-stop overrides it without erasing it, so the
+    // script that dialed in slow motion still reads back its own number.
     void  setTimeScale(float scale);
     float timeScale();
     inline constexpr float kMaxTimeScale = 5.0f;
+
+    // Pause reasons are a SET, not a counter: pause(Menu) twice and resume(Menu)
+    // once leaves the game running, and a script's pause cannot lift the one the
+    // window put in place when it lost focus. Script is the reason a frontend
+    // uses when it does not name one, so scripts share a channel with each other
+    // and with nobody else.
+    enum class PauseReason : uint32_t {
+        Menu      = 1u << 0,
+        FocusLost = 1u << 1,
+        Debug     = 1u << 2,
+        Script    = 1u << 3,
+    };
+    void  pause (PauseReason reason = PauseReason::Script);
+    void  resume(PauseReason reason = PauseReason::Script);
     // "The game is paused" as ONE predicate rather than a `== 0.0f` spelled out
-    // at every gate (input dispatch, latent flow). No registry row: a script
-    // that wants to ask already has timeScale().
-    inline bool isPaused() { return timeScale() <= 0.0f; }
+    // at every gate (input dispatch, latent flow). It answers "a pause reason is
+    // set", NOT "the clock stands still": a hit-stop also stops the clock, but it
+    // must not read as paused, because PlayerHost DROPS input events while paused
+    // and a 100 ms freeze that eats the player's button press is a bug, not a
+    // feature. By the same token setTimeScale(0) alone is slow motion down to a
+    // standstill, not a pause.
+    bool  isPaused();
+
+    // Hit-stop: freeze gameplay for a REAL-TIME window (typically 0.08–0.12 s) and
+    // then return to exactly where it came from — including a slow motion that was
+    // already running, which it never touches. Re-triggering takes the longer of
+    // the two remaining windows instead of adding them up, so a burst of hits
+    // cannot accumulate into a half-second stall.
+    void  hitStop(float seconds);
+    bool  isFrozen();                    // a hit-stop window is still running
+    float effectiveScale();              // what actually multiplies dt this frame
 }
 
 // ── Player possession (process-global table; PlayerHost owns it) ─────────────
