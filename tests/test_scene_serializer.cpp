@@ -877,6 +877,74 @@ TEST_CASE("Loading a scene with serialised terrain chunks drops them")
 	he_test::removeQuiet(file);
 }
 
+TEST_CASE("A camera rig saved before lag existed loads as the camera its author saw")
+{
+	// Every knob lag and smoothed following added is absent from every scene
+	// saved before them, and those scenes have to keep looking the way they
+	// looked: lag off, the coupling hard. The keys are stripped back out of a
+	// freshly saved scene rather than hand-written, so this stays a test about
+	// the missing keys and not about the rest of the format drifting.
+	const fs::path file = fs::temp_directory_path() / "he_test_rig_legacy.hescene";
+
+	{
+		HorizonWorld world;
+		Entity cam = world.createEntity("Camera");
+		world.addComponent(cam, TransformComponent{});
+		world.addComponent(cam, CameraComponent{});
+		CameraRigComponent rig;
+		rig.armLength           = 6.5f;              // a knob that DID exist
+		rig.targetYaw           = CameraRigComponent::TargetYaw::Follow;
+		rig.targetTurnRate      = 90.0f;
+		rig.lag.enabled         = true;
+		rig.lag.positionSpeed   = 2.0f;
+		world.addComponent(cam, rig);
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+	{
+		std::ifstream in(file);
+		nlohmann::json scene; in >> scene; in.close();
+		REQUIRE(scene.contains("entities"));
+		bool stripped = false;
+		for (auto& e : scene["entities"])
+		{
+			if (!e.contains("components") || !e["components"].contains("cameraRig")) continue;
+			nlohmann::json& c = e["components"]["cameraRig"];
+			for (const char* key : { "targetTurnRate", "lagEnabled", "lagPositionSpeed",
+			                         "lagRotationSpeed", "lagMaxDistance", "lagSnapDistance" })
+			{
+				REQUIRE(c.contains(key));   // the save path really writes them
+				c.erase(key);
+			}
+			stripped = true;
+		}
+		REQUIRE(stripped);
+		std::ofstream out(file);
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	SceneSerializer ser;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+
+	const CameraRigComponent* rig = nullptr;
+	for (auto [e, r] : loaded.registry().view<CameraRigComponent>().each()) rig = &r;
+	REQUIRE(rig != nullptr);
+
+	const CameraRigComponent fresh;
+	CHECK(rig->armLength      == doctest::Approx(6.5f));   // what was there is still there
+	CHECK(rig->targetYaw      == CameraRigComponent::TargetYaw::Follow);
+	CHECK(rig->targetTurnRate == doctest::Approx(fresh.targetTurnRate));
+	CHECK(rig->lag.enabled    == fresh.lag.enabled);
+	CHECK_FALSE(rig->lag.enabled);
+	CHECK(rig->lag.positionSpeed == doctest::Approx(fresh.lag.positionSpeed));
+	CHECK(rig->lag.rotationSpeed == doctest::Approx(fresh.lag.rotationSpeed));
+	CHECK(rig->lag.maxDistance   == doctest::Approx(fresh.lag.maxDistance));
+	CHECK(rig->lag.snapDistance  == doctest::Approx(fresh.lag.snapDistance));
+
+	he_test::removeQuiet(file);
+}
+
 namespace
 {
 	// Every field HE::makeEnvironmentSettings maps, compared one by one. Used to assert
@@ -1438,6 +1506,7 @@ namespace
 		a.cameraRig.lag.rotationSpeed = 11.25f;
 		a.cameraRig.lag.maxDistance   = 1.5f;
 		a.cameraRig.lag.snapDistance  = 3.75f;
+		a.cameraRig.targetTurnRate = 240.0f;
 		// Runtime lag state, deliberately dirtied here: it must NOT come back,
 		// or a PIE stop snapshot would turn wherever a play session parked the
 		// camera into authored content.
@@ -1445,6 +1514,20 @@ namespace
 		a.cameraRig.pivotLagged = { 9.0f, 9.0f, 9.0f };
 		a.cameraRig.armYaw      = 77.0f;
 		a.cameraRig.armPitch    = -33.0f;
+		// The rest of the play-session state, dirtied for the same reason: a
+		// scene that came back mid-shake, mid-kick or mid-blend would be a
+		// level that plays differently the second time it is opened.
+		{
+			HE::ShakeInstance s;
+			s.duration = 10.0f;              // long enough that it cannot be over
+			a.cameraRig.playShake(s);
+		}
+		a.cameraRig.kickFov(12.0f, 0.05f, 0.1f, 0.4f);
+		a.cameraRig.blend.remaining = 0.5f;
+		a.cameraRig.blend.duration  = 1.0f;
+		a.cameraRig.blend.curve     = HE::BlendCurve::EaseOut;
+		a.cameraRig.lastWritten.position = { 5.0f, 5.0f, 5.0f };
+		a.cameraRig.hasLastWritten       = true;
 		reg.emplace<CameraRigComponent>(actor, a.cameraRig);
 
 		a.movement.maxSpeed         = 7.25f;
@@ -1720,6 +1803,7 @@ namespace
 			CHECK(rig->pitchMin       == doctest::Approx(a.cameraRig.pitchMin));
 			CHECK(rig->pitchMax       == doctest::Approx(a.cameraRig.pitchMax));
 			CHECK(rig->targetYaw      == a.cameraRig.targetYaw);
+			CHECK(rig->targetTurnRate == doctest::Approx(a.cameraRig.targetTurnRate));
 			CHECK(rig->hideTargetMesh  == a.cameraRig.hideTargetMesh);
 			CHECK(rig->collision       == a.cameraRig.collision);
 			CHECK(rig->collisionRadius == doctest::Approx(a.cameraRig.collisionRadius));
@@ -1732,6 +1816,14 @@ namespace
 			CHECK_FALSE(rig->hasLagState);
 			CHECK(rig->armYaw   == doctest::Approx(0.0f));
 			CHECK(rig->armPitch == doctest::Approx(0.0f));
+			// Neither is the rest of the play session: no shake carries over,
+			// no kick, no half-finished blend.
+			for (const auto& s : rig->shakes) CHECK(s.id == 0u);
+			CHECK_FALSE(rig->fovKick.active);
+			CHECK(rig->blend.duration  == doctest::Approx(0.0f));
+			CHECK(rig->blend.remaining == doctest::Approx(0.0f));
+			CHECK_FALSE(rig->isBlending());
+			CHECK_FALSE(rig->hasLastWritten);
 			// Runtime-only: a fresh session has hidden nothing yet.
 			CHECK((rig->meshHiddenEntity == entt::null));
 		}
