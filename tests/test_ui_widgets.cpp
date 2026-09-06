@@ -7898,6 +7898,19 @@ TEST_CASE("A click on the clear cross empties the field and does not move the ca
         HE::UIWidgetRect gone{};
         CHECK_FALSE(ti->clearButtonRect(pxr, gone));
     }
+
+    // The promise the shipped component's help text makes: Ctrl+Z brings the
+    // words back. Checked through the manager and not only through applyClear,
+    // because undo walks the FOCUSED field's history — a press that cleared the
+    // field but left the focus somewhere else would take the sentence away with
+    // no way back to it.
+    CHECK(wm.undoFocusedText());
+    {
+        const auto* ti = dynamic_cast<const HE::UITextInput*>(
+            wm.tree(id)->find(field));
+        REQUIRE(ti);
+        CHECK(ti->text == "search term");
+    }
 }
 
 // ── B9: a bar with no end to report ──────────────────────────────────────────
