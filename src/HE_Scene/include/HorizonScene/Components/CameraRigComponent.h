@@ -93,6 +93,55 @@ struct CameraRigComponent {
     // still has a shadow, it just is not drawn.
     bool hideTargetMesh = true;
 
+    // ── Lag ──────────────────────────────────────────────────────────────────
+    // Two smoothings that do two different things (see below). Knobs: scene
+    // data, serialised. The smoothed values themselves are runtime state and
+    // are NOT — see the block after this one.
+    //
+    // Off by default, unlike collision. Collision has an explicit argument
+    // behind it (no physics world → no collision) and its absence reads as a
+    // defect; lag has no such argument, and switching it on would shift every
+    // existing scene and every existing assertion by a frame. Off means the
+    // rig is bit-for-bit what it was before lag existed.
+    struct Lag {
+        bool  enabled       = false;
+        float positionSpeed = 10.0f;  // 1/s, on the pivot; large = tight
+        float rotationSpeed = 15.0f;  // 1/s, on armYaw/armPitch only
+        float maxDistance   = 2.0f;   // m, cap on how far the pivot may trail
+        float snapDistance  = 5.0f;   // m, beyond this it is set, not smoothed
+    };
+    Lag lag;
+
+    // ── Runtime lag state, NOT serialised ────────────────────────────────────
+    // A saved lag pose would become authored content the moment PIE writes its
+    // stop snapshot, and a scene would then load with the camera parked
+    // wherever a play session happened to leave it.
+    //
+    // pivotLagged trails the real pivot; the boom is built from IT, and the
+    // sphere sweep starts there — smoothing the finished camera pose instead
+    // would fight the shortening, with the camera creeping into a wall and back
+    // out again while the arm snaps.
+    //
+    // armYaw/armPitch are the smoothed BOOM direction, and only that. yaw/pitch
+    // above stay the raw input state: they are the look direction that goes into
+    // the transform and the value the Follow coupling writes to the target. A
+    // smoothed look direction would make the mouse feel indirect and would send
+    // the character walking somewhere the player is not looking.
+    //
+    // hasLagState == false means "set, do not smooth, on the next frame". That
+    // is the whole snap mechanism: the first frame of a rig, and any explicit
+    // snap after a teleport or a cut. Beyond that, a jump larger than
+    // snapDistance sets by itself.
+    bool      hasLagState = false;
+    glm::vec3 pivotLagged{ 0.0f };
+    float     armYaw     = 0.0f;
+    float     armPitch   = 0.0f;
+
+    // Set the rig's pose hard on the next frame instead of easing into it.
+    // For teleports, respawns and cuts, where the script knows before the rig
+    // could possibly tell.
+    void snap() { hasLagState = false; }
+
     // Runtime only, not serialised: WHICH entity the rig is currently holding
     // hidden, entt::null for none. Two things depend on it being an entity
     // rather than a flag — telling "I hid this" apart from "the author hid

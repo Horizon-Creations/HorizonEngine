@@ -78,6 +78,19 @@ schaltete damit auch die Maus im Pausenmenü wieder scharf.
 
 ## 3. Das Fundament: Solved Pose
 
+> **Gebaut (Schritt 2).** `HE::SolvedPose` steht in `CameraRigController.h`,
+> `solveRig()` in der anonymen Namensraum-Sektion von `CameraRigController.cpp`.
+> Eine Abweichung vom Entwurf oben: die Struktur trägt neben `rotation`
+> (Quaternion, für den Slerp beim Blend) auch `eulerDegrees` — die Winkel, die
+> das Rig tatsächlich hält. `glm::eulerAngles` liefert ein äquivalentes, aber
+> anderes Tripel zurück (Yaw −179° kommt als +181° mit gekippten Nachbarachsen
+> wieder), und die Kamerarotation ist Autoreninhalt, den der Inspector anzeigt.
+> Wer nicht blendet, schreibt `eulerDegrees`; wer blendet, slerpt `rotation`.
+>
+> Der Blend-Teil aus Punkt 5 der Reihenfolge steht noch aus (Schritt 3), das
+> Quell-Rig wird aber bereits mitgelöst und sein Sweep bereits vorbereitet:
+> `solveRig` bekommt `physics` als Argument und nicht als globale Bedingung.
+
 Heute rechnet `update()` die Pose und schreibt sie direkt in den
 `TransformComponent` der Kamera. Für Lag, Shake und Blending reicht das nicht:
 alle drei brauchen die Pose als **Wert**, bevor sie im Transform landet.
@@ -135,6 +148,20 @@ Szenendaten und wandern durch Serializer, Inspector und Handbuch.
 ---
 
 ## 4. Lag
+
+> **Gebaut (Schritt 2), bis auf §4.4.** Felder, Glätter, Klemme und die drei
+> Hart-Setzen-Fälle stehen; `snapRig()` heißt in der Komponente
+> `CameraRigComponent::snap()` (die Skript-Zeile aus §8 kommt später). Die
+> Regler wandern durch den Serializer, die geglättete Pose ausdrücklich nicht.
+>
+> **`TargetYaw::FollowSmoothed` (§4.4) ist NICHT gebaut** — weiches Nachdrehen
+> der Kopplung ist ein neuer Enum-Wert plus ein `turnRate`-Regler und damit
+> Serializer, Inspector und Handbuch, also Schritt 4.
+>
+> Zu Testpunkt 1 in §10: die dort genannte Sekunde entlarvt `lerp` nicht. Nach
+> 1 s bei `speed = 10` sind beide Formeln auskonvergiert (Restfehler ~1e-5, weit
+> unter ε = 1e-3). Gemessen wird deshalb **mitten in der Bewegung**, bei 0,1 s:
+> Exponentialglätter 0,632, `lerp` 0,665 bzw. 0,648 je nach Schrittweite.
 
 Zwei getrennte Glättungen, weil sie zwei verschiedene Dinge tun.
 

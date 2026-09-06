@@ -1433,6 +1433,18 @@ namespace
 		a.cameraRig.hideTargetMesh  = false;
 		a.cameraRig.collision       = false;
 		a.cameraRig.collisionRadius = 0.45f;
+		a.cameraRig.lag.enabled       = true;
+		a.cameraRig.lag.positionSpeed = 7.5f;
+		a.cameraRig.lag.rotationSpeed = 11.25f;
+		a.cameraRig.lag.maxDistance   = 1.5f;
+		a.cameraRig.lag.snapDistance  = 3.75f;
+		// Runtime lag state, deliberately dirtied here: it must NOT come back,
+		// or a PIE stop snapshot would turn wherever a play session parked the
+		// camera into authored content.
+		a.cameraRig.hasLagState = true;
+		a.cameraRig.pivotLagged = { 9.0f, 9.0f, 9.0f };
+		a.cameraRig.armYaw      = 77.0f;
+		a.cameraRig.armPitch    = -33.0f;
 		reg.emplace<CameraRigComponent>(actor, a.cameraRig);
 
 		a.movement.maxSpeed         = 7.25f;
@@ -1711,6 +1723,15 @@ namespace
 			CHECK(rig->hideTargetMesh  == a.cameraRig.hideTargetMesh);
 			CHECK(rig->collision       == a.cameraRig.collision);
 			CHECK(rig->collisionRadius == doctest::Approx(a.cameraRig.collisionRadius));
+			CHECK(rig->lag.enabled       == a.cameraRig.lag.enabled);
+			CHECK(rig->lag.positionSpeed == doctest::Approx(a.cameraRig.lag.positionSpeed));
+			CHECK(rig->lag.rotationSpeed == doctest::Approx(a.cameraRig.lag.rotationSpeed));
+			CHECK(rig->lag.maxDistance   == doctest::Approx(a.cameraRig.lag.maxDistance));
+			CHECK(rig->lag.snapDistance  == doctest::Approx(a.cameraRig.lag.snapDistance));
+			// The smoothed pose is not scene data — it comes back at its default.
+			CHECK_FALSE(rig->hasLagState);
+			CHECK(rig->armYaw   == doctest::Approx(0.0f));
+			CHECK(rig->armPitch == doctest::Approx(0.0f));
 			// Runtime-only: a fresh session has hidden nothing yet.
 			CHECK((rig->meshHiddenEntity == entt::null));
 		}

@@ -535,3 +535,188 @@ TEST_CASE("CameraRig: hideTargetMesh off leaves the mesh alone")
     HE::CameraRigController::update(r->world, kNoMouse);
     CHECK(r->world.registry().get<MeshComponent>(r->target).visible);
 }
+
+// ─── Lag ──────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// A rig whose camera sits exactly ON the pivot — no boom, no shoulder offset —
+// so the camera's position IS the lagged pivot and the assertions below are
+// about the smoother rather than about trigonometry.
+std::unique_ptr<Rig> makeLagRig()
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 0.0f;
+    r->rig().lag.enabled = true;
+    return r;
+}
+
+// n frames of nothing but time passing.
+void stepTime(Rig& r, float dt, int n)
+{
+    HE::CameraLookInput look;
+    look.dt = dt;
+    for (int i = 0; i < n; ++i)
+        HE::CameraRigController::update(r.world, look);
+}
+
+} // namespace
+
+TEST_CASE("CameraRig: lag is framerate-independent")
+{
+    // THE property. `lerp(a, b, speed * dt)` is tuned at one refresh rate and is
+    // a different camera at another; `1 - exp(-speed * dt)` leaves exactly
+    // exp(-speed * T) of the gap after T seconds however that second was cut up.
+    //
+    // Sampled MID-transition, at 0.1 s, on purpose: run it out to a full second
+    // and both formulations have converged to within a hair of the target, and
+    // the test passes for the broken one too.
+    auto run = [](int steps, float dt) {
+        auto r = makeLagRig();
+        r->rig().lag.positionSpeed = 10.0f;
+        r->rig().lag.maxDistance   = 100.0f;   // out of the way of the clamp
+        r->rig().lag.snapDistance  = 100.0f;   // out of the way of the snap
+
+        stepTime(*r, dt, 1);                   // first frame sets, at the origin
+        r->tgtXform().position = { 1.0f, 0.0f, 0.0f };
+        stepTime(*r, dt, steps);
+        return r->camXform().position.x;
+    };
+
+    const float at60  = run(6,  1.0f / 60.0f);    // 0.1 s
+    const float at120 = run(12, 1.0f / 120.0f);   // the same 0.1 s
+
+    // 1 - exp(-10 * 0.1) = 1 - e^-1
+    CHECK(at60  == doctest::Approx(0.63212f).epsilon(0.002));
+    CHECK(at120 == doctest::Approx(0.63212f).epsilon(0.002));
+    CHECK(at60  == doctest::Approx(at120).epsilon(0.002));
+
+    // And it really was mid-flight, not a hard set dressed up as smoothing.
+    CHECK(at60 > 0.1f);
+    CHECK(at60 < 0.9f);
+}
+
+TEST_CASE("CameraRig: the first frame of a rig sets, it does not ease in")
+{
+    // Otherwise every level start opens with the camera flying in from the world
+    // origin.
+    auto r = makeLagRig();
+    r->rig().armLength = 4.0f;
+    r->tgtXform().position = { 0.0f, 0.0f, 10.0f };
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK(r->camXform().position.z == doctest::Approx(14.0f));
+}
+
+TEST_CASE("CameraRig: a jump past snapDistance sets, one just under it smooths")
+{
+    auto r = makeLagRig();
+    r->rig().lag.positionSpeed = 10.0f;
+    r->rig().lag.snapDistance  = 5.0f;
+    r->rig().lag.maxDistance   = 100.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    // A respawn six metres away — the camera must be there, not travelling.
+    r->tgtXform().position = { 0.0f, 0.0f, 6.0f };
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.z == doctest::Approx(6.0f));
+
+    // Four metres is a fast run, not a teleport, and is smoothed.
+    auto s = makeLagRig();
+    s->rig().lag.positionSpeed = 10.0f;
+    s->rig().lag.snapDistance  = 5.0f;
+    s->rig().lag.maxDistance   = 100.0f;
+    stepTime(*s, 1.0f / 60.0f, 1);
+
+    s->tgtXform().position = { 0.0f, 0.0f, 4.0f };
+    stepTime(*s, 1.0f / 60.0f, 1);
+    CHECK(s->camXform().position.z > 0.1f);
+    CHECK(s->camXform().position.z < 3.9f);
+}
+
+TEST_CASE("CameraRig: maxDistance caps how far the camera can be left behind")
+{
+    auto r = makeLagRig();
+    r->rig().lag.positionSpeed = 2.0f;      // deliberately sluggish
+    r->rig().lag.maxDistance   = 2.0f;
+    r->rig().lag.snapDistance  = 1000.0f;   // the cap must hold on its own
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    // A target moving far faster than the smoother could ever follow.
+    for (int i = 1; i <= 30; ++i)
+    {
+        r->tgtXform().position = { 0.0f, 0.0f, static_cast<float>(i) * 5.0f };
+        stepTime(*r, 1.0f / 60.0f, 1);
+        const float trail = r->tgtXform().position.z - r->camXform().position.z;
+        CHECK(trail <= doctest::Approx(2.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("CameraRig: yaw lag crosses ±180 the short way")
+{
+    auto r = makeLagRig();
+    r->rig().lag.rotationSpeed = 10.0f;
+    r->rig().yaw = 179.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);           // sets armYaw to 179
+    REQUIRE(r->rig().armYaw == doctest::Approx(179.0f));
+
+    // Two degrees across the seam. Folding the difference into (-180, 180] makes
+    // that a two-degree move; not folding it sends the boom 358° the other way.
+    r->rig().yaw = -179.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK(r->rig().armYaw > 179.0f);
+    CHECK(r->rig().armYaw < 181.0f);
+
+    // And the LOOK direction is not smoothed at all — that is the whole point of
+    // keeping armYaw separate from yaw. With lag off the two are equal, so this
+    // is the one assertion that can tell them apart.
+    CHECK(r->camXform().rotation.y == doctest::Approx(-179.0f));
+    CHECK(r->rig().yaw             == doctest::Approx(-179.0f));
+}
+
+TEST_CASE("CameraRig: snap() sets on the next frame instead of easing")
+{
+    // The third hard-set case: a script that teleports its character knows
+    // before the rig could possibly work it out.
+    auto r = makeLagRig();
+    r->rig().lag.positionSpeed = 10.0f;
+    r->rig().lag.snapDistance  = 1000.0f;   // would smooth all the way
+    r->rig().lag.maxDistance   = 1000.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    r->tgtXform().position = { 0.0f, 0.0f, 50.0f };
+    r->rig().snap();
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK(r->camXform().position.z == doctest::Approx(50.0f));
+}
+
+TEST_CASE("CameraRig: lag is off by default and off means today's pose exactly")
+{
+    // The guarantee under which the solved-pose rebuild was allowed to happen:
+    // at default settings the rig is bit-for-bit what it was before lag existed.
+    auto r = makeRig();
+    CHECK_FALSE(r->rig().lag.enabled);
+
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    r->rig().sensitivity = 1.0f;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    // A teleport is followed in the very same frame, with no easing anywhere.
+    r->tgtXform().position = { 7.0f, 0.0f, -3.0f };
+    stepTime(*r, 1.0f / 60.0f, 1);
+    CHECK(r->camXform().position.x == doctest::Approx(7.0f));
+    CHECK(r->camXform().position.z == doctest::Approx(1.0f));
+
+    // And the boom direction is the look direction, not a smoothed copy of it.
+    MouseFrame m; m.dx = -45.0f;             // yaw +45°
+    HE::CameraRigController::update(r->world, m);
+    CHECK(r->rig().armYaw   == doctest::Approx(r->rig().yaw));
+    CHECK(r->rig().armPitch == doctest::Approx(r->rig().pitch));
+}
