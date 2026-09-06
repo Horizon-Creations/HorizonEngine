@@ -10001,6 +10001,66 @@ TEST_CASE("Table: the columns are the row template's cells, read from the asset"
     CHECK(cellW[2] == doctest::Approx(100.0f));
 }
 
+// The titles are parsed once per template PATH and then kept, and the designer's
+// preview destroys and recreates its widgets on the SAME manager. A cache that
+// outlived that would show the old column title after the cell was renamed, and
+// go on showing it until somebody restarted the editor.
+TEST_CASE("Table: renaming a cell and running again renames the column")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildTablePage(cm);
+
+    WidgetManager wm;
+    const int first = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(first != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    auto titleOf = [&](int id, int col) -> std::string
+    {
+        for (const auto& ep : wm.tree(id)->elements)
+            if (ep && ep->name == "List")
+                if (const auto* lv = dynamic_cast<const HE::UIListView*>(ep.get());
+                    lv && col < static_cast<int>(lv->headerLabels.size()))
+                    return lv->headerLabels[static_cast<std::size_t>(col)];
+        return {};
+    };
+    CHECK(titleOf(first, 1) == "Size");
+
+    // The author renames the cell in the row template and runs the preview
+    // again: same manager, same path, a different asset behind it.
+    HE::UIWidgetTree row;
+    row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+    row.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = row.add(HE::UIWidgetType::HorizontalBox);
+    {
+        HE::UIElement& e = *row.find(box);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 40.0f;
+        e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+        e.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f));
+    }
+    const char* renamed[3] = { "Name", "Bytes", "Kind" };
+    for (int i = 0; i < 3; ++i)
+    {
+        const int cell = row.add(HE::UIWidgetType::Text);
+        HE::UIElement& e = *row.find(cell);
+        e.parentId = box;
+        e.name = renamed[i];
+        e.sizeX = 100.0f; e.sizeY = 40.0f;
+        e.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+        e.setProp("Text", HE::UIPropValue::ofString(renamed[i]));
+    }
+    registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+    wm.destroyWidget(first);
+    const int again = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(again != 0);
+    wm.extract(400.0f, 400.0f, out);
+    CHECK(titleOf(again, 1) == "Bytes");
+}
+
 TEST_CASE("Table: a row template that cannot carry columns says so and shows none")
 {
     // Both ways a cell can insist on its own width. Slot Fill takes a share of
@@ -10071,6 +10131,41 @@ TEST_CASE("Table: a press on the header is the header's, not the first row's")
     CHECK(fr[0] == doctest::Approx(140.0f / 400.0f));
     CHECK(fr[0] + fr[1] + fr[2] == doctest::Approx(1.0f));
     // …and the selection survived the whole gesture.
+    CHECK(wm.listSelected(id, "List") == 0);
+}
+
+// A seam is a few pixels wide and sits on the edge of two titles. With the drag
+// turned off it has to belong to the title it is on, or a table with fixed
+// columns has a dead strip beside every one of them that answers nothing.
+TEST_CASE("Table: a seam that cannot be dragged is still part of its title")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildTablePage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    HE::UIListView* lv = nullptr;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->name == "List")
+            lv = const_cast<HE::UIListView*>(dynamic_cast<const HE::UIListView*>(ep.get()));
+    REQUIRE(lv);
+    lv->resizableColumns = false;
+    REQUIRE(wm.setListCount(id, "List", 50));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    const std::string before = lv->columnWidths;
+    // Right on the seam, then pulled: nothing may move, and nothing may be
+    // selected either — a press in the band is still the header's.
+    wm.processPointer(400.0f, 400.0f, 300.0f, 60.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 300.0f, 60.0f, false, true);
+    REQUIRE(wm.listSelected(id, "List") == 0);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 20.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 120.0f, 20.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 120.0f, 20.0f, false, true);
+    CHECK(lv->columnWidths == before);
     CHECK(wm.listSelected(id, "List") == 0);
 }
 

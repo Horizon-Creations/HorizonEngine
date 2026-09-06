@@ -4115,6 +4115,21 @@ behandelt: eine Warnung pro Vorlage, die die Zelle beim Namen nennt, null Spalte
 verhält sich wie bisher. Es ist die Falle, die ein Autor als erste trifft, weil sie die
 Voreinstellung ist.
 
+**4. Der Titel-Zwischenspeicher muss beim Erzeugen weg.** Er hängt am `WidgetManager` und die
+Vorschau des Designers erzeugt ihre Widgets auf DEMSELBEN Manager, auf dem sie sie abgeräumt
+hat. Ohne ein `m_columnInfo.clear()` in `createWidget` zeigt eine umbenannte Zelle so lange die
+alte Überschrift, bis jemand den Editor neu startet. Gerodet wird beim Erzeugen und nicht pro
+Zeile: eine Zeile wird über `graftChildRef` eingesetzt, das kostet also ein erneutes Lesen pro
+Widget und nicht pro Zeile.
+
+**Zwei Sachen bleiben offen und sind gemessen klein:** `availT` nimmt an, dass die Wurzelbox
+der Vorlage die ganze Leinwand einnimmt (`columnCanvasW`) — eine Box bei x=10 mit Breite 380
+auf 400 setzt die Zellen zehn Einheiten neben die Überschriften; `columnInfoFor` hat `sub` in
+der Hand, `uiElementRect(sub, *root)` wäre die genaue Zahl. Und die Trefferprüfung ist bei
+Maßstab 2 an der reinen Geometrie geprüft (`headerAtPoint` auf einem doppelten Rechteck), nicht
+durch `processPointer` auf einer skalierten Leinwand — dieselbe Umrechnung, die die Tab Box
+benutzt, aber gesagt ist gesagt.
+
 **Dazu, ohne Überraschung:** `Column Widths` wird als VERHÄLTNIS gelesen (die Summe ist immer
 die nutzbare Breite), damit die Zahlen ein Fenster-Resize überleben; die Breiten werden in
 Vorlagen-Einheiten auf die Zellen geschrieben, weil eine Zelle in der Zeilenvorlage lebt und

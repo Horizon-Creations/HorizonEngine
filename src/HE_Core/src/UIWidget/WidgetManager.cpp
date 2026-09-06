@@ -359,6 +359,14 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 int WidgetManager::createWidget(ContentManager& content, const std::string& assetPath)
 {
 	m_content = &content; // kept for runtime Material/Font re-resolution
+	// What the row templates say their columns are is parsed once per path and
+	// then kept — and the designer's preview creates its widgets on the SAME
+	// manager it destroyed them on. Without this, renaming a cell in a row
+	// template and running the preview again shows the old column title until
+	// somebody restarts the editor, which is the hardest kind of stale to
+	// explain. Cleared here and not per row: a graft goes through
+	// graftChildRef, so this costs one re-read per widget that is created.
+	m_columnInfo.clear();
 	const HE::UUID assetId = content.loadAsset(assetPath);
 	const UIWidgetAsset* asset = content.getWidget(assetId);
 	if (!asset)
@@ -1421,7 +1429,6 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 		HE_LOG_WARN(Widget, "Table row '%s': its root has to be a single Horizontal Box "
 		                    "for the header to name columns — showing none",
 		            path.c_str());
-		info.warned = true;
 		return &(m_columnInfo[path] = info);
 	}
 	if (const auto* box = dynamic_cast<const HE::UIBoxBase*>(root))
@@ -1447,12 +1454,11 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 			                    "width the table writes — showing no columns",
 			            path.c_str(), ep->name.c_str());
 			info.titles.clear();
-			info.warned = true;
 			return &(m_columnInfo[path] = info);
 		}
 		info.titles.push_back(ep->name);
 	}
-	info.valid = !info.titles.empty();
+
 	return &(m_columnInfo[path] = info);
 }
 
@@ -3393,7 +3399,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 										w.draggingColumn = lv->id;
 										w.columnSeam     = hh.column;
 									}
-									else if (hh.column >= 0 && !hh.divider)
+									// A seam that cannot be dragged is not a dead
+									// strip: it is part of the title it sits on,
+									// or a table with fixed columns has an
+									// eight-pixel hole beside every one of them.
+									else if (hh.column >= 0)
 									{
 										const ScriptTarget th = scriptTargetFor(w, lv->id);
 										rt().fireOnHeaderClicked(th.scriptId, th.elem,

@@ -1034,8 +1034,8 @@ private:
         float padding  = 0.0f;   // the root box's own two numbers, which the
         float spacing  = 0.0f;   // header has to match or it sits beside them
         float canvasW  = 0.0f;   // the template's canvas width
-        bool  valid    = false;  // the precondition held
-        bool  warned   = false;  // …and it has been said once, not once a row
+        // No "valid" flag: a template that fails the precondition has no
+        // titles, and an empty list of them is the same answer said once.
     };
     const ColumnInfo* columnInfoFor(ContentManager& content, const std::string& path);
     std::unordered_map<std::string, ColumnInfo> m_columnInfo;
