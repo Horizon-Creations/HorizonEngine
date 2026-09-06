@@ -3335,14 +3335,26 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						if (hit >= 0)
 							if (auto* live = dynamic_cast<HE::UIAccordion*>(w.tree.find(hot)))
 							{
-								live->expanded = static_cast<int>(
-									HE::UIAccordion::toggledMask(
-										static_cast<uint32_t>(live->expanded), hit, n,
-										live->allowMultiple));
-								m_visualDirty = true;
-								const ScriptTarget t2 = scriptTargetFor(w, hot);
-								rt().fireOnValueChanged(t2.scriptId, t2.elem,
-								                        static_cast<float>(hit));
+								const uint32_t was = live->effectiveMask(n);
+								const uint32_t next = HE::UIAccordion::toggledMask(
+									static_cast<uint32_t>(live->expanded), hit, n,
+									live->allowMultiple);
+								if (next != static_cast<uint32_t>(live->expanded))
+								{
+									live->expanded = static_cast<int>(next);
+									m_visualDirty = true;
+								}
+								// Only when something actually folded. The 33rd
+								// heading has no bit to turn, and an event named
+								// "Toggled" that fires when nothing toggled is
+								// the same lie the Tab Box avoids by comparing
+								// against its active tab.
+								if (next != was)
+								{
+									const ScriptTarget t2 = scriptTargetFor(w, hot);
+									rt().fireOnValueChanged(t2.scriptId, t2.elem,
+									                        static_cast<float>(hit));
+								}
 							}
 					}
 				}

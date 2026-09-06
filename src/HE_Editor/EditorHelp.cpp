@@ -2804,12 +2804,13 @@ namespace
 	  "How far in from the left edge a heading's text starts, in canvas units.",
 	  "", "ui#elements" },
 	{ "UI Widget/Bar Width", "",
-	  "How wide the scrollbar on the right edge is, in canvas units. Zero hides "
-	  "it; the wheel still scrolls.",
+	  "On anything that scrolls, how wide the scrollbar on the right edge is, in "
+	  "canvas units — zero hides it and the wheel still works. On a Color Picker "
+	  "the name means the hue strip beside the field instead.",
 	  "", "ui#elements" },
 	{ "UI Widget/Bar Color", "",
-	  "What the scrollbar's thumb is filled with. There is no track behind it — "
-	  "an empty groove is furniture nobody reads.",
+	  "What a scrollbar's thumb is filled with. There is no track behind it — an "
+	  "empty groove is furniture nobody reads.",
 	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
