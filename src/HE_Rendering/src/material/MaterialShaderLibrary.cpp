@@ -1833,6 +1833,27 @@ constexpr const char* kDecalFSForwardPost = R"(;
 // sampled=false → the Metal tile-mode framebuffer-fetch variant (kDecalFS),
 // sampled=true  → the portable variant that reads a depth TEXTURE.
 // forward=true  → sampled depth AND the self-shading tail above.
+// D3D11 caps a stage at 14 constant-buffer and 16 sampler slots, so the decal
+// shader's canonical bindings (HeDecal 23, heDecalTex 19, heGBDepth 22) cannot
+// become register(b23)/register(s19)/register(s22) — the API could never bind
+// them. These pins move them to the top of the legal range, where the scene path
+// (b0/b1/b3/b8/b9, t0..t7, s0..s7) has nothing, so the decal pass clobbers no
+// binding it would have to restore. D3D12 has no such limit but uses the same
+// numbers, so the two D3D backends share one contract
+// (docs/decals-cross-backend-plan.md §6b).
+constexpr uint32_t kDecalHlslUboReg   = 13; // HeDecal    (binding 23) → b13
+constexpr uint32_t kDecalHlslTexReg   = 14; // heDecalTex (binding 19) → t14/s14
+constexpr uint32_t kDecalHlslDepthReg = 15; // heGBDepth  (binding 22) → t15/s15
+
+// The fragment stage's three resources, for both sampled variants.
+std::vector<he::shaderc::HlslPin> kDecalHlslPins()
+{
+    using he::shaderc::Stage;
+    return { { Stage::Fragment, 0, 23, kDecalHlslUboReg },
+             { Stage::Fragment, 0, 19, kDecalHlslTexReg },
+             { Stage::Fragment, 0, 22, kDecalHlslDepthReg } };
+}
+
 std::string makeDecalFS(bool sampled, bool forward = false)
 {
     return std::string(kDecalFSHead)
@@ -1852,6 +1873,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backen
     if (backend == Backend::Metal)
         out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
             { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
+    else if (backend == Backend::HLSL)
+        out = toCompiled(compileHlslPinned(kDecalVS, Stage::Vertex,
+            { { Stage::Vertex, 0, 23, kDecalHlslUboReg } })); // HeDecal → b13
     else
         out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
     return m_decalCache.emplace(key, std::move(out)).first->second;
@@ -1892,6 +1916,8 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentSampl
             { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
               { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
               { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
+    else if (backend == Backend::HLSL)
+        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
     else
         out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     return m_decalCache.emplace(key, std::move(out)).first->second;
@@ -1911,6 +1937,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentForwa
             { { Stage::Fragment, 0, 23, 0 },
               { Stage::Fragment, 0, 19, 0 },
               { Stage::Fragment, 0, 22, 1 } }));
+    else if (backend == Backend::HLSL)
+        // The variant D3D11 and D3D12 actually draw with — pinned into their
+        // bindable register range (see kDecalHlslPins).
+        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
     else
         out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     return m_decalCache.emplace(key, std::move(out)).first->second;

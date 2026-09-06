@@ -250,7 +250,7 @@ geschrieben; er läuft nicht.
 | G-Buffer-Variante für Graph-Materials | JA | -- | -- | -- |
 | RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
-| Deferred Decals | JA | -- | -- | ~ ¹ |
+| Deferred Decals | JA | ~ ¹ | -- | ~ ¹ |
 | Clustered-Lighting-Build | -- | -- | -- | -- |
 | SSR deferred / SSR forward | -- | -- | -- | -- |
 
@@ -263,8 +263,17 @@ eigene, viel kleinere Beleuchtung mit (ein Richtungslicht + Ambient, Normale aus
 `ddx/ddy` der rekonstruierten Position) — **keine Schatten, keine Punkt-/Spotlichter,
 kein GI auf dem Decal**. Das ist eine bewusste, dokumentierte Abweichung derselben
 Art wie Single-Map statt CSM bei den Schatten. Details und Grenzen:
-`docs/decals-cross-backend-plan.md` §6. D3D11/D3D12 bekommen denselben Shader
-(`MaterialShaderLibrary::decalFragmentForward`), sobald ihre Schritte laufen.
+`docs/decals-cross-backend-plan.md` §6.
+
+**D3D11 zeichnet seit 06.09.2026 dieselben Decals**, mit demselben Shader
+(`MaterialShaderLibrary::decalFragmentForward`) und derselben Abweichung. Nur die
+Tiefe kommt anders zustande: D3D11 kennt keine Render-Pass-Objekte, also braucht es
+keinen Vorpass — die Szenentiefe liegt jetzt als `R24G8_TYPELESS` mit DSV **und** SRV
+vor (Checkpoint C1), und der Decal-Pass nimmt den DSV kurz vom Output-Merger, liest
+die Tiefe als Textur und hängt ihn danach zurück. Das deckt mehr ab als Vulkans
+Vorpass: Skinned Meshes, Partikel und WPO-Geometrie stehen im echten Tiefenpuffer.
+Details: `docs/decals-cross-backend-plan.md` §6b. D3D12 bekommt denselben Shader und
+dieselben Register, sobald sein Schritt läuft.
 
 ### Himmel & Wetter
 
@@ -356,7 +365,7 @@ am offenen Tile-G-Buffer-Pass. Der *Algorithmus* ist portabel (Clustered braucht
 Structured Buffers/SSBOs, siehe §1.4), die *Einbettung* nicht. Sie stehen deshalb erst nach
 P4 an, nicht darin.
 → **Decals sind seit 06.09.2026 vorgezogen** (`docs/decals-cross-backend-plan.md`): GL hat
-den echten Port bekommen, Vulkan einen Forward-Ersatz mit eigener kleiner Beleuchtung.
+den echten Port bekommen, Vulkan und D3D11 einen Forward-Ersatz mit eigener kleiner Beleuchtung.
 Nur der *deferred* Decal-Pfad wartet auf P4; Decals als Feature nicht mehr.
 
 **Echte Hit-Normalen über Tier-2-Argument-Buffer** (`refl-true-hit-normals-argbuffer`) ist
