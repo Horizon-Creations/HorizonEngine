@@ -11,6 +11,8 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EntityIdComponent.h>
 #include <ContentManager/ContentManager.h>
+#include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RenderWorld.h>
 
 #include <algorithm>
 #include <cmath>
@@ -607,6 +609,139 @@ TEST_CASE("The world tick moves a trail's points with the entity")
     REQUIRE(out.points.size() == 4);
     CHECK(out.points.back().worldPos.x == doctest::Approx(3.0f));
     CHECK(out.points.front().age > out.points.back().age);
+}
+
+// ── Render extraction ────────────────────────────────────────────────────────
+// The split from §2 shows up here as two different destinations: a rope becomes
+// an ordinary RenderObject pointing at its runtime mesh, a trail becomes a
+// per-frame RibbonBatch that is not an asset at all.
+
+TEST_CASE("A rope extracts as one render object aimed at its runtime mesh")
+{
+    HorizonWorld world;
+    ContentManager cm;
+    auto& reg = world.registry();
+
+    const Entity e = world.createEntity("Rope");
+    TransformComponent t;
+    t.position = { 2.0f, 3.0f, 4.0f };
+    reg.emplace_or_replace<TransformComponent>(e, t);
+    RopeComponent rope;
+    rope.controlPoints   = { { 0.0f, 0.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } };
+    rope.materialAssetId = HE::UUID::generate();
+    rope.castsShadow     = false;
+    reg.emplace<RopeComponent>(e, rope);
+
+    RenderExtractor ex;
+    RenderWorld     rw;
+
+    // Before the world tick there is no runtime mesh, so there is nothing to
+    // point a RenderObject at — and pushing one anyway would draw the default
+    // cube at the rope's position.
+    ex.extract(world, rw, 1.0f);
+    CHECK(rw.objects.empty());
+
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+    const HE::UUID meshId = reg.get<RopeComponent>(e).runtimeMeshId;
+    REQUIRE(!(meshId == HE::UUID{}));
+
+    ex.extract(world, rw, 1.0f);
+    REQUIRE(rw.objects.size() == 1);
+    const RenderObject& obj = rw.objects[0];
+    CHECK(obj.meshAssetId     == meshId);
+    CHECK(obj.materialAssetId == rope.materialAssetId);
+    CHECK(obj.entityId        == static_cast<uint32_t>(e));
+    CHECK(obj.castsShadow     == false);
+    CHECK(glm::vec3(obj.transform[3]).x == doctest::Approx(2.0f));
+    CHECK(glm::vec3(obj.transform[3]).y == doctest::Approx(3.0f));
+
+    // Hidden means hidden, and no ribbon batch was invented on the way.
+    reg.get<RopeComponent>(e).visible = false;
+    ex.extract(world, rw, 1.0f);
+    CHECK(rw.objects.empty());
+    CHECK(rw.ribbonBatches.empty());
+
+    RopeTrailSystem::releaseWorld(world, cm);
+}
+
+TEST_CASE("A trail extracts as a ribbon batch, not as an object")
+{
+    HorizonWorld world;
+    ContentManager cm;
+    auto& reg = world.registry();
+
+    const Entity e = world.createEntity("Trail");
+    TransformComponent t;
+    t.position = { 0.0f, 0.0f, 5.0f };
+    reg.emplace_or_replace<TransformComponent>(e, t);
+    TrailComponent trail;
+    trail.minVertexDistance = 0.5f;
+    // Matched to the four ticks below, so the oldest point really is at the end
+    // of its life. A lifetime much longer than the run would pin uv.v near 0 for
+    // the whole band — the gradient a material graph reads would be a flat line.
+    trail.lifetime          = 0.4f;
+    trail.alignment         = TrailAlignment::Frame;   // no camera dependency
+    trail.materialAssetId   = HE::UUID::generate();
+    reg.emplace<TrailComponent>(e, trail);
+
+    RenderExtractor ex;
+    RenderWorld     rw;
+
+    // One point is not a band.
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.1f);
+    ex.extract(world, rw, 1.0f);
+    CHECK(rw.ribbonBatches.empty());
+
+    for (int i = 1; i < 5; ++i)
+    {
+        reg.get<TransformComponent>(e).position.x = static_cast<float>(i);
+        RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.1f);
+    }
+    const size_t points = reg.get<TrailComponent>(e).points.size();
+    REQUIRE(points >= 2);
+
+    ex.extract(world, rw, 1.0f);
+    REQUIRE(rw.ribbonBatches.size() == 1);
+    CHECK(rw.objects.empty());   // a trail is NOT a mesh draw
+
+    const RibbonBatch& rb = rw.ribbonBatches[0];
+    CHECK(rb.materialAssetId == trail.materialAssetId);
+    CHECK(rb.entityId        == static_cast<uint32_t>(e));
+    // pos3 + norm3 + uv2 per vertex, two vertices per station.
+    CHECK(rb.vertices.size() == points * 2 * 8);
+    CHECK(rb.indices.size()  == (points - 1) * 6);
+    CHECK(rb.worldBounds.isValid());
+    for (uint32_t i : rb.indices) CHECK(i < points * 2);
+
+    // The age travels in uv.v — the tip at 0, the tail at 1 (docs §3.2). That is
+    // the only channel a material graph has to fade a trail out.
+    float minV = 1e9f, maxV = -1e9f;
+    for (size_t v = 0; v < rb.vertices.size() / 8; ++v)
+    {
+        const float vv = rb.vertices[v * 8 + 7];
+        minV = std::min(minV, vv);
+        maxV = std::max(maxV, vv);
+    }
+    CHECK(minV == doctest::Approx(0.0f));
+    CHECK(maxV > 0.7f);   // the tail really reaches the far end of the gradient
+
+    // The vertices are WORLD space: the band sits where the entity has been, not
+    // at the origin, and the backends draw it with the identity model matrix.
+    CHECK(rb.worldBounds.min.z == doctest::Approx(5.0f).epsilon(0.5));
+
+    reg.get<TrailComponent>(e).visible = false;
+    ex.extract(world, rw, 1.0f);
+    CHECK(rw.ribbonBatches.empty());
+}
+
+TEST_CASE("Ribbon batches do not survive into the next frame's extraction")
+{
+    // RenderWorld::clear has to drop them: they are per-frame geometry, and a
+    // stale batch would draw a trail that no longer exists.
+    RenderWorld rw;
+    rw.ribbonBatches.push_back(RibbonBatch{});
+    rw.clear();
+    CHECK(rw.ribbonBatches.empty());
 }
 
 // ── Serialisation ────────────────────────────────────────────────────────────

@@ -119,6 +119,36 @@ struct DecalData {
     HE::UUID  textureId;
 };
 
+// One TrailComponent's band, already triangulated, in WORLD coordinates.
+//
+// Deliberately NOT an asset, and that is the whole point of the split between a
+// rope and a trail (docs/rope-trail-plan.md §2 / §6.2): a trail's geometry
+// changes every frame, and replacing a runtime StaticMeshAsset every frame would
+// free and rebuild the mesh's BLAS *and* throw away the scene's entire software
+// BVH each time (MetalRenderer.mm's InvalidateMesh drain — the SW-RT ranges live
+// in concatenated arrays and a single mesh cannot be cut out of them). A rope
+// pays that only when somebody moves it; a trail would pay it sixty times a
+// second, for the whole scene.
+//
+// So the backends treat this like the debug lines: CPU vertices into a dynamic
+// buffer, one draw, no UUID and no cache invalidation. The vertex layout is
+// deliberately identical to the cooked mesh format (pos3 + norm3 + uv2), so the
+// ordinary material path — the same vertex shader, the same PBR/graph pipelines,
+// the same alpha-blended transparency pass — draws it with no shader of its own.
+// The AGE rides in uv.v (0 at the tip, 1 at the tail); a material graph reads it
+// there, which is why TrailComponent has no colour-over-life fields.
+//
+// World coordinates mean the model matrix is the identity. Trails never enter
+// the shadow pass, the SSAO prepass or an acceleration structure — same reason
+// as the precipitation billboards.
+struct RibbonBatch {
+    HE::UUID              materialAssetId;
+    std::vector<float>    vertices;   // vertexCount * 8: pos3 + norm3 + uv2
+    std::vector<uint32_t> indices;
+    uint32_t              entityId = 0;
+    HE::AABB              worldBounds;
+};
+
 class RenderWorld {
 public:
     void clear();
@@ -159,6 +189,10 @@ public:
     std::vector<DecalData>           decals;
     std::vector<UIRenderObject>      uiObjects;
     std::vector<ParticleBatch>       particleBatches;
+    // Motion trails, retriangulated every frame — see RibbonBatch above. Drawn
+    // by the backends in the transparency pass, after the opaque scene and the
+    // sky, with the identity model matrix.
+    std::vector<RibbonBatch>         ribbonBatches;
     // Painted landscapes, referenced by RenderObject::landscapeIndex. Only the GI
     // reflection kernels read these (to sample the paint per ray hit) — see
     // GiLandscape.h. Empty in scenes without a terrain.

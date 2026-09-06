@@ -53,6 +53,10 @@ struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend p
 // (defined in MetalRenderer.mm — it carries draw structs built on .mm-local
 // types). Lives on EncodeFrame's stack, never across frames.
 struct MetalDeferredFrame;
+// One collected alpha-blended draw, replayed by EncodeScene's transparency pass
+// (also defined in MetalRenderer.mm, same reason). Named here only so the ribbon
+// collector below can hand its draws into that same list.
+struct TPDraw;
 
 // Passed as the overlay-callback context so ImGui (or any other overlay) can
 // encode into the active render pass. All pointers are Objective-C objects
@@ -1111,6 +1115,19 @@ private:
 	std::vector<DebugLine> m_debugLines;
 	void  CreateDebugLinePipeline();
 	void  EncodeDebugLines(void* renderEncoder, const glm::mat4& viewProj);
+
+	// ── Motion trails (RenderWorld::ribbonBatches) ───────────────────────────
+	// No pipeline and no shader of their own: a ribbon carries the ordinary
+	// cooked vertex layout in WORLD space, so it is collected into the same
+	// blended-draw list the transparency pass already replays and picks up the
+	// material's own pipeline where it has one (docs/rope-trail-plan.md §6.2).
+	// The staging buffers are retained here because TPDraw holds them as bare
+	// pointers; they are released on the NEXT frame's collect, by which time the
+	// command buffer that referenced them is long done.
+	std::vector<void*> m_ribbonBuffers;   // retained id<MTLBuffer>, vertex/index pairs
+	void  CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
+	                         const glm::vec3& cameraPos);
+	void  ReleaseRibbonBuffers();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──
 	// A fixed camera-following rain/snow pool lives in one MTLBuffer (interleaved
