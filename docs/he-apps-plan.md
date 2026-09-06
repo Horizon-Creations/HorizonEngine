@@ -3993,3 +3993,229 @@ aus. Jetzt ein Int-Pin, wie `Rows Changed`.
 Themes (sonst ist die Markierung das eine blaue Ding in einer bernsteinfarbenen Anwendung), und
 die Tests decken den Trefferpunkt bei Maßstab 2 und 0,75 ab — bei Maßstab 1 zu prüfen ist genau
 die Lücke, in der F2 echte Fehler gefunden hat.
+
+---
+
+## 13. Drei Zuschnitte: geplant, nicht gebaut (07.09.2026)
+
+Die drei Punkte, die in `docs/he-apps-merge-analysis.md` §8 als offen stehen und keine
+Kleinigkeit sind: die Tabelle mit Kopfzeile (B2b), das Akkordeon (B5) und mehrere Fenster (A5).
+Hier steht für jeden, was gebaut würde, welche Entscheidung vorweg fällt, welche Dateien er
+anfasst und was ihn blockiert. **Kein Zeilencode davon existiert.** Jeder der drei ist ein
+eigener Schritt wert; die Reihenfolge unten ist auch die empfohlene, weil sie von billig nach
+teuer geht.
+
+---
+
+### 13.1 Tabelle mit Kopfzeile (B2b) — Erweiterung der ListView, Größe M
+
+**Ziel.** Eine Liste mit einer Kopfzeile darüber: Spaltenüberschriften, ziehbare Spaltenbreiten,
+ein Klick auf eine Überschrift meldet sich beim Besitzer.
+
+**Entscheidung 1: eine Eigenschaft an `UIListView`, kein neuer Elementtyp.** Alles, was eine
+Liste ausmacht, hängt heute an `UIWidgetType::ListView`: `WidgetManager::syncLists`
+(WidgetManager.cpp:1385, die Realisierung der Zeilen), die Platzierung in `listSlotRect`
+(UIWidgetTree.cpp:649, angesprungen bei :773), `statePropsOf` und die drei Scroll-Virtuals. Ein
+eigener `UITable`-Typ müsste jede dieser Stellen ein zweites Mal nennen und dazu die volle
+Typ-Checkliste aus 13.2 abarbeiten — für eine Kopfzeile über derselben Mechanik. Also
+`Show Header` (Bool, Vorgabe **aus**, JSON-Schlüssel nur geschrieben wenn an, byte-gleich für
+jede vorhandene Datei), plus `Header Height`, `Header Color`, `Header Text Color`,
+`Header Font Size`, `Resizable Columns`.
+
+**Entscheidung 2: die Überschriften stehen in der Zeilenvorlage, nicht in einer zweiten Liste.**
+Die Namen der direkten Kinder der Vorlagenwurzel SIND die Spaltentitel — dieselbe Regel, mit der
+die Tab Box ihre Reiter beschriftet („kein zweites Feld, das von Hand im Gleichschritt gehalten
+werden muss"). Wer eine Spalte umbenennt, benennt das Element um, das sie zeichnet, und die
+beiden können nicht auseinanderlaufen.
+
+*Vorbedingung, die geprüft und einmal gemeldet wird:* die Wurzel der Vorlage ist eine
+HorizontalBox und ihre Zellen benutzen kein Slot Fill. Die Tabelle schreibt bei jeder
+Realisierung `sizeX` auf diese Kinder; Slot Fill würde dagegen ziehen und die Spalten wären eine
+Zeile lang breit und die nächste schmal. Ist die Vorbedingung verletzt: eine Warnung pro Vorlage
+(nicht pro Zeile), Kopfzeile mit null Spalten, Liste verhält sich wie bisher.
+
+*Gelesen wird aus dem ASSET, nicht aus einer realisierten Zeile.* `syncLists` hat den
+`ContentManager` in der Hand; eine Tabelle mit `itemCount == 0` muss ihre Kopfzeile trotzdem
+zeigen. Titel je `rowWidget`-Pfad zwischenspeichern, so wie `tabLabels` zwischengespeichert sind.
+
+**Entscheidung 3: Spaltenbreiten sind Zustand, keine Autorenliste.** `Column Widths` als
+**String** (`"120,80,200"`), weil `UIPropValue` keine Float-Liste kennt und ein Tastenkürzel den
+Präzedenzfall stellt: was ein Mensch hingezogen hat, reist als Text. Damit steht die Zeile in
+`statePropsOf` neben `Selection` und der Vorschau-Zustand (E4) trägt sie ohne weiteres Zutun.
+Reparaturregel bei Abweichung zur Spaltenzahl — dieselbe wie bei einer Auswahl hinter dem Ende:
+zu viele Einträge fallen weg, fehlende werden zu gleichen Anteilen aufgefüllt.
+
+**Entscheidung 4: kein waagerechtes Scrollen, die Spalten teilen sich die Breite.** Im ganzen
+System gibt es keins (`scrollOffsetPtr` ist eine Zahl, `UIScrollBarStyle` eine Leiste). Ein
+Trenner nimmt der Nachbarspalte, was er der eigenen gibt, wie das Verhältnis eines Splitters —
+die Summe bleibt die Innenbreite. Das ist eine echte Grenze und keine Auslassung: eine Tabelle
+mit dreißig Spalten will hier niemand bauen.
+
+**Entscheidung 5: sortiert wird nicht hier.** Ein Klick auf eine Überschrift feuert
+`OnHeaderClicked` mit dem Spaltenindex, der Besitzer sortiert sein Array und ruft `refreshList`.
+Genau die Begründung, mit der die Liste keine Daten hält. `Sort Column` (Int, -1 = keine) und
+`Sort Ascending` (Bool) sind rein optisch und werden vom Besitzer gesetzt; das Dreieck ist ein
+gezeichnetes Quad und keine Glyphe, weil die UI-Schrift keine Pfeile hat.
+
+**Was die Kopfzeile verschiebt, an vier Stellen** — wer nur eine findet, baut einen Versatz, der
+erst beim Klicken auffällt: `UIListView::innerHeight()` (die Kopfzeile geht ab),
+`rowAt(localY)` (der erste Zeilenanfang rutscht), `listSlotRect` (dieselbe Verschiebung, sonst
+liegt die gezeichnete Zeile woanders als die getroffene) und der obere Einzug in `scrollBar()`,
+der heute schlicht `padding` ist.
+
+**Eine Arithmetik, drei Abnehmer** (die Lektion von `UITabBox::tabLayout`):
+`UIListView::headerLayout(px, …, outX, outW)` und `headerAtPoint(…)` — daraus zeichnet `render`,
+damit entscheidet der Manager, welche Überschrift und welcher Trenner getroffen wurde, und damit
+zeichnet die Vorschau des Designers.
+
+**Berührte Dateien.** `UIElements.h` / `UIElement.cpp` (Felder, `propTable`, `headerLayout`,
+`render`, `writeJson`/`readJson`, `events`), `UIWidgetTree.cpp` (`listSlotRect`),
+`WidgetManager.cpp` (`syncLists` liest die Titel und schreibt die Breiten, Treffer auf
+Überschrift und Trenner, Ziehen, `statePropsOf`), `UIEditorPanel.cpp` (Vorschau-Zeichnung, dort
+wo :3176 die typeigenen Fälle stehen), `EditorHelp.cpp` (die neuen Eigenschaften),
+`HcNodeDocs.cpp` und `EngineApi.cpp` (falls `OnHeaderClicked` eine Skriptzeile bekommt),
+`test_ui_widgets.cpp`.
+
+**Tests.** Titel aus der Vorlage; Kopfzeile verschiebt `rowAt` (der Trefferpunkt bei Maßstab 2
+und 0,75, nicht nur bei 1); Breiten-String repariert sich bei zu vielen und zu wenigen
+Einträgen; Ziehen erhält die Summe; `Show Header` aus schreibt keinen JSON-Schlüssel;
+Slot-Fill-Vorlage warnt genau einmal.
+
+**Offen bleibt danach:** variable Zeilenhöhen (die v1 der Liste ist bewusst fest), waagerechtes
+Scrollen, Spalten sortieren ohne Besitzer.
+
+---
+
+### 13.2 Akkordeon (B5) — neuer Elementtyp, Größe M
+
+**Ziel.** Ein Stapel aufklappbarer Abschnitte. Der Plan nennt es in einem Atemzug mit den
+Reitern; es ist keiner mit anderem Aussehen, sondern ein Stapel, in dem mehrere Abschnitte
+gleichzeitig offen sein dürfen und die Höhe die Summe der offenen ist.
+
+**Die Tab Box ist die Vorlage, in fünf Punkten.** Die **Kinder sind die Abschnitte** und der
+**Name eines Kindes ist seine Überschrift** (kein zweites Feld). `hidesChild` versteckt den
+Körper eines zugeklappten Abschnitts — und weil Bild und Zeiger beide durch
+`uiElementEffectiveVisible` gehen, kann ein Knopf in einem zugeklappten Abschnitt auch keinen
+Klick beantworten. `interactive()` ist wahr, weil die Überschriften angeklickt werden.
+`acceptsChildren()` ist wahr. Und `laysOutChildren()` ist wahr, mit einer eigenen
+`accordionSlotRect`: die Überschriften stehen zwischen den Körpern und ein zugeklappter Körper
+ist null hoch, das rechnet `boxSlotRect` nicht.
+
+**Entscheidung: `Expanded` ist eine Int-Bitmaske, Deckel bei 32 Abschnitten.** Ein Flag pro Kind
+wäre lesbarer, hat aber heute keinen Weg in den Vorschau-Zustand: `statePropsOf` ist **pro
+Elementtyp** und nennt Eigenschaftsnamen, keine Kinder. Eine Zahl geht dort in einer Zeile
+durch, so wie `Active Tab` und `Ratio`. Gegen die unlesbare Zahl im Panel hilft eine typeigene
+Zeichnung in `UIEditorPanel` — eine Reihe Kästchen, beschriftet mit den Kindernamen; die
+`selectionMode`-Auswahlliste der ListView ist der Präzedenzfall dafür, dass ein Int im Panel
+nicht als Int aussehen muss.
+
+**`Allow Multiple`** (Bool, Vorgabe an). Aus heißt: das Aufklappen eines Abschnitts klappt die
+anderen zu — dann ist es eine Tab Box, die untereinander steht, und genau dafür will man es
+manchmal.
+
+**Scrollen ist billig geworden.** Drei Virtuals (`scrollOffsetPtr`, `maxScrollAmount`,
+`scrollBar`), und Mausrad, Klemmung und Zustandsschnappschuss tragen es von selbst — das war die
+Lehre aus der ListView („der dritte scrollende Container kostet keine dieser Stellen mehr").
+
+**Keine Animation in v1**, obwohl `UIWidgetAnim.h` daliegt. Auf- und Zuklappen ist sofort. Eine
+animierte Höhe heißt, dass die Höhe eines Abschnitts eine Frage der Zeit ist, und daran hängen
+Layout, Trefferprüfung und Scrollklemmung im selben Frame.
+
+**Die Checkliste für einen neuen Typ**, vollständig, weil sie sonst stückweise entdeckt wird:
+`UIWidgetType` (**angehängt, nie eingefügt** — die Tabellen darunter sind über die Reihenfolge
+indiziert), `makeUIElement`, `uiWidgetTypeRegistry`, die `kNames`-Tabelle (mit dem
+`static_assert`, das die Länge festnagelt), die Klasse in `UIElements.h` samt `propTable`,
+`render`, `writeJson`/`readJson`, `events`, `statePropsOf`, ein Standardstil in `UITheme.cpp`
+für beide mitgelieferten Themes, `uiReadableRoleOf` in UIWidgetTree.cpp:2081 (welche Farbe die
+lesbare ist), ein `UI Palette/Accordion`-Eintrag in `EditorHelp.cpp` — **den erzwingt
+`test_editor_help.cpp`, ein Typ ohne Hilfeeintrag macht die Testsuite rot** —, `HcNodeDocs.cpp`,
+und in `test_ui_widgets.cpp` fährt der neue Typ durch die Schleifen über
+`uiWidgetTypeRegistry()` (u. a. „makeUIElement produces the right subclass", die Namen und Typ
+aneinander nagelt).
+
+**Eigene Tests.** Aufklappen ändert die Höhe der folgenden Abschnitte; ein Klick in einen
+zugeklappten Körper trifft nichts; `Allow Multiple` aus lässt genau ein Bit stehen; Überschrift,
+Zeichnung und Treffer kommen aus derselben Arithmetik (bei Maßstab ≠ 1 geprüft); die Maske
+überlebt einen Vorschau-Zustandswechsel; ein 33. Abschnitt ist immer zu und sagt es einmal.
+
+---
+
+### 13.3 Mehrere Fenster (A5) — Größe L, und es hängt am Renderer
+
+**Ziel.** Ein zweites Fenster mit eigenem Widget-Baum. Ein Werkzeugfenster neben dem
+Hauptfenster, ein Dokument je Fenster, ein abgekoppeltes Panel.
+
+**Was schon da ist:** `Application::createSecondaryWindow` / `destroyWindow` / `getWindow`
+(Application.cpp:560ff), und `IRenderer::AttachWindow` / `DetachWindow` / `RenderWindow` als
+Virtuals (IRenderer.h:229ff). **Was fehlt, ist der Inhalt:** `RenderWindow` wird von *niemandem*
+aufgerufen, im ganzen Baum nicht.
+
+**Drei Befunde, die den Zuschnitt bestimmen — vor dem Anfangen gelesen:**
+
+**1. Die UI hängt am Weltschnappschuss.** `RenderExtractor.cpp:957` ruft
+`world.widgets().extract(vpWidth, vpHeight, out.uiObjects)`; die UI-Quads reisen also im
+Render-Snapshot des Hauptfensters mit. Metals `EncodeFrame(…, isPrimary=false)` zeichnet für ein
+Zweitfenster **dieselbe Welt** noch einmal, nur ohne die Primär-Arbeit. Für ein zweites Fenster
+braucht es einen **UI-only-Pfad**: `extract(windowId, …)` in eine eigene Objektliste, und ein
+Renderer-Eingang „zeichne DIESE Liste in JENES Ziel", ohne Szenendurchlauf.
+
+**2. Die Backends können es unterschiedlich weit.** **Software** ist der beste Ausgangspunkt und
+nicht der schlechteste: er zeichnet ohnehin nur `uiObjects` in die Fensteroberfläche
+(`SDL_GetWindowSurface`, `SDL_UpdateWindowSurfaceRects`), er hat aber gar kein `AttachWindow` —
+zu tun ist Oberfläche, Bildspeicher, `m_prevObjects` und die Schmutzrechtecke **pro Fenster**
+statt einmal. **Metal** hat den vollen Weg (`m_secondaryTargets`, `EncodeFrame`). **OpenGL** ist
+ein Platzhalter: `RenderWindow` macht Kontext aktiv, löscht schwarz, `// TODO: secondary-window
+draw calls`. **Vulkan** ruft `renderWindowData` (Szene). **D3D11/D3D12** haben nichts.
+→ Für Anwendungen (Software) und für den Mac (Metal) ist es erreichbar; ein Versprechen „A5 auf
+allen Backends" wäre falsch.
+
+**3. Ein Zweitfenster wird heute still abgeräumt.** Application.cpp:136–146 fängt
+`SDL_EVENT_WINDOW_CLOSE_REQUESTED`, detacht und löscht — ohne Rückruf, ohne dass jemand die
+Widgets darin abbauen könnte. Der Weg muss über den Wirt: Widgets dieses Fensters zerstören,
+`OnWindowClosed(id)` feuern, **dann** detachen. Sonst zeigen `WidgetManager`-Instanzen auf ein
+Fenster, das es nicht mehr gibt.
+
+**Entscheidung: EIN WidgetManager, das Fenster ist eine Eigenschaft der Instanz.** Nicht ein
+Manager pro Fenster. Begründung: die `widget.*`-Skript-Api adressiert über Ids, die dem Manager
+gehören — zwei Manager wären zwei Id-Räume, in denen dieselbe Zahl zwei Dinge meint; dazu
+zeigt die HorizonCode-Laufzeitbindung auf einen Manager, und Theme, Textkatalog und Sprache
+müssten sonst bei jedem Wechsel an alle verteilt werden. Also `Instance::windowId` (0 = das
+Hauptfenster).
+
+**Was dabei von einem Feld zu einem pro Fenster wird** (der eigentliche Aufwand):
+Fokus-Widget und Fokus-Element, Hover, der **Grab-Stapel**, der Tooltip samt seiner Uhr, die
+offene Auswahlliste, das laufende Ziehen. Alle als `WindowState`, nach Fensternummer, Fenster 0
+immer vorhanden. **Damit kein Aufrufer angefasst werden muss**, bekommen die ~40 Methoden mit
+`vpWidth`/`vpHeight` eine Überladung mit `windowId = 0` — der einfenstrige Wirt bleibt Zeile für
+Zeile, wie er ist.
+
+**Grabs sind fenstermodal**, nicht anwendungsmodal: ein Dialog sperrt sein Fenster. App-modal
+(alle anderen Fenster taub) ist eine spätere Entscheidung und keine Zeile mehr, wenn der
+`WindowState` erst steht.
+
+**Die Menüleiste bleibt am Hauptfenster.** Auf dem Mac gibt es ohnehin genau eine, und eine
+gezeichnete Leiste in jedem Werkzeugfenster will niemand.
+
+**Eingabe.** `GameApplication::updateUIInput` (GameApplication.cpp:1605) rechnet heute fest mit
+`window()`: Größe, Pixelgröße, `SDL_GetWindowDisplayScale`. Es muss `SDL_GetMouseFocus()`
+nehmen, daraus die Fensternummer, und Maßstab und Größe **dieses** Fensters — sonst sind die
+Klickkoordinaten auf einem zweiten Monitor mit anderer Skalierung schlicht falsch.
+
+**Skript-Api: nur neue Funktionen, keine geänderten.** `app.setTitle`, `app.setSize`,
+`app.minimize` und die anderen bleiben, wie sie sind, und meinen das Hauptfenster — **Pin-Indizes
+sind das, was ein gespeicherter Graph festhält**, ein zusätzlicher Parameter würde jeden
+bestehenden Aufruf umverdrahten. Neu ist eine `window`-Gruppe: `window.open(title, w, h) -> int`,
+`window.close(id)`, `window.setTitle(id, …)`, `window.setSize(id, …)`, `window.show(id, widgetId)`,
+dazu `OnWindowClosed(id)`. Auf `Ctx` zwei Rückrufe (`openWindow`, `closeWindow`), wie
+`setWindowTitle` und `windowSize` schon dort stehen. **Im Editor ist nichts gebunden**: eine
+Warnung und 0 zurück, das Muster von Tray und Menüleiste.
+
+**Nicht in v1:** modale Dialoge als echtes Fenster (der Grab-Stapel macht Modalität im Fenster
+schon, ein OS-modales Fenster braucht die Sperre über Fenstergrenzen), abgekoppelte
+Editor-Panels, Fenster, die den Fokus untereinander weiterreichen (Tabulator endet am
+Fensterrand).
+
+**Reihenfolge.** Erst der UI-only-Renderpfad auf Software (dort ist er am kleinsten und dort
+wird er gebraucht), dann `WindowState` im Manager, dann Wirt und Eingabe, dann die Skriptzeilen,
+zuletzt Metal. OpenGL, Vulkan und D3D bleiben ausdrücklich offen und melden es, statt schwarz zu
+zeichnen.
