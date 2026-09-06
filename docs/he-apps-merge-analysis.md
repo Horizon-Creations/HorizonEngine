@@ -8,7 +8,7 @@
 
 ## 1. Kurzfassung und Empfehlung
 
-**Der Branch ist mergefähig, aber nicht als „App-Feature", sondern als Engine-Umbau mit einem App-Schalter obendrauf.** Etwa neun Zehntel des Diffs liegen in HE_Core und sind für alle Nutzer wirksam, Spiele eingeschlossen. Das ist kein Unfall, sondern die Bauweise, die der Plan von Anfang an vorgab: „kein neues Teilsystem, sondern ein zweiter Betriebsmodus für Dinge, die größtenteils schon existieren". Der App-Modus selbst ist klein: ein Bit in `project.hcfg`, ein Dutzend `if (m_appMode)`-Verzweigungen in `GameApplication`, ein CMake-Schalter für die Runtime-Ausprägung.
+**Der Branch ist mergefähig, aber nicht als „App-Feature", sondern als Engine-Umbau mit einem App-Schalter obendrauf.** Knapp die Hälfte der neuen Zeilen liegt in HE_Core (davon fast die Hälfte eingebettete Fonts), ein Fünftel sind Tests, ein Zehntel Editor. Was in HE_Core liegt, ist fast ausnahmslos ungegated und für alle Nutzer wirksam, Spiele eingeschlossen. Das ist kein Unfall, sondern die Bauweise, die der Plan von Anfang an vorgab: „kein neues Teilsystem, sondern ein zweiter Betriebsmodus für Dinge, die größtenteils schon existieren". Der App-Modus selbst ist klein: ein Bit in `project.hcfg`, ein Dutzend `if (m_appMode)`-Verzweigungen in `GameApplication`, ein CMake-Schalter für die Runtime-Ausprägung.
 
 **Drei Dinge sind geprüft und in Ordnung:**
 
@@ -36,8 +36,9 @@
 |---|---|
 | Commits auf dem Branch (main..HEAD) | 178 |
 | Geänderte Dateien | 194 (+73 495 / −3 678) |
-| Davon Vendor-Header (Fonts, stb_image_write) | ca. 16 700 Zeilen |
-| Davon Tests | ca. 14 000 Zeilen (`test_ui_widgets.cpp` allein +12 881) |
+| Davon HE_Core | 34 395 Zeilen, davon 16 740 Vendor-Header (Fonts, stb_image_write) |
+| Davon Tests | 16 409 Zeilen (`test_ui_widgets.cpp` allein +12 881) |
+| Davon HE_Editor / HE_Scene / HE_Tools / HE_Rendering / HE_Game | 7 120 / 2 834 / 2 351 / 1 546 / 1 535 Zeilen |
 | main seit Merge-Base | 1 Commit (`af05e59b`) |
 | Überlappende Dateien beider Seiten | 3 (`ci.yml`, `ContentManager.h`, `ContentManager.cpp`) |
 | Trocken-Merge `git merge-tree` | konfliktfrei |
@@ -47,7 +48,7 @@
 
 **Merge-Reihenfolge (Anweisung vom Menschen, über den Leitstand am 05.09.):** Alle „normale Engine"-Themen (aktuell Thema 8, Decals) gehen vor diesem Branch nach main. Dieser Branch bleibt der letzte, zieht main nach jedem durchgegangenen Engine-Thema nach und geht selbst erst, wenn er fertig ist und alle Engine-Themen drin sind. Danach: voller ctest, dann PR statt direktem Push, damit die CI drüberläuft.
 
-**Zu prüfen für den Menschen:** Der Leitstand hat gemeldet, dass `claude/decals-cross-backend` versehentlich von diesem Branch abgezweigt war. Der Nachfolger `claude/decals-cross-backend-v2` hat seine Merge-Base auf `af05e59b`, also sauber auf main. Der alte Decals-Branch hat seine Merge-Base auf `e38eabfa` und sollte nicht mehr verwendet werden.
+**Zu prüfen für den Menschen:** Der Leitstand hat gemeldet, dass `claude/decals-cross-backend` versehentlich von diesem Branch abgezweigt war. Geprüft: seine Merge-Base mit diesem Branch ist `6a8ca1f8`, ein Commit dieses Branches, seine Merge-Base mit main nur `e38eabfa`. Der Nachfolger `claude/decals-cross-backend-v2` hat seine Merge-Base auf `af05e59b`, also sauber auf main. Der alte Decals-Branch sollte nicht mehr verwendet werden.
 
 **Bekannte Restbaustellen aus dem Thema** (nicht Teil der 23 Schritte, siehe Abschnitt 8): `app.minimize`, `app.maximize`, `isMaximized` fehlen (eine eigene Titelleiste hat damit nur einen von drei Knöpfen), auswählbarer statischer Text, Menü `enabled`/`checked`, `db` und `print` aus Block C, vier bewusst offene Kontrastbefunde, Lösch-Kreuz im Suchfeld.
 
@@ -191,7 +192,7 @@ Das ist der Abschnitt, an dem die Entscheidung hängt. Eine Zeile pro Punkt: was
 | 7 | `createNewProject` schreibt `fontWeightBold = false` für **jedes** neue Projekt, Spiele eingeschlossen; ältere Projekte lesen „fehlt heißt Bold" | Neue Spielprojekte zeichnen Fließtext regular, alte bleiben Bold | `ProjectManager.cpp:1346` (schreibt `false`), `:1512` (liest Default `true`) | Entscheiden, ob Spiele weiter Bold bekommen sollen (`isApp ? false : true`, eine Zeile). |
 | 8 | `appIconName` fehlt in alten `.heproj`, der Loader nimmt `"widgets"`; neue Spiele bekommen `"sports_esports"`; der Exporter erzeugt das Icon, sobald der Name nicht leer ist, unabhängig von `appProject` | Ein bestehendes Spiel exportiert nach dem Merge mit einem generierten „widgets"-Icon, wo es vorher keins hatte | `ProjectManager.cpp:1349,1516` | Beim Laden leer lassen und das Icon nur erzeugen, wenn der Name gesetzt ist. |
 | 9 | Lua und Python erreichen `widget`, `theme`, `dialog`, `clipboard`, `process`, `json`, `prefs`, `datetime` nicht; die Registry wird nur für Gruppen aus `isScriptGroup` gespiegelt (auf HEAD: math, random, time, input, string, camera, env, entity, audio, debug, fs, save, scene, player, animator, movement, locomotion, particle, nav, physics, http, ui, app) | Jedes Lua-/Python-Projekt, Spiele und Apps, das Listen, Dialoge, Ebenen, Animationen oder Themes aus Textskripten steuern will | `EngineApi.cpp:5046-5083`, `ScriptContext.cpp:842`, `PyScriptBackend.cpp:326`; in `ScriptApi.cpp` gibt es zwar Durchreichungen (`setListCount`, `showModalWidget`), aber kein Lua-/Python-Binding ruft sie | Acht Namen in die Liste aufnehmen (je ein Kommentar, wie bei `http`), oder im Handbuch und im Plan als HorizonCode-only kennzeichnen. Kein Merge-Blocker. |
-| 10 | Drop-Ereignisse und `SDL_EVENT_SYSTEM_THEME_CHANGED` werden in `OnEvent` verschluckt (`return true`), unabhängig vom Modus; jeder gedroppte Pfad wird per `grantPath` für Skripte freigegeben | Alle Spiele; was in `OnEvent` danach käme, sieht die Events nicht mehr | `GameApplication.cpp:1919-1975` | Nur verschlucken, wenn ein Widget den Drop genommen hat; sonst Kenntnisnahme. |
+| 10 | Drop-Ereignisse und `SDL_EVENT_SYSTEM_THEME_CHANGED` werden in `OnEvent` verschluckt (`return true`), unabhängig vom Modus; jeder gedroppte Pfad wird per `grantPath` für Skripte freigegeben | Alle Spiele; was in `OnEvent` danach käme, sieht die Events nicht mehr | `GameApplication.cpp:1919-1932` (Thema, `return true`), `:1934-1977` (Drop, `return true` am Blockende) | Nur verschlucken, wenn ein Widget den Drop genommen hat; sonst Kenntnisnahme. |
 | 11 | Cocoa und UserNotifications werden in **jedes** macOS-Spiel gelinkt (`AppMacMenu.mm`, `AppNotify.mm` in HE_Game) | Jedes macOS-Spiel bekommt zwei Framework-Abhängigkeiten, die es nie ruft | `HE_Game/CMakeLists.txt:23-33` | Klein, hinnehmen; der Ort ist richtig (Cocoa darf nicht in HorizonCore). |
 | 12 | `layer.framebufferOnly = NO` für jedes Metal-Fenster, damit Milchglas den UI-Pass lesen kann | Jedes Metal-Spiel; der Treiber darf das kompakteste Swapchain-Layout nicht mehr wählen | `MetalRenderer.mm:9468` | Messen, oder an „Backdrop-Material im Pak" knüpfen. |
 | 13 | `RendererSoftware` wird auch in der `game`-Ausprägung gebaut und gelinkt, und `GameBackend = "Software"` in `config.json` ist für Spiele gültig | Ein Spiel mit dieser Einstellung lädt und tickt seine Welt, zeichnet aber nur die UI | `HE_Rendering/CMakeLists.txt:64`, `GameApplication.cpp:339` | Im Spiel-Host `Software` nur bei `appMode` zulassen, oder als Feature erklären (ein reines UI-Spiel ohne GPU ist denkbar). |
