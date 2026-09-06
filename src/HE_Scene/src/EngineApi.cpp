@@ -2555,6 +2555,118 @@ void shutdown()
 
 } // namespace http
 
+// ── Timers ───────────────────────────────────────────────────────────────────
+namespace timer {
+namespace {
+struct Entry
+{
+    int    handle    = 0;
+    double interval  = 0.0;   // what a repeat is reset to
+    double remaining = 0.0;   // …and how much of it is left
+    bool   repeat    = false;
+};
+std::vector<Entry>& timers()    { static std::vector<Entry> t;  return t; }
+std::vector<int>&   firedQueue(){ static std::vector<int> q;    return q; }
+int& nextTimerHandle()          { static int h = 0;             return h; }
+
+// The one place a timer is made, so `after` and `every` cannot drift apart on
+// what counts as a refusal.
+int start(double seconds, bool repeat)
+{
+    // Not a number, not a length of time, or shorter than the shortest interval
+    // worth having: a "timer" that fires every frame is the frame loop, and the
+    // graph already has that.
+    if (!(seconds >= kMinIntervalSeconds)) return 0;
+    if (static_cast<int>(timers().size()) >= kMaxTimers)
+    {
+        HE_LOG_WARN(Config, "timer: already running %d timers, refusing a new one.",
+                    kMaxTimers);
+        return 0;
+    }
+    Entry e;
+    e.handle    = ++nextTimerHandle();
+    e.interval  = seconds;
+    e.remaining = seconds;
+    e.repeat    = repeat;
+    timers().push_back(e);
+    return e.handle;
+}
+} // namespace
+
+int  after(double seconds) { return start(seconds, /*repeat=*/false); }
+int  every(double seconds) { return start(seconds, /*repeat=*/true);  }
+
+bool cancel(int handle)
+{
+    auto& t = timers();
+    for (size_t i = 0; i < t.size(); ++i)
+        if (t[i].handle == handle)
+        {
+            t.erase(t.begin() + static_cast<ptrdiff_t>(i));
+            // Anything of its already in the queue goes too. A one-shot
+            // cancelled in the same frame it fired has not fired as far as the
+            // caller is concerned, and delivering it anyway would be the one
+            // case where cancel does not cancel.
+            auto& q = firedQueue();
+            q.erase(std::remove(q.begin(), q.end(), handle), q.end());
+            return true;
+        }
+    return false;
+}
+
+bool active(int handle)
+{
+    for (const Entry& e : timers()) if (e.handle == handle) return true;
+    return false;
+}
+
+double nextDueSeconds()
+{
+    double best = -1.0;
+    for (const Entry& e : timers())
+        if (best < 0.0 || e.remaining < best) best = e.remaining;
+    return best;
+}
+
+void cancelAll() { timers().clear(); firedQueue().clear(); }
+
+bool takeFired(int& handle)
+{
+    auto& q = firedQueue();
+    if (q.empty()) return false;
+    handle = q.front();
+    q.erase(q.begin());
+    return true;
+}
+
+void poll(double dtSeconds)
+{
+    if (timers().empty() || !(dtSeconds > 0.0)) return;
+    auto& t = timers();
+    // One pass, and the one-shots are removed AFTER it: erasing inside the walk
+    // would move the entries under it, and a timer that skipped its turn
+    // because its neighbour fired is the kind of bug nobody finds twice.
+    for (Entry& e : t)
+    {
+        e.remaining -= dtSeconds;
+        if (e.remaining > 0.0) continue;
+        firedQueue().push_back(e.handle);
+        // ASSIGNED, not decremented by the interval: an application that was
+        // away for five seconds owes a 100 ms timer one tick, not fifty.
+        if (e.repeat) e.remaining = e.interval;
+        else          e.remaining = -1.0;   // marked, swept below
+    }
+    t.erase(std::remove_if(t.begin(), t.end(),
+                           [](const Entry& e){ return !e.repeat && e.remaining < 0.0; }),
+            t.end());
+    // A queue nobody drains is a leak with a slow fuse — a host that never
+    // learned about OnTimer would grow one entry per tick forever.
+    auto& q = firedQueue();
+    if (q.size() > 256) q.erase(q.begin(), q.begin() + static_cast<ptrdiff_t>(q.size() - 256));
+}
+
+} // namespace timer
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 namespace json {
 namespace {
@@ -4753,6 +4865,26 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "fs.unwatch", "File", true, {{"handle", P::Int}}, {}, "HE::api::fs::unwatch",
             [](Ctx&, const VV& a){ fs::unwatch(aI(a, 0)); return VV{}; } });
 
+        // ── Timers ───────────────────────────────────────────────────────────
+        // Unpermissioned on purpose: a timer cannot read, start or reach
+        // anything, and what it fires is this application's own graph. The
+        // handle comes back with On Timer, which is what tells two of them
+        // apart — the shape fs.watch and the HTTP ticket already use.
+        t.push_back({ "timer.after", "Timer", true, {{"seconds", P::Float}}, {{"handle", P::Int}},
+            "HE::api::timer::after",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(timer::after(aF(a, 0))) }; } });
+        t.push_back({ "timer.every", "Timer", true, {{"seconds", P::Float}}, {{"handle", P::Int}},
+            "HE::api::timer::every",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(timer::every(aF(a, 0))) }; } });
+        t.push_back({ "timer.cancel", "Timer", true, {{"handle", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::timer::cancel",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(timer::cancel(aI(a, 0))) }; } });
+        t.push_back({ "timer.active", "Timer", false, {{"handle", P::Int}}, {{"active", P::Bool}},
+            "HE::api::timer::active",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(timer::active(aI(a, 0))) }; } });
+        t.push_back({ "timer.cancelAll", "Timer", true, {}, {}, "HE::api::timer::cancelAll",
+            [](Ctx&, const VV&){ timer::cancelAll(); return VV{}; } });
+
         // ── Running another program ──────────────────────────────────────────
         // run() returns FOUR values rather than one: a caller that only wanted
         // to know whether it worked reads `ok`, and one that has to explain a
@@ -5164,6 +5296,9 @@ const std::vector<ApiFn>& registry()
             { "fs.modified", "File Modified Time" },{ "fs.list", "List Directory" },
             { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
             { "fs.watch", "Watch File" },          { "fs.unwatch", "Stop Watching File" },
+            { "timer.after", "Timer After" },      { "timer.every", "Timer Every" },
+            { "timer.cancel", "Cancel Timer" },    { "timer.active", "Timer Is Running" },
+            { "timer.cancelAll", "Cancel All Timers" },
             { "process.run", "Run Program" },      { "process.openUrl", "Open URL" },
             { "process.which", "Find Program" },
             { "http.get", "HTTP Get" },              { "http.post", "HTTP Post" },
@@ -5397,7 +5532,12 @@ bool isScriptGroup(std::string_view group)
                                                     // it a text script can read the clock as a
                                                     // number of seconds and never say what day
                                                     // that is.
-                                                    "datetime" };
+                                                    "datetime",
+                                                    // "timer" is the repeating half of Delay, and
+                                                    // a text script has no twin for it either:
+                                                    // without this a Lua script can sleep a
+                                                    // coroutine but never ask to be called back.
+                                                    "timer" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

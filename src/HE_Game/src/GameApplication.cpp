@@ -2331,6 +2331,33 @@ void GameApplication::OnRender(float deltaTime)
 		}
 	}
 
+	// Timers. Same shape as the two above, and one thing more: the loop is
+	// event-driven and wakes on a 100 ms heartbeat, so a timer left to that
+	// would be up to a tenth of a second late on EVERY tick. The next due time
+	// is handed to the loop as a shorter wait — asked again every frame,
+	// because askWakeWithinMs is a one-shot.
+	{
+		HE::api::timer::poll(deltaTime);
+		int fired = 0;
+		while (HE::api::timer::takeFired(fired))
+		{
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnTimer(gi, 0, fired);
+			// A timer coming due is not an OS event for this window, so the
+			// frame that draws the reaction has to be asked for.
+			requestRedraw();
+		}
+		const double due = HE::api::timer::nextDueSeconds();
+		if (due >= 0.0)
+		{
+			// Rounded DOWN and never below one: waking a millisecond early costs
+			// one idle turn of the loop, waking late is the thing this exists to
+			// prevent.
+			const double ms = due * 1000.0;
+			askWakeWithinMs(ms < 1.0 ? 1 : static_cast<int>(ms));
+		}
+	}
+
 #ifdef __APPLE__
 	// ── The same menu bar, in the system bar (plan A6) ───────────────────────
 	// Whether there IS one is asked here and not at startup: it is SDL's answer,
@@ -2703,6 +2730,8 @@ void GameApplication::OnShutdown()
 	// The watches are this file's statics too, and one left standing would keep
 	// stat-ing a path for an application that has stopped listening.
 	HE::api::fs::clearWatches();
+	// …and so are the timers, for exactly the same reason.
+	HE::api::timer::cancelAll();
 #ifdef __APPLE__
 	// Ours out of the system bar again, SDL's own left standing. One application
 	// per process, and this file's statics outlive the object that filled them.

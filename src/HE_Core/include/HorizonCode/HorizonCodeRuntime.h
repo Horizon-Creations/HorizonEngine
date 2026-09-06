@@ -244,6 +244,10 @@ public:
     // fs.readText; whether it now exists, and how big it is, are the readers'
     // job for the same reason the HTTP ticket leaves that to its own.
     void fireOnFileChanged(InstanceId id, int elem, const std::string& path);
+    // A timer this application started has come due (elem 0: it belongs to the
+    // application). The payload is the HANDLE, which is what tells two timers
+    // apart — the same trade the HTTP ticket and the watched path make.
+    void fireOnTimer(InstanceId id, int elem, int handle);
     // A link in a rich-text label — the payload is the id the markup gave it.
     void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
     // A day was picked in a calendar. The payload is "YYYY-MM-DD": the one

@@ -3826,3 +3826,46 @@ Sprung an den Zeilenanfang.
 stehen, wo der alte Pfad es schluckt — die Bereichsteilung kann kein Byte aus der Mitte entfernen,
 ohne dass Offsets und Text auseinanderfallen. CRLF ist abgedeckt (das `\r` vor einem `\n` liegt
 außerhalb des Bereichs), ein einsames nicht.
+
+### C: `timer`, und die Sache, die im Plan nicht stand (06.09.2026)
+
+HorizonCode hatte immer `Delay`, und `Delay` ist kein Timer: es ist ein Graph, der stehen bleibt,
+bis ein Moment vorbei ist. Eine Uhr, ein Autosave und eine Abfrage wollen alle, dass **wieder**
+etwas passiert, ohne dass ein Graph im Wartezimmer sitzt. `After` feuert einmal, `Every` bis
+jemand `Cancel` sagt, beide geben ein Handle zurück, und dasselbe Handle kommt mit `On Timer`
+wieder herein — dieselbe Form wie `fs.watch` und die HTTP-Fahrkarte, und der Grund, warum man
+zwei laufende Timer auseinanderhalten kann.
+
+**Ohne Berechtigung**, anders als Dateien und Prozesse. Ein Timer kann nichts lesen, nichts
+starten und nirgends hin; das Schlimmste, was er kann, ist feuern, und was er feuert, ist der
+Graph dieser Anwendung. Ein Riegel hätte nichts geschützt. Der Test dreht deshalb alle drei Türen
+zu und ruft die Zeilen trotzdem auf: das ist der Beleg, dass die Tür nie da war, statt dass sie
+zufällig offen stand.
+
+**Und jetzt die Sache, die im Plan nicht steht.** Die Schleife ist ereignisgetrieben und schläft
+in `SDL_WaitEventTimeout` bis zum nächsten Herzschlag, und der ist 100 ms. Ein Timer auf 16 ms
+wäre damit bei **jedem** Tick bis zu einer Zehntelsekunde zu spät, also eine Uhr, die nachgeht.
+`Application::askWakeWithinMs` ist die Antwort: ein **einmaliges** Verkürzen der nächsten
+Wartezeit, kleinster Wunsch gewinnt, verbraucht von dem Frame, der danach läuft. Einmalig ist
+Absicht — ein Schalter, den jemand zu löschen vergisst, nagelt eine leere Anwendung auf volle
+Geschwindigkeit fest. `GameApplication` fragt `timer::nextDueSeconds()` in jedem Frame neu.
+
+Zwei Fallen darin, beide im Code als Satz:
+- **Eine Zahl, zweimal gelesen.** 16 ms schlafen und danach fragen, ob 100 ms herum sind, hieße
+  aufwachen und sofort weiterschlafen — der Timer, der um die kurze Wartezeit gebeten hat, bekäme
+  seinen Frame nie. Wartezeit und Herzschlagprüfung benutzen dieselbe Variable.
+- **Nicht gelöscht, wenn kein Frame lief.** Dann hatte niemand die Gelegenheit, erneut zu bitten,
+  und das Löschen würde genau den Frame verwerfen, für den gebeten wurde.
+
+**`Every` nach einer langen Pause feuert EINMAL.** Die Restzeit wird zugewiesen, nicht um das
+Intervall verringert: eine Anwendung, die fünf Sekunden weg war, schuldet einem 100-ms-Timer einen
+Tick, nicht fünfzig. Fünfzig kämen als Salve an und täten dieselbe Arbeit fünfzigmal.
+
+**Was `cancel` mitnimmt.** Auch das, was schon in der Warteschlange liegt. Ein Timer, der im
+selben Frame gefeuert und dann abgebrochen wurde, hat für den Aufrufer nicht gefeuert; sonst wäre
+das der eine Fall, in dem Abbrechen nicht abbricht. Gedeckelt ist beides: 64 Timer, und die
+Warteschlange wirft ab 256 das Älteste weg, damit ein Wirt, der `On Timer` nie gelernt hat, nicht
+langsam vollläuft.
+
+**Zugestellt wird in `GameApplication`**, wie beim Menü, beim Watcher und bei HTTP — in der
+Editor-Vorschau kommt also nichts an.

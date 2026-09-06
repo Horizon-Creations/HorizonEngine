@@ -155,6 +155,9 @@ public:
     // the watch was.
     virtual void onFileChanged(int elem, const std::string& path)
     { fireEvent("OnFileChanged", elem, Value::ofString(path)); }
+    // A timer came due; the argument is the handle timer.after/every handed back.
+    virtual void onTimer(int elem, int handle)
+    { fireEvent("OnTimer", elem, Value::ofInt(handle)); }
     // A link in a rich-text label. The argument is the link's id.
     virtual void onLinkClicked(int elem, const std::string& id)
     { fireEvent("OnLinkClicked", elem, Value::ofString(id)); }

@@ -2272,6 +2272,11 @@ const std::vector<EngineEventDesc>& engineEvents()
         // Which of the three happened is fs.exists/fs.size's answer, not the
         // event's: an event carries one value.
         { "OnFileChanged",        "onFileChanged",        P::String, true  },
+        // A timer came due. Int payload: the handle, because an event carries
+        // one value and "which timer" is the only part a graph cannot work out
+        // for itself. A one-shot has already stopped existing by the time this
+        // arrives; a repeating one is on its way round again.
+        { "OnTimer",              "onTimer",              P::Int,    true  },
         // The gesture inside the application: this element was picked up, a
         // payload was let go over this one, and the carry is over. OnDrop's
         // String is the SOURCE's payload (its Drag Payload, or its name) — the

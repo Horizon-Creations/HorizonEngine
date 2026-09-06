@@ -2075,6 +2075,173 @@ TEST_CASE("fs: a watch is the sandbox's business too")
     std::filesystem::remove_all(outside, ec);
 }
 
+// ── Timers ───────────────────────────────────────────────────────────────────
+namespace
+{
+    // Everything the queue holds right now, in order. Timers are process-wide
+    // statics like the watches, so every case here starts and ends empty.
+    std::vector<int> drainTimers()
+    {
+        std::vector<int> out;
+        int h = 0;
+        while (HE::api::timer::takeFired(h)) out.push_back(h);
+        return out;
+    }
+}
+
+TEST_CASE("timer: one shot goes off once and stops existing")
+{
+    HE::api::timer::cancelAll();
+    const int h = HE::api::timer::after(0.5);
+    REQUIRE(h != 0);
+    CHECK(HE::api::timer::active(h));
+
+    // Not before it is due, and nothing is queued while it counts down.
+    HE::api::timer::poll(0.2);
+    CHECK(drainTimers().empty());
+    CHECK(HE::api::timer::active(h));
+
+    HE::api::timer::poll(0.4);
+    CHECK(drainTimers() == std::vector<int>{ h });
+    // …and it is gone: a one-shot that stayed "running" after it fired would
+    // make Timer Is Running a question nobody could use.
+    CHECK_FALSE(HE::api::timer::active(h));
+    HE::api::timer::poll(10.0);
+    CHECK(drainTimers().empty());
+    // Cancelling something that has already fired is not an error, it is just
+    // false — a caller cannot act differently on "already gone" and "never was".
+    CHECK_FALSE(HE::api::timer::cancel(h));
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: a repeat that was away fires ONCE, not a burst")
+{
+    HE::api::timer::cancelAll();
+    const int h = HE::api::timer::every(0.1);
+    REQUIRE(h != 0);
+
+    HE::api::timer::poll(0.1);
+    CHECK(drainTimers() == std::vector<int>{ h });
+    CHECK(HE::api::timer::active(h));   // it comes round again
+
+    // Five seconds away — an alt-tab, a breakpoint, a laptop lid. Fifty ticks
+    // arriving at once would do the same work fifty times over, which is never
+    // what a repeating timer was asked for.
+    HE::api::timer::poll(5.0);
+    CHECK(drainTimers() == std::vector<int>{ h });
+    // …and it did not lose its interval either: the next one is a tenth away.
+    CHECK(HE::api::timer::nextDueSeconds() == doctest::Approx(0.1));
+
+    CHECK(HE::api::timer::cancel(h));
+    CHECK_FALSE(HE::api::timer::active(h));
+    HE::api::timer::poll(10.0);
+    CHECK(drainTimers().empty());
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: what it refuses, and what it tells the loop")
+{
+    HE::api::timer::cancelAll();
+    // Nothing due: a negative answer, so the host leaves its heartbeat alone.
+    CHECK(HE::api::timer::nextDueSeconds() < 0.0);
+
+    // Not a length of time. Zero and negative are a "timer" that is the frame
+    // loop, and the graph already has that; a NaN would compare false against
+    // everything and count down forever.
+    CHECK(HE::api::timer::after(0.0) == 0);
+    CHECK(HE::api::timer::every(-1.0) == 0);
+    CHECK(HE::api::timer::after(std::nan("")) == 0);
+    CHECK(HE::api::timer::nextDueSeconds() < 0.0);
+
+    // The nearest one is what the loop is told about, not the first one made.
+    const int slow = HE::api::timer::after(2.0);
+    const int fast = HE::api::timer::after(0.25);
+    REQUIRE(slow != 0);
+    REQUIRE(fast != 0);
+    REQUIRE(slow != fast);
+    CHECK(HE::api::timer::nextDueSeconds() == doctest::Approx(0.25));
+
+    // …and cancelling it hands the answer back to the other one.
+    CHECK(HE::api::timer::cancel(fast));
+    CHECK(HE::api::timer::nextDueSeconds() == doctest::Approx(2.0));
+
+    // A cap, so one line of script cannot turn into an unbounded per-frame cost.
+    HE::api::timer::cancelAll();
+    for (int i = 0; i < HE::api::timer::kMaxTimers; ++i)
+        REQUIRE(HE::api::timer::every(1.0) != 0);
+    CHECK(HE::api::timer::after(1.0) == 0);
+    HE::api::timer::cancelAll();
+    CHECK(HE::api::timer::nextDueSeconds() < 0.0);
+    // …and cancelAll really did take them all with it.
+    CHECK(HE::api::timer::after(1.0) != 0);
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: cancelling in the same frame it fired takes the event with it")
+{
+    HE::api::timer::cancelAll();
+    const int a = HE::api::timer::after(0.1);
+    const int b = HE::api::timer::after(0.1);
+    REQUIRE(a != 0);
+    REQUIRE(b != 0);
+    HE::api::timer::poll(0.2);
+    // Both are due, but the host has not drained yet — and one of them is
+    // cancelled in between. Delivering it anyway would be the one case where
+    // cancel does not cancel.
+    CHECK(HE::api::timer::cancel(b) == false);   // a one-shot is already gone
+    HE::api::timer::cancelAll();
+    CHECK(drainTimers().empty());
+
+    // The same with a repeat, which IS still there to be cancelled.
+    const int r = HE::api::timer::every(0.1);
+    HE::api::timer::poll(0.2);
+    CHECK(HE::api::timer::cancel(r));
+    CHECK(drainTimers().empty());
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: the rows are in the registry, unpermissioned, and reach every frontend")
+{
+    // Unpermissioned on purpose: a timer cannot read, start or reach anything.
+    // Locked down completely, the rows still work — which is what says the gate
+    // was never there rather than that it happened to be open.
+    PermReset restore;
+    HE::api::perm::set(HE::api::perm::Grants{});
+    HE::api::timer::cancelAll();
+
+    const auto& reg = HE::api::registry();
+    auto row = [&](const char* id) -> const HE::api::ApiFn*
+    {
+        for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+        return nullptr;
+    };
+    for (const char* id : { "timer.after", "timer.every", "timer.cancel",
+                            "timer.active", "timer.cancelAll" })
+        CHECK_MESSAGE(row(id) != nullptr, id);
+
+    HE::api::Ctx c;
+    const HE::api::ApiFn* after = row("timer.after");
+    REQUIRE(after);
+    const auto made = after->invoke(c, { HorizonCode::Value::ofFloat(0.5f) });
+    REQUIRE(made.size() == 1);
+    const int h = made[0].i;
+    CHECK(h != 0);
+
+    const HE::api::ApiFn* act = row("timer.active");
+    REQUIRE(act);
+    CHECK(act->invoke(c, { HorizonCode::Value::ofInt(h) })[0].b);
+    const HE::api::ApiFn* can = row("timer.cancel");
+    REQUIRE(can);
+    CHECK(can->invoke(c, { HorizonCode::Value::ofInt(h) })[0].b);
+    CHECK_FALSE(act->invoke(c, { HorizonCode::Value::ofInt(h) })[0].b);
+
+    // The group is on the list the flat frontends build their tables from, so
+    // a Lua or Python script reaches it too — without that a text script can
+    // sleep a coroutine but never ask to be called back.
+    CHECK(HE::api::isScriptGroup("timer"));
+    HE::api::timer::cancelAll();
+}
+
 TEST_CASE("process: shut by default, and asking is not running")
 {
     PermReset restore;

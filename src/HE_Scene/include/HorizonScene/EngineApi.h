@@ -1293,6 +1293,58 @@ namespace http {
 // what a typed-pin graph can carry — an in-memory document type would need a
 // handle, a lifetime and a way to leak one.
 //
+// ── Timers (plan C) ──────────────────────────────────────────────────────────
+// HorizonCode has always had Delay, which is a graph standing still until a
+// moment passes. That is not a timer: a clock, an autosave and a poll all want
+// something to happen AGAIN, without a graph parked in a wait. `after` fires
+// once, `every` fires until somebody stops it, and both hand back a handle that
+// arrives with the event — the same shape fs.watch and the HTTP ticket have,
+// and the reason two timers in flight can be told apart.
+//
+// No permission. A timer cannot read anything, start anything or reach
+// anywhere; the worst it can do is fire, and what it fires is this
+// application's own graph.
+//
+// Delivery is the host's, in the frame, like every other event here — a timer
+// that ran a graph from somewhere else would be running script code in the
+// middle of whatever the frame was doing.
+namespace timer {
+    // Fire once, `seconds` from now. 0 means it did not start: too many timers
+    // already, or an interval that is not a real length of time.
+    int  after(double seconds);
+    // …and again every `seconds`, until `cancel`. The repeat is measured from
+    // the moment it FIRED, not from when it was due: an application that was
+    // away for five seconds owes its 100 ms timer one tick, not fifty. Fifty
+    // would arrive as a burst that does the same work fifty times over, which
+    // is never what a repeating timer was asked for.
+    int  every(double seconds);
+    // False when the handle is unknown — already fired (a one-shot), already
+    // cancelled, or never given out. A caller cannot act differently on those,
+    // so they answer the same.
+    bool cancel(int handle);
+    bool active(int handle);
+    // How long until the next one is due, or a negative number when none is.
+    // The host uses it to shorten its idle wait: the loop wakes on a 100 ms
+    // heartbeat, so without this a clock in this engine is a clock that runs up
+    // to a tenth of a second late on every tick.
+    double nextDueSeconds();
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    void poll(double dtSeconds);
+    // The frame loop drains this and fires OnTimer, for the same reason it
+    // drains finished HTTP tickets and file changes.
+    bool takeFired(int& handle);
+    // Drop every timer. Belongs at shutdown, beside http::shutdown() and
+    // fs::clearWatches(): a timer left standing would keep asking a runtime
+    // that has stopped listening.
+    void cancelAll();
+    // Beyond this many the row refuses rather than letting one line of script
+    // turn into an unbounded per-frame cost, and below this interval a repeat
+    // is a busy loop wearing a timer's clothes.
+    inline constexpr int    kMaxTimers          = 64;
+    inline constexpr double kMinIntervalSeconds = 0.001;
+}
+
 // Every getter takes the value to return when the path is missing, the type is
 // wrong or the text does not parse. None of them throw and none of them log:
 // asking a document whether it has something is a normal thing to do.

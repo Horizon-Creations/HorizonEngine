@@ -1098,6 +1098,28 @@ namespace
 	  "Stops a watch, using the handle Watch File gave you. Watches also all end "
 	  "when the application does." },
 
+	// ── Timers ───────────────────────────────────────────────────────────────
+	// None of these need a permission: a timer cannot reach anything, and what
+	// it fires is this application's own graph.
+	{ "timer.after",
+	  "Fires On Timer once, after the seconds you give it, and hands back a "
+	  "handle so you can tell it apart from other timers (and cancel it before "
+	  "it goes off). Unlike Delay it does not park the graph: everything carries "
+	  "on and the event arrives later. 0 means it did not start." },
+	{ "timer.every",
+	  "The same, but it keeps firing until you cancel it — a clock, an autosave, "
+	  "a poll. If the application was busy or away it fires ONCE when it comes "
+	  "back, not once for every tick it missed." },
+	{ "timer.cancel",
+	  "Stops a timer, using the handle it gave you. Ok is false when there was "
+	  "no such timer running — it already fired, or it was cancelled before." },
+	{ "timer.active",
+	  "Is this timer still running? False for a one-shot that has already gone "
+	  "off, for a cancelled one, and for a handle that never existed." },
+	{ "timer.cancelAll",
+	  "Stops every timer this application started. They also all stop when it "
+	  "closes." },
+
 	// ── Process ──────────────────────────────────────────────────────────────
 	// All three need the project's "Run other programs" permission except Find
 	// Program, which runs nothing.

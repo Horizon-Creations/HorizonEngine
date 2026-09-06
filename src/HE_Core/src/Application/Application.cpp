@@ -237,10 +237,18 @@ namespace HE
 			// of spinning a full frame to discover that nothing did. The event is
 			// left queued, so the PollEvents() below dispatches it as usual. A
 			// pending redraw request skips the wait — it IS the something.
+			// How long this turn may sleep, and how long the heartbeat is worth
+			// for it. ONE number, read twice: sleeping 16 ms and then asking
+			// whether 100 ms have passed would wake up and go straight back to
+			// sleep, and the timer that asked for the short wait would never
+			// get its frame.
+			const int waitMs = (m_nextWakeMs >= 0 && m_nextWakeMs < m_idleHeartbeatMs)
+			                 ? (m_nextWakeMs > 0 ? m_nextWakeMs : 1)
+			                 : m_idleHeartbeatMs;
 			if (m_eventDriven && !m_redrawRequested)
 			{
 				HE_PROFILE_SCOPE_N("IdleWait");
-				Window::WaitForEvent(m_idleHeartbeatMs);
+				Window::WaitForEvent(waitMs);
 			}
 
 			const Uint64 nowTick = SDL_GetTicksNS();
@@ -361,7 +369,7 @@ namespace HE
 			// last one being the safety net under everything that changes the
 			// screen without announcing it.
 			const bool heartbeatDue =
-				(nowTick - lastDrawTick) >= static_cast<Uint64>(m_idleHeartbeatMs) * 1000000ull;
+				(nowTick - lastDrawTick) >= static_cast<Uint64>(waitMs) * 1000000ull;
 			// Two decisions, not one. RUNNING a frame is cheap and has to happen
 			// on the heartbeat regardless, or the clock stops: a script's Delay,
 			// a timer, an animation all live in OnRender and would never fire.
@@ -378,8 +386,14 @@ namespace HE
 				// read a stale mouse delta.
 				m_input.EndFrame();
 				HE_PROFILE_FRAME();
+				// The short wake is deliberately NOT cleared here. Nothing ran,
+				// so nobody had the chance to ask for it again, and clearing it
+				// would drop the very frame it was asked for.
 				continue;
 			}
+			// Consumed: OnRender is about to run and says again if it still
+			// wants a short wait (see askWakeWithinMs).
+			m_nextWakeMs = -1;
 
 			// Settled inside the try (after OnRender) and read again by the swap
 			// below, which sits outside it. True by default so a frame that threw

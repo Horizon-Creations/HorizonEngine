@@ -178,6 +178,17 @@ namespace HE
 		// per second instead of sixty.
 		void  setIdleHeartbeatMs(int ms) { m_idleHeartbeatMs = ms > 0 ? ms : 1; }
 		int   idleHeartbeatMs() const    { return m_idleHeartbeatMs; }
+		// …and a one-shot shortening of it, for the frame that already KNOWS
+		// something is due sooner. A script's timer set to 16 ms would otherwise
+		// arrive on the 100 ms heartbeat, which is a clock that runs late on
+		// every tick.
+		//
+		// One-shot on purpose, and the smallest ask wins: it is consumed by the
+		// frame that follows, and a host that still wants it says so again next
+		// frame. A flag somebody forgot to clear would pin an idle application
+		// at full speed with nothing on screen to show for it.
+		void  askWakeWithinMs(int ms)
+		{ if (ms >= 0 && (m_nextWakeMs < 0 || ms < m_nextWakeMs)) m_nextWakeMs = ms; }
 
 		// ── Multi-window API ──────────────────────────────────────────────
 		// Open a new secondary window.  The renderer's AttachWindow() is called
@@ -240,6 +251,7 @@ namespace HE
 		// if that logic changed something, so 100 ms buys a responsive clock while
 		// an idle app still presents nothing at all.
 		int                        m_idleHeartbeatMs = 100;   // see setIdleHeartbeatMs
+		int                        m_nextWakeMs      = -1;    // see askWakeWithinMs
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;
 		// Opened at the very top of Run(), closed before the main loop. A
