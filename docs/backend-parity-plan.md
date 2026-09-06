@@ -211,7 +211,7 @@ geschrieben; er läuft nicht.
 | G-Buffer-Variante für Graph-Materials | JA | -- | -- | -- |
 | RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
-| Deferred Decals | JA | ~ ¹ | -- | ~ ¹ |
+| Deferred Decals | JA | ~ ¹ | ~ ¹ | ~ ¹ |
 | Clustered-Lighting-Build | -- | -- | -- | -- |
 | SSR deferred / SSR forward | -- | -- | -- | -- |
 
@@ -233,8 +233,21 @@ keinen Vorpass — die Szenentiefe liegt jetzt als `R24G8_TYPELESS` mit DSV **un
 vor (Checkpoint C1), und der Decal-Pass nimmt den DSV kurz vom Output-Merger, liest
 die Tiefe als Textur und hängt ihn danach zurück. Das deckt mehr ab als Vulkans
 Vorpass: Skinned Meshes, Partikel und WPO-Geometrie stehen im echten Tiefenpuffer.
-Details: `docs/decals-cross-backend-plan.md` §6b. D3D12 bekommt denselben Shader und
-dieselben Register, sobald sein Schritt läuft.
+Details: `docs/decals-cross-backend-plan.md` §6b.
+
+**D3D12 zeichnet sie seit dem 06.09.2026 auch**, mit demselben Shader, denselben
+Registern (`b13`, `t14/s14`, `t15/s15`) und derselben Abweichung. Der Weg ist der
+von D3D11, nicht der von Vulkan: die Haupt-Tiefe ist jetzt `R32_TYPELESS` mit DSV
+(`D32_FLOAT`) **und** SRV (`R32_FLOAT`, Checkpoint C2), Swapchain wie Viewport. Was
+D3D11 still auflöst, sagt D3D12 laut: der DSV kommt per `OMSetRenderTargets` vom
+Output-Merger, eine Resource-Barrier stellt die Tiefe auf `PIXEL_SHADER_RESOURCE`,
+nach den Draws geht beides zurück. Kein Vorpass, also dieselbe Deckung wie D3D11
+(Skinned Meshes, Partikel, WPO-Geometrie). Details: `…-plan.md` §6c.
+
+**Damit zeichnen alle fünf Backends Decals**, und zwar aus einer einzigen
+Shader-Quelle in drei Fassungen: Metal per Framebuffer-Fetch in den G-Buffer, GL aus
+einer gesampelten Tiefe in den G-Buffer, Vulkan/D3D11/D3D12 forward ins Farbziel.
+Der Roadmap-Punkt ist damit nicht mehr „nur Metal".
 
 ### Himmel & Wetter
 
