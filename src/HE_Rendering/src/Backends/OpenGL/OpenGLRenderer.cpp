@@ -156,6 +156,13 @@ uniform float     uGIIntensity;
 uniform sampler2D uGIRefl;        // rgb = radiance along the mirror ray, a = confidence
 uniform vec4      uGIReflParams;  // x = intensity, y = max roughness, z = 1 → bound and active
 
+// ── Screen-space reflections, forward path (docs/ssr-cross-backend-plan.md A5)
+// The half-res trace result, sampled per gl_FragCoord like uGIRefl and sitting
+// one stage BELOW it in the same cascade. Its own toggle: SSR needs the
+// reflection pre-pass and last frame's HDR copy, not the BVH.
+uniform sampler2D uSSRFwd;        // rgb = reflected radiance, a = confidence
+uniform vec4      uSSRParams;     // x = 1 → bound and active, y = intensity, z = max roughness
+
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
 
@@ -439,17 +446,26 @@ void main()
 	vec3 fresnelSpec = specColor
 		+ (max(vec3(1.0 - wRough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
 	vec3 envSpec = texture(uSkyEnv, Rrough).rgb;
-	// FORWARD reflection cascade (sky → ray-traced GI reflections). SYNC: this
-	// is the heLitP twin in MaterialShaderLibrary.cpp — a graph material next to
-	// a built-in one must mix the two sources identically, or the same mirror
-	// changes appearance with the material type. The trace carries no per-pixel
-	// roughness (the half-res pre-pass is flat per draw), so the roughness fade
-	// lives here, with the exact shading value.
+	// FORWARD reflection cascade (sky → ray-traced GI reflections → SSR). SYNC:
+	// this is the heLitP twin in MaterialShaderLibrary.cpp — a graph material
+	// next to a built-in one must mix the sources identically and in the SAME
+	// ORDER, or the same mirror changes appearance with the material type. The
+	// traces carry no per-pixel roughness (the half-res pre-pass is flat per
+	// draw), so the roughness fade lives here, with the exact shading value.
 	if (uGIReflParams.z > 0.5)
 	{
 		vec4  rr   = texture(uGIRefl, gl_FragCoord.xy / uViewport);
 		float fade = 1.0 - smoothstep(uGIReflParams.y * 0.7, uGIReflParams.y, wRough);
 		envSpec = mix(envSpec, rr.rgb, rr.a * uGIReflParams.x * fade);
+	}
+	// Screen-space reflections sit ON TOP of the traced ones: where the screen
+	// has the answer it is the sharper and cheaper of the two, and where it does
+	// not (a = 0) the GI/sky term below stays untouched.
+	if (uSSRParams.x > 0.5)
+	{
+		vec4  sr   = texture(uSSRFwd, gl_FragCoord.xy / uViewport);
+		float fade = 1.0 - smoothstep(uSSRParams.z * 0.7, uSSRParams.z, wRough);
+		envSpec = mix(envSpec, sr.rgb, sr.a * uSSRParams.y * fade);
 	}
 	vec3 ambSpec = envSpec * fresnelSpec;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
@@ -5137,13 +5153,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// DDGI probe atlases = units 16/17 (irradiance / visibility).
 		if (GLint l = glGetUniformLocation(prog, "heGIIrradiance"); l >= 0) glUniform1i(l, 16);
 		if (GLint l = glGetUniformLocation(prog, "heGIVisibility"); l >= 0) glUniform1i(l, 17);
-		// Forward reflection cascade: heGIReflFwd = unit 18, the SAME unit the
-		// built-in shaders read as uGIRefl, so the scene pass binds the trace
-		// result once for both. heSSRFwd stays unbound — GL has no SSR pass, and
-		// heLight.ssr.x = 0 keeps that branch dead. (An old PRECOMPILED material
-		// baked before the cascade existed simply has no such uniform; l < 0 then
-		// skips it and heLight.giRefl.z never reaches a sampler.)
+		// Forward reflection cascade: heGIReflFwd = unit 18 and heSSRFwd = unit 20,
+		// the SAME units the built-in shaders read as uGIRefl/uSSRFwd, so the
+		// scene pass binds each trace result once for both. (An old PRECOMPILED
+		// material baked before the cascade existed simply has no such uniform;
+		// l < 0 then skips it and the gate never reaches a sampler.)
 		if (GLint l = glGetUniformLocation(prog, "heGIReflFwd"); l >= 0) glUniform1i(l, 18);
+		if (GLint l = glGetUniformLocation(prog, "heSSRFwd");    l >= 0) glUniform1i(l, 20);
 		// Cloud-shadow transmittance map = unit 19 (per-frame bind in DrawScene,
 		// shared with the built-in shaders' uCloudShadowMap).
 		if (GLint l = glGetUniformLocation(prog, "heCloudShadow"); l >= 0) glUniform1i(l, 19);
@@ -6205,6 +6221,20 @@ void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflMaxDistance  = std::max(1.0f, s.maxDistance);
 	m_giReflQuality      = std::clamp(s.quality, 0, 2);
 	m_giReflBlurEnabled  = s.blur;
+}
+
+// Screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint A). No
+// m_giSupported gate: the trace is a fragment shader over a rasterized pre-pass,
+// so unlike the ray-traced reflections it needs neither compute nor a BVH — GL
+// 4.1 (macOS included) runs it.
+void OpenGLRenderer::SetSSRSettings(const SSRSettings& s)
+{
+	m_ssrEnabled      = s.enabled;
+	m_ssrIntensity    = std::clamp(s.intensity, 0.0f, 1.0f);
+	m_ssrMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
+	m_ssrMaxDistance  = std::max(1.0f, s.maxDistance);
+	m_ssrThickness    = std::max(1e-3f, s.thickness);
+	m_ssrQuality      = std::clamp(s.quality, 0, 2);
 	// GIReflectionSettings::bounces is deliberately ignored here: the GL kernel
 	// traces a single segment (no bounce loop — see docs/gi-reflections-plan.md
 	// §10), so honouring the slider would promise something the image does not
@@ -6376,6 +6406,8 @@ OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int progra
 	l.intensity  = glGetUniformLocation(program, "uGIIntensity");
 	l.reflTex    = glGetUniformLocation(program, "uGIRefl");
 	l.reflParams = glGetUniformLocation(program, "uGIReflParams");
+	l.ssrTex     = glGetUniformLocation(program, "uSSRFwd");
+	l.ssrParams  = glGetUniformLocation(program, "uSSRParams");
 	return l;
 }
 
@@ -6383,15 +6415,22 @@ OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int progra
 // units are shared; only location integers differ between the three programs
 // sharing kUnlitFS). Inactive → just flips uGIEnabled off.
 //
-// `reflActive` is a SEPARATE gate: ray-traced reflections have their own toggle
-// and run with the diffuse GI switched off, so they are pushed before the
-// early-out below.
-void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active, bool reflActive)
+// `reflActive` and `ssrActive` are SEPARATE gates: both reflection sources have
+// their own toggle and run with the diffuse GI switched off, so they are pushed
+// before the early-out below.
+void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active, bool reflActive,
+                                         bool ssrActive)
 {
 	if (L.reflTex >= 0) glUniform1i(L.reflTex, 18);
 	if (L.reflParams >= 0)
 		glUniform4f(L.reflParams, m_giReflIntensity, m_giReflMaxRoughness,
 		            reflActive ? 1.0f : 0.0f, 0.0f);
+	// Screen-space reflections on unit 20 — the same unit setupProgram assigns
+	// heSSRFwd, so the scene pass binds the trace result once for both.
+	if (L.ssrTex >= 0) glUniform1i(L.ssrTex, 20);
+	if (L.ssrParams >= 0)
+		glUniform4f(L.ssrParams, ssrActive ? 1.0f : 0.0f, m_ssrIntensity,
+		            m_ssrMaxRoughness, 0.0f);
 	if (L.enabled >= 0) glUniform1i(L.enabled, active ? 1 : 0);
 	if (!active) return;
 	glUniform1i(L.shadowTex, 5);
@@ -7097,12 +7136,88 @@ void OpenGLRenderer::DispatchGIProbeUpdate()
 	m_giProbeCursor = (m_giProbeCursor + budget) % m_giProbeCount;
 }
 
-void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
+// ─── Reflection pre-pass program (forward SSR, plan A2/§3.2 way (a)) ─────────
+// The SHARED library shader, cross-compiled to GLSL 410 — the same text Metal
+// builds its MRT pre-pass from, so the oct encoding and the depth convention
+// cannot drift between the two backends. Built lazily on the first SSR frame;
+// a failure logs once and SSR simply never runs.
+//
+// UBO binding points, continuing the decal comment's ledger: 0/1/2/3/8 belong to
+// HeLighting/U/HeParams/HeResolve/HeUI and 4 to HeDecal, so this pre-pass takes
+// 5 and the two SSR passes below take 6 and 7. The pre-pass block is ALSO named
+// `U` — same name as the material vertex block, different program, and the
+// index lookup is per program, so nothing aliases as long as it never claims
+// point 1.
+bool OpenGLRenderer::EnsureReflPrepassProgram()
+{
+	if (m_reflPrepassProgram) return true;
+	if (m_reflPrepassTried) return false;
+	m_reflPrepassTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& v = m_matShaderLib.reflPrepassVertex(Backend::GLSL410);
+	const auto& f = m_matShaderLib.reflPrepassFragment(Backend::GLSL410);
+	if (!(v.ok && f.ok))
+	{
+		HE_LOG_ERROR(RHI, "%s",
+			(std::string("OpenGLRenderer: reflection pre-pass shader compile failed\n")
+			 + v.log + f.log).c_str());
+		return false;
+	}
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+	GLuint prog = 0;
+	if (vs && fs)
+	{
+		prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+		if (!linked)
+		{
+			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "%s",
+				(std::string("OpenGLRenderer: reflection pre-pass link failed: ") + log).c_str());
+			glDeleteProgram(prog);
+			prog = 0;
+		}
+	}
+	if (vs) glDeleteShader(vs);
+	if (fs) glDeleteShader(fs);
+	if (!prog) return false;
+	m_reflPrepassProgram = prog;
+	if (const GLuint idx = glGetUniformBlockIndex(m_reflPrepassProgram, "U");
+	    idx != GL_INVALID_INDEX)
+		glUniformBlockBinding(m_reflPrepassProgram, idx, 5);
+	glGenBuffers(1, &m_reflPrepassUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_reflPrepassUBO);
+	glBufferData(GL_UNIFORM_BUFFER,
+		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ReflPrepassUniforms)),
+		nullptr, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	return true;
+#endif
+}
+
+void OpenGLRenderer::EnsureSSAOTargets(int width, int height, bool withRefl)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
-	if (m_ssaoPosFBO && width == m_ssaoW && height == m_ssaoH)
-		return;
+	const bool sized = m_ssaoPosFBO && width == m_ssaoW && height == m_ssaoH;
+	// The reflection attachments are added to the SAME FBO the first frame SSR
+	// asks for them and then simply stay: they cost two half-screen textures and
+	// re-attaching per frame would only churn driver state.
+	if (sized && (!withRefl || m_reflAttrTex)) return;
+	if (sized)
+	{
+		// Right size, only the two reflection attachments are missing.
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
+	}
+	else
+	{
 	DestroySSAOTargets();
 	m_ssaoW = width; m_ssaoH = height;
 
@@ -7143,6 +7258,38 @@ void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
 		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: SSAO FBO incomplete");
+	}
+
+	// ── Reflection MRT attachments (forward SSR, plan A2) ──────────────────
+	// Attachment 1 = the GB1 encoding (oct normal in rg, roughness in b),
+	// attachment 2 = NDC depth as R32F — exactly what the shared trace would
+	// read out of a G-buffer. NEAREST on both for the same reason the deferred
+	// path point-samples them: interpolating an oct normal across a geometry
+	// edge decodes to garbage, and an interpolated depth is a surface that
+	// never existed.
+	if (withRefl && !m_reflAttrTex)
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
+		auto makeTex = [&](unsigned int& tex, unsigned int internalFmt,
+		                   unsigned int fmt, int attachment)
+		{
+			glGenTextures(1, &tex);
+			glBindTexture(GL_TEXTURE_2D, tex);
+			glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(internalFmt), m_ssaoW, m_ssaoH, 0,
+			             fmt, GL_FLOAT, nullptr);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glFramebufferTexture2D(GL_FRAMEBUFFER,
+			                       static_cast<GLenum>(GL_COLOR_ATTACHMENT0 + attachment),
+			                       GL_TEXTURE_2D, tex, 0);
+		};
+		makeTex(m_reflAttrTex, GL_RGBA16F, GL_RGBA, 1);
+		makeTex(m_reflNdcTex,  GL_R32F,    GL_RED,  2);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: reflection pre-pass FBO incomplete");
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -7152,6 +7299,8 @@ void OpenGLRenderer::DestroySSAOTargets()
 	if (m_ssaoPosFBO)   { glDeleteFramebuffers(1, &m_ssaoPosFBO);    m_ssaoPosFBO = 0; }
 	if (m_ssaoPosTex)   { glDeleteTextures(1, &m_ssaoPosTex);        m_ssaoPosTex = 0; }
 	if (m_ssaoPosDepth) { glDeleteRenderbuffers(1, &m_ssaoPosDepth); m_ssaoPosDepth = 0; }
+	if (m_reflAttrTex)  { glDeleteTextures(1, &m_reflAttrTex);       m_reflAttrTex = 0; }
+	if (m_reflNdcTex)   { glDeleteTextures(1, &m_reflNdcTex);        m_reflNdcTex = 0; }
 	if (m_ssaoFBO)      { glDeleteFramebuffers(1, &m_ssaoFBO);       m_ssaoFBO = 0; }
 	if (m_ssaoTex)      { glDeleteTextures(1, &m_ssaoTex);           m_ssaoTex = 0; }
 	if (m_ssaoBlurFBO)  { glDeleteFramebuffers(1, &m_ssaoBlurFBO);   m_ssaoBlurFBO = 0; }
@@ -7163,12 +7312,23 @@ void OpenGLRenderer::DestroySSAOTargets()
 // depth test disabled; the caller re-binds its own target + depth state.
 unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
 	const glm::mat4& viewProj, const glm::mat4& view, const glm::mat4& proj,
-	bool fromGBufferDepth)
+	bool fromGBufferDepth, bool reflMrt, bool aoWanted)
 {
-	if (!m_ssaoPosProgram || !m_ssaoProgram || !m_ssaoBlurProgram) return 0;
+	// The MRT pre-pass has its own program, so a missing SSAO program must not
+	// take the reflection path down with it — and vice versa.
+	if (reflMrt && !EnsureReflPrepassProgram()) reflMrt = false;
+	if (!reflMrt && !m_ssaoPosProgram) return 0;
+	if (aoWanted && (!m_ssaoProgram || !m_ssaoBlurProgram)) aoWanted = false;
+	if (!reflMrt && !aoWanted) return 0;
+	// The G-buffer-depth shortcut reconstructs positions only; it cannot produce
+	// the normal/depth attachments, so it never combines with the MRT pre-pass
+	// (and does not have to — the forward SSR path is the only caller that asks
+	// for them, and it does not run in deferred mode).
 	if (fromGBufferDepth && (!m_ssaoDepthPosProgram || !m_gbDepthTex)) fromGBufferDepth = false;
-	EnsureSSAOTargets(pw, ph);
+	if (reflMrt) fromGBufferDepth = false;
+	EnsureSSAOTargets(pw, ph, reflMrt);
 	if (!m_ssaoPosFBO) return 0;
+	if (reflMrt && !m_reflAttrTex) reflMrt = false;
 
 	// ── 1. View-space position pre-pass ────────────────────────────────────
 	if (fromGBufferDepth)
@@ -7194,9 +7354,55 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LESS);
 	glDepthMask(GL_TRUE);
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // a = 0 → background
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glUseProgram(m_ssaoPosProgram);
+	// Draw-buffer state lives on the FBO, so it is set on EVERY entry: an
+	// AO-only frame after an SSR frame would otherwise still be pointed at the
+	// two reflection attachments and write undefined values into them.
+	const GLenum mrt[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(reflMrt ? 3 : 1, mrt);
+	// Per-attachment clears, not one glClearColor: attachment 2 is NDC depth and
+	// its background value is 1.0 (the far plane). Zero-cleared it would read as
+	// geometry sitting on the near plane and the trace would hit it everywhere.
+	const float cPos[4]  = { 0.0f, 0.0f, 0.0f, 0.0f }; // a = 0 → background
+	const float cAttr[4] = { 0.5f, 0.5f, 0.0f, 0.0f }; // oct(0,0,·) encoded
+	const float cNdc[4]  = { 1.0f, 1.0f, 1.0f, 1.0f }; // far plane → trace early-outs
+	glClearBufferfv(GL_COLOR, 0, cPos);
+	if (reflMrt)
+	{
+		glClearBufferfv(GL_COLOR, 1, cAttr);
+		glClearBufferfv(GL_COLOR, 2, cNdc);
+	}
+	const float d1 = 1.0f;
+	glClearBufferfv(GL_DEPTH, 0, &d1);
+	if (reflMrt)
+	{
+		glUseProgram(m_reflPrepassProgram);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 5, m_reflPrepassUBO);
+	}
+	else
+		glUseProgram(m_ssaoPosProgram);
+	// One per-draw push, two shapes: the hand-written AO program takes loose
+	// uniforms, the shared reflection program the three-mat4 block it shares
+	// with Metal's encoder.
+	auto pushDraw = [&](const glm::mat4& model)
+	{
+		if (reflMrt)
+		{
+			HE::MaterialShaderLibrary::ReflPrepassUniforms u;
+			const glm::mat4 mvp = viewProj * model;
+			const glm::mat4 mv  = view * model;
+			std::memcpy(u.mvp,       glm::value_ptr(mvp),   16 * sizeof(float));
+			std::memcpy(u.modelView, glm::value_ptr(mv),    16 * sizeof(float));
+			std::memcpy(u.model,     glm::value_ptr(model), 16 * sizeof(float));
+			glBindBuffer(GL_UNIFORM_BUFFER, m_reflPrepassUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(u)), &u);
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+		}
+		else
+		{
+			glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * model));
+			glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * model));
+		}
+	};
 	HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 	for (const DrawCall& dc : cmds.drawCalls())
 	{
@@ -7216,18 +7422,27 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 		{
 			for (const glm::mat4& t : dc.instanceTransforms)
 			{
-				glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * t));
-				glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * t));
+				pushDraw(t);
 				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 			}
 		}
 		else
 		{
-			glUniformMatrix4fv(m_uPosMVP,       1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
-			glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * dc.transform));
+			pushDraw(dc.transform);
 			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 		}
 	}
+	// Back to a single draw buffer so nothing downstream inherits the MRT state.
+	if (reflMrt) glDrawBuffers(1, mrt);
+	}
+
+	// The reflection pre-pass can be the whole job: SSR wants it on frames where
+	// SSAO is off or the GI probes replaced it.
+	if (!aoWanted)
+	{
+		glDisable(GL_DEPTH_TEST);
+		glActiveTexture(GL_TEXTURE0);
+		return 0;
 	}
 
 	// ── 2. Occlusion (fullscreen) ──────────────────────────────────────────
@@ -7259,6 +7474,345 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 
 	glActiveTexture(GL_TEXTURE0);
 	return m_ssaoBlurTex;
+}
+
+// ─── Forward screen-space reflections (docs/ssr-cross-backend-plan.md A3/A4) ──
+// The GL twin of MetalRenderer::EncodeForwardSSR, built from the SAME shared
+// trace and blur shaders. Deliberately NOT a second implementation: everything
+// that decides how a reflection looks lives in MaterialShaderLibrary, and this
+// file only decides which texture goes into which slot.
+bool OpenGLRenderer::EnsureSSRPrograms()
+{
+	if (m_ssrTraceProgram && m_ssrBlurProgram) return true;
+	if (m_ssrProgramsTried) return false;
+	m_ssrProgramsTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	// The attribute-less fullscreen triangle the deferred resolve already uses —
+	// the trace and the blur both read gl_FragCoord and take no varyings.
+	const auto& v  = m_matShaderLib.fullscreenVertex(Backend::GLSL410);
+	const auto& ft = m_matShaderLib.ssrTrace(Backend::GLSL410);
+	const auto& fb = m_matShaderLib.ssrBlur(Backend::GLSL410);
+	if (!(v.ok && ft.ok && fb.ok))
+	{
+		HE_LOG_ERROR(RHI, "%s",
+			(std::string("OpenGLRenderer: SSR shader compile failed\n")
+			 + v.log + ft.log + fb.log).c_str());
+		return false;
+	}
+	auto build = [&](const char* what, const char* fragSrc) -> unsigned int
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc);
+		GLuint prog = 0;
+		if (vs && fs)
+		{
+			prog = glCreateProgram();
+			glAttachShader(prog, vs);
+			glAttachShader(prog, fs);
+			glLinkProgram(prog);
+			GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+			if (!linked)
+			{
+				char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				HE_LOG_ERROR(RHI, "%s",
+					(std::string("OpenGLRenderer: SSR ") + what + " link failed: " + log).c_str());
+				glDeleteProgram(prog);
+				prog = 0;
+			}
+		}
+		if (vs) glDeleteShader(vs);
+		if (fs) glDeleteShader(fs);
+		return prog;
+	};
+	m_ssrTraceProgram = build("trace", ft.source.c_str());
+	m_ssrBlurProgram  = build("blur",  fb.source.c_str());
+	if (!m_ssrTraceProgram || !m_ssrBlurProgram)
+	{
+		if (m_ssrTraceProgram) { glDeleteProgram(m_ssrTraceProgram); m_ssrTraceProgram = 0; }
+		if (m_ssrBlurProgram)  { glDeleteProgram(m_ssrBlurProgram);  m_ssrBlurProgram = 0; }
+		return false;
+	}
+	// UBO blocks: HeSSRTrace → binding point 6, HeSSRBlur → 7 (see the ledger on
+	// EnsureReflPrepassProgram). Samplers by name, the way every GLSL 410
+	// program in this backend does it — 420pack is off in the cross-compiler, so
+	// the emitted source carries no binding qualifiers.
+	if (const GLuint idx = glGetUniformBlockIndex(m_ssrTraceProgram, "HeSSRTrace");
+	    idx != GL_INVALID_INDEX)
+		glUniformBlockBinding(m_ssrTraceProgram, idx, 6);
+	if (const GLuint idx = glGetUniformBlockIndex(m_ssrBlurProgram, "HeSSRBlur");
+	    idx != GL_INVALID_INDEX)
+		glUniformBlockBinding(m_ssrBlurProgram, idx, 7);
+	glUseProgram(m_ssrTraceProgram);
+	auto smp = [&](unsigned int prog, const char* nm, int unit) {
+		if (GLint l = glGetUniformLocation(prog, nm); l >= 0) glUniform1i(l, unit);
+	};
+	smp(m_ssrTraceProgram, "heSceneColor",  0);
+	smp(m_ssrTraceProgram, "heGB1",         1);
+	smp(m_ssrTraceProgram, "heGBDepth",     2);
+	smp(m_ssrTraceProgram, "heSSRHistRad",  3);
+	smp(m_ssrTraceProgram, "heSSRHistPos",  4);
+	glUseProgram(m_ssrBlurProgram);
+	smp(m_ssrBlurProgram,  "heSSRIn",       0);
+	glUseProgram(0);
+
+	glGenBuffers(1, &m_ssrTraceUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_ssrTraceUBO);
+	glBufferData(GL_UNIFORM_BUFFER,
+		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::SSRTraceUniforms)),
+		nullptr, GL_DYNAMIC_DRAW);
+	glGenBuffers(1, &m_ssrBlurUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_ssrBlurUBO);
+	glBufferData(GL_UNIFORM_BUFFER,
+		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::SSRBlurUniforms)),
+		nullptr, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	return true;
+#endif
+}
+
+void OpenGLRenderer::EnsureSSRTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_ssrHistFBO[0] && width == m_ssrW && height == m_ssrH) return;
+	DestroySSRTargets();
+	m_ssrW = width; m_ssrH = height;
+	auto makeTex = [&](unsigned int filter) -> unsigned int
+	{
+		unsigned int tex = 0;
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(filter));
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(filter));
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return tex;
+	};
+	for (int i = 0; i < 2; ++i)
+	{
+		// Radiance: the filter is re-set per frame in RenderForwardSSR — at
+		// quality 0 this texture IS what the scene shader upsamples, at the
+		// higher tiers it is a point-sampled temporal history.
+		m_ssrHistRadTex[i] = makeTex(GL_LINEAR);
+		// Positions are never interpolated: a value straddling a depth edge is a
+		// surface that does not exist, and the disocclusion test would accept it.
+		m_ssrHistPosTex[i] = makeTex(GL_NEAREST);
+		glGenFramebuffers(1, &m_ssrHistFBO[i]);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssrHistFBO[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssrHistRadTex[i], 0);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_ssrHistPosTex[i], 0);
+	}
+	m_ssrPingTex = makeTex(GL_LINEAR);
+	glGenFramebuffers(1, &m_ssrPingFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ssrPingFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssrPingTex, 0);
+	m_ssrReflTex = makeTex(GL_LINEAR);
+	glGenFramebuffers(1, &m_ssrReflFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ssrReflFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssrReflTex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: SSR FBO incomplete");
+	// Fresh (undefined-content) targets — the first frame must not blend against
+	// them, the same rule the Metal path states at EnsureSSRTarget.
+	m_ssrHistIdx   = 0;
+	m_ssrHistValid = false;
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void OpenGLRenderer::DestroySSRTargets()
+{
+	for (int i = 0; i < 2; ++i)
+	{
+		if (m_ssrHistFBO[i])    { glDeleteFramebuffers(1, &m_ssrHistFBO[i]);  m_ssrHistFBO[i] = 0; }
+		if (m_ssrHistRadTex[i]) { glDeleteTextures(1, &m_ssrHistRadTex[i]);   m_ssrHistRadTex[i] = 0; }
+		if (m_ssrHistPosTex[i]) { glDeleteTextures(1, &m_ssrHistPosTex[i]);   m_ssrHistPosTex[i] = 0; }
+	}
+	if (m_ssrPingFBO) { glDeleteFramebuffers(1, &m_ssrPingFBO); m_ssrPingFBO = 0; }
+	if (m_ssrPingTex) { glDeleteTextures(1, &m_ssrPingTex);     m_ssrPingTex = 0; }
+	if (m_ssrReflFBO) { glDeleteFramebuffers(1, &m_ssrReflFBO); m_ssrReflFBO = 0; }
+	if (m_ssrReflTex) { glDeleteTextures(1, &m_ssrReflTex);     m_ssrReflTex = 0; }
+	m_ssrW = m_ssrH = 0;
+	m_ssrHistValid = false;
+}
+
+// Full-res copy of the finished HDR frame (opaque + sky + transparency), taken
+// at the end of the geometry pass. NEXT frame's trace reprojects its hits into
+// it — the one frame of content lag is the accepted forward trade (Option A).
+void OpenGLRenderer::CaptureSSRColorHistory(int width, int height)
+{
+	if (!m_hdrColor) return;
+	if (!m_ssrColorHistTex || m_ssrColorHistW != width || m_ssrColorHistH != height)
+	{
+		if (m_ssrColorHistFBO) { glDeleteFramebuffers(1, &m_ssrColorHistFBO); m_ssrColorHistFBO = 0; }
+		if (m_ssrColorHistTex) { glDeleteTextures(1, &m_ssrColorHistTex);     m_ssrColorHistTex = 0; }
+		m_ssrColorHistValid = false;
+		glGenTextures(1, &m_ssrColorHistTex);
+		glBindTexture(GL_TEXTURE_2D, m_ssrColorHistTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glGenFramebuffers(1, &m_ssrColorHistFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssrColorHistFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+		                       m_ssrColorHistTex, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_ssrColorHistW = width; m_ssrColorHistH = height;
+	}
+	if (!m_ssrColorHistFBO) return;
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, m_hdrFBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_ssrColorHistFBO);
+	glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+	                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+	m_ssrColorHistValid = true;
+}
+
+unsigned int OpenGLRenderer::RenderForwardSSR(int pw, int ph, const glm::mat4& viewProj)
+{
+	if (!m_ssrTraceProgram || !m_ssrBlurProgram) return 0;
+	if (!m_reflAttrTex || !m_reflNdcTex)         return 0;
+	if (!m_ssrColorHistTex || !m_ssrColorHistValid) return 0; // frame 1 seeds the copy first
+	const int tw = std::max(1, pw / 2), th = std::max(1, ph / 2);
+	EnsureSSRTargets(tw, th);
+	if (!m_ssrHistFBO[0]) return 0;
+
+	const glm::vec3 camFwd =
+		-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+	const int curIdx  = m_ssrHistIdx;
+	const int prevIdx = 1 - curIdx;
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glBindVertexArray(m_fsVAO);
+	glViewport(0, 0, tw, th);
+
+	// ── 1. Trace (MRT: blended radiance + receiver position) ───────────────
+	{
+		const bool temporal = m_ssrQuality >= 2;
+		float hist = 0.0f;
+		if (temporal && m_ssrHistValid)
+		{
+			// Camera-motion damping, the same measure Metal takes: a moved view
+			// means the un-reprojected reflection CONTENT is stale.
+			float delta = 0.0f;
+			for (int c = 0; c < 4; ++c)
+				for (int r = 0; r < 4; ++r)
+					delta = std::max(delta, std::abs(viewProj[c][r] - m_ssrPrevViewProj[c][r]));
+			hist = delta > 1e-5f ? 0.55f : 0.85f;
+		}
+		m_ssrFrameSeed += 1.0f;
+
+		HE::MaterialShaderLibrary::SSRTraceUniforms tu;
+		const glm::mat4 ivp = glm::inverse(viewProj);
+		std::memcpy(tu.viewProj,     glm::value_ptr(viewProj),          16 * sizeof(float));
+		std::memcpy(tu.invViewProj,  glm::value_ptr(ivp),               16 * sizeof(float));
+		std::memcpy(tu.prevViewProj, glm::value_ptr(m_ssrPrevViewProj), 16 * sizeof(float));
+		tu.cfg2[0] = m_ssrFrameSeed;
+		tu.cfg2[1] = hist;
+		tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+		tu.cfg2[3] = temporal ? 1.0f : 0.0f; // glossy cone jitter (High)
+		tu.camPos[0] = m_renderWorld.camera.position.x;
+		tu.camPos[1] = m_renderWorld.camera.position.y;
+		tu.camPos[2] = m_renderWorld.camera.position.z;
+		tu.camFwd[0] = camFwd.x; tu.camFwd[1] = camFwd.y; tu.camFwd[2] = camFwd.z;
+		tu.cfg[0] = m_ssrMaxDistance;
+		tu.cfg[1] = m_ssrThickness;
+		tu.cfg[2] = m_ssrMaxRoughness;
+		tu.cfg[3] = static_cast<float>(m_ssrQuality <= 0 ? 16 : m_ssrQuality == 1 ? 32 : 64);
+		// GL conventions (docs/ssr-cross-backend-plan.md §1.4, inherited from the
+		// decal port): NDC y points UP, and the sampled depth is [0,1] while NDC z
+		// is [-1,1] — hence scale 2 / bias -1. Metal reads (-1, 1, 0) here.
+		tu.conv[0] =  1.0f;
+		tu.conv[1] =  2.0f;
+		tu.conv[2] = -1.0f;
+		tu.conv[3] =  0.1f;
+		tu.vp[0] = static_cast<float>(tw);
+		tu.vp[1] = static_cast<float>(th);
+
+		glBindBuffer(GL_UNIFORM_BUFFER, m_ssrTraceUBO);
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(tu)), &tu);
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 6, m_ssrTraceUBO);
+
+		// The radiance history is point-sampled from the temporal tier upward
+		// (Metal binds its point sampler there); at quality 0 the very same
+		// texture is what the scene shader upsamples to full screen, and NEAREST
+		// would show as half-res stair-steps in the mirror.
+		const GLint histFilter = m_ssrQuality >= 2 ? GL_NEAREST : GL_LINEAR;
+		for (int i = 0; i < 2; ++i)
+		{
+			glBindTexture(GL_TEXTURE_2D, m_ssrHistRadTex[i]);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, histFilter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, histFilter);
+		}
+
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssrHistFBO[curIdx]);
+		const GLenum mrt[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+		glDrawBuffers(2, mrt);
+		glUseProgram(m_ssrTraceProgram);
+		glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_ssrColorHistTex);
+		glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_reflAttrTex);
+		glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_reflNdcTex);
+		glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_ssrHistRadTex[prevIdx]);
+		glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_ssrHistPosTex[prevIdx]);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		++m_counters.draws;
+		glDrawBuffers(1, mrt);
+
+		m_ssrHistIdx      = prevIdx;
+		m_ssrHistValid    = true;
+		m_ssrPrevViewProj = viewProj;
+	}
+
+	unsigned int result = m_ssrHistRadTex[curIdx];
+
+	// ── 2. Blur chain — the same tier policy as Metal's forward variant. No
+	// wide/roughness-mix stage: the forward path has none there either (the mix
+	// shader serves the GI reflections), and the pre-pass carries no roughness.
+	if (m_ssrQuality >= 1)
+	{
+		glBindBufferBase(GL_UNIFORM_BUFFER, 7, m_ssrBlurUBO);
+		glUseProgram(m_ssrBlurProgram);
+		auto blurPass = [&](unsigned int src, unsigned int dstFBO, float dx, float dy)
+		{
+			HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+			bu.dir[0] = dx;
+			bu.dir[1] = dy;
+			bu.dir[2] = 1.0f / static_cast<float>(tw);
+			bu.dir[3] = 1.0f / static_cast<float>(th);
+			glBindBuffer(GL_UNIFORM_BUFFER, m_ssrBlurUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(bu)), &bu);
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, dstFBO);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, src);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			++m_counters.draws;
+		};
+		const float sx = 1.0f / static_cast<float>(tw);
+		const float sy = 1.0f / static_cast<float>(th);
+		blurPass(result,       m_ssrPingFBO, sx,   0.0f);
+		blurPass(m_ssrPingTex, m_ssrReflFBO, 0.0f, sy);
+		if (m_ssrQuality == 1)
+		{
+			blurPass(m_ssrReflTex, m_ssrPingFBO, sx,   0.0f);
+			blurPass(m_ssrPingTex, m_ssrReflFBO, 0.0f, sy);
+		}
+		result = m_ssrReflTex;
+	}
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, pw, ph);
+	return result;
 }
 
 // The R8 atlas texture for a font key (0 = the shared default), uploaded lazily
@@ -7695,6 +8249,10 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 				// reflection cascade covers the deferred path too — the pre-pass
 				// and trace run before the G-buffer either way.
 				smp("heGIReflFwd", 18);
+				// heSSRFwd gets its unit too even though the DEFERRED path never
+				// lights its gate (A6): left at 0 the sampler would alias heGB0's
+				// unit, which is the kind of thing a strict driver refuses.
+				smp("heSSRFwd", 20);
 				// Cloud-shadow transmittance map — unit 19 (per-frame bind).
 				smp("heCloudShadow", 19);
 				glUseProgram(0);
@@ -9501,6 +10059,22 @@ void OpenGLRenderer::Shutdown()
 	if (m_resolveLightUBO) { glDeleteBuffers(1, &m_resolveLightUBO); m_resolveLightUBO = 0; }
 	if (m_decalProgram)    { glDeleteProgram(m_decalProgram);        m_decalProgram = 0; }
 	if (m_decalUBO)        { glDeleteBuffers(1, &m_decalUBO);        m_decalUBO = 0; }
+	// Forward SSR + its reflection pre-pass (the targets go with DestroySSAOTargets
+	// / DestroySSRTargets below; the "tried" flags reset so a re-Initialize()
+	// gets a fresh build attempt instead of a permanently disabled feature).
+	if (m_reflPrepassProgram) { glDeleteProgram(m_reflPrepassProgram); m_reflPrepassProgram = 0; }
+	if (m_reflPrepassUBO)     { glDeleteBuffers(1, &m_reflPrepassUBO); m_reflPrepassUBO = 0; }
+	if (m_ssrTraceProgram)    { glDeleteProgram(m_ssrTraceProgram);    m_ssrTraceProgram = 0; }
+	if (m_ssrBlurProgram)     { glDeleteProgram(m_ssrBlurProgram);     m_ssrBlurProgram = 0; }
+	if (m_ssrTraceUBO)        { glDeleteBuffers(1, &m_ssrTraceUBO);    m_ssrTraceUBO = 0; }
+	if (m_ssrBlurUBO)         { glDeleteBuffers(1, &m_ssrBlurUBO);     m_ssrBlurUBO = 0; }
+	if (m_ssrColorHistFBO)    { glDeleteFramebuffers(1, &m_ssrColorHistFBO); m_ssrColorHistFBO = 0; }
+	if (m_ssrColorHistTex)    { glDeleteTextures(1, &m_ssrColorHistTex);     m_ssrColorHistTex = 0; }
+	m_ssrColorHistW = m_ssrColorHistH = 0;
+	m_ssrColorHistValid = false;
+	m_reflPrepassTried  = false;
+	m_ssrProgramsTried  = false;
+	DestroySSRTargets();
 	m_decalProgramTried      = false;
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
@@ -10261,13 +10835,34 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// SSAO runs AFTER the G-buffer loop below instead of here.
 		const bool deferredActive =
 			m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
+		// Forward SSR (docs/ssr-cross-backend-plan.md checkpoint A): the FORWARD
+		// path only. The deferred composite is A6 and not built, so in deferred
+		// mode the gate below stays 0 and the frame is byte-identical to SSR
+		// never having existed.
+		const bool ssrFrameActive =
+			m_ssrEnabled && !deferredActive && EnsureSSRPrograms();
+		// The reflection MRT pre-pass is the trace's only geometry input, so it
+		// runs whenever SSR does — including on frames where SSAO is off or the
+		// GI probes replaced it, which is exactly the case RenderSSAO used to
+		// skip entirely (Metal's m_fwdReflPrepassWanted / …Only pair).
+		const bool aoWanted = m_ssaoEnabled && !giShadingActive && !deferredActive;
 		unsigned int aoTex = 0u;
-		if (m_ssaoEnabled && !giShadingActive && !deferredActive)
+		if (aoWanted || ssrFrameActive)
 		{
 			GpuPassScope _ssaoTimer(this, "SSAO");
 			aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
-			                   m_renderWorld.camera.projection);
+			                   m_renderWorld.camera.projection, /*fromGBufferDepth=*/false,
+			                   /*reflMrt=*/ssrFrameActive, aoWanted);
 		}
+		unsigned int ssrTex = 0u;
+		if (ssrFrameActive)
+		{
+			GpuPassScope _ssrTimer(this, "SSR");
+			ssrTex = RenderForwardSSR(pw, ph, viewProj);
+		}
+		// Same gate shape as giReflActive: a real trace result AND a non-zero
+		// intensity. Off → the black dummy is bound and the cascade folds away.
+		const bool ssrActive = ssrTex != 0 && m_ssrIntensity > 0.0f;
 
 		// ── Geometry pass: scene program + per-frame state, into HDR target ─
 		// Set here (not before the graph) because the shadow pass switched the
@@ -10373,6 +10968,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// gate uniform were ever wrong.
 		glActiveTexture(GL_TEXTURE18);
 		glBindTexture(GL_TEXTURE_2D, giReflActive ? giReflTex : m_blackTex);
+		// Screen-space reflection result on unit 20 — one bind for every program
+		// in this pass (built-ins read uSSRFwd, graph materials heSSRFwd). Same
+		// transparent-black fallback: a sample would contribute nothing even if a
+		// gate uniform were ever wrong.
+		glActiveTexture(GL_TEXTURE20);
+		glBindTexture(GL_TEXTURE_2D, ssrActive ? ssrTex : m_blackTex);
 		// Cloud-shadow transmittance map on unit 19 — ONE bind for every program
 		// in this pass (built-ins read uCloudShadowMap, graph materials + the
 		// deferred resolve heCloudShadow). White = no shadow when the pass
@@ -10385,7 +10986,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1i(m_uCloudShadowMap, 19);
 		glUniform4fv(m_uCloudShadowA, 1, glm::value_ptr(cloudShA));
 		glUniform4fv(m_uCloudShadowB, 1, glm::value_ptr(cloudShB));
-		PushGISceneUniforms(m_giLocsUnlit, giShadingActive, giReflActive);
+		PushGISceneUniforms(m_giLocsUnlit, giShadingActive, giReflActive, ssrActive);
 
 		// Lights + CSM/local-shadow uniforms (clamped to the shader's MAX_LIGHTS).
 		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
@@ -10428,7 +11029,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uInstCloudShadowMap, 19);
 			glUniform4fv(m_uInstCloudShadowA, 1, glm::value_ptr(cloudShA));
 			glUniform4fv(m_uInstCloudShadowB, 1, glm::value_ptr(cloudShB));
-			PushGISceneUniforms(m_giLocsInstanced, giShadingActive, giReflActive);
+			PushGISceneUniforms(m_giLocsInstanced, giShadingActive, giReflActive, ssrActive);
 			// Same lights + CSM block as the unlit program; the shadow ATLASES are
 			// already bound on units 1/11 above (texture units are shared).
 			BindSceneLighting({ m_uInstLightCount, m_uInstLightPos, m_uInstLightDir,
@@ -10527,12 +11128,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			lit.giProbe[0] = m_giIndirectIntensity;
 			lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
 			// Ray-traced reflections for heLitP's forward cascade (heGIReflFwd,
-			// unit 18). x = intensity, y = max roughness, z = the gate. ssr[*]
-			// stays zero — GL has no screen-space trace, so that branch of the
-			// same cascade folds away.
+			// unit 18). x = intensity, y = max roughness, z = the gate.
 			lit.giRefl[0] = m_giReflIntensity;
 			lit.giRefl[1] = m_giReflMaxRoughness;
 			lit.giRefl[2] = giReflActive ? 1.0f : 0.0f;
+			// Screen-space reflections, the next stage of the SAME cascade
+			// (heSSRFwd, unit 20). x = the gate, y = intensity, z = max
+			// roughness; w is the DEFERRED marker and stays zero — the forward
+			// path never zeroes ambSpec, and GL has no deferred composite (A6).
+			lit.ssr[0] = ssrActive ? 1.0f : 0.0f;
+			lit.ssr[1] = m_ssrIntensity;
+			lit.ssr[2] = m_ssrMaxRoughness;
+			lit.ssr[3] = 0.0f;
 			// Full light window for heLitP() — same first-8 order as the built-in
 			// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also
 			// writes the per-light atlas layer into lightParams[i].y when
@@ -11369,7 +11976,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uSkinnedCloudShadowMap, 19);
 			glUniform4fv(m_uSkinnedCloudShadowA, 1, glm::value_ptr(cloudShA));
 			glUniform4fv(m_uSkinnedCloudShadowB, 1, glm::value_ptr(cloudShB));
-			PushGISceneUniforms(m_giLocsSkinned, giShadingActive, giReflActive);
+			PushGISceneUniforms(m_giLocsSkinned, giShadingActive, giReflActive, ssrActive);
 
 			constexpr int kMaxBones = 128;
 			// Scratch buffer for the full bone matrix upload per draw call.
@@ -11523,6 +12130,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDepthMask(GL_TRUE);
 		}
 		GpuTimerEndPass();                 // end "Transparent"
+
+		// Forward SSR: keep a full-res copy of the finished HDR frame (opaque +
+		// sky + transparency) — NEXT frame's trace reprojects its hits into it.
+		// Taken here, at the very end of the geometry pass, for the same reason
+		// Metal takes it after its scene encoder: earlier and the reflection
+		// would show a half-drawn world.
+		if (!deferredActive && ssrFrameActive)
+			CaptureSSRColorHistory(pw, ph);
 	});
 
 	glBindVertexArray(0);
@@ -11979,6 +12594,12 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
+	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
+	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
+	// Metal's Option-A path. The deferred composite (A6) is not built, so in
+	// deferred mode the gate stays 0 and the image is unchanged. Programs come
+	// from the shared cross-compiler, hence the #if.
+	c.supportsScreenSpaceReflections = true;
 #endif
 	return c;
 }

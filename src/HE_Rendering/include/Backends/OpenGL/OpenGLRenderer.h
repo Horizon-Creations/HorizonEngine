@@ -76,6 +76,7 @@ public:
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
+	void  SetSSRSettings(const SSRSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -841,16 +842,32 @@ private:
 	float        m_ssaoRadius     = 0.5f;
 	float        m_ssaoIntensity  = 1.0f;
 	int          m_ssaoMethod     = 0;   // 0 = SSAO, 1 = HBAO, 2 = GTAO
+	// ── Reflection MRT pre-pass (forward SSR, docs/ssr-cross-backend-plan.md A2)
+	// Metal's trick, ported: the SSAO position pre-pass grows two attachments so
+	// the forward SSR trace sees exactly the GB1/GBDepth encoding it would get
+	// from a G-buffer. Written by the SHARED library shader (reflPrepassVertex/
+	// Fragment), not by kSSAOPosVS/FS — attachment 0 is the same view-space
+	// position either way, so the occlusion pass below is unaffected.
+	unsigned int m_reflAttrTex    = 0;   // RGBA16F: rg = oct world normal *0.5+0.5, b = roughness (0)
+	unsigned int m_reflNdcTex     = 0;   // R32F: NDC depth in the G-buffer's convention
+	unsigned int m_reflPrepassProgram = 0;
+	bool         m_reflPrepassTried   = false;
+	unsigned int m_reflPrepassUBO = 0;   // ReflPrepassUniforms (3 × mat4), per draw
+	bool EnsureReflPrepassProgram();
 	void CreateSSAOPipeline();           // programs + kernel + noise texture
-	void EnsureSSAOTargets(int width, int height);
+	void EnsureSSAOTargets(int width, int height, bool withRefl);
 	void DestroySSAOTargets();
 	// Pre-pass + occlusion + blur using the geometry draw calls; returns the
 	// blurred AO texture id (or 0 if unavailable). Restores GL_TEXTURE0 active.
 	// fromGBufferDepth (deferred, plan P5): reconstruct the view-space positions
 	// from m_gbDepthTex in one fullscreen draw instead of the geometry pre-pass.
+	// reflMrt: draw the pre-pass through the shared reflection shader into three
+	// attachments (forward SSR). aoWanted = false runs the pre-pass ALONE — the
+	// occlusion and blur stages are skipped and the return value is 0.
 	unsigned int RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
 	                        const glm::mat4& viewProj, const glm::mat4& view,
-	                        const glm::mat4& proj, bool fromGBufferDepth = false);
+	                        const glm::mat4& proj, bool fromGBufferDepth = false,
+	                        bool reflMrt = false, bool aoWanted = true);
 
 	// ── Global Illumination (GL 4.3+ compute port, Windows/Linux — blind) ──────
 	// Software counterpart of the Metal ray-traced DDGI path: CPU-built BVH
@@ -974,10 +991,12 @@ private:
 		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1, localTex = -1;
 		int gridOrigin = -1, gridCounts = -1, intensity = -1;
 		int reflTex = -1, reflParams = -1;   // ray-traced reflections (own toggle)
+		int ssrTex  = -1, ssrParams  = -1;   // screen-space reflections (own toggle)
 	};
 	GISceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
 	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
-	void         PushGISceneUniforms(const GISceneLocs& locs, bool active, bool reflActive);
+	void         PushGISceneUniforms(const GISceneLocs& locs, bool active, bool reflActive,
+	                                 bool ssrActive);
 	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
@@ -1002,6 +1021,54 @@ private:
 	float        m_giReflMaxRoughness = 0.6f;   // above this the sky term stands alone
 	float        m_giReflMaxDistance  = 200.0f; // world-space ray length
 	int          m_giReflQuality      = 1;      // 0 raw / 1 + blur / 2 + cone jitter + temporal
+
+	// ── Screen-space reflections, FORWARD path (docs/ssr-cross-backend-plan.md
+	// checkpoint A) ──────────────────────────────────────────────────────────
+	// Line-for-line the shape of Metal's EncodeForwardSSR: the shared trace runs
+	// at half resolution over the reflection MRT pre-pass and LAST frame's HDR
+	// copy (Option A — one frame of content lag), the blur chain smooths it, and
+	// the scene shaders sample the one resulting texture. No composite pass and
+	// no glossy wide/mix stage: Metal's forward path has neither (the mix
+	// pipeline there serves the GI reflections). The GL DEFERRED path keeps its
+	// gate at zero — that is plan item A6 and deliberately out of scope.
+	unsigned int m_ssrTraceProgram = 0;
+	unsigned int m_ssrBlurProgram  = 0;
+	bool         m_ssrProgramsTried = false;
+	unsigned int m_ssrTraceUBO     = 0;  // SSRTraceUniforms  (binding point 6)
+	unsigned int m_ssrBlurUBO      = 0;  // SSRBlurUniforms   (binding point 7)
+	// Half-res targets. The history pair is written as an MRT (radiance +
+	// receiver world position) so the temporal tier can reject disocclusions;
+	// ping/refl are the blur chain's two buffers.
+	unsigned int m_ssrHistFBO[2]   = { 0, 0 };
+	unsigned int m_ssrHistRadTex[2] = { 0, 0 };
+	unsigned int m_ssrHistPosTex[2] = { 0, 0 };
+	unsigned int m_ssrPingFBO = 0, m_ssrPingTex = 0;
+	unsigned int m_ssrReflFBO = 0, m_ssrReflTex = 0;
+	int          m_ssrW = 0, m_ssrH = 0;
+	int          m_ssrHistIdx   = 0;
+	bool         m_ssrHistValid = false;
+	glm::mat4    m_ssrPrevViewProj{1.0f};
+	float        m_ssrFrameSeed = 0.0f;
+	// Full-res copy of the PREVIOUS frame's HDR colour — the forward trace's
+	// radiance source (Metal's m_ssrColorHist). Invalid on the first frame and
+	// after every resize; the trace skips those frames entirely.
+	unsigned int m_ssrColorHistFBO = 0, m_ssrColorHistTex = 0;
+	int          m_ssrColorHistW = 0, m_ssrColorHistH = 0;
+	bool         m_ssrColorHistValid = false;
+	bool         m_ssrEnabled      = false;
+	float        m_ssrIntensity    = 1.0f;
+	float        m_ssrMaxRoughness = 0.6f;
+	float        m_ssrMaxDistance  = 30.0f;
+	float        m_ssrThickness    = 0.5f;
+	int          m_ssrQuality      = 1;     // 0 = 16 steps, 1 = 32, 2 = 64 + temporal
+	bool EnsureSSRPrograms();
+	void EnsureSSRTargets(int width, int height);
+	void DestroySSRTargets();
+	// Trace + blur chain over the reflection pre-pass; returns the texture the
+	// scene shaders sample (0 when the pass could not run this frame).
+	unsigned int RenderForwardSSR(int pw, int ph, const glm::mat4& viewProj);
+	// End-of-geometry-pass copy of m_hdrColor for NEXT frame's trace.
+	void CaptureSSRColorHistory(int width, int height);
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window
