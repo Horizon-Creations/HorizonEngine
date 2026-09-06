@@ -1142,3 +1142,90 @@ TEST_CASE("CameraBlend: a rig that loses the picture mid-blend does not resume i
     CHECK_FALSE(r->world.registry().get<CameraRigComponent>(b.camera).isBlending());
     CHECK(r->camXform().position.z == doctest::Approx(4.0f));   // a cut, not an ease
 }
+
+// ─── FOV kick ─────────────────────────────────────────────────────────────────
+
+TEST_CASE("CameraFov: a kick never writes the camera's own FOV")
+{
+    // fovDegrees is what the author set: the inspector shows it, the serialiser
+    // saves it, Get/Set Camera FOV mean it. A kick computed INTO it would be the
+    // shake-in-the-transform mistake with a saved scene on the end of it.
+    auto r = makeShakeRig();
+    auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+    cam.fovDegrees = 72.0f;
+
+    HE::api::camera::kickFov(r->api(), 15.0f, 0.05f, 0.1f, 0.3f);
+    for (int i = 0; i < 100; ++i)
+    {
+        stepTime(*r, 1.0f / 60.0f, 1);
+        REQUIRE(cam.fovDegrees == 72.0f);
+    }
+    // And the value the script surface reports is still the authored one.
+    CHECK(HE::api::camera::getFov(r->api()) == doctest::Approx(72.0f));
+}
+
+TEST_CASE("CameraFov: the kick peaks, comes back and leaves fovOffset at exactly zero")
+{
+    auto r = makeShakeRig();
+    auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+    cam.fovDegrees = 60.0f;
+
+    HE::api::camera::kickFov(r->api(), 20.0f, 0.1f, 0.1f, 0.2f);   // 0.4 s in all
+
+    stepTime(*r, 1.0f / 60.0f, 9);        // 0.15 s — inside the hold, at full
+    CHECK(cam.fovOffset == doctest::Approx(20.0f).epsilon(0.05));
+
+    // Past the end, generously: float steps do not land on 0.4 exactly, and the
+    // claim is about what stands there afterwards. Exactly 0.0f, not an epsilon
+    // of tail — an epsilon left standing is a permanently slightly wrong FOV
+    // with nothing running to work it off.
+    stepTime(*r, 1.0f / 60.0f, 60);
+    CHECK(cam.fovOffset == 0.0f);
+
+    // Negative amplitude zooms IN, and lands back on zero the same way.
+    HE::api::camera::kickFov(r->api(), -12.0f, 0.05f, 0.0f, 0.1f);
+    stepTime(*r, 1.0f / 60.0f, 4);
+    CHECK(cam.fovOffset < 0.0f);
+    stepTime(*r, 1.0f / 60.0f, 30);
+    CHECK(cam.fovOffset == 0.0f);
+}
+
+TEST_CASE("CameraFov: a rig that stops driving hands the FOV back")
+{
+    // Two ways to stop driving, and both have to give it back — otherwise the
+    // camera keeps a few degrees of somebody else's kick for good.
+    SUBCASE("its target goes away")
+    {
+        auto r = makeShakeRig();
+        auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+        cam.fovDegrees = 60.0f;
+
+        HE::api::camera::kickFov(r->api(), 25.0f, 0.05f, 5.0f, 0.2f);  // a long hold
+        stepTime(*r, 1.0f / 60.0f, 6);
+        REQUIRE(cam.fovOffset > 1.0f);
+
+        r->world.destroyEntity(r->target);
+        const auto f = HE::CameraRigController::update(r->world, kNoMouse);
+        CHECK_FALSE(f.driven);
+        CHECK(cam.fovOffset == 0.0f);
+    }
+
+    SUBCASE("another camera takes the picture")
+    {
+        auto r = makeShakeRig();
+        // The second camera first: taking the reference before growing the pool
+        // it lives in is how a test starts reading a moved component.
+        const SecondCamera b = addRigCamera(r->world, { 20.0f, 0.0f, 0.0f }, 0.0f);
+        auto& cam = r->world.registry().get<CameraComponent>(r->camera);
+        cam.fovDegrees = 60.0f;
+
+        HE::api::camera::kickFov(r->api(), 25.0f, 0.05f, 5.0f, 0.2f);
+        stepTime(*r, 1.0f / 60.0f, 6);
+        REQUIRE(cam.fovOffset > 1.0f);
+
+        // A cut, so there is no blend left holding the old FOV in the picture.
+        REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 0.0f));
+        stepTime(*r, 1.0f / 60.0f, 1);
+        CHECK(cam.fovOffset == 0.0f);
+    }
+}
