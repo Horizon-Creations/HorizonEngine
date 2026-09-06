@@ -5,6 +5,7 @@
 #include "HorizonScene/Components/TrailComponent.h"
 #include <ContentManager/ContentManager.h>
 #include <Renderer/IRenderer.h>
+#include <DebugDraw/DebugDraw.h>
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
@@ -85,8 +86,8 @@ std::vector<glm::vec3> resolveControlPoints(HorizonWorld& world, entt::entity en
     return pts;
 }
 
-HE::spline::MeshData buildRopeGeometry(const RopeComponent& rope,
-                                       const std::vector<glm::vec3>& localPoints)
+std::vector<glm::vec3> ropeCenterline(const RopeComponent& rope,
+                                      const std::vector<glm::vec3>& localPoints)
 {
     using namespace HE::spline;
     if (localPoints.size() < 2) return {};
@@ -108,6 +109,15 @@ HE::spline::MeshData buildRopeGeometry(const RopeComponent& rope,
             pts[i].y -= rope.sag * 4.0f * t * (1.0f - t);
         }
     }
+    return pts;
+}
+
+HE::spline::MeshData buildRopeGeometry(const RopeComponent& rope,
+                                       const std::vector<glm::vec3>& localPoints)
+{
+    using namespace HE::spline;
+    const std::vector<glm::vec3> pts = ropeCenterline(rope, localPoints);
+    if (pts.size() < 2) return {};
 
     const std::vector<Frame> frames = buildFrames(pts, glm::vec3(0.0f, 1.0f, 0.0f));
     if (frames.size() < 2) return {};
@@ -174,6 +184,51 @@ HE::spline::MeshData buildTrailGeometry(const TrailComponent& trail, const glm::
     rp.cameraPos     = cameraPos;
     rp.twoSided      = false;   // trails are emissive by default; see docs §3.3
     return buildRibbon(sections, rp);
+}
+
+void appendRopeGuides(const RopeComponent& rope, const std::vector<glm::vec3>& localPoints,
+                      const glm::mat4& worldMatrix, DebugDrawBuffer& out)
+{
+    // Amber for the curve, a paler amber for the handles — the editor's own
+    // accent, and distinct from the cyan/magenta the colliders already own.
+    const glm::vec3 kCurve (0.95f, 0.62f, 0.15f);
+    const glm::vec3 kHandle(1.00f, 0.84f, 0.45f);
+
+    auto toWorld = [&](const glm::vec3& p) { return glm::vec3(worldMatrix * glm::vec4(p, 1.0f)); };
+
+    const std::vector<glm::vec3> line = ropeCenterline(rope, localPoints);
+    for (size_t i = 1; i < line.size(); ++i)
+        out.line(toWorld(line[i - 1]), toWorld(line[i]), kCurve);
+
+    // The handles are drawn even when there is no curve. One control point, or
+    // two sitting on top of each other, builds no geometry at all — and that is
+    // exactly the state the author needs to SEE rather than to guess at from an
+    // entity that renders nothing.
+    const float h = std::max(rope.radius * 1.5f, 0.03f);
+    for (const glm::vec3& p : localPoints)
+    {
+        const glm::vec3 w = toWorld(p);
+        out.aabb(w - glm::vec3(h), w + glm::vec3(h), kHandle);
+    }
+}
+
+void appendTrailGuides(const TrailComponent& trail, DebugDrawBuffer& out)
+{
+    const glm::vec3 kCurve(0.35f, 0.80f, 1.00f);
+    const glm::vec3 kTip  (0.75f, 0.95f, 1.00f);
+
+    for (size_t i = 1; i < trail.points.size(); ++i)
+        out.line(trail.points[i - 1].worldPos, trail.points[i].worldPos, kCurve);
+
+    if (!trail.points.empty())
+    {
+        // The tip is the youngest point, which is where the entity was when the
+        // last one was dropped — the end that says whether the trail is still
+        // emitting at all.
+        const float h = std::max(trail.startWidth * 0.5f, 0.03f);
+        const glm::vec3 tip = trail.points.back().worldPos;
+        out.aabb(tip - glm::vec3(h), tip + glm::vec3(h), kTip);
+    }
 }
 
 void stepTrail(TrailComponent& trail, const glm::vec3& worldPos, float dt)

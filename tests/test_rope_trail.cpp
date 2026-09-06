@@ -13,6 +13,7 @@
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <DebugDraw/DebugDraw.h>
 
 #include <algorithm>
 #include <cmath>
@@ -939,4 +940,120 @@ TEST_CASE("collectAssetRefs takes the materials and leaves the runtime mesh alon
     CHECK(has(trailMat));
     // The packer would go looking for a file that was never written.
     CHECK(!has(runtime));
+}
+
+// ── The editor's side ────────────────────────────────────────────────────────
+// What the Details panel and the viewport add on top of the feature: the guide
+// lines that make an unfinished rope visible, and the one lifetime rule the
+// panel can trip that destroying an entity cannot.
+
+TEST_CASE("Rope guides draw the curve that is actually built, and a handle per point")
+{
+    RopeComponent rope;
+    rope.controlPoints  = sCurve();
+    rope.samplesPerSpan = 4;
+    rope.radius         = 0.05f;
+
+    DebugDrawBuffer dbg;
+    RopeTrailSystem::appendRopeGuides(rope, rope.controlPoints, glm::mat4(1.0f), dbg);
+
+    // The curve is the SAME line the rings are threaded onto — asserted against
+    // ropeCenterline rather than against a count of its own, because the point
+    // of sharing that function is that the two cannot drift apart.
+    const std::vector<glm::vec3> line = RopeTrailSystem::ropeCenterline(rope, rope.controlPoints);
+    REQUIRE(line.size() >= 2);
+    const size_t curveLines  = line.size() - 1;
+    const size_t handleLines = rope.controlPoints.size() * 12;   // aabb = 12 edges
+    CHECK(dbg.lines().size() == curveLines + handleLines);
+
+    // And it runs where the curve runs: the first segment starts on the first
+    // control point, since a Catmull-Rom passes through every one of them.
+    CHECK(glm::length(dbg.lines().front().start - rope.controlPoints.front()) < 1e-4f);
+    CHECK(glm::length(dbg.lines()[curveLines - 1].end - rope.controlPoints.back()) < 1e-4f);
+}
+
+TEST_CASE("Rope guides follow the entity's transform, and the attachment's answer")
+{
+    RopeComponent rope;
+    rope.controlPoints = { { 0.0f, 0.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } };
+
+    const glm::vec3 offset(10.0f, 3.0f, -4.0f);
+    glm::mat4 world(1.0f);
+    world[3] = glm::vec4(offset, 1.0f);
+
+    DebugDrawBuffer dbg;
+    RopeTrailSystem::appendRopeGuides(rope, rope.controlPoints, world, dbg);
+    REQUIRE(!dbg.lines().empty());
+    CHECK(glm::length(dbg.lines().front().start - offset) < 1e-4f);
+
+    // The guide takes the points it is GIVEN, which is what resolveControlPoints
+    // returned — so an attached end is drawn where the attachment put it, not
+    // where the authored point still sits.
+    std::vector<glm::vec3> resolved = rope.controlPoints;
+    resolved.back() = glm::vec3(0.0f, -5.0f, 0.0f);
+    DebugDrawBuffer moved;
+    RopeTrailSystem::appendRopeGuides(rope, resolved, world, moved);
+
+    float lowest = 0.0f;
+    for (const DebugLine& l : moved.lines()) lowest = std::min(lowest, l.end.y - offset.y);
+    CHECK(lowest < -4.0f);
+}
+
+TEST_CASE("A rope too short to build anything still shows its handles")
+{
+    // The whole reason the guides exist. Two points on top of each other make no
+    // geometry, so without a guide the entity is simply invisible and there is
+    // nothing on screen to drag apart.
+    RopeComponent rope;
+    rope.controlPoints = { { 1.0f, 2.0f, 3.0f } };
+
+    CHECK(RopeTrailSystem::buildRopeGeometry(rope, rope.controlPoints).empty());
+
+    DebugDrawBuffer dbg;
+    RopeTrailSystem::appendRopeGuides(rope, rope.controlPoints, glm::mat4(1.0f), dbg);
+    CHECK(dbg.lines().size() == 12);   // one handle box, no curve
+}
+
+TEST_CASE("Trail guides trace the points that were dropped, tip included")
+{
+    TrailComponent trail;
+    trail.startWidth = 0.4f;
+    for (int i = 0; i < 5; ++i)
+        trail.points.push_back({ glm::vec3(static_cast<float>(i), 0.0f, 0.0f), 0.0f });
+
+    DebugDrawBuffer dbg;
+    RopeTrailSystem::appendTrailGuides(trail, dbg);
+    CHECK(dbg.lines().size() == 4u + 12u);   // four segments plus the tip box
+
+    // Tip last, the way stepTrail appends — the box has to sit on the newest
+    // point, because that is the one that says whether it is still emitting.
+    float maxX = 0.0f;
+    for (const DebugLine& l : dbg.lines()) maxX = std::max(maxX, l.start.x);
+    CHECK(maxX > 4.0f);
+
+    DebugDrawBuffer empty;
+    RopeTrailSystem::appendTrailGuides(TrailComponent{}, empty);
+    CHECK(empty.lines().empty());
+}
+
+TEST_CASE("Removing the component in the Details panel gives the mesh back too")
+{
+    // Not the same case as a destroyed entity: the handle stays valid and only
+    // the component goes. If the cleanup asked "is the entity still there" the
+    // mesh would be leaked for the rest of the session, and the Details panel's
+    // Remove Component is the ordinary way to get there.
+    HorizonWorld world;
+    ContentManager cm;
+
+    const Entity e = world.createEntity("Rope");
+    world.registry().emplace<RopeComponent>(e, RopeComponent{});
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+
+    const HE::UUID mesh = world.registry().get<RopeComponent>(e).runtimeMeshId;
+    REQUIRE(cm.getStaticMesh(mesh) != nullptr);
+
+    world.registry().remove<RopeComponent>(e);
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+    CHECK(world.registry().valid(e));
+    CHECK(cm.getStaticMesh(mesh) == nullptr);
 }

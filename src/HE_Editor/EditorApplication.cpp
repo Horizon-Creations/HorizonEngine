@@ -2990,6 +2990,35 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// ── Rope & trail guides, for the SELECTED entity only ────────────
+			// A rope is authored as a handful of points in a list, and until one
+			// of them is on screen the list is a set of numbers nobody can aim.
+			// Drawn only for the selection, because these are authoring handles
+			// rather than a scene overlay — every rope in a level showing its
+			// control points at once would bury the level.
+			//
+			// The world matrix comes from worldMatrixOf, not from
+			// TransformComponent::worldMatrix: this block runs right after
+			// tickWorld, which propagates nothing, so the stored matrix is a
+			// frame old and plain identity for anything created this frame.
+			if (m_selectedEntity != entt::null &&
+			    m_editorWorld->registry().valid(m_selectedEntity))
+			{
+				auto& reg = m_editorWorld->registry();
+				if (const auto* rope = reg.try_get<RopeComponent>(m_selectedEntity);
+				    rope && rope->visible)
+				{
+					RopeTrailSystem::appendRopeGuides(
+						*rope,
+						RopeTrailSystem::resolveControlPoints(*m_editorWorld,
+						                                      m_selectedEntity, *rope),
+						HE::worldMatrixOf(*m_editorWorld, m_selectedEntity), dbg);
+				}
+				if (const auto* trail = reg.try_get<TrailComponent>(m_selectedEntity);
+				    trail && trail->visible)
+					RopeTrailSystem::appendTrailGuides(*trail, dbg);
+			}
+
 			// NavMesh wireframe(s): baked polygons, per-component toggle
 			{
 				auto& reg = m_editorWorld->registry();
@@ -5006,8 +5035,9 @@ void EditorApplication::dumpFrameHeadless()
 
 		// Tube: a slack line between two posts, sag on, so the curve, the rings
 		// and the arc-length UV all show at once.
+		Entity tubeEntity = entt::null;
 		{
-			auto e = m_editorWorld->createEntity("RopeTestTube");
+			auto e = tubeEntity = m_editorWorld->createEntity("RopeTestTube");
 			TransformComponent tc; tc.position = origin - right * 3.0f;
 			reg.emplace<TransformComponent>(e, tc);
 			RopeComponent rope;
@@ -5106,6 +5136,24 @@ void EditorApplication::dumpFrameHeadless()
 				origin + right * (a * 1.6f) + glm::vec3(0.0f, -1.2f + std::sin(a * 1.5f) * 0.9f, 0.0f);
 			RopeTrailSystem::update(*m_editorWorld, contentManager(), r,
 			                        m_editorCamera.position(), 0.016f);
+		}
+		// HE_DUMP_ROPETEST=guides: the editor's AUTHORING preview on top of the
+		// geometry — the curve through the control points and a handle box on
+		// each of them, plus the trail's dropped points. It is pushed by hand
+		// here because the guides normally ride the ordinary frame's debug-line
+		// channel, and a headless dump never runs that loop: without this the one
+		// thing the preview is for cannot be looked at.
+		if (std::string(rt).find("guides") != std::string::npos)
+		{
+			DebugDrawBuffer guides;
+			if (const auto* rope = reg.try_get<RopeComponent>(tubeEntity))
+				RopeTrailSystem::appendRopeGuides(
+					*rope,
+					RopeTrailSystem::resolveControlPoints(*m_editorWorld, tubeEntity, *rope),
+					HE::worldMatrixOf(*m_editorWorld, tubeEntity), guides);
+			if (const auto* trail = reg.try_get<TrailComponent>(trailEntity))
+				RopeTrailSystem::appendTrailGuides(*trail, guides);
+			r->SetDebugLines(guides.lines());
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
