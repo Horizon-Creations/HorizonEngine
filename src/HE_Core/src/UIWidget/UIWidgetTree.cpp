@@ -666,6 +666,11 @@ namespace
         // hand should be invisible, not a full-size sheet over the list.
         if (idx < 0) { out.h = 0.0f; return out; }
 
+        // Below the header band, when there is one. The same shift innerHeight,
+        // rowAt, the scrollbar's top and the list's own highlight quads make —
+        // finding only some of them builds an offset that shows up as a click
+        // landing on the row above the one under the pointer.
+        out.y += list.headerExtent() * vs;
         out.y += (idx * list.rowStep() - list.scrollOffset) * vs;
         out.h  = list.rowHeight * vs;
         return out;
@@ -1126,7 +1131,18 @@ bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
         if (!p) break;
         if (p->clipChildren)
         {
-            const UIWidgetRect r = uiElementRect(tree, *p, canvas);
+            UIWidgetRect r = uiElementRect(tree, *p, canvas);
+            // A parent may keep a band of its own rect for itself — a table's
+            // header is the one that does. Its children are cut off BELOW that
+            // band, or a row scrolled half out of view paints over the titles.
+            if (const float ti = p->childClipTopInset(); ti > 0.0f)
+            {
+                float pus = 1.0f, pvs = 1.0f;
+                uiElementUnitScale(tree, *p, pus, pvs, canvas);
+                const float d = std::min(ti * pvs, r.h);
+                r.y += d;
+                r.h  = std::max(0.0f, r.h - d);
+            }
             if (!any) { acc = r; any = true; }
             else
             {

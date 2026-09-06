@@ -36,14 +36,18 @@ bool scrollTrackOf(const UIElement& e, const UIWidgetRect& px, ScrollTrack& t)
 
     const float scaleX = px.w / std::max(1.0f, e.sizeX);
     const float scaleY = px.h / std::max(1.0f, e.sizeY);
-    const float inner  = std::max(1.0f, e.sizeY - 2.0f * sb.inset);
+    // The track's top is its own number, because a table's header takes a band
+    // off the top that the bottom has no counterpart for. Negative means the
+    // two ends are the same inset, which is every other scrolling element.
+    const float top    = sb.topInset >= 0.0f ? sb.topInset : sb.inset;
+    const float inner  = std::max(1.0f, e.sizeY - top - sb.inset);
     t.len   = inner * scaleY;
     // How much of the content the view holds IS how long the thumb is, with a
     // floor: a thumb of two pixels in a list of ten thousand is not a handle.
     t.thumb = std::max(12.0f, t.len * std::min(1.0f, inner / sb.extent));
     t.x     = px.x + px.w - (sb.barWidth + sb.inset) * scaleX;
     t.w     = sb.barWidth * scaleX;
-    t.top   = px.y + sb.inset * scaleY;
+    t.top   = px.y + top * scaleY;
     return true;
 }
 
@@ -395,6 +399,23 @@ const UIPropTable& UIListView::propTable() const
         uiprop::slot<&UIListView::selectionMode>({ "Selection", UIPropType::Int, 0.0f, 2.0f }),
         uiprop::slot<&UIListView::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
         uiprop::slot<&UIListView::barColor>({ "Bar Color", UIPropType::Color }),
+        // ── The header (plan 13.1) ───────────────────────────────────────────
+        uiprop::slot<&UIListView::showHeader>({ "Show Header", UIPropType::Bool }),
+        uiprop::slot<&UIListView::headerHeight>
+            ({ "Header Height", UIPropType::Float, 8.0f, 200.0f }),
+        uiprop::slot<&UIListView::headerColor>({ "Header Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::headerTextColor>
+            ({ "Header Text Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::headerFontSize>
+            ({ "Header Font Size", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIListView::resizableColumns>
+            ({ "Resizable Columns", UIPropType::Bool }),
+        uiprop::slot<&UIListView::columnWidths>({ "Column Widths", UIPropType::String }),
+        // Both of these are the OWNER's to set: the list holds no items and
+        // cannot sort any, so this pair is the little triangle and nothing more.
+        uiprop::slot<&UIListView::sortColumn>
+            ({ "Sort Column", UIPropType::Int, -1.0f, 128.0f }),
+        uiprop::slot<&UIListView::sortAscending>({ "Sort Ascending", UIPropType::Bool }),
         // The item count is RUNTIME state and still belongs here: it is what a
         // graph sets to fill the list, and a Set Property node reaches it by
         // name like every other property. It is simply never serialized.
@@ -2353,6 +2374,178 @@ void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
     quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
 }
 
+// ── ListView: the header's arithmetic (plan 13.1) ────────────────────────────
+
+std::vector<float> UIListView::parseColumnWidths(const std::string& s)
+{
+    std::vector<float> out;
+    std::size_t i = 0;
+    while (i < s.size())
+    {
+        const std::size_t comma = s.find(',', i);
+        const std::string tok = s.substr(i, comma == std::string::npos ? std::string::npos
+                                                                       : comma - i);
+        try
+        {
+            const float v = std::stof(tok);
+            // A column of zero or of a negative width is not a column. Dropping
+            // it here rather than clamping keeps the repair rule below honest:
+            // what is left is what could be read, and the rest is filled in.
+            if (v > 0.0f && std::isfinite(v)) out.push_back(v);
+        }
+        catch (...) { /* not a number: the same as not being there */ }
+        if (comma == std::string::npos) break;
+        i = comma + 1;
+    }
+    return out;
+}
+
+std::string UIListView::formatColumnWidths(const std::vector<float>& w)
+{
+    std::string out;
+    for (std::size_t i = 0; i < w.size(); ++i)
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1f", w[i]);
+        // Whole numbers stay whole: "120" reads as a width, "120.0" reads as a
+        // machine having been here.
+        std::string tok = buf;
+        if (tok.size() > 2 && tok.compare(tok.size() - 2, 2, ".0") == 0)
+            tok.erase(tok.size() - 2);
+        if (i) out += ',';
+        out += tok;
+    }
+    return out;
+}
+
+std::vector<float> UIListView::columnFractions() const
+{
+    const int n = static_cast<int>(headerLabels.size());
+    if (n <= 0) return {};
+    std::vector<float> w = parseColumnWidths(columnWidths);
+    // Too many entries fall away; missing ones take an equal share of what the
+    // ones that ARE there average out to, so a column added to the template
+    // arrives the size of its neighbours rather than hair-thin. The same shape
+    // as a selection that points past the end: repaired, never refused.
+    if (static_cast<int>(w.size()) > n) w.resize(static_cast<std::size_t>(n));
+    if (w.empty())
+    {
+        w.assign(static_cast<std::size_t>(n), 1.0f);
+    }
+    else if (static_cast<int>(w.size()) < n)
+    {
+        float s = 0.0f;
+        for (const float v : w) s += v;
+        const float avg = s / static_cast<float>(w.size());
+        w.resize(static_cast<std::size_t>(n), avg > 0.0f ? avg : 1.0f);
+    }
+    float sum = 0.0f;
+    for (const float v : w) sum += v;
+    if (sum <= 0.0f) { w.assign(static_cast<std::size_t>(n), 1.0f); sum = static_cast<float>(n); }
+    for (float& v : w) v /= sum;
+    return w;
+}
+
+void UIListView::columnLayout(float innerX, float innerW, float k,
+                              float padTemplate, float gapTemplate,
+                              const std::vector<float>& fractions,
+                              std::vector<float>& outX, std::vector<float>& outW)
+{
+    outX.clear(); outW.clear();
+    const int n = static_cast<int>(fractions.size());
+    if (n <= 0) return;
+    outX.reserve(fractions.size()); outW.reserve(fractions.size());
+    // The row template's root box insets and gaps its cells, and a header that
+    // ignored those would sit a padding to the left of every column it names.
+    const float pad = std::max(0.0f, padTemplate) * k;
+    const float gap = std::max(0.0f, gapTemplate) * k;
+    const float avail = std::max(0.0f, innerW - 2.0f * pad - (n - 1) * gap);
+    float cursor = innerX + pad;
+    for (int i = 0; i < n; ++i)
+    {
+        const float w = avail * fractions[static_cast<std::size_t>(i)];
+        outX.push_back(cursor);
+        outW.push_back(w);
+        cursor += w + gap;
+    }
+}
+
+void UIListView::headerLayout(const UIWidgetRect& px,
+                              std::vector<float>& outX, std::vector<float>& outW) const
+{
+    outX.clear(); outW.clear();
+    if (headerLabels.empty()) return;
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float innerX = px.x + padding * scaleX;
+    const float innerW = std::max(0.0f, px.w - 2.0f * padding * scaleX);
+    // Template units into this rect's pixels. A row fills the list's inner
+    // width, so the template's canvas width IS that width; with no template
+    // read yet the two numbers it scales are zero and the factor is moot.
+    const float k = columnCanvasW > 0.0f ? innerW / columnCanvasW : 1.0f;
+    columnLayout(innerX, innerW, k, columnPadding, columnSpacing,
+                 columnFractions(), outX, outW);
+}
+
+UIListView::HeaderHit UIListView::headerAtPoint(const UIWidgetRect& px,
+                                                float x, float y) const
+{
+    HeaderHit hit;
+    if (headerExtent() <= 0.0f) return hit;
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float scaleY = px.h / std::max(1.0f, sizeY);
+    const float top = px.y + padding * scaleY;
+    const float bot = top + headerExtent() * scaleY;
+    if (y < top || y > bot || x < px.x || x > px.x + px.w) return hit;
+    hit.inBand = true;
+
+    std::vector<float> hx, hw;
+    headerLayout(px, hx, hw);
+    // The seams FIRST. A divider is a few pixels wide and sits on the edge of
+    // two titles, so asking about the titles first would swallow every one.
+    const float grab = std::max(3.0f, 4.0f * scaleX);
+    for (std::size_t i = 0; i + 1 < hx.size(); ++i)
+    {
+        const float seam = hx[i] + hw[i];
+        if (x >= seam - grab && x <= seam + grab)
+        {
+            hit.column = static_cast<int>(i);
+            hit.divider = true;
+            return hit;
+        }
+    }
+    for (std::size_t i = 0; i < hx.size(); ++i)
+        if (x >= hx[i] && x < hx[i] + hw[i]) { hit.column = static_cast<int>(i); return hit; }
+    return hit;   // in the band, past the last column
+}
+
+bool UIListView::dragColumnDivider(const UIWidgetRect& px, int col, float x)
+{
+    std::vector<float> hx, hw;
+    headerLayout(px, hx, hw);
+    const int n = static_cast<int>(hx.size());
+    if (col < 0 || col + 1 >= n) return false;
+    // The pair's total is fixed: a divider takes from the next column exactly
+    // what it gives the one before it. Nothing in this system scrolls
+    // sideways, so there is nowhere else for the difference to go.
+    const float total = hw[static_cast<std::size_t>(col)] + hw[static_cast<std::size_t>(col) + 1];
+    if (total <= 0.0f) return false;
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float minW = std::min(8.0f * scaleX, total * 0.5f);
+    float first = x - hx[static_cast<std::size_t>(col)];
+    first = std::clamp(first, minW, total - minW);
+    if (std::abs(first - hw[static_cast<std::size_t>(col)]) < 0.01f) return false;
+    hw[static_cast<std::size_t>(col)] = first;
+    hw[static_cast<std::size_t>(col) + 1] = total - first;
+    // Written back in the element's OWN units, not in the pixels this drag
+    // happened to be in: the same table on a canvas scaled by two would
+    // otherwise save numbers twice as large for the same columns.
+    const float inv = scaleX > 0.0f ? 1.0f / scaleX : 1.0f;
+    std::vector<float> units(hw.size());
+    for (std::size_t i = 0; i < hw.size(); ++i) units[i] = hw[i] * inv;
+    columnWidths = formatColumnWidths(units);
+    return true;
+}
+
 // ── ListView ─────────────────────────────────────────────────────────────────
 // Three things, in this order: the surface (so the border, the rounding and the
 // gradient have a first quad to be stamped onto), the two row states the rows
@@ -2360,8 +2553,9 @@ void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
 //
 // The row CONTENT is not drawn here at all — every row is a real widget grafted
 // under this element, and the ordinary element loop draws it after this one.
-void UIListView::render(const UIWidgetRect& px, const UIElementRenderState&,
-                        const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
+void UIListView::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                        const HE::UUID& mat, float pxScaleY,
+                        std::vector<UIRenderObject>& out) const
 {
     // Always emitted, even fully transparent: it is the element's own rectangle
     // and therefore the quad the surface style is applied to. Without it a list
@@ -2370,10 +2564,58 @@ void UIListView::render(const UIWidgetRect& px, const UIElementRenderState&,
 
     const float scaleX = px.w / std::max(1.0f, sizeX);
     const float scaleY = px.h / std::max(1.0f, sizeY);
-    const float innerY = px.y + padding * scaleY;
+    // Below the header, like everything else that measures from the first row:
+    // the highlight quads are the FIFTH place the band shifts, and the one that
+    // shows up as a selection marking the row above the one that was clicked.
+    const float innerY = px.y + (padding + headerExtent()) * scaleY;
     const float innerH = innerHeight() * scaleY;
     const float rowX   = px.x + padding * scaleX;
     const float rowW   = std::max(0.0f, px.w - 2.0f * padding * scaleX);
+
+    // ── The header band ──────────────────────────────────────────────────────
+    // Drawn here and not after the rows: a row scrolled half out of view is cut
+    // off below the band by childClipTopInset, so nothing can reach up into it.
+    if (headerExtent() > 0.0f && rowW > 0.0f)
+    {
+        const float hy = px.y + padding * scaleY;
+        const float hh = headerExtent() * scaleY;
+        if (headerColor.a > 0.0f) quad(out, rowX, hy, rowW, hh, headerColor);
+
+        std::vector<float> hx, hw;
+        headerLayout(px, hx, hw);
+        const float sizePx = st.fontPx(headerFontSize, pxScaleY);
+        for (std::size_t i = 0; i < hx.size(); ++i)
+        {
+            if (hx[i] >= rowX + rowW) break;                    // clipped away
+            const float w = std::min(hw[i], rowX + rowW - hx[i]);
+            if (w <= 0.0f) continue;
+            emitText(*this, headerLabels[i], { hx[i], hy }, { w, hh },
+                     sizePx, headerTextColor, false, out);
+            // The seam, drawn only where there is a next column to divide from.
+            if (i + 1 < hx.size())
+            {
+                const float sw = std::max(1.0f, scaleX);
+                quad(out, hx[i] + hw[i] - sw * 0.5f, hy, sw, hh,
+                     glm::vec4(headerTextColor.r, headerTextColor.g, headerTextColor.b,
+                               headerTextColor.a * 0.25f));
+            }
+            // The sort marker: a stepped wedge of three quads rather than a
+            // glyph, because the UI font has no arrows in it.
+            if (static_cast<int>(i) == sortColumn)
+            {
+                const float t  = std::max(2.0f, 3.0f * scaleY);
+                const float cy = hy + hh * 0.5f - t * 1.5f;
+                const float cx = hx[i] + w - std::max(4.0f, 6.0f * scaleX);
+                for (int s = 0; s < 3; ++s)
+                {
+                    // Ascending points UP: the narrow step is at the top.
+                    const int step = sortAscending ? s : 2 - s;
+                    const float bw = t * (step + 1);
+                    quad(out, cx - bw * 0.5f, cy + s * t, bw, t, headerTextColor);
+                }
+            }
+        }
+    }
 
     // One row's highlight, clipped to the inner rect BY HAND. The element's own
     // quads are not covered by its clipChildren (that governs its children), so
@@ -2415,6 +2657,23 @@ void UIListView::writeJson(nlohmann::json& j) const
     j["selectionMode"] = selectionMode;
     j["barWidth"] = barWidth;
     j["barColor"] = colJson(barColor);
+    // Not one header key while the header is off, so every list authored before
+    // tables existed saves byte-identical. Sort Column and Sort Ascending are
+    // NOT among them: they are the owner's, set per run like the item count,
+    // and a table that reopened sorted by a column nobody sorted would be
+    // showing a picture of the last run.
+    if (showHeader)
+    {
+        j["showHeader"] = true;
+        j["headerHeight"] = headerHeight;
+        j["headerColor"] = colJson(headerColor);
+        j["headerTextColor"] = colJson(headerTextColor);
+        j["headerFontSize"] = headerFontSize;
+        j["resizableColumns"] = resizableColumns;
+        // The widths a person dragged ARE authored the moment they let go, so
+        // this one is written — that is the whole reason it is a string.
+        j["columnWidths"] = columnWidths;
+    }
 }
 void UIListView::readJson(const nlohmann::json& j)
 {
@@ -2428,6 +2687,13 @@ void UIListView::readJson(const nlohmann::json& j)
     selectionMode = j.value("selectionMode", selectionMode);
     barWidth = j.value("barWidth", barWidth);
     barColor = colFrom(j.value("barColor", nlohmann::json()), barColor);
+    showHeader = j.value("showHeader", false);
+    headerHeight = j.value("headerHeight", headerHeight);
+    headerColor = colFrom(j.value("headerColor", nlohmann::json()), headerColor);
+    headerTextColor = colFrom(j.value("headerTextColor", nlohmann::json()), headerTextColor);
+    headerFontSize = j.value("headerFontSize", headerFontSize);
+    resizableColumns = j.value("resizableColumns", resizableColumns);
+    columnWidths = j.value("columnWidths", std::string());
 }
 
 void UIImage::writeJson(nlohmann::json& j) const

@@ -2246,6 +2246,11 @@ const std::vector<EngineEventDesc>& engineEvents()
         // Enter). Separate from the selection because "which one" and "go" are
         // two different answers in every list that has ever existed.
         { "OnRowActivated",       "onRowActivated",       P::Int,    true  },
+        // A table's column title was clicked, by COLUMN index. It is a request
+        // and not a report: the list holds no items, so the owner sorts its own
+        // array and calls refreshList — the same reason the list cannot answer
+        // what is in row five.
+        { "OnHeaderClicked",      "onHeaderClicked",      P::Int,    true  },
         // The other mouse button, on an element. Its own event rather than a
         // flag on OnClicked, because a right-click means something different
         // everywhere it means anything: it opens a menu, it never presses.

@@ -134,6 +134,11 @@ public:
     { fireEvent("OnRowBind", elem, Value::ofInt(index)); }
     virtual void onRowActivated(int elem, int index)
     { fireEvent("OnRowActivated", elem, Value::ofInt(index)); }
+    // A table's column title was clicked. The argument is the COLUMN index —
+    // the list holds no items and can sort none, so this is a request to the
+    // owner and not a thing that happened to the data.
+    virtual void onHeaderClicked(int elem, int column)
+    { fireEvent("OnHeaderClicked", elem, Value::ofInt(column)); }
     virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
     // A file was dropped on this element from the desktop. One call per file,
     // the argument being its absolute path — a drop of three files is three

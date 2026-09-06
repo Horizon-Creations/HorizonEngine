@@ -859,6 +859,13 @@ private:
         // reason as the two above: one pointer stream, three different things
         // it can be doing, and a shared flag would make them fight.
         int draggingSplit  = 0;
+        // A table's column divider being dragged, and which seam it is: the
+        // element id of the ListView plus the index of the column to the LEFT
+        // of the seam. Decided at the press and held, exactly like the splitter
+        // — a fast pull leaves the divider behind, and re-asking where the
+        // pointer is would drop the grab the moment it did.
+        int draggingColumn = 0;
+        int columnSeam     = -1;
         // ColorPicker being dragged, and WHICH of its three parts took hold:
         // 0 = the saturation/value field, 1 = the hue strip, 2 = alpha. The part
         // is decided once, at the press, and held for the whole drag — pulling
@@ -1012,6 +1019,26 @@ private:
     // and before every pointer event — acts on it. One frame later at the very
     // worst, which is exactly what event-driven drawing is built to survive.
     bool m_syncingLists = false;
+    // ── What a row template says its columns are (plan 13.1) ─────────────────
+    // The column TITLES are the names of the direct children of the template's
+    // root — the same rule the Tab Box labels its pages by, and for the same
+    // reason: a second list of titles beside the things that draw them is two
+    // things somebody has to keep in step, and the first reorder breaks it.
+    //
+    // Read from the ASSET and not from a realized row, because a table with no
+    // items at all still has a header. Cached per template PATH: a dozen tables
+    // on one page sharing a row widget parse it once.
+    struct ColumnInfo
+    {
+        std::vector<std::string> titles;
+        float padding  = 0.0f;   // the root box's own two numbers, which the
+        float spacing  = 0.0f;   // header has to match or it sits beside them
+        float canvasW  = 0.0f;   // the template's canvas width
+        bool  valid    = false;  // the precondition held
+        bool  warned   = false;  // …and it has been said once, not once a row
+    };
+    const ColumnInfo* columnInfoFor(ContentManager& content, const std::string& path);
+    std::unordered_map<std::string, ColumnInfo> m_columnInfo;
     // Elements of a list, in tree order. Nullable entries are never returned.
     std::vector<HE::UIWidgetRef*> listRowsOf(Instance& w, int listId);
     // Find a named ListView in a widget (nullptr = no widget, no such name, or

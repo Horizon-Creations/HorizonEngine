@@ -1199,7 +1199,49 @@ public:
     float barWidth = 6.0f;
     glm::vec4 barColor{ 0.75f, 0.75f, 0.80f, 0.65f };
 
+    // ── The header, which is what turns a list into a table (plan 13.1) ──────
+    // OFF by default, and none of the nine keys below is written while it is
+    // off: every widget authored before this existed saves byte-identical.
+    //
+    // Not a `UITable` type of its own. Everything a list IS hangs off
+    // UIWidgetType::ListView — the realization in syncLists, the placement in
+    // listSlotRect, the three scroll virtuals, the state table — and a second
+    // type would have to name every one of those again for the sake of a band
+    // of titles over the same mechanic.
+    bool  showHeader = false;
+    float headerHeight = 28.0f;
+    glm::vec4 headerColor    { 0.16f, 0.16f, 0.19f, 1.0f };
+    glm::vec4 headerTextColor{ 0.92f, 0.92f, 0.95f, 1.0f };
+    float headerFontSize = 14.0f;
+    // Whether the dividers between the titles can be dragged. The drag takes
+    // from one column what it gives the other, so the total never changes —
+    // there is no sideways scrolling anywhere in this system to give it to.
+    bool  resizableColumns = true;
+    // What a person dragged, as text: "120,80,200". A STRING because
+    // UIPropValue has no float list, and because a keyboard shortcut already
+    // set the precedent that what a human arranged travels as one. Read as
+    // proportions — a list twice as wide gives every column twice the room —
+    // so the numbers keep meaning something when the window is resized.
+    std::string columnWidths;
+    // Purely the little triangle. The list holds no data and therefore cannot
+    // sort any: a click on a title fires OnHeaderClicked, the owner sorts its
+    // own array and calls refreshList, and sets these two to say so. -1 = none.
+    int   sortColumn = -1;
+    bool  sortAscending = true;
+
     // ── Runtime ──────────────────────────────────────────────────────────────
+    // The column titles, and the two numbers of the row template's root box the
+    // header has to match. Read from the ASSET by WidgetManager::syncLists (a
+    // table with no items still has a header) and cached per template path
+    // there, the way UITabBox::tabLabels is filled by the layout pass.
+    //
+    // Only the DRAWING depends on them. Nothing is picked or placed off this
+    // cache, so the worst a stale one can cost is a title one frame old.
+    mutable std::vector<std::string> headerLabels;
+    mutable float columnPadding = 0.0f;   // the root box's Padding, TEMPLATE units
+    mutable float columnSpacing = 0.0f;   // its Spacing, TEMPLATE units
+    mutable float columnCanvasW = 0.0f;   // the template's canvas width, ditto
+
     // How many items there are, which the owner sets and nothing here persists:
     // an application that reopens with the last run's row count would be showing
     // rows for data it has not loaded yet.
@@ -1233,8 +1275,16 @@ public:
 
     // ── The three numbers everything else is derived from ────────────────────
     float rowStep()     const { return rowHeight + spacing; }
-    float innerHeight() const { return sizeY - 2.0f * padding > 0.0f
-                                     ? sizeY - 2.0f * padding : 0.0f; }
+    // How much of the top the header takes, 0 when there is none. The one place
+    // that question is answered, so the four things that shift by it cannot
+    // shift by different amounts.
+    float headerExtent() const
+    { return showHeader && headerHeight > 0.0f ? headerHeight : 0.0f; }
+    float innerHeight() const
+    {
+        const float h = sizeY - 2.0f * padding - headerExtent();
+        return h > 0.0f ? h : 0.0f;
+    }
     // Total height of `itemCount` rows with their gaps between them — the gaps
     // are BETWEEN, so n rows have n-1 of them.
     float measuredExtent() const
@@ -1253,17 +1303,21 @@ public:
     // from its item count, and the cache is a frame behind on the frame the
     // count changed.
     bool   scrollBar(UIScrollBarStyle& s) const override
-    { s = { barWidth, padding, measuredExtent(), barColor }; return true; }
+    { s = { barWidth, padding, measuredExtent(), barColor, padding + headerExtent() };
+      return true; }
+    // The rows stop below the header, not at the element's edge.
+    float  childClipTopInset() const override
+    { return headerExtent() > 0.0f ? padding + headerExtent() : 0.0f; }
 
     // Which item is under a point `localY` canvas units below the element's TOP
-    // edge; -1 when that is padding, a gap between two rows, or past the end.
-    // A gap is deliberately nothing rather than the nearest row: clicking two
-    // pixels of background must not pick a neighbour.
+    // edge; -1 when that is padding, the header, a gap between two rows, or
+    // past the end. A gap is deliberately nothing rather than the nearest row:
+    // clicking two pixels of background must not pick a neighbour.
     int rowAt(float localY) const
     {
         const float step = rowStep();
         if (step <= 0.0f || itemCount <= 0) return -1;
-        const float y = localY - padding + scrollOffset;
+        const float y = localY - padding - headerExtent() + scrollOffset;
         if (y < 0.0f) return -1;
         const int i = static_cast<int>(y / step);
         if (i < 0 || i >= itemCount) return -1;
@@ -1294,12 +1348,49 @@ public:
     // True when the offset moved.
     bool scrollToItem(int item);
 
+    // ── One arithmetic, three consumers ──────────────────────────────────────
+    // The same lesson UITabBox::tabLayout is: render() draws the titles with
+    // this, the manager decides which title and which divider a press hit with
+    // it, and the designer previews the band with it. Two copies of a layout
+    // drift the day one of them learns about padding.
+    //
+    // `columnWidths` is read as PROPORTIONS, so this answers in whatever unit
+    // the rect it is handed is in. `innerX`/`innerW` are the list's inner rect
+    // on the x axis (its own rect inset by Padding), and `k` converts the
+    // template's units into that same unit — see columnCanvasW.
+    static void columnLayout(float innerX, float innerW, float k,
+                             float padTemplate, float gapTemplate,
+                             const std::vector<float>& fractions,
+                             std::vector<float>& outX, std::vector<float>& outW);
+    // What each column's share of the usable width is, summing to 1. The repair
+    // rule for a `Column Widths` that does not match the column count is the
+    // one a selection past the end already follows: too many entries are
+    // dropped, missing ones take an equal share.
+    std::vector<float> columnFractions() const;
+    static std::vector<float> parseColumnWidths(const std::string& s);
+    static std::string formatColumnWidths(const std::vector<float>& w);
+    // Where the columns sit in the element's own PIXEL space, given its rect.
+    void headerLayout(const UIWidgetRect& px,
+                      std::vector<float>& outX, std::vector<float>& outW) const;
+    // What a point in that same pixel space landed on. `inBand` is the header's
+    // whole strip — a press there is the header's whether or not it found a
+    // title, or it would fall through and clear the selection. `column` is -1
+    // past the last one; `divider` says it is on the seam between `column` and
+    // the one after it rather than on the title itself.
+    struct HeaderHit { int column = -1; bool divider = false; bool inBand = false; };
+    HeaderHit headerAtPoint(const UIWidgetRect& px, float x, float y) const;
+    // Move the seam after column `col` to `x` (element pixel space), taking
+    // from the next column exactly what the one before it gains. True when
+    // something moved; `columnWidths` is rewritten from the result.
+    bool dragColumnDivider(const UIWidgetRect& px, int col, float x);
+
     const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override
     {
         return { { "OnRowBind", UIPropType::Int, true },
                  { "OnSelectionChanged", UIPropType::Int, true },
-                 { "OnRowActivated", UIPropType::Int, true } };
+                 { "OnRowActivated", UIPropType::Int, true },
+                 { "OnHeaderClicked", UIPropType::Int, true } };
     }
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override;

@@ -2721,6 +2721,57 @@ namespace
 	  "list fires On Selection Changed with the item's index, and Get List Selected "
 	  "answers it later.",
 	  "", "ui#elements" },
+	{ "UI Widget/Show Header", "",
+	  "Turns a list into a table: a band of column titles above the rows. The "
+	  "titles are the NAMES of the elements in the row widget — rename the cell "
+	  "and you rename the column, so the two can never say different things. The "
+	  "row widget has to be a single Horizontal Box whose cells do not use Slot "
+	  "Fill; anything else and the header shows nothing and says why once.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Height", "",
+	  "How tall the band of titles is, in canvas units. It comes off the top of "
+	  "the room the rows have, so a taller header is fewer rows and not a taller "
+	  "list.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Color", "",
+	  "What the band behind the column titles is filled with. Fully transparent "
+	  "leaves it showing the list's own back colour, which is what a table inside "
+	  "an already-dark card usually wants.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Text Color", "",
+	  "The colour of the column titles, and of the thin seams between them. Its "
+	  "own colour rather than the row text's: a header that reads exactly as loud "
+	  "as its rows is a header nobody sees.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Font Size", "",
+	  "How big the column titles are. Separate from anything in the row widget, "
+	  "because the titles are drawn by the LIST and the rows draw themselves.",
+	  "", "ui#elements" },
+	{ "UI Widget/Resizable Columns", "",
+	  "Whether the seams between the titles can be dragged. A drag takes from the "
+	  "column on the right exactly what it gives the one on the left, so the "
+	  "total stays the width of the list — nothing here scrolls sideways, and a "
+	  "column dragged wider has to come from somewhere.",
+	  "", "ui#elements" },
+	{ "UI Widget/Column Widths", "",
+	  "The column widths as text: \"120,80,200\". Read as PROPORTIONS, so a list "
+	  "twice as wide gives every column twice the room and the numbers keep "
+	  "meaning something after a resize. Too many entries are dropped and missing "
+	  "ones take an average share, which is what makes adding a cell to the row "
+	  "widget safe. Dragging a seam writes this, and it is carried across a "
+	  "preview reload like anything else a person arranged by hand.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sort Column", "",
+	  "Which column shows the little sort marker, or -1 for none. It sorts "
+	  "NOTHING: the list holds no items and cannot. A click on a title fires On "
+	  "Header Clicked with the column index, the owner sorts its own array, calls "
+	  "Refresh List and sets this to say which column it went by — the same "
+	  "division of labour that lets ten thousand rows cost ten elements.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sort Ascending", "",
+	  "Which way the sort marker points. Like Sort Column it is a picture of what "
+	  "the owner did, not an instruction to the list.",
+	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
 	  "number for all four; at half the shorter side the shape becomes a capsule, "

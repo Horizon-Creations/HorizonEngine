@@ -724,7 +724,7 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 	auto forget = [&](int& elem){ if (elem == rootElem || (elem > lo && elem <= hi)) elem = 0; };
 	forget(w->hoveredElem); forget(w->pressedElem); forget(w->focusedElem);
 	forget(w->draggingSlider); forget(w->draggingText); forget(w->draggingSplit);
-	forget(w->draggingColor);
+	forget(w->draggingColor); forget(w->draggingColumn);
 	if (w->focusedElem == 0 && m_focusWidget == w->id) m_focusWidget = 0;
 
 	m_visualDirty = true;
@@ -1382,6 +1382,80 @@ void WidgetManager::syncLists()
 	for (Instance& w : m_instances) syncLists(w);
 }
 
+// What a row template says its columns are, read once per path.
+//
+// The precondition is checked here and said ONCE per template, not once per row
+// and not once per frame: the root has to be a HorizontalBox and its cells must
+// not use Slot Fill. The table writes a width onto each cell on every
+// realization, and Slot Fill pulls against that — the columns would be one
+// width on a row that fits and another on a row that does not, which looks like
+// a rendering bug and is a layout disagreement. A violated precondition gives
+// no columns at all: the header is empty and the list behaves as it always did.
+const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& content,
+                                                              const std::string& path)
+{
+	if (path.empty()) return nullptr;
+	auto it = m_columnInfo.find(path);
+	if (it != m_columnInfo.end()) return &it->second;
+
+	ColumnInfo info;
+	const HE::UUID id = content.loadAsset(path);
+	const UIWidgetAsset* asset = id == HE::UUID{} ? nullptr : content.getWidget(id);
+	if (!asset) return &(m_columnInfo[path] = info);
+	// A COPY of the JSON before anything else touches the content manager: its
+	// getters point into a dense vector, and the next load moves what they show.
+	const std::string treeJson = asset->treeJson;
+
+	HE::UIWidgetTree sub;
+	if (!HE::uiWidgetTreeFromJson(treeJson, sub)) return &(m_columnInfo[path] = info);
+	info.canvasW = sub.canvasWidth;
+
+	// The root: the one element with no parent. More than one and there is no
+	// single row to take the columns from.
+	const HE::UIElement* root = nullptr;
+	int roots = 0;
+	for (const auto& ep : sub.elements)
+		if (ep && ep->parentId == 0) { ++roots; root = ep.get(); }
+	if (roots != 1 || !root || root->type() != HE::UIWidgetType::HorizontalBox)
+	{
+		HE_LOG_WARN(Widget, "Table row '%s': its root has to be a single Horizontal Box "
+		                    "for the header to name columns — showing none",
+		            path.c_str());
+		info.warned = true;
+		return &(m_columnInfo[path] = info);
+	}
+	if (const auto* box = dynamic_cast<const HE::UIBoxBase*>(root))
+	{
+		info.padding = box->padding;
+		info.spacing = box->spacing;
+	}
+	for (const auto& ep : sub.elements)
+	{
+		if (!ep || ep->parentId != root->id) continue;
+		// Two ways a cell can insist on its own width, and both of them win
+		// against the one the table writes each frame: Slot Fill takes a share
+		// of what is left over, and Auto Size measures the text in it. Either
+		// one and the columns would be one width on a row that says "Bob" and
+		// another on the row that says "Bartholomew" — which reads as a drawing
+		// bug and is a layout disagreement. Auto Size is ON by default for a
+		// text element, so this is the one an author meets first.
+		if (ep->slotFill > 0.0f ||
+		    (ep->autoSizedAxes() & HE::UIElement::kAxisX) != 0)
+		{
+			HE_LOG_WARN(Widget, "Table row '%s': cell '%s' decides its own width "
+			                    "(Slot Fill or Auto Size), which fights the column "
+			                    "width the table writes — showing no columns",
+			            path.c_str(), ep->name.c_str());
+			info.titles.clear();
+			info.warned = true;
+			return &(m_columnInfo[path] = info);
+		}
+		info.titles.push_back(ep->name);
+	}
+	info.valid = !info.titles.empty();
+	return &(m_columnInfo[path] = info);
+}
+
 void WidgetManager::syncLists(Instance& w)
 {
 	if (!m_content || m_syncingLists) return;
@@ -1411,6 +1485,32 @@ void WidgetManager::syncLists(Instance& w)
 	{
 		HE::UIListView* lv = dynamic_cast<HE::UIListView*>(w.tree.find(listId));
 		if (!lv) continue;
+
+		// ── The column titles, from the ASSET ────────────────────────────────
+		// Before anything is realized, because a table with an item count of
+		// zero still shows its header — a table whose columns only appear once
+		// it has data is one you cannot see the shape of while it is empty.
+		if (lv->showHeader)
+		{
+			if (const ColumnInfo* ci = columnInfoFor(*m_content, lv->rowWidget))
+			{
+				if (lv->headerLabels != ci->titles) m_visualDirty = true;
+				lv->headerLabels  = ci->titles;
+				lv->columnPadding = ci->padding;
+				lv->columnSpacing = ci->spacing;
+				lv->columnCanvasW = ci->canvasW;
+			}
+			else if (!lv->headerLabels.empty())
+			{
+				lv->headerLabels.clear();
+				m_visualDirty = true;
+			}
+		}
+		else if (!lv->headerLabels.empty())
+		{
+			lv->headerLabels.clear();
+			m_visualDirty = true;
+		}
 
 		// ── Which items can be seen ──────────────────────────────────────────
 		int first = 0, count = 0;
@@ -1496,6 +1596,41 @@ void WidgetManager::syncLists(Instance& w)
 			if (next >= taken.size()) break;   // more rows than items: cannot happen
 			taken[next] = true;
 			r->rowIndex = first + static_cast<int>(next);
+		}
+
+		// ── The columns, written onto the cells of every realized row ────────
+		// In the TEMPLATE's units, which is what a cell's Width is in: the row
+		// is a widget of its own inside a WidgetRef, and its canvas meets the
+		// slot through the ref's scale. The shares are the same number the
+		// header lays itself out with, so a column and its title cannot drift.
+		if (lv->showHeader && !lv->headerLabels.empty() && lv->columnCanvasW > 0.0f)
+		{
+			const std::vector<float> fr = lv->columnFractions();
+			const int cols = static_cast<int>(fr.size());
+			const float availT = std::max(0.0f, lv->columnCanvasW
+			                                    - 2.0f * lv->columnPadding
+			                                    - (cols - 1) * lv->columnSpacing);
+			for (HE::UIWidgetRef* r : rows)
+			{
+				// The row's root box, then its cells. Both walks are over the
+				// host tree: a grafted row lives in it like anything else.
+				const HE::UIElement* rowRoot = nullptr;
+				for (const auto& ep : w.tree.elements)
+					if (ep && ep->parentId == r->id) { rowRoot = ep.get(); break; }
+				if (!rowRoot) continue;
+				int c = 0;
+				for (const auto& ep : w.tree.elements)
+				{
+					if (!ep || ep->parentId != rowRoot->id) continue;
+					if (c >= cols) break;
+					const float want = availT * fr[static_cast<std::size_t>(c++)];
+					if (std::abs(ep->sizeX - want) > 0.01f)
+					{
+						ep->sizeX = want;
+						m_visualDirty = true;
+					}
+				}
+			}
 		}
 
 		// ── …and tell the owner about the ones that moved ────────────────────
@@ -2249,6 +2384,21 @@ namespace
 		return lv.rowAt((mouseY / canvas.scaleY - r.y) / vs);
 	}
 
+	// A list's rect in the element's own PIXEL space — the space render() lays
+	// the header out in, and therefore the only space a hit test on it may ask
+	// its questions in. One helper because the hover cursor, the press and the
+	// drag all need it, and three copies of a coordinate transform is how a
+	// divider ends up grabbable half a column away from where it is drawn.
+	bool listPixelRect(const HE::UIWidgetTree& tree, const HE::UIListView& lv,
+	                   const HE::UIWidgetCanvas& canvas, HE::UIWidgetRect& out)
+	{
+		if (canvas.scaleX <= 0.0f || canvas.scaleY <= 0.0f) return false;
+		const HE::UIWidgetRect r = HE::uiElementRect(tree, lv, &canvas);
+		out = { r.x * canvas.scaleX, r.y * canvas.scaleY,
+		        r.w * canvas.scaleX, r.h * canvas.scaleY };
+		return true;
+	}
+
 	// Is the point on a splitter's DIVIDER, the strip between the two panes?
 	// In canvas units, like the rect it is measured against. One function
 	// because three things ask it and they must not drift: the press decides
@@ -2458,6 +2608,18 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 					if (const auto* sp = dynamic_cast<const HE::UISplitter*>(&e))
 						if (splitterDividerAt(w.tree, *sp, canvas, mcx, mcy))
 							hit.cursor = splitterCursor(*sp);
+				// …and a table's column divider, for exactly that reason: a
+				// list's rect is mostly rows, and the seams are a few pixels of
+				// it. Asked of the same geometry the drawing used.
+				if (hit.cursor == HE::UICursor::Default)
+					if (const auto* lv = dynamic_cast<const HE::UIListView*>(&e);
+					    lv && lv->resizableColumns)
+					{
+						HE::UIWidgetRect pxr{};
+						if (listPixelRect(w.tree, *lv, canvas, pxr) &&
+						    lv->headerAtPoint(pxr, x, y).divider)
+							hit.cursor = HE::UICursor::ResizeWE;
+					}
 			}
 		}
 	}
@@ -2475,7 +2637,7 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 	if (m_dragArmed || m_dragActive) return HE::UIWindowHit::Normal;
 	for (const auto& w : m_instances)
 		if (w.draggingSlider || w.draggingText || w.draggingSplit || w.draggingScroll ||
-		    w.draggingColor)
+		    w.draggingColor || w.draggingColumn)
 			return HE::UIWindowHit::Normal;
 
 	// The edges come before the picture: a title bar that runs to the very top
@@ -3213,9 +3375,34 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 							if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(le->id)))
 							{
 								setFocus(w.id, lv->id);
+								// The HEADER first, and instead of the rows. A
+								// press in the band is never a row: rowAt says
+								// -1 up there, and letting that through would
+								// clear the selection every time somebody
+								// reached for a column title.
+								const HE::UIWidgetCanvas canvas =
+									resolveCanvas(w.tree, vpWidth, vpHeight);
+								HE::UIWidgetRect pxr{};
+								HE::UIListView::HeaderHit hh;
+								if (listPixelRect(w.tree, *lv, canvas, pxr))
+									hh = lv->headerAtPoint(pxr, mouseX, mouseY);
+								if (hh.inBand)
+								{
+									if (hh.divider && lv->resizableColumns)
+									{
+										w.draggingColumn = lv->id;
+										w.columnSeam     = hh.column;
+									}
+									else if (hh.column >= 0 && !hh.divider)
+									{
+										const ScriptTarget th = scriptTargetFor(w, lv->id);
+										rt().fireOnHeaderClicked(th.scriptId, th.elem,
+										                        hh.column);
+									}
+									break;
+								}
 								selectListRow(w, *lv,
-									listRowAtPointer(w.tree, *lv,
-										resolveCanvas(w.tree, vpWidth, vpHeight), mouseY));
+									listRowAtPointer(w.tree, *lv, canvas, mouseY));
 								break;
 							}
 							if (le->parentId == 0) break;
@@ -3239,7 +3426,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			// draggable card belongs to the slider, and the card would otherwise
 			// steal every value change made on it.
 			if (hot != 0 && !w.draggingSlider && !w.draggingText && !w.draggingSplit &&
-			    !w.draggingColor)
+			    !w.draggingColor && !w.draggingColumn)
 				if (const int src = draggableAt(w, hot))
 				{
 					m_dragWidget = w.id; m_dragElem = src;
@@ -3303,6 +3490,24 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					const ScriptTarget t2 = scriptTargetFor(w, w.draggingSplit);
 					rt().fireOnValueChanged(t2.scriptId, t2.elem, sp->clampedRatio(len));
 				}
+			}
+		}
+
+		// ── Column divider drag ──────────────────────────────────────────────
+		// Same shape as the splitter's: no hit test, because the seam was chosen
+		// at the press and letting go is what ends a grab. The arrows stay for
+		// as long as the grab does — a fast pull leaves the divider behind, and
+		// a cursor that flicks back mid-drag says the grab was lost.
+		if (w.draggingColumn != 0 && primaryDown)
+		{
+			if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(w.draggingColumn)))
+			{
+				m_hoverCursor = HE::UICursor::ResizeWE;
+				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, vpWidth, vpHeight);
+				HE::UIWidgetRect pxr{};
+				if (listPixelRect(w.tree, *lv, canvas, pxr) &&
+				    lv->dragColumnDivider(pxr, w.columnSeam, mouseX))
+					m_visualDirty = true;
 			}
 		}
 
@@ -3392,6 +3597,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			w.draggingText   = 0;
 			w.draggingSplit  = 0;
 			w.draggingColor  = 0;
+			w.draggingColumn = 0;
+			w.columnSeam     = -1;
 			// Let go of the bar and it STAYS: a thumb has been put exactly
 			// where it was wanted, and throwing it on afterwards would undo the
 			// aim the drag just took.
@@ -4254,7 +4461,10 @@ const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
 	static const std::vector<std::string> kCheck  = { "Checked" };
 	static const std::vector<std::string> kSlider = { "Value" };
 	static const std::vector<std::string> kCombo  = { "Selected Index" };
-	static const std::vector<std::string> kList   = { "Selection" };
+	// Column Widths sits beside Selection for exactly the same reason: it is
+	// what a PERSON dragged, and a reload that threw it away would put every
+	// column back where the author left it.
+	static const std::vector<std::string> kList   = { "Selection", "Column Widths" };
 	// Which tab you were on and where you dragged the divider are things a
 	// PERSON put there, so a save must not throw them away — the same rule the
 	// text in a field follows.

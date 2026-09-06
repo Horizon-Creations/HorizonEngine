@@ -345,6 +345,12 @@ struct UIScrollBarStyle
     float     inset    = 0.0f;   // the box's own padding: top, bottom and right
     float     extent   = 0.0f;   // total height of the content, canvas units
     glm::vec4 color{ 1.0f };
+    // Where the TRACK starts, when that is not the same as the inset. A table's
+    // header sits above the rows and the bar must not run up behind it, so the
+    // top and the bottom stop being one number. Negative = "the inset", which
+    // is what every scrolling element that has no band at its top says, and it
+    // is last in the struct so the existing four-value inits stay four values.
+    float     topInset = -1.0f;
 };
 
 // ── Base class ────────────────────────────────────────────────────────────────
@@ -838,6 +844,14 @@ public:
     // answer the two above; false means "no bar", which is also what a bar
     // width of 0 says. See UIScrollBarStyle for why this exists at all.
     virtual bool   scrollBar(UIScrollBarStyle&) const { return false; }
+
+    // ── How far in from its OWN top edge this element cuts its children ──────
+    // Canvas units, and only consulted where clipChildren is on. Zero for
+    // everything except a table: its header band is drawn by the element and
+    // the rows are drawn AFTER it, so a row scrolled half out of view would
+    // otherwise paint straight over the column titles. Answering here rather
+    // than shrinking the element's rect keeps the rect the layout gave it.
+    virtual float  childClipTopInset() const { return 0.0f; }
     // Which way a container stacks (only asked when laysOutChildren()).
     virtual bool stacksVertically() const { return true; }
 

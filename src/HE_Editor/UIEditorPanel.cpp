@@ -3243,7 +3243,37 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		const std::string tpl = propStringOr(n, "Row Widget", "");
 		const ImU32 ghost = tpl.empty() ? IM_COL32(200, 120, 120, 70)
 		                                : IM_COL32(150, 210, 160, 70);
+		// The header band, from the SAME arithmetic the runtime draws it with —
+		// the third consumer of headerLayout, and the reason it is one function.
+		// The titles come from the row template and only exist once something
+		// has run, so the designer shows the band and its seams; a preview run
+		// fills the names in and they appear here too.
 		float y = mn.y + pad;
+		if (const auto* lvp = dynamic_cast<const HE::UIListView*>(&n);
+		    lvp && lvp->headerExtent() > 0.0f)
+		{
+			const float hh = lvp->headerExtent() * s;
+			dl->AddRectFilled(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + hh),
+			                  C(themedColor(n, "Header Color", lvp->headerColor)));
+			const ImU32 htc = C(themedColor(n, "Header Text Color", lvp->headerTextColor));
+			std::vector<float> hx, hw;
+			lvp->headerLayout({ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y }, hx, hw);
+			for (std::size_t i = 0; i < hx.size(); ++i)
+			{
+				if (hx[i] >= mx.x - pad) break;
+				dl->AddText(nullptr, std::max(6.0f, lvp->headerFontSize * s),
+				            ImVec2(hx[i] + 2.0f, y + 2.0f), htc,
+				            lvp->headerLabels[i].c_str());
+				if (i + 1 < hx.size())
+					dl->AddLine(ImVec2(hx[i] + hw[i], y), ImVec2(hx[i] + hw[i], y + hh),
+					            htc & 0x40FFFFFFu);
+			}
+			if (hx.empty())
+				dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+					ImVec2(mn.x + pad + 4, y + 2), IM_COL32(210, 200, 160, 200),
+					"columns come from the row widget");
+			y += hh;
+		}
 		for (int i = 0; i < 64 && y + rowH <= mx.y - pad; ++i)
 		{
 			dl->AddRect(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + rowH), ghost);

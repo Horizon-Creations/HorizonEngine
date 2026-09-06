@@ -224,6 +224,8 @@ public:
     // List rows: fill this one in, and open this one. Both carry the ITEM index.
     void fireOnRowBind(InstanceId id, int elem, int index);
     void fireOnRowActivated(InstanceId id, int elem, int index);
+    // A table's column title, by column index. Sorting is the owner's business.
+    void fireOnHeaderClicked(InstanceId id, int elem, int column);
     void fireOnRightClicked(InstanceId id, int elem);
     // A file dropped from the desktop — the payload is its absolute path, and
     // elem 0 means the window itself took it (nothing under the pointer accepts).

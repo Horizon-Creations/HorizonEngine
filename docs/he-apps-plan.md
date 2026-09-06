@@ -4009,6 +4009,9 @@ teuer geht.
 
 ### 13.1 Tabelle mit Kopfzeile (B2b) — Erweiterung der ListView, Größe M
 
+> **GEBAUT am 07.09.2026.** Der Plan unten steht unverändert, weil er beschreibt, was gebaut
+> wurde. Drei Sachen kamen beim Bauen dazu, und alle drei stehen in `13.1a` darunter.
+
 **Ziel.** Eine Liste mit einer Kopfzeile darüber: Spaltenüberschriften, ziehbare Spaltenbreiten,
 ein Klick auf eine Überschrift meldet sich beim Besitzer.
 
@@ -4083,6 +4086,41 @@ Slot-Fill-Vorlage warnt genau einmal.
 
 **Offen bleibt danach:** variable Zeilenhöhen (die v1 der Liste ist bewusst fest), waagerechtes
 Scrollen, Spalten sortieren ohne Besitzer.
+
+---
+
+### 13.1a Was beim Bauen dazukam (07.09.2026)
+
+**1. Die Kopfzeile verschiebt FÜNF Stellen, nicht vier.** Die vierte Liste oben nennt
+`innerHeight`, `rowAt`, `listSlotRect` und den oberen Einzug der Leiste. Die fünfte ist
+`UIListView::render` selbst: `innerY` ist dort die Oberkante, an der Auswahl- und
+Hover-Rechteck gezeichnet werden, und ohne die Verschiebung markiert die Auswahl die Zeile
+ÜBER der angeklickten. Dass die Leiste zwei verschiedene Einzüge braucht, hat
+`UIScrollBarStyle` ein `topInset` eingebracht (negativ = „wie `inset`", damit die vorhandenen
+Vier-Werte-Initialisierungen vier Werte bleiben) — gelesen wird es nur in `scrollTrackOf`, also
+zeichnen, greifen und Daumen-Rückrechnung an einer Stelle.
+
+**2. Die Zeilen malten über die Kopfzeile.** `clipChildren` schneidet an der VOLLEN Rechteck
+des Elternteils, und das Element zeichnet seine Kopfzeile, bevor die Zeilen als Kinder
+gezeichnet werden: eine halb aus dem Bild gescrollte Zeile lag also über den Überschriften.
+Neu ist `UIElement::childClipTopInset()` (Vorgabe 0, die Tabelle gibt `padding + headerExtent()`
+zurück), gelesen in `uiElementClipRect`. Weil derselbe Aufruf auch die Trefferfläche
+beschneidet, ist die Zeile dort oben zugleich nicht mehr anklickbar — was richtig ist.
+
+**3. Die Vorbedingung hat einen zweiten Halbsatz: `Auto Size`.** Der Plan nennt Slot Fill. Ein
+Textelement misst sich aber standardmäßig SELBST auf der x-Achse (`autoSize = true`), und
+`uiApplyAutoSize` läuft nach `syncLists` — die geschriebene Spaltenbreite war eine Zeile später
+wieder die Breite des Wortes. Das ist derselbe Konflikt wie Slot Fill und wird genauso
+behandelt: eine Warnung pro Vorlage, die die Zelle beim Namen nennt, null Spalten, Liste
+verhält sich wie bisher. Es ist die Falle, die ein Autor als erste trifft, weil sie die
+Voreinstellung ist.
+
+**Dazu, ohne Überraschung:** `Column Widths` wird als VERHÄLTNIS gelesen (die Summe ist immer
+die nutzbare Breite), damit die Zahlen ein Fenster-Resize überleben; die Breiten werden in
+Vorlagen-Einheiten auf die Zellen geschrieben, weil eine Zelle in der Zeilenvorlage lebt und
+deren Leinwand über die `WidgetRef`-Skalierung auf den Platz trifft; `OnHeaderClicked` kostete
+fünf Stellen (Runtime-Deklaration, Makro, Ereignistabelle, `HorizonCodeCompiled`-Virtual, der
+Auslöser im Manager) und keinen Eintrag in `HcNodeDocs`, weil Ereignisse dort nicht stehen.
 
 ---
 

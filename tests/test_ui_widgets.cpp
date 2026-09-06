@@ -247,6 +247,17 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Selection", UIPropType::Int },
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color },
+            // The header is what turns the same type into a table (plan 13.1):
+            // one property and its trimmings, not a second element type.
+            { "Show Header", UIPropType::Bool },
+            { "Header Height", UIPropType::Float },
+            { "Header Color", UIPropType::Color },
+            { "Header Text Color", UIPropType::Color },
+            { "Header Font Size", UIPropType::Float },
+            { "Resizable Columns", UIPropType::Bool },
+            { "Column Widths", UIPropType::String },
+            { "Sort Column", UIPropType::Int },
+            { "Sort Ascending", UIPropType::Bool },
             { "Item Count", UIPropType::Int } } },
         // A WrapBox is a box plus the one number a wrapping row has that a
         // straight one does not: the gap between LINES.
@@ -9671,6 +9682,439 @@ TEST_CASE("ListView: a row is placed by the item it shows, not by stacking")
         ++checked;
     }
     CHECK(checked >= 10);
+}
+
+// ═══ The header that makes it a table (docs/he-apps-plan.md 13.1) ════════════
+// One property on the same type, not a second type. What follows therefore
+// mostly checks that the band SHIFTS everything it should: a header that moves
+// four of the five things is an offset nobody sees until a click lands on the
+// row above the one under the pointer.
+
+TEST_CASE("Table: the header takes its band off the top, everywhere")
+{
+    HE::UIListView lv;
+    lv.sizeY = 200.0f; lv.padding = 0.0f; lv.spacing = 0.0f; lv.rowHeight = 20.0f;
+    lv.itemCount = 100;
+    REQUIRE(lv.innerHeight() == doctest::Approx(200.0f));
+    REQUIRE(lv.rowAt(0.0f) == 0);
+
+    lv.showHeader = true;
+    lv.headerHeight = 30.0f;
+    CHECK(lv.headerExtent() == doctest::Approx(30.0f));
+    // 1. the room the rows have…
+    CHECK(lv.innerHeight() == doctest::Approx(170.0f));
+    // …and therefore how far it scrolls.
+    CHECK(lv.maxScroll() == doctest::Approx(2000.0f - 170.0f));
+    // 2. where the first row starts. The band itself is not a row.
+    CHECK(lv.rowAt(0.0f) == -1);
+    CHECK(lv.rowAt(29.0f) == -1);
+    CHECK(lv.rowAt(30.0f) == 0);
+    CHECK(lv.rowAt(49.0f) == 0);
+    CHECK(lv.rowAt(50.0f) == 1);
+    // 3. the scrollbar's top, which is its own number now that the two ends of
+    //    the track are not the same inset.
+    lv.padding = 4.0f;
+    HE::UIScrollBarStyle sb;
+    REQUIRE(lv.scrollBar(sb));
+    CHECK(sb.inset == doctest::Approx(4.0f));
+    CHECK(sb.topInset == doctest::Approx(34.0f));
+    // 4. and how far in from its own top edge the rows are cut off, so a row
+    //    scrolled half out of view cannot paint over the titles.
+    CHECK(lv.childClipTopInset() == doctest::Approx(34.0f));
+
+    // Off again and every one of them is what it was.
+    lv.showHeader = false;
+    lv.padding = 0.0f;
+    CHECK(lv.innerHeight() == doctest::Approx(200.0f));
+    CHECK(lv.rowAt(0.0f) == 0);
+    CHECK(lv.childClipTopInset() == doctest::Approx(0.0f));
+    REQUIRE(lv.scrollBar(sb));
+    CHECK(sb.topInset == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Table: Column Widths is read as proportions and repairs itself")
+{
+    HE::UIListView lv;
+    lv.showHeader = true;
+    lv.headerLabels = { "A", "B", "C" };
+
+    // Nothing said: equal shares.
+    auto fr = lv.columnFractions();
+    REQUIRE(fr.size() == 3);
+    for (const float f : fr) CHECK(f == doctest::Approx(1.0f / 3.0f));
+
+    // Proportions, not pixels: the same string on a list of any width gives the
+    // same shares, and they always add up to the whole.
+    lv.columnWidths = "100,50,50";
+    fr = lv.columnFractions();
+    REQUIRE(fr.size() == 3);
+    CHECK(fr[0] == doctest::Approx(0.5f));
+    CHECK(fr[1] == doctest::Approx(0.25f));
+    CHECK(fr[2] == doctest::Approx(0.25f));
+
+    // Too many entries fall away — the same repair a selection past the end
+    // gets, and the string is not refused for it.
+    lv.columnWidths = "100,50,50,999,999";
+    fr = lv.columnFractions();
+    REQUIRE(fr.size() == 3);
+    CHECK(fr[0] == doctest::Approx(0.5f));
+
+    // Too few: the missing ones take the average share of the ones that ARE
+    // there, so a cell added to the row template arrives the size of its
+    // neighbours instead of hair-thin.
+    lv.columnWidths = "100,100";
+    fr = lv.columnFractions();
+    REQUIRE(fr.size() == 3);
+    for (const float f : fr) CHECK(f == doctest::Approx(1.0f / 3.0f));
+
+    // Rubbish is the same as absent, entry by entry.
+    lv.columnWidths = "100,,-4,abc,100";
+    fr = lv.columnFractions();
+    REQUIRE(fr.size() == 3);
+    CHECK(fr[0] == doctest::Approx(1.0f / 3.0f));
+
+    // No columns at all: no shares, and nothing divides by zero on the way.
+    lv.headerLabels.clear();
+    CHECK(lv.columnFractions().empty());
+}
+
+TEST_CASE("Table: the titles, the seams and the hits come from one arithmetic")
+{
+    HE::UIListView lv;
+    lv.sizeX = 400.0f; lv.sizeY = 200.0f;
+    lv.padding = 0.0f; lv.showHeader = true; lv.headerHeight = 30.0f;
+    lv.headerLabels = { "Name", "Size", "Kind" };
+    lv.columnWidths = "200,100,100";
+    lv.columnCanvasW = 400.0f;
+
+    // At its authored size first.
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 200.0f };
+    std::vector<float> hx, hw;
+    lv.headerLayout(px, hx, hw);
+    REQUIRE(hx.size() == 3);
+    CHECK(hx[0] == doctest::Approx(0.0f));
+    CHECK(hw[0] == doctest::Approx(200.0f));
+    CHECK(hx[1] == doctest::Approx(200.0f));
+    CHECK(hw[1] == doctest::Approx(100.0f));
+    CHECK(hx[2] == doctest::Approx(300.0f));
+    // They fill the width exactly — there is no sideways scrolling for a
+    // leftover to go into.
+    CHECK(hx[2] + hw[2] == doctest::Approx(400.0f));
+
+    // A press in the band is the header's, whether or not it found a title.
+    CHECK(lv.headerAtPoint(px, 100.0f, 15.0f).column == 0);
+    CHECK(lv.headerAtPoint(px, 250.0f, 15.0f).column == 1);
+    CHECK(lv.headerAtPoint(px, 250.0f, 15.0f).inBand);
+    CHECK_FALSE(lv.headerAtPoint(px, 250.0f, 15.0f).divider);
+    // Below the band is a row, not a title.
+    CHECK_FALSE(lv.headerAtPoint(px, 100.0f, 60.0f).inBand);
+    // The seam wins over the titles either side of it, or a divider a few
+    // pixels wide could never be grabbed.
+    CHECK(lv.headerAtPoint(px, 200.0f, 15.0f).divider);
+    CHECK(lv.headerAtPoint(px, 200.0f, 15.0f).column == 0);
+    // …but not after the last column: there is nothing on the other side of it.
+    CHECK_FALSE(lv.headerAtPoint(px, 400.0f, 15.0f).divider);
+
+    // AT SCALE. The rect is twice as big, so every answer is, and a hit test
+    // that had its own copy of the sums would be a column out here.
+    const HE::UIWidgetRect px2{ 0.0f, 0.0f, 800.0f, 400.0f };
+    lv.headerLayout(px2, hx, hw);
+    REQUIRE(hx.size() == 3);
+    CHECK(hw[0] == doctest::Approx(400.0f));
+    CHECK(hx[1] == doctest::Approx(400.0f));
+    CHECK(lv.headerAtPoint(px2, 200.0f, 30.0f).column == 0);
+    CHECK(lv.headerAtPoint(px2, 500.0f, 30.0f).column == 1);
+    CHECK_FALSE(lv.headerAtPoint(px2, 200.0f, 70.0f).inBand);   // below the band
+    CHECK(lv.headerAtPoint(px2, 400.0f, 30.0f).divider);
+}
+
+TEST_CASE("Table: dragging a seam moves it and keeps the total")
+{
+    HE::UIListView lv;
+    lv.sizeX = 400.0f; lv.sizeY = 200.0f;
+    lv.padding = 0.0f; lv.showHeader = true; lv.headerHeight = 30.0f;
+    lv.headerLabels = { "A", "B", "C" };
+    lv.columnWidths = "200,100,100";
+    lv.columnCanvasW = 400.0f;
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 200.0f };
+
+    CHECK(lv.dragColumnDivider(px, 0, 150.0f));
+    std::vector<float> hx, hw;
+    lv.headerLayout(px, hx, hw);
+    REQUIRE(hw.size() == 3);
+    CHECK(hw[0] == doctest::Approx(150.0f));
+    // What the first column lost, the second one got. Nothing else moved.
+    CHECK(hw[1] == doctest::Approx(150.0f));
+    CHECK(hw[2] == doctest::Approx(100.0f));
+    CHECK(hw[0] + hw[1] + hw[2] == doctest::Approx(400.0f));
+
+    // Dragged past its neighbour, the neighbour keeps a minimum rather than
+    // disappearing: a column dragged to nothing is one nobody can get back.
+    CHECK(lv.dragColumnDivider(px, 0, 5000.0f));
+    lv.headerLayout(px, hx, hw);
+    CHECK(hw[1] > 0.0f);
+    CHECK(hw[0] + hw[1] == doctest::Approx(300.0f));
+
+    // A seam that does not exist is not a drag, and neither is one that moved
+    // nowhere.
+    CHECK_FALSE(lv.dragColumnDivider(px, 2, 380.0f));
+    CHECK_FALSE(lv.dragColumnDivider(px, -1, 100.0f));
+    lv.headerLayout(px, hx, hw);
+    CHECK_FALSE(lv.dragColumnDivider(px, 0, hx[0] + hw[0]));
+}
+
+TEST_CASE("Table: a list with the header off saves exactly what it always did")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::ListView);
+    auto* lv = dynamic_cast<HE::UIListView*>(t.find(id));
+    REQUIRE(lv);
+    lv->rowWidget = "mem://row.hasset";
+
+    // Not one of the nine keys while it is off, so every widget authored before
+    // tables existed writes byte-identical.
+    nlohmann::json j;
+    lv->writeJson(j);
+    for (const char* k : { "showHeader", "headerHeight", "headerColor",
+                           "headerTextColor", "headerFontSize", "resizableColumns",
+                           "columnWidths", "sortColumn", "sortAscending" })
+        CHECK_FALSE(j.contains(k));
+
+    lv->showHeader = true;
+    lv->headerHeight = 33.0f;
+    lv->columnWidths = "120,80,200";
+    lv->resizableColumns = false;
+    // The owner's two, set per run like the item count.
+    lv->sortColumn = 1;
+    lv->sortAscending = false;
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    auto* rl = dynamic_cast<HE::UIListView*>(r.find(id));
+    REQUIRE(rl);
+    CHECK(rl->showHeader);
+    CHECK(rl->headerHeight == doctest::Approx(33.0f));
+    CHECK(rl->columnWidths == "120,80,200");
+    CHECK_FALSE(rl->resizableColumns);
+    // A table that reopened sorted by a column nobody sorted would be a picture
+    // of the last run, exactly like a pre-scrolled offset.
+    CHECK(rl->sortColumn == -1);
+    CHECK(rl->sortAscending);
+}
+
+namespace
+{
+    // The same page buildListPage makes, but with a row template shaped like a
+    // table row: a Horizontal Box whose three children are the columns. Their
+    // NAMES are the column titles — there is no second list of them.
+    void buildTablePage(ContentManager& cm, int badCell = 0,   // 0 none, 1 Slot Fill, 2 Auto Size
+                        float rootPadding = 0.0f, float rootSpacing = 0.0f,
+                        float rowSpacing = 0.0f)
+    {
+        HE::UIWidgetTree row;
+        row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+        row.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int box = row.add(HE::UIWidgetType::HorizontalBox);
+        {
+            HE::UIElement& e = *row.find(box);
+            HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+            e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 40.0f;
+            e.setProp("Padding", HE::UIPropValue::ofFloat(rootPadding));
+            e.setProp("Spacing", HE::UIPropValue::ofFloat(rootSpacing));
+        }
+        const char* names[3] = { "Name", "Size", "Kind" };
+        for (int i = 0; i < 3; ++i)
+        {
+            const int cell = row.add(HE::UIWidgetType::Text);
+            HE::UIElement& e = *row.find(cell);
+            e.parentId = box;
+            e.name = names[i];
+            e.sizeX = 100.0f; e.sizeY = 40.0f;
+            // A cell is a COLUMN, so it does not get to decide its own width.
+            // Auto Size is on by default for a text element, which is exactly
+            // the trap the precondition below exists to name.
+            e.setProp("AutoSize", HE::UIPropValue::ofBool(badCell == 2 && i == 1));
+            if (badCell == 1 && i == 1) e.slotFill = 1.0f;
+            e.setProp("Text", HE::UIPropValue::ofString(names[i]));
+        }
+        registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+        HE::UIWidgetTree page;
+        page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+        page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const int list = page.add(HE::UIWidgetType::ListView);
+        {
+            auto* lv = dynamic_cast<HE::UIListView*>(page.find(list));
+            lv->name = "List";
+            HE::uiSetAnchorPreset(*lv, 0); lv->pivotX = lv->pivotY = 0.0f;
+            lv->posX = 0.0f; lv->posY = 0.0f; lv->sizeX = 400.0f; lv->sizeY = 400.0f;
+            lv->rowWidget = "mem://row.hasset";
+            lv->rowHeight = 40.0f; lv->spacing = rowSpacing; lv->padding = 0.0f;
+            lv->showHeader = true; lv->headerHeight = 40.0f;
+            lv->columnWidths = "200,100,100";
+        }
+        registerWidget(cm, page, nullptr, "mem://page.hasset");
+    }
+}
+
+TEST_CASE("Table: the columns are the row template's cells, read from the asset")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildTablePage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    const HE::UIListView* lv = nullptr;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->name == "List") lv = dynamic_cast<const HE::UIListView*>(ep.get());
+    REQUIRE(lv);
+    // A table with NO items still has a header: the titles come from the asset,
+    // not from a realized row, or a table you have not filled yet would have no
+    // shape to look at.
+    CHECK(lv->itemCount == 0);
+    REQUIRE(lv->headerLabels.size() == 3);
+    CHECK(lv->headerLabels[0] == "Name");
+    CHECK(lv->headerLabels[2] == "Kind");
+
+    // …and with items, the cells of every realized row are given the width of
+    // the column above them.
+    REQUIRE(wm.setListCount(id, "List", 20));
+    wm.extract(400.0f, 400.0f, out);
+    const int rowRef = wm.listRow(id, "List", 0);
+    REQUIRE(rowRef != 0);
+    const HE::UIWidgetTree& t = *wm.tree(id);
+    const HE::UIElement* rowRoot = nullptr;
+    for (const auto& ep : t.elements)
+        if (ep && ep->parentId == rowRef) { rowRoot = ep.get(); break; }
+    REQUIRE(rowRoot);
+    std::vector<float> cellW;
+    for (const auto& ep : t.elements)
+        if (ep && ep->parentId == rowRoot->id) cellW.push_back(ep->sizeX);
+    REQUIRE(cellW.size() == 3);
+    CHECK(cellW[0] == doctest::Approx(200.0f));
+    CHECK(cellW[1] == doctest::Approx(100.0f));
+    CHECK(cellW[2] == doctest::Approx(100.0f));
+}
+
+TEST_CASE("Table: a row template that cannot carry columns says so and shows none")
+{
+    // Both ways a cell can insist on its own width. Slot Fill takes a share of
+    // what is left over; Auto Size measures the text in it — and Auto Size is
+    // ON by default for a text element, so it is the one an author meets first.
+    for (const int bad : { 1, 2 })
+    {
+        TempWidgetDir dir;
+        ContentManager cm(dir.path.string());
+        buildTablePage(cm, bad);
+
+        WidgetManager wm;
+        const int id = createShown(wm, cm, "mem://page.hasset");
+        REQUIRE(id != 0);
+        REQUIRE(wm.setListCount(id, "List", 20));
+        std::vector<UIRenderObject> out;
+        wm.extract(400.0f, 400.0f, out);
+
+        const HE::UIListView* lv = nullptr;
+        for (const auto& ep : wm.tree(id)->elements)
+            if (ep && ep->name == "List") lv = dynamic_cast<const HE::UIListView*>(ep.get());
+        REQUIRE(lv);
+        // No columns, and the list is otherwise exactly the list it always was.
+        CHECK(lv->headerLabels.empty());
+        CHECK(lv->columnFractions().empty());
+        CHECK(wm.listRow(id, "List", 0) != 0);
+    }
+}
+
+TEST_CASE("Table: a press on the header is the header's, not the first row's")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildTablePage(cm);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 50));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+
+    // The band is the top 40; row 0 starts under it. Picking row 0 first, so
+    // "nothing changed" cannot be confused with "nothing was picked".
+    wm.processPointer(400.0f, 400.0f, 300.0f, 60.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 300.0f, 60.0f, false, true);
+    CHECK(wm.listSelected(id, "List") == 0);
+
+    // A press on a column TITLE leaves it alone. Without the header taking the
+    // press first, rowAt would answer -1 up there and clear the selection every
+    // time somebody reached for a title.
+    wm.processPointer(400.0f, 400.0f, 100.0f, 20.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 100.0f, 20.0f, false, true);
+    CHECK(wm.listSelected(id, "List") == 0);
+
+    // And a drag on the seam between the first two columns moves it — the
+    // widths are rewritten, and by the same arithmetic that drew them.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 20.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 140.0f, 20.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 140.0f, 20.0f, false, true);
+
+    const HE::UIListView* lv = nullptr;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->name == "List") lv = dynamic_cast<const HE::UIListView*>(ep.get());
+    REQUIRE(lv);
+    const auto fr = lv->columnFractions();
+    REQUIRE(fr.size() == 3);
+    CHECK(fr[0] == doctest::Approx(140.0f / 400.0f));
+    CHECK(fr[0] + fr[1] + fr[2] == doctest::Approx(1.0f));
+    // …and the selection survived the whole gesture.
+    CHECK(wm.listSelected(id, "List") == 0);
+}
+
+TEST_CASE("Table: a row scrolled half out of view stops below the titles")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    buildTablePage(cm, /*badCell=*/0, 0.0f, 0.0f, /*rowSpacing=*/6.0f);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.setListCount(id, "List", 200));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    // Scrolled to an item whose top does NOT land on the band, so the row at the
+    // top is cut by the header rather than sitting neatly under it.
+    REQUIRE(wm.scrollListToItem(id, "List", 12));
+    wm.extract(400.0f, 400.0f, out);
+
+    const HE::UIWidgetTree& t = *wm.tree(id);
+    const HE::UIListView* lv = nullptr;
+    for (const auto& ep : t.elements)
+        if (ep && ep->name == "List") lv = dynamic_cast<const HE::UIListView*>(ep.get());
+    REQUIRE(lv);
+    const HE::UIWidgetCanvas canvas =
+        HE::uiResolveCanvas(t, 400.0f, 400.0f);
+    const HE::UIWidgetRect lr = HE::uiElementRect(t, *lv, &canvas);
+    const float bandBottom = lr.y + lv->padding + lv->headerExtent();
+
+    // Every realized row is clipped to below the band. The element itself draws
+    // the titles BEFORE its children, so without this a row would paint on top
+    // of the column it belongs to.
+    int checked = 0;
+    for (const auto& ep : t.elements)
+    {
+        const auto* ref = dynamic_cast<const HE::UIWidgetRef*>(ep.get());
+        if (!ref || ref->rowIndex < 0 || ref->parentId != lv->id) continue;
+        HE::UIWidgetRect clip{};
+        REQUIRE(HE::uiElementClipRect(t, *ref, clip, &canvas));
+        CHECK(clip.y >= doctest::Approx(bandBottom));
+        ++checked;
+    }
+    CHECK(checked > 0);
 }
 
 // ═══ Layers: dialogs, popups, menus (docs/he-apps-plan.md B4) ════════════════
