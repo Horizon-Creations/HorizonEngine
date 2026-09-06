@@ -137,7 +137,14 @@ Preis: eine zweite, abweichende Optik-Quelle — Schatten, GI und Punktlichter
 fehlen dem Decal dort. Genau die Art „zweite Wahrheit", vor der der
 Deferred-Plan warnt (eine Shading-Quelle, §4.2).
 
-**Empfehlung:** Weg 1 für die Optik-Parität, aber **nicht blockierend** — d. h.
+> **Entschieden am 06.09.2026 (Leitstand): Weg 2.** Kein Warten auf den
+> Deferred-Port — der ist ein Vielfaches der Arbeit und würde die Decal-Aufgabe
+> sprengen. Vulkan, D3D11 und D3D12 bekommen Forward-Screen-Space-Decals mit
+> bewusster, hier dokumentierter Abweichung von der Metal/GL-Optik, genau wie
+> Single-Map statt CSM bei den Schatten. Der Rest dieses Abschnitts steht als
+> Begründung; die Empfehlung darunter ist überholt.
+
+**Empfehlung (überholt, siehe Kasten):** Weg 1 für die Optik-Parität, aber **nicht blockierend** — d. h.
 in diesem Thema A vollständig liefern (GL + Metal-Zwei-Pass), und für die drei
 Forward-Backends die **Vorbedingung** aus §4 liefern (lesbare Tiefe), weil die
 jeder der beiden Wege braucht und sie außerdem SSAO/SSR dort freischaltet. Der
@@ -280,27 +287,120 @@ Vorbild steht drei Zeilen tiefer: die Shadow-Tiefe ist bereits
 Haupt-Tiefe anwenden, plus die Barriere `DEPTH_WRITE` →
 `PIXEL_SHADER_RESOURCE` und zurück.
 
-**C3 · Vulkan** — `m_depthImage` hat nur
+**C3 · Vulkan** — ~~`m_depthImage` hat nur
 `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` (`:6075`). Zwei Wege:
 `SAMPLED_BIT` ergänzen und per Layout-Übergang lesen (passt zu C1/C2 und zur
 Sampled-Variante), **oder** einen zweiten Subpass mit der Tiefe als
 Input-Attachment — dann kompiliert `kDecalFS` mit seinem `subpassInput`
 **unverändert** nach SPIR-V, und Vulkan bekommt als einziges Nicht-Apple-Backend
-den originalen Metal-Shader. Der zweite Weg ist der elegantere und der
-näher am Metal-Pfad; er kostet einen Render-Pass-Umbau.
+den originalen Metal-Shader.~~
+
+**Erledigt in Schritt 3, aber auf einem dritten Weg** — beide oben scheitern an
+derselben Stelle, nämlich am **Swapchain-Pass**:
+
+- *`SAMPLED_BIT` + Layout-Übergang* setzt voraus, dass der Decal-Draw **außerhalb**
+  des Szenenpasses liegt (eine gebundene Tiefe darf man nicht sampeln). Im
+  Viewport ginge das; im Swapchain-Pfad hängen aber **UI-Canvas und ImGui im
+  selben Render-Pass** hinter `DrawScene`, und der Farb-Endzustand ist
+  `PRESENT_SRC_KHR`. Den Pass dort aufzuschneiden heißt, das ImGui-Backend
+  mitzuziehen (es hält `GetRenderPass()` und baut seine Pipelines dagegen).
+- *Zweiter Subpass mit Input-Attachment* kehrt die Reihenfolge um: alles in
+  Subpass 0 — auch UI und ImGui — läge dann **unter** den Decals.
+
+Gebaut wurde deshalb ein **Kamera-Tiefen-Vorpass in ein eigenes Bild**. Damit ist
+die gesampelte Tiefe nie die des aktiven Passes, der Decal-Draw darf **innerhalb**
+des Szenenpasses sitzen, und alle drei Zielpfade (Swapchain, Viewport,
+Viewport-HDR) brauchen keine Sonderbehandlung. Der Vorpass leiht sich
+`m_shadowPass` (Depth-only, `m_depthFormat`, Endlayout `SHADER_READ_ONLY`) und
+damit `m_shadowPipeline` — Framebuffer-Größen sind von ihrem Render-Pass
+unabhängig, neu sind nur Bild und Framebuffer. C1/C2 (D3D11/D3D12) bleiben davon
+unberührt: dort ist der zusätzliche Vorpass genauso eine Option wie das
+sampelbare DSV.
 
 ---
 
-## 6. Checkpoint D — Forward-Decal-Shader (nur nach Freigabe von Weg 2)
+## 6. Checkpoint D — Forward-Decal-Shader (freigegeben, gebaut in Schritt 3)
 
-`kDecalFSForward`: Schritte 1–4 wie gehabt, danach Normale aus
-`dFdx/dFdy` der rekonstruierten Weltposition, Lambert gegen `heLight.sunDir` +
-Ambient, Blend ins Farbziel statt nach GB0. Ein Shader, drei Backends
-(HLSL für D3D11/D3D12, SPIR-V für Vulkan) — die Bindungen kommen aus dem
-jeweiligen Root-Signature-/Descriptor-Muster der Material-Pipelines
-(`D3D12Renderer.cpp:5747`, `D3D11Renderer.cpp:2775`, `VulkanRenderer.cpp:2024`).
-**Explizit vermerken:** kein Schatten, keine Punktlichter, kein GI auf dem
-Decal — bewusste Abweichung von der Metal/GL-Optik.
+`decalFragmentForward(Backend)` in `MaterialShaderLibrary`: Schritte 1–4 wie
+gehabt, danach Normale aus `dFdx/dFdy` der rekonstruierten Weltposition, Lambert
+gegen die dominante Richtungsquelle + Ambient, Blend ins Farbziel statt nach GB0.
+Ein Shader, drei Backends (HLSL für D3D11/D3D12, SPIR-V für Vulkan).
+
+**Die bewusste Abweichung, explizit:** kein Schatten, keine Punkt-/Spotlichter,
+kein GI auf dem Decal. Auf Metal/GL ist die Decal-Farbe *BaseColor* und wird vom
+selben Resolve beleuchtet wie alles andere — eine Shading-Quelle. Hier ist sie
+ein selbst beleuchteter Aufkleber auf bereits beleuchteten Pixeln, also eine
+zweite, kleinere Wahrheit. Steht so auch in `docs/backend-parity-plan.md`.
+
+### Wie er gebaut ist
+
+- **Erzeugt aus demselben Template** wie die anderen zwei Fassungen
+  (`makeDecalFS(sampled, forward)`), Cache-Schlüssel `backend*4 + 3`. Der Rumpf
+  bis einschließlich Tiefenlesen ist buchstäblich derselbe Text.
+- **Kein einziges `discard`.** Das ist keine Stilfrage: `dFdx`/`dFdy` sind in
+  nicht-uniformem Kontrollfluss undefiniert, und im Original stehen beide
+  `discard` **vor** der Position, aus der die Normale abgeleitet wird. Die
+  Deckung wandert deshalb in die Alpha (`d >= 1` und außerhalb der Box → `a = 0`);
+  bei `SrcAlpha/OneMinusSrcAlpha` lässt Alpha 0 das Ziel unangetastet. Ein ctest
+  hält das fest: der Forward-Shader darf das Wort `discard` nicht enthalten, die
+  gesampelte Fassung muss es enthalten.
+- **NaN-Fallen entschärft:** ein entartetes Kreuzprodukt (`length ≈ 0`) und eine
+  Sonnenrichtung der Länge 0 bekommen beide einen expliziten Zweig, weil ein NaN
+  die Alpha-Multiplikation überlebt und ins Blending durchschlägt.
+- **`DecalUniforms` ist um vier `vec4` gewachsen** (`sunDir`, `sunColor`,
+  `ambient`, `camPos`, hinten angehängt). Metal und GL lassen sie auf null und
+  lesen sie nie — der Block ist trotzdem geteilt, weil Vertex- und
+  Fragment-Stufe **dasselbe** `HeDecal` deklarieren müssen (ein Member-Unterschied
+  ist auf GL ein Linkfehler, den kein Test ohne Kontext findet; der Vergleich der
+  beiden Blocktexte steht als ctest).
+
+---
+
+## 6a. Checkpoint E — Vulkan (Schritt 3, gebaut)
+
+Der Vulkan-Pfad in einem Absatz: **Kamera-Tiefen-Vorpass** (§5 C3) vor dem
+Szenenpass, dann ein Decal-Draw **innerhalb** des Szenenpasses, direkt nach den
+opaken Zeichnungen und vor den transparenten — dieselbe Stelle, an der Metal und
+GL ihre Decals in den G-Buffer legen.
+
+| Baustein | Ort |
+|---|---|
+| Tiefen-Vorpass | `VulkanRenderer::EncodeDecalDepth`, Aufruf in `Render()` gleich nach `EncodeShadowMap` |
+| Ziel des Vorpasses | `DecalDepth` (Bild + View + Framebuffer), zweimal: Swapchain-groß an `createDepthResources`, Viewport-groß an `createViewportResources` |
+| Pipelines | `EnsureDecalPipelines`, lazy wie GLs `EnsureDecalProgram`; zwei Stück, `m_renderPass` (LDR) und `m_postFxSceneRP` (HDR), ausgewählt über `hdr` wie die Szenen-Pipelines |
+| Zeichnen | `VulkanRenderer::EncodeDecals`, aufgerufen aus `DrawScene` nach der Opaque-Schleife |
+| Uniforms | Ring `m_decalUBO[2]`, **512 B Slot-Stride** (`DecalUniforms` ist > 256 B, und mehr als 256 darf `minUniformBufferOffsetAlignment` nicht verlangen), ein Descriptor-Set pro Decal aus `m_decalPool[frame]` |
+| Textur | `resolveDecalTexture(UUID)` — `DecalData::textureId` ist eine **Textur**, keine Material-UUID, der Albedo-Cache kann sie also nicht liefern |
+
+**Die Zahlen, die Vulkan von Metal/GL unterscheiden:**
+`params = (hasTex, +1, 1, 0)`. Vulkans NDC-y zeigt nach unten (`kVulkanClipFix`
+kippt es), also muss `uv.y = 0` oben auf `clip.y = -1` fallen → Vorzeichen `+1`;
+die Tiefe liegt in Textur **und** NDC schon in `0..1` → Skalierung 1, Bias 0.
+(Metal: `-1, 1, 0`. GL: `+1, 2, -1`.)
+
+**Die Cull-Seite** ist wie bei GL keine Differenz: `VK_FRONT_FACE_COUNTER_CLOCKWISE`
++ `VK_CULL_MODE_FRONT_BIT`. GL und Vulkan nennen dasselbe Dreieck vorderseitig,
+sobald es **auf dem Schirm** gegen den Uhrzeigersinn liegt — Vulkans Flächenformel
+trägt das führende Minus für seinen y-nach-unten-Framebuffer genau dafür —, und
+`kVulkanClipFix` ist gerade das, was das Bild auf dem Schirm gleich macht.
+
+**Grenzen, bewusst und zu melden:**
+
+- **Der Vorpass zeichnet nur opake statische Meshes.** Transparentes schreibt im
+  Szenenpass auch keine Tiefe, sonst käme das Decal auf der Glasscheibe an.
+  Skinned Meshes, Partikel und WPO-verschobene Geometrie stehen nicht im Vorpass,
+  also projizieren Decals nicht auf sie — dieselbe Lücke, die die Shadow-Map hat.
+- **Der Vorpass ist ein zusätzlicher Geometriedurchlauf.** Er läuft nur in Frames,
+  die überhaupt ein Decal haben (`m_renderWorld.decals.empty()` → sofort zurück).
+- **Höchstens `k_maxDecals` (256) Decals pro Frame**, danach eine einmalige
+  Warnung im Log.
+- **`colorWriteMask` nur RGB** — im Viewport ist die Alpha des Bildes das, womit
+  ImGui compositet.
+- **Nie auf echter Hardware gelaufen.** Dieser Mac hat kein Vulkan-SDK, also baut
+  `VulkanRenderer.cpp` hier nicht einmal mit. Geprüft wurde: `clang++
+  -fsyntax-only` gegen die von SDL mitgelieferten Vulkan-Header (die ganze
+  Übersetzungseinheit), plus der Cross-Compile-ctest für beide Shader-Stufen.
+  Der Rest ist Nutzer-Verify (§7 Gate 4).
 
 ---
 
@@ -315,10 +415,13 @@ Gates sind deshalb dieselben wie beim GI- und Deferred-Port:
 2. **Cross-Compile als ctest.** Vorbild existiert:
    `tests/test_material_graph.cpp:676` („Every standard node cross-compiles with
    all inputs wired") kompiliert Library-Shader je `Backend` und prüft `.ok`.
-   Neuer Testfall: `decalVertex` und `decalFragmentSampled` müssen für
-   `Metal`, `GLSL410`, `HLSL` und `SpirV` kompilieren. **Heute gibt es keinen
-   einzigen Decal-Test** (`grep -i decal tests/` ist leer) — dieser Test ist das
-   erste automatische Netz unter dem Feature.
+   Neuer Testfall: `decalVertex`, `decalFragmentSampled` und (seit Schritt 3)
+   `decalFragmentForward` müssen für `Metal`, `GLSL410`, `HLSL` und `SpirV`
+   kompilieren. **Vor Schritt 2 gab es keinen einzigen Decal-Test** — dieser Test
+   ist das erste automatische Netz unter dem Feature. Er prüft außerdem zwei
+   Dinge, die kein Compiler meldet: dass Vertex- und Fragment-Stufe denselben
+   `HeDecal`-Block deklarieren (sonst GL-Linkfehler), und dass der Forward-Shader
+   kein `discard` enthält (sonst undefinierte Ableitungen).
 3. **Metal-Zwei-Pass real** (Checkpoint B): per `scripts/he_shot.py` headless
    sichtbar, mit `HE_RENDER_PATH=deferred` und ohne Tile-Modus.
 4. **GL/VK/D3D: Nutzer-Verify auf echter Hardware.** Wird als offen gemeldet,
@@ -343,3 +446,20 @@ hier also nichts zu brechen.
 Schritte 2 und 3 hängen zusammen und sollten in einer Hand bleiben: der
 Sampled-Shader wird in 3 gegen echte Hardware bewiesen, bevor er in 4 blind
 nach GL geht.
+
+### Wie die Schnitte tatsächlich gefallen sind
+
+| # | Inhalt | Stand |
+|---|---|---|
+| 1 | Kartierung + Plan (`00ad406b`) | fertig |
+| 2 | A komplett: Sampled-Variante + GL-Decal-Pass + ctest (`ae579089`) | fertig |
+| 3 | **E: Vulkan** (Tiefen-Vorpass + Forward-Decal-Pass) und **D: `decalFragmentForward`** | fertig |
+| — | B Metal-Zwei-Pass-Fallback | offen, nie gebaut |
+| — | C1/C2 + Decal-Pass für D3D11 und D3D12 | offen (Schritte 31/32) |
+
+Schritt 3 hat B und D getauscht: die Entscheidung des Leitstands zu §2.1 (Weg 2)
+kam vor Checkpoint B, und weil D für drei Backends derselbe Shader ist, gehörte er
+zum ersten von ihnen. **Damit ist die Reihenfolge-Warnung aus §4 eingetreten**: der
+Sampled-Pfad ist bis heute nirgends rasterisiert worden, weder auf GL noch auf
+Vulkan. Checkpoint B bleibt die einzige Stelle, an der er sich auf dieser Maschine
+gegen echte Hardware beweisen ließe, und er ist immer noch offen.

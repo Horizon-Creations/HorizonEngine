@@ -250,9 +250,21 @@ geschrieben; er läuft nicht.
 | G-Buffer-Variante für Graph-Materials | JA | -- | -- | -- |
 | RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
-| Deferred Decals | JA | -- | -- | -- |
+| Deferred Decals | JA | -- | -- | ~ ¹ |
 | Clustered-Lighting-Build | -- | -- | -- | -- |
 | SSR deferred / SSR forward | -- | -- | -- | -- |
+
+¹ **Vulkan zeichnet Decals, aber nicht deferred.** Vulkan hat keinen G-Buffer, also
+gibt es dort kein Base-Color-Ziel, in das ein Decal *vor* der Beleuchtung blenden
+könnte. Statt auf den Deferred-Port (P4) zu warten, zeichnet Vulkan
+**Forward-Screen-Space-Decals**: Kamera-Tiefen-Vorpass, Weltposition rekonstruieren,
+Box clippen, in die bereits beleuchtete Farbe blenden. Der Projektor bringt seine
+eigene, viel kleinere Beleuchtung mit (ein Richtungslicht + Ambient, Normale aus
+`ddx/ddy` der rekonstruierten Position) — **keine Schatten, keine Punkt-/Spotlichter,
+kein GI auf dem Decal**. Das ist eine bewusste, dokumentierte Abweichung derselben
+Art wie Single-Map statt CSM bei den Schatten. Details und Grenzen:
+`docs/decals-cross-backend-plan.md` §6. D3D11/D3D12 bekommen denselben Shader
+(`MaterialShaderLibrary::decalFragmentForward`), sobald ihre Schritte laufen.
 
 ### Himmel & Wetter
 
@@ -343,6 +355,9 @@ Render-Passes — aber das ist ein eigener Entwurf, kein Port. Nicht in diesem P
 am offenen Tile-G-Buffer-Pass. Der *Algorithmus* ist portabel (Clustered braucht nur
 Structured Buffers/SSBOs, siehe §1.4), die *Einbettung* nicht. Sie stehen deshalb erst nach
 P4 an, nicht darin.
+→ **Decals sind seit 06.09.2026 vorgezogen** (`docs/decals-cross-backend-plan.md`): GL hat
+den echten Port bekommen, Vulkan einen Forward-Ersatz mit eigener kleiner Beleuchtung.
+Nur der *deferred* Decal-Pfad wartet auf P4; Decals als Feature nicht mehr.
 
 **Echte Hit-Normalen über Tier-2-Argument-Buffer** (`refl-true-hit-normals-argbuffer`) ist
 ein Metal-Ressourcenmodell-Merkmal. Auf D3D12/Vulkan wäre das Bindless — anderer Entwurf.

@@ -2334,7 +2334,9 @@ bool VulkanRenderer::EnsureDecalPipelines()
 
     using Backend = HE::MaterialShaderLibrary::Backend;
     const auto& v = m_matShaderLib.decalVertex(Backend::SpirV);
-    const auto& f = m_matShaderLib.decalFragmentSampled(Backend::SpirV);
+    // The FORWARD variant: it shades the pixel itself, because there is no
+    // G-buffer resolve here that would light it afterwards.
+    const auto& f = m_matShaderLib.decalFragmentForward(Backend::SpirV);
     if (!v.ok || !f.ok || v.spirv.empty() || f.spirv.empty())
     {
         HE_LOG_ERROR(RHI, "%s",
@@ -2630,6 +2632,12 @@ void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
         HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
     const glm::mat4 invViewProj = glm::inverse(viewProj);
 
+    // The forward variant shades the decal itself. Same source as the material
+    // HeLighting fill: the DOMINANT directional light, not the sky-dome sun —
+    // the night/cloud lesson from the Metal/GL fill sites.
+    glm::vec3 sunDir(0.0f), sunColor(0.0f);
+    m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+
     uint32_t slot = 0;
     for (const DecalData& dcl : m_renderWorld.decals)
     {
@@ -2659,6 +2667,14 @@ void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
         du.params[3] = 0.0f;
         du.vp[0] = static_cast<float>(width);
         du.vp[1] = static_cast<float>(height);
+        du.sunDir[0]   = sunDir.x;   du.sunDir[1]   = sunDir.y;   du.sunDir[2]   = sunDir.z;
+        du.sunColor[0] = sunColor.r; du.sunColor[1] = sunColor.g; du.sunColor[2] = sunColor.b;
+        du.ambient[0]  = m_renderWorld.ambient.r;
+        du.ambient[1]  = m_renderWorld.ambient.g;
+        du.ambient[2]  = m_renderWorld.ambient.b;
+        du.camPos[0]   = m_renderWorld.camera.position.x;
+        du.camPos[1]   = m_renderWorld.camera.position.y;
+        du.camPos[2]   = m_renderWorld.camera.position.z;
 
         const VkDeviceSize off = static_cast<VkDeviceSize>(slot) * k_decalSlotStride;
         std::memcpy(static_cast<uint8_t*>(m_decalUBO[fi].mapped) + off, &du, sizeof(du));
