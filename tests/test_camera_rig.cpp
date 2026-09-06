@@ -923,3 +923,222 @@ TEST_CASE("CameraShake: a shake moves the camera without touching the rig's inpu
     CHECK(glm::length(r->camXform().position) > 1e-4f);
     CHECK(r->camXform().rotation.z != doctest::Approx(0.0f));
 }
+
+// ─── Blending between rigs ────────────────────────────────────────────────────
+
+namespace {
+
+struct SecondCamera {
+    Entity camera = entt::null;
+    Entity target = entt::null;
+};
+
+// A second rig camera in the same world, on a target of its own, so the two
+// poses a blend runs between are far apart and no assertion below can be
+// satisfied by accident. It is NOT main — blendTo is what hands it the picture.
+SecondCamera addRigCamera(HorizonWorld& world, glm::vec3 targetPos,
+                          float armLength, float yaw = 0.0f, float fov = 60.0f)
+{
+    SecondCamera s;
+
+    s.target = world.createEntity("Target B");
+    TransformComponent tt; tt.position = targetPos;
+    world.addComponent(s.target, tt);
+
+    s.camera = world.createEntity("Camera B");
+    world.addComponent(s.camera, TransformComponent{});
+    CameraComponent cam; cam.isMain = false; cam.fovDegrees = fov;
+    world.addComponent(s.camera, cam);
+
+    CameraRigComponent rig;
+    rig.target      = world.entityId(s.target);
+    rig.yaw         = yaw;
+    rig.pitch       = 0.0f;
+    rig.pivotOffset = {};
+    rig.armOffset   = {};
+    rig.armLength   = armLength;
+    world.addComponent(s.camera, rig);
+    return s;
+}
+
+int mainCameraCount(HorizonWorld& world)
+{
+    int n = 0;
+    for (auto [e, cam] : world.registry().view<CameraComponent>().each())
+        if (cam.isMain) ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("CameraBlend: t=0 is the source pose and t=1 the target pose, exactly")
+{
+    // "Exactly" at both ends is what makes a blend invisible where it starts and
+    // where it stops: slerp at a == 0 or 1 is the same pose only up to rounding,
+    // so both ends are written verbatim rather than interpolated.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;                      // camera A at (0, 0, 4)
+    r->world.registry().get<CameraComponent>(r->camera).fovDegrees = 60.0f;
+    const SecondCamera b = addRigCamera(r->world, { 100.0f, 0.0f, 0.0f }, 2.0f,
+                                        0.0f, 90.0f); // camera B at (100, 0, 2)
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+
+    // dt = 0: time has not moved, so the blend is at its very start.
+    HE::CameraLookInput look;                          // dt = 0
+    HE::CameraRigController::update(r->world, look);
+    const auto& bx = r->world.registry().get<TransformComponent>(b.camera);
+    CHECK(bx.position.x == doctest::Approx(0.0f));
+    CHECK(bx.position.z == doctest::Approx(4.0f));
+    // FOV rides along: the picture is still the 60° camera's, expressed as an
+    // offset against the 90° camera that now owns it.
+    CHECK(r->world.registry().get<CameraComponent>(b.camera).fovOffset
+              == doctest::Approx(-30.0f));
+    CHECK(HE::CameraRigController::isBlending(r->world.registry()));
+
+    // And out the far end.
+    stepTime(*r, 1.0f, 1);
+    CHECK(bx.position.x == doctest::Approx(100.0f));
+    CHECK(bx.position.z == doctest::Approx(2.0f));
+    CHECK(r->world.registry().get<CameraComponent>(b.camera).fovOffset == 0.0f);
+    CHECK_FALSE(HE::CameraRigController::isBlending(r->world.registry()));
+}
+
+TEST_CASE("CameraBlend: blendTo leaves exactly one main camera")
+{
+    // Not decoration. findRigCamera and the render extractor both take the FIRST
+    // isMain they meet in entt view order, and that order shifts as pools grow —
+    // two main cameras during a blend is the picture flicking between two poses
+    // in irregular frames.
+    auto r = makeRig();
+    const SecondCamera b = addRigCamera(r->world, { 10.0f, 0.0f, 0.0f }, 2.0f);
+
+    // A third camera that someone left flagged main by hand, and a fourth with
+    // no rig at all — blendTo has to clear both.
+    Entity stray = r->world.createEntity("Stray");
+    r->world.addComponent(stray, TransformComponent{});
+    CameraComponent strayCam; strayCam.isMain = true;
+    r->world.addComponent(stray, strayCam);
+
+    REQUIRE(mainCameraCount(r->world) == 2);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 0.5f));
+
+    CHECK(mainCameraCount(r->world) == 1);
+    CHECK(r->world.registry().get<CameraComponent>(b.camera).isMain);
+
+    // A camera that is not one is refused rather than half-applied.
+    CHECK_FALSE(HE::CameraRigController::blendTo(r->world, r->target, 0.5f));
+    CHECK(mainCameraCount(r->world) == 1);
+}
+
+TEST_CASE("CameraBlend: a blend across ±180 yaw takes the short way")
+{
+    // The reason rotation is slerped as a quaternion rather than lerped as three
+    // numbers: 170 to −170 read as numbers is 340 degrees the wrong way round,
+    // and the camera spins a full turn where it should have crossed 20 degrees.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 0.0f;
+    r->rig().yaw         = 170.0f;
+    const SecondCamera b = addRigCamera(r->world, { 0.0f, 0.0f, 0.0f }, 0.0f, -170.0f);
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.5f, 1);                    // smoothstep(0.5) = 0.5, the midpoint
+
+    // The forward vector, not the euler angles: mid-blend the transform carries
+    // whatever triple glm::eulerAngles recovered, which near yaw 180 is a
+    // different — equivalent — set of numbers. The direction is unambiguous.
+    const auto& rigB = r->world.registry().get<CameraRigComponent>(b.camera);
+    const glm::vec3 fwd = rigB.lastWritten.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+    CHECK(fwd.z == doctest::Approx(1.0f).epsilon(0.01));   // through 180
+    CHECK(fwd.z > 0.9f);                                   // and NOT through 0
+}
+
+TEST_CASE("CameraBlend: a source camera destroyed mid-blend ends it cleanly")
+{
+    // Not "carry on from the last known source pose": that pose is a frame old
+    // and the world has moved on, so it would blend from somewhere nothing is.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    const SecondCamera b = addRigCamera(r->world, { 50.0f, 0.0f, 0.0f }, 2.0f);
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.25f, 1);
+    REQUIRE(HE::CameraRigController::isBlending(r->world.registry()));
+
+    r->world.destroyEntity(r->camera);        // the source, mid-flight
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK_FALSE(HE::CameraRigController::isBlending(r->world.registry()));
+    const auto& bx = r->world.registry().get<TransformComponent>(b.camera);
+    CHECK(bx.position.x == doctest::Approx(50.0f));
+    CHECK(bx.position.z == doctest::Approx(2.0f));
+}
+
+TEST_CASE("CameraBlend: a second blend starts at the pose on screen, not at its rig")
+{
+    // The interpolated pose belongs to no entity, so it has to be frozen at the
+    // moment of the call — and it is the OUTGOING rig that holds it, because the
+    // camera that has been showing the picture is the one that wrote it. Read
+    // the incoming rig instead and the picture snaps to the source camera's full
+    // pose before easing back, which is the jump this whole mechanism exists to
+    // prevent.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;                       // A at (0, 0, 4)
+    const SecondCamera b = addRigCamera(r->world, { 100.0f, 0.0f, 0.0f }, 2.0f);  // B at (100, 0, 2)
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.5f, 1);                             // halfway across
+
+    const glm::vec3 onScreen =
+        r->world.registry().get<CameraRigComponent>(b.camera).lastWritten.position;
+    REQUIRE(onScreen.x > 1.0f);                        // genuinely between the two
+    REQUIRE(onScreen.x < 99.0f);
+
+    // Turn around and go back to A. dt = 0, so the new blend is at its start and
+    // what lands in the transform is its source pose verbatim.
+    REQUIRE(HE::CameraRigController::blendTo(r->world, r->camera, 1.0f));
+    HE::CameraLookInput look;                          // dt = 0
+    HE::CameraRigController::update(r->world, look);
+
+    CHECK(r->camXform().position.x == onScreen.x);
+    CHECK(r->camXform().position.y == onScreen.y);
+    CHECK(r->camXform().position.z == onScreen.z);
+}
+
+TEST_CASE("CameraBlend: a rig that loses the picture mid-blend does not resume it")
+{
+    // Its `remaining` would otherwise sit frozen for as long as it is off
+    // screen, and handing isMain back to it by hand would pick the blend up
+    // again from a source that has long moved on. Setting isMain by hand is a
+    // cut, always.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    const SecondCamera b = addRigCamera(r->world, { 100.0f, 0.0f, 0.0f }, 2.0f);
+
+    stepTime(*r, 1.0f / 60.0f, 1);
+    REQUIRE(HE::CameraRigController::blendTo(r->world, b.camera, 1.0f));
+    stepTime(*r, 0.25f, 1);
+    REQUIRE(r->world.registry().get<CameraRigComponent>(b.camera).isBlending());
+
+    // Hand it straight back, the crude way.
+    r->world.registry().get<CameraComponent>(b.camera).isMain = false;
+    r->world.registry().get<CameraComponent>(r->camera).isMain = true;
+    stepTime(*r, 1.0f / 60.0f, 1);
+
+    CHECK_FALSE(r->world.registry().get<CameraRigComponent>(b.camera).isBlending());
+    CHECK(r->camXform().position.z == doctest::Approx(4.0f));   // a cut, not an ease
+}

@@ -420,8 +420,14 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
                 applyMeshVisibility(reg, other.meshHiddenEntity, false);
                 other.meshHiddenEntity = entt::null;
             }
-            cam.fovOffset       = 0.0f;
+            cam.fovOffset        = 0.0f;
             other.hasLastWritten = false;
+
+            // And it drops its own blend. Its `remaining` would otherwise sit
+            // frozen for as long as it is off screen, so handing isMain back to
+            // it by hand would RESUME a blend from a source that has moved on —
+            // where the rule is that a hand-set isMain is always a cut.
+            other.blend = {};
         }
     }
     f.occluded = active.occluded;
@@ -592,13 +598,20 @@ bool CameraRigController::blendTo(HorizonWorld& world, entt::entity toCamera,
     // something any entity holds — so it is frozen. The same applies to a source
     // camera that has no rig of its own: there is nothing to re-solve, so its
     // world pose is taken once, here.
-    const bool sourceIsLive = reg.all_of<CameraRigComponent>(from);
-    if (rig->isBlending() && rig->hasLastWritten)
+    //
+    // The interpolated pose is the OUTGOING rig's `lastWritten`, not the
+    // incoming one's: the camera that has been showing the picture is the one
+    // that wrote it. Asking the incoming rig instead looks plausible and is
+    // never true — a rig that is not driving has its hasLastWritten cleared in
+    // update(), and a rig that IS driving would be `from == toCamera` and has
+    // already returned above as a cut.
+    auto* fromRig = reg.try_get<CameraRigComponent>(from);
+    if (fromRig && fromRig->isBlending() && fromRig->hasLastWritten)
     {
         b.useFromPose = true;
-        b.fromPose    = rig->lastWritten;
+        b.fromPose    = fromRig->lastWritten;
     }
-    else if (!sourceIsLive)
+    else if (!fromRig)
     {
         // World matrices first — a camera's worldMatrix is whatever the last
         // propagate left there, and for a cutscene camera that was parented or
