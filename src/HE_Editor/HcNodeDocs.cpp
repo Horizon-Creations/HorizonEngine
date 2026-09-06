@@ -1098,6 +1098,37 @@ namespace
 	  "Stops a watch, using the handle Watch File gave you. Watches also all end "
 	  "when the application does." },
 
+	// ── Database ─────────────────────────────────────────────────────────────
+	// Open needs the project's "Read and write files" permission; a database is
+	// a file. The readers do not.
+	{ "db.open",
+	  "Opens a SQLite database file, creating it if it is not there yet, and "
+	  "gives you a handle for the other Database nodes. The path follows the "
+	  "same rules as the file nodes: relative to your project, or somewhere the "
+	  "user picked in a dialog. 0 means it did not open." },
+	{ "db.close",
+	  "Closes a database. They also all close when the application does." },
+	{ "db.exec",
+	  "Runs SQL that gives no rows back — CREATE, INSERT, UPDATE, DELETE. Put a "
+	  "? where each value goes and pass the values as a JSON array in Params "
+	  "(for example [\"Ada\", 36]); never paste them into the SQL yourself, or a "
+	  "name with a quote in it becomes somebody else's command. Ok is false when "
+	  "it failed, and Database Error says why." },
+	{ "db.query",
+	  "Runs a SELECT and gives the rows back as JSON — an array of objects, one "
+	  "per row, which the JSON nodes read. Same ? and Params as Run SQL. An "
+	  "empty result and a failed one both come back as [], so check Database "
+	  "Error to tell them apart. Very large results are cut off (Database Error "
+	  "says so); use LIMIT." },
+	{ "db.changes",
+	  "How many rows the last Run SQL on this database actually changed. This is "
+	  "how you tell \"it worked\" from \"nothing matched\"." },
+	{ "db.lastInsertId",
+	  "The row id the last INSERT on this database created." },
+	{ "db.lastError",
+	  "Why the last call on this database failed, in SQLite's own words, or "
+	  "empty when it did not." },
+
 	// ── Timers ───────────────────────────────────────────────────────────────
 	// None of these need a permission: a timer cannot reach anything, and what
 	// it fires is this application's own graph.

@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <map>
 #include <set>
+#include <nlohmann/json.hpp>   // db.query hands its rows back as JSON text
 #include <HorizonScene/EngineApi.h>
 #include <Net/HttpsClient.h>   // http.available must answer what the backend says
 #include <Types/TypeRegistry.h>
@@ -2073,6 +2074,204 @@ TEST_CASE("fs: a watch is the sandbox's business too")
 
     std::filesystem::remove_all(root, ec);
     std::filesystem::remove_all(outside, ec);
+}
+
+// ── SQLite ───────────────────────────────────────────────────────────────────
+
+TEST_CASE("db: a database is a file, and the file rules are the file rules")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_perm";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::db::closeAll();
+
+    // Shut by default, like every other row that touches the disk. A database
+    // that opened without the permission would be the way around all of them.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK(HE::api::db::open(c, "data.db") == 0);
+
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    const int h = HE::api::db::open(c, "data.db");
+    REQUIRE(h != 0);
+    CHECK(std::filesystem::exists(root / "data.db"));
+
+    // An escape is refused the same way a readText escape is: it goes through
+    // resolved(), which is the one place a script's string becomes a path.
+    HE::api::perm::set(HE::api::perm::Grants{});   // relative still works, absolute does not
+    CHECK(HE::api::db::open(c, "../outside.db") == 0);
+
+    HE::api::db::closeAll();
+    // …and closeAll really did close it: the handle is dead, not merely tidy.
+    CHECK(HE::api::db::changes(c, h) == 0);
+    CHECK(HE::api::db::lastError(c, h).empty());
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("db: SQL can name files too, and ATTACH is where that is stopped")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_attach";
+    const auto outside = std::filesystem::temp_directory_path() / "he_api_db_outside";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::create_directories(outside, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    HE::api::db::closeAll();
+
+    const int h = HE::api::db::open(c, "sandboxed.db");
+    REQUIRE(h != 0);
+
+    // The hole this closes: `open` goes through resolved(), but SQL names files
+    // in a STRING that no resolved() ever sees. Without the authorizer this one
+    // statement reaches anything on the disk.
+    const std::string other = (outside / "elsewhere.db").string();
+    CHECK_FALSE(HE::api::db::exec(c, h, "ATTACH DATABASE '" + other + "' AS other", ""));
+    CHECK_FALSE(HE::api::db::lastError(c, h).empty());
+    CHECK_FALSE(std::filesystem::exists(outside / "elsewhere.db"));
+    CHECK_FALSE(HE::api::db::exec(c, h, "DETACH DATABASE other", ""));
+
+    // Ordinary SQL is untouched by the authorizer — a lock that also refused
+    // CREATE TABLE would be a lock on the whole group.
+    CHECK(HE::api::db::exec(c, h, "CREATE TABLE t(a INTEGER)", ""));
+
+    HE::api::db::closeAll();
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+}
+
+TEST_CASE("db: rows come back as JSON, and values go in as parameters")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_rows";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    HE::api::db::closeAll();
+
+    const int h = HE::api::db::open(c, "sub/people.db");
+    REQUIRE(h != 0);
+    // The parent folder was made: SQLite answers "unable to open database file"
+    // for a missing directory, which reads like a permission problem.
+    CHECK(std::filesystem::exists(root / "sub" / "people.db"));
+
+    REQUIRE(HE::api::db::exec(
+        c, h, "CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, height REAL, note TEXT)", ""));
+    REQUIRE(HE::api::db::exec(c, h, "INSERT INTO people(name, height, note) VALUES(?, ?, ?)",
+                              R"(["Ada", 1.7, null])"));
+    CHECK(HE::api::db::changes(c, h) == 1);
+    CHECK(HE::api::db::lastInsertId(c, h) == doctest::Approx(1.0));
+
+    // The value that makes this matter: an apostrophe pasted into SQL is
+    // somebody else's statement. Bound as a parameter it is a name.
+    REQUIRE(HE::api::db::exec(c, h, "INSERT INTO people(name, height) VALUES(?, ?)",
+                              R"(["O'Brien; DROP TABLE people;--", 1.82])"));
+    CHECK(HE::api::db::changes(c, h) == 1);
+
+    const std::string rows = HE::api::db::query(c, h, "SELECT * FROM people ORDER BY id", "");
+    const nlohmann::json j = nlohmann::json::parse(rows, nullptr, false);
+    REQUIRE(j.is_array());
+    REQUIRE(j.size() == 2);                 // the table is still there
+    CHECK(j[0]["name"] == "Ada");
+    CHECK(j[0]["height"].get<double>() == doctest::Approx(1.7));
+    CHECK(j[0]["id"].get<int>() == 1);
+    CHECK(j[0]["note"].is_null());          // SQL NULL is JSON null
+    CHECK(j[1]["name"] == "O'Brien; DROP TABLE people;--");
+    CHECK(HE::api::db::lastError(c, h).empty());
+
+    // A parameter in the WHERE, which is the other half of the same promise.
+    const nlohmann::json one = nlohmann::json::parse(
+        HE::api::db::query(c, h, "SELECT name FROM people WHERE height > ?", "[1.75]"),
+        nullptr, false);
+    REQUIRE(one.is_array());
+    REQUIRE(one.size() == 1);
+    CHECK(one[0]["name"] == "O'Brien; DROP TABLE people;--");
+
+    // Nothing matched and it failed are both "[]" — lastError is what tells
+    // them apart, which is why an error is never put in the result.
+    CHECK(HE::api::db::query(c, h, "SELECT * FROM people WHERE id = 999", "") == "[]");
+    CHECK(HE::api::db::lastError(c, h).empty());
+    CHECK(HE::api::db::query(c, h, "SELECT * FROM nosuchtable", "") == "[]");
+    CHECK_FALSE(HE::api::db::lastError(c, h).empty());
+    // …and the next successful call clears it, so nobody reads yesterday's.
+    CHECK(HE::api::db::exec(c, h, "DELETE FROM people WHERE id = 1", ""));
+    CHECK(HE::api::db::lastError(c, h).empty());
+    CHECK(HE::api::db::changes(c, h) == 1);
+
+    // A blob has no honest JSON shape and comes back as null rather than as a
+    // lie in the data.
+    REQUIRE(HE::api::db::exec(c, h, "CREATE TABLE b(x BLOB)", ""));
+    REQUIRE(HE::api::db::exec(c, h, "INSERT INTO b(x) VALUES(X'00FF00')", ""));
+    const nlohmann::json bj = nlohmann::json::parse(
+        HE::api::db::query(c, h, "SELECT x FROM b", ""), nullptr, false);
+    REQUIRE(bj.is_array());
+    REQUIRE(bj.size() == 1);
+    CHECK(bj[0]["x"].is_null());
+
+    // An unknown handle answers like a closed one, everywhere.
+    CHECK(HE::api::db::query(c, 9999, "SELECT 1", "") == "[]");
+    CHECK_FALSE(HE::api::db::exec(c, 9999, "SELECT 1", ""));
+    CHECK(HE::api::db::changes(c, 9999) == 0);
+    CHECK(HE::api::db::lastError(c, 9999).empty());
+
+    HE::api::db::close(c, h);
+    HE::api::db::closeAll();
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("db: the rows are in the registry and reach every frontend")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_rows2";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    HE::api::db::closeAll();
+
+    const auto& reg = HE::api::registry();
+    auto row = [&](const char* id) -> const HE::api::ApiFn*
+    {
+        for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+        return nullptr;
+    };
+    for (const char* id : { "db.open", "db.close", "db.exec", "db.query",
+                            "db.changes", "db.lastInsertId", "db.lastError" })
+        CHECK_MESSAGE(row(id) != nullptr, id);
+
+    const auto opened = row("db.open")->invoke(c, { HorizonCode::Value::ofString("r.db") });
+    REQUIRE(opened.size() == 1);
+    const int h = opened[0].i;
+    REQUIRE(h != 0);
+    CHECK(row("db.exec")->invoke(c, { HorizonCode::Value::ofInt(h),
+                                      HorizonCode::Value::ofString("CREATE TABLE k(v TEXT)"),
+                                      HorizonCode::Value::ofString("") })[0].b);
+    CHECK(row("db.exec")->invoke(c, { HorizonCode::Value::ofInt(h),
+                                      HorizonCode::Value::ofString("INSERT INTO k VALUES(?)"),
+                                      HorizonCode::Value::ofString(R"(["v"])") })[0].b);
+    const std::string out = row("db.query")->invoke(
+        c, { HorizonCode::Value::ofInt(h),
+             HorizonCode::Value::ofString("SELECT v FROM k"),
+             HorizonCode::Value::ofString("") })[0].s;
+    CHECK(out == R"([{"v":"v"}])");
+    // …and the json group reads it, which is the whole reason the result is text.
+    CHECK(HE::api::json::getString(c, out, "[0].v", "") == "v");
+
+    CHECK(HE::api::isScriptGroup("db"));
+    HE::api::db::closeAll();
+    std::filesystem::remove_all(root, ec);
 }
 
 // ── Timers ───────────────────────────────────────────────────────────────────

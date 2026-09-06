@@ -2732,6 +2732,9 @@ void GameApplication::OnShutdown()
 	HE::api::fs::clearWatches();
 	// …and so are the timers, for exactly the same reason.
 	HE::api::timer::cancelAll();
+	// The database connections last: closing one flushes it, and a file left
+	// half-written is the one of these three that costs somebody their data.
+	HE::api::db::closeAll();
 #ifdef __APPLE__
 	// Ours out of the system bar again, SDL's own left standing. One application
 	// per process, and this file's statics outlive the object that filled them.

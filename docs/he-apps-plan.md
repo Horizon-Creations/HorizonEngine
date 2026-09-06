@@ -3869,3 +3869,46 @@ langsam vollläuft.
 
 **Zugestellt wird in `GameApplication`**, wie beim Menü, beim Watcher und bei HTTP — in der
 Editor-Vorschau kommt also nichts an.
+
+### C: `db`, und die zweite Tür, die SQL selbst aufmacht (06.09.2026)
+
+Die letzte offene Zeile aus Block C, die im Plan als „groß" und „erst wenn es jemand braucht"
+stand. Sieben Zeilen: `Open`, `Close`, `Run SQL`, `Query SQL`, `Rows Changed`, `Last Insert Id`,
+`Database Error`.
+
+**Die Amalgamation, nicht das System-SQLite.** macOS liefert eine im SDK mit, Linux meistens,
+Windows nie — eine Skriptzeile, die es auf zwei von drei Plattformen gibt, ist schlimmer als
+keine. Also 1,6 MB Archiv über FetchContent mit URL und SHA256 (3.47.2), ein statisches Ziel wie
+bei lz4, `PRIVATE` an HorizonScene gehängt: `sqlite3.h` steht in keinem unserer Header, und weil
+die Ergebnisse als JSON-Text herauskommen, sieht nichts oberhalb dieser Bibliothek jemals ein
+`sqlite3*`.
+
+**Ergebnisse sind JSON-Text, Parameter ein JSON-Array.** Ein Pin trägt keine Tabelle, und ein
+Ergebnistyp im Speicher bräuchte ein Handle, eine Lebensdauer und einen Weg, eines zu verlieren —
+dieselbe Rechnung, an deren Ende die `json`-Gruppe selbst Text ist, und deren Leser hier gleich
+mitbenutzt werden. Das Array vor den `?` ist keine Bequemlichkeit: ein Graph, der seine Werte in
+das SQL klebt, ist ein Graph mit einem Injection-Loch, von dem der Autor nichts weiß. Der Test
+schreibt `O'Brien; DROP TABLE people;--` als Namen in die Tabelle und liest ihn wieder heraus.
+
+**Und die Falle, die sonst still offen geblieben wäre: `ATTACH DATABASE '/etc/…'`.** `open` geht
+durch `fs::resolved()`, die eine Stelle aus Block C — aber SQL benennt Dateien in einer
+**Zeichenkette**, die kein `resolved()` je zu sehen bekommt. Eine Anweisung, und die Sandbox ist
+umgangen. Davor sitzt jetzt ein `sqlite3_set_authorizer`, der ATTACH und DETACH verweigert und
+sonst nichts anfasst (ein Riegel, der auch CREATE TABLE ablehnt, wäre ein Riegel gegen die ganze
+Gruppe). Das Laden von Erweiterungen ist zusätzlich wegkompiliert. Der Test prüft beides: die
+fremde Datei entsteht nicht, und gewöhnliches SQL läuft weiter.
+
+**Ein Blob kommt als `null` zurück.** JSON hat keine Bytefolge, und Base64 wäre hier eine
+Kodierung, für die der Graph keinen Dekodierer hat — eine Lüge in der Form von Daten. Wer Bytes
+braucht, legt sie in eine Datei und den Pfad in die Zeile.
+
+**„Nichts gefunden" und „fehlgeschlagen" sind beide `[]`**, unterschieden durch `Database Error` —
+eine Fehlermeldung an der Stelle des Ergebnisses wäre ein Dokument, das die `json`-Gruppe
+bereitwillig als Daten liest. Sehr große Ergebnisse werden bei 10 000 Zeilen abgeschnitten, und
+zwar **nicht still**: `Database Error` sagt es, denn eine kurze Antwort und eine falsche sind
+nicht dasselbe.
+
+**Nicht gemessen, mit Absicht benannt:** was SQLite in einem fertigen Runtime WIRKLICH wiegt.
+`out/deploy` wird in diesem Baum nicht gebaut, `runtime_size` überspringt hier also. 1,6 MB
+Archiv gegen rund 10 % plus 5 MB Spielraum ist reichlich Luft, aber die Zahl, die zählt, kommt
+aus CI.

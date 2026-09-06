@@ -283,6 +283,54 @@ else()
     set(HE_HAVE_ZSTD TRUE)
 endif()
 
+# ─── SQLite (the `db` script group, docs/he-apps-plan.md Block C) ─────────────
+# The AMALGAMATION, not the git repository: sqlite's own tree is built by a tcl
+# script and ships no usable CMakeLists, while the amalgamation is two files and
+# a header that every platform compiles the same way. The URL is versioned and
+# hashed, so a build either gets exactly this SQLite or fails loudly.
+#
+# NOT the system libsqlite3, even though macOS ships one in its SDK: it is there
+# on macOS, usually there on Linux and never there on Windows, so linking it
+# would make `db` a feature that exists on two of the three platforms. A vendored
+# 1.5 MB is the cheaper answer than a script row that is missing on Windows.
+message(STATUS "HorizonEngine: fetching SQLite 3.47.2 (amalgamation) for the db script group")
+FetchContent_Declare(
+    sqlite3
+    URL      https://sqlite.org/2024/sqlite-amalgamation-3470200.zip
+    URL_HASH SHA256=aa73d8748095808471deaa8e6f34aa700e37f2f787f4425744f53fdd15a89c40
+)
+FetchContent_GetProperties(sqlite3)
+if(NOT sqlite3_POPULATED)
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
+    FetchContent_Populate(sqlite3)
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 NEW)
+    endif()
+endif()
+enable_language(C)
+add_library(sqlite3_static STATIC "${sqlite3_SOURCE_DIR}/sqlite3.c")
+target_include_directories(sqlite3_static PUBLIC "${sqlite3_SOURCE_DIR}")
+# Everything an embedded database in a desktop application does not need. Each
+# line is size or attack surface that would otherwise ship in every runtime:
+#   OMIT_LOAD_EXTENSION — loading a .so through SQL is exactly the hole the
+#     authorizer in EngineApi.cpp closes; switched off at compile time as well,
+#     because two locks on that door cost nothing.
+#   THREADSAFE=0 — every call happens on the frame thread, like the rest of the
+#     script API, and the mutexes would be paid for on every statement.
+#   OMIT_DEPRECATED / OMIT_COMPLETE — nothing here calls them.
+target_compile_definitions(sqlite3_static PRIVATE
+    SQLITE_OMIT_LOAD_EXTENSION=1
+    SQLITE_THREADSAFE=0
+    SQLITE_OMIT_DEPRECATED=1
+    SQLITE_OMIT_COMPLETE=1
+    SQLITE_DQS=0
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_DEFAULT_FOREIGN_KEYS=1
+)
+set_target_properties(sqlite3_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # ─── Crypto backend (hpak AES-256-GCM encryption) ─────────────────────────────
 # Encryption of shipped assets is obfuscation against casual ripping, NOT a
 # security boundary (the key ships with the game). The primary backend is system

@@ -46,6 +46,9 @@
 #include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
+// The `db` group only. Kept out of EngineApi.h on purpose: no sqlite3* ever
+// leaves this file, so nothing above HorizonScene has to know SQLite exists.
+#include <sqlite3.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -2555,6 +2558,229 @@ void shutdown()
 
 } // namespace http
 
+// ── SQLite ───────────────────────────────────────────────────────────────────
+namespace db {
+namespace {
+struct Conn
+{
+    int          handle = 0;
+    sqlite3*     db     = nullptr;
+    std::string  err;             // what the last call on this connection said
+};
+std::vector<Conn>& conns()      { static std::vector<Conn> c; return c; }
+int& nextDbHandle()             { static int h = 0;          return h; }
+
+Conn* find(int handle)
+{
+    for (Conn& c : conns()) if (c.handle == handle) return &c;
+    return nullptr;
+}
+
+// SQL can name files that no `resolved()` ever sees: `ATTACH DATABASE '/etc/x'`
+// is one statement away from reading anything on the disk, and it arrives as a
+// string rather than as a path argument. This is where that door is shut. The
+// extension loader is compiled out as well (SQLITE_OMIT_LOAD_EXTENSION), so it
+// is refused here only for the case where somebody turns that back on.
+int authorize(void*, int action, const char*, const char*, const char*, const char*)
+{
+    switch (action)
+    {
+    case SQLITE_ATTACH:
+    case SQLITE_DETACH:
+        return SQLITE_DENY;
+    default:
+        return SQLITE_OK;
+    }
+}
+
+// The JSON array in front of the `?`s. Anything the array does not cover stays
+// NULL, which is what an unbound parameter already is — a statement with more
+// placeholders than values is the caller's mistake to see in the result, not a
+// reason to refuse the whole call.
+void bindParams(sqlite3_stmt* st, const std::string& params)
+{
+    if (params.empty()) return;
+    nlohmann::json j = nlohmann::json::parse(params, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_array()) return;
+    const int want = sqlite3_bind_parameter_count(st);
+    for (size_t i = 0; i < j.size() && static_cast<int>(i) < want; ++i)
+    {
+        const nlohmann::json& v = j[i];
+        const int at = static_cast<int>(i) + 1;
+        if      (v.is_null())            sqlite3_bind_null(st, at);
+        else if (v.is_boolean())         sqlite3_bind_int(st, at, v.get<bool>() ? 1 : 0);
+        else if (v.is_number_integer())  sqlite3_bind_int64(st, at, v.get<int64_t>());
+        else if (v.is_number())          sqlite3_bind_double(st, at, v.get<double>());
+        else
+        {
+            // Everything else — a string, and an object or array written out as
+            // its own JSON. A nested value bound as text is at least readable
+            // again; refusing it would make one bad element throw the whole
+            // statement away.
+            const std::string s = v.is_string() ? v.get<std::string>() : v.dump();
+            sqlite3_bind_text(st, at, s.c_str(), static_cast<int>(s.size()),
+                              SQLITE_TRANSIENT);
+        }
+    }
+}
+} // namespace
+
+int open(Ctx&, const std::string& path)
+{
+    if (!perm::allowed(perm::get().files, "db.open")) return 0;
+    if (static_cast<int>(conns().size()) >= kMaxConnections)
+    {
+        HE_LOG_WARN(Config, "db.open: %d connections are already open, refusing '%s'.",
+                    kMaxConnections, path.c_str());
+        return 0;
+    }
+    // The same one place every other row that names a file goes through. A
+    // database that opened its own path would be the hole in Block C's model.
+    const std::filesystem::path p = fs::resolved(path);
+    if (p.empty()) return 0;
+    // The directory has to exist — SQLite would answer "unable to open database
+    // file" for a missing folder, which reads like a permission problem.
+    std::error_code ec;
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+
+    sqlite3* h = nullptr;
+    const int rc = sqlite3_open_v2(p.string().c_str(), &h,
+                                   SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+    if (rc != SQLITE_OK || !h)
+    {
+        HE_LOG_WARN(Config, "db.open: could not open '%s': %s", path.c_str(),
+                    h ? sqlite3_errmsg(h) : "out of memory");
+        if (h) sqlite3_close(h);
+        return 0;
+    }
+    sqlite3_set_authorizer(h, &authorize, nullptr);
+    Conn c;
+    c.handle = ++nextDbHandle();
+    c.db     = h;
+    conns().push_back(c);
+    return c.handle;
+}
+
+void close(Ctx&, int handle)
+{
+    auto& v = conns();
+    for (size_t i = 0; i < v.size(); ++i)
+        if (v[i].handle == handle)
+        {
+            sqlite3_close(v[i].db);
+            v.erase(v.begin() + static_cast<ptrdiff_t>(i));
+            return;
+        }
+}
+
+void closeAll()
+{
+    for (Conn& c : conns()) sqlite3_close(c.db);
+    conns().clear();
+}
+
+bool exec(Ctx&, int handle, const std::string& sql, const std::string& params)
+{
+    Conn* c = find(handle);
+    if (!c) return false;
+    c->err.clear();
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(c->db, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
+    {
+        c->err = sqlite3_errmsg(c->db);
+        return false;
+    }
+    bindParams(st, params);
+    // Stepped to the end even for a statement that returns rows: `exec` on a
+    // SELECT is a caller who wanted the side effect and not the answer, and
+    // stopping at the first row would leave a half-run statement behind.
+    int rc = sqlite3_step(st);
+    while (rc == SQLITE_ROW) rc = sqlite3_step(st);
+    const bool ok = (rc == SQLITE_DONE);
+    if (!ok) c->err = sqlite3_errmsg(c->db);
+    sqlite3_finalize(st);
+    return ok;
+}
+
+std::string query(Ctx&, int handle, const std::string& sql, const std::string& params)
+{
+    Conn* c = find(handle);
+    if (!c) return "[]";
+    c->err.clear();
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(c->db, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
+    {
+        c->err = sqlite3_errmsg(c->db);
+        return "[]";
+    }
+    bindParams(st, params);
+
+    nlohmann::json rows = nlohmann::json::array();
+    const int cols = sqlite3_column_count(st);
+    int n = 0;
+    int rc = SQLITE_OK;
+    bool truncated = false;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+    {
+        if (n >= kMaxRows) { truncated = true; break; }
+        nlohmann::json row = nlohmann::json::object();
+        for (int i = 0; i < cols; ++i)
+        {
+            const char* name = sqlite3_column_name(st, i);
+            if (!name) continue;
+            switch (sqlite3_column_type(st, i))
+            {
+            case SQLITE_INTEGER:
+                row[name] = static_cast<int64_t>(sqlite3_column_int64(st, i));
+                break;
+            case SQLITE_FLOAT:
+                row[name] = sqlite3_column_double(st, i);
+                break;
+            case SQLITE_TEXT:
+            {
+                const unsigned char* t = sqlite3_column_text(st, i);
+                row[name] = t ? reinterpret_cast<const char*>(t) : "";
+                break;
+            }
+            // NULL and BLOB both. A blob has no honest JSON shape (see the
+            // header), and pretending otherwise would put a lie in the data
+            // rather than in the error.
+            default:
+                row[name] = nullptr;
+                break;
+            }
+        }
+        rows.push_back(std::move(row));
+        ++n;
+    }
+    if (!truncated && rc != SQLITE_DONE) c->err = sqlite3_errmsg(c->db);
+    sqlite3_finalize(st);
+    if (truncated)
+        c->err = "the result was cut off at " + std::to_string(kMaxRows) +
+                 " rows — use LIMIT to ask for fewer";
+    return rows.dump();
+}
+
+int changes(Ctx&, int handle)
+{
+    Conn* c = find(handle);
+    return c ? sqlite3_changes(c->db) : 0;
+}
+
+double lastInsertId(Ctx&, int handle)
+{
+    Conn* c = find(handle);
+    return c ? static_cast<double>(sqlite3_last_insert_rowid(c->db)) : 0.0;
+}
+
+std::string lastError(Ctx&, int handle)
+{
+    Conn* c = find(handle);
+    return c ? c->err : std::string();
+}
+
+} // namespace db
+
 // ── Timers ───────────────────────────────────────────────────────────────────
 namespace timer {
 namespace {
@@ -4865,6 +5091,40 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "fs.unwatch", "File", true, {{"handle", P::Int}}, {}, "HE::api::fs::unwatch",
             [](Ctx&, const VV& a){ fs::unwatch(aI(a, 0)); return VV{}; } });
 
+        // ── SQLite ───────────────────────────────────────────────────────────
+        // `open` is behind the project's file permission and goes through the
+        // same resolved() every other path does. The readers are ungated for
+        // the reason the HTTP readers are: they answer about a connection this
+        // application already opened.
+        t.push_back({ "db.open", "Database", true, {{"path", P::String}}, {{"handle", P::Int}},
+            "HE::api::db::open",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(db::open(c, aS(a, 0))) }; } });
+        t.push_back({ "db.close", "Database", true, {{"handle", P::Int}}, {}, "HE::api::db::close",
+            [](Ctx& c, const VV& a){ db::close(c, aI(a, 0)); return VV{}; } });
+        // `params` is a JSON array bound to the `?`s — the reason a graph never
+        // has to paste a value into its SQL, which is the reason it never has
+        // an injection hole.
+        t.push_back({ "db.exec", "Database", true,
+            {{"handle", P::Int}, {"sql", P::String}, {"params", P::String}},
+            {{"ok", P::Bool}}, "HE::api::db::exec",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofBool(db::exec(c, aI(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "db.query", "Database", true,
+            {{"handle", P::Int}, {"sql", P::String}, {"params", P::String}},
+            {{"rows", P::String}}, "HE::api::db::query",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofString(db::query(c, aI(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "db.changes", "Database", false, {{"handle", P::Int}}, {{"rows", P::Int}},
+            "HE::api::db::changes",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(db::changes(c, aI(a, 0))) }; } });
+        t.push_back({ "db.lastInsertId", "Database", false, {{"handle", P::Int}}, {{"id", P::Float}},
+            "HE::api::db::lastInsertId",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofFloat(static_cast<float>(db::lastInsertId(c, aI(a, 0)))) }; } });
+        t.push_back({ "db.lastError", "Database", false, {{"handle", P::Int}}, {{"error", P::String}},
+            "HE::api::db::lastError",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(db::lastError(c, aI(a, 0))) }; } });
+
         // ── Timers ───────────────────────────────────────────────────────────
         // Unpermissioned on purpose: a timer cannot read, start or reach
         // anything, and what it fires is this application's own graph. The
@@ -5296,6 +5556,10 @@ const std::vector<ApiFn>& registry()
             { "fs.modified", "File Modified Time" },{ "fs.list", "List Directory" },
             { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
             { "fs.watch", "Watch File" },          { "fs.unwatch", "Stop Watching File" },
+            { "db.open", "Open Database" },        { "db.close", "Close Database" },
+            { "db.exec", "Run SQL" },              { "db.query", "Query SQL" },
+            { "db.changes", "Rows Changed" },      { "db.lastInsertId", "Last Insert Id" },
+            { "db.lastError", "Database Error" },
             { "timer.after", "Timer After" },      { "timer.every", "Timer Every" },
             { "timer.cancel", "Cancel Timer" },    { "timer.active", "Timer Is Running" },
             { "timer.cancelAll", "Cancel All Timers" },
@@ -5537,7 +5801,11 @@ bool isScriptGroup(std::string_view group)
                                                     // a text script has no twin for it either:
                                                     // without this a Lua script can sleep a
                                                     // coroutine but never ask to be called back.
-                                                    "timer" };
+                                                    "timer",
+                                                    // "db" has no flat twin either, and it is the
+                                                    // one group a text script would otherwise have
+                                                    // to reimplement rather than route around.
+                                                    "db" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

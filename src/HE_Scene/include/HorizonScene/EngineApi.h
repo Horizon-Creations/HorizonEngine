@@ -1293,6 +1293,77 @@ namespace http {
 // what a typed-pin graph can carry — an in-memory document type would need a
 // handle, a lifetime and a way to leak one.
 //
+// ── SQLite (plan C, the `db` row) ────────────────────────────────────────────
+// A real database, for the applications that outgrow `prefs`. SQLite, vendored
+// as the amalgamation (see the root CMakeLists) rather than taken from the
+// system: macOS ships one, Linux usually does and Windows never, and a script
+// row that only exists on two platforms is worse than none.
+//
+// Two decisions run through everything here:
+//
+//   RESULTS ARE JSON TEXT. `query` gives back an array of objects, one per row,
+//   and the `json` group already owns the readers for that — a pin cannot carry
+//   a table, and an in-memory result type would need a handle, a lifetime and a
+//   way to leak one. Text is what a typed-pin graph can hold, the same answer
+//   the json group itself landed on.
+//
+//   PARAMETERS ARE A JSON ARRAY, and that is not a convenience. A graph that
+//   built its SQL by pasting strings together would be a graph with an
+//   injection hole in it, and the person writing it would have no way to know.
+//   `?` in the SQL, values in the array, bound by SQLite itself.
+//
+// Behind `perm::files`, and `open` goes through fs::resolved() like every other
+// row that names a path — a database is a file, and the one place a script's
+// string becomes a real path is the whole of Block C's model. SQL can name
+// files too (`ATTACH DATABASE '/etc/…'`), which no resolved() would ever see;
+// an authorizer refuses ATTACH, DETACH and extension loading, so the model has
+// no second door.
+namespace db {
+    // Open (creating it if need be) and hand back a handle. 0 means it did not
+    // open: no permission, a path the sandbox refuses, or SQLite could not.
+    int  open(Ctx&, const std::string& path);
+    void close(Ctx&, int handle);
+    // Statements that return no rows: CREATE, INSERT, UPDATE, DELETE, and the
+    // pragmas SQLite still allows. `params` is a JSON array bound to the `?`s;
+    // "" and "[]" both mean none. False when the statement failed — `lastError`
+    // then says why, in SQLite's own words.
+    bool exec(Ctx&, int handle, const std::string& sql, const std::string& params);
+    // …and the one that does: a JSON array of objects, "[]" when nothing
+    // matched, "[]" as well when the statement failed (lastError is how the two
+    // are told apart — an error string in place of a result would be a document
+    // the json group would happily parse as data).
+    //
+    // A BLOB column comes back as null, deliberately. JSON has no byte string,
+    // and base64 here would be an encoding the graph has no decoder for — a
+    // silent lie in the shape of data. Store bytes as text or keep them in a
+    // file and put the path in the row.
+    std::string query(Ctx&, int handle, const std::string& sql, const std::string& params);
+    // Rows the LAST exec changed, and the rowid the last insert made. Both are
+    // per connection and both are what a caller needs to say "nothing matched"
+    // apart from "it worked".
+    int         changes(Ctx&, int handle);
+    double      lastInsertId(Ctx&, int handle);
+    // Why the last call on this connection failed, or "". Unpermissioned like
+    // the HTTP readers: it answers about work this application already did.
+    std::string lastError(Ctx&, int handle);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // Close every connection. Belongs at shutdown beside http::shutdown(), and
+    // wherever the grants are cleared: a handle that outlived its permission
+    // would be a path the script may no longer open, still open.
+    void closeAll();
+    // More than this many connections at once and `open` refuses. An
+    // application with sixteen databases open has a design problem, not a
+    // limit problem.
+    inline constexpr int kMaxConnections = 16;
+    // A result longer than this is cut off rather than built: a SELECT without a
+    // WHERE on a large table would otherwise turn one graph node into a string
+    // the size of the database. It is not silent — `lastError` says the result
+    // was truncated, which is the difference between a short answer and a wrong
+    // one. LIMIT is how a caller asks for less on purpose.
+    inline constexpr int kMaxRows = 10000;
+}
+
 // ── Timers (plan C) ──────────────────────────────────────────────────────────
 // HorizonCode has always had Delay, which is a graph standing still until a
 // moment passes. That is not a timer: a clock, an autosave and a poll all want
