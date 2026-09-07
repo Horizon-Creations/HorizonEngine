@@ -1656,8 +1656,13 @@ void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
         // Said once, at the point it stops being tried. Anything else would
         // either repeat every spawn or say nothing at all, and "my joint does
         // not exist and nothing mentioned it" is the expensive kind of silence.
-        HE_LOG_WARN(Physics, "Entity %u: its joint was never built — the entity it names has no "
-                             "rigid body (a Character Controller is not one). Giving up on it.",
+        // Deliberately naming BOTH ways an entry gets stuck. The first draft
+        // said only "has no rigid body", which is a lie for the other one — the
+        // partner was destroyed and the entity it names is gone — and this tree
+        // treats a log that misleads as worse than no log at all.
+        HE_LOG_WARN(Physics, "Entity %u: its joint was never built — the entity it names either "
+                             "never gained a rigid body (a Character Controller is not one) or "
+                             "no longer exists. Giving up on it.",
                     p.entityId);
         return true;
     };
@@ -1929,10 +1934,12 @@ bool PhysicsWorld::addJoint(HorizonWorld& world, uint32_t entityA, uint32_t enti
     if (buildJointFor(world, entityA))
         return true;
 
-    // Authored but not built — the partner may still be on its way. Queue it and
-    // say so with the return value; buildJointFor has already logged whichever
-    // of the two reasons applies.
-    m_impl->queueJoint(entityA);
+    // Authored but not built. Queue it only when it can still succeed — a
+    // missing body is a partner that may yet spawn, while every other refusal
+    // has already logged its reason and dropped the entry, and putting it back
+    // would repeat that same complaint on the next unrelated spawn.
+    if (!m_impl->entityToBody.count(entityA) || !m_impl->entityToBody.count(entityB))
+        m_impl->queueJoint(entityA);
     return false;
 }
 
