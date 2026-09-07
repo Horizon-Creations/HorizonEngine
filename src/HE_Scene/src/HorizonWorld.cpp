@@ -12,6 +12,7 @@
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/IkComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -74,6 +75,10 @@ void HorizonWorld::reserveComponentStorage()
     // dlopen'd dylib is a realistic first toucher of this pool, and a pool owned
     // by a library that later unloads dangles the registry at teardown.
     (void)m_registry.storage<AnimationLayerComponent>();
+    // And the same for IK: "put this character's feet on the ground" is a thing
+    // game logic switches on when a figure walks onto terrain, so the game dylib
+    // is a plausible first toucher here too.
+    (void)m_registry.storage<IkComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const

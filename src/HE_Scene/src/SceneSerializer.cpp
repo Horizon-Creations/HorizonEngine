@@ -39,6 +39,7 @@
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
 #include "HorizonScene/Components/RootMotionComponent.h"
 #include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/IkComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
@@ -605,6 +606,50 @@ namespace
 				{ "translationY",    rm->options.extractTranslationY },
 				{ "yaw",             rm->options.extractYaw },
 				{ "lock",            static_cast<int>(rm->options.lock) },
+			};
+		}
+		if (auto* ik = registry.try_get<IkComponent>(entity))
+		{
+			// Runtime fields are deliberately absent, and it is a longer list than
+			// usual: the smoothed offsets and angles describe a ground that was
+			// under the character in one frame of one session, the primed flags
+			// have to start false so the first frame after a load SNAPS rather
+			// than easing in from zero, and the resolved joint indices are
+			// derived from a skeleton that can be re-imported under a saved scene.
+			json feet = json::array();
+			for (const auto& f : ik->feet)
+			{
+				feet.push_back({
+					{ "foot",             f.footJoint },
+					{ "knee",             f.kneeJoint },
+					{ "hip",              f.hipJoint },
+					{ "weight",           f.weight },
+					{ "traceUp",          f.traceUp },
+					{ "traceDown",        f.traceDown },
+					{ "footHeightOffset", f.footHeightOffset },
+					{ "alignToNormal",    f.alignToNormal },
+					{ "maxPitch",         f.maxPitchDegrees },
+					{ "maxRoll",          f.maxRollDegrees },
+					{ "interpSpeed",      f.interpSpeed },
+				});
+			}
+			const auto& la = ik->lookAt;
+			comps["ik"] = {
+				{ "feet",         std::move(feet) },
+				{ "adjustPelvis", ik->adjustPelvis },
+				{ "pelvisJoint",  ik->pelvisJoint },
+				{ "lookAt", {
+					{ "enabled",      la.enabled },
+					{ "chain",        la.chain },
+					{ "chainWeights", la.chainWeights },
+					{ "targetEntity", uuidToJson(la.targetEntityId) },
+					{ "targetWorld",  { la.targetWorld.x, la.targetWorld.y, la.targetWorld.z } },
+					{ "forwardLocal", { la.forwardLocal.x, la.forwardLocal.y, la.forwardLocal.z } },
+					{ "weight",       la.weight },
+					{ "maxYaw",       la.maxYawDegrees },
+					{ "maxPitch",     la.maxPitchDegrees },
+					{ "interpSpeed",  la.interpSpeed },
+				} },
 			};
 		}
 		if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
@@ -1336,6 +1381,50 @@ namespace
 			rm.options.lock = HE::rootMotionLockFromInt(
 				c.value("lock", static_cast<int>(rm.options.lock)));
 			registry.emplace_or_replace<RootMotionComponent>(entity, rm);
+		}
+		if (comps.contains("ik"))
+		{
+			const json& c = comps["ik"];
+			IkComponent ik;
+			for (const auto& fj : c.value("feet", json::array()))
+			{
+				IkComponent::FootIk f;
+				f.footJoint        = fj.value("foot", std::string());
+				f.kneeJoint        = fj.value("knee", std::string());
+				f.hipJoint         = fj.value("hip",  std::string());
+				f.weight           = fj.value("weight",           f.weight);
+				f.traceUp          = fj.value("traceUp",          f.traceUp);
+				f.traceDown        = fj.value("traceDown",        f.traceDown);
+				f.footHeightOffset = fj.value("footHeightOffset", f.footHeightOffset);
+				f.alignToNormal    = fj.value("alignToNormal",    f.alignToNormal);
+				f.maxPitchDegrees  = fj.value("maxPitch",         f.maxPitchDegrees);
+				f.maxRollDegrees   = fj.value("maxRoll",          f.maxRollDegrees);
+				f.interpSpeed      = fj.value("interpSpeed",      f.interpSpeed);
+				ik.feet.push_back(std::move(f));
+			}
+			ik.adjustPelvis = c.value("adjustPelvis", ik.adjustPelvis);
+			ik.pelvisJoint  = c.value("pelvisJoint",  ik.pelvisJoint);
+			if (c.contains("lookAt"))
+			{
+				const json& lj = c["lookAt"];
+				auto& la = ik.lookAt;
+				la.enabled        = lj.value("enabled",      la.enabled);
+				la.chain          = lj.value("chain",        std::vector<std::string>{});
+				la.chainWeights   = lj.value("chainWeights", std::vector<float>{});
+				la.targetEntityId = jsonToUuid(lj.value("targetEntity", json()));
+				const auto tw = lj.value("targetWorld",  std::vector<float>{});
+				if (tw.size() == 3) la.targetWorld  = { tw[0], tw[1], tw[2] };
+				const auto fl = lj.value("forwardLocal", std::vector<float>{});
+				// A zero forward would divide by zero in the solver, and a hand-
+				// edited scene is exactly where one comes from. Keep the default.
+				if (fl.size() == 3 && (fl[0] != 0.0f || fl[1] != 0.0f || fl[2] != 0.0f))
+					la.forwardLocal = { fl[0], fl[1], fl[2] };
+				la.weight          = lj.value("weight",      la.weight);
+				la.maxYawDegrees   = lj.value("maxYaw",      la.maxYawDegrees);
+				la.maxPitchDegrees = lj.value("maxPitch",    la.maxPitchDegrees);
+				la.interpSpeed     = lj.value("interpSpeed", la.interpSpeed);
+			}
+			registry.emplace_or_replace<IkComponent>(entity, std::move(ik));
 		}
 		if (comps.contains("propertyanimator"))
 		{

@@ -374,6 +374,6 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         // them. A layer applied before the crossfade would be mixed straight back
         // out again. And after rootMotionApply, so it cannot write back the root
         // translation that was just taken out.
-        HE::poseFinalize(world, cm, dt, e, *mesh, final_trs, smc, notifies);
+        HE::poseFinalize(world, cm, dt, e, *mesh, final_trs, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
     }
 }

@@ -78,6 +78,6 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
 
         // Layer stack (if any) → FK → IBM. After rootMotionApply on purpose: a
         // layer must not write back the root translation that was just taken out.
-        HE::poseFinalize(world, cm, dt, e, *mesh, localTRS, smc, notifies);
+        HE::poseFinalize(world, cm, dt, e, *mesh, localTRS, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
     }
 }

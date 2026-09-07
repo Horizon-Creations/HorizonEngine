@@ -372,3 +372,451 @@ TEST_CASE("Foot alignment: the sole follows the ground, up to the clamp")
         CHECK(quatAngleDegrees(pose[2].rotation) == doctest::Approx(30.0f).epsilon(0.01f));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  The stage: IkComponent inside the animation phase, driven by the real
+//  SceneSystems::tickAnimation. Everything above answered "does the arithmetic
+//  converge"; this half answers "does it run at the right moment, on the right
+//  transform, and does it stay out of the way when it has no ground to stand on".
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/PhysicsWorld.h>
+#include <HorizonScene/RootMotion.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/IkComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <memory>
+
+namespace
+{
+
+// Pelvis(0) ┬ HipL(1) ─ KneeL(2) ─ FootL(3)
+//           └ HipR(4) ─ KneeR(5) ─ FootR(6)
+SkeletalMeshAsset makeBiped(const HE::UUID& id)
+{
+    SkeletalMeshAsset m;
+    m.id = id; m.name = "biped";
+    addJoint(m, "Pelvis", -1);
+    addJoint(m, "HipL",    0);
+    addJoint(m, "KneeL",   1);
+    addJoint(m, "FootL",   2);
+    addJoint(m, "HipR",    0);
+    addJoint(m, "KneeR",   4);
+    addJoint(m, "FootR",   5);
+    addJoint(m, "Spine",   0);   // 7
+    addJoint(m, "Neck",    7);   // 8
+    addJoint(m, "Head",    8);   // 9
+    return m;
+}
+
+void constantTranslation(AnimationClipAsset& c, uint32_t joint, glm::vec3 v, float dur)
+{
+    AnimationChannel ch;
+    ch.jointIndex = joint;
+    ch.path       = AnimPathType::Translation;
+    ch.times      = { 0.0f, dur };
+    ch.values     = { v.x, v.y, v.z, v.x, v.y, v.z };
+    c.channels.push_back(std::move(ch));
+}
+
+void constantRotation(AnimationClipAsset& c, uint32_t joint, float degX, float dur)
+{
+    const glm::quat q = glm::angleAxis(glm::radians(degX), glm::vec3(1, 0, 0));
+    AnimationChannel ch;
+    ch.jointIndex = joint;
+    ch.path       = AnimPathType::Rotation;
+    ch.times      = { 0.0f, dur };
+    ch.values     = { q.x, q.y, q.z, q.w,  q.x, q.y, q.z, q.w };
+    c.channels.push_back(std::move(ch));
+}
+
+// A standing pose, constant over the clip: both knees bent 12°, both feet ~2 cm
+// above the character's own origin. Constant on purpose — a test about IK should
+// not also depend on where a playhead happens to be.
+AnimationClipAsset makeStandClip()
+{
+    AnimationClipAsset c;
+    c.duration = 1.0f;
+    c.name     = "stand";
+    constantTranslation(c, 0, { 0.0f,  1.0f,  0.0f }, c.duration);
+    constantTranslation(c, 1, { -0.1f, 0.0f,  0.0f }, c.duration);
+    constantTranslation(c, 2, { 0.0f, -0.5f,  0.0f }, c.duration);
+    constantTranslation(c, 3, { 0.0f, -0.5f,  0.0f }, c.duration);
+    constantTranslation(c, 4, { 0.1f,  0.0f,  0.0f }, c.duration);
+    constantTranslation(c, 5, { 0.0f, -0.5f,  0.0f }, c.duration);
+    constantTranslation(c, 6, { 0.0f, -0.5f,  0.0f }, c.duration);
+    constantTranslation(c, 7, { 0.0f,  0.2f,  0.0f }, c.duration);
+    constantTranslation(c, 8, { 0.0f,  0.3f,  0.0f }, c.duration);
+    constantTranslation(c, 9, { 0.0f,  0.2f,  0.0f }, c.duration);
+    constantRotation(c, 1,  12.0f, c.duration);
+    constantRotation(c, 2, -24.0f, c.duration);
+    constantRotation(c, 4,  12.0f, c.duration);
+    constantRotation(c, 5, -24.0f, c.duration);
+    return c;
+}
+
+struct BipedRig
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    HE::UUID       meshId;
+    entt::entity   entity = entt::null;
+
+    const std::vector<glm::mat4>& bones()
+    {
+        return world.registry().get<SkeletalMeshComponent>(entity).boneMatrices;
+    }
+    // Where a joint sits in WORLD space, read back out of the bone matrices. The
+    // inverse bind matrices are all identity in these skeletons, so a bone matrix
+    // IS the joint's model frame.
+    glm::vec3 jointWorld(int j)
+    {
+        const auto& t = world.registry().get<TransformComponent>(entity);
+        return glm::vec3(glm::translate(glm::mat4(1.0f), t.position) *
+                         glm::vec4(glm::vec3(bones()[j][3]), 1.0f));
+    }
+};
+
+std::unique_ptr<BipedRig> makeBipedRig(glm::vec3 at = glm::vec3(0.0f))
+{
+    auto rig = std::make_unique<BipedRig>();
+    rig->meshId = HE::UUID::generate();
+    rig->cm.registerSkeletalMesh(makeBiped(rig->meshId));
+    const HE::UUID clipId = rig->cm.registerAnimationClip(makeStandClip());
+
+    rig->entity = rig->world.createEntity("Character");
+    TransformComponent t; t.position = at;
+    rig->world.addComponent(rig->entity, t);
+    SkeletalMeshComponent smc; smc.meshAssetId = rig->meshId;
+    rig->world.addComponent(rig->entity, smc);
+    AnimatorComponent an; an.clipAssetId = clipId; an.looping = true;
+    rig->world.addComponent(rig->entity, an);
+    return rig;
+}
+
+// The two feet, wired to the joints of makeBiped.
+IkComponent standingFeet()
+{
+    IkComponent ik;
+    IkComponent::FootIk l; l.footJoint = "FootL";
+    IkComponent::FootIk r; r.footJoint = "FootR";
+    ik.feet = { l, r };
+    return ik;
+}
+
+// A static box whose TOP face sits at `topY`, twenty metres across.
+Entity buildFloor(HorizonWorld& world, float topY, glm::vec3 rotationDegrees = glm::vec3(0.0f),
+                  glm::vec3 at = glm::vec3(0.0f))
+{
+    Entity floor = world.createEntity("Floor");
+    TransformComponent t;
+    t.position = { at.x, topY - 0.5f, at.z };
+    t.rotation = rotationDegrees;
+    world.addComponent(floor, t);
+    RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+    world.addComponent(floor, rb);
+    ColliderComponent col; col.shape = ColliderShape::Box; col.halfExtents = { 10.0f, 0.5f, 10.0f };
+    world.addComponent(floor, col);
+    return floor;
+}
+
+} // namespace
+
+TEST_CASE("IK without physics poses exactly like no IK at all")
+{
+    // The preview's case, and the strongest form of the claim: not "close to",
+    // BIT FOR BIT. A foot solved against a guessed ground plane would look
+    // plausible in the editor and be wrong in the game, which is the one thing a
+    // preview may never be.
+    auto plain = makeBipedRig();
+    SceneSystems::tickAnimation(plain->world, plain->cm, 1.0f / 60.0f);
+    const std::vector<glm::mat4> want = plain->bones();
+
+    auto withIk = makeBipedRig();
+    withIk->world.addComponent(withIk->entity, standingFeet());
+    SceneSystems::tickAnimation(withIk->world, withIk->cm, 1.0f / 60.0f);
+    const std::vector<glm::mat4>& got = withIk->bones();
+
+    REQUIRE(got.size() == want.size());
+    for (size_t i = 0; i < want.size(); ++i)
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+                CHECK(got[i][c][r] == want[i][c][r]);
+
+    // And the smoothing state stayed at rest, so switching into play mode does
+    // not ease out of an offset that was never real.
+    const auto& ic = withIk->world.registry().get<IkComponent>(withIk->entity);
+    CHECK(ic.feet[0].smoothedOffset == 0.0f);
+    CHECK_FALSE(ic.feet[0].primed);
+}
+
+TEST_CASE("Look-at runs without physics, because that is the whole point of it")
+{
+    auto plain = makeBipedRig();
+    SceneSystems::tickAnimation(plain->world, plain->cm, 1.0f / 60.0f);
+    const std::vector<glm::mat4> want = plain->bones();
+
+    auto rig = makeBipedRig();
+    IkComponent ik = standingFeet();
+    ik.lookAt.enabled      = true;
+    ik.lookAt.chain        = { "Spine", "Neck", "Head" };
+    ik.lookAt.chainWeights = { 0.2f, 0.3f, 0.5f };
+    ik.lookAt.targetWorld  = { -3.0f, 1.7f, 0.0f };   // 90° to the left, so it clamps
+    rig->world.addComponent(rig->entity, ik);
+    SceneSystems::tickAnimation(rig->world, rig->cm, 1.0f / 60.0f);
+
+    // The head TURNED and the legs did not. Turned, not moved: the head sits
+    // directly above the neck, so a yaw about the neck leaves its position exactly
+    // where it was — reading a position here would be a test that passes on a
+    // look-at that does nothing.
+    const glm::vec3 look = glm::normalize(glm::vec3(rig->bones()[9] * glm::vec4(0, 0, -1, 0)));
+    CHECK(glm::degrees(std::atan2(-look.x, -look.z)) == doctest::Approx(70.0f).epsilon(0.01f));
+    CHECK(glm::length(glm::vec3(rig->bones()[3][3]) - glm::vec3(want[3][3])) < 1.0e-6f);
+
+    // First frame SNAPS rather than easing in from zero — a character that spawns
+    // looking forward and then swings its head round over half a second is not
+    // what "look at this" means.
+    const auto& ic = rig->world.registry().get<IkComponent>(rig->entity);
+    CHECK(ic.lookAt.primed);
+    CHECK(ic.lookAt.smoothedAngles.x == doctest::Approx(70.0f).epsilon(0.01f));
+}
+
+TEST_CASE("Foot IK on real ground: both feet land, and one that finds nothing gives up")
+{
+    auto rig = makeBipedRig();
+    buildFloor(rig->world, 0.0f);
+    rig->world.addComponent(rig->entity, standingFeet());
+
+    PhysicsWorld phys;
+    phys.initialize(rig->world);
+    HE::RootMotionContext ctx{ &phys };
+
+    constexpr float dt = 1.0f / 60.0f;
+    for (int i = 0; i < 90; ++i)
+        SceneSystems::tickAnimation(rig->world, rig->cm, dt, nullptr, &ctx);
+
+    // The stand pose puts the feet ~2 cm above the character's origin; on a floor
+    // at y = 0 the pelvis comes down by that much and the soles reach the ground.
+    CHECK(rig->jointWorld(3).y == doctest::Approx(0.0f).epsilon(0.02f));
+    CHECK(rig->jointWorld(6).y == doctest::Approx(0.0f).epsilon(0.02f));
+
+    SUBCASE("a foot over a hole keeps the other one on the ground")
+    {
+        // The floor moves out from under the LEFT foot only (it stands at
+        // x = -0.1; the slab now starts at x = +0.05).
+        auto rig2 = makeBipedRig();
+        buildFloor(rig2->world, 0.0f, glm::vec3(0.0f), glm::vec3(10.05f, 0.0f, 0.0f));
+        rig2->world.addComponent(rig2->entity, standingFeet());
+
+        PhysicsWorld phys2;
+        phys2.initialize(rig2->world);
+        HE::RootMotionContext ctx2{ &phys2 };
+        for (int i = 0; i < 90; ++i)
+            SceneSystems::tickAnimation(rig2->world, rig2->cm, dt, nullptr, &ctx2);
+
+        const auto& ic = rig2->world.registry().get<IkComponent>(rig2->entity);
+        CHECK_FALSE(ic.feet[0].primed);                 // left foot: nothing under it
+        CHECK(ic.feet[0].smoothedOffset == 0.0f);
+        CHECK(ic.feet[1].primed);                       // right foot: still solved
+        CHECK(rig2->jointWorld(6).y == doctest::Approx(0.0f).epsilon(0.02f));
+    }
+}
+
+TEST_CASE("Foot IK eases onto a step instead of jumping onto it")
+{
+    // The stair-edge case. The ground under the character rises 20 cm between one
+    // frame and the next, which is exactly what a real step does to a downward
+    // ray, and the foot must not teleport with it.
+    auto rig = makeBipedRig();
+    buildFloor(rig->world, 0.0f);
+    rig->world.addComponent(rig->entity, standingFeet());
+
+    PhysicsWorld phys;
+    phys.initialize(rig->world);
+    HE::RootMotionContext ctx{ &phys };
+
+    constexpr float dt = 1.0f / 60.0f;
+    for (int i = 0; i < 60; ++i)
+        SceneSystems::tickAnimation(rig->world, rig->cm, dt, nullptr, &ctx);
+    const float settled = rig->jointWorld(3).y;
+    CHECK(settled == doctest::Approx(0.0f).epsilon(0.02f));
+
+    // A second slab 20 cm up, right where the character stands.
+    buildFloor(rig->world, 0.2f);
+    phys.initialize(rig->world);
+
+    SceneSystems::tickAnimation(rig->world, rig->cm, dt, nullptr, &ctx);
+    const float afterOne = rig->jointWorld(3).y;
+    // Moved towards the step, but nowhere near all the way: interpSpeed 10 over
+    // one 60th of a second is about 15 % of the distance.
+    CHECK(afterOne > settled + 0.005f);
+    CHECK(afterOne < settled + 0.15f);
+
+    for (int i = 0; i < 60; ++i)
+        SceneSystems::tickAnimation(rig->world, rig->cm, dt, nullptr, &ctx);
+    CHECK(rig->jointWorld(3).y == doctest::Approx(0.2f).epsilon(0.05f));
+}
+
+TEST_CASE("Foot IK on a slope: both feet reach the surface and the ankles stay inside their limits")
+{
+    // 30° of tilt about Z: the two feet stand at different heights, each one's
+    // normal leans sideways, and the slope is steeper than the 20° roll limit —
+    // so the clamp has something to do rather than being merely satisfied.
+    constexpr float kSlopeDegrees = 30.0f;
+    constexpr float dt = 1.0f / 60.0f;
+
+    auto run = [](bool align)
+    {
+        auto rig = makeBipedRig();
+        buildFloor(rig->world, 0.0f, glm::vec3(0.0f, 0.0f, kSlopeDegrees));
+        IkComponent ik = standingFeet();
+        for (auto& f : ik.feet) { f.alignToNormal = align; f.maxRollDegrees = 20.0f; }
+        rig->world.addComponent(rig->entity, ik);
+
+        auto phys = std::make_shared<PhysicsWorld>();
+        phys->initialize(rig->world);
+        HE::RootMotionContext ctx{ phys.get() };
+        for (int i = 0; i < 120; ++i)
+            SceneSystems::tickAnimation(rig->world, rig->cm, dt, nullptr, &ctx);
+        // The physics world has to outlive the rig it indexed into.
+        return std::make_pair(std::move(rig), phys);
+    };
+
+    auto [flatFoot, physA] = run(false);
+    auto [tilted,   physB] = run(true);
+
+    // The slab is rotated about its own centre, so its top face does NOT pass
+    // through the origin — the plane is worked out from the geometry rather than
+    // assumed, which is the difference between testing the IK and testing a guess
+    // about where the floor ended up.
+    const glm::quat rot   = glm::angleAxis(glm::radians(kSlopeDegrees), glm::vec3(0, 0, 1));
+    const glm::vec3 n     = rot * glm::vec3(0, 1, 0);
+    const glm::vec3 p0    = glm::vec3(0.0f, -0.5f, 0.0f) + rot * glm::vec3(0.0f, 0.5f, 0.0f);
+    auto groundY = [&](const glm::vec3& p) { return p0.y - (n.x * (p.x - p0.x)) / n.y; };
+
+    const glm::vec3 footL = tilted->jointWorld(3);
+    const glm::vec3 footR = tilted->jointWorld(6);
+    CHECK(footL.y == doctest::Approx(groundY(footL)).epsilon(0.05f));
+    CHECK(footR.y == doctest::Approx(groundY(footR)).epsilon(0.05f));
+    // And they really are at different heights, or the two checks above would
+    // pass on a flat floor too.
+    CHECK(std::fabs(footL.y - footR.y) > 0.05f);
+
+    // The ankle rotation is what the CLAMP limits, and a clamp on a delta has to
+    // be measured as a delta: the animated pose already tilts the foot, and the
+    // limit is on what the ground ADDS to it, not on where it ends up.
+    //
+    // Not asserted as exactly 20° either. The limit is on the roll about the
+    // character's forward axis; the total angle between two sole normals is that
+    // roll composed with the pitch the animation already had, and composing two
+    // rotations about different axes does not add their angles. What has to hold
+    // is that the ground moved the ankle a long way and still never past the line.
+    for (int j : { 3, 6 })
+    {
+        const glm::vec3 before =
+            glm::normalize(glm::vec3(flatFoot->bones()[j] * glm::vec4(0, 1, 0, 0)));
+        const glm::vec3 after =
+            glm::normalize(glm::vec3(tilted->bones()[j] * glm::vec4(0, 1, 0, 0)));
+        const float added = glm::degrees(std::acos(glm::clamp(glm::dot(before, after), -1.0f, 1.0f)));
+        CHECK(added > 10.0f);          // the ground was followed
+        CHECK(added <= 20.01f);        // and the 30° it asked for was refused
+    }
+}
+
+TEST_CASE("IK serialisation: the authored fields survive, the runtime ones do not")
+{
+    HorizonWorld world;
+    const entt::entity e = world.createEntity("Character");
+    world.addComponent(e, TransformComponent{});
+
+    IkComponent ik;
+    IkComponent::FootIk f;
+    f.footJoint        = "FootL";
+    f.kneeJoint        = "KneeL";
+    f.hipJoint         = "HipL";
+    f.weight           = 0.8f;
+    f.traceUp          = 0.4f;
+    f.traceDown        = 0.7f;
+    f.footHeightOffset = 0.06f;
+    f.alignToNormal    = false;
+    f.maxPitchDegrees  = 25.0f;
+    f.maxRollDegrees   = 15.0f;
+    f.interpSpeed      = 12.0f;
+    f.smoothedOffset   = -0.13f;   // runtime: must NOT come back
+    f.primed           = true;     // runtime: must NOT come back
+    ik.feet.push_back(f);
+    ik.adjustPelvis = false;
+    ik.pelvisJoint  = "Pelvis";
+    ik.lookAt.enabled        = true;
+    ik.lookAt.chain          = { "Spine", "Neck", "Head" };
+    ik.lookAt.chainWeights   = { 0.2f, 0.3f, 0.5f };
+    ik.lookAt.targetEntityId = HE::UUID::generate();
+    ik.lookAt.targetWorld    = { 1.0f, 2.0f, 3.0f };
+    ik.lookAt.forwardLocal   = { 0.0f, 0.0f, 1.0f };
+    ik.lookAt.weight         = 0.6f;
+    ik.lookAt.maxYawDegrees  = 55.0f;
+    ik.lookAt.maxPitchDegrees = 35.0f;
+    ik.lookAt.interpSpeed    = 6.0f;
+    ik.lookAt.smoothedAngles = { 12.0f, 3.0f };   // runtime: must NOT come back
+    ik.lookAt.primed         = true;              // runtime: must NOT come back
+    ik.resolvedForMeshId     = HE::UUID::generate();
+    ik.resolvedPelvis        = 4;
+    world.addComponent(e, ik);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+
+    HorizonWorld back;
+    REQUIRE(ser.loadFromMemory(back, blob));
+
+    entt::entity loaded = entt::null;
+    for (auto [ent, c] : back.registry().view<IkComponent>().each()) { loaded = ent; break; }
+    REQUIRE(loaded != entt::entity{entt::null});
+    const auto& got = back.registry().get<IkComponent>(loaded);
+
+    REQUIRE(got.feet.size() == 1);
+    CHECK(got.feet[0].footJoint        == "FootL");
+    CHECK(got.feet[0].kneeJoint        == "KneeL");
+    CHECK(got.feet[0].hipJoint         == "HipL");
+    CHECK(got.feet[0].weight           == doctest::Approx(0.8f));
+    CHECK(got.feet[0].traceUp          == doctest::Approx(0.4f));
+    CHECK(got.feet[0].traceDown        == doctest::Approx(0.7f));
+    CHECK(got.feet[0].footHeightOffset == doctest::Approx(0.06f));
+    CHECK(got.feet[0].alignToNormal    == false);
+    CHECK(got.feet[0].maxPitchDegrees  == doctest::Approx(25.0f));
+    CHECK(got.feet[0].maxRollDegrees   == doctest::Approx(15.0f));
+    CHECK(got.feet[0].interpSpeed      == doctest::Approx(12.0f));
+    CHECK(got.adjustPelvis             == false);
+    CHECK(got.pelvisJoint              == "Pelvis");
+    CHECK(got.lookAt.enabled           == true);
+    REQUIRE(got.lookAt.chain.size()        == 3);
+    REQUIRE(got.lookAt.chainWeights.size() == 3);
+    CHECK(got.lookAt.chain[1]          == "Neck");
+    CHECK(got.lookAt.chainWeights[2]   == doctest::Approx(0.5f));
+    CHECK(got.lookAt.targetEntityId    == ik.lookAt.targetEntityId);
+    CHECK(got.lookAt.targetWorld.z     == doctest::Approx(3.0f));
+    CHECK(got.lookAt.forwardLocal.z    == doctest::Approx(1.0f));
+    CHECK(got.lookAt.weight            == doctest::Approx(0.6f));
+    CHECK(got.lookAt.maxYawDegrees     == doctest::Approx(55.0f));
+    CHECK(got.lookAt.maxPitchDegrees   == doctest::Approx(35.0f));
+    CHECK(got.lookAt.interpSpeed       == doctest::Approx(6.0f));
+
+    // The runtime half came back at its defaults. `primed` above all: loaded as
+    // true, the first frame after a load would EASE the foot in from an offset
+    // measured against a ground in a different session.
+    CHECK(got.feet[0].smoothedOffset   == 0.0f);
+    CHECK_FALSE(got.feet[0].primed);
+    CHECK(got.lookAt.smoothedAngles.x  == 0.0f);
+    CHECK_FALSE(got.lookAt.primed);
+    CHECK(got.resolvedForMeshId        == HE::UUID{});
+    CHECK(got.resolvedPelvis           == -1);
+    CHECK(got.jointsDirty);
+    CHECK_FALSE(got.hasLastEntityPos);
+}

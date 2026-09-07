@@ -153,6 +153,6 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
         blendTRS(trsA, trsB, blend.blendAlpha, blended);
         // Layer stack (if any) → FK → IBM. After rootMotionApply on purpose: a
         // layer must not write back the root translation that was just taken out.
-        HE::poseFinalize(world, cm, dt, e, *mesh, blended, smc, notifies);
+        HE::poseFinalize(world, cm, dt, e, *mesh, blended, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
     }
 }
