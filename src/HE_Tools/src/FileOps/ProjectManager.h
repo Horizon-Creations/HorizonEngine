@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <Application/DocumentTypes.h>   // HE::AppDocumentType (the .heproj list)
+#include <Physics/CollisionLayers.h>     // HE::CollisionLayerConfig (the .heproj matrix)
 
 // Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
@@ -306,6 +307,18 @@ struct ProjectData
 	// new project against the ones already on disk. Same asymmetry as
 	// `themeStyled` on an element, for the same reason.
 	bool fontWeightBold = true;
+
+	// ── Which of the sixteen collision channels may touch which ──────────────
+	// ".heproj \"collisionLayers\"", carried into the packaged build's
+	// project.hcfg and handed to PhysicsWorld both here and there, so the
+	// preview collides the way the shipped game does.
+	//
+	// A PROJECT setting and not a scene one: a channel index stored in a scene
+	// means nothing without the names and the matrix that say what it is, and
+	// two scenes of the same game disagreeing about what "Player" collides with
+	// is not a thing anybody wants to debug. Default-constructed is "everything
+	// collides", which is what every project written before this behaved like.
+	HE::CollisionLayerConfig collisionLayers;
 
 	// ── What the application IS, to the system around it (plan A7) ───────────
 	// The icon is GENERATED from one of the engine's built-in icons on a plate

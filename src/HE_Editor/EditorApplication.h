@@ -278,6 +278,16 @@ struct AppContext
 	// window). commitGameInstance re-registers it with the app runtime + saves it.
 	HorizonCode::Graph*   gameInstanceGraph = nullptr;
 	std::function<void()> commitGameInstance;
+
+	// Push the project's collision matrix into the RUNNING simulation. Bound by
+	// EditorApplication, which is the only thing that holds the PhysicsWorld;
+	// the settings page calls it after saving an edit.
+	//
+	// A callback rather than a PhysicsWorld pointer on this struct: the world is
+	// created at play start and destroyed at play stop, so a pointer here would
+	// be right for as long as nobody looked at it. Doing nothing outside play
+	// mode is correct — the next play start reads the matrix from the project.
+	std::function<void()> applyCollisionLayers;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;

@@ -578,25 +578,53 @@ void setWorldPosition(Ctx& c, Entity e, const glm::vec3& p)
 
 // ── Physics ──────────────────────────────────────────────────────────────────
 namespace physics {
+// One conversion for all four cast entries. ScriptApi::RaycastResult does not
+// carry the channel and cannot grow one — it is the shape the flat Lua/Python
+// bindings return, and those are frozen (adding a field there changes a
+// script-visible arity, see the note in ScriptContext.cpp). So raycast reaches
+// PhysicsWorld directly like the others, and this is the single place that knows
+// how a PhysicsWorld hit becomes an api hit.
+static RaycastHit toApiHit(const PhysicsWorld::RaycastHit& r)
+{
+    return { r.hit, r.entityId, r.point, r.normal, r.distance, static_cast<int>(r.layer) };
+}
 RaycastHit raycast(Ctx& c, const glm::vec3& o, const glm::vec3& d, float maxDist)
 {
-    const auto r = ScriptApi::raycast(c.physics, o, d, maxDist);
-    return { r.hit, r.entityId, r.point, r.normal, r.distance };
+    if (!c.physics) return {};
+    return toApiHit(c.physics->raycast(o, d, maxDist));
 }
-// The rest reach PhysicsWorld directly rather than through ScriptApi. ScriptApi
-// exists to serve the flat Lua/Python bindings, and those are frozen (adding to
-// them changes a script-visible arity, see the note in ScriptContext.cpp) — a
-// shim there would be a function nothing can ever call.
 RaycastHit sphereCast(Ctx& c, const glm::vec3& o, const glm::vec3& d, float radius, float maxDist)
 {
-    RaycastHit out;
-    if (!c.physics) return out;
-    const PhysicsWorld::RaycastHit r = c.physics->sphereCast(o, d, radius, maxDist);
-    return { r.hit, r.entityId, r.point, r.normal, r.distance };
+    if (!c.physics) return {};
+    return toApiHit(c.physics->sphereCast(o, d, radius, maxDist));
 }
 std::vector<Entity> overlapSphere(Ctx& c, const glm::vec3& center, float radius)
 {
     return c.physics ? c.physics->overlapSphere(center, radius) : std::vector<Entity>{};
+}
+
+// The same three with a channel mask. The int comes from a script, so it is cast
+// rather than trusted to be sixteen bits: a negative value is every bit set,
+// which reads as "every channel" — the same thing the unmasked call does, and
+// the harmless answer for a number nobody meant.
+RaycastHit raycastLayers(Ctx& c, const glm::vec3& o, const glm::vec3& d, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->raycast(o, d, maxDist, PhysicsWorld::kNoEntity,
+                                       static_cast<uint32_t>(layerMask)));
+}
+RaycastHit sphereCastLayers(Ctx& c, const glm::vec3& o, const glm::vec3& d,
+                            float radius, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->sphereCast(o, d, radius, maxDist, PhysicsWorld::kNoEntity,
+                                          static_cast<uint32_t>(layerMask)));
+}
+std::vector<Entity> overlapSphereLayers(Ctx& c, const glm::vec3& center, float radius, int layerMask)
+{
+    return c.physics ? c.physics->overlapSphere(center, radius, PhysicsWorld::kNoEntity,
+                                                static_cast<uint32_t>(layerMask))
+                     : std::vector<Entity>{};
 }
 bool addForce(Ctx& c, Entity e, const glm::vec3& f)   { return c.physics && c.physics->addForce(e, f); }
 bool addImpulse(Ctx& c, Entity e, const glm::vec3& i) { return c.physics && c.physics->addImpulse(e, i); }
@@ -4550,28 +4578,64 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ transform::setWorldPosition(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
 
         // Physics
+        // `layer` is the SIXTH output and was appended, not inserted. A saved
+        // graph draws the outputs its own copy of the descriptor names, and both
+        // the interpreter and the codegen read a result BY INDEX with a bounds
+        // check — so an appended output is invisible to a node that predates it,
+        // while an inserted one would have shifted every wire after it. (Inputs
+        // are the dangerous direction; see physics.raycastLayers below.)
         t.push_back({ "physics.raycast", "Physics", false,
             {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}},
-            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
             "HE::api::physics::raycast",
             [](Ctx& c, const VV& a){ auto r = physics::raycast(c, aV3(a, 0), aV3(a, 1), aF(a, 2));
-                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance) }; } });
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
         t.push_back({ "physics.setVelocity", "Physics", true, {{"entity", P::Int}, {"velocity", P::Vec3}}, {}, "HE::api::physics::setVelocity",
             [](Ctx& c, const VV& a){ physics::setVelocity(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
         t.push_back({ "physics.isGrounded", "Physics", false, {{"entity", P::Int}}, {{"grounded", P::Bool}}, "HE::api::physics::isGrounded",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::isGrounded(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "physics.sphereCast", "Physics", false,
             {{"origin", P::Vec3}, {"direction", P::Vec3}, {"radius", P::Float}, {"maxDistance", P::Float}},
-            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
             "HE::api::physics::sphereCast",
             [](Ctx& c, const VV& a){ auto r = physics::sphereCast(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aF(a, 3));
-                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance) }; } });
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
         t.push_back({ "physics.overlapSphere", "Physics", false,
             {{"center", P::Vec3}, {"radius", P::Float}}, {{"entities", P::Int, /*isArray=*/true}},
             "HE::api::physics::overlapSphere",
             [](Ctx& c, const VV& a){
                 Value arr; arr.isArray = true; arr.type = P::Int;
                 for (Entity e : physics::overlapSphere(c, aV3(a, 0), aF(a, 1)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        // The same three queries restricted to a set of collision channels, as
+        // THREE MORE NAMES rather than one more parameter on the three above.
+        // The reason is the saved graph: a node keeps its own copy of the
+        // parameter list, and a node that predates a new parameter simply passes
+        // one argument fewer — the codegen pads with a zero literal and the
+        // interpreter's readers answer zero for an argument that is not there.
+        // Zero for a channel MASK means "see nothing", so every existing
+        // Raycast node in every existing project would have kept its shape and
+        // silently stopped hitting anything. The C++ side takes a defaulted
+        // parameter instead, because no stored caller exists there.
+        t.push_back({ "physics.raycastLayers", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::raycastLayers",
+            [](Ctx& c, const VV& a){ auto r = physics::raycastLayers(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aI(a, 3));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.sphereCastLayers", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"radius", P::Float}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::sphereCastLayers",
+            [](Ctx& c, const VV& a){ auto r = physics::sphereCastLayers(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aF(a, 3), aI(a, 4));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.overlapSphereLayers", "Physics", false,
+            {{"center", P::Vec3}, {"radius", P::Float}, {"layerMask", P::Int}}, {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapSphereLayers",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapSphereLayers(c, aV3(a, 0), aF(a, 1), aI(a, 2)))
                     arr.items.push_back(Value::ofInt((int)e));
                 return VV{ std::move(arr) }; } });
         t.push_back({ "physics.addForce", "Physics", true, {{"entity", P::Int}, {"force", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addForce",
@@ -5759,6 +5823,13 @@ const std::vector<ApiFn>& registry()
             // name is a coin toss.
             { "physics.isGrounded", "Is Grounded (Physics)" },
             { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
+            // "(Layers)" and not "Masked" or "Filtered": the add menu is flat
+            // and alphabetical-ish, so the suffix has to name the EXTRA input
+            // the row carries. The word is the same one the project settings
+            // page and the Details combo use for the same thing.
+            { "physics.raycastLayers", "Raycast (Layers)" },
+            { "physics.sphereCastLayers", "Sphere Cast (Layers)" },
+            { "physics.overlapSphereLayers", "Overlap Sphere (Layers)" },
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
             { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },

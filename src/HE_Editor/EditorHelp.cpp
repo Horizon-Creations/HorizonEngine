@@ -272,6 +272,24 @@ namespace
 	  "Solve this body in the 2D solver — motion stays in the XY plane. For "
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
+	// Two entries, one per component scope, because that is what the combo
+	// resolves to: the Details panel sets the scope to the component it is
+	// drawing, so a single shared key would answer under neither. They say
+	// different things — a rigid body's channel is what everything else SEES,
+	// a character's is what BLOCKS it.
+	{ "Rigid Body/Collision Layer", "",
+	  "Which of the project's sixteen collision channels this body sits in. The "
+	  "matrix in Preferences (Project, Collision Layers) decides which pairs of "
+	  "channels may touch, so this is how a bullet passes through a ragdoll or a "
+	  "pickup volume only sees the player. A layer keeps its number, so renaming "
+	  "one relabels it and moves nothing.",
+	  "", "systems#physics" },
+	{ "Character Controller/Collision Layer", "",
+	  "Which collision channel the character walks in — it decides what BLOCKS "
+	  "the character, through the same matrix in Preferences (Project, Collision "
+	  "Layers). Separate from the Rigid Body row because a character need not "
+	  "have a rigid body at all.",
+	  "", "systems#physics" },
 	{ "Collider/Shape", "",
 	  "Box, Sphere or Capsule for a shape from the numbers below; Mesh, Convex "
 	  "Hull or Height Field to take the geometry from the entity itself. A "
@@ -1912,6 +1930,18 @@ namespace
 	// The pages on this tab that edit the PROJECT. Everything else here follows
 	// the editor from project to project; these travel with the project and into
 	// the application it exports.
+	// ── Project ▸ Collision Layers ───────────────────────────────────────────
+	{ "Collision Layers/Name", "Layer name",
+	  "What this channel is called, everywhere it is offered. The NUMBER is what "
+	  "a scene stores, so renaming a layer relabels it and moves nothing. Leave "
+	  "one empty and it reads back as its built-in name, which for the five "
+	  "presets is Default, Player, Trigger, Character or Terrain.",
+	  "", "systems#physics" },
+	{ "Collision Layers/Everything Collides", "Everything Collides",
+	  "Ticks every box in the matrix again, which is the state a new project "
+	  "starts in. The names are left alone. The way back out of a matrix with "
+	  "most of it switched off.",
+	  "", "systems#physics" },
 	{ "Permissions/Files outside the project", "Files outside the project",
 	  "Off, a script reads and writes only inside the project's Saved folder — an "
 	  "absolute path is simply refused. On, it may name any path on the machine.\n\n"
@@ -4435,6 +4465,7 @@ namespace
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
+		{ "Collision Layers/", "editor-settings", "Settings Reference", "Collision layers" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────

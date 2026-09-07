@@ -352,6 +352,10 @@ namespace physics {
         glm::vec3 point{0.0f};
         glm::vec3 normal{0.0f};
         float     distance = 0.0f;
+        // Which collision channel the thing that was hit sits in — 0..15, an
+        // index into the project's collision layers. Appended last, so a script
+        // that never asked for it is unaffected.
+        int       layer = 0;
     };
     RaycastHit raycast(Ctx&, const glm::vec3& origin, const glm::vec3& dir, float maxDist);
     // A sphere is what a ray is not: it has width, so it does not slip through
@@ -363,6 +367,26 @@ namespace physics {
     // Every entity in range, in one call: the query an explosion and a melee
     // swing are both built from. Empty without physics.
     std::vector<Entity> overlapSphere(Ctx&, const glm::vec3& center, float radius);
+
+    // ── The same three, restricted to a set of collision channels ────────────
+    // `layerMask` is a BITFIELD, not a channel index: bit N means channel N may
+    // be seen. 65535 is every channel and reproduces the three above exactly;
+    // 0 sees nothing at all, which is a legal thing to ask for and a very easy
+    // thing to write by accident.
+    //
+    // Separate entries rather than a fourth parameter on the three above, and
+    // that is the whole reason they exist as their own names: a HorizonCode node
+    // saved before a parameter was added draws one input too few, and the value
+    // the missing one contributes is a zero — which for a mask means "see
+    // nothing". Every existing graph would have kept its shape and quietly
+    // stopped hitting anything. So the three originals keep their signatures
+    // forever and the mask arrives under a new name.
+    RaycastHit raycastLayers(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                             float maxDist, int layerMask);
+    RaycastHit sphereCastLayers(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                                float radius, float maxDist, int layerMask);
+    std::vector<Entity> overlapSphereLayers(Ctx&, const glm::vec3& center, float radius,
+                                            int layerMask);
 
     // Pushing a rigid body around. A force is continuous and has to be applied
     // every frame, an impulse lands once, a torque spins. All three need a

@@ -149,6 +149,61 @@ TEST_CASE("ProjectConfigLoader application flags round-trip")
     he_test::removeAllQuiet(tmpDir);
 }
 
+// The .hcfg's version tail rule, in the one place where getting it wrong ships
+// a game that boots without its pak: a project that never touched the matrix
+// must keep emitting the version it emitted before, because a user-dropped
+// runtime bundle from an older engine rejects every version it does not know.
+TEST_CASE("ProjectConfigLoader collision layers ride a tail nobody else pays for")
+{
+    auto tmpDir = std::filesystem::temp_directory_path() / "he_test_pcfg_layers";
+    std::filesystem::create_directories(tmpDir);
+    const auto file = tmpDir / "project.hcfg";
+    // The version is the uint16 right behind the four magic bytes.
+    const auto versionOf = [&file] {
+        std::ifstream f(file, std::ios::binary);
+        char buf[6] = {};
+        f.read(buf, 6);
+        return static_cast<uint16_t>(static_cast<uint8_t>(buf[4]) |
+                                     (static_cast<uint8_t>(buf[5]) << 8));
+    };
+
+    SUBCASE("an untouched matrix does not raise the file version")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "Plain";
+        cfg.hpakFilename = "Plain.hpak";
+        REQUIRE(ProjectConfigLoader::save(tmpDir, cfg));
+        CHECK(versionOf() == 2);
+
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(tmpDir, loaded));
+        // …and it still reads back as "everything collides", which is what an
+        // engine that predates channels simulated.
+        CHECK(loaded.collisionLayers.isDefault());
+    }
+
+    SUBCASE("a real matrix round-trips, names and blocked pairs both")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "Layered";
+        cfg.hpakFilename = "Layered.hpak";
+        cfg.collisionLayers.setLayerName(6, "Bullet");
+        cfg.collisionLayers.setCollides(6, 3, false);
+        REQUIRE(ProjectConfigLoader::save(tmpDir, cfg));
+        CHECK(versionOf() == 6);
+
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(tmpDir, loaded));
+        CHECK(loaded.collisionLayers.layerName(6) == "Bullet");
+        CHECK_FALSE(loaded.collisionLayers.collides(6, 3));
+        // Both cells, not just the one that was written.
+        CHECK_FALSE(loaded.collisionLayers.collides(3, 6));
+        CHECK(loaded.collisionLayers.collides(6, 4));
+    }
+
+    he_test::removeAllQuiet(tmpDir);
+}
+
 TEST_CASE("ProjectConfigLoader returns false for missing file")
 {
     ProjectConfig cfg;

@@ -1902,6 +1902,31 @@ private:
     bool     m_skipSensors;
 };
 
+// Which collision channels a QUERY may see at all.
+//
+// Deliberately an ObjectLayerFilter and not another test inside HEQueryFilter
+// above: an ObjectLayerFilter is asked in the BROAD phase, before Jolt has
+// walked a body's triangles, while a BodyFilter is only reached once the narrow
+// phase already has a candidate. A ray that ignores fifteen of sixteen channels
+// should not pay for their meshes and then throw the answers away.
+//
+// The mask names CHANNELS, so it is shifted by the channel, not by the raw
+// ObjectLayer — the moving bit lives in bit 0 and would double every index.
+// Bits above kCount are harmless: no encoded layer ever selects one.
+class HELayerMaskFilter final : public JPH::ObjectLayerFilter
+{
+public:
+    explicit HELayerMaskFilter(uint32_t mask) : m_mask(mask) {}
+
+    bool ShouldCollide(JPH::ObjectLayer layer) const override
+    {
+        return ((m_mask >> HELayers::channelOf(layer)) & 1u) != 0u;
+    }
+
+private:
+    uint32_t m_mask;
+};
+
 // Collects the ENTITIES an overlap test touched, rather than the hits.
 //
 // It has to be a custom collector: on the CollideShape path Jolt never fills
@@ -1981,7 +2006,8 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     const glm::vec3& origin,
     const glm::vec3& direction,
     float            maxDistance,
-    uint32_t         ignoreEntityId) const
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
 {
     RaycastHit result;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
@@ -2001,10 +2027,11 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     };
     // Sensors stay visible to raycast — that is what it has always reported, and
     // a script asking "what is in front of me" may well mean a trigger.
-    const HEQueryFilter bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HEQueryFilter      bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter  layerFilter(layerMask);
 
     JPH::RayCastResult hit;
-    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit, {}, {}, bodyFilter))
+    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit, {}, layerFilter, bodyFilter))
         return result;
 
     result.hit      = true;
@@ -2027,6 +2054,10 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
             JPH::Vec3 n = body.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
             result.normal = { n.GetX(), n.GetY(), n.GetZ() };
             result.entityId = static_cast<uint32_t>(body.GetUserData());
+            // Read back out of the body rather than remembered per entity: this
+            // is the value the simulation is actually using, so it stays right
+            // through a rebuild that changed the component's channel.
+            result.layer = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
         }
     }
 
@@ -2038,7 +2069,8 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     const glm::vec3& direction,
     float            radius,
     float            maxDistance,
-    uint32_t         ignoreEntityId) const
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
 {
     RaycastHit result;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f || radius <= 0.0f)
@@ -2068,11 +2100,12 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
 
     JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
-    const HEQueryFilter bodyFilter(ignoreEntityId, /*skipSensors=*/true);
+    const HEQueryFilter     bodyFilter(ignoreEntityId, /*skipSensors=*/true);
+    const HELayerMaskFilter layerFilter(layerMask);
 
     m_impl->physicsSystem.GetNarrowPhaseQuery().CastShape(
         cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector,
-        {}, {}, bodyFilter);
+        {}, layerFilter, bodyFilter);
 
     if (!collector.HadHit())
         return result;
@@ -2094,7 +2127,11 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     {
         JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), collector.mHit.mBodyID2);
         if (lock.Succeeded())
-            result.entityId = static_cast<uint32_t>(lock.GetBody().GetUserData());
+        {
+            const JPH::Body& body = lock.GetBody();
+            result.entityId = static_cast<uint32_t>(body.GetUserData());
+            result.layer    = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
+        }
     }
 
     return result;
@@ -2103,7 +2140,8 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
 std::vector<uint32_t> PhysicsWorld::overlapSphere(
     const glm::vec3& center,
     float            radius,
-    uint32_t         ignoreEntityId) const
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
 {
     std::vector<uint32_t> result;
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
@@ -2115,13 +2153,14 @@ std::vector<uint32_t> PhysicsWorld::overlapSphere(
     JPH::CollideShapeSettings settings;
     HEOverlapCollector        collector;
     const HEQueryFilter       bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter   layerFilter(layerMask);
 
     // Results are expressed relative to `at` rather than the world origin, the
     // same reason sphereCast passes its origin as the base offset: it is what
     // keeps the test itself precise far from the origin.
     m_impl->physicsSystem.GetNarrowPhaseQuery().CollideShape(
         sphere, JPH::Vec3::sReplicate(1.0f), JPH::RMat44::sTranslation(at),
-        settings, at, collector, {}, {}, bodyFilter);
+        settings, at, collector, {}, layerFilter, bodyFilter);
 
     return collector.take();
 }

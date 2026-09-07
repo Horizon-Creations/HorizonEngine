@@ -42,6 +42,13 @@ public:
         glm::vec3 point    = {};
         glm::vec3 normal   = {};
         float     distance = 0.0f;
+        // Which of the sixteen collision channels the thing that was hit sits
+        // in. Appended here rather than left to the caller because the only
+        // other way to it is looking the entity up in the registry and reading
+        // its RigidBodyComponent — a lookup to learn something the query
+        // already had in its hand. Meaningless when `hit` is false, like every
+        // field above it.
+        uint8_t   layer    = 0;
     };
 
     PhysicsWorld();
@@ -186,6 +193,20 @@ public:
     // so the sentinel has to be a value the allocator never hands out.
     static constexpr uint32_t kNoEntity = 0xFFFFFFFFu;
 
+    // "Every channel" for the layerMask parameters below — the default, so a
+    // caller who does not care about channels writes nothing and sees what the
+    // query always reported.
+    //
+    // A MASK, not a channel index: a query asks "world and enemies, not
+    // triggers", which is a set. Bit i means channel i is eligible; sixteen of
+    // the thirty-two bits mean anything, and the rest simply never match, so an
+    // over-wide mask needs no validation. Note that this filters what the query
+    // may SEE — it has nothing to do with the collision matrix, which decides
+    // what the simulation resolves. A ray fired on the Player channel is not
+    // restricted to what a player collides with; it sees exactly what its mask
+    // names.
+    static constexpr uint32_t kAllLayers = 0xFFFFFFFFu;
+
     // Cast a ray from `origin` along `direction` (need not be normalised) up to
     // `maxDistance` metres. Returns the closest hit or RaycastHit{hit=false}.
     //
@@ -193,10 +214,17 @@ public:
     // something's own position reports that something, which is never what the
     // caller meant. Triggers ARE reported, as they always were; callers that
     // care check the hit entity.
+    //
+    // `layerMask` narrows what the ray may see to the channels whose bit is set
+    // (kAllLayers = every one, and the parameter is last so no existing caller
+    // changes). The filter sits in Jolt's OBJECT-LAYER slot, ahead of the narrow
+    // phase, so a ray that ignores fifteen channels also skips their triangle
+    // tests instead of doing them and discarding the answer.
     RaycastHit raycast(const glm::vec3& origin,
                        const glm::vec3& direction,
                        float            maxDistance = 1000.0f,
-                       uint32_t         ignoreEntityId = kNoEntity) const;
+                       uint32_t         ignoreEntityId = kNoEntity,
+                       uint32_t         layerMask = kAllLayers) const;
 
     // Sweep a sphere of `radius` from `origin` along `direction` up to
     // `maxDistance` metres, and report the first thing it touches.
@@ -209,11 +237,14 @@ public:
     // Unlike raycast, this one skips TRIGGERS. A sweep is asking "what would
     // block me", and a trigger volume blocks nothing — a checkpoint between the
     // player and the camera would otherwise yank the view in.
+    //
+    // `layerMask` as on raycast: which channels the sweep may see at all.
     RaycastHit sphereCast(const glm::vec3& origin,
                           const glm::vec3& direction,
                           float            radius,
                           float            maxDistance,
-                          uint32_t         ignoreEntityId = kNoEntity) const;
+                          uint32_t         ignoreEntityId = kNoEntity,
+                          uint32_t         layerMask = kAllLayers) const;
 
     // Every entity whose body overlaps a sphere at `center`. This is the query
     // an explosion and a melee swing are built from: everything in range in one
@@ -227,9 +258,12 @@ public:
     // query ("what is here"), not a sweep ("what would block me"). A
     // CharacterVirtual is not a body and only appears through its kinematic
     // collision proxy, which is what EntityHost gives every PlayerCharacter.
+    //
+    // `layerMask` as on raycast: which channels count as being "here".
     std::vector<uint32_t> overlapSphere(const glm::vec3& center,
                                         float            radius,
-                                        uint32_t         ignoreEntityId = kNoEntity) const;
+                                        uint32_t         ignoreEntityId = kNoEntity,
+                                        uint32_t         layerMask = kAllLayers) const;
 
     // ── Rigid bodies: the write half ─────────────────────────────────────────
     // What makes a crate pushable from a script. Each addresses the body the

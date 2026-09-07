@@ -172,6 +172,50 @@ TEST_CASE("ProjectManager: manifest without profiles loads seeded defaults")
     he_test::removeAllQuiet(dir);
 }
 
+// The collision matrix travels in the .heproj, and it travels SPARSELY: a
+// project that never edited it keeps a manifest with no such key at all, and a
+// missing key has to read back as "everything collides" — which is how every
+// project written before channels existed simulated.
+TEST_CASE("ProjectManager: the collision matrix round-trips, and only once touched")
+{
+    const auto dir = fs::temp_directory_path() / "he_layers_rt";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "Layers", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    REQUIRE(pm.saveProject(heproj));
+
+    // A fresh project writes no key, because the default says nothing.
+    {
+        std::ifstream in(heproj);
+        const nlohmann::json j = nlohmann::json::parse(in);
+        CHECK_FALSE(j.contains("collisionLayers"));
+    }
+    {
+        ProjectManager fresh;
+        REQUIRE(fresh.loadProject(heproj));
+        CHECK(fresh.currentProject().collisionLayers.isDefault());
+    }
+
+    auto& cfg = pm.currentProject().collisionLayers;
+    cfg.setLayerName(7, "Pickup");
+    cfg.setCollides(7, HE::CollisionLayerConfig::kPlayer, false);
+    REQUIRE(pm.saveProject(heproj));
+
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    const auto& back = pm2.currentProject().collisionLayers;
+    CHECK(back.layerName(7) == "Pickup");
+    CHECK_FALSE(back.collides(7, HE::CollisionLayerConfig::kPlayer));
+    CHECK_FALSE(back.collides(HE::CollisionLayerConfig::kPlayer, 7));   // symmetric
+    CHECK(back.collides(7, HE::CollisionLayerConfig::kTerrain));        // untouched
+    // The presets keep their names through a save that renamed a different one.
+    CHECK(back.layerName(HE::CollisionLayerConfig::kPlayer) == "Player");
+
+    he_test::removeAllQuiet(dir);
+}
+
 TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive save")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_rt";

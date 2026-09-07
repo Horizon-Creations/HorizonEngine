@@ -1543,6 +1543,13 @@ void GameApplication::startPhysics()
 	// packaged game has nothing but its log file, so this line is the only
 	// thing standing between a shipped level and crate-shaped houses.
 	m_physicsWorld->setContentManager(&contentManager());
+	// The project's collision matrix, from project.hcfg. BEFORE initialize() for
+	// the same reason as the line above it: initialize() is what puts every body
+	// into its channel, so a matrix arriving afterwards would leave the opening
+	// scene colliding the way an unconfigured project does. Default-constructed
+	// when the build predates the field — everything collides, which is how this
+	// engine behaved before channels existed.
+	m_physicsWorld->setCollisionLayers(m_config.collisionLayers);
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
 	// has to know where bodies are built. Set HERE rather than at the two call

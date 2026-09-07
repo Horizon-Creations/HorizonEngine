@@ -651,13 +651,65 @@ einer, der beim Loeschen einer Entity abstuerzt.
 
 ## 8. Offene Punkte fuer den naechsten Schritt
 
-1. **Interpreter-Arity** — verhaelt sich `HcGraphHost` bei einem Node mit zu
-   wenigen Eingaengen wie der Codegen (§ 6.2)? Belegt ist nur der Codegen.
+1. ~~**Interpreter-Arity**~~ — **beantwortet in Schritt 3, und schlimmer als
+   gedacht.** Der Interpreter (`HorizonCode.cpp:3157` fuer den Exec-Fall,
+   `:3779` fuer den puren) baut `args` aus `n.params.size()`, also aus der am
+   Node GESPEICHERTEN Parameterliste, und die Lese-Helfer in `EngineApi.cpp`
+   (`aF`/`aI`/`aV3`, `:4434-4457`) antworten fuer einen fehlenden Index die Null
+   des Typs. Ein Node, der einen Parameter zu wenig hat, uebergibt also eine
+   Null — genau wie `HcCodegen`s `zeroLit`, nur ohne dass irgendwo ein Literal
+   sichtbar wuerde. **Fuer AUSGAENGE ist beides harmlos:** beide Pfade lesen ein
+   Ergebnis ueber einen bereichsgepruefen Index, ein ANGEHAENGTER Ausgang ist
+   fuer einen alten Node unsichtbar. Deshalb hat `raycast`/`sphereCast` jetzt
+   `layer` als sechsten Ausgang, waehrend die Maske unter drei neuen Namen kommt.
 2. **Constraint-Limit** — fuehrt `PhysicsSystem::Init`s `max contact constraints`
    auch die `TwoBodyConstraint`s, oder gibt es kein eigenes Limit (§ 6.4)?
-3. **`.heproj`-Durchreichung** — schreibt `ProjectExporter` einen unbekannten
-   Block der `.heproj` automatisch in die `.hcfg` weiter, oder braucht jedes Feld
-   seine eigene Zeile? (`allowFiles` hat je eine — vermutlich Letzteres.)
-4. **Terrain-Layer** — das implizite HeightField bekommt `Default`. Ob es
-   stattdessen einen eigenen vorbelegten Layer verdient, ist eine Frage an den
-   Menschen, keine technische.
+3. ~~**`.heproj`-Durchreichung**~~ — **beantwortet in Schritt 3: jedes Feld
+   braucht seine eigene Zeile**, an fuenf Stellen. `ProjectData`
+   (`ProjectManager.h`) + Lesen/Schreiben (`ProjectManager.cpp:1525/1631`),
+   `ExportSettings` (`ProjectExporter.h`), die Uebergabe im Export-Dialog
+   (`ExportDialogPanel.cpp:1291`), die Kopie im Exporter
+   (`ProjectExporter.cpp:1072`) und `ProjectConfig` + Reader/Writer. Die `.hcfg`
+   ist BINAER mit versionierten Schwaenzen: die Matrix ist **v6**, ein String mit
+   demselben JSON, das auch in der `.heproj` steht. Geschrieben nur, wenn
+   `!isDefault()` — ein Projekt, das die Matrix nie angefasst hat, emittiert
+   weiter v2, sonst weigert sich ein aelteres Runtime-Bundle daneben und bootet
+   ohne sein Pak. Dieselbe Sparsamkeit in der `.heproj`: kein Schluessel, solange
+   nichts geaendert wurde.
+4. ~~**Terrain-Layer**~~ — vom Brett entschieden und in Schritt 2 gebaut: eigener
+   vorbelegter Kanal `Terrain` (4).
+
+---
+
+## 9. Was Schritt 3 gebaut hat (Layers, Queries + UI)
+
+- `HELayerMaskFilter` in `PhysicsWorld.cpp`, im **ObjectLayerFilter-Slot** der
+  drei Queries (der zweite `{}`), nicht in `HEQueryFilter` — Broadphase statt
+  Narrow-Phase. `PhysicsWorld::kAllLayers` neben `kNoEntity`; `layerMask` als
+  LETZTER, defaultierter Parameter von `raycast`/`sphereCast`/`overlapSphere`.
+- `RaycastHit::layer` (`uint8_t`), gefuellt aus `body.GetObjectLayer()` in beiden
+  Lock-Bloecken; gespiegelt als `int layer` auf `HE::api::physics::RaycastHit`
+  und als sechster Registry-Ausgang von `physics.raycast`/`physics.sphereCast`.
+- Drei neue Registry-Eintraege `physics.raycastLayers` /
+  `physics.sphereCastLayers` / `physics.overlapSphereLayers`, samt Anzeigenamen
+  („Raycast (Layers)" …) und `HcNodeDocs`-Beschreibungen. Die Maske ist ein
+  BITFELD, kein Kanal-Index; die Beschreibungen sagen das, weil es in diesem
+  Schritt keinen Hilfs-Node dafuer gibt.
+- **Der Unterschied, den ein Test festnagelt:** die Maske sagt, was eine Query
+  SEHEN darf; die Matrix sagt, was die Simulation AUFLOEST. Ein Strahl auf einem
+  Kanal, der mit nichts kollidiert, findet trotzdem, was seine Maske nennt.
+- Projekt-Einstellungsseite **Project ▸ Collision Layers**: 16 Namensfelder
+  (Platzhalter zeigt, wie ein leerer Name zurueckliest) und die Matrix als
+  DREIECK — die obere Haelfte waere dieselbe Antwort ein zweites Mal, und
+  `setCollides` schreibt ohnehin beide Zellen. Datei wird am Ende einer
+  Bearbeitung geschrieben, nicht pro Tastendruck. Knopf „Everything Collides"
+  als Rueckweg.
+- `AppContext::applyCollisionLayers` (Callback, kein `PhysicsWorld*`: die Welt
+  entsteht beim Play-Start und stirbt beim Stopp) — eine Matrix-Aenderung
+  waehrend des Spielens landet sofort in der laufenden Simulation.
+- Details-Combo `Collision Layer` auf `RigidBodyComponent` und
+  `CharacterControllerComponent`, Namen aus der Projekt-Config, geklemmt NUR
+  fuer das Widget (Praezedenzfall: `Collider/Shape`).
+- `setCollisionLayers` wird jetzt tatsaechlich gerufen: `GameApplication` aus
+  `m_config.collisionLayers`, `EditorApplication` beim Play-Start — beide **vor**
+  `initialize()`, weil dort die Kanaele in die Bodies wandern.

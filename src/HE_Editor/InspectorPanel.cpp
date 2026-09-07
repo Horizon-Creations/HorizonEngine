@@ -1,6 +1,7 @@
 #include "InspectorPanel.h"
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorUndo, panel plumbing
+#include <Physics/CollisionLayers.h>     // the project's sixteen collision channels
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include "EditorHelp.h"                  // per-component scope for the property tooltips
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
@@ -100,6 +101,62 @@ void render(AppContext& ctx)
 	(void)ctx;
 #endif // HE_IMGUI_ENABLED
 }
+
+#ifdef HE_IMGUI_ENABLED
+// The project's sixteen collision-channel names, as a combo's item list.
+//
+// The names come from the PROJECT (Preferences ▸ Project ▸ Collision Layers) and
+// are data, not literals — which is why the combo below asks for its help by key
+// rather than by label. Without a project open the default names stand, so the
+// row still reads "Default"/"Player"/… instead of sixteen blanks.
+struct CollisionLayerNames
+{
+	std::string names[HE::CollisionLayerConfig::kCount];
+	const char* items[HE::CollisionLayerConfig::kCount] = {};
+
+	explicit CollisionLayerNames(AppContext& ctx)
+	{
+		static const HE::CollisionLayerConfig kFallback;
+		const HE::CollisionLayerConfig& cfg =
+			ctx.projectManager ? ctx.projectManager->currentProject().collisionLayers : kFallback;
+		for (int i = 0; i < HE::CollisionLayerConfig::kCount; ++i)
+		{
+			names[i] = cfg.layerName(i);
+			items[i] = names[i].c_str();
+		}
+	}
+};
+
+// One combo for both components that carry a channel. The value is a uint8_t
+// that nothing on the way in validates, so it is clamped FOR THE WIDGET only and
+// never written back — the same rule the Collider's Shape row follows and for
+// the same reason: repairing a component from a draw call is a scene edit nobody
+// asked for, that no undo step covers and that would not even mark the scene
+// dirty. Returns true when the author picked a different channel.
+bool collisionLayerRow(const char* label, uint8_t* value,
+                       const CollisionLayerNames& layers, EditorUndo* undo)
+{
+	constexpr int kCount = HE::CollisionLayerConfig::kCount;
+	const int  raw     = static_cast<int>(*value);
+	const bool unknown = raw >= kCount;
+	int        shown   = unknown ? 0 : raw;
+	bool       changed = false;
+	// Row::combo asks for its own tooltip under the open component scope, so the
+	// entry this resolves to is "Rigid Body/Collision Layer" or "Character
+	// Controller/Collision Layer" depending on which section is drawing.
+	if (EditorWidgets::Row::combo(label, &shown, layers.items, kCount))
+	{
+		if (undo) undo->snapshotNow();
+		*value  = static_cast<uint8_t>(shown);
+		changed = true;
+	}
+	if (unknown && static_cast<int>(*value) == raw)
+		hint("This entity's collision layer (%d) is past the sixteen this project has, "
+		     "so physics puts the body on Default and the row above shows Default. "
+		     "Pick any other layer to store a real value in the scene.", raw);
+	return changed;
+}
+#endif // HE_IMGUI_ENABLED
 
 // The body of the Details panel: every component's rows, drawn against an
 // EXPLICIT world + entity instead of the editor's current selection. Split out
@@ -1420,6 +1477,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
+			// Which channel this body sits in — what the project's collision
+			// matrix looks up when it decides whether a pair may touch.
+			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
+			                  CollisionLayerNames(ctx), undo);
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -1536,6 +1597,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Jump height is not authored directly: it falls out of this against
 			// Gravity above, so the two rows sit next to each other.
 			Row::dragFloat("Jump Speed (m/s)",   &cc->jumpSpeed,  0.1f, 0.0f, 30.0f); trackEdit();
+			// The character's OWN channel, separate from the RigidBodyComponent's
+			// because a character need not have one. It decides what BLOCKS the
+			// character as it walks.
+			collisionLayerRow("Collision Layer##character", &cc->collisionLayer,
+			                  CollisionLayerNames(ctx), undo);
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);

@@ -1891,3 +1891,147 @@ TEST_CASE("PhysicsWorld: the landscape sits in the Terrain channel")
     // it would not be if the height field had been left in Default.
     CHECK(world.registry().get<TransformComponent>(box).position.y < -5.0f);
 }
+
+// ─── Layer masks on the queries ───────────────────────────────────────────────
+// The mask is what a query MAY SEE, and it has nothing to do with the collision
+// matrix: the matrix decides what the simulation resolves, this decides what a
+// ray is allowed to report. A body on a channel a ray excludes is invisible to
+// it even though nothing about the simulation changed.
+namespace
+{
+    // A static box on a named channel, so a query can be asked to see it or not.
+    Entity makeLayeredBox(HorizonWorld& world, const char* name,
+                          const glm::vec3& pos, uint8_t channel)
+    {
+        Entity e = world.createEntity(name);
+        TransformComponent t; t.position = pos; t.scale = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(e, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static; rb.collisionLayer = channel;
+        world.addComponent(e, rb);
+        return e;
+    }
+
+    constexpr uint32_t bit(uint8_t channel) { return 1u << channel; }
+}
+
+TEST_CASE("PhysicsWorld: a raycast reports which channel it hit")
+{
+    HorizonWorld world;
+    const Entity wall = makeLayeredBox(world, "Wall", { 0.0f, 0.0f, 0.0f }, kChanA);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const auto hit = phys.raycast({ -10.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 100.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId == static_cast<uint32_t>(wall));
+    // The point of the field: the caller learns WHAT it hit without looking the
+    // entity up in the registry to read its RigidBodyComponent back.
+    CHECK(hit.layer == kChanA);
+}
+
+// MUTATION: pass `{}` instead of layerFilter into CastRay and this fails — the
+// excluded wall comes back as a hit.
+TEST_CASE("PhysicsWorld: a raycast only sees the channels its mask names")
+{
+    HorizonWorld world;
+    const Entity near_ = makeLayeredBox(world, "Near", { 0.0f, 0.0f, 0.0f }, kChanA);
+    const Entity far_  = makeLayeredBox(world, "Far",  { 6.0f, 0.0f, 0.0f }, kChanB);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ -10.0f, 0.0f, 0.0f };
+    const glm::vec3 dir { 1.0f, 0.0f, 0.0f };
+
+    // No mask: the closest thing, as always.
+    CHECK(phys.raycast(from, dir, 100.0f).entityId == static_cast<uint32_t>(near_));
+    // Everything: the same answer, so the default really is "no filter".
+    CHECK(phys.raycast(from, dir, 100.0f, PhysicsWorld::kNoEntity,
+                       PhysicsWorld::kAllLayers).entityId == static_cast<uint32_t>(near_));
+
+    // Only the far channel: the near box is skipped and the ray carries on.
+    const auto onlyFar = phys.raycast(from, dir, 100.0f, PhysicsWorld::kNoEntity, bit(kChanB));
+    REQUIRE(onlyFar.hit);
+    CHECK(onlyFar.entityId == static_cast<uint32_t>(far_));
+    CHECK(onlyFar.layer == kChanB);
+
+    // A mask that names neither: a miss, not the nearest thing anyway.
+    CHECK_FALSE(phys.raycast(from, dir, 100.0f, PhysicsWorld::kNoEntity, bit(kChanA + 4)).hit);
+    // And zero really does mean "see nothing" — the reason the mask never got
+    // added to the existing registry signatures.
+    CHECK_FALSE(phys.raycast(from, dir, 100.0f, PhysicsWorld::kNoEntity, 0u).hit);
+}
+
+TEST_CASE("PhysicsWorld: a sphere cast only sees the channels its mask names")
+{
+    HorizonWorld world;
+    const Entity near_ = makeLayeredBox(world, "Near", { 0.0f, 0.0f, 0.0f }, kChanA);
+    const Entity far_  = makeLayeredBox(world, "Far",  { 6.0f, 0.0f, 0.0f }, kChanB);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ -10.0f, 0.0f, 0.0f };
+    const glm::vec3 dir { 1.0f, 0.0f, 0.0f };
+
+    const auto all = phys.sphereCast(from, dir, 0.25f, 100.0f);
+    REQUIRE(all.hit);
+    CHECK(all.entityId == static_cast<uint32_t>(near_));
+    CHECK(all.layer == kChanA);
+
+    const auto onlyFar = phys.sphereCast(from, dir, 0.25f, 100.0f,
+                                         PhysicsWorld::kNoEntity, bit(kChanB));
+    REQUIRE(onlyFar.hit);
+    CHECK(onlyFar.entityId == static_cast<uint32_t>(far_));
+    CHECK(onlyFar.layer == kChanB);
+
+    CHECK_FALSE(phys.sphereCast(from, dir, 0.25f, 100.0f,
+                                PhysicsWorld::kNoEntity, 0u).hit);
+}
+
+TEST_CASE("PhysicsWorld: an overlap query only sees the channels its mask names")
+{
+    HorizonWorld world;
+    const Entity a = makeLayeredBox(world, "A", { 0.0f, 0.0f, 0.0f }, kChanA);
+    const Entity b = makeLayeredBox(world, "B", { 1.5f, 0.0f, 0.0f }, kChanB);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 at{ 0.75f, 0.0f, 0.0f };
+    CHECK(phys.overlapSphere(at, 3.0f).size() == 2u);
+
+    const auto onlyA = phys.overlapSphere(at, 3.0f, PhysicsWorld::kNoEntity, bit(kChanA));
+    REQUIRE(onlyA.size() == 1u);
+    CHECK(onlyA[0] == static_cast<uint32_t>(a));
+
+    const auto onlyB = phys.overlapSphere(at, 3.0f, PhysicsWorld::kNoEntity, bit(kChanB));
+    REQUIRE(onlyB.size() == 1u);
+    CHECK(onlyB[0] == static_cast<uint32_t>(b));
+
+    CHECK(phys.overlapSphere(at, 3.0f, PhysicsWorld::kNoEntity, 0u).empty());
+}
+
+// The mask filters what a query SEES; the matrix decides what the simulation
+// RESOLVES. Two different questions that both mention layers, and confusing them
+// is the easy mistake here — so one test pins them apart.
+TEST_CASE("PhysicsWorld: the query mask is not the collision matrix")
+{
+    HorizonWorld world;
+    const Entity wall = makeLayeredBox(world, "Wall", { 0.0f, 0.0f, 0.0f }, kChanA);
+
+    PhysicsWorld phys;
+    HE::CollisionLayerConfig cfg;
+    // Everything about kChanA is switched off in the simulation…
+    for (int b = 0; b < HE::CollisionLayerConfig::kCount; ++b)
+        cfg.setCollides(kChanA, b, false);
+    phys.setCollisionLayers(cfg);
+    phys.initialize(world);
+
+    // …and a ray that names kChanA still finds it. A query is not a contact.
+    const auto hit = phys.raycast({ -10.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f },
+                                  100.0f, PhysicsWorld::kNoEntity, bit(kChanA));
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId == static_cast<uint32_t>(wall));
+}

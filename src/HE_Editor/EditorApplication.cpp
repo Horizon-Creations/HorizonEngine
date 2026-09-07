@@ -6090,6 +6090,13 @@ AppContext EditorApplication::makeContext()
 			if (m_projectManager.currentProject().appProject)
 				m_appPreviewRestartPending = true;
 		},
+		.applyCollisionLayers = [this]{
+			// Only while a simulation exists. Outside play mode there is nothing
+			// to update and nothing to be wrong: the next play start builds its
+			// PhysicsWorld and reads the matrix from the project itself.
+			if (m_physicsWorld)
+				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
@@ -6566,6 +6573,10 @@ void EditorApplication::setPlayMode(bool play)
 		// falls back to a box. Handed over afterwards, every such collider in the
 		// starting scene would silently be a crate.
 		m_physicsWorld->setContentManager(&contentManager());
+		// BEFORE initialize() as well: initialize() is what puts every body into
+		// its channel, and a matrix handed over afterwards would leave the
+		// opening scene simulating on the default one until something rebuilt.
+		m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is

@@ -16,6 +16,7 @@
 #include <Application/AppIcon.h>       // the generated app icon + its preview
 #include <Renderer/UIFont.h>           // icon names, and the plate colour parser
 #include <Types/Enums.h>
+#include <Physics/CollisionLayers.h>   // the project collision matrix, Project ▸ Collision Layers
 #include <algorithm>
 #include <cfloat>
 #include <cstdio>
@@ -30,6 +31,7 @@ std::string getRHIName(HE::RendererBackend backend);
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>   // InputTextWithHint over std::string (layer names)
 #endif
 
 namespace EditorSettingsPanel
@@ -1248,6 +1250,172 @@ void drawPermissionsPage(AppContext& ctx)
 	}
 }
 
+// ─── Project ▸ Collision Layers ──────────────────────────────────────────────
+// The sixteen named collision channels and the matrix that says which pairs may
+// touch. A PROJECT setting, saved in the .heproj and carried into the exported
+// build, exactly like Permissions above.
+//
+// The matrix is drawn as a TRIANGLE, not a square. The two halves of a symmetric
+// matrix are the same answer written twice, and a square grid invites somebody
+// to tick one and not the other and then wonder why nothing changed —
+// CollisionLayerConfig writes both cells from either one, so the second half
+// would be a mirror that cannot be edited independently anyway.
+void drawCollisionLayersPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Collision Layers");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData&              p   = ctx.projectManager->currentProject();
+	HE::CollisionLayerConfig& cfg = p.collisionLayers;
+	constexpr int kCount = HE::CollisionLayerConfig::kCount;
+
+	EditorWidgets::hint("A collision layer is a named channel. Every rigid body and every "
+	                    "character sits in one (Details ▸ Collision Layer), and the matrix "
+	                    "below decides which pairs of channels the simulation lets touch. "
+	                    "Belongs to the PROJECT: saved in its .heproj and carried into the "
+	                    "build you export.");
+	ImGui::Spacing();
+
+	// Written per keystroke into the model so the matrix labels follow the
+	// typing, and to the FILE when an edit ends — the same split the Application
+	// page makes, for the same reason: a .heproj rewritten per character is a lot
+	// of temp-file churn on a versioned file that has a watcher on it.
+	bool commit = false;
+
+	ImGui::SeparatorText("Names");
+	EditorWidgets::hint("A layer keeps its NUMBER for good — that is what a scene stores — so "
+	                    "renaming one relabels it everywhere and remaps nothing. Leave a name "
+	                    "empty and it reads as \"Layer <n>\".");
+
+	if (ImGui::BeginTable("##collisionlayernames", 2,
+	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+	{
+		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed,
+		                        ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f);
+		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
+		for (int i = 0; i < kCount; ++i)
+		{
+			ImGui::PushID(i);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextDisabled("%d", i);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			// The placeholder shows what an empty name READS BACK AS, which is
+			// not "Layer <n>" for all sixteen: the five presets answer with
+			// their built-in names. Asking a default-constructed config is the
+			// only spelling of that which cannot drift from layerName() itself.
+			static const HE::CollisionLayerConfig kDefaults;
+			const std::string placeholder = kDefaults.layerName(i);
+			std::string       name        = cfg.names[i];
+			if (ImGui::InputTextWithHint("##layername", placeholder.c_str(), &name))
+				cfg.setLayerName(i, name);
+			// By key, not by label: the control has no literal label of its own —
+			// sixteen rows share one row shape and the visible text is data.
+			EditorWidgets::helpForKey("Collision Layers/Name");
+			commit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Matrix");
+	EditorWidgets::hint("Ticked means the pair collides, which is how every project starts. "
+	                    "Clearing a box is what makes a channel pass through another one. "
+	                    "The diagonal is a layer against ITSELF.");
+
+	// 17 columns: the row's name plus one per channel. Numbers in the header
+	// rather than names — a sixteen-column grid has no room for words, and the
+	// list above is the key from number to name.
+	// The height is given EXPLICITLY because of ScrollX: a scrolling table with
+	// an outer size of zero becomes a child that eats all the height left in the
+	// page, which would put the button below it out of reach. Seventeen rows —
+	// the header and the sixteen channels.
+	const ImVec2 matrixSize(0.0f,
+		ImGui::GetFrameHeightWithSpacing() * (kCount + 1) + ImGui::GetStyle().CellPadding.y * 2.0f);
+	if (ImGui::BeginTable("##collisionmatrix", kCount + 1,
+	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg |
+	                      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollX,
+	                      matrixSize))
+	{
+		ImGui::TableSetupColumn("##rowname", ImGuiTableColumnFlags_WidthFixed);
+		for (int b = 0; b < kCount; ++b)
+		{
+			char head[8];
+			std::snprintf(head, sizeof(head), "%d", b);
+			ImGui::TableSetupColumn(head, ImGuiTableColumnFlags_WidthFixed);
+		}
+		// Scrolled sideways, the names column and the numbers have to stay: a
+		// grid of unlabelled boxes is not something anyone can aim at.
+		ImGui::TableSetupScrollFreeze(1, 1);
+		ImGui::TableHeadersRow();
+
+		for (int a = 0; a < kCount; ++a)
+		{
+			ImGui::PushID(a);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(cfg.layerName(a).c_str());
+			// Only the lower triangle carries a box. The upper half is the same
+			// answer read the other way round; drawing it would be two controls
+			// for one value.
+			for (int b = 0; b <= a; ++b)
+			{
+				ImGui::TableSetColumnIndex(b + 1);
+				ImGui::PushID(b);
+				bool on = cfg.collides(a, b);
+				if (ImGui::Checkbox("##cell", &on))
+				{
+					// setCollides, never matrix[][] by hand: it writes BOTH
+					// cells, and Jolt does not promise which way round it asks.
+					cfg.setCollides(a, b, on);
+					commit = true;
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s \xc3\x97 %s", cfg.layerName(a).c_str(),
+					                  cfg.layerName(b).c_str());
+				ImGui::PopID();
+			}
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	// The way back. A matrix somebody has switched most of off is otherwise
+	// 136 boxes to undo by hand, and "nothing collides any more" is exactly the
+	// state somebody reaches while finding out what these do.
+	if (EditorWidgets::button("Everything Collides"))
+	{
+		for (int a = 0; a < kCount; ++a)
+			for (int b = 0; b <= a; ++b)
+				cfg.setCollides(a, b, true);
+		commit = true;
+	}
+	EditorWidgets::helpForLabel("Everything Collides");
+	ImGui::TextDisabled("Ticks every box again. The names stay as they are.");
+
+	if (commit)
+	{
+		if (!ctx.projectManager->saveProject(p.path))
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's collision layers", p.path);
+		// And into the running simulation, so a matrix edited during play takes
+		// effect where it can be seen. PhysicsWorld copies the matrix into the
+		// filter Jolt holds and wakes every body, so a box already lying on a
+		// floor that just stopped colliding does fall.
+		else if (ctx.applyCollisionLayers)
+			ctx.applyCollisionLayers();
+	}
+}
+
 // ─── Project ▸ Application ───────────────────────────────────────────────────
 // What the application IS to the system it lands on (plan A7): its icon, its
 // identifier, its version. The icon is GENERATED from one of the built-in icons
@@ -1832,9 +2000,10 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::Effects,            "Effects" },
 };
 constexpr NavItem kProjectItems[] = {
-	{ Page::Application, "Application" },
-	{ Page::Permissions, "Permissions" },
-	{ Page::Fonts,       "Fonts" },
+	{ Page::Application,     "Application" },
+	{ Page::Permissions,     "Permissions" },
+	{ Page::Fonts,           "Fonts" },
+	{ Page::CollisionLayers, "Collision Layers" },
 };
 constexpr NavGroup kNavGroups[] = {
 	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
@@ -1956,6 +2125,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
 	else if (s_page == Page::Fonts)       drawFontsPage(ctx);
 	else if (s_page == Page::Application) drawApplicationPage(ctx);
+	else if (s_page == Page::CollisionLayers) drawCollisionLayersPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

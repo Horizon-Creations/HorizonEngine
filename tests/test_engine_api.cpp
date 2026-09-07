@@ -185,8 +185,13 @@ TEST_CASE("EngineApi: side-effect classification is correct")
     CHECK(setPos->results.empty());
 
     const auto* ray = HE::api::find("physics.raycast");
-    REQUIRE(ray->results.size() == 5);
+    REQUIRE(ray->results.size() == 6);
     CHECK(ray->results[0].type == P::Bool);       // hit
+    // `layer` was APPENDED, never inserted: both backends read a result by
+    // index, so a graph saved before it existed keeps wiring 0..4 to the same
+    // five things. Inserting anywhere else would have moved every wire after it.
+    CHECK(ray->results[5].name == std::string("layer"));
+    CHECK(ray->results[5].type == P::Int);
 }
 
 // ═══ Marshalling round-trips against a real world ═════════════════════════════
@@ -663,8 +668,45 @@ TEST_CASE("Physics: forces, velocity, overlap and gravity are on the registry")
 
     const auto* sweep = find("physics.sphereCast");
     REQUIRE(sweep->params.size() == 4);      // origin, direction, radius, maxDistance
-    REQUIRE(sweep->results.size() == 5);     // same hit shape as raycast
+    REQUIRE(sweep->results.size() == 6);     // same hit shape as raycast
     CHECK(sweep->results[0].type == P::Bool);
+
+    // ── The layer-masked forms ───────────────────────────────────────────────
+    // They exist as their own names rather than as a fourth parameter on the
+    // three above, and this is the test that keeps it that way: a node saved
+    // before a new parameter passes one argument fewer, which reads back as a
+    // zero, and zero for a channel MASK means "see nothing". Every stored
+    // Raycast node would have kept its shape and stopped hitting anything.
+    for (const char* id : { "physics.raycast", "physics.sphereCast",
+                            "physics.overlapSphere" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        for (const auto& p : row->params)
+            CHECK(p.name != std::string("layerMask"));
+    }
+
+    const auto* rayL = find("physics.raycastLayers");
+    REQUIRE(rayL != nullptr);
+    CHECK_FALSE(rayL->isExec);
+    REQUIRE(rayL->params.size() == 4);        // + layerMask, last
+    CHECK(rayL->params[3].name == std::string("layerMask"));
+    CHECK(rayL->params[3].type == P::Int);
+    REQUIRE(rayL->results.size() == 6);       // the same hit shape as raycast
+
+    const auto* sweepL = find("physics.sphereCastLayers");
+    REQUIRE(sweepL != nullptr);
+    REQUIRE(sweepL->params.size() == 5);
+    CHECK(sweepL->params[4].name == std::string("layerMask"));
+    REQUIRE(sweepL->results.size() == 6);
+
+    const auto* overlapL = find("physics.overlapSphereLayers");
+    REQUIRE(overlapL != nullptr);
+    REQUIRE(overlapL->params.size() == 3);
+    CHECK(overlapL->params[2].name == std::string("layerMask"));
+    REQUIRE(overlapL->results.size() == 1);
+    CHECK(overlapL->results[0].isArray);
 
     // Lua and Python reach the whole group through horizon.physics.* — the flat
     // bindings only ever had raycast/setVelocity/isGrounded.
@@ -682,6 +724,9 @@ TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
     CHECK(HE::api::physics::getGravity(c) == glm::vec3(0.0f));
     CHECK(HE::api::physics::overlapSphere(c, glm::vec3(0.0f), 5.0f).empty());
     CHECK_FALSE(HE::api::physics::sphereCast(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f).hit);
+    CHECK_FALSE(HE::api::physics::raycastLayers(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK_FALSE(HE::api::physics::sphereCastLayers(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f, 0xFFFF).hit);
+    CHECK(HE::api::physics::overlapSphereLayers(c, glm::vec3(0.0f), 5.0f, 0xFFFF).empty());
     CHECK_NOTHROW(HE::api::physics::setGravity(c, glm::vec3(0.0f, -1.0f, 0.0f)));
     CHECK_NOTHROW(HE::api::physics::setVelocity(c, 1, glm::vec3(1.0f)));
 

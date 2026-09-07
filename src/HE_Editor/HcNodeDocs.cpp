@@ -141,6 +141,19 @@ namespace
 	{ "physics.overlapSphere",
 	  "Every entity whose collider overlaps this sphere, as an array. The "
 	  "explosion-radius query; walk the result with a For Each." },
+	{ "physics.raycastLayers",
+	  "Raycast, but it only sees the collision layers you name. Layer Mask is a "
+	  "bitfield and not a layer number: add 1 for layer 0, 2 for layer 1, 4 for "
+	  "layer 2 and so on, or pass 65535 for every layer. Zero sees nothing at "
+	  "all. The layer names live in Project Settings under Collision Layers." },
+	{ "physics.sphereCastLayers",
+	  "Sphere Cast restricted to the collision layers in Layer Mask, which is a "
+	  "bitfield: 1 is layer 0, 2 is layer 1, 4 is layer 2, 65535 is all of them. "
+	  "What a camera boom wants, so it stops on walls and ignores the player." },
+	{ "physics.overlapSphereLayers",
+	  "Overlap Sphere restricted to the collision layers in Layer Mask, a "
+	  "bitfield in the same shape as the two casts above. An explosion that hurts "
+	  "enemies and leaves the scenery alone is this node with one bit set." },
 	{ "physics.setVelocity",
 	  "Sets a body's velocity in metres per second outright, discarding whatever "
 	  "it had. For a nudge use Add Impulse, which adds to the motion instead of "
