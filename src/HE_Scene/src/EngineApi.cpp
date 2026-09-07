@@ -626,11 +626,69 @@ std::vector<Entity> overlapSphereLayers(Ctx& c, const glm::vec3& center, float r
                                                 static_cast<uint32_t>(layerMask))
                      : std::vector<Entity>{};
 }
+
+// The oriented shapes and the multi-hit ray. Each takes its mask as a real
+// parameter rather than a defaulted one: the row that calls it names five or
+// seven inputs, and the invariant test in test_engine_api holds every cppCall to
+// the arity its row declares.
+RaycastHit boxCast(Ctx& c, const glm::vec3& origin, const glm::vec3& halfExtents,
+                   const glm::vec3& rotation, const glm::vec3& d, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->boxCast(origin, halfExtents, rotation, d, maxDist,
+                                       PhysicsWorld::kNoEntity, static_cast<uint32_t>(layerMask)));
+}
+RaycastHit capsuleCast(Ctx& c, const glm::vec3& origin, float radius, float height,
+                       const glm::vec3& rotation, const glm::vec3& d, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->capsuleCast(origin, radius, height, rotation, d, maxDist,
+                                           PhysicsWorld::kNoEntity,
+                                           static_cast<uint32_t>(layerMask)));
+}
+std::vector<Entity> overlapBox(Ctx& c, const glm::vec3& center, const glm::vec3& halfExtents,
+                               const glm::vec3& rotation, int layerMask)
+{
+    return c.physics ? c.physics->overlapBox(center, halfExtents, rotation,
+                                             PhysicsWorld::kNoEntity,
+                                             static_cast<uint32_t>(layerMask))
+                     : std::vector<Entity>{};
+}
+std::vector<Entity> overlapCapsule(Ctx& c, const glm::vec3& center, float radius, float height,
+                                   const glm::vec3& rotation, int layerMask)
+{
+    return c.physics ? c.physics->overlapCapsule(center, radius, height, rotation,
+                                                 PhysicsWorld::kNoEntity,
+                                                 static_cast<uint32_t>(layerMask))
+                     : std::vector<Entity>{};
+}
+std::vector<RaycastHit> raycastAll(Ctx& c, const glm::vec3& o, const glm::vec3& d,
+                                   float maxDist, int layerMask)
+{
+    std::vector<RaycastHit> out;
+    if (!c.physics) return out;
+    const auto hits = c.physics->raycastAll(o, d, maxDist, PhysicsWorld::kNoEntity,
+                                            static_cast<uint32_t>(layerMask));
+    out.reserve(hits.size());
+    for (const auto& h : hits) out.push_back(toApiHit(h));
+    return out;
+}
 bool addForce(Ctx& c, Entity e, const glm::vec3& f)   { return c.physics && c.physics->addForce(e, f); }
 bool addImpulse(Ctx& c, Entity e, const glm::vec3& i) { return c.physics && c.physics->addImpulse(e, i); }
 bool addTorque(Ctx& c, Entity e, const glm::vec3& t)  { return c.physics && c.physics->addTorque(e, t); }
+// `p` is WORLD and is passed straight through — the exception to the local rule
+// that setPosition below obeys, argued in the header. Nothing to convert here is
+// the whole point: the caller's point is already the point.
+bool addForceAtPosition(Ctx& c, Entity e, const glm::vec3& f, const glm::vec3& p)
+{ return c.physics && c.physics->addForceAtPosition(e, f, p); }
+bool addImpulseAtPosition(Ctx& c, Entity e, const glm::vec3& i, const glm::vec3& p)
+{ return c.physics && c.physics->addImpulseAtPosition(e, i, p); }
 void setVelocity(Ctx& c, Entity e, const glm::vec3& v) { ScriptApi::setVelocity(c.physics, e, v); }
 glm::vec3 getVelocity(Ctx& c, Entity e)                { return c.physics ? c.physics->getVelocity(e) : glm::vec3(0.0f); }
+bool setAngularVelocity(Ctx& c, Entity e, const glm::vec3& w)
+{ return c.physics && c.physics->setAngularVelocity(e, w); }
+glm::vec3 getAngularVelocity(Ctx& c, Entity e)
+{ return c.physics ? c.physics->getAngularVelocity(e) : glm::vec3(0.0f); }
 bool isGrounded(Ctx& c, Entity e)                      { return ScriptApi::isGrounded(c.physics, e); }
 void setGravity(Ctx& c, const glm::vec3& g)            { if (c.physics) c.physics->setGravity(g); }
 glm::vec3 getGravity(Ctx& c)                           { return c.physics ? c.physics->gravity() : glm::vec3(0.0f); }
@@ -4638,14 +4696,99 @@ const std::vector<ApiFn>& registry()
                 for (Entity e : physics::overlapSphereLayers(c, aV3(a, 0), aF(a, 1), aI(a, 2)))
                     arr.items.push_back(Value::ofInt((int)e));
                 return VV{ std::move(arr) }; } });
+        // ── The oriented shapes ──────────────────────────────────────────────
+        // These carry `layerMask` from their first day, so they will never need
+        // a "(Layers)" twin the way the three sphere rows above did. `rotation`
+        // is an Euler triple in degrees, the same thing the Details panel shows
+        // for an entity — a Vec3 rather than a quaternion because the graph has
+        // no quaternion and because nobody types one by hand.
+        t.push_back({ "physics.boxCast", "Physics", false,
+            {{"origin", P::Vec3}, {"halfExtents", P::Vec3}, {"rotation", P::Vec3},
+             {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::boxCast",
+            [](Ctx& c, const VV& a){ auto r = physics::boxCast(c, aV3(a, 0), aV3(a, 1), aV3(a, 2), aV3(a, 3), aF(a, 4), aI(a, 5));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.capsuleCast", "Physics", false,
+            {{"origin", P::Vec3}, {"radius", P::Float}, {"height", P::Float}, {"rotation", P::Vec3},
+             {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::capsuleCast",
+            [](Ctx& c, const VV& a){ auto r = physics::capsuleCast(c, aV3(a, 0), aF(a, 1), aF(a, 2), aV3(a, 3), aV3(a, 4), aF(a, 5), aI(a, 6));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.overlapBox", "Physics", false,
+            {{"center", P::Vec3}, {"halfExtents", P::Vec3}, {"rotation", P::Vec3}, {"layerMask", P::Int}},
+            {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapBox",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapBox(c, aV3(a, 0), aV3(a, 1), aV3(a, 2), aI(a, 3)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "physics.overlapCapsule", "Physics", false,
+            {{"center", P::Vec3}, {"radius", P::Float}, {"height", P::Float}, {"rotation", P::Vec3}, {"layerMask", P::Int}},
+            {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapCapsule",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapCapsule(c, aV3(a, 0), aF(a, 1), aF(a, 2), aV3(a, 3), aI(a, 4)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        // Five PARALLEL arrays, not one array of hits: a graph value carries a
+        // list of ONE type and there is no list of structs, so the hit has to be
+        // taken apart. Index i of each names the same hit and all five are the
+        // same length, which is what makes a For Each over Entities able to read
+        // the other four by the loop's index.
+        t.push_back({ "physics.raycastAll", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"entities", P::Int, /*isArray=*/true}, {"points", P::Vec3, /*isArray=*/true},
+             {"normals", P::Vec3, /*isArray=*/true}, {"distances", P::Float, /*isArray=*/true},
+             {"layers", P::Int, /*isArray=*/true}},
+            "HE::api::physics::raycastAll",
+            [](Ctx& c, const VV& a){
+                Value entities; entities.isArray = true; entities.type = P::Int;
+                Value points;   points.isArray   = true; points.type   = P::Vec3;
+                Value normals;  normals.isArray  = true; normals.type  = P::Vec3;
+                Value dists;    dists.isArray    = true; dists.type    = P::Float;
+                Value layers;   layers.isArray   = true; layers.type   = P::Int;
+                for (const auto& h : physics::raycastAll(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aI(a, 3)))
+                {
+                    entities.items.push_back(Value::ofInt((int)h.entity));
+                    points.items.push_back(v3(h.point));
+                    normals.items.push_back(v3(h.normal));
+                    dists.items.push_back(Value::ofFloat(h.distance));
+                    layers.items.push_back(Value::ofInt(h.layer));
+                }
+                return VV{ std::move(entities), std::move(points), std::move(normals),
+                           std::move(dists), std::move(layers) }; } });
         t.push_back({ "physics.addForce", "Physics", true, {{"entity", P::Int}, {"force", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addForce",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addForce(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
         t.push_back({ "physics.addImpulse", "Physics", true, {{"entity", P::Int}, {"impulse", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addImpulse",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addImpulse(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
         t.push_back({ "physics.addTorque", "Physics", true, {{"entity", P::Int}, {"torque", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addTorque",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addTorque(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        // The point is a WORLD position, unlike setPosition's below — argued in
+        // the header, and the reason these two do not convert anything.
+        t.push_back({ "physics.addForceAtPosition", "Physics", true,
+            {{"entity", P::Int}, {"force", P::Vec3}, {"position", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::physics::addForceAtPosition",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addForceAtPosition(c, (Entity)aI(a, 0), aV3(a, 1), aV3(a, 2))) }; } });
+        t.push_back({ "physics.addImpulseAtPosition", "Physics", true,
+            {{"entity", P::Int}, {"impulse", P::Vec3}, {"position", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::physics::addImpulseAtPosition",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addImpulseAtPosition(c, (Entity)aI(a, 0), aV3(a, 1), aV3(a, 2))) }; } });
         t.push_back({ "physics.getVelocity", "Physics", false, {{"entity", P::Int}}, {{"velocity", P::Vec3}}, "HE::api::physics::getVelocity",
             [](Ctx& c, const VV& a){ return VV{ v3(physics::getVelocity(c, (Entity)aI(a, 0))) }; } });
+        // Radians per second, not degrees — the one rate on this surface, said
+        // again in the node description because nobody expects it.
+        t.push_back({ "physics.setAngularVelocity", "Physics", true,
+            {{"entity", P::Int}, {"angularVelocity", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::physics::setAngularVelocity",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setAngularVelocity(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.getAngularVelocity", "Physics", false,
+            {{"entity", P::Int}}, {{"angularVelocity", P::Vec3}},
+            "HE::api::physics::getAngularVelocity",
+            [](Ctx& c, const VV& a){ return VV{ v3(physics::getAngularVelocity(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "physics.setGravity", "Physics", true, {{"gravity", P::Vec3}}, {}, "HE::api::physics::setGravity",
             [](Ctx& c, const VV& a){ physics::setGravity(c, aV3(a, 0)); return VV{}; } });
         t.push_back({ "physics.getGravity", "Physics", false, {}, {{"gravity", P::Vec3}}, "HE::api::physics::getGravity",
@@ -5830,8 +5973,19 @@ const std::vector<ApiFn>& registry()
             { "physics.raycastLayers", "Raycast (Layers)" },
             { "physics.sphereCastLayers", "Sphere Cast (Layers)" },
             { "physics.overlapSphereLayers", "Overlap Sphere (Layers)" },
+            // No "(Layers)" twins for these four: they were born with the mask,
+            // so there is only ever one row per shape.
+            { "physics.boxCast", "Box Cast" },         { "physics.capsuleCast", "Capsule Cast" },
+            { "physics.overlapBox", "Overlap Box" },   { "physics.overlapCapsule", "Overlap Capsule" },
+            { "physics.raycastAll", "Raycast All" },
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
+            { "physics.addForceAtPosition", "Add Force At Position" },
+            { "physics.addImpulseAtPosition", "Add Impulse At Position" },
+            // Unsuffixed, unlike Get Velocity below: nothing else in the palette
+            // owns an angular one, so there is no coin toss to resolve.
+            { "physics.setAngularVelocity", "Set Angular Velocity" },
+            { "physics.getAngularVelocity", "Get Angular Velocity" },
             { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },
             { "physics.hasPhysics", "Has Physics" },
             // Suffixed for the same reason as Get Velocity below: Transform owns

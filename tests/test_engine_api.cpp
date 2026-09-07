@@ -713,6 +713,115 @@ TEST_CASE("Physics: forces, velocity, overlap and gravity are on the registry")
     CHECK(HE::api::isScriptGroup("physics"));
 }
 
+TEST_CASE("Physics: the oriented shapes carry their mask from the first day")
+{
+    using HE::api::find;
+
+    // The three sphere rows needed a second name each to gain a mask, because a
+    // stored node cannot grow an input. These four were born with it, so the
+    // mask is simply the last parameter and there is nothing to twin. The test
+    // exists to keep it that way: the moment one of them ships without the mask,
+    // adding it later costs another four names.
+    struct Row { const char* id; std::size_t params; };
+    for (const Row& r : { Row{ "physics.boxCast", 6 }, Row{ "physics.capsuleCast", 7 },
+                          Row{ "physics.overlapBox", 4 }, Row{ "physics.overlapCapsule", 5 },
+                          Row{ "physics.raycastAll", 4 } })
+    {
+        INFO("row: " << r.id);
+        const auto* row = find(r.id);
+        REQUIRE(row != nullptr);
+        CHECK_FALSE(row->isExec);                     // a query, not an action
+        REQUIRE(row->params.size() == r.params);
+        CHECK(row->params.back().name == std::string("layerMask"));
+        CHECK(row->params.back().type == P::Int);
+    }
+
+    // Rotation is a Vec3 of degrees, not a quaternion: the graph has no
+    // quaternion type and nobody types one by hand anyway.
+    const auto* box = find("physics.boxCast");
+    CHECK(box->params[1].name == std::string("halfExtents"));
+    CHECK(box->params[2].name == std::string("rotation"));
+    CHECK(box->params[2].type == P::Vec3);
+    REQUIRE(box->results.size() == 6);                // the same hit shape as raycast
+
+    // The capsule takes the two numbers the Collider component shows, in that
+    // order, so a character's own fields sweep that character's own shape.
+    const auto* capsule = find("physics.capsuleCast");
+    CHECK(capsule->params[1].name == std::string("radius"));
+    CHECK(capsule->params[2].name == std::string("height"));
+
+    // raycastAll is five PARALLEL arrays, because a graph value is a list of one
+    // type and there is no list of structs. All five must be arrays or index i
+    // stops meaning the same hit in each.
+    const auto* all = find("physics.raycastAll");
+    REQUIRE(all->results.size() == 5);
+    for (const auto& res : all->results)
+    {
+        INFO("result: " << res.name);
+        CHECK(res.isArray);
+    }
+    CHECK(all->results[0].type == P::Int);      // entities
+    CHECK(all->results[1].type == P::Vec3);     // points
+    CHECK(all->results[2].type == P::Vec3);     // normals
+    CHECK(all->results[3].type == P::Float);    // distances
+    CHECK(all->results[4].type == P::Int);      // layers
+
+    // The force pair and the spin pair: actions are exec, questions are not.
+    for (const char* id : { "physics.addForceAtPosition", "physics.addImpulseAtPosition",
+                            "physics.setAngularVelocity" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        CHECK(row->isExec);
+        REQUIRE(row->results.size() == 1);
+        CHECK(row->results[0].type == P::Bool);
+    }
+    const auto* atPoint = find("physics.addImpulseAtPosition");
+    REQUIRE(atPoint->params.size() == 3);
+    CHECK(atPoint->params[2].name == std::string("position"));
+
+    const auto* getSpin = find("physics.getAngularVelocity");
+    REQUIRE(getSpin != nullptr);
+    CHECK_FALSE(getSpin->isExec);
+    REQUIRE(getSpin->results.size() == 1);
+    CHECK(getSpin->results[0].type == P::Vec3);
+}
+
+TEST_CASE("Physics: the new rows are neutral without a PhysicsWorld too")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::boxCast(c, glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f),
+                                          glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK_FALSE(HE::api::physics::capsuleCast(c, glm::vec3(0.0f), 0.5f, 2.0f, glm::vec3(0.0f),
+                                              glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK(HE::api::physics::overlapBox(c, glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f),
+                                       0xFFFF).empty());
+    CHECK(HE::api::physics::overlapCapsule(c, glm::vec3(0.0f), 0.5f, 2.0f, glm::vec3(0.0f),
+                                           0xFFFF).empty());
+    CHECK(HE::api::physics::raycastAll(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 10.0f,
+                                       0xFFFF).empty());
+    CHECK_FALSE(HE::api::physics::addForceAtPosition(c, 1, glm::vec3(1.0f), glm::vec3(0.0f)));
+    CHECK_FALSE(HE::api::physics::addImpulseAtPosition(c, 1, glm::vec3(1.0f), glm::vec3(0.0f)));
+    CHECK_FALSE(HE::api::physics::setAngularVelocity(c, 1, glm::vec3(1.0f)));
+    CHECK(HE::api::physics::getAngularVelocity(c, 1) == glm::vec3(0.0f));
+
+    // Through the thunk, where the five arrays must come back as five EMPTY
+    // arrays rather than as scalars — a For Each wired to any of them reads the
+    // element type off the array itself, and a scalar zero would mistype it.
+    auto out = HE::api::find("physics.raycastAll")->invoke(c,
+        { Value::ofVec3(glm::vec3(0.0f)), Value::ofVec3(glm::vec3(0, 0, 1)),
+          Value::ofFloat(10.0f), Value::ofInt(0xFFFF) });
+    REQUIRE(out.size() == 5);
+    for (const auto& v : out)
+    {
+        CHECK(v.isArray);
+        CHECK(v.items.empty());
+    }
+    CHECK(out[1].type == P::Vec3);
+}
+
 TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
 {
     Ctx c{};   // no world, no physics

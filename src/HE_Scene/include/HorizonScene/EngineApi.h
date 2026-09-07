@@ -388,12 +388,59 @@ namespace physics {
     std::vector<Entity> overlapSphereLayers(Ctx&, const glm::vec3& center, float radius,
                                             int layerMask);
 
+    // ── The shapes that have an orientation, and the ray that keeps going ────
+    // A sphere is the one shape that needs no rotation, which is why it was the
+    // one that existed. `rotation` is an Euler triple in DEGREES and is read
+    // exactly as an entity's own rotation is, so a box cast at (0, 45, 0) is the
+    // same box a body at (0, 45, 0) is.
+    //
+    // Each carries `layerMask` from its first day — a bitfield, as above — so
+    // none of these ever needs a second name to gain one.
+    //
+    // The capsule's `height` is its FULL height including the caps, the same
+    // number the Collider component shows, so a character's own two fields sweep
+    // that character's own shape.
+    RaycastHit boxCast(Ctx&, const glm::vec3& origin, const glm::vec3& halfExtents,
+                       const glm::vec3& rotation, const glm::vec3& dir, float maxDist,
+                       int layerMask);
+    RaycastHit capsuleCast(Ctx&, const glm::vec3& origin, float radius, float height,
+                           const glm::vec3& rotation, const glm::vec3& dir, float maxDist,
+                           int layerMask);
+    std::vector<Entity> overlapBox(Ctx&, const glm::vec3& center, const glm::vec3& halfExtents,
+                                   const glm::vec3& rotation, int layerMask);
+    std::vector<Entity> overlapCapsule(Ctx&, const glm::vec3& center, float radius, float height,
+                                       const glm::vec3& rotation, int layerMask);
+
+    // Every body on the line rather than the first, nearest first, one entry per
+    // entity. The shot that goes through two enemies, and the sight line that
+    // needs to know it crossed a window before it reached the player.
+    //
+    // The registry hands this out as PARALLEL ARRAYS — entities, points,
+    // normals, distances, layers — because a graph value is a list of one type
+    // and there is no list-of-structs. Index i of each names the same hit, and
+    // all five are the same length.
+    std::vector<RaycastHit> raycastAll(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                                       float maxDist, int layerMask);
+
     // Pushing a rigid body around. A force is continuous and has to be applied
     // every frame, an impulse lands once, a torque spins. All three need a
     // DYNAMIC rigid body on the entity and answer false when there is none.
     bool addForce(Ctx&, Entity e, const glm::vec3& force);
     bool addImpulse(Ctx&, Entity e, const glm::vec3& impulse);
     bool addTorque(Ctx&, Entity e, const glm::vec3& torque);
+
+    // The same push applied somewhere other than the centre of mass, so it turns
+    // the body as well as moving it: a crate that tumbles away from a blast
+    // instead of sliding away from it.
+    //
+    // `position` is a WORLD point — the one deliberate exception to the rule
+    // stated on setPosition below, that a position next to an entity is local.
+    // It is not a pose, it is where in the world the push lands, and every
+    // source of one (a raycast hit, an explosion's centre) is already world. Put
+    // through the parent chain instead, "push the door at its handle" would mean
+    // a different point depending on what the door is parented to.
+    bool addForceAtPosition(Ctx&, Entity e, const glm::vec3& force, const glm::vec3& position);
+    bool addImpulseAtPosition(Ctx&, Entity e, const glm::vec3& impulse, const glm::vec3& position);
 
     // Velocity in m/s — ONE pair for characters and rigid bodies. It addresses
     // the character controller when the entity has one and the rigid body
@@ -404,6 +451,16 @@ namespace physics {
     void       setVelocity(Ctx&, Entity e, const glm::vec3& v);
     glm::vec3  getVelocity(Ctx&, Entity e);
     bool       isGrounded(Ctx&, Entity e);
+
+    // Spin, in RADIANS per second about the world axes — the only value on this
+    // surface that is not in degrees, because it is a rate rather than a pose.
+    // A full turn a second is (0, 6.283, 0).
+    //
+    // Rigid bodies only, and no character dispatch like the pair above: a
+    // character controller has no spin to hold, so an entity that is only a
+    // controller reads zero and refuses the write.
+    bool       setAngularVelocity(Ctx&, Entity e, const glm::vec3& radiansPerSecond);
+    glm::vec3  getAngularVelocity(Ctx&, Entity e);
 
     // TELEPORT — where the entity IS, not a push towards it. Both write Jolt
     // directly and mirror the value into the transform in the same call, so the

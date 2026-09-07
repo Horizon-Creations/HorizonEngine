@@ -154,6 +154,33 @@ namespace
 	  "Overlap Sphere restricted to the collision layers in Layer Mask, a "
 	  "bitfield in the same shape as the two casts above. An explosion that hurts "
 	  "enemies and leaves the scenery alone is this node with one bit set." },
+	{ "physics.boxCast",
+	  "Sweeps a box along a direction and reports the first thing it touches. "
+	  "Half Extents is half the box's size on each axis, Rotation is its tilt in "
+	  "degrees, the same numbers the Details panel shows for an entity. Layer "
+	  "Mask is a bitfield: 1 is layer 0, 2 is layer 1, 65535 is all of them. "
+	  "Distance is where the box's centre stopped, not where it touched." },
+	{ "physics.capsuleCast",
+	  "Sweeps a capsule along a direction: the query that asks whether a "
+	  "character fits through a gap, using that character's own Radius and "
+	  "Height. Height is the full height including both rounded ends. Rotation "
+	  "tilts the capsule in degrees, Layer Mask is a bitfield as on the other "
+	  "casts." },
+	{ "physics.overlapBox",
+	  "Every entity whose collider is inside this box right now, as an array. "
+	  "Half Extents is half the box's size on each axis and Rotation turns it, "
+	  "both in the same units the Details panel uses. A room, a corridor or a "
+	  "selection rectangle, where Overlap Sphere would also catch the corners." },
+	{ "physics.overlapCapsule",
+	  "Every entity inside an upright capsule, as an array. Height is the full "
+	  "height including both ends, and Rotation lays it on its side if you want "
+	  "that. The query a respawn makes before it puts a player somewhere: is "
+	  "anybody already standing there?" },
+	{ "physics.raycastAll",
+	  "Fires a ray and reports EVERY body along it rather than the first, nearest "
+	  "first. The five outputs are parallel arrays, so index 3 of Points belongs "
+	  "to index 3 of Entities. A shot that passes through two enemies, or a line "
+	  "of sight that has to know it crossed a window. Each entity appears once." },
 	{ "physics.setVelocity",
 	  "Sets a body's velocity in metres per second outright, discarding whatever "
 	  "it had. For a nudge use Add Impulse, which adds to the motion instead of "
@@ -173,6 +200,23 @@ namespace
 	  "once, not every frame." },
 	{ "physics.addTorque",
 	  "Adds rotational force about the world axes, spinning the body." },
+	{ "physics.addForceAtPosition",
+	  "A continuous force applied at a point rather than through the middle, so "
+	  "it turns the body as well as moving it. Position is a point in the WORLD, "
+	  "not an offset inside the entity, so a raycast hit point can be wired "
+	  "straight into it. Call it every frame while it should push." },
+	{ "physics.addImpulseAtPosition",
+	  "An instant push at a point rather than through the middle: the crate "
+	  "tumbles away from the blast instead of sliding away from it. Position is a "
+	  "point in the WORLD, so a hit point wires straight in. Call it once, not "
+	  "every frame." },
+	{ "physics.setAngularVelocity",
+	  "Sets how fast the body spins, in RADIANS per second about the world axes "
+	  "and not in degrees. One full turn a second is about 6.28. Rigid bodies "
+	  "only, so a character controller ignores it." },
+	{ "physics.getAngularVelocity",
+	  "How fast the body is spinning, in RADIANS per second about the world axes "
+	  "and not in degrees. Zero for an entity without a rigid body." },
 	{ "physics.setGravity",
 	  "Sets gravity for the WHOLE physics world, not for one entity. The default "
 	  "is (0, -9.81, 0)." },

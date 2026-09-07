@@ -713,3 +713,51 @@ einer, der beim Loeschen einer Entity abstuerzt.
 - `setCollisionLayers` wird jetzt tatsaechlich gerufen: `GameApplication` aus
   `m_config.collisionLayers`, `EditorApplication` beim Play-Start — beide **vor**
   `initialize()`, weil dort die Kanaele in die Bodies wandern.
+
+---
+
+## 10. Was Schritt 4 gebaut hat (Shape-Casts + Kraefte-Rest)
+
+- `castShapeImpl` / `overlapShapeImpl` als **freie Funktionen im anonymen
+  Namensraum** von `PhysicsWorld.cpp`, nicht als private Member: ihre Argumente
+  sind Jolt-Typen, und kein Jolt-Typ darf in `PhysicsWorld.h`. Die Formulierung
+  in § 5.2 war insoweit nicht umsetzbar. `sphereCast`/`overlapSphere` sind
+  Dreizeiler daneben, mit unveraendertem Verhalten (die vorhandenen Tests waren
+  der Beleg dafuer, bevor irgendeine neue Form dazukam).
+- Fuenf neue Abfragen: `boxCast`, `capsuleCast`, `overlapBox`, `overlapCapsule`,
+  `raycastAll` — alle mit `layerMask` als letztem, defaultiertem Parameter.
+- **Die Drehung ist ein Euler-Vec3 in GRAD, auf beiden Ebenen**, und geht durch
+  `joltRotationOf`, das denselben Ausdruck benutzt wie `TransformHierarchy`
+  (`glm::quat(glm::radians(euler))`). Eine zweite Konvention waere ein Fehler,
+  den niemand sehen koennte; ein Test nagelt es fest, indem die ausgerichtete
+  Platte weiter fliegt als die verdrehte.
+- **Entartete Formen sind eine leere Frage, kein Assert:** Jolt behauptet
+  `halfHeight > 0` und `radius > 0` fuer die Kapsel, ein Debug-Build stirbt
+  daran. Halbausdehnung/Radius ≤ 0 antwortet „nichts". Eine Kapsel, die nur aus
+  Kappen besteht (`height ≤ 2·radius`), behaelt einen Millimeter Zylinder und
+  ist damit die Kugel, die der Aufrufer gemeint hat.
+- `raycastAll` sortiert selbst (`AllHitCollisionCollector::Sort()`; Jolt
+  verspricht keine Reihenfolge) und meldet **jede Entity einmal, die naechste
+  Beruehrung**: ein Netz meldet Vorder- und Rueckwand. `RayCastSettings` bleibt
+  auf den Vorgaben, weil genau die der Ein-Treffer-`CastRay` implizit benutzt —
+  `hits[0]` ist damit derselbe Treffer, den `raycast` gemeldet haette.
+- Kraefte-Rest: `addForceAtPosition`, `addImpulseAtPosition`,
+  `set/getAngularVelocity`.
+- **Die Ausnahme von der Lokal-Regel:** der Angriffspunkt der beiden ersten ist
+  eine WELT-Position, obwohl `EngineApi.h` als Regel fuehrt, dass eine Position
+  neben einer Entity lokal ist. Begruendung im Header an beiden Stellen: es ist
+  keine Pose, sondern der Ort, an dem der Stoss landet, und jede Quelle dafuer
+  (Raycast-Treffer, Explosionszentrum) ist bereits Welt.
+- **Winkelgeschwindigkeit ist in RADIANT pro Sekunde**, die einzige Stelle
+  dieser Flaeche, die nicht in Grad rechnet — es ist eine Rate, keine Lage.
+  Steht im Header UND in der Node-Beschreibung. Keine Character-Weiche wie bei
+  `setVelocity`: ein `CharacterVirtual` hat keine Drehung.
+- Neun Registry-Zeilen, alle mit Anzeigename und `HcNodeDocs`-Beschreibung.
+  **Die neuen Formen brauchen keine `…Layers`-Zwillinge** (§ 6.2), weil sie die
+  Maske von Anfang an tragen. `physics.raycastAll` liefert **fuenf parallele
+  Arrays** (entities/points/normals/distances/layers) — ein Graph-Wert ist eine
+  Liste EINES Typs, ein Array von Strukturen gibt es nicht. Vec3-Arrays hatten
+  keinen Praezedenzfall in der Registry; Lua-, Python- und ForEach-Pfad lesen
+  den Elementtyp generisch vom Array, ein Test haelt das fest.
+- 122/122 ctest-Ziele gruen (3 uebersprungene `runtime_size`-Ziele wie immer),
+  22 neue Testfaelle/Bloecke in `test_physics.cpp` und `test_engine_api.cpp`.
