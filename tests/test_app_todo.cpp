@@ -645,6 +645,23 @@ namespace
 {
     // Run `exe` in its own directory with a frame budget. Returns the exit code,
     // -1 when it could not be started, -2 when it outlived the deadline.
+    //
+    // Windows-native: popen() here would still hand a Windows shell a bash
+    // command line ("cd X && ... & echo $!"), and the poll loop below kills
+    // by pid through `kill -0`/`kill -9`, neither of which exists there. A
+    // real port is CreateProcess + WaitForSingleObject with a timeout, not a
+    // guess typed on a machine that cannot run it to find out if it is right.
+    // Until then this returns -1, which the caller already reads as "could
+    // not launch — skipped" — the same shape the no-display-server skip on
+    // Linux uses, not a new kind of gap.
+#ifdef _WIN32
+    int bootOnce(const std::filesystem::path&, int, int)
+    {
+        MESSAGE("bootOnce is POSIX-only (popen + kill by pid) — "
+                "needs a CreateProcess port; skipped on Windows");
+        return -1;
+    }
+#else
     int bootOnce(const std::filesystem::path& exe, int frames, int timeoutSeconds)
     {
         const std::string dir = exe.parent_path().string();
@@ -689,6 +706,7 @@ namespace
         std::system(("kill -9 " + pid + " 2>/dev/null").c_str());
         return -2;
     }
+#endif
 
     // The last few lines of that log, for the failure message.
     //
