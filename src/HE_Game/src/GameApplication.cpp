@@ -3,6 +3,15 @@
 #include "EmbeddedPakKey.h"
 #include <fstream>
 #include <Hpak/ProjectConfig.h>
+#include <Application/AppIcon.h>       // the window icon the export generated
+#include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
+#ifdef __APPLE__
+#include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
+#include "AppNotify.h"                 // …and the notification centre
+#endif
+#ifdef __linux__
+#include <Platform/Process.h>          // notifyShow hands the text to notify-send
+#endif
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
@@ -41,6 +50,8 @@
 #include <functional>                // the host services a Ctx carries (see g_host)
 #include <unordered_set>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_tray.h>   // the tray icon (plan A7)
+#include <list>              // tray ids: addresses SDL's userdata may keep
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <filesystem>
@@ -52,6 +63,17 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The frame of a borderless window (docs/he-apps-plan.md F3) ──────────────
+// The grab band along the edges, in window POINTS, so it is the same physical
+// thickness on a Retina screen as on a plain one. Six is what the desktops
+// settle around; below four it is a band nobody can hit, above eight it starts
+// eating the clicks of what is drawn at the edge of the window.
+constexpr float kFrameBorderPoints = 6.0f;
+// …and the smallest window an edge drag may leave behind. Handed to SDL as well
+// as used by the manual resizer, so the platform that resizes for us and the
+// platform we resize ourselves stop at the same place.
+constexpr struct { int w, h; } kFrameMinPoints{ 320, 200 };
+
 // ── The host half of every HE::api::Ctx this file builds ─────────────────────
 // Everything a Ctx carries that belongs to the APPLICATION rather than to the
 // current scene: it is filled once in OnInit and outlives every world, physics
@@ -73,10 +95,203 @@ struct HostCtxParts
 	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
 	std::function<void(uint32_t)> destroyObject;
 	std::function<void()>         quit;
+	// The window rows (app.setTitle/setSize/size) and app.requestRedraw. They
+	// belong HERE and not at a call site, which is the lesson this struct exists
+	// to teach: they were bound at the one Ctx the HorizonCode path builds, so a
+	// Lua or Python script asking for the window size got a silent zero.
+	std::function<void(const std::string&)> setWindowTitle;
+	std::function<void(uint32_t, uint32_t)> setWindowSize;
+	std::function<glm::vec2()>              windowSize;
+	std::function<void()>                   requestRedraw;
+	// The other two title-bar buttons (plan F3), bound here for the reason the
+	// three rows above are: a Lua script and a graph must reach the same window.
+	std::function<void()>     minimizeWindow;
+	std::function<void(bool)> setWindowMaximized;
+	std::function<bool()>     windowMaximized;
+	// The tray rows, bound for the same reason and in the same place.
+	std::function<void(const std::string&)>                     showTray;
+	std::function<void()>                                       hideTray;
+	std::function<void(const std::string&, const std::string&)> addTrayItem;
+	std::function<void()>                                       clearTrayMenu;
+	std::function<bool(bool)>                                   setAutostart;
+	std::function<bool()>                                       autostart;
+	std::function<void(const std::string&, const std::string&)> addMenu;
+	std::function<void(const std::string&, const std::string&, const std::string&,
+	                   const std::string&)> addMenuItem;
+	std::function<void(const std::string&)>                     addMenuSeparator;
+	std::function<void()>                                       clearMenuBar;
+	std::function<void(const std::string&, bool)>               setMenuItemEnabled;
+	std::function<void(const std::string&, bool)>               setMenuItemChecked;
+	std::function<bool(const std::string&)>                     menuItemEnabled;
+	std::function<bool(const std::string&)>                     menuItemChecked;
+	// The SECOND window (A5), bound here for the reason every row above is:
+	// a Lua script, a Python script and a graph must all reach the same windows.
+	std::function<uint32_t(const std::string&, uint32_t, uint32_t)> openWindow;
+	std::function<void(uint32_t)>                                   closeWindow;
+	std::function<void(uint32_t, const std::string&)>               setWindowTitleOf;
+	std::function<void(uint32_t, uint32_t, uint32_t)>               setWindowSizeOf;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
 HostCtxParts g_host;
+
+// ── The tray (plan A7) ───────────────────────────────────────────────────────
+// Beside g_host and for its reason: one application per process. SDL hands a
+// tray entry's callback a bare void*, so the thing it points at must outlive the
+// click and never move — a std::list of ids does both, a vector would not.
+struct TrayItem { std::string id; };
+SDL_Tray*            g_tray     = nullptr;
+SDL_TrayMenu*        g_trayMenu = nullptr;
+std::list<TrayItem>  g_trayIds;
+// A click arrives from INSIDE SDL's event pump. Firing a graph from there would
+// re-enter the interpreter in the middle of a frame, so the id waits here and
+// the frame loop delivers it — the same shape the drop path uses.
+std::vector<std::string> g_trayClicks;
+
+// The menu bar changed and the SYSTEM bar has not been told yet (macOS). Set by
+// the four app.*Menu* callbacks, acted on once per frame — a graph that builds a
+// menu of six entries touches the bar seven times, and rebuilding NSMenus seven
+// times to arrive at the same bar is six rebuilds nobody asked for.
+bool g_menuDirty = false;
+
+void SDLCALL trayEntryClicked(void* userdata, SDL_TrayEntry*)
+{
+    if (const TrayItem* item = static_cast<const TrayItem*>(userdata))
+        g_trayClicks.push_back(item->id);
+}
+
+// ── Notifications (plan C) ───────────────────────────────────────────────────
+// One function, three answers, and only one of them written where it can be
+// seen working. macOS goes through UserNotifications (AppNotify.mm). Linux hands
+// the text to `notify-send`, the tool every desktop that has a notification
+// daemon ships with — the D-Bus call underneath it would be the same message
+// with a protocol implementation around it, and this one is readable.
+//
+// Windows has neither and gets a warning instead of a wrong guess: its toasts
+// need a WinRT activation identity and a Start-menu shortcut to post from, which
+// is a piece of work rather than a fallback, and nothing here could be tested.
+bool notifyAvailable()
+{
+#if defined(__APPLE__)
+    return HE::AppNotify::available();
+#elif defined(__linux__)
+    return HE::Proc::which("notify-send").has_value();
+#else
+    return false;
+#endif
+}
+
+bool notifyShow(const std::string& title, const std::string& body)
+{
+#if defined(__APPLE__)
+    return HE::AppNotify::show(title, body);
+#elif defined(__linux__)
+    const auto tool = HE::Proc::which("notify-send");
+    if (!tool)
+    {
+        HE_LOG_WARN(Core, "%s", "notify: notify-send is not installed — nothing was shown");
+        return false;
+    }
+    // Title first, then the text, which is notify-send's own argument order.
+    // Two arguments and never a shell line: a title with a quote in it would
+    // otherwise be somebody else's command.
+    HE::Proc::Options opt;
+    opt.exe = *tool;
+    opt.args.push_back(title.empty() ? body : title);
+    if (!title.empty() && !body.empty()) opt.args.push_back(body);
+    opt.timeoutMs = 5000;
+    return HE::Proc::run(opt).ok();
+#else
+    (void)title; (void)body;
+    HE_LOG_WARN(Core, "%s", "notify: not implemented on this platform yet");
+    return false;
+#endif
+}
+
+// What a login entry has to point at. SDL_GetBasePath gives the directory the
+// executable lives in — inside a .app that is Contents/Resources, and launching
+// THAT does nothing, so the bundle itself is what macOS is told to open.
+std::filesystem::path executablePathForAutostart()
+{
+    const char* base = SDL_GetBasePath();
+    if (!base) return {};
+    std::filesystem::path p(base);
+#ifdef __APPLE__
+    // …/Foo.app/Contents/Resources/ → …/Foo.app
+    for (std::filesystem::path up = p; !up.empty() && up != up.root_path(); up = up.parent_path())
+        if (up.extension() == ".app") return up;
+#endif
+    return p / "HorizonGame";
+}
+
+void destroyTray()
+{
+    if (g_tray) SDL_DestroyTray(g_tray);   // takes the menu and its entries with it
+    g_tray     = nullptr;
+    g_trayMenu = nullptr;
+    g_trayIds.clear();
+}
+
+void trayShow(const std::string& tooltip)
+{
+    if (g_tray)
+    {
+        // Already up: showing it again is how a tooltip is changed.
+        SDL_SetTrayTooltip(g_tray, tooltip.empty() ? nullptr : tooltip.c_str());
+        return;
+    }
+    // The icon the export generated — the same picture as the window's, because
+    // an application with two different icons is two applications to whoever is
+    // looking at the screen.
+    SDL_Surface* icon = nullptr;
+    std::vector<std::uint8_t> rgba;
+    int w = 0, h = 0;
+    if (const char* base = SDL_GetBasePath())
+        if (HE::heLoadPngRGBA(std::filesystem::path(base) / "AppIcon.png", rgba, w, h))
+            icon = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, rgba.data(), w * 4);
+
+    g_tray = SDL_CreateTray(icon, tooltip.empty() ? nullptr : tooltip.c_str());
+    if (icon) SDL_DestroySurface(icon);
+    if (!g_tray)
+    {
+        HE_LOG_WARN(Core, "app.showTray: the system refused a tray icon (%s)", SDL_GetError());
+        return;
+    }
+    g_trayMenu = SDL_CreateTrayMenu(g_tray);
+}
+
+void trayAddItem(const std::string& id, const std::string& label)
+{
+    if (!g_trayMenu)
+    {
+        HE_LOG_WARN(Core, "%s", "app.addTrayItem: there is no tray yet — call Show Tray Icon first");
+        return;
+    }
+    g_trayIds.push_back({ id });
+    SDL_TrayEntry* entry =
+        SDL_InsertTrayEntryAt(g_trayMenu, -1, label.c_str(), SDL_TRAYENTRY_BUTTON);
+    if (!entry)
+    {
+        g_trayIds.pop_back();
+        HE_LOG_WARN(Core, "app.addTrayItem: %s", SDL_GetError());
+        return;
+    }
+    SDL_SetTrayEntryCallback(entry, trayEntryClicked, &g_trayIds.back());
+}
+
+void trayClearMenu()
+{
+    if (!g_trayMenu) return;
+    int count = 0;
+    // Copied first: removing an entry invalidates the list SDL handed back.
+    const SDL_TrayEntry** entries = SDL_GetTrayEntries(g_trayMenu, &count);
+    std::vector<SDL_TrayEntry*> doomed;
+    for (int i = 0; i < count; ++i)
+        doomed.push_back(const_cast<SDL_TrayEntry*>(entries[i]));
+    for (SDL_TrayEntry* e : doomed) SDL_RemoveTrayEntry(e);
+    // The ids go with them; nothing points at them any more.
+    g_trayIds.clear();
+}
 
 // The only Ctx factory in this file. `self` is the calling HorizonCode instance
 // (0 for everything that is not a graph — the scene-request pump, Lua, Python).
@@ -94,17 +309,48 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.createObject  = g_host.createObject;
 	c.destroyObject = g_host.destroyObject;
 	c.requestQuit   = g_host.quit;
+	c.setWindowTitle = g_host.setWindowTitle;
+	c.setWindowSize  = g_host.setWindowSize;
+	c.windowSize     = g_host.windowSize;
+	c.requestRedraw  = g_host.requestRedraw;
+	c.minimizeWindow     = g_host.minimizeWindow;
+	c.setWindowMaximized = g_host.setWindowMaximized;
+	c.windowMaximized    = g_host.windowMaximized;
+	c.showTray       = g_host.showTray;
+	c.hideTray       = g_host.hideTray;
+	c.addTrayItem    = g_host.addTrayItem;
+	c.clearTrayMenu  = g_host.clearTrayMenu;
+	c.setAutostart   = g_host.setAutostart;
+	c.autostart      = g_host.autostart;
+	c.addMenu          = g_host.addMenu;
+	c.addMenuItem      = g_host.addMenuItem;
+	c.addMenuSeparator = g_host.addMenuSeparator;
+	c.clearMenuBar     = g_host.clearMenuBar;
+	c.setMenuItemEnabled = g_host.setMenuItemEnabled;
+	c.setMenuItemChecked = g_host.setMenuItemChecked;
+	c.menuItemEnabled    = g_host.menuItemEnabled;
+	c.menuItemChecked    = g_host.menuItemChecked;
+	c.openWindow         = g_host.openWindow;
+	c.closeWindow        = g_host.closeWindow;
+	c.setWindowTitleOf   = g_host.setWindowTitleOf;
+	c.setWindowSizeOf    = g_host.setWindowSizeOf;
+	// Not through g_host: notifications need nothing from the application object,
+	// so they are the platform function itself and there is no state to capture.
+	c.notify          = [](const std::string& t, const std::string& b) { return notifyShow(t, b); };
+	c.notifyAvailable = [] { return notifyAvailable(); };
 	return c;
 }
 
-// What this platform ran on before the config could name a backend, and what an
-// unusable choice falls back to.
-constexpr HE::RendererBackend kDefaultBackend =
-#ifdef __APPLE__
-	HE::RendererBackend::Metal;
-#else
-	HE::RendererBackend::OpenGL;
-#endif
+// What this runtime runs on before the config could name a backend, and what an
+// unusable choice falls back to. It used to be a constexpr picked by __APPLE__,
+// which stopped being the right question with the runtime flavours (A3b): an
+// app-basic runtime links the software rasterizer ALONE, and defaulting it to
+// Metal would throw in RendererFactory before the window opens. The library that
+// links the backends is the only one that knows, so it answers.
+static HE::RendererBackend defaultBackend()
+{
+	return RendererFactory::Default();
+}
 
 // Backends by NAME (the editor's getRHIName spelling), because config.json is a
 // file a player or a support ticket edits by hand: "Metal" survives a
@@ -116,30 +362,20 @@ bool backendFromName(const std::string& name, HE::RendererBackend& out)
 	if (name == "D3D11")  { out = HE::RendererBackend::D3D11;  return true; }
 	if (name == "D3D12")  { out = HE::RendererBackend::D3D12;  return true; }
 	if (name == "Metal")  { out = HE::RendererBackend::Metal;  return true; }
+	if (name == "Software") { out = HE::RendererBackend::Software; return true; }
 	return false;
 }
 
 // Whether THIS runtime can create that backend at all. RendererFactory throws
-// for one whose implementation was not compiled in, so the same #ifdef set has
-// to be answered here — a config authored for another platform must fall back,
-// not abort the game before its window opens.
+// for one whose implementation was not compiled in, so the question has to be
+// asked before the answer is used — a config authored for another platform, or
+// for another runtime flavour, must fall back and not abort the game before its
+// window opens. The duplicate #ifdef ladder that used to stand here is gone: it
+// had to be kept in step with the factory by hand, and the flavours (A3b) are
+// exactly the change that would have broken that.
 bool backendAvailable(HE::RendererBackend backend)
 {
-	switch (backend)
-	{
-	case HE::RendererBackend::OpenGL: return true;
-#ifdef HE_VULKAN_ENABLED
-	case HE::RendererBackend::Vulkan: return true;
-#endif
-#ifdef _WIN32
-	case HE::RendererBackend::D3D11:
-	case HE::RendererBackend::D3D12:  return true;
-#endif
-#ifdef __APPLE__
-	case HE::RendererBackend::Metal:  return true;
-#endif
-	default: return false;
-	}
+	return RendererFactory::Available(backend);
 }
 
 bool windowModeFromName(const std::string& name, HE::WindowMode& out)
@@ -198,7 +434,7 @@ GameApplication::~GameApplication() = default;
 
 void GameApplication::applyShippedConfig()
 {
-	m_backend = kDefaultBackend;
+	m_backend = defaultBackend();
 
 	// Before a single shipped key is laid over the in-memory config: the game
 	// must not persist any of it. configFilePath() resolves to the per-user file
@@ -218,6 +454,32 @@ void GameApplication::applyShippedConfig()
 	else if (const size_t applied = overlayShippedConfig(fs::path(baseRaw)); applied > 0)
 		HE_LOG_INFO(Core, "GameApplication: applied %zu shipped setting(s) from config.json",
 		            applied);
+
+	// ── An application opens in a WINDOW ─────────────────────────────────────
+	// The member's default is Fullscreen, which is right for a game and wrong
+	// for a tool: nobody ships a todo list that takes over the display, and
+	// docs/he-apps-plan.md says so ("eine App startet standardmäßig als
+	// windowed, man kann sie ja dann maximieren").
+	//
+	// Which it is lives in project.hcfg, and that is read in OnInit — far too
+	// late, the window exists by then. So it is peeked at here, into a LOCAL
+	// config: this is only the default, and an explicit GameWindowMode below
+	// still wins.
+	//
+	// The answer is LATCHED into m_appMode, because the window mode is not the
+	// only thing that has to know before OnInit reads the real config: the
+	// FPS-style mouse grab at the top of OnInit is the other one (plan E6).
+	// OnInit overwrites the member from the same file a moment later, so this is
+	// the same answer arriving earlier, not a second source of truth.
+	if (baseRaw)
+	{
+		ProjectConfig peek;
+		if (ProjectConfigLoader::load(fs::path(baseRaw), peek) && peek.appMode)
+		{
+			m_appMode    = true;
+			m_windowMode = HE::WindowMode::Windowed;
+		}
+	}
 
 	// An absent key keeps what the member already holds, which is what a game
 	// shipped before any of this existed: 1280x720 fullscreen, VSync on, on the
@@ -244,7 +506,7 @@ void GameApplication::applyShippedConfig()
 
 	if (const std::string name = gs.getCustomConfigString("GameBackend"); !name.empty())
 	{
-		HE::RendererBackend wanted = kDefaultBackend;
+		HE::RendererBackend wanted = defaultBackend();
 		if (!backendFromName(name, wanted))
 			HE_LOG_WARN(Core, "GameApplication: unknown graphics backend '%s' — using the default",
 			            name.c_str());
@@ -270,7 +532,11 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 
 std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 {
-	HE_LOG_INFO(Core, "%s", "GameApplication: creating renderer");
+	// The flavour goes in the log next to the backend because the two are the
+	// whole difference between the three shipped runtimes, and a report that
+	// says "the app is slow" is worth nothing without knowing which one ran.
+	HE_LOG_INFO(Core, "GameApplication: creating renderer (runtime flavour '%s')",
+	            RendererFactory::RuntimeFlavor());
 	return RendererFactory::Create(m_backend);
 }
 
@@ -281,7 +547,17 @@ void GameApplication::OnInit()
 	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
 	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
 	// cursor is always reachable. The window is already open by the time OnInit runs.
-	setMouseCaptured(true);
+	//
+	// …and that last sentence is exactly why an APPLICATION must not come
+	// through here (plan E6). The window is open, so this hides the system
+	// cursor and puts the window into relative mode; the release further down,
+	// once project.hcfg is read, undoes it — but a tool that flashes the pointer
+	// away on launch is a tool that looks like a game engine's leftovers. The
+	// constructor already peeked at the same file, so the answer is available
+	// before the grab rather than after it. A game, and every path where there
+	// is no hcfg to peek at, behaves exactly as before.
+	if (!m_appMode)
+		setMouseCaptured(true);
 
 	// Enable SDL text-input so focused in-game TextInput widgets receive
 	// SDL_EVENT_TEXT_INPUT. Harmless when no field is focused (OnEvent only
@@ -297,10 +573,64 @@ void GameApplication::OnInit()
 	}
 	const std::filesystem::path exeDir(baseRaw);
 
+	// ── The window icon (plan A7) ────────────────────────────────────────────
+	// AppIcon.png sits beside the data because the exporter generated it there.
+	// On macOS the Dock icon comes from the bundle's .icns and setting one here
+	// would replace it with the bare bitmap, so this is the other platforms'
+	// path — where the window icon IS the taskbar entry. Same reasoning the
+	// editor's own icon follows.
+#ifndef __APPLE__
+	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+		HE::heSetWindowIcon(w, exeDir / "AppIcon.png");
+#endif
+
 	if (!ProjectConfigLoader::load(exeDir, m_config))
 	{
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
+	}
+	// Application build (docs/he-apps-plan.md A1): everything below that belongs
+	// to a GAME is skipped. Latched into a member because half a dozen places
+	// downstream ask, and reaching into m_config at each of them invites one of
+	// them being forgotten.
+	m_appMode = m_config.appMode;
+	if (m_appMode)
+	{
+		HE_LOG_INFO(Core, "%s", "GameApplication: application mode — no world, no physics, "
+		                        "no scene");
+		// Normally already false: the grab at the top of OnInit is skipped for an
+		// application, off the constructor's peek at this same file. This is the
+		// case the peek cannot answer — a config that only becomes readable HERE
+		// (SDL_GetBasePath disagreeing with itself, a hcfg written between the
+		// two reads). Cheap, and an app that swallowed the cursor is not a bug
+		// the user can talk their way out of.
+		setMouseCaptured(false);
+		// A2: draw on events, not on a clock.
+		setEventDriven(true);
+
+		// ── F3: the frame this window asked the OS to leave off ──────────────
+		// Borderless plus an application means "I draw my own title bar", and
+		// from that moment the OS has to be told what its picture means: which
+		// part carries the window, which parts are its edges. The widget tree
+		// answers both, through one callback, and the whole rest of the feature
+		// is that answer being right.
+		//
+		// Only for an application, and only for Borderless: a game that goes
+		// borderless means "fullscreen without the mode switch", and a fullscreen
+		// window with draggable regions in it would be a window the user could
+		// pull off their screen.
+		if (m_windowMode == HE::WindowMode::Borderless && window())
+		{
+			// The same floor the manual resizer clamps to, given to SDL as well:
+			// on Windows and Linux the window manager does the resizing and would
+			// otherwise let the window shrink to nothing.
+			if (SDL_Window* fw = window()->GetNativeWindow())
+				SDL_SetWindowMinimumSize(fw, kFrameMinPoints.w, kFrameMinPoints.h);
+			window()->SetHitTest([this](int px, int py) { return frameHitAt(px, py); });
+			m_customFrame = true;
+			HE_LOG_INFO(Core, "%s", "GameApplication: borderless window — the widget tree "
+			                        "owns the title bar and the resize edges (plan F3)");
+		}
 	}
 
 	// Override content root set by Application base (it uses argv[0] + "Content")
@@ -394,6 +724,44 @@ void GameApplication::OnInit()
 				"HorizonCodeGen library is missing or was rejected — running interpreted");
 	}
 
+	// ── The theme, before anything is on screen ─────────────────────────────
+	// Both halves BEFORE the GameInstance runs: OnInit is where the first widget
+	// is created, and a widget created against the default theme and re-themed a
+	// frame later is a flash of the wrong colours.
+	//
+	// The desktop's own light/dark is asked for here and again on
+	// SDL_EVENT_SYSTEM_THEME_CHANGED, so an application set to "System" follows
+	// it while it runs. Unknown (a platform SDL cannot ask) keeps the dark
+	// default rather than guessing light.
+	{
+		// m_widgets, NOT m_world->widgets(): the world is built further down and
+		// does not exist yet here. It BORROWS this manager when it is
+		// (setWidgetManager), so the two are the same object from then on — but
+		// only one of them can be reached this early.
+		WidgetManager& wm = m_widgets;
+		const SDL_SystemTheme sys = SDL_GetSystemTheme();
+		if (sys == SDL_SYSTEM_THEME_LIGHT)     wm.setSystemThemeMode(HE::UIThemeMode::Light);
+		else if (sys == SDL_SYSTEM_THEME_DARK) wm.setSystemThemeMode(HE::UIThemeMode::Dark);
+		wm.setThemePreference(HE::uiThemePreferenceFromName(m_config.themeMode));
+		if (!m_config.theme.empty())
+		{
+			if (const HE::UUID id = contentManager().loadAsset(m_config.theme); id != HE::UUID{})
+				if (const ThemeAsset* a = contentManager().getTheme(id))
+				{
+					HE::UITheme t;
+					if (HE::uiThemeFromJson(a->json, t)) wm.setTheme(t);
+					else HE_LOG_WARN(Core, "GameApplication: theme '%s' is unreadable — "
+					                       "using the built-in default",
+					                 m_config.theme.c_str());
+				}
+			if (wm.theme().name == HE::uiDefaultTheme().name && !m_config.theme.empty())
+				HE_LOG_INFO(Core, "GameApplication: theme '%s'", m_config.theme.c_str());
+		}
+		HE_LOG_INFO(Core, "GameApplication: theme mode %s (asked for %s)",
+		            HE::uiThemeModeName(wm.themeMode()),
+		            HE::uiThemePreferenceName(wm.themePreference()));
+	}
+
 	// App-wide GameInstance: load its graph. Preferred source: packed into the
 	// .hpak (ships with the same codec/encryption/bundle layout); fallback: a loose
 	// GameInstance.hcode next to the exe (dev runs on loose content). Empty → an
@@ -439,6 +807,24 @@ void GameApplication::OnInit()
 			SDL_free(pref);
 		}
 	}
+	// What this build may reach outside itself, straight off the hcfg. Set even
+	// when everything is false: perm::set replaces the whole struct, and a
+	// process that ran an application with permissions and then one without has
+	// to end up with the second one's answer.
+	{
+		HE::api::perm::Grants g;
+		g.files     = m_config.allowFiles;
+		g.processes = m_config.allowProcesses;
+		g.network   = m_config.allowNetwork;
+		HE::api::perm::set(g);
+	}
+	// Which scripts the text in this build is written in, straight off the hcfg
+	// and before anything draws: the atlas is baked once, on first use, so this
+	// is the only moment it can be decided. A shipped app never sees the editor,
+	// which is why the answer travels in the config rather than being asked.
+	HE::uiSetFontScripts(m_config.fontScripts);
+	HE::uiSetFontWeightBold(m_config.fontWeightBold);
+
 	// Savegames: the shipped game IS play mode, and save.create() resolves the
 	// project's default template from the hcfg.
 	HE::api::save::setDefaultTemplate(m_config.defaultSaveTemplate);
@@ -467,6 +853,129 @@ void GameApplication::OnInit()
 		// The shipped game IS the application, so app.quit leaves the loop for
 		// real (the editor binds the same hook to stopping play mode instead).
 		g_host.quit     = [this]{ Quit(); };
+		// The shipped build owns its window outright, so unlike the editor there
+		// is nothing to protect here — a graph that resizes it means it. And
+		// "quit" means quit: the shipped game IS the application, so app.quit
+		// leaves the loop for real (the editor binds the same hook to stopping
+		// play mode instead). A main menu's Exit button has nothing else to call.
+		g_host.setWindowTitle = [this](const std::string& t) { setWindowTitle(t); };
+		g_host.setWindowSize  = [this](uint32_t w, uint32_t h) { setWindowSize(w, h); };
+		g_host.windowSize     = [this] {
+			const HE::Window* w = window();
+			return w ? glm::vec2(static_cast<float>(w->GetWidth()),
+			                     static_cast<float>(w->GetHeight()))
+			         : glm::vec2(0.0f);
+		};
+		g_host.requestRedraw  = [this] { requestRedraw(); };
+		// The two title-bar buttons that had nothing to call (plan F3). Bound
+		// wherever setWindowSize is bound and for the same reason: the shipped
+		// game owns its window, so a graph that minimises it means it.
+		g_host.minimizeWindow     = [this] { setWindowMinimized(); };
+		g_host.setWindowMaximized = [this](bool on) { setWindowMaximized(on); };
+		g_host.windowMaximized    = [this] { return windowMaximized(); };
+		g_host.showTray       = [](const std::string& tip) { trayShow(tip); };
+		g_host.hideTray       = [] { destroyTray(); };
+		g_host.addTrayItem    = [](const std::string& id, const std::string& label)
+		                        { trayAddItem(id, label); };
+		g_host.clearTrayMenu  = [] { trayClearMenu(); };
+		// Autostart needs three things the host is the only one to know: who this
+		// application is, what it is called, and where its executable actually
+		// sits right now — a login entry pointing at where it USED to be is worse
+		// than none.
+		g_host.setAutostart   = [this](bool on) {
+			return HE::heSetAutostart(m_config.bundleId, m_config.projectName,
+			                          executablePathForAutostart(), on);
+		};
+		g_host.autostart      = [this] { return HE::heAutostart(m_config.bundleId); };
+		// The menu bar lives in the widget manager, which is where it is drawn.
+		// Built row by row here rather than handed over whole: a graph adds a
+		// menu, then its entries, and each call has to land somewhere.
+		//
+		// Every one of them only marks the bar dirty for the SYSTEM menu (macOS);
+		// rebuilding NSMenus once per call would rebuild them four times while a
+		// graph's OnInit lays out one menu, and the frame loop is where that kind
+		// of work belongs anyway.
+		g_host.addMenu = [this](const std::string& id, const std::string& label) {
+			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
+			for (const HE::AppMenu& m : menus)
+				if (m.id == id) return;   // adding the same menu twice is one menu
+			menus.push_back({ id, label, {} });
+			m_widgets.setMenuBar(std::move(menus));
+			g_menuDirty = true;
+		};
+		g_host.addMenuItem = [this](const std::string& menuId, const std::string& id,
+		                            const std::string& label, const std::string& shortcut) {
+			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
+			for (HE::AppMenu& m : menus)
+				if (m.id == menuId)
+				{
+					m.items.push_back({ id, label, false, shortcut });
+					m_widgets.setMenuBar(std::move(menus));
+					g_menuDirty = true;
+					return;
+				}
+			HE_LOG_WARN(Core, "app.addMenuItem: no menu called '%s'", menuId.c_str());
+		};
+		g_host.addMenuSeparator = [this](const std::string& menuId) {
+			std::vector<HE::AppMenu> menus = m_widgets.menuBar();
+			for (HE::AppMenu& m : menus)
+				if (m.id == menuId)
+				{
+					m.items.push_back({ "", "", true, "" });
+					m_widgets.setMenuBar(std::move(menus));
+					g_menuDirty = true;
+					return;
+				}
+		};
+		g_host.clearMenuBar = [this] { m_widgets.setMenuBar({}); g_menuDirty = true; };
+		// The two rows that change while the program runs. Straight through to
+		// the manager rather than round the copy-modify-setMenuBar dance the
+		// four above do: setMenuBar closes an open menu, and this is the call a
+		// graph makes precisely while one is open.
+		g_host.setMenuItemEnabled = [this](const std::string& id, bool on) {
+			if (!m_widgets.setMenuItemEnabled(id, on))
+				HE_LOG_WARN(Core, "app.setMenuItemEnabled: no menu entry called '%s'",
+				            id.c_str());
+			else g_menuDirty = true;
+		};
+		g_host.setMenuItemChecked = [this](const std::string& id, bool on) {
+			if (!m_widgets.setMenuItemChecked(id, on))
+				HE_LOG_WARN(Core, "app.setMenuItemChecked: no menu entry called '%s'",
+				            id.c_str());
+			else g_menuDirty = true;
+		};
+		g_host.menuItemEnabled = [this](const std::string& id) {
+			return m_widgets.menuItemEnabled(id);
+		};
+		g_host.menuItemChecked = [this](const std::string& id) {
+			return m_widgets.menuItemChecked(id);
+		};
+		// ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────
+		// The shipped application owns its windows outright, so a graph that
+		// opens one means it. createSecondaryWindow refuses on a renderer with
+		// no path into a second window and says so there; 0 comes back here and
+		// the graph reads it as "no window", which is the only honest answer.
+		g_host.openWindow = [this](const std::string& title, uint32_t w, uint32_t h) -> uint32_t
+		{
+			HE::WindowProps p;
+			p.title  = title.empty() ? "Window" : title;
+			p.width  = w;
+			p.height = h;
+			// api is NOT set here on purpose: createSecondaryWindow forces the
+			// main window's, because the SDL flags follow from it.
+			return createSecondaryWindow(p).id;
+		};
+		g_host.closeWindow = [this](uint32_t id) { destroyWindow(HE::WindowHandle{ id }); };
+		g_host.setWindowTitleOf = [this](uint32_t id, const std::string& t)
+		{
+			if (HE::Window* w = getWindow(HE::WindowHandle{ id })) w->SetTitle(t);
+			else HE_LOG_WARN(Script, "window.setTitle: no window with id %u", id);
+		};
+		g_host.setWindowSizeOf = [this](uint32_t id, uint32_t w, uint32_t h)
+		{
+			if (HE::Window* win = getWindow(HE::WindowHandle{ id })) win->SetSize(w, h);
+			else HE_LOG_WARN(Script, "window.setSize: no window with id %u", id);
+		};
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
@@ -576,7 +1085,8 @@ void GameApplication::OnInit()
 			}
 			// The caller travels along — see the editor's twin — and so does the
 			// whole app-level half of the Ctx (audio, runtime, entity host, the
-			// object services, quit): apiCtx() is the one place that fills it.
+			// object services, the window rows, quit): apiCtx() is the one place
+			// that fills it.
 			HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(),
 			                        &contentManager(), self);
 			return fn->invoke(c, args);
@@ -601,7 +1111,11 @@ void GameApplication::OnInit()
 
 	SceneSerializer serializer;
 	bool sceneLoaded = false;
-	if (m_config.hasPackedScene)
+	// An application has no scene to load. The world above still exists and is
+	// still handed to the renderer below, because it is what routes the widget
+	// API (ScriptApi::createWidget goes through HorizonWorld::widgets) — it just
+	// stays empty.
+	if (!m_appMode && m_config.hasPackedScene)
 	{
 		// Preferred: binary (CBOR) scene packed into the .hpak.
 		const auto sceneBytes = contentManager().readMountedEntry(sceneUuid);
@@ -616,7 +1130,7 @@ void GameApplication::OnInit()
 		else
 			HE_LOG_WARN(Core, "%s", "GameApplication: failed to load packed startup scene");
 	}
-	if (!sceneLoaded && !m_config.mainSceneName.empty())
+	if (!m_appMode && !sceneLoaded && !m_config.mainSceneName.empty())
 	{
 		// Fallback: loose .hescene (JSON) next to the executable.
 		const std::filesystem::path scenePath = exeDir / m_config.mainSceneName;
@@ -631,31 +1145,44 @@ void GameApplication::OnInit()
 	// assets, spawn the controllers on the shared runtime (Construct + BeginPlay)
 	// and start pumping Tick/Input.* events (OnRender). After the scene load so
 	// BeginPlay can reach scene entities through the engine-call API.
-	// Physics first of the three, because startPhysics() is what hands the entity
-	// host the world it builds spawned bodies in.
-	startPhysics();
-	// Then the entity host, still before the player host: a controller's
-	// BeginPlay is where the game spawns its character with Create Object, and
-	// that spawn is only served — with an entity, and now with a body on it —
-	// while the entity host is running. The body half of that sentence used to
-	// be a claim rather than a fact; EntityHost::spawn makes it true.
-	if (m_world)
-		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
-	// The entity host is handed over so the player host can find the characters
-	// the LEVEL already placed; it never spawns through it.
-	m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
-	// Last of the hosts: a player character spawned just above may be the very
-	// entity whose state machine needs a sync graph.
-	m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	// None of this exists in an application: no bodies to simulate, no player to
+	// possess, no characters to animate. Left unstarted rather than started and
+	// then fed an empty world, so the cost is zero rather than nearly zero — and
+	// so their per-frame ticks below no-op on their own.
+	if (!m_appMode)
+	{
+		// Physics first of the three, because startPhysics() is what hands the
+		// entity host the world it builds spawned bodies in.
+		startPhysics();
+		// Then the entity host, still before the player host: a controller's
+		// BeginPlay is where the game spawns its character with Create Object,
+		// and that spawn is only served — with an entity, and now with a body on
+		// it — while the entity host is running. The body half of that sentence
+		// used to be a claim rather than a fact; EntityHost::spawn makes it true.
+		if (m_world)
+			m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+		// The entity host is handed over so the player host can find the characters
+		// the LEVEL already placed; it never spawns through it.
+		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// Last of the hosts: a player character spawned just above may be the very
+		// entity whose state machine needs a sync graph.
+		m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	}
 
 	// AFTER the player spawns, not before: a PlayerCharacter class brings its own
 	// camera along, and that camera only exists once the class has been
 	// instantiated. Checking first would find an empty scene, add a fallback
 	// camera flagged isMain, and that fallback — created earlier — is the one the
 	// extractor picks. The player would then own a camera nothing renders through.
+	// Kept in application mode too, deliberately: the extractor and every backend
+	// build their frame around an active camera, and a UI-only frame still goes
+	// through that path. It costs one entity and nothing per frame — what an app
+	// skips is the CONTROLLER (updateCameraController below), so the camera sits
+	// still and WASD belongs to the UI.
 	if (ensureDefaultCamera(*m_world))
 		HE_LOG_INFO(Core, "%s",
-			"GameApplication: added a default free-fly camera (scene had none)");
+			m_appMode ? "GameApplication: added the still camera the UI frame renders through"
+			          : "GameApplication: added a default free-fly camera (scene had none)");
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
@@ -665,9 +1192,12 @@ void GameApplication::OnInit()
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");
 
-	HE_LOG_INFO(Core, "%s",
-		("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
-		 " scene-referenced asset roots").c_str());
+	// Nothing to stream without a scene: an app's assets are reached through its
+	// widgets, which load on demand.
+	if (!m_appMode)
+		HE_LOG_INFO(Core, "%s",
+			("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
+			 " scene-referenced asset roots").c_str());
 
 	// Native C++ game logic: an optional GameLogic library next to the executable
 	// (built from the game's C++ project). Once loaded, the base Application loop
@@ -1063,13 +1593,75 @@ void GameApplication::updateScripts(float dt)
 		m_scriptContext->callOnUpdate(instId, dt);
 }
 
+HE::UIWindowHit GameApplication::frameHitAt(int pointX, int pointY)
+{
+	if (!m_customFrame) return HE::UIWindowHit::Normal;
+	SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr;
+	if (!w) return HE::UIWindowHit::Normal;
+
+	// SDL asks in window points; the widget tree lays out and hit-tests in
+	// drawable pixels. On a Retina display those differ by two, and skipping
+	// this line would put the title bar at half its height — the same class of
+	// mistake F2 found twice.
+	int ww = 1, wh = 1, pw = 1, ph = 1;
+	SDL_GetWindowSize(w, &ww, &wh);
+	SDL_GetWindowSizeInPixels(w, &pw, &ph);
+	const float sx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
+	const float sy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
+
+	return m_widgets.windowHitAt(static_cast<float>(pw), static_cast<float>(ph),
+	                             pointX * sx, pointY * sy,
+	                             kFrameBorderPoints * sx);
+}
+
+bool GameApplication::menuShortcutFromKey(const SDL_KeyboardEvent& key)
+{
+	if (!m_world) return false;
+
+	// The name comes from the SCANCODE with no modifiers, not from the keycode
+	// in the event. The keycode is what the layout says the key produces right
+	// now, so Shift+2 arrives as "quotedbl" on a German keyboard and Ctrl+Alt+Q
+	// as something else again on the layouts that put a character there — a
+	// chord written "Ctrl+Shift+2" would then match on one keyboard and not on
+	// the next. The scancode is the physical key, and the unmodified keycode is
+	// the name a person would write for it.
+	const SDL_Keycode plain = SDL_GetKeyFromScancode(key.scancode, SDL_KMOD_NONE, false);
+	const char* name = SDL_GetKeyName(plain);
+	if (!name || !*name) return false;
+
+	// Cmd and Ctrl are one flag here, exactly as they are in the text-editing
+	// keys above: an application says Ctrl+S once and gets Cmd+S on a Mac.
+	return m_world->widgets().fireMenuShortcut(
+		name,
+		(key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0,
+		(key.mod & SDL_KMOD_SHIFT) != 0,
+		(key.mod & SDL_KMOD_ALT) != 0);
+}
+
 void GameApplication::updateUIInput()
 {
 	if (!m_world) return;
 
-	SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr;
+	SDL_Window* const primary = window() ? window()->GetNativeWindow() : nullptr;
 	float mx = 0.0f, my = 0.0f;
 	const SDL_MouseButtonFlags buttons = SDL_GetMouseState(&mx, &my);
+
+	// ── Which window are those coordinates in? ───────────────────────────────
+	// SDL_GetMouseState reports relative to the window the mouse is OVER, so
+	// the size and the scale have to come from that window too — on a second
+	// monitor with a different setting, taking the main window's numbers puts
+	// every click somewhere else entirely. Off every window of ours (or no
+	// second window at all) means the main one, which is what it always was.
+	SDL_Window* w = SDL_GetMouseFocus();
+	uint32_t uiWindow = 0;
+	if (w && w != primary)
+	{
+		const uint32_t sid = SDL_GetWindowID(w);
+		if (getWindow(HE::WindowHandle{ sid })) uiWindow = sid;
+		else                                    w = primary;   // not one of ours
+	}
+	else
+		w = primary;
 
 	// The UI pass renders at drawable resolution; SDL reports the mouse in
 	// window points — rescale (HiDPI).
@@ -1082,6 +1674,17 @@ void GameApplication::updateUIInput()
 	const float sx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
 	const float sy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
 
+	// The system scaling, asked fresh every frame rather than watched for
+	// SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: it is one cheap call, and it is
+	// right the frame the window is dragged onto a second monitor with a
+	// different setting. This is what a ConstantPixel canvas lays out in, and
+	// it is NOT the sx/sy above — that pair converts window points to pixels
+	// (macOS Retina), this one also carries what Windows and X11 call the
+	// content scale, where the points ARE pixels and only the scale says 200%.
+	// …for THIS window. Two windows on two monitors have two of these, and the
+	// one that matters is the one the pointer is in.
+	m_widgets.setDisplayScale(uiWindow, w ? SDL_GetWindowDisplayScale(w) : 1.0f);
+
 	// While the fly-look holds the mouse captive there is no visible cursor —
 	// hover states clear and nothing is clickable (Esc releases the mouse).
 	//
@@ -1090,16 +1693,66 @@ void GameApplication::updateUIInput()
 	// what clears a hover the UI is already showing. Returning early would leave
 	// the last hovered button lit for as long as the mode lasts.
 	const bool uiTakesInput = HE::api::input::mode() != HE::api::input::Mode::GameOnly;
-	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput;
+	// …and an edge drag owns the pointer while it lasts, the same way the
+	// fly-look does: the mouse is sizing the window, not pointing at anything in
+	// it, and a slider under the edge that starts following it would be the UI
+	// answering a gesture that was never aimed at it.
+	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput &&
+	                          !m_frameResize.active();
 
 	// Widget pointer input first — widgets draw on top of entity UI. The answer
 	// ("the pointer is on something clickable") is kept, not dropped: it is what
 	// masks the mouse buttons out of gameplay next frame, so pressing a menu
 	// button does not also fire the weapon behind it.
 	m_uiWantsPointer =
-		m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
+		m_world->widgets().processPointer(uiWindow,
+		                                  static_cast<float>(pw), static_cast<float>(ph),
 		                                  mx * sx, my * sy,
-		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
+		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
+		                                  (buttons & SDL_BUTTON_RMASK) != 0);
+
+	// Tell the OS where the focused field is, so an input method opens its
+	// candidate list beside it instead of in the corner of the screen. Pushed
+	// every frame a field is focused: the field can move (a scrolled list, a
+	// resized window), and SDL only remembers what it was last told.
+	// The window the field is IN, which is the one the pointer just wrote to.
+	if (SDL_Window* win = w)
+	{
+		HE::UIWidgetRect fieldRect{};
+		if (m_world->widgets().focusedFieldRect(static_cast<float>(pw),
+		                                        static_cast<float>(ph), fieldRect))
+		{
+			// Back to window points: SDL wants the rect in the same space it
+			// reports the mouse in, and the UI works in drawable pixels.
+			const SDL_Rect area{
+				static_cast<int>(fieldRect.x / (sx > 0.0f ? sx : 1.0f)),
+				static_cast<int>(fieldRect.y / (sy > 0.0f ? sy : 1.0f)),
+				static_cast<int>(fieldRect.w / (sx > 0.0f ? sx : 1.0f)),
+				static_cast<int>(fieldRect.h / (sy > 0.0f ? sy : 1.0f)) };
+			SDL_SetTextInputArea(win, &area, 0);
+		}
+	}
+
+	// A double-click selects the word under it, a triple-click the whole line.
+	// Consumed here rather than in OnEvent so it reuses the pointer arithmetic
+	// above instead of a second, drifting copy of it. The press that came with
+	// the same click already focused the field and put the caret there.
+	if (pointerValid && m_uiClickCount >= 2)
+	{
+		if (m_uiClickCount == 2)
+		{
+			// Text first, then the things for which a double-click means "open
+			// this": a list row. One gesture, one meaning per thing it lands on.
+			if (!m_world->widgets().selectWordAtPointer(static_cast<float>(pw),
+			                                            static_cast<float>(ph),
+			                                            mx * sx, my * sy))
+				m_world->widgets().activateAtPointer(static_cast<float>(pw),
+				                                     static_cast<float>(ph), mx * sx, my * sy);
+		}
+		else
+			m_world->widgets().selectAllFocused();
+	}
+	m_uiClickCount = 0;
 
 	// The wheel goes to a scroll box under the cursor first; what it does not
 	// consume stays available to whatever else reads the wheel this frame.
@@ -1114,11 +1767,62 @@ void GameApplication::updateUIInput()
 	// Show the cursor the hovered widget element requested (default = arrow).
 	if (pointerValid) HE::applyUICursor(m_world->widgets().hoverCursor());
 
+	// ── …and the edge cursors of a borderless window, on the one platform ────
+	// Windows, X11 and Wayland set the resize cursor themselves the moment the
+	// hit test names an edge — doing it a second time from here would fight
+	// them. macOS reads only SDL_HITTEST_DRAGGABLE and never touches the cursor,
+	// so an edge there would look like ordinary content right up until it moved.
+	// AFTER applyUICursor, because on an edge the frame outranks whatever the
+	// element under it wanted.
+#if defined(__APPLE__)
+	// Main window only: the borderless frame is the application's own chrome,
+	// and a tool window has the system's title bar like everything else.
+	if (m_customFrame && uiWindow == 0 && w && !m_mouseCaptured)
+	{
+		const HE::UIWindowHit fh = m_frameResize.active()
+			? m_frameResize.edge()
+			: frameHitAt(static_cast<int>(mx), static_cast<int>(my));
+		if (HE::uiWindowHitIsResize(fh))
+			HE::applyUICursor(HE::uiWindowHitCursor(fh));
+	}
+#endif
+
 	// ── Keyboard / gamepad menu navigation ───────────────────────────────────
 	// A menu has to be usable without a mouse. Arrow keys and the pad's D-Pad
 	// move the focus, Enter/Space and the south button activate it. Not routed
 	// while a text field has the keyboard: there the arrows belong to the text.
-	if (uiTakesInput && !m_world->widgets().hasFocusedTextField())
+	// ── Back, and NOT behind the text-field gate ─────────────────────────────
+	// isEditingText() is "something has the keyboard", and showModal gives
+	// the keyboard to the dialog by construction — so putting this inside the
+	// block below would switch it off at exactly the moment a dialog is up. It
+	// also has to work WHILE typing: cancelling a dialog from inside its own
+	// input field is what Escape means everywhere.
+	if (uiTakesInput)
+	{
+		const bool back = input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
+		if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
+		m_uiBackPrev = back;
+
+		// Tab is the other way through a form, and it belongs OUTSIDE the gate
+		// below for the same reason Escape does: it has to work while a text
+		// field has the keyboard, because leaving that field is exactly what it
+		// is for. Shift+Tab goes back.
+		const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
+		if (tab && !m_uiTabPrev)
+		{
+			const bool back2 = input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
+			                   input().IsKeyDown(SDL_SCANCODE_RSHIFT);
+			m_world->widgets().focusNext(back2, static_cast<float>(pw),
+			                             static_cast<float>(ph));
+		}
+		m_uiTabPrev = tab;
+	}
+	// The arrows reach the widgets when no text field has the keyboard — or when
+	// a list hangs open, because then they belong to the list whatever else has
+	// the focus. That second half is what makes a dropdown opened from beside a
+	// text field navigable at all.
+	if (uiTakesInput && (!m_world->widgets().isEditingText() ||
+	                     m_world->widgets().hasOpenDropdown()))
 	{
 		Input& in = input();
 		using Nav = WidgetManager::NavDir;
@@ -1247,6 +1951,77 @@ void GameApplication::updateCameraController(float dt)
 
 bool GameApplication::OnEvent(const SDL_Event& event)
 {
+	// ── Resizing a borderless window at its edges (plan F3) ──────────────────
+	// First in this function, and consuming: a press on an edge is a press on
+	// the window's frame, and nothing behind the frame may see it.
+	//
+	// This runs on macOS and nowhere else, without a single #ifdef. Windows,
+	// X11 and Wayland take the RESIZE_* answer out of the hit test, size the
+	// window themselves and swallow the press while doing it — so on those three
+	// the button-down below simply never arrives, and the same code is dead by
+	// construction rather than by a platform switch that could go stale.
+	if (m_customFrame)
+	{
+		if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT)
+		{
+			const HE::UIWindowHit hit = frameHitAt(static_cast<int>(event.button.x),
+			                                       static_cast<int>(event.button.y));
+			if (HE::uiWindowHitIsResize(hit))
+			{
+				SDL_Window* fw = window() ? window()->GetNativeWindow() : nullptr;
+				if (fw)
+				{
+					HE::UIWindowRect r{};
+					SDL_GetWindowPosition(fw, &r.x, &r.y);
+					SDL_GetWindowSize(fw, &r.w, &r.h);
+					// The DESKTOP position, not the one in the event: the whole
+					// point of dragging the left edge is that the pointer leaves
+					// the window, and a window-relative position stops moving
+					// exactly when the window starts to.
+					float gx = 0.0f, gy = 0.0f;
+					SDL_GetGlobalMouseState(&gx, &gy);
+					m_frameResize.begin(hit, r, static_cast<int>(gx), static_cast<int>(gy));
+					// A double-click on the edge is a resize that started twice,
+					// not a word being selected somewhere behind it.
+					m_uiClickCount = 0;
+					return true;
+				}
+			}
+		}
+		else if (m_frameResize.active())
+		{
+			if (event.type == SDL_EVENT_MOUSE_MOTION)
+			{
+				float gx = 0.0f, gy = 0.0f;
+				SDL_GetGlobalMouseState(&gx, &gy);
+				const HE::UIWindowRect r = m_frameResize.update(
+					static_cast<int>(gx), static_cast<int>(gy),
+					kFrameMinPoints.w, kFrameMinPoints.h);
+				if (SDL_Window* fw = window() ? window()->GetNativeWindow() : nullptr)
+				{
+					// Position first, then size: growing to the left is the
+					// window moving AND growing, and doing it the other way
+					// round makes the far edge jitter by one frame's delta.
+					SDL_SetWindowPosition(fw, r.x, r.y);
+					SDL_SetWindowSize(fw, r.w, r.h);
+				}
+				return true;
+			}
+			if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT)
+			{
+				m_frameResize.end();
+				return true;
+			}
+		}
+	}
+
+	// A double- or triple-click on a text field selects a word or the line.
+	// Only the COUNT is taken here; where the pointer was is worked out in
+	// updateUIInput, which already does that arithmetic once.
+	if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT &&
+	    event.button.clicks >= 2)
+		m_uiClickCount = event.button.clicks;
+
 	// OS window focus → GameInstance OnWindowFocusChanged (while running), and —
 	// when the project asks for it — the FocusLost pause reason.
 	//
@@ -1269,17 +2044,129 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		if (m_pauseOnFocusLoss) HE::api::time::pause(HE::api::time::PauseReason::FocusLost);
 	}
 
+	// The desktop switched between light and dark while we were running. An
+	// application set to "System" follows it now rather than at the next start —
+	// that is the entire difference between the setting and a once-at-boot
+	// reading. Outside every gate below: the desktop's theme has nothing to do
+	// with whether a text field happens to be open, and it sat inside that gate
+	// long enough to mean the setting only worked while someone was typing.
+	if (event.type == SDL_EVENT_SYSTEM_THEME_CHANGED)
+	{
+		const SDL_SystemTheme sys = SDL_GetSystemTheme();
+		if (sys == SDL_SYSTEM_THEME_LIGHT)
+			m_widgets.setSystemThemeMode(HE::UIThemeMode::Light);
+		else if (sys == SDL_SYSTEM_THEME_DARK)
+			m_widgets.setSystemThemeMode(HE::UIThemeMode::Dark);
+		return true;
+	}
+
+	// ── Files dragged in from the desktop (docs/he-apps-plan.md B7) ──────────
+	// SDL reports one drag as four kinds of event: it entered the window, it
+	// moved, here is a file, it is over. The files arrive one at a time BEFORE
+	// the end, so they are collected and delivered when the gesture finishes —
+	// dropping three files is one drop, not three.
+	if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION ||
+	    event.type == SDL_EVENT_DROP_FILE  || event.type == SDL_EVENT_DROP_COMPLETE)
+	{
+		// The drop position comes in window points, like the mouse; the UI works
+		// in drawable pixels. Same conversion updateUIInput does, and for the
+		// same reason: on a Retina display the two differ by a factor of two.
+		SDL_Window* win = window() ? window()->GetNativeWindow() : nullptr;
+		int ww = 1, wh = 1, pw = 1, ph = 1;
+		if (win) { SDL_GetWindowSize(win, &ww, &wh); SDL_GetWindowSizeInPixels(win, &pw, &ph); }
+		const float dsx = ww > 0 ? static_cast<float>(pw) / ww : 1.0f;
+		const float dsy = wh > 0 ? static_cast<float>(ph) / wh : 1.0f;
+		if (event.type != SDL_EVENT_DROP_COMPLETE)
+		{
+			m_dropX = event.drop.x * dsx;
+			m_dropY = event.drop.y * dsy;
+		}
+		switch (event.type)
+		{
+		case SDL_EVENT_DROP_BEGIN:
+			m_dropPaths.clear();
+			break;
+		case SDL_EVENT_DROP_POSITION:
+			m_widgets.dropHover(static_cast<float>(pw), static_cast<float>(ph),
+			                    m_dropX, m_dropY, true);
+			break;
+		case SDL_EVENT_DROP_FILE:
+			if (event.drop.data) m_dropPaths.emplace_back(event.drop.data);
+			break;
+		default:   // SDL_EVENT_DROP_COMPLETE
+			// Dragging a file onto the window IS choosing it, exactly as picking
+			// it in an open dialog is — same person, same intent, and the app was
+			// handed the path either way. So the drop grants it, or the event
+			// would arrive carrying a path the script is not allowed to read,
+			// which is a file drop that cannot open a file. The grant belongs
+			// HERE and not in the widget layer: turning a human gesture into a
+			// permission is the host's job, and the dialogs do it from the same
+			// side (HE::api::fs::grantPath).
+			for (const std::string& p : m_dropPaths) HE::api::fs::grantPath(p);
+			m_widgets.processDrop(static_cast<float>(pw), static_cast<float>(ph),
+			                      m_dropX, m_dropY, m_dropPaths);
+			m_dropPaths.clear();
+			break;
+		}
+		return true;
+	}
+
 	// A focused in-game text field owns the keyboard: route text + edit keys to
 	// the widget and swallow them so they don't drive the camera/gameplay.
 	// Not under game-only routing: there the UI receives nothing, and a field
 	// that still held focus from before the switch would otherwise keep eating
 	// the movement keys with no way for the player to take them back.
+	// A focused selectable LABEL owns a much smaller grammar than a field: it
+	// can be selected in and copied out of, and nothing else. Its own block
+	// rather than a widening of the one below, so a paragraph cannot swallow
+	// Return, Backspace or a letter the application bound to something.
 	if (m_world && HE::api::input::mode() != HE::api::input::Mode::GameOnly &&
-	    m_world->widgets().hasFocusedTextField())
+	    m_world->widgets().isSelectingText() && event.type == SDL_EVENT_KEY_DOWN)
+	{
+		WidgetManager& wm = m_world->widgets();
+		using TE = WidgetManager::TextEdit;
+		const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+		const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+		const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
+		switch (event.key.key)
+		{
+		case SDLK_LEFT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);  return true;
+		case SDLK_RIGHT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift); return true;
+		case SDLK_HOME: wm.editFocusedText(TE::Home, shift); return true;
+		case SDLK_END:  wm.editFocusedText(TE::End,  shift); return true;
+		case SDLK_UP:   wm.editFocusedText(TE::Up,   shift); return true;
+		case SDLK_DOWN: wm.editFocusedText(TE::Down, shift); return true;
+		case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+		case SDLK_C:
+			if (ctrl)
+			{
+				const std::string sel = wm.focusedSelection();
+				if (!sel.empty()) SDL_SetClipboardText(sel.c_str());
+				return true;
+			}
+			break;
+		// Everything else belongs to whatever the application does with it. A
+		// label is not a text box and must not act like one.
+		default: break;
+		}
+	}
+	if (m_world && HE::api::input::mode() != HE::api::input::Mode::GameOnly &&
+	    m_world->widgets().isEditingText())
 	{
 		if (event.type == SDL_EVENT_TEXT_INPUT)
 		{
 			m_world->widgets().inputText(event.text.text);
+			return true;
+		}
+		// What an input method is still building. Sent repeatedly while the user
+		// types on a CJK keyboard, and finally as an empty string when the
+		// composition is committed or cancelled — which is exactly what clears it.
+		if (event.type == SDL_EVENT_TEXT_EDITING)
+		{
+			m_world->widgets().inputComposition(event.edit.text ? event.edit.text : "",
+			                                    event.edit.start);
 			return true;
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)
@@ -1291,17 +2178,43 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 			using TE = WidgetManager::TextEdit;
 			const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
 			const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+			const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
 			switch (event.key.key)
 			{
-			case SDLK_BACKSPACE: wm.inputBackspace(); return true;
+			// Word-wise variants first: Ctrl (Cmd on a Mac) and Alt both mean
+			// "by word" for the arrows and Backspace, which is what the two
+			// platform conventions expect and neither is wrong here.
+			case SDLK_BACKSPACE:
+				if (ctrl || alt) { wm.editFocusedText(TE::DeleteWordLeft, false); return true; }
+				wm.inputBackspace(); return true;
 			case SDLK_DELETE:    wm.editFocusedText(TE::Delete, false); return true;
-			case SDLK_LEFT:      wm.editFocusedText(TE::Left,  shift);  return true;
-			case SDLK_RIGHT:     wm.editFocusedText(TE::Right, shift);  return true;
+			case SDLK_LEFT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);
+				return true;
+			case SDLK_RIGHT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift);
+				return true;
 			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
 			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
+			// Only a multiline field answers these; in a single-line one they do
+			// nothing and the key is still swallowed, because a focused text
+			// field owns the arrow keys either way.
+			case SDLK_UP:        wm.editFocusedText(TE::Up,    shift);  return true;
+			case SDLK_DOWN:      wm.editFocusedText(TE::Down,  shift);  return true;
 			case SDLK_RETURN:
 			case SDLK_KP_ENTER:  wm.inputSubmit(); return true;
 			case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+			case SDLK_Z:
+				// Ctrl+Z takes back, Ctrl+Shift+Z puts back — the chord every
+				// platform agrees on. Ctrl+Y is the Windows spelling of redo and
+				// is bound below for the people who reach for it.
+				if (ctrl)
+				{
+					if (shift) wm.redoFocusedText(); else wm.undoFocusedText();
+					return true;
+				}
+				break;
+			case SDLK_Y: if (ctrl) { wm.redoFocusedText(); return true; } break;
 			case SDLK_C:
 				if (ctrl)
 				{
@@ -1328,12 +2241,33 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				break;
 			default: break;
 			}
+			// ── A menu's shortcut, from inside a field somebody is typing in ──
+			// After the switch above and not before it, and that is the whole
+			// decision: an application that binds Ctrl+C to Edit → Copy must not
+			// take the field's own copy away, because there is nothing left to
+			// copy WITH — the clipboard lives out here and no graph can reach a
+			// field's selection. So the field's chords win where they overlap,
+			// and every other chord reaches the menu.
+			//
+			// Only WITH a modifier. A bare F5 while a form is being filled in is
+			// a person typing, not a person reloading, and a menu that fired on
+			// it would make text fields unusable in any application whose menus
+			// carry plain-key shortcuts.
+			if (!event.key.repeat && (ctrl || alt))
+				if (menuShortcutFromKey(event.key)) return true;
 			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
 		}
 	}
 
 	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
 	{
+		// ── A menu's shortcut, nothing being typed ───────────────────────────
+		// FIRST in this block and ahead of everything the widgets are polled
+		// for: a shortcut is the menu answered without opening it, and a bar
+		// that only answers once its own strip has been clicked open is not a
+		// shortcut at all. Bare keys are allowed here — F5 means F5 when nobody
+		// is in a text field.
+		if (menuShortcutFromKey(event.key)) return true;
 #ifdef HE_GAME_DEV_HOTKEYS
 		// V: static VSync toggle — DEVELOPMENT BUILDS ONLY. A shipped game has no
 		// settings menu yet, and a stray V must not silently flip the player's
@@ -1348,14 +2282,40 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 			return true;
 		}
 #endif
-		// Esc: release/re-grab the mouse.
+		// Esc closes the topmost dialog, popup or menu FIRST, and only when
+		// there is none does it mean what it always meant here. The order is the
+		// whole point: a pause dialog that Escape cannot dismiss because Escape
+		// is already spoken for is a dialog nobody can leave.
 		if (event.key.key == SDLK_ESCAPE)
 		{
+			// Leaving a field comes first, and before closing anything: Escape
+			// out of a search box means "stop typing", not "throw away the
+			// dialog I was typing in". The focus stays where it is, so the very
+			// next Tab carries on through the form.
+			if (m_world && m_world->widgets().stopEditingText()) return true;
+			if (m_world && m_world->widgets().closeTopLayer()) return true;
+			// …and in an APPLICATION it means nothing else. There is no
+			// FPS-style grab to give back — an app never took the cursor — so
+			// toggling one here only hid the pointer of a program that has no
+			// use for a hidden pointer. Not swallowed either: Escape is a key an
+			// application's own logic is entitled to see.
+			if (m_appMode) return false;
 			setMouseCaptured(!m_mouseCaptured);
 			return true;
 		}
 	}
 	return false;
+}
+
+bool GameApplication::WantsPresent()
+{
+	// Outside application mode this is never consulted (the loop only asks in
+	// event-driven mode), but answering true keeps the contract honest if that
+	// ever changes: a game's world moves every frame whether the UI did or not.
+	if (!m_appMode || !m_world) return true;
+	// Consuming, once per frame — see WidgetManager::consumeVisualDirty for why
+	// asking must also clear.
+	return m_world->widgets().consumeVisualDirty();
 }
 
 void GameApplication::OnRender(float deltaTime)
@@ -1364,6 +2324,120 @@ void GameApplication::OnRender(float deltaTime)
 	// so every renderer touch below goes through this one handle and its null check
 	// — the checks used to be applied to some calls and forgotten on others.
 	IRenderer* const r = renderer();
+
+	// ── "Open with", delivered once ──────────────────────────────────────────
+	// Through the SAME door a drop uses, and deliberately so: an application that
+	// opens what it is handed wants ONE place to say so, and whether the document
+	// arrived by double-click or by being dragged onto the window is the system's
+	// business, not the author's. Position (-1, -1) is honest — nothing was
+	// dropped anywhere, so no element takes it and it reaches the GameInstance.
+	// (On macOS this list is empty: the system sends an open event, which SDL
+	// turns into the drop path above.)
+	if (m_launchFilesPending)
+	{
+		m_launchFilesPending = false;
+		const std::vector<std::string>& files = launchArguments();
+		if (!files.empty())
+		{
+			for (const std::string& p : files) HE::api::fs::grantPath(p);
+			int pw = 1, ph = 1;
+			if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+				SDL_GetWindowSizeInPixels(w, &pw, &ph);
+			m_widgets.processDrop(static_cast<float>(pw), static_cast<float>(ph),
+			                      -1.0f, -1.0f, files);
+		}
+	}
+
+	// Tray clicks, collected inside SDL's pump and delivered here — outside it,
+	// where firing a graph is what the frame is for. Same reason the launch
+	// files above wait, and the ids go to the GameInstance because the tray
+	// belongs to the application and not to any element.
+	if (!g_trayClicks.empty())
+	{
+		std::vector<std::string> clicks;
+		clicks.swap(g_trayClicks);
+		if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+			for (const std::string& id : clicks)
+				m_gameInstance.runtime().fireOnTrayItem(gi, 0, id);
+	}
+
+	// Answered HTTP requests, collected on the worker thread and delivered here
+	// for the same reason the tray's clicks are: firing a graph belongs in the
+	// frame. The graph gets the TICKET and asks the readers what came back.
+	{
+		int ticket = 0;
+		while (HE::api::http::takeFinished(ticket))
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnHttpResponse(gi, 0, ticket);
+	}
+
+	// Watched files. The scan itself happens HERE and not on a thread: the
+	// sandbox root, the granted paths and the permission bits are process-wide
+	// statics that no lock guards, so a watcher thread resolving a path would
+	// race every file dialog. It costs a stat per watch per second, and an idle
+	// application still reaches this line because the event-driven loop keeps a
+	// 100 ms heartbeat.
+	{
+		HE::api::fs::pollWatches(deltaTime);
+		std::string changed;
+		while (HE::api::fs::takeChange(changed))
+		{
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnFileChanged(gi, 0, changed);
+			// Nothing about a file arriving is an OS event for this window, so
+			// the frame that would draw the reaction has to be asked for.
+			requestRedraw();
+		}
+	}
+
+	// Timers. Same shape as the two above, and one thing more: the loop is
+	// event-driven and wakes on a 100 ms heartbeat, so a timer left to that
+	// would be up to a tenth of a second late on EVERY tick. The next due time
+	// is handed to the loop as a shorter wait — asked again every frame,
+	// because askWakeWithinMs is a one-shot.
+	{
+		HE::api::timer::poll(deltaTime);
+		int fired = 0;
+		while (HE::api::timer::takeFired(fired))
+		{
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnTimer(gi, 0, fired);
+			// A timer coming due is not an OS event for this window, so the
+			// frame that draws the reaction has to be asked for.
+			requestRedraw();
+		}
+		const double due = HE::api::timer::nextDueSeconds();
+		if (due >= 0.0)
+		{
+			// Rounded DOWN and never below one: waking a millisecond early costs
+			// one idle turn of the loop, waking late is the thing this exists to
+			// prevent.
+			const double ms = due * 1000.0;
+			askWakeWithinMs(ms < 1.0 ? 1 : static_cast<int>(ms));
+		}
+	}
+
+#ifdef __APPLE__
+	// ── The same menu bar, in the system bar (plan A6) ───────────────────────
+	// Whether there IS one is asked here and not at startup: it is SDL's answer,
+	// and it only becomes true once SDL has registered the application. Asking
+	// once too early would draw the strip for the rest of the run.
+	if (g_menuDirty)
+	{
+		g_menuDirty = false;
+		m_widgets.setMenuBarNative(HE::AppMacMenu::available());
+		HE::AppMacMenu::set(m_widgets.menuBar());
+	}
+	// A menu click comes out of AppKit's own run loop, so it waits exactly like a
+	// tray click and arrives at the same door as the drawn bar's: OnMenuItem at
+	// the GameInstance, carrying the id.
+	{
+		std::string menuItemId;
+		while (HE::AppMacMenu::take(menuItemId))
+			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+				m_gameInstance.runtime().fireOnMenuItem(gi, 0, menuItemId);
+	}
+#endif
 
 	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
 	// scripts read fresh values this frame (before the ECS/script updates below).
@@ -1479,7 +2553,10 @@ void GameApplication::OnRender(float deltaTime)
 	// following a target it updated before the step would follow where that
 	// target was LAST frame, and that lag is visible. Still before the systems
 	// tick, so LOD and precipitation get this frame's camera position.
-	updateCameraController(gameDt);
+	// Not in an application: its camera is a still one that exists only so the
+	// frame has a viewpoint, and a fly-camera controller there would answer WASD
+	// while the user is typing into a text field.
+	if (!m_appMode) updateCameraController(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
@@ -1489,6 +2566,15 @@ void GameApplication::OnRender(float deltaTime)
 	// pause menu is a widget, and a menu that stops ticking when the game pauses
 	// cannot animate, count down, or hand the player a way back out.
 	if (m_world) m_world->widgets().tick(deltaTime);
+
+	// An animation is the one thing that changes the picture without anyone
+	// touching the machine, and an event-driven application sleeps until
+	// something happens (see Application::setEventDriven). Asking for the next
+	// frame while one runs is what makes it run at the display's speed instead
+	// of the idle heartbeat's ten frames a second. The last frame of an
+	// animation still asks, and the one after it does not — the value has
+	// arrived by then, so the loop goes back to sleep on its own.
+	if (m_world && m_world->widgets().isAnimating()) requestRedraw();
 
 	// Player instances: Tick + Input.<Action>.* events (mapping ticked against
 	// the app Input state, which ProcessEvent keeps current).
@@ -1521,7 +2607,9 @@ void GameApplication::OnRender(float deltaTime)
 	// Tick the shared gameplay/visual systems (weather, animation, particles, …) so a
 	// shipped game animates exactly like the editor preview. Feed the active scene
 	// camera's world position so LOD + precipitation follow the player.
-	if (m_world)
+	// An application has none of these in its (empty) world, and every one of them
+	// would walk a view of zero entities per frame for the rest of its life.
+	if (m_world && !m_appMode)
 	{
 		glm::vec3 camPos(0.0f);
 		for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
@@ -1536,8 +2624,9 @@ void GameApplication::OnRender(float deltaTime)
 		}
 		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&
 		                          r && r->GetCapabilities().supportsGpuParticles;
-		// Unbraced on purpose: the scope reaches to the end of this `if (m_world)`
-		// block, so the GI + environment pushes below are timed with it (as before).
+		// Unbraced on purpose: the scope reaches to the end of this block, which is
+		// now the world-systems tick alone — the renderer pushes moved out from
+		// under it when the app-mode branch turned out to be unreachable there.
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
@@ -1545,12 +2634,54 @@ void GameApplication::OnRender(float deltaTime)
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
+	}
 
+	// ── Renderer settings, in BOTH modes ─────────────────────────────────────
+	// This used to sit INSIDE the `if (m_world && !m_appMode)` block above, which
+	// made the `if (r && m_appMode)` branch below unreachable: a condition nested
+	// inside its own negation. Nothing warned, nothing failed, and the effect was
+	// that an application never turned any of this off — it kept the renderer's
+	// defaults and drew a sky, clouds and a ground behind its interface, paying
+	// for the whole chain over an empty world. Found by capturing a frame and
+	// asking why the fix that was supposedly already there had changed nothing.
+	{
 		// Post-process + lighting settings, all read from the same config.json
 		// keys the editor's Preferences write, so a shipped game looks like the
 		// editor preview it was authored in. Capability-gated where a backend can
 		// be unable to do it at all.
-		if (r)
+		// ── An application draws quads, not a world ──────────────────────────
+		// Everything below is a WORLD effect: bloom over emissive surfaces, ambient
+		// occlusion between them, anti-aliasing of their edges, global illumination
+		// bouncing off them, screen-space reflections in them. An app has none, and
+		// leaving them on means paying for a full post-processing chain over an
+		// empty scene every frame — which is exactly what made an exported app feel
+		// slow next to a running editor, both of them on one GPU.
+		//
+		// Pushed as OFF rather than skipped: the renderer keeps whatever it was
+		// last told, so saying nothing would leave its own defaults (bloom and SSAO
+		// are on by default) running.
+		if (r && m_appMode)
+		{
+			r->SetBloomSettings(IRenderer::BloomSettings{ false, 1.0f, 0.6f });
+			r->SetSSAOSettings(IRenderer::SSAOSettings{ false, 0.5f, 1.0f, 0 });
+			// GI and SSR default to disabled, so their default-constructed form IS
+			// the "off" push.
+			r->SetGISettings(IRenderer::GISettings{});
+			r->SetSSRSettings(IRenderer::SSRSettings{});
+			IRenderer::AntiAliasingSettings aaOff;
+			aaOff.method = static_cast<int>(HE::AAMethod::Off);
+			r->SetAntiAliasingSettings(aaOff);
+			// Forward: the deferred path builds a G-buffer and runs a fullscreen
+			// lighting resolve, for surfaces that do not exist here.
+			r->SetRenderPath(HE::RenderPath::Forward);
+			// …and no SKY. Same trap as the effects above, and it was left open:
+			// the environment is pushed in the OTHER branch only, so an
+			// application never said anything about it and the renderer kept its
+			// own default — which draws one. An atmosphere behind a settings
+			// dialog is not a subtle bug, and it cost a sky pass per frame.
+			r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
+		}
+		else if (r && m_world)
 		{
 			// Bloom + AO. The packaged game pushed neither for a long time, which
 			// meant a shipped build ran on the renderer's built-in defaults no
@@ -1644,8 +2775,51 @@ void GameApplication::OnRender(float deltaTime)
 	}
 }
 
+void GameApplication::OnWindowClosing(HE::WindowHandle handle)
+{
+	// Everything that hung in it goes with it. Not hidden — destroyed: the
+	// window is about to stop existing, and a widget that still names it would
+	// be drawn by nothing and clicked by nobody. destroyWidget also lets go of
+	// any grab it held, which is what keeps the OTHER window clickable.
+	const int gone = m_widgets.destroyWidgetsOfWindow(handle.id);
+	if (gone > 0)
+		HE_LOG_INFO(Widget, "Window %u closed — %d widget(s) destroyed with it",
+		            handle.id, gone);
+	// The pointer cannot still be in a window that is gone.
+	if (m_widgets.pointerWindow() == handle.id)
+		m_widgets.processPointer(0u, 1.0f, 1.0f, 0.0f, 0.0f, false, false);
+	// …and the graph is told, LAST: a handler that opens the next window must
+	// land in a world where this one is already finished with.
+	if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
+		m_gameInstance.runtime().fireOnWindowClosed(gi, 0, static_cast<int>(handle.id));
+}
+
 void GameApplication::OnShutdown()
 {
+	// The tray outlives the window unless it is taken down deliberately, and an
+	// icon left in the menu bar of a program that has exited is the worst thing
+	// a tray can do.
+	destroyTray();
+	g_trayClicks.clear();
+	// The HTTP worker before anything it could still answer into. A request in
+	// flight is waited out (up to its own timeout), which is why that timeout is
+	// five seconds and not ten.
+	HE::api::http::shutdown();
+	// The watches are this file's statics too, and one left standing would keep
+	// stat-ing a path for an application that has stopped listening.
+	HE::api::fs::clearWatches();
+	// …and so are the timers, for exactly the same reason.
+	HE::api::timer::cancelAll();
+	// The database connections last: closing one flushes it, and a file left
+	// half-written is the one of these three that costs somebody their data.
+	HE::api::db::closeAll();
+#ifdef __APPLE__
+	// Ours out of the system bar again, SDL's own left standing. One application
+	// per process, and this file's statics outlive the object that filled them.
+	HE::AppMacMenu::set({});
+	g_menuDirty = false;
+#endif
+
 	// Stop audio first: sounds reference asset PCM the ContentManager owns.
 	m_audioEngine.shutdown();
 

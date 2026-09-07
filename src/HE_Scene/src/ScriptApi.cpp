@@ -277,6 +277,205 @@ bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn
 	return world.widgets().callFunction(widgetId, fn);
 }
 
+int addWidgetChild(HorizonWorld& world, ContentManager* content, int widgetId,
+                   const std::string& parentName, const std::string& assetPath)
+{
+	if (!content) return 0;
+	// Instance ids are 64-bit in the runtime and 32-bit across the script
+	// boundary, like every other widget handle here (a widget id IS its script
+	// id, see createWidget). Narrowed in one place rather than at each call.
+	return static_cast<int>(
+		world.widgets().addChild(*content, widgetId, parentName, assetPath));
+}
+
+bool removeWidgetChild(HorizonWorld& world, int widgetId, int childId)
+{
+	return world.widgets().removeChild(
+		widgetId, static_cast<HorizonCode::InstanceId>(childId));
+}
+
+int clearWidgetChildren(HorizonWorld& world, int widgetId, const std::string& parentName)
+{
+	return world.widgets().clearChildren(widgetId, parentName);
+}
+
+bool animateNumber(HorizonWorld& world, int widgetId, const std::string& elemName,
+                   const std::string& prop, float to, float seconds,
+                   const std::string& easing)
+{
+	return world.widgets().animateNamed(widgetId, elemName, prop,
+	                                    HE::UIPropValue::ofFloat(to), seconds,
+	                                    HE::uiEaseFromName(easing));
+}
+bool animateColor(HorizonWorld& world, int widgetId, const std::string& elemName,
+                  const std::string& prop, const glm::vec4& to, float seconds,
+                  const std::string& easing)
+{
+	return world.widgets().animateNamed(widgetId, elemName, prop,
+	                                    HE::UIPropValue::ofColor(to), seconds,
+	                                    HE::uiEaseFromName(easing));
+}
+bool animateVec2(HorizonWorld& world, int widgetId, const std::string& elemName,
+                 const std::string& prop, const glm::vec2& to, float seconds,
+                 const std::string& easing)
+{
+	return world.widgets().animateNamed(widgetId, elemName, prop,
+	                                    HE::UIPropValue::ofVec2(to), seconds,
+	                                    HE::uiEaseFromName(easing));
+}
+int stopAnimation(HorizonWorld& world, int widgetId, const std::string& elemName,
+                  const std::string& prop)
+{
+	return world.widgets().stopAnimationsNamed(widgetId, elemName, prop);
+}
+
+bool playClip(HorizonWorld& world, int widgetId, const std::string& clip, bool loop,
+              const std::string& direction)
+{
+	return world.widgets().playAnimation(widgetId, clip, &loop,
+	                                     HE::uiAnimDirectionFromName(direction));
+}
+bool playClipAsAuthored(HorizonWorld& world, int widgetId, const std::string& clip,
+                        bool restore, const std::string& direction)
+{
+	// No loop override: the clip's own Loop decides, which is what makes looping
+	// a property of the animation instead of of every call site.
+	return world.widgets().playAnimation(widgetId, clip, nullptr,
+	                                     HE::uiAnimDirectionFromName(direction), restore);
+}
+int stopClip(HorizonWorld& world, int widgetId, const std::string& clip)
+{
+	return world.widgets().stopAnimationClip(widgetId, clip);
+}
+int widgetOfScript(HorizonWorld& world, uint32_t scriptId)
+{
+	return world.widgets().widgetIdForScript(scriptId);
+}
+uint32_t childWidget(HorizonWorld& world, int widgetId, const std::string& element)
+{
+	return world.widgets().childInstance(widgetId, element);
+}
+int stopAllAnimations(HorizonWorld& world, int widgetId)
+{
+	return world.widgets().stopAllAnimations(widgetId);
+}
+int restoreOriginalState(HorizonWorld& world, int widgetId)
+{
+	return world.widgets().restoreOriginalState(widgetId);
+}
+bool isClipPlaying(HorizonWorld& world, int widgetId, const std::string& clip)
+{
+	return world.widgets().isPlayingAnimation(widgetId, clip);
+}
+
+bool setListCount(HorizonWorld& world, int widgetId, const std::string& listName, int count)
+{
+	return world.widgets().setListCount(widgetId, listName, count);
+}
+int listCount(HorizonWorld& world, int widgetId, const std::string& listName)
+{
+	return world.widgets().listCount(widgetId, listName);
+}
+int listRow(HorizonWorld& world, int widgetId, const std::string& listName, int index)
+{
+	// Narrowed here for the same reason addWidgetChild narrows: instance ids are
+	// 64-bit in the runtime and 32-bit across the script boundary.
+	return static_cast<int>(world.widgets().listRow(widgetId, listName, index));
+}
+bool refreshList(HorizonWorld& world, int widgetId, const std::string& listName)
+{
+	return world.widgets().refreshList(widgetId, listName);
+}
+bool setListSelected(HorizonWorld& world, int widgetId, const std::string& listName,
+                     int index, bool selected)
+{
+	return world.widgets().setListSelected(widgetId, listName, index, selected);
+}
+int listSelected(HorizonWorld& world, int widgetId, const std::string& listName)
+{
+	return world.widgets().listSelected(widgetId, listName);
+}
+bool scrollListToItem(HorizonWorld& world, int widgetId, const std::string& listName, int index)
+{
+	return world.widgets().scrollListToItem(widgetId, listName, index);
+}
+
+void showModalWidget(HorizonWorld& world, int widgetId)
+{ world.widgets().showModal(widgetId); }
+void showWidgetInWindow(HorizonWorld& world, int widgetId, uint32_t windowId)
+{
+	// Move first, then show. The other way round would draw it for one frame in
+	// the window it is leaving.
+	world.widgets().setWidgetWindow(widgetId, windowId);
+	world.widgets().showWidget(widgetId);
+}
+void openWidgetPopup(HorizonWorld& world, int widgetId, float x, float y)
+{ world.widgets().openPopupAt(widgetId, x, y); }
+void openWidgetPopupAtPointer(HorizonWorld& world, int widgetId)
+{ world.widgets().openPopupAtPointer(widgetId); }
+bool closeTopLayer(HorizonWorld& world)
+{ return world.widgets().closeTopLayer(); }
+
+bool setTheme(HorizonWorld& world, ContentManager* content, const std::string& path)
+{
+	if (!content || path.empty()) return false;
+	const HE::UUID id = content->loadAsset(path);
+	const ThemeAsset* a = id == HE::UUID{} ? nullptr : content->getTheme(id);
+	if (!a)
+	{
+		HE_LOG_WARN(Script, "theme.set: no theme asset at '%s'", path.c_str());
+		return false;
+	}
+	HE::UITheme t;
+	if (!HE::uiThemeFromJson(a->json, t))
+	{
+		HE_LOG_WARN(Script, "theme.set: '%s' is not a readable theme", path.c_str());
+		return false;
+	}
+	world.widgets().setTheme(t);
+	return true;
+}
+
+void setThemeMode(HorizonWorld& world, const std::string& mode)
+{
+	// By NAME, like the backend in config.json: "Dark" survives a renumbering of
+	// the enum and reads in a save file, a 1 does neither. Three words, not two:
+	// "System" is a RULE and not a colour, and an application that follows the
+	// desktop has to be able to say so.
+	if (mode != "Light" && mode != "Dark" && mode != "System")
+	{
+		HE_LOG_WARN(Script, "theme.setMode: '%s' is not Light, Dark or System — ignored",
+		            mode.c_str());
+		return;
+	}
+	world.widgets().setThemePreference(HE::uiThemePreferenceFromName(mode));
+}
+
+std::string themeMode(HorizonWorld& world)
+{
+	// What it RESOLVED to, not what was asked for: a Preferences screen shows
+	// the preference it wrote, and everything else wants to know which of the
+	// two colours is actually on screen.
+	return HE::uiThemeModeName(world.widgets().themeMode());
+}
+
+std::string themePreference(HorizonWorld& world)
+{
+	return HE::uiThemePreferenceName(world.widgets().themePreference());
+}
+
+void setFontScale(HorizonWorld& world, float scale)
+{
+	world.widgets().setFontScale(scale);
+}
+
+float fontScale(HorizonWorld& world)
+{
+	// What was CLAMPED to, not what was asked for — the same rule themeMode
+	// follows: a Preferences screen has to show the number on screen.
+	return world.widgets().fontScale();
+}
+
 bool pointerOverUI(HorizonWorld& world) { return world.widgets().pointerOverUI(); }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────

@@ -11,9 +11,597 @@
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <Diagnostics/Log.h>
+#include <ContentManager/HAsset.h>        // application starter content (root widget)
+#include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/UIElements.h>
+#include <HorizonCode/HorizonCode.h>      // …and the GameInstance graph that shows it
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
+
+// ─── Application starter content ──────────────────────────────────────────────
+// An application project with empty folders has nothing to show: no world, no
+// scene, and therefore a black panel where its UI should be. So the template
+// lays down the two things that make it an app — a ROOT WIDGET, and a
+// GameInstance whose OnInit creates it. That is also exactly the structure the
+// packaged build runs, so the preview practises the product rather than a
+// stand-in for it. See docs/he-apps-plan.md E1/E2.
+namespace
+{
+// Content-relative path of the widget the template writes, and the name the
+// GameInstance node refers to it by. One constant, because a mismatch between
+// the file and the reference is a silently empty window.
+constexpr const char* kRootWidgetRel = "UI/RootWidget.hasset";
+
+// A root widget: a panel filling the canvas, with the project's name on it. Not
+// empty — an empty canvas looks exactly like a broken one, and the first thing
+// anybody does is change this text, which teaches where the text lives.
+std::string rootWidgetTreeJson(const std::string& projectName)
+{
+	HE::UIWidgetTree tree;
+	tree.canvasWidth  = 1280.0f;
+	tree.canvasHeight = 720.0f;
+
+	const int panelId = tree.add(HE::UIWidgetType::Panel);
+	if (auto* panel = tree.find(panelId))
+	{
+		panel->name = "Root";
+		HE::uiSetAnchorPreset(*panel, 15);   // stretched to all four edges
+		panel->posX = panel->posY = 0.0f;
+		panel->sizeX = panel->sizeY = 0.0f;  // on a stretched axis these are insets
+		if (auto* p = dynamic_cast<HE::UIPanel*>(panel))
+			p->color = glm::vec4(0.12f, 0.12f, 0.14f, 1.0f);
+	}
+
+	const int labelId = tree.add(HE::UIWidgetType::Text);
+	if (auto* label = tree.find(labelId))
+	{
+		label->name     = "Title";
+		label->parentId = panelId;
+		HE::uiSetAnchorPreset(*label, 5);    // centred
+		label->posX = label->posY = 0.0f;
+		label->sizeX = 600.0f; label->sizeY = 60.0f;
+		if (auto* t = dynamic_cast<HE::UIText*>(label))
+		{
+			t->text     = projectName;
+			t->fontSize = 32.0f;
+		}
+	}
+	return HE::uiWidgetTreeToJson(tree);
+}
+
+// ── The five shaped templates (docs/he-apps-plan.md D3) ──────────────────────
+// Each one is a root widget and nothing else: same manifest, same folders, same
+// GameInstance as the plain Application. The layout IS the template.
+//
+// What they deliberately do NOT carry is graph logic. A nav button that swaps
+// the page needs an event wired in the widget's own class, and a template that
+// ships wiring teaches its wiring rather than the frame — so what moves here
+// moves because the ELEMENT moves it (the splitter divider, the tab strip, the
+// scroll box, the fields), and the first thing the user writes is the first
+// thing they would have written anyway. Each template says so, on itself, in
+// the one place they will read: the text on the page.
+namespace tpl
+{
+// The shared palette. Literal colors rather than theme roles: a new project has
+// no theme asset yet, and a template that looks unfinished until one exists is
+// worse than one that looks the same everywhere.
+const glm::vec4 kBack  { 0.11f, 0.11f, 0.13f, 1.0f };  // window ground
+const glm::vec4 kSurf  { 0.16f, 0.16f, 0.19f, 1.0f };  // cards, bars, panes
+const glm::vec4 kAccent{ 0.24f, 0.52f, 0.86f, 1.0f };
+const glm::vec4 kText  { 0.93f, 0.93f, 0.96f, 1.0f };
+const glm::vec4 kMuted { 0.62f, 0.63f, 0.70f, 1.0f };
+
+// Every helper returns the new element's id, and takes the parent's — a tree
+// built by nesting calls reads like the tree it makes.
+int panel(HE::UIWidgetTree& t, int parent, const char* name, const glm::vec4& c,
+          float corner = 0.0f)
+{
+	const int id = t.add(HE::UIWidgetType::Panel);
+	auto* e = t.find(id);
+	e->name = name; e->parentId = parent;
+	e->cornerRadius = glm::vec4(corner);
+	if (auto* p = dynamic_cast<HE::UIPanel*>(e)) p->color = c;
+	return id;
+}
+
+int text(HE::UIWidgetTree& t, int parent, const char* name, const std::string& s,
+         float size, const glm::vec4& c = kText, bool wrap = false)
+{
+	const int id = t.add(HE::UIWidgetType::Text);
+	auto* e = t.find(id);
+	e->name = name; e->parentId = parent;
+	e->sizeY = size * 1.6f;
+	e->hitTestable = false;   // a label never takes a click away from what it labels
+	if (auto* x = dynamic_cast<HE::UIText*>(e))
+	{
+		x->text = s; x->fontSize = size; x->color = c;
+		x->wordWrap = wrap; x->autoSize = !wrap;
+	}
+	return id;
+}
+
+// A button IS a rectangle with a label child — there is no label field on it —
+// so the two are made together or every template writes the same two calls.
+int button(HE::UIWidgetTree& t, int parent, const std::string& label,
+           float w = 140.0f, float h = 38.0f, const glm::vec4& c = kSurf)
+{
+	const int id = t.add(HE::UIWidgetType::Button);
+	auto* e = t.find(id);
+	e->name = label; e->parentId = parent;
+	e->sizeX = w; e->sizeY = h; e->cornerRadius = glm::vec4(6.0f);
+	if (auto* b = dynamic_cast<HE::UIButton*>(e))
+	{
+		b->color        = c;
+		b->hoveredColor = c + glm::vec4(0.06f, 0.06f, 0.06f, 0.0f);
+		b->pressedColor = c - glm::vec4(0.04f, 0.04f, 0.04f, 0.0f);
+	}
+	const int lbl = text(t, id, "Label", label, 16.0f);
+	auto* l = t.find(lbl);
+	HE::uiSetAnchorPreset(*l, 5);            // centred in the button
+	l->posX = l->posY = 0.0f;
+	if (auto* x = dynamic_cast<HE::UIText*>(l)) { x->alignH = 1; x->alignV = 1; }
+	return id;
+}
+
+int box(HE::UIWidgetTree& t, int parent, HE::UIWidgetType type, const char* name,
+        float padding, float spacing)
+{
+	const int id = t.add(type);
+	auto* e = t.find(id);
+	e->name = name; e->parentId = parent;
+	if (auto* b = dynamic_cast<HE::UIBoxBase*>(e)) { b->padding = padding; b->spacing = spacing; }
+	return id;
+}
+
+// A gap that eats what is left over. Slot Fill above zero is what pins the row
+// after it to the far end, and it is the one piece of box layout nobody guesses.
+int spacer(HE::UIWidgetTree& t, int parent, float fill, float size = 8.0f)
+{
+	const int id = t.add(HE::UIWidgetType::Spacer);
+	auto* e = t.find(id);
+	e->name = fill > 0.0f ? "Fill" : "Gap"; e->parentId = parent;
+	e->sizeX = e->sizeY = size;
+	e->slotFill = fill;
+	return id;
+}
+
+// The full-bleed ground every template starts from, plus a vertical box inside
+// it that the template fills. Returns the box.
+int shell(HE::UIWidgetTree& t, float padding = 0.0f, float spacing = 0.0f)
+{
+	t.canvasWidth  = 1280.0f;
+	t.canvasHeight = 720.0f;
+	const int root = panel(t, -1, "Root", kBack);
+	auto* r = t.find(root);
+	HE::uiSetAnchorPreset(*r, 15);            // stretched to all four edges
+	r->posX = r->posY = r->sizeX = r->sizeY = 0.0f;
+
+	const int col = box(t, root, HE::UIWidgetType::VerticalBox, "Content", padding, spacing);
+	auto* c = t.find(col);
+	HE::uiSetAnchorPreset(*c, 15);
+	c->posX = c->posY = c->sizeX = c->sizeY = 0.0f;
+	return col;
+}
+
+// The line each template leaves for its reader. Same sentence shape everywhere:
+// what already works, and the one wire they write first.
+int hint(HE::UIWidgetTree& t, int parent, const std::string& s)
+{
+	const int id = text(t, parent, "Hint", s, 14.0f, kMuted, true);
+	t.find(id)->sizeY = 44.0f;
+	return id;
+}
+
+// ── Sidebar ──────────────────────────────────────────────────────────────────
+void sidebar(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t);
+
+	const int split = t.add(HE::UIWidgetType::Splitter);
+	{
+		auto* s = t.find(split);
+		s->name = "Split"; s->parentId = col; s->slotFill = 1.0f;
+		if (auto* sp = dynamic_cast<HE::UISplitter*>(s))
+		{
+			sp->vertical = false; sp->ratio = 0.22f;
+			sp->minFirst = 140.0f; sp->minSecond = 240.0f;
+		}
+	}
+
+	const int nav = box(t, split, HE::UIWidgetType::VerticalBox, "Sidebar", 12.0f, 6.0f);
+	text(t, nav, "AppName", projectName, 20.0f);
+	spacer(t, nav, 0.0f, 10.0f);
+	for (const char* item : { "Home", "Library", "Activity" })
+		button(t, nav, item, 0.0f, 38.0f);
+	spacer(t, nav, 1.0f);
+	button(t, nav, "Settings", 0.0f, 38.0f);
+
+	const int page = box(t, split, HE::UIWidgetType::VerticalBox, "Page", 24.0f, 12.0f);
+	text(t, page, "Title", "Home", 28.0f);
+	text(t, page, "Body",
+	     "The divider between the two panes is draggable, and the sidebar keeps its "
+	     "minimum width.", 16.0f, kMuted, true);
+	hint(t, page,
+	     "Next: give this page a name, then wire a sidebar button's On Clicked to set "
+	     "Title's Text — that one wire is the whole navigation.");
+	spacer(t, page, 1.0f);
+}
+
+// ── Wizard ───────────────────────────────────────────────────────────────────
+void wizard(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t, 32.0f, 14.0f);
+
+	text(t, col, "Title", projectName + " Setup", 28.0f);
+	text(t, col, "Step", "Step 1 of 3", 15.0f, kMuted);
+
+	const int bar = t.add(HE::UIWidgetType::ProgressBar);
+	{
+		auto* b = t.find(bar);
+		b->name = "Progress"; b->parentId = col; b->sizeY = 8.0f;
+		if (auto* p = dynamic_cast<HE::UIProgressBar*>(b))
+		{
+			p->value = 1.0f / 3.0f;
+			p->fillColor = kAccent;
+			p->backColor = kSurf;
+		}
+	}
+
+	const int card = panel(t, col, "Card", kSurf, 10.0f);
+	t.find(card)->slotFill = 1.0f;
+	const int inner = box(t, card, HE::UIWidgetType::VerticalBox, "StepContent", 20.0f, 10.0f);
+	{
+		auto* i = t.find(inner);
+		HE::uiSetAnchorPreset(*i, 15);
+		i->posX = i->posY = i->sizeX = i->sizeY = 0.0f;
+	}
+	text(t, inner, "Question", "What should we call it?", 20.0f);
+	const int field = t.add(HE::UIWidgetType::TextInput);
+	{
+		auto* f = t.find(field);
+		f->name = "Answer"; f->parentId = inner; f->sizeY = 36.0f;
+		f->cornerRadius = glm::vec4(6.0f);
+		if (auto* x = dynamic_cast<HE::UITextInput*>(f)) x->placeholder = "Name";
+	}
+	hint(t, inner,
+	     "Next: wire Next's On Clicked to raise Progress's Value and swap this text — a "
+	     "step is a value, not a screen.");
+	spacer(t, inner, 1.0f);
+
+	const int row = box(t, col, HE::UIWidgetType::HorizontalBox, "Buttons", 0.0f, 10.0f);
+	t.find(row)->sizeY = 44.0f;
+	button(t, row, "Back");
+	spacer(t, row, 1.0f);
+	button(t, row, "Next", 140.0f, 38.0f, kAccent);
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+void dashboard(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t, 24.0f, 16.0f);
+
+	const int head = box(t, col, HE::UIWidgetType::HorizontalBox, "Header", 0.0f, 10.0f);
+	t.find(head)->sizeY = 44.0f;
+	text(t, head, "Title", projectName, 26.0f);
+	spacer(t, head, 1.0f);
+	button(t, head, "Refresh", 120.0f, 36.0f);
+
+	// Two columns of equal share, two rows: the shape a dashboard is, said once.
+	const int grid = t.add(HE::UIWidgetType::Grid);
+	{
+		auto* g = t.find(grid);
+		g->name = "Cards"; g->parentId = col; g->slotFill = 1.0f;
+		if (auto* x = dynamic_cast<HE::UIGrid*>(g))
+		{
+			x->columns = { "*", "*" };
+			x->rows    = { "*", "*" };
+			x->spacing = x->rowSpacing = 16.0f;
+			x->reparse();
+		}
+	}
+
+	struct Card { const char* title; const char* value; float fill; };
+	const Card cards[] = {
+		{ "Sessions",  "1,284", 0.72f },
+		{ "Errors",    "3",     0.08f },
+		{ "Storage",   "46 GB", 0.46f },
+		{ "Uptime",    "99.4 %",0.99f },
+	};
+	for (const Card& c : cards)
+	{
+		const int p = panel(t, grid, c.title, kSurf, 10.0f);
+		const int in = box(t, p, HE::UIWidgetType::VerticalBox, "Body", 16.0f, 6.0f);
+		{
+			auto* i = t.find(in);
+			HE::uiSetAnchorPreset(*i, 15);
+			i->posX = i->posY = i->sizeX = i->sizeY = 0.0f;
+		}
+		text(t, in, "Label", c.title, 15.0f, kMuted);
+		text(t, in, "Value", c.value, 34.0f);
+		spacer(t, in, 1.0f);
+		const int b = t.add(HE::UIWidgetType::ProgressBar);
+		auto* e = t.find(b);
+		e->name = "Bar"; e->parentId = in; e->sizeY = 6.0f;
+		if (auto* pb = dynamic_cast<HE::UIProgressBar*>(e))
+		{
+			pb->value = c.fill; pb->fillColor = kAccent; pb->backColor = kBack;
+		}
+	}
+
+	hint(t, col,
+	     "Next: wire Refresh's On Clicked to set a card's Value — every tile here is a "
+	     "Text and a Progress Bar, both writable from a graph.");
+}
+
+// ── Form / Editor ────────────────────────────────────────────────────────────
+void form(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t, 24.0f, 14.0f);
+
+	text(t, col, "Title", projectName, 26.0f);
+	text(t, col, "Subtitle", "Edit the fields and save.", 15.0f, kMuted);
+
+	// The form scrolls, because a form is the one layout that always outgrows
+	// its window, and finding that out later means rebuilding it.
+	const int scroll = box(t, col, HE::UIWidgetType::ScrollBox, "Scroll", 0.0f, 10.0f);
+	t.find(scroll)->slotFill = 1.0f;
+
+	const int grid = t.add(HE::UIWidgetType::Grid);
+	{
+		auto* g = t.find(grid);
+		g->name = "Fields"; g->parentId = scroll;
+		if (auto* x = dynamic_cast<HE::UIGrid*>(g))
+		{
+			// A label column that fits its labels, beside a field column that
+			// takes the rest — the reason Grid exists.
+			x->columns = { "auto", "*" };
+			x->rows    = { "auto", "auto", "auto", "auto" };
+			x->spacing = 12.0f; x->rowSpacing = 10.0f;
+			x->reparse();
+		}
+	}
+
+	auto label = [&](const char* s)
+	{
+		const int id = text(t, grid, s, s, 16.0f, kMuted);
+		t.find(id)->sizeY = 34.0f;
+	};
+
+	label("Name");
+	{
+		const int f = t.add(HE::UIWidgetType::TextInput);
+		auto* e = t.find(f);
+		e->name = "Name"; e->parentId = grid; e->sizeY = 34.0f;
+		e->cornerRadius = glm::vec4(6.0f);
+		if (auto* x = dynamic_cast<HE::UITextInput*>(e)) x->placeholder = "Untitled";
+	}
+	label("Kind");
+	{
+		const int f = t.add(HE::UIWidgetType::ComboBox);
+		auto* e = t.find(f);
+		e->name = "Kind"; e->parentId = grid; e->sizeY = 34.0f;
+		e->cornerRadius = glm::vec4(6.0f);
+		if (auto* x = dynamic_cast<HE::UIComboBox*>(e))
+			x->options = { "Draft", "Published", "Archived" };
+	}
+	label("Amount");
+	{
+		const int f = t.add(HE::UIWidgetType::Slider);
+		auto* e = t.find(f);
+		e->name = "Amount"; e->parentId = grid; e->sizeY = 28.0f;
+		if (auto* x = dynamic_cast<HE::UISlider*>(e)) { x->value = 0.35f; x->fillColor = kAccent; }
+	}
+	label("Options");
+	{
+		const int f = t.add(HE::UIWidgetType::CheckBox);
+		auto* e = t.find(f);
+		e->name = "Notify"; e->parentId = grid; e->sizeY = 28.0f;
+		if (auto* x = dynamic_cast<HE::UICheckBox*>(e)) x->label = "Notify me about changes";
+	}
+
+	hint(t, col,
+	     "Next: wire Save's On Clicked to read Name's Text — the fields already type, "
+	     "toggle and drag on their own.");
+
+	const int row = box(t, col, HE::UIWidgetType::HorizontalBox, "Actions", 0.0f, 10.0f);
+	t.find(row)->sizeY = 44.0f;
+	spacer(t, row, 1.0f);
+	button(t, row, "Cancel");
+	button(t, row, "Save", 140.0f, 38.0f, kAccent);
+}
+
+// ── Tool with a toolbar ──────────────────────────────────────────────────────
+void tool(HE::UIWidgetTree& t, const std::string& projectName)
+{
+	const int col = shell(t);
+
+	const int barPanel = panel(t, col, "Toolbar", kSurf);
+	t.find(barPanel)->sizeY = 48.0f;
+	const int bar = box(t, barPanel, HE::UIWidgetType::HorizontalBox, "Buttons", 8.0f, 8.0f);
+	{
+		auto* b = t.find(bar);
+		HE::uiSetAnchorPreset(*b, 15);
+		b->posX = b->posY = b->sizeX = b->sizeY = 0.0f;
+	}
+	for (const char* item : { "New", "Open", "Save" })
+		button(t, bar, item, 84.0f, 32.0f);
+	spacer(t, bar, 1.0f);
+	{
+		const int f = t.add(HE::UIWidgetType::TextInput);
+		auto* e = t.find(f);
+		e->name = "Search"; e->parentId = bar; e->sizeX = 220.0f; e->sizeY = 32.0f;
+		e->cornerRadius = glm::vec4(16.0f);
+		if (auto* x = dynamic_cast<HE::UITextInput*>(e)) x->placeholder = "Search";
+	}
+
+	const int split = t.add(HE::UIWidgetType::Splitter);
+	{
+		auto* s = t.find(split);
+		s->name = "Split"; s->parentId = col; s->slotFill = 1.0f;
+		if (auto* sp = dynamic_cast<HE::UISplitter*>(s))
+		{
+			sp->vertical = false; sp->ratio = 0.28f;
+			sp->minFirst = 160.0f; sp->minSecond = 240.0f;
+		}
+	}
+
+	const int list = box(t, split, HE::UIWidgetType::ScrollBox, "Items", 8.0f, 4.0f);
+	for (int i = 1; i <= 12; ++i)
+	{
+		const int rowPanel = panel(t, list, "Item", kSurf, 6.0f);
+		t.find(rowPanel)->sizeY = 32.0f;
+		const int lbl = text(t, rowPanel, "Label", "Item " + std::to_string(i), 15.0f);
+		auto* l = t.find(lbl);
+		HE::uiSetAnchorPreset(*l, 3);   // centred on the left edge
+		l->posX = 10.0f; l->posY = 0.0f;
+		if (auto* x = dynamic_cast<HE::UIText*>(l)) x->alignV = 1;
+	}
+
+	const int work = box(t, split, HE::UIWidgetType::VerticalBox, "Work", 24.0f, 10.0f);
+	text(t, work, "Title", projectName, 26.0f);
+	text(t, work, "Body",
+	     "The list scrolls, the divider drags, the search field types. This pane is where "
+	     "the tool's own view goes.", 16.0f, kMuted, true);
+	hint(t, work,
+	     "Next: turn Items into a List View if the list gets long — it realizes only the "
+	     "rows that fit, however many items there are.");
+	spacer(t, work, 1.0f);
+
+	const int statusPanel = panel(t, col, "StatusBar", kSurf);
+	t.find(statusPanel)->sizeY = 26.0f;
+	const int status = box(t, statusPanel, HE::UIWidgetType::HorizontalBox, "Status", 8.0f, 8.0f);
+	{
+		auto* s = t.find(status);
+		HE::uiSetAnchorPreset(*s, 15);
+		s->posX = s->posY = s->sizeX = s->sizeY = 0.0f;
+	}
+	text(t, status, "State", "Ready", 13.0f, kMuted);
+	spacer(t, status, 1.0f);
+	text(t, status, "Count", "12 items", 13.0f, kMuted);
+}
+} // namespace tpl
+
+// The root widget a preset lays down. Application keeps the panel-with-a-name it
+// always had; the five shaped ones each build their own frame. One switch, so a
+// new template is one case and one entry in the picker.
+std::string presetWidgetTreeJson(ProjectPreset preset, const std::string& projectName)
+{
+	HE::UIWidgetTree tree;
+	switch (preset)
+	{
+	case ProjectPreset::AppSidebar:   tpl::sidebar(tree, projectName);   break;
+	case ProjectPreset::AppWizard:    tpl::wizard(tree, projectName);    break;
+	case ProjectPreset::AppDashboard: tpl::dashboard(tree, projectName); break;
+	case ProjectPreset::AppForm:      tpl::form(tree, projectName);      break;
+	case ProjectPreset::AppTool:      tpl::tool(tree, projectName);      break;
+	default:
+		return rootWidgetTreeJson(projectName);
+	}
+	return HE::uiWidgetTreeToJson(tree);
+}
+
+// Write the root widget as a real .hasset: META (so the content browser and every
+// picker can see what it is) plus the tree chunk. Same shape the editor's own
+// "New UI Widget" writes, because a template asset that differs from a
+// hand-made one is a second format nobody maintains.
+bool writeRootWidgetAsset(const fs::path& root, const std::string& projectName,
+                          ProjectPreset preset)
+{
+	HAsset::Writer w;
+	const HE::UUID assetId = HE::UUID::generate();
+	std::vector<uint8_t> meta;
+	HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Widget));
+	HAsset::Writer::appendPOD(meta, assetId.hi);
+	HAsset::Writer::appendPOD(meta, assetId.lo);
+	HAsset::Writer::appendString(meta, std::string("RootWidget"));
+	HAsset::Writer::appendString(meta, std::string(kRootWidgetRel));
+	w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+
+	const std::string treeJson = presetWidgetTreeJson(preset, projectName);
+	w.addChunk(HAsset::CHUNK_UIWT, treeJson.data(), treeJson.size());
+
+	return w.write((root / "Content" / kRootWidgetRel).string(),
+	               static_cast<uint16_t>(HE::AssetType::Widget));
+}
+
+// The GameInstance: OnInit → Create Widget(RootWidget) → Show Widget. Built as a
+// Graph and serialised with the engine's own toJson rather than hand-written
+// JSON — the node/link format is internal and would drift out from under a
+// literal.
+//
+// Three nodes, not two: Create Widget makes an INSTANCE of the widget class and
+// leaves it hidden; Show Widget is what puts it on screen.
+bool writeAppGameInstance(const fs::path& root)
+{
+	HorizonCode::Graph g;
+
+	// Laid out left to right along one row. Positions are not decoration: nodes
+	// all default to (0, 0), and a graph written without them opens as a single
+	// pile in which only the last node drawn is visible.
+	constexpr float kY      = 0.0f;
+	constexpr float kColGap = 260.0f;
+
+	HorizonCode::Node ev;
+	ev.id   = g.nextId++;
+	ev.type = HorizonCode::NodeType::Event;
+	ev.s    = "OnInit";
+	ev.x    = 0.0f;  ev.y = kY;
+	g.nodes.push_back(ev);
+
+	HorizonCode::Node create;
+	create.id   = g.nextId++;
+	create.type = HorizonCode::NodeType::CreateWidget;
+	create.s    = kRootWidgetRel;
+	create.x    = kColGap;  create.y = kY;
+	g.nodes.push_back(create);
+
+	HorizonCode::Node show;
+	show.id   = g.nextId++;
+	show.type = HorizonCode::NodeType::ShowWidget;
+	show.x    = kColGap * 2.0f;  show.y = kY;
+	g.nodes.push_back(show);
+
+	// A node's pins live in ONE flat index space, in the order exec-in, exec-out,
+	// data-in, data-out. Computed from the signature rather than written as
+	// literals: the numbers depend on how many pins each node type happens to
+	// have, and a literal would be silently wrong the day one of them gains an
+	// input.
+	auto execOutPin = [](const HorizonCode::Node& n, int k)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		return static_cast<int>(s.execIns.size()) + k;
+	};
+	auto execInPin  = [](const HorizonCode::Node&, int k) { return k; };
+	auto dataOutPin = [](const HorizonCode::Node& n, int k)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		return static_cast<int>(s.execIns.size() + s.execOuts.size() + s.dataIns.size()) + k;
+	};
+	auto dataInPin  = [](const HorizonCode::Node& n, int k)
+	{
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		return static_cast<int>(s.execIns.size() + s.execOuts.size()) + k;
+	};
+
+	// Exec: event → create → show. Data: the widget id Create Widget hands out
+	// goes into Show Widget's input. connect() validates, so a refused link is a
+	// bug in this function and says so instead of shipping a graph that does
+	// nothing.
+	const bool wired =
+		g.connect(ev.id,     execOutPin(ev, 0),     create.id, execInPin(create, 0)) &&
+		g.connect(create.id, execOutPin(create, 0), show.id,   execInPin(show, 0))   &&
+		g.connect(create.id, dataOutPin(create, 0), show.id,   dataInPin(show, 0));
+	if (!wired)
+		HE_LOG_WARN(Config, "%s", "Application template: could not wire the GameInstance graph "
+		                          "— the preview will start empty");
+
+	std::ofstream out(root / "GameInstance.hcode", std::ios::trunc);
+	if (!out.is_open()) return false;
+	out << HorizonCode::toJson(g);
+	return out.good();
+}
+} // namespace
 
 // ─── Export profiles ──────────────────────────────────────────────────────────
 
@@ -627,7 +1215,9 @@ static json startupSceneJson(ProjectPreset preset)
 bool ProjectManager::createNewProject(const std::string& projectDir,
 									  const std::string& projectName,
 									  ProjectPreset preset,
-									  ProjectScriptLanguage scriptLanguage)
+									  ProjectScriptLanguage scriptLanguage,
+									  bool appProject,
+									  bool advancedShaderEffects)
 {
 	fs::path root(projectDir);
 	if (!fs::exists(root))
@@ -691,6 +1281,19 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		fs::create_directories(root / "Content" / "Source");
 		fs::create_directories(root / "Content" / "UI");
 		break;
+	// An application is UI and the things UI draws with. No Models, no Scenes,
+	// no Materials — the last of those only when Advanced Shader Effects are on,
+	// and even then a folder can be made when the first one is.
+	case ProjectPreset::Application:
+	case ProjectPreset::AppSidebar:
+	case ProjectPreset::AppWizard:
+	case ProjectPreset::AppDashboard:
+	case ProjectPreset::AppForm:
+	case ProjectPreset::AppTool:
+		fs::create_directories(root / "Content" / "UI");
+		fs::create_directories(root / "Content" / "Textures");
+		fs::create_directories(root / "Content" / "Fonts");
+		break;
 	case ProjectPreset::Empty:
 	default:
 		break;
@@ -703,10 +1306,18 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		fs::create_directories(root / "Content" / "Scripts");
 
 	// ── Write .heproj manifest ─────────────────────────────────────────────────
-	// Default startup scene: Content/StartupScene.hescene
-	fs::path scenePath = root / "Content" / "StartupScene.hescene";
+	// Choosing the Application preset IS the decision that this is an app, so the
+	// caller's flag and the preset are merged here rather than left able to
+	// disagree.
+	const bool isApp = appProject || isAppPreset(preset);
 
+	// Default startup scene: Content/StartupScene.hescene — except for an
+	// application, which has no world to load one into. Its startupScene stays
+	// empty, and the runtime's app mode never looks for one.
+	fs::path scenePath;
+	if (!isApp)
 	{
+		scenePath = root / "Content" / "StartupScene.hescene";
 		std::ofstream sceneOut(scenePath);
 		if (sceneOut.is_open())
 			sceneOut << startupSceneJson(preset).dump(4);
@@ -717,8 +1328,29 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	j["id"]             = newProjectId();
 	j["version"]        = "1.0";
 	j["preset"]         = static_cast<int>(preset);
-	j["startupScene"]   = "Content/StartupScene.hescene";
+	j["startupScene"]   = isApp ? std::string() : std::string("Content/StartupScene.hescene");
 	j["scriptLanguage"] = HE::tools::toString(scriptLanguage);
+	j["appProject"]            = isApp;
+	j["advancedShaderEffects"] = advancedShaderEffects;
+	// A new project reaches nothing outside itself. Written out rather than left
+	// absent so the file states its own answer from the first day: a permission
+	// that only exists once somebody turns it on is one nobody discovers.
+	j["allowFiles"]     = false;
+	j["allowProcesses"] = false;
+	j["allowNetwork"]   = false;
+	// The base set, for the same reason: the file says what it gets from day one.
+	j["fontScripts"]    = 0;
+	// …and regular body text for an APPLICATION: ordinary body text is regular,
+	// and <b> then has something to be bolder than. A game keeps the bold the
+	// engine has always drawn, because that is what its author is comparing
+	// against — a new game project whose text looked different from every
+	// existing one would be a change nobody asked for (merge analysis 6.1 #7).
+	j["fontWeightBold"] = isApp ? false : true;
+	// An application with an icon from the first day. A game gets one too — it
+	// is the same "this is what you are in the Dock" problem.
+	j["appIconName"]    = isApp ? "widgets" : "sports_esports";
+	j["appIconColor"]   = "#1e70c8";
+	j["appVersion"]     = "1.0";
 
 	// Seed the default packaging profiles so Build > Export works out of the box.
 	const auto profiles = defaultExportProfiles();
@@ -758,18 +1390,46 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 		return false;
 	}
 
+	// An application's starter content, on the SOFT terms the two above the
+	// third-person block use, and deliberately not on its hard one: a project
+	// that opens with an empty preview is worse than one that opens with a label
+	// on a panel, but neither is a reason to refuse a project whose folders and
+	// manifest are already on disk. The difference is that a missing controller
+	// leaves a scene that looks finished and is not, while a missing root widget
+	// leaves a blank window nobody could mistake for working.
+	if (isApp)
+	{
+		if (!writeRootWidgetAsset(root, projectName, preset))
+			HE_LOG_WARN(Config, "%s", "Application template: could not write the root widget "
+			                          "asset — the preview will start empty");
+		if (!writeAppGameInstance(root))
+			HE_LOG_WARN(Config, "%s", "Application template: could not write GameInstance.hcode "
+			                          "— nothing will create the root widget");
+	}
+
 	m_currentProject.name                = projectName;
 	m_currentProject.path                = heprojPath.string();
-	m_currentProject.startupScene        = scenePath.string();
+	m_currentProject.startupScene        = scenePath.string();   // empty for an application
 	m_currentProject.exportProfiles      = profiles;
 	m_currentProject.activeExportProfile = profiles.front().name;
 	m_currentProject.scriptLanguage      = scriptLanguage;
+	m_currentProject.appProject            = isApp;
+	m_currentProject.advancedShaderEffects = advancedShaderEffects;
+	// The two the manifest above chose by kind. Mirrored here as well, or the
+	// project the editor is holding disagrees with the file it just wrote until
+	// somebody closes and reopens it — and the editor applies the text weight
+	// from THIS copy, so a new application would draw bold for its first session.
+	m_currentProject.fontWeightBold        = !isApp;
+	m_currentProject.appIconName           = isApp ? "widgets" : "sports_esports";
 	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
-	                    "%zu export profile(s), startup scene '%s'",
+	                    "%zu export profile(s), startup scene '%s', kind %s, "
+	                    "advanced shader effects %s",
 	            m_currentProject.name.c_str(), m_currentProject.path.c_str(),
 	            HE::tools::toString(m_currentProject.scriptLanguage),
 	            static_cast<int>(preset), m_currentProject.exportProfiles.size(),
-	            m_currentProject.startupScene.c_str());
+	            m_currentProject.startupScene.c_str(),
+	            isApp ? "application" : "game",
+	            advancedShaderEffects ? "on" : "off");
 
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
@@ -839,6 +1499,48 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.scriptLanguage =
 		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
 	m_currentProject.defaultSaveTemplate = jsonString(j, "defaultSaveTemplate");
+	m_currentProject.theme     = jsonString(j, "theme");
+	m_currentProject.themeMode = jsonString(j, "themeMode");
+	// Absent keys mean a project written before applications existed: a game,
+	// with materials. Both defaults therefore have to be the game's answer.
+	m_currentProject.appProject            = jsonBool(j, "appProject", false);
+	m_currentProject.advancedShaderEffects = jsonBool(j, "advancedShaderEffects", true);
+	// Absent means shut, here and only here among the flags above: a project
+	// written before permissions existed never asked for any of this, and
+	// reading absence as "yes" would open every one of them retroactively.
+	m_currentProject.allowFiles     = jsonBool(j, "allowFiles", false);
+	m_currentProject.allowProcesses = jsonBool(j, "allowProcesses", false);
+	m_currentProject.allowNetwork   = jsonBool(j, "allowNetwork", false);
+	// Absent means the base set, which is what every project written before this
+	// existed was getting anyway.
+	m_currentProject.fontScripts    = j.contains("fontScripts") && j["fontScripts"].is_number_unsigned()
+	                                      ? j["fontScripts"].get<std::uint32_t>() : 0u;
+	// Absent means bold, which is what every project written before this was
+	// getting. New projects say false explicitly (see the template below).
+	m_currentProject.fontWeightBold = jsonBool(j, "fontWeightBold", true);
+	// The application's identity. Absent icon name means NO icon, not a default
+	// one: a project written before this field existed shipped without an icon,
+	// and filling the gap here would put a generated "widgets" plate on the next
+	// export of every existing game — a picture nobody chose, replacing nothing
+	// (merge analysis 6.1 #8). The exporter already skips an empty name, so an
+	// absent key stays absent all the way to the build.
+	m_currentProject.appIconName  = jsonString(j, "appIconName");
+	m_currentProject.appIconColor = jsonString(j, "appIconColor", "#1e70c8");
+	m_currentProject.bundleId     = jsonString(j, "bundleId");
+	m_currentProject.appVersion   = jsonString(j, "appVersion", "1.0");
+	m_currentProject.documentTypes.clear();
+	if (j.contains("documentTypes") && j["documentTypes"].is_array())
+		for (const auto& e : j["documentTypes"])
+		{
+			if (!e.is_object()) continue;
+			HE::AppDocumentType t;
+			t.extension   = jsonString(e, "extension");
+			t.displayName = jsonString(e, "name");
+			t.iconName    = jsonString(e, "icon");
+			// A type with no extension is not a type; dropped on load rather than
+			// carried around as a row that can never be written out.
+			if (!t.extension.empty()) m_currentProject.documentTypes.push_back(std::move(t));
+		}
 
 	// The id is in here because collaboration compares it and nothing else shows
 	// it. A joiner refused for "a different project" otherwise has no way to see
@@ -903,6 +1605,36 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
 	j["scriptLanguage"]      = HE::tools::toString(m_currentProject.scriptLanguage);
 	j["defaultSaveTemplate"] = m_currentProject.defaultSaveTemplate;
+	// Only once chosen, like every other optional key here: a project that never
+	// touched a theme keeps a .heproj that looks exactly as it did.
+	if (!m_currentProject.theme.empty())     j["theme"]     = m_currentProject.theme;
+	if (!m_currentProject.themeMode.empty()) j["themeMode"] = m_currentProject.themeMode;
+	// Application flags. Written unconditionally so the file always states what
+	// it is, rather than a missing key having to mean "game" forever.
+	j["appProject"]            = m_currentProject.appProject;
+	j["advancedShaderEffects"] = m_currentProject.advancedShaderEffects;
+	j["allowFiles"]            = m_currentProject.allowFiles;
+	j["allowProcesses"]        = m_currentProject.allowProcesses;
+	j["allowNetwork"]          = m_currentProject.allowNetwork;
+	j["fontScripts"]           = m_currentProject.fontScripts;
+	j["fontWeightBold"]        = m_currentProject.fontWeightBold;
+	j["appIconName"]           = m_currentProject.appIconName;
+	j["appIconColor"]          = m_currentProject.appIconColor;
+	j["appVersion"]            = m_currentProject.appVersion;
+	// Only when it was chosen: an empty key would freeze today's derived value
+	// into the file and make a later rename of the project stop moving it.
+	if (!m_currentProject.bundleId.empty()) j["bundleId"] = m_currentProject.bundleId;
+	// Written only when there are any, so a project that owns no file type keeps
+	// a manifest that says nothing about file types.
+	if (!m_currentProject.documentTypes.empty())
+	{
+		json types = json::array();
+		for (const HE::AppDocumentType& t : m_currentProject.documentTypes)
+			types.push_back({ { "extension", t.extension },
+			                  { "name",      t.displayName },
+			                  { "icon",      t.iconName } });
+		j["documentTypes"] = std::move(types);
+	}
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

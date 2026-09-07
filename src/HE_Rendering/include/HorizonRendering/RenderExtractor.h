@@ -78,7 +78,13 @@ public:
 
     // Populate outWorld.uiObjects from UISystem::extract.
     // Called after extract() when viewport pixel dimensions are known.
-    void extractUI(HorizonWorld& world, float vpWidth, float vpHeight, RenderWorld& outWorld);
+    //
+    // windowId picks the window whose widgets are wanted; 0 is the main one.
+    // The ENTITY ui (a world-space canvas on a component) is only ever the main
+    // window's — it belongs to the scene being played, and a tool window that
+    // is not looking at the scene has no business drawing its health bar.
+    void extractUI(HorizonWorld& world, float vpWidth, float vpHeight, RenderWorld& outWorld,
+                   uint32_t windowId = 0);
 
     // Optional: when set, mesh renderables get each mesh's real object-space AABB
     // (looked up by asset UUID) as their cull bounds — less overdraw / popping and

@@ -75,6 +75,15 @@ add_executable(he_tests
     test_particles.cpp
     test_ui.cpp
     test_ui_widgets.cpp
+    # Its own file so it gets its own PROCESS: the shared font atlas is baked
+    # once, and this is the one run that bakes it in the regular weight.
+    test_ui_font_weight.cpp
+    test_app_icon.cpp
+    test_document_types.cpp
+    test_autostart.cpp
+    test_software_raster.cpp
+    test_app_todo.cpp
+    test_ui_theme.cpp
     test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp
@@ -127,6 +136,11 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
+    # The software UI rasterizer, compiled in for the same reason as the culler:
+    # it is quads-in-pixels-out with no SDL, no window and no IRenderer, so what
+    # the UI style vocabulary ACTUALLY draws is answerable headless — the one
+    # thing about "Schicht 0" that used to need a GPU and a pair of eyes.
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRaster.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
@@ -260,6 +274,12 @@ target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
 # runner and a packaged test binary.
 target_compile_definitions(he_tests PRIVATE
     HE_DOCS_BUNDLE_PATH="${CMAKE_SOURCE_DIR}/EditorDeps/Docs/he-docs.json")
+# The deployed game runtime the export half of the Wave-1 acceptance copies into
+# its packaged build (docs/he-apps-plan.md). Handed over as a path, like the docs
+# bundle above: a configure without the deploy step simply has none, and the test
+# says so and skips rather than failing.
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_GAME_RUNTIME_DIR="${DEPLOY_GAME}")
 # The editor's own font, for the UI screenshots (test_ui_shot.cpp). Without it
 # they still render, in ImGui's default font — but half of what a UI shot shows
 # is line height and spacing, and those belong to the font.
@@ -419,8 +439,12 @@ target_link_libraries(he_tests PRIVATE
 # Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
-if(TARGET he_materialshader)
-    target_link_libraries(he_tests PRIVATE he_materialshader)
+target_link_libraries(he_tests PRIVATE he_materialshader)
+# The TARGET is always there now (A3b Teil 2 — without glslang it is built against the
+# stub), so "can I link it" stopped being the question. The question these cases ask is
+# "can this build actually cross-compile", and only HE_HAVE_SHADERC answers that: a
+# -DHE_ENABLE_SHADERC=OFF build compiles every one of them into a guaranteed failure.
+if(HE_HAVE_SHADERC)
     target_compile_definitions(he_tests PRIVATE HE_TESTS_HAVE_SHADERC=1)
 endif()
 
@@ -482,6 +506,54 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME editor_help_audit
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/scripts/editor_help_audit.py" --check)
+endif()
+
+# ── "How heavy is what we actually ship?" ────────────────────────────────────
+# docs/he-apps-plan.md A3 wrote a size table into the plan and got it wrong,
+# because the numbers came from a tree that was not a Release build. That is why
+# this is a test with a threshold rather than a paragraph: the MEASURING POINT is
+# part of the claim, and it is printed with every run.
+#
+# It measures the deploy tree the exporter copies verbatim into a packaged build.
+# Absent (a configure without the deploy step, a fresh checkout) is a SKIP, not a
+# failure — exit code 2, declared below — or every such build would go red for
+# having nothing to weigh.
+#
+# The build type is handed over for the same reason the path is printed: the
+# thresholds were measured on a RELEASE tree and mean nothing on a Debug one,
+# which is several times the size. Anything else reports and skips.
+#
+# One test per runtime flavour (docs/he-apps-plan.md A3b), because the three are
+# different artefacts with different limits and a single number would either let
+# the app runtimes grow unwatched or fail the game runtime on day one. Only the
+# game flavour is deployed by an ordinary build; the two app ones come from
+# scripts/build_runtimes.py, so on a normal machine — and in CI — they skip. That
+# is deliberate: the test exists so that a tree which HAS built them is measured,
+# and it costs nothing in one that has not.
+if(Python3_Interpreter_FOUND)
+    set(_runtime_size_dirs
+        runtime_size              "${DEPLOY_DIR}/Game"        game
+        runtime_size_app_advanced "${DEPLOY_DIR}/AppAdvanced" app-advanced
+        runtime_size_app_basic    "${DEPLOY_DIR}/AppBasic"    app-basic)
+    list(LENGTH _runtime_size_dirs _rs_len)
+    math(EXPR _rs_last "${_rs_len} / 3 - 1")
+    foreach(_i RANGE ${_rs_last})
+        math(EXPR _n "${_i} * 3")
+        math(EXPR _d "${_n} + 1")
+        math(EXPR _f "${_n} + 2")
+        list(GET _runtime_size_dirs ${_n} _rs_name)
+        list(GET _runtime_size_dirs ${_d} _rs_dir)
+        list(GET _runtime_size_dirs ${_f} _rs_flavor)
+        # --flavor is passed explicitly rather than left to the directory name:
+        # DEPLOY_DIR is a cache PATH a user may point anywhere, and a runtime
+        # weighed against the wrong flavour's threshold is worse than none.
+        add_test(NAME ${_rs_name}
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
+                         "${_rs_dir}" --check "--flavor=${_rs_flavor}"
+                         "--build-type=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,${CMAKE_BUILD_TYPE}>")
+        set_tests_properties(${_rs_name} PROPERTIES SKIP_RETURN_CODE 2)
+    endforeach()
 endif()
 
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP

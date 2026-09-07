@@ -16,16 +16,19 @@ set(HE_CORE_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../HE_Core/include)
 # ─── Shared cross-backend material shader layer ────────────────────────────────
 # Backend-agnostic: MaterialAsset custom GLSL → per-backend source via he::shaderc.
 # Every backend links this and builds its own pipeline object from the shared source.
-# Only available when the shader cross-compiler was fetched (HE_ENABLE_SHADERC).
-if(TARGET he_shadercompiler)
-    add_library(he_materialshader STATIC
-        src/material/MaterialShaderLibrary.cpp
-        include/material/MaterialShaderLibrary.h)
-    target_include_directories(he_materialshader PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${HE_CORE_INCLUDE})
-    target_link_libraries(he_materialshader PUBLIC HorizonCore PRIVATE he_shadercompiler)
-    target_compile_features(he_materialshader PUBLIC cxx_std_20)
+# ALWAYS built: he_shadercompiler is either the real cross-compiler or the stub that
+# answers every compile with a failure (root CMakeLists). The difference is
+# HE_HAVE_SHADERC, and it means one thing only — "may cross-compile at runtime".
+# The material path itself, precompiled variants included, is in every build.
+add_library(he_materialshader STATIC
+    src/material/MaterialShaderLibrary.cpp
+    include/material/MaterialShaderLibrary.h)
+target_include_directories(he_materialshader PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${HE_CORE_INCLUDE})
+target_link_libraries(he_materialshader PUBLIC HorizonCore PRIVATE he_shadercompiler)
+target_compile_features(he_materialshader PUBLIC cxx_std_20)
+if(HE_HAVE_SHADERC)
     target_compile_definitions(he_materialshader PUBLIC HE_HAVE_SHADERC=1)
 endif()
 
@@ -48,6 +51,28 @@ if(TARGET he_materialshader)
     target_link_libraries(RendererOpenGL PRIVATE he_materialshader he_shadercompiler)
 endif()
 target_compile_definitions(RendererOpenGL PRIVATE HE_RENDERING_BUILD_DLL)
+
+# ─── Software Backend (UI only, no GPU) ────────────────────────────────────────
+# docs/he-apps-plan.md Block G: the renderer an application with "Advanced Shader
+# Effects" switched off ships with. No glad, no OpenGL::GL, no shader compiler —
+# that absence IS the feature, and it is why this is its own library rather than
+# a mode of another one.
+#
+# Split in two: SoftwareRaster is quads-in-pixels-out with no SDL and no
+# IRenderer, so it is unit-testable; SoftwareRenderer is the shell that gets the
+# quads and puts them in a window.
+add_library(RendererSoftware STATIC
+    src/Backends/Software/SoftwareRaster.cpp
+    src/Backends/Software/SoftwareRenderer.cpp
+    include/Backends/Software/SoftwareRaster.h
+    include/Backends/Software/SoftwareRenderer.h)
+target_include_directories(RendererSoftware PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${HE_CORE_INCLUDE}
+)
+target_link_libraries(RendererSoftware PUBLIC HorizonCore PRIVATE glm::glm SDL3::SDL3)
+target_compile_features(RendererSoftware PUBLIC cxx_std_20)
+target_compile_definitions(RendererSoftware PRIVATE HE_RENDERING_BUILD_DLL)
 
 # ─── Vulkan Backend ────────────────────────────────────────────────────────────
 # CACHE INTERNAL so the resolved value is visible to sibling subdirectories
@@ -295,16 +320,47 @@ target_include_directories(HorizonRendering
             ${CMAKE_CURRENT_SOURCE_DIR}/glad/include
 )
 
-set(HR_BACKENDS RendererOpenGL)
-if(HE_VULKAN_ENABLED)
-    list(APPEND HR_BACKENDS RendererVulkan)
+# ─── Which backends this runtime carries (docs/he-apps-plan.md A3b) ───────────
+# All backend libraries are still BUILT above — the editor links several of them
+# by name, and a target that exists costs nothing until something links it. What
+# the runtime flavour decides is which ones end up INSIDE HorizonRendering:
+#
+#   game          every backend the platform has            (as before)
+#   app-advanced  the platform's forward renderer, alone    (Metal on macOS, GL elsewhere)
+#   app-basic     RendererSoftware, alone                   (no GPU stack at all)
+#
+# Each linked backend also gets a HE_BACKEND_* define on HorizonRendering, and
+# RendererFactory switches on those rather than on the platform macros: asking
+# "am I on Windows" answered the wrong question the moment a Windows runtime
+# could deliberately carry only OpenGL.
+if(HE_RUNTIME_FLAVOR STREQUAL "app-basic")
+    set(HR_BACKENDS RendererSoftware)
+    set(HR_BACKEND_DEFS HE_BACKEND_SOFTWARE)
+elseif(HE_RUNTIME_FLAVOR STREQUAL "app-advanced")
+    if(APPLE)
+        set(HR_BACKENDS RendererMetal)
+        set(HR_BACKEND_DEFS HE_BACKEND_METAL)
+    else()
+        set(HR_BACKENDS RendererOpenGL)
+        set(HR_BACKEND_DEFS HE_BACKEND_OPENGL)
+    endif()
+else()
+    set(HR_BACKENDS RendererOpenGL RendererSoftware)
+    set(HR_BACKEND_DEFS HE_BACKEND_OPENGL HE_BACKEND_SOFTWARE)
+    if(HE_VULKAN_ENABLED)
+        list(APPEND HR_BACKENDS RendererVulkan)
+        list(APPEND HR_BACKEND_DEFS HE_BACKEND_VULKAN)
+    endif()
+    if(WIN32)
+        list(APPEND HR_BACKENDS RendererD3D11 RendererD3D12)
+        list(APPEND HR_BACKEND_DEFS HE_BACKEND_D3D11 HE_BACKEND_D3D12)
+    endif()
+    if(APPLE)
+        list(APPEND HR_BACKENDS RendererMetal)
+        list(APPEND HR_BACKEND_DEFS HE_BACKEND_METAL)
+    endif()
 endif()
-if(WIN32)
-    list(APPEND HR_BACKENDS RendererD3D11 RendererD3D12)
-endif()
-if(APPLE)
-    list(APPEND HR_BACKENDS RendererMetal)
-endif()
+message(STATUS "HorizonRendering: backends linked (${HE_RUNTIME_FLAVOR}): ${HR_BACKENDS}")
 
 # HorizonScene is PRIVATE: only RenderExtractor.cpp touches the ECS —
 # the dependency must never leak to consumers of HorizonRendering.
@@ -313,7 +369,8 @@ target_link_libraries(HorizonRendering
     PRIVATE ${HR_BACKENDS} SDL3::SDL3 HorizonScene
 )
 target_compile_definitions(HorizonRendering
-    PRIVATE HE_RENDERING_BUILD_DLL
+    PRIVATE HE_RENDERING_BUILD_DLL ${HR_BACKEND_DEFS}
+            HE_RUNTIME_FLAVOR_NAME="${HE_RUNTIME_FLAVOR}"
     PUBLIC  HE_RENDERING_DLL
 )
 if(HE_VULKAN_ENABLED)

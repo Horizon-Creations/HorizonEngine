@@ -2708,7 +2708,7 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 		         "\"" + name + "\" was not sent to the others.",
 		         "It is " + std::to_string(mb) + " MB and this machine will not send "
 		             "more than " + std::to_string(limit) + " MB in one file. Raise "
-		             "\"Largest asset to transfer\" in Preferences » Collaboration, or "
+		             "\"Largest asset to transfer\" in Preferences » Editor » Collaboration, or "
 		             "leave this one to source control — the others still have the "
 		             "older file.",
 		         relPath);
@@ -2728,7 +2728,7 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 	         sender + " sent \"" + name + "\", and this machine refused it.",
 	         "It is " + std::to_string(mb) + " MB and this machine accepts at most " +
 	             std::to_string(limit) + " MB in one file — their limit is higher than "
-	             "yours. Raise \"Largest asset to transfer\" in Preferences » "
+	             "yours. Raise \"Largest asset to transfer\" in Preferences » Editor » "
 	             "Collaboration and ask them to save it again, or pull it from source "
 	             "control. Nothing was written here, so the file you have is the old one.",
 	         relPath);
@@ -2835,7 +2835,7 @@ void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,
 	             std::to_string(limit) + " MB in one file — their limit is lower than "
 	             "yours, which is why nothing on this machine reported a problem. " +
 	             left + " Ask them to raise \"Largest asset to transfer\" in "
-	             "Preferences » Collaboration and save it again, or put this file "
+	             "Preferences » Editor » Collaboration and save it again, or put this file "
 	             "through source control.",
 	         relPath);
 }

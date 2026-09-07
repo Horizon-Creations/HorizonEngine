@@ -7,8 +7,10 @@
 #include "EditorWidgets.h"
 
 #include <imgui.h>
+#include <UIWidget/UIElement.h>   // the widget-type registry the palette lists
 
 #include <algorithm>
+#include <cstring>
 #include <set>
 #include <string>
 
@@ -65,6 +67,29 @@ TEST_CASE("editor help: every entry is a usable tooltip")
 	// Guards the case where a bad merge leaves the table almost empty: it would
 	// still compile, and every tooltip in the editor would simply be gone.
 	CHECK(Help::entryCount() > 120);
+}
+
+// ── The gap the static audit cannot see ─────────────────────────────────────
+// The palette draws one button per widget type with ImGui::Button(typeName(t)),
+// and the coverage script only reads LITERAL labels — so nineteen controls were
+// invisible to it and had no explanation at all. Third gap of that kind, after
+// the fixed file list and DragInt2, and the same lesson each time: a coverage
+// tool that does not know a call shape reports coverage, not a gap.
+//
+// A scan cannot answer this one, so a runtime test does: every type the registry
+// hands out must have an entry, which means a NEW widget type fails here until
+// somebody writes the sentence.
+TEST_CASE("editor reference: every element type in the palette explains itself")
+{
+	for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+	{
+		const std::string key = std::string("UI Palette/") + HE::uiWidgetTypeName(t);
+		const HE::Ed::Help::Entry* e = HE::Ed::Help::findKey(key);
+		REQUIRE_MESSAGE(e != nullptr, "no palette description for ", key);
+		// Long enough to be a sentence. The node-docs test uses the same floor,
+		// for the same reason: a three-word stub is a box ticked, not an answer.
+		CHECK_MESSAGE(std::strlen(e->body) >= 20, key);
+	}
 }
 
 TEST_CASE("editor reference: F1 on a control opens the control, not a chapter")

@@ -370,6 +370,19 @@ bool drawFunctionInterfacePanel(MaterialGraph& g)
 			ImGui::SetNextItemWidth(66.0f);
 			if (ImGui::Combo("##ty", &t, kTypes, 4)) { n->p[0] = (float)t; committed = true; }
 			ImGui::SameLine();
+			// The number a CALLER's pin takes when nothing is wired to it — the
+			// difference between an effect that works the moment it is dropped in
+			// and one that has to be wired up before it shows anything. Inputs
+			// only: an output has no caller-side pin to fall back to.
+			if (type == MatNodeType::FnInput)
+			{
+				ImGui::SetNextItemWidth(58.0f);
+				if (ImGui::DragFloat("##def", &n->p[1], 0.05f))
+					n->p[2] = 1.0f;  // touching it is what declares one (see FnInput)
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+				EditorWidgets::helpForKey("Material Function/Default");
+				ImGui::SameLine();
+			}
 			// A function needs at least one output; inputs may go to zero.
 			const bool lastOutput = type == MatNodeType::FnOutput && rows.size() <= 1;
 			ImGui::BeginDisabled(lastOutput);

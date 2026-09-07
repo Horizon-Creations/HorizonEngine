@@ -363,6 +363,172 @@ namespace
 	  "Calls a public function on the widget's own graph by name — the way the "
 	  "outside talks to a screen. Ok is false when the widget or the function is "
 	  "not there." },
+	{ "widget.addChild",
+	  "Puts another widget INSIDE this one, while it runs: the asset is grafted "
+	  "under the element you name, so a Vertical Box called \"List\" stacks a row "
+	  "per call. That is how a list of unknown length is built — a todo list, "
+	  "search results, a chat. The Child that comes back is a live object: Set "
+	  "External writes its public variables, Call External runs its functions, "
+	  "Bind Event listens to what it emits. 0 when the widget, the element or the "
+	  "asset is not there." },
+	{ "widget.removeChild",
+	  "Takes one of those rows out again, by the Child the Add gave you. Its "
+	  "elements and its logic both go. Ok is false when that child is not in this "
+	  "widget (already removed, or it belongs to another one)." },
+	{ "widget.clearChildren",
+	  "Empties one element of everything Add Widget Child put in it, and says how "
+	  "many went. The short way to rebuild a list from scratch instead of "
+	  "tracking every row you added." },
+	{ "widget.setListCount",
+	  "Tells a ListView how many items there are. It keeps no items of its own: "
+	  "it works out which of them fit on screen, puts up only those rows, and asks "
+	  "you to fill each one in through On Row Bind. That is why ten thousand items "
+	  "cost ten rows instead of ten thousand elements. Name the list by the name "
+	  "its element has in the designer. Safe to call from inside On Row Bind — an "
+	  "endless list that loads more when its last row appears is written exactly "
+	  "that way; the new count takes effect on the next frame." },
+	{ "widget.listCount",
+	  "How many items the list was last told it has. Not how many rows are on "
+	  "screen — that is the list's own business." },
+	{ "widget.listRow",
+	  "The live row showing that item, or 0 when it is scrolled out of sight. This "
+	  "is what an On Row Bind handler writes into: Set External for the row's "
+	  "public variables, Call External for its functions. Do not hold on to it — "
+	  "the same row is pointed at a different item as soon as the list scrolls." },
+	{ "widget.refreshList",
+	  "Asks every row on screen to be filled in again, without moving anything. "
+	  "What you call after sorting, filtering or editing your data: the list never "
+	  "saw it, so it cannot notice that it changed. The selection is by INDEX, so "
+	  "after a sort it points at whichever items now sit at those positions — "
+	  "remap it yourself if it has to follow the same rows. Calling this from "
+	  "inside On Row Bind is allowed: it takes effect on the next frame rather "
+	  "than looping back into the bind that asked for it." },
+	{ "widget.setListSelected",
+	  "Picks or unpicks one item. An index of -1 clears the selection. Does nothing "
+	  "when the list's Selection is None; in Single mode picking one drops the "
+	  "other. Fires On Selection Changed when the set really changed." },
+	{ "widget.listSelected",
+	  "The picked item's index, or -1 when nothing is picked. With Multiple "
+	  "selection this is the lowest of them." },
+	{ "widget.showModal",
+	  "Puts this widget up as a DIALOG: the screen behind it dims, nothing under "
+	  "it can be clicked, scrolled or reached with the keyboard, and the focus "
+	  "starts inside it. It is raised above every other widget, so it cannot end "
+	  "up blocking input while drawing behind something. It stays until Close Top "
+	  "Layer, Escape or the Back button — that is what makes it modal." },
+	{ "widget.openPopup",
+	  "Puts the widget up at a point on screen — in render-target pixels — and "
+	  "lets a click anywhere else dismiss it. Its root elements are moved there "
+	  "and pushed back inside the screen, whatever anchors they were drawn with, "
+	  "so a menu near the bottom edge opens upwards instead of off the screen. No "
+	  "dimming: a popup is left by looking elsewhere, a dialog has to be answered." },
+	{ "widget.openPopupAtPointer",
+	  "The same, at the mouse. This is the context menu: answer On Right Clicked "
+	  "with it and the menu appears where the click was. The engine remembers "
+	  "where the pointer last was, so the graph does not have to." },
+	{ "widget.closeTopLayer",
+	  "Closes the topmost dialog, popup or open dropdown and says whether there "
+	  "was one. Exactly what Escape and the gamepad's Back button do — so a "
+	  "\"Cancel\" button is this node and nothing else. The widget that closes gets "
+	  "On Dismissed, and the keyboard focus goes back where it was before it "
+	  "opened. Hide Widget on a dialog does the same thing — hiding one IS closing "
+	  "it, so it lets go of the input, the focus and the dimming and fires On "
+	  "Dismissed too. This node is the one to reach for when you do not have the "
+	  "dialog's own id, which is the usual case for a Cancel button." },
+
+	{ "widget.scrollListToItem",
+	  "Scrolls just far enough for that item to be fully visible, and does nothing "
+	  "when it already is — so stepping through a list does not re-centre it on "
+	  "every step." },
+
+	// ── Animation ────────────────────────────────────────────────────────────
+	{ "widget.animate",
+	  "Moves a NUMBER of one element from where it is to where you say, over "
+	  "the given seconds, along an easing curve (\"Linear\", \"Out Quad\", "
+	  "\"Out Back\"…). Opacity, corner radius, rotation, font size. Zero seconds "
+	  "writes it at once. Starting a second one on the same property replaces the "
+	  "first from wherever the value has got to, so a value can be retargeted "
+	  "mid-flight without a jump. OnAnimationFinished says when it lands, and "
+	  "names the property it was." },
+	{ "widget.animateColor",
+	  "The same for a COLOUR — a fade, a flash, a hover that arrives instead of "
+	  "snapping. Every colour an element has can be animated, including a "
+	  "button's hovered and pressed ones." },
+	{ "widget.animateVec2",
+	  "The same for a POINT: Position to slide something in, Size to grow it. "
+	  "\"Out Back\" is the curve that makes a dialog land rather than arrive." },
+	{ "widget.playAnimation",
+	  "Plays one of the animations the widget carries — the ones made in the "
+	  "Designer's timeline — picked from the dropdown. Leave Widget unwired and "
+	  "it plays this widget's own. Whether it loops is the animation's own "
+	  "decision. Direction runs it forwards, backwards, or out and back. "
+	  "Restore After Completed puts the properties it moved back the way they "
+	  "were when it finishes, which is the whole of \"flash this and undo it\". "
+	  "An embedded component's animations count too, so a page can play what its "
+	  "component brought with it. OnClipFinished says when it ends; a looping "
+	  "one never does, and never restores either." },
+	{ "widget.playAnimationLooped",
+	  "The same, but you decide about looping instead of the animation. For the "
+	  "case where one clip is both the spinner that runs until you stop it and "
+	  "the flourish that plays once." },
+	{ "widget.childRef",
+	  "A reference to the component sitting in one of this widget's slots, by "
+	  "the slot's name. A component is a class like any other, so this is how "
+	  "you call its functions, bind its events and read its public variables — "
+	  "and how a page tells one of three identical cards apart. Leave Widget "
+	  "unwired for this widget's own slots." },
+	{ "widget.stopAllAnimations",
+	  "Stops everything moving in the widget: the authored animations and the "
+	  "single-property ones both. What a screen being torn down or swapped "
+	  "reaches for, because it does not have to name what it started. Values "
+	  "stay where they got to; Restore Original State is the one that puts them "
+	  "back." },
+	{ "widget.restoreOriginalState",
+	  "Stops everything and puts every property an animation ever touched back "
+	  "the way it was BEFORE anything animated it — not the way it was a moment "
+	  "ago. Stopping is part of it: a clip left running would write over the "
+	  "restored values on the next frame. Outputs how many properties were put "
+	  "back, which is 0 when nothing had been animated." },
+	{ "widget.stopAnimationClip",
+	  "Stops that animation, or every one of the widget's when the name is left "
+	  "empty. Values stay where they got to, and nothing is reported — cancelled "
+	  "is not finished." },
+	{ "widget.isPlayingAnimation",
+	  "Whether that animation is running right now. What a toggle asks before "
+	  "deciding which way to go." },
+	{ "widget.stopAnimation",
+	  "Stops what is running on that property, or on the whole element when the "
+	  "property is left empty. The value stays where it got to — a stop is not a "
+	  "rewind — and a stopped animation reports nothing, because cancelled is not "
+	  "finished." },
+
+	// ── Theme ────────────────────────────────────────────────────────────────
+	{ "theme.set",
+	  "Switches the whole application to another Theme asset. Every element bound "
+	  "to a colour role takes the new colour at once — that is what a role is for. "
+	  "Ok is false when there is no such asset or it cannot be read." },
+	{ "theme.setMode",
+	  "\"Light\", \"Dark\" or \"System\". Both colours live in the SAME theme, so "
+	  "this is a switch and not a second set of widgets: every bound colour "
+	  "re-resolves immediately. System is the default and follows the desktop, "
+	  "including while the application runs. Anything else is ignored." },
+	{ "theme.getMode",
+	  "Which of the two colours is on screen right now — Light or Dark, never "
+	  "System. This is what to ask when the answer decides something else, like "
+	  "which icon to show." },
+	{ "theme.getPreference",
+	  "What was ASKED for: Light, Dark or System. This is what a Preferences "
+	  "screen shows and writes back, because System is a rule and not a colour — "
+	  "storing what it resolved to today would stop it following tomorrow." },
+	{ "theme.setFontScale",
+	  "How big the text is for the person reading it: 1 is what the designer "
+	  "drew, 1.5 is half again. Only the TEXT grows — corners, padding and tab "
+	  "strips stay where they were authored, because a whole interface zoomed is "
+	  "a different setting (the display scale, which the system supplies). "
+	  "Clamped to 0.5 … 3." },
+	{ "theme.getFontScale",
+	  "The text size actually in use, after clamping — what a Preferences screen "
+	  "shows next to its slider." },
 
 	// ── Cursor / App ─────────────────────────────────────────────────────────
 	{ "cursor.setVisible",
@@ -372,6 +538,243 @@ namespace
 	{ "app.quit",
 	  "Ends the game. In the editor it stops play mode instead, so a quit button "
 	  "can be tested without closing the editor." },
+	{ "app.setTitle",
+	  "Sets the text in the window's title bar. Only an application owns its "
+	  "window outright — in the editor this is ignored rather than renaming the "
+	  "editor itself." },
+	{ "window.open",
+	  "Opens a SECOND window with its own widget tree, and answers its id. A "
+	  "tool window beside the main one, a document per window, a panel off to "
+	  "the side. Answers 0 when it was refused: in the editor, and on a renderer "
+	  "with no path into a second window (Software and Metal have one)." },
+	{ "window.close",
+	  "Closes a window this application opened. Everything that hung in it is "
+	  "destroyed with it and On Window Closed fires — the same event its own "
+	  "close button gives you, because it is the same thing happening. Ending "
+	  "the whole application is Quit Game, not this." },
+	{ "window.setTitle",
+	  "Sets the title of one window by its id. Window 0 is the main one, and "
+	  "for it this does exactly what Set Window Title does." },
+	{ "window.setSize",
+	  "Resizes one window by its id, in logical points. Window 0 is the main "
+	  "one. Both sides must be positive." },
+	{ "window.show",
+	  "Puts a widget in a window and shows it there. A real move: anything the "
+	  "widget was holding in the window it came from — a dialog's grab, the "
+	  "keyboard focus — stays behind, because a dialog that keeps its old window "
+	  "sealed is a window nobody can click again. Window 0 brings it back to the "
+	  "main window." },
+	{ "app.setSize",
+	  "Resizes the window, in logical points. Both sides must be positive; a zero "
+	  "or negative size is refused rather than passed on to the platform." },
+	{ "app.size",
+	  "The window's current size in logical points, as X and Y. On a high-DPI "
+	  "display this is the points size, not the pixel count behind it." },
+	{ "app.minimize",
+	  "Puts the window away into the dock or the taskbar. The other half of a "
+	  "title bar a window draws itself: without a system frame there is no "
+	  "minimise button but the one you drew." },
+	{ "app.maximize",
+	  "Fills the screen's work area with the window, or puts it back where it "
+	  "was when this is off. One call for both, because one button on a title "
+	  "bar does both: wire it to Is Window Maximized inverted." },
+	{ "app.isMaximized",
+	  "Whether the window is maximised right now. Asked of the system rather "
+	  "than remembered, so it stays right after somebody double-clicked the "
+	  "title bar or used the platform's own shortcut." },
+	{ "app.requestRedraw",
+	  "Draws one more frame. An application sleeps until something happens, so "
+	  "anything that changes the screen without an input event behind it — a "
+	  "timer, a finished load — has to say so here." },
+	{ "app.showTray",
+	  "Puts the application's icon in the system tray (the menu bar on macOS) "
+	  "with a tooltip. Called again while it is up, it only changes the tooltip. "
+	  "The icon is the one the export generated, so the tray and the window agree "
+	  "about what this application looks like." },
+	{ "app.hideTray",
+	  "Takes the tray icon away again. It also goes when the application exits — "
+	  "an icon left behind by a program that is gone is the worst thing a tray "
+	  "can do — so this is for hiding it while still running." },
+	{ "app.addTrayItem",
+	  "Adds an entry to the tray menu, in order. The ID is what On Tray Item "
+	  "receives when somebody chooses it, and the label is what they read: "
+	  "translating the menu then cannot quietly rewire what its entries do." },
+	{ "app.addMenu",
+	  "Adds a menu to the application's menu bar, in order. The id is how Add "
+	  "Menu Item names it afterwards; the label is what is drawn in the strip. "
+	  "Adding the same id twice is one menu, not two. On macOS the same menus go "
+	  "into the SYSTEM bar next to the Apple symbol instead, and the strip in the "
+	  "window is not drawn at all — a page that leaves room for the bar gets that "
+	  "room back there." },
+	{ "app.addMenuItem",
+	  "Adds an entry to the menu with that id. Choosing it fires On Menu Item "
+	  "with the ENTRY's id — the label is only what somebody reads, so "
+	  "translating the menu leaves what it does alone. Shortcut is the chord "
+	  "that chooses it without opening the menu, written the way people write "
+	  "one: \"Ctrl+Shift+S\", \"F5\", \"Alt+Left\". It fires the same On Menu "
+	  "Item, because it is the same entry answered a faster way. Ctrl means "
+	  "Command on a Mac, so a chord is written once and is right on every "
+	  "platform; leave it empty for an entry that has none." },
+	{ "app.addMenuSeparator",
+	  "Adds a dividing line to a menu. It carries no id and cannot be chosen: it "
+	  "is there to group the entries above and below it." },
+	{ "app.notify",
+	  "Puts a banner in the system's notification centre — what an application "
+	  "says when it has finished something nobody is watching any more. It is "
+	  "not a dialog: nothing waits for it and nothing comes back. True means the "
+	  "system took it, not that somebody read it; whether it appears is the "
+	  "system's decision (Do Not Disturb, this app's own switch). On macOS it "
+	  "needs the packaged app — a game runtime started straight from a build "
+	  "folder has no identity to post as." },
+	{ "app.notifyAvailable",
+	  "Can this program show notifications at all? False in the editor preview, "
+	  "and on a Linux without notify-send. Ask once instead of finding out per "
+	  "notification." },
+	{ "app.setMenuItemEnabled",
+	  "Greys a menu entry out, or brings it back. Addressed by the ENTRY's id — "
+	  "the same id On Menu Item carries — so an id used in two menus is one "
+	  "command offered twice and both rows follow. A disabled row cannot be "
+	  "chosen and its shortcut does nothing either, which is the half that "
+	  "matters: a greyed-out Save whose Ctrl+S still saves has said one thing "
+	  "and done another." },
+	{ "app.setMenuItemChecked",
+	  "Puts a mark beside a menu entry, or takes it away — for a row that names "
+	  "a state (\"Show Toolbar\") rather than an action. Choosing the row still "
+	  "fires On Menu Item and nothing else: whether the mark then moves is the "
+	  "application's decision, because a menu that ticked itself would be wrong "
+	  "the moment the command it named failed." },
+	{ "app.menuItemEnabled",
+	  "Whether that menu entry can be chosen right now. False for an id no row "
+	  "carries." },
+	{ "app.menuItemChecked",
+	  "Whether that menu entry carries its mark right now — what a row bound to "
+	  "a setting reads to flip it instead of remembering it." },
+	{ "app.clearMenuBar",
+	  "Removes the whole menu bar. A menu usually changes as a set, so the way "
+	  "to change one is to clear it and build the new one." },
+	{ "app.setAutostart",
+	  "Arranges for this application to start when the user logs in, or takes "
+	  "that back. It needs the project's \"Run other programs\" permission: it "
+	  "asks the SYSTEM to run a program at every login, which is more than "
+	  "running one now, not less." },
+	{ "app.autostart",
+	  "Whether this application is currently set to start at login. Reads what "
+	  "the system was told, not what the application believes — so a checkbox "
+	  "bound to it stays right even after somebody changed it elsewhere." },
+	{ "app.clearTrayMenu",
+	  "Removes every entry from the tray menu, leaving the icon in place. What a "
+	  "menu offers usually depends on what the application is doing, and rebuilding "
+	  "it is how that stays true." },
+
+	// ── Clipboard ────────────────────────────────────────────────────────────
+	{ "clipboard.getText",
+	  "The text currently on the system clipboard, or an empty string when there "
+	  "is none. The same clipboard Ctrl+C and Ctrl+V use in a text field." },
+	{ "clipboard.setText",
+	  "Puts text on the system clipboard, replacing whatever was there. Every "
+	  "other application on the machine can then paste it." },
+	{ "clipboard.hasText",
+	  "True when the system clipboard currently holds text. Use it to grey out a "
+	  "Paste button instead of pasting nothing." },
+
+	// ── Dialogs ──────────────────────────────────────────────────────────────
+	{ "dialog.message",
+	  "Shows a native message box and waits until the user dismisses it. Kind is "
+	  "0 for information, 1 for a warning, 2 for an error. Blocking on purpose: "
+	  "it is for what must be read before anything else happens." },
+	// ── JSON ─────────────────────────────────────────────────────────────────
+	{ "json.getString",
+	  "Reads a text value out of JSON. The path is dotted, with [i] for array "
+	  "elements: \"user.name\", \"items[2].id\". Missing, wrong type or unparsable "
+	  "text all give you the fallback." },
+	{ "json.getNumber",
+	  "Reads a number out of JSON at a dotted path. Missing, wrong type or "
+	  "unparsable text all give you the fallback rather than an error." },
+	{ "json.getBool",
+	  "Reads a true/false value out of JSON at a dotted path. Falls back to the "
+	  "given value when the path is missing or holds something else." },
+	{ "json.has",
+	  "True when the dotted path exists in the JSON text. Says nothing about what "
+	  "type the value has, only that something is there." },
+	{ "json.count",
+	  "How many elements the array at this path has, or zero when the path is not "
+	  "an array. Use it to walk items[0], items[1] without guessing the end." },
+	{ "json.setString",
+	  "Writes a text value into JSON and returns the whole document as new text. "
+	  "Missing objects along the path are created; an empty input starts a new "
+	  "document." },
+	{ "json.setNumber",
+	  "Writes a number into JSON at a dotted path and returns the whole document "
+	  "as new text. Missing objects along the path are created." },
+	{ "json.setBool",
+	  "Writes a true/false value into JSON at a dotted path and returns the whole "
+	  "document as new text. Missing objects along the path are created." },
+
+	// ── Preferences ──────────────────────────────────────────────────────────
+	{ "prefs.getString",
+	  "Reads a saved setting as text, or the fallback when it was never set. "
+	  "Preferences are small scraps like a last folder — not the save system, "
+	  "which is shaped by a template and belongs to a game's progress." },
+	{ "prefs.getNumber",
+	  "Reads a saved setting as a number, or the fallback when it was never set "
+	  "or holds something else." },
+	{ "prefs.getBool",
+	  "Reads a saved setting as true/false, or the fallback when it was never set. "
+	  "The natural home for \"don't show this again\"." },
+	{ "prefs.setString",
+	  "Saves a text setting under a key. Written to disk immediately, so a crash "
+	  "cannot cost more than the last change." },
+	{ "prefs.setNumber",
+	  "Saves a numeric setting under a key. Written to disk immediately." },
+	{ "prefs.setBool",
+	  "Saves a true/false setting under a key. Written to disk immediately." },
+	{ "prefs.has",
+	  "True when this key has ever been set. Lets a first run be told apart from "
+	  "one where the user deliberately chose the default." },
+	{ "prefs.remove",
+	  "Forgets one setting, so the next read gets its fallback again. False when "
+	  "there was nothing under that key." },
+	{ "prefs.clear",
+	  "Forgets every setting at once — what a \"reset to defaults\" button does." },
+
+	// ── Date and time ────────────────────────────────────────────────────────
+	{ "datetime.now",
+	  "The current wall-clock time as seconds since 1970. This is the clock the "
+	  "operating system shows, not the game clock: pausing does not stop it." },
+	{ "datetime.format",
+	  "Turns a time into text using a strftime pattern, in local time. "
+	  "\"%Y-%m-%d %H:%M\" gives you 2026-08-27 14:32." },
+	{ "datetime.year",   "The year of that time, in local time, as a full number like 2026." },
+	{ "datetime.month",  "The month of that time in local time, 1 for January through 12." },
+	{ "datetime.day",    "The day of the month of that time, in local time, from 1 to 31." },
+	{ "datetime.hour",   "The hour of that time in local time, from 0 to 23." },
+	{ "datetime.minute", "The minute of that time in local time, from 0 to 59." },
+	{ "datetime.second", "The second of that time in local time, 0 to 60 (leap seconds)." },
+	{ "datetime.weekday",
+	  "The day of the week of that time in local time, with 0 for Sunday through "
+	  "6 for Saturday." },
+
+	{ "dialog.confirm",
+	  "Asks a yes/no question in a native dialog and returns true for the first "
+	  "button. Both labels are yours, so it can ask \"Save\" against \"Discard\" "
+	  "rather than only ever Yes and No. Return takes the first button, Escape "
+	  "the second." },
+	{ "dialog.openFile",
+	  "The system's own file picker. Returns the chosen path, or empty if the "
+	  "person cancelled — cancelling is a normal answer, not a failure.\n\n"
+	  "What comes back is ALLOWED to the file calls from then on, even in a "
+	  "project that permits nothing outside its own folder: somebody choosing a "
+	  "file is the permission. This is how an application opens a document.\n\n"
+	  "Filter is a description and its extensions in one string, "
+	  "\"Text files:txt;md\", or empty for anything." },
+	{ "dialog.saveFile",
+	  "The system's own \"save as\" picker. Same as Open File Dialog in every "
+	  "other way, including that the path it returns becomes writable to the file "
+	  "calls. The file usually does not exist yet — that is the point." },
+	{ "dialog.pickFolder",
+	  "Asks for a directory. Everything INSIDE it becomes reachable to the file "
+	  "calls, not just the folder itself, which is what makes \"choose a workspace "
+	  "folder\" work with no permission set anywhere." },
 
 	// ── Math ─────────────────────────────────────────────────────────────────
 	// The trigonometry and rounding rows are registered through a helper rather
@@ -685,6 +1088,160 @@ namespace
 	  "Deletes a file. Ok is false if it was not there." },
 	{ "fs.makeDir",
 	  "Creates a directory, parents included. Ok is true if it already existed." },
+	{ "fs.isDir",
+	  "Is there a DIRECTORY at this path? Exists answers about anything; this one "
+	  "answers about the thing you can list." },
+	{ "fs.size",
+	  "The file's size in bytes, or -1 for anything that is not a readable file — "
+	  "a directory included, since a folder's size is not a number one call can "
+	  "honestly give." },
+	{ "fs.modified",
+	  "When the file was last written, in seconds, on the same clock Now uses. So "
+	  "\"how old is this file\" is Now minus this, and not a second time format to "
+	  "learn. -1 when there is nothing there." },
+	{ "fs.list",
+	  "The names of everything directly inside a directory, sorted. Names only, "
+	  "not full paths — joining stays yours. Empty for a path that is not a "
+	  "directory. Leave the path empty for the top of your own folder." },
+	{ "fs.rename",
+	  "Moves or renames, in one step. Both paths follow the same rules as every "
+	  "other file call." },
+	{ "fs.copy",
+	  "Copies a file. It will NOT overwrite: if something is already at the "
+	  "destination it does nothing and Ok is false. This is the one file call that "
+	  "could destroy something you did not name, so it refuses instead." },
+	{ "fs.watch",
+	  "Keeps an eye on a file or a folder. From now on On File Changed fires "
+	  "with the path whenever it appears, disappears or changes; for a folder "
+	  "that means its immediate contents, one level deep. Returns a handle for "
+	  "Stop Watching, or 0 when the path is out of reach. Checked about once a "
+	  "second, so it is for reacting, not for timing." },
+	{ "fs.unwatch",
+	  "Stops a watch, using the handle Watch File gave you. Watches also all end "
+	  "when the application does." },
+
+	// ── Printing ─────────────────────────────────────────────────────────────
+	{ "print.toPdf",
+	  "Writes text as a PDF, at a path that follows the same rules as the file "
+	  "nodes. It is set in Courier and laid out as a page of text: lines break "
+	  "at your newlines and at the page width, pages break when they are full. "
+	  "Needs the project's \"Read and write files\" permission." },
+	{ "print.file",
+	  "Hands a file to the system's printing. Ok means it was handed over, not "
+	  "that it came out of a printer — what the queue does next is between the "
+	  "user and their printer. Needs the \"Run other programs\" permission, "
+	  "because that is what this is. Not available on Windows yet." },
+	{ "print.available",
+	  "Is there anything here to print with? Check it before offering a Print "
+	  "button. It answers false on Windows, where printing still needs its own "
+	  "piece of work." },
+
+	// ── Database ─────────────────────────────────────────────────────────────
+	// Open needs the project's "Read and write files" permission; a database is
+	// a file. The readers do not.
+	{ "db.open",
+	  "Opens a SQLite database file, creating it if it is not there yet, and "
+	  "gives you a handle for the other Database nodes. The path follows the "
+	  "same rules as the file nodes: relative to your project, or somewhere the "
+	  "user picked in a dialog. 0 means it did not open." },
+	{ "db.close",
+	  "Closes a database. They also all close when the application does." },
+	{ "db.exec",
+	  "Runs SQL that gives no rows back — CREATE, INSERT, UPDATE, DELETE. Put a "
+	  "? where each value goes and pass the values as a JSON array in Params "
+	  "(for example [\"Ada\", 36]); never paste them into the SQL yourself, or a "
+	  "name with a quote in it becomes somebody else's command. Ok is false when "
+	  "it failed, and Database Error says why." },
+	{ "db.query",
+	  "Runs a SELECT and gives the rows back as JSON — an array of objects, one "
+	  "per row, which the JSON nodes read. Same ? and Params as Run SQL. An "
+	  "empty result and a failed one both come back as [], so check Database "
+	  "Error to tell them apart. Very large results are cut off (Database Error "
+	  "says so); use LIMIT." },
+	{ "db.changes",
+	  "How many rows the last Run SQL on this database actually changed. This is "
+	  "how you tell \"it worked\" from \"nothing matched\"." },
+	{ "db.lastInsertId",
+	  "The row id the last INSERT on this database created." },
+	{ "db.lastError",
+	  "Why the last call on this database failed, in SQLite's own words, or "
+	  "empty when it did not." },
+
+	// ── Timers ───────────────────────────────────────────────────────────────
+	// None of these need a permission: a timer cannot reach anything, and what
+	// it fires is this application's own graph.
+	{ "timer.after",
+	  "Fires On Timer once, after the seconds you give it, and hands back a "
+	  "handle so you can tell it apart from other timers (and cancel it before "
+	  "it goes off). Unlike Delay it does not park the graph: everything carries "
+	  "on and the event arrives later. 0 means it did not start." },
+	{ "timer.every",
+	  "The same, but it keeps firing until you cancel it — a clock, an autosave, "
+	  "a poll. If the application was busy or away it fires ONCE when it comes "
+	  "back, not once for every tick it missed." },
+	{ "timer.cancel",
+	  "Stops a timer, using the handle it gave you. Ok is false when there was "
+	  "no such timer running — it already fired, or it was cancelled before." },
+	{ "timer.active",
+	  "Is this timer still running? False for a one-shot that has already gone "
+	  "off, for a cancelled one, and for a handle that never existed." },
+	{ "timer.cancelAll",
+	  "Stops every timer this application started. They also all stop when it "
+	  "closes." },
+
+	// ── Process ──────────────────────────────────────────────────────────────
+	// All three need the project's "Run other programs" permission except Find
+	// Program, which runs nothing.
+	{ "process.run",
+	  "Runs another program and WAITS for it. Arguments go in one at a time — this "
+	  "is not a command line, so a path with a space in it needs no quoting and "
+	  "cannot inject anything.\n\n"
+	  "Four answers, because a caller who only wants to know whether it worked "
+	  "reads Ok, and one who has to explain a failure to a person needs the exit "
+	  "code and Err. A non-zero exit code is an ANSWER, not a breakage.\n\n"
+	  "It blocks the frame, so give it a timeout you are willing to wait; left at "
+	  "zero it is thirty seconds. Needs the project's \"Run other programs\" "
+	  "permission." },
+	{ "process.openUrl",
+	  "Hands a web address (or a file) to whatever this desktop opens it with — a "
+	  "browser, the file manager, the mail client. The usual way to show a manual "
+	  "or a release page. Needs the project's \"Run other programs\" permission." },
+	{ "process.which",
+	  "Where the system would find this program, or empty if it would not find it "
+	  "at all. Deliberately needs NO permission: asking whether something is "
+	  "installed runs nothing, and it is how a script tells somebody what it "
+	  "would need before they decide to allow it." },
+
+	// ── HTTP ─────────────────────────────────────────────────────────────────
+	{ "http.get",
+	  "Starts a GET and returns straight away with a ticket number. The answer "
+	  "arrives later as On Http Response, carrying that same ticket. Needs the "
+	  "project's \"Network access\" permission; 0 means it never started." },
+	{ "http.post",
+	  "Starts a POST with this body. An empty Content Type means "
+	  "application/json. Like Get it returns a ticket and answers later." },
+	{ "http.done",
+	  "Has this ticket been answered yet? Usually not needed — On Http Response "
+	  "fires exactly when it turns true — but useful for a screen that shows "
+	  "\"loading\" while it waits." },
+	{ "http.ok",
+	  "Did the request REACH the server and come back? This is about the "
+	  "connection, not about the answer: a 404 is ok=true with status 404." },
+	{ "http.status",
+	  "The HTTP status code, 200 for the ordinary success. 0 when the request "
+	  "never got an answer, and then Response Error says why." },
+	{ "http.body",
+	  "What came back, as text. Feed it to the JSON nodes when it is JSON." },
+	{ "http.error",
+	  "Why the request failed to reach anybody (no network, bad host, timed "
+	  "out). Empty when Response OK is true." },
+	{ "http.forget",
+	  "Drops a response you are finished with. Optional: the engine keeps the "
+	  "last 32 and forgets the oldest by itself." },
+	{ "http.available",
+	  "Does this build have a network stack at all? False only on a Linux build "
+	  "made without libcurl, where every request would fail — worth saying out "
+	  "loud once instead of failing per request." },
 
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",
@@ -764,6 +1321,12 @@ namespace
 	  "does not have to hardcode the list." },
 
 	// ── String ───────────────────────────────────────────────────────────────
+	{ "string.equals",
+	  "Are the two texts the same? Exact and case-sensitive — put To Lower on "
+	  "both sides when case should not matter. This is what to branch on after "
+	  "On Menu Item or On Tray Item: the Equals node next door compares NUMBERS, "
+	  "and two texts arriving there both count as 0, so every id would match "
+	  "every other one." },
 	{ "string.length",
 	  "How many characters the text has." },
 	{ "string.substring",

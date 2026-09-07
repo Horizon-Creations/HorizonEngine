@@ -20,6 +20,7 @@ const char* rhiName(HE::RendererBackend api)
 		case HE::RendererBackend::D3D11:  return "D3D11";
 		case HE::RendererBackend::D3D12:  return "D3D12";
 		case HE::RendererBackend::Vulkan: return "Vulkan";
+		case HE::RendererBackend::Software: return "Software";
 		default:                          return "unknown";
 	}
 }
@@ -87,7 +88,16 @@ namespace HE
 		if (argc > 1 && argv)
 		{
 			std::string cmd;
-			for (int i = 1; i < argc; ++i) { if (!cmd.empty()) cmd += ' '; cmd += argv[i] ? argv[i] : ""; }
+			for (int i = 1; i < argc; ++i)
+			{
+				const std::string a = argv[i] ? argv[i] : "";
+				if (!cmd.empty()) cmd += ' ';
+				cmd += a;
+				// Kept, not just logged: this is where "open with" arrives on
+				// Windows and Linux. Options are not documents, so anything
+				// starting with a dash stays out of the list.
+				if (!a.empty() && a[0] != '-') m_launchArgs.push_back(a);
+			}
 			HE_LOG_INFO(Core, "Command line: %s", cmd.c_str());
 		}
 
@@ -126,11 +136,11 @@ namespace HE
 			// Forward window-close events for secondary windows
 			if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 			{
-				auto it = m_secondaryWindows.find(e.window.windowID);
-				if (it != m_secondaryWindows.end())
+				if (m_secondaryWindows.count(e.window.windowID))
 				{
-					if (m_renderer) m_renderer->DetachWindow(it->second.get());
-					m_secondaryWindows.erase(it);
+					// Through the same door destroyWindow uses, so the host is
+					// told exactly once however the window came to close.
+					destroyWindow(WindowHandle{ e.window.windowID });
 					return;
 				}
 			}
@@ -217,8 +227,30 @@ namespace HE
 		Uint64 lastTick = SDL_GetTicksNS();
 		EngineProfiler& profiler = EngineProfiler::instance();
 
+		// Last frame that was actually drawn — the reference the event-driven
+		// heartbeat measures against (see setEventDriven).
+		Uint64 lastDrawTick = SDL_GetTicksNS();
+
 		while (m_running && !m_window->ShouldClose())
 		{
+			// Event-driven idle: sleep inside SDL until something arrives instead
+			// of spinning a full frame to discover that nothing did. The event is
+			// left queued, so the PollEvents() below dispatches it as usual. A
+			// pending redraw request skips the wait — it IS the something.
+			// How long this turn may sleep, and how long the heartbeat is worth
+			// for it. ONE number, read twice: sleeping 16 ms and then asking
+			// whether 100 ms have passed would wake up and go straight back to
+			// sleep, and the timer that asked for the short wait would never
+			// get its frame.
+			const int waitMs = (m_nextWakeMs >= 0 && m_nextWakeMs < m_idleHeartbeatMs)
+			                 ? (m_nextWakeMs > 0 ? m_nextWakeMs : 1)
+			                 : m_idleHeartbeatMs;
+			if (m_eventDriven && !m_redrawRequested)
+			{
+				HE_PROFILE_SCOPE_N("IdleWait");
+				Window::WaitForEvent(waitMs);
+			}
+
 			const Uint64 nowTick = SDL_GetTicksNS();
 			const Uint64 delta   = nowTick - lastTick;
 			// Two numbers, on purpose. `measuredDt` is how long the last frame
@@ -235,6 +267,77 @@ namespace HE
 			// Stamp every log record produced this frame with the frame index, so a
 			// message can be lined up against a profiler capture or a video.
 			HE::Log::setFrameNumber(++m_frameIndex);
+
+			// ── HE_EXIT_AFTER_FRAMES: boot, draw, leave ─────────────────────
+			// The one thing no unit test in this repository covers is STARTING:
+			// the window, the renderer, the pak, the GameInstance's OnInit. A
+			// null pointer there is a crash before anything a test can assert
+			// on, and it stayed hidden until somebody launched the app by hand —
+			// which is exactly how it was found, once.
+			//
+			// With this set, the application runs that many frames and then asks
+			// to quit, so "does it boot" becomes an exit code a test can read.
+			// Read once and cached: getenv per frame is a syscall for a value
+			// that cannot change.
+			{
+				static const unsigned long long kExitAfter = []() -> unsigned long long
+				{
+					const char* v = std::getenv("HE_EXIT_AFTER_FRAMES");
+					return (v && *v) ? std::strtoull(v, nullptr, 10) : 0ull;
+				}();
+				if (kExitAfter != 0 && m_frameIndex >= kExitAfter)
+				{
+					HE_LOG_INFO(Core, "HE_EXIT_AFTER_FRAMES=%llu reached — leaving cleanly",
+					            kExitAfter);
+					m_running = false;
+				}
+			}
+
+			// ── HE_CAPTURE_FRAME / HE_CAPTURE_PATH: what it actually drew ────
+			// The companion to the frame budget above. "Does it start" is an exit
+			// code; "does it LOOK right" is not, and a shipped application has no
+			// editor to take a screenshot from. One frame, written as a plain
+			// PPM (three lines of code, no encoder to link) for a human or a
+			// script to look at.
+			//
+			// The capture happens BEFORE this frame is drawn, so it holds the
+			// frame before it — which is why the default is well past the first.
+			{
+				static const unsigned long long kCaptureAt = []() -> unsigned long long
+				{
+					const char* v = std::getenv("HE_CAPTURE_FRAME");
+					return (v && *v) ? std::strtoull(v, nullptr, 10) : 0ull;
+				}();
+				// CaptureViewport reads the OFFSCREEN target — the one the editor
+				// shows in its viewport pane. A game renders straight to the
+				// window and never allocates it, so a capture run has to ask for
+				// it, once, before the frame it wants.
+				if (kCaptureAt != 0 && m_frameIndex == 1 && m_renderer && m_window)
+					m_renderer->SetViewportSize(m_window->GetWidth(), m_window->GetHeight());
+				if (kCaptureAt != 0 && m_frameIndex == kCaptureAt && m_renderer)
+				{
+					std::vector<uint8_t> rgba;
+					uint32_t cw = 0, ch = 0;
+					const char* path = std::getenv("HE_CAPTURE_PATH");
+					const std::string out = (path && *path) ? path : "capture.ppm";
+					if (m_renderer->CaptureViewport(rgba, cw, ch) && cw > 0 && ch > 0)
+					{
+						if (std::FILE* f = std::fopen(out.c_str(), "wb"))
+						{
+							std::fprintf(f, "P6\n%u %u\n255\n", cw, ch);
+							for (std::size_t i = 0; i + 3 < rgba.size(); i += 4)
+								std::fwrite(&rgba[i], 1, 3, f);
+							std::fclose(f);
+							HE_LOG_INFO(Core, "Captured frame %llu (%ux%u) to %s",
+							            kCaptureAt, cw, ch, out.c_str());
+						}
+						else
+							HE_LOG_ERROR(Core, "Could not write the capture to %s", out.c_str());
+					}
+					else
+						HE_LOG_ERROR(Core, "%s", "The renderer produced no frame to capture");
+				}
+			}
 
 			// Hitch detector. A frame this long is always worth knowing about — it is
 			// usually a synchronous asset load, a shader compile or a GC-like stall in
@@ -260,6 +363,42 @@ namespace HE
 			// same stick/button values.
 			m_input.PollGamepads();
 
+			// Does this frame get drawn at all? A game always draws. An
+			// event-driven application draws when the OS gave it something, when
+			// something asked for a redraw, or when the heartbeat expired — the
+			// last one being the safety net under everything that changes the
+			// screen without announcing it.
+			const bool heartbeatDue =
+				(nowTick - lastDrawTick) >= static_cast<Uint64>(waitMs) * 1000000ull;
+			// Two decisions, not one. RUNNING a frame is cheap and has to happen
+			// on the heartbeat regardless, or the clock stops: a script's Delay,
+			// a timer, an animation all live in OnRender and would never fire.
+			// PRESENTING it is the expensive half, and is settled after OnRender
+			// by WantsPresent() — so a heartbeat that finds nothing changed ticks
+			// the app forward without touching the GPU at all.
+			const bool inputHappened = m_window->EventsLastPoll() > 0 || m_redrawRequested;
+			const bool runThisFrame  = !m_eventDriven || inputHappened || heartbeatDue;
+			m_redrawRequested = false;
+			if (!runThisFrame)
+			{
+				// Nothing happened. No OnRender, no Render, no swap — and the
+				// input frame still has to end, or the next real frame would
+				// read a stale mouse delta.
+				m_input.EndFrame();
+				HE_PROFILE_FRAME();
+				// The short wake is deliberately NOT cleared here. Nothing ran,
+				// so nobody had the chance to ask for it again, and clearing it
+				// would drop the very frame it was asked for.
+				continue;
+			}
+			// Consumed: OnRender is about to run and says again if it still
+			// wants a short wait (see askWakeWithinMs).
+			m_nextWakeMs = -1;
+
+			// Settled inside the try (after OnRender) and read again by the swap
+			// below, which sits outside it. True by default so a frame that threw
+			// on its way through still ends cleanly the way it always did.
+			bool present = true;
 			try
 				{
 					// OnRender first: builds ImGui frame and calls ImGui::Render()
@@ -268,18 +407,31 @@ namespace HE
 						HE_PROFILE_SCOPE_N("OnRender");
 						OnRender(dt);
 					}
-					if (m_renderer)
+					// Now that the frame's logic has run, ask whether it is worth
+					// showing. Always yes outside event-driven mode; inside it,
+					// yes when input arrived and otherwise only when the app says
+					// something changed. WantsPresent() is CONSUMING, so it is
+					// called exactly once per frame and never inside a short-circuit.
+					const bool appChanged = WantsPresent();
+					present = !m_eventDriven || inputHappened || appChanged;
+					if (present) lastDrawTick = nowTick;
+					if (m_renderer && present)
 					{
 						HE_PROFILE_SCOPE_N("Render");
 						m_renderer->Render();
 					}
 
-					// Secondary windows
-					for (auto& [id, win] : m_secondaryWindows)
-					{
-						if (m_renderer) m_renderer->RenderWindow(win.get());
-						win->SwapBuffers();
-					}
+					// Secondary windows, on the SAME decision as the primary.
+					// In event-driven mode a frame that is not worth showing is
+					// not worth showing in a tool window either, and redrawing
+					// them anyway would keep a sleeping application busy — which
+					// is the one thing event-driven drawing exists to avoid.
+					if (present)
+						for (auto& [id, win] : m_secondaryWindows)
+						{
+							if (m_renderer) m_renderer->RenderWindow(win.get());
+							win->SwapBuffers();
+						}
 				}
 			catch (const std::exception& e)
 			{
@@ -304,6 +456,11 @@ namespace HE
 				m_loop.tick(*m_world, m_logicLoader.logic(), GameLogicDeltaTime(dt));
 			}
 
+			// No swap for a frame that was only ticked: presenting an unchanged
+			// image still costs a full buffer flip and, with VSync on, blocks
+			// until the next refresh — which is exactly the cost this is here to
+			// avoid.
+			if (present)
 			{
 				HE_PROFILE_SCOPE_N("SwapBuffers");
 				m_window->SwapBuffers();
@@ -387,9 +544,16 @@ namespace HE
 
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
-		// Detach and destroy secondary windows first
-		for (auto& [id, win] : m_secondaryWindows)
-			if (m_renderer) m_renderer->DetachWindow(win.get());
+		// Detach and destroy secondary windows first — each through the same
+		// door a user's click takes, so the host gets its OnWindowClosing for
+		// every one of them and nothing is torn down behind its back. Ids
+		// snapshotted: destroyWindow erases from the map it would iterate.
+		{
+			std::vector<uint32_t> ids;
+			ids.reserve(m_secondaryWindows.size());
+			for (const auto& [id, win] : m_secondaryWindows) ids.push_back(id);
+			for (const uint32_t id : ids) destroyWindow(WindowHandle{ id });
+		}
 		m_secondaryWindows.clear();
 		if (m_renderer)
 			m_renderer->Shutdown();
@@ -412,7 +576,25 @@ namespace HE
             HE_LOG_WARN(Core, "%s", "createSecondaryWindow called before Run() — ignoring");
             return {};
         }
-        auto win = std::make_unique<Window>(props, /*isPrimary=*/false);
+        if (m_renderer && !m_renderer->GetCapabilities().supportsSecondaryWindows)
+        {
+            // Refused in ONE place rather than four backends each inventing an
+            // excuse: GL clears the window black, Vulkan would redraw the whole
+            // scene into it, D3D has no path at all. A window that opens onto
+            // any of those is worse than one that does not open.
+            HE_LOG_WARN(Core, "%s",
+                "createSecondaryWindow: this renderer has no second-window path "
+                "(Software and Metal do) — no window opened");
+            return {};
+        }
+        WindowProps sp = props;
+        // The graphics API is NOT the caller's to choose. The SDL flags follow
+        // from it and cannot be changed afterwards, and one renderer draws into
+        // both windows: a secondary created for the default (OpenGL) under a
+        // software renderer has a GL flag and no SDL surface to blit into, which
+        // fails inside the backend with nothing pointing back at here.
+        sp.api = m_window->GetApi();
+        auto win = std::make_unique<Window>(sp, /*isPrimary=*/false);
         uint32_t id = win->GetWindowId();
         if (m_renderer) m_renderer->AttachWindow(win.get());
         m_secondaryWindows[id] = std::move(win);
@@ -424,8 +606,15 @@ namespace HE
     {
         auto it = m_secondaryWindows.find(handle.id);
         if (it == m_secondaryWindows.end()) return;
-        if (m_renderer) m_renderer->DetachWindow(it->second.get());
+        // The host first, while the window is still there: it destroys the
+        // widgets that hang in it and fires OnWindowClosed at the graph. A
+        // handler that closes the window AGAIN would recurse, so the entry is
+        // taken out of the map before the call and destroyed after it.
+        auto win = std::move(it->second);
         m_secondaryWindows.erase(it);
+        OnWindowClosing(handle);
+        if (m_renderer) m_renderer->DetachWindow(win.get());
+        win.reset();
         HE_LOG_INFO(Core, "%s", ("Secondary window destroyed (id=" + std::to_string(handle.id) + ")").c_str());
     }
 
@@ -443,6 +632,23 @@ namespace HE
     void Application::setWindowSize(uint32_t width, uint32_t height)
     {
         if (m_window) m_window->SetSize(width, height);
+    }
+
+    void Application::setWindowMinimized()
+    {
+        if (m_window) m_window->Minimize();
+    }
+
+    void Application::setWindowMaximized(bool maximized)
+    {
+        if (!m_window) return;
+        if (maximized) m_window->Maximize();
+        else           m_window->Restore();
+    }
+
+    bool Application::windowMaximized() const
+    {
+        return m_window && m_window->IsMaximized();
     }
 
     void Application::setVSync(bool enabled)

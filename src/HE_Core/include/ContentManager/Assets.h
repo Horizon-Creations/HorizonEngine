@@ -16,6 +16,18 @@ struct MaterialShaderVariant
 	uint8_t     backend = 0; // HE::RendererBackend
 	std::string vertex;
 	std::string fragment;
+	// The SAME fragment paired with the screen-space UI quad vertex
+	// (MaterialShaderLibrary::uiVertex) — one variant serves the mesh path and the
+	// in-game UI path at once (docs/he-apps-plan.md A3b). Without it a packaged
+	// build could draw a graph material on a mesh but not on a widget, because the
+	// UI vertex would still have to be cross-compiled at load; that is the whole
+	// difference between "an app may ship without glslang" and "an app without
+	// glslang has no materials".
+	//
+	// Empty is legal and means exactly one thing: fall back to cross-compiling the
+	// UI vertex (a pak baked before this field existed, or a backend whose UI
+	// vertex failed to compile at export time).
+	std::string uiVertex;
 };
 
 namespace HE
@@ -362,6 +374,15 @@ struct EnumTypeAsset : public RuntimeAsset
 // this template carries, with defaults. Same JSON shape as CHUNK_STDF
 // (TypeRegistry::structFromJson round-trips it); consumed by HE::api::save.
 struct SaveGameTemplateAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
+// What an application looks like: colour roles in light and dark, size steps,
+// shadows. JSON in the same shape HE::uiThemeToJson writes (docs/he-apps-plan.md
+// D1) — stored as text like every other authored graph, so a merge conflict in
+// it is readable.
+struct ThemeAsset : public RuntimeAsset
 {
 	std::string json;
 };

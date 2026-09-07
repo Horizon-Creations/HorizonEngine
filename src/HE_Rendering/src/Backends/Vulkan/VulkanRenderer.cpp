@@ -1457,6 +1457,19 @@ void VulkanRenderer::RenderWindow(HE::Window* window)
 {
     auto it = m_extraWindows.find(window->GetNativeWindow());
     if (it == m_extraWindows.end()) return;
+    // What this draws is the SCENE again, not the second window's widget tree
+    // (A5, docs/he-apps-plan.md §13.3) — the same world from the same camera,
+    // which is not what a tool window is for. Said once rather than left to be
+    // discovered; GetCapabilities().supportsSecondaryWindows is false here, so
+    // createSecondaryWindow refuses before anything reaches this line.
+    static bool warned = false;
+    if (!warned)
+    {
+        warned = true;
+        HE_LOG_WARN(RHI, "%s",
+            "VulkanRenderer: a second window redraws the SCENE, it has no UI-only "
+            "path — Software and Metal have one");
+    }
     renderWindowData(it->second);
 }
 

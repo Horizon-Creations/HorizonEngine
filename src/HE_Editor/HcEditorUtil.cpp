@@ -11,6 +11,8 @@
 #include <ContentManager/HAsset.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
+#include <UIWidget/UIWidgetAnim.h>   // the easing + direction vocabularies, for their dropdowns
+#include <SDL3/SDL_gamepad.h>        // …and SDL's own spelling of the pad buttons and axes
 #include <Types/Enums.h>
 #include <filesystem>
 #include <algorithm>
@@ -1646,7 +1648,22 @@ bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin)
 	       pd.type == P::Float || pd.type == P::String;
 }
 
-void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
+float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
+{
+	using P = HorizonCode::PinType;
+	HorizonCode::PinDesc pd{};
+	const int di = dataInIndexOf(n, unifiedPin, pd);
+	if (di < 0) return 0.0f;
+	// A number or a checkbox is happy in the default slot. A NAME is not: it has
+	// to be readable to be checkable, and as a dropdown it also has an arrow to
+	// put somewhere. Wide enough for "Ping Pong" and most element names, capped
+	// because a node is not a panel — the list that opens is sized to its
+	// entries, so a long path is one click from being read in full.
+	return pd.type == P::String ? 112.0f : 0.0f;
+}
+
+void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
+                          const ParamChoices& choices)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
 	HorizonCode::PinDesc pd{};
@@ -1671,7 +1688,9 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
 	// The stored default keeps the PIN's type (retypes re-seed on next edit).
 	V& v = n.pinDefaults[di];
 	if (v.type != pd.type) { v = V{}; v.type = pd.type; }
-	ImGui::SetNextItemWidth(-FLT_MIN);
+	// No SetNextItemWidth here: the canvas pushed the width of the slot it gave
+	// us (GraphEditor), and "fill the window" would lay the widget out across
+	// the whole canvas to be clipped back to a stub — the arrow first.
 	switch (pd.type)
 	{
 		case P::Bool:
@@ -1689,118 +1708,145 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case P::String:
-			ImGui::InputText("##pd", &v.s);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		{
+			// A list where there is one, a text box where there is not. The
+			// pick lands in the same place the typing would have, so nothing
+			// downstream can tell which control wrote it.
+			const std::vector<std::string> opts = choices ? choices(n, pd.name)
+			                                              : std::vector<std::string>{};
+			if (opts.empty())
+			{
+				ImGui::InputText("##pd", &v.s);
+				committed |= ImGui::IsItemDeactivatedAfterEdit();
+				break;
+			}
+			// The CURRENT value previews even when the list does not hold it: a
+			// name authored before the list existed, or one whose asset has
+			// since been renamed, has to stay readable. Hiding it would be the
+			// second half of the bug this control is here to prevent.
+			HE::Ed::Help::Scope helpScope("Node Parameter");
+			const bool open = ImGui::BeginCombo("##pd", v.s.empty() ? "(pick one)" : v.s.c_str());
+			// The pin has no visible label, so the tooltip is looked up under the
+			// PARAMETER's name — "animation" asks for "Node Parameter/Animation".
+			// A parameter with no entry simply has no tooltip, which is what it
+			// had when it was a text box.
+			if (!open)
+			{
+				std::string label = pd.name;
+				if (!label.empty()) label[0] = (char)std::toupper((unsigned char)label[0]);
+				EditorWidgets::helpForLabel(label.c_str());
+			}
+			if (open)
+			{
+				for (const std::string& o : opts)
+					if (ImGui::Selectable(o.c_str(), v.s == o)) { v.s = o; committed = true; }
+				ImGui::EndCombo();
+			}
 			break;
+		}
 		default: break;
 	}
 }
 
-bool drawSaveFieldParamPicker(HorizonCode::Node& n, ContentManager* cm)
+// Both of these used to be their own combo on the node's BODY, under a pin that
+// still had a text box beside it — two controls for one value, one of which was
+// the error-prone kind. They are lists like every other list now, drawn at the
+// pin itself (engineParamChoices), and what is left of them is the sentence that
+// explains where the entries come from.
+const char* engineParamHint(const HorizonCode::Node& n)
 {
-	using P = HorizonCode::PinType; using V = HorizonCode::Value;
-	if (n.type != HorizonCode::NodeType::EngineCall) return false;
-	if (n.s.rfind("save.", 0) != 0) return false;
-	int di = -1;
-	for (size_t i = 0; i < n.params.size(); ++i)
-		if (n.params[i].type == P::String && !n.params[i].isArray && n.params[i].name == "field")
-			{ di = (int)i; break; }
-	if (di < 0) return false;
-
-	// The accessor's type decides which template fields it can touch.
-	auto accepts = [&](const HE::StructField& f) -> bool {
-		if (f.isArray) return false;
-		if (n.s == "save.getNumber" || n.s == "save.setNumber")
-			return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
-		if (n.s == "save.getString" || n.s == "save.setString") return f.type == P::String;
-		if (n.s == "save.getBool"   || n.s == "save.setBool")   return f.type == P::Bool;
-		if (n.s == "save.getStruct" || n.s == "save.setStruct") return f.type == P::Struct;
-		return true;
-	};
-
-	// Resolve the project default template's schema (same rules the runtime uses).
-	HE::StructDef schema;
-	bool haveSchema = false;
-	const std::string tpl = HE::api::save::defaultTemplate();
-	if (cm && !tpl.empty())
-		if (const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(cm->loadAsset(tpl)))
-			haveSchema = HE::TypeRegistry::structFromJson(a->json, schema);
-
-	std::string cur;
-	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
-		cur = it->second.s;
-
-	// "Node Parameter", not "HorizonCode Node": a Field on a save call is a slot
-	// in the savegame template, and a Field on a Get Struct Field node is a
-	// member of a struct. Two questions, so two scopes.
-	HE::Ed::Help::Scope helpScope("Node Parameter");
-
-	bool changed = false;
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool fieldOpen = ImGui::BeginCombo("Field", cur.empty() ? "(pick a field)" : cur.c_str());
-	if (!fieldOpen) EditorWidgets::helpForLabel("Field");
-	if (fieldOpen)
-	{
-		bool any = false;
-		if (haveSchema)
-			for (const auto& f : schema.fields)
-			{
-				if (!accepts(f)) continue;
-				any = true;
-				if (ImGui::Selectable(f.name.c_str(), cur == f.name))
-				{
-					V v; v.type = P::String; v.s = f.name;
-					n.pinDefaults[di] = std::move(v);
-					changed = true;
-				}
-			}
-		if (!any)
-			ImGui::TextDisabled(haveSchema
-				? "No template field matches this accessor's type"
-				: "No default SaveGameTemplate set for the project");
-		ImGui::EndCombo();
-	}
-	ImGui::TextDisabled("Fields come from the project's default SaveGame\\nTemplate - no remembering what lives where.");
-	return changed;
+	if (n.type != HorizonCode::NodeType::EngineCall) return nullptr;
+	if (n.s.rfind("scene.", 0) == 0)
+		return "Scenes come from the project and are packed and\nresolved by this exact string.";
+	if (n.s.rfind("save.", 0) == 0)
+		return "Fields come from the project's default SaveGame\nTemplate, filtered to what this call can carry.";
+	return nullptr;
 }
 
-bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
+std::vector<std::string> engineParamChoices(const HorizonCode::Node& n,
+                                            const std::string& param, ContentManager* cm)
 {
-	using P = HorizonCode::PinType; using V = HorizonCode::Value;
-	if (n.type != HorizonCode::NodeType::EngineCall) return false;
-	// The scene-path param on scene.load / scene.loadAdditive (a String named
-	// "scene"). Its pin-default key is the data-in index == the param index (an
-	// EngineCall's data-ins are exactly its params, in order).
-	int di = -1;
-	for (size_t i = 0; i < n.params.size(); ++i)
-		if (n.params[i].type == P::String && !n.params[i].isArray &&
-		    (n.params[i].name == "scene" || n.params[i].name == "path"))
-			{ di = (int)i; break; }
-	if (di < 0) return false;
+	using P = HorizonCode::PinType;
+	std::vector<std::string> out;
+	if (n.type != HorizonCode::NodeType::EngineCall || param.empty()) return out;
+	const std::string& row = n.s;
+	auto startsWith = [&row](const char* p){ return row.rfind(p, 0) == 0; };
 
-	std::string cur;
-	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
-		cur = it->second.s;
-
-	HE::Ed::Help::Scope helpScope("Node Parameter");
-
-	bool changed = false;
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool sceneOpen = ImGui::BeginCombo("Scene", cur.empty() ? "(pick a scene)" : cur.c_str());
-	if (!sceneOpen) EditorWidgets::helpForLabel("Scene");
-	if (sceneOpen)
+	// ── The engine's own closed vocabularies ─────────────────────────────────
+	if (param == "easing")
 	{
-		for (const auto& s : listScenes(cm))
-			if (ImGui::Selectable((s.label + "##" + s.path).c_str(), cur == s.path))
-			{
-				V v; v.type = P::String; v.s = s.path;
-				n.pinDefaults[di] = std::move(v);
-				changed = true;
-			}
-		ImGui::EndCombo();
+		for (int i = 0; i < (int)HE::UIEase::COUNT; ++i)
+			out.push_back(HE::uiEaseName((HE::UIEase)i));
 	}
-	ImGui::TextDisabled("Project-relative scene path — packed + resolved\nby this exact string (no manual typing).");
-	return changed;
+	else if (param == "direction")
+	{
+		for (int i = 0; i < (int)HE::UIAnimDirection::COUNT; ++i)
+			out.push_back(HE::uiAnimDirectionName((HE::UIAnimDirection)i));
+	}
+	else if (param == "mode" && row == "theme.setMode")
+	{
+		// The three ScriptApi::setThemeMode accepts, and the third is the point:
+		// "System" is a rule, not a colour.
+		out = { "Light", "Dark", "System" };
+	}
+	// Asked of SDL rather than written out here: these names are ITS spelling
+	// ("dpup", "lefttrigger"), and a second copy would be a list that drifts.
+	else if (param == "button" && row == "input.gamepadButton")
+	{
+		for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
+			if (const char* s = SDL_GetGamepadStringForButton((SDL_GamepadButton)i)) out.push_back(s);
+	}
+	else if (param == "axis" && row == "input.gamepadAxis")
+	{
+		for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i)
+			if (const char* s = SDL_GetGamepadStringForAxis((SDL_GamepadAxis)i)) out.push_back(s);
+	}
+	// ── Things that exist in the project ────────────────────────────────────
+	// A path that is typed is a path that is one rename away from loading
+	// nothing, and the failure is silent in every one of these cases.
+	else if (param == "scene" || (param == "path" && startsWith("scene.")))
+	{
+		for (const ClassRef& s : listScenes(cm)) out.push_back(s.path);
+	}
+	else if (param == "class")
+	{
+		for (const ClassRef& c : listHorizonCodeClasses(cm)) out.push_back(c.path);
+	}
+	else if (param == "widgetAsset")
+	{
+		for (const ClassRef& a : listAssets(cm, HE::AssetType::Widget)) out.push_back(a.path);
+	}
+	else if (param == "themeAsset")
+	{
+		for (const ClassRef& a : listAssets(cm, HE::AssetType::Theme)) out.push_back(a.path);
+	}
+	else if (param == "asset" && startsWith("audio."))
+	{
+		for (const ClassRef& a : listAssets(cm, HE::AssetType::Audio)) out.push_back(a.path);
+	}
+	else if (param == "field" && startsWith("save."))
+	{
+		// The accessor's TYPE decides which fields it may touch: Save Get Number
+		// offers the numbers, and offering it a string field would be offering a
+		// call that cannot work.
+		auto accepts = [&row](const HE::StructField& f) -> bool {
+			if (f.isArray) return false;
+			if (row == "save.getNumber" || row == "save.setNumber")
+				return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
+			if (row == "save.getString" || row == "save.setString") return f.type == P::String;
+			if (row == "save.getBool"   || row == "save.setBool")   return f.type == P::Bool;
+			if (row == "save.getStruct" || row == "save.setStruct") return f.type == P::Struct;
+			return true;
+		};
+		HE::StructDef schema;
+		const std::string tpl = HE::api::save::defaultTemplate();
+		if (cm && !tpl.empty())
+			if (const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(cm->loadAsset(tpl)))
+				if (HE::TypeRegistry::structFromJson(a->json, schema))
+					for (const auto& f : schema.fields)
+						if (accepts(f)) out.push_back(f.name);
+	}
+	return out;
 }
 
 int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,

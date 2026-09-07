@@ -1695,6 +1695,12 @@ private:
         case NT::GetProperty:
             return coerceCall("hc::getProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) + ")",
                               trOf(n.propType, false, n.typeName));
+        // Target and element come from PINS, so both are expressions and not
+        // literals; the property is the node's own and stays a literal.
+        case NT::GetPropertyOn:
+            return coerceCall("hc::getPropertyOn(m_ctx, " + input(n, 0, fnCtx) + ", " +
+                              input(n, 1, fnCtx) + ", " + strLit(n.s) + ")",
+                              trOf(n.propType, false, n.typeName));
         case NT::GetExternal:
         {
             const TypeRef want = trOf(n.propType, false, n.typeName);
@@ -1741,6 +1747,8 @@ private:
         case NT::SetVariable:
         case NT::SetProperty:
             return input(n, 0, fnCtx);
+        case NT::SetPropertyOn:
+            return input(n, 2, fnCtx);   // the pass-through is the VALUE pin
         case NT::SetExternal:
             return input(n, 1, fnCtx);
         case NT::GetGameInstance: return "hc::gameInstance(m_ctx)";
@@ -2267,6 +2275,11 @@ private:
         case NT::SetProperty:
             b.line("hc::setProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) + ", " +
                    toValueCall(input(n, 0, fnCtx), dataInType(n, 0), m_opt.namespaceName) + ");");
+            break;
+        case NT::SetPropertyOn:
+            b.line("hc::setPropertyOn(m_ctx, " + input(n, 0, fnCtx) + ", " +
+                   input(n, 1, fnCtx) + ", " + strLit(n.s) + ", " +
+                   toValueCall(input(n, 2, fnCtx), dataInType(n, 2), m_opt.namespaceName) + ");");
             break;
         case NT::ShowSelf: b.line("hc::showSelf(m_ctx);"); break;
         case NT::HideSelf: b.line("hc::hideSelf(m_ctx);"); break;

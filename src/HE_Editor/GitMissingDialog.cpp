@@ -45,7 +45,7 @@ void remedyButtons(const char* buttonLabel, const char* command,
 
 } // namespace
 
-// Public (shared with the Preferences ▸ Source Control ▸ Repository page).
+// Public (shared with the Preferences ▸ Editor ▸ Source Control page).
 void drawGitInstallRemedy()
 {
 #if defined(__APPLE__)

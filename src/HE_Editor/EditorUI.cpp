@@ -12,6 +12,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "TypeAssetPanel.h"
+#include "ThemeAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -705,6 +706,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       HorizonCodeClassPanel::isDirty(assetPath)    ||
 	       InputAssetPanel::isDirty(assetPath)          ||
 	       TypeAssetPanel::isDirty(assetPath)           ||
+	       ThemeAssetPanel::isDirty(assetPath)          ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath);
 }
@@ -724,6 +726,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	HorizonCodeClassPanel::appendDirtyPaths(out);
 	InputAssetPanel::appendDirtyPaths(out);
 	TypeAssetPanel::appendDirtyPaths(out);
+	ThemeAssetPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	std::sort(out.begin(), out.end());
@@ -747,6 +750,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = HorizonCodeClassPanel::save(ctx, assetPath)                 && ok;
 	ok = InputAssetPanel::save(ctx, assetPath)                       && ok;
 	ok = TypeAssetPanel::save(ctx, assetPath)                        && ok;
+	ok = ThemeAssetPanel::save(ctx, assetPath)                       && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
@@ -787,6 +791,7 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	HorizonCodeClassPanel::forget(assetPath);
 	InputAssetPanel::forget(assetPath);
 	TypeAssetPanel::forget(assetPath);
+	ThemeAssetPanel::forget(assetPath);
 	ParticleGraphEditorPanel::forget(assetPath);
 	AnimatorStateMachineEditorPanel::forget(assetPath);
 	StaticMeshEditorPanel::forget(assetPath);
@@ -875,6 +880,7 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = HorizonCodeClassPanel::reloadFromDisk(assetPath)                || any;
 	any = InputAssetPanel::reloadFromDisk(assetPath)                      || any;
 	any = TypeAssetPanel::reloadFromDisk(assetPath)                       || any;
+	any = ThemeAssetPanel::reloadFromDisk(assetPath)                      || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;
@@ -1287,6 +1293,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	if (nativeMenu)
 	{
 		MacMenuBar::setProjectLoaded(ctx.projectLoaded);
+		// …and hide the rows that only mean something in a game. Both calls are
+		// per-frame and both no-op unless the answer changed.
+		MacMenuBar::setAppProject(ctx.projectManager &&
+		                          ctx.projectManager->currentProject().appProject);
 		using MC = MacMenuBar::Cmd;
 		// The ImGui menu row shows these as ticked MenuItems; the native bar has
 		// to be told. Without it the menu most users see cannot say whether a
@@ -1374,14 +1384,23 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (EditorWidgets::menuItem("Close Project", "Ctrl+W"))
 			requestGuarded(GuardedAction::CloseProject);
         ImGui::Separator();
-        if (EditorWidgets::menuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
-        if (EditorWidgets::menuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
-        if (EditorWidgets::menuItem("Add Scene Additive...")) triggerAddSceneAdditive();
+        // Scenes are a game's unit of content. An application has none — its
+        // interface comes up from the GameInstance — so the four scene rows are
+        // hidden rather than offered and then refused (docs/he-apps-plan.md E2).
+        const bool appProj = ctx.projectManager &&
+                             ctx.projectManager->currentProject().appProject;
+        if (!appProj)
+        {
+            if (EditorWidgets::menuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
+            if (EditorWidgets::menuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
+            if (EditorWidgets::menuItem("Add Scene Additive...")) triggerAddSceneAdditive();
+        }
         // Keep these three in step with MacMenuBar.mm's File block — a Mac user
         // never sees this row (see MacMenuBar.h).
         if (EditorWidgets::menuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
         if (EditorWidgets::menuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
-        if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S"))    triggerSaveSceneAs();
+        if (!appProj)
+            if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S")) triggerSaveSceneAs();
         ImGui::Separator();
         if (EditorWidgets::menuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
@@ -1461,12 +1480,19 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showConsole, "Console");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
-        // look for it the first time.
-        if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
-                            ctx.projectLoaded))
-            ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
-        if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
-            openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+        // look for it the first time. Both are gone in an application: there is
+        // no ground to grid and no level to script — the Game Instance below is
+        // the one an app really does own, and stays.
+        const bool appProjView = ctx.projectManager &&
+                                 ctx.projectManager->currentProject().appProject;
+        if (!appProjView)
+        {
+            if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
+                                ctx.projectLoaded))
+                ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
+            if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
+                openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+        }
         if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
         ImGui::EndMenu();
@@ -2016,6 +2042,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {
             ImGui::PopStyleVar(2);
+            // This form is the Project Hub's create form in a modal — the same
+            // controls, so the same help scope. Without it the rows here are
+            // filed under whatever scope happens to precede them in this file,
+            // which is the Help MENU.
+            HE::Ed::Help::Scope helpScope("Project Hub");
 
             if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
             ImGui::TextUnformatted("New Project");
@@ -2095,8 +2126,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::Spacing();
             ImGui::Text("Template");
             ImGui::SetNextItemWidth(-1);
+            // All of them, not the first five — see the Project Hub's twin.
             ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
-                ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount, 5);
+                ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount,
+                ProjectHubPanel::kPresetCount);
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
             ImGui::PopStyleColor();
@@ -2110,6 +2143,26 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
             ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
             ImGui::PopStyleColor();
+
+            // Advanced Shader Effects: whether this project may author materials
+            // (docs/he-apps-plan.md A0). Only for APPLICATIONS — a game without
+            // materials is not a thing anyone wants, and offering the switch
+            // everywhere is how an Empty project ended up with materials
+            // disabled by a checkbox its author read as harmless.
+            //
+            // Forced back on for every other template, so leaving it unticked and
+            // then picking Game cannot carry the setting across.
+            if (isAppPreset(static_cast<ProjectPreset>(ctx.hubSelectedPreset)))
+            {
+                ImGui::Spacing();
+                ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
+                ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
+                    ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
+                    : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
+                      "Smaller build, no GPU required.");
+            }
+            else
+                ctx.hubAdvancedShaderFx = true;
 
             ImGui::Spacing();
             if (!ctx.hubCreateError.empty())
@@ -2138,7 +2191,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     bool ok = ctx.projectManager->createNewProject(
                         projRoot.string(), name,
                         static_cast<ProjectPreset>(ctx.hubSelectedPreset),
-                        static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang));
+                        static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang),
+                        /*appProject*/ false, ctx.hubAdvancedShaderFx);
                     if (ok)
                     {
                         const std::string& heprojPath = ctx.projectManager->currentProject().path;
@@ -2731,13 +2785,40 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             GameInstancePanel::render(ctx, tabPos, tabSize);
         else if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
             MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
-            MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        {
+            // Advanced Shader Effects off = this project does not author
+            // materials (docs/he-apps-plan.md E1b). An existing one can still be
+            // opened — the file is right there in the browser — but it says why
+            // it is inert rather than showing an editor whose result nothing
+            // would draw.
+            const bool allowMaterials = !ctx.projectManager ||
+                ctx.projectManager->currentProject().advancedShaderEffects;
+            if (allowMaterials)
+                MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+            else
+            {
+                ImGui::SetNextWindowPos(tabPos);
+                ImGui::SetNextWindowSize(tabSize);
+                ImGui::Begin("##MaterialsDisabled", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+                ImGui::TextWrapped(
+                    "Advanced Shader Effects are switched off for this project, so materials "
+                    "are not used. Widgets are styled with corner radius, borders, gradients "
+                    "and shadows instead.");
+                ImGui::Spacing();
+                ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
+                ImGui::End();
+            }
+        }
         else if (UIEditorPanel::isWidgetAsset(tabPath))
             UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (HorizonCodeClassPanel::isClassAsset(tabPath))
             HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (InputAssetPanel::isInputAsset(tabPath))
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (ThemeAssetPanel::isThemeAsset(tabPath))
+            ThemeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (TypeAssetPanel::isTypeAsset(tabPath))
             TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
@@ -2864,7 +2945,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // create/rename/delete menus — all in OutlinerPanel.cpp.
     OutlinerPanel::render(ctx);
 
-    InspectorPanel::render(ctx);
+    // The Details panel edits the selected ENTITY's components. An application
+    // has no entities, and its widgets are edited in the UI designer tab, so the
+    // panel would be permanently empty (docs/he-apps-plan.md E2).
+    if (!ctx.appLivePreview)
+        InspectorPanel::render(ctx);
 
     // Level Script + Game Instance now render as editor tabs (see the tab dispatch).
 

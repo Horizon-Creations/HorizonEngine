@@ -289,6 +289,14 @@ struct AppContext
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
+	// An APPLICATION project has no play mode: its UI runs permanently and the
+	// viewport panel is the app itself (docs/he-apps-plan.md E2). Panels that ask
+	// "are we playing?" to decide whether the in-game UI owns the pointer must
+	// ask this as well, or the preview would be a picture you cannot click.
+	bool appLivePreview = false;
+	// Rebuild that preview from the saved assets. Bound only in an application
+	// project; the viewport toolbar's transport calls it instead of play/stop.
+	std::function<void()> restartAppPreview;
 	// Transport pause. Meaningful only while playing, and always false outside it.
 	bool isPaused  = false;
 	// Post-PIE report: the warnings/errors captured during the last play session
@@ -308,7 +316,18 @@ struct AppContext
 	// outside/captured. The wheel rides along because a scroll box under the
 	// cursor has to get it before the editor camera's dolly does.
 	std::function<void(float mx, float my, float vpW, float vpH,
-	                   bool down, bool valid, float wheel)> reportPlayUIPointer;
+	                   bool down, bool valid, float wheel,
+	                   bool rightDown, bool doubleClick)> reportPlayUIPointer;
+	// …and WHERE that image sits, so an OS file drop can be turned into the same
+	// coordinates. A drag from the desktop is not a mouse: it arrives as its own
+	// SDL event with a position in the window that received it, and nobody but
+	// the panel knows where in that window the preview is. `x`/`y` are the
+	// image's top-left corner in window points, `scale` turns points into
+	// render-target pixels, and `windowId` is the SDL window the panel is in —
+	// a torn-off viewport is a different window, and a drop on it is not a drop
+	// on the main one.
+	std::function<void(float x, float y, float scaleX, float scaleY,
+	                   unsigned windowId)> reportPlayUIRect;
 
 	// ── Scene file management ──────────────────────────────────────────────
 	// currentScenePath is empty for an unsaved/new scene. sceneDirty reflects
@@ -387,7 +406,7 @@ struct AppContext
 	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
 	// same null-means-still-running convention as the two above. Read-only: it
 	// discovers the router but never creates a mapping. Shown in
-	// Preferences ▸ Tools ▸ Status and in the Collaboration window.
+	// Preferences ▸ Editor ▸ Tool Status and in the Collaboration window.
 	const HE::Net::RouterProbe* routerProbe = nullptr;
 	std::function<void()> recheckRouter;
 
@@ -470,6 +489,11 @@ struct AppContext
 	// Project hub transient state
 	int&   hubSelectedPreset;
 	int&   hubSelectedLang;   // scripting-language pick (ProjectScriptLanguage order)
+	// "Advanced Shader Effects" in the create form. Decides whether the new
+	// project may author MATERIALS at all, and therefore which renderer its
+	// packaged build links (docs/he-apps-plan.md A0/E1b). On by default: that is
+	// what every project before the switch existed had.
+	bool&  hubAdvancedShaderFx;
 	char*  hubProjectName = nullptr;  // points into EditorApplication's char array
 	int    hubProjectNameSize = 0;
 	char*  hubProjectDir  = nullptr;
@@ -705,14 +729,61 @@ private:
 	float m_uiPointerX = 0.0f, m_uiPointerY = 0.0f;
 	float m_uiViewportW = 0.0f, m_uiViewportH = 0.0f;
 	bool  m_uiPointerDown = false, m_uiPointerValid = false;
+	// The right button opens context menus, and a double-click opens a list row.
+	// Both are fed from the viewport panel like the left button is; without them
+	// the live preview is a preview of an application you cannot fully use.
+	bool  m_uiPointerRight = false, m_uiPointerDouble = false;
 	float m_uiWheel = 0.0f;   // this frame's notches, consumed by the widget pass
+	// Where the preview image sits inside its own window, and how its points map
+	// to render-target pixels. Only a file drop needs this: the mouse arrives
+	// already converted (reportPlayUIPointer), a drag from the desktop does not.
+	float m_uiPanelX = 0.0f, m_uiPanelY = 0.0f;
+	float m_uiPanelScaleX = 1.0f, m_uiPanelScaleY = 1.0f;
+	unsigned m_uiPanelWindow = 0;   // SDL window id of the panel's viewport
+	// The files of the drag in flight, collected between DROP_BEGIN and
+	// DROP_COMPLETE, and where it was last seen in preview pixels.
+	std::vector<std::string> m_dropPaths;
+	float m_dropX = 0.0f, m_dropY = 0.0f;
+	bool  m_dropInPreview = false;   // …and whether it is over the preview at all
 	// Last frame's UI-navigation buttons (bits: up/down/left/right/activate) —
 	// the input layer reports held state, and holding Down must step one entry.
 	std::uint8_t m_uiNavPrev = 0;
+	// Gamepad East ("Back"): its own edge, because it means "close the top
+	// layer" and a held button must not close a whole stack of dialogs.
+	bool m_uiBackPrev = false;
+	// Tab: its own edge, and read outside the text-field gate because Tab has to
+	// work while typing — leaving the field is what it is for.
+	bool m_uiTabPrev = false;
 	bool  m_widgetTextInputActive = false; // SDL text input toggled for a focused widget field
 
 	// Play-in-editor
 	bool m_isPlaying = false;
+	// Which project's application UI has already been started (its .heproj path),
+	// so the GameInstance's OnInit fires ONCE per project instead of every frame.
+	// A path rather than a bool: opening another project has to start that one's
+	// UI, and comparing paths says so without a second "project changed" signal
+	// to keep in sync. Empty = nothing started.
+	std::string m_appUiStartedFor;
+	// An application's live preview has to pick up edits. Until the state-preserving
+	// hot reload exists (docs/he-apps-plan.md E2 Stufe 3), "picking up an edit" means
+	// tearing the preview down and building it again — correct by construction, at
+	// the cost of the state it was holding.
+	//
+	// Set from the asset-saved hook and from the GameInstance commit, CONSUMED at
+	// the frame boundary: both of those fire from inside a save, and destroying the
+	// widget tree while the thing that triggered the save is still walking it is a
+	// crash waiting for a big enough project.
+	bool m_appPreviewRestartPending = false;
+	// …and whether that pending restart should carry the preview's state across.
+	// A SAVE should (the point of E4 Stufe 3: a one-word label fix must not empty
+	// a half-filled form); the toolbar's "Restart Live Preview" must not, since
+	// getting OUT of a state is the only reason to press it.
+	bool m_appPreviewKeepState = true;
+	// Tear the application preview down and start it again: OnShutdown, drop every
+	// widget, re-register the current GameInstance graph, OnInit. No-op outside an
+	// application project. keepState carries what the widgets were holding across
+	// the rebuild (docs/he-apps-plan.md E4, Stufe 3).
+	void restartAppPreview(bool keepState);
 	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
 	// write time::setTimeScale, because that knob belongs to the game — a title
 	// with its own pause menu sets it itself, and two owners of one variable fight
@@ -913,6 +984,7 @@ private:
 	// Project Hub transient state
 	int         m_hubSelectedPreset  = 0;
 	int         m_hubSelectedLang    = 0;  // index into the wizard's ProjectScriptLanguage order
+	bool        m_hubAdvancedShaderFx = true; // see EditorContext::hubAdvancedShaderFx
 	char        m_hubProjectName[256]= {};
 	char        m_hubProjectDir[512] = {};
 	std::string m_hubCreateError;

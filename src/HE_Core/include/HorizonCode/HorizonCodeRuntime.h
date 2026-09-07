@@ -39,6 +39,16 @@ struct HostBindings
 {
     std::function<Value(InstanceId id, int elem, const std::string& prop)>              getProperty;
     std::function<void (InstanceId id, int elem, const std::string& prop, const Value&)> setProperty;
+    // The same two on a REFERENCED instance, addressing the element by NAME —
+    // an id belongs to the asset that authored it, and a reference points at
+    // one this graph did not. `target` is where they differ from the pair
+    // above: those act on the instance that is running, these on the one the
+    // Target pin names. Unbound (a host with no elements) reads as nothing and
+    // writes nothing, like every other binding here.
+    std::function<Value(InstanceId target, const std::string& elem, const std::string& prop)>
+        getPropertyOn;
+    std::function<void (InstanceId target, const std::string& elem, const std::string& prop,
+                        const Value&)> setPropertyOn;
     std::function<void (InstanceId id)> showSelf;
     std::function<void (InstanceId id)> hideSelf;
 };
@@ -211,6 +221,60 @@ public:
     void fireOnValueChanged(InstanceId id, int elem, float value);
     void fireOnCheckChanged(InstanceId id, int elem, bool checked);
     void fireOnSelectionChanged(InstanceId id, int elem, int index);
+    // List rows: fill this one in, and open this one. Both carry the ITEM index.
+    void fireOnRowBind(InstanceId id, int elem, int index);
+    void fireOnRowActivated(InstanceId id, int elem, int index);
+    // A table's column title, by column index. Sorting is the owner's business.
+    void fireOnHeaderClicked(InstanceId id, int elem, int column);
+    void fireOnRightClicked(InstanceId id, int elem);
+    // A file dropped from the desktop — the payload is its absolute path, and
+    // elem 0 means the window itself took it (nothing under the pointer accepts).
+    void fireOnFileDropped(InstanceId id, int elem, const std::string& path);
+    // An entry in the tray menu was chosen (elem 0: the tray belongs to the
+    // application, not to any element).
+    void fireOnTrayItem(InstanceId id, int elem, const std::string& itemId);
+    // …and one in the menu bar (elem 0 for the same reason).
+    void fireOnMenuItem(InstanceId id, int elem, const std::string& itemId);
+    // A second window has closed (elem 0: a window belongs to the application,
+    // not to any element). The payload is the id window.open handed back.
+    void fireOnWindowClosed(InstanceId id, int elem, int windowId);
+    // An HTTP request this application started has been answered (elem 0: it
+    // belongs to the application). The payload is the TICKET, not the answer —
+    // an event carries one value and a response is four, so the readers
+    // (http.status, http.body, …) say what came back.
+    void fireOnHttpResponse(InstanceId id, int elem, int ticket);
+    // A path this application asked fs.watch about has appeared, vanished or
+    // changed (elem 0: it belongs to the application). The payload is the PATH
+    // in the spelling the watch used, so the graph can hand it straight back to
+    // fs.readText; whether it now exists, and how big it is, are the readers'
+    // job for the same reason the HTTP ticket leaves that to its own.
+    void fireOnFileChanged(InstanceId id, int elem, const std::string& path);
+    // A timer this application started has come due (elem 0: it belongs to the
+    // application). The payload is the HANDLE, which is what tells two timers
+    // apart — the same trade the HTTP ticket and the watched path make.
+    void fireOnTimer(InstanceId id, int elem, int handle);
+    // A link in a rich-text label — the payload is the id the markup gave it.
+    void fireOnLinkClicked(InstanceId id, int elem, const std::string& linkId);
+    // A day was picked in a calendar. The payload is "YYYY-MM-DD": the one
+    // spelling of a date that no locale disagrees about, and the only one a
+    // parser on the other end can be sure of.
+    void fireOnDateChanged(InstanceId id, int elem, const std::string& isoDate);
+    // A colour was picked. Its own event rather than OnValueChanged, because a
+    // colour is four numbers and the pin type for it already exists.
+    void fireOnColorChanged(InstanceId id, int elem, const glm::vec4& color);
+    // Dragging inside the application. OnDrop's payload is what the SOURCE said
+    // it was; OnDragEnded's bool is whether anything took it.
+    void fireOnDragStarted(InstanceId id, int elem);
+    void fireOnDrop(InstanceId id, int elem, const std::string& payload);
+    void fireOnDragEnded(InstanceId id, int elem, bool accepted);
+    // An animation reached its target — the payload is the property's name.
+    void fireOnAnimationFinished(InstanceId id, int elem, const std::string& prop);
+    // An authored CLIP reached its end — the payload is the clip's name. Its
+    // own event, because a clip belongs to the widget and a tween to one
+    // element, and a graph waiting for one must not hear the other.
+    void fireOnClipFinished(InstanceId id, const std::string& clip);
+    // A dialog, popup or menu closing — the whole widget, so no element.
+    void fireOnDismissed(InstanceId id);
     void fireConstruct(InstanceId id);
     void fireDestruct(InstanceId id);
     void fireBeginPlay(InstanceId id);
@@ -369,6 +433,11 @@ private:
     std::unordered_map<InstanceId, std::unordered_map<EventId, std::vector<InstanceId>>> m_listeners;
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
+    // Which classes have already had their "Create Widget without a Show
+    // Widget" hint printed (see widgetCreatorsWithoutShow). Keyed by class, not
+    // by instance: a class spawned two hundred times has one thing wrong with
+    // it, not two hundred.
+    std::unordered_set<std::string> m_unshownWidgetWarned;
     // The same instance as an object, when it is a compiled one. Kept beside the
     // id so generated code can reach the GameInstance without the map lookup
     // every other reference needs — it is the one target whose class is known at

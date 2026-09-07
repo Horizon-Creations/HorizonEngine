@@ -31,7 +31,11 @@ reproduziert. Alles andere stammt aus dem Abgleich und trägt seine Belege im Te
 
 ---
 
-## 1. Vier Befunde, die den Plan bestimmen
+## 1. Fünf Befunde, die den Plan bestimmen
+
+> §1.5 ist am 01.09.2026 dazugekommen, nach demselben Beweisverfahren wie §0. Der
+> ursprüngliche Abgleich hat den UI-Pass nicht betrachtet, weil es damals nichts gab, was
+> daran hing; die HE-Apps-Richtung (`docs/he-apps-plan.md`) hat das geändert.
 
 ### 1.1 Der gesamte GI-Stack auf D3D11 **und** D3D12 ist zur Laufzeit tot
 
@@ -145,6 +149,41 @@ Die Begründung ist **GL-4.1-spezifisch** — und gilt für D3D11/D3D12/Vulkan n
 Structured Buffers bzw. SSBOs. Die Clustered-Variante ist für sie also nicht technisch
 gesperrt, sondern nur von dieser Zeile. Für die Tile-Variante gilt das nur eingeschränkt
 (siehe §4).
+
+### 1.5 Der UI-Pass zeichnet auf D3D11, D3D12 und Vulkan nur farbige Rechtecke
+
+Nachgemessen am 01.09.2026. Alle drei Backends schieben pro Quad **denselben** Satz von sechs
+Werten in ihren Konstantenpuffer bzw. ihre Push-Constants, und sonst nichts:
+
+| | Datei:Zeile | Felder |
+|---|---|---|
+| D3D11 | `D3D11Renderer.cpp:3298-3322` (`UICBData`), Shader `:838` (`kUIHLSL`) | rect, color, uvRect, viewport, mode, rotation |
+| D3D12 | `D3D12Renderer.cpp:2768-2797` (`UICB`) | dieselben sechs |
+| Vulkan | `VulkanRenderer.cpp:8027-8049` (`UIPush`) | dieselben sechs |
+
+`mode` unterscheidet nur „einfarbiges Quad" von „Glyphe aus dem Font-Atlas". Damit fehlt der
+gesamte **Schicht 0** aus `docs/he-apps-plan.md` §D5: Eckenradius, Rahmen, linearer und
+radialer Verlauf, Schlagschatten, Innenschatten. Dazu fehlen Element-**Texturen** und
+**UI-Materialien**. Der Grep ist eindeutig: `cornerRadius` kommt in allen drei Dateien **null
+mal** vor, `obj.textureAssetId` ebenfalls null mal, und der einzige `obj.materialAssetId`-
+Treffer in D3D11 (`:3540`) und Vulkan (`:3551`) sitzt im **Szenen**-Pfad, nicht im UI-Pass.
+
+Was vorhanden ist und bleiben kann: Quads, Glyphen mit mehreren Atlanten, Clipping per
+Scissor, Rotation um einen Pivot. Auf Windows ist ein abgerundeter Knopf heute ein Rechteck,
+ein Verlauf eine Fläche, ein Schatten unsichtbar, ein Icon nicht da.
+
+**Warum das jetzt zählt und im August noch nicht:** das Theme-System (`docs/he-apps-plan.md`
+§D1, gebaut Ende August/Anfang September) spielt Rundung, Rahmen und Farben **pro
+Elementtyp** aus. Alles, was ein Autor dort einstellt, kommt auf zwei von fünf Backends nicht
+an — und zwar stillschweigend, weil das Quad ja gezeichnet wird.
+
+**Warum es billig ist:** es ist reine Portierung, kein Entwurf. Der GL-Fragment-Shader
+`kUIFS` (`OpenGLRenderer.cpp:4675-4783`, 108 Zeilen) ist GLSL 410 ohne eine einzige
+GL-Besonderheit — eine SDF für die vier Radien, ein Rahmen-Ring, zwei Verlaufsformen, zwei
+Schatten. Er lässt sich fast Zeile für Zeile nach HLSL und nach Vulkan-GLSL übertragen. Die
+Uniform-Liste, die dazugehört, steht komplett in `OpenGLRenderer.cpp:7530-7549`. Der
+Software-Rasterizer kann Schicht 0 übrigens schon (`SoftwareRaster.cpp:159-163`), was für
+einen zweiten unabhängigen Beleg der Portabilität taugt.
 
 ---
 
@@ -280,6 +319,29 @@ Der Roadmap-Punkt ist damit nicht mehr „nur Metal".
 
 **Keine Lücke, anders gelöst:** D3D12 hat kein `GetViewportTexture`-Override, löst dasselbe
 aber über `GetViewportD3DResource` + `HasViewportResourceChanged`. Nicht nachziehen.
+
+### UI-Pass — siehe §1.5
+
+Metal ist hier ausnahmsweise nicht die Referenz, sondern GL: `kUIFS`
+(`OpenGLRenderer.cpp:4675`) ist der portable Shader, Metal (`MetalRenderer.mm:11220`) macht
+dasselbe in MSL.
+
+| Feature | GL | D3D11 | D3D12 | Vulkan |
+|---|:--:|:--:|:--:|:--:|
+| Einfarbige Quads | JA | JA | JA | JA |
+| Glyphen (mehrere Font-Atlanten) | JA | JA | JA | JA |
+| Clipping (Scissor) | JA | JA | JA | JA |
+| Rotation um Pivot | JA | JA | JA | JA |
+| Eckenradius (4 Radien, SDF) | JA | -- | -- | -- |
+| Rahmen (Breite + Farbe) | JA | -- | -- | -- |
+| Verlauf linear / radial | JA | -- | -- | -- |
+| Schlagschatten (weiche Kante) | JA | -- | -- | -- |
+| Innenschatten | JA | -- | -- | -- |
+| Element-Textur (9-Slice-Quelle) | JA | -- | -- | -- |
+| UI-Material (`MatDomain::UserInterface`) | JA | -- | -- | -- |
+
+Der Software-Renderer erfüllt die Schicht-0-Zeilen ebenfalls (`SoftwareRaster.cpp:159`), er
+steht nur nicht in dieser Matrix, weil er nicht Ziel des Plans ist.
 
 ---
 
@@ -585,6 +647,44 @@ D3D11 nimmt an dieser Phase nicht teil (§3).
 **Verifikation:** `HE_DUMP_GIREFL`, `HE_DUMP_GIREFLTEST`, `HE_DUMP_GIREFLQUALITY`,
 `HE_DUMP_GIREFLROUGH`, `HE_DUMP_GIREFLBLUR`, `HE_DUMP_GIREFLBOUNCES`,
 `HE_DUMP_GIREFLLANDSCAPE` gegen die Metal-Referenz.
+
+### P6 — Der UI-Pass: Schicht 0 auf D3D11, D3D12 und Vulkan (siehe §1.5)
+
+Steht als letzte Phase in der Nummerierung, gehört nach Nutzen pro Aufwand aber **vor P4 und
+P5**: es ist die einzige Lücke im ganzen Plan, die ein Autor beim Bedienen des Editors direkt
+herstellt (er stellt einen Eckenradius im Theme ein) und auf zwei Zielplattformen
+stillschweigend verliert. Die Reihenfolge gehört dem, der den Plan fährt; die Begründung
+steht hier, damit sie nicht neu hergeleitet werden muss.
+
+Drei Schritte, jeder einzeln abnehmbar:
+
+1. **Den Konstantenpuffer erweitern.** Die drei Strukturen (`UICBData`, `UICB`, `UIPush`)
+   bekommen dieselben Felder, die GL heute als Uniforms setzt
+   (`OpenGLRenderer.cpp:7530-7549`): `cornerRadius` (float4), `borderWidth`, `borderColor`,
+   `gradient`, `gradientColor`, `gradientAngle`, `gradientShape`, `blur`, `innerBlur`,
+   `innerColor`. **Vulkan hat hier ein echtes Limit:** `UIPush`
+   (`VulkanRenderer.cpp:7986`) ist heute 96 Byte, die zehn Felder bringen es auf rund 184,
+   und garantiert sind nur 128 (`:37` sagt das selbst über den Objekt-Push). Also entweder
+   packen — die vier Flags/Winkel passen in einen `vec4`, dann sind es 144, immer noch zu
+   viel — oder ein Uniform-Buffer pro Quad, so wie D3D12 es ohnehin macht. Das ist der
+   einzige Entwurfspunkt der ganzen Phase.
+2. **Den Shader übertragen.** `kUIFS` (`OpenGLRenderer.cpp:4675-4783`) nach HLSL für
+   `kUIHLSL` (`D3D11Renderer.cpp:838`, D3D12 nutzt denselben Quelltext) und nach
+   Vulkan-GLSL. Reine Übersetzung: eine Rounded-Box-SDF, ein Rahmen-Ring, zwei
+   Verlaufsformen, zwei Schatten. Kein `discard`, keine Ableitungen außer `fwidth`, keine
+   Backend-Besonderheiten.
+3. **Texturen und UI-Materialien.** Erst danach, weil beides an der Ressourcenbindung hängt
+   und nicht am Shader-Kern: `obj.textureAssetId` braucht pro Quad eine gebundene Textur
+   (GL: `OpenGLRenderer.cpp:7520`), `obj.materialAssetId` den Weg über
+   `MaterialShaderLibrary` mit `MatDomain::UserInterface`.
+
+**Verifikation:** kein `HE_DUMP_*` nötig und keins vorhanden — der Widget-Pfad hat einen
+eigenen, schnelleren Beleg. `scripts/he_uishot.py` rastert Widgets über den
+Software-Rasterizer, der Schicht 0 bereits kann, und `RenderWidgetThumbnail` zeichnet
+dasselbe Widget über das echte Backend. Ein Abgleich der beiden Bilder pro Backend ist die
+Abnahme; solange nur GL und Metal `RenderWidgetThumbnail` haben (siehe Matrix
+„Editor-Integration"), ist der Vergleich auf Windows ein Screenshot aus einem gepackten Build
+gegen denselben Software-Abzug.
 
 ---
 

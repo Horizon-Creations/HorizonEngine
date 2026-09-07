@@ -16,6 +16,7 @@
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "TypeAssetPanel.h"
+#include "ThemeAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -506,6 +507,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 	// Source root (its .h/.cpp classes + the h/cpp viewer).
 	const bool cbShowSource = ctx.projectManager &&
 		ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp;
+	// Same shape of restriction as the language above: a project with Advanced
+	// Shader Effects switched off never authors a material, so it is not offered
+	// one. Existing material FILES stay visible on purpose — a file that exists
+	// and cannot be seen only confuses source control and the reference scan.
+	const bool cbAllowMaterials = !ctx.projectManager ||
+		ctx.projectManager->currentProject().advancedShaderEffects;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("Content Browser", nullptr, ImGuiWindowFlags_NoTitleBar);
     if (ctx.fontHeading) ImGui::PopFont();
@@ -936,6 +943,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{ "Script",            HE::AssetType::Script },
 			{ "HorizonCode Class", HE::AssetType::HorizonCodeClass },
 			{ "UI Widget",         HE::AssetType::Widget },
+			{ "Theme",             HE::AssetType::Theme },
 			{ "Particle System",   HE::AssetType::ParticleSystem },
 			{ "Animator",          HE::AssetType::AnimatorStateMachine },
 			{ "Animation Clip",    HE::AssetType::AnimationClip },
@@ -1031,6 +1039,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				case HE::AssetType::StructType:          return { I.horizonCodeClass,     {0.60f, 0.95f, 0.80f, 1.0f} };
 				case HE::AssetType::EnumType:            return { I.horizonCodeClass,     {0.80f, 0.95f, 0.60f, 1.0f} };
 				case HE::AssetType::SaveGameTemplate:    return { I.horizonCodeClass,     {0.95f, 0.85f, 0.95f, 1.0f} };
+				case HE::AssetType::Theme:               return { I.widget,               {0.55f, 0.80f, 0.95f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
@@ -1228,6 +1237,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      HorizonCodeClassPanel::isClassAsset(fullPath) ||
 			      InputAssetPanel::isInputAsset(fullPath) ||
 			      TypeAssetPanel::isTypeAsset(fullPath) ||
+			      ThemeAssetPanel::isThemeAsset(fullPath) ||
 			      SkeletalMeshEditorPanel::isSkeletalMeshAsset(fullPath) ||
 			      StaticMeshEditorPanel::isStaticMeshAsset(fullPath) ||
 			      ParticleGraphEditorPanel::isParticleAsset(fullPath) ||
@@ -2160,6 +2170,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						const std::string tree = HE::uiWidgetTreeToJson(HE::UIWidgetTree{});
 						w.addChunk(HAsset::CHUNK_UIWT, tree.data(), tree.size());
 					}
+					// A theme is born as the shipped default, not as an empty
+					// file: an author edits colours, they do not invent nine
+					// roles from nothing, and an empty theme would be black.
+					if (type == HE::AssetType::Theme)
+					{
+						const std::string json = HE::uiThemeToJson(HE::uiDefaultTheme());
+						w.addChunk(HAsset::CHUNK_THEM, json.data(), json.size());
+					}
 					if (type == HE::AssetType::HorizonCodeClass)
 					{
 						const std::string graph = HorizonCode::toJson(HorizonCode::Graph{});
@@ -2231,6 +2249,66 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			};
 
+			// ── Application projects: a short, flat list ──────────────────────────
+			// Scenes, input mappings, particles, animator machines and savegame
+			// templates are all gameplay furniture. An app authors an interface and
+			// the logic behind it, so it is offered exactly that — grouping four
+			// entries into submenus would be filing for its own sake.
+			if (ctx.projectManager && ctx.projectManager->currentProject().appProject)
+			{
+				if (EditorWidgets::menuItem("UI Widget"))
+					tryCreate("NewWidget", ".hasset", HE::AssetType::Widget);
+				// The mode that needs a theme MOST is the one that could not
+				// create one — an application is the whole reason themes exist.
+				if (EditorWidgets::menuItem("Theme"))
+					tryCreate("NewTheme", ".hasset", HE::AssetType::Theme);
+
+				// The logic asset of whatever language the project was created in.
+				// Only the PLAIN class: Entity, Player Controller and Player
+				// Character are the character/gameplay rows of the taxonomy and
+				// have nothing to sit on here.
+				switch (ctx.projectManager->currentProject().scriptLanguage)
+				{
+				case ProjectScriptLanguage::HorizonCode:
+					if (EditorWidgets::menuItem("HorizonCode Class"))
+						tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
+					break;
+				case ProjectScriptLanguage::Lua:
+					if (EditorWidgets::menuItem("Script"))
+						tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
+					break;
+				case ProjectScriptLanguage::Python:
+					if (EditorWidgets::menuItem("Script"))
+						tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
+					break;
+				case ProjectScriptLanguage::Cpp:
+					if (EditorWidgets::menuItem("C++ Class"))
+					{
+						std::strncpy(s_cppClassName, "AppClass", sizeof(s_cppClassName) - 1);
+						s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
+						s_openCppClassPopup = true;
+						ImGui::CloseCurrentPopup();
+					}
+					break;
+				}
+
+				// Only with Advanced Shader Effects — the same gate as everywhere else.
+				if (cbAllowMaterials)
+				{
+					if (EditorWidgets::menuItem("Material"))
+						tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+					if (EditorWidgets::menuItem("Material Function"))
+						tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+				}
+
+				ImGui::Separator();
+				if (EditorWidgets::menuItem("Folder")) createFolderIn(targetFolder);
+				// Plain return: this is drawCreateAssetItems, and the popup or menu
+				// around it belongs to whoever called — ending it here would close
+				// someone else's.
+				return;
+			}
+
 			// ── Grouped, because a flat list of sixteen is a list you read every
 			// time instead of aiming at. The two that stay loose are the ones you
 			// make most and open as documents in their own right; everything else
@@ -2297,8 +2375,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			if (ImGui::BeginMenu("Rendering"))
 			{
-				if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
-				if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+				// Materials only where the project allows them (cbAllowMaterials).
+				if (cbAllowMaterials)
+				{
+					if (EditorWidgets::menuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+					if (EditorWidgets::menuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+				}
 				if (EditorWidgets::menuItem("Particle System"))   tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
 				ImGui::EndMenu();
 			}
@@ -2310,6 +2392,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				if (EditorWidgets::menuItem("Struct")) tryCreate("NewStruct", ".hasset", HE::AssetType::StructType);
 				if (EditorWidgets::menuItem("Enum"))   tryCreate("NewEnum",   ".hasset", HE::AssetType::EnumType);
 				if (EditorWidgets::menuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
+				if (EditorWidgets::menuItem("Theme")) tryCreate("NewTheme", ".hasset", HE::AssetType::Theme);
 				ImGui::EndMenu();
 			}
 
@@ -2751,7 +2834,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Allowed even for an engine-default material: it creates a NEW,
 				// separate asset (a plain project one, not "Engine/..."-namespaced)
 				// rather than mutating the default.
-				if (ext == ".hasset" && ctx.contentManager &&
+				if (ext == ".hasset" && ctx.contentManager && cbAllowMaterials &&
 				    MaterialEditorPanel::isMaterialAsset(s_ctxMenuItem) &&
 				    EditorWidgets::menuItem("Create Material Instance"))
 				{

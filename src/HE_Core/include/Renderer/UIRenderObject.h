@@ -21,9 +21,55 @@ struct UIRenderObject {
     int         layer     = 0;
     glm::vec2   uvMin     = {0.0f, 0.0f}; // glyph quads: atlas UV rect
     glm::vec2   uvMax     = {0.0f, 0.0f};
-    // Corner radius in pixels for solid quads (type 0); 0 = square. A value of
-    // min(w,h)/2 yields a circle — used for the slider handle. Ignored by glyphs.
-    float       cornerRadius = 0.0f;
+    // Corner radii in pixels for solid quads (type 0), one per corner in CSS
+    // order: x = top-left, y = top-right, z = bottom-right, w = bottom-left.
+    // 0 = square. All four at min(w,h)/2 yields a circle — used for the slider
+    // handle. Ignored by glyphs.
+    //
+    // Four rather than one because a tab, a chat bubble and the top half of a
+    // card all round some corners and not others, and every one of those was
+    // impossible to author with a single number.
+    glm::vec4   cornerRadius{ 0.0f, 0.0f, 0.0f, 0.0f };
+    // ── Border ("Schicht 0", docs/he-apps-plan.md D5) ────────────────────────
+    // An outline drawn INSIDE the quad, following the corner radius, in pixels.
+    // 0 = none, which is what every quad carried before borders existed.
+    //
+    // Inside rather than centred on the edge: an element's rect is what the
+    // layout gave it, and a border that grew outwards would overlap its
+    // neighbours and change with its own width.
+    float       borderWidth = 0.0f;
+    glm::vec4   borderColor{ 0.0f, 0.0f, 0.0f, 1.0f };
+    // ── Linear gradient ("Schicht 0") ────────────────────────────────────────
+    // Off = the quad is `color` throughout, which is what every quad was before.
+    // On = `color` fades to `gradientColor` along `gradientAngleDeg`, measured
+    // clockwise from "down": 0 = top to bottom, 90 = left to right.
+    //
+    // Down at zero rather than right, because a vertical fade is what almost
+    // every button and header wants, and the common case should be the one that
+    // needs no number typed into it.
+    bool        gradient = false;
+    glm::vec4   gradientColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    float       gradientAngleDeg = 0.0f;
+    // 0 = linear (the angle above), 1 = radial: `color` at the centre of the
+    // quad fading to `gradientColor` at its FARTHEST CORNER, which is the rule
+    // CSS's radial-gradient uses by default. Farthest corner rather than
+    // nearest side because it is the only normalization under which the second
+    // colour actually reaches every part of the box.
+    int         gradientShape = 0;
+    // ── Soft edge ("Schicht 0") ──────────────────────────────────────────────
+    // 0 = the crisp ~1px antialiased edge every quad has always had. Above 0,
+    // the shape's coverage fades across `blur` pixels either side of its edge,
+    // which is what makes a drop shadow one ordinary quad rather than a blur
+    // pass: the producer emits the shape again, offset, in the shadow's colour,
+    // GROWN by `blur` on every side so the falloff is not cut off — and this
+    // shader therefore measures the shape against a box inset by `blur`.
+    float       blur = 0.0f;
+    // A second shadow, cast INWARDS from the shape's own edge: same falloff,
+    // drawn on top of the fill and inside the shape, so it darkens the rim
+    // instead of the ground. 0 = none. It rides on the element's own quad,
+    // because it has to be clipped to that quad's shape.
+    float       innerShadowBlur = 0.0f;
+    glm::vec4   innerShadowColor{ 0.0f, 0.0f, 0.0f, 0.0f };
     // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
     // font; other keys index UIFontCache (an imported Font asset).
     uint32_t    fontAtlasKey = 0;
@@ -41,4 +87,27 @@ struct UIRenderObject {
     // chain and shifts the rect; see uiElementRotation).
     float       rotation = 0.0f;
     glm::vec2   rotationPivot{ 0.0f, 0.0f };
+    // ── Element state for node-graph materials ("Schicht 1", D5) ─────────────
+    // What the Element State node reads: x = hovered, y = pressed, z = focused,
+    // w = disabled. 0..1 rather than 0/1 — an element with a Transition (B8)
+    // hands over its BLEND, so a material eases with the widget instead of
+    // snapping while the widget fades. All zero on every quad that is not a
+    // widget surface, which is what every quad carried before this existed.
+    //
+    // It rides on the quad rather than on the material because the whole point
+    // is that two widgets sharing one material are in different states.
+    glm::vec4   uiState{ 0.0f, 0.0f, 0.0f, 0.0f };
 };
+
+namespace HE {
+
+// Painter sort key inside one canvas (and inside one standalone widget, see
+// WidgetManager): layer is the major key, UI nesting depth the minor one, so a
+// child draws over its parent at equal layer. Both UI producers — the entity
+// path (UISystem::extract) and the widget path (WidgetManager::extract) — sort
+// by this, and they have to agree, so the formula lives next to the object it
+// orders rather than in either producer. 256 = the exclusive depth cap both
+// walks clamp to.
+inline int uiSortKey(int layer, int depth) { return layer * 256 + depth; }
+
+} // namespace HE

@@ -1,4 +1,5 @@
 #include "UIEditorPanel.h"
+#include <imgui_internal.h>   // ShadeVertsLinearColorGradientKeepAlpha — see drawSurfacePreview
 #include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
 
@@ -14,10 +15,12 @@
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
+#include "UITimelineMath.h"                     // seconds ⇄ pixels for the animation strip
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <MaterialGraph/MaterialGraph.h>        // MatDomain (widget materials are UI-domain)
 #include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/UITheme.h>
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
 #include <UIWidget/UIWidgetBinding.h>
@@ -32,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -78,6 +82,53 @@ struct State
 	int    previewIndex = 0;
 	float  previewW = 0.0f, previewH = 0.0f;
 
+	// ── The timeline (docs/he-apps-plan.md B8) ───────────────────────────────
+	// Which of the widget's clips is open, as an INDEX into tree.animations
+	// (-1 = none). View state: which animation somebody is looking at is not
+	// part of the widget.
+	int    clipIndex = -1;
+	float  playhead  = 0.0f;    // seconds into the open clip
+	bool   clipPlaying = false; // previewing it in the designer, not at runtime
+	int    trackSel = -1;       // the track new keys go on (-1 = none)
+	int    keySel   = -1;       // the key on it whose value the strip edits
+	bool   keyDragged = false;  // a key moved this drag → one undo on release
+	// The lane's view onto the clip: zoom is a multiple of FIT (1 = the whole
+	// clip spans the lane) and scroll is the second at its left edge. View
+	// state, like the canvas zoom beside it — where somebody was looking is not
+	// part of the animation.
+	float  clipZoom   = 1.0f;
+	float  clipScroll = 0.0f;
+	// Scratch buffers, not the document: an InputText writes on every keystroke,
+	// so typing straight into a clip's name would leave a clip called "F" behind
+	// on the way to "FadeIn".
+	std::string newClipName;
+	// …and the same for renaming one, which has the stronger reason: every
+	// keystroke would be a rename of its own, and each would drag the graph's
+	// Play nodes along to a name nobody meant to type.
+	std::string clipRenameEdit;
+	float  timelineH = 210.0f;  // the strip's height, dragged by its top edge
+
+	// Which theme the canvas RESOLVES bound colours against (toolbar ▸ theme).
+	// View state as well, and deliberately not the running preview's setting: a
+	// widget is meant to survive the project's own themes, and checking that has
+	// to be possible without switching the whole editor preview over to one.
+	//   0 = whatever the preview runs, 1 = the built-in default,
+	//   2 = the editor's amber, 3 = the theme asset at themeAssetPath.
+	int         themeSource = 0;
+	std::string themeAssetPath;
+	HE::UITheme themeOverride;         // resolved when it changes, not per frame
+	bool        themeOverrideOk = false;
+	// The JSON the override was parsed from. Kept so the panel can notice that
+	// the asset changed underneath it — somebody saving that theme in its own
+	// editor is exactly the case this control is used for — without parsing it
+	// sixty times a second.
+	std::string themeOverrideJson;
+	std::string themeOverrideFor;      // the path that JSON was read from
+	// 0 = the mode the preview resolved to, 1 = Light, 2 = Dark. Separate from
+	// the theme because "the same theme, in the other mode" is the commoner of
+	// the two questions.
+	int         themeModeOverride = 0;
+
 	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element.
 	int    dragMode = 0;
 	int    resizeHandle = -1;        // 0..7: corners+edges (see handleOffsets)
@@ -85,6 +136,31 @@ struct State
 	float  dragStartPos[2]  = {};
 	float  dragStartSize[2] = {};
 	bool   dragDidEdit = false;      // push one undo snapshot per completed drag
+	// A press inside the current selection keeps that selection so it can be
+	// DRAGGED — otherwise an element something else lies over could be selected
+	// and then never moved, because the press that starts the drag re-picks the
+	// thing on top of it. The pick is not thrown away though, only deferred: if
+	// the button comes up without the mouse having travelled, it was a click and
+	// this is what it would have selected.
+	int    pendingPick = 0;
+	bool   hasPendingPick = false;
+	// Snapping (docs/he-apps-plan.md D4). On by default — an editor that lines
+	// nothing up is one where every layout is hand-typed numbers — and held off
+	// for one drag with ALT. Alt rather than Ctrl because on the Mac ImGui's
+	// Ctrl IS the command key, and Ctrl+click is a right click there.
+	//
+	// View state, like the zoom and the theme preview beside it: whether
+	// somebody wants help while dragging is not part of the widget.
+	bool   snapOn = true;
+	// The lines the last snap caught, in canvas units, drawn for the length of
+	// the drag. Filled by the drag block itself so the guide is the line the
+	// element actually sat on, not one recomputed a frame later.
+	HE::UISnapLine snapGuide[2];
+	bool   hasSnapGuide[2] = { false, false };
+	// Details panel: is the corner radius shown as one number or as four? A
+	// display mode, not a value — an element whose corners already differ is
+	// always shown as four whatever this says.
+	bool   cornerPerSide = false;
 
 	// Graph canvas — the shared GraphEditor component owns pan/zoom/selection/
 	// drag; these are the host-side bits it can't own.
@@ -162,10 +238,146 @@ std::string elementName(const UIElement& e)
 }
 
 // Generic property read helpers (return sensible fallbacks when absent).
+// ── The theme the PREVIEW resolves bound colours against ────────────────────
+// The runtime resolves a bound colour when it creates the widget: uiApplyTheme
+// writes the role's value into the ordinary property, against whatever mode is
+// in force. The designer never created anything, so it was drawing the literal
+// that happened to be stored — which for the shipped components is the light
+// palette they were generated with. Result: a page that is dark in the preview
+// and light in the designer, for the same asset.
+//
+// Resolved on the READ side rather than by applying the theme to the tree,
+// because the tree the designer draws IS the authored document: writing
+// resolved colours into it would put them in the file.
+//
+// Set once per frame by whatever is about to draw, from the editor's own widget
+// runtime — the same object the live preview asks — so the two cannot disagree
+// about either the theme or the mode.
+const HE::UITheme* g_previewTheme = nullptr;
+HE::UIThemeMode    g_previewMode  = HE::UIThemeMode::Dark;
+
+// A value the element holds, resolved through the theme when the theme has
+// something to say about it — a role binding, or the element's style.
+//
+// Asked, not written, and asked through the SAME function the runtime writes
+// with (uiThemeValueFor). This used to be a second copy of uiApplyTheme's rule
+// here, which held for exactly as long as there was one rule; a style is a
+// second one, and a designer that knew only the first would show an unthemed
+// button beside a themed preview.
+glm::vec4 themedColor(const UIElement& e, const char* name, const glm::vec4& literal)
+{
+	HE::UIPropValue v;
+	if (g_previewTheme &&
+	    HE::uiThemeValueFor(e, *g_previewTheme, g_previewMode, name, v) &&
+	    v.type == UIPropType::Color)
+		return v.col;
+	return literal;
+}
+
+// Does the theme decide this property, so that typing a value here would be
+// overwritten the next time the theme or the mode changes? That is the question
+// every read-only field in the details panel is asking, and since styles it is
+// no longer "is a role bound": a style decides properties nobody bound, and a
+// LOCKED property is decided by neither — the lock is what makes it yours.
+bool themeDecides(const UIElement& e, const char* prop)
+{
+	if (!g_previewTheme)
+	{
+		const std::string& r = e.themeRoleFor(prop);
+		return !r.empty() && r != HE::kUIThemeLiteral;
+	}
+	HE::UIPropValue v;
+	return HE::uiThemeValueFor(e, *g_previewTheme, g_previewMode, prop, v);
+}
+
+float themedFloat(const UIElement& e, const char* name, float literal)
+{
+	HE::UIPropValue v;
+	if (g_previewTheme &&
+	    HE::uiThemeValueFor(e, *g_previewTheme, g_previewMode, name, v) &&
+	    v.type == UIPropType::Float)
+		return v.f;
+	return literal;
+}
+
+// Resolve the designer's theme override — when it is picked, and thereafter
+// whenever the asset it came from has changed. Parsing a theme's JSON sixty
+// times a second to get the same nine colours back would be silly; comparing the
+// string it was parsed FROM is a memcmp of a few kilobytes, and it is what makes
+// an edit in the theme editor show up here at once. Somebody saving that theme
+// next door is the case this control exists for.
+//
+// An asset that cannot be read falls back to following the preview rather than
+// to white: the point of the control is to SEE a theme, and a silent white one
+// looks like a bug in the widget.
+void resolvePreviewTheme(State& st, AppContext& ctx)
+{
+	if (st.themeSource == 1 || st.themeSource == 2)
+	{
+		st.themeOverride   = st.themeSource == 1 ? HE::uiDefaultTheme() : HE::uiAmberTheme();
+		st.themeOverrideOk = true;
+		st.themeOverrideFor.clear();
+		st.themeOverrideJson.clear();
+		return;
+	}
+	// Which asset the canvas should resolve against: the one picked in the
+	// toolbar, or — while the toolbar says "from the preview" — the theme this
+	// WIDGET names for itself, because that is what the runtime would use for it.
+	const std::string path = st.themeSource == 3 ? st.themeAssetPath
+	                       : st.themeSource == 0 ? st.tree.themeAsset : std::string();
+	if (path.empty() || !ctx.contentManager)
+	{
+		st.themeOverrideOk = false;
+		st.themeOverrideFor.clear();
+		st.themeOverrideJson.clear();
+		return;
+	}
+
+	const HE::UUID id = ctx.contentManager->loadAsset(path);
+	// The getter points into the manager's dense asset vector, so the JSON is
+	// read out here and now — one more loadAsset would move it.
+	const ThemeAsset* a = id == HE::UUID{} ? nullptr : ctx.contentManager->getTheme(id);
+	const std::string json = a ? a->json : std::string();
+	// What was last ATTEMPTED, not what last succeeded: an unreadable theme must
+	// be attempted once and then left alone, or the warning below is printed
+	// sixty times a second.
+	if (path == st.themeOverrideFor && json == st.themeOverrideJson) return;
+	st.themeOverrideFor  = path;
+	st.themeOverrideJson = json;
+	st.themeOverrideOk   = a && HE::uiThemeFromJson(json, st.themeOverride);
+	if (!st.themeOverrideOk)
+		HE_LOG_WARN(Editor, "UI Designer: '%s' is not a readable theme", path.c_str());
+}
+
+// What the toolbar cell says it is drawing with. Short by design — it sits in a
+// strip beside four other cells — and it names the MODE only when the mode is
+// being forced, since "Default" already means "and whatever mode the preview is
+// in".
+std::string previewThemeLabel(const State& st)
+{
+	std::string s;
+	switch (st.themeSource)
+	{
+		case 1:  s = "Default"; break;
+		case 2:  s = "Amber";   break;
+		case 3:  s = std::filesystem::path(st.themeAssetPath).stem().string(); break;
+		// "From the preview" is the widget's OWN theme where it names one — that
+		// is what the runtime would use for it, so it is what the cell should
+		// say rather than a word that hides it.
+		default: s = st.tree.themeAsset.empty()
+			? std::string("Preview")
+			: std::filesystem::path(st.tree.themeAsset).stem().string();
+			break;
+	}
+	if (st.themeModeOverride == 1) s += " / Light";
+	if (st.themeModeOverride == 2) s += " / Dark";
+	return s;
+}
+
 glm::vec4 propColorOr(const UIElement& e, const char* name, const glm::vec4& fb)
 {
 	const UIPropValue v = e.getProp(name);
-	return v.type == UIPropType::Color ? v.col : fb;
+	return themedColor(e, name, v.type == UIPropType::Color ? v.col : fb);
 }
 std::string propStringOr(const UIElement& e, const char* name, const std::string& fb)
 {
@@ -175,12 +387,22 @@ std::string propStringOr(const UIElement& e, const char* name, const std::string
 float propFloatOr(const UIElement& e, const char* name, float fb)
 {
 	const UIPropValue v = e.getProp(name);
-	return v.type == UIPropType::Float ? v.f : fb;
+	return themedFloat(e, name, v.type == UIPropType::Float ? v.f : fb);
 }
 bool propBoolOr(const UIElement& e, const char* name, bool fb)
 {
 	const UIPropValue v = e.getProp(name);
 	return v.type == UIPropType::Bool ? v.b : fb;
+}
+// Its own reader, because these guards are typed and an Int read through
+// propFloatOr silently comes back as the FALLBACK — the value lives in `.i`,
+// `.f` is zero, and the type check sends it to the default. That is what made
+// the designer draw every label left-middle no matter which of the nine cells
+// was picked, while the engine drew it correctly.
+int propIntOr(const UIElement& e, const char* name, int fb)
+{
+	const UIPropValue v = e.getProp(name);
+	return v.type == UIPropType::Int ? v.i : fb;
 }
 
 // ── Undo (combined tree + graph snapshot; '\x1f' = ASCII Unit Separator) ──────
@@ -436,9 +658,11 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
 		{
 			const int dragged = *static_cast<const int*>(p->Data);
-			// Only Panels may contain children.
+			// Containers take children (see UIElement::acceptsChildren) — a
+			// Panel, a layout box, and a Button, whose caption and icon ARE
+			// children.
 			if (dragged != nodeId && !st.tree.isDescendantOf(nodeId, dragged) &&
-			    n->type() == UIWidgetType::Panel)
+			    n->acceptsChildren())
 			{
 				if (UIElement* d = st.tree.find(dragged))
 				{
@@ -450,15 +674,16 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 		{
 			const int t = *static_cast<const int*>(p->Data);
-			// New elements nest under Panels; otherwise share the target's parent.
-			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
+			// New elements nest inside a container; otherwise share the
+			// target's parent.
+			const int parent = n->acceptsChildren() ? nodeId : n->parentId;
 			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, nullptr);
 			structureEdit = true;
 		}
 		// …and one of the project's own widgets, embedded as a WidgetRef.
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
 		{
-			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
+			const int parent = n->acceptsChildren() ? nodeId : n->parentId;
 			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), parent, nullptr);
 			structureEdit = true;
 		}
@@ -491,6 +716,315 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	}
 }
 
+// ── Text alignment: nine positions, drawn as nine ───────────────────────────
+// The first property that could not be a generic UIPropDesc row. "Align H" and
+// "Align V" are two ints, but what the author is choosing is ONE thing: where in
+// its box the text sits. Two number fields would make them type 0..2 twice and
+// work out in their head which is which, so they get the same 3×3 grid the
+// anchor picker uses — deliberately, because it is the same kind of question one
+// level further in (the anchor places the ELEMENT in its parent, this places the
+// GLYPHS in the element).
+//
+// And because the two ARE that similar, they must not LOOK alike: the anchor
+// grid is 4×4 amber dots and bars, this one is 3×3 and draws stacked text lines
+// in a cool grey. Two identical grids in one panel is a control the author
+// reaches for by position and gets wrong — which is exactly what happened.
+void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
+{
+	const int curH = e.getProp("Align H").i;
+	const int curV = e.getProp("Align V").i;
+
+	ImGui::TextUnformatted("Text Align");
+	ImGui::SameLine(80.0f);
+	ImGui::BeginGroup();
+	{
+		const float cell = 22.0f;
+		ImDrawList* dl   = ImGui::GetWindowDrawList();
+		for (int row = 0; row < 3; ++row)
+		{
+			for (int col = 0; col < 3; ++col)
+			{
+				if (col > 0) ImGui::SameLine();
+				const bool active = curH == col && curV == row;
+				if (active) ImGui::PushStyleColor(ImGuiCol_Button,
+					ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				char id[16]; std::snprintf(id, sizeof id, "##ta%d", row * 3 + col);
+				if (ImGui::Button(id, ImVec2(cell, cell)))
+				{
+					e.setProp("Align H", UIPropValue::ofInt(col));
+					e.setProp("Align V", UIPropValue::ofInt(row));
+					edit = committed = true;
+				}
+				if (active) ImGui::PopStyleColor();
+
+				// The marker says what the cell does: two stacked lines — a
+				// paragraph seen from far away — ragged on the side the text
+				// hangs off, sitting in that third of the box.
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				const float pad = 5.0f;
+				const ImVec2 in0(mn.x + pad, mn.y + pad), in1(mx.x - pad, mx.y - pad);
+				const float w = in1.x - in0.x, h = in1.y - in0.y;
+				const float gap = 3.0f;
+				// Block of two lines, placed top / middle / bottom.
+				const float top = in0.y + (row == 0 ? 0.0f : row == 1 ? (h - gap) * 0.5f : h - gap);
+				const ImU32 markCol = IM_COL32(205, 210, 225, active ? 255 : 150);
+				const float len[2] = { w, w * 0.62f };   // long line, short line
+				for (int i = 0; i < 2; ++i)
+				{
+					const float slack = w - len[i];
+					const float x = in0.x + (col == 0 ? 0.0f : col == 1 ? slack * 0.5f : slack);
+					const float y = top + static_cast<float>(i) * gap;
+					dl->AddLine(ImVec2(x, y), ImVec2(x + len[i], y), markCol, 1.6f);
+				}
+			}
+		}
+	}
+	ImGui::EndGroup();
+	EditorWidgets::helpForLabel("Text Align");
+}
+
+// ── "Where does this colour come from?" ──────────────────────────────────────
+// A small button after every colour row: unbound it says "Literal", bound it
+// names the theme role, and the swatch beside it goes read-only because the
+// theme owns that value now (docs/he-apps-plan.md D1).
+//
+// Drawn HERE, next to every colour, rather than as a separate list of bindings
+// somewhere else: the question "is this colour mine or the theme's" is about
+// THIS row, and an author who has to look in a second place to answer it will
+// not use the theme at all.
+// Which vocabulary a property may bind to. The property decides, never the name:
+// the size steps and the text levels both contain "Small", and only the thing it
+// sits on says which one is meant (see uiApplyTheme).
+// NoRole is the fourth case and it is not a vocabulary: it is a number a style
+// may decide although nothing in the role vocabularies can name it (a slider's
+// minimum, a box's spacing). Such a row still needs the button — otherwise it is
+// simply greyed out with nothing to click and no way back, which is the "why can
+// I not press this" the help rules exist for.
+enum class ThemeBindKind { Color, TextLevel, SizeStep, NoRole };
+
+void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
+                         ThemeBindKind kind = ThemeBindKind::Color)
+{
+	// Its own scope — a helper that borrows the caller's is filed under whichever
+	// function happens to sit above it in this file. Same lesson as
+	// drawSurfaceStyle.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	const std::string bound = e.themeRoleFor(prop);
+	// Is this one of the values the element's STYLE decides? Three states share
+	// the "not bound to a role" case now, and telling them apart is the whole
+	// job of this button: typed here, decided by the style, or locked against
+	// the theme on purpose.
+	const bool locked = bound == HE::kUIThemeLiteral;
+	bool styled = false;
+	if (bound.empty() && g_previewTheme)
+		for (const std::string& p : HE::uiThemeDecidedProps(e, *g_previewTheme))
+			if (p == prop) { styled = true; break; }
+
+	ImGui::SameLine();
+	ImGui::PushID((prop + "##role").c_str());
+	const char* label = locked ? "Locked" : bound.empty() ? (styled ? "Style" : "Literal")
+	                                                      : bound.c_str();
+	if (ImGui::SmallButton(label)) ImGui::OpenPopup("##rolepick");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			locked ? "This value is held against the theme: no role and no style\n"
+			         "may write it. That is what a component parameter sets."
+			: styled ? "This value comes from the theme's style for this element.\n"
+			           "Editing it here would be overwritten the next time the\n"
+			           "theme or the mode changes."
+			: bound.empty()
+				? "This value is typed in here. Pick a theme entry instead and every\n"
+				  "element bound to it changes together — including light/dark."
+				: "This value comes from the theme. Editing it here would be\n"
+				  "overwritten the next time the theme or the mode changes.");
+	if (ImGui::BeginPopup("##rolepick"))
+	{
+		if (ImGui::Selectable("Literal (type it here)", bound.empty()))
+		{ e.setThemeRole(prop, ""); committed = true; }
+		if (ImGui::Selectable("Locked (keep this value)", locked))
+		{ e.setThemeRole(prop, HE::kUIThemeLiteral); committed = true; }
+		if (kind != ThemeBindKind::NoRole) ImGui::Separator();
+		const int n = kind == ThemeBindKind::NoRole
+			? 0
+			: kind == ThemeBindKind::Color
+			? static_cast<int>(HE::UIThemeRole::COUNT)
+			: kind == ThemeBindKind::TextLevel
+				? static_cast<int>(HE::UIThemeTextLevel::COUNT)
+				: static_cast<int>(HE::UIThemeSize::COUNT);
+		for (int i = 0; i < n; ++i)
+		{
+			const char* name =
+				kind == ThemeBindKind::Color
+					? HE::uiThemeRoleName(static_cast<HE::UIThemeRole>(i))
+					: kind == ThemeBindKind::TextLevel
+						? HE::uiThemeTextLevelName(static_cast<HE::UIThemeTextLevel>(i))
+						: HE::uiThemeSizeName(static_cast<HE::UIThemeSize>(i));
+			if (ImGui::Selectable(name, bound == name))
+			{ e.setThemeRole(prop, name); committed = true; }
+		}
+		ImGui::EndPopup();
+	}
+	ImGui::PopID();
+}
+
+// ── Surface style ("Schicht 0", docs/he-apps-plan.md D5) ─────────────────────
+// Rounding, border and gradient live on the BASE, not in any type's property
+// table, so the generic loop below never saw them and until now they could only
+// be set from a graph. This is their editor.
+//
+// The four radii are the reason this is handwritten. One number is what almost
+// every element wants, four is what a tab or a chat bubble needs, and two
+// separate controls for one idea is how an author ends up with a rounding they
+// cannot explain. So: one field while the corners agree, a 2×2 grid laid out
+// like the box itself once they do not, and one checkbox between the two.
+void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
+{
+	// Its own scope, though the only caller already pushes the same one: a
+	// helper that names its scope is a helper the audit can place, and one that
+	// borrows the caller's is filed under whichever function happens to sit
+	// above it in this file.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	ImGui::SeparatorText("Surface");
+
+	// Expanded either because the author asked, or because the values ALREADY
+	// differ — collapsing that into one field would silently throw three of
+	// them away.
+	const bool differ = !n.uniformCornerRadius();
+	bool perCorner = differ || st.cornerPerSide;
+	if (EditorWidgets::checkbox("Per corner", &perCorner))
+	{
+		st.cornerPerSide = perCorner;
+		// Folding back up keeps the top-left corner and gives it to the other
+		// three, which is the only answer that does not need a rule nobody can
+		// remember.
+		if (!perCorner) { n.cornerRadius = glm::vec4(n.cornerRadius.x); committed = true; }
+	}
+	if (!perCorner)
+	{
+		const bool radiusBound = themeDecides(n, "Corner Radius");
+		float r = n.cornerRadius.x;
+		ImGui::BeginDisabled(radiusBound);
+		if (ImGui::DragFloat("Corner Radius", &r, 0.5f, 0.0f, 10000.0f))
+		{ n.cornerRadius = glm::vec4(std::max(0.0f, r)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		drawThemeRoleButton(n, "Corner Radius", committed, ThemeBindKind::SizeStep);
+		EditorWidgets::helpForLabel("Corner Radius");
+	}
+	else
+	{
+		// Laid out where the corners ARE: top row top-left/top-right, bottom row
+		// bottom-left/bottom-right. Reading the grid is reading the box.
+		const float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x)
+		                * 0.5f;
+		float* const cell[4] = { &n.cornerRadius.x, &n.cornerRadius.y,      // TL, TR
+		                         &n.cornerRadius.w, &n.cornerRadius.z };    // BL, BR
+		static const char* kId[4] = { "##crTL", "##crTR", "##crBL", "##crBR" };
+		for (int i = 0; i < 4; ++i)
+		{
+			if (i % 2) ImGui::SameLine();
+			ImGui::SetNextItemWidth(w);
+			if (ImGui::DragFloat(kId[i], cell[i], 0.5f, 0.0f, 10000.0f))
+			{ *cell[i] = std::max(0.0f, *cell[i]); edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		ImGui::TextDisabled("Corners: top-left / top-right, then bottom.");
+		EditorWidgets::helpForLabel("Per corner");
+	}
+
+	if (ImGui::DragFloat("Border Width", &n.borderWidth, 0.25f, 0.0f, 1000.0f))
+	{ n.borderWidth = std::max(0.0f, n.borderWidth); edit = true; }
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Border Width");
+	if (n.borderWidth > 0.0f)
+	{
+		{
+			const bool bound = themeDecides(n, "Border Color");
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Border Color", &n.borderColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Border Color", committed);
+		}
+		EditorWidgets::helpForLabel("Border Color");
+	}
+
+	if (EditorWidgets::checkbox("Gradient", &n.gradient)) committed = true;
+	if (n.gradient)
+	{
+		{
+			const bool bound = themeDecides(n, "Gradient Color");
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Gradient Color", committed);
+		}
+		EditorWidgets::helpForLabel("Gradient Color");
+		static const char* kShapes[] = { "Linear", "Radial" };
+		const bool shapeOpen = ImGui::BeginCombo("Gradient Shape",
+			kShapes[n.gradientShape == 1 ? 1 : 0]);
+		if (!shapeOpen) EditorWidgets::helpForLabel("Gradient Shape");
+		if (shapeOpen)
+		{
+			for (int i = 0; i < 2; ++i)
+				if (ImGui::Selectable(kShapes[i], n.gradientShape == i))
+				{ n.gradientShape = i; committed = true; }
+			ImGui::EndCombo();
+		}
+		// A radial fade has no direction, so the angle is not offered rather
+		// than offered and ignored.
+		if (n.gradientShape != 1)
+		{
+			edit |= ImGui::DragFloat("Gradient Angle", &n.gradientAngle, 1.0f,
+			                         -360.0f, 360.0f, "%.0f\xc2\xb0");
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Gradient Angle");
+		}
+	}
+
+	if (EditorWidgets::checkbox("Shadow", &n.shadow)) committed = true;
+	if (n.shadow)
+	{
+		{
+			const bool bound = themeDecides(n, "Shadow Color");
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Shadow Color", &n.shadowColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Shadow Color", committed);
+		}
+		EditorWidgets::helpForLabel("Shadow Color");
+		if (ImGui::DragFloat("Shadow Blur", &n.shadowBlur, 0.5f, 0.0f, 500.0f))
+		{ n.shadowBlur = std::max(0.0f, n.shadowBlur); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Shadow Blur");
+		float off[2] = { n.shadowOffsetX, n.shadowOffsetY };
+		if (ImGui::DragFloat2("Shadow Offset", off, 0.5f))
+		{ n.shadowOffsetX = off[0]; n.shadowOffsetY = off[1]; edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Shadow Offset");
+	}
+
+	if (EditorWidgets::checkbox("Inner Shadow", &n.innerShadow)) committed = true;
+	if (n.innerShadow)
+	{
+		{
+			const bool bound = themeDecides(n, "Inner Shadow Color");
+			ImGui::BeginDisabled(bound);
+			edit |= ImGui::ColorEdit4("Inner Shadow Color", &n.innerShadowColor.r);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			drawThemeRoleButton(n, "Inner Shadow Color", committed);
+		}
+		EditorWidgets::helpForLabel("Inner Shadow Color");
+		if (ImGui::DragFloat("Inner Shadow Blur", &n.innerShadowBlur, 0.5f, 0.0f, 500.0f))
+		{ n.innerShadowBlur = std::max(0.0f, n.innerShadowBlur); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Inner Shadow Blur");
+	}
+}
+
 // ── Generic property editor ─────────────────────────────────────────────────────
 // Draws one editable widget for a UIPropDesc; reads via getProp, writes via
 // setProp. `edit` set on any change this frame (live view), `committed` when an
@@ -502,13 +1036,33 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	{
 	case UIPropType::Float:
 	{
-		float v = e.getProp(pd.name).f;
+		// A font size can come from the theme's typography levels, and a gap from
+		// its spacing steps, the same way a colour comes from a role — that is
+		// what makes "every heading on every screen" one number instead of forty.
+		// Not every number can be bound by hand (there is no size step that means
+		// "a slider's minimum"), but any number a STYLE names is decided by the
+		// theme — so the two questions are separate: what may be bound here, and
+		// what is already answered elsewhere.
+		const bool bindable = HE::uiThemeScaleBindable(pd.name);
+		const bool bound = themeDecides(e, pd.name.c_str());
+		float v = themedFloat(e, pd.name.c_str(), e.getProp(pd.name).f);
 		const bool ranged = pd.minV < pd.maxV;
+		ImGui::BeginDisabled(bound);
 		const bool ch = ranged
 			? ImGui::SliderFloat((pd.name + id).c_str(), &v, pd.minV, pd.maxV)
 			: ImGui::DragFloat((pd.name + id).c_str(), &v, 0.5f);
 		if (ch) { e.setProp(pd.name, UIPropValue::ofFloat(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		if (bindable)
+			drawThemeRoleButton(e, pd.name, committed,
+			                    HE::uiThemeScaleFor(pd.name) == HE::UIThemeScale::Text
+			                        ? ThemeBindKind::TextLevel
+			                        : ThemeBindKind::SizeStep);
+		// A number the style decided, that no role vocabulary can name: the row
+		// is greyed out, so it needs the button that says why and lets you take
+		// it back.
+		else if (bound) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::NoRole);
 		break;
 	}
 	case UIPropType::Int:
@@ -542,10 +1096,20 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	}
 	case UIPropType::Color:
 	{
-		glm::vec4 v = e.getProp(pd.name).col;
+		// A bound colour is the theme's, so the swatch is shown and not edited:
+		// a value that is overwritten on the next mode switch is worse than one
+		// that cannot be typed.
+		const bool bound = themeDecides(e, pd.name.c_str());
+		// The swatch shows what the CANVAS shows: the theme's value where the
+		// theme decides, the stored one otherwise. A field that disagrees with
+		// the picture beside it is worse than no field.
+		glm::vec4 v = themedColor(e, pd.name.c_str(), e.getProp(pd.name).col);
+		ImGui::BeginDisabled(bound);
 		if (ImGui::ColorEdit4((pd.name + id).c_str(), &v.x))
 			{ e.setProp(pd.name, UIPropValue::ofColor(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		drawThemeRoleButton(e, pd.name, committed);
 		break;
 	}
 	case UIPropType::Vec2:
@@ -588,6 +1152,245 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	}
 }
 
+// Defined further down with the canvas drawing it serves; the details panel
+// needs it too, to read what the referenced widget declares.
+const HE::UIWidgetTree* embeddedTreeFor(AppContext& ctx, const std::string& path);
+
+// ── Setting a component's parameters, on the page that embeds it ─────────────
+// One row per parameter the referenced widget DECLARES. What is drawn is chosen
+// by the type of the property the parameter points at, so a "Label" is a text
+// box and a "Accent" is a colour swatch without this panel knowing anything
+// about either component.
+//
+// A parameter that has not been set is not an empty value: it is the
+// component's own default, shown here so the author can see what they would be
+// changing, and the row says which of the two it is looking at.
+void drawParamValues(HE::UIWidgetRef& ref, const HE::UIWidgetTree& sub,
+                     bool& edit, bool& committed)
+{
+	// Its own scope, not the caller's: a helper that borrows one is filed under
+	// whichever function happens to sit above it in this file.
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	if (sub.params.empty())
+	{
+		ImGui::TextDisabled("This widget declares no parameters.");
+		return;
+	}
+	ImGui::SeparatorText("Parameters");
+
+	for (const HE::UIWidgetParam& p : sub.params)
+	{
+		const UIElement* target = sub.find(p.elementId);
+		if (!target) continue;
+		// The declaration may name a property the element no longer has — the
+		// component was edited after this parameter was declared. Saying so is
+		// the whole point of looking it up here rather than trusting the name.
+		const std::vector<UIPropDesc> props = target->properties();
+		const UIPropDesc* pd = nullptr;
+		for (const UIPropDesc& d : props) if (d.name == p.property) { pd = &d; break; }
+		if (!pd)
+			for (const UIPropDesc& d : HE::uiBaseProperties())
+				if (d.name == p.property) { pd = &d; break; }
+		if (!pd)
+		{
+			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+				"%s: points at a property that no longer exists.", p.name.c_str());
+			continue;
+		}
+
+		ImGui::PushID(p.name.c_str());
+		const HE::UIPropValue* set = ref.paramValue(p.name);
+		// The value on screen: what this copy was told, or — when it was told
+		// nothing — what the component itself holds.
+		HE::UIPropValue v = set ? *set : target->getPropAny(p.property);
+		bool changed = false;
+
+		// The knob's NAME goes above its control, not beside it. ImGui puts a
+		// label to the right by default, and beside a control stretched to the
+		// panel that means the name sits in the far corner, reading as if it
+		// belonged to whatever is next to it. Every row here goes through the
+		// editor's own label-above rows, like the rest of the tool.
+		const std::string label = p.name + "##pv";
+		switch (pd->type)
+		{
+		case UIPropType::Float:
+			changed = pd->minV < pd->maxV
+				? EditorWidgets::Row::sliderFloat(label.c_str(), &v.f, pd->minV, pd->maxV)
+				: EditorWidgets::Row::dragFloat(label.c_str(), &v.f, 0.5f);
+			break;
+		case UIPropType::Int:
+			changed = EditorWidgets::Row::dragInt(label.c_str(), &v.i, 1.0f);
+			break;
+		case UIPropType::Bool:
+			// The one exception, and deliberately: a tick box is small and its
+			// label belongs beside it — that is what a checkbox looks like
+			// everywhere, and it is what the rest of this editor does too.
+			changed = ImGui::Checkbox(label.c_str(), &v.b);
+			if (changed) committed = true;
+			break;
+		case UIPropType::String:
+			changed = pd->multiline
+				? EditorWidgets::Row::inputTextMultiline(
+					label.c_str(), &v.s, ImGui::GetTextLineHeight() * 3.0f)
+				: EditorWidgets::Row::inputText(label.c_str(), &v.s);
+			break;
+		case UIPropType::Color:
+			changed = EditorWidgets::Row::colorEdit4(label.c_str(), &v.col.x);
+			break;
+		case UIPropType::Vec2:
+			changed = EditorWidgets::Row::dragFloat2(label.c_str(), &v.v2.x, 0.5f);
+			break;
+		case UIPropType::StringList:
+		{
+			// The same small editor the property panel uses. It earns its place:
+			// a choice row whose OPTIONS cannot be set is a component that shows
+			// somebody else's list, which is no component at all.
+			ImGui::TextUnformatted(p.name.c_str());
+			int removeAt = -1;
+			for (int i = 0; i < static_cast<int>(v.list.size()); ++i)
+			{
+				ImGui::PushID(i);
+				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 28.0f);
+				if (ImGui::InputText("##lrow", &v.list[i])) changed = true;
+				if (ImGui::IsItemDeactivatedAfterEdit()) { changed = true; committed = true; }
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("\xc3\x97"))
+				{ removeAt = i; changed = true; committed = true; }
+				ImGui::PopID();
+			}
+			if (removeAt >= 0) v.list.erase(v.list.begin() + removeAt);
+			if (ImGui::SmallButton("+##ladd"))
+			{ v.list.push_back("Item"); changed = true; committed = true; }
+			EditorWidgets::helpForLabel("+");
+			break;
+		}
+		}
+		if (changed) { v.type = pd->type; ref.setParamValue(p.name, &v); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+
+		if (!p.help.empty() && ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s", p.help.c_str());
+
+		// Only offered once there is something to go back FROM. A "Default"
+		// button on an untouched row would suggest it is currently something
+		// else.
+		if (set)
+		{
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Default"))
+			{ ref.setParamValue(p.name, nullptr); committed = true; }
+			EditorWidgets::helpForLabel("Default");
+		}
+		ImGui::PopID();
+	}
+	EditorWidgets::helpForLabel("Parameters");
+}
+
+// ── What this widget offers whoever embeds it ────────────────────────────────
+// The component author's half of D2. A parameter names one property of one
+// element and gives that pair a name of its own, so a page that embeds this
+// widget stores "Label" and not "element 7's Text" — and this widget stays free
+// to be rebuilt inside without breaking a single page that uses it.
+//
+// It sits on the CANVAS panel, not on the element's, because it is a property
+// of the widget as a whole: the list of knobs a component has is one list, and
+// an author looking for "what does this component offer" must not have to click
+// through every element to assemble it.
+void drawParameterDeclarations(State& st, AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Canvas");
+	ImGui::Spacing();
+	ImGui::TextDisabled("Parameters");
+	ImGui::Separator();
+	ImGui::TextWrapped("What a page that embeds this widget can set. Each one "
+	                   "points at a property of one element; whatever that "
+	                   "property holds here is the default.");
+
+	int removeAt = -1;
+	for (int i = 0; i < static_cast<int>(st.tree.params.size()); ++i)
+	{
+		HE::UIWidgetParam& p = st.tree.params[i];
+		ImGui::PushID(i);
+
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 28.0f);
+		ImGui::InputText("##pname", &p.name);
+		EditorWidgets::helpForLabel("Parameter Name");
+		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+		ImGui::SameLine();
+		if (EditorWidgets::dangerSmallButton("\xc3\x97")) removeAt = i;
+
+		// Which element it writes. Shown by the same name the hierarchy uses, so
+		// what is picked here is findable up there.
+		const UIElement* target = st.tree.find(p.elementId);
+		if (ImGui::BeginCombo("Element", target ? elementName(*target).c_str() : "(none)"))
+		{
+			for (const auto& ep : st.tree.elements)
+			{
+				if (!ep) continue;
+				if (ImGui::Selectable(elementName(*ep).c_str(), ep->id == p.elementId))
+				{
+					p.elementId = ep->id;
+					// The property came from the OLD element's table and may not
+					// exist on this one. Cleared rather than carried over: a row
+					// naming a property its element does not have writes nothing,
+					// silently, which is the failure this panel exists to prevent.
+					p.property.clear();
+					commitEdit(st, ctx);
+				}
+			}
+			ImGui::EndCombo();
+		}
+		EditorWidgets::helpForLabel("Element");
+
+		// …and which of that element's properties. Only the ones it really has,
+		// read from the same table the details panel above is built from.
+		if (target)
+		{
+			if (ImGui::BeginCombo("Property",
+			                      p.property.empty() ? "(none)" : p.property.c_str()))
+			{
+				// The type's own first, because that is what an author came for
+				// — then the ones every element has, of which "Visible" is the
+				// one components reach for constantly (a help line that only the
+				// rows with help show).
+				for (const UIPropDesc& pd : target->properties())
+					if (ImGui::Selectable(pd.name.c_str(), pd.name == p.property))
+					{ p.property = pd.name; commitEdit(st, ctx); }
+				ImGui::Separator();
+				for (const UIPropDesc& pd : HE::uiBaseProperties())
+					if (ImGui::Selectable(pd.name.c_str(), pd.name == p.property))
+					{ p.property = pd.name; commitEdit(st, ctx); }
+				ImGui::EndCombo();
+			}
+			EditorWidgets::helpForLabel("Property");
+		}
+
+		ImGui::InputText("Help", &p.help);
+		EditorWidgets::helpForLabel("Help");
+		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
+		ImGui::PopID();
+		ImGui::Spacing();
+	}
+	if (removeAt >= 0)
+	{
+		st.tree.params.erase(st.tree.params.begin() + removeAt);
+		commitEdit(st, ctx);
+	}
+
+	if (ImGui::Button("Add Parameter"))
+	{
+		// Pre-pointed at whatever is selected, because an author who wants to
+		// expose a property has almost always just been looking at it.
+		HE::UIWidgetParam p;
+		p.name      = "Parameter";
+		p.elementId = st.tree.find(st.selected) ? st.selected : 0;
+		st.tree.params.push_back(std::move(p));
+		commitEdit(st, ctx);
+	}
+	EditorWidgets::helpForLabel("Add Parameter");
+}
+
 // ── Details panel ──────────────────────────────────────────────────────────────
 void drawDetails(State& st, AppContext& ctx)
 {
@@ -625,6 +1428,60 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 		// The paragraph that used to be written out here is the help entry now —
 		// same words, and reachable with F1 instead of only by hovering.
+
+		// What this widget IS, in a sentence or two — shown wherever somebody is
+		// about to reach for it, the palette above all.
+		ImGui::Spacing();
+		if (EditorWidgets::Row::inputTextMultiline(
+				"Description", &st.tree.description, ImGui::GetTextLineHeight() * 3.0f))
+			st.dirty = true;
+		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
+		// ── This widget's own theme ──────────────────────────────────────────
+		// The project names one theme and everything resolves against it; a
+		// single widget may say otherwise. Empty is the normal answer, and the
+		// slot says so rather than making the project's theme look optional.
+		ImGui::Spacing();
+		{
+			std::string path = st.tree.themeAsset;
+			if (assetSlot(ctx, "Theme", path, HE::AssetType::Theme, "widgettheme"))
+			{
+				st.tree.themeAsset = path;
+				commitEdit(st, ctx);
+			}
+			EditorWidgets::helpForLabel("Theme");
+			if (st.tree.themeAsset.empty())
+				ImGui::TextDisabled("Follows the project's theme.");
+			else
+				ImGui::TextDisabled("Overrides the project's, for this widget and\n"
+				                    "everything embedded in it.");
+		}
+
+		// ── Hand the whole widget to the theme ───────────────────────────────
+		// An element read from a file that predates styles follows none, which is
+		// what keeps opening an old widget from repainting it. That rule is right
+		// and it makes exactly one thing tedious: a widget authored before styles
+		// would have to be switched over element by element, which is the
+		// per-value work styles exist to end.
+		ImGui::Spacing();
+		{
+			// Both counted over the same loop: the element vector is indexed by
+			// id and holds a hole wherever one was deleted, so its size is not
+			// how many elements there are.
+			int following = 0, total = 0;
+			for (const auto& ep : st.tree.elements)
+				if (ep) { ++total; if (ep->themeStyled) ++following; }
+			if (EditorWidgets::button("Follow the Theme", ImVec2(160.0f, 0.0f)))
+			{
+				for (auto& ep : st.tree.elements) if (ep) ep->themeStyled = true;
+				commitEdit(st, ctx);
+			}
+			EditorWidgets::helpForLabel("Follow the Theme");
+			ImGui::SameLine();
+			ImGui::TextDisabled("%d of %d", following, total);
+		}
+
+		drawParameterDeclarations(st, ctx);
 
 		ImGui::Spacing();
 		ImGui::TextDisabled("Preview");
@@ -675,10 +1532,21 @@ void drawDetails(State& st, AppContext& ctx)
 	bool edit      = false; // any value changed this frame (live view update)
 	bool committed = false; // an edit finished (undo snapshot + live asset)
 
-	ImGui::TextDisabled("%s", n->typeName());
+	// What KIND of thing this is. For a placed component that is the component's
+	// own name — "Card", "Form Row" — and not "WidgetRef", which is the
+	// machinery underneath and says nothing to the person who dragged it in.
+	if (n->type() == UIWidgetType::WidgetRef)
+	{
+		const std::string wp = n->getProp("Widget").s;
+		ImGui::TextDisabled("%s", wp.empty()
+			? "Component"
+			: std::filesystem::path(wp).stem().string().c_str());
+	}
+	else
+		ImGui::TextDisabled("%s", n->typeName());
 	ImGui::Separator();
 
-	ImGui::InputText("Name", &n->name);
+	EditorWidgets::Row::inputText("Name", &n->name);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Name");
 
@@ -694,6 +1562,49 @@ void drawDetails(State& st, AppContext& ctx)
 	{
 		const bool vert = layoutParent->stacksVertically();
 		ImGui::TextDisabled("Placed by the %s above it.", layoutParent->typeName());
+		// A wrap box gives every child its OWN size on both axes and ignores
+		// Slot Fill — a child that ate the leftover space would take the whole
+		// first line and there would never be a second one. So it gets the two
+		// size fields and not the fill, which is the opposite of a plain box.
+		if (layoutParent->type() == UIWidgetType::Grid)
+		{
+			// A grid child names its CELL, not a size: the cell is the slot, the
+			// way a box's slot is. -1 means "the next free one", which is what a
+			// form wants — fill it top to bottom and never type a coordinate.
+			int cell[2] = { n->gridColumn, n->gridRow };
+			if (ImGui::DragInt2("Cell (col, row)", cell, 0.1f, -1, 999))
+			{ n->gridColumn = cell[0] < -1 ? -1 : cell[0];
+			  n->gridRow    = cell[1] < -1 ? -1 : cell[1]; edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Cell (col, row)");
+			int span[2] = { n->gridColumnSpan, n->gridRowSpan };
+			if (ImGui::DragInt2("Span (cols, rows)", span, 0.1f, 1, 99))
+			{ n->gridColumnSpan = span[0] < 1 ? 1 : span[0];
+			  n->gridRowSpan    = span[1] < 1 ? 1 : span[1]; edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Span (cols, rows)");
+			// Its own size is only read by an `auto` track — everywhere else the
+			// cell decides — so it stays editable but says so.
+			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::TextDisabled("Only an \"auto\" track reads this size.");
+			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		else if (layoutParent->type() == UIWidgetType::WrapBox)
+		{
+			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Width");
+			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Height");
+			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			// The shared helpForLabel("Pivot") below covers both branches — it
+			// attaches to the last item drawn, which is this one.
+		}
+		else {
 		edit |= ImGui::DragFloat("Slot Fill", &n->slotFill, 0.05f, 0.0f, 100.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		if (n->slotFill < 0.0f) n->slotFill = 0.0f;
@@ -712,6 +1623,7 @@ void drawDetails(State& st, AppContext& ctx)
 		}
 		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		} // end of the stacked-box branch
 		EditorWidgets::helpForLabel("Pivot");
 	}
 	else
@@ -779,17 +1691,27 @@ void drawDetails(State& st, AppContext& ctx)
 			edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Position");
-			// A container that sizes itself to its content owns those two
-			// numbers: showing them editable would be offering a value that is
-			// overwritten before it is ever drawn.
-			const bool measured = n->getProp("Size To Content").b;
-			ImGui::BeginDisabled(measured);
+			// An element that sizes itself to its content owns those numbers:
+			// showing them editable would be offering a value that is
+			// overwritten before it is ever drawn. The element answers which
+			// axes that is (autoSizedAxes) rather than one property being read
+			// here, because the answer differs per type and per switch — a
+			// wrapping label authors its width and measures only its height.
+			const int measured = n->autoSizedAxes();
+			// Disabled only when BOTH are measured: half a DragFloat2 cannot be
+			// greyed, and greying the pair would take away a number the author
+			// still owns.
+			ImGui::BeginDisabled(measured == (HE::UIElement::kAxisX | HE::UIElement::kAxisY));
 			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Size");
 			ImGui::EndDisabled();
-			if (measured)
-				ImGui::TextDisabled("Measured from the content (Min Width/Height below).");
+			if (measured == (HE::UIElement::kAxisX | HE::UIElement::kAxisY))
+				ImGui::TextDisabled("Measured from the content (Min/Max Size below).");
+			else if (measured & HE::UIElement::kAxisX)
+				ImGui::TextDisabled("The width is measured from the content.");
+			else if (measured & HE::UIElement::kAxisY)
+				ImGui::TextDisabled("The height is measured from the content.");
 		}
 	}
 	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
@@ -851,6 +1773,24 @@ void drawDetails(State& st, AppContext& ctx)
 		                  "Re-anchoring keeps the element exactly where it is.");
 	} // end of the anchored (non-box-child) branch
 
+	// ── The floor and the ceiling ────────────────────────────────────────────
+	// Below both branches on purpose: a bound is the one size rule that means
+	// the same thing whoever does the placing. In a box the box decides the
+	// extent and these hold it; on an anchor the anchor does and these hold it;
+	// with Size To Content the measurement does. That is why they are not up in
+	// the branch that draws "Size", where they would look like a property of
+	// authored sizes only.
+	edit |= ImGui::DragFloat2("Min Size", &n->minSizeX, 1.0f, 0.0f, 10000.0f);
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Min Size");
+	edit |= ImGui::DragFloat2("Max Size", &n->maxSizeX, 1.0f, 0.0f, 10000.0f);
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Max Size");
+	if (n->minSizeX < 0.0f) n->minSizeX = 0.0f;
+	if (n->minSizeY < 0.0f) n->minSizeY = 0.0f;
+	if (n->maxSizeX < 0.0f) n->maxSizeX = 0.0f;
+	if (n->maxSizeY < 0.0f) n->maxSizeY = 0.0f;
+
 	// The four tooltips that stood here are entries now, so F1 reaches them too.
 	int layer = n->layer;
 	if (ImGui::DragInt("Layer", &layer, 1)) { n->layer = layer; edit = true; }
@@ -866,14 +1806,209 @@ void drawDetails(State& st, AppContext& ctx)
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	EditorWidgets::helpForLabel("Opacity");
 
+	// ── Which style of the theme this element follows ────────────────────────
+	// One control for the element's whole look, above the values it decides.
+	// Binding property by property still exists — it is the small button beside
+	// each value — but it is the exception now, not the way you theme a button.
+	ImGui::SeparatorText("Theme");
+	{
+		const std::string typeStyle = n->typeName();
+
+		// Whether the theme dresses this element at all, and — when it does not
+		// follow its own type — which style by name it points at instead. The
+		// list is whatever the theme in the toolbar holds right now, so switching
+		// the preview theme switches what can be picked here.
+		const std::string shown = !n->themeStyled ? std::string("None")
+			: n->themeStyle.empty() ? typeStyle : n->themeStyle;
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		const bool open = ImGui::BeginCombo("Style", shown.c_str());
+		if (!open) EditorWidgets::helpForLabel("Style");
+		if (open)
+		{
+			if (ImGui::Selectable("None (this element decides for itself)", !n->themeStyled))
+			{ n->themeStyled = false; committed = true; }
+			// The style named after the element's own TYPE: "dress this like the
+			// project's buttons", and the default for anything newly placed.
+			if (ImGui::Selectable(typeStyle.c_str(),
+			                      n->themeStyled && n->themeStyle.empty()))
+			{ n->themeStyled = true; n->themeStyle.clear(); committed = true; }
+			// Everything the theme calls something else. Variants ("Button.success")
+			// are NOT offered here — they are picked as a Tag below, because a
+			// variant of another type is not a thing this element can be. Their
+			// names are the author's, so the help audit cannot see them, and
+			// there is nothing to explain: the entry is the style's name.
+			if (g_previewTheme)
+			{
+				// Only styles with a name of their OWN. Another type's style is
+				// not something this element can claim — under the cascade a
+				// selector belongs to its type — and after the theme editor's
+				// "Add Every Value" there are eighteen of those to scroll past.
+				auto isTypeName = [](const std::string& k)
+				{
+					for (HE::UIWidgetType t : HE::uiWidgetTypeRegistry())
+						if (k == HE::uiWidgetTypeName(t)) return true;
+					return false;
+				};
+				bool ruled = false;
+				for (const auto& [key, style] : g_previewTheme->styles)
+				{
+					if (isTypeName(key) || !HE::uiThemeSelectorTag(key).empty()) continue;
+					if (!ruled) { ImGui::Separator(); ruled = true; }
+					if (ImGui::Selectable(key.c_str(),
+					                      n->themeStyled && n->themeStyle == key))
+					{ n->themeStyled = true; n->themeStyle = key; committed = true; }
+				}
+			}
+			ImGui::EndCombo();
+		}
+
+		// ── The tag: which KIND of its type this element is ──────────────────
+		// "Button.success". The list is what the theme defines for this type, so
+		// a tag is picked from what exists rather than typed from memory — and an
+		// element that carries one still takes everything its plain type says.
+		const std::vector<std::string> tags =
+			g_previewTheme ? g_previewTheme->tagsFor(typeStyle) : std::vector<std::string>();
+		ImGui::BeginDisabled(!n->themeStyled);
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		const bool tagOpen = ImGui::BeginCombo("Tag",
+			n->themeTag.empty() ? "(none)" : n->themeTag.c_str());
+		if (!tagOpen) EditorWidgets::helpForLabel("Tag");
+		if (tagOpen)
+		{
+			if (ImGui::Selectable("(none)", n->themeTag.empty()))
+			{ n->themeTag.clear(); committed = true; }
+			for (const std::string& tag : tags)
+				if (ImGui::Selectable(tag.c_str(), n->themeTag == tag))
+				{ n->themeTag = tag; committed = true; }
+			// A tag the theme no longer defines stays pickable so it can be SEEN;
+			// dropping it silently is how an element ends up carrying a word
+			// nobody can find.
+			if (!n->themeTag.empty() &&
+			    std::find(tags.begin(), tags.end(), n->themeTag) == tags.end())
+				ImGui::Selectable((n->themeTag + " (not in this theme)").c_str(), true);
+			ImGui::EndCombo();
+		}
+		ImGui::EndDisabled();
+
+		const int decided = n->themeStyled && g_previewTheme
+			? static_cast<int>(HE::uiThemeDecidedProps(*n, *g_previewTheme).size()) : 0;
+		if (!n->themeStyled)
+			ImGui::TextDisabled("Every value below is this element's own.");
+		else if (decided > 0)
+			ImGui::TextDisabled("%d value%s below come%s from the theme.", decided,
+			                    decided == 1 ? "" : "s", decided == 1 ? "s" : "");
+		else
+			// Not an error: pointing an element at a style is half the work, and
+			// the theme editor is where the other half happens.
+			ImGui::TextDisabled("The theme decides nothing about this element yet.");
+	}
+
 	// Type-specific properties (generic, driven by properties()).
 	const std::vector<UIPropDesc> props = n->properties();
 	if (!props.empty())
 	{
 		ImGui::SeparatorText("Properties");
 		for (const UIPropDesc& pd : props)
+		{
+			// "Align H"/"Align V" are one control, not two number fields: which
+			// of nine positions the text sits in is a thing you point at. Drawn
+			// once, at the H row, and the V row is skipped.
+			if (pd.name == "Align V") continue;
+			if (pd.name == "Align H") { drawTextAlignGrid(*n, edit, committed); continue; }
+			// A list's row template is an ASSET, drawn with the picker below —
+			// a path one has to type correctly is the reason the list would be
+			// empty at run time with nothing to say why.
+			if (pd.name == "Row Widget") continue;
+			// …and its item count is runtime state. It is a property because a
+			// graph SETS it by name; it is not a field here because a number
+			// typed into the designer is thrown away the moment the list runs.
+			if (pd.name == "Item Count") continue;
+			// Three named modes, not the numbers 0, 1 and 2.
+			if (pd.name == "Selection" && n->type() == UIWidgetType::ListView)
+			{
+				static const char* kModes[] = { "None", "Single", "Multiple" };
+				int mode = std::clamp(n->getProp("Selection").i, 0, 2);
+				if (ImGui::Combo("Selection", &mode, kModes, 3))
+				{
+					n->setProp("Selection", HE::UIPropValue::ofInt(mode));
+					edit = committed = true;
+				}
+				EditorWidgets::helpForLabel("Selection");
+				continue;
+			}
+			// A bitmask is a number nobody can read. One tick box per section,
+			// labelled with the section's own name — the same move the list's
+			// three named modes are, for the same reason: what the author means
+			// is "open this one", not "set bit 2".
+			if (pd.name == "Expanded" && n->type() == UIWidgetType::Accordion)
+			{
+				const auto* ac = dynamic_cast<const HE::UIAccordion*>(n);
+				std::vector<std::string> names;
+				for (const auto& cp : st.tree.elements)
+					if (cp && cp->parentId == n->id)
+						names.push_back(cp->name.empty() ? std::string("Section") : cp->name);
+				ImGui::TextUnformatted("Expanded");
+				EditorWidgets::helpForLabel("Expanded");
+				if (names.empty())
+					ImGui::TextDisabled("Drop something in: its children are the sections.");
+				const int shown = std::min<int>(static_cast<int>(names.size()),
+				                                HE::UIAccordion::kMaxSections);
+				for (int i = 0; i < shown; ++i)
+				{
+					const uint32_t bit = 1u << static_cast<unsigned>(i);
+					bool on = (static_cast<uint32_t>(n->getProp("Expanded").i) & bit) != 0u;
+					// Through the SAME toggle the runtime uses, so Allow
+					// Multiple behaves here exactly as it does when the heading
+					// is clicked in the running application.
+					if (ImGui::Checkbox((names[i] + "##acc" + std::to_string(i)).c_str(), &on))
+					{
+						const uint32_t next = HE::UIAccordion::toggledMask(
+							static_cast<uint32_t>(n->getProp("Expanded").i), i,
+							static_cast<int>(names.size()),
+							ac ? ac->allowMultiple : true);
+						n->setProp("Expanded", HE::UIPropValue::ofInt(static_cast<int>(next)));
+						edit = committed = true;
+					}
+				}
+				if (static_cast<int>(names.size()) > HE::UIAccordion::kMaxSections)
+					ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+						"%d sections; everything past the 32nd stays folded.",
+						static_cast<int>(names.size()));
+				continue;
+			}
 			drawPropertyWidget(*n, pd, edit, committed);
+		}
 	}
+
+	// The row a ListView repeats. Picked like any other asset, and never the
+	// widget being edited — a list whose row is the page it sits on is the same
+	// circle a self-embedding WidgetRef is, and the runtime refuses it.
+	if (n->type() == UIWidgetType::ListView)
+	{
+		ImGui::SeparatorText("Rows");
+		std::string path = n->getProp("Row Widget").s;
+		if (assetSlot(ctx, "Row Widget", path, HE::AssetType::Widget, "lvrow"))
+		{
+			if (path == st.relPath)
+				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+					"A list cannot use the widget it sits in as its row.");
+			else
+			{
+				n->setProp("Row Widget", HE::UIPropValue::ofString(path));
+				committed = true;
+			}
+		}
+		EditorWidgets::helpForLabel("Row Widget");
+		ImGui::TextDisabled("How many rows there are comes from the running\n"
+		                    "application (Set List Count); the list then asks\n"
+		                    "On Row Bind to fill in each one it puts up.");
+	}
+
+	// "Schicht 0": the style of the element's own surface. Only where there IS
+	// one — the same question the material slot asks, and the reason a Text
+	// label is not offered a border that would outline nothing.
+	if (n->hasSurfaceStyle())
+		drawSurfaceStyle(st, *n, edit, committed);
 
 	// Material slot (only types that expose one — text runs have no quad).
 	if (n->hasMaterialSlot())
@@ -887,26 +2022,37 @@ void drawDetails(State& st, AppContext& ctx)
 				"This is a Surface material: it will not draw correctly here.");
 	}
 
-	// The widget a WidgetRef embeds. Picked from the project's widgets, and
-	// never itself — a widget that embeds itself is refused at runtime, so the
-	// picker does not offer the trap in the first place.
+	// ── A placed component is a CONTROL, not a reference to one ──────────────
+	// What sits on the page is a Card, a Form Row, a Title Bar. That it happens
+	// to be carried by a WidgetRef is how the engine grafts it, not something an
+	// author has to hold in their head — so the panel does not offer to re-point
+	// it at a different asset, any more than it offers to turn a Button into a
+	// Text. Change your mind, delete it and drag the other one in.
+	//
+	// The asset path is shown ONLY when it does not resolve. A component whose
+	// widget was renamed or deleted would otherwise be a blank slot with nothing
+	// to say for itself, and there would be no way to find out what it used to
+	// be — the same rule as an unreadable grid track: visible and fixable beats
+	// silent and gone.
 	if (n->type() == UIWidgetType::WidgetRef)
 	{
-		ImGui::SeparatorText("Embedded widget");
-		std::string path = n->getProp("Widget").s;
-		if (assetSlot(ctx, "Widget", path, HE::AssetType::Widget, "wref"))
+		const std::string path = n->getProp("Widget").s;
+		const HE::UIWidgetTree* sub = path.empty() ? nullptr : embeddedTreeFor(ctx, path);
+		if (!sub)
 		{
-			if (path == st.relPath)
-				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
-					"A widget cannot embed itself.");
-			else
-			{
-				n->setProp("Widget", HE::UIPropValue::ofString(path));
-				committed = true;
-			}
+			ImGui::SeparatorText("Component");
+			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+				path.empty() ? "This component points at nothing."
+				             : "This component's widget cannot be loaded.");
+			if (!path.empty()) ImGui::TextDisabled("%s", path.c_str());
+			ImGui::TextDisabled("Delete it and drag the component in again.");
 		}
-		ImGui::TextDisabled("Grafted in when the widget is created; the designer\n"
-		                    "shows the slot it will fill.");
+		else if (auto* wr = dynamic_cast<HE::UIWidgetRef*>(n))
+			// What this copy of it is told. Read from the referenced asset every
+			// frame rather than cached on the ref: the component is edited in
+			// another tab, and a knob that appears only after a reload is a knob
+			// nobody finds.
+			drawParamValues(*wr, *sub, edit, committed);
 	}
 
 	// Texture slot: the plain "put this picture on it" path, tinted by the
@@ -948,7 +2094,19 @@ void drawDetails(State& st, AppContext& ctx)
 	// Pointer interaction: hit-testability + the cursor shown on hover.
 	ImGui::SeparatorText("Interaction");
 	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
+	// Directly under it, and deliberately not phrased as its opposite: this is
+	// the other thing a press here can mean, and the two are independent.
+	if (EditorWidgets::checkbox("Window drag", &n->windowDrag)) committed = true;
 	if (EditorWidgets::checkbox("Clip children", &n->clipChildren)) committed = true;
+	if (EditorWidgets::checkbox("Focus frame", &n->focusFrame)) committed = true;
+	// Beside the focus frame, because both are about the keyboard and this is
+	// the one row that says where Tab goes next. 0 = the order of the tree on
+	// the left, which is what an author reads anyway.
+	if (EditorWidgets::Row::inputInt("Tab index", &n->tabIndex)) committed = true;
+	if (EditorWidgets::checkbox("Accepts drop", &n->acceptsDrop)) committed = true;
+	if (EditorWidgets::checkbox("Draggable", &n->draggable)) committed = true;
+	if (n->draggable)
+		if (EditorWidgets::Row::inputText("Drag payload", &n->dragPayload)) committed = true;
 	const bool cursorOpen = ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor));
 	if (!cursorOpen) EditorWidgets::helpForLabel("Hover cursor");
 	if (cursorOpen)
@@ -957,6 +2115,19 @@ void drawDetails(State& st, AppContext& ctx)
 			if (ImGui::Selectable(HE::uiCursorName((HE::UICursor)c), (int)n->hoverCursor == c))
 			{ n->hoverCursor = (HE::UICursor)c; committed = true; }
 		ImGui::EndCombo();
+	}
+	// What the element says about itself after the pointer has rested on it.
+	// Here rather than among the type's own properties because every element can
+	// have one — a tooltip is a sentence about a control, not a kind of control.
+	{
+		char buf[512];
+		const std::size_t n2 = std::min(n->tooltip.size(), sizeof(buf) - 1);
+		std::memcpy(buf, n->tooltip.c_str(), n2);
+		buf[n2] = '\0';
+		if (ImGui::InputText("Tooltip", buf, sizeof(buf)))
+		{ n->tooltip = buf; edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Tooltip");
 	}
 
 	if (edit) st.dirty = true;
@@ -971,11 +2142,639 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 // adds (or focuses) the matching event node in the logic graph and jumps to
 // Graph mode (Unreal-style "add event → wire it up in the graph"). Events come
 // from the element type's events() list.
+// ── The selected key, edited where it was clicked ────────────────────────────
+// This row is what replaced the round trip through the details panel. Clicking a
+// key puts the playhead on it, so the canvas already shows the moment whose
+// value stands in this field: change the number and the picture changes with it,
+// which is the shortest loop an animation editor can have.
+void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
+{
+	// Its own scope although its only caller already opened the same one: a
+	// helper that relies on the scope of whoever called it is a helper whose
+	// tooltips move when it is called from somewhere else, and the coverage
+	// audit reads it where it stands rather than where it runs.
+	HE::Ed::Help::Scope helpScope("UI Timeline");
+	ImGui::Separator();
+	const bool haveTrack = st.trackSel >= 0 && st.trackSel < static_cast<int>(clip.tracks.size());
+	if (!haveTrack || st.keySel < 0 ||
+	    st.keySel >= static_cast<int>(clip.tracks[st.trackSel].keys.size()))
+	{
+		ImGui::TextDisabled("Click a key to edit its value here.");
+		return;
+	}
+	HE::UIAnimTrack& tr  = clip.tracks[st.trackSel];
+	HE::UIAnimKey&   key = tr.keys[st.keySel];
+
+	bool edited = false, committed = false;
+
+	ImGui::SetNextItemWidth(110.0f);
+	if (ImGui::DragFloat("Time", &key.time, 0.005f, 0.0f, clip.duration, "%.3f s"))
+	{
+		// The playhead rides along, so the canvas keeps showing the key being
+		// moved rather than the instant it has just left.
+		key.time = std::clamp(key.time, 0.0f, clip.duration);
+		st.playhead = key.time;
+		edited = true;
+	}
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Time");
+
+	// Deliberately NOT re-sorted afterwards: the index this row is holding
+	// would move under it mid-drag. Evaluation does not depend on the order
+	// (see uiAnimEvaluate), so the only cost is a file whose keys are listed
+	// out of order, and the only gain would be tidiness nobody sees.
+	ImGui::SameLine(); ImGui::SetNextItemWidth(220.0f);
+	switch (key.value.type)
+	{
+	case UIPropType::Float:
+		if (ImGui::DragFloat("Value", &key.value.f, 0.5f)) edited = true;
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Value");
+		break;
+	case UIPropType::Color:
+		if (ImGui::ColorEdit4("Value", &key.value.col.x)) edited = true;
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Value");
+		break;
+	case UIPropType::Vec2:
+		if (ImGui::DragFloat2("Value", &key.value.v2.x, 0.5f)) edited = true;
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		EditorWidgets::helpForLabel("Value");
+		break;
+	default:
+		// Only reachable through a hand-edited file — Add Track offers nothing
+		// else. Said out loud rather than hidden: a key you can neither see nor
+		// edit is a file nobody can repair.
+		ImGui::TextDisabled("(this key's type cannot be interpolated)");
+		break;
+	}
+
+	ImGui::SameLine(); ImGui::SetNextItemWidth(130.0f);
+	const bool easeOpen = ImGui::BeginCombo("Ease", HE::uiEaseName(key.ease));
+	if (!easeOpen) EditorWidgets::helpForLabel("Ease");
+	if (easeOpen)
+	{
+		for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+		{
+			const auto e = static_cast<HE::UIEase>(c);
+			if (ImGui::Selectable(HE::uiEaseName(e), key.ease == e))
+			{ key.ease = e; committed = true; }
+		}
+		ImGui::EndCombo();
+	}
+
+	ImGui::SameLine();
+	if (EditorWidgets::dangerSmallButton("Delete Key"))
+	{
+		tr.keys.erase(tr.keys.begin() + st.keySel);
+		st.keySel = -1;
+		committed = true;
+	}
+	EditorWidgets::helpForLabel("Delete Key");
+
+	if (edited) st.dirty = true;
+	if (committed) commitEdit(st, ctx);
+}
+
+// ── The timeline (docs/he-apps-plan.md B8) ───────────────────────────────────
+// The strip under the canvas: the widget's clips, their tracks, their keys, and
+// a playhead you can drag. What the animation editor of every engine looks like,
+// with the vocabulary this one already has — a track is an element's property,
+// a key is a value at a time, and the easing sits on the key.
+//
+// An animation is edited HERE, not in the details panel. That was the first
+// version and it asked people to hold two documents in their head at once: the
+// canvas showed the clip, the details panel wrote the widget's own values, and a
+// switch between them decided which of the two you were looking at. So: with a
+// clip open the canvas always shows it, a key is selected by clicking it, and
+// its value is typed in this strip. The details panel goes back to being what it
+// is everywhere else — the widget's authored state, seen by closing the clip.
+void drawTimeline(State& st, AppContext& ctx, float height)
+{
+	HE::Ed::Help::Scope helpScope("UI Timeline");
+	// NoScrollWithMouse because the wheel belongs to the lane: it zooms the
+	// time axis, and a strip that scrolled its own rows instead the moment a
+	// third track appeared would be zoom that works until you use it.
+	ImGui::BeginChild("##uiw_timeline", ImVec2(0.0f, height), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_NoScrollWithMouse);
+
+	const int clipCount = static_cast<int>(st.tree.animations.size());
+	if (st.clipIndex >= clipCount) { st.clipIndex = clipCount - 1; st.playhead = 0.0f; }
+
+	// ── The bar: which clip, how long, and the transport ─────────────────────
+	ImGui::SetNextItemWidth(180.0f);
+	const std::string shown = st.clipIndex < 0
+		? std::string("(no animation)") : st.tree.animations[st.clipIndex].name;
+	const bool open = ImGui::BeginCombo("##clip", shown.c_str());
+	if (!open) EditorWidgets::helpForLabel("Animation");
+	if (open)
+	{
+		// Closing the clip is a real choice, not an absence of one: it is how
+		// you get the canvas back to the widget's own values, so it has to be
+		// reachable after the first animation exists.
+		if (ImGui::Selectable("(none)##c", st.clipIndex < 0))
+		{ st.clipIndex = -1; st.playhead = 0.0f; st.trackSel = -1; st.keySel = -1; st.clipPlaying = false; }
+		for (int i = 0; i < clipCount; ++i)
+			if (ImGui::Selectable((st.tree.animations[i].name + "##c").c_str(), i == st.clipIndex))
+			{
+				st.clipIndex = i; st.playhead = 0.0f; st.trackSel = -1; st.keySel = -1;
+				st.clipPlaying = false; st.clipZoom = 1.0f; st.clipScroll = 0.0f;
+			}
+		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("New")) ImGui::OpenPopup("##newclip");
+	if (ImGui::BeginPopup("##newclip"))
+	{
+		ImGui::TextDisabled("A name for the animation");
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputText("##newclipname", &st.newClipName,
+		                     ImGuiInputTextFlags_EnterReturnsTrue) &&
+		    !st.newClipName.empty())
+		{
+			HE::UIAnimClip c;
+			c.name = st.newClipName;
+			c.duration = 1.0f;
+			st.tree.animations.push_back(std::move(c));
+			st.clipIndex = static_cast<int>(st.tree.animations.size()) - 1;
+			st.playhead = 0.0f;
+			st.trackSel = -1; st.keySel = -1;
+			st.clipZoom = 1.0f; st.clipScroll = 0.0f;
+			st.newClipName.clear();
+			commitEdit(st, ctx);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::TextDisabled("(type a name, then Enter)");
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("New");
+
+	if (st.clipIndex < 0)
+	{
+		ImGui::TextDisabled("No animation yet. \"New\" makes one; a track is a property of an");
+		ImGui::TextDisabled("element, and a key is what that property is at a moment.");
+		ImGui::EndChild();
+		return;
+	}
+	HE::UIAnimClip& clip = st.tree.animations[st.clipIndex];
+
+	// ── Renaming one, with the graph following it ────────────────────────────
+	// The name IS the identity — a graph plays a clip by name — so a rename is
+	// a retargeting job and not a text edit. This graph's own Play/Stop nodes
+	// are rewritten here, and the rest of the project is ASKED about through the
+	// same dialog every other HorizonCode rename uses. Nothing is rewritten
+	// behind anyone's back, and nothing that names it is left unmentioned.
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Rename"))
+	{
+		st.clipRenameEdit = clip.name;
+		ImGui::OpenPopup("##renameclip");
+	}
+	if (ImGui::BeginPopup("##renameclip"))
+	{
+		ImGui::TextDisabled("A new name for this animation");
+		ImGui::SetNextItemWidth(180.0f);
+		if (ImGui::InputText("##renameclipname", &st.clipRenameEdit,
+		                     ImGuiInputTextFlags_EnterReturnsTrue) &&
+		    !st.clipRenameEdit.empty())
+		{
+			const std::string before = clip.name;
+			const std::string after  = st.clipRenameEdit;
+			// Taken only when it is free: two clips of one name would make every
+			// Play node ambiguous, which is the state this whole control exists
+			// to keep the widget out of.
+			bool taken = false;
+			for (const HE::UIAnimClip& c : st.tree.animations)
+				if (&c != &clip && c.name == after) taken = true;
+			if (!taken && after != before)
+			{
+				clip.name = after;
+				const HcRename::Target t{ st.relPath, HcRename::Member::Animation,
+				                          before, after };
+				const HcRename::Plan p = HcRename::planGraph(
+					st.graph, HcRename::Role::Declares, { st.relPath }, st.relPath, {}, t);
+				HcRename::apply(st.graph, p, t);
+				commitEdit(st, ctx);
+				HcRenameDialog::requestAfterRename(ctx, t, { st.relPath });
+			}
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::TextDisabled("(type a name, then Enter)");
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("Rename");
+
+	ImGui::SameLine();
+	if (EditorWidgets::dangerSmallButton("Delete"))
+	{
+		st.tree.animations.erase(st.tree.animations.begin() + st.clipIndex);
+		st.clipIndex = -1; st.trackSel = -1; st.keySel = -1; st.clipPlaying = false;
+		commitEdit(st, ctx);
+		ImGui::EndChild();
+		return;
+	}
+	EditorWidgets::helpForLabel("Delete");
+
+	ImGui::SameLine(); ImGui::SetNextItemWidth(90.0f);
+	if (ImGui::DragFloat("Length", &clip.duration, 0.05f, 0.05f, 600.0f, "%.2f s"))
+	{
+		st.dirty = true;
+		st.playhead = std::clamp(st.playhead, 0.0f, clip.duration);
+	}
+	if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+	EditorWidgets::helpForLabel("Length");
+
+	ImGui::SameLine();
+	if (EditorWidgets::checkbox("Loop", &clip.loop)) commitEdit(st, ctx);
+	ImGui::SameLine();
+	// Where the animation stops having anything to say: the last key, capped by
+	// the length. The designer plays to here and the lane greys out the rest,
+	// so what you watch is what the runtime will run (see uiAnimPlayEnd).
+	const float playEnd = HE::uiAnimPlayEnd(clip);
+	if (EditorWidgets::smallButton(st.clipPlaying ? "Stop" : "Play"))
+	{
+		st.clipPlaying = !st.clipPlaying;
+		if (st.clipPlaying && st.playhead >= playEnd) st.playhead = 0.0f;
+	}
+	// By KEY, not by label: the button says Play or Stop depending on what it
+	// would do, and a label-keyed tooltip would exist for one of the two.
+	EditorWidgets::helpForKey("ui.timeline-play");
+
+	// Where we are, in the unit the clip is actually in. A 400 ms hover read as
+	// "0.40 s" is arithmetic the reader has to do; below two seconds the
+	// interesting digits are milliseconds, above it they are not.
+	auto fmtTime = [&](char* buf, size_t n, float t)
+	{
+		if (playEnd <= 2.0f) std::snprintf(buf, n, "%.0f ms", t * 1000.0f);
+		else                 std::snprintf(buf, n, "%.2f s", t);
+	};
+	// Against the last key, not against the length: the second number is what
+	// the reader is counting towards, and counting towards a moment nothing
+	// happens at is the confusion the greyed tail beside it is also about.
+	char nowTxt[24], endTxt[24];
+	fmtTime(nowTxt, sizeof(nowTxt), st.playhead);
+	fmtTime(endTxt, sizeof(endTxt), playEnd);
+	ImGui::SameLine();
+	ImGui::TextDisabled("%s / %s", nowTxt, endTxt);
+
+	// The zoom controls sit here, on the bar, but they can only be APPLIED once
+	// the lane's width is known a few lines further down — zooming around a
+	// point needs the point in pixels. So the bar records the intent.
+	int  zoomIntent = 0;
+	bool zoomFit = false;
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Zoom Out")) zoomIntent = -1;
+	EditorWidgets::helpForLabel("Zoom Out");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Zoom In")) zoomIntent = 1;
+	EditorWidgets::helpForLabel("Zoom In");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Fit")) zoomFit = true;
+	EditorWidgets::helpForLabel("Fit");
+	if (st.clipZoom > 1.001f) { ImGui::SameLine(); ImGui::TextDisabled("%.0f%%", st.clipZoom * 100.0f); }
+
+	// Playing here is the DESIGNER's own preview — the runtime is not involved,
+	// and the editor draws every frame anyway, so it needs no pump.
+	if (st.clipPlaying)
+	{
+		st.playhead += ImGui::GetIO().DeltaTime;
+		if (st.playhead >= playEnd)
+		{
+			if (clip.loop && playEnd > 0.0f) st.playhead = std::fmod(st.playhead, playEnd);
+			else { st.playhead = playEnd; st.clipPlaying = false; }
+		}
+	}
+
+	// ── Tracks and keys ──────────────────────────────────────────────────────
+	constexpr float kNameW = 190.0f;
+	constexpr float kRowH  = 22.0f;
+	const ImVec2 area = ImGui::GetContentRegionAvail();
+	const float  laneW = std::max(60.0f, area.x - kNameW - 8.0f);
+	const ImVec2 top   = ImGui::GetCursorScreenPos();
+	ImDrawList*  dl    = ImGui::GetWindowDrawList();
+	const float  laneL = top.x + kNameW, laneR = laneL + laneW;
+
+	// Seconds ⇄ pixels, the one conversion everything below shares — the ruler,
+	// the diamonds, the playhead and every hit test. It lives in its own header
+	// because it is the one part of an animation editor that can be checked
+	// without a window (see UITimelineMath.h).
+	HE::Ed::UITimelineView view{ laneL, laneW, clip.duration, st.clipZoom, st.clipScroll };
+	view.clampScroll();   // Length may have shrunk under a scrolled view
+
+	// The wheel over the lane zooms at the pointer, Shift+wheel pans. Plain
+	// wheel zooms rather than pans on purpose: at fit there is nothing to pan
+	// to, so panning would be the gesture that does nothing most of the time.
+	const ImVec2 mp = ImGui::GetIO().MousePos;
+	const bool overLane = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+	                      mp.x >= laneL && mp.x <= laneR &&
+	                      mp.y >= top.y && mp.y <= top.y + area.y;
+	const float wheel = ImGui::GetIO().MouseWheel;
+	if (overLane && wheel != 0.0f)
+	{
+		if (ImGui::GetIO().KeyShift)
+		{ view.scroll -= wheel * view.visibleSpan() * 0.15f; view.clampScroll(); }
+		else view.zoomAt(view.zoom * std::pow(1.25f, wheel), mp.x);
+	}
+	// The buttons zoom around the PLAYHEAD — that is what somebody pressing +
+	// is looking at — falling back to the middle of the view when it is off
+	// screen, because anchoring on something invisible reads as a jump.
+	if (zoomIntent != 0)
+	{
+		const bool onScreen = st.playhead >= view.scroll &&
+		                      st.playhead <= view.scroll + view.visibleSpan();
+		view.zoomAt(view.zoom * (zoomIntent > 0 ? 1.5f : 1.0f / 1.5f),
+		            onScreen ? view.xOf(st.playhead) : laneL + laneW * 0.5f);
+	}
+	if (zoomFit) { view.zoom = 1.0f; view.scroll = 0.0f; }
+	// Playback follows the playhead when it runs out of the view. Scrubbing
+	// deliberately does not: there the pointer IS the playhead, and a view that
+	// slid under it would fight the hand holding it.
+	if (st.clipPlaying) view.reveal(st.playhead);
+	st.clipZoom = view.zoom; st.clipScroll = view.scroll;
+
+	// The ruler. Labels stand on the 1-2-5 rung that keeps them ~64 px apart,
+	// so zooming in turns seconds into milliseconds by itself, and a half-step
+	// tick without a label gives the eye something to halve.
+	dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+	dl->AddRectFilled(ImVec2(laneL, top.y), ImVec2(laneR, top.y + 18.0f),
+	                  IM_COL32(28, 26, 24, 255));
+	const float step  = HE::Ed::uiTimelineTickStep(view.pixelsPerSecond());
+	const float first = std::floor(view.scroll / step) * step;
+	const float last  = view.scroll + view.visibleSpan();
+	// Counted, not accumulated: a step of a millisecond added a thousand times
+	// is not the same number as a thousand milliseconds.
+	for (int n = 0; n < 4096; ++n)
+	{
+		const float t = first + step * static_cast<float>(n);
+		if (t > last + step) break;
+		if (t < -0.0001f || t > clip.duration + 0.0001f) continue;
+		const float x = view.xOf(t);
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, top.y + 18.0f), IM_COL32(90, 86, 80, 255));
+		if (t + step * 0.5f <= clip.duration)
+		{
+			const float hx = view.xOf(t + step * 0.5f);
+			dl->AddLine(ImVec2(hx, top.y + 11.0f), ImVec2(hx, top.y + 18.0f),
+			            IM_COL32(64, 61, 57, 255));
+		}
+		char lbl[24];
+		if (step >= 1.0f)        std::snprintf(lbl, sizeof(lbl), "%.0f s", t);
+		else if (step >= 0.001f) std::snprintf(lbl, sizeof(lbl), "%.0f ms", t * 1000.0f);
+		else                     std::snprintf(lbl, sizeof(lbl), "%.2f ms", t * 1000.0f);
+		dl->AddText(ImVec2(x + 3.0f, top.y + 2.0f), IM_COL32(150, 145, 138, 255), lbl);
+	}
+	dl->PopClipRect();
+
+	// The ruler strip takes clicks and drags: that is the scrub.
+	ImGui::SetCursorScreenPos(ImVec2(laneL, top.y));
+	ImGui::InvisibleButton("##ruler", ImVec2(laneW, 18.0f));
+	if (ImGui::IsItemActive())
+	{
+		st.playhead = view.tOf(ImGui::GetMousePos().x);
+		st.clipPlaying = false;
+	}
+
+	// One row per track, and the keys on it.
+	int removeTrack = -1;
+	for (int i = 0; i < static_cast<int>(clip.tracks.size()); ++i)
+	{
+		HE::UIAnimTrack& tr = clip.tracks[i];
+		const float rowY = top.y + 20.0f + kRowH * static_cast<float>(i);
+		ImGui::PushID(i);
+
+		// The name: the element as the hierarchy shows it, then the property.
+		const UIElement* e = st.tree.find(tr.element);
+		const std::string label = (e ? (e->name.empty() ? std::string(e->typeName()) : e->name)
+		                             : std::string("(gone)")) + "  ·  " + tr.prop;
+		ImGui::SetCursorScreenPos(ImVec2(top.x, rowY + 2.0f));
+		if (ImGui::Selectable((label + "##t").c_str(), st.trackSel == i, 0,
+		                      ImVec2(kNameW - 22.0f, kRowH - 4.0f)))
+			{ st.trackSel = i; st.keySel = -1; }
+		ImGui::SameLine();
+		if (EditorWidgets::dangerSmallButton("x")) removeTrack = i;
+
+		// The lane, and a diamond per key. Dragging one moves it in time, which
+		// is the one edit a timeline has to have.
+		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+		dl->AddRectFilled(ImVec2(laneL, rowY), ImVec2(laneR, rowY + kRowH),
+		                  st.trackSel == i ? IM_COL32(46, 42, 38, 255) : IM_COL32(34, 32, 30, 255));
+		dl->PopClipRect();
+		for (int k = 0; k < static_cast<int>(tr.keys.size()); ++k)
+		{
+			HE::UIAnimKey& key = tr.keys[k];
+			const float cx = view.xOf(key.time), cy = rowY + kRowH * 0.5f;
+			// A key scrolled out of the lane gets no button at all. Clipping is
+			// a drawing matter; an invisible button at x = -400 would still sit
+			// on top of the track NAME and eat its clicks.
+			if (cx < laneL - 6.0f || cx > laneR + 6.0f) continue;
+			ImGui::PushID(k);
+			ImGui::SetCursorScreenPos(ImVec2(cx - 6.0f, cy - 6.0f));
+			ImGui::InvisibleButton("##key", ImVec2(12.0f, 12.0f));
+			const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+			const bool picked = st.trackSel == i && st.keySel == k;
+			// Clicking a key goes TO it: it becomes the one the strip edits and
+			// the playhead lands on its time, so the canvas shows exactly the
+			// moment whose value is now in the field below. Selecting a key and
+			// then editing a value belonging to some other instant is the
+			// confusion this editor is meant to be free of.
+			if (ImGui::IsItemActivated())
+			{
+				st.trackSel = i;
+				st.keySel = k;
+				st.playhead = key.time;
+				st.clipPlaying = false;
+			}
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			{
+				key.time = view.tOf(ImGui::GetMousePos().x);
+				st.playhead = key.time;
+				st.dirty = true;
+				st.trackSel = i;
+				st.keySel = k;
+				st.keyDragged = true;
+			}
+			// IsItemDeactivatedAfterEdit is no use here: an InvisibleButton never
+			// reports itself as EDITED, so the undo snapshot has to be hung on
+			// "the drag ended and it actually moved something".
+			if (ImGui::IsItemDeactivated() && st.keyDragged)
+			{ st.keyDragged = false; commitEdit(st, ctx); }
+			// A right-click on a key is where its curve and its removal live —
+			// the two things you want on a key and nowhere else to put them.
+			if (ImGui::BeginPopupContextItem("##keymenu"))
+			{
+				ImGui::TextDisabled("Easing into this key");
+				for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+				{
+					const auto ease = static_cast<HE::UIEase>(c);
+					if (ImGui::Selectable(HE::uiEaseName(ease), key.ease == ease))
+					{ key.ease = ease; commitEdit(st, ctx); }
+				}
+				ImGui::Separator();
+				if (EditorWidgets::dangerMenuItem("Delete Key"))
+				{
+					tr.keys.erase(tr.keys.begin() + k);
+					if (st.trackSel == i && st.keySel >= k) st.keySel = -1;
+					commitEdit(st, ctx);
+					ImGui::EndPopup();
+					ImGui::PopID();
+					break;
+				}
+				ImGui::EndPopup();
+			}
+			const ImU32 col = hot ? IM_COL32(255, 214, 140, 255) : IM_COL32(230, 170, 60, 255);
+			const ImVec2 d[4] = { { cx, cy - 6.0f }, { cx + 6.0f, cy }, { cx, cy + 6.0f }, { cx - 6.0f, cy } };
+			dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+			dl->AddConvexPolyFilled(d, 4, col);
+			// The selected key wears a ring rather than another fill: which key
+			// you are editing has to be readable next to which key the pointer
+			// happens to be over, and two shades of amber are not.
+			if (picked)
+			{
+				const ImVec2 o[4] = { { cx, cy - 9.0f }, { cx + 9.0f, cy }, { cx, cy + 9.0f }, { cx - 9.0f, cy } };
+				dl->AddPolyline(o, 4, IM_COL32(255, 250, 240, 255), ImDrawFlags_Closed, 1.5f);
+			}
+			dl->PopClipRect();
+			ImGui::PopID();
+		}
+		ImGui::PopID();
+	}
+	if (removeTrack >= 0)
+	{
+		clip.tracks.erase(clip.tracks.begin() + removeTrack);
+		st.trackSel = -1;
+		st.keySel = -1;
+		commitEdit(st, ctx);
+	}
+
+	const float laneBottom = std::max(
+		top.y + 20.0f + kRowH * static_cast<float>(clip.tracks.size()) + 4.0f, top.y + 40.0f);
+
+	// After the last key the animation is over: nothing moves there any more, so
+	// nothing plays there either, and the lane says so instead of leaving a
+	// stretch that looks like part of the clip. The difference between "this is
+	// 200 ms long" and "this is 200 ms in a two second box" is one somebody has
+	// to be able to SEE, or they spend the wait wondering what is happening.
+	if (playEnd < clip.duration - 0.0005f)
+	{
+		const float x = view.xOf(playEnd);
+		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+		dl->AddRectFilled(ImVec2(std::max(x, laneL), top.y), ImVec2(laneR, laneBottom),
+		                  IM_COL32(16, 15, 14, 170));
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, laneBottom), IM_COL32(130, 124, 114, 200));
+		dl->PopClipRect();
+	}
+
+	// The playhead, over everything, carrying its own time: the ruler says where
+	// the ticks are, this says where YOU are, and at a glance the two together
+	// are the answer to "how far in is this".
+	{
+		const float x = view.xOf(st.playhead);
+		dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, top.y + area.y), true);
+		dl->AddLine(ImVec2(x, top.y), ImVec2(x, laneBottom),
+		            IM_COL32(255, 240, 200, 220), 1.5f);
+		// Re-read after this frame's scrubbing and playing: the bar's copy was
+		// printed before either happened, and a tag that trails the line it is
+		// attached to by a frame is worse than no tag.
+		fmtTime(nowTxt, sizeof(nowTxt), st.playhead);
+		const ImVec2 sz = ImGui::CalcTextSize(nowTxt);
+		// Kept inside the lane: a tag that hangs off the left edge at time zero
+		// is unreadable exactly when the number is most obviously right.
+		const float tagX = std::clamp(x + 3.0f, laneL, laneR - sz.x - 6.0f);
+		dl->AddRectFilled(ImVec2(tagX, top.y), ImVec2(tagX + sz.x + 6.0f, top.y + 16.0f),
+		                  IM_COL32(120, 90, 30, 235), 2.0f);
+		dl->AddText(ImVec2(tagX + 3.0f, top.y + 1.0f), IM_COL32(255, 245, 225, 255), nowTxt);
+		dl->PopClipRect();
+	}
+
+	// ── Adding tracks and keys ───────────────────────────────────────────────
+	ImGui::SetCursorScreenPos(ImVec2(top.x, top.y + 24.0f + kRowH *
+		static_cast<float>(clip.tracks.size())));
+	UIElement* sel = st.tree.find(st.selected);
+	ImGui::BeginDisabled(!sel);
+	if (EditorWidgets::smallButton("Add Track")) ImGui::OpenPopup("##addtrack");
+	ImGui::EndDisabled();
+	if (ImGui::BeginPopup("##addtrack"))
+	{
+		ImGui::TextDisabled("A property of the selected element");
+		if (sel)
+			for (const UIPropDesc& pd : sel->allProperties())
+			{
+				// Only what can be interpolated: a string has no halfway, and a
+				// track that snapped at the end would be a duration meaning
+				// nothing (the same rule animate() applies).
+				if (pd.type != UIPropType::Float && pd.type != UIPropType::Color &&
+				    pd.type != UIPropType::Vec2) continue;
+				bool have = false;
+				for (const HE::UIAnimTrack& tr : clip.tracks)
+					if (tr.element == sel->id && tr.prop == pd.name) have = true;
+				if (have || !ImGui::Selectable(pd.name.c_str())) continue;
+				HE::UIAnimTrack tr;
+				tr.element = sel->id;
+				tr.prop    = pd.name;
+				// A track starts with the value the element has now, at the
+				// playhead — an empty track is a row that evaluates to nothing.
+				tr.keys.push_back({ st.playhead, sel->getPropAny(pd.name), HE::UIEase::Linear });
+				clip.tracks.push_back(std::move(tr));
+				st.trackSel = static_cast<int>(clip.tracks.size()) - 1;
+				st.keySel = 0;
+				commitEdit(st, ctx);
+			}
+		ImGui::EndPopup();
+	}
+	else EditorWidgets::helpForLabel("Add Track");
+
+	ImGui::SameLine();
+	const bool canKey = st.trackSel >= 0 && st.trackSel < static_cast<int>(clip.tracks.size());
+	ImGui::BeginDisabled(!canKey);
+	if (EditorWidgets::smallButton("Key"))
+	{
+		HE::UIAnimTrack& tr = clip.tracks[st.trackSel];
+		if (const UIElement* e = st.tree.find(tr.element))
+		{
+			// What the CLIP says here, not what the element holds: with the
+			// canvas showing the animation, a key made of the authored value
+			// would make the picture jump the moment it was added. Adding a key
+			// changes nothing about the animation until you edit it, which is
+			// what "add a key" means everywhere. An empty track has nothing to
+			// say, so there the authored value is the only candidate.
+			UIPropValue v = e->getPropAny(tr.prop);
+			std::vector<HE::UIAnimSample> samples;
+			HE::uiAnimEvaluate(clip, st.playhead, samples);
+			for (const HE::UIAnimSample& s : samples)
+				if (s.element == tr.element && s.prop == tr.prop && s.value.type == v.type)
+					v = s.value;
+			// A key at this moment already? Replace it. Two keys at one time
+			// evaluate deterministically but mean nothing to a person.
+			bool replaced = false;
+			for (HE::UIAnimKey& k : tr.keys)
+				if (std::fabs(k.time - st.playhead) < 0.001f) { k.value = v; replaced = true; }
+			if (!replaced) tr.keys.push_back({ st.playhead, v, HE::UIEase::Linear });
+			std::stable_sort(tr.keys.begin(), tr.keys.end(),
+				[](const HE::UIAnimKey& a, const HE::UIAnimKey& b){ return a.time < b.time; });
+			// Sorting moved the indices under the selection, so it is found
+			// again by TIME — and the new key is selected either way, because
+			// the next thing anybody does is type its value.
+			st.keySel = -1;
+			for (int k = 0; k < static_cast<int>(tr.keys.size()); ++k)
+				if (std::fabs(tr.keys[k].time - st.playhead) < 0.001f) st.keySel = k;
+			commitEdit(st, ctx);
+		}
+	}
+	ImGui::EndDisabled();
+	EditorWidgets::helpForLabel("Key");
+	ImGui::SameLine();
+	ImGui::TextDisabled("%s", canKey
+		? "Adds a key at the playhead, holding what the animation shows there."
+		: "Pick a track first, or click a key to edit it.");
+
+	drawKeyEditor(st, ctx, clip);
+	ImGui::EndChild();
+}
+
 void drawDetailsEvents(State& st, AppContext& ctx)
 {
 	UIElement* n = st.tree.find(st.selected);
 	if (!n) return;
-	const std::vector<UIEventDesc> evs = n->events();
+	const std::vector<UIEventDesc> evs = n->allEvents();
 	if (evs.empty()) return;
 
 	ImGui::SeparatorText("Events");
@@ -1015,10 +2814,164 @@ void handleDelta(int handle, const ImVec2& d, ImVec2& dMin, ImVec2& dMax)
 	}
 }
 
+// One rounded rectangle with four independent radii, as an ImDrawList path.
+// ImGui's own AddRectFilled takes ONE rounding and a set of corner flags, which
+// cannot express "8 at the top, square at the bottom" — the shape a tab is. A
+// radius of 0 makes PathArcTo emit the centre point alone, so a square corner
+// falls out of the same four calls.
+void pathRoundedRect(ImDrawList* dl, const ImVec2& a, const ImVec2& b, const glm::vec4& r)
+{
+	constexpr float kPi = 3.14159265358979323846f;   // IM_PI is imgui_internal
+	const float lim = 0.5f * std::min(b.x - a.x, b.y - a.y);
+	const float tl = std::clamp(r.x, 0.0f, lim), tr = std::clamp(r.y, 0.0f, lim);
+	const float br = std::clamp(r.z, 0.0f, lim), bl = std::clamp(r.w, 0.0f, lim);
+	dl->PathArcTo(ImVec2(a.x + tl, a.y + tl), tl, kPi,          kPi * 1.5f);
+	dl->PathArcTo(ImVec2(b.x - tr, a.y + tr), tr, kPi * 1.5f,   kPi * 2.0f);
+	dl->PathArcTo(ImVec2(b.x - br, b.y - br), br, 0.0f,         kPi * 0.5f);
+	dl->PathArcTo(ImVec2(a.x + bl, b.y - bl), bl, kPi * 0.5f,   kPi);
+}
+
+// The element's own surface, exactly as "Schicht 0" describes it: the authored
+// rounding, the fill (flat or faded), and the border drawn INSIDE the shape.
+//
+// Drawn here once for every type that HAS a surface, instead of six types each
+// hard-coding a rounding of 3 or 4 and ignoring what the author set. The
+// designer's whole job is to show what the engine will draw, and until this it
+// showed a rounding nobody had asked for and no border or gradient at all.
+void drawSurfacePreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
+                        const ImVec2& mx, float s, const glm::vec4& fill,
+                        float alpha, float dim, void* texHandle, bool drawFill)
+{
+	const auto C = [&](const glm::vec4& c)
+	{
+		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
+	};
+	// Read through the theme like every colour here: a style may decide the
+	// rounding, and "Corner Radius" is one value for all four corners, which is
+	// what the property means when it is bound (uiApplyTheme writes all four).
+	const float themedR = themedFloat(n, "Corner Radius", n.cornerRadius.x);
+	const glm::vec4 radii =
+		(themedR == n.cornerRadius.x ? n.cornerRadius : glm::vec4(themedR)) * s;
+	// The drop shadow, under everything this element draws. ImDrawList has no
+	// soft edge, so it is approximated by a handful of nested shapes at rising
+	// alpha — the same picture, out of coarser material.
+	if (drawFill && n.shadow && n.shadowColor.a > 0.001f)
+	{
+		const float blur = std::max(0.0f, n.shadowBlur * s);
+		const ImVec2 o(n.shadowOffsetX * s, n.shadowOffsetY * s);
+		// Outermost first, each the same faint alpha: stacked "over", they build
+		// up to roughly the authored alpha where they all overlap and fade out
+		// where only the widest one reaches. That is a falloff, drawn with the
+		// only tool a draw list has.
+		constexpr int kSteps = 6;
+		glm::vec4 c = n.shadowColor;
+		c.a /= kSteps;
+		for (int i = kSteps; i >= 1; --i)
+		{
+			const float g = blur * static_cast<float>(i) / kSteps;
+			pathRoundedRect(dl, ImVec2(mn.x + o.x - g, mn.y + o.y - g),
+			                    ImVec2(mx.x + o.x + g, mx.y + o.y + g), radii + g);
+			dl->PathFillConvex(C(c));
+		}
+	}
+	// A picture on the surface is the surface: the texture is drawn square (a
+	// rounded image needs a clip ImDrawList cannot express along a path), and
+	// the border still follows the authored shape on top of it.
+	if (!drawFill)
+	{
+		// The caller drew its own picture; only the outline is left to add.
+	}
+	else if (texHandle)
+		dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx,
+		             ImVec2(0, 0), ImVec2(1, 1), C(fill));
+	else
+	{
+		const int vtx0 = dl->VtxBuffer.Size;
+		pathRoundedRect(dl, mn, mx, radii);
+		// A radial fade reaches its far colour at the corners, so that is what
+		// the shape is filled with and the rings below work inwards from it.
+		dl->PathFillConvex(C(n.gradient && n.gradientShape == 1 ? n.gradientColor : fill));
+		if (n.gradient && n.gradientShape != 1)
+		{
+			// The same rule the shaders use: an angle clockwise from "down",
+			// projected onto the box. Shading the vertices the fill just wrote
+			// is how a path gets a gradient at all — AddRectFilledMultiColor is
+			// axis-aligned and square.
+			const float rad = n.gradientAngle * 0.017453292f;
+			const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+			const ImVec2 d(std::sin(rad), std::cos(rad));
+			const float  half = 0.5f * (std::abs(d.x) * (mx.x - mn.x) +
+			                            std::abs(d.y) * (mx.y - mn.y));
+			ImGui::ShadeVertsLinearColorGradientKeepAlpha(
+				dl, vtx0, dl->VtxBuffer.Size,
+				ImVec2(c.x - d.x * half, c.y - d.y * half),
+				ImVec2(c.x + d.x * half, c.y + d.y * half),
+				C(fill), C(n.gradientColor));
+		}
+		else if (n.gradient)
+		{
+			// Radial. ImGui can shade a path's VERTICES, and this path's are all
+			// on its outline — every one of them out at the far stop — so
+			// shading it comes out flat. Rings do the fade instead.
+			//
+			// They stop at the circle INSCRIBED in the box, never at the corner:
+			// a circle centred in a rounded rectangle and no wider than its
+			// shorter side cannot leave it, and ImDrawList has no way to clip to
+			// a path. So the corners keep the far colour and only the last ring
+			// is a slightly compressed step. The engine fades all the way to the
+			// farthest corner; this is the preview's approximation of it.
+			const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+			const float w = mx.x - mn.x, h = mx.y - mn.y;
+			const float farR = std::max(1e-4f, 0.5f * std::sqrt(w * w + h * h));
+			const float inR  = 0.5f * std::min(w, h);
+			constexpr int kRings = 24;
+			for (int i = kRings; i >= 1; --i)
+			{
+				const float r = inR * static_cast<float>(i) / kRings;
+				const glm::vec4 col = fill + (n.gradientColor - fill) * (r / farR);
+				dl->AddCircleFilled(c, r, C(col), 48);
+			}
+		}
+	}
+	// The inner shadow, over the fill and under the border: rings drawn just
+	// inside the edge, the same stacking trick as the drop shadow. They stay
+	// within the shape by construction, so nothing spills.
+	if (drawFill && n.innerShadow && n.innerShadowColor.a > 0.001f)
+	{
+		const float depth = std::max(1.0f, n.innerShadowBlur * s);
+		constexpr int kSteps = 5;
+		glm::vec4 c = n.innerShadowColor;
+		c.a /= kSteps;
+		for (int i = 1; i <= kSteps; ++i)
+		{
+			const float g = depth * static_cast<float>(i) / kSteps;
+			if (mx.x - g <= mn.x + g || mx.y - g <= mn.y + g) break;
+			pathRoundedRect(dl, ImVec2(mn.x + g * 0.5f, mn.y + g * 0.5f),
+			                    ImVec2(mx.x - g * 0.5f, mx.y - g * 0.5f),
+			                    radii - g * 0.5f);
+			dl->PathStroke(C(c), ImDrawFlags_Closed, g);
+		}
+	}
+	if (n.borderWidth > 0.0f)
+	{
+		// Inside the shape, like the shaders draw it: the stroke is centred on
+		// the path, so the path moves in by half the width.
+		const float bw = std::max(1.0f, n.borderWidth * s);
+		const ImVec2 im(mn.x + bw * 0.5f, mn.y + bw * 0.5f);
+		const ImVec2 ix(mx.x - bw * 0.5f, mx.y - bw * 0.5f);
+		if (ix.x > im.x && ix.y > im.y)
+		{
+			pathRoundedRect(dl, im, ix, radii - bw * 0.5f);
+			dl->PathStroke(C(n.borderColor), ImDrawFlags_Closed, bw);
+		}
+	}
+}
+
 // Draw a simplified WYSIWYG preview of one element from its generic properties.
 void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
                         const ImVec2& mx, float s, void* texHandle = nullptr,
-                        float alpha = 1.0f, float dim = 1.0f)
+                        float alpha = 1.0f, float dim = 1.0f,
+                        const HE::UIWidgetTree* tree = nullptr)
 {
 	// Every colour of the element itself goes through here: faded by the
 	// inherited opacity and knocked back while it is disabled, exactly as
@@ -1027,17 +2980,31 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
 	};
+	// The authored surface first, for every type that has one — the same rule
+	// WidgetManager stamps onto the first quad. What follows in each case is
+	// only what is drawn ON that surface.
+	// An Image is left out here and gets its outline AFTER the switch: its
+	// surface is the picture, which it draws itself (nine pieces when sliced),
+	// and a tinted rectangle under it would be a colour nobody authored.
+	if (n.hasSurfaceStyle() && n.type() != UIWidgetType::Image)
+	{
+		// Which of its colours IS the surface. Every one of these types names it
+		// differently, and that name is the only thing they disagree about.
+		const char* key =
+			n.type() == UIWidgetType::Panel  ? "Color" :
+			n.type() == UIWidgetType::Button ? "Normal Color" : "Back Color";
+		const glm::vec4 fallback =
+			n.type() == UIWidgetType::Panel       ? glm::vec4{ 0.12f, 0.12f, 0.14f, 0.85f } :
+			n.type() == UIWidgetType::Button      ? glm::vec4{ 0.20f, 0.20f, 0.20f, 1 } :
+			n.type() == UIWidgetType::TextInput   ? glm::vec4{ 0.10f, 0.10f, 0.10f, 1 }
+			                                      : glm::vec4{ 0.15f, 0.15f, 0.15f, 1 };
+		drawSurfacePreview(dl, n, mn, mx, s, propColorOr(n, key, fallback),
+		                   alpha, dim, texHandle, /*drawFill=*/true);
+	}
 	switch (n.type())
 	{
 	case UIWidgetType::Panel:
-	{
-		if (texHandle)
-			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             C(propColorOr(n, "Color", { 1,1,1,1 })));
-		else
-			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
-		break;
-	}
+		break;   // nothing but its surface
 	case UIWidgetType::Image:
 	{
 		if (texHandle)
@@ -1109,6 +3076,230 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		dl->AddRect(mn, mx, IM_COL32(150, 210, 160, 110));
 		break;
 	}
+	case UIWidgetType::Grid:
+	{
+		// The whole designer value of a grid is SEEING the tracks. An empty one
+		// that draws only its outline is a rectangle you cannot aim into.
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		const float pad = propFloatOr(n, "Padding", 0.0f) * s;
+		const ImVec2 i0(mn.x + pad, mn.y + pad), i1(mx.x - pad, mx.y - pad);
+		if (i1.x > i0.x && i1.y > i0.y)
+		{
+			if (pad > 0.5f) dl->AddRect(i0, i1, IM_COL32(120, 190, 255, 50));
+			// The lines come from the SAME solver the runtime lays out with
+			// (uiGridTracks), so what is drawn here is where a child really
+			// lands — an even split would show an author a grid that does not
+			// exist. Proportions rather than absolutes, because the preview is
+			// at whatever scale the canvas view is.
+			const auto* g = dynamic_cast<const HE::UIGrid*>(&n);
+			if (g && tree)
+			{
+				std::vector<float> cw, rh;
+				HE::uiGridTracks(*tree, *g, nullptr, cw, rh);
+				const ImU32 line = IM_COL32(120, 190, 255, 70);
+				auto ticks = [&](const std::vector<float>& t, float lo, float hi, bool vertical)
+				{
+					float sum = 0.0f;
+					for (float v : t) sum += v;
+					if (sum <= 0.0f || t.size() < 2) return;
+					float at = 0.0f;
+					for (std::size_t i = 0; i + 1 < t.size(); ++i)
+					{
+						at += t[i];
+						const float p = lo + (hi - lo) * (at / sum);
+						if (vertical) dl->AddLine(ImVec2(p, i0.y), ImVec2(p, i1.y), line);
+						else          dl->AddLine(ImVec2(i0.x, p), ImVec2(i1.x, p), line);
+					}
+				};
+				ticks(cw, i0.x, i1.x, true);
+				ticks(rh, i0.y, i1.y, false);
+			}
+		}
+		break;
+	}
+	case UIWidgetType::TabBox:
+	{
+		// The strip, from the SAME layout the runtime clicks against
+		// (UITabBox::tabLayout) — a designer that spaced the tabs its own way
+		// would show an author a strip they cannot hit where they see it.
+		const auto* tb = dynamic_cast<const HE::UITabBox*>(&n);
+		if (!tb) break;
+		const float tabH = tb->tabHeight * s;
+		dl->AddRectFilled(mn, ImVec2(mx.x, mn.y + tabH),
+		                  C(themedColor(n, "Strip Color", tb->stripColor)));
+		std::vector<std::string> labels;
+		if (tree)
+			for (const auto& cp : tree->elements)
+				if (cp && cp->parentId == n.id)
+					labels.push_back(cp->name.empty() ? std::string("Page") : cp->name);
+		std::vector<float> tx, tw;
+		HE::UITabBox::tabLayout({ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y },
+		                        tb->fontSize * s, tb->tabPadding * s, labels,
+		                        n.fontAtlasKey, tx, tw);
+		for (size_t i = 0; i < tx.size(); ++i)
+		{
+			if (tx[i] >= mx.x) break;
+			const float w = std::min(tw[i], mx.x - tx[i]);
+			const bool on = static_cast<int>(i) == tb->activeTab;
+			dl->AddRectFilled(ImVec2(tx[i], mn.y), ImVec2(tx[i] + w, mn.y + tabH),
+			                  C(themedColor(n, on ? "Active Tab Color" : "Tab Color",
+			                                on ? tb->activeColor : tb->tabColor)));
+			const float fs = tb->fontSize * s;
+			dl->AddText(nullptr, fs,
+			            ImVec2(tx[i] + tb->tabPadding * s, mn.y + (tabH - fs) * 0.5f),
+			            C(themedColor(n, "Text Color", tb->textColor)), labels[i].c_str());
+		}
+		// …and the page area's outline, so an empty Tab Box is something you can
+		// aim a drop at rather than a strip with nothing under it.
+		dl->AddRect(ImVec2(mn.x, mn.y + tabH), mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
+	case UIWidgetType::Splitter:
+	{
+		const auto* sp = dynamic_cast<const HE::UISplitter*>(&n);
+		if (!sp) break;
+		const float len = sp->vertical ? (mx.y - mn.y) : (mx.x - mn.x);
+		const float div = std::min(sp->dividerSize * s, len);
+		const float first = sp->clampedRatio(len) * std::max(0.0f, len - div);
+		const ImU32 c = C(themedColor(n, "Divider Color", sp->dividerColor));
+		if (sp->vertical)
+			dl->AddRectFilled(ImVec2(mn.x, mn.y + first), ImVec2(mx.x, mn.y + first + div), c);
+		else
+			dl->AddRectFilled(ImVec2(mn.x + first, mn.y), ImVec2(mn.x + first + div, mx.y), c);
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
+	case UIWidgetType::Accordion:
+	{
+		// The SAME layout the runtime folds with (UIAccordion::sectionLayout),
+		// so a heading is where the author sees it. The heights come from the
+		// tree and not from the element's drawing cache: the designer's preview
+		// has not necessarily drawn a frame yet.
+		const auto* ac = dynamic_cast<const HE::UIAccordion*>(&n);
+		if (!ac) break;
+		std::vector<std::string> labels;
+		std::vector<float> bodies;
+		if (tree)
+			for (const auto& cp : tree->elements)
+				if (cp && cp->parentId == n.id)
+				{
+					labels.push_back(cp->name.empty() ? std::string("Section") : cp->name);
+					bodies.push_back(cp->sizeY * s);
+				}
+		const float headH = ac->headerHeight * s;
+		const uint32_t m  = ac->effectiveMask(static_cast<int>(bodies.size()));
+		std::vector<HE::UIAccordion::Slot> slots;
+		HE::UIAccordion::sectionLayout(mn.y - ac->scrollOffset * s, headH,
+		                               ac->spacing * s, bodies, m, slots);
+		for (std::size_t i = 0; i < slots.size(); ++i)
+		{
+			if (slots[i].headerY >= mx.y) break;
+			const bool open = i < 32 && (m & (1u << static_cast<unsigned>(i))) != 0u;
+			const float y1 = std::min(slots[i].headerY + headH, mx.y);
+			if (y1 <= slots[i].headerY) continue;
+			dl->AddRectFilled(ImVec2(mn.x, slots[i].headerY), ImVec2(mx.x, y1),
+			                  C(themedColor(n, open ? "Open Header Color" : "Header Color",
+			                                open ? ac->openHeaderColor : ac->headerColor)));
+			const float fs = ac->fontSize * s;
+			dl->AddText(nullptr, fs,
+			            ImVec2(mn.x + ac->textIndent * s,
+			                   slots[i].headerY + (headH - fs) * 0.5f),
+			            C(themedColor(n, "Text Color", ac->textColor)), labels[i].c_str());
+		}
+		// …and the frame, so an accordion with nothing in it is something you
+		// can aim a drop at rather than an empty rectangle.
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
+	case UIWidgetType::DatePicker:
+	{
+		// The SAME layout the runtime clicks against, so an author cannot see
+		// the 12th where a click would land on the 13th.
+		const auto* dp = dynamic_cast<const HE::UIDatePicker*>(&n);
+		if (!dp) break;
+		const HE::UIWidgetRect r{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y };
+		const auto L = HE::UIDatePicker::layoutIn(r);
+		dl->AddRectFilled(mn, mx, C(themedColor(n, "Back Color", dp->backColor)));
+		dl->AddRectFilled(ImVec2(L.header.x, L.header.y),
+		                  ImVec2(L.header.x + L.header.w, L.header.y + L.header.h),
+		                  C(themedColor(n, "Header Color", dp->headerColor)));
+		const float fs = dp->fontSize * s;
+		const ImU32 tc = C(themedColor(n, "Text Color", dp->textColor));
+		const ImU32 mc = C(themedColor(n, "Muted Color", dp->mutedColor));
+		const std::string cap = dp->caption();
+		dl->AddText(nullptr, fs,
+		            ImVec2(L.header.x + L.header.w * 0.5f - fs * 0.28f * cap.size(),
+		                   L.header.y + (L.header.h - fs) * 0.5f), tc, cap.c_str());
+		for (int c = 0; c < HE::UIDatePicker::kCols; ++c)
+			dl->AddText(nullptr, fs * 0.85f,
+			            ImVec2(L.weekdays.x + L.cellW * (c + 0.5f) - fs * 0.25f,
+			                   L.weekdays.y + (L.weekdays.h - fs * 0.85f) * 0.5f),
+			            mc, HE::UIDatePicker::weekdayInitial(c, dp->mondayFirst));
+		const int sel = dp->selectedCell();
+		for (int i = 0; i < HE::UIDatePicker::kCells; ++i)
+		{
+			const float cx = L.grid.x + L.cellW * (i % HE::UIDatePicker::kCols);
+			const float cy = L.grid.y + L.cellH * (i / HE::UIDatePicker::kCols);
+			if (i == sel)
+				dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + L.cellW, cy + L.cellH),
+				                  C(themedColor(n, "Selected Color", dp->selectedColor)),
+				                  std::min(L.cellW, L.cellH) * 0.5f);
+			int dy = 0, dm = 0, dd = 0;
+			dp->dateAtCell(i, dy, dm, dd);
+			char num[4];
+			std::snprintf(num, sizeof(num), "%d", dd);
+			dl->AddText(nullptr, fs,
+			            ImVec2(cx + L.cellW * 0.5f - fs * 0.28f * std::strlen(num),
+			                   cy + (L.cellH - fs) * 0.5f),
+			            dp->cellInMonth(i) ? tc : mc, num);
+		}
+		break;
+	}
+	case UIWidgetType::ColorPicker:
+	{
+		// The field and the strip out of ImGui's own vertex colours: a designer
+		// has to see WHICH colour is picked, and a flat rectangle would show a
+		// picker that looks the same whatever it holds.
+		const auto* cp = dynamic_cast<const HE::UIColorPicker*>(&n);
+		if (!cp) break;
+		const HE::UIWidgetRect r{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y };
+		const auto p = HE::UIColorPicker::partsIn(r, cp->barWidth * s, cp->gap * s,
+		                                          cp->showAlpha);
+		dl->AddRectFilled(mn, mx, C(themedColor(n, "Back Color", cp->backColor)));
+		const glm::vec3 pure = HE::uiHsvToRgb(cp->hueOf(), 1.0f, 1.0f);
+		const ImU32 white = IM_COL32_WHITE;
+		const ImU32 hueC  = IM_COL32((int)(pure.r * 255), (int)(pure.g * 255),
+		                             (int)(pure.b * 255), 255);
+		dl->AddRectFilledMultiColor(ImVec2(p.sv.x, p.sv.y),
+		                            ImVec2(p.sv.x + p.sv.w, p.sv.y + p.sv.h),
+		                            white, hueC, hueC, white);
+		dl->AddRectFilledMultiColor(ImVec2(p.sv.x, p.sv.y),
+		                            ImVec2(p.sv.x + p.sv.w, p.sv.y + p.sv.h),
+		                            IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0),
+		                            IM_COL32(0, 0, 0, 255), IM_COL32(0, 0, 0, 255));
+		const float segH = p.hue.h / 6.0f;
+		for (int i = 0; i < 6; ++i)
+		{
+			const glm::vec3 a = HE::uiHsvToRgb(i * 60.0f, 1.0f, 1.0f);
+			const glm::vec3 b = HE::uiHsvToRgb((i + 1) * 60.0f, 1.0f, 1.0f);
+			const ImU32 ca = IM_COL32((int)(a.r * 255), (int)(a.g * 255), (int)(a.b * 255), 255);
+			const ImU32 cb = IM_COL32((int)(b.r * 255), (int)(b.g * 255), (int)(b.b * 255), 255);
+			dl->AddRectFilledMultiColor(ImVec2(p.hue.x, p.hue.y + segH * i),
+			                            ImVec2(p.hue.x + p.hue.w, p.hue.y + segH * (i + 1)),
+			                            ca, ca, cb, cb);
+		}
+		if (p.hasAlpha)
+			dl->AddRectFilledMultiColor(
+				ImVec2(p.alpha.x, p.alpha.y),
+				ImVec2(p.alpha.x + p.alpha.w, p.alpha.y + p.alpha.h),
+				C(glm::vec4(glm::vec3(cp->color), 1.0f)), C(glm::vec4(glm::vec3(cp->color), 1.0f)),
+				IM_COL32(180, 180, 180, 255), IM_COL32(180, 180, 180, 255));
+		dl->AddCircle(ImVec2(p.sv.x + p.sv.w * cp->saturationOf(),
+		                     p.sv.y + p.sv.h * (1.0f - cp->valueOf())),
+		              std::max(3.0f, p.hue.w * 0.22f), IM_COL32_WHITE);
+		break;
+	}
+	case UIWidgetType::WrapBox:
 	case UIWidgetType::VerticalBox:
 	case UIWidgetType::HorizontalBox:
 	{
@@ -1122,31 +3313,127 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			            IM_COL32(120, 190, 255, 50));
 		break;
 	}
+	case UIWidgetType::ListView:
+	{
+		// Its surface is drawn above. What is drawn here is what the designer
+		// CANNOT have: the rows, which only exist while the application runs.
+		// Ghost rows at the authored height, so the row size and the padding are
+		// something you can see and aim at instead of two numbers in a panel.
+		const float pad  = propFloatOr(n, "Padding", 4.0f) * s;
+		const float rowH = std::max(2.0f, propFloatOr(n, "Row Height", 40.0f) * s);
+		const float gap  = propFloatOr(n, "Spacing", 2.0f) * s;
+		const std::string tpl = propStringOr(n, "Row Widget", "");
+		const ImU32 ghost = tpl.empty() ? IM_COL32(200, 120, 120, 70)
+		                                : IM_COL32(150, 210, 160, 70);
+		// The header band, from the SAME arithmetic the runtime draws it with —
+		// the third consumer of headerLayout, and the reason it is one function.
+		// The titles come from the row template and only exist once something
+		// has run, so the designer shows the band and its seams; a preview run
+		// fills the names in and they appear here too.
+		float y = mn.y + pad;
+		if (const auto* lvp = dynamic_cast<const HE::UIListView*>(&n);
+		    lvp && lvp->headerExtent() > 0.0f)
+		{
+			const float hh = lvp->headerExtent() * s;
+			dl->AddRectFilled(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + hh),
+			                  C(themedColor(n, "Header Color", lvp->headerColor)));
+			const ImU32 htc = C(themedColor(n, "Header Text Color", lvp->headerTextColor));
+			std::vector<float> hx, hw;
+			lvp->headerLayout({ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y }, hx, hw);
+			for (std::size_t i = 0; i < hx.size(); ++i)
+			{
+				if (hx[i] >= mx.x - pad) break;
+				dl->AddText(nullptr, std::max(6.0f, lvp->headerFontSize * s),
+				            ImVec2(hx[i] + 2.0f, y + 2.0f), htc,
+				            lvp->headerLabels[i].c_str());
+				if (i + 1 < hx.size())
+					dl->AddLine(ImVec2(hx[i] + hw[i], y), ImVec2(hx[i] + hw[i], y + hh),
+					            htc & 0x40FFFFFFu);
+			}
+			if (hx.empty())
+				dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+					ImVec2(mn.x + pad + 4, y + 2), IM_COL32(210, 200, 160, 200),
+					"columns come from the row widget");
+			y += hh;
+		}
+		for (int i = 0; i < 64 && y + rowH <= mx.y - pad; ++i)
+		{
+			dl->AddRect(ImVec2(mn.x + pad, y), ImVec2(mx.x - pad, y + rowH), ghost);
+			y += rowH + gap;
+		}
+		// A list without a template can never show anything, and that is the
+		// single most likely reason one looks empty when it runs.
+		if (tpl.empty())
+			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+				ImVec2(mn.x + pad + 4, mn.y + pad + 2),
+				IM_COL32(230, 170, 170, 200), "no Row Widget");
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		break;
+	}
+	case UIWidgetType::Spacer:
+	{
+		// Invisible at runtime, and therefore drawn HERE — a gap you cannot see
+		// in the designer is a gap you cannot grab, resize or even find again.
+		// Dashes plus a double-headed arrow along the axis it pushes on.
+		dl->AddRect(mn, mx, IM_COL32(150, 150, 165, 80));
+		const float w = mx.x - mn.x, h = mx.y - mn.y;
+		const ImU32 arrow = IM_COL32(150, 150, 165, 120);
+		const float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+		const float tip = std::min(6.0f, std::min(w, h) * 0.3f);
+		if (h >= w)   // taller than wide: it pushes downwards
+		{
+			dl->AddLine(ImVec2(cx, mn.y + 2), ImVec2(cx, mx.y - 2), arrow);
+			dl->AddTriangleFilled(ImVec2(cx, mn.y + 1), ImVec2(cx - tip * 0.5f, mn.y + 1 + tip),
+			                      ImVec2(cx + tip * 0.5f, mn.y + 1 + tip), arrow);
+			dl->AddTriangleFilled(ImVec2(cx, mx.y - 1), ImVec2(cx - tip * 0.5f, mx.y - 1 - tip),
+			                      ImVec2(cx + tip * 0.5f, mx.y - 1 - tip), arrow);
+		}
+		else
+		{
+			dl->AddLine(ImVec2(mn.x + 2, cy), ImVec2(mx.x - 2, cy), arrow);
+			dl->AddTriangleFilled(ImVec2(mn.x + 1, cy), ImVec2(mn.x + 1 + tip, cy - tip * 0.5f),
+			                      ImVec2(mn.x + 1 + tip, cy + tip * 0.5f), arrow);
+			dl->AddTriangleFilled(ImVec2(mx.x - 1, cy), ImVec2(mx.x - 1 - tip, cy - tip * 0.5f),
+			                      ImVec2(mx.x - 1 - tip, cy + tip * 0.5f), arrow);
+		}
+		break;
+	}
 	case UIWidgetType::Text:
 	{
 		const float fs = propFloatOr(n, "FontSize", 22.0f) * s;
 		const std::string txt = propStringOr(n, "Text", "");
-		dl->AddText(nullptr, fs, mn, C(propColorOr(n, "Color", { 1,1,1,1 })),
-		            txt.empty() ? "(empty)" : txt.c_str());
+		const char* shown = txt.empty() ? "(empty)" : txt.c_str();
+		// Honour Align H/Align V. This used to draw at the rect's top-left
+		// corner unconditionally, which made every label look pinned there and
+		// disagree with what the engine actually drew — the designer's whole job
+		// is to show what you will get.
+		// WORD WRAP, if the element asks for it. This used to measure and draw
+		// with no wrap column at all, so a wrapping label was one long line here
+		// and several in the engine — and an AUTO-SIZED wrapping label looked
+		// worst of all, because its height came from the engine's wrapped
+		// measurement while the designer drew it as a single line running out of
+		// its own box.
+		const bool wrap = n.getProp("WordWrap").b;
+		const float wrapW = wrap ? std::max(1.0f, mx.x - mn.x) : FLT_MAX;
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrapW, shown);
+		const int aH = propIntOr(n, "Align H", 0);
+		const int aV = propIntOr(n, "Align V", 1);
+		const float slackX = std::max(0.0f, (mx.x - mn.x) - ts.x);
+		const float slackY = std::max(0.0f, (mx.y - mn.y) - ts.y);
+		const ImVec2 at(mn.x + (aH == 1 ? slackX * 0.5f : aH == 2 ? slackX : 0.0f),
+		                mn.y + (aV == 1 ? slackY * 0.5f : aV == 2 ? slackY : 0.0f));
+		dl->AddText(nullptr, fs, at, C(propColorOr(n, "Color", { 1,1,1,1 })), shown,
+		            nullptr, wrap ? wrapW : 0.0f);
 		break;
 	}
 	case UIWidgetType::Button:
 	{
-		if (texHandle)
-			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             C(propColorOr(n, "Normal Color", { 1,1,1,1 })));
-		else
-			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
-		dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
-		const std::string txt = propStringOr(n, "Text", "");
-		if (!txt.empty())
-		{
-			const float fs = propFloatOr(n, "FontSize", 20.0f) * s;
-			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, txt.c_str());
-			dl->AddText(nullptr, fs,
-				ImVec2((mn.x + mx.x - ts.x) * 0.5f, (mn.y + mx.y - ts.y) * 0.5f),
-				C(propColorOr(n, "Text Color", { 1,1,1,1 })), txt.c_str());
-		}
+		// Nothing but its surface, which is drawn above from the AUTHORED
+		// rounding, border and gradient — this used to hard-code a rounding of 4
+		// and an outline the engine never drew.
+		//
+		// No caption either: a Button is a surface, and what sits on it is a
+		// CHILD element that this same function draws in its own turn.
 		break;
 	}
 	case UIWidgetType::CheckBox:
@@ -1194,17 +3481,18 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::ProgressBar:
 	{
+		// The track is the surface (drawn above); only the fill on top of it
+		// belongs here.
 		float val = propFloatOr(n, "Value", 0.5f);
 		val = val < 0.0f ? 0.0f : (val > 1.0f ? 1.0f : val);
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
 		dl->AddRectFilled(mn, ImVec2(mn.x + val * (mx.x - mn.x), mx.y),
-			C(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })), 3.0f * s);
+			C(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })),
+			std::min(n.cornerRadius.x, n.cornerRadius.w) * s);
 		break;
 	}
 	case UIWidgetType::TextInput:
 	{
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.10f,0.10f,0.10f,1 })), 3.0f * s);
-		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
+		// Background and outline are the surface, drawn above.
 		const std::string txt = propStringOr(n, "Text", "");
 		const bool placeholder = txt.empty();
 		std::string shown = placeholder ? propStringOr(n, "Placeholder", "") : txt;
@@ -1228,8 +3516,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::ComboBox:
 	{
-		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
-		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
+		// Background and outline are the surface, drawn above.
 		// Current option = Options[Selected Index].
 		std::string shown;
 		const UIPropValue opts = n.getProp("Options");
@@ -1240,15 +3527,29 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		if (!shown.empty())
 			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
 				C(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
-		// Dropdown arrow.
-		const float ax = mx.x - (mx.y - mn.y) * 0.5f, ay = (mn.y + mx.y) * 0.5f;
-		const float ar = std::max(2.0f, (mx.y - mn.y) * 0.14f);
-		dl->AddTriangleFilled(ImVec2(ax - ar, ay - ar * 0.6f), ImVec2(ax + ar, ay - ar * 0.6f),
-			ImVec2(ax, ay + ar * 0.6f), IM_COL32(200,200,210,180));
+		// The dropdown triangle, from the ELEMENT'S own geometry rather than from
+		// numbers typed twice — this used to sit slightly higher and slightly
+		// smaller here than the engine drew it, and its colour was a hard-coded
+		// grey instead of the combo's own text colour.
+		{
+			const HE::UIComboBox::Arrow a = HE::UIComboBox::arrowIn(
+				{ mn.x, mn.y, mx.x - mn.x, mx.y - mn.y });
+			glm::vec4 ac = propColorOr(n, "Text Color", { 1, 1, 1, 1 });
+			ac.a *= 0.8f;
+			dl->AddTriangleFilled(ImVec2(a.cx - a.halfW, a.cy - a.height * 0.5f),
+			                      ImVec2(a.cx + a.halfW, a.cy - a.height * 0.5f),
+			                      ImVec2(a.cx,           a.cy + a.height * 0.5f), C(ac));
+		}
 		break;
 	}
 	default: break;
 	}
+
+	// The Image's outline last, over the picture it just drew — the one type
+	// whose surface is not a colour, so the fill half of this is skipped.
+	if (n.type() == UIWidgetType::Image && n.borderWidth > 0.0f)
+		drawSurfacePreview(dl, n, mn, mx, s, glm::vec4(0.0f), alpha, dim,
+		                   nullptr, /*drawFill=*/false);
 }
 
 // ── Embedded widgets in the designer ─────────────────────────────────────────
@@ -1290,13 +3591,14 @@ void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree
 		texHandle = AssetThumbnailCache::get(ctx.contentManager->contentRoot() + "/" + n.texture);
 	const float alpha = HE::uiElementEffectiveOpacity(tree, n);
 	const float dim   = HE::uiElementEffectiveEnabled(tree, n) ? 1.0f : HE::kUIDisabledDim;
-	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim);
+	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim, &tree);
 }
 
 // Draw `tree` into the rect [mn, mx] — the whole tree, in paint order, with the
 // same clipping rule the runtime uses. `depth` bounds the recursion so a circle
 // of widgets embedding each other cannot hang the editor.
 void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
+                      const HE::UIWidgetRef* ref,
                       const ImVec2& mn, const ImVec2& mx, float s, int depth)
 {
 	constexpr int kMaxDepth = 4;
@@ -1323,6 +3625,16 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// A copy, because auto-size mutates the tree it measures and the cached one
 	// must stay as the asset wrote it.
 	HE::UIWidgetTree laid = tree;
+	// What this particular copy was told, applied BEFORE it is measured: a
+	// parameter that changes a label changes how wide that label wants to be.
+	//
+	// This is why parameters are element properties and not script variables.
+	// Graphs do not run in the designer, so a knob that only a graph could turn
+	// would leave a page of five form rows showing five identical labels here
+	// and five different ones at runtime — and the designer would be lying
+	// about the one thing it exists to show.
+	if (ref && !ref->paramValues.empty())
+		HE::uiApplyWidgetParams(laid, ref->paramValues);
 	HE::uiApplyAutoSize(laid, &canvas);
 	HE::uiUpdateScrollExtents(laid);
 
@@ -1363,13 +3675,87 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 		if (it.n->type() == UIWidgetType::WidgetRef)
 			if (const HE::UIWidgetTree* sub =
 				embeddedTreeFor(ctx, it.n->getProp("Widget").s))
-				drawEmbeddedTree(dl, ctx, *sub, emn, emx, subY, depth + 1);
+				drawEmbeddedTree(dl, ctx, *sub,
+				                 dynamic_cast<const HE::UIWidgetRef*>(it.n),
+				                 emn, emx, subY, depth + 1);
 		if (clipped) dl->PopClipRect();
 	}
 }
 
+// The open clip's values, in the tree for exactly as long as this object lives.
+// See the comment at its use in drawCanvas for why it is an RAII guard and not
+// a pair of calls.
+struct ScrubPreview
+{
+	HE::UIWidgetTree* tree = nullptr;
+	std::vector<std::pair<std::pair<int, std::string>, UIPropValue>> saved;
+
+	explicit ScrubPreview(State& st)
+	{
+		if (st.clipIndex < 0 ||
+		    st.clipIndex >= static_cast<int>(st.tree.animations.size())) return;
+		std::vector<HE::UIAnimSample> samples;
+		HE::uiAnimEvaluate(st.tree.animations[st.clipIndex], st.playhead, samples);
+		if (samples.empty()) return;
+		tree = &st.tree;
+		for (const HE::UIAnimSample& s : samples)
+		{
+			UIElement* e = tree->find(s.element);
+			if (!e) continue;
+			const UIPropValue cur = e->getPropAny(s.prop);
+			// A track whose property changed type under it is skipped rather
+			// than written — the same check the runtime makes.
+			if (cur.type != s.value.type) continue;
+			saved.push_back({ { s.element, s.prop }, cur });
+			e->setPropAny(s.prop, s.value);
+		}
+	}
+	~ScrubPreview()
+	{
+		if (!tree) return;
+		for (const auto& [where, value] : saved)
+			if (UIElement* e = tree->find(where.first)) e->setPropAny(where.second, value);
+	}
+	ScrubPreview(const ScrubPreview&) = delete;
+	ScrubPreview& operator=(const ScrubPreview&) = delete;
+};
+
 void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
+	// What a bound colour resolves to, for everything this frame draws — taken
+	// from the editor's OWN widget runtime, which is the same object the live
+	// preview resolves against. Asking it rather than keeping a second copy is
+	// what stops the designer and the preview from showing two different themes
+	// for one asset (see themedColor).
+	if (ctx.world)
+	{
+		g_previewTheme = &ctx.world->widgets().theme();
+		g_previewMode  = ctx.world->widgets().themeMode();
+	}
+	// The theme asset behind the canvas — the one picked in the toolbar, or the
+	// one this widget names for itself — is re-read when the file changed, so
+	// saving it in its own editor lands here in the same frame. Costs a string
+	// compare when nothing happened.
+	if (st.themeSource != 1 && st.themeSource != 2) resolvePreviewTheme(st, ctx);
+	// …unless this tab is looking at the widget under another theme, or in the
+	// other mode. Two independent overrides on top of the same default, so
+	// "the project's theme, dark" and "the preview's theme, dark" are both
+	// reachable — and neither writes anything back into the runtime.
+	if (st.themeSource != 0 && st.themeOverrideOk) g_previewTheme = &st.themeOverride;
+	if (st.themeModeOverride != 0)
+		g_previewMode = st.themeModeOverride == 1 ? HE::UIThemeMode::Light
+		                                         : HE::UIThemeMode::Dark;
+
+	// ── The open clip, at the playhead ───────────────────────────────────────
+	// Applied for the length of THIS function and taken back on the way out, so
+	// nothing outside one frame's drawing ever sees a scrubbed value: not the
+	// save, not an undo snapshot, not the collaboration mirror. A preview that
+	// leaks into the document is data loss dressed up as a preview, and the
+	// alternative — restoring at five call sites — is five places to forget.
+	//
+	// Inside the frame it applies to the picking as well as the picture, which
+	// is right: you click what you can see.
+	const ScrubPreview scrub(st);
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 
@@ -1494,7 +3880,8 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		{
 			const std::string wp = it.n->getProp("Widget").s;
 			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, wp))
-				drawEmbeddedTree(dl, ctx, *sub, mn, mx, s, 0);
+				drawEmbeddedTree(dl, ctx, *sub,
+				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0);
 			else
 			{
 				const std::string label = wp.empty()
@@ -1591,17 +3978,30 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	}
 
 	// ── Mouse interaction ─────────────────────────────────────────────────────
+	// `items` is in paint order, so walking it backwards is walking the stack
+	// from the top down — the first rect the point falls into is the element
+	// that is drawn over all the others there.
 	auto topmostAt = [&](const ImVec2& canvasPt) -> int
 	{
 		for (auto it = items.rbegin(); it != items.rend(); ++it)
-			if (canvasPt.x >= it->r.mn.x && canvasPt.x <= it->r.mx.x &&
-			    canvasPt.y >= it->r.mn.y && canvasPt.y <= it->r.mx.y)
-				return it->n->id;
+		{
+			if (canvasPt.x < it->r.mn.x || canvasPt.x > it->r.mx.x ||
+			    canvasPt.y < it->r.mn.y || canvasPt.y > it->r.mx.y) continue;
+			// The part of an element a clipping ancestor cuts away is not on
+			// screen, so it cannot be clicked here either — same rule the
+			// runtime hit test follows.
+			HE::UIWidgetRect clip{};
+			if (HE::uiElementClipRect(st.tree, *it->n, clip, layoutCanvas))
+				if (canvasPt.x < clip.x || canvasPt.x > clip.x + clip.w ||
+				    canvasPt.y < clip.y || canvasPt.y > clip.y + clip.h) continue;
+			return it->n->id;
+		}
 		return 0;
 	};
 
 	if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 	{
+		st.hasPendingPick = false;
 		if (sel && hoveredHandle >= 0)
 		{
 			st.dragMode = 2;
@@ -1613,22 +4013,51 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		}
 		else
 		{
-			const int hit = topmostAt(toCanvas(mouse));
-			st.selected = hit;
-			if (hit != 0)
+			// Elements that place themselves are the only draggable ones: inside
+			// a layout box the position is computed, so a drag would move a
+			// number nothing reads. Re-ordering there is the hierarchy's job.
+			auto draggable = [&](const UIElement* n2)
 			{
-				UIElement* n2 = st.tree.find(hit);
-				// Only elements that place themselves can be dragged: inside a
-				// layout box the position is computed, so a drag would move a
-				// number nothing reads. Re-ordering there is the hierarchy's job.
+				if (!n2) return false;
 				const UIElement* par = n2->parentId != 0 ? st.tree.find(n2->parentId) : nullptr;
-				if (!par || !par->laysOutChildren())
-				{
-					st.dragMode = 1;
-					st.dragStartMouse = mouse;
-					st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
-					st.dragDidEdit = false;
-				}
+				return !par || !par->laysOutChildren();
+			};
+			const ImVec2 cpt = toCanvas(mouse);
+			const int top = topmostAt(cpt);
+
+			// A press inside the CURRENT selection grabs that selection, even
+			// when something else lies over it — otherwise an element under
+			// another one could be selected from the hierarchy and then never
+			// moved, because the very press that starts the drag re-picks the
+			// thing on top.
+			//
+			// The pick is only deferred, not lost: a press that comes up again
+			// without the mouse having travelled was a click, and a click still
+			// selects what is on top. So the selection is sticky for DRAGGING
+			// and never sticky for LOOKING — which is what keeps a full-screen
+			// panel from becoming a selection one can no longer get out of.
+			bool grabSelection = false;
+			if (sel && sel->id != top && draggable(sel))
+			{
+				const Rect sr = elementCanvasRect(st.tree, *sel, layoutCanvas);
+				grabSelection = cpt.x >= sr.mn.x && cpt.x <= sr.mx.x &&
+				                cpt.y >= sr.mn.y && cpt.y <= sr.mx.y;
+			}
+			if (grabSelection)
+			{
+				st.pendingPick    = top;
+				st.hasPendingPick = true;
+			}
+			else
+			{
+				st.selected = top;
+			}
+			if (UIElement* n2 = st.tree.find(st.selected); n2 && draggable(n2))
+			{
+				st.dragMode = 1;
+				st.dragStartMouse = mouse;
+				st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
+				st.dragDidEdit = false;
 			}
 		}
 	}
@@ -1636,74 +4065,171 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	if (st.dragMode != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
 	{
 		UIElement* n2 = st.tree.find(st.selected);
+		// Nothing moves until the mouse has actually travelled. A few pixels of
+		// slack is what separates a click from a drag — without it every click
+		// nudges what it selects by a pixel and pushes an undo step for it, and
+		// the deferred pick above would never fire.
+		const float travel = std::max(std::abs(mouse.x - st.dragStartMouse.x),
+		                              std::abs(mouse.y - st.dragStartMouse.y));
+		if (!st.dragDidEdit && travel < 4.0f) n2 = nullptr;
 		if (n2)
 		{
 			const ImVec2 d((mouse.x - st.dragStartMouse.x) / s,
 			               (mouse.y - st.dragStartMouse.y) / s);
-			if (std::abs(d.x) > 0.01f || std::abs(d.y) > 0.01f) st.dragDidEdit = true;
-			if (st.dragMode == 1)
+			st.dragDidEdit = true;
+			// Always written from the values the drag STARTED at, never from the
+			// fields as they stand: this runs twice per frame — once to see where
+			// the plain drag lands, once with the snap correction folded in — and
+			// a second incremental pass would apply the delta twice.
+			const auto applyDrag = [&](const ImVec2& dd)
 			{
-				n2->posX = st.dragStartPos[0] + d.x;
-				n2->posY = st.dragStartPos[1] + d.y;
-			}
-			else if (st.dragMode == 2)
+				if (st.dragMode == 1)
+				{
+					n2->posX = st.dragStartPos[0] + dd.x;
+					n2->posY = st.dragStartPos[1] + dd.y;
+				}
+				else if (st.dragMode == 2)
+				{
+					// Per-axis: dragging the min edge shifts pos by d*(1-pivot) and
+					// shrinks size; the max edge grows size and shifts pos by d*pivot.
+					ImVec2 dMin, dMax;
+					handleDelta(st.resizeHandle, dd, dMin, dMax);
+					float nx = st.dragStartSize[0] - dMin.x + dMax.x;
+					float ny = st.dragStartSize[1] - dMin.y + dMax.y;
+					// The floor is on the RESULTING rect, not on the field: on a
+					// stretched axis the field is the difference to the anchored
+					// span and is normally negative (an inset), so clamping it at 1
+					// would make those handles unusable.
+					const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2, layoutCanvas);
+					nx = std::max(1.0f - ar.w, nx);
+					ny = std::max(1.0f - ar.h, ny);
+					n2->sizeX = nx;
+					n2->sizeY = ny;
+					n2->posX = st.dragStartPos[0] + dMin.x * (1.0f - n2->pivotX) + dMax.x * n2->pivotX;
+					n2->posY = st.dragStartPos[1] + dMin.y * (1.0f - n2->pivotY) + dMax.y * n2->pivotY;
+				}
+			};
+			applyDrag(d);
+
+			// ── Snapping ─────────────────────────────────────────────────────
+			// The correction is measured on the RESOLVED rect and then added
+			// back to `d`, which works for both gestures for the same reason:
+			// handleDelta routes d.x into whichever of dMin/dMax the handle
+			// owns, and a rect's moving edge follows that component 1:1.
+			st.hasSnapGuide[0] = st.hasSnapGuide[1] = false;
+			if (st.snapOn && !ImGui::GetIO().KeyAlt)
 			{
-				// Per-axis: dragging the min edge shifts pos by d*(1-pivot) and
-				// shrinks size; the max edge grows size and shifts pos by d*pivot.
-				ImVec2 dMin, dMax;
-				handleDelta(st.resizeHandle, d, dMin, dMax);
-				float nx = st.dragStartSize[0] - dMin.x + dMax.x;
-				float ny = st.dragStartSize[1] - dMin.y + dMax.y;
-				// The floor is on the RESULTING rect, not on the field: on a
-				// stretched axis the field is the difference to the anchored
-				// span and is normally negative (an inset), so clamping it at 1
-				// would make those handles unusable.
-				const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2, layoutCanvas);
-				nx = std::max(1.0f - ar.w, nx);
-				ny = std::max(1.0f - ar.h, ny);
-				n2->sizeX = nx;
-				n2->sizeY = ny;
-				n2->posX = st.dragStartPos[0] + dMin.x * (1.0f - n2->pivotX) + dMax.x * n2->pivotX;
-				n2->posY = st.dragStartPos[1] + dMin.y * (1.0f - n2->pivotY) + dMax.y * n2->pivotY;
+				// A resize offers only the edge under the cursor. The other one
+				// is standing still, and snapping it would move a side nobody
+				// took hold of. Handles: 0..3 corners TL/TR/BL/BR, 4..7 T/B/L/R.
+				int maskX = HE::kUISnapAll, maskY = HE::kUISnapAll;
+				if (st.dragMode == 2)
+				{
+					static const int kMaskX[8] = { HE::kUISnapMin, HE::kUISnapMax,
+						HE::kUISnapMin, HE::kUISnapMax, 0, 0, HE::kUISnapMin, HE::kUISnapMax };
+					static const int kMaskY[8] = { HE::kUISnapMin, HE::kUISnapMin,
+						HE::kUISnapMax, HE::kUISnapMax, HE::kUISnapMin, HE::kUISnapMax, 0, 0 };
+					const int h = std::clamp(st.resizeHandle, 0, 7);
+					maskX = kMaskX[h]; maskY = kMaskY[h];
+				}
+				const std::vector<HE::UISnapLine> cands =
+					HE::uiSnapCandidates(st.tree, *n2, layoutCanvas);
+				const HE::UIWidgetRect r0 = HE::uiElementRect(st.tree, *n2, layoutCanvas);
+				const HE::UISnapResult sn =
+					HE::uiSnapDelta(r0, cands, 6.0f / s, maskX, maskY);
+				if (sn.lineX >= 0 || sn.lineY >= 0)
+				{
+					applyDrag(ImVec2(d.x + sn.dx, d.y + sn.dy));
+					// Only claim a guide the element actually reached. A Min/Max
+					// bound that bites stops the rect short of the line, and a
+					// guide drawn there would promise an alignment that is not
+					// on screen.
+					const HE::UIWidgetRect r1 = HE::uiElementRect(st.tree, *n2, layoutCanvas);
+					const float ownX[3] = { r1.x, r1.x + r1.w * 0.5f, r1.x + r1.w };
+					const float ownY[3] = { r1.y, r1.y + r1.h * 0.5f, r1.y + r1.h };
+					const auto reached = [](const float (&own)[3], float pos)
+					{
+						for (float v : own) if (std::abs(v - pos) < 0.5f) return true;
+						return false;
+					};
+					if (sn.lineX >= 0 && reached(ownX, cands[sn.lineX].pos))
+						{ st.snapGuide[0] = cands[sn.lineX]; st.hasSnapGuide[0] = true; }
+					if (sn.lineY >= 0 && reached(ownY, cands[sn.lineY].pos))
+						{ st.snapGuide[1] = cands[sn.lineY]; st.hasSnapGuide[1] = true; }
+				}
 			}
 			st.dirty = true;
 		}
 	}
+
+	// The guides, drawn after the canvas so they lie over what they align to and
+	// clipped to it so they stop at its edge. A middle reads dashed, an edge
+	// solid: the two are different promises and the picture should say which.
+	if (st.dragMode != 0 && (st.hasSnapGuide[0] || st.hasSnapGuide[1]))
+	{
+		dl->PushClipRect(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y), true);
+		for (int a = 0; a < 2; ++a)
+		{
+			if (!st.hasSnapGuide[a]) continue;
+			const HE::UISnapLine& L = st.snapGuide[a];
+			const ImU32 col = L.center ? IM_COL32(120, 220, 255, 200)
+			                           : IM_COL32(255, 90, 160, 220);
+			const ImVec2 p0 = L.vertical ? toScreen(ImVec2(L.pos, 0.0f))
+			                             : toScreen(ImVec2(0.0f, L.pos));
+			const ImVec2 p1 = L.vertical ? toScreen(ImVec2(L.pos, canvasH))
+			                             : toScreen(ImVec2(canvasW, L.pos));
+			if (!L.center) { dl->AddLine(p0, p1, col, 1.0f); continue; }
+			const float len = L.vertical ? (p1.y - p0.y) : (p1.x - p0.x);
+			for (float t = 0.0f; t < len; t += 10.0f)
+			{
+				const float t2 = std::min(len, t + 5.0f);
+				dl->AddLine(L.vertical ? ImVec2(p0.x, p0.y + t) : ImVec2(p0.x + t, p0.y),
+				            L.vertical ? ImVec2(p0.x, p0.y + t2) : ImVec2(p0.x + t2, p0.y),
+				            col, 1.0f);
+			}
+		}
+		dl->PopClipRect();
+	}
 	if (st.dragMode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 	{
 		if (st.dragDidEdit) commitEdit(st, ctx);
+		// It never became a drag, so it was a click after all: the pick the
+		// press held back happens now.
+		else if (st.hasPendingPick) st.selected = st.pendingPick;
+		st.hasPendingPick = false;
 		st.dragMode = 0;
 		st.resizeHandle = -1;
+		st.hasSnapGuide[0] = st.hasSnapGuide[1] = false;
 	}
 
-	// ── Palette drop onto the canvas (new element; nested when over a panel) ──
+	// ── Palette drop onto the canvas (new element; nested when over a container) ──
+	// Where a drop LANDS: the topmost container under the cursor, 0 = the canvas
+	// itself. Same painter order as the pick, so what you see on top is what
+	// takes the drop.
+	auto containerAt = [&](const ImVec2& canvasPt) -> int
+	{
+		for (auto it = items.rbegin(); it != items.rend(); ++it)
+			if (it->n->acceptsChildren() &&
+			    canvasPt.x >= it->r.mn.x && canvasPt.x <= it->r.mx.x &&
+			    canvasPt.y >= it->r.mn.y && canvasPt.y <= it->r.mx.y)
+				return it->n->id;
+		return 0;
+	};
 	if (ImGui::BeginDragDropTarget())
 	{
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 		{
 			const int t = *static_cast<const int*>(p->Data);
 			const ImVec2 cpt = toCanvas(mouse);
-			// Drop into the topmost PANEL under the cursor (containers nest).
-			int parent = 0;
-			for (auto it = items.rbegin(); it != items.rend(); ++it)
-				if (it->n->type() == UIWidgetType::Panel &&
-				    cpt.x >= it->r.mn.x && cpt.x <= it->r.mx.x &&
-				    cpt.y >= it->r.mn.y && cpt.y <= it->r.mx.y)
-					{ parent = it->n->id; break; }
-			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, &cpt);
+			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), containerAt(cpt), &cpt);
 			commitEdit(st, ctx);
 		}
 		// One of the project's own widgets, dropped where the cursor is.
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
 		{
 			const ImVec2 cpt = toCanvas(mouse);
-			int parent = 0;
-			for (auto it = items.rbegin(); it != items.rend(); ++it)
-				if (it->n->type() == UIWidgetType::Panel &&
-				    cpt.x >= it->r.mn.x && cpt.x <= it->r.mx.x &&
-				    cpt.y >= it->r.mn.y && cpt.y <= it->r.mx.y)
-					{ parent = it->n->id; break; }
-			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), parent, &cpt);
+			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data),
+			                             containerAt(cpt), &cpt);
 			commitEdit(st, ctx);
 		}
 		ImGui::EndDragDropTarget();
@@ -1753,6 +4279,13 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 			return "Get " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
 		case NT::SetProperty:
 			return "Set " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
+		// The by-reference pair names the property but NOT the element: which
+		// one it lands on is a pin, and a title that answered a question the
+		// node leaves open would be a title that lies half the time.
+		case NT::GetPropertyOn:
+			return "Get (Ref) ." + (n.s.empty() ? std::string("prop") : n.s);
+		case NT::SetPropertyOn:
+			return "Set (Ref) ." + (n.s.empty() ? std::string("prop") : n.s);
 		default:
 			return HGH::defaultNodeTitle(n);
 	}
@@ -2206,7 +4739,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		elementCombo("Element", /*includeAny=*/true);
 		// Event name from the bound element's events() (or free text when Any).
 		const UIElement* tgt = st.tree.find(n->elem);
-		const std::vector<UIEventDesc> evs = tgt ? tgt->events() : std::vector<UIEventDesc>{};
+		const std::vector<UIEventDesc> evs = tgt ? tgt->allEvents() : std::vector<UIEventDesc>{};
 		if (!evs.empty())
 		{
 			if (ImGui::BeginCombo("Event", n->s.empty() ? "(none)" : n->s.c_str()))
@@ -2409,6 +4942,79 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.onEdit       = [&st, &ctx](bool committed){
 		st.dirty = true;
 		if (committed) commitEdit(st, ctx); };
+	// What a widget's own graph can put in a string pin: the animations this
+	// widget carries (its own and the ones its embedded components brought), and
+	// its elements by the names they have in the designer. Both are lists the
+	// registry cannot know and the author should not have to spell.
+	host.paramChoices = [&st, &ctx](const HC::Node& node, const std::string& param)
+		-> std::vector<std::string>
+	{
+		std::vector<std::string> out;
+		if (node.s.rfind("widget.", 0) != 0) return out;
+		// Named elements, optionally of one type. A name is what a graph can
+		// hold on to; an element without one is the asset's private business,
+		// which is also why it cannot be addressed and is not offered.
+		auto named = [&st, &out](std::optional<HE::UIWidgetType> only)
+		{
+			for (const auto& ep : st.tree.elements)
+				if (ep && !ep->name.empty() && (!only || ep->type() == *only))
+					out.push_back(ep->name);
+		};
+		if (param == "animation")
+		{
+			for (const HE::UIAnimClip& c : st.tree.animations) out.push_back(c.name);
+			// An embedded component's clips play by name too (WidgetManager
+			// searches the embeds), so a page can offer what its parts brought.
+			for (const auto& ep : st.tree.elements)
+				if (ep && ep->type() == HE::UIWidgetType::WidgetRef)
+					if (const HE::UIWidgetTree* sub =
+					        embeddedTreeFor(ctx, ep->getProp("Widget").s))
+						for (const HE::UIAnimClip& c : sub->animations)
+							if (std::find(out.begin(), out.end(), c.name) == out.end())
+								out.push_back(c.name);
+		}
+		else if (param == "element" || param == "parent") named(std::nullopt);
+		// Only the lists: a Set List Count pointed at a Button is a call that
+		// cannot work, and a menu that offers it is a menu that lies.
+		else if (param == "list") named(HE::UIWidgetType::ListView);
+		else if (param == "property")
+		{
+			// The properties of the element this same node names — which is why
+			// the provider is handed the NODE and not just the parameter. The
+			// element pin is the one before this one on every row that has both.
+			std::string elem;
+			for (std::size_t i = 0; i + 1 < node.params.size(); ++i)
+				if (node.params[i].name == "element" && node.params[i + 1].name == param)
+					if (auto it = node.pinDefaults.find((int)i);
+					    it != node.pinDefaults.end() && it->second.type == PT::String)
+						elem = it->second.s;
+			for (const auto& ep : st.tree.elements)
+				if (ep && ep->name == elem)
+				{
+					for (const UIPropDesc& pd : ep->allProperties())
+					{
+						// The animation rows can only move a number, a colour or
+						// a point; offering the rest would be offering a call
+						// that refuses itself at run time.
+						if (node.s.rfind("widget.animate", 0) == 0 &&
+						    pd.type != UIPropType::Float && pd.type != UIPropType::Color &&
+						    pd.type != UIPropType::Vec2) continue;
+						out.push_back(pd.name);
+					}
+					break;
+				}
+		}
+		else if (param == "function")
+		{
+			// This widget's own public functions. A call at a widget somebody
+			// else made cannot be listed from here, and guessing at one would
+			// be worse than the text box.
+			for (const HC::Node& fn : st.graph.nodes)
+				if (fn.type == NT::FunctionEntry && !fn.s.empty() && fn.access == 0)
+					out.push_back(fn.s);
+		}
+		return out;
+	};
 	host.menus        = &kMenus;
 
 	GraphEditor::Model m = HGH::buildModel(host);
@@ -2491,7 +5097,17 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		ImGui::TextDisabled("%s", elemLabel(st, st.gDropElem).c_str());
 		ImGui::Separator();
 		const UIElement* tgt = st.tree.find(st.gDropElem);
-		const std::vector<UIPropDesc> props = tgt ? tgt->properties() : std::vector<UIPropDesc>{};
+		// ALL of them, not just the type's own: the runtime reads and writes
+		// through getPropAny/setPropAny, so Visible, Render Opacity, Position,
+		// Size, Rotation, Tooltip and the surface styles were all settable from
+		// a graph already — this menu was simply not offering them, which reads
+		// as "a button has no Visible" rather than as a menu being short.
+		//
+		// allProperties() puts the type's own first and the shared ones after,
+		// so the split below is where one list ends and the other begins.
+		const std::vector<UIPropDesc> props = tgt ? tgt->allProperties()
+		                                         : std::vector<UIPropDesc>{};
+		const std::size_t ownCount = tgt ? tgt->properties().size() : 0u;
 		auto makePropNode = [&](NT type, const UIPropDesc& pd)
 		{
 			const int id = addGraphNode(st, type, st.geState.addMenuGraphPos);
@@ -2499,26 +5115,77 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			nn->elem = st.gDropElem;
 			nn->s = pd.name;
 			nn->propType = HE::uiPropTypeToPin(pd.type);
+			// The by-reference pair addresses the element by NAME instead —
+			// filled in here, because the name of the element you dropped is
+			// the one piece of it the node cannot work out for itself.
+			if (type == NT::GetPropertyOn || type == NT::SetPropertyOn)
+			{
+				HC::Value v; v.type = PT::String; v.s = tgt ? tgt->name : std::string();
+				nn->pinDefaults[1] = std::move(v);
+			}
 			st.selectedGraphNode = id;
 			commitEdit(st, ctx);
 		};
 		// Same rule as everywhere a submenu carries an entry: ask while the header
 		// is still the last item, and only while the submenu is shut.
+		// One list, drawn twice, with a rule between the two halves: the type's
+		// own properties first, because that is what somebody who dropped a
+		// Slider came for, then the ones every element has.
+		auto propItems = [&](NT type)
+		{
+			for (std::size_t i = 0; i < props.size(); ++i)
+			{
+				if (i == ownCount && i != 0) ImGui::Separator();
+				if (ImGui::MenuItem(props[i].name.c_str())) makePropNode(type, props[i]);
+			}
+		};
 		const bool getOpen = ImGui::BeginMenu("Get", !props.empty());
 		if (!getOpen) EditorWidgets::helpForLabel("Get");
-		if (getOpen)
-		{
-			for (const UIPropDesc& pd : props)
-				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::GetProperty, pd);
-			ImGui::EndMenu();
-		}
+		if (getOpen) { propItems(NT::GetProperty); ImGui::EndMenu(); }
 		const bool setOpen = ImGui::BeginMenu("Set", !props.empty());
 		if (!setOpen) EditorWidgets::helpForLabel("Set");
-		if (setOpen)
+		if (setOpen) { propItems(NT::SetProperty); ImGui::EndMenu(); }
+
+		// …and the same two through a reference, which is how every other class
+		// is reached. Offered only for a NAMED element: these address it by
+		// name, and an element without one cannot be pointed at.
+		ImGui::Separator();
+		const bool named = tgt && !tgt->name.empty();
+		ImGui::BeginDisabled(!named);
+		const bool getRefOpen = ImGui::BeginMenu("Get Ref", named && !props.empty());
+		if (!getRefOpen) EditorWidgets::helpForLabel("Get Ref");
+		if (getRefOpen) { propItems(NT::GetPropertyOn); ImGui::EndMenu(); }
+		const bool setRefOpen = ImGui::BeginMenu("Set Ref", named && !props.empty());
+		if (!setRefOpen) EditorWidgets::helpForLabel("Set Ref");
+		if (setRefOpen) { propItems(NT::SetPropertyOn); ImGui::EndMenu(); }
+		ImGui::EndDisabled();
+		if (!named)
+			ImGui::TextDisabled("Give the element a name to reach it by reference.");
+
+		// A slot holding a component is the other kind of reference: the thing
+		// in it is an INSTANCE, with functions, events and public variables of
+		// its own. That one is not a property at all, so it is its own entry.
+		if (named && tgt->type() == UIWidgetType::WidgetRef)
 		{
-			for (const UIPropDesc& pd : props)
-				if (ImGui::MenuItem(pd.name.c_str())) makePropNode(NT::SetProperty, pd);
-			ImGui::EndMenu();
+			if (EditorWidgets::menuItem("Get Widget Ref"))
+			{
+				const int id = addGraphNode(st, NT::EngineCall, st.geState.addMenuGraphPos);
+				HC::Node* nn = st.graph.findNode(id);
+				if (const HE::api::ApiFn* fn = HE::api::find("widget.childRef"))
+				{
+					nn->s = fn->id;
+					nn->hasArg = fn->isExec;
+					for (const auto& p : fn->params)
+						nn->params.push_back({ p.name, p.type, p.isArray });
+					for (const auto& r : fn->results)
+						nn->results.push_back({ r.name, r.type, r.isArray });
+					HC::Value v; v.type = PT::String; v.s = tgt->name;
+					nn->pinDefaults[1] = std::move(v);
+				}
+				st.selectedGraphNode = id;
+				commitEdit(st, ctx);
+			}
+			EditorWidgets::helpForLabel("Get Widget Ref");
 		}
 		ImGui::EndPopup();
 	}
@@ -2629,6 +5296,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
 	// ── Toolbar ───────────────────────────────────────────────────────────────
+	bool openThemePopup = false;
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
@@ -2658,7 +5326,93 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		bar.endGroup();
 
+		// Snapping sits beside the view controls because that is what it is: a
+		// way of DRAGGING, not a property of the widget. Nothing here is saved.
+		if (st.viewMode == 0)
+		{
+			bar.group();
+			if (bar.item("##uisnap", T::iconGrid, "Snap", st.snapOn, true,
+			             "Line elements up while dragging (hold Alt to ignore)",
+			             "ui.snap"))
+			{
+				st.snapOn = !st.snapOn;
+			}
+			bar.endGroup();
+		}
+
+		// Which theme the canvas draws with. In the bar rather than in Details
+		// because it is a way of LOOKING at the widget, like the zoom beside it,
+		// and because it has to be one click away: the whole use of it is
+		// flicking between two themes and watching what moves.
+		if (st.viewMode == 0)
+		{
+			bar.group();
+			if (bar.item("##uitheme", T::iconBrush, previewThemeLabel(st).c_str(),
+			             st.themeSource != 0 || st.themeModeOverride != 0, true,
+			             "Draw the canvas with another theme", "ui.theme-preview"))
+			{
+				// Re-read on every open: a theme asset saved in its own editor a
+				// second ago is exactly the one somebody comes here to look at.
+				resolvePreviewTheme(st, ctx);
+				openThemePopup = true;
+			}
+			bar.endGroup();
+		}
+
 		if (T::saveButton(bar, st.dirty)) saveState(st, ctx);
+	}
+
+	// Outside the bar: a popup has to be opened after the strip's draw channels
+	// are merged, or it is drawn into a channel that no longer exists.
+	if (openThemePopup) ImGui::OpenPopup("##uithemepick");
+	if (ImGui::BeginPopup("##uithemepick"))
+	{
+		HE::Ed::Help::Scope helpScope("UI Theme Preview");
+		const ImGuiSelectableFlags keep = ImGuiSelectableFlags_NoAutoClosePopups;
+		// Every fixed entry is written out with its label as a literal rather
+		// than fed through a lambda, because the help audit reads literals and a
+		// control it cannot see is a control with no entry and nobody noticing.
+		auto choose = [&](int source, const std::string& path)
+		{
+			st.themeSource    = source;
+			st.themeAssetPath = path;
+			resolvePreviewTheme(st, ctx);
+		};
+		ImGui::TextDisabled("Theme");
+		if (ImGui::Selectable("From the preview", st.themeSource == 0, keep))
+			choose(0, std::string());
+		EditorWidgets::helpForLabel("From the preview");
+		if (ImGui::Selectable("Default", st.themeSource == 1, keep))
+			choose(1, std::string());
+		EditorWidgets::helpForLabel("Default");
+		if (ImGui::Selectable("Amber", st.themeSource == 2, keep))
+			choose(2, std::string());
+		EditorWidgets::helpForLabel("Amber");
+		// The project's own themes. Their labels are asset names, so the audit
+		// cannot see them — and there is nothing to explain about one anyway:
+		// the entry IS the asset's name.
+		const std::vector<HcEditorUtil::ClassRef> themes =
+			HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Theme);
+		if (!themes.empty()) ImGui::Separator();
+		for (const HcEditorUtil::ClassRef& a : themes)
+		{
+			const bool on = st.themeSource == 3 && st.themeAssetPath == a.path;
+			if (ImGui::Selectable((a.label + "##" + a.path).c_str(), on, keep))
+				choose(3, a.path);
+		}
+
+		ImGui::Separator();
+		ImGui::TextDisabled("Mode");
+		if (ImGui::Selectable("Follow the preview", st.themeModeOverride == 0, keep))
+			st.themeModeOverride = 0;
+		EditorWidgets::helpForLabel("Follow the preview");
+		if (ImGui::Selectable("Light", st.themeModeOverride == 1, keep))
+			st.themeModeOverride = 1;
+		EditorWidgets::helpForLabel("Light");
+		if (ImGui::Selectable("Dark", st.themeModeOverride == 2, keep))
+			st.themeModeOverride = 2;
+		EditorWidgets::helpForLabel("Dark");
+		ImGui::EndPopup();
 	}
 
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
@@ -2711,10 +5465,30 @@ void render(AppContext& ctx, const std::string& assetPath,
 	if (st.viewMode == 0)
 	{
 		// ═══ Designer: palette + hierarchy | canvas | element details ═══
-		ImGui::BeginChild("##uiw_left", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
+		// The left column is TWO scrolling panes, half the height each. One pane
+		// meant that scrolling down to a component pushed the hierarchy off the
+		// bottom, and the hierarchy is what you are dropping the component INTO:
+		// the two lists are used together, so neither may scroll the other away.
+		ImGui::BeginChild("##uiw_left", ImVec2(leftW, 0), ImGuiChildFlags_Borders,
+			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		{
+			// What is left once both headings and their rules are paid for,
+			// halved. Measured rather than guessed, so the split stays even
+			// under Preferences ▸ UI Font Scale.
+			const float chrome = 2.0f * (ImGui::GetTextLineHeightWithSpacing() +
+			                             ImGui::GetStyle().ItemSpacing.y * 2.0f);
+			const float halfH  = std::max(60.0f,
+				(ImGui::GetContentRegionAvail().y - chrome) * 0.5f);
+
 			ImGui::TextDisabled("Palette");
 			ImGui::Separator();
+			ImGui::BeginChild("##uiw_palette", ImVec2(0.0f, halfH));
+
+			// Its own scope, so every type button below is looked up as
+			// "UI Palette/<TypeName>" without a call site naming a key. It stays
+			// open across the hierarchy below, as it did when this was one pane:
+			// the hierarchy pushes its own and that is what decides there.
+			HE::Ed::Help::Scope paletteScope("UI Palette");
 			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
 			{
 				// WidgetRef is not offered as a bare type: every widget of the
@@ -2726,6 +5500,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 				// A plain click adds (centered on the canvas or under the selected
 				// panel); dragging the button onto the canvas/hierarchy places it there.
 				const bool clicked = ImGui::Button(typeName(t), ImVec2(-1.0f, 0));
+				// What this element IS. The scan that audits tooltip coverage
+				// only reads literal labels, so it never saw one of these
+				// buttons at all — third gap of that kind. A runtime test asks
+				// the registry instead (test_editor_help.cpp).
+				EditorWidgets::helpForLabel(typeName(t));
 				if (ImGui::BeginDragDropSource())
 				{
 					const int ti = static_cast<int>(t);
@@ -2737,7 +5516,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				{
 					int parent = 0;
 					if (const UIElement* selN = st.tree.find(st.selected))
-						parent = selN->type() == UIWidgetType::Panel ? selN->id : selN->parentId;
+						parent = selN->acceptsChildren() ? selN->id : selN->parentId;
 					st.selected = addElementAt(st, t, parent, nullptr);
 					commitEdit(st, ctx);
 				}
@@ -2750,17 +5529,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				const auto widgets = HcEditorUtil::listAssets(ctx.contentManager,
 				                                              HE::AssetType::Widget);
-				int offered = 0;
-				for (const auto& a : widgets) if (a.path != st.relPath) ++offered;
+				// Two lists, not one. The engine's own components arrive under
+				// the "Engine/" prefix and would otherwise sit in the middle of
+				// the project's own widgets in alphabetical order — where an
+				// author cannot tell "something I made" from "something that
+				// came with the engine", which is the only distinction that
+				// matters when you are looking for a form row.
+				auto isEngine = [](const std::string& p)
+				{ return p.rfind("Engine/", 0) == 0; };
 
-				ImGui::Spacing();
-				ImGui::TextDisabled("User Defined");
-				ImGui::Separator();
-				if (offered == 0)
-					ImGui::TextDisabled("(no other widgets yet)");
-				for (const auto& a : widgets)
+				auto drawOne = [&](const HcEditorUtil::ClassRef& a)
 				{
-					if (a.path == st.relPath) continue;   // never itself
 					ImGui::PushID(a.path.c_str());
 					const bool clicked = ImGui::Button(a.label.c_str(), ImVec2(-1.0f, 0));
 					if (ImGui::BeginDragDropSource())
@@ -2772,24 +5551,58 @@ void render(AppContext& ctx, const std::string& assetPath,
 						ImGui::TextUnformatted(a.label.c_str());
 						ImGui::EndDragDropSource();
 					}
+					// What the widget says about ITSELF, when it says anything.
+					// A name is not a description, and the twelve shipped
+					// components are exactly the case where the difference
+					// decides whether somebody has to place one to find out
+					// what it does.
 					if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-						ImGui::SetTooltip("%s\nEmbedded as a WidgetRef: authored once,\n"
-						                  "used here.", a.path.c_str());
+					{
+						const HE::UIWidgetTree* t = embeddedTreeFor(ctx, a.path);
+						if (t && !t->description.empty())
+							ImGui::SetTooltip("%s\n\n%s", t->description.c_str(),
+							                  a.path.c_str());
+						else
+							ImGui::SetTooltip("%s\nEmbedded as a WidgetRef: authored once,\n"
+							                  "used here.", a.path.c_str());
+					}
 					if (clicked)
 					{
 						int parent = 0;
 						if (const UIElement* selN = st.tree.find(st.selected))
-							parent = selN->type() == UIWidgetType::Panel ? selN->id : selN->parentId;
+							parent = selN->acceptsChildren() ? selN->id : selN->parentId;
 						st.selected = addWidgetRefAt(st, a.path, parent, nullptr);
 						commitEdit(st, ctx);
 					}
 					ImGui::PopID();
-				}
-			}
+				};
 
-			ImGui::Spacing();
+				int own = 0;
+				for (const auto& a : widgets)
+					if (a.path != st.relPath && !isEngine(a.path)) ++own;
+
+				ImGui::Spacing();
+				ImGui::TextDisabled("User Defined");
+				ImGui::Separator();
+				if (own == 0) ImGui::TextDisabled("(no other widgets yet)");
+				for (const auto& a : widgets)
+					if (a.path != st.relPath && !isEngine(a.path)) drawOne(a);
+
+				// ── Components ───────────────────────────────────────────────
+				// What ships with the engine (docs/he-apps-plan.md D2). Copyable
+				// and editable like anything else under Engine/: a project that
+				// wants a different form row saves over it and gets its own.
+				ImGui::Spacing();
+				ImGui::TextDisabled("Components");
+				ImGui::Separator();
+				for (const auto& a : widgets)
+					if (a.path != st.relPath && isEngine(a.path)) drawOne(a);
+			}
+			ImGui::EndChild();
+
 			ImGui::TextDisabled("Hierarchy");
 			ImGui::Separator();
+			ImGui::BeginChild("##uiw_tree", ImVec2(0.0f, 0.0f));
 
 			// Canvas root: select-none target + reparent-to-root drop target.
 			HE::Ed::Help::Scope helpScope("UI Hierarchy");
@@ -2824,16 +5637,28 @@ void render(AppContext& ctx, const std::string& assetPath,
 			for (int rootId : st.tree.childrenOf(0))
 				drawHierarchyNode(st, ctx, rootId, structureEdit);
 			if (structureEdit) commitEdit(st, ctx);
+			ImGui::EndChild();
 		}
 		ImGui::EndChild();
 
 		ImGui::SameLine();
 
+		// The middle column is the canvas with the TIMELINE under it, the way
+		// every animation editor is laid out: what you are looking at above,
+		// when it happens below.
+		const float midW = ImGui::GetContentRegionAvail().x - rightW
+		                 - ImGui::GetStyle().ItemSpacing.x;
+		const float timelineH = std::clamp(st.timelineH, 90.0f,
+			std::max(90.0f, ImGui::GetContentRegionAvail().y - 160.0f));
+		ImGui::BeginChild("##uiw_mid", ImVec2(midW, 0));
 		ImGui::BeginChild("##uiw_canvas",
-			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
+			ImVec2(0, ImGui::GetContentRegionAvail().y - timelineH
+			          - ImGui::GetStyle().ItemSpacing.y),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		drawCanvas(st, ctx, ImGui::GetContentRegionAvail());
+		ImGui::EndChild();
+		drawTimeline(st, ctx, timelineH);
 		ImGui::EndChild();
 
 		ImGui::SameLine();
@@ -2980,6 +5805,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		ImGui::EndChild();
 	}
+
+	// ── Application projects: save as you design ─────────────────────────────
+	// The live preview rebuilds itself when an asset is SAVED, so an unsaved
+	// change is an invisible one — and "why is nothing happening" is a bad first
+	// experience of a live preview (docs/he-apps-plan.md E2).
+	//
+	// Held back until the mouse is up and no field is being typed into: saving on
+	// every frame of a drag would rebuild the preview dozens of times across one
+	// gesture, and each rebuild throws the app's state away.
+	if (ctx.appLivePreview && st.dirty &&
+	    !ImGui::IsAnyMouseDown() && !ImGui::IsAnyItemActive())
+		saveState(st, ctx);
 
 	ImGui::End();
 }

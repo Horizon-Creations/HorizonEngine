@@ -15,6 +15,7 @@
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
+#include <UIWidget/UIWindowFrame.h>   // the borderless window's own frame (F3)
 #include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
 
 class ScriptContext;
@@ -34,7 +35,15 @@ protected:
     void            OnInit()               override;
     bool            OnEvent(const SDL_Event& event) override;
     void            OnRender(float dt)     override;
+    // Event-driven mode (application builds): "did anything change what is on
+    // screen since the last frame we showed?" A game never gets here — it is not
+    // event-driven — so this answers for the app case only, and it answers with
+    // the widget layer, which is where an app's picture lives.
+    bool            WantsPresent()         override;
     void            OnShutdown()           override;
+    // A second window is going (A5, docs/he-apps-plan.md §13.3): its widgets go
+    // with it and the graph is told, while the window still exists.
+    void            OnWindowClosing(HE::WindowHandle handle) override;
     // C++ game logic runs on the same clock as everything else that IS the game.
     float           GameLogicDeltaTime(float) override { return HE::api::time::deltaTime(); }
 
@@ -81,6 +90,24 @@ private:
     // In-game UI pointer input: hit-test the (uncaptured) mouse against UI
     // elements, drive button states and dispatch onClick/onHover* to scripts.
     void updateUIInput();
+
+    // What SDL's hit test asks, for a window without a system title bar
+    // (docs/he-apps-plan.md F3). The point arrives in WINDOW POINTS; everything
+    // the widget tree knows is in drawable pixels, and converting between the
+    // two is this function's only job besides asking. Returns Normal — "this is
+    // ordinary content" — whenever there is no window or no custom frame.
+    HE::UIWindowHit frameHitAt(int pointX, int pointY);
+
+    // ── A menu bar's shortcut, out of one key press (plan B10) ───────────────
+    // Turns an SDL key event into the name + modifiers the widget layer matches
+    // chords against, and fires the entry that owns it. True = the key belonged
+    // to a menu and nothing else may see it.
+    //
+    // Called from TWO places in OnEvent — once inside the text-editing block and
+    // once outside it — so it is a function rather than a paragraph copied
+    // twice: the two call sites differ only in whether a bare key may fire, and
+    // that difference belongs at the call site where it is decided.
+    bool menuShortcutFromKey(const SDL_KeyboardEvent& key);
 
     // Ensure a camera the free-fly controller can drive. A scene authored without
     // one otherwise renders through the extractor's fixed fallback camera, which
@@ -136,12 +163,46 @@ private:
     // The input layer reports held state, and a held Down must step one entry
     // rather than run through the whole menu — so the edges are kept here.
     uint8_t m_uiNavPrev = 0;
+    // Gamepad East ("Back"): its own edge, because it means "close the top
+    // layer" and a held button must not close a whole stack of dialogs.
+    bool m_uiBackPrev = false;
+    // Tab: its own edge for the same reason, and outside the block above
+    // because Tab has to work WHILE typing — leaving a field is what it is for.
+    bool m_uiTabPrev = false;
     // True while the pointer sits on an interactive UI element (the return value
     // of WidgetManager::processPointer, kept from the last updateUIInput). The
     // mouse BUTTONS are masked out of everything gameplay reads while it holds,
     // so a click on a menu button is not also a shot — the mirror image of the
     // keyboard swallow in OnEvent while a text field has focus.
     bool m_uiWantsPointer = false;
+    // SDL's click count from the last left press this frame (2 = double,
+    // 3 = triple). Latched in OnEvent, consumed by updateUIInput, which is where
+    // the pointer arithmetic lives. Zero means "no multi-click this frame".
+    int  m_uiClickCount = 0;
+    // Files being dragged in from the desktop. SDL hands them over one at a time
+    // while the drag is still in the air and only then says it is over, so they
+    // are collected here and delivered at the end: dropping three files onto a
+    // window is one gesture. Cleared at the start of every drag, so a drag that
+    // leaves the window again cannot leave its files behind for the next one.
+    std::vector<std::string> m_dropPaths;
+    // Where the drag was last seen, in drawable pixels — the position comes with
+    // the movement, not with the drop that ends it.
+    float m_dropX = 0.0f, m_dropY = 0.0f;
+    // "Open with" (plan A7): the documents this process was STARTED with, held
+    // until the first frame. They arrive before the GameInstance exists, and a
+    // file handed to nobody is a file lost — so they wait one frame and then go
+    // through the same door a drop does.
+    bool m_launchFilesPending = true;
+
+    // ── The tray (plan A7) ───────────────────────────────────────────────────
+    // SDL owns the icon and the menu; what is kept here is what SDL cannot hold
+    // for us. The ids are stored because a tray entry's callback gets a `void*`
+    // and a std::string in a vector that reallocates would hand it a dangling
+    // one — so they live in a deque-like list that never moves its elements.
+    // The tray itself lives in GameApplication.cpp beside g_host, for the reason
+    // that struct exists: there is one application per process, and SDL's tray
+    // callback gets a bare void* that has to point at something whose address
+    // never moves.
     // Startup window + backend, settled once by applyShippedConfig. The values
     // here are the ones a game shipped with before the config could carry them,
     // so an export without those keys behaves exactly as it always did.
@@ -150,6 +211,25 @@ private:
     HE::WindowMode      m_windowMode   = HE::WindowMode::Fullscreen;
     HE::RendererBackend m_backend      = HE::RendererBackend::OpenGL;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
+    // Mirror of ProjectConfig::appMode, latched by applyShippedConfig before the
+    // window exists (docs/he-apps-plan.md A1). True = this build is an
+    // application: no scene, no physics, no gameplay hosts, no camera control,
+    // no ECS systems tick. The world object itself still exists — it is what
+    // routes the widget API — it is simply empty.
+    bool m_appMode       = false;
+
+    // ── The frame of a borderless window (docs/he-apps-plan.md F3) ───────────
+    // True once the hit test is installed: this build is an application, it
+    // asked for a window without a system title bar, and the widget tree is now
+    // what answers "where can this window be picked up, where are its edges".
+    bool m_customFrame   = false;
+    // The manual edge resize, for the one platform that needs it. SDL's Cocoa
+    // backend reads only SDL_HITTEST_DRAGGABLE and ignores every RESIZE_*
+    // result; Windows, X11 and Wayland resize the window themselves AND swallow
+    // the press while doing it, which is why this needs no platform switch —
+    // there, the button-down that would start it never arrives.
+    HE::UIWindowResizer m_frameResize;
+
     // config.json "PauseOnFocusLoss". Only the packaged game reads it — the
     // editor window loses focus constantly, and a PIE session that froze every
     // time you clicked the Details panel would be unusable.

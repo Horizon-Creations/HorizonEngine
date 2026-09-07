@@ -106,6 +106,81 @@ struct Ctx
     std::function<uint32_t(const std::string& classPath, const float* position,
                            const float* rotationEuler)> createObject;
     std::function<void(uint32_t objectId)> destroyObject;
+
+    // The host's WINDOW, as the three things a script may do to it, plus one for
+    // the frame. Callbacks for the same reason requestQuit is one: HE_Scene
+    // cannot reach an HE::Application, and the answer differs per host (a
+    // packaged app owns its window outright; the editor must not let a previewed
+    // graph resize the editor). Unset = the row logs once and does nothing, like
+    // every other unbound service here.
+    std::function<void(const std::string&)>   setWindowTitle;
+    std::function<void(uint32_t, uint32_t)>   setWindowSize;
+    std::function<glm::vec2()>                windowSize;
+    // Draw one more frame. An event-driven application (docs/he-apps-plan.md A2)
+    // sleeps until something happens, and a script changing a widget is exactly
+    // the kind of "something" that carries no OS event with it.
+    std::function<void()> requestRedraw;
+    // The tray icon (docs/he-apps-plan.md A7). Callbacks like the window rows
+    // above, and unbound in the editor for the same reason: a previewed graph
+    // must not put an icon in the menu bar of the machine somebody is working on.
+    std::function<void(const std::string& tooltip)>                 showTray;
+    std::function<void()>                                           hideTray;
+    std::function<void(const std::string& id, const std::string&)>  addTrayItem;
+    std::function<void()>                                           clearTrayMenu;
+    // Starting with the machine. Bound where the application knows its own name
+    // and where its executable is, which is the host and nowhere else.
+    std::function<bool(bool enabled)>                               setAutostart;
+    std::function<bool()>                                           autostart;
+    // The menu bar. One callback per operation rather than a shared "apply this
+    // whole menu" so a graph can build it row by row, which is how a graph
+    // builds anything.
+    std::function<void(const std::string& id, const std::string& label)>       addMenu;
+    std::function<void(const std::string& menuId, const std::string& id,
+                       const std::string& label,
+                       const std::string& shortcut)>                           addMenuItem;
+    std::function<void(const std::string& menuId)>                             addMenuSeparator;
+    std::function<void()>                                                      clearMenuBar;
+    // A notification in the system's own notification centre. Bound in the host
+    // because every platform answers it somewhere else — and unbound in the
+    // editor, for the reason the tray is: a previewed graph must not put a
+    // banner on the screen of somebody who is working.
+    std::function<bool(const std::string& title, const std::string& body)>     notify;
+    std::function<bool()>                                                      notifyAvailable;
+    // The other two buttons on a window's own title bar (plan F3). Close was
+    // requestQuit from the start; these are the ones the bar had nothing to
+    // call, which is why a borderless window could be shipped with three
+    // buttons of which two did nothing.
+    //
+    // Maximised is a BOOL and not two rows, because that is what a button on a
+    // title bar toggles — and it is asked of the platform rather than
+    // remembered, since somebody can maximise a window by double-clicking its
+    // bar without any of this being told.
+    std::function<void()>     minimizeWindow;
+    std::function<void(bool)> setWindowMaximized;
+    std::function<bool()>     windowMaximized;
+    // What a menu row can do right now, and what it says (AppMenu.h). Four
+    // callbacks rather than a wider addMenuItem: a graph drawn before this
+    // existed keeps its four pins, and these are the two things that change
+    // WHILE the application runs — Paste greys out when the clipboard empties,
+    // and a view option ticks when the view changes.
+    std::function<void(const std::string& id, bool)> setMenuItemEnabled;
+    std::function<void(const std::string& id, bool)> setMenuItemChecked;
+    std::function<bool(const std::string& id)>       menuItemEnabled;
+    std::function<bool(const std::string& id)>       menuItemChecked;
+    // ── A SECOND window (A5, docs/he-apps-plan.md §13.3) ────────────────────
+    // Separate rows from the four above rather than a window id added to them:
+    // pin indices are what a saved graph holds on to, so a widened setWindowSize
+    // would rewire every call anybody had already drawn. The four above keep
+    // meaning the MAIN window, always.
+    //
+    // openWindow answers 0 when it refused — no host, or a renderer with no
+    // second-window path (Capabilities::supportsSecondaryWindows). Unbound in
+    // the editor, like the tray and the menu bar and for the same reason: a
+    // previewed graph must not open windows on the screen of somebody working.
+    std::function<uint32_t(const std::string& title, uint32_t w, uint32_t h)> openWindow;
+    std::function<void(uint32_t id)>                                closeWindow;
+    std::function<void(uint32_t id, const std::string& title)>      setWindowTitleOf;
+    std::function<void(uint32_t id, uint32_t w, uint32_t h)>        setWindowSizeOf;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -556,6 +631,109 @@ namespace widget {
     void setZOrder(Ctx&, int id, int z);
     bool isVisible(Ctx&, int id);
     bool callFunction(Ctx&, int id, const std::string& fn);   // PUBLIC fns only
+    // Build the interface while it runs. addChild grafts a widget asset under a
+    // NAMED element and returns the new instance (0 = not found), which is the
+    // handle Set External / Call External / Bind Event take — a row is an object
+    // like any other. Without these three a list of arbitrary length cannot be
+    // written at all: every element would have to exist in the designer first.
+    int  addChild(Ctx&, int id, const std::string& parentName, const std::string& assetPath);
+    bool removeChild(Ctx&, int id, int childId);
+    int  clearChildren(Ctx&, int id, const std::string& parentName);
+
+    // ── Lists (docs/he-apps-plan.md B2) ─────────────────────────────────────
+    // The one thing addChild cannot do well: ten thousand rows. A ListView is
+    // given a COUNT and a row template and realizes only what fits on screen, so
+    // this group is deliberately thin — say how many items there are, answer
+    // OnRowBind for the rows it puts up, and reach a row when you need to.
+    bool setListCount(Ctx&, int id, const std::string& listName, int count);
+    int  listCount(Ctx&, int id, const std::string& listName);
+    // The live row instance showing that item — 0 when it is scrolled out. The
+    // handle Set External / Call External take, exactly like addChild's.
+    int  listRow(Ctx&, int id, const std::string& listName, int index);
+    bool refreshList(Ctx&, int id, const std::string& listName);
+    bool setListSelected(Ctx&, int id, const std::string& listName, int index, bool selected);
+    int  listSelected(Ctx&, int id, const std::string& listName);   // -1 = none
+    bool scrollListToItem(Ctx&, int id, const std::string& listName, int index);
+
+    // ── Animation (docs/he-apps-plan.md B8) ─────────────────────────────────
+    // Move a property of one element to a value over `seconds`, along a named
+    // curve ("Linear", "Out Quad", "Out Back"… — HE::uiEaseName). Three rows
+    // rather than one: a number, a colour and a point are three different pins
+    // in a graph, and a row taking "some value" would be a pin nobody can wire.
+    //
+    // On a themed element it is a script write stretched over time and follows
+    // the same rule as any other: while it runs it wins, and the theme reclaims
+    // the property at its next apply.
+    bool animate(Ctx&, int id, const std::string& element, const std::string& prop,
+                 float to, float seconds, const std::string& easing);
+    bool animateColor(Ctx&, int id, const std::string& element, const std::string& prop,
+                      const glm::vec4& to, float seconds, const std::string& easing);
+    bool animateVec2(Ctx&, int id, const std::string& element, const std::string& prop,
+                     const glm::vec2& to, float seconds, const std::string& easing);
+    // How many were stopped. Empty `prop` stops everything on that element; the
+    // value stays where it got to, because a stop is not a rewind.
+    int  stopAnimation(Ctx&, int id, const std::string& element, const std::string& prop);
+
+    // The component embedded in the slot of that name, as a REFERENCE (0 = no
+    // such slot, or nothing in it). A component is another instance, so this is
+    // the handle its functions, its events and its public variables are reached
+    // through — the same one listRow hands out for a list row.
+    uint32_t childRef(Ctx&, int id, const std::string& element);
+
+    // ── Authored clips ──────────────────────────────────────────────────────
+    // The animations the widget carries, made in the designer's timeline. By
+    // NAME, because the name is what the timeline shows and what a graph can
+    // type. An embedded component's clips are found too — a page can play the
+    // animation its component brought with it.
+    //
+    // In a GRAPH, an empty Widget pin means the widget whose graph is calling —
+    // playing one's own animation is the overwhelming case and should not need
+    // a wire. That substitution sits on the scripting edge (the registry's
+    // third post-pass), so these C++ functions still read `id` 0 as widget 0.
+    // `direction` is a UIAnimDirection name ("Forward", "Backward",
+    // "Ping Pong"); an unknown one plays forwards rather than nothing.
+    // `restore` puts the properties the clip drove back the way they were when
+    // it FINISHES — not when it is stopped, and never for a loop.
+    bool playAnimation(Ctx&, int id, const std::string& clip, bool restore = false,
+                       const std::string& direction = {});
+    bool playAnimationLooped(Ctx&, int id, const std::string& clip, bool loop,
+                             const std::string& direction = {});
+    int  stopAnimationClip(Ctx&, int id, const std::string& clip);
+    bool isPlayingAnimation(Ctx&, int id, const std::string& clip);
+    // Everything moving in the widget, clips and single properties both — what
+    // a screen being torn down reaches for without naming what it started.
+    int  stopAllAnimations(Ctx&, int id);
+    // Stop everything and put every property an animation ever touched back the
+    // way it was before it did. Returns how many were put back.
+    int  restoreOriginalState(Ctx&, int id);
+
+    // ── Layers (docs/he-apps-plan.md B4) ────────────────────────────────────
+    // A dialog, a menu, a context menu. All three are "input belongs to this
+    // until it lets go"; they differ in whether the screen behind is dimmed and
+    // in what makes them leave.
+    void showModal(Ctx&, int id);
+    // In render-target pixels, the space every coordinate here is in. The
+    // pointer variant is the one a context menu wants and needs no numbers.
+    void openPopup(Ctx&, int id, float x, float y);
+    void openPopupAtPointer(Ctx&, int id);
+    bool closeTopLayer(Ctx&);          // false = nothing was open
+}
+
+// ── Theme (docs/he-apps-plan.md D1) ──────────────────────────────────────────
+// What the whole application looks like, in one place. Every element bound to a
+// colour ROLE re-resolves the moment either of these is called, which is what
+// makes "follow the system" or a Preferences switch one line instead of a
+// reload.
+namespace theme {
+    bool        set(Ctx&, const std::string& assetPath);   // false = not found / unreadable
+    void        setMode(Ctx&, const std::string& mode);    // "Light", "Dark" or "System"
+    std::string mode(Ctx&);        // what it RESOLVED to: "Light" or "Dark"
+    std::string preference(Ctx&);  // what was ASKED for: + "System"
+    // The reader's text size (B10): a factor on every authored font size and on
+    // nothing else. Clamped to 0.5 … 3, and fontScale gives back what it was
+    // clamped TO, not what was asked for.
+    void        setFontScale(Ctx&, float scale);
+    float       fontScale(Ctx&);
 }
 
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────
@@ -569,6 +747,194 @@ namespace cursor {
 // through Ctx::requestQuit — see there for why the host supplies it.
 namespace app {
     void quit(Ctx&);
+    // The window an application lives in. All four are no-ops (with one warning)
+    // when the host bound no window — see the callbacks on Ctx.
+    void      setTitle(Ctx&, const std::string& title);
+    void      setSize(Ctx&, int width, int height);
+    glm::vec2 size(Ctx&);                 // logical points; (0,0) when unbound
+    void      requestRedraw(Ctx&);        // draw one more frame (event-driven apps)
+
+    // ── The other two title-bar buttons (plan F3) ───────────────────────────
+    // A window that draws its own frame draws three buttons. Close has been
+    // app.quit since the beginning; these are the two that had nothing behind
+    // them, so a borderless window shipped with two buttons that did nothing.
+    //
+    // maximize takes a BOOL and covers restoring, because that is the one thing
+    // the button does: `maximize(not isMaximized())` is the whole handler. Ask
+    // isMaximized rather than remembering — a window can be maximised by
+    // double-clicking its bar, and nothing tells the graph.
+    void      minimize(Ctx&);
+    void      maximize(Ctx&, bool maximized);
+    bool      isMaximized(Ctx&);          // false when unbound, silently
+
+    // ── The tray (plan A7) ──────────────────────────────────────────────────
+    // An icon in the system's tray / menu bar, with a menu of the application's
+    // own entries. showTray puts it there (again with a new tooltip if it is
+    // already up), hideTray takes it away, and the menu is built by adding
+    // entries to it.
+    //
+    // An entry is an ID and a LABEL, not just a label: clicking one fires
+    // OnTrayItem with the id, so translating the menu does not silently rewire
+    // what its entries do.
+    void showTray(Ctx&, const std::string& tooltip);
+    void hideTray(Ctx&);
+    void addTrayItem(Ctx&, const std::string& id, const std::string& label);
+    void clearTrayMenu(Ctx&);
+
+    // ── Starting with the machine (plan A7) ─────────────────────────────────
+    // Behind the "Run other programs" permission, and not because it runs one
+    // now: it asks the SYSTEM to run one, every login, without anybody being
+    // there. That is the same door, and a project that has not opened it should
+    // not be able to arrange it.
+    void setAutostart(Ctx&, bool enabled);
+    bool autostart(Ctx&);
+
+    // ── The menu bar (plan A6) ──────────────────────────────────────────────
+    // Built, not authored: addMenu opens a menu, addMenuItem fills it, and
+    // clearMenuBar starts over — which is how a menu usually changes, as a set.
+    // Choosing an entry fires OnMenuItem with its id, the same shape the tray
+    // has.
+    //
+    // WHERE it appears is the platform's answer, not the application's: Windows
+    // and Linux get a strip drawn along the top of the window, macOS gets the
+    // system bar next to the Apple symbol (HE_Game/AppMacMenu) and no strip.
+    // Same calls, same ids, same event — only WidgetManager::menuBarHeight()
+    // tells them apart, and on macOS it is 0 because the bar is not in the
+    // window to leave room for.
+    //
+    // An entry may carry a SHORTCUT, written the way people write one
+    // ("Ctrl+Shift+S", UIWidget/UIShortcut.h; Cmd on a Mac is that Ctrl). It
+    // fires the same OnMenuItem the entry fires when it is chosen, because it is
+    // the same entry answered a faster way — not a second event to keep in step.
+    // Empty means no shortcut, and a chord this engine cannot express is
+    // refused with a warning rather than silently shown beside an entry that
+    // would never answer to it.
+    void addMenu(Ctx&, const std::string& id, const std::string& label);
+    void addMenuItem(Ctx&, const std::string& menuId, const std::string& id,
+                     const std::string& label, const std::string& shortcut = "");
+    void addMenuSeparator(Ctx&, const std::string& menuId);
+    void clearMenuBar(Ctx&);
+
+    // ── The two things about a row that change while the program runs ───────
+    // Greying an entry out and ticking it. By the ENTRY's id, the same id
+    // OnMenuItem carries — so a row is addressed by what it DOES, and an id
+    // used in two menus is one command offered twice and is set in both.
+    //
+    // Not part of addMenuItem, and not a rebuild: replacing the bar closes an
+    // open menu, so greying out Paste as the clipboard empties would shut the
+    // menu somebody is reading. These change the one row and leave the rest
+    // standing, open menu included.
+    //
+    // Disabling stops the CHORD as well as the click. A greyed-out Save whose
+    // Ctrl+S still saves is the bug nobody finds by hand.
+    void setMenuItemEnabled(Ctx&, const std::string& id, bool enabled);
+    void setMenuItemChecked(Ctx&, const std::string& id, bool checked);
+    // …and what it says now, so a tick can be flipped rather than remembered.
+    // False for an id no row carries.
+    bool menuItemEnabled(Ctx&, const std::string& id);
+    bool menuItemChecked(Ctx&, const std::string& id);
+
+    // ── Notifications (plan C, Welle 3) ─────────────────────────────────────
+    // A banner in the system's notification centre — what an application says
+    // when it has finished something the person is no longer watching. It is
+    // NOT a dialog: nothing waits for it, nothing comes back from it, and the
+    // system decides whether it is shown at all (Do Not Disturb, the user's
+    // settings for this app, a full screen).
+    //
+    // Ungated on purpose, unlike the file and process rows. A notification
+    // cannot read anything, reach anywhere or start anything; the worst it can
+    // do is be annoying, and that is what the system's own per-app switch is
+    // for.
+    //
+    // True means "handed to the system", never "somebody read it".
+    bool notify(Ctx&, const std::string& title, const std::string& body);
+    // Can this build put one there at all? False in the editor (nothing is
+    // bound), and on a Linux without notify-send. Worth asking once rather than
+    // discovering it per notification.
+    bool notifyAvailable(Ctx&);
+}
+
+// ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────────────
+// A tool window beside the main one, a document per window, a panel taken off
+// to the side. Its own widget tree, its own dialogs: a modal here seals THIS
+// window and the one next to it carries on.
+//
+// A group of its own rather than more parameters on app.*: pin indices are what
+// a saved graph holds on to, and widening app.setSize would rewire every call
+// anybody had already drawn. So app.* keeps meaning the main window, always,
+// and everything here takes the id open() handed back.
+//
+// Not every renderer can do it. Software can (a window's own surface is all it
+// draws into anyway) and Metal can; OpenGL, Vulkan and D3D cannot, and open()
+// answers 0 there with one warning rather than putting an empty black window on
+// the screen. It answers 0 in the editor too, where nothing is bound — the
+// pattern the tray and the menu bar already follow.
+namespace window {
+    // Open one. Answers its id, or 0 when it was refused. The size is in the
+    // same logical points app.setSize takes.
+    int  open(Ctx&, const std::string& title, int width, int height);
+    // Close it. Everything that hung in it is destroyed with it and the graph
+    // gets OnWindowClosed — the same event the window's own close button fires,
+    // because it is the same thing happening.
+    void close(Ctx&, int id);
+    void setTitle(Ctx&, int id, const std::string& title);
+    void setSize(Ctx&, int id, int width, int height);
+    // Put a widget in it and show it. A real move: whatever the widget held in
+    // the window it came from (a grab, the focus) stays behind, because a
+    // dialog that keeps its old window modal is a window nobody can click.
+    // id 0 brings it back to the main window.
+    void show(Ctx&, int id, int widgetId);
+}
+
+// ── Clipboard ────────────────────────────────────────────────────────────────
+// The system clipboard, as text. Already wired into the focused TextInput for
+// Ctrl+C/X/V; this is the same clipboard for a graph that wants to put something
+// there itself ("Copy result", "Paste from clipboard").
+namespace clipboard {
+    std::string getText(Ctx&);                    // "" when empty or unavailable
+    void        setText(Ctx&, const std::string& text);
+    bool        hasText(Ctx&);
+}
+
+// ── Native dialogs ───────────────────────────────────────────────────────────
+// The blocking, OS-drawn kind. An application that has to tell the user
+// something before it can go on ("unsaved changes", "that file is not readable")
+// needs one that is not made of widgets, because a widget dialog cannot exist
+// before the widget tree does.
+namespace dialog {
+    // Kind: 0 = info, 1 = warning, 2 = error. Anything else is treated as info.
+    void message(Ctx&, const std::string& title, const std::string& text, int kind);
+    // Returns true for the FIRST button (the affirmative one). The two labels
+    // are given rather than fixed, so a graph can ask "Save"/"Discard" instead of
+    // only ever "Yes"/"No".
+    bool confirm(Ctx&, const std::string& title, const std::string& text,
+                 const std::string& affirmative, const std::string& negative);
+
+    // ── Picking a file or a folder ───────────────────────────────────────────
+    // The native pickers, and the ONE mechanism by which a script gets at a path
+    // outside its sandbox: whatever comes back is handed to fs::grantPath, so
+    // the very next fs call on it works with no permission set anywhere. That is
+    // the plan's model — the choosing is the permission.
+    //
+    // Synchronous, like message/confirm above and unlike SDL's own file dialogs,
+    // which answer through a callback on some other thread. A graph pin cannot
+    // hold a continuation, so these wait: they pump SDL's event queue (which is
+    // what the pickers need on Linux) WITHOUT dispatching it, so the app's own
+    // loop still sees every event afterwards and no script re-enters mid-frame.
+    // The frame is blocked meanwhile, which is exactly what a modal is.
+    //
+    // "" means the person cancelled, which is a normal answer and not an error.
+    // `filter` is a description and a semicolon-separated extension list in one
+    // string — "Text files:txt;md" — or empty for "anything". One string because
+    // a graph pin is one value, and a filter nobody can type is a filter nobody
+    // uses.
+    // No title: SDL's pickers do not take one, the platform supplies its own,
+    // and a pin that does nothing is worse here than anywhere else — pin INDICES
+    // are what a saved graph stores, so removing a dead one later would rewire
+    // every graph past it. Cheaper to not have it.
+    std::string openFile(Ctx&, const std::string& filter);
+    std::string saveFile(Ctx&, const std::string& filter);
+    std::string pickFolder(Ctx&);
 }
 
 // ── Camera (the world's main camera: isMain, else the first CameraComponent) ──
@@ -746,18 +1112,449 @@ namespace debug {
     void collect(float dt, std::vector<DebugLine>& out);
 }
 
+// ── What a script may reach outside its own project (docs/he-apps-plan.md C) ──
+// Three doors, declared in the .heproj and carried into the packaged build's
+// project.hcfg. All THREE are shut unless a project says otherwise, which is what
+// keeps every project written before them behaving exactly as it did.
+//
+// This is a one-way door in the plan's own risk list, so it is stated once, here:
+//
+//   The permission is about what a SCRIPT may name on its own. It is not about
+//   what a PERSON may choose. A path the user picked in a file dialog is granted
+//   for the rest of the session whatever `files` says — the choosing IS the
+//   permission, and that is the whole model the plan asks for ("der Dialog
+//   ERTEILT den Pfad, dann ist er frei"). `files` is the blanket that lets a
+//   script name an absolute path with nobody having picked it.
+//
+// The editor is gated by the same block as the shipped app rather than by a
+// looser rule of its own. A preview that may delete a stranger's directory while
+// the export may not is the worse of the two failures: the damage happens on the
+// author's machine, to the author's files, before anybody could have shipped it.
+namespace perm {
+    struct Grants
+    {
+        bool files     = false;   // fs beyond the sandbox, without a dialog
+        bool processes = false;   // process.run / process.openUrl
+        bool network    = false;  // reserved for `http` (Welle 3); nothing reads it yet
+    };
+    // App hook, called at project load and at app boot. Replacing the whole
+    // struct rather than setting flags one at a time: a half-applied permission
+    // set is a state nobody should be able to observe.
+    void          set(const Grants& g);
+    const Grants& get();
+    // "May this row run?" — logs once per row name when it may not, because a
+    // script that silently does nothing is the hardest failure to diagnose and
+    // the likeliest one here (the answer is a project setting, not the code).
+    bool allowed(bool granted, const char* row);
+}
+
 // ── Sandboxed file I/O (fs) + save-game store (save) ─────────────────────────
-// All paths are RELATIVE to a per-project sandbox root the app sets (editor: the
+// Paths are RELATIVE to a per-project sandbox root the app sets (editor: the
 // project's Saved/ dir; game: the per-user pref dir). Absolute paths and ".."
-// are rejected — scripts can never leave the sandbox.
+// are rejected there — a script can never walk out of the sandbox by accident.
+//
+// An ABSOLUTE path is a second, deliberate route, open only when the project
+// grants `perm::files` or when the path was GRANTED at runtime by somebody
+// picking it in a dialog (see grantPath). Both are checked in the one place that
+// turns a script's string into a real path, so a row added later cannot forget.
 namespace fs {
     void        setSandboxRoot(const std::string& absDir);  // app hook (created on demand)
     std::string sandboxRoot();
+    // Open an absolute path (or a whole directory) to the scripts for the rest of
+    // this session. Called by the file dialogs with whatever the user picked, and
+    // by nothing else — a row that granted its own argument would be a permission
+    // model that permits everything.
+    void        grantPath(const std::string& absPath);
+    // Every grant so far, for a host that wants to show or persist them. Grants
+    // are session-scoped on purpose: a project that needs a path every time
+    // should ask for `perm::files`, not accumulate a list nobody can audit.
+    const std::vector<std::string>& grantedPaths();
+    void        clearGrants();
     bool        writeText(const std::string& rel, const std::string& text);
     std::string readText(const std::string& rel);            // "" when missing/invalid
     bool        exists(const std::string& rel);
     bool        remove(const std::string& rel);               // files only
     bool        makeDir(const std::string& rel);
+
+    // ── The rest of what an application needs from a filesystem ──────────────
+    // isDir answers about the same path `exists` does, separately, because
+    // "there is something there" and "I may list it" are different questions and
+    // one bool cannot carry both.
+    bool        isDir(const std::string& path);
+    // Bytes, and seconds since the epoch — the same clock `datetime` speaks, so
+    // a file's age is a subtraction and not a second time format to learn.
+    // -1 when the path is unreachable, which no real file can be.
+    double      size(const std::string& path);
+    double      modified(const std::string& path);
+    // The immediate children of a directory, names only, sorted. Names rather
+    // than full paths so joining stays the caller's decision, and sorted because
+    // a directory's own order is the filesystem's business and differs between
+    // two machines showing "the same" list.
+    std::vector<std::string> list(const std::string& dir);
+    bool        rename(const std::string& from, const std::string& to);
+    // Files only, and it does NOT overwrite: a copy that silently replaced the
+    // destination would be the one row here that can destroy data the caller
+    // never named.
+    bool        copy(const std::string& from, const std::string& to);
+
+    // ── Watching (plan C, the last open row of the fs line) ──────────────────
+    // `watch` names a file or a directory and hands back a handle; from then on
+    // the application fires OnFileChanged with the PATH whenever that file, or
+    // an immediate child of that directory, appears, disappears or changes. 0
+    // means it did not start — an unreachable path (the same refusal every row
+    // here gives) or too many watches already.
+    //
+    // The path comes back in the CALLER'S spelling. A script that watched the
+    // relative "docs" is told about "docs/notes.txt", never about the absolute
+    // path underneath: an absolute path is exactly what `resolved` would refuse
+    // to open again unless the project granted files, so the event would carry
+    // a name its own receiver could not read.
+    //
+    // The event carries one value, and "what happened" is three (appeared,
+    // vanished, changed). The path is the one that fits, and `exists`, `size`
+    // and `modified` answer the rest — the same trade the HTTP ticket makes.
+    //
+    // Polling, not an OS notifier, and not on a thread. The sandbox root, the
+    // grants and the permission bits are process-wide statics that no lock
+    // guards; a watcher thread calling `resolved` would race every dialog. The
+    // frame already wakes on its own heartbeat (100 ms), so the scan sits there
+    // and costs a stat per watch every `kWatchIntervalSeconds`.
+    //
+    // A directory watch is ONE level deep. Recursion would turn a watch on a
+    // home folder into a full-disk walk every second, and a script that wants a
+    // tree can watch the branches it cares about.
+    int         watch(const std::string& path);
+    void        unwatch(int handle);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // Called once per frame by the application. Does the actual stat work at
+    // most every kWatchIntervalSeconds; everything else is an early return.
+    void        pollWatches(double dtSeconds);
+    // The frame loop drains this and fires OnFileChanged, for the same reason it
+    // drains finished HTTP tickets: firing a graph belongs in the frame.
+    bool        takeChange(std::string& path);
+    // Drop every watch. Belongs wherever clearGrants() is called — a watch that
+    // outlived its grant would keep reporting a path the script may no longer
+    // open.
+    void        clearWatches();
+    // Longest a change may go unnoticed. One second is the editor's own file
+    // cadence rounded down, and the number the plan's stopgap ("fs.modified in a
+    // Delay loop") already taught scripts to expect.
+    inline constexpr double kWatchIntervalSeconds = 1.0;
+    // Beyond this many watches the row refuses instead of quietly scanning
+    // forever, and beyond this many entries a directory is watched for its own
+    // existence only. Both are the same bargain: a script cannot turn a
+    // one-line call into an unbounded per-second cost.
+    inline constexpr int    kMaxWatches   = 32;
+    inline constexpr size_t kMaxWatchEntries = 4096;
+}
+
+// ── Running another program (process) ────────────────────────────────────────
+// Straight onto HE::Proc, which is a real subprocess API — argv vector rather
+// than a shell string, stdout and stderr apart, honest exit codes, a timeout.
+// Every row here needs `perm::processes`; without it they log once and return
+// their neutral answer.
+//
+// run() is SYNCHRONOUS and therefore takes a timeout with a real default: a
+// graph node that never returns freezes the frame it was called on, and an
+// application that hangs on a subprocess looks exactly like one that crashed.
+namespace process {
+    struct RunResult
+    {
+        bool        ok = false;      // ran to completion and exited zero
+        int         exitCode = -1;
+        std::string out, err;
+    };
+    RunResult run(Ctx&, const std::string& exe, const std::vector<std::string>& args,
+                  double timeoutSeconds);
+    // Hand a URL (or a file) to whatever the desktop opens it with. The one row
+    // here an ordinary application really wants — "open the manual", "show this
+    // in the file manager" — and the only one that reaches outside without
+    // running anything the caller named.
+    bool        openUrl(Ctx&, const std::string& url);
+    // Where the OS would find `exe`, or "" — so a script can say "you need git"
+    // instead of failing to launch it.
+    std::string which(Ctx&, const std::string& exe);
+}
+
+// ── HTTP (asynchronous; plan C, Welle 3) ─────────────────────────────────────
+// A request is STARTED here and answered later: `get`/`post` hand back a ticket
+// number and return immediately, the work happens on one worker thread, and the
+// finished ticket arrives at the application as OnHttpResponse. Then the readers
+// below say what came back. Blocking would have been half a line of code and the
+// wrong half — the frame loop is what draws the window, and a script that waits
+// ten seconds for a server is a program somebody force-quits.
+//
+// Why a ticket and not the answer: an event carries ONE value, and a response is
+// four (ok, status, body, error). The ticket is the one thing that fits, and it
+// is also what tells two requests in flight apart.
+//
+// The transport is HE::Net::httpsRequest, which delegates to NSURLSession,
+// WinHTTP or libcurl — certificate validation is exactly the thing not to write
+// by hand. http:// and https:// both work.
+//
+// Behind the project's "Network access" permission (perm::network). A refused
+// call returns 0 and logs once; 0 is never a valid ticket, so "did it start" is
+// the same question everywhere.
+namespace http {
+    // Start a request. Returns the ticket, or 0 when the permission is missing,
+    // the URL is empty, or this build has no TLS backend at all.
+    int  get(Ctx&, const std::string& url);
+    // `contentType` empty means application/json — the one an app posting from a
+    // graph almost always wants, and spelling it out every time is a way to get
+    // it wrong once.
+    int  post(Ctx&, const std::string& url, const std::string& contentType,
+              const std::string& body);
+
+    // Readers. Unpermissioned on purpose: they answer about a request this
+    // process already made, and a gate here would only hide the answer from the
+    // code that was allowed to ask the question.
+    bool        done(Ctx&, int ticket);    // false while in flight or unknown
+    bool        ok(Ctx&, int ticket);      // reached the server and got an answer
+    int         status(Ctx&, int ticket);  // HTTP status, 0 when there is none
+    std::string body(Ctx&, int ticket);
+    std::string error(Ctx&, int ticket);   // "" unless ok is false
+    // Drop a finished response. Optional politeness: the table keeps the last 32
+    // and evicts the oldest by itself, so a long-running app cannot grow through
+    // it. Reading a forgotten (or evicted) ticket answers like an unknown one.
+    void        forget(Ctx&, int ticket);
+    // Does this build have a TLS backend? False on a Linux built without libcurl,
+    // where every request fails — a thing an application should be able to say
+    // out loud rather than discover per request.
+    bool        available(Ctx&);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // The frame loop takes finished tickets out of here and fires OnHttpResponse.
+    // Delivery is the host's because firing a graph belongs in the frame, not on
+    // the worker — the same rule the tray's clicks follow.
+    bool takeFinished(int& ticket);
+    // Stop the worker and join it. Called at shutdown; a request already in
+    // flight still has to end, so this waits up to the request timeout.
+    void shutdown();
+}
+
+// ── JSON ─────────────────────────────────────────────────────────────────────
+// Reading and writing JSON text, addressed by a dotted PATH: "user.name",
+// "items[2].id", "" for the document itself. Text in, text out, because that is
+// what a typed-pin graph can carry — an in-memory document type would need a
+// handle, a lifetime and a way to leak one.
+//
+// ── Printing (plan C, the `print` row) ───────────────────────────────────────
+// The plan's own words were "ehrlich gesagt: erstmal nicht", and this is the
+// small honest half of it rather than the whole: text becomes a PDF, and a file
+// is handed to whatever the system prints with. Laying out a WIDGET TREE onto
+// paper is a different piece of work — a second renderer with a second set of
+// units — and is not here.
+//
+// COURIER, and that is a decision rather than a taste. The wrap has to know how
+// wide a line is, and Courier is the one base-14 font where that is a
+// multiplication instead of a table of 256 widths: every glyph is 0.6 em. A
+// proportional font would need that table, and without it a line of capitals
+// runs past the margin — a defect you only see on paper, which is the worst
+// place to find one.
+//
+// The PDF is uncompressed on purpose. It is a few kilobytes either way, and an
+// uncompressed one can be read back by a test (and by a person with an editor),
+// which is what makes "it wrote a PDF" a checkable claim rather than a hope.
+namespace print {
+    // Write `text` as a PDF at `path`. Behind `perm::files` and through
+    // fs::resolved(), like every other row that names a file. Lines break at
+    // '\n' and at the page's own width; pages break by line count. `title` goes
+    // into the document's Info dictionary and may be empty.
+    bool toPdf(Ctx&, const std::string& path, const std::string& text,
+               const std::string& title);
+    // Hand a file to the system's printing. Behind `perm::processes`: this is
+    // running another program, and the fact that the program is a spooler does
+    // not change what the permission is about. True means HANDED OVER, not
+    // printed — what the queue does next is between the user and their printer,
+    // the same honesty `notify` settled on.
+    bool file(Ctx&, const std::string& path);
+    // Can this build reach a spooler at all? False on Windows, where printing
+    // needs its own piece of work rather than a guess (see the .cpp).
+    bool available(Ctx&);
+}
+
+// ── SQLite (plan C, the `db` row) ────────────────────────────────────────────
+// A real database, for the applications that outgrow `prefs`. SQLite, vendored
+// as the amalgamation (see the root CMakeLists) rather than taken from the
+// system: macOS ships one, Linux usually does and Windows never, and a script
+// row that only exists on two platforms is worse than none.
+//
+// Two decisions run through everything here:
+//
+//   RESULTS ARE JSON TEXT. `query` gives back an array of objects, one per row,
+//   and the `json` group already owns the readers for that — a pin cannot carry
+//   a table, and an in-memory result type would need a handle, a lifetime and a
+//   way to leak one. Text is what a typed-pin graph can hold, the same answer
+//   the json group itself landed on.
+//
+//   PARAMETERS ARE A JSON ARRAY, and that is not a convenience. A graph that
+//   built its SQL by pasting strings together would be a graph with an
+//   injection hole in it, and the person writing it would have no way to know.
+//   `?` in the SQL, values in the array, bound by SQLite itself.
+//
+// Behind `perm::files`, and `open` goes through fs::resolved() like every other
+// row that names a path — a database is a file, and the one place a script's
+// string becomes a real path is the whole of Block C's model. SQL can name
+// files too (`ATTACH DATABASE '/etc/…'`), which no resolved() would ever see;
+// an authorizer refuses ATTACH, DETACH and extension loading, so the model has
+// no second door.
+namespace db {
+    // Open (creating it if need be) and hand back a handle. 0 means it did not
+    // open: no permission, a path the sandbox refuses, or SQLite could not.
+    int  open(Ctx&, const std::string& path);
+    void close(Ctx&, int handle);
+    // Statements that return no rows: CREATE, INSERT, UPDATE, DELETE, and the
+    // pragmas SQLite still allows. `params` is a JSON array bound to the `?`s;
+    // "" and "[]" both mean none. False when the statement failed — `lastError`
+    // then says why, in SQLite's own words.
+    bool exec(Ctx&, int handle, const std::string& sql, const std::string& params);
+    // …and the one that does: a JSON array of objects, "[]" when nothing
+    // matched, "[]" as well when the statement failed (lastError is how the two
+    // are told apart — an error string in place of a result would be a document
+    // the json group would happily parse as data).
+    //
+    // A BLOB column comes back as null, deliberately. JSON has no byte string,
+    // and base64 here would be an encoding the graph has no decoder for — a
+    // silent lie in the shape of data. Store bytes as text or keep them in a
+    // file and put the path in the row.
+    std::string query(Ctx&, int handle, const std::string& sql, const std::string& params);
+    // Rows the LAST exec changed, and the rowid the last insert made. Both are
+    // per connection and both are what a caller needs to say "nothing matched"
+    // apart from "it worked".
+    int         changes(Ctx&, int handle);
+    double      lastInsertId(Ctx&, int handle);
+    // Why the last call on this connection failed, or "". Unpermissioned like
+    // the HTTP readers: it answers about work this application already did.
+    std::string lastError(Ctx&, int handle);
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    // Close every connection. Belongs at shutdown beside http::shutdown(), and
+    // wherever the grants are cleared: a handle that outlived its permission
+    // would be a path the script may no longer open, still open.
+    void closeAll();
+    // More than this many connections at once and `open` refuses. An
+    // application with sixteen databases open has a design problem, not a
+    // limit problem.
+    inline constexpr int kMaxConnections = 16;
+    // A result longer than this is cut off rather than built: a SELECT without a
+    // WHERE on a large table would otherwise turn one graph node into a string
+    // the size of the database. It is not silent — `lastError` says the result
+    // was truncated, which is the difference between a short answer and a wrong
+    // one. LIMIT is how a caller asks for less on purpose.
+    inline constexpr int kMaxRows = 10000;
+}
+
+// ── Timers (plan C) ──────────────────────────────────────────────────────────
+// HorizonCode has always had Delay, which is a graph standing still until a
+// moment passes. That is not a timer: a clock, an autosave and a poll all want
+// something to happen AGAIN, without a graph parked in a wait. `after` fires
+// once, `every` fires until somebody stops it, and both hand back a handle that
+// arrives with the event — the same shape fs.watch and the HTTP ticket have,
+// and the reason two timers in flight can be told apart.
+//
+// No permission. A timer cannot read anything, start anything or reach
+// anywhere; the worst it can do is fire, and what it fires is this
+// application's own graph.
+//
+// Delivery is the host's, in the frame, like every other event here — a timer
+// that ran a graph from somewhere else would be running script code in the
+// middle of whatever the frame was doing.
+namespace timer {
+    // Fire once, `seconds` from now. 0 means it did not start: too many timers
+    // already, or an interval that is not a real length of time.
+    int  after(double seconds);
+    // …and again every `seconds`, until `cancel`. The repeat is measured from
+    // the moment it FIRED, not from when it was due: an application that was
+    // away for five seconds owes its 100 ms timer one tick, not fifty. Fifty
+    // would arrive as a burst that does the same work fifty times over, which
+    // is never what a repeating timer was asked for.
+    int  every(double seconds);
+    // False when the handle is unknown — already fired (a one-shot), already
+    // cancelled, or never given out. A caller cannot act differently on those,
+    // so they answer the same.
+    bool cancel(int handle);
+    bool active(int handle);
+    // How long until the next one is due, or a negative number when none is.
+    // The host uses it to shorten its idle wait: the loop wakes on a 100 ms
+    // heartbeat, so without this a clock in this engine is a clock that runs up
+    // to a tenth of a second late on every tick.
+    double nextDueSeconds();
+
+    // ── Host side (not script rows) ──────────────────────────────────────────
+    void poll(double dtSeconds);
+    // The frame loop drains this and fires OnTimer, for the same reason it
+    // drains finished HTTP tickets and file changes.
+    bool takeFired(int& handle);
+    // Drop every timer. Belongs at shutdown, beside http::shutdown() and
+    // fs::clearWatches(): a timer left standing would keep asking a runtime
+    // that has stopped listening.
+    void cancelAll();
+    // Beyond this many the row refuses rather than letting one line of script
+    // turn into an unbounded per-frame cost, and below this interval a repeat
+    // is a busy loop wearing a timer's clothes.
+    inline constexpr int    kMaxTimers          = 64;
+    inline constexpr double kMinIntervalSeconds = 0.001;
+}
+
+// Every getter takes the value to return when the path is missing, the type is
+// wrong or the text does not parse. None of them throw and none of them log:
+// asking a document whether it has something is a normal thing to do.
+namespace json {
+    std::string getString(Ctx&, const std::string& text, const std::string& path,
+                          const std::string& fallback);
+    double      getNumber(Ctx&, const std::string& text, const std::string& path, double fallback);
+    bool        getBool  (Ctx&, const std::string& text, const std::string& path, bool fallback);
+    bool        has      (Ctx&, const std::string& text, const std::string& path);
+    // Elements at `path` when it names an array, else 0. Lets a graph walk
+    // "items[0]", "items[1]", … without guessing where to stop.
+    int         count    (Ctx&, const std::string& text, const std::string& path);
+    // Setters return the WHOLE document as new text. Missing intermediate
+    // objects are created; a path through something that is not an object (or
+    // text that does not parse) returns the input unchanged.
+    std::string setString(Ctx&, const std::string& text, const std::string& path,
+                          const std::string& value);
+    std::string setNumber(Ctx&, const std::string& text, const std::string& path, double value);
+    std::string setBool  (Ctx&, const std::string& text, const std::string& path, bool value);
+}
+
+// ── Preferences ──────────────────────────────────────────────────────────────
+// Small persistent settings: window position, last folder, "don't show this
+// again". Deliberately NOT the save system — that one is shaped by a
+// SaveGameTemplate asset and belongs to a game's progress, while these are
+// key/value scraps an application accumulates. Stored as one JSON file inside
+// the same sandbox the fs group uses, written on every change so a crash cannot
+// lose more than the last setting.
+namespace prefs {
+    std::string getString(Ctx&, const std::string& key, const std::string& fallback);
+    double      getNumber(Ctx&, const std::string& key, double fallback);
+    bool        getBool  (Ctx&, const std::string& key, bool fallback);
+    void        setString(Ctx&, const std::string& key, const std::string& value);
+    void        setNumber(Ctx&, const std::string& key, double value);
+    void        setBool  (Ctx&, const std::string& key, bool value);
+    bool        has      (Ctx&, const std::string& key);
+    bool        remove   (Ctx&, const std::string& key);
+    void        clear    (Ctx&);
+}
+
+// ── Date and time ────────────────────────────────────────────────────────────
+// The WALL clock, unlike the time group, which is the game's. An application
+// showing "last saved 14:32" needs the one that keeps running when the game is
+// paused and matches what the operating system says.
+namespace datetime {
+    // Seconds since the Unix epoch, as a double so it survives a Float pin.
+    double      now(Ctx&);
+    // strftime format ("%Y-%m-%d %H:%M:%S" and friends), in LOCAL time.
+    std::string format(Ctx&, double epochSeconds, const std::string& fmt);
+    // Individual fields of the local time, since a graph pulling one number out
+    // of a formatted string is a parser nobody wanted to write.
+    int         year  (Ctx&, double epochSeconds);
+    int         month (Ctx&, double epochSeconds);   // 1..12
+    int         day   (Ctx&, double epochSeconds);   // 1..31
+    int         hour  (Ctx&, double epochSeconds);   // 0..23
+    int         minute(Ctx&, double epochSeconds);   // 0..59
+    int         second(Ctx&, double epochSeconds);   // 0..60 (leap second)
+    int         weekday(Ctx&, double epochSeconds);  // 0 = Sunday
 }
 // ── Savegames: one ACTIVE, template-shaped save document ─────────────────────
 // A save is { id, templateRef, fields, entities }: its fields are declared by a
@@ -922,6 +1719,13 @@ namespace scene {
 // std::string in this header's users).
 namespace str {
     int         length(const std::string& s);
+    // Exact, case-sensitive. The node HorizonCode was missing: its Equals is
+    // Float (the interpreter compares |a-b| < 1e-6), so two strings arriving
+    // there both coerce to 0 and every id equals every other one. Anything that
+    // routes on a String — On Menu Item, On Tray Item, a dropped file's name —
+    // needs this to branch at all. Case-insensitive is toLower on both sides,
+    // which is a decision the caller should have to make visible.
+    bool        equals(const std::string& a, const std::string& b);
     std::string substring(const std::string& s, int start, int count); // clamped
     bool        contains(const std::string& s, const std::string& needle);
     int         find(const std::string& s, const std::string& needle);   // -1 if absent

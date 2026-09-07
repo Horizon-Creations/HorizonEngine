@@ -79,6 +79,28 @@ InstanceId Runtime::addLevels(std::vector<Graph> levels, HostBindings bindings, 
     for (const Graph& g : inst.levels)
         for (const auto& var : g.variables)
             if (var.scope == 0) inst.vars[var.name] = variableDefaultValue(var);
+
+    // The migration hint for graphs written while Create Widget still showed
+    // its widget by itself (docs/he-apps-release-notes.md). Deliberately a
+    // warning and not a repair: rewriting a graph as it loads is a change to
+    // somebody's project that nobody watched happen. Said ONCE per class — a
+    // class spawned two hundred times has one thing wrong with it, not two
+    // hundred. An instance with no class key (the level script, the
+    // GameInstance) is registered by the host and arrives once anyway, so it
+    // is not deduplicated: there is no name to file it under, and filing them
+    // all under the empty one would silence every host graph but the first.
+    if (inst.cls.key.empty() || m_unshownWidgetWarned.insert(inst.cls.key).second)
+        for (const Graph& g : inst.levels)
+            for (int nodeId : widgetCreatorsWithoutShow(g))
+            {
+                const Node* n = g.findNode(nodeId);
+                hcWarn("'" + (inst.cls.key.empty() ? std::string("<graph>") : inst.cls.key)
+                       + "': Create Widget (node " + std::to_string(nodeId) + ", "
+                       + (n && !n->s.empty() ? n->s : std::string("no asset"))
+                       + ") creates a HIDDEN widget and nothing shows it - wire its "
+                         "Widget output into a Show Widget");
+            }
+
     m_insts.emplace(id, std::move(inst));
     return id;
 }
@@ -383,6 +405,31 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         const Inst* i = find(id);
         if (i && i->host.setProperty) i->host.setProperty(id, elem, prop, v);
     };
+    // Through a reference: the bindings of the TARGET answer, not this
+    // instance's. That is what makes the node work across widgets — a page's
+    // graph reaching into a component it embeds, or a shared function reaching
+    // into whatever it was handed.
+    // An unwired Target means THIS instance. The same courtesy the engine
+    // rows do for their own Target pins, and the reason these nodes are usable
+    // straight out of the menu: reaching an element of one's own widget is the
+    // common case, and it should not need a Get Self wired into it to work.
+    // Zero is the sentinel; a real reference always goes where it points.
+    ctx.getPropertyOn = [this, id](uint32_t target, const std::string& elem,
+                                   const std::string& prop) -> Value
+    {
+        const uint32_t t = target ? target : id;
+        const Inst* i = find(t);
+        if (!i) { hcError("null reference — Get Property '" + prop + "' on a null/destroyed widget"); return {}; }
+        return i->host.getPropertyOn ? i->host.getPropertyOn(t, elem, prop) : Value{};
+    };
+    ctx.setPropertyOn = [this, id](uint32_t target, const std::string& elem,
+                                   const std::string& prop, const Value& v)
+    {
+        const uint32_t t = target ? target : id;
+        const Inst* i = find(t);
+        if (!i) { hcError("null reference — Set Property '" + prop + "' on a null/destroyed widget"); return; }
+        if (i->host.setPropertyOn) i->host.setPropertyOn(t, elem, prop, v);
+    };
     ctx.showSelf = [this, id]
     {
         const Inst* i = find(id);
@@ -606,6 +653,8 @@ HE_HC_POINTER_EVENT(fireOnMouseEnter, "OnMouseEnter", onMouseEnter)
 HE_HC_POINTER_EVENT(fireOnMouseLeave, "OnMouseLeave", onMouseLeave)
 HE_HC_POINTER_EVENT(fireOnFocused,    "OnFocused",    onFocused)
 HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
+HE_HC_POINTER_EVENT(fireOnRightClicked, "OnRightClicked", onRightClicked)
+HE_HC_POINTER_EVENT(fireOnDragStarted,  "OnDragStarted",  onDragStarted)
 #undef HE_HC_POINTER_EVENT
 
 // The no-payload lifecycle events — their hooks take nothing, so they cannot
@@ -627,6 +676,7 @@ HE_HC_PLAIN_EVENT(fireOnInit,          "OnInit",          onInit)
 HE_HC_PLAIN_EVENT(fireOnShutdown,      "OnShutdown",      onShutdown)
 HE_HC_PLAIN_EVENT(fireOnLevelLoaded,   "OnLevelLoaded",   onLevelLoaded)
 HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
+HE_HC_PLAIN_EVENT(fireOnDismissed,     "OnDismissed",     onDismissed)
 #undef HE_HC_PLAIN_EVENT
 
 // The value-carrying ones: same order, own signatures.
@@ -650,6 +700,51 @@ HE_HC_VALUE_EVENT(fireOnCheckChanged,  "OnCheckChanged",  bool,
                   onCheckChanged(elem, v),  Value::ofBool(v))
 HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
                   onSelectionChanged(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnRowBind, "OnRowBind", int,
+                  onRowBind(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnAnimationFinished, "OnAnimationFinished", const std::string&,
+                  onAnimationFinished(elem, v), Value::ofString(v))
+
+// The clip event has no element: a clip belongs to the widget. It therefore
+// cannot use the elem-carrying macro above, and spelling it out is shorter than
+// a third macro for one event.
+void Runtime::fireOnClipFinished(InstanceId id, const std::string& clip)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onClipFinished(clip);
+    else runEventOnLevel(*i, id, "OnClipFinished", 0, Value::ofString(clip));
+    static const EventId ev = eventId("OnClipFinished");
+    dispatchToListeners(id, ev, "OnClipFinished", Value::ofString(clip));
+}
+HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
+                  onRowActivated(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnHeaderClicked, "OnHeaderClicked", int,
+                  onHeaderClicked(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnFileDropped, "OnFileDropped", const std::string&,
+                  onFileDropped(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnTrayItem, "OnTrayItem", const std::string&,
+                  onTrayItem(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnMenuItem, "OnMenuItem", const std::string&,
+                  onMenuItem(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnWindowClosed, "OnWindowClosed", int,
+                  onWindowClosed(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnHttpResponse, "OnHttpResponse", int,
+                  onHttpResponse(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnTimer, "OnTimer", int,
+                  onTimer(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnFileChanged, "OnFileChanged", const std::string&,
+                  onFileChanged(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnLinkClicked, "OnLinkClicked", const std::string&,
+                  onLinkClicked(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDateChanged, "OnDateChanged", const std::string&,
+                  onDateChanged(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnColorChanged, "OnColorChanged", const glm::vec4&,
+                  onColorChanged(elem, v), Value::ofColor(v))
+HE_HC_VALUE_EVENT(fireOnDrop, "OnDrop", const std::string&,
+                  onDrop(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDragEnded, "OnDragEnded", bool,
+                  onDragEnded(elem, v), Value::ofBool(v))
 #undef HE_HC_VALUE_EVENT
 
 // The physics contacts: one Int argument (the other entity), no element. Same

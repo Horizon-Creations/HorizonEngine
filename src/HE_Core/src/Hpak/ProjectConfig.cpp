@@ -6,7 +6,10 @@
 
 static constexpr char     k_magic[4] = {'H','C','F','G'};
 // v3: appends defaultSaveTemplate (string) after startupSceneUuid.
-static constexpr uint16_t k_version  = 3;
+// v4: appends theme + themeMode (two strings) after that.
+// v5: appends bundleId (string) — the application's own name for itself, which
+//     the runtime needs to write an autostart entry that belongs to it.
+static constexpr uint16_t k_version  = 5;
 
 bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectConfig& cfg)
 {
@@ -20,7 +23,12 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     // version it doesn't know and boots pak-less. So the v3 tail is only
     // written when it actually carries something — a project without a default
     // save template keeps emitting plain v2, which every runtime reads.
-    const uint16_t version = cfg.defaultSaveTemplate.empty() ? 2 : k_version;
+    // Each tail is written only when it CARRIES something, so a project that
+    // uses none of it keeps emitting the plain v2 every runtime can read.
+    const bool hasTheme = !cfg.theme.empty() || !cfg.themeMode.empty();
+    const uint16_t version = !cfg.bundleId.empty() ? 5
+                           : hasTheme ? 4
+                           : cfg.defaultSaveTemplate.empty() ? 2 : 3;
     HAsset::Writer::appendPOD(buf, version);
     const uint16_t reserved = 0;
     HAsset::Writer::appendPOD(buf, reserved);
@@ -29,15 +37,43 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     HAsset::Writer::appendString(buf, cfg.hpakFilename);
     HAsset::Writer::appendString(buf, cfg.mainSceneName);
     buf.insert(buf.end(), cfg.projectUuidBytes, cfg.projectUuidBytes + 16);
-    const uint32_t flags = (cfg.enableModSupport    ? 1u : 0u)
-                         | (cfg.encrypted           ? 2u : 0u)
-                         | (cfg.hasPackedScene      ? 4u : 0u)
-                         | (cfg.horizonCodeCompiled ? 8u : 0u);
+    // Bits 16/32 are the application flags (see ProjectConfig). 32 stores the
+    // NEGATION of advancedShaderEffects so that every config ever written
+    // before it existed — bit clear — reads back as enabled.
+    const uint32_t flags = (cfg.enableModSupport      ? 1u  : 0u)
+                         | (cfg.encrypted             ? 2u  : 0u)
+                         | (cfg.hasPackedScene        ? 4u  : 0u)
+                         | (cfg.horizonCodeCompiled   ? 8u  : 0u)
+                         | (cfg.appMode               ? 16u : 0u)
+                         | (cfg.advancedShaderEffects ? 0u  : 32u)
+                         // Bits 64/128/256 are the permission block. Stored
+                         // STRAIGHT, unlike 32 above: a build written before
+                         // they existed has them clear, and clear is also what
+                         // they should mean — a project that never asked for
+                         // file or process access does not get it.
+                         | (cfg.allowFiles            ? 64u : 0u)
+                         | (cfg.allowProcesses        ? 128u: 0u)
+                         | (cfg.allowNetwork          ? 256u: 0u)
+                         // Bits 512/1024 are the font scripts, one bit per
+                         // script, in the same order as HE::UIFontScripts. Two
+                         // fit here; a third would need its own bit rather than
+                         // widening this shift, so the mask is masked.
+                         | ((cfg.fontScripts & 3u) << 9)
+                         // Bit 2048 is the text weight, NEGATED like bit 32: a
+                         // build that predates it has the bit clear and drew bold.
+                         | (cfg.fontWeightBold        ? 0u  : 2048u);
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
     if (version >= 3)
         HAsset::Writer::appendString(buf, cfg.defaultSaveTemplate);
+    if (version >= 4)
+    {
+        HAsset::Writer::appendString(buf, cfg.theme);
+        HAsset::Writer::appendString(buf, cfg.themeMode);
+    }
+    if (version >= 5)
+        HAsset::Writer::appendString(buf, cfg.bundleId);
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
@@ -59,7 +95,9 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     uint16_t version = 0, reserved = 0;
     if (!HAsset::Reader::readPOD(buf, off, version))  return false;
     if (!HAsset::Reader::readPOD(buf, off, reserved)) return false;
-    if (version != 2 && version != k_version) return false;   // v2 = no template tail
+    // Every version this build knows. Each adds a tail; an older one simply has
+    // fewer, and the reader stops where that version stopped.
+    if (version != 2 && version != 3 && version != 4 && version != 5) return false;
 
     if (!HAsset::Reader::readString(buf, off, out.projectName))   return false;
     if (!HAsset::Reader::readString(buf, off, out.hpakFilename))  return false;
@@ -69,10 +107,17 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     off += 16;
     uint32_t flags = 0;
     if (!HAsset::Reader::readPOD(buf, off, flags)) return false;
-    out.enableModSupport    = (flags & 1u) != 0;
-    out.encrypted           = (flags & 2u) != 0;
-    out.hasPackedScene      = (flags & 4u) != 0;
-    out.horizonCodeCompiled = (flags & 8u) != 0;
+    out.enableModSupport      = (flags & 1u) != 0;
+    out.encrypted             = (flags & 2u) != 0;
+    out.hasPackedScene        = (flags & 4u) != 0;
+    out.horizonCodeCompiled   = (flags & 8u) != 0;
+    out.appMode               = (flags & 16u) != 0;
+    out.advancedShaderEffects = (flags & 32u) == 0;   // stored negated, see save()
+    out.allowFiles            = (flags & 64u) != 0;
+    out.allowProcesses        = (flags & 128u) != 0;
+    out.allowNetwork          = (flags & 256u) != 0;
+    out.fontScripts           = (flags >> 9) & 3u;
+    out.fontWeightBold        = (flags & 2048u) == 0;   // stored negated, see save()
     if (off + 32 > buf.size()) return false;
     std::memcpy(out.encKey, buf.data() + off, 32);
     off += 32;
@@ -82,5 +127,14 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     out.defaultSaveTemplate.clear();
     if (version >= 3 && !HAsset::Reader::readString(buf, off, out.defaultSaveTemplate))
         return false;
+    out.theme.clear();
+    out.themeMode.clear();
+    if (version >= 4)
+    {
+        if (!HAsset::Reader::readString(buf, off, out.theme))     return false;
+        if (!HAsset::Reader::readString(buf, off, out.themeMode)) return false;
+    }
+    out.bundleId.clear();
+    if (version >= 5 && !HAsset::Reader::readString(buf, off, out.bundleId)) return false;
     return true;
 }

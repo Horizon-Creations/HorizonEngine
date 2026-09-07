@@ -1280,13 +1280,42 @@ vertex UIVert uiVertex(uint vid [[vertex_id]],
     o.luv = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     return o;
 }
-// shape = { mode, cornerRadius(px), rectW(px), rectH(px) }.
+// One rounded box, four radii. `p` is the point relative to the box's centre
+// (y down), `radii` is { top-left, top-right, bottom-right, bottom-left }: the
+// quadrant `p` falls in picks its own corner, and the rest is the ordinary
+// rounded-box distance. With all four equal it is exactly the formula that
+// stood here before, so nothing that used one radius changes by a pixel.
+static float heRoundedBoxSDF(float2 p, float2 halfSz, float4 radii)
+{
+    float r = (p.x > 0.0) ? ((p.y > 0.0) ? radii.z : radii.y)
+                          : ((p.y > 0.0) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    float2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+// shape = { mode, maxCornerRadius(px), rectW(px), rectH(px) }; the four radii
+// themselves ride in `radii` (buffer 6). shape.y is only the "is this rounded at
+// all" question the fast path asks.
 // mode 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
 // quad (RGBA from texture(0), tinted by colour). Modes 1 and 2 share the slot:
 // a glyph run binds the atlas there, an image its own texture.
+// border = { widthPx, r, g, b } and borderA carries its alpha in .x — the border
+// needs five numbers and a float4 holds four. Width 0 = no border, which is what
+// every quad drew before borders existed.
+// grad = the gradient's second colour; gradP = { on, angleDegrees, radial }.
+// Off, the quad is `color` throughout — what every quad was before gradients.
+// fx = { dropBlurPx, innerBlurPx, 0, 0 }, innerCol = the inner shadow's colour.
+// Both 0 = the crisp edge every quad had before shadows existed.
 fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& color [[buffer(0)]],
                            constant float4& shape [[buffer(1)]],
+                           constant float4& border [[buffer(2)]],
+                           constant float4& borderA [[buffer(3)]],
+                           constant float4& grad [[buffer(4)]],
+                           constant float4& gradP [[buffer(5)]],
+                           constant float4& radii [[buffer(6)]],
+                           constant float4& fx [[buffer(7)]],
+                           constant float4& innerCol [[buffer(8)]],
                            texture2d<float> atlas [[texture(0)]])
 {
     if (shape.x > 0.5 && shape.x < 1.5) {
@@ -1301,22 +1330,63 @@ fragment float4 uiFragment(UIVert in [[stage_in]],
         if (shape.y <= 0.0) return c;
         // A rounded image is the same SDF the solid path uses, applied to the
         // sampled alpha — that is what makes a rounded avatar possible at all.
-        float2 halfSzT = shape.zw * 0.5;
-        float  rT      = min(shape.y, min(halfSzT.x, halfSzT.y));
-        float2 pT      = (in.luv - 0.5) * shape.zw;
-        float2 qT      = abs(pT) - (halfSzT - rT);
-        float  dT      = length(max(qT, 0.0)) + min(max(qT.x, qT.y), 0.0) - rT;
+        float dT = heRoundedBoxSDF((in.luv - 0.5) * shape.zw, shape.zw * 0.5, radii);
         return float4(c.rgb, c.a * clamp(0.5 - dT, 0.0, 1.0));
     }
-    if (shape.y <= 0.0) return color; // square quad → crisp, no SDF/AA
-    // Solid quad with rounded corners (radius = min(w,h)/2 → circle).
-    float2 halfSz = shape.zw * 0.5;
-    float  r      = min(shape.y, min(halfSz.x, halfSz.y));
-    float2 p      = (in.luv - 0.5) * shape.zw;
-    float2 q      = abs(p) - (halfSz - r);
-    float  d      = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-    float  cov  = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d is in pixels)
-    return float4(color.rgb, color.a * cov);
+    // The surface colour, before any shape is cut out of it: a linear fade from
+    // `color` to `grad` along an angle measured clockwise from "down". Projected
+    // onto the quad's own 0..1 space, so the fade follows the box rather than the
+    // screen, and shifted by 0.5 so the middle of the box is the middle of it.
+    float4 fill = color;
+    if (gradP.x > 0.5) {
+        float t;
+        if (gradP.z > 0.5) {
+            // Radial: the middle of the box out to its FARTHEST CORNER, which is
+            // where CSS puts the far stop by default and the only normalization
+            // under which the second colour reaches every part of the box.
+            // Measured in the quad's own 0..1 space so the circle follows the
+            // box's proportions rather than coming out an ellipse on a wide one.
+            float2 d = (in.luv - 0.5) * shape.zw;
+            t = clamp(length(d) / max(1e-4, length(shape.zw * 0.5)), 0.0, 1.0);
+        } else {
+            float  a = gradP.y * 0.017453292;       // degrees → radians
+            float2 dir = float2(sin(a), cos(a));    // 0° = down, 90° = right
+            t = clamp(dot(in.luv - 0.5, dir) + 0.5, 0.0, 1.0);
+        }
+        fill = mix(color, grad, t);
+    }
+    // Square AND borderless is the one case that needs no distance field at all,
+    // so it stays the crisp fast path it always was.
+    if (shape.y <= 0.0 && border.x <= 0.0 && fx.x <= 0.0 && fx.y <= 0.0) return fill;
+    // A blurred quad is a DROP SHADOW: the producer grew the rect by the blur on
+    // every side so the falloff is not cut off, so the shape itself sits inset by
+    // exactly that much. Nothing else applies to it — a shadow has no border, no
+    // gradient and no inner shadow, it is one colour with an edge.
+    float2 halfSz = shape.zw * 0.5 - fx.x;
+    float d    = heRoundedBoxSDF((in.luv - 0.5) * shape.zw, halfSz, radii);
+    // Crisp is the ~1px antialiased edge every quad has always had; blurred
+    // fades across `blur` pixels either side of the edge.
+    float cov  = (fx.x > 0.0) ? (1.0 - smoothstep(-fx.x, fx.x, d))
+                              : clamp(0.5 - d, 0.0, 1.0);
+    if (fx.x > 0.0) return float4(fill.rgb, fill.a * cov);
+    // The INNER shadow, cast from the shape's own edge inwards: `d` is negative
+    // inside, so -d is how deep in this pixel is, and the same falloff read the
+    // other way round darkens the rim. Over the fill, under the border.
+    if (fx.y > 0.0) {
+        float t = 1.0 - smoothstep(0.0, fx.y, -d);
+        float a = innerCol.a * clamp(t, 0.0, 1.0);
+        fill = float4(mix(fill.rgb, innerCol.rgb, a), fill.a);
+    }
+    if (border.x <= 0.0) return float4(fill.rgb, fill.a * cov);
+    // The border is the ring between the shape's edge and the same shape shrunk
+    // by its width: `d` is a signed distance in pixels, so the inner edge is
+    // simply d + width. One mix, antialiased on both sides by the same rule the
+    // outline already uses. The gradient belongs to the FILL, not the outline —
+    // a fading border is a different feature and nobody asked for it.
+    float  inner = clamp(0.5 - (d + border.x), 0.0, 1.0);
+    float3 rgb   = mix(border.yzw, fill.rgb, inner);
+    float  a     = mix(borderA.x, fill.a, inner);
+    return float4(rgb, a * cov);
 }
 )MSL";
 
@@ -5770,6 +5840,8 @@ void MetalRenderer::Shutdown()
 	m_uiFontAtlases.clear();
 	for (auto& [k, pso] : m_uiMaterialPipelines) if (pso) CFBridgingRelease(pso);
 	m_uiMaterialPipelines.clear();
+	if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
+	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
@@ -9575,7 +9647,12 @@ void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
 
 	layer.device             = (__bridge id<MTLDevice>)m_device;
 	layer.pixelFormat        = kSwapchainFormat;
-	layer.framebufferOnly    = YES;
+	// NO, not YES: a Backdrop material (D5 Schicht 1) blits the drawable into the
+	// backdrop snapshot mid-UI-pass, and a framebuffer-only drawable refuses to be
+	// a blit source. The cost is that the driver may not pick its most compressed
+	// layout for the swapchain; the alternative is that frosted glass cannot exist
+	// in a direct-to-window game window at all.
+	layer.framebufferOnly    = NO;
 	layer.opaque             = YES; // game window fully covers the framebuffer —
 	                                // ignore the alpha channel so transparent UI
 	                                // (glyph gaps, rounded corners) shows the scene
@@ -10512,7 +10589,13 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_ssaoResult = m_ssaoBlurTex;
 }
 
-#if defined(HE_HAVE_SHADERC)
+// ─── Node-graph material path ────────────────────────────────────────────────
+// Compiled into EVERY build, HE_ENABLE_SHADERC=OFF included (docs/he-apps-plan.md
+// A3b): a packaged build gets its MSL from MaterialAsset::precompiledShaders, and
+// only the FALLBACK below — cross-compiling at load — needs the translator. The
+// UI material pipeline further down was never guarded and called straight into
+// this region, so gating it out did not even give a smaller build; it gave one
+// that failed to link.
 void* MetalRenderer::EnsureMaterialArchive()
 {
 	if (m_matArchiveTried) return m_matBinaryArchive;
@@ -10702,8 +10785,6 @@ bool MetalRenderer::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
-
-#endif // HE_HAVE_SHADERC
 
 // Build (or fetch) a Metal pipeline for GPU-instanced ParticleGraph particle
 // rendering (RenderWorld::particleBatches — the real scene path, not
@@ -11126,27 +11207,59 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 // Build (or fetch) the pipeline that draws a UI quad with a node-graph material:
 // the material's shared fragment MSL paired with the screen-space uiVertex, alpha-
 // blended into the LDR UI target. Cache key = the material's shader hash.
-void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
+void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bool* usesBackdrop)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (usesBackdrop) *usesBackdrop = false;
 	if (!ResolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return nullptr; // no custom shader → solid-color quad
+	// Read off the SOURCE, not off a field on the asset: a packaged build skips
+	// the graph regeneration entirely (precompiled blobs) and a material instance
+	// takes a second road through syncMaterialInstance — the generated shader is
+	// the one thing all three configurations share.
+	if (usesBackdrop) *usesBackdrop = fragGlsl.find("heBackdrop") != std::string::npos;
 	if (auto it = m_uiMaterialPipelines.find(key); it != m_uiMaterialPipelines.end())
 		return it->second;
 
+	// Baked at export time (A3b): the same variant the MESH path already reads,
+	// paired with its UI vertex instead of the standard one — the fragment is
+	// literally the same string, which is why one variant can serve both. Present
+	// → no runtime cross-compile, so a packaged application needs no glslang to
+	// draw a widget with a material on it. Read out of the asset and copied at
+	// once: ContentManager's getters point into a dense vector, and the next load
+	// invalidates them.
 	using Backend = HE::MaterialShaderLibrary::Backend;
-	const auto& v = m_matShaderLib.uiVertex(Backend::Metal);
-	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal);
+	std::string vertMSL, fragMSL, log;
+	bool ok = false;
+	if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal) && !var.uiVertex.empty())
+			{
+				vertMSL = var.uiVertex; fragMSL = var.fragment;
+				ok = !fragMSL.empty();
+				break;
+			}
+	if (!ok)
+	{
+		// No baked UI half — loose editor assets, a pak from before the field
+		// existed, a backend the export skipped. Cross-compile, as before; in a
+		// build without the translator this simply fails and the quad falls back
+		// to its solid colour.
+		const auto& v = m_matShaderLib.uiVertex(Backend::Metal);
+		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal);
+		vertMSL = v.source; fragMSL = f.source; log = v.log + f.log;
+		ok = v.ok && f.ok;
+	}
 
 	void* result = nullptr;
-	if (v.ok && f.ok)
+	if (ok)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* err = nil;
-		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:v.source.c_str()]
+		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
 		                                           options:nil error:&err];
 		id<MTLLibrary> fLib = err ? nil
-			: [device newLibraryWithSource:[NSString stringWithUTF8String:f.source.c_str()]
+			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
 			                       options:nil error:&err];
 		if (vLib && fLib)
 		{
@@ -11172,7 +11285,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId)
 	}
 	else
 		HE_LOG_ERROR(RHI, "%s",
-			(std::string("MetalRenderer: UI material shader compile failed\n") + v.log + f.log).c_str());
+			(std::string("MetalRenderer: UI material shader compile failed\n") + log).c_str());
 
 	m_uiMaterialPipelines[key] = result; // cache success AND failure (null)
 	return result;
@@ -11197,9 +11310,51 @@ void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
 	return stored;
 }
 
-void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
+// Copy the UI target into the backdrop snapshot and rebuild its mip chain. Runs
+// between two halves of the UI pass, so no encoder may be open when it is called.
+bool MetalRenderer::SnapshotUIBackdrop(void* cmdBufPtr, void* srcTexturePtr)
 {
-	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	id<MTLTexture>       src    = (__bridge id<MTLTexture>)srcTexturePtr;
+	if (!cmdBuf || !src) return false;
+	const int w = (int)src.width, h = (int)src.height;
+	if (w <= 0 || h <= 0) return false;
+
+	id<MTLTexture> dst = (__bridge id<MTLTexture>)m_uiBackdrop;
+	// Format is part of the identity, not just the size: a blit demands the two
+	// textures agree on it, and the source is the drawable in one path and the
+	// viewport texture in the other.
+	if (!dst || m_uiBackdropW != w || m_uiBackdropH != h || dst.pixelFormat != src.pixelFormat)
+	{
+		if (m_uiBackdrop) { CFBridgingRelease(m_uiBackdrop); m_uiBackdrop = nullptr; }
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:src.pixelFormat width:w height:h mipmapped:YES];
+		// RenderTarget alongside ShaderRead: generating mips renders into the
+		// levels, and a ShaderRead-only texture is rejected for it.
+		d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+		d.storageMode = MTLStorageModePrivate;
+		dst = [device newTextureWithDescriptor:d];
+		if (!dst) return false;
+		m_uiBackdrop = (void*)CFBridgingRetain(dst);
+		m_uiBackdropW = w; m_uiBackdropH = h;
+	}
+
+	id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+	[blit copyFromTexture:src sourceSlice:0 sourceLevel:0
+	          sourceOrigin:MTLOriginMake(0, 0, 0)
+	            sourceSize:MTLSizeMake(w, h, 1)
+	             toTexture:dst destinationSlice:0 destinationLevel:0
+	     destinationOrigin:MTLOriginMake(0, 0, 0)];
+	[blit generateMipmapsForTexture:dst];
+	[blit endEncoding];
+	return true;
+}
+
+void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
+                                  void* cmdBufPtr, void* passDescPtr)
+{
+	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return renderEncoderPtr;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	const simd::float2 vp = { (float)std::max(1, width), (float)std::max(1, height) };
 
@@ -11255,13 +11410,43 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setScissorRect:s];
 	};
 
+	// ── The backdrop snapshot (D5 Schicht 1) ────────────────────────────────
+	// "Stale" from the start: the pass has drawn nothing yet, so the first
+	// frosted element still needs a picture — of the scene, which is exactly
+	// what is under it. Every quad drawn afterwards makes it stale again, so a
+	// dialog over a panel blurs the PANEL, not the scene the panel covers.
+	bool backdropStale = true;
+	auto cutForBackdrop = [&]()
+	{
+		if (!cmdBufPtr || !passDescPtr) return; // preview path: no snapshot to take
+		MTLRenderPassDescriptor* pd = (__bridge MTLRenderPassDescriptor*)passDescPtr;
+		id<MTLTexture> src = pd.colorAttachments[0].texture;
+		[enc endEncoding];
+		SnapshotUIBackdrop(cmdBufPtr, (__bridge void*)src);
+		// Reopen on the SAME target, keeping what is already there. A descriptor
+		// is copied when the encoder is created, so editing it now only affects
+		// the encoder made on the next line.
+		pd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+		if (pd.depthAttachment.texture) pd.depthAttachment.loadAction = MTLLoadActionLoad;
+		enc = [(__bridge id<MTLCommandBuffer>)cmdBufPtr renderCommandEncoderWithDescriptor:pd];
+		// A new encoder inherits nothing: every piece of bound state this loop
+		// tracks has to be forgotten, or the next quad draws with none of it.
+		basicBound = false; boundMaterial = nullptr; boundAtlasKey = 0;
+		appliedClip = glm::vec4(-1.0f);
+		backdropStale = false;
+	};
+
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
-		applyClip(obj.clipRect);
 		// Custom material on an image quad → material pipeline (solid path below
 		// stays the fallback when the material has no custom shader / failed).
+		bool wantsBackdrop = false;
 		void* matPso = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? GetOrBuildUIMaterialPipeline(obj.materialAssetId) : nullptr;
+			? GetOrBuildUIMaterialPipeline(obj.materialAssetId, &wantsBackdrop) : nullptr;
+		// Before the clip is applied, and before anything is bound: cutting the
+		// pass throws both away.
+		if (matPso && wantsBackdrop && backdropStale) cutForBackdrop();
+		applyClip(obj.clipRect);
 		if (matPso)
 		{
 			if (boundMaterial != matPso)
@@ -11278,6 +11463,27 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			u.model[3] = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 			u.color    = obj.color;
 			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			// HeUI (D5 Schicht 1): the element under the pixel, per quad —
+			// rect = {w, h, x, y}, the four corner radii, the interaction state.
+			// Only a UserInterface-domain shader declares the block; for any
+			// other material the bytes simply go unread.
+			// screen.z = 0: a Metal snapshot is a texture copy of a top-left
+			// target, so it is already the right way up (GL flips, see there).
+			const simd::float4 heUI[4] = {
+				{ obj.size.x, obj.size.y, obj.position.x, obj.position.y },
+				{ obj.cornerRadius.x, obj.cornerRadius.y, obj.cornerRadius.z, obj.cornerRadius.w },
+				{ obj.uiState.x, obj.uiState.y, obj.uiState.z, obj.uiState.w },
+				{ vp.x, vp.y, 0.0f, 0.0f },
+			};
+			[enc setFragmentBytes:heUI length:sizeof(heUI) atIndex:3];
+			// The backdrop snapshot, or the dummy when there is none (the preview
+			// path, or a first frame): a declared texture must be bound either way.
+			{
+				id<MTLTexture> bd = m_uiBackdrop ? (__bridge id<MTLTexture>)m_uiBackdrop
+				                                 : (__bridge id<MTLTexture>)m_dummyTexture;
+				[enc setFragmentTexture:bd atIndex:5];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:5];
+			}
 			[enc setFragmentBytes:&matLight length:sizeof(matLight)
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 
@@ -11305,6 +11511,7 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 			}
 			[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+			backdropStale = true; // this quad is now part of what is "behind"
 			continue;
 		}
 
@@ -11344,20 +11551,50 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
 		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };
 		const simd::float4 uvr   = { obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y };
-		// shape = { mode, cornerRadius, rectW, rectH } (see uiFragment).
+		// shape = { mode, maxCornerRadius, rectW, rectH } (see uiFragment): the
+		// maximum is what the "is this rounded at all" fast path asks, the four
+		// radii themselves go in their own slot.
 		const float mode = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
-		const simd::float4 shape = { mode, obj.cornerRadius, obj.size.x, obj.size.y };
+		const float maxR = std::max(std::max(obj.cornerRadius.x, obj.cornerRadius.y),
+		                            std::max(obj.cornerRadius.z, obj.cornerRadius.w));
+		const simd::float4 shape = { mode, maxR, obj.size.x, obj.size.y };
+		const simd::float4 radii = { obj.cornerRadius.x, obj.cornerRadius.y,
+		                             obj.cornerRadius.z, obj.cornerRadius.w };
 		const simd::float4 rot = { obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f };
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
 		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
 		[enc setVertexBytes:&rot   length:sizeof(rot)   atIndex:3];
-		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];
-		[enc setFragmentBytes:&shape length:sizeof(shape) atIndex:1];
+		// border = { widthPx, r, g, b }, its alpha alone in the next slot — five
+		// numbers, four components (see uiFragment).
+		const simd::float4 border  = { obj.borderWidth, obj.borderColor.r,
+		                               obj.borderColor.g, obj.borderColor.b };
+		const simd::float4 borderA = { obj.borderColor.a, 0.0f, 0.0f, 0.0f };
+		const simd::float4 grad  = { obj.gradientColor.r, obj.gradientColor.g,
+		                             obj.gradientColor.b, obj.gradientColor.a };
+		const simd::float4 gradP = { obj.gradient ? 1.0f : 0.0f,
+		                             obj.gradientAngleDeg,
+		                             obj.gradientShape == 1 ? 1.0f : 0.0f, 0.0f };
+		[enc setFragmentBytes:&color   length:sizeof(color)   atIndex:0];
+		[enc setFragmentBytes:&shape   length:sizeof(shape)   atIndex:1];
+		[enc setFragmentBytes:&border  length:sizeof(border)  atIndex:2];
+		[enc setFragmentBytes:&borderA length:sizeof(borderA) atIndex:3];
+		[enc setFragmentBytes:&grad    length:sizeof(grad)    atIndex:4];
+		[enc setFragmentBytes:&gradP   length:sizeof(gradP)   atIndex:5];
+		[enc setFragmentBytes:&radii   length:sizeof(radii)   atIndex:6];
+		const simd::float4 fx = { obj.blur, obj.innerShadowBlur, 0.0f, 0.0f };
+		const simd::float4 innerCol = { obj.innerShadowColor.r, obj.innerShadowColor.g,
+		                                obj.innerShadowColor.b, obj.innerShadowColor.a };
+		[enc setFragmentBytes:&fx       length:sizeof(fx)       atIndex:7];
+		[enc setFragmentBytes:&innerCol length:sizeof(innerCol) atIndex:8];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+		backdropStale = true; // this quad is now part of what is "behind"
 	}
 	// Hand the encoder back in the state it was given in: the scissor is
 	// encoder-wide, and whatever draws after this pass never asked for one.
 	applyClip(glm::vec4(0.0f));
+	// The encoder the CALLER must carry on with — the same one it handed in
+	// unless a Backdrop material forced the pass to be cut.
+	return (__bridge void*)enc;
 }
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────
@@ -11780,7 +12017,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
-#if defined(HE_HAVE_SHADERC)
 	// Compact "material lighting ABI" for custom-shader materials (M2 std-lit). Bound at
 	// fragment buffer 1 so the shared MaterialShaderLibrary preamble's heLit() has sun +
 	// ambient. Harmless for the default PBR pipeline (which doesn't read buffer 1).
@@ -11793,7 +12029,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 
 	// Transparent (opacity < 1) draws collected during the opaque loop and replayed
 	// sorted back-to-front, alpha-blended, after the sky. In deferred mode the
@@ -11835,7 +12070,6 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
 		ru.depthParams[3] = static_cast<float>(m_gbufferDebugView); // HE_DUMP_GBUFFER
-#if defined(HE_HAVE_SHADERC)
 		// P7: point/spot lights come from the cluster lists; the resolve's
 		// heLight window shrinks to directional-only (a COPY — the full fill in
 		// `matLight` keeps serving the forward-routed and transparent draws).
@@ -11846,16 +12080,13 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			[encoder setFragmentBytes:&clusterLight length:sizeof(clusterLight)
 			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 		}
-#endif
 		[encoder setFragmentBytes:&ru length:sizeof(ru) atIndex:3];
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 		++m_counters.draws;
-#if defined(HE_HAVE_SHADERC)
 		// Restore the FULL light window for everything drawn after the resolve.
 		if (m_deferredClustered)
 			[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 			                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 
 		// Restore what the resolve draw clobbered for the passes below: the
 		// scene-pass texture slots 1-3 and the GI uniforms on fragment buffer 3.
@@ -11882,10 +12113,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 				if (t.pipeline)
 				{
-#if defined(HE_HAVE_SHADERC)
 					[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 					                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-#endif
 					float padded[64] = { 0 };
 					std::memcpy(padded, t.params.data(),
 					            std::min(t.params.size(), size_t(64)) * sizeof(float));
@@ -11898,9 +12127,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						}
 					if (t.wpo)
 					{
-#if defined(HE_HAVE_SHADERC)
 						[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-#endif
 						[encoder setVertexBytes:padded length:sizeof(padded) atIndex:3];
 					}
 				}
@@ -14726,7 +14953,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				// UI is laid out in OUTPUT pixels — it is drawn onto the viewport
 				// texture after the rescale, so a render scale must not reach it
 				// (or every widget would be placed as if the screen were smaller).
-				EncodeUIPass((__bridge void*)fxEncoder, outW, outH);
+				fxEncoder = (__bridge id<MTLRenderCommandEncoder>)
+					EncodeUIPass((__bridge void*)fxEncoder, outW, outH,
+					             (__bridge void*)cmdBuf, (__bridge void*)fxPass);
 				[fxEncoder endEncoding];
 			}
 			else if (m_viewportColor)
@@ -14762,7 +14991,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			// ── In-Game UI ──────────────────────────────────────────────────
 			if (isPrimary && !offscreen)
-				EncodeUIPass((__bridge void*)encoder, pw, ph);
+				// May hand back a SECOND encoder (a Backdrop material cuts the
+				// pass in two) — the overlay below has to use that one.
+				encoder = (__bridge id<MTLRenderCommandEncoder>)
+					EncodeUIPass((__bridge void*)encoder, pw, ph,
+					             (__bridge void*)cmdBuf, (__bridge void*)pass);
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
 			if (isPrimary && m_overlayCallback)
@@ -15227,6 +15460,10 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	c.supportsPostProcessing     = true;
 	c.supportsHDR                = true;
 	c.supportsGpuParticles       = true;
+	// A second window with its own widget tree (A5): a CAMetalLayer per window
+	// was already there (m_secondaryTargets), and EncodeWindowUI is the path
+	// that actually draws something into it.
+	c.supportsSecondaryWindows   = true;
 	// Cached at Initialize() by EnsureRaytracingSupport(): true only on devices +
 	// OS versions that actually support Metal ray tracing.
 	c.supportsGlobalIllumination = m_giSupported;
@@ -15324,7 +15561,88 @@ void MetalRenderer::RenderWindow(HE::Window* window)
 {
 	auto it = m_secondaryTargets.find(window->GetNativeWindow());
 	if (it == m_secondaryTargets.end()) return;
-	EncodeFrame(window->GetNativeWindow(), it->second, /*isPrimary=*/false);
+	// UI ONLY, and not EncodeFrame(isPrimary=false) as it used to be. That path
+	// drew the whole SCENE a second time into the second window — the same
+	// world, from the same camera, minus the primary-only work. A5
+	// (docs/he-apps-plan.md §13.3) is about a window with its own WIDGET TREE,
+	// which is a different thing and a far cheaper one: no shadows, no
+	// G-buffer, no post, one render pass.
+	EncodeWindowUI(window->GetNativeWindow(), it->second, window->GetWindowId());
+}
+
+// ── One window's widgets, and nothing else ───────────────────────────────────
+// The whole secondary-window render path. It borrows two things from the
+// primary: m_renderWorld.uiObjects (swapped out and back, exactly as
+// RenderWidgetThumbnail does — the extractor rebuilds that list per call and
+// the primary's must survive it) and EncodeUIPass, which is where every UI quad
+// this engine draws comes from, so the two windows cannot look different.
+void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uint32_t windowId)
+{
+	if (!m_world || !target.metalLayer) return;
+	@autoreleasepool
+	{
+		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;
+		int pw = 0, ph = 0;
+		SDL_GetWindowSizeInPixels(sdlWin, &pw, &ph);
+		if (pw <= 0 || ph <= 0) return;   // minimised
+		{
+			CGSize size = layer.drawableSize;
+			if ((int)size.width != pw || (int)size.height != ph)
+				layer.drawableSize = CGSizeMake(pw, ph);
+		}
+		// The UI pipelines are built with depthAttachmentPixelFormat =
+		// kDepthFormat (MetalRenderer.mm:6282, and every per-material UI
+		// pipeline with it), and Metal requires the pass to match: a pass
+		// WITHOUT a depth attachment fails validation, which in a release build
+		// is a silent dropped draw and a window that stays near-black. So the
+		// depth texture exists for the format's sake and for nothing else —
+		// nothing here tests against it, the widget tree is painter-ordered.
+		// RenderWidgetThumbnail makes its own for the same reason.
+		EnsureDepthTexture(target, pw, ph);
+
+		// This window's widgets, into the list EncodeUIPass reads. Saved and
+		// put back so the primary's frame is untouched by ours.
+		std::vector<UIRenderObject> saved;
+		saved.swap(m_renderWorld.uiObjects);
+		m_extractor.setContentManager(m_contentManager);
+		m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
+		                      m_renderWorld, windowId);
+
+		id<CAMetalDrawable> drawable = [layer nextDrawable];
+		if (drawable)
+		{
+			id<MTLCommandQueue>  queue  = (__bridge id<MTLCommandQueue>)m_commandQueue;
+			id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+
+			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+			pass.colorAttachments[0].texture     = drawable.texture;
+			pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			// The same near-black every other backend starts from, so a window
+			// does not change colour with its renderer.
+			pass.colorAttachments[0].clearColor =
+				MTLClearColorMake(18.0 / 255.0, 18.0 / 255.0, 22.0 / 255.0, 1.0);
+			// Depth attached only to satisfy the pipelines' declared format (see
+			// EnsureDepthTexture above): cleared, never stored, never read. What
+			// is in front is decided by the painter order EncodeUIPass draws in.
+			pass.depthAttachment.texture     = (__bridge id<MTLTexture>)target.depthTexture;
+			pass.depthAttachment.loadAction  = MTLLoadActionClear;
+			pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			pass.depthAttachment.clearDepth  = 1.0;
+
+			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+			// May hand back a SECOND encoder — a Backdrop material cuts the pass
+			// in two to blit the drawable. That is why cmdBuf and pass go in.
+			enc = (__bridge id<MTLRenderCommandEncoder>)
+				EncodeUIPass((__bridge void*)enc, pw, ph,
+				             (__bridge void*)cmdBuf, (__bridge void*)pass);
+			[enc endEncoding];
+			[cmdBuf presentDrawable:drawable];
+			[cmdBuf commit];
+		}
+
+		m_renderWorld.uiObjects.swap(saved);
+	}
 }
 
 // ─── ImGui texture helpers ────────────────────────────────────────────────────

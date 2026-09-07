@@ -443,6 +443,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_saveTemplateAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::Theme:
+	{
+		ThemeAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_THEM))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_themeAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -1569,6 +1576,13 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			w.addChunk(HAsset::CHUNK_SGTP, a.json.data(), a.json.size());
 		break;
 	}
+	case HE::AssetType::Theme:
+	{
+		auto& a = static_cast<ThemeAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_THEM, a.json.data(), a.json.size());
+		break;
+	}
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
@@ -1652,6 +1666,21 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 // Assets.h), so one template serves both — a layout change stays in one place.
 namespace
 {
+// Does this variant type carry a UI vertex? Material does (A3b — one variant serves the
+// mesh and the UI path), Particle does not. Detected instead of specialised so the two
+// codecs stay ONE function: the layout lives in one place, which is the point of the
+// template.
+template<typename Variant>
+inline constexpr bool kHasUIVertex = requires(Variant v) { v.uiVertex; };
+
+// A record grew a field, and the record is repeated — so a reader that stops early
+// mis-parses everything AFTER it, not just the tail. Hence a version, and hence it is
+// written where an old blob can never be mistaken for it: v1 starts with the variant
+// COUNT, and encode returns {} for an empty list, so a leading 0 is impossible in v1
+// and marks "versioned header follows".
+constexpr uint8_t kShaderVariantVersionMark = 0;
+constexpr uint8_t kShaderVariantVersion     = 2; // v2 = + uiVertex per record
+
 template<typename Variant>
 std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 {
@@ -1659,12 +1688,18 @@ std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 	// chunk entirely (rather than baking a count-0 PSHD that decodes to nothing).
 	if (vars.empty()) return {};
 	std::vector<uint8_t> b;
+	if constexpr (kHasUIVertex<Variant>)
+	{
+		HAsset::Writer::appendPOD(b, kShaderVariantVersionMark);
+		HAsset::Writer::appendPOD(b, kShaderVariantVersion);
+	}
 	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
 	for (const auto& v : vars)
 	{
 		HAsset::Writer::appendPOD(b, v.backend);
 		HAsset::Writer::appendString(b, v.vertex);
 		HAsset::Writer::appendString(b, v.fragment);
+		if constexpr (kHasUIVertex<Variant>) HAsset::Writer::appendString(b, v.uiVertex);
 	}
 	return b;
 }
@@ -1675,6 +1710,13 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 	std::vector<Variant> out;
 	size_t o = 0; uint8_t count = 0;
 	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
+	uint8_t version = 1;
+	if (count == kShaderVariantVersionMark)
+	{
+		// Versioned header: the 0 was the mark, the real count follows the version.
+		if (!HAsset::Reader::readPOD(bytes, o, version)) return out;
+		if (!HAsset::Reader::readPOD(bytes, o, count))   return out;
+	}
 	out.reserve(count);
 	for (uint8_t i = 0; i < count; ++i)
 	{
@@ -1682,6 +1724,12 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
 		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
 		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
+		if constexpr (kHasUIVertex<Variant>)
+		{
+			// v1 paks simply have no UI vertex; the renderer then cross-compiles it,
+			// exactly as it did before the field existed.
+			if (version >= 2 && !HAsset::Reader::readString(bytes, o, v.uiVertex)) break;
+		}
 		out.push_back(std::move(v));
 	}
 	return out;
@@ -1750,6 +1798,8 @@ const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { 
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
+const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
+ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const SaveGameTemplateAsset* ContentManager::getSaveGameTemplate(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_saveTemplateAssets, id); }
 SaveGameTemplateAsset*       ContentManager::getSaveGameTemplateMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_saveTemplateAssets, id); }
 const StructTypeAsset*    ContentManager::getStructType(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_structTypeAssets, id); }
@@ -1847,6 +1897,7 @@ HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       {
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
 HE::UUID ContentManager::registerStructType(StructTypeAsset asset) { return registerRuntimeAsset(m_structTypeAssets, std::move(asset), HE::AssetType::StructType); }
 HE::UUID ContentManager::registerSaveGameTemplate(SaveGameTemplateAsset asset) { return registerRuntimeAsset(m_saveTemplateAssets, std::move(asset), HE::AssetType::SaveGameTemplate); }
+HE::UUID ContentManager::registerTheme(ThemeAsset asset) { return registerRuntimeAsset(m_themeAssets, std::move(asset), HE::AssetType::Theme); }
 HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }

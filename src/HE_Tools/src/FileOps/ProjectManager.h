@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <Application/DocumentTypes.h>   // HE::AppDocumentType (the .heproj list)
 
 // Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
@@ -24,7 +25,53 @@ enum class ProjectPreset
 	// createNewProject, which forces the language rather than letting the Hub
 	// hand out a template that cannot work.
 	ThirdPerson,
+	// An APPLICATION rather than a game (docs/he-apps-plan.md E1): UI, textures
+	// and fonts, and deliberately NO startup scene — there is no world to put one
+	// in. Choosing it is what sets ProjectData::appProject, so the two can never
+	// disagree.
+	//
+	// AFTER ThirdPerson, not before it: both branches appended a row at the same
+	// number, and this file says "only ever append" because the value is written
+	// into the .heproj as a plain int. Main is the trunk and had already handed
+	// that number to ThirdPerson, so the one that had not shipped is the one that
+	// moves. Nobody's project changes template underneath them.
+	Application,
+	// ── The five shaped applications (docs/he-apps-plan.md D3) ───────────────
+	// All of them ARE applications: they take the same manifest, the same three
+	// folders and the same GameInstance as Application above, and differ in one
+	// thing only — the root widget they lay down. "Application" is the empty
+	// window; these five are the layouts people actually start from, and each
+	// one draws something the moment it is opened rather than after an hour of
+	// building the frame everybody builds.
+	//
+	// Appended, like everything else in this enum: the value goes into the
+	// .heproj as a plain int, so inserting one would change what an existing
+	// project says it was made from.
+	AppSidebar,     // navigation left, content right
+	AppWizard,      // one step at a time, Back/Next, progress
+	AppDashboard,   // a grid of cards with numbers in them
+	AppForm,        // a labelled form with a save bar
+	AppTool,        // toolbar on top, list beside canvas, status bar below
+	// Not a template: the number of them. The editor's picker is an array of
+	// names indexed by this enum, and the two drifting apart is how choosing
+	// "Application" silently created an Empty project.
+	COUNT,
 };
+
+// Does this template make an APPLICATION? Asked in four places (folder layout,
+// the manifest's appProject flag, the starter content, the Advanced checkbox in
+// both create forms), and every one of them used to compare against
+// ProjectPreset::Application by hand — which is exactly the shape of thing that
+// forgets the sixth template the day a sixth exists.
+inline bool isAppPreset(ProjectPreset p)
+{
+	return p == ProjectPreset::Application ||
+	       p == ProjectPreset::AppSidebar  ||
+	       p == ProjectPreset::AppWizard   ||
+	       p == ProjectPreset::AppDashboard||
+	       p == ProjectPreset::AppForm     ||
+	       p == ProjectPreset::AppTool;
+}
 
 // The gameplay scripting language a project is authored in, chosen at creation
 // and persisted in the .heproj manifest ("scriptLanguage"). Lua and Python map
@@ -198,6 +245,85 @@ struct ProjectData
 	// (".heproj \"defaultSaveTemplate\""). Empty = the project's single template
 	// if exactly one exists, else create() fails loud.
 	std::string defaultSaveTemplate;
+
+	// ── The theme this project's interface uses (docs/he-apps-plan.md D1) ────
+	// Content-relative path of a Theme asset (empty = the engine's built-in
+	// default) and the mode that was ASKED for ("System"/"Light"/"Dark"; empty
+	// reads as System). Both travel into project.hcfg on export, so a shipped
+	// application boots looking the way it was authored.
+	std::string theme;
+	std::string themeMode;
+
+	// ── Application projects (docs/he-apps-plan.md A0/A1/E1b) ────────────────
+	// appProject: this is an APPLICATION, not a game. No scene, no world, no
+	// physics; the packaged build gets ProjectConfig::appMode and draws only when
+	// something changed. Persisted as ".heproj \"appProject\"".
+	bool appProject = false;
+	// advancedShaderEffects: may this project author MATERIALS (the node graphs
+	// that give a widget a custom shader, "Schicht 1" in the plan)? Off is the
+	// same kind of HARD restriction as scriptLanguage above: the Content Browser
+	// hides the material creators, the material editor stays shut, widgets offer
+	// no material slot, and the packaged runtime can be built without a shader
+	// compiler. Default TRUE, because every project that predates the flag has
+	// them and a game always does.
+	bool advancedShaderEffects = true;
+
+	// ── What a script in this project may reach outside it (plan, Block C) ───
+	// Three doors, all shut unless this project opens them, persisted as
+	// ".heproj \"allowFiles\"/\"allowProcesses\"/\"allowNetwork\"" and carried
+	// into the packaged build's project.hcfg.
+	//
+	// The plan calls the permission model a one-way street and says to settle it
+	// before unlocking anything, so it is settled here: the permission is about
+	// what a SCRIPT may name on its own, never about what a PERSON may choose.
+	// A path picked in a file dialog is granted for that session whatever
+	// allowFiles says — the choosing IS the permission. allowFiles is the
+	// blanket that lets a script name an absolute path with nobody having picked
+	// it.
+	//
+	// The EDITOR is gated by the same three as the shipped app, deliberately.
+	// A preview that may delete a stranger's directory while the export may not
+	// is the worse of the two failures: it happens on the author's machine,
+	// before anything could have shipped.
+	bool allowFiles     = false;
+	bool allowProcesses = false;
+	bool allowNetwork   = false;   // reserved for `http` (Welle 3)
+
+	// ── Which scripts this project's text is written in ──────────────────────
+	// A HE::UIFontScripts mask, ".heproj \"fontScripts\"", carried into the
+	// packaged build. Zero is the base set every project gets: Latin as it is
+	// actually written, umlauts and accents included. The bits above it (Greek,
+	// Cyrillic) cost atlas area, which is why they are asked for rather than
+	// assumed — and why they are a PROJECT setting: the shipped app has to bake
+	// what its own text needs, on a machine that never saw the editor.
+	std::uint32_t fontScripts = 0;
+
+	// The weight the UI text is drawn in, ".heproj \"fontWeightBold\"". True is
+	// what the engine has always drawn, so an ABSENT key means true and no
+	// existing project changes its look. A new APPLICATION is written with
+	// false: ordinary body text is regular, and `<b>` then has something to be
+	// bolder than. A new GAME keeps the bold, because a game author compares a
+	// new project against the ones already on disk. Same asymmetry as
+	// `themeStyled` on an element, for the same reason.
+	bool fontWeightBold = true;
+
+	// ── What the application IS, to the system around it (plan A7) ───────────
+	// The icon is GENERATED from one of the engine's built-in icons on a plate
+	// of `appIconColor`, so a project has an icon on the day it is created and
+	// nobody has to produce a .icns, an .ico and a .png of the same picture.
+	// Empty name = no icon written, and the runtime's default stands — which is
+	// also what a project that predates the field loads as, so its next export
+	// does not acquire a picture nobody chose.
+	std::string appIconName;
+	std::string appIconColor = "#1e70c8";   // "#RRGGBB", as everywhere else
+	// Empty = derived from the project name, which is what every export did
+	// before this field existed. Set it and the export says exactly this.
+	std::string bundleId;
+	std::string appVersion = "1.0";
+	// The file types this application owns (".heproj \"documentTypes\"", an array
+	// of {extension, name, icon}). Empty is the normal case — an application that
+	// owns no file type is not a lesser one.
+	std::vector<HE::AppDocumentType> documentTypes;
 };
 
 class HE_TOOLS_API ProjectManager
@@ -211,10 +337,14 @@ public:
 	// projectName – display name (also used as .heproj filename)
 	// preset      – which folder template to apply
 	// scriptLanguage – the project's primary gameplay scripting language
+	// appProject / advancedShaderEffects – see ProjectData. Defaulted so every
+	// existing call site keeps creating exactly the game it created before.
 	bool createNewProject(const std::string& projectDir,
 						  const std::string& projectName,
 						  ProjectPreset preset = ProjectPreset::Empty,
-						  ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode);
+						  ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode,
+						  bool appProject = false,
+						  bool advancedShaderEffects = true);
 
 	bool loadProject(const std::string& projectPath);
 	bool saveProject(const std::string& projectPath);

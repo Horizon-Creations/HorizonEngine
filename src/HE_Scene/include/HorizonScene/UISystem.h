@@ -19,15 +19,14 @@ bool buildFontAtlas(int width, int height, float fontSizePixels,
 // so renderer backends can upload the atlas without a scene dependency;
 // extract() lays out text through HE::emitUITextGlyphs.
 
-// Painter sort key inside one canvas (and inside one standalone widget, see
-// WidgetManager): layer is the major key, UI nesting depth the minor one, so a
-// child draws over its parent at equal layer. The element views iterate in
-// arbitrary order, so without the depth term a child could vanish under its
-// parent panel. 256 = the exclusive depth cap the walks below clamp to.
-inline int sortKey(int layer, int depth) { return layer * 256 + depth; }
+// The painter sort key moved to HE_Core with the WidgetManager (plan A3b): it
+// is HE::uiSortKey in Renderer/UIRenderObject.h. Both UI producers order by it
+// and have to agree, so there is one definition and it sits next to the object
+// it orders. The element views iterate in arbitrary order, so without the depth
+// term a child could vanish under its parent panel.
 
 // UI nesting depth of an element entity: the number of UIElementComponent
-// ancestors above it, capped at 255 (see sortKey).
+// ancestors above it, capped at 255 (see HE::uiSortKey).
 int nestingDepth(entt::registry& reg, entt::entity e);
 
 // Resolve an element's screen-space rect. Anchoring is parent-relative: when

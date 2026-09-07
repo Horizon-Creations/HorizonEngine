@@ -2,8 +2,84 @@
 #include <Renderer/UIFont.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cctype>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
 
 namespace HE {
+
+// ── The scrollbar, worked out once ───────────────────────────────────────────
+// Everything the thumb needs, in the element's pixel space. Both the drawing
+// and the grab go through this, and the offset↔thumb conversion below is it
+// read backwards — which is the whole point of it being one function.
+
+namespace {
+
+struct ScrollTrack
+{
+    float x = 0.0f;      // left edge of the bar, pixels
+    float w = 0.0f;      // its width
+    float top = 0.0f;    // top of the TRACK the thumb slides in
+    float len = 0.0f;    // the track's length
+    float thumb = 0.0f;  // the thumb's height
+    float maxOff = 0.0f; // the element's own scroll range, canvas units
+};
+
+bool scrollTrackOf(const UIElement& e, const UIWidgetRect& px, ScrollTrack& t)
+{
+    UIScrollBarStyle sb;
+    if (!e.scrollBar(sb) || sb.barWidth <= 0.0f || sb.extent <= 0.0f) return false;
+    t.maxOff = e.maxScrollAmount();
+    if (t.maxOff <= 0.0f) return false;          // it all fits: no thumb
+
+    const float scaleX = px.w / std::max(1.0f, e.sizeX);
+    const float scaleY = px.h / std::max(1.0f, e.sizeY);
+    // The track's top is its own number, because a table's header takes a band
+    // off the top that the bottom has no counterpart for. Negative means the
+    // two ends are the same inset, which is every other scrolling element.
+    const float top    = sb.topInset >= 0.0f ? sb.topInset : sb.inset;
+    const float inner  = std::max(1.0f, e.sizeY - top - sb.inset);
+    t.len   = inner * scaleY;
+    // How much of the content the view holds IS how long the thumb is, with a
+    // floor: a thumb of two pixels in a list of ten thousand is not a handle.
+    t.thumb = std::max(12.0f, t.len * std::min(1.0f, inner / sb.extent));
+    t.x     = px.x + px.w - (sb.barWidth + sb.inset) * scaleX;
+    t.w     = sb.barWidth * scaleX;
+    t.top   = px.y + top * scaleY;
+    return true;
+}
+
+} // namespace
+
+bool uiScrollThumbRect(const UIElement& e, const UIWidgetRect& px, UIWidgetRect& out)
+{
+    ScrollTrack t;
+    if (!scrollTrackOf(e, px, t)) return false;
+    // const_cast because scrollOffsetPtr is the setter and the getter at once;
+    // nothing is written through it here.
+    const float* off = const_cast<UIElement&>(e).scrollOffsetPtr();
+    if (!off) return false;
+    const float f = std::clamp(*off / t.maxOff, 0.0f, 1.0f);
+    out.x = t.x;
+    out.y = t.top + f * (t.len - t.thumb);
+    out.w = t.w;
+    out.h = t.thumb;
+    return true;
+}
+
+float uiScrollOffsetForThumbTop(const UIElement& e, const UIWidgetRect& px, float thumbTopPx)
+{
+    ScrollTrack t;
+    if (!scrollTrackOf(e, px, t)) return 0.0f;
+    const float travel = t.len - t.thumb;
+    // A thumb that fills its track cannot say anything about where it is, so a
+    // drag on one means "stay" rather than "jump to the top".
+    if (travel <= 0.0f) return std::clamp(0.0f, 0.0f, t.maxOff);
+    const float f = std::clamp((thumbTopPx - t.top) / travel, 0.0f, 1.0f);
+    return f * t.maxOff;
+}
 
 // ── Factory / registry ───────────────────────────────────────────────────────
 
@@ -24,6 +100,15 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::HorizontalBox: return std::make_unique<UIHorizontalBox>();
         case UIWidgetType::ScrollBox:     return std::make_unique<UIScrollBox>();
         case UIWidgetType::WidgetRef:     return std::make_unique<UIWidgetRef>();
+        case UIWidgetType::Spacer:        return std::make_unique<UISpacer>();
+        case UIWidgetType::ListView:      return std::make_unique<UIListView>();
+        case UIWidgetType::WrapBox:       return std::make_unique<UIWrapBox>();
+        case UIWidgetType::Grid:          return std::make_unique<UIGrid>();
+        case UIWidgetType::TabBox:        return std::make_unique<UITabBox>();
+        case UIWidgetType::Splitter:      return std::make_unique<UISplitter>();
+        case UIWidgetType::DatePicker:    return std::make_unique<UIDatePicker>();
+        case UIWidgetType::ColorPicker:   return std::make_unique<UIColorPicker>();
+        case UIWidgetType::Accordion:     return std::make_unique<UIAccordion>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -35,7 +120,11 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
-        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef };
+        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef, UIWidgetType::Spacer,
+        UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid,
+        UIWidgetType::TabBox, UIWidgetType::Splitter,
+        UIWidgetType::DatePicker, UIWidgetType::ColorPicker,
+        UIWidgetType::Accordion };
     return kAll;
 }
 
@@ -50,7 +139,9 @@ const char* uiWidgetTypeName(UIWidgetType t)
     static constexpr const char* kNames[] = {
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
-        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef" };
+        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
+        "ListView", "WrapBox", "Grid", "TabBox", "Splitter",
+        "DatePicker", "ColorPicker", "Accordion" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -65,36 +156,9 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     return UIWidgetType::Panel;
 }
 
-// ── UTF-8 cursor movement ────────────────────────────────────────────────────
-namespace
-{
-    // A continuation byte is 10xxxxxx: never a character boundary.
-    bool isUtf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
-}
-
-size_t uiUtf8Prev(const std::string& s, size_t i)
-{
-    if (i == 0) return 0;
-    if (i > s.size()) i = s.size();
-    --i;
-    while (i > 0 && isUtf8Cont(s[i])) --i;
-    return i;
-}
-
-size_t uiUtf8Next(const std::string& s, size_t i)
-{
-    if (i >= s.size()) return s.size();
-    ++i;
-    while (i < s.size() && isUtf8Cont(s[i])) ++i;
-    return i;
-}
-
-size_t uiUtf8Clamp(const std::string& s, size_t i)
-{
-    if (i >= s.size()) return s.size();
-    while (i > 0 && isUtf8Cont(s[i])) --i;
-    return i;
-}
+// The UTF-8 walk moved to Renderer/UIFont.cpp, where the glyph loops use the
+// same one: the caret and the glyphs have to agree about where a character
+// begins, and two copies of that rule would eventually disagree.
 
 const char* uiCursorName(UICursor c)
 {
@@ -110,8 +174,142 @@ const char* uiCursorName(UICursor c)
         case UICursor::Move:      return "Move";
         case UICursor::No:        return "No";
         case UICursor::Wait:      return "Wait";
+        // Spelled out rather than drawn: the diagonal double arrows (U+2921/2922)
+        // are not in the editor's font, and a property row that reads as a box
+        // is worse than one that reads as two letters.
+        case UICursor::ResizeNWSE:return "Resize NW-SE";
+        case UICursor::ResizeNESW:return "Resize NE-SW";
         default:                  return "Default";
     }
+}
+
+// ── A property value on disk ─────────────────────────────────────────────────
+// Written into whatever object the caller hands over, under keys of its own, so
+// a value can share an object with the name it belongs to (see
+// UIWidgetRef::writeJson) instead of needing a wrapper.
+//
+// The type travels as its NAME. A number would be one byte shorter and would
+// change meaning the day somebody inserts a type into UIPropType instead of
+// appending one — the failure being not a parse error but a colour read as a
+// string, which is the kind that surfaces months later in someone's project.
+
+namespace
+{
+    const char* propTypeName(UIPropType t)
+    {
+        switch (t)
+        {
+            case UIPropType::Float:      return "float";
+            case UIPropType::Int:        return "int";
+            case UIPropType::Bool:       return "bool";
+            case UIPropType::String:     return "string";
+            case UIPropType::Color:      return "color";
+            case UIPropType::Vec2:       return "vec2";
+            case UIPropType::StringList: return "stringList";
+        }
+        return "float";
+    }
+}
+
+void uiPropValueToJson(nlohmann::json& out, const UIPropValue& v)
+{
+    out["type"] = propTypeName(v.type);
+    switch (v.type)
+    {
+        case UIPropType::Float:  out["value"] = v.f;   break;
+        case UIPropType::Int:    out["value"] = v.i;   break;
+        case UIPropType::Bool:   out["value"] = v.b;   break;
+        case UIPropType::String: out["value"] = v.s;   break;
+        case UIPropType::Color:  out["value"] = { v.col.r, v.col.g, v.col.b, v.col.a }; break;
+        case UIPropType::Vec2:   out["value"] = { v.v2.x, v.v2.y }; break;
+        case UIPropType::StringList: out["value"] = v.list; break;
+    }
+}
+
+UIPropValue uiPropValueFromJson(const nlohmann::json& o)
+{
+    const std::string t = o.value("type", std::string("float"));
+    const auto it = o.find("value");
+    const bool has = it != o.end();
+    // An unreadable value falls back to the TYPE's zero rather than to nothing:
+    // the parameter still exists and still writes, it just writes a default,
+    // which is visible and fixable. Dropping it would leave the component
+    // showing whatever it was authored with and no sign that anything was lost.
+    if (t == "int")    return UIPropValue::ofInt(has && it->is_number() ? it->get<int>() : 0);
+    if (t == "bool")   return UIPropValue::ofBool(has && it->is_boolean() && it->get<bool>());
+    if (t == "string") return UIPropValue::ofString(has && it->is_string() ? it->get<std::string>()
+                                                                          : std::string());
+    if (t == "color")
+    {
+        glm::vec4 c{ 1.0f };
+        if (has && it->is_array() && it->size() == 4)
+            c = { (*it)[0].get<float>(), (*it)[1].get<float>(),
+                  (*it)[2].get<float>(), (*it)[3].get<float>() };
+        return UIPropValue::ofColor(c);
+    }
+    if (t == "vec2")
+    {
+        glm::vec2 v{ 0.0f };
+        if (has && it->is_array() && it->size() == 2)
+            v = { (*it)[0].get<float>(), (*it)[1].get<float>() };
+        return UIPropValue::ofVec2(v);
+    }
+    if (t == "stringList")
+    {
+        UIPropValue r;
+        r.type = UIPropType::StringList;
+        if (has && it->is_array())
+            for (const auto& s : *it) if (s.is_string()) r.list.push_back(s.get<std::string>());
+        return r;
+    }
+    return UIPropValue::ofFloat(has && it->is_number() ? it->get<float>() : 0.0f);
+}
+
+UIPropValue uiPropValueCoerce(const UIPropValue& v, UIPropType want)
+{
+    if (v.type == want) return v;
+    // What the value is worth as a number, whichever slot it came in through.
+    // A Bool counts as 0/1 and a String as what std::stof can read off its
+    // front — the two conversions a person would expect — and anything else is
+    // 0, which is this type's zero and not a reinterpretation.
+    const auto asNumber = [&]() -> float
+    {
+        switch (v.type)
+        {
+            case UIPropType::Float: return v.f;
+            case UIPropType::Int:   return static_cast<float>(v.i);
+            case UIPropType::Bool:  return v.b ? 1.0f : 0.0f;
+            case UIPropType::String:
+                try { return std::stof(v.s); } catch (...) { return 0.0f; }
+            default: return 0.0f;
+        }
+    };
+    switch (want)
+    {
+        case UIPropType::Float:  return UIPropValue::ofFloat(asNumber());
+        case UIPropType::Int:    return UIPropValue::ofInt(static_cast<int>(asNumber()));
+        case UIPropType::Bool:   return UIPropValue::ofBool(asNumber() != 0.0f);
+        case UIPropType::String:
+        {
+            switch (v.type)
+            {
+                case UIPropType::Float: return UIPropValue::ofString(std::to_string(v.f));
+                case UIPropType::Int:   return UIPropValue::ofString(std::to_string(v.i));
+                case UIPropType::Bool:  return UIPropValue::ofString(v.b ? "true" : "false");
+                default:                return UIPropValue::ofString(std::string());
+            }
+        }
+        case UIPropType::Color:  return UIPropValue::ofColor(glm::vec4(1.0f));
+        case UIPropType::Vec2:   return UIPropValue::ofVec2(glm::vec2(0.0f));
+        case UIPropType::StringList:
+        {
+            UIPropValue r;
+            r.type = UIPropType::StringList;
+            if (v.type == UIPropType::String && !v.s.empty()) r.list.push_back(v.s);
+            return r;
+        }
+    }
+    return v;
 }
 
 // ── Property tables (one per widget type) ────────────────────────────────────
@@ -143,8 +341,150 @@ const UIPropTable& UIWidgetRef::propTable() const
     return t;
 }
 
-void UIWidgetRef::writeJson(nlohmann::json& j) const { j["widget"] = widgetPath; }
-void UIWidgetRef::readJson(const nlohmann::json& j)  { widgetPath = j.value("widget", widgetPath); }
+void UIWidgetRef::writeJson(nlohmann::json& j) const
+{
+    j["widget"] = widgetPath;
+    // Only when this copy was actually told something, like every other optional
+    // field: a ref authored before components existed saves byte-identical.
+    //
+    // An ARRAY rather than an object keyed by name, because the order an author
+    // set them in is the order they are shown in, and a JSON object is free to
+    // reorder its keys — the same reason the Map container needed its own key
+    // list (see the container work).
+    if (!paramValues.empty())
+    {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& [name, v] : paramValues)
+        {
+            nlohmann::json e;
+            e["name"] = name;
+            uiPropValueToJson(e, v);
+            arr.push_back(std::move(e));
+        }
+        j["params"] = std::move(arr);
+    }
+}
+void UIWidgetRef::readJson(const nlohmann::json& j)
+{
+    widgetPath = j.value("widget", widgetPath);
+    paramValues.clear();
+    if (const auto it = j.find("params"); it != j.end() && it->is_array())
+        for (const auto& e : *it)
+        {
+            if (!e.is_object()) continue;
+            std::string name = e.value("name", std::string());
+            if (name.empty()) continue;
+            paramValues.emplace_back(std::move(name), uiPropValueFromJson(e));
+        }
+}
+
+// Nothing of its own — a Spacer is its rect and nothing else.
+const UIPropTable& UISpacer::propTable() const
+{
+    static const UIPropTable t = {};
+    return t;
+}
+
+const UIPropTable& UIListView::propTable() const
+{
+    // "Padding" and "Spacing" keep the names every other container uses: a list
+    // is inset and gapped the same way a box is, and a second vocabulary for the
+    // same two numbers would be one an author has to learn twice.
+    static const UIPropTable t = {
+        uiprop::slot<&UIListView::rowWidget>({ "Row Widget", UIPropType::String }),
+        uiprop::slot<&UIListView::rowHeight>({ "Row Height", UIPropType::Float, 1.0f, 2000.0f }),
+        uiprop::slot<&UIListView::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIListView::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIListView::backColor>({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::rowHoverColor>({ "Row Hover Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::rowSelectedColor>({ "Row Selected Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::selectionMode>({ "Selection", UIPropType::Int, 0.0f, 2.0f }),
+        uiprop::slot<&UIListView::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIListView::barColor>({ "Bar Color", UIPropType::Color }),
+        // ── The header (plan 13.1) ───────────────────────────────────────────
+        uiprop::slot<&UIListView::showHeader>({ "Show Header", UIPropType::Bool }),
+        uiprop::slot<&UIListView::headerHeight>
+            ({ "Header Height", UIPropType::Float, 8.0f, 200.0f }),
+        uiprop::slot<&UIListView::headerColor>({ "Header Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::headerTextColor>
+            ({ "Header Text Color", UIPropType::Color }),
+        uiprop::slot<&UIListView::headerFontSize>
+            ({ "Header Font Size", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIListView::resizableColumns>
+            ({ "Resizable Columns", UIPropType::Bool }),
+        uiprop::slot<&UIListView::columnWidths>({ "Column Widths", UIPropType::String }),
+        // Both of these are the OWNER's to set: the list holds no items and
+        // cannot sort any, so this pair is the little triangle and nothing more.
+        uiprop::slot<&UIListView::sortColumn>
+            ({ "Sort Column", UIPropType::Int, -1.0f, 128.0f }),
+        uiprop::slot<&UIListView::sortAscending>({ "Sort Ascending", UIPropType::Bool }),
+        // The item count is RUNTIME state and still belongs here: it is what a
+        // graph sets to fill the list, and a Set Property node reaches it by
+        // name like every other property. It is simply never serialized.
+        //
+        // Not a plain field slot: writing the number alone would leave a
+        // selection pointing past the end and an offset beyond the new bottom,
+        // so Set Property and Set List Count would do different amounts of work
+        // for the same sentence. Both land on setItemCount instead.
+        uiprop::custom({ "Item Count", UIPropType::Int, 0.0f, 1.0e9f },
+            [](const UIElement& e) -> UIPropValue
+            { return UIPropValue::ofInt(static_cast<const UIListView&>(e).itemCount); },
+            [](UIElement& e, const UIPropValue& v)
+            { static_cast<UIListView&>(e).setItemCount(v.i); }),
+    };
+    return t;
+}
+
+void UIListView::setItemCount(int n)
+{
+    itemCount = n > 0 ? n : 0;
+    selection.erase(std::remove_if(selection.begin(), selection.end(),
+        [this](int i){ return i >= itemCount; }), selection.end());
+    if (hoveredRow >= itemCount) hoveredRow = -1;
+    scrollOffset = std::clamp(scrollOffset, 0.0f, maxScroll());
+}
+
+bool UIListView::setSelected(int item, bool on)
+{
+    if (selectionMode == 0) return false;
+    if (item < 0 || item >= itemCount) return false;
+    const bool had = isSelected(item);
+    if (had == on) return false;
+    if (!on)
+    {
+        selection.erase(std::remove(selection.begin(), selection.end(), item),
+                        selection.end());
+        return true;
+    }
+    // Single mode is not "multiple, but please only pick one": picking replaces
+    // what was there, which is the whole difference between the two modes.
+    if (selectionMode == 1) selection.clear();
+    selection.push_back(item);
+    std::sort(selection.begin(), selection.end());
+    return true;
+}
+
+bool UIListView::clearSelection()
+{
+    if (selection.empty()) return false;
+    selection.clear();
+    return true;
+}
+
+bool UIListView::scrollToItem(int item)
+{
+    if (item < 0 || item >= itemCount) return false;
+    const float top    = item * rowStep();
+    const float bottom = top + rowHeight;
+    const float before = scrollOffset;
+    // Above the view: put its top at the top. Below it: put its bottom at the
+    // bottom. Already inside: leave it exactly where it is, because a list that
+    // re-centres on every keystroke is a list nobody can read while stepping.
+    if (top < scrollOffset)                        scrollOffset = top;
+    else if (bottom > scrollOffset + innerHeight()) scrollOffset = bottom - innerHeight();
+    scrollOffset = std::clamp(scrollOffset, 0.0f, maxScroll());
+    return scrollOffset != before;
+}
 
 const UIPropTable& UIBoxBase::propTable() const
 {
@@ -152,8 +492,78 @@ const UIPropTable& UIBoxBase::propTable() const
         uiprop::slot<&UIBoxBase::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIBoxBase::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIBoxBase::sizeToContent>({ "Size To Content", UIPropType::Bool }),
-        uiprop::slot<&UIBoxBase::minSizeX>({ "Min Width",  UIPropType::Float }),
-        uiprop::slot<&UIBoxBase::minSizeY>({ "Min Height", UIPropType::Float }),
+    };
+    return t;
+}
+
+// ── Track tokens ─────────────────────────────────────────────────────────────
+UIGridTrack uiParseGridTrack(const std::string& token)
+{
+    // Trimmed and lowercased first: "  Auto " is what a human types.
+    std::string t;
+    for (char c : token) if (c != ' ' && c != '\t') t.push_back(static_cast<char>(std::tolower(
+        static_cast<unsigned char>(c))));
+    if (t == "auto") return { UIGridTrack::Kind::Auto, 0.0f };
+    if (!t.empty() && t.back() == '*')
+    {
+        const std::string head = t.substr(0, t.size() - 1);
+        if (head.empty()) return { UIGridTrack::Kind::Weight, 1.0f };
+        try
+        {
+            const float w = std::stof(head);
+            return { UIGridTrack::Kind::Weight, w > 0.0f ? w : 1.0f };
+        }
+        catch (...) { return { UIGridTrack::Kind::Weight, 1.0f }; }
+    }
+    try
+    {
+        std::size_t used = 0;
+        const float v = std::stof(t, &used);
+        // "12px" or "12 nonsense" is not a number anybody meant — fall through
+        // to the visible default rather than silently reading the 12.
+        if (used == t.size() && v >= 0.0f) return { UIGridTrack::Kind::Fixed, v };
+    }
+    catch (...) {}
+    // Unreadable: one share. A track you can SEE and fix beats one that
+    // collapsed to nothing and hid the typo.
+    return { UIGridTrack::Kind::Weight, 1.0f };
+}
+
+const UIPropTable& UIGrid::propTable() const
+{
+    // The two lists are custom slots and not plain fields: writing them has to
+    // re-parse, or a Set Property from a graph would change the words and leave
+    // the layout running on the old ones.
+    static const UIPropTable t = {
+        uiprop::custom({ "Column Sizes", UIPropType::StringList },
+            [](const UIElement& e) -> UIPropValue
+            { UIPropValue v; v.type = UIPropType::StringList;
+              v.list = static_cast<const UIGrid&>(e).columns; return v; },
+            [](UIElement& e, const UIPropValue& v)
+            { auto& g = static_cast<UIGrid&>(e); g.columns = v.list; g.reparse(); }),
+        uiprop::custom({ "Row Sizes", UIPropType::StringList },
+            [](const UIElement& e) -> UIPropValue
+            { UIPropValue v; v.type = UIPropType::StringList;
+              v.list = static_cast<const UIGrid&>(e).rows; return v; },
+            [](UIElement& e, const UIPropValue& v)
+            { auto& g = static_cast<UIGrid&>(e); g.rows = v.list; g.reparse(); }),
+        uiprop::slot<&UIGrid::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIGrid::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIGrid::rowSpacing>({ "Row Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIGrid::sizeToContent>({ "Size To Content", UIPropType::Bool }),
+    };
+    return t;
+}
+
+const UIPropTable& UIWrapBox::propTable() const
+{
+    // Padding and Spacing keep the container names; Line Spacing is the one
+    // number a wrapping row has that a straight one does not.
+    static const UIPropTable t = {
+        uiprop::slot<&UIWrapBox::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIWrapBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIWrapBox::lineSpacing>({ "Line Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIWrapBox::sizeToContent>({ "Size To Content", UIPropType::Bool }),
     };
     return t;
 }
@@ -166,8 +576,6 @@ const UIPropTable& UIScrollBox::propTable() const
         uiprop::slot<&UIScrollBox::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIScrollBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIScrollBox::sizeToContent>({ "Size To Content", UIPropType::Bool }),
-        uiprop::slot<&UIScrollBox::minSizeX>({ "Min Width",  UIPropType::Float }),
-        uiprop::slot<&UIScrollBox::minSizeY>({ "Min Height", UIPropType::Float }),
         uiprop::slot<&UIScrollBox::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
         uiprop::slot<&UIScrollBox::barColor>({ "Bar Color", UIPropType::Color }),
     };
@@ -195,23 +603,30 @@ const UIPropTable& UIText::propTable() const
         uiprop::slot<&UIText::color>   ({ "Color", UIPropType::Color }),
         uiprop::slot<&UIText::wordWrap>({ "WordWrap", UIPropType::Bool }),
         uiprop::slot<&UIText::autoSize>({ "AutoSize", UIPropType::Bool }),
-        // Not a plain field: the bool the user sees is the 0/1 `align` index.
-        uiprop::custom({ "Center", UIPropType::Bool },
-            [](const UIElement& e) { return UIPropValue::ofBool(static_cast<const UIText&>(e).align == 1); },
-            [](UIElement& e, const UIPropValue& v) { static_cast<UIText&>(e).align = v.b ? 1 : 0; }),
+        uiprop::slot<&UIText::richText>({ "RichText", UIPropType::Bool }),
+        // Named the way the field names them, so a theme binding written for one
+        // resolves the same way on the other.
+        uiprop::slot<&UIText::selectable>    ({ "Selectable", UIPropType::Bool }),
+        uiprop::slot<&UIText::selectionColor>({ "Selection Color", UIPropType::Color }),
+        // 0/1/2 each. The details panel draws these two as ONE 3×3 grid (see
+        // UIEditorPanel) rather than as two number fields — the first attribute
+        // that needed a hand-built editor, because "which of nine positions" is
+        // not a number anybody wants to type.
+        uiprop::slot<&UIText::alignH>({ "Align H", UIPropType::Int, 0.0f, 2.0f }),
+        uiprop::slot<&UIText::alignV>({ "Align V", UIPropType::Int, 0.0f, 2.0f }),
     };
     return t;
 }
 
 const UIPropTable& UIButton::propTable() const
 {
+    // Three state colours and nothing else of its own: the caption is a child
+    // now (see UIButton), and the rest of a button's look — corner radius,
+    // border, gradient — are the shared surface properties every surface has.
     static const UIPropTable t = {
-        uiprop::slot<&UIButton::text>        ({ "Text", UIPropType::String }),
-        uiprop::slot<&UIButton::fontSize>    ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
         uiprop::slot<&UIButton::color>       ({ "Normal Color", UIPropType::Color }),
         uiprop::slot<&UIButton::hoveredColor>({ "Hovered Color", UIPropType::Color }),
         uiprop::slot<&UIButton::pressedColor>({ "Pressed Color", UIPropType::Color }),
-        uiprop::slot<&UIButton::textColor>   ({ "Text Color", UIPropType::Color }),
     };
     return t;
 }
@@ -225,6 +640,9 @@ const UIPropTable& UICheckBox::propTable() const
         uiprop::slot<&UICheckBox::boxColor>  ({ "Box Color", UIPropType::Color }),
         uiprop::slot<&UICheckBox::checkColor>({ "Check Color", UIPropType::Color }),
         uiprop::slot<&UICheckBox::textColor> ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UICheckBox::switchStyle>({ "Switch", UIPropType::Bool }),
+        // Same name the label already uses for the same idea (see UIText).
+        uiprop::slot<&UICheckBox::autoSize>({ "AutoSize", UIPropType::Bool }),
     };
     return t;
 }
@@ -246,6 +664,7 @@ const UIPropTable& UIProgressBar::propTable() const
 {
     static const UIPropTable t = {
         uiprop::slot<&UIProgressBar::value>    ({ "Value", UIPropType::Float, 0.0f, 1.0f }),
+        uiprop::slot<&UIProgressBar::indeterminate>({ "Indeterminate", UIPropType::Bool }),
         uiprop::slot<&UIProgressBar::backColor>({ "Back Color", UIPropType::Color }),
         uiprop::slot<&UIProgressBar::fillColor>({ "Fill Color", UIPropType::Color }),
     };
@@ -267,9 +686,106 @@ const UIPropTable& UITextInput::propTable() const
         uiprop::slot<&UITextInput::password>   ({ "Password", UIPropType::Bool }),
         uiprop::slot<&UITextInput::editable>   ({ "Editable", UIPropType::Bool }),
         uiprop::slot<&UITextInput::selectable> ({ "Selectable", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::multiline>  ({ "Multiline", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::wrapText>   ({ "Wrap Text", UIPropType::Bool }),
+        // 0 anything, 1 whole numbers, 2 decimals, 3 the characters in Allowed
+        // Characters. See UITextInput::Filter.
+        uiprop::slot<&UITextInput::inputFilter>({ "Input Filter", UIPropType::Int, 0.0f, 3.0f }),
+        uiprop::slot<&UITextInput::allowedChars>({ "Allowed Characters", UIPropType::String }),
+        uiprop::slot<&UITextInput::clearButton>({ "Clear Button", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::steppers>   ({ "Steppers", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::step>       ({ "Step", UIPropType::Float }),
+        uiprop::slot<&UITextInput::minValue>   ({ "Min Value", UIPropType::Float }),
+        uiprop::slot<&UITextInput::maxValue>   ({ "Max Value", UIPropType::Float }),
     };
     return t;
 }
+
+// One character at a time, judged against what the field already holds: "-" is
+// only a minus sign in front, and a second "." is not a decimal point.
+bool UITextInput::acceptsCharacter(const std::string& ch, size_t atByte) const
+{
+    if (ch.empty()) return false;
+    switch (inputFilter)
+    {
+    case FilterCustom:
+        // No list = no rule (see allowedChars).
+        if (allowedChars.empty()) return true;
+        return allowedChars.find(ch) != std::string::npos;
+
+    case FilterInteger:
+    case FilterDecimal:
+    {
+        // Multi-byte characters are never digits or signs.
+        if (ch.size() != 1) return false;
+        const char c = ch[0];
+        if (c >= '0' && c <= '9') return true;
+        if (c == '-')
+        {
+            // Only as the very first character, and only once. `atByte` is where
+            // it would land, so this also refuses a minus typed into the middle.
+            return atByte == 0 && text.find('-') == std::string::npos;
+        }
+        if (c == '.' && inputFilter == FilterDecimal)
+        {
+            // One point, and never before the sign.
+            if (text.find('.') != std::string::npos) return false;
+            return !(atByte == 0 && !text.empty() && text[0] == '-');
+        }
+        return false;
+    }
+
+    case FilterAny:
+    default:
+        return true;
+    }
+}
+
+void UITextInput::recordEdit(const EditState& before, EditKind kind, bool coalesce)
+{
+    // An edit that did not change anything is not a step to come back to. This
+    // is what lets the callers snapshot unconditionally and hand the snapshot
+    // over on every exit path, instead of each of them working out whether the
+    // keystroke survived the filter, the length limit and the read-only flag.
+    if (before.text == text) return;
+    redoStack.clear();
+    // Continuing the open group means NOT pushing: the state to come back to is
+    // the one from the start of the run, which is already on the stack.
+    if (coalesce && openRun == kind && !undoStack.empty()) return;
+    undoStack.push_back(before);
+    if (undoStack.size() > kMaxUndoSteps)
+        undoStack.erase(undoStack.begin(),
+                        undoStack.begin() + static_cast<long>(undoStack.size() - kMaxUndoSteps));
+    // An edit that refused to be merged INTO a group does not open one either:
+    // a paste is a step by itself, and the character typed straight after it
+    // must not be swallowed by it. Only a mergeable edit leaves a run open.
+    openRun = coalesce ? kind : EditKind::None;
+}
+
+namespace
+{
+// The half of undo and redo that is the same in both directions: hand the state
+// you are in to the other stack, take the top of this one, become it.
+bool uiTextStep(UITextInput& ti, std::vector<UITextInput::EditState>& from,
+                std::vector<UITextInput::EditState>& to)
+{
+    if (from.empty()) return false;
+    to.push_back({ ti.text, ti.caret, ti.selAnchor });
+    const UITextInput::EditState s = from.back();
+    from.pop_back();
+    ti.text      = s.text;
+    ti.caret     = s.caret;
+    ti.selAnchor = s.selAnchor;
+    ti.clampCaret();
+    ti.preferredCaretX = -1.0f;
+    // Whatever run was open belongs to the text that just went away.
+    ti.sealUndoRun();
+    return true;
+}
+} // namespace
+
+bool UITextInput::undoEdit() { return uiTextStep(*this, undoStack, redoStack); }
+bool UITextInput::redoEdit() { return uiTextStep(*this, redoStack, undoStack); }
 
 const UIPropTable& UIComboBox::propTable() const
 {
@@ -280,6 +796,7 @@ const UIPropTable& UIComboBox::propTable() const
         uiprop::slot<&UIComboBox::backColor>     ({ "Back Color", UIPropType::Color }),
         uiprop::slot<&UIComboBox::textColor>     ({ "Text Color", UIPropType::Color }),
         uiprop::slot<&UIComboBox::highlightColor>({ "Highlight Color", UIPropType::Color }),
+        uiprop::slot<&UIComboBox::autoSize>      ({ "AutoSize", UIPropType::Bool }),
     };
     return t;
 }
@@ -319,32 +836,156 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
 {
     if (n == "Visible")      { out = UIPropValue::ofBool(e.visible);            return true; }
     if (n == "Hit Testable") { out = UIPropValue::ofBool(e.hitTestable);        return true; }
+    if (n == "Window Drag")  { out = UIPropValue::ofBool(e.windowDrag);         return true; }
     if (n == "Clip Children"){ out = UIPropValue::ofBool(e.clipChildren);       return true; }
+    if (n == "Focus Frame")  { out = UIPropValue::ofBool(e.focusFrame);         return true; }
+    if (n == "Accepts Drop") { out = UIPropValue::ofBool(e.acceptsDrop);        return true; }
+    if (n == "Draggable")    { out = UIPropValue::ofBool(e.draggable);          return true; }
+    if (n == "Drag Payload") { out = UIPropValue::ofString(e.dragPayload);      return true; }
     if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
     if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
+    if (n == "Transition")   { out = UIPropValue::ofFloat(e.transition);        return true; }
+    if (n == "Tab Index")    { out = UIPropValue::ofInt(e.tabIndex);            return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
+    if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
+    if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
+    if (n == "Column Span")  { out = UIPropValue::ofInt(e.gridColumnSpan);      return true; }
+    if (n == "Row Span")     { out = UIPropValue::ofInt(e.gridRowSpan);         return true; }
     if (n == "Rotation")     { out = UIPropValue::ofFloat(e.rotation);          return true; }
     if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
     if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
+    // Beside Size, and shaped like it: what an author sets here is one pair,
+    // and two scalar rows for one idea is how somebody ends up with a floor on
+    // the width and none on the height without meaning to. 0 on an axis = no
+    // bound on that axis.
+    if (n == "Min Size")     { out = UIPropValue::ofVec2({ e.minSizeX, e.minSizeY }); return true; }
+    if (n == "Max Size")     { out = UIPropValue::ofVec2({ e.maxSizeX, e.maxSizeY }); return true; }
     if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
     if (n == "Hover Cursor") { out = UIPropValue::ofInt((int)e.hoverCursor);    return true; }
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
     if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
+    if (n == "Tooltip")      { out = UIPropValue::ofString(e.tooltip);          return true; }
+    // "Corner Radius" is the whole rounding as ONE number, which is what it has
+    // always been and what nearly every element wants. Reading it back gives the
+    // top-left corner, so a graph that set it reads its own value; the four
+    // named rows below are for the elements that round their corners differently.
+    if (n == "Corner Radius"){ out = UIPropValue::ofFloat(e.cornerRadius.x);    return true; }
+    if (n == "Corner TL")    { out = UIPropValue::ofFloat(e.cornerRadius.x);    return true; }
+    if (n == "Corner TR")    { out = UIPropValue::ofFloat(e.cornerRadius.y);    return true; }
+    if (n == "Corner BR")    { out = UIPropValue::ofFloat(e.cornerRadius.z);    return true; }
+    if (n == "Corner BL")    { out = UIPropValue::ofFloat(e.cornerRadius.w);    return true; }
+    if (n == "Border Width") { out = UIPropValue::ofFloat(e.borderWidth);       return true; }
+    if (n == "Border Color") { out = UIPropValue::ofColor(e.borderColor);       return true; }
+    if (n == "Gradient")     { out = UIPropValue::ofBool(e.gradient);           return true; }
+    if (n == "Gradient Color"){out = UIPropValue::ofColor(e.gradientColor);     return true; }
+    if (n == "Gradient Angle"){out = UIPropValue::ofFloat(e.gradientAngle);     return true; }
+    if (n == "Gradient Shape"){out = UIPropValue::ofInt(e.gradientShape);       return true; }
+    if (n == "Shadow")       { out = UIPropValue::ofBool(e.shadow);             return true; }
+    if (n == "Shadow Color") { out = UIPropValue::ofColor(e.shadowColor);       return true; }
+    if (n == "Shadow Blur")  { out = UIPropValue::ofFloat(e.shadowBlur);        return true; }
+    if (n == "Shadow Offset"){ out = UIPropValue::ofVec2({ e.shadowOffsetX, e.shadowOffsetY });
+                               return true; }
+    if (n == "Inner Shadow") { out = UIPropValue::ofBool(e.innerShadow);        return true; }
+    if (n == "Inner Shadow Color"){ out = UIPropValue::ofColor(e.innerShadowColor); return true; }
+    if (n == "Inner Shadow Blur") { out = UIPropValue::ofFloat(e.innerShadowBlur);  return true; }
     return false;
 }
 
+} // namespace
+
+const std::vector<UIPropDesc>& uiBaseProperties()
+{
+    // Same names, same types, same ORDER as getBaseProp above — read together,
+    // they are one list written twice, and test_ui_widgets pins that.
+    static const std::vector<UIPropDesc> t = {
+        { "Visible",             UIPropType::Bool },
+        { "Hit Testable",        UIPropType::Bool },
+        { "Window Drag",         UIPropType::Bool },
+        { "Clip Children",       UIPropType::Bool },
+        { "Focus Frame",         UIPropType::Bool },
+        { "Accepts Drop",        UIPropType::Bool },
+        { "Draggable",           UIPropType::Bool },
+        // Beside Draggable rather than down with the other strings: this list is
+        // getBaseProp written a second time, and the two are read together.
+        { "Drag Payload",        UIPropType::String },
+        { "Enabled",             UIPropType::Bool },
+        { "Render Opacity",      UIPropType::Float, 0.0f, 1.0f },
+        { "Transition",          UIPropType::Float, 0.0f, 2.0f },
+        { "Tab Index",           UIPropType::Int },
+        { "Slot Fill",           UIPropType::Float },
+        { "Grid Column",         UIPropType::Int },
+        { "Grid Row",            UIPropType::Int },
+        { "Column Span",         UIPropType::Int },
+        { "Row Span",            UIPropType::Int },
+        { "Rotation",            UIPropType::Float },
+        { "Position",            UIPropType::Vec2 },
+        { "Size",                UIPropType::Vec2 },
+        { "Min Size",            UIPropType::Vec2 },
+        { "Max Size",            UIPropType::Vec2 },
+        { "Layer",               UIPropType::Int },
+        { "Hover Cursor",        UIPropType::Int },
+        { "Material",            UIPropType::String },
+        { "Texture",             UIPropType::String },
+        { "Font",                UIPropType::String },
+        { "Tooltip",             UIPropType::String },
+        { "Corner Radius",       UIPropType::Float },
+        { "Corner TL",           UIPropType::Float },
+        { "Corner TR",           UIPropType::Float },
+        { "Corner BR",           UIPropType::Float },
+        { "Corner BL",           UIPropType::Float },
+        { "Border Width",        UIPropType::Float },
+        { "Border Color",        UIPropType::Color },
+        { "Gradient",            UIPropType::Bool },
+        { "Gradient Color",      UIPropType::Color },
+        { "Gradient Angle",      UIPropType::Float },
+        { "Gradient Shape",      UIPropType::Int },
+        { "Shadow",              UIPropType::Bool },
+        { "Shadow Color",        UIPropType::Color },
+        { "Shadow Blur",         UIPropType::Float },
+        { "Shadow Offset",       UIPropType::Vec2 },
+        { "Inner Shadow",        UIPropType::Bool },
+        { "Inner Shadow Color",  UIPropType::Color },
+        { "Inner Shadow Blur",   UIPropType::Float },
+    };
+    return t;
+}
+
+namespace
+{
 bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
 {
     if (n == "Visible")      { e.visible     = v.b; return true; }
     if (n == "Hit Testable") { e.hitTestable = v.b; return true; }
+    if (n == "Window Drag")  { e.windowDrag = v.b; return true; }
     if (n == "Clip Children"){ e.clipChildren = v.b; return true; }
+    if (n == "Focus Frame")  { e.focusFrame = v.b; return true; }
+    if (n == "Accepts Drop") { e.acceptsDrop = v.b; return true; }
+    if (n == "Draggable")    { e.draggable = v.b; return true; }
+    if (n == "Drag Payload") { e.dragPayload = v.s; return true; }
     if (n == "Enabled")      { e.enabled = v.b; return true; }
     if (n == "Render Opacity"){ e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); return true; }
+    // A negative transition is a state change running backwards, which is
+    // nothing; it lands on 0, the value that means "at once".
+    if (n == "Transition")   { e.transition = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // No clamp: all three ranges mean something (see UIElement::tabIndex).
+    if (n == "Tab Index")    { e.tabIndex = v.i; return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
+    if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
+    if (n == "Grid Row")     { e.gridRow    = v.i < -1 ? -1 : v.i; return true; }
+    if (n == "Column Span")  { e.gridColumnSpan = v.i < 1 ? 1 : v.i; return true; }
+    if (n == "Row Span")     { e.gridRowSpan    = v.i < 1 ? 1 : v.i; return true; }
     if (n == "Rotation")     { e.rotation = v.f; return true; }
     if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
     if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
+    // Floored at 0, which is the value that means "no bound": a negative one
+    // would be a third meaning nobody could name, and clamping it here keeps
+    // uiElementRect from having to ask.
+    if (n == "Min Size")
+    { e.minSizeX = std::max(0.0f, v.v2.x); e.minSizeY = std::max(0.0f, v.v2.y); return true; }
+    if (n == "Max Size")
+    { e.maxSizeX = std::max(0.0f, v.v2.x); e.maxSizeY = std::max(0.0f, v.v2.y); return true; }
     if (n == "Layer")        { e.layer = v.i; return true; }
     if (n == "Hover Cursor")
     {
@@ -358,6 +999,27 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // runtime re-resolves it when this changes (WidgetManager watches both).
     if (n == "Texture")      { e.texture = v.s; return true; }
     if (n == "Font")         { e.font = v.s; return true; }
+    if (n == "Tooltip")      { e.tooltip = v.s; return true; }
+    // Writing the single name rounds ALL FOUR corners — the property a script or
+    // a theme sets when it means "round this thing".
+    if (n == "Corner Radius"){ e.cornerRadius = glm::vec4(std::max(0.0f, v.f)); return true; }
+    if (n == "Corner TL")    { e.cornerRadius.x = std::max(0.0f, v.f); return true; }
+    if (n == "Corner TR")    { e.cornerRadius.y = std::max(0.0f, v.f); return true; }
+    if (n == "Corner BR")    { e.cornerRadius.z = std::max(0.0f, v.f); return true; }
+    if (n == "Corner BL")    { e.cornerRadius.w = std::max(0.0f, v.f); return true; }
+    if (n == "Border Width") { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; return true; }
+    if (n == "Border Color") { e.borderColor = v.col; return true; }
+    if (n == "Gradient")     { e.gradient = v.b; return true; }
+    if (n == "Gradient Color"){ e.gradientColor = v.col; return true; }
+    if (n == "Gradient Angle"){ e.gradientAngle = v.f; return true; }
+    if (n == "Gradient Shape"){ e.gradientShape = (v.i == 1) ? 1 : 0; return true; }
+    if (n == "Shadow")       { e.shadow = v.b; return true; }
+    if (n == "Shadow Color") { e.shadowColor = v.col; return true; }
+    if (n == "Shadow Blur")  { e.shadowBlur = std::max(0.0f, v.f); return true; }
+    if (n == "Shadow Offset"){ e.shadowOffsetX = v.v2.x; e.shadowOffsetY = v.v2.y; return true; }
+    if (n == "Inner Shadow") { e.innerShadow = v.b; return true; }
+    if (n == "Inner Shadow Color"){ e.innerShadowColor = v.col; return true; }
+    if (n == "Inner Shadow Blur") { e.innerShadowBlur = std::max(0.0f, v.f); return true; }
     return false;
 }
 } // namespace
@@ -367,15 +1029,60 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     std::vector<UIPropDesc> out = properties();
     out.push_back({ "Visible",      UIPropType::Bool });
     out.push_back({ "Hit Testable", UIPropType::Bool });
+    out.push_back({ "Window Drag",  UIPropType::Bool });
     out.push_back({ "Clip Children",UIPropType::Bool });
+    out.push_back({ "Focus Frame",  UIPropType::Bool });
     out.push_back({ "Enabled",      UIPropType::Bool });
     out.push_back({ "Render Opacity", UIPropType::Float, 0.0f, 1.0f });
+    // Offered on every type, not only the ones that blend today: it is a
+    // property of the ELEMENT, a theme sets it once for a whole application,
+    // and a row that appears and disappears depending on the widget type is a
+    // row nobody trusts. What each type does with it is the renderer's business.
+    out.push_back({ "Transition",   UIPropType::Float, 0.0f, 2.0f });
+    out.push_back({ "Tab Index",    UIPropType::Int });
     out.push_back({ "Slot Fill",    UIPropType::Float });
+    out.push_back({ "Grid Column",  UIPropType::Int });
+    out.push_back({ "Grid Row",     UIPropType::Int });
+    out.push_back({ "Column Span",  UIPropType::Int });
+    out.push_back({ "Row Span",     UIPropType::Int });
     out.push_back({ "Rotation",     UIPropType::Float });
     out.push_back({ "Position",     UIPropType::Vec2 });
     out.push_back({ "Size",         UIPropType::Vec2 });
+    out.push_back({ "Min Size",     UIPropType::Vec2 });
+    out.push_back({ "Max Size",     UIPropType::Vec2 });
     out.push_back({ "Layer",        UIPropType::Int });
     out.push_back({ "Hover Cursor", UIPropType::Int });
+    out.push_back({ "Tooltip",      UIPropType::String });
+    // Border ("Schicht 0"): a style on the element's own surface. Offered only
+    // where there IS a surface — the same test the material slot uses — so a
+    // Text label does not grow a border property that outlines nothing.
+    if (hasSurfaceStyle())
+    {
+        out.push_back({ "Corner Radius", UIPropType::Float });
+        // The four on top of the one: "Corner Radius" is all of them at once,
+        // these address a single corner. Both are real properties a graph can
+        // set, which is why they are listed and not just editor state.
+        out.push_back({ "Corner TL", UIPropType::Float });
+        out.push_back({ "Corner TR", UIPropType::Float });
+        out.push_back({ "Corner BR", UIPropType::Float });
+        out.push_back({ "Corner BL", UIPropType::Float });
+        out.push_back({ "Border Width", UIPropType::Float });
+        out.push_back({ "Border Color", UIPropType::Color });
+        // Split into three plain properties rather than one gradient object:
+        // the designer's property editor is generic over UIPropType, so anything
+        // expressed in the existing kinds gets its editor for free.
+        out.push_back({ "Gradient",       UIPropType::Bool });
+        out.push_back({ "Gradient Color", UIPropType::Color });
+        out.push_back({ "Gradient Angle", UIPropType::Float, 0.0f, 360.0f });
+        out.push_back({ "Gradient Shape", UIPropType::Int, 0.0f, 1.0f });
+        out.push_back({ "Shadow",         UIPropType::Bool });
+        out.push_back({ "Shadow Color",   UIPropType::Color });
+        out.push_back({ "Shadow Blur",    UIPropType::Float });
+        out.push_back({ "Shadow Offset",  UIPropType::Vec2 });
+        out.push_back({ "Inner Shadow",       UIPropType::Bool });
+        out.push_back({ "Inner Shadow Color", UIPropType::Color });
+        out.push_back({ "Inner Shadow Blur",  UIPropType::Float });
+    }
     // Asset slots only where the editor exposes them: Material behind
     // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic
     // the details panel uses).
@@ -421,7 +1128,10 @@ namespace
         ro.materialAssetId = mat;
         ro.textureAssetId  = tex;
         ro.type     = 0;
-        ro.cornerRadius = cornerRadius;
+        // The helper's callers (a slider handle, a checkbox box) want ONE
+        // rounding on all four corners; the four-corner story belongs to the
+        // authored surface, which the manager stamps on afterwards.
+        ro.cornerRadius = glm::vec4(cornerRadius);
         ro.uvMin    = uv0;
         ro.uvMax    = uv1;
         out.push_back(std::move(ro));
@@ -429,6 +1139,43 @@ namespace
     // Corner radius that matches the editor preview: a small rounding clamped to
     // never exceed half the smaller side.
     float roundedR(float w, float h, float r) { return std::min(r, 0.5f * std::min(w, h)); }
+
+    // ── A solid triangle, out of the only shape this system has ──────────────
+    // Rows of decreasing width, each one an ordinary quad. Built this way rather
+    // than as two turned bars (the modern chevron) for a reason that is not
+    // taste: WidgetManager::extract folds the whole rotation chain onto EVERY
+    // quad an element emits, overwriting whatever the element set — so inside a
+    // rotated panel a chevron's two bars would both take the panel's angle and
+    // come out parallel. A triangle made of upright rows has no angle to lose.
+    //
+    // The rows overlap by a hair so no seam shows between them, and there are
+    // as many as there are pixels of height, so the staircase is one pixel per
+    // step at any size.
+    void triangle(std::vector<UIRenderObject>& out, const HE::UIComboBox::Arrow& a,
+                  const glm::vec4& color, bool pointUp)
+    {
+        if (a.halfW <= 0.0f || a.height <= 0.0f) return;
+        const int rows = std::clamp(static_cast<int>(std::ceil(a.height)), 3, 32);
+        const float step = a.height / static_cast<float>(rows);
+        const float top  = a.cy - a.height * 0.5f;
+        for (int i = 0; i < rows; ++i)
+        {
+            // How far along the triangle this row is, measured from its BASE:
+            // full width at the base, a sliver at the point.
+            const float t = pointUp ? (static_cast<float>(i) + 1.0f) / rows
+                                    : 1.0f - static_cast<float>(i) / rows;
+            const float w = 2.0f * a.halfW * t;
+            if (w <= 0.0f) continue;
+            // Each row is a CAPSULE, not a rectangle. The rounding costs nothing
+            // (it is the same SDF every quad already goes through) and it is
+            // antialiased, so the two diagonal edges come out soft instead of as
+            // a hard staircase — which is the whole difference between "a
+            // triangle" and "a triangle somebody drew out of blocks".
+            const float rh = step + 0.5f;
+            quad(out, a.cx - w * 0.5f, top + step * static_cast<float>(i),
+                 w, rh, color, HE::UUID{}, roundedR(w, rh, rh * 0.5f));
+        }
+    }
 }
 
 // Text emit that honors the element's Font asset (fontAtlasKey) when set, else
@@ -450,7 +1197,7 @@ static void emitText(const UIElement& e, const std::string& text, const glm::vec
                      const glm::vec2& size, float sizePx, const glm::vec4& color,
                      bool centerH, std::vector<UIRenderObject>& out)
 {
-    HE::UITextLayout opts; opts.centerH = centerH;
+    HE::UITextLayout opts; opts.alignH = centerH ? 1 : 0;
     emitTextL(e, text, pos, size, sizePx, color, opts, out);
 }
 
@@ -518,36 +1265,333 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
 // font size; the width tracks the widest line unless WordWrap owns it (then the
 // authored width IS the wrap column). A small padding keeps descenders and the
 // last glyph's side bearing off the edge.
-void UIText::applyAutoSize(float resolvedWidth)
+const HE::UIRichText& UIText::parsed() const
+{
+    if (!m_parsedOnce || m_parsedFrom != text)
+    {
+        m_parsed = HE::uiParseRichText(text);
+        m_parsedFrom = text;
+        m_parsedOnce = true;
+    }
+    return m_parsed;
+}
+
+namespace
+{
+    // The one place that says how a Text's rect and font turn into a rich
+    // layout. Three callers — measure, draw, hit test — and they must agree
+    // down to the pixel or a link is clickable somewhere it is not drawn.
+    HE::UIRichLayout richLayoutOf(const UIText& t, const HE::UIWidgetRect& px,
+                                  float pxScaleY, float fontScale)
+    {
+        HE::UITextLayout opts;
+        opts.alignH = t.alignH;
+        opts.alignV = t.alignV;
+        opts.wrap   = t.wordWrap;
+        const HE::BakedUIFont* f = HE::UIFontCache::find(t.fontAtlasKey);
+        const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+        return HE::uiLayoutRichText(font, t.parsed(), { px.x, px.y }, { px.w, px.h },
+                                    t.fontSize * pxScaleY * fontScale, opts, t.fontAtlasKey);
+    }
+}
+
+std::string UIText::linkAt(const UIWidgetRect& px, float pxScaleY, float x, float y,
+                           float fontScale) const
+{
+    if (!richText || !parsed().hasLinks) return {};
+    return HE::uiRichLinkAt(parsed(), richLayoutOf(*this, px, pxScaleY, fontScale), x, y);
+}
+
+void UIText::applyAutoSize(float resolvedWidth, float fontScale)
 {
     if (!autoSize) return;
     HE::UITextLayout opts;
-    opts.centerH = align == 1;
+    opts.alignH = alignH;
+    opts.alignV = alignV;
     opts.wrap    = wordWrap;
     // The wrap column is the width the element ACTUALLY has: on a stretched
     // axis sizeX is the difference to the anchored span (often negative), so it
     // would wrap the text at one unit.
     const float wrapW = wordWrap ? std::max(1.0f, resolvedWidth) : 0.0f;
+    // The size the reader actually sees, in canvas units — sizeX/sizeY are
+    // authored units, and the measurement has to be in the same space as what
+    // it is going to be written into. A box that fits at 100 % clips at 150 %,
+    // which is the whole reason this argument exists.
+    const float fs = fontSize * fontScale;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    const glm::vec2 m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)
-                          : HE::measureUIText(text, fontSize, wrapW, opts);
+    // Rich text measures through the rich layout, or a label would be sized for
+    // the markup it is written in rather than the words it shows — the tags
+    // would count as characters and a <size=2> word would not count enough.
+    glm::vec2 m;
+    if (richText)
+    {
+        const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+        m = HE::uiLayoutRichText(font, parsed(), { 0.0f, 0.0f },
+                                 { wrapW > 0.0f ? wrapW : 1.0e6f, 0.0f },
+                                 fs, opts, fontAtlasKey).size;
+    }
+    else
+        m = f ? HE::measureUIText(*f, text, fs, wrapW, opts)
+              : HE::measureUIText(text, fs, wrapW, opts);
     // An axis the anchor stretches belongs to the parent — content does not get
     // to resize it, or a label anchored across a side would come out one text
     // width WIDER than the side it is anchored to.
     const bool stretchX = anchorMaxX > anchorMinX + 1e-4f;
     const bool stretchY = anchorMaxY > anchorMinY + 1e-4f;
-    if (!wordWrap && !stretchX) sizeX = m.x + fontSize * 0.25f;
-    if (!stretchY)              sizeY = m.y + fontSize * 0.35f;
+    if (!wordWrap && !stretchX) sizeX = m.x + fs * 0.25f;
+    if (!stretchY)              sizeY = m.y + fs * 0.35f;
 }
 
-void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
+void UIText::render(const UIWidgetRect& px, const UIElementRenderState& st,
                     const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
+    if (richText)
+    {
+        const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+        const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+        // `color` is what a run without one of its own draws in, so a rich label
+        // with no colour tags is exactly the label it was before the flag.
+        HE::uiEmitRichText(font, fontAtlasKey, parsed(),
+                           richLayoutOf(*this, px, pxScaleY, st.fontScale), color, layer, out);
+        return;
+    }
+    // ── A label somebody can select in ───────────────────────────────────────
+    // Its own path, and that is the whole point of it. The path below hands the
+    // WHOLE string to the text layer, which splits it with layoutUITextLines;
+    // the hit test has to address bytes and therefore asks uiTextWrapRanges.
+    // Those are two greedy word-wraps, and where they disagree the highlight
+    // sits a word away from the glyphs it is supposed to be under. So a
+    // selectable label draws row by row out of the SAME list its caret is
+    // computed from. A label without the flag keeps the old path untouched, so
+    // every label authored so far emits byte for byte what it always did.
+    if (selectionEnabled())
+    {
+        const float sizePx = st.fontPx(fontSize, pxScaleY);
+        const std::vector<UITextSelectRow> rows = selectRows(px, pxScaleY, st.fontScale);
+        if (!rows.empty())
+        {
+            const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+            HE::UITextLayout mopts;
+            auto widthOf = [&](size_t from, size_t to)
+            {
+                if (to <= from) return 0.0f;
+                const std::string run = text.substr(from, to - from);
+                return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, mopts)
+                          : HE::measureUIText(run, sizePx, 0.0f, mopts)).x;
+            };
+
+            // The selection first, behind the glyphs, so the words stay readable
+            // on top of it. Same three shapes as the multiline field: the first
+            // row from the anchor to its end, whole rows between, the last from
+            // its start to the caret.
+            //
+            // Only while FOCUSED, which is the label's version of the rule the
+            // field's caret follows. Without it, a paragraph somebody selected
+            // in and then clicked away from stays highlighted for the rest of
+            // the run — and two of them can be highlighted at once, which says
+            // the reader has two selections when they have one. The offsets are
+            // kept either way, so coming back finds what was left.
+            if (st.focused && hasSelection())
+            {
+                const size_t a = std::min(selMin(), text.size());
+                const size_t b = std::min(selMax(), text.size());
+                for (const UITextSelectRow& r : rows)
+                {
+                    if (r.end < a || r.begin > b) continue;
+                    const size_t ra = std::min(std::max(a, r.begin), r.end);
+                    const size_t rb = std::min(std::max(b, r.begin), r.end);
+                    const float xa = widthOf(r.begin, ra), xb = widthOf(r.begin, rb);
+                    // A row whose break is inside the selection gets a small stub
+                    // past its last character; without it a selected blank line is
+                    // invisible and one run reads as several unrelated ones.
+                    const float stub = (r.end < b) ? sizePx * 0.35f : 0.0f;
+                    quad(out, r.x + xa, r.top, std::max(1.0f, xb - xa + stub), sizePx,
+                         selectionColor);
+                }
+            }
+
+            // The glyphs, a row at a time. Each row goes into its OWN one-row
+            // rect at the position selectRows worked out, so the text layer has
+            // nothing left to align or re-split.
+            HE::UITextLayout ropts;   // alignH left, alignV middle: the row IS the box
+            for (const UITextSelectRow& r : rows)
+            {
+                if (r.end <= r.begin) continue;
+                emitTextL(*this, text.substr(r.begin, r.end - r.begin), { r.x, r.top },
+                          { r.width, sizePx }, sizePx, color, ropts, out);
+            }
+            return;
+        }
+        // No usable font or no size: fall through and draw the way a label
+        // always did rather than draw nothing.
+    }
+
     HE::UITextLayout opts;
-    opts.centerH = align == 1;
-    opts.wrap    = wordWrap;
-    emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
+    opts.alignH = alignH;
+    opts.alignV = alignV;
+    opts.wrap   = wordWrap;
+    emitTextL(*this, text, { px.x, px.y }, { px.w, px.h }, st.fontPx(fontSize, pxScaleY),
               color, opts, out);
+}
+
+// ── Selecting and copying a label ────────────────────────────────────────────
+
+std::string UIText::selectedText() const
+{
+    if (!hasSelection()) return {};
+    const size_t a = std::min(selMin(), text.size());
+    const size_t b = std::min(selMax(), text.size());
+    return text.substr(a, b - a);
+}
+
+void UIText::clampCaret()
+{
+    if (caret > text.size())     caret = text.size();
+    if (selAnchor > text.size()) selAnchor = text.size();
+    // Off a character boundary is what a rewritten text leaves behind, and half
+    // a letter in the clipboard is worse than a caret that moved.
+    while (caret > 0 && caret < text.size() &&
+           (static_cast<unsigned char>(text[caret]) & 0xC0) == 0x80) --caret;
+    while (selAnchor > 0 && selAnchor < text.size() &&
+           (static_cast<unsigned char>(text[selAnchor]) & 0xC0) == 0x80) --selAnchor;
+}
+
+std::vector<HE::UITextVisualLine> UIText::rowRanges() const
+{
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    const HE::BakedUIFont& font = fp ? *fp : HE::sharedUIFont();
+    std::vector<HE::UITextVisualLine> lines =
+        (wordWrap && font.ok && rowWidthPx > 0.0f && rowSizePx > 0.0f)
+            ? HE::uiTextWrapRanges(font, text, rowSizePx, rowWidthPx)
+            : HE::uiTextVisualLines(text);
+    // A trailing break does not start a row. The same rule layoutUITextLines
+    // follows, and for the same reason: an empty last row is half the block's
+    // height, so a centred label whose author pressed Enter to mean "done"
+    // would sit half a line too high the moment it became selectable. Exactly
+    // one is dropped, so a deliberate blank line still leaves one.
+    if (lines.size() > 1 && lines.back().end <= lines.back().begin) lines.pop_back();
+    return lines;
+}
+
+float UIText::caretXInRow(const HE::UITextVisualLine& row, size_t byte) const
+{
+    if (rowSizePx <= 0.0f) return 0.0f;
+    const size_t to = std::min(std::max(byte, row.begin), row.end);
+    if (to <= row.begin) return 0.0f;
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout opts;
+    const std::string run = text.substr(row.begin, to - row.begin);
+    return (fp ? HE::measureUIText(*fp, run, rowSizePx, 0.0f, opts)
+               : HE::measureUIText(run, rowSizePx, 0.0f, opts)).x;
+}
+
+size_t UIText::byteAtRowX(const HE::UITextVisualLine& row, float x) const
+{
+    if (rowSizePx <= 0.0f || x <= 0.0f) return row.begin;
+    // The same midpoint rule the pointer follows, so an arrow key and a click
+    // land on the same character when they are aimed at the same column.
+    size_t best = row.begin;
+    for (size_t i = row.begin; i < row.end; )
+    {
+        const size_t nx = HE::uiUtf8Next(text, i);
+        if (x < (caretXInRow(row, i) + caretXInRow(row, nx)) * 0.5f) return i;
+        best = nx;
+        i = nx;
+    }
+    return best;
+}
+
+std::vector<UITextSelectRow> UIText::selectRows(const UIWidgetRect& px, float pxScaleY,
+                                                float fontScale) const
+{
+    std::vector<UITextSelectRow> rows;
+    if (!selectionEnabled()) return rows;
+    const float sizePx = fontSize * pxScaleY * fontScale;
+    if (sizePx <= 0.0f) return rows;
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    const HE::BakedUIFont& font = fp ? *fp : HE::sharedUIFont();
+    if (!font.ok) return rows;
+
+    // Remembered BEFORE the rows are asked for, because the rows come out of
+    // them: this is the one place that knows how wide the words may run, and an
+    // arrow key arrives later with no viewport to work it out from.
+    rowWidthPx = px.w;
+    rowSizePx  = sizePx;
+    std::vector<HE::UITextVisualLine> lines = rowRanges();
+    if (lines.empty()) return rows;
+
+    HE::UITextLayout opts;   // for the line spacing, which nothing here changes
+    const float step = sizePx * opts.lineSpacing;
+    const float n    = static_cast<float>(lines.size());
+    const float blockHeight = (n - 1.0f) * step + sizePx;
+    // The same three lines emitUITextGlyphs uses to place a block, because the
+    // rows have to land where that function would have put them.
+    float blockCentre = px.y + px.h * 0.5f;                       // 1 = middle
+    if (alignV == 0)      blockCentre = px.y + blockHeight * 0.5f;
+    else if (alignV == 2) blockCentre = px.y + px.h - blockHeight * 0.5f;
+    const float firstCentre = blockCentre - (n - 1.0f) * step * 0.5f;
+
+    HE::UITextLayout mopts;
+    rows.reserve(lines.size());
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        const HE::UITextVisualLine& ln = lines[i];
+        const std::string run = text.substr(ln.begin, ln.end - ln.begin);
+        const float w = run.empty() ? 0.0f
+                                    : HE::measureUIText(font, run, sizePx, 0.0f, mopts).x;
+        // Per ROW, not per block — centring a paragraph centres each of its
+        // lines, which is what centring text means (emitUITextGlyphs again).
+        const float slack = std::max(0.0f, px.w - w);
+        const float x = px.x + (alignH == 1 ? slack * 0.5f
+                              : alignH == 2 ? slack
+                                            : 0.0f);
+        rows.push_back({ ln.begin, ln.end, ln.next, x,
+                         firstCentre + static_cast<float>(i) * step - sizePx * 0.5f, w });
+    }
+    return rows;
+}
+
+size_t UIText::caretAtPoint(const UIWidgetRect& px, float pxScaleY, float x, float y,
+                            float fontScale) const
+{
+    const std::vector<UITextSelectRow> rows = selectRows(px, pxScaleY, fontScale);
+    if (rows.empty()) return 0;
+    const float sizePx = fontSize * pxScaleY * fontScale;
+    HE::UITextLayout opts;
+    const float step = sizePx * opts.lineSpacing;
+
+    // Which row the point is on. Above the first lands on it, below the last on
+    // that one: dragging off the edge of a paragraph extends the selection to
+    // the end rather than dropping it.
+    long idx = 0;
+    if (step > 0.0f)
+        idx = static_cast<long>(std::floor((y - rows.front().top) / step));
+    if (idx < 0) idx = 0;
+    if (idx >= static_cast<long>(rows.size())) idx = static_cast<long>(rows.size()) - 1;
+    const UITextSelectRow& r = rows[static_cast<size_t>(idx)];
+
+    const HE::BakedUIFont* fp = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout mopts;
+    auto widthTo = [&](size_t to)
+    {
+        if (to <= r.begin) return 0.0f;
+        const std::string run = text.substr(r.begin, to - r.begin);
+        return (fp ? HE::measureUIText(*fp, run, sizePx, 0.0f, mopts)
+                   : HE::measureUIText(run, sizePx, 0.0f, mopts)).x;
+    };
+    const float local = x - r.x;
+    if (local <= 0.0f) return r.begin;
+    // Walk the boundaries and take the one whose midpoint the point passed —
+    // aiming at the left half of a character puts the caret in front of it.
+    size_t best = r.begin;
+    for (size_t i = r.begin; i < r.end; )
+    {
+        const size_t nx = HE::uiUtf8Next(text, i);
+        if (local < (widthTo(i) + widthTo(nx)) * 0.5f) return i;
+        best = nx;
+        i = nx;
+    }
+    return best;
 }
 
 // ── Button ───────────────────────────────────────────────────────────────────
@@ -555,16 +1599,50 @@ void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,
 void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
                       const HE::UUID& mat, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
-    glm::vec4 c = color;
-    if (st.hovered) c = hoveredColor;
-    if (st.pressed) c = pressedColor;
-    quad(out, px.x, px.y, px.w, px.h, c, mat, roundedR(px.w, px.h, 6.0f), textureAssetId);
-    if (!text.empty())
-        emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
-                 textColor, /*centerH=*/true, out);
+    // Rest → hover → press, as two mixes rather than two assignments. At 0 and
+    // at 1 they give back exactly what the two `if`s gave before (a press wins
+    // over a hover either way), and in between they are the transition.
+    glm::vec4 c = glm::mix(color, hoveredColor, st.hoverAmount());
+    c = glm::mix(c, pressedColor, st.pressAmount());
+    // The surface, and only the surface. No radius here either: it is an
+    // authored property now, stamped onto this quad by the manager. Whatever is
+    // ON the button is made of children, drawn by the same loop that draws every
+    // other element.
+    quad(out, px.x, px.y, px.w, px.h, c, mat, 0.0f, textureAssetId);
 }
 
 // ── CheckBox ─────────────────────────────────────────────────────────────────
+
+void UICheckBox::applyAutoSize(float resolvedWidth, float fontScale)
+{
+    (void)resolvedWidth;   // nothing here wraps, so the laid-out width says nothing
+    const int axes = autoSizedAxes();
+    if (axes == 0) return;
+    // The size the reader actually SEES, in canvas units: a row that fits the
+    // label at 100 % cuts it in half at 150 %, which is why the scale reaches
+    // this far down at all (see UIText::applyAutoSize).
+    const float fs = fontSize * fontScale;
+    // No height cap while measuring: the height is what is being computed here,
+    // and capping the box against the size the element happens to carry would
+    // measure the row against yesterday's answer.
+    const BoxMetrics m = metricsFor(fs, 0.0f, switchStyle);
+    HE::UITextLayout opts;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const glm::vec2 lm = label.empty()
+        ? glm::vec2(0.0f)
+        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
+             : HE::measureUIText(label, fs, 0.0f, opts));
+    // The same slack a label gets, and for the same reason: a run measured to
+    // the last pixel of its last glyph has no room for the one that overhangs.
+    if (axes & kAxisX)
+        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
+    // The row is as tall as the taller of the two things in it. The box is
+    // 1.15 of the font and the line is a touch over one, so in practice the box
+    // wins — but a font whose line box is taller than that must not be clipped
+    // by a row sized for a square nobody looks at.
+    if (axes & kAxisY)
+        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+}
 
 void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
@@ -574,21 +1652,50 @@ void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // (to place its label, say) grew a box the size of half the screen. Capped
     // at the element's height so a deliberately tiny one still fits, and
     // centred in it so the box sits with the text rather than above it.
-    const float box = std::min(px.h, fontSize * pxScaleY * 1.15f);
+    //
+    // The three numbers come from metricsFor, which applyAutoSize asks too — a
+    // row measured against a control of a different width is a label that ends
+    // somewhere other than where the row does.
+    const BoxMetrics m = metricsFor(st.fontPx(fontSize, pxScaleY), px.h, switchStyle);
+    const float box = m.box;
     const float by  = px.y + (px.h - box) * 0.5f;
-    glm::vec4 bc = boxColor;
-    if (st.hovered) bc = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
-    quad(out, px.x, by, box, box, bc, {}, roundedR(box, box, 4.0f));
-    if (checked)
+    const glm::vec4 bcHover = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
+    glm::vec4 bc = glm::mix(boxColor, bcHover, st.hoverAmount());
+    // How wide the control is, which is the only thing the label needs to know
+    // about which of the two pictures was drawn.
+    const float ctrl = m.ctrl;
+    if (switchStyle)
     {
-        const float inset = box * 0.22f;
-        const float cb = box - 2 * inset;
-        quad(out, px.x + inset, by + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
+        // The track carries the state, not a mark inside it: a switch that is
+        // on is a coloured track with the knob at the far end, and that reads
+        // from across the room where a tick does not. Fully rounded, always —
+        // this radius is a SHAPE, and a square switch is a checkbox that has
+        // been stretched.
+        const glm::vec4 track = checked ? checkColor : bc;
+        quad(out, px.x, by, ctrl, box, track, {}, box * 0.5f);
+        const float inset = box * 0.14f;
+        const float knob  = box - 2.0f * inset;
+        const float kx = px.x + inset + (checked ? ctrl - box : 0.0f);
+        // The knob is the one part that is the same colour in both states: it
+        // is the handle, and a handle that changes colour reads as a second
+        // piece of information there is nothing to say with.
+        quad(out, kx, by + inset, knob, knob, glm::vec4(1.0f, 1.0f, 1.0f, 0.95f),
+             {}, knob * 0.5f);
     }
-    const float gap = 0.4f * box;   // scales with the box, not a fixed 8 px
-    const float lx = px.x + box + gap;
-    emitText(*this, label, { lx, px.y }, { px.w - box - gap, px.h },
-             fontSize * pxScaleY, textColor, /*centerH=*/false, out);
+    else
+    {
+        quad(out, px.x, by, box, box, bc, {}, roundedR(box, box, 4.0f));
+        if (checked)
+        {
+            const float inset = box * 0.22f;
+            const float cb = box - 2 * inset;
+            quad(out, px.x + inset, by + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
+        }
+    }
+    const float gap = m.gap;
+    const float lx = px.x + ctrl + gap;
+    emitText(*this, label, { lx, px.y }, { px.w - ctrl - gap, px.h },
+             st.fontPx(fontSize, pxScaleY), textColor, /*centerH=*/false, out);
 }
 
 // ── Slider ───────────────────────────────────────────────────────────────────
@@ -612,12 +1719,139 @@ void UISlider::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
 // ── ProgressBar ──────────────────────────────────────────────────────────────
 
-void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState&,
+void UIProgressBar::render(const UIWidgetRect& px, const UIElementRenderState& st,
                            const HE::UUID&, float, std::vector<UIRenderObject>& out) const
 {
-    const float t = std::clamp(value, 0.0f, 1.0f);
-    quad(out, px.x, px.y, px.w,     px.h, backColor, {}, roundedR(px.w, px.h, 4.0f));
-    quad(out, px.x, px.y, px.w * t, px.h, fillColor, {}, roundedR(px.w * t, px.h, 4.0f));
+    // The track's radius is stamped (authored property); the FILL keeps its own,
+    // because it is a part drawn on the surface rather than the surface itself.
+    quad(out, px.x, px.y, px.w, px.h, backColor, {}, 0.0f);
+    if (!indeterminate)
+    {
+        const float t = std::clamp(value, 0.0f, 1.0f);
+        quad(out, px.x, px.y, px.w * t, px.h, fillColor, {}, roundedR(px.w * t, px.h, 4.0f));
+        return;
+    }
+    // A segment of a third of the track, sliding across it and starting again.
+    // It runs from fully off the left to fully off the right, so the cycle has
+    // no moment where the bar is empty and no moment where it snaps back — the
+    // segment leaves as the next one arrives.
+    constexpr float kPeriod = 1.4f;    // seconds for one pass
+    constexpr float kSegFrac = 0.33f;
+    const float seg = px.w * kSegFrac;
+    const float f = kPeriod > 0.0f
+        ? (st.time - std::floor(st.time / kPeriod) * kPeriod) / kPeriod : 0.0f;
+    const float x = px.x - seg + f * (px.w + 2.0f * seg);
+    // Clipped to the track BY HAND: an element's own quads are not covered by
+    // clipChildren, so the part hanging over the edge would paint outside the
+    // bar (the list view's row highlights do the same, for the same reason).
+    const float x0 = std::max(x, px.x);
+    const float x1 = std::min(x + seg, px.x + px.w);
+    if (x1 > x0)
+        quad(out, x0, px.y, x1 - x0, px.h, fillColor, {}, roundedR(x1 - x0, px.h, 4.0f));
+}
+
+// ── TextInput: the number field's two arrows ─────────────────────────────────
+
+bool UITextInput::stepperRects(const UIWidgetRect& px, UIWidgetRect& up,
+                               UIWidgetRect& down) const
+{
+    if (!steppers || multiline) return false;
+    constexpr float kInset = 2.0f;
+    // As wide as it is tall, roughly, and never more than a third of the field:
+    // a narrow field must still have somewhere to type.
+    const float w = std::min(px.w * 0.33f, std::max(10.0f, px.h * 0.62f));
+    const float h = (px.h - 2.0f * kInset) * 0.5f;
+    if (w <= 0.0f || h <= 0.0f) return false;
+    const float x = px.x + px.w - kInset - w;
+    up   = { x, px.y + kInset,     w, h };
+    down = { x, px.y + kInset + h, w, h };
+    return true;
+}
+
+bool UITextInput::clearButtonRect(const UIWidgetRect& px, UIWidgetRect& out) const
+{
+    // Four reasons there is none, and each of them is a state, not a setting:
+    // an empty field has nothing to clear (a cross that clears nothing is a
+    // button that does nothing), a read-only field cannot be emptied by anybody
+    // — by the cross any more than by the keyboard — and a multiline field is a
+    // little document, where "throw all of it away" is not a thing to offer
+    // beside the first line.
+    if (!clearButton || multiline || !editable || text.empty()) return false;
+    constexpr float kInset = 2.0f;
+    const float side = std::min(px.w * 0.33f, std::max(10.0f, px.h * 0.62f));
+    if (side <= 0.0f) return false;
+    // To the LEFT of the arrows when there are arrows, rather than on top of
+    // them. A number field with a cross is a strange thing to author, but a
+    // strange thing to author must still be drawn where it is clicked.
+    UIWidgetRect upR{}, downR{};
+    const float rightEdge = stepperRects(px, upR, downR) ? upR.x : px.x + px.w - kInset;
+    out = { rightEdge - side, px.y + (px.h - side) * 0.5f, side, side };
+    return out.x >= px.x;
+}
+
+bool UITextInput::applyClear()
+{
+    if (text.empty()) return false;
+    const EditState before{ text, caret, selAnchor };
+    text.clear();
+    caret = selAnchor = 0;
+    // The same three pieces of runtime state a click resets: where the arrows
+    // were aiming and how far the text was pushed sideways. Neither means
+    // anything about an empty field, and a scroll left over from the sentence
+    // that was there would draw the caret off the left edge.
+    preferredCaretX = -1.0f;
+    scrollPx = 0.0f;
+    // A group of its own, never merged into the typing before it: taking back a
+    // clear has to give the whole sentence back, not its last letter.
+    recordEdit(before, EditKind::Replace, /*coalesce=*/false);
+    return true;
+}
+
+namespace {
+
+// A number the way a person writes it: no decimal tail on a whole number, and
+// no trailing zeros on one that has a tail. Printed rather than streamed so the
+// result does not depend on the locale — a field that says "1,5" in Germany and
+// "1.5" everywhere else is a field whose text no parser agrees about.
+std::string formatStepValue(double v)
+{
+    char buf[64];
+    if (v == std::floor(v) && std::fabs(v) < 1e15)
+    {
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+        return buf;
+    }
+    std::snprintf(buf, sizeof(buf), "%.6f", v);
+    std::string s = buf;
+    while (!s.empty() && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    return s;
+}
+
+} // namespace
+
+bool UITextInput::applyStep(int dir)
+{
+    if (!steppers || multiline || dir == 0) return false;
+    // What is in the field, read as a number. Empty or unreadable counts as 0:
+    // a field nobody has filled in yet has to step from somewhere, and refusing
+    // to move at all teaches nothing about why.
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double parsed = std::strtod(begin, &end);
+    const double cur = (end && end != begin) ? parsed : 0.0;
+
+    double nv = cur + static_cast<double>(dir) * static_cast<double>(step);
+    if (minValue < maxValue)
+        nv = std::clamp(nv, static_cast<double>(minValue), static_cast<double>(maxValue));
+    const std::string s = formatStepValue(nv);
+    if (s == text) return false;   // already at the limit
+    text = s;
+    // The caret goes to the end and the selection with it. A number that has
+    // just been replaced whole has no interesting place to stand in the middle
+    // of, and a caret left at byte 4 of a two-character number is out of bounds.
+    caret = selAnchor = text.size();
+    return true;
 }
 
 // ── TextInput ────────────────────────────────────────────────────────────────
@@ -627,22 +1861,82 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
 {
     glm::vec4 bg = backColor;
     if (st.focused) bg = glm::vec4(glm::min(glm::vec3(backColor) + 0.06f, glm::vec3(1.0f)), backColor.a);
-    quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
-    // Thin focus border (four edge quads).
-    if (st.focused)
-    {
-        const glm::vec4 b(0.35f, 0.55f, 0.90f, 1.0f);
-        quad(out, px.x, px.y, px.w, 2.0f, b);
-        quad(out, px.x, px.y + px.h - 2.0f, px.w, 2.0f, b);
-        quad(out, px.x, px.y, 2.0f, px.h, b);
-        quad(out, px.x + px.w - 2.0f, px.y, 2.0f, px.h, b);
-    }
+    quad(out, px.x, px.y, px.w, px.h, bg, {}, 0.0f);   // radius is stamped (authored)
+    // No border of its own any more. This type used to draw four blue edge
+    // quads, from before the manager drew a focus ring for EVERY element type —
+    // and two rings around one field is not twice as clear, it is a field with
+    // something wrong with it. The lightened background above stays: that is
+    // this type's own answer to "the caret is in here", and it survives being
+    // clipped, which a ring drawn outside the box does not.
     const float pad = 6.0f;
+    // The arrows take their column out of the text's width, not off the top of
+    // it: a number running underneath its own stepper is the first thing a
+    // field with one gets wrong.
+    UIWidgetRect upR{}, downR{};
+    const bool hasSteppers = stepperRects(px, upR, downR);
+    // …and so does the cross, for the same reason. It is asked for BEFORE the
+    // width is worked out, so the text ends where the cross begins rather than
+    // running under it.
+    UIWidgetRect clearR{};
+    const bool hasClear = clearButtonRect(px, clearR);
+    const float takenFrom = hasClear ? clearR.x : (hasSteppers ? upR.x : px.x + px.w);
+    const float rightPad = (hasClear || hasSteppers) ? pad + (px.x + px.w - takenFrom) : pad;
     const glm::vec2 tp{ px.x + pad, px.y };
-    const glm::vec2 ts{ px.w - 2 * pad, px.h };
-    const float sizePx = fontSize * pxScaleY;
+    const glm::vec2 ts{ px.w - pad - rightPad, px.h };
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
+    if (hasSteppers)
+    {
+        // A chevron out of three rows rather than a glyph: the field draws with
+        // quads, and an arrow that needed the icon font would tie a number
+        // field to a font being loaded.
+        const glm::vec4 ink(glm::vec3(textColor) * 0.75f, textColor.a);
+        auto chevron = [&](const UIWidgetRect& r, bool up)
+        {
+            const float unit = std::max(1.0f, std::min(r.w, r.h) * 0.16f);
+            const float cx = r.x + r.w * 0.5f;
+            const float cy = r.y + r.h * 0.5f;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float rowW = unit * (5.0f - 2.0f * static_cast<float>(i));
+                const float dy   = (up ? -1.0f : 1.0f) * (static_cast<float>(i) - 1.0f) * unit;
+                quad(out, cx - rowW * 0.5f, cy + dy - unit * 0.5f, rowW, unit, ink, {}, 0.0f);
+            }
+        };
+        chevron(upR, true);
+        chevron(downR, false);
+    }
+    if (hasClear)
+    {
+        // Two diagonals out of small squares, like the chevron above and for
+        // its reason: the field draws with quads, and a cross that needed a
+        // glyph would tie every search box to a font having been loaded — the
+        // same rule the title bar's ASCII buttons follow. Rotating two bars
+        // would have been shorter and would not survive the element itself
+        // being rotated: the manager stamps ITS rotation over every quad a type
+        // emits (see the fold in WidgetManager::extract).
+        const glm::vec4 ink(glm::vec3(textColor) * 0.75f, textColor.a);
+        const float unit = std::max(1.0f, clearR.h * 0.11f);
+        const float cx = clearR.x + clearR.w * 0.5f;
+        const float cy = clearR.y + clearR.h * 0.5f;
+        quad(out, cx - unit * 0.5f, cy - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+        for (int i = 1; i <= 2; ++i)
+        {
+            const float d = static_cast<float>(i) * unit;
+            // The four arms, two squares each. The middle belongs to both
+            // diagonals and is drawn once, above — twice would be a second quad
+            // in exactly the same place, which costs a draw and shows in the
+            // alpha where the two overlap.
+            quad(out, cx - d - unit * 0.5f, cy - d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+            quad(out, cx + d - unit * 0.5f, cy + d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+            quad(out, cx - d - unit * 0.5f, cy + d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+            quad(out, cx + d - unit * 0.5f, cy - d - unit * 0.5f, unit, unit, ink, {}, 0.0f);
+        }
+    }
 
-    if (text.empty() && !st.focused)
+    // The placeholder goes away when somebody starts EDITING, not when the tab
+    // order walks past: a hint that vanishes because the focus went by leaves an
+    // empty box that says nothing about itself.
+    if (text.empty() && !st.editing)
     {
         emitText(*this, placeholder, tp, ts, sizePx,
                  glm::vec4(glm::vec3(textColor) * 0.5f, textColor.a * 0.7f), false, out);
@@ -662,47 +1956,235 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     // emitted with — this is what puts the caret and the selection where the
     // characters actually are.
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    auto widthTo = [&](size_t byteEnd)
+    auto runWidth = [&](const std::string& shown)
     {
-        const std::string run = shownFor(text.substr(0, std::min(byteEnd, text.size())));
-        if (run.empty()) return 0.0f;
+        if (shown.empty()) return 0.0f;
         HE::UITextLayout opts;
-        return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
-                  : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
+        return (f ? HE::measureUIText(*f, shown, sizePx, 0.0f, opts)
+                  : HE::measureUIText(shown, sizePx, 0.0f, opts)).x;
     };
+    auto widthTo = [&](size_t byteEnd)
+    { return runWidth(shownFor(text.substr(0, std::min(byteEnd, text.size())))); };
+
+    // ── More than one line ───────────────────────────────────────────────────
+    // Its own path rather than a handful of conditionals in the one below: a
+    // multiline field scrolls the other way, aligns to the top, and draws its
+    // selection as several rectangles. Sharing the body would mean a `multiline`
+    // test on nearly every line of it, and every single-line field — which is
+    // every field authored so far — has to keep drawing exactly as it did.
+    if (multiline)
+    {
+        // Measured BEFORE the lines are asked for, because the lines depend on
+        // them: this is the one place that knows how wide the text may be.
+        wrapWidthPx = ts.x;
+        wrapSizePx  = sizePx;
+        const std::vector<HE::UITextVisualLine> lines = visualLines();
+        HE::UITextLayout lopts;                 // alignH left, alignV TOP
+        lopts.alignV = 0;
+        const float step = sizePx * lopts.lineSpacing;
+
+        contentHeightPx = static_cast<float>(lines.size() - 1) * step + sizePx;
+        viewHeightPx    = std::max(1.0f, ts.y - 2.0f * pad);
+
+        // Keep the caret in view. Only while focused: a reader who scrolled up
+        // to look at something should not be yanked back by a caret they are not
+        // moving.
+        const size_t caretLine = HE::uiVisualLineOfOffset(lines, caret);
+        if (st.editing)
+        {
+            const float top = static_cast<float>(caretLine) * step;
+            if (top < scrollPxY)                      scrollPxY = top;
+            if (top + step > scrollPxY + viewHeightPx) scrollPxY = top + step - viewHeightPx;
+        }
+        // Never leave empty space below while text hangs off the top — what
+        // happens when the field grows or lines are deleted.
+        const float maxScroll = std::max(0.0f, contentHeightPx - viewHeightPx);
+        if (scrollPxY > maxScroll) scrollPxY = maxScroll;
+        if (scrollPxY < 0.0f)      scrollPxY = 0.0f;
+
+        const float x0   = tp.x;
+        const float yTop = px.y + pad - scrollPxY;
+        auto lineY = [&](size_t i) { return yTop + static_cast<float>(i) * step; };
+        auto shownUpTo = [&](const HE::UITextVisualLine& ln, size_t byte)
+        {
+            const size_t b = std::min(std::max(byte, ln.begin), ln.end);
+            return runWidth(shownFor(text.substr(ln.begin, b - ln.begin)));
+        };
+
+        // Selection first, behind the glyphs. Three shapes in one loop: the
+        // first line from the anchor to its end, whole lines in between, the
+        // last from its start to the caret.
+        if (st.editing && selectable && hasSelection())
+        {
+            const size_t a = selMin(), b = selMax();
+            for (size_t i = 0; i < lines.size(); ++i)
+            {
+                const HE::UITextVisualLine& ln = lines[i];
+                if (ln.end < a || ln.begin > b) continue;
+                const float xa = shownUpTo(ln, a), xb = shownUpTo(ln, b);
+                // A line whose newline is inside the selection gets a small stub
+                // past its last character. Without it a selected blank line is
+                // invisible, and a multi-line selection looks like several
+                // unrelated highlights instead of one run.
+                const float stub = (ln.end < b) ? sizePx * 0.35f : 0.0f;
+                const float y = lineY(i);
+                if (y + sizePx < px.y || y > px.y + px.h) continue;
+                quad(out, x0 + xa, y, std::max(1.0f, xb - xa + stub), sizePx, selectionColor);
+            }
+        }
+
+        // The glyphs, a line at a time, skipping what is scrolled out of sight.
+        // Each line is emitted into its OWN one-line rect: handing the whole
+        // string to the text layer would let it re-split and re-align, and then
+        // two different answers about where line seven is.
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            const float y = lineY(i);
+            if (y + sizePx < px.y || y > px.y + px.h) continue;
+            const HE::UITextVisualLine& ln = lines[i];
+            const std::string run = shownFor(text.substr(ln.begin, ln.end - ln.begin));
+            if (run.empty()) continue;
+            emitTextL(*this, run, { x0, y }, { ts.x, sizePx }, sizePx, textColor, lopts, out);
+        }
+
+        // The IME's unfinished text, at the caret, on the caret's line.
+        float compW = 0.0f;
+        const float caretY = lineY(caretLine);
+        const float caretX = shownUpTo(lines[caretLine], caret);
+        if (st.editing && !composition.empty())
+        {
+            HE::UITextLayout copts; copts.alignV = 0;
+            compW = runWidth(composition);
+            emitTextL(*this, composition, { x0 + caretX, caretY }, { ts.x, sizePx },
+                      sizePx, textColor, copts, out);
+            quad(out, x0 + caretX, caretY + sizePx - std::max(1.0f, sizePx * 0.06f),
+                 std::max(1.0f, compW), std::max(1.0f, sizePx * 0.06f), textColor);
+        }
+
+        if (st.editing)
+        {
+            float cx = caretX;
+            if (!composition.empty())
+            {
+                const size_t upTo = compositionCursor < 0
+                    ? composition.size()
+                    : std::min(static_cast<size_t>(compositionCursor), composition.size());
+                cx += runWidth(composition.substr(0, upTo));
+            }
+            quad(out, x0 + cx, caretY, std::max(1.0f, sizePx * 0.08f), sizePx, textColor);
+        }
+        return;
+    }
+
+    // ── Sideways scroll ──────────────────────────────────────────────────────
+    // Keep the caret inside the visible strip. Without this a field you can type
+    // more into than it is wide grows a caret that walks off the right edge and
+    // takes the text you are typing with it. Unfocused fields snap back to the
+    // start, because that is the half a reader wants to see.
+    const float inner = std::max(1.0f, ts.x);
+    if (!st.editing) scrollPx = 0.0f;
+    else
+    {
+        const float caretX = widthTo(caret);
+        if (caretX - scrollPx > inner) scrollPx = caretX - inner;
+        if (caretX - scrollPx < 0.0f)  scrollPx = caretX;
+        // Never leave empty space on the right while text hangs off the left —
+        // what happens when the field grows or the text shrinks.
+        const float total = widthTo(text.size());
+        if (total - scrollPx < inner) scrollPx = std::max(0.0f, total - inner);
+        if (scrollPx < 0.0f) scrollPx = 0.0f;
+    }
+    const glm::vec2 sp{ tp.x - scrollPx, tp.y };
 
     // Selection behind the text, so the glyphs stay readable on top of it.
-    if (st.focused && selectable && hasSelection())
+    if (st.editing && selectable && hasSelection())
     {
         const float x0 = widthTo(selMin()), x1 = widthTo(selMax());
         const float h  = std::min(px.h - 4.0f, sizePx * 1.25f);
-        quad(out, tp.x + x0, px.y + (px.h - h) * 0.5f, std::max(1.0f, x1 - x0), h,
+        quad(out, sp.x + x0, px.y + (px.h - h) * 0.5f, std::max(1.0f, x1 - x0), h,
              selectionColor);
     }
 
-    emitText(*this, shownFor(text), tp, ts, sizePx, textColor, false, out);
+    emitText(*this, shownFor(text), sp, ts, sizePx, textColor, false, out);
+
+    // ── The IME's unfinished text ────────────────────────────────────────────
+    // Drawn AT the caret and pushed in front of whatever follows it, because
+    // that is where it will land when the input method commits. Underlined
+    // rather than coloured differently: an underline is what every platform's
+    // preedit looks like, and it survives a theme that made the text any colour.
+    float compositionWidth = 0.0f;
+    if (st.editing && !composition.empty())
+    {
+        const float caretX = widthTo(caret);
+        const glm::vec2 cp{ sp.x + caretX, sp.y };
+        // Measured the same way the field measures everything else.
+        HE::UITextLayout copts;
+        compositionWidth = (f ? HE::measureUIText(*f, composition, sizePx, 0.0f, copts)
+                              : HE::measureUIText(composition, sizePx, 0.0f, copts)).x;
+
+        emitText(*this, composition, cp, ts, sizePx, textColor, false, out);
+        // The underline: one thin quad under the run, at the text's own colour.
+        const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
+        const float baseY = px.y + (px.h - h) * 0.5f + h;
+        quad(out, cp.x, baseY - std::max(1.0f, sizePx * 0.06f),
+             std::max(1.0f, compositionWidth), std::max(1.0f, sizePx * 0.06f), textColor);
+    }
 
     // The caret: a thin bar at its offset, not a "|" glued to the end of the
     // string — that could only ever be at the end, which is why the field had
-    // no way to edit anywhere else.
-    if (st.focused)
+    // no way to edit anywhere else. While an IME is composing it sits inside the
+    // composition, where that input method put it.
+    if (st.editing)
     {
         const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
-        quad(out, tp.x + widthTo(caret), px.y + (px.h - h) * 0.5f,
+        float caretX = widthTo(caret);
+        if (!composition.empty())
+        {
+            // -1 = the IME did not say; the end of its own text is the sane place.
+            const size_t upTo = compositionCursor < 0
+                ? composition.size()
+                : std::min(static_cast<size_t>(compositionCursor), composition.size());
+            HE::UITextLayout copts;
+            const std::string run = composition.substr(0, upTo);
+            const float inner = run.empty() ? 0.0f
+                : (f ? HE::measureUIText(*f, run, sizePx, 0.0f, copts)
+                     : HE::measureUIText(run, sizePx, 0.0f, copts)).x;
+            caretX += inner;
+        }
+        quad(out, sp.x + caretX, px.y + (px.h - h) * 0.5f,
              std::max(1.0f, sizePx * 0.08f), h, textColor);
     }
 }
 
+// The rows the field shows. One function, three callers — render, caretAtPoint
+// and the manager's arrow keys — because the alternative is three answers to
+// "where does row two begin", and the caret ends up beside its own glyphs.
+std::vector<HE::UITextVisualLine> UITextInput::visualLines() const
+{
+    // Wrapping needs a width, and the width is only known once the field has
+    // been drawn. Not yet drawn, not wrapping, not multiline, or a password
+    // (see the header): the authored breaks, exactly as before.
+    if (!multiline || !wrapText || password || wrapWidthPx <= 0.0f || wrapSizePx <= 0.0f)
+        return HE::uiTextVisualLines(text);
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
+    return HE::uiTextWrapRanges(font, text, wrapSizePx, wrapWidthPx);
+}
+
 // Byte offset in `text` nearest to a point `localX` pixels into the field's
 // text area — what a click has to answer to put the caret where it was aimed.
-size_t UITextInput::caretAtX(float localX, float pxScaleY) const
+size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY,
+                                 float fontScale) const
 {
-    const float sizePx = fontSize * pxScaleY;
+    // The same product render() drew with. This is the first of the two places
+    // that break QUIETLY when the reader's text size is not passed through: the
+    // glyphs are wide and the walk below measures them narrow, so the caret
+    // lands a few characters short of where it was aimed and nothing looks wrong.
+    const float sizePx = fontSize * pxScaleY * fontScale;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
     HE::UITextLayout opts;
-    auto widthTo = [&](size_t byteEnd)
+    auto runWidth = [&](std::string run)
     {
-        std::string run = text.substr(0, std::min(byteEnd, text.size()));
         if (password)
         {
             std::string dots;
@@ -713,14 +2195,42 @@ size_t UITextInput::caretAtX(float localX, float pxScaleY) const
         return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
                   : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
     };
-    if (localX <= 0.0f) return 0;
+
+    // Which line the click landed on, and where that line starts and ends. A
+    // single-line field is the same walk over one range that covers everything,
+    // so there is one loop below and not two.
+    size_t lo = 0, hi = text.size();
+    if (multiline)
+    {
+        const std::vector<HE::UITextVisualLine> lines = visualLines();
+        const float step = sizePx * opts.lineSpacing;
+        // Undo the vertical scroll and the top padding the same way render() put
+        // them in. A click above the first line lands on it, below the last on
+        // that one — dragging off the top of a field should not deselect.
+        const float rel = localY + scrollPxY;
+        long idx = step > 0.0f ? static_cast<long>(std::floor(rel / step)) : 0;
+        if (idx < 0) idx = 0;
+        if (idx >= static_cast<long>(lines.size())) idx = static_cast<long>(lines.size()) - 1;
+        lo = lines[static_cast<size_t>(idx)].begin;
+        hi = lines[static_cast<size_t>(idx)].end;
+    }
+    else
+    {
+        // The click arrives relative to the field's text area; a single-line
+        // field's text may be scrolled sideways, so undo that first or every
+        // click past the scroll point lands on the wrong character.
+        localX += scrollPx;
+    }
+
+    if (localX <= 0.0f) return lo;
     // Walk the boundaries and take the one whose midpoint the click passed —
     // clicking the left half of a character puts the caret before it.
-    size_t best = 0;
-    for (size_t i = 0; i < text.size(); )
+    size_t best = lo;
+    for (size_t i = lo; i < hi; )
     {
         const size_t next = uiUtf8Next(text, i);
-        const float a = widthTo(i), b = widthTo(next);
+        const float a = runWidth(text.substr(lo, i - lo));
+        const float b = runWidth(text.substr(lo, next - lo));
         if (localX < (a + b) * 0.5f) return i;
         best = next;
         i = next;
@@ -730,17 +2240,63 @@ size_t UITextInput::caretAtX(float localX, float pxScaleY) const
 
 // ── ComboBox ─────────────────────────────────────────────────────────────────
 
+void UIComboBox::applyAutoSize(float resolvedWidth, float fontScale)
+{
+    (void)resolvedWidth;
+    const int axes = autoSizedAxes();
+    if (axes == 0) return;
+    const float fs = fontSize * fontScale;
+    HE::UITextLayout opts;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const auto measure = [&](const std::string& s) -> glm::vec2
+    {
+        if (s.empty()) return glm::vec2(0.0f);
+        return f ? HE::measureUIText(*f, s, fs, 0.0f, opts)
+                 : HE::measureUIText(s, fs, 0.0f, opts);
+    };
+    // Every option, not the selected one: see the note on autoSize. An empty
+    // list still has to be a box somebody can click, so the placeholder for it
+    // is one line of nothing rather than a width of zero.
+    float widest = 0.0f, lineH = 0.0f;
+    for (const std::string& o : options)
+    {
+        const glm::vec2 m = measure(o);
+        widest = std::max(widest, m.x);
+        lineH  = std::max(lineH, m.y);
+    }
+    if (options.empty()) lineH = measure(" ").y;
+    // The height first, because the ARROW is a square as wide as the box is
+    // tall (arrowIn), so the width cannot be known before it.
+    const float h = std::max(lineH + fs * 0.35f, fs * 1.4f);
+    if (axes & kAxisY) sizeY = h;
+    if (axes & kAxisX)
+    {
+        // Left inset, the widest option, and the arrow's square on the right —
+        // the three spans render() lays the closed box out of. contentInset
+        // reads the authored radius here, which is the canvas-unit radius, the
+        // same space this measurement is in.
+        const float pad = contentInset(cornerRadius.x);
+        // `h` and not sizeY: on an axis a stretching anchor owns, sizeY is an
+        // inset and not a height, and the arrow would come out the wrong size.
+        sizeX = pad + widest + fs * 0.25f + h;
+    }
+}
+
 void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
     glm::vec4 bg = st.hovered ? highlightColor : backColor;
-    quad(out, px.x, px.y, px.w, px.h, bg, {}, roundedR(px.w, px.h, 4.0f));
-    const float pad = 6.0f;
+    quad(out, px.x, px.y, px.w, px.h, bg, {}, 0.0f);   // radius is stamped (authored)
+    // The inset follows the ROUNDING, not a fixed number: on a pill-shaped combo
+    // a fixed 6 puts the first letters out over the curve.
+    const float pad = contentInset(cornerRadius.x * pxScaleY);
     emitText(*this, currentText(), { px.x + pad, px.y }, { px.w - px.h - pad, px.h },
-             fontSize * pxScaleY, textColor, false, out);
-    // Dropdown indicator ("v") in the right box.
-    emitText(*this, "v", { px.x + px.w - px.h, px.y }, { px.h, px.h },
-             fontSize * pxScaleY, textColor, true, out);
+             st.fontPx(fontSize, pxScaleY), textColor, false, out);
+    // The indicator. It used to be the LETTER "v" set in the UI font, which is
+    // what it looked like: a letter. Now it is the same triangle the designer
+    // draws, from the same numbers, and it turns over while the list is down —
+    // the one piece of state a combo has that its own rectangle cannot show.
+    triangle(out, arrowIn(px), glm::vec4(glm::vec3(textColor), textColor.a * 0.8f), open);
 }
 
 // ── JSON (type-specific fields; base fields handled by the tree serializer) ───
@@ -764,15 +2320,38 @@ void UIBoxBase::writeJson(nlohmann::json& j) const
     // Written only once used, so a box authored before this existed stays
     // byte-identical.
     if (sizeToContent) j["sizeToContent"] = true;
-    if (minSizeX > 0.0f || minSizeY > 0.0f) j["minSize"] = { minSizeX, minSizeY };
+    // "minSize" used to be written here and is written by the tree serializer
+    // now, into this very object — same key, same condition, so every box that
+    // carries one still saves and loads byte-identically.
 }
 void UIBoxBase::readJson(const nlohmann::json& j)
 {
     padding = j.value("padding", padding); spacing = j.value("spacing", spacing);
     sizeToContent = j.value("sizeToContent", false);
-    if (const auto& m = j.value("minSize", nlohmann::json::array()); m.size() >= 2)
-    { minSizeX = m[0].get<float>(); minSizeY = m[1].get<float>(); }
 }
+
+void UIGrid::writeJson(nlohmann::json& j) const
+{
+    UIBoxBase::writeJson(j);
+    j["columns"] = columns;
+    j["rows"]    = rows;
+    j["rowSpacing"] = rowSpacing;
+}
+void UIGrid::readJson(const nlohmann::json& j)
+{
+    UIBoxBase::readJson(j);
+    if (const auto c = j.find("columns"); c != j.end() && c->is_array())
+        columns = c->get<std::vector<std::string>>();
+    if (const auto r = j.find("rows"); r != j.end() && r->is_array())
+        rows = r->get<std::vector<std::string>>();
+    rowSpacing = j.value("rowSpacing", rowSpacing);
+    reparse();
+}
+
+void UIWrapBox::writeJson(nlohmann::json& j) const
+{ UIBoxBase::writeJson(j); j["lineSpacing"] = lineSpacing; }
+void UIWrapBox::readJson(const nlohmann::json& j)
+{ UIBoxBase::readJson(j); lineSpacing = j.value("lineSpacing", lineSpacing); }
 
 // The offset and the measured content extent are runtime state: a menu that
 // reopens where it was last scrolled to is a bug, not a feature.
@@ -790,22 +2369,333 @@ void UIScrollBox::readJson(const nlohmann::json& j)
 void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
                          const HE::UUID&, float, std::vector<UIRenderObject>& out) const
 {
-    const float maxOff = maxScroll();
-    if (barWidth <= 0.0f || maxOff <= 0.0f || contentExtent <= 0.0f) return;
-    const float inner = std::max(1.0f, sizeY - 2.0f * padding);
-    // Screen pixels per canvas unit on this axis, so the bar is drawn in the
-    // same space as the rect handed in.
-    const float scaleY = px.h / std::max(1.0f, sizeY);
-    const float scaleX = px.w / std::max(1.0f, sizeX);
+    // Where the thumb goes is not this function's business: it is the same
+    // question a press on the bar asks, and both go through uiScrollThumbRect.
+    UIWidgetRect th;
+    if (!uiScrollThumbRect(*this, px, th)) return;
+    quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
+}
 
-    const float visibleFrac = std::min(1.0f, inner / contentExtent);
-    const float trackPx     = inner * scaleY;
-    const float thumbPx     = std::max(12.0f, trackPx * visibleFrac);
-    const float t           = maxOff > 0.0f ? (scrollOffset / maxOff) : 0.0f;
-    const float x = px.x + px.w - (barWidth + padding) * scaleX;
-    const float y = px.y + padding * scaleY + t * (trackPx - thumbPx);
-    quad(out, x, y, barWidth * scaleX, thumbPx, barColor, HE::UUID{},
-         barWidth * scaleX * 0.5f);
+// ── ListView: the header's arithmetic (plan 13.1) ────────────────────────────
+
+std::vector<float> UIListView::parseColumnWidths(const std::string& s)
+{
+    std::vector<float> out;
+    std::size_t i = 0;
+    while (i < s.size())
+    {
+        const std::size_t comma = s.find(',', i);
+        const std::string tok = s.substr(i, comma == std::string::npos ? std::string::npos
+                                                                       : comma - i);
+        try
+        {
+            const float v = std::stof(tok);
+            // A column of zero or of a negative width is not a column. Dropping
+            // it here rather than clamping keeps the repair rule below honest:
+            // what is left is what could be read, and the rest is filled in.
+            if (v > 0.0f && std::isfinite(v)) out.push_back(v);
+        }
+        catch (...) { /* not a number: the same as not being there */ }
+        if (comma == std::string::npos) break;
+        i = comma + 1;
+    }
+    return out;
+}
+
+std::string UIListView::formatColumnWidths(const std::vector<float>& w)
+{
+    std::string out;
+    for (std::size_t i = 0; i < w.size(); ++i)
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1f", w[i]);
+        // Whole numbers stay whole: "120" reads as a width, "120.0" reads as a
+        // machine having been here.
+        std::string tok = buf;
+        if (tok.size() > 2 && tok.compare(tok.size() - 2, 2, ".0") == 0)
+            tok.erase(tok.size() - 2);
+        if (i) out += ',';
+        out += tok;
+    }
+    return out;
+}
+
+std::vector<float> UIListView::columnFractions() const
+{
+    const int n = static_cast<int>(headerLabels.size());
+    if (n <= 0) return {};
+    std::vector<float> w = parseColumnWidths(columnWidths);
+    // Too many entries fall away; missing ones take an equal share of what the
+    // ones that ARE there average out to, so a column added to the template
+    // arrives the size of its neighbours rather than hair-thin. The same shape
+    // as a selection that points past the end: repaired, never refused.
+    if (static_cast<int>(w.size()) > n) w.resize(static_cast<std::size_t>(n));
+    if (w.empty())
+    {
+        w.assign(static_cast<std::size_t>(n), 1.0f);
+    }
+    else if (static_cast<int>(w.size()) < n)
+    {
+        float s = 0.0f;
+        for (const float v : w) s += v;
+        const float avg = s / static_cast<float>(w.size());
+        w.resize(static_cast<std::size_t>(n), avg > 0.0f ? avg : 1.0f);
+    }
+    float sum = 0.0f;
+    for (const float v : w) sum += v;
+    if (sum <= 0.0f) { w.assign(static_cast<std::size_t>(n), 1.0f); sum = static_cast<float>(n); }
+    for (float& v : w) v /= sum;
+    return w;
+}
+
+void UIListView::columnLayout(float innerX, float innerW, float k,
+                              float padTemplate, float gapTemplate,
+                              const std::vector<float>& fractions,
+                              std::vector<float>& outX, std::vector<float>& outW)
+{
+    outX.clear(); outW.clear();
+    const int n = static_cast<int>(fractions.size());
+    if (n <= 0) return;
+    outX.reserve(fractions.size()); outW.reserve(fractions.size());
+    // The row template's root box insets and gaps its cells, and a header that
+    // ignored those would sit a padding to the left of every column it names.
+    const float pad = std::max(0.0f, padTemplate) * k;
+    const float gap = std::max(0.0f, gapTemplate) * k;
+    const float avail = std::max(0.0f, innerW - 2.0f * pad - (n - 1) * gap);
+    float cursor = innerX + pad;
+    for (int i = 0; i < n; ++i)
+    {
+        const float w = avail * fractions[static_cast<std::size_t>(i)];
+        outX.push_back(cursor);
+        outW.push_back(w);
+        cursor += w + gap;
+    }
+}
+
+void UIListView::headerLayout(const UIWidgetRect& px,
+                              std::vector<float>& outX, std::vector<float>& outW) const
+{
+    outX.clear(); outW.clear();
+    if (headerLabels.empty()) return;
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float innerX = px.x + padding * scaleX;
+    const float innerW = std::max(0.0f, px.w - 2.0f * padding * scaleX);
+    // Template units into this rect's pixels. A row fills the list's inner
+    // width, so the template's canvas width IS that width; with no template
+    // read yet the two numbers it scales are zero and the factor is moot.
+    const float k = columnCanvasW > 0.0f ? innerW / columnCanvasW : 1.0f;
+    columnLayout(innerX, innerW, k, columnPadding, columnSpacing,
+                 columnFractions(), outX, outW);
+}
+
+UIListView::HeaderHit UIListView::headerAtPoint(const UIWidgetRect& px,
+                                                float x, float y) const
+{
+    HeaderHit hit;
+    if (headerExtent() <= 0.0f) return hit;
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float scaleY = px.h / std::max(1.0f, sizeY);
+    const float top = px.y + padding * scaleY;
+    const float bot = top + headerExtent() * scaleY;
+    if (y < top || y > bot || x < px.x || x > px.x + px.w) return hit;
+    hit.inBand = true;
+
+    std::vector<float> hx, hw;
+    headerLayout(px, hx, hw);
+    // The seams FIRST. A divider is a few pixels wide and sits on the edge of
+    // two titles, so asking about the titles first would swallow every one.
+    const float grab = std::max(3.0f, 4.0f * scaleX);
+    for (std::size_t i = 0; i + 1 < hx.size(); ++i)
+    {
+        const float seam = hx[i] + hw[i];
+        if (x >= seam - grab && x <= seam + grab)
+        {
+            hit.column = static_cast<int>(i);
+            hit.divider = true;
+            return hit;
+        }
+    }
+    for (std::size_t i = 0; i < hx.size(); ++i)
+        if (x >= hx[i] && x < hx[i] + hw[i]) { hit.column = static_cast<int>(i); return hit; }
+    return hit;   // in the band, past the last column
+}
+
+bool UIListView::dragColumnDivider(const UIWidgetRect& px, int col, float x)
+{
+    std::vector<float> hx, hw;
+    headerLayout(px, hx, hw);
+    const int n = static_cast<int>(hx.size());
+    if (col < 0 || col + 1 >= n) return false;
+    // The pair's total is fixed: a divider takes from the next column exactly
+    // what it gives the one before it. Nothing in this system scrolls
+    // sideways, so there is nowhere else for the difference to go.
+    const float total = hw[static_cast<std::size_t>(col)] + hw[static_cast<std::size_t>(col) + 1];
+    if (total <= 0.0f) return false;
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float minW = std::min(8.0f * scaleX, total * 0.5f);
+    float first = x - hx[static_cast<std::size_t>(col)];
+    first = std::clamp(first, minW, total - minW);
+    if (std::abs(first - hw[static_cast<std::size_t>(col)]) < 0.01f) return false;
+    hw[static_cast<std::size_t>(col)] = first;
+    hw[static_cast<std::size_t>(col) + 1] = total - first;
+    // Written back in the element's OWN units, not in the pixels this drag
+    // happened to be in: the same table on a canvas scaled by two would
+    // otherwise save numbers twice as large for the same columns.
+    const float inv = scaleX > 0.0f ? 1.0f / scaleX : 1.0f;
+    std::vector<float> units(hw.size());
+    for (std::size_t i = 0; i < hw.size(); ++i) units[i] = hw[i] * inv;
+    columnWidths = formatColumnWidths(units);
+    return true;
+}
+
+// ── ListView ─────────────────────────────────────────────────────────────────
+// Three things, in this order: the surface (so the border, the rounding and the
+// gradient have a first quad to be stamped onto), the two row states the rows
+// themselves cannot know about, and the scrollbar.
+//
+// The row CONTENT is not drawn here at all — every row is a real widget grafted
+// under this element, and the ordinary element loop draws it after this one.
+void UIListView::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                        const HE::UUID& mat, float pxScaleY,
+                        std::vector<UIRenderObject>& out) const
+{
+    // Always emitted, even fully transparent: it is the element's own rectangle
+    // and therefore the quad the surface style is applied to. Without it a list
+    // could not have a border.
+    quad(out, px.x, px.y, px.w, px.h, backColor, mat, 0.0f, textureAssetId);
+
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+    const float scaleY = px.h / std::max(1.0f, sizeY);
+    // Below the header, like everything else that measures from the first row:
+    // the highlight quads are the FIFTH place the band shifts, and the one that
+    // shows up as a selection marking the row above the one that was clicked.
+    const float innerY = px.y + (padding + headerExtent()) * scaleY;
+    const float innerH = innerHeight() * scaleY;
+    const float rowX   = px.x + padding * scaleX;
+    const float rowW   = std::max(0.0f, px.w - 2.0f * padding * scaleX);
+
+    // ── The header band ──────────────────────────────────────────────────────
+    // Drawn here and not after the rows: a row scrolled half out of view is cut
+    // off below the band by childClipTopInset, so nothing can reach up into it.
+    if (headerExtent() > 0.0f && rowW > 0.0f)
+    {
+        const float hy = px.y + padding * scaleY;
+        const float hh = headerExtent() * scaleY;
+        if (headerColor.a > 0.0f) quad(out, rowX, hy, rowW, hh, headerColor);
+
+        std::vector<float> hx, hw;
+        headerLayout(px, hx, hw);
+        const float sizePx = st.fontPx(headerFontSize, pxScaleY);
+        for (std::size_t i = 0; i < hx.size(); ++i)
+        {
+            if (hx[i] >= rowX + rowW) break;                    // clipped away
+            const float w = std::min(hw[i], rowX + rowW - hx[i]);
+            if (w <= 0.0f) continue;
+            emitText(*this, headerLabels[i], { hx[i], hy }, { w, hh },
+                     sizePx, headerTextColor, false, out);
+            // The seam, drawn only where there is a next column to divide from.
+            if (i + 1 < hx.size())
+            {
+                const float sw = std::max(1.0f, scaleX);
+                quad(out, hx[i] + hw[i] - sw * 0.5f, hy, sw, hh,
+                     glm::vec4(headerTextColor.r, headerTextColor.g, headerTextColor.b,
+                               headerTextColor.a * 0.25f));
+            }
+            // The sort marker: a stepped wedge of three quads rather than a
+            // glyph, because the UI font has no arrows in it.
+            if (static_cast<int>(i) == sortColumn)
+            {
+                const float t  = std::max(2.0f, 3.0f * scaleY);
+                const float cy = hy + hh * 0.5f - t * 1.5f;
+                const float cx = hx[i] + w - std::max(4.0f, 6.0f * scaleX);
+                for (int s = 0; s < 3; ++s)
+                {
+                    // Ascending points UP: the narrow step is at the top.
+                    const int step = sortAscending ? s : 2 - s;
+                    const float bw = t * (step + 1);
+                    quad(out, cx - bw * 0.5f, cy + s * t, bw, t, headerTextColor);
+                }
+            }
+        }
+    }
+
+    // One row's highlight, clipped to the inner rect BY HAND. The element's own
+    // quads are not covered by its clipChildren (that governs its children), so
+    // a half-scrolled row would otherwise paint over the border.
+    auto rowQuad = [&](int item, const glm::vec4& c)
+    {
+        if (c.a <= 0.001f || item < 0 || item >= itemCount) return;
+        const float top = innerY + (item * rowStep() - scrollOffset) * scaleY;
+        const float y0  = std::max(top, innerY);
+        const float y1  = std::min(top + rowHeight * scaleY, innerY + innerH);
+        if (y1 <= y0 || rowW <= 0.0f) return;
+        quad(out, rowX, y0, rowW, y1 - y0, c, HE::UUID{},
+             roundedR(rowW, y1 - y0, 3.0f));
+    };
+    for (const int s : selection) rowQuad(s, rowSelectedColor);
+    // Hover under selection would be invisible on the picked row, so it goes on
+    // top — and is skipped there, because a lighter version of the same row is
+    // noise rather than feedback.
+    if (hoveredRow >= 0 && !isSelected(hoveredRow)) rowQuad(hoveredRow, rowHoverColor);
+
+    // Same sum as the scroll box's, because it is now literally the same sum.
+    UIWidgetRect th;
+    if (uiScrollThumbRect(*this, px, th))
+        quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
+}
+
+// The item count, the offset and the selection are all runtime state: a list
+// that reopened pre-scrolled to row 400 of data nobody has loaded yet would be
+// showing a picture of the last run.
+void UIListView::writeJson(nlohmann::json& j) const
+{
+    j["rowWidget"] = rowWidget;
+    j["rowHeight"] = rowHeight;
+    j["padding"] = padding;
+    j["spacing"] = spacing;
+    j["backColor"] = colJson(backColor);
+    j["rowHoverColor"] = colJson(rowHoverColor);
+    j["rowSelectedColor"] = colJson(rowSelectedColor);
+    j["selectionMode"] = selectionMode;
+    j["barWidth"] = barWidth;
+    j["barColor"] = colJson(barColor);
+    // Not one header key while the header is off, so every list authored before
+    // tables existed saves byte-identical. Sort Column and Sort Ascending are
+    // NOT among them: they are the owner's, set per run like the item count,
+    // and a table that reopened sorted by a column nobody sorted would be
+    // showing a picture of the last run.
+    if (showHeader)
+    {
+        j["showHeader"] = true;
+        j["headerHeight"] = headerHeight;
+        j["headerColor"] = colJson(headerColor);
+        j["headerTextColor"] = colJson(headerTextColor);
+        j["headerFontSize"] = headerFontSize;
+        j["resizableColumns"] = resizableColumns;
+        // The widths a person dragged ARE authored the moment they let go, so
+        // this one is written — that is the whole reason it is a string.
+        j["columnWidths"] = columnWidths;
+    }
+}
+void UIListView::readJson(const nlohmann::json& j)
+{
+    rowWidget = j.value("rowWidget", rowWidget);
+    rowHeight = j.value("rowHeight", rowHeight);
+    padding   = j.value("padding", padding);
+    spacing   = j.value("spacing", spacing);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
+    rowHoverColor = colFrom(j.value("rowHoverColor", nlohmann::json()), rowHoverColor);
+    rowSelectedColor = colFrom(j.value("rowSelectedColor", nlohmann::json()), rowSelectedColor);
+    selectionMode = j.value("selectionMode", selectionMode);
+    barWidth = j.value("barWidth", barWidth);
+    barColor = colFrom(j.value("barColor", nlohmann::json()), barColor);
+    showHeader = j.value("showHeader", false);
+    headerHeight = j.value("headerHeight", headerHeight);
+    headerColor = colFrom(j.value("headerColor", nlohmann::json()), headerColor);
+    headerTextColor = colFrom(j.value("headerTextColor", nlohmann::json()), headerTextColor);
+    headerFontSize = j.value("headerFontSize", headerFontSize);
+    resizableColumns = j.value("resizableColumns", resizableColumns);
+    columnWidths = j.value("columnWidths", std::string());
 }
 
 void UIImage::writeJson(nlohmann::json& j) const
@@ -832,7 +2722,15 @@ void UIImage::readJson(const nlohmann::json& j)
 
 void UIText::writeJson(nlohmann::json& j) const
 { j["text"] = text; j["fontSize"] = fontSize; j["color"] = colJson(color);
-  j["wordWrap"] = wordWrap; j["autoSize"] = autoSize; j["align"] = align; }
+  j["wordWrap"] = wordWrap; j["autoSize"] = autoSize;
+  // "align" keeps its name and meaning (the horizontal one), so a widget saved
+  // before there was a vertical alignment still loads with its text where it was.
+  j["align"] = alignH; j["alignV"] = alignV;
+  // Only when it is on: a label that never heard of markup saves byte-identically.
+  if (richText) j["richText"] = true;
+  // …and the same bargain for selecting: an existing label writes neither key,
+  // so every .hasset in the tree stays byte for byte what it was.
+  if (selectable) { j["selectable"] = true; j["selectionColor"] = colJson(selectionColor); } }
 void UIText::readJson(const nlohmann::json& j)
 { text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
   color = colFrom(j.value("color", nlohmann::json()), color);
@@ -840,21 +2738,33 @@ void UIText::readJson(const nlohmann::json& j)
   // Widgets authored before auto-size keep their hand-set box: defaulting them
   // to true would resize every existing label on load.
   autoSize = j.value("autoSize", false);
-  align    = j.value("align", align); }
+  alignH   = j.value("align", alignH);
+  // Absent = middle, which is where text always sat before this existed.
+  alignV   = j.value("alignV", alignV);
+  // Absent = off, which is the only safe default: a label authored before this
+  // may hold a literal '<' that markup would eat.
+  richText = j.value("richText", false);
+  // Absent = off, like markup: a label nobody marked selectable must not start
+  // taking the focus and the presses of whatever it sits on.
+  selectable = j.value("selectable", false);
+  selectionColor = colFrom(j.value("selectionColor", nlohmann::json()), selectionColor); }
 
 void UIButton::writeJson(nlohmann::json& j) const
 {
-    j["text"] = text; j["fontSize"] = fontSize;
+    // "text"/"fontSize"/"textColor" are deliberately NOT written any more: they
+    // are the legacy caption, and their absence is what tells the loader that
+    // this button has already been migrated to a Text child.
     j["color"] = colJson(color); j["hoveredColor"] = colJson(hoveredColor);
-    j["pressedColor"] = colJson(pressedColor); j["textColor"] = colJson(textColor);
+    j["pressedColor"] = colJson(pressedColor);
 }
 void UIButton::readJson(const nlohmann::json& j)
 {
-    text = j.value("text", text); fontSize = j.value("fontSize", fontSize);
     color = colFrom(j.value("color", nlohmann::json()), color);
     hoveredColor = colFrom(j.value("hoveredColor", nlohmann::json()), hoveredColor);
     pressedColor = colFrom(j.value("pressedColor", nlohmann::json()), pressedColor);
-    textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    // The legacy caption is NOT read into this element — it has nowhere to live
+    // here any more. uiWidgetTreeFromJson turns it into a Text child, which it
+    // can do and this cannot: an element only ever sees its own object.
 }
 
 void UICheckBox::writeJson(nlohmann::json& j) const
@@ -862,10 +2772,16 @@ void UICheckBox::writeJson(nlohmann::json& j) const
     j["checked"] = checked; j["label"] = label; j["fontSize"] = fontSize;
     j["boxColor"] = colJson(boxColor); j["checkColor"] = colJson(checkColor);
     j["textColor"] = colJson(textColor);
+    if (switchStyle) j["switch"] = true;   // byte-identical for every older file
+    if (autoSize)    j["autoSize"] = true; // same rule: only once somebody set it
 }
 void UICheckBox::readJson(const nlohmann::json& j)
 {
     checked = j.value("checked", checked); label = j.value("label", label);
+    switchStyle = j.value("switch", switchStyle);
+    // Default off, so a checkbox authored before this keeps the size it was
+    // given instead of shrinking to its label the first time it is loaded.
+    autoSize = j.value("autoSize", false);
     fontSize = j.value("fontSize", fontSize);
     boxColor = colFrom(j.value("boxColor", nlohmann::json()), boxColor);
     checkColor = colFrom(j.value("checkColor", nlohmann::json()), checkColor);
@@ -890,10 +2806,14 @@ void UISlider::readJson(const nlohmann::json& j)
 void UIProgressBar::writeJson(nlohmann::json& j) const
 {
     j["value"] = value; j["backColor"] = colJson(backColor); j["fillColor"] = colJson(fillColor);
+    // Only when it is on, so every bar authored before this saves byte for byte
+    // what it saved yesterday — the same rule B8's "Transition" follows.
+    if (indeterminate) j["indeterminate"] = true;
 }
 void UIProgressBar::readJson(const nlohmann::json& j)
 {
     value = j.value("value", value);
+    indeterminate = j.value("indeterminate", indeterminate);
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
     fillColor = colFrom(j.value("fillColor", nlohmann::json()), fillColor);
 }
@@ -907,8 +2827,24 @@ void UITextInput::writeJson(nlohmann::json& j) const
     if (password)      j["password"] = true;
     if (!editable)     j["editable"] = false;
     if (!selectable)   j["selectable"] = false;
+    if (multiline)     j["multiline"] = true;
+    if (wrapText)      j["wrapText"] = true;
     if (selectionColor != glm::vec4(0.25f, 0.45f, 0.80f, 0.75f))
         j["selectionColor"] = colJson(selectionColor);
+    // Same rule: written only when set, so every field authored before the
+    // filter existed still saves byte-identically.
+    if (inputFilter != FilterAny)  j["inputFilter"] = inputFilter;
+    if (!allowedChars.empty())     j["allowedChars"] = allowedChars;
+    if (clearButton)               j["clearButton"] = true;
+    // …and the number field. The step is written along with the switch rather
+    // than on its own, because a stepper of 1 and a stepper of 0.25 are two
+    // different controls and the file has to say which.
+    if (steppers)
+    {
+        j["steppers"] = true;
+        j["step"] = step;
+        if (minValue < maxValue) { j["minValue"] = minValue; j["maxValue"] = maxValue; }
+    }
 }
 void UITextInput::readJson(const nlohmann::json& j)
 {
@@ -921,6 +2857,15 @@ void UITextInput::readJson(const nlohmann::json& j)
     password   = j.value("password", false);
     editable   = j.value("editable", true);
     selectable = j.value("selectable", true);
+    multiline  = j.value("multiline", false);
+    wrapText   = j.value("wrapText", false);
+    inputFilter  = j.value("inputFilter", static_cast<int>(FilterAny));
+    allowedChars = j.value("allowedChars", std::string());
+    clearButton  = j.value("clearButton", false);
+    steppers = j.value("steppers", false);
+    step     = j.value("step", 1.0f);
+    minValue = j.value("minValue", 0.0f);
+    maxValue = j.value("maxValue", 0.0f);
     // The authored text decides where the caret starts, not a stale offset.
     caret = selAnchor = text.size();
 }
@@ -930,16 +2875,941 @@ void UIComboBox::writeJson(nlohmann::json& j) const
     j["options"] = options; j["selectedIndex"] = selectedIndex; j["fontSize"] = fontSize;
     j["backColor"] = colJson(backColor); j["textColor"] = colJson(textColor);
     j["highlightColor"] = colJson(highlightColor);
+    if (autoSize) j["autoSize"] = true;    // only once set, like every other switch here
 }
 void UIComboBox::readJson(const nlohmann::json& j)
 {
     if (j.contains("options") && j["options"].is_array())
         options = j["options"].get<std::vector<std::string>>();
     selectedIndex = j.value("selectedIndex", selectedIndex);
+    autoSize = j.value("autoSize", false);
     fontSize = j.value("fontSize", fontSize);
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
     textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
     highlightColor = colFrom(j.value("highlightColor", nlohmann::json()), highlightColor);
+}
+
+// ── TabBox ───────────────────────────────────────────────────────────────────
+
+bool UITabBox::hidesChild(const UIWidgetTree& tree, const UIElement& child) const
+{
+    const int idx = uiChildIndexOf(tree, id, child.id);
+    if (idx < 0) return false;                 // not one of my children
+    // A Tab Box whose activeTab is out of range shows the FIRST page rather
+    // than none: an empty-looking container is a mistake that hides itself,
+    // and a stray Set Property should not be able to blank the window.
+    const int active = activeTab >= 0 && activeTab < uiChildCountOf(tree, id) ? activeTab : 0;
+    return idx != active;
+}
+
+void UITabBox::tabLayout(const UIWidgetRect& px, float sizePx, float padPx,
+                         const std::vector<std::string>& labels, uint64_t fontAtlasKey,
+                         std::vector<float>& outX, std::vector<float>& outW)
+{
+    outX.clear(); outW.clear();
+    outX.reserve(labels.size()); outW.reserve(labels.size());
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout opts;
+    float cursor = px.x;
+    for (const std::string& label : labels)
+    {
+        const float textW = label.empty() ? 0.0f
+            : (f ? HE::measureUIText(*f, label, sizePx, 0.0f, opts)
+                 : HE::measureUIText(label, sizePx, 0.0f, opts)).x;
+        // A tab is as wide as what it says. All-equal widths look tidy until one
+        // page is called "Settings" and another "A", and then the strip is
+        // mostly empty.
+        const float w = textW + 2.0f * padPx;
+        outX.push_back(cursor);
+        outW.push_back(w);
+        cursor += w;
+    }
+}
+
+int UITabBox::tabAtPoint(const UIWidgetRect& px, float sizePx, float padPx, float tabH,
+                         const std::vector<std::string>& labels, uint64_t fontAtlasKey,
+                         float x, float y)
+{
+    if (y < px.y || y > px.y + tabH) return -1;      // below the strip is the page
+    std::vector<float> tx, tw;
+    tabLayout(px, sizePx, padPx, labels, fontAtlasKey, tx, tw);
+    for (size_t i = 0; i < tx.size(); ++i)
+    {
+        // Past the element's own right edge is not a tab, however wide the
+        // labels added up to — the strip is clipped there, so a click there
+        // lands on nothing rather than on a tab nobody can see.
+        if (tx[i] >= px.x + px.w) break;
+        if (x >= tx[i] && x < tx[i] + tw[i]) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+const UIPropTable& UITabBox::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UITabBox::activeTab>  ({ "Active Tab", UIPropType::Int }),
+        uiprop::slot<&UITabBox::tabHeight>  ({ "Tab Height", UIPropType::Float, 12.0f, 200.0f }),
+        uiprop::slot<&UITabBox::fontSize>   ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UITabBox::tabPadding> ({ "Tab Padding", UIPropType::Float, 0.0f, 100.0f }),
+        uiprop::slot<&UITabBox::stripColor> ({ "Strip Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::tabColor>   ({ "Tab Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::activeColor>({ "Active Tab Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::textColor>  ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UITabBox::pageColor>  ({ "Page Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UITabBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                      const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
+{
+    // Only the LABEL takes the reader's text size. The strip stays the height it
+    // was authored at, like every other piece of geometry — that is the line
+    // between "text is bigger" and "the whole interface is zoomed", and the
+    // second one is the display scale, which lives somewhere else.
+    const float tabH   = tabHeight * pxScaleY;
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
+    const float padPx  = tabPadding * pxScaleY;
+
+    // The page area first, behind everything the pages themselves draw.
+    if (pageColor.a > 0.0f)
+        quad(out, px.x, px.y + tabH, px.w, std::max(0.0f, px.h - tabH), pageColor);
+    quad(out, px.x, px.y, px.w, tabH, stripColor);
+
+    std::vector<float> tx, tw;
+    tabLayout(px, sizePx, padPx, tabLabels, fontAtlasKey, tx, tw);
+    for (size_t i = 0; i < tx.size(); ++i)
+    {
+        if (tx[i] >= px.x + px.w) break;                       // clipped away
+        const float w = std::min(tw[i], px.x + px.w - tx[i]);  // and the last one trimmed
+        const bool  on = static_cast<int>(i) == activeTab;
+        quad(out, tx[i], px.y, w, tabH, on ? activeColor : tabColor);
+        emitText(*this, tabLabels[i], { tx[i] + padPx, px.y }, { w - 2.0f * padPx, tabH },
+                 sizePx, textColor, false, out);
+    }
+}
+
+void UITabBox::writeJson(nlohmann::json& j) const
+{
+    j["activeTab"] = activeTab;
+    j["tabHeight"] = tabHeight;
+    j["fontSize"]  = fontSize;
+    j["tabPadding"] = tabPadding;
+    j["stripColor"]  = colJson(stripColor);
+    j["tabColor"]    = colJson(tabColor);
+    j["activeColor"] = colJson(activeColor);
+    j["textColor"]   = colJson(textColor);
+    j["pageColor"]   = colJson(pageColor);
+}
+
+void UITabBox::readJson(const nlohmann::json& j)
+{
+    activeTab  = j.value("activeTab", 0);
+    tabHeight  = j.value("tabHeight", tabHeight);
+    fontSize   = j.value("fontSize", fontSize);
+    tabPadding = j.value("tabPadding", tabPadding);
+    stripColor  = colFrom(j.value("stripColor", nlohmann::json()), stripColor);
+    tabColor    = colFrom(j.value("tabColor", nlohmann::json()), tabColor);
+    activeColor = colFrom(j.value("activeColor", nlohmann::json()), activeColor);
+    textColor   = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    pageColor   = colFrom(j.value("pageColor", nlohmann::json()), pageColor);
+}
+
+// ── Splitter ─────────────────────────────────────────────────────────────────
+
+bool UISplitter::hidesChild(const UIWidgetTree& tree, const UIElement& child) const
+{
+    // Exactly two panes. A third child is not an error worth refusing — the
+    // designer would have to stop a drop mid-gesture — but it is not drawn and
+    // takes no click, which is what makes it obvious rather than confusing.
+    return uiChildIndexOf(tree, id, child.id) >= 2;
+}
+
+float UISplitter::clampedRatio(float lengthPx) const
+{
+    if (lengthPx <= 0.0f) return 0.5f;
+    const float div = std::min(dividerSize, lengthPx);
+    const float usable = std::max(0.0f, lengthPx - div);
+    if (usable <= 0.0f) return 0.5f;
+    float first = ratio * usable;
+    // The minimums, in the order that keeps them honest when they cannot both
+    // be met: the FIRST pane's minimum is applied first, then the second's, so
+    // a splitter too short for both ends up with the second pane at its floor
+    // and the first squeezed — one of them has to give, and picking silently
+    // would be the worse answer.
+    if (first < minFirst) first = minFirst;
+    if (usable - first < minSecond) first = usable - minSecond;
+    if (first < 0.0f) first = 0.0f;
+    if (first > usable) first = usable;
+    return first / usable;
+}
+
+const UIPropTable& UISplitter::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UISplitter::vertical>   ({ "Vertical", UIPropType::Bool }),
+        uiprop::slot<&UISplitter::ratio>      ({ "Ratio", UIPropType::Float, 0.0f, 1.0f }),
+        uiprop::slot<&UISplitter::dividerSize>({ "Divider Size", UIPropType::Float, 1.0f, 40.0f }),
+        uiprop::slot<&UISplitter::minFirst>   ({ "Min First", UIPropType::Float, 0.0f, 2000.0f }),
+        uiprop::slot<&UISplitter::minSecond>  ({ "Min Second", UIPropType::Float, 0.0f, 2000.0f }),
+        uiprop::slot<&UISplitter::dividerColor>({ "Divider Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UISplitter::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                        const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
+{
+    const float len = vertical ? px.h : px.w;
+    const float div = std::min(dividerSize * pxScaleY, len);
+    const float first = clampedRatio(len) * std::max(0.0f, len - div);
+    // A little brighter while the pointer is on it, so a divider you can grab
+    // says so before you try.
+    const glm::vec4 c = st.hovered
+        ? glm::vec4(glm::min(glm::vec3(dividerColor) + 0.12f, glm::vec3(1.0f)), dividerColor.a)
+        : dividerColor;
+    if (vertical) quad(out, px.x, px.y + first, px.w, div, c);
+    else          quad(out, px.x + first, px.y, div, px.h, c);
+}
+
+void UISplitter::writeJson(nlohmann::json& j) const
+{
+    j["vertical"] = vertical;
+    j["ratio"] = ratio;
+    j["dividerSize"] = dividerSize;
+    j["minFirst"] = minFirst;
+    j["minSecond"] = minSecond;
+    j["dividerColor"] = colJson(dividerColor);
+}
+
+void UISplitter::readJson(const nlohmann::json& j)
+{
+    vertical = j.value("vertical", false);
+    ratio = j.value("ratio", 0.5f);
+    dividerSize = j.value("dividerSize", dividerSize);
+    minFirst = j.value("minFirst", minFirst);
+    minSecond = j.value("minSecond", minSecond);
+    dividerColor = colFrom(j.value("dividerColor", nlohmann::json()), dividerColor);
+}
+
+// ── Accordion ────────────────────────────────────────────────────────────────
+
+uint32_t UIAccordion::normalizedMask(uint32_t mask, int sections, bool allowMultiple)
+{
+    const int n = std::clamp(sections, 0, kMaxSections);
+    // A shift of 32 on a 32-bit value is undefined, so the full mask is spelled
+    // out rather than computed. This is the bug the "33rd section" test exists
+    // to catch, and it does not announce itself — it just works on one compiler.
+    const uint32_t keep = n >= kMaxSections ? 0xFFFFFFFFu
+                                            : ((1u << static_cast<unsigned>(n)) - 1u);
+    uint32_t m = mask & keep;
+    if (!allowMultiple && m != 0u)
+        m &= ~(m - 1u);        // the lowest set bit, and nothing else
+    return m;
+}
+
+uint32_t UIAccordion::toggledMask(uint32_t mask, int section, int sections,
+                                  bool allowMultiple)
+{
+    if (section < 0 || section >= std::clamp(sections, 0, kMaxSections)) return mask;
+    const uint32_t bit = 1u << static_cast<unsigned>(section);
+    uint32_t m = normalizedMask(mask, sections, allowMultiple);
+    if (m & bit) m &= ~bit;                        // closing is always allowed
+    else         m = allowMultiple ? (m | bit) : bit;
+    return m;
+}
+
+void UIAccordion::sectionLayout(float top, float headerH, float gap,
+                                const std::vector<float>& bodyHeights, uint32_t mask,
+                                std::vector<Slot>& out)
+{
+    out.clear();
+    out.reserve(bodyHeights.size());
+    const float h = std::max(0.0f, headerH);
+    float y = top;
+    for (std::size_t i = 0; i < bodyHeights.size(); ++i)
+    {
+        Slot s;
+        s.headerY = y;
+        y += h;
+        s.bodyY = y;
+        // Past the 32nd there is no bit to read, so the section is closed —
+        // which is also what hidesChild answers for the same child.
+        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
+                          (mask & (1u << static_cast<unsigned>(i))) != 0u;
+        s.bodyH = open ? std::max(0.0f, bodyHeights[i]) : 0.0f;
+        y += s.bodyH;
+        if (i + 1 < bodyHeights.size()) y += std::max(0.0f, gap);
+        out.push_back(s);
+    }
+}
+
+float UIAccordion::contentHeight(float headerH, float gap,
+                                 const std::vector<float>& bodyHeights, uint32_t mask)
+{
+    std::vector<Slot> slots;
+    sectionLayout(0.0f, headerH, gap, bodyHeights, mask, slots);
+    if (slots.empty()) return 0.0f;
+    return slots.back().bodyY + slots.back().bodyH;
+}
+
+int UIAccordion::headerAt(float top, float headerH, float gap,
+                          const std::vector<float>& bodyHeights, uint32_t mask, float y)
+{
+    if (headerH <= 0.0f) return -1;
+    std::vector<Slot> slots;
+    sectionLayout(top, headerH, gap, bodyHeights, mask, slots);
+    for (std::size_t i = 0; i < slots.size(); ++i)
+        if (y >= slots[i].headerY && y < slots[i].headerY + headerH)
+            return static_cast<int>(i);
+    return -1;
+}
+
+bool UIAccordion::hidesChild(const UIWidgetTree& tree, const UIElement& child) const
+{
+    const int idx = uiChildIndexOf(tree, id, child.id);
+    if (idx < 0) return false;                 // not one of my children
+    if (idx >= kMaxSections) return true;      // no bit to read: always folded
+    const uint32_t m = effectiveMask(uiChildCountOf(tree, id));
+    return (m & (1u << static_cast<unsigned>(idx))) == 0u;
+}
+
+const UIPropTable& UIAccordion::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIAccordion::expanded>       ({ "Expanded", UIPropType::Int }),
+        uiprop::slot<&UIAccordion::allowMultiple>  ({ "Allow Multiple", UIPropType::Bool }),
+        uiprop::slot<&UIAccordion::headerHeight>   ({ "Header Height", UIPropType::Float, 8.0f, 200.0f }),
+        uiprop::slot<&UIAccordion::fontSize>       ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIAccordion::spacing>        ({ "Spacing", UIPropType::Float, 0.0f, 100.0f }),
+        uiprop::slot<&UIAccordion::textIndent>     ({ "Text Indent", UIPropType::Float, 0.0f, 100.0f }),
+        uiprop::slot<&UIAccordion::headerColor>    ({ "Header Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::openHeaderColor>({ "Open Header Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::textColor>      ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::bodyColor>      ({ "Body Color", UIPropType::Color }),
+        uiprop::slot<&UIAccordion::barWidth>       ({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIAccordion::barColor>       ({ "Bar Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UIAccordion::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                         const HE::UUID& mat, float pxScaleY,
+                         std::vector<UIRenderObject>& out) const
+{
+    // The element's own rectangle, always emitted so the surface style has a
+    // quad to be applied to — the same reason the list view emits its own.
+    quad(out, px.x, px.y, px.w, px.h, glm::vec4(0.0f), mat, 0.0f, textureAssetId);
+
+    // ONE factor for everything vertical, and it is the one handed in: canvas
+    // units → pixels, an embedded widget's scale already folded into it. The
+    // press converts the other way with the same number, which is what keeps a
+    // heading clickable where it is drawn on a canvas that scales.
+    const float k       = pxScaleY;
+    const float headPx  = std::max(0.0f, headerHeight) * k;
+    const float gapPx   = std::max(0.0f, spacing) * k;
+    const float sizePx  = st.fontPx(fontSize, pxScaleY);
+    const float indent  = std::max(0.0f, textIndent) * k;
+
+    std::vector<float> bodies;
+    bodies.reserve(sectionBodies.size());
+    for (const float h : sectionBodies) bodies.push_back(std::max(0.0f, h) * k);
+
+    std::vector<Slot> slots;
+    sectionLayout(px.y - scrollOffset * k, headPx, gapPx, bodies,
+                  effectiveMask(static_cast<int>(bodies.size())), slots);
+
+    // Cut by hand at the element's own edges: clipChildren governs the CHILDREN,
+    // and these quads are the element's own, so a heading scrolled halfway out
+    // would otherwise paint over the border.
+    const float top = px.y, bottom = px.y + px.h;
+    auto band = [&](float y, float h, const glm::vec4& c, bool rounded)
+    {
+        if (c.a <= 0.001f || h <= 0.0f || px.w <= 0.0f) return;
+        const float y0 = std::max(y, top), y1 = std::min(y + h, bottom);
+        if (y1 <= y0) return;
+        quad(out, px.x, y0, px.w, y1 - y0, c, HE::UUID{},
+             rounded ? roundedR(px.w, y1 - y0, 3.0f) : 0.0f);
+    };
+
+    const uint32_t m = effectiveMask(static_cast<int>(bodies.size()));
+    for (std::size_t i = 0; i < slots.size(); ++i)
+    {
+        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
+                          (m & (1u << static_cast<unsigned>(i))) != 0u;
+        band(slots[i].bodyY, slots[i].bodyH, bodyColor, false);
+        band(slots[i].headerY, headPx, open ? openHeaderColor : headerColor, true);
+        // The label only where the band is actually on screen: a glyph run is
+        // not clipped by the band's own trimming above.
+        if (i < sectionLabels.size() && headPx > 0.0f &&
+            slots[i].headerY + headPx > top && slots[i].headerY < bottom)
+            emitText(*this, sectionLabels[i], { px.x + indent, slots[i].headerY },
+                     { std::max(0.0f, px.w - 2.0f * indent), headPx },
+                     sizePx, textColor, false, out);
+    }
+
+    UIWidgetRect th;
+    if (uiScrollThumbRect(*this, px, th))
+        quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
+}
+
+// The offset is runtime state (like the scroll box's), the mask is not: which
+// sections an author left open is part of what the widget IS.
+void UIAccordion::writeJson(nlohmann::json& j) const
+{
+    j["expanded"]      = expanded;
+    j["allowMultiple"] = allowMultiple;
+    j["headerHeight"]  = headerHeight;
+    j["fontSize"]      = fontSize;
+    j["spacing"]       = spacing;
+    j["textIndent"]    = textIndent;
+    j["headerColor"]     = colJson(headerColor);
+    j["openHeaderColor"] = colJson(openHeaderColor);
+    j["textColor"]       = colJson(textColor);
+    j["bodyColor"]       = colJson(bodyColor);
+    j["barWidth"]        = barWidth;
+    j["barColor"]        = colJson(barColor);
+}
+
+void UIAccordion::readJson(const nlohmann::json& j)
+{
+    expanded      = j.value("expanded", expanded);
+    allowMultiple = j.value("allowMultiple", allowMultiple);
+    headerHeight  = j.value("headerHeight", headerHeight);
+    fontSize      = j.value("fontSize", fontSize);
+    spacing       = j.value("spacing", spacing);
+    textIndent    = j.value("textIndent", textIndent);
+    headerColor     = colFrom(j.value("headerColor", nlohmann::json()), headerColor);
+    openHeaderColor = colFrom(j.value("openHeaderColor", nlohmann::json()), openHeaderColor);
+    textColor       = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    bodyColor       = colFrom(j.value("bodyColor", nlohmann::json()), bodyColor);
+    barWidth        = j.value("barWidth", barWidth);
+    barColor        = colFrom(j.value("barColor", nlohmann::json()), barColor);
+}
+
+// ── The Gregorian calendar, and nothing else ─────────────────────────────────
+
+bool uiIsLeapYear(int year)
+{
+    // The full rule, not the divisible-by-four half of it: 1900 was not a leap
+    // year and 2000 was, and a picker that gets February 2100 wrong is a picker
+    // that is wrong about a date somebody will type.
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+int uiDaysInMonth(int year, int month)
+{
+    static const int kDays[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month < 1 || month > 12) return 30;
+    if (month == 2 && uiIsLeapYear(year)) return 29;
+    return kDays[month - 1];
+}
+
+int uiDayOfWeek(int year, int month, int day)
+{
+    // Sakamoto's. The table shifts each month's start so that a year counted
+    // from March (where the leap day is at the END and stops mattering) can be
+    // read off with one division apiece.
+    static const int kShift[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (month < 1 || month > 12) return 0;
+    int y = year;
+    if (month < 3) y -= 1;
+    // + 7 * 400 so a negative proleptic year still lands in range; the modulo of
+    // a negative number is negative in C++ and that would index off the front.
+    y += 2800;
+    return (y + y / 4 - y / 100 + y / 400 + kShift[month - 1] + day) % 7;
+}
+
+// ── DatePicker ───────────────────────────────────────────────────────────────
+
+std::string UIDatePicker::isoDate() const
+{
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+                  clampedYear(), clampedMonth(), clampedDay());
+    return buf;
+}
+
+void UIDatePicker::dateAtCell(int index, int& outYear, int& outMonth, int& outDay) const
+{
+    const int y = clampedYear(), m = clampedMonth();
+    outYear = y; outMonth = m; outDay = 1;
+    if (index < 0 || index >= kCells) return;
+    // How far this cell is from the 1st. Negative reaches back into the month
+    // before, past the length of this one into the month after — which is what
+    // makes the grid a continuous calendar rather than a month in a box.
+    const int offset = index - firstCell();
+    const int n = uiDaysInMonth(y, m);
+    if (offset < 0)
+    {
+        const int pm = m == 1 ? 12 : m - 1;
+        const int py = m == 1 ? y - 1 : y;
+        outYear = py; outMonth = pm;
+        outDay = uiDaysInMonth(py, pm) + offset + 1;
+    }
+    else if (offset >= n)
+    {
+        outYear = m == 12 ? y + 1 : y;
+        outMonth = m == 12 ? 1 : m + 1;
+        outDay = offset - n + 1;
+    }
+    else outDay = offset + 1;
+}
+
+bool UIDatePicker::cellInMonth(int index) const
+{
+    if (index < 0 || index >= kCells) return false;
+    const int offset = index - firstCell();
+    return offset >= 0 && offset < uiDaysInMonth(clampedYear(), clampedMonth());
+}
+
+int UIDatePicker::selectedCell() const
+{
+    const int c = firstCell() + clampedDay() - 1;
+    return c >= 0 && c < kCells ? c : -1;
+}
+
+UIDatePicker::Layout UIDatePicker::layoutIn(const UIWidgetRect& r)
+{
+    Layout L;
+    // Eight rows' worth of height, split 1.25 / 0.75 / 6. Fractions of the rect
+    // rather than authored heights: it is one sum for the draw and the hit test
+    // and it needs no unit conversion, which is the whole reason a click cannot
+    // land on a different day than the one it is over.
+    const float unit = r.h / 8.0f;
+    L.header   = { r.x, r.y, r.w, unit * 1.25f };
+    L.weekdays = { r.x, L.header.y + L.header.h, r.w, unit * 0.75f };
+    L.grid     = { r.x, L.weekdays.y + L.weekdays.h, r.w,
+                   std::max(0.0f, r.h - L.header.h - L.weekdays.h) };
+    L.cellW = r.w / static_cast<float>(kCols);
+    L.cellH = L.grid.h / static_cast<float>(kRows);
+    // The arrows are square, at the caption's two ends.
+    const float a = L.header.h;
+    L.prevArrow = { r.x, r.y, a, a };
+    L.nextArrow = { r.x + r.w - a, r.y, a, a };
+    return L;
+}
+
+int UIDatePicker::cellAt(const UIWidgetRect& r, float x, float y)
+{
+    const Layout L = layoutIn(r);
+    if (L.cellW <= 0.0f || L.cellH <= 0.0f) return -1;
+    if (x < L.grid.x || x >= L.grid.x + L.grid.w) return -1;
+    if (y < L.grid.y || y >= L.grid.y + L.grid.h) return -1;
+    const int col = std::clamp(static_cast<int>((x - L.grid.x) / L.cellW), 0, kCols - 1);
+    const int row = std::clamp(static_cast<int>((y - L.grid.y) / L.cellH), 0, kRows - 1);
+    return row * kCols + col;
+}
+
+int UIDatePicker::arrowAt(const UIWidgetRect& r, float x, float y)
+{
+    const Layout L = layoutIn(r);
+    auto in = [&](const UIWidgetRect& q)
+    { return x >= q.x && x < q.x + q.w && y >= q.y && y < q.y + q.h; };
+    if (in(L.prevArrow)) return -1;
+    if (in(L.nextArrow)) return 1;
+    return 0;
+}
+
+std::string UIDatePicker::caption() const
+{
+    static const char* kMonths[12] = {
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December" };
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s %d", kMonths[clampedMonth() - 1], clampedYear());
+    return buf;
+}
+
+const char* UIDatePicker::weekdayInitial(int column, bool mondayFirst)
+{
+    static const char* kSun[7] = { "S", "M", "T", "W", "T", "F", "S" };
+    static const char* kMon[7] = { "M", "T", "W", "T", "F", "S", "S" };
+    if (column < 0 || column > 6) return "";
+    return mondayFirst ? kMon[column] : kSun[column];
+}
+
+void UIDatePicker::addMonths(int delta)
+{
+    int y = clampedYear(), m = clampedMonth(), d = clampedDay();
+    // Months since year 0, so paging across a December needs no special case.
+    long long total = static_cast<long long>(y) * 12 + (m - 1) + delta;
+    if (total < 0) total = 0;
+    y = static_cast<int>(total / 12);
+    m = static_cast<int>(total % 12) + 1;
+    year = y < 1 ? 1 : (y > 9999 ? 9999 : y);
+    month = m;
+    // The 31st of a month with 30 days is the 30th, not the 1st of the next —
+    // paging forward and back again must not walk the date away from where it
+    // started any further than the short month forces.
+    const int n = uiDaysInMonth(clampedYear(), clampedMonth());
+    day = d > n ? n : d;
+}
+
+const UIPropTable& UIDatePicker::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIDatePicker::year>         ({ "Year", UIPropType::Int }),
+        uiprop::slot<&UIDatePicker::month>        ({ "Month", UIPropType::Int }),
+        uiprop::slot<&UIDatePicker::day>          ({ "Day", UIPropType::Int }),
+        uiprop::slot<&UIDatePicker::mondayFirst>  ({ "Monday First", UIPropType::Bool }),
+        uiprop::slot<&UIDatePicker::fontSize>     ({ "FontSize", UIPropType::Float, 6.0f, 72.0f }),
+        uiprop::slot<&UIDatePicker::backColor>    ({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::headerColor>  ({ "Header Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::textColor>    ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::mutedColor>   ({ "Muted Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::selectedColor>({ "Selected Color", UIPropType::Color }),
+        uiprop::slot<&UIDatePicker::hoverColor>   ({ "Hover Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UIDatePicker::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                          const HE::UUID&, float pxScaleY,
+                          std::vector<UIRenderObject>& out) const
+{
+    // The full-rect background FIRST: that is the quad the border, the rounding
+    // and the gradient are stamped onto (WidgetManager::extract).
+    quad(out, px.x, px.y, px.w, px.h, backColor);
+
+    const Layout L = layoutIn(px);
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
+    if (headerColor.a > 0.0f)
+        quad(out, L.header.x, L.header.y, L.header.w, L.header.h, headerColor);
+
+    emitText(*this, caption(), { L.header.x + L.prevArrow.w, L.header.y },
+             { std::max(0.0f, L.header.w - 2.0f * L.prevArrow.w), L.header.h },
+             sizePx, textColor, /*centerH=*/true, out);
+
+    // The two arrows, out of the same rows-of-quads triangle the ComboBox uses —
+    // a chevron of two turned bars would lose its angle inside a rotated panel
+    // (see triangle() above), and a calendar in a tilted card is not a special
+    // case anyone should have to think about.
+    auto sideArrow = [&](const UIWidgetRect& box, bool pointLeft)
+    {
+        const float halfH = std::max(2.0f, box.h * 0.17f);
+        const int rows = std::clamp(static_cast<int>(std::ceil(halfH * 2.0f)), 3, 32);
+        const float step = (halfH * 2.0f) / static_cast<float>(rows);
+        const float top  = box.y + box.h * 0.5f - halfH;
+        const float depth = halfH * 1.15f;
+        const float cx = box.x + box.w * 0.5f;
+        for (int i = 0; i < rows; ++i)
+        {
+            // Distance from the middle row: full depth at the point, nothing at
+            // the base, which is a triangle lying on its side.
+            const float f = std::abs((static_cast<float>(i) + 0.5f) / rows - 0.5f) * 2.0f;
+            const float w = depth * (1.0f - f);
+            if (w <= 0.0f) continue;
+            const float x = pointLeft ? cx - depth * 0.5f : cx + depth * 0.5f - w;
+            const float rh = step + 0.5f;
+            quad(out, x, top + step * static_cast<float>(i), w, rh, textColor,
+                 HE::UUID{}, roundedR(w, rh, rh * 0.5f));
+        }
+    };
+    sideArrow(L.prevArrow, true);
+    sideArrow(L.nextArrow, false);
+
+    // The weekday strip.
+    const float wdSize = sizePx * 0.85f;
+    for (int c = 0; c < kCols; ++c)
+        emitText(*this, weekdayInitial(c, mondayFirst),
+                 { L.weekdays.x + L.cellW * static_cast<float>(c), L.weekdays.y },
+                 { L.cellW, L.weekdays.h }, wdSize, mutedColor, /*centerH=*/true, out);
+
+    // The days. The highlight goes down first so the number reads on top of it.
+    const int sel = selectedCell();
+    for (int i = 0; i < kCells; ++i)
+    {
+        const float cx = L.grid.x + L.cellW * static_cast<float>(i % kCols);
+        const float cy = L.grid.y + L.cellH * static_cast<float>(i / kCols);
+        if (i == sel && selectedColor.a > 0.0f)
+            quad(out, cx, cy, L.cellW, L.cellH, selectedColor, HE::UUID{},
+                 roundedR(L.cellW, L.cellH, std::min(L.cellW, L.cellH) * 0.5f));
+        else if (i == hoverCell && hoverColor.a > 0.0f)
+            quad(out, cx, cy, L.cellW, L.cellH, hoverColor, HE::UUID{},
+                 roundedR(L.cellW, L.cellH, std::min(L.cellW, L.cellH) * 0.5f));
+
+        int dy = 0, dm = 0, dd = 0;
+        dateAtCell(i, dy, dm, dd);
+        char num[4];
+        std::snprintf(num, sizeof(num), "%d", dd);
+        emitText(*this, num, { cx, cy }, { L.cellW, L.cellH }, sizePx,
+                 cellInMonth(i) ? textColor : mutedColor, /*centerH=*/true, out);
+    }
+}
+
+void UIDatePicker::writeJson(nlohmann::json& j) const
+{
+    j["year"] = year; j["month"] = month; j["day"] = day;
+    j["mondayFirst"] = mondayFirst;
+    j["fontSize"] = fontSize;
+    j["backColor"] = colJson(backColor);
+    j["headerColor"] = colJson(headerColor);
+    j["textColor"] = colJson(textColor);
+    j["mutedColor"] = colJson(mutedColor);
+    j["selectedColor"] = colJson(selectedColor);
+    j["hoverColor"] = colJson(hoverColor);
+}
+
+void UIDatePicker::readJson(const nlohmann::json& j)
+{
+    year = j.value("year", year); month = j.value("month", month);
+    day = j.value("day", day);
+    mondayFirst = j.value("mondayFirst", mondayFirst);
+    fontSize = j.value("fontSize", fontSize);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
+    headerColor = colFrom(j.value("headerColor", nlohmann::json()), headerColor);
+    textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    mutedColor = colFrom(j.value("mutedColor", nlohmann::json()), mutedColor);
+    selectedColor = colFrom(j.value("selectedColor", nlohmann::json()), selectedColor);
+    hoverColor = colFrom(j.value("hoverColor", nlohmann::json()), hoverColor);
+}
+
+// ── HSV ⇄ RGB ────────────────────────────────────────────────────────────────
+
+glm::vec3 uiHsvToRgb(float hueDeg, float sat, float val)
+{
+    float h = std::fmod(hueDeg, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    const float s = std::clamp(sat, 0.0f, 1.0f);
+    const float v = std::clamp(val, 0.0f, 1.0f);
+    const float c = v * s;
+    const float seg = h / 60.0f;
+    const float x = c * (1.0f - std::abs(std::fmod(seg, 2.0f) - 1.0f));
+    const float m = v - c;
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    switch (static_cast<int>(seg) % 6)
+    {
+        case 0: r = c; g = x; break;
+        case 1: r = x; g = c; break;
+        case 2: g = c; b = x; break;
+        case 3: g = x; b = c; break;
+        case 4: r = x; b = c; break;
+        default: r = c; b = x; break;
+    }
+    return { r + m, g + m, b + m };
+}
+
+void uiRgbToHsv(const glm::vec3& rgb, float& hueDeg, float& sat, float& val)
+{
+    const float r = std::clamp(rgb.r, 0.0f, 1.0f);
+    const float g = std::clamp(rgb.g, 0.0f, 1.0f);
+    const float b = std::clamp(rgb.b, 0.0f, 1.0f);
+    const float mx = std::max(r, std::max(g, b));
+    const float mn = std::min(r, std::min(g, b));
+    const float d = mx - mn;
+    val = mx;
+    sat = mx > 0.0f ? d / mx : 0.0f;
+    // A grey has no hue to report, and answering 0 (red) would be a lie the
+    // caller cannot tell from an answer. UIColorPicker::hueOf is the one place
+    // that knows what to do about it.
+    if (d <= 0.0f) { hueDeg = 0.0f; return; }
+    float h;
+    if (mx == r)      h = 60.0f * std::fmod((g - b) / d, 6.0f);
+    else if (mx == g) h = 60.0f * ((b - r) / d + 2.0f);
+    else              h = 60.0f * ((r - g) / d + 4.0f);
+    if (h < 0.0f) h += 360.0f;
+    hueDeg = h;
+}
+
+// ── ColorPicker ──────────────────────────────────────────────────────────────
+
+float UIColorPicker::saturationOf() const
+{
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(color), h, s, v);
+    return s;
+}
+
+float UIColorPicker::valueOf() const
+{
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(color), h, s, v);
+    return v;
+}
+
+float UIColorPicker::hueOf() const
+{
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(color), h, s, v);
+    // Below that, the colour genuinely has no hue and `hue` is the memory of
+    // the one the drag came from. The threshold is not zero because a colour
+    // that came back out of eight bits per channel is never exactly grey.
+    return s > 0.001f ? h : hue;
+}
+
+void UIColorPicker::setHsv(float hueDeg, float sat, float val)
+{
+    float h = std::fmod(hueDeg, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    hue = h;
+    const glm::vec3 rgb = uiHsvToRgb(h, sat, val);
+    color = glm::vec4(rgb, color.a);
+}
+
+void UIColorPicker::setColor(const glm::vec4& c)
+{
+    color = c;
+    float h = 0.0f, s = 0.0f, v = 0.0f;
+    uiRgbToHsv(glm::vec3(c), h, s, v);
+    // Only when the colour HAS a hue: writing grey must not throw away the hue
+    // the strip is standing on, or the next drag of the value would come back
+    // as red instead of as the colour it was.
+    if (s > 0.001f) hue = h;
+}
+
+UIColorPicker::Parts UIColorPicker::partsIn(const UIWidgetRect& r, float barPx,
+                                            float gapPx, bool withAlpha)
+{
+    Parts p;
+    p.hasAlpha = withAlpha;
+    const float bar = std::max(1.0f, barPx);
+    const float gap = std::max(0.0f, gapPx);
+    const int   bars = withAlpha ? 2 : 1;
+    // The strips take what they need from the right and the field takes the
+    // rest, floored at a pixel: a picker squeezed narrower than its own strips
+    // is a picker with no field, not one with a negative one.
+    const float used = static_cast<float>(bars) * (bar + gap);
+    const float svW  = std::max(1.0f, r.w - used);
+    p.sv = { r.x, r.y, svW, r.h };
+    p.hue = { r.x + svW + gap, r.y, bar, r.h };
+    if (withAlpha) p.alpha = { p.hue.x + bar + gap, r.y, bar, r.h };
+    return p;
+}
+
+namespace
+{
+    // A quad that fades from one colour to another along `angleDeg` (clockwise
+    // from "down", the same convention the authored gradient uses). The alpha
+    // travels with it, which is what makes the value overlay one quad.
+    void gradQuad(std::vector<UIRenderObject>& out, const UIWidgetRect& r,
+                  const glm::vec4& from, const glm::vec4& to, float angleDeg)
+    {
+        UIRenderObject ro;
+        ro.position = { r.x, r.y };
+        ro.size     = { r.w, r.h };
+        ro.color    = from;
+        ro.gradient = true;
+        ro.gradientColor = to;
+        ro.gradientAngleDeg = angleDeg;
+        out.push_back(std::move(ro));
+    }
+
+    // The marker every picker draws: a ring, which is an empty quad with a
+    // border on it. Two of them, light over dark, so it stays visible on both
+    // ends of the field it is standing on.
+    void ring(std::vector<UIRenderObject>& out, float cx, float cy, float radius)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            const float rr = radius + static_cast<float>(i);
+            UIRenderObject ro;
+            ro.position = { cx - rr, cy - rr };
+            ro.size     = { rr * 2.0f, rr * 2.0f };
+            ro.color    = glm::vec4(0.0f);           // the fill shows what is under it
+            ro.cornerRadius = glm::vec4(rr);
+            ro.borderWidth  = 1.0f;
+            ro.borderColor  = i == 0 ? glm::vec4(0.0f, 0.0f, 0.0f, 0.65f)
+                                     : glm::vec4(1.0f, 1.0f, 1.0f, 0.9f);
+            out.push_back(std::move(ro));
+        }
+    }
+}
+
+const UIPropTable& UIColorPicker::propTable() const
+{
+    static const UIPropTable t = {
+        // Custom rather than a plain slot on `color`, for one reason: writing a
+        // colour has to keep `hue` in step, or a script that sets grey costs
+        // the strip its position. The GETTER hands the stored colour back
+        // verbatim, so the round trip is exact.
+        uiprop::custom({ "Color", UIPropType::Color },
+            [](const UIElement& e) {
+                return UIPropValue::ofColor(static_cast<const UIColorPicker&>(e).color); },
+            [](UIElement& e, const UIPropValue& v) {
+                static_cast<UIColorPicker&>(e).setColor(v.col); }),
+        uiprop::slot<&UIColorPicker::showAlpha>({ "Show Alpha", UIPropType::Bool }),
+        uiprop::slot<&UIColorPicker::barWidth> ({ "Bar Width", UIPropType::Float, 4.0f, 80.0f }),
+        uiprop::slot<&UIColorPicker::gap>      ({ "Gap", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIColorPicker::backColor>({ "Back Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+void UIColorPicker::render(const UIWidgetRect& px, const UIElementRenderState&,
+                           const HE::UUID&, float pxScaleY,
+                           std::vector<UIRenderObject>& out) const
+{
+    quad(out, px.x, px.y, px.w, px.h, backColor);
+
+    // The strips are lengths across the element, so they take the same factor
+    // the font does — one number, because a strip that is wide on one axis and
+    // narrow on the other is not a strip anybody authored.
+    const Parts p = partsIn(px, barWidth * pxScaleY, gap * pxScaleY, showAlpha);
+    const float h = hueOf();
+    const glm::vec3 pure = uiHsvToRgb(h, 1.0f, 1.0f);
+
+    // ── The saturation/value field, in two quads and exactly ────────────────
+    // White → the pure hue, left to right, IS HSV at V = 1; black laid over it
+    // at alpha 1 - V is the multiply by V. See the class comment.
+    gradQuad(out, p.sv, glm::vec4(1.0f), glm::vec4(pure, 1.0f), 90.0f);
+    gradQuad(out, p.sv, glm::vec4(0.0f, 0.0f, 0.0f, 0.0f), glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), 0.0f);
+
+    // ── The hue strip, in six ───────────────────────────────────────────────
+    // One quad per 60° segment, because that is exactly how far the wheel runs
+    // straight in RGB. Seven stops, six gaps.
+    const float segH = p.hue.h / 6.0f;
+    for (int i = 0; i < 6; ++i)
+    {
+        const glm::vec3 a = uiHsvToRgb(static_cast<float>(i) * 60.0f, 1.0f, 1.0f);
+        const glm::vec3 b = uiHsvToRgb(static_cast<float>(i + 1) * 60.0f, 1.0f, 1.0f);
+        // Half a pixel of overlap so no seam shows between the segments.
+        const UIWidgetRect seg{ p.hue.x, p.hue.y + segH * static_cast<float>(i),
+                                p.hue.w, segH + 0.5f };
+        gradQuad(out, seg, glm::vec4(a, 1.0f), glm::vec4(b, 1.0f), 0.0f);
+    }
+
+    if (p.hasAlpha)
+    {
+        // A light backing so the transparent end is something rather than the
+        // panel behind it, then the colour fading out over it, top to bottom.
+        quad(out, p.alpha.x, p.alpha.y, p.alpha.w, p.alpha.h,
+             glm::vec4(0.72f, 0.72f, 0.72f, 1.0f));
+        gradQuad(out, p.alpha, glm::vec4(glm::vec3(color), 1.0f),
+                 glm::vec4(glm::vec3(color), 0.0f), 0.0f);
+    }
+
+    // ── The three markers ───────────────────────────────────────────────────
+    const float s = saturationOf(), v = valueOf();
+    const float mr = std::max(3.0f, std::min(p.hue.w, p.sv.h) * 0.22f);
+    ring(out, p.sv.x + p.sv.w * s, p.sv.y + p.sv.h * (1.0f - v), mr);
+    ring(out, p.hue.x + p.hue.w * 0.5f, p.hue.y + p.hue.h * (h / 360.0f), p.hue.w * 0.42f);
+    if (p.hasAlpha)
+        ring(out, p.alpha.x + p.alpha.w * 0.5f,
+             p.alpha.y + p.alpha.h * (1.0f - std::clamp(color.a, 0.0f, 1.0f)),
+             p.alpha.w * 0.42f);
+}
+
+void UIColorPicker::writeJson(nlohmann::json& j) const
+{
+    j["color"] = colJson(color);
+    // The remembered hue travels with the file, or reopening a widget whose
+    // colour is grey would put the strip back on red.
+    j["hue"] = hue;
+    j["showAlpha"] = showAlpha;
+    j["barWidth"] = barWidth;
+    j["gap"] = gap;
+    j["backColor"] = colJson(backColor);
+}
+
+void UIColorPicker::readJson(const nlohmann::json& j)
+{
+    color = colFrom(j.value("color", nlohmann::json()), color);
+    hue = j.value("hue", hue);
+    showAlpha = j.value("showAlpha", showAlpha);
+    barWidth = j.value("barWidth", barWidth);
+    gap = j.value("gap", gap);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
 }
 
 } // namespace HE

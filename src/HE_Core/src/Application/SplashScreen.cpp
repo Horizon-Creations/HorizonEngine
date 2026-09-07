@@ -1,9 +1,10 @@
 #include "Application/SplashScreen.h"
 #include "Diagnostics/Log.h"
 
-// PNG only, and private to this file: the splash needs one decoder for one
-// image, and nothing else in HorizonCore has an opinion about stb_image.
-#define STB_IMAGE_STATIC
+// PNG only, and this is HorizonCore's ONE copy of the decoder: AppIcon.cpp reads
+// the generated window icon back through the same symbols, so it must not be
+// file-local (it was, until there were two readers). Still not exported — the
+// library's own translation units share it, nothing outside sees stb_image.
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
 #include <stb_image.h>
@@ -231,8 +232,8 @@ bool SplashScreen::makeFace(Face& face, float pixelSize)
 float SplashScreen::textWidth(const Face& face, const std::string& s) const
 {
 	float w = 0.0f;
-	for (unsigned char c : s)
-		if (c >= 32 && c < 128) w += face.baked.glyphs[c - 32].xadvance;
+	for (size_t i = 0; i < s.size(); )
+		if (const BakedGlyph* g = face.baked.glyph(uiUtf8Decode(s, i))) w += g->xadvance;
 	return w;
 }
 
@@ -246,10 +247,11 @@ float SplashScreen::text(const Face& face, const std::string& s, float x, float 
 	SDL_SetTextureColorMod(face.tex, r, g, b);
 	SDL_SetTextureAlphaMod(face.tex, a);
 	float pen = x;
-	for (unsigned char c : s)
+	for (size_t i = 0; i < s.size(); )
 	{
-		if (c < 32 || c >= 128) continue;
-		const BakedGlyph& gl = face.baked.glyphs[c - 32];
+		const BakedGlyph* glp = face.baked.glyph(uiUtf8Decode(s, i));
+		if (!glp) continue;
+		const BakedGlyph& gl = *glp;
 		const float gw = gl.x1 - gl.x0;
 		const float gh = gl.y1 - gl.y0;
 		if (gw > 0.0f && gh > 0.0f)

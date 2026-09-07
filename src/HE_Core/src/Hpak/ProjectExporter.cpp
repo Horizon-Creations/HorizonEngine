@@ -2,6 +2,9 @@
 #include <Types/Enums.h>            // HE::AssetType (the packed type indices)
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
+#include <Application/AppIcon.h>            // the generated .icns/.ico/.png
+#include <Application/DocumentTypes.h>      // …and the three ways to declare a file type
+#include <Renderer/UIFont.h>                // uiParseRichColor for the plate colour
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
@@ -39,12 +42,40 @@ ExportPlatform exportPlatformFromName(const std::string& name)
     return ExportPlatform::Host;
 }
 
-std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
-                                        ExportPlatform p)
+const char* runtimeFlavorName(RuntimeFlavor f)
 {
+    switch (f)
+    {
+    case RuntimeFlavor::AppAdvanced: return "AppAdvanced";
+    case RuntimeFlavor::AppBasic:    return "AppBasic";
+    case RuntimeFlavor::Game:
+    default:                         return "Game";
+    }
+}
+
+RuntimeFlavor runtimeFlavorFor(bool appMode, bool advancedShaderEffects)
+{
+    // A game always takes the full runtime: it has a world, and dropping four of
+    // the platform's five backends from something that may run on any GPU is not
+    // a size saving, it is a support problem.
+    if (!appMode) return RuntimeFlavor::Game;
+    return advancedShaderEffects ? RuntimeFlavor::AppAdvanced : RuntimeFlavor::AppBasic;
+}
+
+std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
+                                        ExportPlatform p,
+                                        RuntimeFlavor f)
+{
+    // Host keeps its flat layout (…/Game, …/AppAdvanced, …/AppBasic) — that is
+    // where the build deploys. Cross-targets nest the flavour under the platform
+    // rather than beside it, because what a user drops there is a bundle built on
+    // that platform, and all three of a platform's runtimes arrive together.
     if (p == ExportPlatform::Host)
-        return editorBaseDir / ".." / "Game";
-    return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p);
+        return editorBaseDir / ".." / runtimeFlavorName(f);
+    if (f == RuntimeFlavor::Game)
+        return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p);
+    return editorBaseDir / ".." / "GameRuntimes" / exportPlatformName(p)
+                         / runtimeFlavorName(f);
 }
 
 // A directory qualifies as a runtime bundle only if the game executable is
@@ -61,26 +92,51 @@ static bool isRuntimeBundle(const std::filesystem::path& dir)
 }
 
 std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseDir,
-                                        ExportPlatform p)
+                                        ExportPlatform p,
+                                        RuntimeFlavor  f,
+                                        RuntimeFlavor* outFlavor)
 {
+    if (outFlavor) *outFlavor = f;
     if (editorBaseDir.empty()) return {};
 
-    const std::filesystem::path sub = (p == ExportPlatform::Host)
-        ? std::filesystem::path("Game")
-        : std::filesystem::path("GameRuntimes") / exportPlatformName(p);
+    // Wanted flavour first, then Game as the fallback. Searching flavour-by-
+    // flavour rather than directory-by-directory is deliberate: an editor that
+    // has BOTH an out/deploy/AppBasic two levels up and a Game right beside it
+    // must still ship the app runtime it was asked for — walking the tree first
+    // would hand back whichever happened to sit closer.
+    RuntimeFlavor wanted[2] = { f, RuntimeFlavor::Game };
+    const int tries = (f == RuntimeFlavor::Game) ? 1 : 2;
 
-    // Walk upward: <dir>/Game next to the editor covers the deploy layout
-    // (deploy/Editor + deploy/Game); <dir>/out/deploy/Game covers running the
-    // editor from a build tree anywhere inside the repo.
-    std::error_code ec;
-    std::filesystem::path dir = editorBaseDir.lexically_normal();
-    for (int depth = 0; depth < 7 && !dir.empty(); ++depth)
+    for (int t = 0; t < tries; ++t)
     {
-        if (isRuntimeBundle(dir / sub))                    return dir / sub;
-        if (isRuntimeBundle(dir / "out" / "deploy" / sub)) return dir / "out" / "deploy" / sub;
-        const auto parent = dir.parent_path();
-        if (parent == dir) break; // filesystem root
-        dir = parent;
+        const RuntimeFlavor flavor = wanted[t];
+        const std::filesystem::path sub = (p == ExportPlatform::Host)
+            ? std::filesystem::path(runtimeFlavorName(flavor))
+            : (flavor == RuntimeFlavor::Game
+                   ? std::filesystem::path("GameRuntimes") / exportPlatformName(p)
+                   : std::filesystem::path("GameRuntimes") / exportPlatformName(p)
+                         / runtimeFlavorName(flavor));
+
+        // Walk upward: <dir>/Game next to the editor covers the deploy layout
+        // (deploy/Editor + deploy/Game); <dir>/out/deploy/Game covers running the
+        // editor from a build tree anywhere inside the repo.
+        std::filesystem::path dir = editorBaseDir.lexically_normal();
+        for (int depth = 0; depth < 7 && !dir.empty(); ++depth)
+        {
+            if (isRuntimeBundle(dir / sub))
+            {
+                if (outFlavor) *outFlavor = flavor;
+                return dir / sub;
+            }
+            if (isRuntimeBundle(dir / "out" / "deploy" / sub))
+            {
+                if (outFlavor) *outFlavor = flavor;
+                return dir / "out" / "deploy" / sub;
+            }
+            const auto parent = dir.parent_path();
+            if (parent == dir) break; // filesystem root
+            dir = parent;
+        }
     }
     return {};
 }
@@ -121,6 +177,32 @@ static bool looksMachO(const std::vector<uint8_t>& bytes)
         || w == 0xBEBAFECAu || w == 0xCAFEBABEu;  // FAT magics (either order)
 }
 
+// A path as one shell argument: wrapped in single quotes, embedded quotes
+// escaped as '\''. An apostrophe in an export path must not break a command —
+// that would skip a re-sign, not just look ugly.
+static std::string shellQuote(const std::filesystem::path& p)
+{
+    std::string out = "'";
+    for (const char c : p.string()) out += (c == '\'') ? "'\\''" : std::string(1, c);
+    return out + "'";
+}
+
+#if defined(__APPLE__) || defined(__linux__)
+// Drop the LOCAL symbol table from a copied binary. `-x` and nothing more: the
+// exported symbols stay, so a crash backtrace out of a shipped build still names
+// functions, and a game-logic module still finds what it links against. What
+// goes is the file-local half nobody outside the build ever reads — on this
+// machine about a fifth of every engine library.
+//
+// Best effort: a host without `strip` leaves the file exactly as copied, which
+// is what shipped before this existed. The caller re-signs on Apple, because a
+// stripped Mach-O has an invalid signature and arm64 kills those on launch.
+static bool stripLocalSymbols(const std::filesystem::path& p)
+{
+    return std::system(("/usr/bin/strip -x " + shellQuote(p) + " 2>/dev/null").c_str()) == 0;
+}
+#endif
+
 #ifdef __APPLE__
 // Ad-hoc re-sign in place. Patching invalidated the signature; on arm64 macOS
 // an invalid signature means the binary is killed on launch, so a failed
@@ -130,11 +212,7 @@ static bool resignMachO(const std::filesystem::path& p)
     // Shell-quote the path: wrap in single quotes, escaping embedded single
     // quotes as '\'' (an apostrophe in the export path must not break the
     // command — that would skip the re-sign, not just look ugly).
-    std::string quoted = "'";
-    for (const char c : p.string())
-        quoted += (c == '\'') ? "'\\''" : std::string(1, c);
-    quoted += "'";
-    const std::string cmd = "/usr/bin/codesign --force --sign - " + quoted + " 2>/dev/null";
+    const std::string cmd = "/usr/bin/codesign --force --sign - " + shellQuote(p) + " 2>/dev/null";
     return std::system(cmd.c_str()) == 0;
 }
 #endif
@@ -308,7 +386,11 @@ static std::string bundleIdentifier(const std::string& projectName)
 }
 
 static bool writeInfoPlist(const std::filesystem::path& contentsDir,
-                           const std::string& projectName)
+                           const std::string& projectName,
+                           const std::string& bundleId,
+                           const std::string& version,
+                           bool hasIcon,
+                           const std::vector<HE::AppDocumentType>& docTypes)
 {
     // XML-escape the display name (project names can contain & < > " ').
     std::string name;
@@ -323,19 +405,31 @@ static bool writeInfoPlist(const std::filesystem::path& contentsDir,
         default: name += c;
         }
 
+    // An empty identifier means "derive it", which is what every export did
+    // before the field existed; a version that is empty means the same for 1.0.
+    const std::string ident = bundleId.empty() ? bundleIdentifier(projectName) : bundleId;
+    const std::string ver   = version.empty() ? std::string("1.0") : version;
+
     const std::string plist =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
         "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         "<plist version=\"1.0\">\n<dict>\n"
         "  <key>CFBundleExecutable</key><string>HorizonGame</string>\n"
-        "  <key>CFBundleIdentifier</key><string>" + bundleIdentifier(projectName) + "</string>\n"
+        "  <key>CFBundleIdentifier</key><string>" + ident + "</string>\n"
         "  <key>CFBundleName</key><string>" + name + "</string>\n"
         "  <key>CFBundleDisplayName</key><string>" + name + "</string>\n"
         "  <key>CFBundlePackageType</key><string>APPL</string>\n"
         "  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n"
-        "  <key>CFBundleVersion</key><string>1.0</string>\n"
-        "  <key>CFBundleShortVersionString</key><string>1.0</string>\n"
+        "  <key>CFBundleVersion</key><string>" + ver + "</string>\n"
+        "  <key>CFBundleShortVersionString</key><string>" + ver + "</string>\n" +
+        // Named only when the file is actually there: a bundle that points at a
+        // missing icon shows the generic one AND makes Finder cache that.
+        (hasIcon ? "  <key>CFBundleIconFile</key><string>AppIcon</string>\n" : "") +
+        // Which files are this application's, and what the system should call
+        // them. Empty when the project claims none, and then the plist reads
+        // exactly as it did before document types existed.
+        HE::heInfoPlistDocumentTypes(docTypes, ident) +
         "  <key>NSHighResolutionCapable</key><true/>\n"
         "  <key>LSMinimumSystemVersion</key><string>11.0</string>\n"
         "</dict>\n</plist>\n";
@@ -832,6 +926,40 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                     return ExportResult{false, "Failed to copy runtime binary "
                                                + dit->path().filename().string() + ": "
                                                + ec.message(), ctx.assetsPacked};
+                // Symbols the shipped build has no use for, dropped from the
+                // COPY (the developer's own binaries keep theirs). Only the
+                // file-local half — see stripLocalSymbols.
+#if defined(__APPLE__) || defined(__linux__)
+                {
+                    // Four bytes, not the whole file: the biggest thing here is
+                    // a 14 MB interpreter and all this asks is the magic.
+                    std::vector<uint8_t> head(4, 0);
+                    {
+                        std::ifstream f(dst, std::ios::binary);
+                        f.read(reinterpret_cast<char*>(head.data()), 4);
+                        if (!f) head.clear();
+                    }
+                    const bool machO = looksMachO(head);
+                    if (stripLocalSymbols(dst))
+                    {
+#ifdef __APPLE__
+                        // Stripping invalidates the signature, and arm64 kills a
+                        // binary with a broken one on launch — so a re-sign that
+                        // fails has to fail the export, exactly like the key
+                        // patch's does. The .app's later --deep sign would cover
+                        // the bundle case, but a plain-folder export has no such
+                        // second chance.
+                        if (machO && !resignMachO(dst))
+                            return ExportResult{false, "Failed to re-sign "
+                                                       + dst.filename().string()
+                                                       + " after stripping symbols",
+                                                ctx.assetsPacked};
+#else
+                        (void)machO;
+#endif
+                    }
+                }
+#endif
                 ++ctx.binaryCopied;
                 copied.push_back(dst);
             }
@@ -934,6 +1062,29 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.encrypted = settings.encrypt;
     cfg.horizonCodeCompiled = ctx.hcGenShipped;
     cfg.defaultSaveTemplate = settings.defaultSaveTemplate;
+    cfg.appMode               = settings.appProject;
+    cfg.advancedShaderEffects = settings.advancedShaderEffects;
+    cfg.allowFiles            = settings.allowFiles;
+    cfg.allowProcesses        = settings.allowProcesses;
+    cfg.allowNetwork          = settings.allowNetwork;
+    cfg.fontScripts           = settings.fontScripts;
+    cfg.fontWeightBold        = settings.fontWeightBold;
+    // RESOLVED here, so the runtime never derives it a second time and reaches a
+    // different answer than the bundle around it — but only when the answer
+    // could not be derived anyway. A filled bundle id makes the writer choose
+    // v5, and a runtime bundle from an older engine rejects every version it
+    // does not know and boots WITHOUT its pak. Dropping a prebuilt runtime under
+    // GameRuntimes/<Platform>/ is a documented way to work, so a game whose id
+    // is exactly what the name derives to leaves the field empty and keeps
+    // emitting the version that runtime can read. An APPLICATION always writes
+    // it: it is what the autostart entry and the document types are filed under,
+    // and there is no older runtime for applications to be compatible with.
+    const std::string derivedId = bundleIdentifier(projectName);
+    const std::string resolvedId = settings.bundleId.empty() ? derivedId : settings.bundleId;
+    cfg.bundleId              = (settings.appProject || resolvedId != derivedId)
+                                    ? resolvedId : std::string();
+    cfg.theme                 = settings.theme;
+    cfg.themeMode             = settings.themeMode;
     // Key placement: inside the game executable when the patch succeeded (the
     // hcfg then carries only the encrypted flag), in the hcfg otherwise.
     if (settings.encrypt && !ctx.keyEmbedded)
@@ -964,30 +1115,181 @@ static std::optional<ExportResult> writeGameConfig(const ExportSettings& setting
     // config.json does not fail loudly in the game — it silently resets every
     // graphics setting to the engine default, which is exactly the bug this
     // file exists to close.
-    const auto parsed = nlohmann::json::parse(settings.gameConfigJson, nullptr,
-                                              /*allow_exceptions=*/false);
+    auto parsed = nlohmann::json::parse(settings.gameConfigJson, nullptr,
+                                        /*allow_exceptions=*/false);
     if (parsed.is_discarded() || !parsed.is_object())
         return ExportResult{false, "Game settings are not a JSON object", ctx.assetsPacked};
 
+    // ── An application does not take over the display (plan E6) ──────────────
+    // The runtime already opens an app windowed, but this file is the LAST word:
+    // GameWindowMode read from here overrides that default, so a "Fullscreen" in
+    // it undoes the whole thing. Enforced at the exporter rather than only in
+    // the dialog that fills gameConfigJson, because there the mode is a setting
+    // remembered across exports — export a game, then an app, and the game's
+    // Fullscreen is what the app would have shipped with.
+    //
+    // ONLY Fullscreen is rewritten, and Borderless deliberately passes through:
+    // a window without a frame is what an application with its own title bar
+    // asks for (plan F3), and clamping everything to "Windowed" would take that
+    // away in the name of a rule about something else.
+    std::string configText = settings.gameConfigJson;
+    if (settings.appProject)
+    {
+        bool rewritten = false;
+        if (const auto entries = parsed.find("CustomConfig");
+            entries != parsed.end() && entries->is_array())
+        {
+            for (auto& e : *entries)
+            {
+                if (!e.is_object()) continue;
+                const auto key = e.find("Key");
+                if (key == e.end() || !key->is_string() || *key != "GameWindowMode") continue;
+                const auto value = e.find("Value");
+                if (value == e.end() || !value->is_string() || *value != "Fullscreen") continue;
+                *value    = "Windowed";
+                rewritten = true;
+            }
+        }
+        // Re-serialized only when something actually changed, so an export that
+        // was already right writes the caller's bytes through untouched.
+        if (rewritten)
+            configText = parsed.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+    }
+
     const auto dst = ctx.dataDir / "config.json";
     std::ofstream out(dst, std::ios::trunc);
-    out << settings.gameConfigJson;
+    out << configText;
     out.flush();
     if (!out.good())
         return ExportResult{false, "Failed to write " + dst.string(), ctx.assetsPacked};
     return std::nullopt;
 }
 
+// Phase 7b: the application's icon, generated rather than demanded. One name
+// from the built-in icon face on a coloured plate becomes the three files three
+// systems each insist on — nobody draws the same picture three times, and a
+// project has an icon on the day it is created.
+//
+// Reports whether the macOS container was written, which is what decides
+// CFBundleIconFile below: a bundle that names a missing icon shows the generic
+// one and gets that cached.
+static bool writeAppIcons(const ExportSettings& settings, const ExportContext& ctx)
+{
+    if (settings.appIconName.empty()) return false;
+
+    glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
+    HE::uiParseRichColor(settings.appIconColor, bg);   // unparsable → the default plate
+    const glm::vec4 fg = HE::heAppIconForeground(bg);
+    const std::vector<HE::AppIconImage> set =
+        HE::heRenderAppIconSet(settings.appIconName, bg, fg, { 16, 32, 64, 128, 256, 512 });
+    if (set.empty()) return false;   // a name the face does not have is no icon
+
+    // The PNG goes everywhere: it is what the runtime loads to set its window
+    // icon, which is the taskbar entry on Windows and Linux both.
+    const auto at = [&set](int px) -> const HE::AppIconImage* {
+        for (const HE::AppIconImage& i : set) if (i.px == px) return &i;
+        return nullptr;
+    };
+    if (const HE::AppIconImage* png = at(256))
+        HE::hePngWrite(ctx.dataDir / "AppIcon.png", png->rgba.data(), png->px, png->px);
+
+    // "Host" means the machine this editor runs on, resolved here so the phase
+    // never has to ask the caller what it meant.
+    ExportPlatform target = settings.iconPlatform;
+    if (target == ExportPlatform::Host)
+    {
+#ifdef _WIN32
+        target = ExportPlatform::Windows;
+#elif defined(__APPLE__)
+        target = ExportPlatform::MacOS;
+#else
+        target = ExportPlatform::Linux;
+#endif
+    }
+    const bool mac = ctx.app || target == ExportPlatform::MacOS;
+    const bool win = target == ExportPlatform::Windows;
+    bool icns = false;
+    if (mac && ctx.app)
+        icns = HE::heIcnsWrite(ctx.appPath / "Contents" / "Resources" / "AppIcon.icns", set);
+    if (win)
+        HE::heIcoWrite(ctx.binDir / "AppIcon.ico", set);
+
+    // A document type gets an icon of its own when it names one, on the same
+    // plate as the application: a folder of files that all wear the app's icon
+    // tells nobody which is which, and asking for a second drawing is how the
+    // whole feature would go unused.
+    for (const HE::AppDocumentType& t : settings.documentTypes)
+    {
+        if (t.iconName.empty() || !HE::heValidDocumentExtension(t.extension)) continue;
+        const std::vector<HE::AppIconImage> docSet =
+            HE::heRenderAppIconSet(t.iconName, bg, fg, { 16, 32, 64, 128, 256, 512 });
+        if (docSet.empty()) continue;
+        if (mac && ctx.app)
+            HE::heIcnsWrite(ctx.appPath / "Contents" / "Resources" / ("Doc-" + t.extension + ".icns"),
+                            docSet);
+        if (win)
+            HE::heIcoWrite(ctx.binDir / ("Doc-" + t.extension + ".ico"), docSet);
+    }
+    return icns;
+}
+
+// Phase 7c: the declarations the OTHER two systems want. macOS carries its own
+// inside Info.plist; Linux and Windows want files beside the executable, and
+// INSTALLING them is an installer's job — an export writes what would be
+// installed, never the registry or the user's mime database.
+static void writeDocumentTypeFiles(const std::string& projectName,
+                                   const ExportSettings& settings, const ExportContext& ctx)
+{
+    if (settings.documentTypes.empty() || ctx.app) return;
+
+    const std::string ident = settings.bundleId.empty()
+                                  ? bundleIdentifier(projectName) : settings.bundleId;
+    ExportPlatform target = settings.iconPlatform;
+    if (target == ExportPlatform::Host)
+    {
+#ifdef _WIN32
+        target = ExportPlatform::Windows;
+#elif defined(__APPLE__)
+        target = ExportPlatform::MacOS;
+#else
+        target = ExportPlatform::Linux;
+#endif
+    }
+
+    const auto write = [](const std::filesystem::path& p, const std::string& text) {
+        std::ofstream f(p, std::ios::trunc);
+        if (f) f << text;
+    };
+
+    if (target == ExportPlatform::Windows)
+    {
+        write(ctx.binDir / "RegisterFileTypes.reg",
+              HE::heWindowsRegistration(projectName, "HorizonGame.exe", ident,
+                                        settings.documentTypes));
+    }
+    else if (target == ExportPlatform::Linux)
+    {
+        write(ctx.binDir / (ident + ".desktop"),
+              HE::heDesktopEntry(projectName, "HorizonGame", ident, settings.documentTypes));
+        write(ctx.binDir / (ident + ".xml"),
+              HE::heSharedMimeInfo(ident, settings.documentTypes));
+    }
+}
+
 // Phase 8: finalize the .app — Info.plist makes Contents/ a real bundle (so
 // SDL_GetBasePath resolves Resources), then an ad-hoc codesign of the whole
 // thing — the key patch already re-signed the bare executable, but adding
 // Info.plist and dylibs invalidates that; the bundle must be sealed last.
-static std::optional<ExportResult> finalizeAppBundle(const std::string&   projectName,
-                                                     const ExportContext& ctx)
+static std::optional<ExportResult> finalizeAppBundle(const std::string&    projectName,
+                                                     const ExportSettings& settings,
+                                                     bool                  hasIcon,
+                                                     const ExportContext&  ctx)
 {
     if (ctx.app)
     {
-        if (!writeInfoPlist(ctx.appPath / "Contents", projectName))
+        if (!writeInfoPlist(ctx.appPath / "Contents", projectName,
+                            settings.bundleId, settings.appVersion, hasIcon,
+                            settings.documentTypes))
             return ExportResult{false, "Failed to write Info.plist", ctx.assetsPacked};
 #ifdef __APPLE__
         if (!signAppBundle(ctx.appPath))
@@ -1030,8 +1332,11 @@ ExportResult ProjectExporter::exportProject(
     if (auto fail = writeProjectConfig(projectName, settings, startupSceneBinary, ctx))
         return *fail;
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
+    stage("icon");
+    const bool hasIcon = writeAppIcons(settings, ctx);
+    writeDocumentTypeFiles(projectName, settings, ctx);
     stage("bundle");
-    if (auto fail = finalizeAppBundle(projectName, ctx))                        return *fail;
+    if (auto fail = finalizeAppBundle(projectName, settings, hasIcon, ctx))     return *fail;
 
     // The runtime always ships under this name (routeRuntime above keys on it),
     // so the executable is derived, not searched for. Reported only if it is

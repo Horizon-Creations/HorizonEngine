@@ -165,6 +165,21 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { { "Value", n.propType, false, tn } };
         s.dataOuts = { { "Value", n.propType, false, tn } }; // pass the set value through
         break;
+    // The same two through a reference: which widget, and which element of it
+    // by name. Element is a PIN and not a field on the node, so the answer can
+    // come from a variable — that is the difference between a node bound to one
+    // element and one that can be pointed at any.
+    case T::GetPropertyOn:
+        s.dataIns  = { { "Target", P::Ref }, { "Element", P::String } };
+        s.dataOuts = { { "Value", n.propType, false, tn } };
+        break;
+    case T::SetPropertyOn:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "", P::Exec } };
+        s.dataIns  = { { "Target", P::Ref }, { "Element", P::String },
+                       { "Value", n.propType, false, tn } };
+        s.dataOuts = { { "Value", n.propType, false, tn } }; // pass the set value through
+        break;
     case T::GetVariable:
         s.dataOuts = { { "Value", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
         break;
@@ -633,6 +648,11 @@ const char* nodeDisplayName(NodeType t)
         case T::Sequence:     return "Sequence";
         case T::GetProperty:  return "Get Property";
         case T::SetProperty:  return "Set Property";
+        // Named after the pair they belong with: "Get (Ref)" reads a variable
+        // on a referenced instance, these read a PROPERTY on a referenced
+        // widget. The name is the on-disk key, so it is also a promise.
+        case T::GetPropertyOn: return "Get Property (Ref)";
+        case T::SetPropertyOn: return "Set Property (Ref)";
         case T::GetVariable:  return "Get Variable";
         case T::SetVariable:  return "Set Variable";
         case T::ShowSelf:   return "Show Self";
@@ -813,6 +833,14 @@ const char* nodeTooltip(NodeType t)
         case T::SetProperty:
             return "Writes the wired value to a property of the chosen target element\n"
                    "when executed.";
+        case T::GetPropertyOn:
+            return "Reads a property of an element of the REFERENCED widget, by the\n"
+                   "element's name. Target left unwired means this widget.\n"
+                   "Pure — evaluated whenever the output is used.";
+        case T::SetPropertyOn:
+            return "Writes a property of an element of the REFERENCED widget, by the\n"
+                   "element's name, when executed. Target left unwired means this\n"
+                   "widget; wired, it reaches one this graph did not have to author.";
         case T::GetVariable:
             return "Reads a graph variable (persistent per running instance).\n"
                    "Pure — evaluated whenever the output is used.";
@@ -1066,7 +1094,9 @@ const char* nodeCategory(NodeType t)
         case T::IsValid:
         case T::Cast:          return "Reference";
         case T::GetProperty:
-        case T::SetProperty:   return "Property";
+        case T::SetProperty:
+        case T::GetPropertyOn:
+        case T::SetPropertyOn: return "Property";
         case T::GetVariable:
         case T::SetVariable:   return "Variables";
         case T::ShowSelf:
@@ -1934,6 +1964,63 @@ bool fromJson(const std::string& json, Graph& out)
     return true;
 }
 
+std::vector<int> widgetCreatorsWithoutShow(const Graph& g)
+{
+    std::vector<int> out;
+    for (const Node& c : g.nodes)
+    {
+        if (c.type != T::CreateWidget) continue;
+
+        // The frontier is data-OUT pins the widget reference has reached. It
+        // starts at the one Create Widget has, and grows through the pass-
+        // throughs below.
+        std::vector<std::pair<int, int>> frontier;   // (node id, absolute out pin)
+        std::unordered_set<long long>    seen;
+        const auto push = [&](int node, int pin) {
+            const long long k = ((long long)node << 32) | (unsigned)pin;
+            if (seen.insert(k).second) frontier.push_back({ node, pin });
+        };
+        push(c.id, pinRanges(c).dataOut0);
+
+        bool shown = false;
+        while (!frontier.empty() && !shown)
+        {
+            const auto [srcNode, srcPin] = frontier.back();
+            frontier.pop_back();
+            for (const Link& l : g.links)
+            {
+                if (l.srcNode != srcNode || l.srcPin != srcPin) continue;
+                const Node* d = g.findNode(l.dstNode);
+                if (!d) continue;
+                if (d->type == T::ShowWidget) { shown = true; break; }
+                // Hide and Destroy consume the reference without showing it —
+                // they are the whole reason a graph can look wired and still
+                // draw nothing.
+                if (d->type == T::HideWidget || d->type == T::DestroyWidget) continue;
+                if (d->type == T::SetVariable)
+                {
+                    // Set Variable passes its value through, AND parks it under
+                    // a name every Get Variable of that name can pick up again —
+                    // including one in another function's sub-graph.
+                    push(d->id, pinRanges(*d).dataOut0);
+                    for (const Node& r : g.nodes)
+                        if (r.type == T::GetVariable && r.s == d->s)
+                            push(r.id, pinRanges(r).dataOut0);
+                    continue;
+                }
+                // Anything else: the reference left the part of the graph this
+                // can read (a function call, an engine row like Show Modal
+                // Widget, a node added after this was written). Assume it is
+                // shown and say nothing.
+                shown = true;
+                break;
+            }
+        }
+        if (!shown) out.push_back(c.id);
+    }
+    return out;
+}
+
 // ── Item-level JSON, public (collaboration addresses single items) ──────────
 std::string nodeToJson(const Node& n)     { return nodeToJsonObj(n).dump(); }
 std::string variableToJson(const Variable& v) { return variableToJsonObj(v).dump(); }
@@ -2140,6 +2227,83 @@ const std::vector<EngineEventDesc>& engineEvents()
         { "OnValueChanged",       "onValueChanged",       P::Float,  true  },
         { "OnCheckChanged",       "onCheckChanged",       P::Bool,   true  },
         { "OnSelectionChanged",   "onSelectionChanged",   P::Int,    true  },
+        // A day was picked in a calendar. String payload, "YYYY-MM-DD": a date
+        // written any other way is a date the far end has to guess the order of.
+        { "OnDateChanged",        "onDateChanged",        P::String, true  },
+        // A colour was picked. Colour payload, because one exists and squeezing
+        // four numbers through a float would make every graph unpack them again.
+        { "OnColorChanged",       "onColorChanged",       P::Color,  true  },
+        // An animation reached its target. String payload: WHICH property, so
+        // "fade it, then hide it" can tell the fade from the slide beside it.
+        { "OnAnimationFinished",  "onAnimationFinished",  P::String, true  },
+        // A named clip from the widget's timeline ended. String payload: which.
+        { "OnClipFinished",       "onClipFinished",       P::String, true  },
+        // A ListView asking to have one row filled in. The argument is the ITEM
+        // index, not the row: the list holds no data, so this is the only
+        // question it can ask and the answer is whatever the owner keeps.
+        { "OnRowBind",            "onRowBind",            P::Int,    true  },
+        // …and a row being opened rather than merely picked (double-click,
+        // Enter). Separate from the selection because "which one" and "go" are
+        // two different answers in every list that has ever existed.
+        { "OnRowActivated",       "onRowActivated",       P::Int,    true  },
+        // A table's column title was clicked, by COLUMN index. It is a request
+        // and not a report: the list holds no items, so the owner sorts its own
+        // array and calls refreshList — the same reason the list cannot answer
+        // what is in row five.
+        { "OnHeaderClicked",      "onHeaderClicked",      P::Int,    true  },
+        // The other mouse button, on an element. Its own event rather than a
+        // flag on OnClicked, because a right-click means something different
+        // everywhere it means anything: it opens a menu, it never presses.
+        { "OnRightClicked",       "onRightClicked",       P::Exec,   true  },
+        // A file dragged in from the desktop and let go over an element that
+        // says "Accepts Drop". String payload: the file's absolute path, one
+        // event per file. Bubbles up like a click, so the drop zone is the
+        // element that ACCEPTS, never whichever caption the pointer met.
+        { "OnFileDropped",        "onFileDropped",        P::String, true  },
+        // An entry in the application's tray menu was chosen. String payload:
+        // the entry's ID, never its label — a menu that is translated must not
+        // quietly stop working.
+        { "OnTrayItem",           "onTrayItem",           P::String, true  },
+        // An entry in the application's MENU BAR was chosen. Same shape as the
+        // tray, for the same reason: the id comes back, never the label.
+        { "OnMenuItem",           "onMenuItem",           P::String, true  },
+        // A second window this application opened has closed — by its own close
+        // button, or because window.close was called. Int payload: the id
+        // window.open handed back, because that is the one thing a graph cannot
+        // work out for itself when it has two of them open. It fires while the
+        // window still exists; the widgets that hung in it are already gone.
+        { "OnWindowClosed",       "onWindowClosed",       P::Int,    true  },
+        // An HTTP request this application started has been answered. Int
+        // payload: the TICKET http.get/http.post handed back, because an event
+        // carries one value and a response is four — the readers say the rest.
+        { "OnHttpResponse",       "onHttpResponse",       P::Int,    true  },
+        // A path this application watched has appeared, vanished or changed.
+        // String payload: the path, spelled the way fs.watch was called — an
+        // absolute one would be exactly what the sandbox refuses to reopen.
+        // Which of the three happened is fs.exists/fs.size's answer, not the
+        // event's: an event carries one value.
+        { "OnFileChanged",        "onFileChanged",        P::String, true  },
+        // A timer came due. Int payload: the handle, because an event carries
+        // one value and "which timer" is the only part a graph cannot work out
+        // for itself. A one-shot has already stopped existing by the time this
+        // arrives; a repeating one is on its way round again.
+        { "OnTimer",              "onTimer",              P::Int,    true  },
+        // The gesture inside the application: this element was picked up, a
+        // payload was let go over this one, and the carry is over. OnDrop's
+        // String is the SOURCE's payload (its Drag Payload, or its name) — the
+        // one thing the target has to know and the only thing an event argument
+        // can carry. OnDragEnded's Bool says whether anything took it, which is
+        // how a source knows to put itself back.
+        // A link inside a rich-text label was clicked. String payload: the id the
+        // markup gave it (`<link=terms>`), because a label may hold several and
+        // "which one" is the only question the graph has.
+        { "OnLinkClicked",        "onLinkClicked",        P::String, true  },
+        { "OnDragStarted",        "onDragStarted",        P::Exec,   true  },
+        { "OnDrop",               "onDrop",               P::String, true  },
+        { "OnDragEnded",          "onDragEnded",          P::Bool,   true  },
+        // A dialog, popup or menu closing. Fired on the widget's OWN graph and
+        // not addressed to an element, because what closed is the whole thing.
+        { "OnDismissed",          "onDismissed",          P::Exec,   false },
         { "OnInit",               "onInit",               P::Exec,   false },
         { "OnShutdown",           "onShutdown",           P::Exec,   false },
         { "OnWindowFocusChanged", "onWindowFocusChanged", P::Bool,   false },
@@ -2861,6 +3025,18 @@ void Runner::execNode(const Node& n, int depth)
         if (m_ctx.setProperty)
             m_ctx.setProperty(n.elem, n.s, coerce(evalInput(n, 0, depth + 1), n.propType));
         break;
+    case T::SetPropertyOn:
+    {
+        // Every input is read, in pin order, whether or not the write happens:
+        // a data wire may run a chain of pure nodes, and skipping them because
+        // the target turned out to be null would make an unwired pin change
+        // what the graph COMPUTES, not just what it writes.
+        const Value target = evalInput(n, 0, depth + 1);
+        const Value elem   = coerce(evalInput(n, 1, depth + 1), P::String);
+        const Value val    = coerce(evalInput(n, 2, depth + 1), n.propType);
+        if (m_ctx.setPropertyOn) m_ctx.setPropertyOn(target.ref, elem.s, n.s, val);
+        break;
+    }
     case T::SetVariable:
         // A function-local writes the innermost frame of its owning function;
         // outside that function the write is dropped. Everything else goes to
@@ -3536,6 +3712,17 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};
         return coerce(v, n.propType);
     }
+    case T::GetPropertyOn:
+    {
+        const Value target = evalInput(n, 0, depth + 1);
+        const Value elem   = coerce(evalInput(n, 1, depth + 1), P::String);
+        Value v = m_ctx.getPropertyOn ? m_ctx.getPropertyOn(target.ref, elem.s, n.s) : Value{};
+        return coerce(v, n.propType);
+    }
+    // Set-node pass-through, like SetProperty's below: the value output re-reads
+    // the Value input, which for this node is the THIRD pin.
+    case T::SetPropertyOn:
+        return coerce(evalInput(n, 2, depth + 1), n.propType);
     case T::GetVariable:
     {
         // Function-local: read the innermost frame of the owning function;

@@ -156,6 +156,16 @@ struct Host
 	// An edit happened. committed = this is an undo/snapshot point (a finished
 	// edit); false = a value is still being dragged (mark dirty, don't snapshot).
 	std::function<void(bool committed)> onEdit;
+	// Which values a STRING parameter of an engine call can take, when the host
+	// knows: the animations THIS widget carries, its elements by name. Empty (or
+	// unset) falls back to the vocabularies every graph shares — the easing
+	// curves, the play directions — and to a plain text pin when there are none.
+	//
+	// A hook rather than a table because the answer is a property of the asset
+	// being edited, which the registry cannot know and this file must not have
+	// to ask about.
+	std::function<std::vector<std::string>(const HC::Node& node,
+	                                       const std::string& param)> paramChoices;
 	const MenuOpts*     menus        = nullptr;
 };
 
