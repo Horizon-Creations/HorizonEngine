@@ -1733,6 +1733,14 @@ TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 	p.checkParity();
 	CHECK(p.var("built").f == 1.0f);
 
+	// A String argument on an event with NO element — the shape the three
+	// animation notifies have, and the one where a wrong `elem` in the engine's
+	// event table would emit a hook that overrides nothing at all.
+	p.interp.rt.fireEvent(p.interp.id, "OnAnimationNotify", 0, Value::ofString("Step"));
+	p.compInst->onAnimationNotify("Step");
+	p.checkParity();
+	CHECK(p.var("notify").s == "Step");
+
 	// An event the graph does not handle is reachable and silent, not a crash.
 	p.compInst->onShutdown();
 	p.compInst->onValueChanged(3, 1.0f);

@@ -72,6 +72,7 @@ add_executable(he_tests
     test_skeletalmeshcomponent.cpp
     test_animationsystem.cpp
     test_root_motion.cpp
+    test_animation_notify.cpp
     test_navigation.cpp
     test_particles.cpp
     test_ui.cpp
