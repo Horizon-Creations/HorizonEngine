@@ -789,3 +789,156 @@ TEST_CASE("CharacterController mode: a clip that ends stops the figure instead o
     CHECK(world.registry().get<CharacterControllerComponent>(e).velocity.z
           == doctest::Approx(0.0f).epsilon(1e-2));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  The editor's preview: the same arithmetic, asked about a whole clip at once
+//
+//  These are what makes the line drawn under a selected figure trustworthy. A
+//  preview that answers differently from the tick is worse than none: it is a
+//  wrong answer with a picture attached.
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("root motion path: a straight walk comes out straight, and the right length")
+{
+    ContentManager cm;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeSkeleton(meshId));
+    const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(meshId);
+    REQUIRE(mesh != nullptr);
+
+    const AnimationClipAsset clip = makeWalkClip(1.0f, 2.0f);
+    HE::RootMotionOptions opt;   // first root joint, XZ + yaw
+
+    std::vector<glm::vec3> path;
+    AnimationPreview::rootMotionPath(*mesh, clip, opt, 16, path);
+
+    REQUIRE(path.size() == 17);                       // the origin plus one per span
+    CHECK(path.front() == glm::vec3(0.0f));           // the path starts where the character is
+    CHECK(path.back().z == doctest::Approx(2.0f).epsilon(1e-3));
+    CHECK(path.back().x == doctest::Approx(0.0f).epsilon(1e-4));
+
+    for (size_t i = 1; i < path.size(); ++i)
+        CHECK(path[i].z >= path[i - 1].z);            // never doubles back
+}
+
+TEST_CASE("root motion path: a quarter turn curves, and the tilt does not change where it ends")
+{
+    ContentManager cm;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeSkeleton(meshId));
+    const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(meshId);
+    REQUIRE(mesh != nullptr);
+
+    const glm::quat tilt = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1, 0, 0));
+    HE::RootMotionOptions opt;
+
+    std::vector<glm::vec3> flat, tilted;
+    std::vector<float>     yaw;
+    AnimationPreview::rootMotionPath(*mesh, makeQuarterTurnClip(1.0f, 33, 2.0f), opt, 32, flat, &yaw);
+    AnimationPreview::rootMotionPath(*mesh, makeQuarterTurnClip(1.0f, 33, 2.0f, tilt), opt, 32, tilted);
+
+    REQUIRE(flat.size() == 33);
+    REQUIRE(yaw.size()  == flat.size());
+    // A quarter circle of radius 2 starting at the origin facing +Z ends at
+    // (2, 0, 2) — and the heading has turned by 90°.
+    CHECK(flat.back().x == doctest::Approx(2.0f).epsilon(0.02));
+    CHECK(flat.back().z == doctest::Approx(2.0f).epsilon(0.02));
+    CHECK(yaw.back()    == doctest::Approx(90.0f).epsilon(0.02));
+    CHECK(yaw.front()   == doctest::Approx(0.0f));
+
+    // The Blender rest tilt cancels: it is a constant on the root, and the delta
+    // is referenced against frame 0. A preview that climbed here would be showing
+    // exactly the bug the reference cures.
+    CHECK(tilted.back().x == doctest::Approx(flat.back().x).epsilon(0.02));
+    CHECK(tilted.back().y == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK(tilted.back().z == doctest::Approx(flat.back().z).epsilon(0.02));
+}
+
+TEST_CASE("root motion path: the three answers that mean 'no path'")
+{
+    ContentManager cm;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeSkeleton(meshId));
+    const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(meshId);
+    REQUIRE(mesh != nullptr);
+
+    std::vector<glm::vec3> path;
+    HE::RootMotionOptions opt;
+
+    // The per-clip switch off — the same gate rootMotionSampleClip applies, so
+    // the preview goes dark exactly when the game would stop moving.
+    AnimationClipAsset off = makeWalkClip(1.0f, 2.0f);
+    off.hasRootMotion = false;
+    AnimationPreview::rootMotionPath(*mesh, off, opt, 16, path);
+    CHECK(path.empty());
+
+    // A joint name that matches nothing. Not "the first root anyway": a typo has
+    // to look different from a clip that carries nothing.
+    opt.rootJointName = "NoSuchBone";
+    AnimationPreview::rootMotionPath(*mesh, makeWalkClip(1.0f, 2.0f), opt, 16, path);
+    CHECK(path.empty());
+
+    // A clip with no length.
+    opt.rootJointName.clear();
+    AnimationPreview::rootMotionPath(*mesh, makeWalkClip(0.0f, 2.0f), opt, 16, path);
+    CHECK(path.empty());
+}
+
+TEST_CASE("root motion path: the preview ends where a ticked entity actually arrives")
+{
+    // The whole point of the line. Two routes to the same number: the editor's
+    // one-shot integration over the clip, and sixty frames of the real tick.
+    auto rig = makeRig(makeWalkClip(1.0f, 2.0f), RootMotionComponent::Mode::Transform,
+                       /*looping=*/false);
+
+    const SkeletalMeshAsset*  mesh = rig->cm.getSkeletalMesh(rig->meshId);
+    const AnimationClipAsset* clip = rig->cm.getAnimationClip(rig->clipId);
+    REQUIRE(mesh != nullptr);
+    REQUIRE(clip != nullptr);
+
+    const HE::RootMotionOptions opt;
+    std::vector<glm::vec3> path;
+    AnimationPreview::rootMotionPath(*mesh, *clip, opt, 64, path);
+    REQUIRE(path.size() > 1);
+
+    // No PhysicsWorld: Transform mode writes the transform itself and only ever
+    // reaches for the physics to hand a character controller back its velocity.
+    HE::RootMotionContext ctx{};
+    for (int i = 0; i < 80; ++i)   // the 1 s clip is over well before this
+        SceneSystems::tickAnimation(rig->world, rig->cm, 1.0f / 60.0f, nullptr, &ctx);
+
+    const glm::vec3 arrived = rig->world.registry().get<TransformComponent>(rig->entity).position;
+    CHECK(arrived.z == doctest::Approx(path.back().z).epsilon(0.02));
+    CHECK(arrived.x == doctest::Approx(path.back().x).epsilon(0.02));
+}
+
+TEST_CASE("preview pose: the lock parks the root, and the per-clip switch turns it off")
+{
+    ContentManager cm;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeSkeleton(meshId));
+    const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(meshId);
+    REQUIRE(mesh != nullptr);
+
+    AnimationClipAsset clip = makeWalkClip(1.0f, 2.0f);
+    HE::RootMotionOptions opt;   // Lock::Zero
+
+    std::vector<glm::mat4> raw, locked;
+    AnimationPreview::evaluateClipPose(*mesh, clip, 1.0f, raw);
+    AnimationPreview::evaluateClipPoseLocked(*mesh, clip, 1.0f, opt, locked);
+
+    REQUIRE(raw.size()    == mesh->skeleton.size());
+    REQUIRE(locked.size() == mesh->skeleton.size());
+    // Unlocked, the root carries the whole walk; locked, it stands at the origin
+    // — which is what "animates in place" means, and what the path beside it is
+    // then the missing half of.
+    CHECK(raw[0][3].z    == doctest::Approx(2.0f).epsilon(1e-3));
+    CHECK(locked[0][3].z == doctest::Approx(0.0f).epsilon(1e-4));
+
+    // The clip's own switch turns the lock off too: the two halves have to agree,
+    // or the mesh would animate in place with no path to explain where it went.
+    clip.hasRootMotion = false;
+    std::vector<glm::mat4> unswitched;
+    AnimationPreview::evaluateClipPoseLocked(*mesh, clip, 1.0f, opt, unswitched);
+    CHECK(unswitched[0][3].z == doctest::Approx(2.0f).epsilon(1e-3));
+}
