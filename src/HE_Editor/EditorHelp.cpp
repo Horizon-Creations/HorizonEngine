@@ -130,6 +130,12 @@ namespace
 	  "layer has its own clip, its own weight and a bone mask saying which part "
 	  "of the skeleton it may touch.",
 	  "", "systems#animation" },
+	{ "Component/Inverse Kinematics", "Inverse Kinematics",
+	  "Corrects the finished pose against the world it is standing in: feet onto "
+	  "the ground that is actually under them, head and spine turned towards "
+	  "something worth looking at. It runs after the animators and after the "
+	  "layers, so it holds whatever they came up with.",
+	  "", "systems#animation" },
 	{ "Component/Root Motion", "Root Motion",
 	  "Moves the entity by the motion the animator put into the root bone, and "
 	  "takes that motion back out of the pose. Without it a walk cycle slides on "
@@ -1128,6 +1134,124 @@ namespace
 	  "Another pose on top of the stack. Layers are applied in order, each onto "
 	  "the result of the one before it, so the last one in the list has the last "
 	  "word wherever its mask lets it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Foot Joint", "",
+	  "The ankle this leg ends at, by name. Everything else about the leg is "
+	  "found from here, so this is the one field that has to be right — a name "
+	  "the skeleton does not have switches this foot off and says so in the log.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Knee Joint", "",
+	  "Leave it empty and the joint above the foot is used, which is right on "
+	  "every humanoid rig. Fill it in for a leg that has an extra joint in the "
+	  "way — a dog or a bird bends two joints up from the paw, and bending the "
+	  "wrong two makes it walk on its ankles.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Hip Joint", "",
+	  "Same rule as the knee: empty means the joint above it. The hip is the top "
+	  "of the two-bone chain — it aims the leg, the knee bends it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Foot Weight", "",
+	  "How much of the correction this foot gets. 0 leaves the leg exactly as the "
+	  "animation posed it. Gameplay fades this down while a character is in the "
+	  "air or in a cutscene, and the solver also drops it to 0 by itself whenever "
+	  "the ground ray finds nothing.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Trace Up", "",
+	  "How far ABOVE the foot the ground ray starts. This is what finds a step "
+	  "the animation has already pushed the foot into: start the ray at the "
+	  "ankle and it begins inside the geometry and misses it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Trace Down", "",
+	  "How far below the foot the ray still looks. Past this the character counts "
+	  "as being in the air and the leg is left where the animation put it — so "
+	  "this is also the height a ledge has to be for the feet to let go of it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Sole Offset", "",
+	  "Ankle to sole, in metres. No skeleton knows this by itself: the foot joint "
+	  "sits inside the ankle, so putting the JOINT on the ground buries the foot "
+	  "up to it. Measure it once per character and it is right for every surface.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Foot Interp Speed", "",
+	  "How fast the foot catches up with ground that moved. Higher is more exact "
+	  "and more twitchy; 0 snaps. It exists because a stair edge moves the ground "
+	  "under a ray by a whole step in one frame, and a foot that follows that "
+	  "literally pops.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Align To Normal", "",
+	  "Tilt the foot to match the slope it landed on, instead of leaving it flat. "
+	  "Off is the right answer for a character that only ever walks on level "
+	  "ground, and one calculation cheaper.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Max Pitch", "",
+	  "How far the toe may tip up or down to follow a slope. The limit matters "
+	  "more than the value: a foot that finds a wall would otherwise stand itself "
+	  "up on end at 90°, which is the most recognisable IK failure there is.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Max Roll", "",
+	  "The same limit sideways, across the foot. Usually smaller than the pitch "
+	  "limit, because an ankle has less to give in that direction than a human "
+	  "one does.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Remove Foot", "",
+	  "Takes this leg out of the list. The other legs keep their settings.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Add Foot", "",
+	  "Another leg. Two is the usual answer; four works the same way and so does "
+	  "one, for anything that hops.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Adjust Pelvis", "",
+	  "Lower the whole body by the deepest foot's drop before solving the legs. "
+	  "This is the difference between IK and IK that works on stairs: without it "
+	  "the low leg has to reach further than it has bone and straightens out.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Pelvis Joint", "",
+	  "Which joint counts as the body. Empty means the parent of the first leg's "
+	  "hip, which on a normal rig is the pelvis.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look At", "",
+	  "Turn the head — and as much of the spine as you let it — towards a target. "
+	  "Unlike the feet this needs no physics at all, so it works in the editor "
+	  "and you can see what you are aiming.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Chain", "",
+	  "The joints that share the turn, root first, separated by commas — usually "
+	  "Spine, Neck, Head. One joint alone is the look of a bird; a spine that "
+	  "carries part of it is what makes a character look AT something.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Chain Weights", "",
+	  "How the turn is split over the chain, in the same order and separated by "
+	  "commas. They are normalised, so 1, 2, 3 and 0.17, 0.33, 0.5 mean the same "
+	  "thing. Empty splits it evenly.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Target", "",
+	  "The entity to look at. Its position is followed as it moves, so this is "
+	  "what a guard watching a player is. Set to \"(world point)\" to aim at a "
+	  "fixed place instead.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Target Point", "",
+	  "The place in the world to look at, when no target entity is chosen. In "
+	  "world coordinates, not relative to the character.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Head Forward", "",
+	  "Which way the head looks in its OWN frame. 0, 0, -1 is this engine's "
+	  "forward and the right answer for most rigs; an import from a tool with "
+	  "another convention needs its own axis here, and the sign of it is what "
+	  "decides whether the character looks at the target or away from it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Weight", "",
+	  "How much of the turn reaches the pose. Gameplay fades this in when a "
+	  "character notices something and back out when it looks away, which is the "
+	  "difference between a head that turns and a head that snaps.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Max Yaw", "",
+	  "How far the head may turn left or right before it gives up and stops "
+	  "following. Without a limit a target walking behind the character spins the "
+	  "head 180° and the neck with it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Interp Speed", "",
+	  "How fast the head follows a target that moved. Low is a slow, deliberate "
+	  "look; high is alert. It also softens the moment a target leaves the cone "
+	  "and the angle clamps.",
 	  "", "systems#animation" },
 	{ "Property Animator/Speed", "",
 	  "Playback rate of the property clip: 1 is as authored, negative runs it "
@@ -4887,6 +5011,7 @@ namespace
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
+		"Inverse Kinematics",
 		"Property Animator", "Particle System",
 		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",

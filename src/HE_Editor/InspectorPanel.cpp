@@ -896,6 +896,163 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimationLayerComponent>(entity); }
 	}
 
+	// ── Inverse Kinematics ──────────────────────────────────────────────────
+	// The correction laid over whatever the animators and the layers above ended
+	// up with: feet onto the ground that is actually there, head onto the thing it
+	// is looking at. One section for all three drivers, like Root Motion.
+	if (auto* ik = registry.try_get<IkComponent>(entity))
+	{
+		if (componentHeader("Inverse Kinematics", true, removed))
+		{
+			EditorWidgets::WrapText wrap;   // joint names are authored free text
+
+			int removeFoot = -1;
+			for (size_t i = 0; i < ik->feet.size(); ++i)
+			{
+				auto& f = ik->feet[i];
+				ImGui::PushID(static_cast<int>(i));
+				ImGui::Separator();
+
+				// The three names invalidate the resolution cache, so they set the
+				// dirty flag rather than relying on it being noticed next frame.
+				if (Row::inputText("Foot Joint##ik", &f.footJoint)) { ik->jointsDirty = true; }
+				trackEdit();
+				if (Row::inputText("Knee Joint##ik", &f.kneeJoint)) { ik->jointsDirty = true; }
+				trackEdit();
+				if (Row::inputText("Hip Joint##ik",  &f.hipJoint))  { ik->jointsDirty = true; }
+				trackEdit();
+
+				Row::sliderFloat("Foot Weight##ik", &f.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
+				Row::dragFloat("Trace Up##ik",   &f.traceUp,   0.01f, 0.0f, 5.0f, "%.2f m"); trackEdit();
+				Row::dragFloat("Trace Down##ik", &f.traceDown, 0.01f, 0.0f, 5.0f, "%.2f m"); trackEdit();
+				Row::dragFloat("Sole Offset##ik", &f.footHeightOffset, 0.005f, -0.5f, 0.5f, "%.3f m"); trackEdit();
+				Row::dragFloat("Foot Interp Speed##ik", &f.interpSpeed, 0.1f, 0.0f, 60.0f, "%.1f"); trackEdit();
+				EditorWidgets::checkbox("Align To Normal##ik", &f.alignToNormal); trackEdit();
+				if (f.alignToNormal)
+				{
+					Row::dragFloat("Max Pitch##ik", &f.maxPitchDegrees, 0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+					Row::dragFloat("Max Roll##ik",  &f.maxRollDegrees,  0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+				}
+
+				if (EditorWidgets::dangerSmallButton("Remove Foot")) removeFoot = static_cast<int>(i);
+				ImGui::PopID();
+			}
+			if (removeFoot >= 0)
+			{
+				if (undo) undo->snapshotNow();
+				ik->feet.erase(ik->feet.begin() + removeFoot);
+				ik->jointsDirty = true;    // the cache is index-parallel to the list
+				trackEdit();
+			}
+
+			ImGui::Separator();
+			if (EditorWidgets::button("Add Foot", ImVec2(120.0f, 0.0f)))
+			{
+				if (undo) undo->snapshotNow();
+				ik->feet.push_back(IkComponent::FootIk{});
+				ik->jointsDirty = true;
+				trackEdit();
+			}
+
+			EditorWidgets::checkbox("Adjust Pelvis", &ik->adjustPelvis); trackEdit();
+			if (ik->adjustPelvis)
+			{
+				if (Row::inputText("Pelvis Joint", &ik->pelvisJoint)) { ik->jointsDirty = true; }
+				trackEdit();
+			}
+
+			ImGui::Separator();
+			auto& la = ik->lookAt;
+			EditorWidgets::checkbox("Look At", &la.enabled); trackEdit();
+			if (la.enabled)
+			{
+				// The chain is one line of comma-separated names rather than a
+				// list of rows: it is one to three joints, always the same three
+				// on a humanoid, and a row each with its own add and remove button
+				// would be more chrome than content.
+				std::string chainText;
+				for (size_t i = 0; i < la.chain.size(); ++i)
+				{ if (i) chainText += ", "; chainText += la.chain[i]; }
+				if (Row::inputText("Look Chain", &chainText))
+				{
+					la.chain.clear();
+					size_t start = 0;
+					while (start <= chainText.size())
+					{
+						const size_t comma = chainText.find(',', start);
+						std::string part = chainText.substr(
+							start, comma == std::string::npos ? std::string::npos : comma - start);
+						const size_t b = part.find_first_not_of(" \t");
+						const size_t e2 = part.find_last_not_of(" \t");
+						if (b != std::string::npos) la.chain.push_back(part.substr(b, e2 - b + 1));
+						if (comma == std::string::npos) break;
+						start = comma + 1;
+					}
+					ik->jointsDirty = true;
+					trackEdit();
+				}
+
+				// Same shape as the chain, and the same reason. Missing entries
+				// count as 1, so an empty box splits the turn evenly.
+				std::string weightText;
+				for (size_t i = 0; i < la.chainWeights.size(); ++i)
+				{
+					if (i) weightText += ", ";
+					char buf[32];
+					std::snprintf(buf, sizeof(buf), "%.2f", la.chainWeights[i]);
+					weightText += buf;
+				}
+				if (Row::inputText("Chain Weights", &weightText))
+				{
+					la.chainWeights.clear();
+					size_t start = 0;
+					while (start <= weightText.size())
+					{
+						const size_t comma = weightText.find(',', start);
+						const std::string part = weightText.substr(
+							start, comma == std::string::npos ? std::string::npos : comma - start);
+						try { la.chainWeights.push_back(std::stof(part)); } catch (...) {}
+						if (comma == std::string::npos) break;
+						start = comma + 1;
+					}
+					trackEdit();
+				}
+
+				// "(world point)" is not "no target" — it is the other kind of
+				// target, and the field below it is then the one that matters.
+				{
+					std::vector<const char*> names{ "(world point)" };
+					std::vector<HE::UUID>    ids{ HE::UUID{} };
+					int current = 0;
+					for (auto [e, name] : registry.view<NameComponent>().each())
+					{
+						if (e == entity || e == world.rootEntity()) continue;
+						if (!registry.all_of<TransformComponent>(e))  continue;
+						const HE::UUID id = world.entityId(e);
+						if (id == HE::UUID{}) continue;
+						if (id == la.targetEntityId) current = static_cast<int>(ids.size());
+						names.push_back(name.name.c_str());
+						ids.push_back(id);
+					}
+					if (Row::combo("Look Target", &current, names.data(), static_cast<int>(names.size())))
+					{ la.targetEntityId = ids[static_cast<size_t>(current)]; trackEdit(); }
+				}
+				if (la.targetEntityId == HE::UUID{})
+				{
+					Row::dragFloat3("Target Point", &la.targetWorld.x, 0.05f, -10000.0f, 10000.0f);
+					trackEdit();
+				}
+
+				Row::dragFloat3("Head Forward", &la.forwardLocal.x, 0.05f, -1.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Look Weight", &la.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
+				Row::dragFloat("Max Yaw",   &la.maxYawDegrees,   0.5f, 0.0f, 180.0f, "%.0f°"); trackEdit();
+				Row::dragFloat("Max Pitch##ikla", &la.maxPitchDegrees, 0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+				Row::dragFloat("Look Interp Speed", &la.interpSpeed, 0.1f, 0.0f, 60.0f, "%.1f"); trackEdit();
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<IkComponent>(entity); }
+	}
+
 	// ── Property Animator ───────────────────────────────────────────────────
 	if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
 	{
@@ -2446,6 +2603,10 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// stack does nothing, so adding it changes nothing until asked.
 			if (registry.all_of<SkeletalMeshComponent>(entity))
 				addItem("Animation Layers", AnimationLayerComponent{});
+			// And once more: IK corrects the pose of a skeleton. With no feet in
+			// the list and look-at off, adding it changes nothing until asked.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Inverse Kinematics", IkComponent{});
 
 			// Animator / Animator Blend / Property Animator, Character
 			// Controller, and the UI components are intentionally not offered
