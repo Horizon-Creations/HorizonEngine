@@ -1989,7 +1989,13 @@ namespace
 bool SceneSerializer::isKnownComponentKey(const std::string& key)
 {
 	static const std::unordered_set<std::string> kKnown = {
-		"animator", "animatorblend", "animstatemachine", "audiolistener",
+		"animationlayers", "animator", "animatorblend", "animstatemachine",
+		// "rootmotion" was written and read for a while without ever being listed
+		// here, so every scene carrying it logged "unknown component — it is being
+		// dropped on load" while loading it perfectly well. Exactly the noise the
+		// comment on this function warns about, found while adding the line above.
+		"rootmotion",
+		"audiolistener",
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
 		"movement",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
