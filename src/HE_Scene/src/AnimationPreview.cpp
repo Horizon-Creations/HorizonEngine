@@ -2,9 +2,11 @@
 #include "AnimationEval.h" // internal: sampleClip/composeBoneMatrices/lockRootJoint, same src/ tree
 
 #include <ContentManager/ContentManager.h>
+#include <HorizonScene/AnimationIk.h>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 void AnimationPreview::evaluateClipPose(const SkeletalMeshAsset& mesh, const AnimationClipAsset& clip,
                                         float t, std::vector<glm::mat4>& outBoneMatrices)
@@ -109,4 +111,51 @@ void AnimationPreview::evaluateBlendSpacePose(const SkeletalMeshAsset& mesh, Con
     // clip it cannot read either.
     if (localTRS.empty()) localTRS.assign(mesh.skeleton.size(), JointTRS{});
     composeBoneMatrices(mesh, localTRS, outBoneMatrices);
+}
+
+void AnimationPreview::evaluateClipPoseLookAt(const SkeletalMeshAsset& mesh,
+                                              const AnimationClipAsset& clip, float t,
+                                              const std::vector<std::string>& chain,
+                                              const std::vector<float>& chainWeights,
+                                              const glm::vec3& targetModel,
+                                              const glm::vec3& forwardLocal,
+                                              float maxYawDegrees, float maxPitchDegrees,
+                                              float weight,
+                                              std::vector<glm::mat4>& outBoneMatrices,
+                                              glm::vec2* outAnglesDegrees)
+{
+    if (outAnglesDegrees) *outAnglesDegrees = glm::vec2(0.0f);
+
+    std::vector<JointTRS> localTRS(mesh.skeleton.size());
+    sampleClip(clip, t, localTRS);
+
+    // The same two halves the runtime runs, in the same order — solve in the
+    // model matrices, finish with the inverse bind. Falling back to
+    // composeBoneMatrices when nothing resolves is not a shortcut but the point:
+    // an empty chain has to leave the preview showing the plain clip.
+    std::vector<glm::mat4> model;
+    composeModelMatrices(mesh, localTRS, model);
+
+    std::vector<int>   joints;
+    std::vector<float> weights;
+    for (size_t i = 0; i < chain.size(); ++i)
+    {
+        const int j = HE::findJointByName(mesh, chain[i]);
+        if (j < 0) continue;
+        joints.push_back(j);
+        weights.push_back(i < chainWeights.size() ? chainWeights[i] : 1.0f);
+    }
+
+    if (!joints.empty())
+    {
+        const glm::vec2 angles = HE::lookAtAngles(mesh, joints, model, targetModel, forwardLocal,
+                                                  maxYawDegrees, maxPitchDegrees);
+        // No smoothing here, on purpose: a scrubbing preview has no previous
+        // frame to ease from, and an author dragging a target wants to see where
+        // it points, not where it is on its way to.
+        HE::applyLookAt(mesh, joints, weights, angles, forwardLocal, weight, localTRS, model);
+        if (outAnglesDegrees) *outAnglesDegrees = angles;
+    }
+
+    applyInverseBind(mesh, model, outBoneMatrices);
 }

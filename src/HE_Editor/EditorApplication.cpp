@@ -55,6 +55,7 @@
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
 #include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
+#include <HorizonScene/AnimationIk.h>                  // findJointByName — the head the look-at line starts at
 #include <HorizonScene/Components/RootMotionComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
@@ -1971,6 +1972,62 @@ static void appendRootMotionPreview(HorizonWorld& world, ContentManager& cm,
 	out.line(prev - glm::vec3(0.0f, 0.15f, 0.0f), prev + glm::vec3(0.0f, 0.35f, 0.0f), col);
 }
 
+// ── Look-at target ───────────────────────────────────────────────────────────
+// A cross where the selected figure is looking, and a line from its head to it.
+//
+// The same argument as the root-motion line above, one stage later: a target
+// point is three numbers in the Details panel, and three numbers do not tell
+// anybody whether the head can actually reach them. The line does — it is either
+// pointing at the cross or it is stopped short by the yaw limit, and both of
+// those are visible at a glance and neither is visible in the numbers.
+static void appendLookAtPreview(HorizonWorld& world, ContentManager& cm,
+                                entt::entity e, DebugDrawBuffer& out)
+{
+	auto& reg = world.registry();
+	const auto* ik   = reg.try_get<IkComponent>(e);
+	const auto* skel = reg.try_get<SkeletalMeshComponent>(e);
+	if (!ik || !skel || !ik->lookAt.enabled || ik->lookAt.chain.empty()) return;
+
+	glm::vec3 target = ik->lookAt.targetWorld;
+	if (ik->lookAt.targetEntityId != HE::UUID{})
+	{
+		const Entity t = world.findByEntityId(ik->lookAt.targetEntityId);
+		if (t == entt::null) return;
+		// worldPositionOf, never TransformComponent::worldMatrix — the same rule
+		// the solver itself follows, and for the same reason.
+		target = HE::worldPositionOf(world, t);
+	}
+
+	// Teal rather than the amber the root-motion line uses: on a figure that has
+	// both, two lines in one colour leaving the same body would read as one.
+	const glm::vec3 col(0.35f, 0.80f, 0.78f);
+	constexpr float r = 0.12f;
+	out.line(target - glm::vec3(r, 0.0f, 0.0f), target + glm::vec3(r, 0.0f, 0.0f), col);
+	out.line(target - glm::vec3(0.0f, r, 0.0f), target + glm::vec3(0.0f, r, 0.0f), col);
+	out.line(target - glm::vec3(0.0f, 0.0f, r), target + glm::vec3(0.0f, 0.0f, r), col);
+
+	// From the head, when there is a posed skeleton to find one in. The bone
+	// matrices carry the inverse bind matrix, so the joint's own frame is
+	// boneMatrix · bindMatrix — and the bind matrix is the inverse of what the
+	// skeleton stores. Without a pose yet, the line starts at the entity instead
+	// of not being drawn: the cross is the useful half anyway.
+	glm::vec3 from = HE::worldPositionOf(world, e);
+	const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(skel->meshAssetId);
+	if (mesh && !skel->boneMatrices.empty())
+	{
+		const int head = HE::findJointByName(*mesh, ik->lookAt.chain.back());
+		if (head >= 0 && static_cast<size_t>(head) < skel->boneMatrices.size())
+		{
+			glm::mat4 ibm;
+			std::memcpy(&ibm, mesh->skeleton[static_cast<size_t>(head)].inverseBindMatrix.data(),
+			            sizeof(glm::mat4));
+			const glm::mat4 jointModel = skel->boneMatrices[static_cast<size_t>(head)] * glm::inverse(ibm);
+			from = glm::vec3(HE::worldMatrixOf(world, e) * glm::vec4(glm::vec3(jointModel[3]), 1.0f));
+		}
+	}
+	out.line(from, target, col);
+}
+
 // HE-PATCH(stuck-keys) watchdog: once a second, compare ImGui's idea of the
 // keyboard against SDL's. A key ImGui thinks is held while SDL says it is up
 // means a key-up never reached ImGui (see the HE-PATCH in imgui_impl_sdl3.cpp's
@@ -3599,7 +3656,12 @@ void EditorApplication::OnRender(float dt)
 			// lines, and the question ("does this clip go where I meant it to")
 			// is asked about one figure at a time.
 			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
-				appendRootMotionPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+				{
+					appendRootMotionPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+					// And where its head is aimed, for the same one-figure-at-a-time
+					// reason.
+					appendLookAtPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+				}
 
 			// The ground grid, last of the editor's own lines: it is the biggest
 			// contributor by far, and appending it after the gizmos keeps the

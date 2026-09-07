@@ -68,4 +68,31 @@ namespace AnimationPreview
                                 const HE::BlendSpace& space, float x, float y, float phase,
                                 std::vector<glm::mat4>& outBoneMatrices,
                                 std::vector<float>* outWeights = nullptr);
+
+    // The clip's pose with the look-at chain turned onto `targetModel`, so the
+    // mesh preview can show what a look-at setting actually does before there is
+    // a character in a scene to try it on.
+    //
+    // Look-at and NOT foot placement, and that split is the same one the runtime
+    // makes: a foot needs a ground ray and there is no physics world here, so a
+    // preview that solved one would be showing a pose the game never produces.
+    // Turning a head needs nothing but the skeleton.
+    //
+    // `chain` is joint NAMES, root first — the same strings IkComponent holds, so
+    // the preview and the component cannot disagree about what resolves. Names
+    // the skeleton does not have are skipped, with their weights.
+    //
+    // `targetModel` is in the mesh's own space: there is no entity here to have a
+    // world matrix, which is exactly why this exists.
+    //
+    // `outAnglesDegrees`, when given, receives the (yaw, pitch) actually used
+    // after clamping — the numbers to put next to the sliders, so an author can
+    // see that the limit and not the target is what is holding the head back.
+    void evaluateClipPoseLookAt(const SkeletalMeshAsset& mesh, const AnimationClipAsset& clip,
+                                float t, const std::vector<std::string>& chain,
+                                const std::vector<float>& chainWeights,
+                                const glm::vec3& targetModel, const glm::vec3& forwardLocal,
+                                float maxYawDegrees, float maxPitchDegrees, float weight,
+                                std::vector<glm::mat4>& outBoneMatrices,
+                                glm::vec2* outAnglesDegrees = nullptr);
 }
