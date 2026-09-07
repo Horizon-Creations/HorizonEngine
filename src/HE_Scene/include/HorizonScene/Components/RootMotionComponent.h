@@ -28,6 +28,20 @@ struct RootMotionComponent
         CharacterController,
     };
 
+    // See HE::rootMotionLockFromInt: a saved mode is a raw int, and an unknown
+    // one would be an enum with no enumerator — which passes `!= Off` and then
+    // fails `== Transform`, landing in the character-controller branch by
+    // accident. Off is the safe answer, and it is what an absent key gives too.
+    static constexpr Mode modeFromInt(int v)
+    {
+        switch (v)
+        {
+            case (int)Mode::Transform:           return Mode::Transform;
+            case (int)Mode::CharacterController: return Mode::CharacterController;
+            default:                             return Mode::Off;
+        }
+    }
+
     Mode mode = Mode::Off;
     HE::RootMotionOptions options;
 

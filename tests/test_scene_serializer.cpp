@@ -18,6 +18,7 @@
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/PropertyAnimatorComponent.h>
 #include <HorizonScene/Components/NavMeshComponent.h>
@@ -517,6 +518,89 @@ TEST_CASE("SceneSerializer round-trips AnimatorBlendComponent")
 		CHECK(found);
 		he_test::removeQuiet(file);
 	}
+}
+
+TEST_CASE("SceneSerializer round-trips RootMotionComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_rootmotion.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+
+		RootMotionComponent rm;
+		// Every field away from its default, so a mistyped JSON key shows up as a
+		// value that fell back rather than as a value that happened to match.
+		rm.mode = RootMotionComponent::Mode::CharacterController;
+		rm.options.rootJointName        = "Hips";
+		rm.options.extractTranslationXZ = false;
+		rm.options.extractTranslationY  = true;
+		rm.options.extractYaw           = false;
+		rm.options.lock                 = HE::RootMotionLock::TranslationOnly;
+		world.registry().emplace<RootMotionComponent>(e, rm);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lrm] : loaded.registry().view<RootMotionComponent>().each())
+		{
+			found = true;
+			CHECK(lrm.mode == RootMotionComponent::Mode::CharacterController);
+			CHECK(lrm.options.rootJointName        == "Hips");
+			CHECK(lrm.options.extractTranslationXZ == false);
+			CHECK(lrm.options.extractTranslationY  == true);
+			CHECK(lrm.options.extractYaw           == false);
+			CHECK(lrm.options.lock == HE::RootMotionLock::TranslationOnly);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer: an out-of-range root motion mode loads as Off, not as a mode")
+{
+	// A file from a newer editor, or a hand-edit. Casting the int blind gives an
+	// enum with no enumerator, which passes `!= Off` and then fails
+	// `== Transform` — landing in the character-controller branch by accident.
+	const fs::path file = fs::temp_directory_path() / "he_test_rootmotion_bad.hescene";
+	{
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+		RootMotionComponent rm; rm.mode = RootMotionComponent::Mode::Transform;
+		world.registry().emplace<RootMotionComponent>(e, rm);
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+
+	{
+		std::ifstream in(file);
+		nlohmann::json scene; in >> scene; in.close();
+		REQUIRE(scene.contains("entities"));
+		bool patched = false;
+		for (auto& ent : scene["entities"])
+		{
+			if (!ent.contains("components") || !ent["components"].contains("rootmotion")) continue;
+			ent["components"]["rootmotion"]["mode"] = 99;
+			patched = true;
+		}
+		REQUIRE(patched);
+		std::ofstream out(file); out << scene.dump(4);
+	}
+
+	HorizonWorld loaded;
+	SceneSerializer ser;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	bool found = false;
+	for (auto [le, lrm] : loaded.registry().view<RootMotionComponent>().each())
+	{
+		found = true;
+		CHECK(lrm.mode == RootMotionComponent::Mode::Off);
+	}
+	CHECK(found);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("SceneSerializer round-trips PropertyAnimatorComponent")

@@ -35,6 +35,22 @@ enum class RootMotionLock : uint8_t
     TranslationOnly,
 };
 
+// A saved lock is a raw int in the .hescene JSON, and a file from a newer editor
+// — or a hand-edit — can name a value this build does not have. Casting it blind
+// makes an enum with no enumerator, and the switch that reads it then falls
+// through to whichever branch happens to be last. Same guard, and the same
+// reason, as HE::transitionOpFromInt.
+constexpr RootMotionLock rootMotionLockFromInt(int v)
+{
+    switch (v)
+    {
+        case (int)RootMotionLock::Zero:            return RootMotionLock::Zero;
+        case (int)RootMotionLock::FirstFrame:      return RootMotionLock::FirstFrame;
+        case (int)RootMotionLock::TranslationOnly: return RootMotionLock::TranslationOnly;
+        default:                                   return RootMotionLock::Zero;
+    }
+}
+
 // The value range of RootMotionComponent without the ECS, so the preview and the
 // tests can drive the same helpers the systems drive.
 struct RootMotionOptions

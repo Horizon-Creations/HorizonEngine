@@ -277,7 +277,24 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             if (sm.transitionElapsed >= sm.transitionDuration)
             {
                 sm.currentStateName  = sm.transitionTarget;
-                sm.clipTime          = sm.transitionElapsed;
+                // Wrapped the same way the incoming playhead was sampled. A
+                // crossfade longer than the clip it fades INTO leaves an elapsed
+                // time past the clip's end, and the pose is wrapped a line later
+                // anyway — but root motion reads this value BEFORE that wrap and
+                // would spend one frame with a span pinned to the clip's end.
+                sm.clipTime = sm.transitionElapsed;
+                if (nextClip && nextClip->duration > 0.0f)
+                {
+                    if (nextState && nextState->looping)
+                    {
+                        sm.clipTime = std::fmod(sm.clipTime, nextClip->duration);
+                        if (sm.clipTime < 0.0f) sm.clipTime += nextClip->duration;
+                    }
+                    else
+                    {
+                        sm.clipTime = std::min(sm.clipTime, nextClip->duration);
+                    }
+                }
                 sm.inTransition      = false;
                 sm.transitionElapsed = 0.0f;
             }

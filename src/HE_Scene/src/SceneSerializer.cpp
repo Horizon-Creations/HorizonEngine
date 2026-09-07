@@ -1210,13 +1210,12 @@ namespace
 		{
 			const json& c = comps["rootmotion"];
 			RootMotionComponent rm;
-			rm.mode = static_cast<RootMotionComponent::Mode>(
-				c.value("mode", static_cast<int>(rm.mode)));
+			rm.mode = RootMotionComponent::modeFromInt(c.value("mode", static_cast<int>(rm.mode)));
 			rm.options.rootJointName        = c.value("rootJoint",     rm.options.rootJointName);
 			rm.options.extractTranslationXZ = c.value("translationXZ", rm.options.extractTranslationXZ);
 			rm.options.extractTranslationY  = c.value("translationY",  rm.options.extractTranslationY);
 			rm.options.extractYaw           = c.value("yaw",           rm.options.extractYaw);
-			rm.options.lock = static_cast<HE::RootMotionLock>(
+			rm.options.lock = HE::rootMotionLockFromInt(
 				c.value("lock", static_cast<int>(rm.options.lock)));
 			registry.emplace_or_replace<RootMotionComponent>(entity, rm);
 		}
