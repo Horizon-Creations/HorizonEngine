@@ -659,3 +659,91 @@ alles Automatisierbare ist in den Schritten 2 bis 6 abgedeckt.
 * **Python-Abhängigkeit** (`mcp>=2`) auf der Nutzerseite. Das Shim muss ohne
   Editor-Build laufen (reines Skript) und beim Fehlen des Pakets eine klare
   Meldung mit Installationszeile geben.
+
+---
+
+## 5. Was am Ende tatsächlich gebaut wurde
+
+Nachgetragen zum Abschluss des Themas. Der Plan oben ist von Schritt 1 und steht
+unverändert da; dieser Abschnitt sagt, wo die Umsetzung ihm gefolgt ist und wo
+nicht. Wer wissen will, was die Engine *kann*, liest diesen Abschnitt, nicht die
+Schrittliste in Kapitel 3.
+
+### 5.1 Steht
+
+| Was | Wo |
+|---|---|
+| Command-Gateway, fünf Befehle, `Origin{User,Remote,External}`, Lock-Gate, zwei Undo-Senken | `src/HE_Editor/EditorCommands.h/.cpp` |
+| TCP-Listener auf 127.0.0.1, JSON-RPC 2.0, Auth per Token, Frame-Limit 4 MiB, max. 4 Verbindungen | `src/HE_Editor/McpBridge.h/.cpp` |
+| Werkzeug-Registry und Kernwerkzeuge (`ping`, `scene_info`) | `src/HE_Editor/McpToolRegistry.h/.cpp` |
+| Entity-Werkzeuge: `entity_create`, `entity_destroy`, `entity_reparent`, `entity_set_transform`, `entity_set_components`, `entity_list`, `entity_get` | `src/HE_Editor/McpToolsEntity.cpp` |
+| Dreizehn HorizonCode-Werkzeuge (lesend und autorenschaftlich) | `src/HE_Editor/McpToolsHc.cpp` |
+| 233 Werkzeuge aus der `HE::api`-Registry, Schema aus `params`, Beschreibung aus `NodeDocs::engineCall` | `src/HE_Editor/McpToolsApi.h/.cpp` |
+| Ein/Aus-Schalter, Port, Zustandsanzeige, „Try Again" | Preferences → Editor → **Remote Control** |
+| Fußzeilen-Anzeige mit Tooltip, Klick öffnet die Seite | `src/HE_Editor/McpStatusBar.h/.cpp` |
+| Konsolenzeilen mit Präfix `MCP:` für Start, Stopp, Auth und jeden `tools/call` | `McpBridge.cpp:432` |
+
+Zur **Namenskonvention**: die Werkzeuge heißen `scene_info`, nicht `scene.info`
+wie in 2.5/2.6 geschrieben. Die Messages-API lässt für Tool-Namen nur
+`^[a-zA-Z0-9_-]{1,64}$` zu, ein Punkt macht das Werkzeug beim Client
+unbenutzbar (Entscheidung aus Schritt 4).
+
+### 5.2 Das Sicherheitsmodell, wie es sich heute bedienen lässt
+
+2.3 ist inhaltlich umgesetzt, mit zwei Abweichungen und einer Ergänzung.
+
+* **Nur IPv4.** 2.3.2 nennt `127.0.0.1` *und* `::1`. Ein Socket kann nicht beide
+  Loopbacks binden, und ein zweiter wäre eine zweite Angriffsfläche für nichts.
+  Der Listener ist IPv4; ein Client muss wörtlich `127.0.0.1` verbinden,
+  `localhost` kann auf `::1` auflösen und dann ins Leere laufen.
+* **Keine Notification beim ersten Client.** 2.3.8 und Schritt 6 sehen eine
+  vor. Gebaut ist stattdessen die Fußzeilenanzeige, die den Zustand *dauerhaft*
+  zeigt statt einmal — bei etwas, das eine Sitzung lang läuft, ist eine
+  Meldung, die man verpasst haben kann, die schwächere Antwort. Die
+  Konsolenzeilen (`MCP: client N authenticated`) gibt es zusätzlich.
+* **Ergänzung: der dritte Zustand.** `McpBridge::setEnabled` kehrt früh zurück,
+  wenn sich der Wert nicht geändert hat. Ein `start()`, das scheitert (Port
+  belegt, Endpunktdatei nicht schreibbar), wird vom Frameloop also nie
+  wiederholt: die Einstellung sagt an, und es lauscht nichts. Preferences und
+  Fußzeile zeigen diesen Zustand getrennt an („Enabled, but the listener is not
+  up" / „Remote Control: not listening"), und der Knopf „Try Again" geht den
+  einzigen Wiederholungspfad, den es gibt — aus und wieder an. Eine Checkbox,
+  die hier nur angehakt dastünde, wäre eine Lüge über genau das, wofür sie da
+  ist.
+
+Die Richtung ist einseitig und soll es bleiben: Preferences schreibt
+ausschließlich `EditorConfig::McpServerEnabled`, der Frameloop schiebt das
+jedes Frame in `setEnabled`. Der `McpBridge*` in `AppContext` ist für die UI
+**lesend** — er beantwortet, was die Config nicht kann (läuft der Listener
+wirklich, auf welchem Port, wie viele Clients).
+
+`Restore Defaults` setzt den Schalter bedingungslos zurück, auch wenn gerade
+ein Client verbunden ist. Ein „Restore Defaults", das einen offenen Listener
+stehen ließe, wäre genau die Überraschung, gegen die der Standard-Aus existiert.
+
+### 5.3 Was offen ist
+
+* **`scripts/he_mcp.py` gibt es nicht.** Das ist die eine echte Lücke, und sie
+  ist größer als sie aussieht: die Brücke spricht rohes JSON-RPC über einen
+  gerahmten TCP-Socket, **nicht** MCP über stdio. Ein Client wie Claude Code
+  kann sich damit heute nicht anhängen. Ein `claude mcp add`-Rezept im Handbuch
+  wäre eine Anleitung für ein Programm, das es nicht gibt — deshalb steht
+  keines darin. Das Shim braucht einen eigenen Schritt (reines Python,
+  `mcp>=2`, liest Port und Token aus `<Config-Dir>/mcp-endpoint.json`, reicht
+  `tools/list` und `tools/call` durch und kennt selbst keine Werkzeuge).
+* **Kein Handbuch-Kapitel „Editor fernsteuern".** Das Kapitel läge nicht in
+  diesem Repo: `EditorDeps/Docs/he-docs.json` wird von
+  `scripts/build_docs_bundle.py` aus `~/VSCode/Website/HorizonEngineDocs/*.html`
+  erzeugt. Die drei Handbucheinträge der neuen Bedienelemente haben deshalb ein
+  leeres `topic` — F1 landet in der generierten Settings-Referenz unter der
+  Überschrift „Remote Control", was funktioniert; ein `topic` auf einen
+  Website-Anker, den es noch nicht gibt, würde `test_editor_help` rot färben.
+  Wenn das Kapitel geschrieben ist: Abschnitt in `collaboration.html`, Bundle
+  neu bauen, Bundle hier committen, Website **nicht** deployen — und erst dann
+  die `topic`-Felder füllen.
+* **Nie gegen einen echten Client gelaufen.** Alles hier ist durch Tests über
+  einen echten Socket belegt, aber der Ende-zu-Ende-Durchlauf aus Schritt 7
+  (Mensch am Bildschirm, Würfel platzieren, Undo sehen) steht aus — und kann
+  es auch, solange das Shim fehlt.
+* Die Punkte aus Kapitel 4 bleiben, wo sie noch nicht durch Schritt 2
+  entschieden wurden.
