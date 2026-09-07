@@ -229,8 +229,10 @@ Verworfen, mit Grund:
 * **Editor als stdio-Subprozess des Clients.** MCP-Clients starten Server als
   Kindprozesse. Der Editor ist eine GUI-App, die der Mensch startet und
   weiterbenutzt; sie kann nicht Kind eines Claude-Prozesses sein, und ein
-  zweiter Editor-Prozess sähe eine andere Welt. Dazu die PATH-Falle von
-  Finder-Apps (`docs`-Memory `macos-gui-app-path`).
+  zweiter Editor-Prozess sähe eine andere Welt. Dazu die PATH-Falle: eine
+  aus dem Finder gestartete .app erbt ein minimales PATH ohne Homebrew
+  (siehe `ensureToolPathAugmented()`), ein aus ihr gestartetes Python fände
+  sein `mcp`-Paket nicht.
 * **Streamable-HTTP/SSE direkt in C++.** Es gibt keinen HTTP-Server im Baum;
   ihn zu schreiben, inklusive Session-Handling und Chunking, kostet mehr als
   das ganze Gateway, für einen Vorteil (kein Python), der lokal nicht zählt.
@@ -564,9 +566,19 @@ Tests:
 * `events/poll`: Puffer der `onCommandApplied`-Ereignisse pro Verbindung
   (uuid, Befehl, Origin), damit ein Client sieht, was der Mensch parallel
   tut. Kein Push, nur Poll.
-* Tests: `api.call` auf eine Exec-Zeile → `refused_by_policy`; pure Zeile
-  liefert das Ergebnis der Registry-`invoke`; Ereignispuffer hält 256 und
-  meldet Überlauf.
+
+| Datei | Was |
+|---|---|
+| `src/HE_Editor/McpToolsApi.cpp` (neu) | `api.list`, `api.call` (nur `isExec == false`), `component.keys` |
+| `src/HE_Editor/McpToolRegistry.h/.cpp` | Registrierung der neuen Tools, Schema aus `ApiFn::params/results` |
+| `src/HE_Editor/EditorCommands.h/.cpp` | Ereignispuffer am Observer (256 Einträge, Überlauf-Marke) |
+| `src/HE_Editor/McpBridge.h/.cpp` | `events/poll`, Cursor pro Verbindung |
+| `src/HE_Editor/McpToolsEntity.cpp` | `editor.selection.set` für Mehrfachauswahl |
+| `tests/test_mcp_bridge.cpp` | siehe unten |
+
+Tests: `api.call` auf eine Exec-Zeile → `refused_by_policy`; pure Zeile
+liefert das Ergebnis der Registry-`invoke`; Ereignispuffer hält 256 und
+meldet Überlauf; zwei Verbindungen haben unabhängige Cursor.
 
 ### Schritt 6: Editor-UX, Handbuch, Sichtbarkeit
 
@@ -576,8 +588,18 @@ Tests:
 * Handbuch-Kapitel (DocsLibrary) „Editor fernsteuern" mit der
   Shim-Konfiguration für Claude Code (`claude mcp add`) und Claude Desktop.
 * `EditorHelp`-Deckung grün, `editor_help_audit.py` grün.
-* Tests: Help-Audit, `test_docs_library` mit dem neuen Kapitel, ein
-  `he_uishot`-Bild des Preferences-Abschnitts als Sichtprüfung.
+
+| Datei | Was |
+|---|---|
+| `src/HE_Editor/EditorSettingsPanel.cpp` | Abschnitt „Fernsteuerung (MCP)": Schalter, Port, Pfad der Endpunkt-Datei, Hinweistext |
+| `src/HE_Editor/EditorHelp.cpp` | Einträge für jedes neue Bedienelement |
+| `src/HE_Editor/DocsLibrary.cpp` (+ Docs-Quelle) | Kapitel „Editor fernsteuern" |
+| `src/HE_Editor/CollabPresenceBar.cpp` oder `EditorToolbar.cpp` | Statusanzeige „MCP: an, n Clients" mit Tooltip |
+| `src/HE_Editor/McpBridge.cpp` | Notifications über `NotificationStore`, Console-Präfix |
+| `tests/test_editor_help.cpp`, `tests/test_docs_library.cpp` | Deckung und Kapitel |
+
+Tests: Help-Audit, `test_docs_library` mit dem neuen Kapitel, ein
+`he_uishot`-Bild des Preferences-Abschnitts als Sichtprüfung.
 
 ### Schritt 7: Ende-zu-Ende, Doku, Website
 
@@ -588,8 +610,16 @@ Tests:
   die Änderungen, Lock-Konflikt einmal provoziert.
 * Optional: Streamable-HTTP direkt in C++ als Ersatz des Shims, nur wenn
   das Shim in der Praxis stört.
-* Roadmap-Eintrag + Devlog (über `horizon-web`-MCP, Deploy bestätigen
-  lassen).
+
+| Datei | Was |
+|---|---|
+| `docs/mcp-editor-integration-plan.md` | Abschluss-Stand, Abweichungen vom Plan |
+| `README.md` | Absatz „Editor per MCP fernsteuern" mit der Shim-Zeile |
+| `scripts/he_mcp.py` | Fehlermeldung bei fehlendem `mcp`-Paket mit Installationszeile |
+| `Website/HorizonEngine/roadmap.json` (Geschwister-Repo, über `horizon-web`-MCP) | Roadmap-Eintrag, Devlog; Deploy bestätigen lassen |
+
+Tests: die beiden Durchläufe oben sind Handtests mit Protokoll im Thread;
+alles Automatisierbare ist in den Schritten 2 bis 6 abgedeckt.
 
 ---
 
@@ -604,6 +634,15 @@ Tests:
   ein noch nicht gehaltenes Subjekt einen Roundtrip; der Client bekommt
   `lock_pending` und wiederholt. Ein ungeduldiger Client sieht das als
   Fehler. Der Fehlertext muss das erklären.
+* **Lock-Timeout gegen `dropUnowned`.** 2.4 gibt externe Locks nach 2 s
+  ohne weiteren Befehl frei; `CollabUndo::dropUnowned` wirft jeden Eintrag,
+  dessen Lock weg ist. Zusammen hieße das: jeder MCP-Edit in einer Session
+  verliert sein Undo 2 s später. Schritt 2 muss sich entscheiden: entweder
+  leben externe Locks, bis der Client sie freigibt oder die Verbindung
+  trennt (Undo bleibt, ein Client kann Subjekte lange halten, der Mensch
+  sieht das am Lock-Badge), oder der Timeout bleibt und Session-Undo für
+  MCP-Edits gilt als nicht vorhanden. Mein Vorschlag ist das Erste, mit
+  Freigabe beim Disconnect.
 * **Struktur-Undo in einer Session** ist neu (`CollabUndo`-Erweiterung) und
   hat die Regel „gültig, solange der Lock gehalten wird". Ein Destroy gibt
   den Lock auf das zerstörte Subjekt frei; der Undo-Eintrag muss den Lock
