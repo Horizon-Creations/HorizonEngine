@@ -147,7 +147,17 @@ schiebt das Mesh, und die Entity fährt zusätzlich).
 
 Drei Teile, in dieser Reihenfolge pro Frame und pro Playhead:
 
-1. **Extraktion.** `delta = rootTRS(t) − rootTRS(tPrev)`, im Mesh-Raum.
+1. **Extraktion.** Das Delta ist ein **relativer Transform**, keine
+   Subtraktion:
+   `Δ = inverse(rootTransform(tPrev)) * rootTransform(t)`,
+   also `Δ.translation = inverse(q(tPrev)) * (p(t) − p(tPrev))` und
+   `Δ.yaw = yaw(q(t) * inverse(q(tPrev)))`.
+   Eine Subtraktion wäre nur richtig, solange sich die Wurzel nicht dreht. Sobald
+   `extractYaw` an ist und der Clip eine Kurve läuft (jeder Turn, jede Rolle),
+   dreht die Entity mit dem extrahierten Yaw mit, und eine im Mesh-Raum
+   subtrahierte Translation läge dann im falschen Rahmen: die Figur driftet
+   seitwärts aus der Kurve heraus. Unreal rechnet an derselben Stelle
+   `GetRelativeTransform`.
 2. **Root-Lock.** Die Wurzel-TRS in `localTRS` wird auf einen festen Wert
    gesetzt, bevor `composeBoneMatrices` läuft.
 3. **Anwendung.** Das Delta landet auf der Entity (Transform oder Character
@@ -163,11 +173,22 @@ gibt es den Namen überhaupt; ohne Treffer wird einmal pro Entity gewarnt
 deaktiviert.
 
 **Wie wird das Delta über einen Loop gerechnet?**
-`advancePlayback` wrappt bereits, deshalb muss der Delta-Helfer die Wrap-Kante
-selbst erkennen. Regel (Vorwärtslauf, `t < tPrev` heißt gewrappt):
-`delta = (rootTRS(duration) − rootTRS(tPrev)) + (rootTRS(t) − rootTRS(0))`.
-Rückwärts (`speed < 0`) spiegelverkehrt. Nicht-loopender Clip am Ende:
-`tPrev == t`, das Delta ist null, es passiert nichts. Das ist richtig so.
+Der Helfer bekommt die **ungewrappte** Spanne, nicht zwei gewrappte Stände:
+`tPrev` und `tPrev + dt * speed`, gerechnet **bevor** `advancePlayback` (bzw.
+das inline-`fmod` der Zustandsmaschine) wrappt. Der Helfer zerlegt selbst in
+Runden und komponiert die Teil-Deltas:
+`Δ = Δ(tPrev → duration) * Δ(0 → duration)^n * Δ(0 → t)`.
+
+Das ist der wichtige Teil der Entscheidung. Aus zwei gewrappten Ständen lässt
+sich weder die Laufrichtung noch die Rundenzahl zurückgewinnen: `t < tPrev`
+kann „vorwärts über die Kante" oder „rückwärts" heißen, und ein Clip, der in
+einem Frame anderthalb Runden läuft, sieht aus wie ein halber Frame. Mit der
+ungewrappten Spanne sind Rückwärtslauf und Mehrfachrunden gratis, und der
+Helfer braucht kein `looping`-Flag, um zu raten.
+
+Nicht-loopender Clip am Ende: `advancePlayback` klemmt, die Spanne ist leer,
+das Delta ist die Identität. Für den Charakter-Modus reicht das aber **nicht**,
+siehe die Dauerschreib-Regel in 2.3.
 
 **Was ist „tPrev"?**
 Ein `lastSampledTime` **pro Playhead**, nicht pro Entity:
@@ -175,6 +196,18 @@ Ein `lastSampledTime` **pro Playhead**, nicht pro Entity:
 Zustandsmaschine **zwei** (`clipTime` und `transitionElapsed`). Beim Abschluss
 des Crossfades wandert der eingehende Wert auf den ausgehenden mit, analog zu
 `sm.clipTime = sm.transitionElapsed`, sonst springt das Delta im Abschlussframe.
+
+Drei Regeln dazu, die sonst je einen eigenen Fehler ergeben:
+
+* `lastSampledTime` wird **jeden Frame für jeden laufenden Playhead**
+  fortgeschrieben, unabhängig davon, ob dieser Playhead gerade etwas feuert
+  oder anwendet. Sonst sammelt der gerade nicht gewichtete Playhead eine
+  Spanne an und schüttet sie in dem Frame aus, in dem er das Gewicht bekommt.
+* Beim **Start** einer Transition wird der eingehende Playhead auf 0 gesetzt,
+  und sein `lastSampledTime` mit ihm.
+* Beim **Eintritt** eines Playheads (erste Auswertung, neu angelegte
+  Komponente) gilt `lastSampledTime = -ε`, damit ein Notify bei `time == 0`
+  nicht verlorengeht (siehe 3.3).
 
 **Crossfade und Zwei-Clip-Blend:** die beiden Deltas werden mit demselben
 `alpha` gemischt, mit dem auch die Pose gemischt wird (`blendTRS`). Ein Delta
@@ -233,8 +266,29 @@ Aufruf aus `tickAnimation` hat damit exakt dieselbe Latenz wie der aus
 **letzte** Schreiber vor dem Step, gewinnt also gegen die Eingabe, solange
 Root Motion aktiv ist. Genau diese Semantik will man.
 
-Daraus folgt: **kein `pendingDelta`-Puffer, keine Änderung an
-`MovementSystem`.** Das Verbot in der `movement`-Doku („nichts, was eine Figur
+**Dauerschreib-Regel, und warum sie kein Detail ist.**
+`setCharacterVelocity` **hält** die Geschwindigkeit in Jolt, bis sie jemand
+überschreibt. `MovementSystem` überschreibt sie nur für Entities mit
+`MovementComponent` — ein NPC mit bloßem Character Controller hat keine. Und
+`AnimationSystem` überspringt eine Entity mit `!playing`, also hört Root Motion
+in dem Moment auf zu schreiben, in dem ein nicht-loopender Clip klemmt. Beides
+zusammen ergibt eine Figur, die für immer weitergleitet.
+
+Regel: solange auf einer Entity im `CharacterController`-Modus ein
+root-motion-tragender Clip aktiv ist, wird **jeden Frame** geschrieben, auch
+bei Delta null. In dem Frame, in dem der Clip endet (oder Root Motion abgewählt
+wird), wird die Horizontale einmal auf 0 geschrieben. Das Y bleibt in beiden
+Fällen `cc.velocity.y`.
+
+**Wer besitzt den Yaw?** `MovementSystem` schreibt `t.rotation.y` bereits an
+zwei Stellen (`lookYaw` und `orientToMovement`). Root Motion mit `extractYaw`
+ist ein dritter Schreiber. Entscheidung: Root Motion gewinnt, solange sie
+aktiv ist, und `orientToMovement` wird für diese Entity ausgesetzt, mit einer
+gedrosselten Warnung, wenn beides angeschaltet ist. Zwei Besitzer eines Yaw
+sind ein Zittern, das hinterher niemand lokalisiert.
+
+Daraus folgt: **kein `pendingDelta`-Puffer und keine Umbauten an
+`MovementSystem`** (bis auf die eine Yaw-Ausnahme oben). Das Verbot in der `movement`-Doku („nichts, was eine Figur
 bewegt, gehört in die Animationsphase") betrifft **Transform-Schreibvorgänge
 nach dem Step**; eine Geschwindigkeit für den kommenden Step ist keiner. Der
 Yaw-Schreiber ist ein Transform-Schreiber, aber der Character Controller
@@ -274,10 +328,15 @@ struct RootMotionDelta { glm::vec3 translation{0}; float yawDegrees = 0.0f; };
 // Wurzel-Joint des Skeletts (Name leer = erster mit parent < 0). -1 wenn keiner passt.
 int  findRootJoint(const SkeletalMeshAsset& mesh, const std::string& name);
 
-// Delta zwischen zwei Playhead-Ständen, wrap- und rückwärtsfest.
+// Delta über eine UNGEWRAPPTE Spanne (tPrev, tEnd]. Der Helfer zerlegt Runden
+// und Richtung selbst — deshalb kein `looping`-Flag und kein Vorzeichen-Raten.
 RootMotionDelta extractRootMotion(const AnimationClipAsset& clip, int rootJoint,
-                                  float tPrev, float t, bool looping,
+                                  float tPrev, float tEnd,
                                   const RootMotionOptions& opt);
+
+// Dieselbe Spanne, dieselbe Zerlegung, andere Ausbeute.
+void collectNotifies(const AnimationClipAsset& clip, uint32_t entity,
+                     float tPrev, float tEnd, NotifyQueue& out);
 
 // Wurzel-TRS in localTRS neutralisieren, passend zu opt/lock.
 void lockRootJoint(std::vector<JointTRS>& localTRS, int rootJoint,
@@ -345,22 +404,31 @@ aber das ist zu verifizieren, bevor ein Notify im gepackten Build verschwindet.
 
 ### 3.3 Feuerregel
 
-Pro Playhead und Frame, halboffenes Intervall `(tPrev, t]`:
+Pro Playhead und Frame, über **dieselbe ungewrappte Spanne**, mit der auch das
+Root-Motion-Delta gerechnet wird (2.2): `(tPrev, tPrev + dt * speed]`,
+halboffen links, geschlossen rechts.
 
-* **Notify** feuert, wenn `time` im Intervall liegt.
-* **Notify State** feuert `Begin`, wenn `time` im Intervall liegt, und `End`,
-  wenn `time + duration` darin liegt.
-* **Loop-Wrap:** das Intervall zerfällt in `(tPrev, duration]` und `(0, t]`,
-  beide werden geprüft. Ein Clip, der in einem Frame mehr als einmal durchläuft
-  (winzige Dauer, großer `dt`), feuert jedes Notify genau einmal — das ist
-  bewusst: hundert Fußtritte in einem Frame sind kein Feature.
-* **Rückwärtslauf** (`speed < 0`): dasselbe Intervall, umgekehrt orientiert;
+* **Notify** feuert, wenn `time` in der Spanne liegt.
+* **Notify State** feuert `Begin`, wenn `time` darin liegt, und `End`, wenn
+  `time + duration` darin liegt.
+* **Loop-Wrap:** der Helfer zerlegt die Spanne in Runden, genau wie beim
+  Delta. Ein Clip, der in einem Frame anderthalb Runden läuft, feuert die
+  Notifies der vollen Runde einmal und die der halben einmal. Kein Rundenzähler
+  wird geraten, weil die Spanne ungewrappt hereinkommt.
+* **Die Naht bei 0 und `duration`.** In einem Loop sind das derselbe Augenblick,
+  und ein Notify dort darf pro Runde genau einmal feuern. Konvention: die
+  rechte Kante gewinnt, also gehört `duration` zur ablaufenden Runde und `0`
+  zur neuen. Da die Spanne links offen ist, feuert ein Notify bei `time == 0`
+  in der ersten Runde sonst **nie** — deshalb startet ein Playhead mit
+  `lastSampledTime = -ε` (2.2). Ein Fußtritt auf Frame 0 ist der normale
+  Autorenfall, nicht die Ausnahme.
+* **Rückwärtslauf** (`speed < 0`): dieselbe Spanne, negativ orientiert.
   `Begin`/`End` bleiben an ihre Zeitstempel gebunden und tauschen die
   Reihenfolge nicht. Ein rückwärts abgespielter Angriff meldet erst das
   Fenster-Ende. Alles andere wäre eine zweite Semantik für dieselben Daten.
-* **Nicht-loopender Clip am Ende:** `tPrev == t`, es feuert nichts mehr. Ein
-  Notify exakt auf `duration` feuert damit genau einmal, im Frame des
-  Erreichens (weil das Intervall rechts geschlossen ist).
+* **Nicht-loopender Clip am Ende:** die Spanne ist leer, es feuert nichts mehr.
+  Ein Notify exakt auf `duration` feuert damit genau einmal, im Frame des
+  Erreichens (weil die Spanne rechts geschlossen ist).
 * **Crossfade:** nur der Playhead mit dem höheren Gewicht feuert
   (`alpha < 0.5` → ausgehender, sonst eingehender). Beide feuern zu lassen gibt
   während jedes Übergangs doppelte Fußtritte, und das ist die Beschwerde, die
@@ -460,9 +528,15 @@ Tests (`tests/test_animationsystem.cpp` oder neu
 2. Delta über einen einfachen Translations-Clip: halbe Dauer = halbe Strecke.
 3. Delta über die Loop-Kante: Summe der beiden Teilintervalle, kein Sprung
    zurück auf null.
-4. Delta bei `speed < 0` ist das negierte Vorwärts-Delta.
-5. Root-Lock: `boneMatrices[root]` ist nach dem Lock identisch zum Bindpose-
-   Ergebnis, obwohl der Clip die Wurzel bewegt.
+4. Delta bei `speed < 0` ist das inverse Vorwärts-Delta.
+4b. **Kurve:** Clip, dessen Wurzel 90° dreht und dabei vorwärts läuft. Nach
+   voller Abspieldauer steht die Entity dort, wo der Künstler sie hingelegt
+   hat. Das ist der Test, der die Subtraktion vom relativen Transform
+   unterscheidet, und ohne ihn fällt der Fehler erst im Spiel auf.
+5. Root-Lock: `boneMatrices[root]` ist nach dem Lock identisch zu
+   `composeBoneMatrices` derselben, von Hand gesperrten TRS. **Nicht** gegen
+   „Bindpose" prüfen: die Bind-Lokale der Wurzel ist bei Blender-Exporten
+   (−90° X) keine Identität.
 6. `Transform`-Modus: Entity mit Elternteil steht nach N Frames an der
    erwarteten **Welt**-Position (das ist der Test, der die Welt/Lokal-Grenze
    festnagelt).
@@ -472,6 +546,10 @@ Tests (`tests/test_animationsystem.cpp` oder neu
 9. `CharacterController`-Modus gegen eine headless `PhysicsWorld`, wie es die
    bestehenden Physik-Tests tun: nach einem Step steht die Figur weiter vorn,
    und ihr Y ist von der Gravitation bestimmt, nicht vom Clip.
+9b. **Kein Dauergleiten:** nicht-loopender Clip auf einer Entity **ohne**
+   `MovementComponent`. Nachdem der Clip geklemmt hat, ist die horizontale
+   Geschwindigkeit des Character Controllers 0 und die Figur steht nach
+   weiteren Steps still. Ohne die Dauerschreib-Regel gleitet sie für immer.
 
 ### Schritt 3 — Notifies
 
@@ -488,10 +566,18 @@ Tests:
    zweimal bei zwei aufeinanderfolgenden Frames um den Zeitstempel herum.
 3. Loop-Wrap: ein Notify bei `t = 0.05` feuert im Frame, der über die Kante
    läuft.
+3b. Ein Notify bei `time == 0` feuert im **ersten** Frame genau einmal, und
+   danach einmal pro Runde. Das ist der Test für `lastSampledTime = -ε` und
+   für die Nahtkonvention.
+3c. Ein Frame, der anderthalb Runden überstreicht, feuert jedes Notify der
+   vollen Runde einmal und die der halben einmal.
 4. Notify State: `Begin` und `End` in getrennten Frames, in dieser Reihenfolge.
 5. Nicht-loopender Clip: das Notify auf `duration` feuert genau einmal, danach
    nie wieder, egal wie viele Frames folgen.
-6. Crossfade: bei `alpha = 0.2` feuert nur der ausgehende Clip.
+6. Crossfade: bei `alpha = 0.2` feuert nur der ausgehende Clip. Und: nach dem
+   Gewichtswechsel bei 0.5 schüttet der eingehende Playhead **keinen** Rückstau
+   aus — das ist der Test für „`lastSampledTime` läuft für beide Playheads
+   jeden Frame mit".
 7. `NotifyQueue* == nullptr`: nichts wird gesammelt (und nichts kostet).
 8. Zustellung: Lua-Skript, HorizonCode-Entity-Klasse und Sync-Graph bekommen
    dasselbe Notify, und ein zerstörtes Entity bekommt keins.
