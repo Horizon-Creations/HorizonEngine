@@ -1,5 +1,10 @@
 # Themes written as CSS — what would fit, what would not
 
+> **Der Umsetzungsplan dazu steht in `docs/ui-theme-css-plan.md`** (07.09.2026).
+> Er korrigiert drei Punkte hier unten (verlustfreie Farbschreibweise, der Editor
+> kann Zeilennummern längst, Schatten fehlen in der Tabelle) und schneidet die
+> Arbeit in Checkpoints. Diese Bewertung bleibt, wie sie ist.
+
 Assessment, 01.09.2026. Nothing here is built. The question was whether a theme
 could later be authored as CSS instead of in the Theme editor, and how far that
 goes; this is the answer, written down before anybody starts.
