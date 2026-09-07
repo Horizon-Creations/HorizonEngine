@@ -1,8 +1,11 @@
 #pragma once
 #include <ContentManager/Assets.h>
+#include <HorizonScene/AnimationPose.h>
 #include <HorizonScene/RootMotion.h>
 #include <glm/glm.hpp>
 #include <vector>
+
+class ContentManager;
 
 // Public wrapper around the internal clip-sampling + forward-kinematics pipeline
 // (AnimationEval.h/.cpp, shared by AnimationSystem/AnimationBlendSystem) for
@@ -47,4 +50,22 @@ namespace AnimationPreview
                         const HE::RootMotionOptions& opt, int samples,
                         std::vector<glm::vec3>& outPoints,
                         std::vector<float>* outYawDegrees = nullptr);
+
+    // The pose a blend space wears at the parameter point (x, y) and shared phase
+    // `phase` — what the blend-space editor draws under the cursor it is dragging
+    // around the diagram, with no entity and no state machine anywhere.
+    //
+    // `phase` is a normalised cycle position, NOT seconds: each sample is read at
+    // `phase * its own duration`, which is exactly what the runtime does and the
+    // whole reason clips of different length stay in step. It is wrapped into
+    // [0, 1) here, because a scrubbing preview has no playhead to wrap it.
+    //
+    // `outWeights`, when given, receives one weight per sample — the numbers the
+    // diagram writes next to its points. Same numbers the runtime uses, capped
+    // and renormalised the same way, or the preview would be showing a mix the
+    // game never plays.
+    void evaluateBlendSpacePose(const SkeletalMeshAsset& mesh, ContentManager& cm,
+                                const HE::BlendSpace& space, float x, float y, float phase,
+                                std::vector<glm::mat4>& outBoneMatrices,
+                                std::vector<float>* outWeights = nullptr);
 }

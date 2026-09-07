@@ -32,9 +32,11 @@ struct AnimationLayerComponent
         enum class Source : uint8_t
         {
             Clip = 0,
-            // A 1D/2D blend space. Reserved here so the on-disk field exists from
-            // the start; the sampler arrives with the blend-space work, and until
-            // then a layer set to it contributes nothing and says so once.
+            // A 1D/2D blend space (HE::BlendSpace): N clips mixed by where the
+            // parameters stand. A layer has no parameters of its own and reads
+            // the entity's AnimatorStateMachineComponent::params — the same map
+            // the base pose is steered by, so a strafe set on a layer and the
+            // state underneath it cannot disagree about the character's speed.
             BlendSpace = 1,
         };
 
@@ -101,6 +103,12 @@ struct AnimationLayerComponent
     // second writer will forget — and a mask that quietly keeps affecting the
     // wrong joints is a bug nobody would think to look for here.
     bool                            masksDirty = true;
+
+    // Blend spaces this stack's layers have referenced, parsed once each. Not
+    // serialized. Unlike the mask cache it is not skeleton-dependent — a blend
+    // space is a list of clip ids and coordinates, and neither depends on which
+    // mesh is wearing it.
+    HE::BlendSpaceCache             blendSpaces;
 
     // Cleared by HE::poseBeginFrame at the top of the animation phase. An entity
     // may carry more than one pose driver (nothing stops it today) and the layer

@@ -51,6 +51,11 @@ struct AnimationState
     int         id = 0; // stable id for the GraphEditor canvas (0 = unassigned)
     std::string name;
     HE::UUID    clipId;
+    // A 1D/2D blend space instead of a single clip (HE::BlendSpace). A SET
+    // blendSpaceId WINS over clipId — a state has one pose source, and a graph
+    // saved before blend spaces existed simply has no such key and reads exactly
+    // as it always did.
+    HE::UUID    blendSpaceId;
     bool        looping = true;
     float       x = 0.0f, y = 0.0f; // persisted canvas position
 };

@@ -571,7 +571,7 @@ TEST_CASE("notifies: one dispatch serves the script, the entity class and the sy
     // exactly why AnimatorHost keeps its own table instead of the runtime being
     // asked "who is on this entity": the answer would be ambiguous.
     HE::AnimatorStateMachineGraph fsm;
-    fsm.states.push_back({ 1, "Idle", HE::UUID{}, true, 0.0f, 0.0f });
+    fsm.states.push_back({ 1, "Idle", HE::UUID{}, HE::UUID{}, true, 0.0f, 0.0f });
     fsm.startState = "Idle";
 
     AnimatorStateMachineAsset asset;

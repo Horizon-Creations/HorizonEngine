@@ -396,6 +396,15 @@ struct BoneMaskAsset : public RuntimeAsset
 	std::string json;
 };
 
+// N clips placed in a 1D or 2D parameter space, mixed by where the parameters
+// stand (HE::BlendSpace round-trips the JSON). The samples name their clips by
+// UUID, so a blend space is an asset that references other assets — see
+// BlendSpace/BlendSpace.h.
+struct BlendSpaceAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;

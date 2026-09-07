@@ -1,9 +1,11 @@
 #pragma once
+#include <BlendSpace/BlendSpace.h>
 #include <BoneMask/BoneMask.h>
 #include <ContentManager/Assets.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <cstdint>
+#include <deque>
 #include <vector>
 
 // ── The pose, and what a layer does to it ────────────────────────────────────
@@ -105,5 +107,95 @@ void applyLayerPose(const std::vector<JointTRS>& base,
                     const std::vector<float>*    maskWeights,
                     float weight, LayerBlendMode mode, int rootJoint,
                     std::vector<JointTRS>& out);
+
+// ── Blend spaces ─────────────────────────────────────────────────────────────
+// The arithmetic of "N clips, mixed by where the parameters stand". Public for
+// the same reason blendTRS is: the state machine, the layer stage, the editor's
+// blend-space diagram and the tests all need it and none of them share an ECS.
+// Everything here is a pure function of authored data — no assets are resolved,
+// no playhead is advanced, no ECS is touched. That half lives in PoseSource.h.
+
+// At most this many samples are actually sampled per blend space per frame; the
+// rest are dropped and the survivors renormalised.
+//
+// A two-clip blend costs two sampleClip passes per character per frame today; a
+// 3x3 blend space would be nine. Four is the line under which the cost stays
+// predictable, and a fifth sample with meaningful weight means the space is
+// packed tighter than anybody can see anyway.
+inline constexpr size_t kBlendSpaceMaxActiveSamples = 4;
+
+// One weight per sample of `space` at the parameter point (x, y), summing to 1
+// (all zero only when the space has no samples at all).
+//
+// 1D: sort by x, find the bracketing pair, interpolate linearly, and CLAMP
+// outside the sample range — never extrapolate. A character at speed 12 moving
+// its legs twice as fast as the fastest authored sample is not a feature.
+//
+// 2D: the gradient band (Rune Skovbo Johansen; the method behind Unity's
+// "Freeform Cartesian"). Thirty lines, no triangulation, any sample placement,
+// and exactly 1.0 at a sample point. Delaunay — Unreal's way — would need a
+// triangulator this tree does not have plus a degenerate case (collinear
+// samples) the gradient band simply does not have.
+void blendSpaceWeights(const BlendSpace& space, float x, float y,
+                       std::vector<float>& outWeights);
+
+// The seconds one lap of the CURRENT mix takes: Σ w_i · dur_i / speedScale_i.
+//
+// This is the denominator of the shared phase, and the shared phase is the whole
+// point of a blend space. Walk (1.2 s) and run (0.8 s) wrapped against their own
+// durations on one absolute clock drift apart within a second, and mid-blend the
+// left foot of one pose meets the right foot of the other. On a phase they stay
+// in step by construction.
+//
+// `durations[i]` is sample i's clip duration; 0 for a sample whose clip is
+// missing, which then contributes nothing here either. Returns 0 when nothing
+// usable is left — the caller's cue to stand the phase still rather than divide.
+float blendSpaceWeightedDuration(const BlendSpace& space,
+                                 const std::vector<float>& weights,
+                                 const std::vector<float>& durations);
+
+// N-way pose mix: iterative normalised pairwise blending, seeded with the
+// HEAVIEST pose.
+//
+//   acc = pose[0]; accW = w[0];                  // sorted by weight, descending
+//   acc = blendTRS(acc, pose[i], w[i] / (accW + w[i])); accW += w[i];
+//
+// A true N-way quaternion mean is not a slerp and is not associative, so the
+// result depends on the order the chain is walked in. Descending puts the
+// dominant sample at the anchor, where the deviation is smallest. Samples with
+// weight 0 are skipped entirely rather than blended with alpha 0, so an inactive
+// sample cannot perturb the chain at all.
+//
+// `poses` and `weights` must be the same length. With exactly two non-zero
+// weights that sum to 1, the result is bit-for-bit blendTRS(heavier, lighter, w).
+void blendPosesN(const std::vector<std::vector<JointTRS>>& poses,
+                 const std::vector<float>&                 weights,
+                 std::vector<JointTRS>&                    out);
+
+// The order blendPosesN walks its chain in: sample indices with weight > 0,
+// heaviest first, ties broken by the LOWER index so the order — and therefore
+// which sample fires its notifies — cannot flicker between two frames.
+void blendSpaceEvalOrder(const std::vector<float>& weights, std::vector<size_t>& outOrder);
+
+// One parsed blend space, cached on whatever component referenced it. The asset
+// carries JSON; parsing it per frame per character wearing the same locomotion
+// set is a cost that would never be found again. Same shape, and the same
+// reason, as AnimatorStateMachineComponent::resolvedGraph.
+//
+// `ok == false` records "this id does not resolve" so the miss is not retried
+// (and re-logged) every frame either.
+struct BlendSpaceCacheEntry
+{
+    HE::UUID   id;
+    BlendSpace space;
+    bool       ok = false;
+};
+
+// A deque and NOT a vector, on purpose: a resolved blend space is borrowed by
+// pointer (copying one per playhead per frame is the cost the cache exists to
+// avoid), and vector::push_back would invalidate the pointer handed out a moment
+// earlier. A crossfade whose incoming state uses a second, not-yet-cached blend
+// space is exactly that moment. Deque entries do not move.
+using BlendSpaceCache = std::deque<BlendSpaceCacheEntry>;
 
 } // namespace HE

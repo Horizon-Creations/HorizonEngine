@@ -108,7 +108,8 @@ namespace HE
         EnumType,         // user-defined enum (named int-backed entries) — see HE::TypeRegistry
         SaveGameTemplate, // savegame field schema (typed fields + defaults), consumed by HE::api::save
         Theme,            // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
-        BoneMask          // which joints an animation layer may touch, by joint NAME (HE::BoneMask)
+        BoneMask,         // which joints an animation layer may touch, by joint NAME (HE::BoneMask)
+        BlendSpace        // N clips in a 1D/2D parameter space, mixed by parameter (HE::BlendSpace)
     };
 
     // Does this kind of asset travel over a collaboration session?
@@ -152,6 +153,10 @@ namespace HE
             // the editor, and the sort of thing an animator and a rigger change
             // while looking at the same character.
             case AssetType::BoneMask:
+            // A handful of clip references with coordinates: a few hundred bytes,
+            // authored in the editor by dragging points around, and exactly the
+            // sort of thing two people tune while watching the same character run.
+            case AssetType::BlendSpace:
                 return true;
 
             case AssetType::StaticMesh:

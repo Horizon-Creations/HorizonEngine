@@ -33,6 +33,7 @@ add_library(HorizonCore SHARED
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp
+	src/BlendSpace/BlendSpace.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UITheme.cpp

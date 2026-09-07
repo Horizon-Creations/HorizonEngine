@@ -1,8 +1,10 @@
 #include <HorizonScene/AnimationPreview.h>
 #include "AnimationEval.h" // internal: sampleClip/composeBoneMatrices/lockRootJoint, same src/ tree
 
+#include <ContentManager/ContentManager.h>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <cmath>
 
 void AnimationPreview::evaluateClipPose(const SkeletalMeshAsset& mesh, const AnimationClipAsset& clip,
                                         float t, std::vector<glm::mat4>& outBoneMatrices)
@@ -63,4 +65,48 @@ void AnimationPreview::rootMotionPath(const SkeletalMeshAsset& mesh, const Anima
         outPoints.push_back(pos);
         if (outYawDegrees) outYawDegrees->push_back(yaw);
     }
+}
+
+void AnimationPreview::evaluateBlendSpacePose(const SkeletalMeshAsset& mesh, ContentManager& cm,
+                                              const HE::BlendSpace& space, float x, float y,
+                                              float phase, std::vector<glm::mat4>& outBoneMatrices,
+                                              std::vector<float>* outWeights)
+{
+    std::vector<float> weights;
+    HE::blendSpaceWeights(space, x, y, weights);
+
+    // A sample whose clip is gone cannot contribute a pose, so it must not keep
+    // its share of the weight either — the same renormalisation the runtime does,
+    // because a preview that mixes differently from the game is not a preview.
+    std::vector<const AnimationClipAsset*> clips(space.samples.size(), nullptr);
+    for (size_t i = 0; i < space.samples.size(); ++i)
+    {
+        if (weights[i] <= 0.0f) continue;
+        clips[i] = cm.getAnimationClip(space.samples[i].clipId);
+        if (!clips[i] || clips[i]->duration <= 0.0f) { clips[i] = nullptr; weights[i] = 0.0f; }
+    }
+    float sum = 0.0f;
+    for (float w : weights) sum += w;
+    if (sum > 0.0f) for (float& w : weights) w /= sum;
+    if (outWeights) *outWeights = weights;
+
+    // Wrapped here and not by the caller: a diagram cursor has no playhead, and
+    // fmod of a negative phase is negative.
+    float p = std::fmod(phase, 1.0f);
+    if (p < 0.0f) p += 1.0f;
+
+    std::vector<std::vector<JointTRS>> poses(space.samples.size());
+    for (size_t i = 0; i < space.samples.size(); ++i)
+    {
+        if (weights[i] <= 0.0f) continue;
+        poses[i].assign(mesh.skeleton.size(), JointTRS{});
+        sampleClip(*clips[i], p * clips[i]->duration, poses[i]);
+    }
+
+    std::vector<JointTRS> localTRS;
+    HE::blendPosesN(poses, weights, localTRS);
+    // Nothing usable: the bind pose, which is what the mesh preview shows for a
+    // clip it cannot read either.
+    if (localTRS.empty()) localTRS.assign(mesh.skeleton.size(), JointTRS{});
+    composeBoneMatrices(mesh, localTRS, outBoneMatrices);
 }

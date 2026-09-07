@@ -84,8 +84,8 @@ namespace
 	std::string stateMachineJson()
 	{
 		HE::AnimatorStateMachineGraph g;
-		g.states.push_back({ 1, "Idle", HE::UUID{}, true, 0.0f, 0.0f });
-		g.states.push_back({ 2, "Walk", HE::UUID{}, true, 0.0f, 0.0f });
+		g.states.push_back({ 1, "Idle", HE::UUID{}, HE::UUID{}, true, 0.0f, 0.0f });
+		g.states.push_back({ 2, "Walk", HE::UUID{}, HE::UUID{}, true, 0.0f, 0.0f });
 		g.transitions.push_back({ "Idle", "Walk", "speed",
 		                          HE::TransitionOp::Greater, 0.5f, 0.0f });
 		g.startState = "Idle";

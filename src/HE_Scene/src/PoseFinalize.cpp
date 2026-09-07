@@ -1,10 +1,12 @@
 #include "PoseFinalize.h"
 #include "AnimationEval.h"
+#include "PoseSource.h"
 #include "NotifyCollect.h"
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/Components/AnimationLayerComponent.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/RootMotionComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <BoneMask/BoneMask.h>
@@ -77,40 +79,52 @@ void refreshMaskCache(AnimationLayerComponent& lc, ContentManager& cm,
 
 // One layer, onto `pose`. Advances the layer's own playhead, collects its
 // notifies and blends its clip on top.
-void applyOneLayer(entt::entity e, AnimationLayerComponent::Layer& layer,
+void applyOneLayer(entt::entity e, AnimationLayerComponent& lc,
+                   AnimationLayerComponent::Layer& layer,
                    const std::vector<float>* maskWeights, ContentManager& cm, float dt,
                    const SkeletalMeshAsset& mesh, int rootJoint,
+                   const std::unordered_map<std::string, float>* params,
                    std::vector<JointTRS>& pose, NotifyQueue* notifies)
 {
-    if (layer.source == AnimationLayerComponent::Layer::Source::BlendSpace)
-    {
-        // The field exists so the on-disk format does not change when blend
-        // spaces arrive; the sampler does not exist yet.
+    const bool wantsBlendSpace =
+        layer.source == AnimationLayerComponent::Layer::Source::BlendSpace;
+
+    // A layer has no parameters of its own. It borrows the entity's state-machine
+    // parameters when there is a state machine, which is the map a script already
+    // writes "Speed" into — and 0 on both axes otherwise, which the clamp turns
+    // into the leftmost sample rather than into nothing at all.
+    if (wantsBlendSpace && !params)
         HE_LOG_THROTTLE(Animation, Warning, 10.0,
-                        "Entity %u: animation layer '%s' is set to a blend space, which "
-                        "this build cannot sample yet — the layer contributes nothing",
+                        "Entity %u: animation layer '%s' uses a blend space but the entity "
+                        "has no state machine to read its parameters from — both axes read 0",
+                        static_cast<uint32_t>(e), layer.name.c_str());
+
+    const PoseSource src = makePoseSource(cm, lc.blendSpaces,
+                                          wantsBlendSpace ? HE::UUID{} : layer.clipId,
+                                          wantsBlendSpace ? layer.blendSpaceId : HE::UUID{},
+                                          params);
+    if (!src.valid())
+    {
+        HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                        "Entity %u: animation layer '%s' has no usable pose source — "
+                        "the layer contributes nothing",
                         static_cast<uint32_t>(e), layer.name.c_str());
         return;
     }
 
-    const AnimationClipAsset* clip = cm.getAnimationClip(layer.clipId);
-    if (!clip || clip->duration <= 0.0f)
-    {
-        HE_LOG_THROTTLE(Animation, Warning, 5.0,
-                        "Entity %u: animation layer '%s' %s — the layer contributes nothing",
-                        static_cast<uint32_t>(e), layer.name.c_str(),
-                        clip ? "has a zero-duration clip" : "has no resolvable clip");
-        return;
-    }
+    const bool  looping = src.looping(layer.looping);
+    const float period  = src.period();
+    const float rate    = src.rate();
 
     // Unwrapped, exactly as the drivers capture it: the span (tPrev, tEnd] with
     // its direction and its laps intact. Read off the WRAPPED playhead afterwards
-    // it would be neither.
+    // it would be neither. In the playhead's own unit — seconds for a clip, phase
+    // for a blend space — which is why the speed goes through `rate`.
     const float tPrev = layer.playbackTime;
-    const float tEnd  = layer.playing ? tPrev + dt * layer.playbackSpeed : tPrev;
+    const float tEnd  = layer.playing ? tPrev + dt * layer.playbackSpeed * rate : tPrev;
     if (layer.playing)
         advancePlayback(layer.playbackTime, layer.playing,
-                        layer.playbackSpeed, layer.looping, clip->duration, dt);
+                        layer.playbackSpeed * rate, looping, period, dt);
 
     // A layer fires its notifies as soon as it has ANY weight — not past
     // kNotifyDominanceAlpha. That threshold answers a different question: the two
@@ -121,19 +135,27 @@ void applyOneLayer(entt::entity e, AnimationLayerComponent::Layer& layer,
     //
     // A layer at weight 0 is still walked past (dominant=false), or it would hoard
     // its frame-0 notify and dump it the instant the weight came up.
-    notifyCollectClip(e, *clip, tPrev, tEnd, layer.looping,
-                      /*dominant=*/layer.weight > 0.0f, layer.notifiesPrimed, notifies);
-
-    // Root motion is the BASE's business. A layer clip that carries motion in its
-    // root simply does not contribute it — rootMotionSampleClip is never called
-    // here, and the root's translation is pinned by applyLayerPose below.
-    std::vector<JointTRS> layerTRS(mesh.skeleton.size());
-    sampleClip(*clip, layer.playbackTime, layerTRS);
+    //
+    // Root motion is the BASE's business. A layer whose clip carries motion in its
+    // root simply does not contribute it — a null RootMotionComponent is handed in
+    // so nothing is extracted, and the root's translation is pinned by
+    // applyLayerPose below.
+    std::vector<JointTRS> layerTRS;
+    RootMotionDelta       unused;
+    bool                  unusedHave = false;
+    src.evaluate(e, mesh, looping, tPrev, tEnd, layer.playbackTime,
+                 /*rmc=*/nullptr, /*dominant=*/layer.weight > 0.0f,
+                 layer.notifiesPrimed, notifies, layerTRS, unused, unusedHave);
 
     std::vector<JointTRS> refTRS;
     const std::vector<JointTRS>* ref = nullptr;
     if (layer.mode == LayerBlendMode::Additive)
     {
+        // Only a CLIP source has "its own clip at t = 0". An additive blend-space
+        // layer without a named reference has nothing to take a difference
+        // against, so it falls back to the identity pose — which is what a layer
+        // authored against the bind pose means anyway.
+        const AnimationClipAsset* clip = src.clip;
         // The reference the difference is taken against: another clip if one was
         // named, otherwise this layer's own clip at additiveRefTime — which is
         // "the pose this animation starts from", the ordinary way an additive
@@ -143,7 +165,7 @@ void applyOneLayer(entt::entity e, AnimationLayerComponent::Layer& layer,
             if (const AnimationClipAsset* c = cm.getAnimationClip(layer.additiveRefClipId))
                 refClip = c;
         refTRS.assign(mesh.skeleton.size(), JointTRS{});
-        sampleClip(*refClip, layer.additiveRefTime, refTRS);
+        if (refClip) sampleClip(*refClip, layer.additiveRefTime, refTRS);
         ref = &refTRS;
     }
 
@@ -195,13 +217,21 @@ void poseFinalize(HorizonWorld& world, ContentManager& cm, float dt, entt::entit
 
             refreshMaskCache(*lc, cm, mesh, smc.meshAssetId);
 
+            // A blend-space layer needs numbers on its axes and has none of its
+            // own. It reads the entity's state-machine parameters — the map a
+            // script already writes "Speed" into for the base pose — so a layer
+            // and the state driving it agree on what the character is doing.
+            const auto* smForParams = reg.try_get<AnimatorStateMachineComponent>(e);
+            const std::unordered_map<std::string, float>* params =
+                smForParams ? &smForParams->params : nullptr;
+
             for (size_t i = 0; i < lc->layers.size(); ++i)
             {
                 const std::vector<float>* weights =
                     (lc->layers[i].maskId == HE::UUID{} || i >= lc->resolvedMasks.size())
                         ? nullptr : &lc->resolvedMasks[i];
-                applyOneLayer(e, lc->layers[i], weights, cm, dt, mesh, rootJoint,
-                              localTRS, notifies);
+                applyOneLayer(e, *lc, lc->layers[i], weights, cm, dt, mesh, rootJoint,
+                              params, localTRS, notifies);
             }
         }
     }

@@ -14,6 +14,7 @@ add_library(HorizonScene SHARED
     src/AnimationEval.cpp
     src/AnimationPose.cpp
     src/PoseFinalize.cpp
+    src/PoseSource.cpp
     src/RootMotion.cpp
     src/RootMotionApply.cpp
     src/AnimationNotify.cpp

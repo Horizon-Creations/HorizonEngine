@@ -145,4 +145,158 @@ void applyLayerPose(const std::vector<JointTRS>& base,
     }
 }
 
+// ── Blend spaces ─────────────────────────────────────────────────────────────
+
+namespace {
+
+// Keep at most kBlendSpaceMaxActiveSamples non-zero weights and renormalise the
+// survivors to sum 1. Ties are broken by the lower index (stable_sort), so the
+// set that survives — and with it the sample that fires notifies — cannot
+// flicker between two frames that computed the same weights.
+void capAndNormalise(std::vector<float>& w)
+{
+    std::vector<size_t> order;
+    order.reserve(w.size());
+    for (size_t i = 0; i < w.size(); ++i)
+        if (w[i] > 0.0f) order.push_back(i);
+    std::stable_sort(order.begin(), order.end(),
+                     [&](size_t a, size_t b) { return w[a] > w[b]; });
+
+    for (size_t k = kBlendSpaceMaxActiveSamples; k < order.size(); ++k)
+        w[order[k]] = 0.0f;
+
+    float sum = 0.0f;
+    for (float v : w) sum += v;
+    if (sum <= 0.0f) return;   // nothing survived; the caller sees all-zero
+    for (float& v : w) v /= sum;
+}
+
+// 1D: the bracketing pair in x, interpolated linearly, clamped at both ends.
+void weights1D(const BlendSpace& space, float x, std::vector<float>& w)
+{
+    const size_t n = space.samples.size();
+    std::vector<size_t> byX(n);
+    for (size_t i = 0; i < n; ++i) byX[i] = i;
+    // Stable, so samples sharing an x keep their authored order and the pick
+    // below is the same every frame.
+    std::stable_sort(byX.begin(), byX.end(),
+                     [&](size_t a, size_t b) { return space.samples[a].x < space.samples[b].x; });
+
+    if (x <= space.samples[byX.front()].x) { w[byX.front()] = 1.0f; return; }
+    if (x >= space.samples[byX.back()].x)  { w[byX.back()]  = 1.0f; return; }
+
+    for (size_t k = 0; k + 1 < n; ++k)
+    {
+        const float x0 = space.samples[byX[k]].x;
+        const float x1 = space.samples[byX[k + 1]].x;
+        if (!(x >= x0 && x <= x1)) continue;
+        const float span = x1 - x0;
+        if (span <= 0.0f) { w[byX[k]] = 1.0f; return; }  // two samples on one x
+        const float t = (x - x0) / span;
+        w[byX[k]]     = 1.0f - t;
+        w[byX[k + 1]] = t;
+        return;
+    }
+}
+
+// 2D gradient band. For each sample i, walk every OTHER sample j and ask how far
+// the query point has travelled from i towards j, measured along i→j and
+// normalised by |i→j|²; the smallest "1 minus that" over all j is i's weight.
+//
+// At a sample point every term is 1 for that sample (it has not travelled at
+// all) and <= 0 for the others, which is where "exactly 1.0 on a sample" comes
+// from without a special case. Two samples in the SAME place would divide by
+// zero, so that pair is skipped — they then simply share the weight.
+void weights2D(const BlendSpace& space, float x, float y, std::vector<float>& w)
+{
+    const size_t n = space.samples.size();
+    for (size_t i = 0; i < n; ++i)
+    {
+        const glm::vec2 pi(space.samples[i].x, space.samples[i].y);
+        const glm::vec2 pq = glm::vec2(x, y) - pi;
+        float wi = 1.0f;
+        for (size_t j = 0; j < n; ++j)
+        {
+            if (j == i) continue;
+            const glm::vec2 ij = glm::vec2(space.samples[j].x, space.samples[j].y) - pi;
+            const float len2 = glm::dot(ij, ij);
+            if (len2 <= 0.0f) continue;   // coincident samples: no direction to travel
+            wi = std::min(wi, 1.0f - glm::dot(pq, ij) / len2);
+            if (wi <= 0.0f) break;
+        }
+        w[i] = std::max(wi, 0.0f);
+    }
+}
+
+} // namespace
+
+void blendSpaceWeights(const BlendSpace& space, float x, float y,
+                       std::vector<float>& outWeights)
+{
+    const size_t n = space.samples.size();
+    outWeights.assign(n, 0.0f);
+    if (n == 0) return;
+    if (n == 1) { outWeights[0] = 1.0f; return; }
+
+    if (space.kind == BlendSpaceKind::OneD) weights1D(space, x, outWeights);
+    else                                    weights2D(space, x, y, outWeights);
+
+    capAndNormalise(outWeights);
+}
+
+float blendSpaceWeightedDuration(const BlendSpace& space,
+                                 const std::vector<float>& weights,
+                                 const std::vector<float>& durations)
+{
+    float total = 0.0f;
+    const size_t n = std::min(space.samples.size(), std::min(weights.size(), durations.size()));
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (weights[i] <= 0.0f || durations[i] <= 0.0f) continue;
+        // speedScale is guarded to > 0 by blendSpaceFromJson; a hand-built
+        // BlendSpace that skipped the parser gets the same guard here rather than
+        // a division by zero.
+        const float s = (space.samples[i].speedScale > 0.0f) ? space.samples[i].speedScale : 1.0f;
+        total += weights[i] * durations[i] / s;
+    }
+    return total;
+}
+
+void blendSpaceEvalOrder(const std::vector<float>& weights, std::vector<size_t>& outOrder)
+{
+    outOrder.clear();
+    for (size_t i = 0; i < weights.size(); ++i)
+        if (weights[i] > 0.0f) outOrder.push_back(i);
+    std::stable_sort(outOrder.begin(), outOrder.end(),
+                     [&](size_t a, size_t b) { return weights[a] > weights[b]; });
+}
+
+void blendPosesN(const std::vector<std::vector<JointTRS>>& poses,
+                 const std::vector<float>&                 weights,
+                 std::vector<JointTRS>&                    out)
+{
+    std::vector<size_t> order;
+    blendSpaceEvalOrder(weights, order);
+    // Only poses that actually exist can anchor the chain.
+    order.erase(std::remove_if(order.begin(), order.end(),
+                               [&](size_t i) { return i >= poses.size(); }),
+                order.end());
+
+    if (order.empty()) { out.clear(); return; }
+
+    out = poses[order[0]];
+    float accW = weights[order[0]];
+    for (size_t k = 1; k < order.size(); ++k)
+    {
+        const size_t i = order[k];
+        const float  wi = weights[i];
+        const float  denom = accW + wi;
+        if (denom <= 0.0f) continue;
+        std::vector<JointTRS> tmp;
+        blendTRS(out, poses[i], wi / denom, tmp);
+        out  = std::move(tmp);
+        accW = denom;
+    }
+}
+
 } // namespace HE
