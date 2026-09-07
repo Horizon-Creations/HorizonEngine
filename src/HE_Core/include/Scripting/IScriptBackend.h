@@ -63,6 +63,20 @@ public:
     { (void)id; (void)otherEntityId; return true; }
     virtual bool callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
     { (void)id; (void)otherEntityId; return true; }
+    // Animation notifies: an event the artist put on a clip's timeline, arriving
+    // as the playhead sweeps over it. The name is the whole payload. Begin/End
+    // are the two edges of a notify STATE (a hit window, an invulnerability);
+    // the plain one is a point event (a footstep, a sound).
+    //
+    // Defaulted like the overlap pair above, and for the same reason: a backend
+    // written before these existed keeps compiling and simply never delivers one,
+    // which is indistinguishable from a script that defines no handler.
+    virtual bool callOnAnimationNotify(InstanceId id, const std::string& name)
+    { (void)id; (void)name; return true; }
+    virtual bool callOnAnimationNotifyBegin(InstanceId id, const std::string& name)
+    { (void)id; (void)name; return true; }
+    virtual bool callOnAnimationNotifyEnd(InstanceId id, const std::string& name)
+    { (void)id; (void)name; return true; }
     // UI pointer event on the instance's own entity (click / hover enter/exit).
     virtual bool callOnUIEvent(InstanceId id, UIScriptEvent ev) = 0;
 

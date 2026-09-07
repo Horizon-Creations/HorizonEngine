@@ -759,6 +759,41 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
 	}
 
+	// ── Root Motion ─────────────────────────────────────────────────────────
+	// One section for all three animators above: whichever of them poses this
+	// entity, its clip's root motion is taken out of the pose here and put onto
+	// the entity instead. Which is why this is a component of its own and not a
+	// group of fields on each of the three.
+	if (auto* rmc = registry.try_get<RootMotionComponent>(entity))
+	{
+		if (componentHeader("Root Motion", true, removed))
+		{
+			EditorWidgets::WrapText wrap;   // the joint name is authored free text
+
+			static const char* kModes[] = { "Off", "Transform", "Character Controller" };
+			int mode = static_cast<int>(rmc->mode);
+			if (Row::combo("Mode##rm", &mode, kModes, IM_ARRAYSIZE(kModes)))
+			{ rmc->mode = static_cast<RootMotionComponent::Mode>(mode); trackEdit(); }
+
+			Row::inputText("Root Joint##rm", &rmc->options.rootJointName); trackEdit();
+			EditorWidgets::checkbox("Translation XZ##rm", &rmc->options.extractTranslationXZ); trackEdit();
+			ImGui::SameLine();
+			EditorWidgets::checkbox("Translation Y##rm",  &rmc->options.extractTranslationY);  trackEdit();
+			EditorWidgets::checkbox("Yaw##rm",            &rmc->options.extractYaw);           trackEdit();
+
+			static const char* kLocks[] = { "Zero", "First Frame", "Translation Only" };
+			int lock = static_cast<int>(rmc->options.lock);
+			if (Row::combo("Lock##rm", &lock, kLocks, IM_ARRAYSIZE(kLocks)))
+			{ rmc->options.lock = static_cast<HE::RootMotionLock>(lock); trackEdit(); }
+
+			// The readout is the only way to tell "the clip carries nothing" from
+			// "the joint name is wrong" without reading the log.
+			Row::labelText("Last Delta##rm", "%.3f, %.3f, %.3f  |  %.2f°",
+				rmc->lastDelta.x, rmc->lastDelta.y, rmc->lastDelta.z, rmc->lastYawDelta);
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RootMotionComponent>(entity); }
+	}
+
 	// ── Property Animator ───────────────────────────────────────────────────
 	if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
 	{
@@ -2300,6 +2335,11 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// dependency is the rule that makes it meaningful, not the absence.
 			if (registry.all_of<SkeletalMeshComponent>(entity))
 				addItem("Animator State Machine", AnimatorStateMachineComponent{});
+			// Same rule, same reason: root motion is about a skeleton's root
+			// bone, so it is offered exactly where there is a skeleton. It
+			// defaults to Off, so adding it changes nothing until asked.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Root Motion", RootMotionComponent{});
 
 			// Animator / Animator Blend / Property Animator, Character
 			// Controller, and the UI components are intentionally not offered

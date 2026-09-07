@@ -11,6 +11,7 @@
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AnimatorHost.h>
+#include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
@@ -140,6 +141,10 @@ private:
     // the animation phase, which fires each graph right before the transitions
     // it feeds (see AnimationStateMachineSystem::update).
     AnimatorHost m_animatorHost;
+    // This frame's animation notifies. A member and not a local so its storage
+    // survives the frame it was emptied in — one allocation for the session
+    // instead of one per frame for something that is refilled every frame.
+    HE::NotifyQueue m_animNotifies;
     // Physics. The shipping runtime used to have none at all, which made every
     // physics.* call a silent no-op and left the collision/overlap events dead
     // in an exported game while they worked in PIE. Rebuilt on every scene

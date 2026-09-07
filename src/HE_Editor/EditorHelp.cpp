@@ -124,6 +124,11 @@ namespace
 	{ "Component/Animator Blend", "Animator Blend",
 	  "Cross-fades two clips by weight — walk into run, aim into idle.",
 	  "", "systems#animation" },
+	{ "Component/Root Motion", "Root Motion",
+	  "Moves the entity by the motion the animator put into the root bone, and "
+	  "takes that motion back out of the pose. Without it a walk cycle slides on "
+	  "the spot; with it, and set to Off, nothing changes.",
+	  "", "systems#animation" },
 	{ "Component/Animator State Machine", "Animator State Machine",
 	  "Runs an animator state machine asset: states with clips, and transitions "
 	  "that fire on parameters. The graph decides which clip plays.",
@@ -1022,6 +1027,44 @@ namespace
 	  "", "systems#animation" },
 	{ "Animator State Machine/Speed", "",
 	  "Playback rate for whichever state is running.", "", "systems#animation" },
+	{ "Root Motion/Mode", "",
+	  "Off changes nothing. Transform moves the entity directly, for props and "
+	  "anything that is not a physical figure. Character Controller hands the "
+	  "motion to the physics character, which is what a walking figure wants: it "
+	  "keeps its own gravity and still collides with the world.",
+	  "", "systems#animation" },
+	{ "Root Motion/Root Joint", "",
+	  "Which bone carries the motion. Empty picks the skeleton's first root, "
+	  "which is right for almost every rig — name one only if the skeleton has "
+	  "several roots. A name that matches nothing suspends root motion and says "
+	  "so in the log, rather than moving the wrong bone.",
+	  "", "systems#animation" },
+	{ "Root Motion/Translation XZ", "",
+	  "Take the horizontal travel out of the pose and give it to the entity. "
+	  "This is the part that turns a walk cycle into walking.",
+	  "", "systems#animation" },
+	{ "Root Motion/Translation Y", "",
+	  "The same for the vertical. Off by default: a character controller owns its "
+	  "own up and down (gravity, a jump still in flight), and a clip pushing "
+	  "against that fights it every frame. Worth turning on for a clip that is "
+	  "meant to lift the figure, on the Transform mode.",
+	  "", "systems#animation" },
+	{ "Root Motion/Yaw", "",
+	  "Turn the entity by the turning in the clip, so a turn-in-place actually "
+	  "turns. While this is on it overrides Movement's Orient To Movement — two "
+	  "things turning one character is a jitter nobody can locate afterwards.",
+	  "", "systems#animation" },
+	{ "Root Motion/Lock", "",
+	  "What the root bone does in the pose once its motion has been taken out. "
+	  "Zero parks it at the origin. First Frame parks it where the clip starts, "
+	  "for clips authored away from the origin. Translation Only leaves the "
+	  "rotation in the pose — pair that one with Yaw off, or the turn happens twice.",
+	  "", "systems#animation" },
+	{ "Root Motion/Last Delta", "",
+	  "What the last frame actually moved, in metres and degrees. All zeroes "
+	  "while a clip carries no root motion — which is how you tell that apart "
+	  "from a joint name that matches nothing.",
+	  "", "systems#animation" },
 	{ "Property Animator/Speed", "",
 	  "Playback rate of the property clip: 1 is as authored, negative runs it "
 	  "backwards.",
@@ -3779,9 +3822,69 @@ namespace
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "
-	  "Browser. Empty leaves it in its bind pose. It is preview state on this "
-	  "tab, so it is not saved with the asset and pushes no undo step.",
+	  "Browser. Empty leaves it in its bind pose. Choosing one is preview state on "
+	  "this tab and pushes no undo step — but the notifies and the Root Motion "
+	  "switch below are edits to the CLIP, and they are saved into it.",
 	  "", "systems#animation" },
+	{ "Mesh Viewer/Root Motion", "",
+	  "Does this clip's root bone carry motion that belongs on the character? On, "
+	  "the motion is taken out of the pose here and the figure animates in place, "
+	  "with the path beside the preview showing where it would travel. Off, the "
+	  "root stays in the pose — which is what an idle with a pinned root wants. "
+	  "It is a property of the CLIP; whether an entity acts on the motion is the "
+	  "Root Motion component's Mode.",
+	  "", "systems#animation" },
+	{ "Mesh Viewer/Name", "Notify Name",
+	  "The name gameplay listens for. It is the entire payload of a notify: a "
+	  "graph reacts to \"Footstep\", and a name nothing listens to fires nothing "
+	  "rather than failing. There is no list to pick from on purpose — a clip is "
+	  "authored against the graph that hears it.",
+	  "", "systems#animation" },
+	{ "Mesh Viewer/Time", "Notify Time",
+	  "Where on the clip the event sits, in seconds. Dragging the marker on the "
+	  "lane does the same thing, against a pose you can see — which is the reason "
+	  "this timeline lives in the mesh tab and not in an editor of its own.",
+	  "", "systems#animation" },
+	{ "Mesh Viewer/Duration", "Notify Duration",
+	  "Zero makes it a notify: it fires once as the playhead sweeps past. Anything "
+	  "above zero makes it a notify STATE, which fires Begin at Time and End at "
+	  "Time plus this — a hit window, an invulnerability, a trail. A state reaching "
+	  "past the end of its clip ends with the clip rather than never.",
+	  "", "systems#animation" },
+	{ "anim.notify-lane", "Notify Timeline",
+	  "The events on this clip's timeline. A diamond is a notify, a bar a notify "
+	  "state. Double-click empty space to add one, drag a marker to move it, "
+	  "right-click for the menu; clicking empty lane moves the playhead, so an "
+	  "event can be placed against the pose it belongs to. Everything here is "
+	  "saved into the clip, not into the mesh.",
+	  "", "systems#animation" },
+	{ "Notify Timeline/Add Notify", "",
+	  "Adds an event at the playhead that fires once when the animation sweeps "
+	  "past it. Give it the name the listening graph uses.",
+	  "", "systems#animation" },
+	{ "Notify Timeline/Add Notify State", "",
+	  "Adds an event with a length: it fires Begin when the playhead enters it and "
+	  "End when it leaves, so a window can be opened and closed by the animation "
+	  "that motivates it.",
+	  "", "systems#animation" },
+	{ "Notify Timeline/Delete", "",
+	  "Removes the selected event from the clip. Nothing else moves — the firing "
+	  "walk compares every entry against the span, so the order of the list has "
+	  "never meant anything.",
+	  "", "systems#animation" },
+	{ "anim.root-path", "Root Motion Path",
+	  "Where one lap of this clip would carry a character, seen from above, with "
+	  "the marker showing where the playhead stands on it and the metres covered "
+	  "printed underneath. Nothing moves for it: the motion is extracted, the root "
+	  "is locked, and the travel is drawn instead — the same line appears in the "
+	  "viewport under a selected entity that has a Root Motion component.",
+	  "", "systems#animation" },
+	{ "anim.clip-save", "Save Clip",
+	  "Writes this clip's notifies and its Root Motion switch back to the clip "
+	  "asset. Greyed out when there is nothing unsaved. Closing the tab keeps the "
+	  "edits, and the quit prompt lists the clip by its own name — the mesh in the "
+	  "title is not what changed, so the tab carries no unsaved mark of its own.",
+	  "Ctrl+S", "systems#animation" },
 
 	// ── HorizonCode: the panels around the graph ─────────────────────────────
 	// The node reference covers what each NODE does. This covers the panels that
@@ -4578,6 +4681,7 @@ namespace
 		{ "Sync Graph/",                "editor-animation", "Animation Editors", "Sync graph" },
 		{ "Audio Editor/",              "editor-animation", "Animation Editors", "Audio editor" },
 		{ "Mesh Viewer/",               "editor-animation", "Animation Editors", "Mesh viewer" },
+		{ "Notify Timeline/",           "editor-animation", "Animation Editors", "Notify timeline" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },
@@ -4604,7 +4708,7 @@ namespace
 		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
-		"Animator State Machine", "Property Animator", "Particle System",
+		"Animator State Machine", "Root Motion", "Property Animator", "Particle System",
 		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};

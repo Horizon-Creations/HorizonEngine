@@ -19,8 +19,10 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RootMotion.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
@@ -2640,7 +2642,19 @@ void GameApplication::OnRender(float deltaTime)
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
-		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
+		// A packaged build has no edit mode, so root motion is always applied here.
+		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
+		                            &rootMotion, &m_animNotifies);
+
+		// Drained HERE and not at the collision drain up in the physics block:
+		// that one runs in the frame BEFORE the animation phase, so every notify
+		// would reach its handler a frame late. dispatch empties the queue.
+		HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
+		AnimationNotifySystem::dispatch(m_animNotifies, *m_world,
+		                                m_scriptContext.get(), m_scriptInstances,
+		                                &m_gameInstance.runtime(), m_entityHost.instances(),
+		                                &m_animatorHost);
 	}
 
 	// ── Renderer settings, in BOTH modes ─────────────────────────────────────

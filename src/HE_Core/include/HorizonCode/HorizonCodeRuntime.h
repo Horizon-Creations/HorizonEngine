@@ -291,6 +291,12 @@ public:
     void fireOnEndOverlap(InstanceId id, uint32_t other);
     void fireOnHit(InstanceId id, uint32_t other);
     void fireOnHitEnd(InstanceId id, uint32_t other);
+    // Animation notifies (Entity classes and animator sync graphs). The payload
+    // is the notify's NAME and nothing else — that is all one carries. Fire is
+    // the point event, Begin/End the two edges of a notify state.
+    void fireOnAnimationNotify(InstanceId id, const std::string& name);
+    void fireOnAnimationNotifyBegin(InstanceId id, const std::string& name);
+    void fireOnAnimationNotifyEnd(InstanceId id, const std::string& name);
 
     // Scene-switch garbage collection: keep `root` and every instance reachable
     // from it through Ref-typed variables, remove all others. Called on scene

@@ -6,6 +6,7 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
+#include "HorizonScene/Components/RootMotionComponent.h"
 #include <Diagnostics/Logger.h>
 
 #include <algorithm>
@@ -121,7 +122,22 @@ void MovementSystem::update(HorizonWorld& world, PhysicsWorld* physics, float dt
         // Off by default, because something else usually owns the facing — a
         // camera rig with coupled rotation, most of all. Two owners fighting
         // over one yaw is a jitter nobody can locate afterwards.
-        if (mv.orientToMovement && glm::length(glm::vec2(planar.x, planar.z)) > 1e-4f)
+        //
+        // Root motion with extractYaw is a THIRD writer of this yaw, and it is
+        // the one that wins: it turns the character the way the clip turns it,
+        // which is the whole reason someone switched it on. orientToMovement
+        // steps aside rather than fighting it.
+        const auto* rmc = reg.try_get<RootMotionComponent>(e);
+        const bool rootOwnsYaw = rmc && rmc->mode != RootMotionComponent::Mode::Off
+                              && rmc->options.extractYaw;
+        if (mv.orientToMovement && rootOwnsYaw)
+        {
+            HE_LOG_THROTTLE(Input, Warning, 5.0,
+                "Entity %u: Orient To Movement and root-motion yaw both want to turn this "
+                "character - root motion wins and Orient To Movement is ignored. Switch one "
+                "of the two off.", static_cast<uint32_t>(e));
+        }
+        else if (mv.orientToMovement && glm::length(glm::vec2(planar.x, planar.z)) > 1e-4f)
         {
             const float want = glm::degrees(std::atan2(-planar.x, -planar.z));
             float delta = want - t.rotation.y;

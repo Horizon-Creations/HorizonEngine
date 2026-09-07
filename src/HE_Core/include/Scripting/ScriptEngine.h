@@ -76,6 +76,12 @@ public:
     bool callOnBeginOverlap(InstanceId id, uint32_t otherEntityId) override;
     bool callOnEndOverlap(InstanceId id, uint32_t otherEntityId) override;
 
+    // Call script.onAnimationNotify/…Begin/…End(self, name) — the events an
+    // artist put on a clip's timeline. No-op if not defined.
+    bool callOnAnimationNotify(InstanceId id, const std::string& name) override;
+    bool callOnAnimationNotifyBegin(InstanceId id, const std::string& name) override;
+    bool callOnAnimationNotifyEnd(InstanceId id, const std::string& name) override;
+
     // Call script.onClick/onHoverEnter/onHoverExit(self). No-op if not defined.
     bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
 
@@ -115,6 +121,10 @@ public:
 private:
     // Returns false and sets m_lastError on Lua error.
     bool pcall(int nargs, int nresults);
+
+    // Shared body of the three notify handlers above: they differ only in the
+    // Lua method name they look for.
+    bool callNotifyMethod(InstanceId id, const char* method, const std::string& name);
 
     struct ScriptRef  { int luaRef = -1; };   // LUA_NOREF sentinel
     struct InstanceRef { int luaRef = -1; std::string scriptName; };

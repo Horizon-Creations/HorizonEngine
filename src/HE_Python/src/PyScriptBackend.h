@@ -52,6 +52,10 @@ public:
 	bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) override;
 	bool callOnBeginOverlap(InstanceId id, uint32_t otherEntityId) override;
 	bool callOnEndOverlap(InstanceId id, uint32_t otherEntityId) override;
+	// snake_case on this side: on_animation_notify / _begin / _end.
+	bool callOnAnimationNotify(InstanceId id, const std::string& name) override;
+	bool callOnAnimationNotifyBegin(InstanceId id, const std::string& name) override;
+	bool callOnAnimationNotifyEnd(InstanceId id, const std::string& name) override;
 	bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
 
 	std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const override;
@@ -62,6 +66,10 @@ public:
 	const std::string& lastError() const override { return m_lastError; }
 
 private:
+	// Shared body of the three notify handlers: they differ only in the Python
+	// method name they look for.
+	bool callNotifyMethod(InstanceId id, const char* method, const std::string& name);
+
 	struct Impl;                 // pImpl hides <Python.h> from the header
 	std::unique_ptr<Impl> m_impl;
 	std::string           m_lastError;
