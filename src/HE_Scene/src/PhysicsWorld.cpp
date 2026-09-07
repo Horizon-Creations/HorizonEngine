@@ -1962,6 +1962,129 @@ private:
     std::vector<uint32_t>        m_entities;
 };
 
+// ── The one sweep and the one overlap ────────────────────────────────────────
+// Every cast below differs from every other in exactly one thing: which shape
+// it hands in. Everything else — the normalisation, the base offset, the
+// back-face rule, where the distance comes from, how the normal is turned round
+// — is the same, and each of those is a decision that was got wrong once and
+// fixed once. Copying sixty lines per shape would be copying four chances to
+// let one copy drift.
+//
+// Free functions rather than private members because their arguments are Jolt
+// types and no Jolt type may appear in PhysicsWorld.h. The caller owns the
+// shape's Ref for the duration — RShapeCast keeps a bare pointer to it.
+PhysicsWorld::RaycastHit castShapeImpl(const JPH::PhysicsSystem& system,
+                                       const JPH::Shape*         shape,
+                                       const glm::vec3&          origin,
+                                       const JPH::Quat&          rotation,
+                                       const glm::vec3&          direction,
+                                       float                     maxDistance,
+                                       uint32_t                  ignoreEntityId,
+                                       uint32_t                  layerMask)
+{
+    PhysicsWorld::RaycastHit result;
+    if (shape == nullptr || maxDistance <= 0.0f)
+        return result;
+
+    const float len = std::sqrt(direction.x * direction.x +
+                                direction.y * direction.y +
+                                direction.z * direction.z);
+    if (len < 1e-6f)
+        return result;
+    const glm::vec3 dir          = direction / len;
+    const glm::vec3 displacement = dir * maxDistance;
+    const JPH::RVec3 at(origin.x, origin.y, origin.z);
+
+    // The cast is expressed relative to inBaseOffset (the origin here), which is
+    // what keeps the numbers small and precise far from the world origin.
+    const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
+        shape,
+        JPH::Vec3::sReplicate(1.0f),
+        JPH::RMat44::sRotationTranslation(rotation, at),
+        JPH::Vec3(displacement.x, displacement.y, displacement.z));
+
+    JPH::ShapeCastSettings settings;
+    // A camera boom asks "how far can I go", so a surface it is already touching
+    // must not read as a hit at fraction 0 for the back face it is leaving.
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    // A sweep asks "what would block me", and a trigger volume blocks nothing.
+    const HEQueryFilter     bodyFilter(ignoreEntityId, /*skipSensors=*/true);
+    const HELayerMaskFilter layerFilter(layerMask);
+
+    system.GetNarrowPhaseQuery().CastShape(cast, settings, at, collector,
+                                           {}, layerFilter, bodyFilter);
+
+    if (!collector.HadHit())
+        return result;
+
+    // Distance comes from the FRACTION, not from the contact point: the fraction
+    // is where the shape's ORIGIN stopped, which already sits clear of the
+    // surface by whatever the shape's own extent is. Using the contact point
+    // would put the camera in the wall.
+    const float fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
+
+    result.hit      = true;
+    result.distance = fraction * maxDistance;
+    result.point    = origin + dir * result.distance;
+    result.normal   = { collector.mHit.mPenetrationAxis.GetX(),
+                        collector.mHit.mPenetrationAxis.GetY(),
+                        collector.mHit.mPenetrationAxis.GetZ() };
+    if (const float n = glm::length(result.normal); n > 1e-6f)
+        result.normal = -result.normal / n;   // penetration axis points INTO the hit surface
+
+    {
+        JPH::BodyLockRead lock(system.GetBodyLockInterface(), collector.mHit.mBodyID2);
+        if (lock.Succeeded())
+        {
+            const JPH::Body& body = lock.GetBody();
+            result.entityId = static_cast<uint32_t>(body.GetUserData());
+            result.layer    = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
+        }
+    }
+
+    return result;
+}
+
+std::vector<uint32_t> overlapShapeImpl(const JPH::PhysicsSystem& system,
+                                       const JPH::Shape*         shape,
+                                       const JPH::RMat44&        transform,
+                                       uint32_t                  ignoreEntityId,
+                                       uint32_t                  layerMask)
+{
+    if (shape == nullptr)
+        return {};
+
+    JPH::CollideShapeSettings settings;
+    HEOverlapCollector        collector;
+    // Sensors ARE reported: an overlap asks "what is here", and a trigger volume
+    // is here.
+    const HEQueryFilter       bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter   layerFilter(layerMask);
+
+    // Results are expressed relative to the shape's own position rather than the
+    // world origin, the same reason a cast passes its origin as the base offset:
+    // it is what keeps the test itself precise far from the origin.
+    const JPH::RVec3 at = transform.GetTranslation();
+    system.GetNarrowPhaseQuery().CollideShape(
+        shape, JPH::Vec3::sReplicate(1.0f), transform,
+        settings, at, collector, {}, layerFilter, bodyFilter);
+
+    return collector.take();
+}
+
+// Degrees to the quaternion Jolt wants, through the SAME expression
+// TransformHierarchy uses to compose an entity's rotation
+// (`glm::quat(glm::radians(euler))`). A second Euler convention would make a box
+// cast at (0, 45, 0) disagree with a box body at (0, 45, 0), and nothing on
+// screen would say which of the two was wrong.
+JPH::Quat joltRotationOf(const glm::vec3& rotationEuler)
+{
+    const glm::quat q = glm::quat(glm::radians(rotationEuler));
+    return JPH::Quat(q.x, q.y, q.z, q.w);
+}
+
 // The body a script's push should land on, plus why it cannot land when it
 // does not. The verdict is separated from the LOGGING so every public call can
 // name itself in its own throttled message — one shared log site would let
@@ -2072,69 +2195,58 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
-    RaycastHit result;
-    if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f || radius <= 0.0f)
-        return result;
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return {};
 
-    const float len = std::sqrt(direction.x * direction.x +
-                                direction.y * direction.y +
-                                direction.z * direction.z);
-    if (len < 1e-6f)
-        return result;
-    const glm::vec3 dir         = direction / len;
-    const glm::vec3 displacement = dir * maxDistance;
+    const JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+    return castShapeImpl(m_impl->physicsSystem, sphere, origin, JPH::Quat::sIdentity(),
+                         direction, maxDistance, ignoreEntityId, layerMask);
+}
 
-    JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+PhysicsWorld::RaycastHit PhysicsWorld::boxCast(
+    const glm::vec3& origin,
+    const glm::vec3& halfExtents,
+    const glm::vec3& rotationEuler,
+    const glm::vec3& direction,
+    float            maxDistance,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized ||
+        halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+        return {};
 
-    // The cast is expressed relative to inBaseOffset (the origin here), which is
-    // what keeps the numbers small and precise far from the world origin.
-    const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
-        sphere,
-        JPH::Vec3::sReplicate(1.0f),
-        JPH::RMat44::sTranslation(JPH::RVec3(origin.x, origin.y, origin.z)),
-        JPH::Vec3(displacement.x, displacement.y, displacement.z));
+    // Jolt's own clamp (mConvexRadius = min(requested, smallest half extent))
+    // makes the default safe for a box of any size, which is why nothing is
+    // clamped here — and it is the same rounding a BOX COLLIDER on a body gets,
+    // so a sweep with a body's extents behaves like that body.
+    const JPH::Ref<JPH::Shape> box =
+        new JPH::BoxShape(JPH::Vec3(halfExtents.x, halfExtents.y, halfExtents.z));
+    return castShapeImpl(m_impl->physicsSystem, box, origin, joltRotationOf(rotationEuler),
+                         direction, maxDistance, ignoreEntityId, layerMask);
+}
 
-    JPH::ShapeCastSettings settings;
-    // A camera boom asks "how far can I go", so a surface it is already touching
-    // must not read as a hit at fraction 0 for the back face it is leaving.
-    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+PhysicsWorld::RaycastHit PhysicsWorld::capsuleCast(
+    const glm::vec3& origin,
+    float            radius,
+    float            height,
+    const glm::vec3& rotationEuler,
+    const glm::vec3& direction,
+    float            maxDistance,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return {};
 
-    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
-    const HEQueryFilter     bodyFilter(ignoreEntityId, /*skipSensors=*/true);
-    const HELayerMaskFilter layerFilter(layerMask);
-
-    m_impl->physicsSystem.GetNarrowPhaseQuery().CastShape(
-        cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector,
-        {}, layerFilter, bodyFilter);
-
-    if (!collector.HadHit())
-        return result;
-
-    // Distance comes from the FRACTION, not from the contact point: the fraction
-    // is where the sphere's CENTRE stopped, which already sits one radius clear
-    // of the surface. Using the contact point would put the camera in the wall.
-    const float fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
-
-    result.hit      = true;
-    result.distance = fraction * maxDistance;
-    result.point    = origin + dir * result.distance;
-    result.normal   = { collector.mHit.mPenetrationAxis.GetX(),
-                        collector.mHit.mPenetrationAxis.GetY(),
-                        collector.mHit.mPenetrationAxis.GetZ() };
-    if (const float n = glm::length(result.normal); n > 1e-6f)
-        result.normal = -result.normal / n;   // penetration axis points INTO the hit surface
-
-    {
-        JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), collector.mHit.mBodyID2);
-        if (lock.Succeeded())
-        {
-            const JPH::Body& body = lock.GetBody();
-            result.entityId = static_cast<uint32_t>(body.GetUserData());
-            result.layer    = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
-        }
-    }
-
-    return result;
+    // Same arithmetic ColliderComponent's capsule is built with — full height
+    // minus the two caps — except that Jolt asserts on a cylinder of zero
+    // length, so a height that is all caps keeps a sliver rather than being
+    // refused. What the caller drew is a sphere, and that is what they get.
+    const float halfCylinder = std::max(1e-3f, height * 0.5f - radius);
+    const JPH::Ref<JPH::Shape> capsule = new JPH::CapsuleShape(halfCylinder, radius);
+    return castShapeImpl(m_impl->physicsSystem, capsule, origin, joltRotationOf(rotationEuler),
+                         direction, maxDistance, ignoreEntityId, layerMask);
 }
 
 std::vector<uint32_t> PhysicsWorld::overlapSphere(
@@ -2143,26 +2255,131 @@ std::vector<uint32_t> PhysicsWorld::overlapSphere(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
-    std::vector<uint32_t> result;
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
-        return result;
+        return {};
 
-    JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
-    const JPH::RVec3     at(center.x, center.y, center.z);
+    const JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+    return overlapShapeImpl(m_impl->physicsSystem, sphere,
+                            JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z)),
+                            ignoreEntityId, layerMask);
+}
 
-    JPH::CollideShapeSettings settings;
-    HEOverlapCollector        collector;
-    const HEQueryFilter       bodyFilter(ignoreEntityId, /*skipSensors=*/false);
-    const HELayerMaskFilter   layerFilter(layerMask);
+std::vector<uint32_t> PhysicsWorld::overlapBox(
+    const glm::vec3& center,
+    const glm::vec3& halfExtents,
+    const glm::vec3& rotationEuler,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized ||
+        halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+        return {};
 
-    // Results are expressed relative to `at` rather than the world origin, the
-    // same reason sphereCast passes its origin as the base offset: it is what
-    // keeps the test itself precise far from the origin.
-    m_impl->physicsSystem.GetNarrowPhaseQuery().CollideShape(
-        sphere, JPH::Vec3::sReplicate(1.0f), JPH::RMat44::sTranslation(at),
-        settings, at, collector, {}, layerFilter, bodyFilter);
+    const JPH::Ref<JPH::Shape> box =
+        new JPH::BoxShape(JPH::Vec3(halfExtents.x, halfExtents.y, halfExtents.z));
+    return overlapShapeImpl(m_impl->physicsSystem, box,
+                            JPH::RMat44::sRotationTranslation(
+                                joltRotationOf(rotationEuler),
+                                JPH::RVec3(center.x, center.y, center.z)),
+                            ignoreEntityId, layerMask);
+}
 
-    return collector.take();
+std::vector<uint32_t> PhysicsWorld::overlapCapsule(
+    const glm::vec3& center,
+    float            radius,
+    float            height,
+    const glm::vec3& rotationEuler,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return {};
+
+    const float halfCylinder = std::max(1e-3f, height * 0.5f - radius);
+    const JPH::Ref<JPH::Shape> capsule = new JPH::CapsuleShape(halfCylinder, radius);
+    return overlapShapeImpl(m_impl->physicsSystem, capsule,
+                            JPH::RMat44::sRotationTranslation(
+                                joltRotationOf(rotationEuler),
+                                JPH::RVec3(center.x, center.y, center.z)),
+                            ignoreEntityId, layerMask);
+}
+
+std::vector<PhysicsWorld::RaycastHit> PhysicsWorld::raycastAll(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float            maxDistance,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    std::vector<RaycastHit> hits;
+    if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
+        return hits;
+
+    const float len = std::sqrt(direction.x * direction.x +
+                                direction.y * direction.y +
+                                direction.z * direction.z);
+    if (len < 1e-6f)
+        return hits;
+    const glm::vec3 dir = direction / len;
+
+    const JPH::RRayCast ray{
+        JPH::RVec3(origin.x, origin.y, origin.z),
+        JPH::Vec3(dir.x, dir.y, dir.z) * maxDistance
+    };
+
+    // Every default here is what the single-hit CastRay does implicitly (ignore
+    // back faces, treat a convex shape as solid), so hits[0] is the hit raycast
+    // would have returned for the same arguments — a promise the header makes.
+    const JPH::RayCastSettings rayCastSettings;
+    JPH::AllHitCollisionCollector<JPH::CastRayCollector> collector;
+    const HEQueryFilter     bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter layerFilter(layerMask);
+
+    m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(
+        ray, rayCastSettings, collector, {}, layerFilter, bodyFilter);
+
+    if (!collector.HadHit())
+        return hits;
+
+    // Jolt collects in whatever order the trees were walked. Nearest first is
+    // the order every caller means by "what did the shot pass through".
+    collector.Sort();
+
+    std::unordered_set<uint32_t> seen;
+    hits.reserve(collector.mHits.size());
+    for (const JPH::RayCastResult& hit : collector.mHits)
+    {
+        RaycastHit out;
+        out.hit      = true;
+        out.distance = hit.mFraction * maxDistance;
+
+        const JPH::RVec3 hitPos = ray.GetPointOnRay(hit.mFraction);
+        out.point = {
+            static_cast<float>(hitPos.GetX()),
+            static_cast<float>(hitPos.GetY()),
+            static_cast<float>(hitPos.GetZ())
+        };
+
+        {
+            JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), hit.mBodyID);
+            if (!lock.Succeeded())
+                continue;   // the body went away between the query and the lock
+            const JPH::Body& body = lock.GetBody();
+            const JPH::Vec3  n = body.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
+            out.normal   = { n.GetX(), n.GetY(), n.GetZ() };
+            out.entityId = static_cast<uint32_t>(body.GetUserData());
+            out.layer    = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
+        }
+
+        // One entry per entity, and the sort above means the one kept is the
+        // nearest. A mesh reports its near face and its far face as two hits of
+        // the same body, and "the bullet went through the house twice" is not an
+        // answer anybody asked for.
+        if (seen.insert(out.entityId).second)
+            hits.push_back(out);
+    }
+
+    return hits;
 }
 
 bool PhysicsWorld::addForce(uint32_t entityId, const glm::vec3& force)
@@ -2210,6 +2427,42 @@ bool PhysicsWorld::addTorque(uint32_t entityId, const glm::vec3& torque)
         return false;
     }
     bodyInterface.AddTorque(target.id, JPH::Vec3(torque.x, torque.y, torque.z));
+    return true;
+}
+
+bool PhysicsWorld::addForceAtPosition(uint32_t entityId, const glm::vec3& force,
+                                      const glm::vec3& worldPosition)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addForceAtPosition on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddForce(target.id, JPH::Vec3(force.x, force.y, force.z),
+                           JPH::RVec3(worldPosition.x, worldPosition.y, worldPosition.z));
+    return true;
+}
+
+bool PhysicsWorld::addImpulseAtPosition(uint32_t entityId, const glm::vec3& impulse,
+                                        const glm::vec3& worldPosition)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addImpulseAtPosition on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddImpulse(target.id, JPH::Vec3(impulse.x, impulse.y, impulse.z),
+                             JPH::RVec3(worldPosition.x, worldPosition.y, worldPosition.z));
     return true;
 }
 
@@ -2264,6 +2517,43 @@ glm::vec3 PhysicsWorld::getVelocity(uint32_t entityId) const
     // A static body answers zero without complaint: that is its true velocity,
     // not a lookup that failed.
     const JPH::Vec3 v = m_impl->physicsSystem.GetBodyInterface().GetLinearVelocity(body->second);
+    return { v.GetX(), v.GetY(), v.GetZ() };
+}
+
+bool PhysicsWorld::setAngularVelocity(uint32_t entityId, const glm::vec3& angularVelocity)
+{
+    if (!m_impl) return false;
+
+    // No character branch, unlike setVelocity: a CharacterVirtual has no spin to
+    // set. An entity that carries both a controller and a kinematic proxy body
+    // gets the spin on the body, which is the only thing that can hold one.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.movable)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "setAngularVelocity on entity %u did nothing: %s",
+                        entityId,
+                        target.exists ? "its rigid body is Static, which never turns"
+                                      : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.SetAngularVelocity(
+        target.id, JPH::Vec3(angularVelocity.x, angularVelocity.y, angularVelocity.z));
+    return true;
+}
+
+glm::vec3 PhysicsWorld::getAngularVelocity(uint32_t entityId) const
+{
+    if (!m_impl) return glm::vec3(0.0f);
+
+    const auto body = m_impl->entityToBody.find(entityId);
+    if (body == m_impl->entityToBody.end())
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "getAngularVelocity on entity %u reads zero: %s",
+                        entityId, kNoBodyReason);
+        return glm::vec3(0.0f);
+    }
+    const JPH::Vec3 v = m_impl->physicsSystem.GetBodyInterface().GetAngularVelocity(body->second);
     return { v.GetX(), v.GetY(), v.GetZ() };
 }
 

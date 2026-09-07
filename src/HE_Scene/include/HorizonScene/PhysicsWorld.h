@@ -265,6 +265,83 @@ public:
                                         uint32_t         ignoreEntityId = kNoEntity,
                                         uint32_t         layerMask = kAllLayers) const;
 
+    // ── The same two questions, asked with a shape that has an orientation ───
+    // A sphere is the only shape that needs no rotation, which is why it came
+    // first and why these four arrive together: a box and a capsule are only
+    // useful once they can lie on their side.
+    //
+    // `rotationEuler` is in DEGREES and is read exactly as TransformComponent::
+    // rotation is (`glm::quat(glm::radians(euler))`, one shared expression) — so
+    // a box cast at (0, 45, 0) is the same box a body at (0, 45, 0) is, which is
+    // the only reason this parameter is worth having. A second Euler convention
+    // here would be a bug nobody could see.
+    //
+    // Everything else matches sphereCast/overlapSphere and is documented there:
+    // a CAST skips triggers and reports where the shape's ORIGIN stopped (not
+    // the contact point, so a camera does not end up inside the wall), an
+    // OVERLAP reports triggers and answers with entities. `ignoreEntityId` and
+    // `layerMask` mean what they mean everywhere else.
+    //
+    // A degenerate shape is a miss, not an assert: a half extent or a radius of
+    // zero or less answers "nothing" rather than reaching Jolt, which would
+    // trip an assertion in a debug build over what is really a caller's empty
+    // query.
+    RaycastHit boxCast(const glm::vec3& origin,
+                       const glm::vec3& halfExtents,
+                       const glm::vec3& rotationEuler,
+                       const glm::vec3& direction,
+                       float            maxDistance,
+                       uint32_t         ignoreEntityId = kNoEntity,
+                       uint32_t         layerMask = kAllLayers) const;
+
+    // `height` is the FULL height including both caps, the same number
+    // ColliderComponent::height carries — so a character's capsule can be swept
+    // ahead of the character by handing this its own two fields. A height of at
+    // most twice the radius is a sphere and is treated as one (the cylinder in
+    // the middle gets a hair of length rather than being refused).
+    RaycastHit capsuleCast(const glm::vec3& origin,
+                           float            radius,
+                           float            height,
+                           const glm::vec3& rotationEuler,
+                           const glm::vec3& direction,
+                           float            maxDistance,
+                           uint32_t         ignoreEntityId = kNoEntity,
+                           uint32_t         layerMask = kAllLayers) const;
+
+    std::vector<uint32_t> overlapBox(const glm::vec3& center,
+                                     const glm::vec3& halfExtents,
+                                     const glm::vec3& rotationEuler,
+                                     uint32_t         ignoreEntityId = kNoEntity,
+                                     uint32_t         layerMask = kAllLayers) const;
+
+    std::vector<uint32_t> overlapCapsule(const glm::vec3& center,
+                                         float            radius,
+                                         float            height,
+                                         const glm::vec3& rotationEuler,
+                                         uint32_t         ignoreEntityId = kNoEntity,
+                                         uint32_t         layerMask = kAllLayers) const;
+
+    // Every body along the ray, not just the first — a bullet that passes
+    // through two enemies, a line of sight that has to know it crossed glass
+    // before it reached the player.
+    //
+    // SORTED, nearest first. Jolt promises no order at all, and "the first thing
+    // the shot hits" is the question every caller actually asks, so the sort is
+    // done here rather than left as a trap.
+    //
+    // ONE ENTRY PER ENTITY, the nearest one. A concave mesh reports its entry
+    // and its far wall as two hits of the same body, and "the bullet passed
+    // through the house twice" is not what the caller meant — the same reason
+    // overlapSphere de-duplicates its sub-shape reports.
+    //
+    // Triggers are reported (it is a ray, and raycast reports them), and hit[0]
+    // is the same hit `raycast` would have returned for the same arguments.
+    std::vector<RaycastHit> raycastAll(const glm::vec3& origin,
+                                       const glm::vec3& direction,
+                                       float            maxDistance = 1000.0f,
+                                       uint32_t         ignoreEntityId = kNoEntity,
+                                       uint32_t         layerMask = kAllLayers) const;
+
     // ── Rigid bodies: the write half ─────────────────────────────────────────
     // What makes a crate pushable from a script. Each addresses the body the
     // entity's RigidBodyComponent was built into — by initialize() at scene
@@ -283,6 +360,29 @@ public:
     bool addImpulse(uint32_t entityId, const glm::vec3& impulse);  // kg·m/s, at the centre of mass
     bool addTorque(uint32_t entityId, const glm::vec3& torque);    // N·m around the world axes
 
+    // The same push, applied somewhere OTHER than the centre of mass — so it
+    // spins the body as well as moving it. This is the difference between a
+    // crate sliding away from an explosion and a crate tumbling away from it,
+    // and it is the pair addTorque cannot express: a torque alone spins in
+    // place, a force at the centre alone never spins at all.
+    //
+    // `worldPosition` is a WORLD point, and it is the one place in this engine's
+    // gameplay surface where a position sitting next to an entity is not that
+    // entity's local space. The reason is that it is not a pose: it is where in
+    // the world the push lands, and every source of one — a raycast hit point,
+    // an explosion's centre, a contact — is already a world point. Converting it
+    // through the entity's parent chain would turn "push the door at its handle"
+    // into a push at some point that depends on what the door happens to be
+    // parented to. Same rule at the HE::api::physics level, said again there.
+    //
+    // A point far from the body pushes it just as hard: Jolt does not care
+    // whether the point is inside the shape. Passing the body's own centre makes
+    // these exactly addForce/addImpulse.
+    bool addForceAtPosition(uint32_t entityId, const glm::vec3& force,
+                            const glm::vec3& worldPosition);
+    bool addImpulseAtPosition(uint32_t entityId, const glm::vec3& impulse,
+                              const glm::vec3& worldPosition);
+
     // Linear velocity of whatever the entity moves by, in m/s.
     //
     // ONE pair for characters and rigid bodies, dispatching on which of the two
@@ -297,6 +397,20 @@ public:
     // rigid-body half.
     bool      setVelocity(uint32_t entityId, const glm::vec3& velocity);
     glm::vec3 getVelocity(uint32_t entityId) const;
+
+    // Spin, in RADIANS PER SECOND about the world axes — the one place in this
+    // API that is not in degrees, because it is a rate rather than a pose and
+    // every physics number it is combined with (a torque, an inertia) is in
+    // radians. A full turn a second is (0, 6.283, 0).
+    //
+    // RIGID BODIES ONLY, and no character dispatch like the pair above: a
+    // CharacterVirtual has no angular velocity at all — it is kept upright by
+    // definition — so an entity that only has a controller reads zero and
+    // refuses the write. Kinematic bodies accept it (they are driven, and a
+    // driven platform may well rotate); a static one refuses and logs, like
+    // every other write here.
+    bool      setAngularVelocity(uint32_t entityId, const glm::vec3& angularVelocity);
+    glm::vec3 getAngularVelocity(uint32_t entityId) const;
 
     // Set the movement velocity for a CharacterController entity (m/s).
     // Has no effect if the entity has no active character controller.

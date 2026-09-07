@@ -2035,3 +2035,329 @@ TEST_CASE("PhysicsWorld: the query mask is not the collision matrix")
     REQUIRE(hit.hit);
     CHECK(hit.entityId == static_cast<uint32_t>(wall));
 }
+
+// ─── Shape casts and overlaps with an orientation ─────────────────────────────
+
+namespace
+{
+    // A static box of an arbitrary size and pose. The three shape-query tests
+    // below all need a wall that is somewhere other than axis-aligned at the
+    // origin, which none of the earlier helpers can build.
+    Entity makeBox(HorizonWorld& world, const char* name, const glm::vec3& pos,
+                   const glm::vec3& scale, const glm::vec3& rotationEuler = glm::vec3(0.0f))
+    {
+        Entity e = world.createEntity(name);
+        TransformComponent t;
+        t.position = pos;
+        t.scale    = scale;
+        t.rotation = rotationEuler;
+        world.addComponent(e, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        world.addComponent(e, rb);
+        return e;
+    }
+}
+
+TEST_CASE("PhysicsWorld: a box cast is the width the caller drew, and its rotation turns it")
+{
+    HorizonWorld world;
+    // Two one-metre cubes with a one-metre gap between their inner faces.
+    makeBox(world, "Left",  { -1.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
+    makeBox(world, "Right", {  1.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ 0.0f, 0.0f, -5.0f };
+    const glm::vec3 dir { 0.0f, 0.0f,  1.0f };
+    // Three metres wide across the gap, half a metre deep — it cannot fit.
+    const glm::vec3 halfExtents{ 1.5f, 0.3f, 0.3f };
+
+    const auto blocked = phys.boxCast(from, halfExtents, glm::vec3(0.0f), dir, 10.0f);
+    REQUIRE(blocked.hit);
+    // Where the BOX stopped, not where it touched: its leading face rests on the
+    // wall, so its centre is its own half depth short of it.
+    CHECK(blocked.distance == doctest::Approx(4.2f).epsilon(0.02));
+
+    // The same box turned a quarter turn about Y is three metres DEEP and a
+    // little over half a metre wide, so it goes straight through the gap.
+    CHECK_FALSE(phys.boxCast(from, halfExtents, { 0.0f, 90.0f, 0.0f }, dir, 10.0f).hit);
+
+    // A ray down the middle of the gap hits nothing either — which is exactly
+    // the reason boxCast exists: a line does not know how wide the caller is.
+    CHECK_FALSE(phys.raycast(from, dir, 10.0f).hit);
+
+    // Degenerate extents are an empty question, not an assertion in a debug build.
+    CHECK_FALSE(phys.boxCast(from, { 0.0f, 0.3f, 0.3f }, glm::vec3(0.0f), dir, 10.0f).hit);
+    CHECK_FALSE(phys.boxCast(from, { -1.0f, 0.3f, 0.3f }, glm::vec3(0.0f), dir, 10.0f).hit);
+}
+
+// The one that would catch a second Euler convention. A cast box whose rotation
+// is read the same way a BODY's rotation is lies parallel to the tilted wall and
+// so travels furthest before touching it; read any other way it presents a
+// corner and is stopped early.
+TEST_CASE("PhysicsWorld: a cast's rotation means what a body's rotation means")
+{
+    HorizonWorld world;
+    const glm::vec3 tilt{ 0.0f, 45.0f, 0.0f };
+    makeBox(world, "TiltedWall", { 0.0f, 0.0f, 0.0f }, { 4.0f, 4.0f, 0.4f }, tilt);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ 0.0f, 0.0f, -10.0f };
+    const glm::vec3 dir { 0.0f, 0.0f,  1.0f };
+    const glm::vec3 plate{ 2.0f, 2.0f, 0.05f };   // a thin wide plate
+
+    const auto aligned    = phys.boxCast(from, plate, tilt, dir, 20.0f);
+    const auto misaligned = phys.boxCast(from, plate, glm::vec3(0.0f), dir, 20.0f);
+    REQUIRE(aligned.hit);
+    REQUIRE(misaligned.hit);
+
+    // Face to face, so the plate gets within a couple of centimetres of the wall.
+    CHECK(aligned.distance > misaligned.distance + 1.0f);
+    CHECK(aligned.distance > 9.0f);
+    CHECK(aligned.distance < 10.0f);
+}
+
+TEST_CASE("PhysicsWorld: a capsule cast stops its own half height short of the floor")
+{
+    HorizonWorld world;
+    makeBox(world, "Floor", { 0.0f, 0.0f, 0.0f }, { 20.0f, 0.5f, 20.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ 0.0f, 5.0f, 0.0f };
+    const glm::vec3 down{ 0.0f, -1.0f, 0.0f };
+
+    // radius 0.5, full height 2 → half a metre of cylinder plus two caps, so the
+    // capsule's lowest point is one metre below its centre. The floor's top face
+    // is at 0.25.
+    const auto hit = phys.capsuleCast(from, 0.5f, 2.0f, glm::vec3(0.0f), down, 20.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.distance == doctest::Approx(3.75f).epsilon(0.02));
+    CHECK(hit.normal.y > 0.9f);
+
+    // A height that is nothing but caps is a sphere, and is answered as one
+    // rather than refused — Jolt would assert on a cylinder of zero length.
+    const auto sphereish = phys.capsuleCast(from, 0.5f, 0.5f, glm::vec3(0.0f), down, 20.0f);
+    REQUIRE(sphereish.hit);
+    CHECK(sphereish.distance == doctest::Approx(4.25f).epsilon(0.02));
+
+    CHECK_FALSE(phys.capsuleCast(from, 0.0f, 2.0f, glm::vec3(0.0f), down, 20.0f).hit);
+    CHECK_FALSE(phys.capsuleCast(from, 0.5f, 2.0f, glm::vec3(0.0f), down, 0.0f).hit);
+}
+
+TEST_CASE("PhysicsWorld: an overlap box sweeps a corridor, and turning it changes the answer")
+{
+    HorizonWorld world;
+    const Entity alongX = makeBox(world, "AlongX", { 3.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
+    const Entity alongZ = makeBox(world, "AlongZ", { 0.0f, 0.0f, 3.0f }, { 1.0f, 1.0f, 1.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    // A rod eight metres long down the X axis: it reaches the box on X and
+    // passes nowhere near the one on Z. A sphere big enough to reach either
+    // would have caught both, which is the whole reason for the shape.
+    const glm::vec3 rod{ 4.0f, 0.6f, 0.6f };
+    const auto onX = phys.overlapBox(glm::vec3(0.0f), rod, glm::vec3(0.0f));
+    REQUIRE(onX.size() == 1u);
+    CHECK(onX[0] == static_cast<uint32_t>(alongX));
+
+    const auto onZ = phys.overlapBox(glm::vec3(0.0f), rod, { 0.0f, 90.0f, 0.0f });
+    REQUIRE(onZ.size() == 1u);
+    CHECK(onZ[0] == static_cast<uint32_t>(alongZ));
+
+    // Ignore and mask behave as they do everywhere else.
+    CHECK(phys.overlapBox(glm::vec3(0.0f), rod, glm::vec3(0.0f),
+                          static_cast<uint32_t>(alongX)).empty());
+    CHECK(phys.overlapBox(glm::vec3(0.0f), rod, glm::vec3(0.0f),
+                          PhysicsWorld::kNoEntity, 0u).empty());
+    CHECK(phys.overlapBox(glm::vec3(0.0f), { 0.0f, 0.6f, 0.6f }, glm::vec3(0.0f)).empty());
+}
+
+TEST_CASE("PhysicsWorld: an overlap capsule stands up until it is told to lie down")
+{
+    HorizonWorld world;
+    const Entity above = makeBox(world, "Above", { 0.0f, 1.5f, 0.0f }, { 1.0f, 1.0f, 1.0f });
+    const Entity beside = makeBox(world, "Beside", { 1.5f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    // Radius 0.5, full height 4 → two metres of reach up and down, half a metre
+    // sideways: the "is anybody standing inside me" query a respawn makes.
+    const auto standing = phys.overlapCapsule(glm::vec3(0.0f), 0.5f, 4.0f, glm::vec3(0.0f));
+    REQUIRE(standing.size() == 1u);
+    CHECK(standing[0] == static_cast<uint32_t>(above));
+
+    // A quarter turn about Z puts the same capsule on its side, and the answer
+    // changes with it.
+    const auto lying = phys.overlapCapsule(glm::vec3(0.0f), 0.5f, 4.0f, { 0.0f, 0.0f, 90.0f });
+    REQUIRE(lying.size() == 1u);
+    CHECK(lying[0] == static_cast<uint32_t>(beside));
+
+    CHECK(phys.overlapCapsule(glm::vec3(0.0f), 0.0f, 4.0f, glm::vec3(0.0f)).empty());
+    CHECK(phys.overlapCapsule(glm::vec3(0.0f), 0.5f, 4.0f, glm::vec3(0.0f),
+                              PhysicsWorld::kNoEntity, 0u).empty());
+}
+
+TEST_CASE("PhysicsWorld: raycastAll reports everything on the line, nearest first")
+{
+    HorizonWorld world;
+    const Entity near_ = makeStaticBox(world, "Near", {  0.0f, 0.0f, 0.0f });
+    const Entity mid   = makeStaticBox(world, "Mid",  {  6.0f, 0.0f, 0.0f });
+    const Entity far_  = makeStaticBox(world, "Far",  { 12.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ -10.0f, 0.0f, 0.0f };
+    const glm::vec3 dir { 1.0f, 0.0f, 0.0f };
+
+    const auto hits = phys.raycastAll(from, dir, 100.0f);
+    REQUIRE(hits.size() == 3u);
+    CHECK(hits[0].entityId == static_cast<uint32_t>(near_));
+    CHECK(hits[1].entityId == static_cast<uint32_t>(mid));
+    CHECK(hits[2].entityId == static_cast<uint32_t>(far_));
+    CHECK(hits[0].distance < hits[1].distance);
+    CHECK(hits[1].distance < hits[2].distance);
+    CHECK(hits[0].distance == doctest::Approx(9.5f).epsilon(0.02));
+    for (const auto& h : hits)
+    {
+        CHECK(h.hit);
+        CHECK(h.normal.x < -0.9f);   // every face turned back towards the shooter
+    }
+
+    // The promise the header makes: the first of these is the hit `raycast`
+    // would have returned on its own.
+    const auto single = phys.raycast(from, dir, 100.0f);
+    REQUIRE(single.hit);
+    CHECK(single.entityId == hits[0].entityId);
+    CHECK(single.distance == doctest::Approx(hits[0].distance));
+
+    // Range, ignore and "nothing there" all behave like the single-hit form.
+    CHECK(phys.raycastAll(from, dir, 12.0f).size() == 1u);
+    CHECK(phys.raycastAll(from, dir, 100.0f, static_cast<uint32_t>(mid)).size() == 2u);
+    CHECK(phys.raycastAll({ 0.0f, 50.0f, 0.0f }, dir, 100.0f).empty());
+    CHECK(phys.raycastAll(from, glm::vec3(0.0f), 100.0f).empty());
+}
+
+TEST_CASE("PhysicsWorld: raycastAll sees only the channels its mask names")
+{
+    HorizonWorld world;
+    const Entity a = makeLayeredBox(world, "A", { 0.0f, 0.0f, 0.0f }, kChanA);
+    const Entity b = makeLayeredBox(world, "B", { 6.0f, 0.0f, 0.0f }, kChanB);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ -10.0f, 0.0f, 0.0f };
+    const glm::vec3 dir { 1.0f, 0.0f, 0.0f };
+
+    CHECK(phys.raycastAll(from, dir, 100.0f).size() == 2u);
+
+    const auto onlyB = phys.raycastAll(from, dir, 100.0f, PhysicsWorld::kNoEntity, bit(kChanB));
+    REQUIRE(onlyB.size() == 1u);
+    CHECK(onlyB[0].entityId == static_cast<uint32_t>(b));
+    CHECK(onlyB[0].layer == kChanB);
+
+    const auto onlyA = phys.raycastAll(from, dir, 100.0f, PhysicsWorld::kNoEntity, bit(kChanA));
+    REQUIRE(onlyA.size() == 1u);
+    CHECK(onlyA[0].entityId == static_cast<uint32_t>(a));
+
+    CHECK(phys.raycastAll(from, dir, 100.0f, PhysicsWorld::kNoEntity, 0u).empty());
+}
+
+TEST_CASE("PhysicsWorld: shape queries answer nothing on a world that was never initialised")
+{
+    PhysicsWorld phys;   // no initialize()
+    CHECK_FALSE(phys.boxCast({ 0, 0, 0 }, { 1, 1, 1 }, glm::vec3(0.0f), { 0, 0, 1 }, 10.0f).hit);
+    CHECK_FALSE(phys.capsuleCast({ 0, 0, 0 }, 0.5f, 2.0f, glm::vec3(0.0f), { 0, 0, 1 }, 10.0f).hit);
+    CHECK(phys.overlapBox({ 0, 0, 0 }, { 1, 1, 1 }, glm::vec3(0.0f)).empty());
+    CHECK(phys.overlapCapsule({ 0, 0, 0 }, 0.5f, 2.0f, glm::vec3(0.0f)).empty());
+    CHECK(phys.raycastAll({ 0, 0, 0 }, { 0, 0, 1 }, 10.0f).empty());
+}
+
+// ─── Force at a point, and spin ───────────────────────────────────────────────
+
+// One test for both features, because each is the other's measuring instrument:
+// an off-centre impulse is the only push that produces a spin, and the angular
+// velocity is the only way to see that the point was used at all.
+TEST_CASE("PhysicsWorld: an impulse off the centre spins the body, one through it does not")
+{
+    HorizonWorld world;
+    const Entity centred = makeDynamicBox(world, "Centred", { 0.0f, 10.0f, 0.0f });
+    const Entity edged   = makeDynamicBox(world, "Edged",   { 8.0f, 10.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    phys.setGravity({ 0.0f, 0.0f, 0.0f });   // isolate the push from the fall
+
+    // Straight through the centre of mass: all of it becomes travel.
+    CHECK(phys.addImpulse(static_cast<uint32_t>(centred), { 0.0f, 0.0f, 5.0f }));
+    CHECK(glm::length(phys.getAngularVelocity(static_cast<uint32_t>(centred))) < 1e-4f);
+    CHECK(phys.getVelocity(static_cast<uint32_t>(centred)).z == doctest::Approx(5.0f));
+
+    // The same push at the corner of the other box: it travels AND it turns.
+    CHECK(phys.addImpulseAtPosition(static_cast<uint32_t>(edged), { 0.0f, 0.0f, 5.0f },
+                                    { 8.5f, 10.5f, 0.0f }));
+    CHECK(glm::length(phys.getAngularVelocity(static_cast<uint32_t>(edged))) > 0.1f);
+    CHECK(phys.getVelocity(static_cast<uint32_t>(edged)).z == doctest::Approx(5.0f));
+
+    // A force at a point needs a step to be felt — Jolt accumulates it and
+    // consumes it in the next update, exactly like addForce.
+    const Entity pushed = edged;
+    phys.setVelocity(static_cast<uint32_t>(pushed), glm::vec3(0.0f));
+    phys.setAngularVelocity(static_cast<uint32_t>(pushed), glm::vec3(0.0f));
+    CHECK(phys.addForceAtPosition(static_cast<uint32_t>(pushed), { 0.0f, 0.0f, 500.0f },
+                                  { 8.5f, 10.5f, 0.0f }));
+    phys.step(world, kDt);
+    CHECK(glm::length(phys.getAngularVelocity(static_cast<uint32_t>(pushed))) > 0.1f);
+}
+
+TEST_CASE("PhysicsWorld: angular velocity round-trips, and refuses what cannot turn")
+{
+    HorizonWorld world;
+    const Entity box   = makeDynamicBox(world, "Box", { 0.0f, 10.0f, 0.0f });
+    const Entity wall  = makeStaticBox(world, "Wall", { 20.0f, 0.0f, 0.0f });
+    const Entity ghost = world.createEntity("NoBody");
+    { TransformComponent t; world.addComponent(ghost, t); }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    phys.setGravity(glm::vec3(0.0f));
+
+    // Radians per second about the world axes: a full turn a second is 2π.
+    CHECK(phys.setAngularVelocity(static_cast<uint32_t>(box), { 0.0f, 6.2832f, 0.0f }));
+    CHECK(phys.getAngularVelocity(static_cast<uint32_t>(box)).y == doctest::Approx(6.2832f));
+
+    // And it is a real spin, not a stored number: a quarter of a second of it
+    // turns the box a noticeable amount about Y.
+    for (int i = 0; i < 15; ++i)
+        phys.step(world, kDt);
+    CHECK(std::abs(world.registry().get<TransformComponent>(box).rotation.y) > 20.0f);
+
+    CHECK_FALSE(phys.setAngularVelocity(static_cast<uint32_t>(wall), { 0.0f, 1.0f, 0.0f }));
+    CHECK_FALSE(phys.setAngularVelocity(static_cast<uint32_t>(ghost), { 0.0f, 1.0f, 0.0f }));
+    CHECK(phys.getAngularVelocity(static_cast<uint32_t>(ghost)) == glm::vec3(0.0f));
+    CHECK(phys.getAngularVelocity(99999u) == glm::vec3(0.0f));
+}
+
+TEST_CASE("PhysicsWorld: a push at a point refuses exactly what a push at the centre refuses")
+{
+    HorizonWorld world;
+    const Entity wall  = makeStaticBox(world, "Wall", { 0.0f, 0.0f, 0.0f });
+    const Entity ghost = world.createEntity("NoBody");
+    { TransformComponent t; world.addComponent(ghost, t); }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    CHECK_FALSE(phys.addForceAtPosition(static_cast<uint32_t>(wall), { 1, 0, 0 }, { 0, 0, 0 }));
+    CHECK_FALSE(phys.addImpulseAtPosition(static_cast<uint32_t>(wall), { 1, 0, 0 }, { 0, 0, 0 }));
+    CHECK_FALSE(phys.addForceAtPosition(static_cast<uint32_t>(ghost), { 1, 0, 0 }, { 0, 0, 0 }));
+    CHECK_FALSE(phys.addImpulseAtPosition(99999u, { 1, 0, 0 }, { 0, 0, 0 }));
+}
