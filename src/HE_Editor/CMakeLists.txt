@@ -115,6 +115,10 @@ add_executable(HorizonEditor WIN32
 	# documents as hooks and apply every item through the CollabDocSync adapter,
 	# so nothing here writes into a graph by hand either.
 	McpToolsHc.cpp
+	# The engine's own API as tools, generated from HE::api::registry() rather
+	# than written out — the sixth reader of that table after Lua, Python, the
+	# add menu, the node reference and the palette.
+	McpToolsApi.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp

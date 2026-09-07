@@ -119,6 +119,7 @@ add_executable(he_tests
     test_mcp_bridge.cpp
     test_mcp_tools_entity.cpp
     test_mcp_hc.cpp
+    test_mcp_api.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -172,6 +173,11 @@ add_executable(he_tests
     # come out of the collab diff as exactly one delta" are both answerable
     # against a HorizonCode::Graph on the stack, with no panel and no window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsHc.cpp
+    # The engine API as tools. In here because the file is generated FROM a
+    # table: "does every row of HE::api::registry() turn into a tool with a
+    # legal name and a schema that matches its signature" is a question about
+    # two data structures, and the answer must not depend on a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsApi.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.

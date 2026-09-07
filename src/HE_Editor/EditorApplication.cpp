@@ -14,6 +14,7 @@
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
+#include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
@@ -5965,6 +5966,36 @@ void EditorApplication::setupMcpTools()
 	};
 
 	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
+
+	// The engine's own API, one tool per pure row of HE::api::registry(). No
+	// list here: what the engine registers is what a client can call, and the
+	// rows that CHANGE the world are refused by the policy in McpToolsApi.cpp
+	// rather than by an omission somebody has to maintain.
+	HE::Ed::McpApiHooks api;
+	// The editor's one Ctx factory — the same one Lua, Python and a previewed
+	// graph go through, so a row reached from outside finds exactly what it
+	// finds from inside. Read per call, because entering play mode replaces the
+	// physics world and a captured pointer would be the old one.
+	api.makeCtx = [this] {
+		return apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
+	};
+	// The registry speaks raw entt handles and every other tool on this
+	// interface speaks uuids, so this is the translation between them. -1 for an
+	// unknown uuid: 0 is a valid handle, and a miss that fell through to it
+	// would act on a stranger.
+	api.entityByUuid = [this](const std::string& uuid) -> std::int64_t {
+		if (!m_editorWorld) return -1;
+		const Entity e = HE::Ed::entityByUuid(*m_editorWorld, uuid);
+		if (e == entt::null) return -1;
+		return static_cast<std::int64_t>(entt::to_integral(e));
+	};
+	api.uuidOf = [this](std::uint32_t handle) -> std::string {
+		if (!m_editorWorld) return {};
+		const Entity e = static_cast<Entity>(handle);
+		if (!m_editorWorld->registry().valid(e)) return {};
+		return HE::Ed::uuidOf(*m_editorWorld, e);
+	};
+	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
