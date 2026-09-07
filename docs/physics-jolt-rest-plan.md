@@ -149,14 +149,32 @@ umbenennbar, aber nicht loeschbar:
 
 | Index | Name | Wer landet dort ohne Zutun |
 | --- | --- | --- |
-| 0 | `Default` | jeder Body ohne eigene Wahl, das Terrain, jede Static-Geometrie |
+| 0 | `Default` | jeder Body ohne eigene Wahl, jede Static-Geometrie |
 | 1 | `Player` | nichts automatisch — der Name existiert, damit die Vorbelegung nicht leer ist |
-| 2 | `Trigger` | jeder Body mit `ColliderComponent::isTrigger` |
-| 3 | `Character` | der Kinematic-Proxy eines `CharacterControllerComponent` |
+| 2 | `Trigger` | nichts automatisch, siehe unten |
+| 3 | `Character` | Default-Wert von `CharacterControllerComponent::collisionLayer` |
+| 4 | `Terrain` | der implizite Landschafts-HeightField, fest |
 
-Die Vorbelegung von 2 und 3 ist **kein** Automatismus, der die Wahl ueberstimmt:
-sie ist nur der Default-Wert des neuen Feldes fuer eine Entity, die nie einen
-Layer gewaehlt hat. Explizit gewaehlt schlaegt Vorbelegung.
+**Nachgezogen in Schritt 2 (`92338f9e`), die Tabelle oben ist die korrigierte:**
+
+- Es sind **fuenf** Vorbelegungen, nicht vier. Der Terrain-Layer ist die
+  Entscheidung des Menschen (Brett, chefchen): so kann eine Abfrage „nur der
+  Boden" oder „alles ausser dem Boden" ueberhaupt formuliert werden.
+- **`Trigger` ist kein Automatismus.** Die urspruengliche Begruendung („niemand
+  hat einen Component, in den er etwas anderes schreiben koennte", § 3.4) gilt
+  fuer Sensoren nicht: ein Sensor IST ein Body aus `RigidBodyComponent`, und die
+  traegt das Feld jetzt. Ihn zwangsweise nach 2 zu schieben wuerde also eine
+  explizit getroffene Wahl ueberstimmen — genau das, was der naechste Absatz
+  verbietet. Der Name steht bereit fuer den, der ihn waehlt.
+- `RigidBodyComponent::collisionLayer` ist **0**,
+  `CharacterControllerComponent::collisionLayer` ist **3**. Auf einer
+  PlayerCharacter-Entity, die beides hat, beantworten die zwei Felder zwei
+  verschiedene Fragen: das des Characters, wovon der Spieler **aufgehalten**
+  wird, das des Koerpers, wofuer ihn alle anderen **halten**.
+
+Die Vorbelegung ist **kein** Automatismus, der die Wahl ueberstimmt: sie ist nur
+der Default-Wert des neuen Feldes fuer eine Entity, die nie einen Layer gewaehlt
+hat. Explizit gewaehlt schlaegt Vorbelegung.
 
 Die Matrix ist per Default **komplett `true`**. Alles andere bricht jedes
 bestehende Projekt beim Oeffnen: heute kollidiert alles mit allem ausser
@@ -259,8 +277,17 @@ in Jolt auf `BodyCreationSettings`, also da, wo `RigidBodyComponent` schon
 Dazu ein zweites Feld auf `CharacterControllerComponent` — der Character hat
 keinen `RigidBodyComponent`-Zwang und braucht seinen eigenen (§ 3.5).
 
-Terrain-Implizitkoerper und Sensoren: `Default` bzw. `Trigger`, fest, weil
-niemand einen Component hat, in den er etwas anderes schreiben koennte.
+Terrain-Implizitkoerper: `Terrain`, fest, weil niemand einen Component hat, in
+den er etwas anderes schreiben koennte. Sensoren bekommen **nichts** aufgezwungen
+— Begruendung oben in § 3.1.
+
+Nachtrag aus Schritt 2: `setCollisionLayers` muss nach dem Schreiben der Matrix
+**alle Bodies aufwecken**. Ein schlafender Body ist nicht in Jolts Active Set,
+die Broadphase fragt also nie wieder nach ihm — der Boden unter einer bereits
+liegengebliebenen Kiste wegzuschalten liesse sie in der Luft haengen. Genau der
+Fall, den ein Autor trifft, der die Matrix waehrend des Spielens aendert; ein
+Test deckt ihn ab (`PhysicsWorld: the matrix may be changed while the simulation
+runs`, mit vier Sekunden Vorlauf, damit die Kiste wirklich schlaeft).
 
 ### 3.5 Character-Controller
 

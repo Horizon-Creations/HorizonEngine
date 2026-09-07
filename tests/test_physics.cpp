@@ -1697,8 +1697,14 @@ TEST_CASE("PhysicsWorld: the matrix may be changed while the simulation runs")
 {
     LayerDrop drop(kChanA, kChanB);
     drop.phys.initialize(drop.world);
-    const float resting = drop.settleY();
-    REQUIRE(resting > 0.0f);   // it landed
+    // Four seconds, not two: the box has to be ASLEEP, not merely resting. A
+    // sleeping body is out of Jolt's active set, so nothing re-asks the
+    // broadphase about it — and that is exactly the case an author hits when
+    // they edit the matrix during play, with the scene already settled.
+    const float resting = drop.settleY(4 * kSteps2s);
+    REQUIRE(resting > 0.0f);          // it landed
+    REQUIRE(drop.phys.getVelocity(static_cast<uint32_t>(drop.box)).y
+            == doctest::Approx(0.0f).epsilon(0.01));
 
     // The floor is switched off underneath a body that is already asleep on it.
     // Bodies keep the object layer they were built with — only the answer to

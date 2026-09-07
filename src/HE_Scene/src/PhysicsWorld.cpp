@@ -1020,6 +1020,25 @@ void PhysicsWorld::setCollisionLayers(const HE::CollisionLayerConfig& config)
     // no re-Init, no rebuild of any body. Bodies keep the object layer they were
     // created with; only the answer to "may these two touch" changes.
     m_impl->ooFilter.setLayers(config);
+
+    // …and then every body is woken, which is the half that is easy to miss. A
+    // SLEEPING body is not in Jolt's active set: nothing re-asks the broadphase
+    // about it, so switching the floor out from under a settled crate would
+    // leave it hanging in the air until something else disturbed it. That is
+    // precisely the case an author hits — edit the matrix during play, on a
+    // scene that has come to rest — so the wake-up is not an optimisation
+    // detail, it is what makes the promise above true.
+    //
+    // Statics are skipped by Jolt itself, and this runs once per matrix edit
+    // (the editor on a change, GameApplication before a single body exists), so
+    // it never touches the frame loop.
+    std::vector<JPH::BodyID> ids;
+    ids.reserve(m_impl->entityToBody.size());
+    for (const auto& [entityId, bodyId] : m_impl->entityToBody)
+        ids.push_back(bodyId);
+    if (!ids.empty())
+        m_impl->physicsSystem.GetBodyInterface().ActivateBodies(
+            ids.data(), static_cast<int>(ids.size()));
 }
 
 bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
