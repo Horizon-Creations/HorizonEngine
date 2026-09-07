@@ -1776,7 +1776,15 @@ public:
     // not an answer.
     std::string isoDate() const;
 
-    static const int kCols = 7, kRows = 6, kCells = 42;
+    // One constant per declaration, and not the shorter comma list they were.
+    // MSVC applies the enclosing class's __declspec(dllexport) to every
+    // declarator AFTER the first, and then rejects its own work: "kCols" built,
+    // "kRows" and "kCells" were C2487, "member of dll interface class may not be
+    // declared with dll interface". Nothing about the constants is different —
+    // only that they shared a declaration with one that came first.
+    static const int kCols  = 7;
+    static const int kRows  = 6;
+    static const int kCells = 42;
 
     // Which cell the 1st of the shown month falls in, 0..6.
     int firstCell() const
