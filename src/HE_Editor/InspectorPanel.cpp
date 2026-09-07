@@ -1046,7 +1046,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::dragFloat3("Head Forward", &la.forwardLocal.x, 0.05f, -1.0f, 1.0f); trackEdit();
 				Row::sliderFloat("Look Weight", &la.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
 				Row::dragFloat("Max Yaw",   &la.maxYawDegrees,   0.5f, 0.0f, 180.0f, "%.0f°"); trackEdit();
-				Row::dragFloat("Max Pitch##ikla", &la.maxPitchDegrees, 0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+				// "Look Max Pitch" and not "Max Pitch": the label IS the help key,
+				// and a second "Max Pitch" under this component would hand the
+				// look-at row the foot's tooltip about tipping a toe.
+				Row::dragFloat("Look Max Pitch", &la.maxPitchDegrees, 0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
 				Row::dragFloat("Look Interp Speed", &la.interpSpeed, 0.1f, 0.0f, 60.0f, "%.1f"); trackEdit();
 			}
 		}

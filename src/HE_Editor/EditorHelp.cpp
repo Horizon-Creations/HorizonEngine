@@ -1248,6 +1248,11 @@ namespace
 	  "following. Without a limit a target walking behind the character spins the "
 	  "head 180° and the neck with it.",
 	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Max Pitch", "",
+	  "How far the head may tip up or down. Separate from the yaw limit because a "
+	  "neck has far less of this to give: a character can look most of the way "
+	  "over its shoulder long before it can look at its own feet.",
+	  "", "systems#animation" },
 	{ "Inverse Kinematics/Look Interp Speed", "",
 	  "How fast the head follows a target that moved. Low is a slow, deliberate "
 	  "look; high is alert. It also softens the moment a target leaves the cone "

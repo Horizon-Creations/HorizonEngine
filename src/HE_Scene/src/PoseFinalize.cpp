@@ -205,6 +205,11 @@ void refreshIkJoints(IkComponent& ic, const SkeletalMeshAsset& mesh, HE::UUID me
     for (size_t i = 0; i < ic.feet.size(); ++i)
     {
         const auto& f = ic.feet[i];
+        // An empty name is "not configured yet" — the state every foot is in for
+        // the seconds between pressing Add Foot and typing into it. Left to fall
+        // through it would log a missing joint '' every five seconds at exactly
+        // the moment the user is looking for a real message.
+        if (f.footJoint.empty()) continue;
         const int foot = findJointByName(mesh, f.footJoint);
         if (foot < 0)
         {
