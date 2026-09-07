@@ -12979,23 +12979,30 @@ TEST_CASE("Engine components: a page that embeds one survives being packaged")
     REQUIRE(result.success);
 
     // From here on, only the pak exists — the way a shipped game sees the world.
-    ContentManager cm;
-    REQUIRE(cm.mountPak((outputDir / "CompGame.hpak").string()));
-    REQUIRE(cm.loadAsset(kComponent) != HE::UUID{});
+    // Scoped: ContentManager keeps the .hpak open for as long as it lives, and
+    // Windows — unlike the two systems this was written and run on first —
+    // refuses to remove a directory holding a file someone still has open.
+    // The mounted manager has to be gone before the cleanup below, not merely
+    // unused.
+    {
+        ContentManager cm;
+        REQUIRE(cm.mountPak((outputDir / "CompGame.hpak").string()));
+        REQUIRE(cm.loadAsset(kComponent) != HE::UUID{});
 
-    WidgetManager wm;
-    const int id = createShown(wm, cm, "Page.hasset");
-    REQUIRE(id != 0);
-    std::vector<UIRenderObject> out;
-    wm.extract(400.0f, 300.0f, out);
+        WidgetManager wm;
+        const int id = createShown(wm, cm, "Page.hasset");
+        REQUIRE(id != 0);
+        std::vector<UIRenderObject> out;
+        wm.extract(400.0f, 300.0f, out);
 
-    // Eight glyphs for "Packaged". Nine would be the component's own "Card"
-    // plus its body line, and zero would be the slot with nothing grafted into
-    // it — which is what both of the earlier bugs looked like.
-    CHECK(glyphsBetween(out, 0.0f, 300.0f) >= 8);
-    int packaged = 0;
-    for (const auto& ro : out) if (ro.type == 2 && ro.position.y < 60.0f) ++packaged;
-    CHECK(packaged == 8);
+        // Eight glyphs for "Packaged". Nine would be the component's own "Card"
+        // plus its body line, and zero would be the slot with nothing grafted
+        // into it — which is what both of the earlier bugs looked like.
+        CHECK(glyphsBetween(out, 0.0f, 300.0f) >= 8);
+        int packaged = 0;
+        for (const auto& ro : out) if (ro.type == 2 && ro.position.y < 60.0f) ++packaged;
+        CHECK(packaged == 8);
+    }
 
     std::filesystem::remove_all(contentDir);
     std::filesystem::remove_all(outputDir);
