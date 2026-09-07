@@ -8,7 +8,14 @@ class ContentManager;
 class IRenderer;
 class PhysicsWorld;
 class AnimatorHost;
-namespace HE { struct RootMotionContext; }
+namespace HE {
+struct RootMotionContext;
+// Declared, not included: the definition lives in AnimationNotify.h and this
+// header is on every application's include path. The alias must stay spelled
+// the same in both places, which is why it is one line and not a class.
+struct AnimationNotifyEvent;
+using NotifyQueue = std::vector<AnimationNotifyEvent>;
+}
 
 namespace SceneSystems
 {
@@ -67,9 +74,16 @@ namespace SceneSystems
     // root lock happen either way, so the pose an author sees is the pose the game
     // produces; only the moving is gated. A play session passes a context holding
     // the PhysicsWorld (needed for the character-controller mode).
+    // `notifies` is the third gate of the same shape, and its null case is the
+    // sharpest of the three: nullptr means the timeline events are not evaluated
+    // AT ALL. The systems never learn whether anything is playing — they collect
+    // when handed somewhere to collect into, and the queue therefore cannot grow
+    // without bound in an editor where nobody drains it. Whoever passes one
+    // drains it immediately after this call; see AnimationNotifySystem.
     void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
                        AnimatorHost* sync = nullptr,
-                       HE::RootMotionContext* rootMotion = nullptr);
+                       HE::RootMotionContext* rootMotion = nullptr,
+                       HE::NotifyQueue* notifies = nullptr);
 
     // Publish scene-side counters (entities, lights, live particles, rigid bodies,
     // audio sources, scripts, in-flight streaming) to the EngineProfiler. Called at

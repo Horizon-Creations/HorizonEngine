@@ -39,6 +39,16 @@ struct AnimatorStateMachineComponent
     float       transitionElapsed  = 0.0f;
     float       transitionDuration = 0.2f;
 
+    // A crossfade has TWO playheads, so it has two first frames to close. The
+    // incoming one is un-primed again every time a transition STARTS — it is
+    // being set back to 0, and a notify on the incoming clip's frame 0 is
+    // exactly what "the attack begins" means. When the transition completes the
+    // incoming flag moves onto the outgoing one, the same way transitionElapsed
+    // moves onto clipTime, so the surviving playhead does not re-prime and dump
+    // its frame-0 notify a second time. Runtime only, never saved.
+    bool        clipNotifiesPrimed       = false;
+    bool        transitionNotifiesPrimed = false;
+
     // ── Legacy migration staging (SceneSerializer only) ─────────────────────────
     // Scenes saved before the state machine became an asset (Forts. 70, e82137f)
     // had the whole graph INLINE on this component. SceneSerializer::load

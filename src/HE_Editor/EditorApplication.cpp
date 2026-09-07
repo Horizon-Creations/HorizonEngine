@@ -55,6 +55,7 @@
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -2873,9 +2874,27 @@ void EditorApplication::OnRender(float dt)
 			// scene while somebody authors it would be SAVED there. Outside play
 			// the context is null, so the motion is still taken out of the pose
 			// (the pose is identical either way) and simply not applied.
+			//
+			// Notifies are gated on the same session, for the third form of the
+			// same argument: a null queue means they are not even evaluated, so an
+			// editor nobody plays in neither pays for them nor accumulates them.
+			const bool playing = m_animatorHost.running();
 			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
 			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
-			                            m_animatorHost.running() ? &rootMotion : nullptr);
+			                            playing ? &rootMotion : nullptr,
+			                            playing ? &m_animNotifies : nullptr);
+
+			// Immediately after, and not at the collision drain above: that one
+			// sits in the frame BEFORE this phase and would cost every notify a
+			// frame. dispatch empties the queue.
+			if (playing && m_scriptContext)
+			{
+				HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
+				AnimationNotifySystem::dispatch(m_animNotifies, *m_editorWorld,
+				                                m_scriptContext.get(), m_scriptInstances,
+				                                &m_gameInstance.runtime(), m_entityHost.instances(),
+				                                &m_animatorHost);
+			}
 		}
 
 		// Remember what the gameplay half of this frame produced — pose AND the

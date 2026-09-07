@@ -6,13 +6,15 @@
 #include <ContentManager/ContentManager.h>
 #include "AnimationEval.h"
 #include "RootMotionApply.h"
+#include "NotifyCollect.h"
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
 #include <cmath>
 
 void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
-                             HE::RootMotionContext* rootMotion)
+                             HE::RootMotionContext* rootMotion,
+                             HE::NotifyQueue* notifies)
 {
     auto& reg  = world.registry();
     auto  view = reg.view<AnimatorComponent, SkeletalMeshComponent>();
@@ -44,6 +46,13 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
 
         advancePlayback(animator.playbackTime, animator.playing,
                         animator.playbackSpeed, animator.looping, clip->duration, dt);
+
+        // Over the same span as the delta below, and BEFORE the skeleton is
+        // looked up on purpose: the timeline moved, so what is written on it
+        // happened. A footstep sound does not depend on there being a mesh to
+        // pose, and a missing one is already reported a few lines down.
+        HE::notifyCollectClip(e, *clip, tPrev, tEnd, animator.looping,
+                              /*dominant=*/true, animator.notifiesPrimed, notifies);
 
         const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(smc.meshAssetId);
         if (!mesh || mesh->skeleton.empty())

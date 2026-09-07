@@ -767,6 +767,26 @@ HE_HC_ENTITY_EVENT(fireOnHit,          "OnHit",          onHit)
 HE_HC_ENTITY_EVENT(fireOnHitEnd,       "OnHitEnd",       onHitEnd)
 #undef HE_HC_ENTITY_EVENT
 
+// The animation notifies: one String argument (the notify's name), no element.
+// Neither macro above fits — the value events carry an element, the entity events
+// carry an int — and three of them is where a third macro finally earns itself,
+// which is exactly what the comment above fireOnClipFinished said it did not.
+#define HE_HC_STRING_EVENT(fn, name, hook)                                      \
+    void Runtime::fn(InstanceId id, const std::string& s)                       \
+    {                                                                           \
+        Inst* i = find(id);                                                     \
+        if (!i) return;                                                         \
+        const Value arg = Value::ofString(s);                                   \
+        if (i->compiled) i->compiled->hook(s);                                  \
+        else runEventOnLevel(*i, id, name, 0, arg);                             \
+        static const EventId ev = eventId(name);                                \
+        dispatchToListeners(id, ev, name, arg);                                 \
+    }
+HE_HC_STRING_EVENT(fireOnAnimationNotify,      "OnAnimationNotify",      onAnimationNotify)
+HE_HC_STRING_EVENT(fireOnAnimationNotifyBegin, "OnAnimationNotifyBegin", onAnimationNotifyBegin)
+HE_HC_STRING_EVENT(fireOnAnimationNotifyEnd,   "OnAnimationNotifyEnd",   onAnimationNotifyEnd)
+#undef HE_HC_STRING_EVENT
+
 void Runtime::fireTick(InstanceId id, float dt)
 {
     Inst* i = find(id);

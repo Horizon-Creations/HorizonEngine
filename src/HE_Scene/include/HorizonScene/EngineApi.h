@@ -441,6 +441,18 @@ namespace animator {
     void        setParam(Ctx&, Entity e, const std::string& name, float value);
     float       getParam(Ctx&, Entity e, const std::string& name);   // 0 when unset
     std::string getState(Ctx&, Entity e);                            // "" when none
+
+    // The notify names written on an animation clip's timeline, by the clip's
+    // ASSET PATH — a clip is addressed by path everywhere else a script reaches
+    // an asset, and a UUID has no pin type to travel in.
+    //
+    // Notify names are free strings with no registry behind them, so a typo
+    // fires nothing and reports nothing. This is the answer to that: it is the
+    // read a debug view makes, and the read a graph makes instead of guessing.
+    // There is deliberately no way to FIRE one from here — notifies are received,
+    // and a second source for them would be a second thing that could be wrong.
+    // Empty for an unknown path, a clip with no notifies, or no content manager.
+    std::vector<std::string> notifiesOf(Ctx&, const std::string& clipPath);
 }
 
 // ── Particles: firing an effect ──────────────────────────────────────────────

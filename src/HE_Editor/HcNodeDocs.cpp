@@ -198,6 +198,11 @@ namespace
 	{ "animator.getState",
 	  "The name of the state playing right now, as the animator asset spells it. "
 	  "Empty when there is no state machine." },
+	{ "animator.notifiesOf",
+	  "The notify names written on an animation clip's timeline, by the clip's "
+	  "asset path. Notify names are free text with nothing checking them, so a "
+	  "misspelled one fires nothing and says nothing — this is how to see what a "
+	  "clip actually carries. Empty for an unknown path or a clip without any." },
 
 	// ── Particles ────────────────────────────────────────────────────────────
 	{ "particle.burst",

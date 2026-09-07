@@ -1171,6 +1171,26 @@ bool PyScriptBackend::callOnEndOverlap(InstanceId id, uint32_t other)
 	Py_DECREF(r); return true;
 }
 
+// The three notify handlers differ only in the Python method name, so they share
+// one body. "s" marshals the name as a str.
+bool PyScriptBackend::callNotifyMethod(InstanceId id, const char* method, const std::string& name)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, method)) return true;
+	PyObject* r = PyObject_CallMethod(obj, method, "s", name.c_str());
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
+bool PyScriptBackend::callOnAnimationNotify(InstanceId id, const std::string& name)
+{ return callNotifyMethod(id, "on_animation_notify", name); }
+
+bool PyScriptBackend::callOnAnimationNotifyBegin(InstanceId id, const std::string& name)
+{ return callNotifyMethod(id, "on_animation_notify_begin", name); }
+
+bool PyScriptBackend::callOnAnimationNotifyEnd(InstanceId id, const std::string& name)
+{ return callNotifyMethod(id, "on_animation_notify_end", name); }
+
 bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
 	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :

@@ -193,7 +193,8 @@ void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager
 }
 
 void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
-                                 AnimatorHost* sync, HE::RootMotionContext* rootMotion)
+                                 AnimatorHost* sync, HE::RootMotionContext* rootMotion,
+                                 HE::NotifyQueue* notifies)
 {
     HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickAnimation");
 
@@ -205,9 +206,9 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     // Order within the phase is unchanged: the three skeletal drivers all write
     // SkeletalMeshComponent::boneMatrices, so the last one wins on an entity
     // that carries more than one of them (which nothing stops today).
-    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt, rootMotion); }
-    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt, rootMotion); }
-    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt, sync, rootMotion); }
+    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt, rootMotion, notifies); }
+    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt, rootMotion, notifies); }
+    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt, sync, rootMotion, notifies); }
     { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
 
     HE::rootMotionEndFrame(world, rootMotion);

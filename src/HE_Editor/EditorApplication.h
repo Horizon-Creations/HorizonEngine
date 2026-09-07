@@ -18,6 +18,7 @@
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
@@ -594,6 +595,9 @@ private:
 	// Handed to the animation phase rather than ticked here, so each graph fires
 	// right before the transitions it feeds.
 	AnimatorHost       m_animatorHost;
+	// This frame's animation notifies — PIE only, and a member so its storage
+	// outlives the frame that emptied it.
+	HE::NotifyQueue    m_animNotifies;
 	HorizonCode::Graph m_gameInstanceGraph;
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file

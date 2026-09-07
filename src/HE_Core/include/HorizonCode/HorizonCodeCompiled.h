@@ -200,6 +200,15 @@ public:
     virtual void onEndOverlap(int other)   { fireEvent("OnEndOverlap",   0, Value::ofInt(other)); }
     virtual void onHit(int other)          { fireEvent("OnHit",          0, Value::ofInt(other)); }
     virtual void onHitEnd(int other)       { fireEvent("OnHitEnd",       0, Value::ofInt(other)); }
+    // Animation notifies on an Entity class; the argument is the notify's name,
+    // which is the whole of what one carries. No element: a notify belongs to the
+    // entity being animated, not to any part of a widget.
+    virtual void onAnimationNotify(const std::string& name)
+    { fireEvent("OnAnimationNotify", 0, Value::ofString(name)); }
+    virtual void onAnimationNotifyBegin(const std::string& name)
+    { fireEvent("OnAnimationNotifyBegin", 0, Value::ofString(name)); }
+    virtual void onAnimationNotifyEnd(const std::string& name)
+    { fireEvent("OnAnimationNotifyEnd", 0, Value::ofString(name)); }
 
     // ── execution (mirrors Runner's entry points) ───────────────────────────
     virtual void fireEvent(const std::string& name, int elem, const Value& arg)

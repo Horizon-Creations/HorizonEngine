@@ -8,6 +8,7 @@
 #include <ContentManager/Assets.h>
 #include "AnimationEval.h"
 #include "RootMotionApply.h"
+#include "NotifyCollect.h"
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
@@ -117,7 +118,8 @@ bool evalTransition(const AnimatorStateMachineComponent& sm, const HE::Animation
 void AnimationStateMachineSystem::markConfigDirty(AnimatorStateMachineComponent& sm) { sm.configDirty = true; }
 
 void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
-                                         AnimatorHost* sync, HE::RootMotionContext* rootMotion)
+                                         AnimatorHost* sync, HE::RootMotionContext* rootMotion,
+                                         HE::NotifyQueue* notifies)
 {
     auto& reg  = world.registry();
     auto  view = reg.view<AnimatorStateMachineComponent, SkeletalMeshComponent>();
@@ -200,6 +202,10 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                 sm.transitionTarget   = t.toState;
                 sm.transitionElapsed  = 0.0f;
                 sm.transitionDuration = t.duration;
+                // The incoming playhead is being set back to 0, so it gets a
+                // fresh first frame — and a notify on the incoming clip's frame 0
+                // is exactly what "the attack starts here" is written as.
+                sm.transitionNotifiesPrimed = false;
                 break;
             }
         }
@@ -210,6 +216,14 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         const float inPrev = sm.transitionElapsed;
         if (sm.inTransition)
             sm.transitionElapsed += dt * sm.playbackSpeed;
+
+        // The crossfade weight, needed before the pose branch below because BOTH
+        // playheads' notify collection has to agree on which of them is the one
+        // that fires. Outside a transition the outgoing playhead is the only one
+        // there is, so it always wins.
+        const float notifyAlpha = sm.inTransition
+            ? std::min(sm.transitionElapsed / sm.transitionDuration, 1.0f) : 0.0f;
+        const bool  outFires = !sm.inTransition || notifyAlpha < HE::kNotifyDominanceAlpha;
 
         // Sample outgoing clip
         const size_t jointCount = mesh->skeleton.size();
@@ -223,6 +237,13 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         if (rmc && curClip)
             haveOut = HE::rootMotionSampleClip(e, *rmc, *mesh, *curClip, outPrev, outPrev + step,
                                                curState->looping, trsOut, deltaOut);
+
+        // The outgoing playhead's notifies, over the span the delta above used.
+        // Not gated on a RootMotionComponent — a footstep is not root motion, and
+        // a character that never moves from the clip still has one.
+        if (curClip)
+            HE::notifyCollectClip(e, *curClip, outPrev, outPrev + step, curState->looping,
+                                  outFires, sm.clipNotifiesPrimed, notifies);
 
         std::vector<JointTRS> final_trs;
 
@@ -262,6 +283,13 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                     haveIn = HE::rootMotionSampleClip(e, *rmc, *mesh, *nextClip,
                                                       inFrom, inFrom + step,
                                                       nextState->looping, trsIn, deltaIn);
+
+                // The incoming playhead. It is walked past even while it is the
+                // lighter half — that is what stops it from holding its first
+                // frame back and firing it the instant the weight tips over.
+                HE::notifyCollectClip(e, *nextClip, inFrom, inFrom + step,
+                                      nextState->looping, !outFires,
+                                      sm.transitionNotifiesPrimed, notifies);
             }
 
             // Both deltas, mixed with the alpha that mixes the pose. Letting only
@@ -297,6 +325,12 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                 }
                 sm.inTransition      = false;
                 sm.transitionElapsed = 0.0f;
+                // The incoming playhead just became the outgoing one, so its
+                // priming travels with it — exactly as transitionElapsed travels
+                // onto clipTime a few lines up. Without this the surviving
+                // playhead would look fresh again and fire its frame-0 notify a
+                // second time in the frame the crossfade ends.
+                sm.clipNotifiesPrimed = sm.transitionNotifiesPrimed;
             }
         }
         else

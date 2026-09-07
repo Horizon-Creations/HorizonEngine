@@ -672,6 +672,22 @@ std::string getState(Ctx& c, Entity e)
     auto* sm = smOf(c, e);
     return sm ? sm->currentStateName : std::string();
 }
+std::vector<std::string> notifiesOf(Ctx& c, const std::string& clipPath)
+{
+    std::vector<std::string> out;
+    if (!c.content || clipPath.empty()) return out;
+    // loadAsset by path, the way the audio group reaches a sound: it resolves
+    // from the mounted paks or the disk registry and is a no-op for something
+    // already resident.
+    const AnimationClipAsset* clip = c.content->getAnimationClip(c.content->loadAsset(clipPath));
+    if (!clip) return out;
+    out.reserve(clip->notifies.size());
+    // In authoring order, duplicates included: a clip may legitimately carry the
+    // same name twice (two footsteps), and de-duplicating here would answer a
+    // question nobody asked while hiding one somebody might.
+    for (const AnimationNotify& n : clip->notifies) out.push_back(n.name);
+    return out;
+}
 } // namespace animator
 
 // ── Particles ────────────────────────────────────────────────────────────────
@@ -4622,6 +4638,14 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(animator::getParam(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
         t.push_back({ "animator.getState", "Animator", false, {{"entity", P::Int}}, {{"state", P::String}}, "HE::api::animator::getState",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(animator::getState(c, (Entity)aI(a, 0))) }; } });
+        // Which notifies a clip carries. A read, and the only row in this group
+        // that takes a path instead of an entity: the question is about the ASSET.
+        t.push_back({ "animator.notifiesOf", "Animator", false, {{"clipPath", P::String}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::animator::notifiesOf",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (const std::string& n : animator::notifiesOf(c, aS(a, 0)))
+                    arr.items.push_back(Value::ofString(n));
+                return VV{ arr }; } });
 
         // Movement — the reads an animator asks for. Derived from the character
         // controller on the spot, so there is no second copy to go stale.
@@ -5735,6 +5759,7 @@ const std::vector<ApiFn>& registry()
             { "particle.isPlaying", "Is Effect Playing" },
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
             { "animator.getState", "Get Animator State" },
+            { "animator.notifiesOf", "Get Clip Notifies" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
             { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
             { "movement.forwardAmount", "Get Forward Amount" },

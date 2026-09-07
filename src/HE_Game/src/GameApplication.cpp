@@ -22,6 +22,7 @@
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
@@ -2637,7 +2638,16 @@ void GameApplication::OnRender(float deltaTime)
 		// A packaged build has no edit mode, so root motion is always applied here.
 		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
-		                            &rootMotion);
+		                            &rootMotion, &m_animNotifies);
+
+		// Drained HERE and not at the collision drain up in the physics block:
+		// that one runs in the frame BEFORE the animation phase, so every notify
+		// would reach its handler a frame late. dispatch empties the queue.
+		HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
+		AnimationNotifySystem::dispatch(m_animNotifies, *m_world,
+		                                m_scriptContext.get(), m_scriptInstances,
+		                                &m_gameInstance.runtime(), m_entityHost.instances(),
+		                                &m_animatorHost);
 	}
 
 	// ── Renderer settings, in BOTH modes ─────────────────────────────────────
