@@ -212,8 +212,8 @@ namespace
 	  "every frame." },
 	{ "physics.setAngularVelocity",
 	  "Sets how fast the body spins, in RADIANS per second about the world axes "
-	  "and not in degrees. One full turn a second is about 6.28. Rigid bodies "
-	  "only, so a character controller ignores it." },
+	  "and not in degrees. One full turn a second is about 6.28. It turns rigid "
+	  "bodies only: a character controller is kept upright and does not spin." },
 	{ "physics.getAngularVelocity",
 	  "How fast the body is spinning, in RADIANS per second about the world axes "
 	  "and not in degrees. Zero for an entity without a rigid body." },
