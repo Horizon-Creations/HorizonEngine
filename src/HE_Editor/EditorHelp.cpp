@@ -4037,6 +4037,24 @@ namespace
 	  "state does not leave by itself when the clip ends; only a transition moves "
 	  "the machine on.",
 	  "", "systems#animation" },
+	// The two slots on a state node. They carry no label — a node body has room
+	// for the readout and nothing else — so the audit cannot see them and they
+	// are hovered rather than read. Which is exactly why they need an entry: a
+	// drop target that says "(no blend space)" and nothing else does not explain
+	// what it would do with one.
+	{ "State Machine/Clip Slot", "Clip",
+	  "The animation this state poses from: drop an Animation Clip from the "
+	  "Content Browser onto it. A state with no clip holds the pose it entered "
+	  "with, which looks like a frozen character rather than like a missing "
+	  "asset — the readout on the node is what tells the two apart.",
+	  "", "systems#animation" },
+	{ "State Machine/Blend Space Slot", "Blend Space",
+	  "A blend space instead of the clip above: several clips mixed by where the "
+	  "animator's parameters stand, which is how walk, jog and run become one "
+	  "state. Drop one on, and it WINS over the clip — a state carrying both "
+	  "poses from the space and ignores the clip, which is what the node says out "
+	  "loud rather than leaving you to guess. Right-click takes it off again.",
+	  "", "systems#animation" },
 	{ "State Machine Transitions/From", "From State",
 	  "The state this transition leaves, written as that state's name. Names, not "
 	  "ids, are how a transition points at its endpoints, so a name matching no "

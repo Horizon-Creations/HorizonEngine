@@ -492,6 +492,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y + 24.0f * zoom));
 			ImGui::SetNextItemAllowOverlap();
 			ImGui::InvisibleButton("##clipslot", ImVec2(std::max(bodyMax.x - bodyMin.x, 1.0f), 22.0f * zoom));
+			EditorWidgets::helpForKey("State Machine/Clip Slot");
 			// The graph's own dirty flag covers this (structuralEdit), so no world
 			// snapshot — hence the drop half only, not the whole slot widget.
 			if (const EditorWidgets::AssetDrop drop =
@@ -515,6 +516,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y + 46.0f * zoom));
 			ImGui::SetNextItemAllowOverlap();
 			ImGui::InvisibleButton("##bsslot", ImVec2(std::max(bodyMax.x - bodyMin.x, 1.0f), 22.0f * zoom));
+			EditorWidgets::helpForKey("State Machine/Blend Space Slot");
 			if (hasSpace && ImGui::IsItemClicked(ImGuiMouseButton_Right))
 			{
 				s->blendSpaceId = HE::UUID{};
