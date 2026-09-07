@@ -1108,6 +1108,24 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabLanDiscovery           = globalstate.getCustomConfigBool("CollabLanDiscovery", m_editorConfig.CollabLanDiscovery);
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
+	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
+	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
+	// The environment overrides the stored config in one direction only: it can
+	// turn the bridge ON for a single run (a headless test, a scripted session),
+	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
+	//
+	// Held in its own members rather than folded into m_editorConfig, because
+	// the config is written back on exit: a run started with HE_MCP=1 would
+	// otherwise leave the listener enabled for the next one the human starts by
+	// hand, which is exactly the surprise the default-off setting exists to
+	// prevent.
+	if (const char* envMcp = std::getenv("HE_MCP"))
+		m_mcpEnvEnabled = (envMcp[0] == '1');
+	if (const char* envMcpPort = std::getenv("HE_MCP_PORT"))
+	{
+		const int p = std::atoi(envMcpPort);
+		if (p > 0 && p < 65536) m_mcpEnvPort = p;
+	}
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	// The ground grid's switch. It lives in ViewportPanel next to the only code
@@ -3506,6 +3524,26 @@ void EditorApplication::OnRender(float dt)
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
 		m_collab.update(nowMs);
+
+		// ── The MCP bridge ────────────────────────────────────────────────
+		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
+		// has already landed and an external client reads the same world the
+		// humans in the session see; and before EditorUI::render, so whatever a
+		// client changed is on screen in the SAME frame rather than one late.
+		//
+		// Not gated on a project being loaded, on purpose. The listener's
+		// lifetime belongs to the editor, not to a scene — a client has to be
+		// able to connect and ask what is open before anything is, and get the
+		// honest answer that nothing is.
+		if (!m_mcpToolsRegistered) setupMcpTools();
+		m_mcp.setPort(static_cast<std::uint16_t>(
+			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
+		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
+		// Preferences panel then only ever writes the config, and setEnabled
+		// ignores a value that has not changed, so this costs nothing.
+		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
+		m_mcp.update(nowMs);
+
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
 
@@ -5765,6 +5803,45 @@ void EditorApplication::applyRemoteDocDeltas(
 	// put an unsaveable "*" on a read-only tab and offer it at the quit prompt.
 }
 
+// ─── What an external MCP client may ask this editor ─────────────────────────
+// Called once, on the first frame. The tools close over `this`, which is safe
+// for exactly one reason: the bridge is a member of this object and is pumped
+// from this object's frame loop, so a handler can only ever run while the editor
+// it reads is alive and on the main thread.
+//
+// The state the tools report is read through lambdas rather than passed as
+// values, because "what is open" changes with every project switch and the
+// registry is built once.
+void EditorApplication::setupMcpTools()
+{
+	m_mcpToolsRegistered = true;
+
+	// The endpoint file goes into the per-user data directory, NEVER into the
+	// project: a project directory is what ends up in git, and this file carries
+	// the token that authorises editing the scene.
+	m_mcp.setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
+
+	HE::Ed::McpEditorHooks hooks;
+	hooks.projectName = [this] { return m_projectManager.currentProject().name; };
+	hooks.scenePath   = [this] { return m_currentScenePath; };
+	// The same expression AppContext uses (see makeContext): the scene is dirty
+	// when the undo revision has moved past the one it was saved at.
+	hooks.sceneDirty  = [this] { return m_undo.revision() != m_savedRevision; };
+	hooks.isPlaying   = [this] { return m_isPlaying; };
+	hooks.inSession   = [this] { return m_collab.inSession(); };
+	hooks.entityCount = [this]() -> int {
+		// -1, not 0: "no world" and "an empty world" are different answers, and
+		// a client that cannot tell them apart would report an open scene with
+		// nothing in it when in truth no project is loaded.
+		if (!m_editorWorld) return -1;
+		int n = 0;
+		m_editorWorld->registry().view<entt::entity>().each([&](auto) { ++n; });
+		return n;
+	};
+
+	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+}
+
 void EditorApplication::syncStructuralChanges()
 {
 	if (!m_editorWorld) return;
@@ -7137,6 +7214,13 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
 
+	// The MCP listener goes down here for the same reason, one step milder: the
+	// endpoint file it leaves behind names a port and a pid, and a shim that
+	// reads a stale one connects to whatever the OS handed that port to next.
+	// The destructor would do it too — this is so it happens before the long
+	// teardown below rather than after it.
+	m_mcp.stop();
+
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process).
 	EditorUI::joinPendingExport();
@@ -7308,6 +7392,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
+	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
+	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

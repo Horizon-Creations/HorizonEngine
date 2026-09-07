@@ -30,6 +30,7 @@
 #endif
 #include <Net/RouterProbe.h>
 #include "GitController.h"
+#include "McpBridge.h"
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -101,6 +102,22 @@ struct EditorConfig
 	// is ahead of everything else the session wants to say. The cap is also the
 	// only thing bounding what one peer can make another allocate.
 	int CollabMaxAssetMB = 64;
+
+	// The MCP bridge: let an external client (a Claude instance, through the
+	// stdio shim) drive this editor — read what is open, and from a later step
+	// on place and move objects in the scene.
+	//
+	// OFF by default, and this default is the security model's first line. When
+	// it is on, a listener on 127.0.0.1 accepts anything that can read the
+	// endpoint file's token, and that file is readable by this user's processes.
+	// That is a decision a human makes for a session, not one they inherit from
+	// an installer. HE_MCP=1 turns it on for a headless run without touching the
+	// stored config; HE_MCP_PORT pins the port.
+	bool McpServerEnabled = false;
+	// 0 = let the OS pick. The port is published in the endpoint file, so nobody
+	// has to know it in advance; pinning one is for a client that cannot read
+	// the file.
+	int  McpPort = 0;
 
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
@@ -660,6 +677,21 @@ private:
 	// therefore carries its own mutex.
 	HE::Ed::NotificationStore m_notifications;
 	GitController    m_git;
+	// The local MCP listener. Pumped once per frame from OnRender, next to the
+	// collaboration pump and for the same reason: both apply things that came
+	// off a socket, and both have to do it on the main thread between the world
+	// settling and the UI reading it.
+	HE::Ed::McpBridge m_mcp;
+	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
+	// because the config is persisted and these must not be: a headless run must
+	// not leave the bridge switched on for the next interactive one.
+	bool m_mcpEnvEnabled = false;
+	int  m_mcpEnvPort    = 0;
+	// One-time wiring of the tool handlers, done on the first pump rather than
+	// in the constructor: the hooks close over editor state (world, project,
+	// play mode) that does not exist yet when the members are built.
+	bool m_mcpToolsRegistered = false;
+	void setupMcpTools();
 	CollabUndo       m_collabUndo;
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.

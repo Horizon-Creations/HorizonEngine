@@ -2,6 +2,7 @@
 
 #include <Net/BitStream.h>
 #include <Net/NetSession.h>
+#include <Net/Socket.h>
 #include <Net/TcpTransport.h>
 
 #include <chrono>
@@ -49,6 +50,88 @@ TEST_CASE("TcpTransport: listening on port 0 binds an ephemeral port")
     REQUIRE(server != nullptr);
     CHECK(server->isListening());
     CHECK(server->boundPort() != 0);
+}
+
+TEST_CASE("TcpTransport: a loopback listener takes 127.0.0.1 and nothing else")
+{
+    auto server = TcpTransport::listenLoopback(0);
+    REQUIRE(server != nullptr);
+    CHECK(server->isListening());
+    REQUIRE(server->boundPort() != 0);
+
+    // The point of the whole thing: from the machine's own loopback address it
+    // is reachable.
+    auto local = TcpTransport::connect("127.0.0.1", server->boundPort());
+    REQUIRE(local != nullptr);
+    REQUIRE(pumpUntil(*server, *local, [&] {
+        return server->connectionCount() == 1;
+    }));
+
+    // …and from the machine's LAN address it is not. This is the security claim
+    // the MCP bridge rests on, so it is asserted rather than assumed: a bind to
+    // INADDR_ANY would pass every other test in this file and fail only here.
+    //
+    // A host with no LAN address (a sandbox, a machine with networking off) has
+    // nothing to make the claim against — that is a skip, not a failure, or the
+    // suite would go red for the wrong reason.
+    const std::string lan = socketLocalAddress();
+    if (lan.empty() || lan == "127.0.0.1") {
+        MESSAGE("no non-loopback local address on this host — "
+                "the 'not reachable from the LAN' half is not testable here");
+        return;
+    }
+
+    auto outside = TcpTransport::connect(lan, server->boundPort());
+    // connect() may fail outright (refused immediately) or fail on the pump;
+    // both are the answer being looked for. What must NOT happen is a second
+    // accepted connection on the server.
+    if (outside) {
+        pumpUntil(*server, *outside, [&] { return server->connectionCount() > 1; },
+                  std::chrono::milliseconds(600));
+    }
+    CHECK(server->connectionCount() == 1);
+}
+
+TEST_CASE("TcpTransport: a lowered frame limit refuses on the prefix")
+{
+    auto server = TcpTransport::listenLoopback(0);
+    REQUIRE(server != nullptr);
+    // Well under the 64 MiB default, which is the whole point: the MCP bridge
+    // will never legitimately see a scene snapshot.
+    server->setMaxFrameSize(4096);
+    CHECK(server->maxFrameSize() == 4096);
+
+    // 0 restores the default; anything above it is clamped rather than trusted.
+    server->setMaxFrameSize(0);
+    CHECK(server->maxFrameSize() == TcpTransport::kMaxFrameSize);
+    server->setMaxFrameSize(TcpTransport::kMaxFrameSize + 1u);
+    CHECK(server->maxFrameSize() == TcpTransport::kMaxFrameSize);
+
+    server->setMaxFrameSize(4096);
+
+    auto client = TcpTransport::connect("127.0.0.1", server->boundPort());
+    REQUIRE(client != nullptr);
+    REQUIRE(pumpUntil(*server, *client, [&] {
+        return server->connectionCount() == 1;
+    }));
+    drain(*server);
+
+    // The client's own limit is untouched, so it will happily send what the
+    // server must refuse — which is exactly the asymmetry being tested.
+    std::vector<std::uint8_t> big(8192, 0x42);
+    // The client has exactly one connection, and TcpTransport hands out ids from
+    // 1 per transport instance.
+    client->send(ConnectionId{ 1 }, big, SendMode::ReliableOrdered);
+
+    bool sawDisconnect = false;
+    pumpUntil(*server, *client, [&] {
+        for (const auto& ev : drain(*server))
+            if (ev.type == NetEventType::Disconnected) sawDisconnect = true;
+        return sawDisconnect;
+    }, std::chrono::seconds(3));
+
+    CHECK(sawDisconnect);
+    CHECK(server->connectionCount() == 0);
 }
 
 TEST_CASE("TcpTransport: client connects and both sides report Connected")

@@ -102,6 +102,11 @@ add_executable(HorizonEditor WIN32
 	EditorApplication.cpp
 	EditorUndo.cpp
 	EditorCommands.cpp
+	# The local listener external MCP clients talk to, and the closed list of
+	# what they may ask for. Both are ImGui- and EditorApplication-free, so the
+	# handshake is covered over a real socket in the test binary.
+	McpBridge.cpp
+	McpToolRegistry.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp
