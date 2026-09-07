@@ -1810,6 +1810,21 @@ namespace
 	  "Send the big files to peers as well as the small ones. Off, everybody needs "
 	  "their own copy of the meshes and textures — but joining is instant.",
 	  "", "collaboration#bigassets" },
+	{ "Preferences/Remote Control/Allow External Tools to Control This Editor", "",
+	  "Lets a program on this machine drive the editor: place and move objects, "
+	  "set properties, author HorizonCode. Loopback only and token-guarded, but "
+	  "while it is on, anything running as you may change the scene. Off by "
+	  "default on purpose.",
+	  "", "" },
+	{ "Preferences/Remote Control/Listening Port", "",
+	  "0 lets the system pick, which is normal — the port is published in the "
+	  "endpoint file with the token. Pin one only for a client that cannot read "
+	  "that file. Fixed while the listener is up.",
+	  "", "" },
+	{ "Preferences/Remote Control/Try Again", "",
+	  "Reopens the listener after a failed start — the setting is on but the port "
+	  "could not be taken, and nothing retries that on its own.",
+	  "", "" },
 	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
@@ -4416,6 +4431,11 @@ namespace
 		{ "Preferences/Global Illumination/", "editor-settings", "Settings Reference", "Global Illumination" },
 		{ "Preferences/Effects/",             "editor-settings", "Settings Reference", "Effects" },
 		{ "Preferences/Collaboration/",       "editor-settings", "Settings Reference", "Collaboration" },
+		// Above the bare "Preferences/" fallback like the rest — without its own
+		// rule these three would land under the "Preferences" heading instead of
+		// their own, which is the silent kind of wrong: the entry exists, F1
+		// works, and it opens the wrong section.
+		{ "Preferences/Remote Control/",      "editor-settings", "Settings Reference", "Remote Control" },
 		{ "Preferences/Viewport/",            "editor-settings", "Settings Reference", "Viewport" },
 		{ "Preferences/Input/",               "editor-settings", "Settings Reference", "Input" },
 		{ "Preferences/Appearance/",          "editor-settings", "Settings Reference", "Appearance" },

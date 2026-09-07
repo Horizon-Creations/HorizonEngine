@@ -531,6 +531,16 @@ struct AppContext
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
 
+	// The MCP bridge, for the two places that have to show what it is actually
+	// doing: the Remote Control page in Preferences and the footer chip. READ
+	// ONLY from the UI — the on/off decision travels one way, from
+	// EditorConfig::McpServerEnabled through the frame loop's setEnabled, so the
+	// panel writes the config and nothing else. What the UI needs the pointer
+	// for is the half of the state the config cannot answer: whether the
+	// listener actually came up, on which port, and how many clients are on it.
+	// Null in a headless/test context.
+	HE::Ed::McpBridge* mcp = nullptr;
+
 	// Things that happened without the user asking — a peer that could not apply
 	// a delete, a scan that could not read a file, an asset nobody answered
 	// about. Posted from ANY thread (see NotificationStore), drawn by the footer

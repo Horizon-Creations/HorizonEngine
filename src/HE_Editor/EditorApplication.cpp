@@ -6659,6 +6659,7 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.mcp                 = &m_mcp,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
 		                              bool folder) { enqueueRetargetOnDisk(oldRel, newRel, folder); },
