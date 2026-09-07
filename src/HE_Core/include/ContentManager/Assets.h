@@ -489,10 +489,37 @@ struct AnimationChannel
 	std::vector<float> values;  // 3 or 4 floats per key depending on path
 };
 
+// A named event with a timestamp on the clip's timeline: the footstep, the
+// moment the sword becomes dangerous, the frame the smoke puff belongs on.
+//
+// Two forms, as in Unreal, and the duration is what tells them apart:
+//   duration == 0 — a NOTIFY. Fires once, as the playhead sweeps over `time`.
+//   duration >  0 — a NOTIFY STATE. Fires Begin on entry and End on exit, so a
+//                   hit window, an invulnerability or a trail can be opened and
+//                   closed by the animation that motivates them.
+//
+// The name is the entire payload. There is no registry of names on purpose: a
+// clip is authored against the graph that listens to it, and a mistyped name
+// fires nothing rather than failing to load. animator.notifiesOf is the answer
+// to "what does this clip actually carry".
+struct AnimationNotify
+{
+	std::string name;
+	float       time     = 0.0f;   // seconds on the clip's timeline
+	float       duration = 0.0f;   // > 0 makes it a notify STATE
+};
+
 struct AnimationClipAsset : public RuntimeAsset
 {
 	float                         duration = 0.0f;  // total clip length in seconds
 	std::vector<AnimationChannel> channels;
+
+	// Events on the timeline, in no guaranteed order — the firing walk compares
+	// every entry against the span, so sorting them would buy nothing and an
+	// editor that reorders the list must not change what fires.
+	// Stored in CHUNK_ANOT; a file written before notifies existed simply has
+	// none, which is also the default.
+	std::vector<AnimationNotify>  notifies;
 
 	// Does this clip's root bone carry motion that belongs on the entity?
 	//

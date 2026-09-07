@@ -152,7 +152,8 @@ inline constexpr uint32_t CHUNK_ANIM = makeChunkId('A','N','I','M'); // duration
 // notify list that comes next. A chunk of its own rather than a tail on ANIM,
 // because a build that predates it would read those bytes as further channels.
 // Absent (every clip written before this) = the struct defaults.
-// Layout: uint8 hasRootMotion, uint32 notifyCount, then that many notifies.
+// Layout: uint8 hasRootMotion, uint32 notifyCount, then that many notifies, each
+// a string name followed by float time and float duration.
 inline constexpr uint32_t CHUNK_ANOT = makeChunkId('A','N','O','T'); // root-motion flag + notifies
 
 // ─────────────────────────────────────────────────────────────────────────────

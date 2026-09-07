@@ -513,6 +513,26 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			// are not there, so a truncated chunk keeps the struct's defaults
 			// instead of taking a guess.
 			if (HAsset::Reader::readPOD(c->data, o, flag)) a.hasRootMotion = (flag != 0);
+
+			// The count was written (as zero) from the very first ANOT chunk, so
+			// a clip saved by the build that only knew hasRootMotion still reads
+			// as a well-formed empty list rather than a short chunk.
+			uint32_t notifyCount = 0;
+			if (HAsset::Reader::readPOD(c->data, o, notifyCount))
+			{
+				a.notifies.reserve(notifyCount);
+				for (uint32_t i = 0; i < notifyCount; ++i)
+				{
+					AnimationNotify n;
+					// Bail on the first short read instead of appending halves: a
+					// truncated file gives the notifies it could prove, and the
+					// clip still plays.
+					if (!HAsset::Reader::readString(c->data, o, n.name))     break;
+					if (!HAsset::Reader::readPOD(c->data, o, n.time))        break;
+					if (!HAsset::Reader::readPOD(c->data, o, n.duration))    break;
+					a.notifies.push_back(std::move(n));
+				}
+			}
 		}
 		handle = m_animClipAssets.insert(std::move(a)); break;
 	}
@@ -1639,10 +1659,13 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 
 		std::vector<uint8_t> n;
 		HAsset::Writer::appendPOD(n, static_cast<uint8_t>(a.hasRootMotion ? 1 : 0));
-		// The notify count is written now, at zero, so the chunk has its final
-		// shape from the first file: a reader that gains notify support later
-		// finds a well-formed empty list rather than a short chunk to special-case.
-		HAsset::Writer::appendPOD(n, static_cast<uint32_t>(0));
+		HAsset::Writer::appendPOD(n, static_cast<uint32_t>(a.notifies.size()));
+		for (const auto& nf : a.notifies)
+		{
+			HAsset::Writer::appendString(n, nf.name);
+			HAsset::Writer::appendPOD(n, nf.time);
+			HAsset::Writer::appendPOD(n, nf.duration);
+		}
 		w.addChunk(HAsset::CHUNK_ANOT, n.data(), n.size());
 		break;
 	}
