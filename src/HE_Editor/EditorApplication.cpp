@@ -2887,7 +2887,13 @@ void EditorApplication::OnRender(float dt)
 			// Immediately after, and not at the collision drain above: that one
 			// sits in the frame BEFORE this phase and would cost every notify a
 			// frame. dispatch empties the queue.
-			if (playing && m_scriptContext)
+			//
+			// The SAME predicate that decided to collect, spelled the same way.
+			// Anything narrower here — a null check on the script context, say,
+			// which dispatch does for itself anyway — would be a frame that fills
+			// the queue and never empties it, and the queue would grow for as long
+			// as the session lasted.
+			if (playing)
 			{
 				HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
 				AnimationNotifySystem::dispatch(m_animNotifies, *m_editorWorld,
