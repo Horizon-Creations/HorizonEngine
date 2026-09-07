@@ -6,6 +6,7 @@
 #include "EditorUI.h"
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
+#include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
@@ -5854,6 +5855,100 @@ void EditorApplication::setupMcpTools()
 	// in the same frame.
 	setupEditorCommands();
 	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+
+	// Authoring HorizonCode. The tools take the documents as hooks rather than
+	// a pointer to this object for the same reason the two above do: a graph is
+	// a value, so what they do to one is answerable in the test binary.
+	HE::Ed::McpHcHooks hc;
+	hc.isPlaying = [this] { return m_isPlaying; };
+
+	hc.documents = [this] {
+		std::vector<HE::Ed::McpHcDoc> out;
+		if (m_editorWorld)
+			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
+			                "Level Script", "level",
+			                m_undo.revision() != m_savedRevision, {}, {} });
+		if (!m_projectManager.currentProject().name.empty())
+			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
+			                "Game Instance", "gameinstance",
+			                // The GameInstance graph is committed (and written)
+			                // on every edit, so it is never "unsaved".
+			                false, {}, {} });
+		// Only the class tabs the editor already HOLDS. Loading one behind the
+		// class panel's back would make a second copy of the graph, and the
+		// human's next Save from that tab would write over everything an MCP
+		// client had done to ours.
+		std::vector<HorizonCodeClassPanel::Held> held;
+		HorizonCodeClassPanel::appendHeld(held);
+		for (HorizonCodeClassPanel::Held& h : held)
+			out.push_back({ h.contentPath, h.contentPath, "class", h.dirty, {}, {} });
+		// apiGroups / excludedNodeTypes stay empty on all three: the level
+		// script, the GameInstance graph and a class asset all pass an
+		// unrestricted MenuOpts today (only the Animator sync graph restricts,
+		// and that is not a HorizonCode document a client can address).
+		return out;
+	};
+
+	hc.resolve = [this](const std::string& key) -> HorizonCode::Graph* {
+		if (key == HE::Ed::kMcpDocLevelScript)
+			return m_editorWorld ? &m_editorWorld->levelScript() : nullptr;
+		if (key == HE::Ed::kMcpDocGameInstance)
+			return m_projectManager.currentProject().name.empty()
+			           ? nullptr : &m_gameInstanceGraph;
+		return HorizonCodeClassPanel::liveGraph(key);
+	};
+
+	hc.beginEdit = [this](const std::string& key) {
+		// Captured BEFORE the mutation and pushed, which is what snapshotNow is
+		// for — so a human can Ctrl+Z what an MCP client did to the level script.
+		// It also bumps the undo revision, which is how the scene learns it is
+		// dirty and how the level script gets written with it.
+		//
+		// The other two have no undo stack of their own today (see the table in
+		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
+		// DocEdit command that step's plan describes and this step does not build.
+		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow();
+	};
+
+	hc.endEdit = [this](const std::string& key) {
+		if (key == HE::Ed::kMcpDocGameInstance)
+		{
+			// Exactly what the Game Instance tab does after a human's edit
+			// (LevelScriptPanel.cpp, GameInstancePanel::render): re-register the
+			// graph with the running host and write it. Skipping it would leave
+			// the app preview running the graph from before the edit.
+			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+			saveGameInstanceGraph();
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
+		}
+		else if (key != HE::Ed::kMcpDocLevelScript)
+		{
+			// A class tab. Without this the tab shows no "*" and its own Save
+			// refuses, believing it has nothing to write.
+			HorizonCodeClassPanel::markDirty(key);
+		}
+	};
+
+	hc.save = [this](const std::string& key) -> bool {
+		if (key == HE::Ed::kMcpDocLevelScript)
+		{
+			// The level script lives IN the scene, so saving it is saving the
+			// scene — there is no second file to write.
+			if (!m_editorWorld || m_currentScenePath.empty()) return false;
+			saveSceneToPath(m_currentScenePath);
+			return m_undo.revision() == m_savedRevision;
+		}
+		if (key == HE::Ed::kMcpDocGameInstance)
+		{
+			saveGameInstanceGraph();
+			return true;
+		}
+		AppContext ctx = makeContext();
+		return HorizonCodeClassPanel::saveByContentPath(ctx, key);
+	};
+
+	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

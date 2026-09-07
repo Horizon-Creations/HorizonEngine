@@ -111,6 +111,10 @@ add_executable(HorizonEditor WIN32
 	# they are the first ones with a scene behind them: everything here goes
 	# through EditorCommands rather than touching the world.
 	McpToolsEntity.cpp
+	# The HorizonCode authoring tools. Same shape one layer over: they take the
+	# documents as hooks and apply every item through the CollabDocSync adapter,
+	# so nothing here writes into a graph by hand either.
+	McpToolsHc.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp

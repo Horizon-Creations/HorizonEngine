@@ -118,6 +118,7 @@ add_executable(he_tests
     test_editor_commands.cpp
     test_mcp_bridge.cpp
     test_mcp_tools_entity.cpp
+    test_mcp_hc.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -165,6 +166,12 @@ add_executable(he_tests
     # "does entity_set_transform actually move the entity, and does undo put it
     # back" is a question this binary can answer.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsEntity.cpp
+    # The HorizonCode authoring tools, in here for the same reason: they take the
+    # documents as hooks and a graph is a value, so "does a connect by pin LABEL
+    # land on the pin the client meant" and "does an edit through these tools
+    # come out of the collab diff as exactly one delta" are both answerable
+    # against a HorizonCode::Graph on the stack, with no panel and no window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsHc.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.

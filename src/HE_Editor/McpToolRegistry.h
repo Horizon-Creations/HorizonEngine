@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+namespace HorizonCode { struct Graph; }
+
 namespace HE::Ed
 {
 
@@ -124,5 +126,83 @@ class EditorCommands;
 // editor both are members of EditorApplication; in a test both are locals of the
 // same fixture.
 void registerEntityTools(McpToolRegistry& registry, EditorCommands& cmds);
+
+// ─── Authoring HorizonCode ───────────────────────────────────────────────────
+// The second half of what an external client can do to a project: read a visual
+// script, add and remove nodes, wire and unwire pins, set parameters, save.
+//
+// Two rules shape this interface, and both come from what already exists:
+//
+//   • Every mutation is expressed in the ITEM-LEVEL JSON HorizonCode already
+//     writes (`nodeToJson` / `variableToJson`, the four-int link array) and
+//     applied through `CollabDocSync::forHorizonCodeGraph`'s adapter. That is
+//     the same door a collaboration peer's edit comes through, so an MCP edit
+//     cannot diverge from what a peer's edit does — and in a live session the
+//     panel's own DocMirror diff picks the change up in the next frame and
+//     publishes it, without this file knowing that collaboration exists.
+//
+//   • Wiring is the exception, and deliberately so: the adapter's link upsert
+//     only checks that both endpoints exist, because a peer's link was already
+//     validated on the peer. A client's is not, so `hc_connect` goes through
+//     `HorizonCode::Graph::connect` (types, direction, occupancy) and falls back
+//     to `connectWithConversion` — the same two steps the canvas takes when a
+//     human drags a wire.
+//
+// Deliberately free of ImGui and of EditorApplication, like the two files above:
+// a graph is a value, and "did that node land where the client asked" is a
+// question a test can put to a `HorizonCode::Graph` on the stack.
+
+// The two documents the editor owns itself rather than holding as an asset.
+// Reserved words on this interface: no content-relative path can collide with
+// them, because every asset path carries a '/' and a '.hasset' suffix.
+inline constexpr const char* kMcpDocLevelScript  = "levelscript";
+inline constexpr const char* kMcpDocGameInstance = "gameinstance";
+
+// One addressable document. `key` is what every tool takes: the two words above
+// for the graphs the editor owns, otherwise the content-relative path of a
+// HorizonCode class asset.
+struct McpHcDoc
+{
+	std::string key;
+	std::string label;
+	std::string kind;          // "level", "gameinstance", "class"
+	bool        dirty = false;
+
+	// The frontend's own restrictions, mirrored from HcGraphHost::MenuOpts so
+	// that MCP cannot insert what the add menu refuses to offer. Both empty =
+	// no restriction, which is what the level script, the GameInstance graph
+	// and a class asset all pass today.
+	std::vector<std::string> apiGroups;           // HE::api groups, e.g. "math"
+	std::vector<std::string> excludedNodeTypes;   // stored node-type names
+};
+
+struct McpHcHooks
+{
+	// Every document a client may address right now. A class asset the editor
+	// has never opened is deliberately absent rather than loaded on demand:
+	// the panel owns that state, and a second copy loaded behind its back would
+	// be the one edit the human's Save then throws away.
+	std::function<std::vector<McpHcDoc>()> documents;
+
+	// The live graph behind `key`, or null for an unknown one. The pointer is
+	// used within the one call and never stored.
+	std::function<HorizonCode::Graph*(const std::string& key)> resolve;
+
+	// Around a mutation. `beginEdit` is where the editor takes whatever undo
+	// entry fits the document (the level script gets a scene snapshot, exactly
+	// as it does when a human edits it); `endEdit` marks the tab dirty and
+	// re-registers the graph where something is running on it.
+	std::function<void(const std::string& key)> beginEdit;
+	std::function<void(const std::string& key)> endEdit;
+
+	// Persist the document. False = the editor could not write it.
+	std::function<bool(const std::string& key)> save;
+
+	// Play-in-editor. Unlike the entity tools there is no gateway underneath
+	// this file to refuse for us, so the check lives here.
+	std::function<bool()> isPlaying;
+};
+
+void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks);
 
 } // namespace HE::Ed
