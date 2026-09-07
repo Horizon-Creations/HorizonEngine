@@ -660,6 +660,57 @@ der zweite Treiber warnt gedrosselt und wendet nichts an.
 
 ---
 
+## 4c. In Schritt 3 getroffene Abweichungen
+
+Schritt 3 (Notifies) ist gebaut. Fünf Stellen weichen bewusst von Abschnitt 3 ab.
+
+1. **Welche Kanten offen sind, ist eine Regel und nicht drei.** Abschnitt 3.3
+   sagt „links offen, rechts geschlossen" und leitet daraus die Nahtkonvention
+   ab. Wörtlich gebaut fällt Test 3b hinten runter: das Folgesegment nach einem
+   Wrap wäre `(0, e]`, und ein Notify auf `time == 0` feuerte im **ersten** Frame
+   (dank der Ursprungsregel unten) und **danach nie wieder**. Gebaut ist deshalb:
+   **die einzige offene Kante ist der Ursprung.** Das Ziel ist zu, und jede Naht,
+   die der Playhead überquert, ist zu — `duration` beim Verlassen einer Runde,
+   `0` beim Betreten der nächsten. Vorwärts also `(a, D]`, `[0, D]`…, `[0, e]`,
+   rückwärts spiegelbildlich. Damit feuert ein Notify auf der Naht genau einmal
+   pro überquerter Naht, und ein Frame über zwei Runden feuert alles zweimal.
+
+2. **`includeStart` statt `lastSampledTime = -ε`.** Schritt 2 hat
+   `lastSampledTime` gestrichen (4b.1) und rechnet die Spanne inline; damit gibt
+   es auch keinen Rückstau mehr, für den ein `primed`-Flag nötig wäre. Übrig
+   bleibt nur der Zweck, für den das ε gedacht war: der erste Frame eines
+   Playheads beginnt genau dort, wo er steht, und ein Notify auf dieser Stelle
+   läge außerhalb der links offenen Spanne. Das ist jetzt ein `bool
+   includeStart`, der die Ursprungskante für diesen einen Frame schließt. Ein
+   Epsilon wäre still von `std::clamp(tPrev, 0, D)` im Walk aufgefressen worden,
+   also von genau der Zeile, die für nicht-loopende Clips nötig ist.
+   Das Flag pro Playhead heißt `notifiesPrimed` (Blend zwei, Zustandsmaschine
+   zwei) und ist Laufzeit-Zustand, der **nicht** gespeichert wird.
+
+3. **Notify States enden spätestens mit dem Clip.** `time + duration` wird auf
+   `clip.duration` geklemmt. In die nächste Runde zu wrappen gäbe einem
+   nicht-loopenden Clip ein `End` vor seinem `Begin`. Fallen beide Kanten in
+   dieselbe Spanne, kommt `Begin` vor `End` (rückwärts gespiegelt).
+
+4. **`animator.notifiesOf` nimmt einen Clip-PFAD, keine `clipId`.** Es gibt
+   keinen UUID-Pin-Typ, in dem eine Id reisen könnte; ein Asset wird in dieser
+   API über seinen Pfad erreicht (`c.content->loadAsset`, wie die Audio-Gruppe).
+   Die Antwort ist die Autorenreihenfolge inklusive Doppelungen.
+
+5. **Kein neues Codegen-Fixture.** Test 10 hängt an `fix/engine_events` statt an
+   einer eigenen Klasse: dort fehlte genau die Form, die die drei Events haben —
+   ein String-Argument auf einem Event **ohne** `elem`. Der Hook, den `HcCodegen`
+   emittiert, wird aus `engineEvents()` abgeleitet, ein falsches `elem` gäbe also
+   eine Methode, die nichts überschreibt und nie gerufen wird.
+
+Geprüft und in Ordnung, was 3.2 offen ließ: der Pack-Pfad reserialisiert
+AnimationClips **gar nicht** (`HpakWriter.cpp:285` gibt den Blob unverändert
+zurück, nur Mesh/Material/Scene/Particles werden umgeschrieben), und
+`AssetRefRetarget::retargetBlob` kopiert jeden Chunk generisch durch. Ein Notify
+überlebt beides.
+
+---
+
 ## 5. Risiken und offene Punkte
 
 1. **`PhysicsWorld*` in `tickAnimation`.** Die Signatur wächst um drei
