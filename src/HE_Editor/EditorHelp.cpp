@@ -1109,9 +1109,11 @@ namespace
 	  "so a slow flinch over a fast run is one number, not a compromise.",
 	  "", "systems#animation" },
 	{ "Animation Layers/Time", "",
-	  "Where this layer's playhead stands, in seconds. Scrubbable, and the field "
-	  "a one-shot layer is set back to 0 in — or animator.playLayer from a "
-	  "script, which also re-arms the clip's frame-0 notify.",
+	  "Where this layer's playhead stands: SECONDS on a clip source, but a "
+	  "normalised phase between 0 and 1 on a blend space, whose samples share "
+	  "one cycle rather than one clock. Scrubbable, and the field a one-shot "
+	  "layer is set back to 0 in — or animator.playLayer from a script, which "
+	  "also re-arms the clip's frame-0 notify.",
 	  "", "systems#animation" },
 	{ "Animation Layers/Looping", "",
 	  "Start over at the end. Off makes the layer a one-shot: it clamps at the "

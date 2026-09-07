@@ -858,7 +858,13 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 
 				Row::dragFloat("Speed##al", &l.playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
-				Row::dragFloat("Time##al",  &l.playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+				// The playhead's unit follows the source: seconds on a clip, a
+				// normalised phase in [0, 1) on a blend space. Showing " s" on a
+				// phase would be a lie in the one place an author checks it.
+				const bool bsSource = l.source == AnimationLayerComponent::Layer::Source::BlendSpace;
+				Row::dragFloat("Time##al", &l.playbackTime, 0.01f, 0.0f,
+				               bsSource ? 1.0f : 999.0f,
+				               bsSource ? "%.3f phase" : "%.3f s"); trackEdit();
 				EditorWidgets::checkbox("Looping##al", &l.looping); trackEdit();
 				ImGui::SameLine();
 				EditorWidgets::checkbox("Playing##al", &l.playing); trackEdit();

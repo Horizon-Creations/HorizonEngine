@@ -74,6 +74,14 @@ struct AnimationLayerComponent
         float    additiveRefTime = 0.0f;
 
         // ── Playhead, per layer ──────────────────────────────────────────────
+        // IN THE SOURCE'S OWN UNIT, and that unit depends on `source`:
+        //   * Source::Clip counts SECONDS and wraps at the clip's duration;
+        //   * Source::BlendSpace counts PHASE in [0, 1) and wraps at 1.
+        // Same double meaning, for the same reason, as
+        // AnimatorStateMachineComponent::clipTime: a blend space mixes clips of
+        // different length and they only stay in step on a shared normalised
+        // cycle. Do not compare this against a clip duration without asking
+        // which source the layer is on.
         float playbackTime  = 0.0f;
         float playbackSpeed = 1.0f;
         bool  looping = true;
