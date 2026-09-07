@@ -1950,7 +1950,12 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
     // Overwriting the map entry alone would leave the previous Jolt body in the
     // world forever — invisible, blocking, and answering every raycast with this
     // same entity id.
-    removeEntity(entityId);
+    //
+    // The one place that asks for the joints BACK, and the reason removeEntity
+    // is not called here: a new body is going up in the same breath, so the
+    // chain this entity was part of has to survive the swap. resolvePendingJoints
+    // below rebuilds them.
+    removeEntityImpl(entityId, /*requeueJoints=*/true);
 
     bool built = buildBodyFor(world, entityId);
     built      = buildCharacterFor(world, entityId) || built;
@@ -2013,9 +2018,18 @@ int PhysicsWorld::addEntityTree(HorizonWorld& world, uint32_t rootEntityId)
 
 void PhysicsWorld::removeEntity(uint32_t entityId)
 {
+    // Every caller of the PUBLIC entry point means it permanently: removeEntityTree,
+    // the two reaps in step(), the zone unloads in both applications, entity.destroy
+    // from a script. None of them is going to put the body back, so a joint aimed at
+    // this entity must not go on the pending list waiting for one.
+    removeEntityImpl(entityId, /*requeueJoints=*/false);
+}
+
+void PhysicsWorld::removeEntityImpl(uint32_t entityId, bool requeueJoints)
+{
     if (!m_impl)
         return;
-    destroyBodyFor(entityId);
+    destroyBodyFor(entityId, requeueJoints);
     // A CharacterVirtual has no Jolt body of its own (mInnerBodyShape is never
     // set), so it appears in no raycast, overlap or contact — erasing the owning
     // pointer IS its complete removal.
@@ -2313,19 +2327,38 @@ void PhysicsWorld::breakOverloadedJoints(HorizonWorld& world, float dt)
         const Entity e = static_cast<Entity>(owner);
         if (reg.valid(e))
             reg.remove<JointComponent>(e);
+        // Nobody drains this queue on their own: CollisionSystem::dispatch has a
+        // callback to hand a contact to and none to hand a broken joint to, so
+        // the only consumers are pollers. A session whose scripts never ask
+        // would grow it forever — bound it, dropping the OLDEST, because a
+        // caller that finally asks wants the news, not the archive.
+        if (m_impl->brokenJoints.size() >= kMaxBrokenJoints)
+        {
+            m_impl->brokenJoints.erase(m_impl->brokenJoints.begin());
+            HE_LOG_THROTTLE(Physics, Warning, 10.0,
+                            "%zu broken joints are waiting and nothing is calling "
+                            "pollJointBroken — the oldest are being dropped.",
+                            kMaxBrokenJoints);
+        }
         m_impl->brokenJoints.push_back(CollisionEvent{ owner, partner });
     }
 }
 
-void PhysicsWorld::destroyBodyFor(uint32_t entityId)
+void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
 {
     // FIRST, before the body goes anywhere. A Jolt constraint keeps raw Body
     // pointers, so a constraint left behind by a destroyed body reads freed
     // memory on the next step — and unlike a dangling BodyID there is no
-    // assertion anywhere that catches it. Requeued rather than forgotten,
-    // because addEntity's documented idempotence tears a body down in order to
-    // put a new one up, and the joints have to come back with it.
-    destroyJointsInvolving(entityId, /*requeue=*/true);
+    // assertion anywhere that catches it.
+    //
+    // Whether the affected joints come BACK is the caller's to say, and it used
+    // to be hardcoded to "yes": right for addEntity's documented idempotence,
+    // which tears a body down in order to put a new one up, and wrong for every
+    // permanent removal, where a surviving partner's joint was requeued to wait
+    // for a body nobody was going to build. It stayed on the list, was retried
+    // by every unrelated spawn after it, and gave up eight passes later with a
+    // warning about a joint that had nothing wrong with it.
+    destroyJointsInvolving(entityId, requeueJoints);
 
     const auto it = m_impl->entityToBody.find(entityId);
     if (it == m_impl->entityToBody.end())

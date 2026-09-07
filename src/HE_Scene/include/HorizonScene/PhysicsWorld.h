@@ -2,6 +2,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -143,6 +144,13 @@ public:
     // Destroy the entity's body and/or character. Silent no-op when it has
     // neither. Also drops the entity's pending contact bookkeeping, so a removal
     // never produces an exit event naming an entity that is already gone.
+    //
+    // This is a PERMANENT removal, and it takes the joints with it: the one this
+    // entity authored and the ones other entities aimed at it are destroyed
+    // outright, not put back on the pending list. A surviving partner's joint
+    // does not come back when this entity is added again — only rebuilding the
+    // OWNER of that joint brings it back. Anything else would leave an entry
+    // waiting for a body that was deliberately deleted.
     void removeEntity(uint32_t entityId);
     int  removeEntityTree(HorizonWorld& world, uint32_t rootEntityId);
 
@@ -498,9 +506,17 @@ public:
     bool setJointCollideConnected(HorizonWorld& world, uint32_t entityA, bool collide);
 
     // Every joint that broke since the last call, as the entity pair it joined —
-    // `entityA` is the one that owned the JointComponent. Drained, like the
-    // contact queues, and for the same reason: an event nobody took is an event
-    // that happened once.
+    // `entityA` is the one that owned the JointComponent. Drained by whoever
+    // calls this, like the contact queues, and for the same reason: an event
+    // nobody took is an event that happened once.
+    //
+    // Unlike the contact queues there is no dispatcher that drains this one on
+    // its own — CollisionSystem has a callback to deliver a contact to and none
+    // to deliver a broken joint to, so the only consumers are pollers. A session
+    // whose scripts never ask would therefore grow the queue forever, which is
+    // what kMaxBrokenJoints bounds: past it the OLDEST entry is dropped and a
+    // throttled warning says nobody is asking. A caller that polls never reaches
+    // the cap, so the contract above is exactly what it always was.
     //
     // A joint that was DESTROYED does not appear here — not through
     // removeJoint, not because one of its bodies was deleted, not through
@@ -591,6 +607,12 @@ public:
     // of a number like this drift the moment one of them is tuned.
     static constexpr float kFixedDt = 1.0f / 60.0f;
 
+    // How many broken joints wait for a pollJointBroken() that may never come.
+    // Public for the same reason kFixedDt is: a test that asserts the bound has
+    // to be able to name it rather than repeat the number. "More than any frame
+    // plausibly breaks" rather than a tuned value.
+    static constexpr std::size_t kMaxBrokenJoints = 256;
+
     // Remove and destroy all physics bodies without touching the ECS.
     void clear();
 
@@ -638,10 +660,18 @@ private:
     // failed too often, so the list cannot become a leak.
     void resolvePendingJoints(HorizonWorld& world);
 
-    // The teardown half, shared by clear(), removeEntity() and the reap in
-    // step(). Includes dropping the entity's contact bookkeeping and every joint
-    // the body was part of.
-    void destroyBodyFor(uint32_t entityId);
+    // The teardown half behind removeEntityImpl(). Includes dropping the
+    // entity's contact bookkeeping and every joint the body was part of.
+    // `requeueJoints` is passed straight to destroyJointsInvolving — see there
+    // for which of the two callers wants which.
+    void destroyBodyFor(uint32_t entityId, bool requeueJoints);
+
+    // The body of removeEntity(), with the one thing the two callers disagree
+    // about made explicit. A REBUILD (addEntity, which tears the old body down
+    // to put a new one up) wants the joints back; the public, permanent
+    // removeEntity() does not. Both used to arrive here with `true`, which put
+    // a surviving partner's joint on a list that could never resolve.
+    void removeEntityImpl(uint32_t entityId, bool requeueJoints);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

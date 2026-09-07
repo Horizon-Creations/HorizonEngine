@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 
 static constexpr float kDt      = 1.0f / 60.0f;
@@ -3142,4 +3143,140 @@ TEST_CASE("PhysicsWorld: positive means THIS entity moves along its own Axis")
             phys.step(world, kDt);
         CHECK(posOf(world, carriage).x == doctest::Approx(0.5f).epsilon(0.05));
     }
+}
+
+// ─── Joint bookkeeping that nothing else notices ──────────────────────────────
+
+TEST_CASE("PhysicsWorld: permanently removing a joint's target does not leave the partner waiting")
+{
+    // The owner survives; the entity its joint NAMES is deleted for good. Nobody
+    // is going to build that body again, so the owner's joint must be let go
+    // rather than put back on the pending list — where it would be retried by
+    // every unrelated spawn after it and then give up with a warning about a
+    // joint that had nothing wrong with it.
+    //
+    // "The list is empty" is not something this class exposes, so the test asks
+    // the question the list answers: bringing the target's BODY back must not
+    // resurrect somebody else's joint. Only rebuilding the owner does that, and
+    // the case below says so.
+    HorizonWorld world;
+    const Entity target = makeStaticBox(world,  "Target", { 0.0f, 10.0f, 0.0f });
+    const Entity owner  = makeDynamicBox(world, "Owner",  { 0.0f,  8.0f, 0.0f });
+    jointTo(world, owner, target, JointType::Distance);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(owner)));
+
+    phys.removeEntity(static_cast<uint32_t>(target));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(owner)));
+
+    // An unrelated spawn runs the pending list. If the owner's joint were still
+    // on it, this is where it would quietly come back.
+    const Entity bystander = makeDynamicBox(world, "Bystander", { 40.0f, 20.0f, 0.0f });
+    REQUIRE(phys.addEntity(world, static_cast<uint32_t>(bystander)));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(owner)));
+
+    // And the target's body itself coming back is not enough either — that is
+    // the removal being permanent, which is the whole point of the flag.
+    REQUIRE(phys.addEntity(world, static_cast<uint32_t>(target)));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(owner)));
+
+    // Rebuilding the OWNER is what brings it back, because that path requeues on
+    // purpose and the component was never touched.
+    REQUIRE(phys.addEntity(world, static_cast<uint32_t>(owner)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(owner)));
+}
+
+TEST_CASE("PhysicsWorld: a rebuild still gets its joints back")
+{
+    // The other half of the same switch, and the reason it is a parameter rather
+    // than a removal: addEntity tears the old body down to put a new one up, and
+    // the chain has to survive that.
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+    jointTo(world, hung, anchor, JointType::Fixed);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // Rebuild the TARGET — the side whose joint is owned by somebody else, which
+    // is exactly the case the permanent path had to stop requeuing.
+    REQUIRE(phys.addEntity(world, static_cast<uint32_t>(anchor)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // And rebuilding the owner keeps its own.
+    REQUIRE(phys.addEntity(world, static_cast<uint32_t>(hung)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // It still holds, which is the only proof that the constraint is real and
+    // not just an entry in a map.
+    for (int i = 0; i < 60; ++i)
+        phys.step(world, kDt);
+    CHECK(posOf(world, hung).y == doctest::Approx(10.0f).epsilon(0.02));
+}
+
+TEST_CASE("PhysicsWorld: the broken-joint queue is bounded when nobody polls it")
+{
+    // Nothing drains this queue on its own — CollisionSystem has no callback to
+    // hand a broken joint to — so a session whose scripts never ask would grow it
+    // forever. Past the cap the OLDEST entries go.
+    HorizonWorld world;
+
+    const int overflow = 8;
+    const int total    = static_cast<int>(PhysicsWorld::kMaxBrokenJoints) + overflow;
+    std::vector<Entity> loads;
+    std::vector<Entity> hooks;
+    loads.reserve(static_cast<size_t>(total));
+    hooks.reserve(static_cast<size_t>(total));
+    for (int i = 0; i < total; ++i)
+    {
+        // Spread the PAIRS out — a heap of boxes would rest on each other and
+        // never pull on their ropes. Each load gets its own hook two metres
+        // above it, because a Distance joint's rest length is the separation it
+        // was built at: one shared hook would give the far loads a rope hundreds
+        // of metres long that does not go taut for the length of this test.
+        const float x = static_cast<float>(i) * 3.0f;
+        const Entity hook = makeStaticBox(world,  "Hook", { x, 10.0f, 0.0f });
+        const Entity load = makeDynamicBox(world, "Load", { x,  8.0f, 0.0f });
+        jointTo(world, load, hook, JointType::Distance);
+        jointOf(world, load).breakForce = 0.5f;   // m·g ≈ 9.8 N is far more
+        loads.push_back(load);
+        hooks.push_back(hook);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (const Entity load : loads)
+        REQUIRE(phys.hasJoint(static_cast<uint32_t>(load)));
+
+    // Deliberately WITHOUT polling in between — that is the session this bounds.
+    for (int i = 0; i < 30; ++i)
+        phys.step(world, kDt);
+
+    const std::vector<PhysicsWorld::CollisionEvent> broken = phys.pollJointBroken();
+    CHECK(broken.size() == PhysicsWorld::kMaxBrokenJoints);
+
+    // Still one event per joint, not the same one repeated: a cap that deduped
+    // or overwrote in place would pass the size check and be useless.
+    std::vector<uint32_t> hookIds;
+    hookIds.reserve(hooks.size());
+    for (const Entity h : hooks)
+        hookIds.push_back(static_cast<uint32_t>(h));
+    std::sort(hookIds.begin(), hookIds.end());
+
+    std::vector<uint32_t> owners;
+    owners.reserve(broken.size());
+    for (const auto& ev : broken)
+    {
+        CHECK(std::binary_search(hookIds.begin(), hookIds.end(), ev.entityB));
+        owners.push_back(ev.entityA);
+    }
+    std::sort(owners.begin(), owners.end());
+    CHECK(std::unique(owners.begin(), owners.end()) == owners.end());
+
+    // And the cap left the drain-on-read contract alone.
+    CHECK(phys.pollJointBroken().empty());
 }
