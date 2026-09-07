@@ -109,6 +109,17 @@ bool save(AppContext& ctx, const std::string& assetPath)
 	return true;
 }
 
+std::string dirtyClipForTab(const std::string& tabPath)
+{
+	const State* st = s_states.find(tabPath);
+	if (!st || st->clipId == HE::UUID{}) return {};
+	// By id rather than by remembering the path on the State: a rename moves the
+	// path and the id is what both maps already agree on.
+	for (const auto& [path, id] : s_dirtyClips)
+		if (id == st->clipId) return path;
+	return {};
+}
+
 void forget(const std::string& assetPath)
 {
 	s_states.forget(assetPath);

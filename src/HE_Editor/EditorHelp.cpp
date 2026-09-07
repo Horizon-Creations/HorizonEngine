@@ -3788,7 +3788,7 @@ namespace
 	  "Writes this clip's notifies and its Root Motion switch back to the clip "
 	  "asset. Greyed out when there is nothing unsaved. Closing the tab keeps the "
 	  "edits, and the quit prompt lists the clip by its own name — the mesh in the "
-	  "title is not what changed.",
+	  "title is not what changed, so the tab carries no unsaved mark of its own.",
 	  "Ctrl+S", "systems#animation" },
 
 	// ── HorizonCode: the panels around the graph ─────────────────────────────

@@ -1021,6 +1021,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		if (!saveAsset(ctx, path))
 			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+		// One tab edits an asset it is not named after: the Skeletal Mesh viewer
+		// authors the NOTIFIES of the clip scrubbed in it. Saving the tab's own
+		// path finds nothing to write and reports success, so without this the
+		// shortcut would be a keystroke that quietly did nothing. Routed here and
+		// not through a second Ctrl+S owner inside the panel — two handlers for
+		// one key is how a Save starts saving the scene as well.
+		if (const std::string clip = SkeletalMeshEditorPanel::dirtyClipForTab(path); !clip.empty())
+			if (!saveAsset(ctx, clip))
+				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + clip).c_str());
 	};
 	// ── Save All (Ctrl/Cmd+Shift+S): every unsaved asset, then the scene ────
 	// unsavedAssetPaths() is panel-driven, so this also catches assets whose tab

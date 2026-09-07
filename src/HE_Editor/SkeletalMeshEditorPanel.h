@@ -36,6 +36,12 @@ namespace SkeletalMeshEditorPanel
 	void appendDirtyPaths(std::vector<std::string>& out);
 	bool save(AppContext& ctx, const std::string& assetPath);
 
+	// The unsaved clip open in the tab at `tabPath`, or "". This is what Ctrl+S
+	// needs: the shortcut saves the ACTIVE TAB, and this tab's own path is a mesh
+	// nobody has edits for — so without the question the keystroke would land on
+	// the mesh, find nothing, report success and leave the clip dirty.
+	std::string dirtyClipForTab(const std::string& tabPath);
+
 	// Drop cached editor state for `path` (content-browser rename/delete). Takes
 	// a mesh path (the tab) or a clip path (its pending edits) — the asset that
 	// went away is not necessarily the one the tab is named after.
