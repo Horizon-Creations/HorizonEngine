@@ -1082,6 +1082,17 @@ namespace
 	  "pose on top of whatever is underneath, so a breathing wobble or an aim "
 	  "offset keeps the run running while it leans on it.",
 	  "", "systems#animation" },
+	{ "Animation Layers/Source", "",
+	  "Where this layer's pose comes from: one clip, or a blend space — several "
+	  "clips mixed by parameter, a strafe set over a run. A layer has no "
+	  "parameters of its own and reads the entity's state-machine parameters, so "
+	  "a layer and the state underneath it cannot disagree about the speed.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Blend Space", "",
+	  "The blend space this layer poses from. Its axes read the same parameters "
+	  "the state machine uses; without a state machine on the entity both axes "
+	  "read 0, which the clamp turns into the outermost sample.",
+	  "", "systems#animation" },
 	{ "Animation Layers/Weight", "",
 	  "How much of this layer reaches the pose, before its mask is applied. 0 is "
 	  "off, but the layer's own playhead keeps running — so fading it back in "
@@ -2487,6 +2498,82 @@ namespace
 	{ "New Asset/Bone Mask", "",
 	  "A list of joint names an animation layer is allowed to touch. Made here "
 	  "and edited in its own tab; a layer without one covers the whole skeleton.",
+	  "", "systems#animation" },
+	{ "New Asset/Blend Space", "",
+	  "Several animation clips placed in a 1D or 2D parameter space and mixed by "
+	  "where the parameters stand — speed into walk/jog/run, direction and speed "
+	  "into a whole strafe set. Made here and edited in its own tab; a state or "
+	  "an animation layer then points at it instead of at a single clip.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Kind", "",
+	  "1D reads one parameter and interpolates along a line — speed into "
+	  "walk/jog/run. 2D reads two and mixes freely placed samples in a plane, "
+	  "which is what a strafe set needs. 1D is the 2D case that ignores Y, so "
+	  "switching keeps every sample where it is.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Parameter X", "",
+	  "The name of the animator parameter this axis reads — the same name a "
+	  "script writes with animator.setFloat. A name nothing writes reads 0, "
+	  "which the clamp turns into the leftmost sample rather than into nothing.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Parameter Y", "",
+	  "The second axis, for a 2D space. Direction is the usual one: X how fast, "
+	  "Y which way.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range X Min", "",
+	  "The left edge of the DIAGRAM, not of the mix. The sampler clamps to the "
+	  "outermost sample and never extrapolates, so widening this shows more empty "
+	  "space and changes no pose.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range X Max", "",
+	  "The right edge of the diagram. Same as the minimum: an editor axis, not a "
+	  "limit on the parameter.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range Y Min", "",
+	  "The bottom edge of the diagram in a 2D space.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range Y Max", "",
+	  "The top edge of the diagram in a 2D space.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Looping", "",
+	  "Whether the shared cycle wraps at the end or stops there. It belongs to "
+	  "the SPACE and not to each place it is used, because all its samples run "
+	  "on one phase: a locomotion set either cycles or it does not.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Cursor X", "",
+	  "Where the preview cursor stands on the first axis. It is this editor's "
+	  "own question and is not saved into the asset — the weights under it are "
+	  "computed by the same function the game uses, so what you read here is "
+	  "what will play.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Cursor Y", "",
+	  "The preview cursor's second axis, for a 2D space.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Clip", "",
+	  "The animation this sample contributes. Every sample is read at the same "
+	  "point in its OWN cycle — at phase 0.5 a 1.2 s walk is read at 0.6 s and a "
+	  "0.8 s run at 0.4 s — which is what keeps clips of different length from "
+	  "drifting apart and crossing the feet mid-blend.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/X", "",
+	  "Where this sample sits on the first axis: the parameter value at which it "
+	  "plays alone, at full weight. Between two samples the mix is linear; "
+	  "outside the outermost ones it clamps.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Y", "",
+	  "Where this sample sits on the second axis of a 2D space. Samples may be "
+	  "placed anywhere — no grid, no triangulation.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Speed Scale", "",
+	  "A tempo correction for a clip whose author got the timing wrong. It does "
+	  "not run this one sample faster on its own — all samples share one phase — "
+	  "it shortens the seconds this sample contributes to the shared cycle, "
+	  "which speeds the whole mix up in proportion to its weight.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Add Sample", "",
+	  "Another clip in the space, placed where the preview cursor stands. At most "
+	  "four samples are ever evaluated at once: a fifth with real weight means "
+	  "the space is packed tighter than anyone can see.",
 	  "", "systems#animation" },
 	{ "Bone Mask Editor/Reference Skeleton", "",
 	  "A skeleton to pick joints from. It is this editor's own reference and is "
@@ -4770,6 +4857,7 @@ namespace
 		{ "Mesh Viewer/",               "editor-animation", "Animation Editors", "Mesh viewer" },
 		{ "Notify Timeline/",           "editor-animation", "Animation Editors", "Notify timeline" },
 		{ "Bone Mask Editor/",          "editor-animation", "Animation Editors", "Bone mask editor" },
+		{ "Blend Space Editor/",        "editor-animation", "Animation Editors", "Blend space editor" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },

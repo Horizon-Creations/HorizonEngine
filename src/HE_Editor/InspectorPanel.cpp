@@ -824,8 +824,19 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				if (Row::combo("Mode##al", &mode, kModes, IM_ARRAYSIZE(kModes)))
 				{ l.mode = HE::layerBlendModeFromInt(mode); trackEdit(); }
 
-				EditorWidgets::assetDropSlot(ctx, "Clip", l.clipId,
-					HE::AssetType::AnimationClip, "alclip");
+				static const char* kSources[] = { "Clip", "Blend Space" };
+				int source = static_cast<int>(l.source);
+				if (Row::combo("Source##al", &source, kSources, IM_ARRAYSIZE(kSources)))
+				{ l.source = AnimationLayerComponent::Layer::sourceFromInt(source); trackEdit(); }
+
+				if (l.source == AnimationLayerComponent::Layer::Source::BlendSpace)
+					EditorWidgets::assetDropSlot(ctx, "Blend Space", l.blendSpaceId,
+						HE::AssetType::BlendSpace, "albs",
+						"(none — this layer poses nothing)", "blend space",
+						/*showClear=*/true);
+				else
+					EditorWidgets::assetDropSlot(ctx, "Clip", l.clipId,
+						HE::AssetType::AnimationClip, "alclip");
 				// Changing the mask must invalidate the resolution cache. The
 				// cache checks the ids itself, so this is belt to that braces —
 				// but the flag is what makes the change land in the SAME frame.

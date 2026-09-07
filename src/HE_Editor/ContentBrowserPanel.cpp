@@ -18,6 +18,7 @@
 #include "TypeAssetPanel.h"
 #include "ThemeAssetPanel.h"
 #include "BoneMaskPanel.h"
+#include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -949,6 +950,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{ "Animator",          HE::AssetType::AnimatorStateMachine },
 			{ "Animation Clip",    HE::AssetType::AnimationClip },
 			{ "Bone Mask",         HE::AssetType::BoneMask },
+			{ "Blend Space",       HE::AssetType::BlendSpace },
 			{ "Input Action",      HE::AssetType::InputAction },
 			{ "Input Mapping",     HE::AssetType::InputMappingContext },
 			{ "Audio",             HE::AssetType::Audio },
@@ -1043,6 +1045,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				case HE::AssetType::SaveGameTemplate:    return { I.horizonCodeClass,     {0.95f, 0.85f, 0.95f, 1.0f} };
 				case HE::AssetType::Theme:               return { I.widget,               {0.55f, 0.80f, 0.95f, 1.0f} };
 				case HE::AssetType::BoneMask:            return { I.animationClip,        {0.95f, 0.70f, 0.55f, 1.0f} };
+				case HE::AssetType::BlendSpace:          return { I.animationClip,        {0.95f, 0.55f, 0.40f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
@@ -1245,7 +1248,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      StaticMeshEditorPanel::isStaticMeshAsset(fullPath) ||
 			      ParticleGraphEditorPanel::isParticleAsset(fullPath) ||
 			      AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(fullPath) ||
-			      BoneMaskPanel::isBoneMaskAsset(fullPath)))
+			      BoneMaskPanel::isBoneMaskAsset(fullPath) ||
+			      BlendSpacePanel::isBlendSpaceAsset(fullPath)))
 				return; // no dedicated editor for this type — same no-op the old inline dispatch had
 
 			const std::string tabLabel = std::filesystem::path(fullPath).stem().string();
@@ -2368,6 +2372,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::Separator();
 				if (EditorWidgets::menuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
 				if (EditorWidgets::menuItem("Bone Mask")) tryCreate("NewBoneMask", ".hasset", HE::AssetType::BoneMask);
+				if (EditorWidgets::menuItem("Blend Space")) tryCreate("NewBlendSpace", ".hasset", HE::AssetType::BlendSpace);
 				ImGui::EndMenu();
 			}
 

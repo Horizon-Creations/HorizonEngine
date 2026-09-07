@@ -111,7 +111,7 @@ AREAS: dict[str, list[str]] = {
     "input": ["InputAssetPanel.cpp"],
     "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
                   "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp",
-                  "BoneMaskPanel.cpp"],
+                  "BoneMaskPanel.cpp", "BlendSpacePanel.cpp"],
     "landscape": ["TerrainTools.cpp", "EnvironmentPanel.cpp"],
     "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",

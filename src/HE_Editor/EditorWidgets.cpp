@@ -44,6 +44,7 @@ namespace
 			// but it never fills nameOut, so the slot would show an accepted asset
 			// with no name on it. A typed getter exists; it belongs here.
 			case HE::AssetType::BoneMask:             return take(cm.getBoneMask(id));
+			case HE::AssetType::BlendSpace:           return take(cm.getBlendSpace(id));
 			default:                                  return cm.assetType(id) == want;
 		}
 	}

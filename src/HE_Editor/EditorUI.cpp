@@ -14,6 +14,7 @@
 #include "TypeAssetPanel.h"
 #include "ThemeAssetPanel.h"
 #include "BoneMaskPanel.h"
+#include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -712,6 +713,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       TypeAssetPanel::isDirty(assetPath)           ||
 	       ThemeAssetPanel::isDirty(assetPath)          ||
 	       BoneMaskPanel::isDirty(assetPath)            ||
+	       BlendSpacePanel::isDirty(assetPath)          ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
 	       SkeletalMeshEditorPanel::isDirty(assetPath);
@@ -734,6 +736,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	TypeAssetPanel::appendDirtyPaths(out);
 	ThemeAssetPanel::appendDirtyPaths(out);
 	BoneMaskPanel::appendDirtyPaths(out);
+	BlendSpacePanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	SkeletalMeshEditorPanel::appendDirtyPaths(out);
@@ -760,6 +763,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = TypeAssetPanel::save(ctx, assetPath)                        && ok;
 	ok = ThemeAssetPanel::save(ctx, assetPath)                       && ok;
 	ok = BoneMaskPanel::save(ctx, assetPath)                         && ok;
+	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
@@ -803,6 +807,7 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	TypeAssetPanel::forget(assetPath);
 	ThemeAssetPanel::forget(assetPath);
 	BoneMaskPanel::forget(assetPath);
+	BlendSpacePanel::forget(assetPath);
 	ParticleGraphEditorPanel::forget(assetPath);
 	AnimatorStateMachineEditorPanel::forget(assetPath);
 	StaticMeshEditorPanel::forget(assetPath);
@@ -893,6 +898,7 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = TypeAssetPanel::reloadFromDisk(assetPath)                       || any;
 	any = ThemeAssetPanel::reloadFromDisk(assetPath)                      || any;
 	any = BoneMaskPanel::reloadFromDisk(assetPath)                        || any;
+	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;
@@ -2842,6 +2848,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ThemeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (BoneMaskPanel::isBoneMaskAsset(tabPath))
             BoneMaskPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (BlendSpacePanel::isBlendSpaceAsset(tabPath))
+            BlendSpacePanel::render(ctx, tabPath, tabPos, tabSize);
         else if (TypeAssetPanel::isTypeAsset(tabPath))
             TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
