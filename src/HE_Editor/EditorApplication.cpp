@@ -53,6 +53,13 @@
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
+#include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
@@ -1895,6 +1902,75 @@ void EditorApplication::appendPlayLog(HE::LogLevel level, const char* message)
 // its header because the header doesn't know the SDL key types.
 extern ImGuiKey ImGui_ImplSDL3_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode);
 
+// ── Root-motion preview ──────────────────────────────────────────────────────
+// Where the selected figure's current clip would take it, drawn as a line from
+// where it stands.
+//
+// This is the editor half of the gate in SceneSystems::tickAnimation: outside a
+// play session the tick gets a null RootMotionContext, so the motion is taken out
+// of the pose and applied to nothing — an authored clip animates in place instead
+// of walking the entity across the scene and INTO the save file. The line is what
+// was missing next to that: without it, "the motion was extracted and parked" and
+// "this clip carries no motion at all" look exactly the same on screen.
+//
+// Recomputed each frame rather than cached: it costs one clip sampling per
+// segment for ONE selected entity, and a cache would have to notice the clip
+// being re-authored in the tab next door — which is precisely when an artist is
+// watching this line.
+static void appendRootMotionPreview(HorizonWorld& world, ContentManager& cm,
+                                    entt::entity e, DebugDrawBuffer& out)
+{
+	auto& reg = world.registry();
+	const auto* rm   = reg.try_get<RootMotionComponent>(e);
+	const auto* skel = reg.try_get<SkeletalMeshComponent>(e);
+	const auto* tc   = reg.try_get<TransformComponent>(e);
+	if (!rm || !skel || !tc) return;
+
+	// Whichever of the three drivers poses this entity, and the clip it is on. A
+	// blend shows the dominant half — the same half kNotifyDominanceAlpha lets
+	// fire, so the preview and the events agree about which clip is in charge.
+	HE::UUID clipId;
+	if (const auto* a = reg.try_get<AnimatorComponent>(e))
+		clipId = a->clipAssetId;
+	else if (const auto* b = reg.try_get<AnimatorBlendComponent>(e))
+		clipId = (b->blendAlpha >= HE::kNotifyDominanceAlpha) ? b->clipBId : b->clipAId;
+	else if (const auto* sm = reg.try_get<AnimatorStateMachineComponent>(e))
+	{
+		for (const HE::AnimationState& s : sm->resolvedGraph.states)
+			if (s.name == sm->currentStateName) { clipId = s.clipId; break; }
+	}
+	if (clipId == HE::UUID{}) return;
+
+	const SkeletalMeshAsset*  mesh = cm.getSkeletalMesh(skel->meshAssetId);
+	const AnimationClipAsset* clip = cm.getAnimationClip(clipId);
+	if (!mesh || !clip) return;
+
+	std::vector<glm::vec3> path;
+	AnimationPreview::rootMotionPath(*mesh, *clip, rm->options, 48, path);
+	if (path.size() < 2) return;
+
+	// The path is in the character's own frame at the start of the clip, so it is
+	// rotated by where the entity faces and offset by where it stands.
+	// worldPositionOf rather than tc->worldMatrix: nothing propagates transforms
+	// inside tickWorld, so that matrix is a frame old for anything that moved.
+	const glm::quat yaw = glm::angleAxis(glm::radians(tc->rotation.y), glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::vec3 org = HE::worldPositionOf(world, e);
+
+	// Amber, the same colour the root-motion rows carry in the Details panel, and
+	// not the selection yellow it would otherwise be mistaken for.
+	const glm::vec3 col(0.90f, 0.69f, 0.34f);
+	glm::vec3 prev = org + yaw * path[0];
+	for (size_t i = 1; i < path.size(); ++i)
+	{
+		const glm::vec3 p = org + yaw * path[i];
+		out.line(prev, p, col);
+		prev = p;
+	}
+	// A tick at the end, so a path that ends where it started is still visible as
+	// a path that ran.
+	out.line(prev - glm::vec3(0.0f, 0.15f, 0.0f), prev + glm::vec3(0.0f, 0.35f, 0.0f), col);
+}
+
 // HE-PATCH(stuck-keys) watchdog: once a second, compare ImGui's idea of the
 // keyboard against SDL's. A key ImGui thinks is held while SDL says it is up
 // means a key-up never reached ImGui (see the HE-PATCH in imgui_impl_sdl3.cpp's
@@ -3404,6 +3480,13 @@ void EditorApplication::OnRender(float dt)
 					}
 				}
 			}
+
+			// Where the selected figure's root motion would carry it. Only for the
+			// selection: a scene full of characters would be a scene full of
+			// lines, and the question ("does this clip go where I meant it to")
+			// is asked about one figure at a time.
+			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
+				appendRootMotionPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
 
 			// The ground grid, last of the editor's own lines: it is the biggest
 			// contributor by far, and appending it after the gizmos keeps the
