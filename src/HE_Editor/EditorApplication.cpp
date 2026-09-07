@@ -5901,7 +5901,7 @@ void EditorApplication::setupEditorCommands()
 	                             const std::vector<std::uint8_t>& blob) {
 		m_collab.publishComponents(handle, blob);
 	};
-	h.beforeDestroy = [this](Entity e, HE::Ed::Origin) {
+	h.beforeDestroy = [this](Entity e, HE::Ed::Origin origin) {
 		// Same order and the same reasons as deleteSelectedEntity: the bodies go
 		// first, because after destroyEntity the hierarchy that names them is
 		// gone, and the selection goes because a selected handle that no longer
@@ -5909,7 +5909,15 @@ void EditorApplication::setupEditorCommands()
 		if (m_isPlaying && m_physicsWorld)
 			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
 		if (m_selectedEntity == e) m_selectedEntity = entt::null;
-		m_structureKnown.erase(e);
+
+		// ONLY for a peer's delete, and this is the echo protection rather than
+		// bookkeeping: syncStructuralChanges publishes a destroy for everything
+		// in m_structureKnown that no longer exists, so dropping the entry here
+		// is how onRemoteDestroy says "they already know". For an external
+		// delete it would be the opposite of what is wanted — the peers would
+		// never hear that the client removed anything. deleteSelectedEntity, the
+		// human's path, does not erase either.
+		if (origin == HE::Ed::Origin::Remote) m_structureKnown.erase(e);
 	};
 	m_commands.setHooks(std::move(h));
 }
@@ -5922,7 +5930,12 @@ void EditorApplication::rememberMcpLock(std::uint64_t subject)
 	if (subject == 0) return;
 	for (const McpLock& l : m_mcpLocks)
 		if (l.subject == subject) return;
-	m_mcpLocks.push_back(McpLock{ subject, 0 });
+	// Stamped now, not zero: the caller has just asked for this lock, and a zero
+	// would make updateMcpLocks ask a second time in the same frame.
+	const auto nowMs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+	m_mcpLocks.push_back(McpLock{ subject, nowMs });
 }
 
 bool EditorApplication::mcpLockedByOther(std::uint64_t subject)
