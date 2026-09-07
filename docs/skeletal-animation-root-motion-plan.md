@@ -711,6 +711,103 @@ zurück, nur Mesh/Material/Scene/Particles werden umgeschrieben), und
 
 ---
 
+## 4d. In Schritt 4 getroffene Abweichungen
+
+Schritt 4 (Editor und Doku) ist gebaut. Was der Editor jetzt kann, und die sechs
+Stellen, an denen es anders kam als in „Schritt 4 — Editor und Doku" geplant.
+
+### Was steht
+
+* **Notify-Zeitleiste** im `SkeletalMeshEditorPanel`, unter dem Scrub-Regler, so
+  wie empfohlen. Ein Lineal auf der 1-2-5-Leiter, eine Spur mit Rauten
+  (Notifies) und Balken (Notify States), der Playhead darüber. Doppelklick auf
+  leere Spur legt eines an, Ziehen verschiebt, Rechtsklick öffnet das Menü
+  (Add Notify / Add Notify State / Delete), Klick auf leere Spur setzt den
+  Playhead. Darunter die Zeilen des ausgewählten Ereignisses (Name, Time,
+  Duration) mit einem Hinweissatz, der sagt, welche der beiden Formen es gerade
+  ist. Die Arithmetik ist `HE::Ed::UITimelineView` aus `UITimelineMath.h`, bei
+  Zoom 1 — der Clip füllt die Spur, es gibt nichts zu scrollen und keine
+  Zoom-Bedienelemente zu erklären.
+* **`hasRootMotion` pro Clip** als Kästchen „Root Motion" im selben Bereich.
+  `Assets.h` kündigte den Schalter an („der per-clip editor toggle ist noch zu
+  bauen"); das war Teil dieses Schritts und ist es jetzt.
+* **Root-Motion-Vorschau in zwei Hälften.** Im Panel ein Aufsicht-Plot in der
+  Ecke der Vorschau (Pfad, Start- und Endpunkt, eine Marke auf der Stelle des
+  Playheads, die zurückgelegten Meter als Text). Im Viewport eine Linie unter
+  der **ausgewählten** Entity mit `RootMotionComponent`, aus deren Weltposition
+  und Blickrichtung gezeichnet. Beide bewegen nichts.
+* **Speichern.** `AnimationClipAsset` wird über das neue
+  `ContentManager::getAnimationClipMutable` direkt bearbeitet und mit
+  `saveAsset` geschrieben; `CHUNK_ANOT` konnte beides schon seit Schritt 3.
+* **Handbuch**: elf neue Einträge, `editor_help_audit --check` wieder bei null
+  offenen Bedienelementen (728/728), `ctest` 124/124.
+
+### Die Abweichungen
+
+1. **Der Tab heißt nach dem Mesh, der Dirty-Eintrag nach dem Clip.** Der
+   naheliegende Weg wäre gewesen, `EditorUI::tabHasUnsavedEdits(tabPfad)` für
+   den Mesh-Pfad true sagen zu lassen. Das wäre eine Lüge in der
+   Beenden-Abfrage: sie listet Pfade, und der Pfad, an dem sich etwas geändert
+   hat, ist der des Clips. `SkeletalMeshEditorPanel::isDirty/appendDirtyPaths/
+   save` antworten deshalb auf **Clip**-Pfade. Nebeneffekt und Absicht zugleich:
+   zwei Tabs, die denselben Clip scrubben, teilen sich einen Eintrag statt einen
+   pro Tab zu führen. Der Preis ist, dass der Tab-Titel keinen Dirty-Punkt trägt
+   — dafür sitzt der Speichern-Knopf mit Zustand auf der Werkzeugleiste.
+   `forget()` löscht seitdem beides: Tab-Zustand unter einem Mesh-Pfad, offene
+   Bearbeitungen unter einem Clip-Pfad.
+
+2. **Der geladene Clip IST der Bearbeitungspuffer.** Keine Kopie im Panel, wie
+   der Zustandsmaschinen-Editor sie führt. Ein Notify, das auf der Spur
+   verschoben wird, ist damit sofort das, wogegen die Animatoren feuern — was in
+   einem Editor mit laufender Play-Session der ganze Punkt ist. „Dirty" ist
+   folglich eine Notiz über eine **Datei**, kein zweiter Datenstand. Deshalb
+   braucht die Namenszeile auch **keinen Scratch-Buffer**: die bekannte Falle
+   (`IsItemDeactivatedAfterEdit` sieht nie den alten Wert) betrifft Undo-Schritte,
+   und hier gibt es keinen zu verlieren.
+
+3. **Das Kontextmenü wird von Hand geöffnet.** `BeginPopupContextItem` müsste
+   direkt hinter der Spur stehen, weil es sich auf das letzte Item bezieht. Das
+   Menü macht aber einen `Help::Scope("Notify Timeline")` auf, und das
+   Deckungs-Audit liest die Datei von oben nach unten: ein Scope über den Zeilen
+   Name/Time/Duration hätte deren Einträge beansprucht und drei Bedienelemente
+   als offen gemeldet, obwohl sie zur Laufzeit unter `Mesh Viewer/` aufgelöst
+   werden. Gebaut ist deshalb `IsItemClicked(Right)` → `OpenPopup`, und das
+   `BeginPopup` steht ganz unten. Zweite Ordnungsfrage im selben Zug: der
+   Rechtsklick wird **vor** dem Linksklick behandelt (`else if`), sonst scrubbt
+   das Öffnen des Menüs den Playhead unter sich weg.
+
+4. **Die Viewport-Linie ist ein berechneter Pfad, keine aufgezeichnete Spur.**
+   Der Plan sagt „aufsummierter Pfad als Debug-Linie". Aufsummiert aus
+   `lastDelta` wäre eine Spur, die erst entsteht, während man zusieht, pro Entity
+   Zustand braucht und gedeckelt werden müsste (Abschnitt 3.4: im Editor wächst
+   nichts unbegrenzt). Gezeichnet wird stattdessen `rootMotionPath` über den
+   ganzen Clip: sofort da, ohne Zustand, ohne Deckel, und es beantwortet die
+   Frage des Künstlers („wohin bringt mich dieser Clip") vollständig statt bis
+   zum aktuellen Frame. Neu berechnet wird sie jedes Bild für **eine**
+   ausgewählte Entity — ein Cache müsste merken, dass nebenan gerade der Clip
+   umgeschrieben wird, und genau dann sieht jemand hin.
+
+5. **Der Plot im Panel ist eine Aufsicht, keine Linie in der 3D-Vorschau.**
+   `RenderSkeletalPreview` rendert im Backend; das Panel hat dessen Projektion
+   nicht und könnte nichts in dasselbe Bild zeichnen. Von oben ist ohnehin die
+   Ansicht, die „wie weit und wohin" beantwortet.
+
+6. **Die Vorschau-Pose ist gesperrt.** `evaluateClipPose` bleibt, wie sie war;
+   daneben steht `evaluateClipPoseLocked`, die den Wurzel-Joint nach denselben
+   Optionen neutralisiert wie die drei Pose-Treiber, und das Panel benutzt sie.
+   Ohne den Lock rutschte das Mesh von den eigenen Füßen weg, während der Pfad
+   daneben behauptet, die Bewegung sei herausgenommen worden. Der Lock hängt am
+   Clip-Schalter: „Root Motion" aus, und der Clip animiert wieder so, wie er
+   exportiert wurde.
+
+Was **nicht** gemacht wurde und offen bleibt: die Website-Roadmap („Skeletal
+Animation", 78 %) und der Devlog. Beides beschreibt, was auf `main` steht, und
+dieser Zweig ist nicht zusammengeführt; außerdem ist ein Deploy eine
+Veröffentlichung und braucht eine ausdrückliche Zusage. Gehört in denselben
+Handgriff wie der Merge.
+
+---
+
 ## 5. Risiken und offene Punkte
 
 1. **`PhysicsWorld*` in `tickAnimation`.** Die Signatur wächst um drei
