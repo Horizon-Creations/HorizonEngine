@@ -195,6 +195,25 @@ namespace
 	  "True while this entity is actually jointed to something in the "
 	  "simulation. A joint whose other end has not spawned yet is authored but "
 	  "not built, and this reports the simulation rather than the component." },
+	{ "physics.setJointMotor",
+	  "Drives a hinge or a slider under its own power: the door swings open, the "
+	  "platform rises. Target Speed is radians per second for a hinge and metres "
+	  "per second for a slider. Max Force is the switch — zero turns the motor "
+	  "off, and a target of zero with force behind it is a brake that holds the "
+	  "joint still. The other three joint types have no motor." },
+	{ "physics.setJointBreakForce",
+	  "How much force this joint carries before it lets go, in newtons; 0 never "
+	  "breaks. When it breaks the joint is gone for good — the component with it "
+	  "— and the pair shows up once in Poll Joint Broken." },
+	{ "physics.setJointCollideConnected",
+	  "Whether the two jointed bodies may touch each other. Off by default, "
+	  "which is what a chain of overlapping links needs; on for a door that must "
+	  "not swing through its own frame." },
+	{ "physics.pollJointBroken",
+	  "Every joint that BROKE since the last call, as two parallel arrays: index "
+	  "i of Entities A owned the joint, index i of Entities B was the other end. "
+	  "Reading empties the list, so read it in one place. A joint that was "
+	  "removed or whose entity was destroyed never appears here." },
 	{ "physics.setVelocity",
 	  "Sets a body's velocity in metres per second outright, discarding whatever "
 	  "it had. For a nudge use Add Impulse, which adds to the motion instead of "

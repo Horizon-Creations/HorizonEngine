@@ -310,6 +310,71 @@ namespace
 	  "A trigger reports overlaps but stops nothing — doorways, pickup volumes, "
 	  "kill zones. Things pass straight through it.",
 	  "", "systems#physics" },
+	// ── Joint ────────────────────────────────────────────────────────────────
+	// Which rows are visible depends on Type, so several of these describe a
+	// control the author only ever sees for one or two of the five kinds. They
+	// say which, because a tooltip read on a hinge should not be about a rope.
+	{ "Joint/Type", "",
+	  "Fixed welds the two bodies in the pose they are in. Point is a ball socket "
+	  "— the link of a chain. Hinge turns on one axis, with limits and a motor: a "
+	  "door, a lid, a wheel. Slider travels along one axis, also with limits and a "
+	  "motor: a drawer, a lift. Distance keeps two points a given range apart: a "
+	  "rope, a grapple, a spring mount.",
+	  "", "systems#physics" },
+	{ "Joint/Target", "",
+	  "The other entity this one is jointed to. BOTH ends need a Rigid Body — a "
+	  "Character Controller is not one — and they cannot both be Static, or "
+	  "nothing could ever move. The joint lives on THIS entity: deleting the "
+	  "other end takes it with it.",
+	  "", "systems#physics" },
+	{ "Joint/Anchor A", "",
+	  "Where the joint attaches, in THIS entity's own space, so it travels with a "
+	  "prefab wherever it is dropped. For Point and Hinge it is the ONE shared "
+	  "pivot both bodies hang from; for Distance it is this end of the rope.",
+	  "", "systems#physics" },
+	{ "Joint/Anchor B", "",
+	  "The far end of a Distance joint, in the OTHER entity's own space. Distance "
+	  "is the only type that reads it — giving a Point or a Hinge two separate "
+	  "points would tell the solver to make them one and snap the bodies together.",
+	  "", "systems#physics" },
+	{ "Joint/Axis", "",
+	  "A direction in this entity's own space: what a Hinge turns about, and what "
+	  "a Slider travels along. Length does not matter, it is normalised — but it "
+	  "cannot be zero, or there is no direction and no joint is built.",
+	  "", "systems#physics" },
+	{ "Joint/Min Limit", "",
+	  "How far the joint may travel one way: DEGREES for a hinge, metres for a "
+	  "slider and for a rope's shortest length. Min at or above Max means no "
+	  "limit at all, which is the default.",
+	  "", "systems#physics" },
+	{ "Joint/Max Limit", "",
+	  "The other end of the same range. A hinge and a slider measure it from the "
+	  "pose the two bodies were authored in, so a door starts closed at 0 — which "
+	  "is also why a range that does not contain 0 is widened until it does.",
+	  "", "systems#physics" },
+	{ "Joint/Motor Target Speed", "",
+	  "How fast the motor drives the joint: radians per second for a hinge, "
+	  "metres per second for a slider. Radians because it is a rate rather than a "
+	  "pose, the same rule the limits above do not follow. A full turn a second "
+	  "is 6.28.",
+	  "", "systems#physics" },
+	{ "Joint/Motor Max Force", "",
+	  "How hard the motor may push, and the SWITCH that turns it on: at 0 there "
+	  "is no motor. Newton-metres for a hinge, newtons for a slider. A target "
+	  "speed of 0 with force behind it is a brake that holds the joint still.",
+	  "", "systems#physics" },
+	{ "Joint/Break Force", "",
+	  "How much force the joint carries before it lets go, in newtons; 0 never "
+	  "breaks. When it breaks it is gone for good — this component goes with it, "
+	  "so the door does not come back on its hinges the next time the scene "
+	  "loads. Game code hears about it once, through Poll Joint Broken.",
+	  "", "systems#physics" },
+	{ "Joint/Collide Connected", "",
+	  "Whether the two jointed bodies may touch each other. Off by default, which "
+	  "is what a chain needs: consecutive links overlap by construction and would "
+	  "otherwise fight the joint holding them. On for a door that must not swing "
+	  "through its own frame.",
+	  "", "systems#physics" },
 	{ "Character Controller/Slope Limit (deg)", "",
 	  "The steepest ground the character can still walk up. Anything steeper is "
 	  "slid off rather than climbed.",
@@ -4536,7 +4601,7 @@ namespace
 	// editor.
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
-		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Character Controller", "Movement",
+		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Property Animator", "Particle System",

@@ -3177,6 +3177,109 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// ── Joints ───────────────────────────────────────────────────────
+			// Drawn for every joint in the scene, like the colliders above and
+			// unlike the rope handles below: a joint is a relationship between
+			// two entities, and the thing an author most needs to see is that
+			// the line goes where they think it does — which they cannot check
+			// by selecting one end.
+			//
+			// From the COMPONENTS, never from Jolt. Jolt's own DrawConstraints
+			// needs JPH_DEBUG_RENDERER and a renderer this engine does not have,
+			// and it would only exist in play mode — the half of the time an
+			// author is not authoring.
+			{
+				auto& reg = m_editorWorld->registry();
+				for (auto [entity, joint] : reg.view<JointComponent>().each())
+				{
+					if (joint.target == HE::UUID{})
+						continue;
+					const Entity other = m_editorWorld->findByEntityId(joint.target);
+					if (other == entt::null || !reg.valid(other))
+						continue;   // dangling reference — the Details panel says so
+
+					// worldMatrixOf, not TransformComponent::worldMatrix: this
+					// block runs right after tickWorld, which propagates
+					// nothing, so the stored matrix is a frame old and plain
+					// identity for anything created this frame. Same reason the
+					// rope guides below walk the chain.
+					const glm::mat4 mA = HE::worldMatrixOf(*m_editorWorld, entity);
+					const glm::mat4 mB = HE::worldMatrixOf(*m_editorWorld, other);
+					const glm::vec3 originA = glm::vec3(mA[3]);
+					const glm::vec3 originB = glm::vec3(mB[3]);
+					const glm::vec3 anchorA = glm::vec3(mA * glm::vec4(joint.anchorA, 1.0f));
+					const glm::vec3 anchorB = glm::vec3(mB * glm::vec4(joint.anchorB, 1.0f));
+
+					// Amber for the selected entity's joint, dim orange for the
+					// rest — the same "this is the one you are editing" the
+					// selection marker above uses.
+					const bool      lit   = (entity == m_selectedEntity || other == m_selectedEntity);
+					const glm::vec3 color = lit ? glm::vec3(1.0f, 0.65f, 0.15f)
+					                            : glm::vec3(0.55f, 0.40f, 0.15f);
+					// A direction in A's space, drawn a metre long: an axis has
+					// no length of its own and the number an author types is a
+					// direction, so any fixed length is as honest as the next.
+					const float     kAxisLen = 1.0f;
+					const glm::vec3 axisWorld =
+						glm::length(joint.axis) > 1.0e-5f
+							? glm::normalize(glm::mat3(mA) * glm::normalize(joint.axis))
+							: glm::vec3(0.0f, 1.0f, 0.0f);
+
+					switch (joint.type)
+					{
+					case JointType::Fixed:
+						// No anchors to draw — the weld IS the pair, so the line
+						// between the two origins is the whole statement.
+						dbg.line(originA, originB, color);
+						break;
+					case JointType::Point:
+					case JointType::Hinge:
+						// ONE shared pivot, so one marker and two lines to it.
+						// Drawing two anchors here would show a joint that does
+						// not exist: the second one is never read.
+						dbg.sphere(anchorA, 0.08f, color);
+						dbg.line(originA, anchorA, color);
+						dbg.line(originB, anchorA, color);
+						if (joint.type == JointType::Hinge)
+							dbg.line(anchorA - axisWorld * kAxisLen * 0.5f,
+							         anchorA + axisWorld * kAxisLen * 0.5f, color);
+						break;
+					case JointType::Slider:
+					{
+						// The line of travel, through A's origin, with its stops
+						// marked where limits were authored. Unlimited draws the
+						// bare direction — there is nothing to mark.
+						const bool  limited = joint.minLimit < joint.maxLimit;
+						const float lo = limited ? joint.minLimit : -kAxisLen;
+						const float hi = limited ? joint.maxLimit :  kAxisLen;
+						const glm::vec3 a = originA + axisWorld * lo;
+						const glm::vec3 b = originA + axisWorld * hi;
+						dbg.line(a, b, color);
+						if (limited)
+						{
+							dbg.sphere(a, 0.06f, color);
+							dbg.sphere(b, 0.06f, color);
+						}
+						dbg.line(originB, originA, color);
+						break;
+					}
+					case JointType::Distance:
+						// The one type that reads both anchors, and the one
+						// whose picture is genuinely a line between two points.
+						dbg.sphere(anchorA, 0.06f, color);
+						dbg.sphere(anchorB, 0.06f, color);
+						dbg.line(anchorA, anchorB, color);
+						break;
+					default:
+						// A type this build does not know. PhysicsWorld builds it
+						// as a weld and logs once; the overlay says the same
+						// thing by drawing the pair and nothing else.
+						dbg.line(originA, originB, color);
+						break;
+					}
+				}
+			}
+
 			// ── Rope & trail guides, for the SELECTED entity only ────────────
 			// A rope is authored as a handful of points in a list, and until one
 			// of them is on screen the list is a set of numbers nobody can aim.

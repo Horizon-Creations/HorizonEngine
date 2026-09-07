@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <unordered_set>
 
 JPH_SUPPRESS_WARNINGS
 
@@ -189,6 +190,39 @@ static void joltEnsureInit()
 class HEContactListener : public JPH::ContactListener
 {
 public:
+    // ── JointComponent::collideConnected, and the only place it is enforced ───
+    // Jolt has no per-constraint "these two may not touch" flag: a constraint
+    // and a contact are separate things to the solver. The alternative it does
+    // offer — collision GROUPS on the bodies — assigns one group per body, which
+    // cannot express "A ignores B, B ignores C, A still hits C", and that is
+    // exactly the shape of a chain.
+    //
+    // So the pair is rejected here, before the manifold is ever built. Cheaper
+    // than it looks: the set is empty in a scene with no joints, and even a
+    // ragdoll's worth of pairs is a handful of hashes on contacts that were
+    // going to be rejected anyway.
+    JPH::ValidateResult OnContactValidate(const JPH::Body& b1, const JPH::Body& b2,
+                                          JPH::RVec3Arg, const JPH::CollideShapeResult&) override
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_noCollidePairs.empty() &&
+                m_noCollidePairs.count(bodyPairKey(b1.GetID(), b2.GetID())) != 0)
+                return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        }
+        return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+    }
+
+    // Called from PhysicsWorld whenever a joint is born or dies — never from
+    // inside Update(), which is what makes the lock above uncontended in
+    // practice rather than only correct.
+    void setPairCollides(const JPH::BodyID& a, const JPH::BodyID& b, bool collides)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (collides) m_noCollidePairs.erase(bodyPairKey(a, b));
+        else          m_noCollidePairs.insert(bodyPairKey(a, b));
+    }
+
     void OnContactAdded(const JPH::Body& b1, const JPH::Body& b2,
                         const JPH::ContactManifold&, JPH::ContactSettings&) override
     {
@@ -275,6 +309,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_active.clear();
+        m_noCollidePairs.clear();
         m_entered.clear();
         m_exited.clear();
         m_enteredOverlap.clear();
@@ -338,6 +373,10 @@ private:
 
     std::mutex m_mutex;
     std::unordered_map<uint64_t, ActiveContact> m_active;
+    // Body pairs held together by a joint whose collideConnected is false.
+    // Keyed the same way m_active is, so a recycled body slot cannot inherit an
+    // old joint's exemption.
+    std::unordered_set<uint64_t> m_noCollidePairs;
     std::vector<PhysicsWorld::CollisionEvent> m_entered;
     std::vector<PhysicsWorld::CollisionEvent> m_exited;
     std::vector<PhysicsWorld::CollisionEvent> m_enteredOverlap;
@@ -398,8 +437,42 @@ struct PhysicsWorld::Impl
     {
         JPH::Ref<JPH::TwoBodyConstraint> constraint;
         uint32_t                         partner = 0;   // entity B
+        // The two bodies, kept because the contact filter for collideConnected
+        // is keyed by BodyID and a joint outlives the map lookup that found
+        // them: by the time a joint is torn down, entityToBody may already have
+        // lost the entry (destroyBodyFor erases the body it is about to remove).
+        JPH::BodyID                      bodyA;
+        JPH::BodyID                      bodyB;
     };
     std::unordered_map<uint32_t, JointRecord> joints;
+
+    // Take a joint out of the simulation: the constraint AND the contact
+    // exemption its collideConnected asked for. Every path that erases from
+    // `joints` goes through here, because forgetting the second half leaves two
+    // bodies permanently passing through each other after the joint that
+    // excused them is gone.
+    void detachJoint(const JointRecord& record)
+    {
+        physicsSystem.RemoveConstraint(record.constraint);
+        setJointedPairCollides(record.bodyA, record.bodyB, true);
+    }
+
+    // The exemption itself, plus the one thing that makes a CHANGE to it visible.
+    //
+    // Jolt caches the outcome of a body pair from the previous step and reuses
+    // it while neither body's cache is invalid (PhysicsSystem::ProcessBodyPair,
+    // mUseBodyPairContactCache) — and "these two do not collide" is an outcome
+    // like any other. Without this, OnContactValidate is simply not asked again
+    // and a joint that is cut, or a collideConnected switched on mid-game, has
+    // no effect at all until something else disturbs the pair. It is safe on a
+    // body that has already gone: the lock fails and the call does nothing.
+    void setJointedPairCollides(const JPH::BodyID& a, const JPH::BodyID& b, bool collides)
+    {
+        contactListener.setPairCollides(a, b, collides);
+        auto& bodyInterface = physicsSystem.GetBodyInterface();
+        bodyInterface.InvalidateContactCache(a);
+        bodyInterface.InvalidateContactCache(b);
+    }
 
     // Joints that are authored but not built: the partner has not spawned yet,
     // or the entity's own body was just torn down for a rebuild. Retried after
@@ -420,6 +493,12 @@ struct PhysicsWorld::Impl
     // "more than any plausible spawn order needs" rather than a tuned value.
     static constexpr int kMaxJointAttempts = 8;
 
+    // Joints that BROKE, waiting for pollJointBroken(). Plain vector rather than
+    // the contact listener's mutex-guarded pair, because the only writer is
+    // step() on the calling thread — Jolt never reports a broken constraint,
+    // this class decides it.
+    std::vector<PhysicsWorld::CollisionEvent> brokenJoints;
+
     void queueJoint(uint32_t entityId)
     {
         for (const auto& p : pendingJoints)
@@ -438,7 +517,7 @@ struct PhysicsWorld::Impl
         const bool had = it != joints.end();
         if (had)
         {
-            physicsSystem.RemoveConstraint(it->second.constraint);
+            detachJoint(it->second);
             joints.erase(it);
         }
         unqueueJoint(entityId);
@@ -1389,6 +1468,91 @@ glm::vec3 anyPerpendicular(const glm::vec3& axis)
 
 JPH::Vec3 toJolt(const glm::vec3& v) { return JPH::Vec3(v.x, v.y, v.z); }
 
+// ── The motor, on the two types that have one ────────────────────────────────
+// Hinge and Slider are the joints with a single degree of freedom, which is what
+// there is to drive; the other three have nothing to turn or push. Returns false
+// for those, so the caller can say so rather than pretending it worked.
+//
+// THE FORCE IS THE SWITCH. At or below zero the motor is Off, which is the
+// default and so nothing an old scene carries starts moving; a target of zero
+// with force behind it is a brake, which is how a door is held shut. Reading the
+// target as the switch would have made that ordinary case unreachable.
+//
+// The limits are set BEFORE the state: Jolt asserts in SetMotorState that the
+// MotorSettings are valid, and a torque limit is part of being valid.
+bool applyJointMotor(JPH::TwoBodyConstraint& constraint, float targetSpeed, float maxForce)
+{
+    const bool on = maxForce > 0.0f;
+    switch (constraint.GetSubType())
+    {
+    case JPH::EConstraintSubType::Hinge:
+    {
+        auto& hinge = static_cast<JPH::HingeConstraint&>(constraint);
+        // Newton-METRES: an angular motor's budget is a torque, and Jolt reads
+        // the torque limit for a hinge and the force limit for a slider.
+        hinge.GetMotorSettings().SetTorqueLimit(on ? maxForce : 0.0f);
+        hinge.SetTargetAngularVelocity(targetSpeed);   // rad/s, Jolt's own unit
+        hinge.SetMotorState(on ? JPH::EMotorState::Velocity : JPH::EMotorState::Off);
+        return true;
+    }
+    case JPH::EConstraintSubType::Slider:
+    {
+        auto& slider = static_cast<JPH::SliderConstraint&>(constraint);
+        slider.GetMotorSettings().SetForceLimit(on ? maxForce : 0.0f);
+        slider.SetTargetVelocity(targetSpeed);         // m/s
+        slider.SetMotorState(on ? JPH::EMotorState::Velocity : JPH::EMotorState::Off);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// How hard the joint is pulling, in newtons, over a step of `dt`.
+//
+// The solver accumulates an IMPULSE per step (newton-seconds), so the force is
+// that over the step length — which is what an author types into a break force
+// and what the same number means for a body's weight. Each constraint type
+// spells its accumulator differently and none of them share a base class member
+// for it, hence the switch; the ROTATION lambdas are deliberately left out, so
+// what breaks a joint is the pull on it and not the twist.
+float jointForceMagnitude(const JPH::TwoBodyConstraint& constraint, float dt)
+{
+    if (dt <= 0.0f)
+        return 0.0f;
+    float impulse = 0.0f;
+    switch (constraint.GetSubType())
+    {
+    case JPH::EConstraintSubType::Fixed:
+        impulse = static_cast<const JPH::FixedConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Point:
+        impulse = static_cast<const JPH::PointConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Hinge:
+        impulse = static_cast<const JPH::HingeConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Slider:
+        // Two components, because a slider only constrains the two directions it
+        // does NOT travel along.
+        impulse = static_cast<const JPH::SliderConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Distance:
+        // One number, and a SIGNED one: a rope pulls at one end of its range and
+        // pushes at the other, and both count against the same limit.
+        impulse = std::abs(static_cast<const JPH::DistanceConstraint&>(constraint)
+                               .GetTotalLambdaPosition());
+        break;
+    default:
+        return 0.0f;
+    }
+    return impulse / dt;
+}
+
 } // namespace
 
 bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
@@ -1463,6 +1627,21 @@ bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
         if (glm::length(jc->axis) < 1.0e-5f)
             return refuse("its axis has no length, so there is no direction to hinge or slide on");
         worldAxis = glm::normalize(decomposeWorld(matA).rotation * glm::normalize(jc->axis));
+        // NEGATED for Jolt, and this one sign is the whole authoring convention.
+        //
+        // Jolt measures a hinge's angle and a slider's travel as body2 moving
+        // along the axis relative to body1 — and body1 here is THIS entity, the
+        // one that owns the component. Handed the axis as authored, a positive
+        // limit and a positive motor speed would move the OTHER entity along it,
+        // which reads backwards for the case the whole component is shaped
+        // around: the door owns the joint and the frame is the target, so "open
+        // to 90°" has to mean the door swings, not the building.
+        //
+        // Flipping the axis flips both at once, which is why it happens here and
+        // not at the two places that consume it: the limits and the motor share
+        // Jolt's convention, and negating one of them alone would leave a motor
+        // driving away from the limit it was given.
+        worldAxis = -worldAxis;
     }
 
     // Limits arrive in DEGREES for an angle and metres for a distance, and
@@ -1576,8 +1755,24 @@ bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
         return refuse("Jolt refused to create the constraint");
 
     m_impl->physicsSystem.AddConstraint(constraint);
-    m_impl->joints[entityId] = Impl::JointRecord{ constraint, targetId };
+    m_impl->joints[entityId] =
+        Impl::JointRecord{ constraint, targetId, itA->second, itB->second };
     m_impl->unqueueJoint(entityId);
+
+    // Both of these come from the COMPONENT and are re-applied on every build,
+    // which is what makes them survive a scene load and a rebuild of either
+    // body. A motor started from a script and then forgotten here would stop the
+    // first time the entity's collider changed.
+    if (jc->motorMaxForce != 0.0f || jc->motorTarget != 0.0f)
+    {
+        if (!applyJointMotor(*constraint, jc->motorTarget, jc->motorMaxForce))
+            HE_LOG_WARN(Physics, "Entity %u: a %s joint has no motor to drive — only a Hinge "
+                                 "or a Slider does, and the motor fields are ignored here",
+                        entityId, jc->type == JointType::Fixed    ? "Fixed"
+                                : jc->type == JointType::Point    ? "Point"
+                                                                  : "Distance");
+    }
+    m_impl->setJointedPairCollides(itA->second, itB->second, jc->collideConnected);
 
     // A settled crate does not feel a rope that was tied to it while it slept:
     // Jolt only solves constraints between active bodies.
@@ -1607,7 +1802,7 @@ void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
         const auto it = m_impl->joints.find(owner);
         if (it == m_impl->joints.end())
             continue;
-        m_impl->physicsSystem.RemoveConstraint(it->second.constraint);
+        m_impl->detachJoint(it->second);
         m_impl->joints.erase(it);
         // A REBUILD wants the joint back — addEntity tears the old body down and
         // puts a new one up, and the chain it was part of has to survive that.
@@ -1915,6 +2110,10 @@ bool PhysicsWorld::addJoint(HorizonWorld& world, uint32_t entityA, uint32_t enti
     jc.axis     = desc.axis;
     jc.minLimit = desc.minLimit;
     jc.maxLimit = desc.maxLimit;
+    jc.motorTarget      = desc.motorTarget;
+    jc.motorMaxForce    = desc.motorMaxForce;
+    jc.breakForce       = desc.breakForce;
+    jc.collideConnected = desc.collideConnected;
     if (jc.target == HE::UUID{})
     {
         // Every entity gets an identity in createEntity, so this is a world
@@ -1967,6 +2166,155 @@ bool PhysicsWorld::hasJoint(uint32_t entityA) const
     if (!m_impl)
         return false;
     return m_impl->joints.count(entityA) != 0;
+}
+
+// The three live edits below share a shape: find the component, write it,
+// then reach for the constraint if there is one. THE COMPONENT FIRST, always —
+// an entity whose joint is still on the pending list has no constraint to touch
+// yet, and the write has to survive until it is built. That is also why none of
+// them fail when only the constraint is missing.
+namespace {
+
+// The component of the joint this entity AUTHORED, or null with a log saying
+// which of the two possible misses it was. Shared by the three setters so the
+// message is one message rather than three that drift.
+JointComponent* jointComponentFor(HorizonWorld& world, uint32_t entityA, const char* what)
+{
+    const Entity a = static_cast<Entity>(entityA);
+    if (!world.registry().valid(a))
+    {
+        HE_LOG_ERROR(Physics, "%s(%u): the entity does not exist", what, entityA);
+        return nullptr;
+    }
+    auto* jc = world.registry().try_get<JointComponent>(a);
+    if (!jc)
+        HE_LOG_ERROR(Physics, "%s(%u): the entity has no joint — only the entity that AUTHORED "
+                              "a joint carries it, not the one it points at", what, entityA);
+    return jc;
+}
+
+} // namespace
+
+bool PhysicsWorld::setJointMotor(HorizonWorld& world, uint32_t entityA,
+                                 float targetSpeed, float maxForce)
+{
+    if (!m_impl)
+        return false;
+    m_impl->world = &world;
+
+    JointComponent* jc = jointComponentFor(world, entityA, "setJointMotor");
+    if (!jc)
+        return false;
+    if (jc->type != JointType::Hinge && jc->type != JointType::Slider)
+    {
+        HE_LOG_ERROR(Physics, "setJointMotor(%u): only a Hinge or a Slider has a motor — this "
+                              "joint has no single axis to drive along", entityA);
+        return false;
+    }
+
+    jc->motorTarget   = targetSpeed;
+    jc->motorMaxForce = maxForce;
+
+    const auto it = m_impl->joints.find(entityA);
+    if (it == m_impl->joints.end())
+        return true;   // authored, not built yet — the build applies it
+
+    applyJointMotor(*it->second.constraint, targetSpeed, maxForce);
+    // A motor cannot spin a sleeping body: Jolt stops solving a constraint the
+    // moment both its bodies are asleep, so a door told to open while nothing
+    // was moving would simply stay shut.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    if (bodyInterface.GetMotionType(it->second.bodyA) != JPH::EMotionType::Static)
+        bodyInterface.ActivateBody(it->second.bodyA);
+    if (bodyInterface.GetMotionType(it->second.bodyB) != JPH::EMotionType::Static)
+        bodyInterface.ActivateBody(it->second.bodyB);
+    return true;
+}
+
+bool PhysicsWorld::setJointBreakForce(HorizonWorld& world, uint32_t entityA, float breakForce)
+{
+    if (!m_impl)
+        return false;
+    m_impl->world = &world;
+
+    JointComponent* jc = jointComponentFor(world, entityA, "setJointBreakForce");
+    if (!jc)
+        return false;
+    // Nothing to push into Jolt: the limit is read straight off the component in
+    // step(), so there is no cached copy that could disagree with this one.
+    jc->breakForce = std::max(breakForce, 0.0f);
+    return true;
+}
+
+bool PhysicsWorld::setJointCollideConnected(HorizonWorld& world, uint32_t entityA, bool collide)
+{
+    if (!m_impl)
+        return false;
+    m_impl->world = &world;
+
+    JointComponent* jc = jointComponentFor(world, entityA, "setJointCollideConnected");
+    if (!jc)
+        return false;
+    jc->collideConnected = collide;
+
+    const auto it = m_impl->joints.find(entityA);
+    if (it != m_impl->joints.end())
+        m_impl->setJointedPairCollides(it->second.bodyA, it->second.bodyB, collide);
+    return true;
+}
+
+std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollJointBroken()
+{
+    if (!m_impl)
+        return {};
+    std::vector<CollisionEvent> result;
+    result.swap(m_impl->brokenJoints);
+    return result;
+}
+
+void PhysicsWorld::breakOverloadedJoints(HorizonWorld& world, float dt)
+{
+    if (m_impl->joints.empty())
+        return;
+
+    auto& reg = world.registry();
+
+    // Two passes, because breaking erases from the map being read. The first is
+    // the only one that touches Jolt's solver state, and it has to run before
+    // anything else in step() disturbs it.
+    std::vector<uint32_t> broken;
+    for (const auto& [owner, record] : m_impl->joints)
+    {
+        const Entity e = static_cast<Entity>(owner);
+        if (!reg.valid(e))
+            continue;   // the reap in step() has it — a destroyed joint is not a broken one
+        const auto* jc = reg.try_get<JointComponent>(e);
+        if (!jc || jc->breakForce <= 0.0f)
+            continue;
+        if (jointForceMagnitude(*record.constraint, dt) > jc->breakForce)
+            broken.push_back(owner);
+    }
+
+    for (const uint32_t owner : broken)
+    {
+        const auto it = m_impl->joints.find(owner);
+        if (it == m_impl->joints.end())
+            continue;
+        const uint32_t partner = it->second.partner;
+        HE_LOG_INFO(Physics, "Entity %u: its joint to entity %u broke", owner, partner);
+        m_impl->detachJoint(it->second);
+        m_impl->joints.erase(it);
+        m_impl->unqueueJoint(owner);
+        // The COMPONENT goes too, and that is the whole difference between a
+        // broken joint and a removed one. Left behind it would be rebuilt the
+        // next time the entity's body was — a door back on its hinges because
+        // its collider changed — and it would come back on the next scene load
+        // as well. A broken joint is gone the way removeJoint means gone.
+        const Entity e = static_cast<Entity>(owner);
+        if (reg.valid(e))
+            reg.remove<JointComponent>(e);
+        m_impl->brokenJoints.push_back(CollisionEvent{ owner, partner });
+    }
 }
 
 void PhysicsWorld::destroyBodyFor(uint32_t entityId)
@@ -2168,6 +2516,11 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
     m_impl->physicsSystem.Update(dt, 1,
         &m_impl->tempAllocator, &m_impl->jobSystem);
+
+    // Immediately after Update and before anything else: a constraint's
+    // accumulated impulse describes the step that just ran, and the next call
+    // into Jolt is free to reset it.
+    breakOverloadedJoints(world, dt);
 
     auto& reg           = world.registry();
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
@@ -3233,6 +3586,11 @@ void PhysicsWorld::clear()
         m_impl->physicsSystem.RemoveConstraint(record.constraint);
     m_impl->joints.clear();
     m_impl->pendingJoints.clear();
+    // The contact exemptions go with them; contactListener.reset() below drops
+    // the whole set in one go, which is why the per-joint detachJoint is not
+    // used here. The queue of broken joints goes too: an event nobody drained is
+    // about a scene that no longer exists.
+    m_impl->brokenJoints.clear();
 
     // Same Remove-then-Destroy pair removeEntity() uses, in bulk. The per-entity
     // contact purge is skipped because reset() below drops the whole table at

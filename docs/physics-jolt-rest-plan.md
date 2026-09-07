@@ -855,3 +855,97 @@ Reparatur; sie gehoert nicht in dieses Thema.
   Gelenktyp mit einer messbaren physikalischen Aussage (das Pendel behaelt
   seinen Radius, der Slider traegt das Gewicht, das Seil faengt den Fall) und
   einer, der einen Anker an einer 100 m entfernten Elternkette prueft.
+
+---
+
+## 12. Was Schritt 6 gebaut hat (Constraints, Rest)
+
+`collideConnected`, Motor, Bruch samt `pollJointBroken`, das Details-Panel, die
+Debug-Zeichnung und Handbuch/Tooltips. Damit ist das Thema durch.
+
+### 12.1 Die eine Entscheidung, die aelter ist als dieser Schritt: das Vorzeichen
+
+**Positiv heisst ab jetzt: DIESE Entity bewegt sich entlang IHRER Achse.** Jolt
+misst andersherum — ein `HingeConstraint` und ein `SliderConstraint` messen
+Winkel und Weg als Bewegung von **body2 relativ zu body1**, und body1 ist hier
+die Entity, die die Komponente traegt. Mit der Achse, wie sie dasteht, haette
+„oeffne bis 90°" also den Rahmen gedreht statt die Tuer.
+
+Gemessen, nicht hergeleitet: eine Sonde mit Achse (0,1,0) und Arm auf +X ergab
+`Motor +1 → z = +0.33`, also eine Drehung gegen die Rechte-Hand-Regel, und
+Limits `0..45` liessen genau dieselbe Richtung zu. Jolt ist also in sich
+schluessig — Limit und Motor teilen die Konvention. Deshalb wird **die Achse
+einmal negiert**, an der Jolt-Grenze in `buildJointFor`, und nicht Limit und
+Motor je fuer sich: ein Motor, der von seinem eigenen Limit wegdreht, ist der
+Fehler, in dem sich das sonst zeigen wuerde. Ein Test pinnt beide Richtungen.
+
+Kein bestehender Test kippt dadurch: die aus Schritt 5 benutzen symmetrische
+Bereiche (−5..5, −0.5..0.5), in denen das Vorzeichen nicht sichtbar ist.
+
+### 12.2 collideConnected liegt im Kontakt-Listener, nicht in Jolt
+
+Jolt hat kein Flag „diese beiden duerfen sich nicht beruehren". Das, was es
+anbietet — Kollisions-GRUPPEN am Koerper — vergibt eine Gruppe pro Koerper und
+kann „A ignoriert B, B ignoriert C, A trifft C weiter" nicht ausdruecken; genau
+das ist aber die Form einer Kette. Also `HEContactListener::OnContactValidate`
+mit einer Menge von Body-Paar-Schluesseln (derselbe `bodyPairKey`, also mit
+Sequenznummer — ein recycelter Body-Slot erbt keine alte Ausnahme).
+
+**Die Falle dabei:** `PhysicsSystem::ProcessBodyPair` benutzt einen
+Body-Pair-Cache und ruft `OnContactValidate` **nicht erneut**, solange keiner der
+beiden Koerper seinen Cache fuer ungueltig erklaert hat. Ohne
+`BodyInterface::InvalidateContactCache` auf beide blieb ein zur Laufzeit
+umgeschaltetes `collideConnected` — und ein durchtrenntes Gelenk — wirkungslos.
+Beides laeuft jetzt durch `Impl::setJointedPairCollides`.
+
+Default ist **false**: aufeinanderfolgende Kettenglieder ueberlappen bauartbedingt
+und wuerden sonst gegen das Gelenk arbeiten, das sie haelt. Das ist auch, was
+Unity und Unreal voreinstellen. Kein Test aus Schritt 5 haengt daran.
+
+### 12.3 Motor: die KRAFT ist der Schalter
+
+`motorMaxForce <= 0` heisst aus. Damit faengt kein altes Projekt an, sich zu
+bewegen (0 ist der Default), und „Ziel 0 **mit** Kraft" bleibt als BREMSE
+benutzbar, die eine Tuer zuhaelt — genau der Fall, den ein Ziel-als-Schalter
+unerreichbar gemacht haette. Nur Hinge und Slider; die anderen drei bekommen
+eine Absage mit Log, kein stilles No-Op. `motorTarget` ist eine RATE, also
+rad/s (Hinge) bzw. m/s (Slider); der Satz in `PhysicsWorld.h:402` ist von „die
+eine Ausnahme" auf die Regel umgeschrieben (Pose = Grad, Rate = Radiant).
+
+Angewandt wird der Motor in **`buildJointFor`**, aus der Komponente — sonst
+verlaere ein per Skript gestarteter Aufzug seinen Antrieb beim naechsten
+Collider-Wechsel. `setJointMotor` schreibt erst die Komponente, dann das
+Constraint, und weckt beide Koerper (Jolt loest kein Constraint zwischen
+schlafenden Koerpern).
+
+### 12.4 Bruch
+
+In `step()` direkt nach `Update()`, bevor irgendetwas anderes Jolts Solver-Stand
+anfasst: pro Gelenk `GetTotalLambdaPosition` (Vec3 bei Fixed/Point/Hinge,
+`Vector<2>` beim Slider, ein Float beim Distance — die Rotations-Lambdas
+absichtlich nicht, es bricht der Zug und nicht die Verdrehung), geteilt durch
+`dt`, gegen `breakForce`.
+
+**Ein gebrochenes Gelenk nimmt seine KOMPONENTE mit.** Sonst kaeme die Tuer beim
+naechsten Rebuild ihres Bodys — oder beim naechsten Szenenladen — wieder in die
+Angeln. `pollJointBroken()` liefert die Paare einmal und leert dabei, wie die
+Kontakt-Warteschlangen. Ein ZERSTOERTES Gelenk erscheint dort nicht: dieselbe
+Linie, die `pollCollisionExit` zieht.
+
+### 12.5 Restliches
+
+- Vier neue Registry-Zeilen statt vier weiterer Parameter an `physics.addJoint`
+  (Arity-Falle, § 8.1): `setJointMotor`, `setJointBreakForce`,
+  `setJointCollideConnected`, `pollJointBroken` (zwei parallele Int-Arrays wie
+  `raycastAll`, exec — Lesen leert).
+- Details-Panel: eigener Block „Joint", Typ-Combo mit derselben Klemmung wie die
+  Shape-Combo des Colliders, Ziel-Picker wie bei Rope/Camera Rig (NICHT auf
+  Entities mit RigidBody gefiltert — Hinweise statt versteckter Eintraege),
+  Felder pro Typ, Motor-Zeilen nur bei Hinge/Slider, „Joint" im
+  Komponenten-Menue.
+- Debug-Zeichnung im Viewport (`EditorApplication.cpp`), aus den KOMPONENTEN und
+  fuer JEDES Gelenk der Szene, nicht nur die Auswahl: ein Gelenk ist eine
+  Beziehung zwischen zwei Entities, und ob die Linie hingeht, wo der Autor
+  denkt, sieht er an einem Ende allein nicht. Weltmatrizen ueber
+  `HE::worldMatrixOf`. Jolts `DrawConstraints` scheidet aus (§ 4.7).
+- Elf Handbuch-Eintraege unter `Joint/…`; `editor_help_audit` bleibt bei 727/727.

@@ -393,6 +393,10 @@ namespace
 				{ "axis",     { j->axis.x, j->axis.y, j->axis.z } },
 				{ "minLimit", j->minLimit },
 				{ "maxLimit", j->maxLimit },
+				{ "motorTarget",      j->motorTarget },
+				{ "motorMaxForce",    j->motorMaxForce },
+				{ "breakForce",       j->breakForce },
+				{ "collideConnected", j->collideConnected },
 			};
 		}
 		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
@@ -1022,6 +1026,13 @@ namespace
 			j.axis     = jsonToVec3(c.value("axis",    json()), j.axis);
 			j.minLimit = c.value("minLimit", j.minLimit);
 			j.maxLimit = c.value("maxLimit", j.maxLimit);
+			// Absent in every scene written before the motor existed, and the
+			// defaults are exactly what those scenes meant: no motor, never
+			// breaks, and the two bodies do not collide.
+			j.motorTarget      = c.value("motorTarget",      j.motorTarget);
+			j.motorMaxForce    = c.value("motorMaxForce",    j.motorMaxForce);
+			j.breakForce       = c.value("breakForce",       j.breakForce);
+			j.collideConnected = c.value("collideConnected", j.collideConnected);
 			registry.emplace_or_replace<JointComponent>(entity, j);
 		}
 		if (comps.contains("characterController"))

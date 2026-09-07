@@ -752,6 +752,31 @@ bool hasJoint(Ctx& c, Entity a)
 {
     return c.physics && c.physics->hasJoint(static_cast<uint32_t>(a));
 }
+// The three below write the JointComponent, so they need the world for the same
+// reason addJoint does.
+bool setJointMotor(Ctx& c, Entity a, float targetSpeed, float maxForce)
+{
+    return c.physics && c.world &&
+           c.physics->setJointMotor(*c.world, static_cast<uint32_t>(a), targetSpeed, maxForce);
+}
+bool setJointBreakForce(Ctx& c, Entity a, float breakForce)
+{
+    return c.physics && c.world &&
+           c.physics->setJointBreakForce(*c.world, static_cast<uint32_t>(a), breakForce);
+}
+bool setJointCollideConnected(Ctx& c, Entity a, bool collide)
+{
+    return c.physics && c.world &&
+           c.physics->setJointCollideConnected(*c.world, static_cast<uint32_t>(a), collide);
+}
+std::vector<BrokenJoint> pollJointBroken(Ctx& c)
+{
+    std::vector<BrokenJoint> out;
+    if (!c.physics) return out;
+    for (const auto& ev : c.physics->pollJointBroken())
+        out.push_back({ static_cast<Entity>(ev.entityA), static_cast<Entity>(ev.entityB) });
+    return out;
+}
 } // namespace physics
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -4853,6 +4878,40 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "physics.hasJoint", "Physics", false,
             {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasJoint",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasJoint(c, (Entity)aI(a, 0))) }; } });
+        // The three settings addJoint does not take, each its own row rather
+        // than four more of its parameters: a stored node cannot grow an input,
+        // and all three are things a game changes while it runs anyway.
+        t.push_back({ "physics.setJointMotor", "Physics", true,
+            {{"entity", P::Int}, {"targetSpeed", P::Float}, {"maxForce", P::Float}},
+            {{"ok", P::Bool}}, "HE::api::physics::setJointMotor",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setJointMotor(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "physics.setJointBreakForce", "Physics", true,
+            {{"entity", P::Int}, {"breakForce", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::physics::setJointBreakForce",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setJointBreakForce(
+                c, (Entity)aI(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "physics.setJointCollideConnected", "Physics", true,
+            {{"entity", P::Int}, {"collide", P::Bool}}, {{"ok", P::Bool}},
+            "HE::api::physics::setJointCollideConnected",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setJointCollideConnected(
+                c, (Entity)aI(a, 0), aB(a, 1))) }; } });
+        // Two PARALLEL arrays for the same reason raycastAll has five: a graph
+        // value is a list of ONE type. Index i of each names the same broken
+        // joint. Drained once, here — a second row that drained the same queue
+        // would hand whichever ran second an empty list.
+        t.push_back({ "physics.pollJointBroken", "Physics", true,
+            {}, {{"entitiesA", P::Int, /*isArray=*/true}, {"entitiesB", P::Int, /*isArray=*/true}},
+            "HE::api::physics::pollJointBroken",
+            [](Ctx& c, const VV&){
+                Value as; as.isArray = true; as.type = P::Int;
+                Value bs; bs.isArray = true; bs.type = P::Int;
+                for (const auto& j : physics::pollJointBroken(c))
+                {
+                    as.items.push_back(Value::ofInt((int)j.a));
+                    bs.items.push_back(Value::ofInt((int)j.b));
+                }
+                return VV{ std::move(as), std::move(bs) }; } });
 
         // Materials
         t.push_back({ "material.getParam", "Material", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Color}}, "HE::api::material::getParam",
@@ -6041,6 +6100,10 @@ const std::vector<ApiFn>& registry()
             { "physics.hasPhysics", "Has Physics" },
             { "physics.addJoint", "Add Joint" },       { "physics.removeJoint", "Remove Joint" },
             { "physics.hasJoint", "Has Joint" },
+            { "physics.setJointMotor", "Set Joint Motor" },
+            { "physics.setJointBreakForce", "Set Joint Break Force" },
+            { "physics.setJointCollideConnected", "Set Joint Collide Connected" },
+            { "physics.pollJointBroken", "Poll Joint Broken" },
             // Suffixed for the same reason as Get Velocity below: Transform owns
             // the unqualified "Set Position", and the add menu lists both flat.
             { "physics.setPosition", "Set Position (Physics)" },

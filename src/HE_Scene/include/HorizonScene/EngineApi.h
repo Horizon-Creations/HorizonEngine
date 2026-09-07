@@ -534,6 +534,47 @@ namespace physics {
     // simulation rather than about the component.
     bool hasJoint(Ctx&, Entity a);
 
+    // The three settings addJoint does NOT take. They are their own rows rather
+    // than four more arguments on that one because a node stored in a graph
+    // cannot grow an input later: a row that gained a parameter would silently
+    // read a zero for it in every graph saved before today. Each of these also
+    // does something on its own — a motor is started and stopped while the game
+    // runs, not authored once — so they would have needed a row regardless.
+    //
+    // Drive a HINGE or a SLIDER: the door opens, the platform rises.
+    // `targetSpeed` is RADIANS per second for a hinge and metres per second for
+    // a slider — a rate, so radians, the same rule setAngularVelocity follows.
+    // `maxForce` IS THE SWITCH: at or below zero the motor is off, and a target
+    // of zero with force behind it is a brake that holds the joint still.
+    // Refused with a log on the other three types, which have no axis to drive.
+    bool setJointMotor(Ctx&, Entity a, float targetSpeed, float maxForce);
+
+    // How much force the joint carries before it lets go, in newtons; 0 never
+    // breaks. When it does break, the joint AND its component are gone — the
+    // door is off its hinges — and the pair shows up in pollJointBroken once.
+    bool setJointBreakForce(Ctx&, Entity a, float breakForce);
+
+    // May the two jointed bodies touch each other? False by default, which is
+    // what a chain of overlapping links needs.
+    bool setJointCollideConnected(Ctx&, Entity a, bool collide);
+
+    // Every joint that BROKE since the last call, as two parallel lists: the
+    // entity that owned the joint and the one it was tied to. Drained, like the
+    // contact queues — whoever asks first gets them, so ask in one place.
+    //
+    // A joint that was removed, or whose entity was destroyed, does not appear:
+    // "it is gone" is not "it broke", and the sound that plays here is a snap.
+    //
+    // ONE function behind two output lists, like raycastAll: draining twice
+    // would hand the second caller nothing, so the split into parallel arrays
+    // happens after the single drain, in the registry row.
+    struct BrokenJoint
+    {
+        Entity a{};   // the entity that owned the joint
+        Entity b{};   // the one it was tied to
+    };
+    std::vector<BrokenJoint> pollJointBroken(Ctx&);
+
     // Does this entity have a body or a character controller at all? The guard
     // to ask before pushing, and the one honest answer to "why did my impulse do
     // nothing" — false without a PhysicsWorld too.

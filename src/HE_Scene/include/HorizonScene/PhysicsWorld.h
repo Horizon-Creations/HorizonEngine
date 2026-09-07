@@ -399,10 +399,14 @@ public:
     bool      setVelocity(uint32_t entityId, const glm::vec3& velocity);
     glm::vec3 getVelocity(uint32_t entityId) const;
 
-    // Spin, in RADIANS PER SECOND about the world axes — the one place in this
-    // API that is not in degrees, because it is a rate rather than a pose and
-    // every physics number it is combined with (a torque, an inertia) is in
-    // radians. A full turn a second is (0, 6.283, 0).
+    // Spin, in RADIANS PER SECOND about the world axes. Radians because it is a
+    // RATE rather than a pose, and every physics number it is combined with (a
+    // torque, an inertia) is in radians. A full turn a second is (0, 6.283, 0).
+    //
+    // That is the rule the whole surface follows, not an exception: a POSE is in
+    // degrees (an entity's rotation, a shape cast's rotation, a hinge's limits)
+    // and a RATE is in radians. The other rate is setJointMotor's target speed
+    // for a hinge, and it says so where it lives.
     //
     // RIGID BODIES ONLY, and no character dispatch like the pair above: a
     // CharacterVirtual has no angular velocity at all — it is kept upright by
@@ -429,6 +433,12 @@ public:
         glm::vec3 axis{ 0.0f, 1.0f, 0.0f };  // LOCAL to A; hinge axis / slider direction
         float     minLimit = 0.0f;   // DEGREES (hinge) or metres (slider)
         float     maxLimit = 0.0f;   // min >= max means unlimited
+        // Hinge and Slider only. RADIANS per second / metres per second, and
+        // the FORCE is the switch — see the component.
+        float     motorTarget   = 0.0f;
+        float     motorMaxForce = 0.0f;
+        float     breakForce    = 0.0f;   // newtons; 0 never breaks
+        bool      collideConnected = false;   // may the two bodies touch
     };
 
     // Join entityA to entityB. Writes entityA's JointComponent from `desc` — the
@@ -460,6 +470,44 @@ public:
     // it have a JointComponent": a joint whose partner has not spawned yet is
     // authored but not yet built, and this answers about the simulation.
     bool hasJoint(uint32_t entityA) const;
+
+    // Drive the joint: the door opens, the platform rises, the wheel spins.
+    // HINGE AND SLIDER ONLY — the other three have no single axis to drive
+    // along, and asking is refused with a log rather than ignored.
+    //
+    // `targetSpeed` is RADIANS per second for a hinge and metres per second for
+    // a slider (a rate, so radians — see setAngularVelocity). `maxForce` is the
+    // switch: at or below zero the motor is OFF, and a target of zero with force
+    // behind it is a BRAKE that holds the joint where it is.
+    //
+    // Writes the component first and the live constraint second, like every
+    // other joint call, so a motor started mid-game survives a save, a load and
+    // a rebuild of either body.
+    bool setJointMotor(HorizonWorld& world, uint32_t entityA,
+                       float targetSpeed, float maxForce);
+
+    // How much force the joint carries before it lets go, in newtons; 0 never
+    // breaks. Live: no rebuild, and the joint that is already over the limit
+    // breaks on the next step.
+    bool setJointBreakForce(HorizonWorld& world, uint32_t entityA, float breakForce);
+
+    // May the two jointed bodies touch each other? False is the default and what
+    // a chain wants — see the component. Takes effect on the next step; contacts
+    // that already exist are not retro-actively removed, which matters for one
+    // frame and never again.
+    bool setJointCollideConnected(HorizonWorld& world, uint32_t entityA, bool collide);
+
+    // Every joint that broke since the last call, as the entity pair it joined —
+    // `entityA` is the one that owned the JointComponent. Drained, like the
+    // contact queues, and for the same reason: an event nobody took is an event
+    // that happened once.
+    //
+    // A joint that was DESTROYED does not appear here — not through
+    // removeJoint, not because one of its bodies was deleted, not through
+    // clear(). Only a joint that lost to the forces on it. That is the same line
+    // pollCollisionExit draws: "it was destroyed" is not "it broke", and game
+    // code that plays a snapping sound has no use for the first.
+    std::vector<CollisionEvent> pollJointBroken();
 
     // Set the movement velocity for a CharacterController entity (m/s).
     // Has no effect if the entity has no active character controller.
@@ -577,6 +625,12 @@ private:
     // and the chain the entity was part of has to come back) and what a removal
     // does not.
     void destroyJointsInvolving(uint32_t entityId, bool requeue);
+
+    // Break every joint whose component names a breakForce it exceeded in the
+    // step that just ran, and remember the pairs for pollJointBroken(). Runs
+    // from step() right after Update(), while the solver's accumulated impulses
+    // still describe the step they were solved for.
+    void breakOverloadedJoints(HorizonWorld& world, float dt);
 
     // Try to build every joint that is authored but not yet in the simulation.
     // Run after each body is built, because "the partner does not exist yet" is

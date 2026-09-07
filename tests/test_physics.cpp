@@ -2760,3 +2760,386 @@ TEST_CASE("PhysicsWorld: a joint anchor is local, so a parented body hangs where
     CHECK(glm::length(worldPos - glm::vec3(100.0f, 10.0f, 0.0f))
               == doctest::Approx(2.0f).epsilon(0.05));
 }
+
+// ─── Joints, part two: collideConnected, motor, break ─────────────────────────
+
+namespace {
+    // The four fields Step 6 added are set on the component after jointTo has
+    // written it, rather than as four more defaulted parameters there: the
+    // helper's signature is already at its limit, and a test that says
+    // `jc.breakForce = 5` reads as what it is.
+    JointComponent& jointOf(HorizonWorld& world, Entity e)
+    {
+        return world.registry().get<JointComponent>(e);
+    }
+
+    // Did the two entities touch at all over `steps` steps? Drains the queue
+    // every step, because it is a queue and a scene that keeps touching would
+    // otherwise only ever be asked about its first frame.
+    bool touchedEachOther(HorizonWorld& world, PhysicsWorld& phys,
+                          Entity a, Entity b, int steps)
+    {
+        const auto ia = static_cast<uint32_t>(a);
+        const auto ib = static_cast<uint32_t>(b);
+        bool touched = false;
+        for (int i = 0; i < steps; ++i)
+        {
+            phys.step(world, kDt);
+            for (const auto& ev : phys.pollCollisionEnter())
+                if ((ev.entityA == ia && ev.entityB == ib) ||
+                    (ev.entityA == ib && ev.entityB == ia))
+                    touched = true;
+        }
+        return touched;
+    }
+}
+
+TEST_CASE("PhysicsWorld: collideConnected decides whether two jointed bodies touch")
+{
+    // Two boxes welded together while overlapping — the shape of every chain
+    // link and every ragdoll limb. Off, they ignore each other; on, they report
+    // the contact like any other pair.
+    const auto run = [](bool collide) {
+        HorizonWorld world;
+        const Entity a = makeDynamicBox(world, "A", { 0.00f, 10.0f, 0.0f });
+        const Entity b = makeDynamicBox(world, "B", { 0.25f, 10.0f, 0.0f });
+        jointTo(world, b, a, JointType::Fixed);
+        PhysicsWorld phys;
+        phys.initialize(world);
+        // Set BEFORE the build would be the same thing; set after and rebuilt is
+        // the live path, and it has to agree with the authored one.
+        jointOf(world, b).collideConnected = collide;
+        phys.addEntity(world, static_cast<uint32_t>(b));
+        REQUIRE(phys.hasJoint(static_cast<uint32_t>(b)));
+        return touchedEachOther(world, phys, a, b, 30);
+    };
+
+    CHECK_FALSE(run(false));   // the default, and what a chain needs
+    CHECK(run(true));
+}
+
+TEST_CASE("PhysicsWorld: setJointCollideConnected takes effect without a rebuild")
+{
+    HorizonWorld world;
+    const Entity a = makeDynamicBox(world, "A", { 0.00f, 10.0f, 0.0f });
+    const Entity b = makeDynamicBox(world, "B", { 0.25f, 10.0f, 0.0f });
+    jointTo(world, b, a, JointType::Fixed);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(b)));
+    CHECK_FALSE(touchedEachOther(world, phys, a, b, 20));
+
+    CHECK(phys.setJointCollideConnected(world, static_cast<uint32_t>(b), true));
+    CHECK(jointOf(world, b).collideConnected);         // the component is the truth
+    CHECK(touchedEachOther(world, phys, a, b, 20));    // and the simulation agrees
+
+    // A joint the entity does not own is not a joint it can change: only the
+    // side that AUTHORED it carries the component.
+    CHECK_FALSE(phys.setJointCollideConnected(world, static_cast<uint32_t>(a), true));
+}
+
+TEST_CASE("PhysicsWorld: a Hinge motor drives the door, and the force is the switch")
+{
+    // A VERTICAL hinge axis, so gravity pulls along the axis and cannot turn the
+    // door at all: every degree of rotation below is the motor's doing and
+    // nothing else's.
+    const auto swing = [](float targetSpeed, float maxForce) {
+        HorizonWorld world;
+        const Entity frame = makeStaticBox(world,  "Frame", { 0.0f, 10.0f, 0.0f });
+        const Entity door  = makeDynamicBox(world, "Door",  { 1.0f, 10.0f, 0.0f });
+        jointTo(world, door, frame, JointType::Hinge, { -1.0f, 0.0f, 0.0f },
+                { 0.0f, 1.0f, 0.0f });
+        auto& jc = jointOf(world, door);
+        jc.motorTarget   = targetSpeed;
+        jc.motorMaxForce = maxForce;
+        PhysicsWorld phys;
+        phys.initialize(world);
+        REQUIRE(phys.hasJoint(static_cast<uint32_t>(door)));
+        for (int i = 0; i < 60; ++i)
+            phys.step(world, kDt);
+        return posOf(world, door);
+    };
+
+    // Half a turn a second for a second: the door is somewhere else entirely,
+    // and still exactly a metre from its pivot.
+    const glm::vec3 driven = swing(3.14f, 200.0f);
+    CHECK(glm::length(driven - glm::vec3(1.0f, 10.0f, 0.0f)) > 1.0f);
+    CHECK(glm::length(driven - glm::vec3(0.0f, 10.0f, 0.0f))
+              == doctest::Approx(1.0f).epsilon(0.05));
+
+    // A target with no force behind it is not a motor. This is the default, so
+    // it is also the promise that no old scene starts moving by itself.
+    const glm::vec3 idle = swing(3.14f, 0.0f);
+    CHECK(glm::length(idle - glm::vec3(1.0f, 10.0f, 0.0f)) < 0.1f);
+}
+
+TEST_CASE("PhysicsWorld: a Slider motor drives the platform, and a zero target brakes it")
+{
+    const auto travel = [](float targetSpeed, float maxForce, bool push) {
+        HorizonWorld world;
+        const Entity rail     = makeStaticBox(world,  "Rail",     { 5.0f, 10.0f, 0.0f });
+        const Entity carriage = makeDynamicBox(world, "Carriage", { 0.0f, 10.0f, 0.0f });
+        jointTo(world, carriage, rail, JointType::Slider, glm::vec3(0.0f),
+                { 1.0f, 0.0f, 0.0f });
+        PhysicsWorld phys;
+        phys.initialize(world);
+        REQUIRE(phys.hasJoint(static_cast<uint32_t>(carriage)));
+        CHECK(phys.setJointMotor(world, static_cast<uint32_t>(carriage),
+                                 targetSpeed, maxForce));
+        if (push)
+            phys.addImpulse(static_cast<uint32_t>(carriage), { 20.0f, 0.0f, 0.0f });
+        for (int i = 0; i < 60; ++i)
+            phys.step(world, kDt);
+        return posOf(world, carriage).x;
+    };
+
+    // A metre a second for a second, along the only axis it may travel.
+    CHECK(travel(1.0f, 500.0f, false) == doctest::Approx(1.0f).epsilon(0.1));
+    // Zero target WITH force is a brake: the shove is absorbed in a few
+    // centimetres instead of carrying the carriage down the rail. That case is
+    // the reason the force is the switch and not the target.
+    CHECK(std::abs(travel(0.0f, 500.0f, true)) < 0.4f);
+    // Zero force is off, so the same shove sends it down the rail.
+    CHECK(travel(0.0f, 0.0f, true) > 1.0f);
+}
+
+TEST_CASE("PhysicsWorld: only a Hinge or a Slider has a motor")
+{
+    HorizonWorld world;
+    const Entity hook = makeStaticBox(world,  "Hook", { 0.0f, 10.0f, 0.0f });
+    const Entity load = makeDynamicBox(world, "Load", { 0.0f,  5.0f, 0.0f });
+    jointTo(world, load, hook, JointType::Distance);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(load)));
+
+    // Refused, not ignored: a rope has no axis to drive along, and a silent
+    // no-op reads to the author as "physics is broken".
+    CHECK_FALSE(phys.setJointMotor(world, static_cast<uint32_t>(load), 1.0f, 100.0f));
+    CHECK(jointOf(world, load).motorMaxForce == doctest::Approx(0.0f));
+
+    // Neither is an entity with no joint at all.
+    CHECK_FALSE(phys.setJointMotor(world, static_cast<uint32_t>(hook), 1.0f, 100.0f));
+}
+
+TEST_CASE("PhysicsWorld: a motor set on an unbuilt joint is applied when it is built")
+{
+    HorizonWorld world;
+    const Entity rail     = makeStaticBox(world,  "Rail",     { 5.0f, 10.0f, 0.0f });
+    const Entity carriage = makeDynamicBox(world, "Carriage", { 0.0f, 10.0f, 0.0f });
+    jointTo(world, carriage, rail, JointType::Slider, glm::vec3(0.0f),
+            { 1.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;   // NOT initialised yet — nothing is built
+    CHECK(phys.setJointMotor(world, static_cast<uint32_t>(carriage), 1.0f, 500.0f));
+
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(carriage)));
+    for (int i = 0; i < 60; ++i)
+        phys.step(world, kDt);
+    CHECK(posOf(world, carriage).x == doctest::Approx(1.0f).epsilon(0.1));
+}
+
+TEST_CASE("PhysicsWorld: breakForce lets go, and says so exactly once")
+{
+    HorizonWorld world;
+    const Entity hook = makeStaticBox(world,  "Hook", { 0.0f, 10.0f, 0.0f });
+    const Entity load = makeDynamicBox(world, "Load", { 0.0f,  8.0f, 0.0f });
+    jointTo(world, load, hook, JointType::Distance);
+    // The rope carries the load's weight, m·g ≈ 9.8 N. Two newtons is not
+    // enough rope for that.
+    jointOf(world, load).breakForce = 2.0f;
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(load)));
+    CHECK(phys.pollJointBroken().empty());
+
+    std::vector<PhysicsWorld::CollisionEvent> broken;
+    for (int i = 0; i < 60; ++i)
+    {
+        phys.step(world, kDt);
+        for (const auto& ev : phys.pollJointBroken())
+            broken.push_back(ev);
+    }
+
+    REQUIRE(broken.size() == 1);   // once, not once per step after it went
+    CHECK(broken[0].entityA == static_cast<uint32_t>(load));
+    CHECK(broken[0].entityB == static_cast<uint32_t>(hook));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(load)));
+    // The COMPONENT goes too — that is the whole difference between a joint that
+    // broke and one that is merely not built: left behind, it would come back on
+    // the next scene load and the next rebuild of either body.
+    CHECK_FALSE(world.registry().all_of<JointComponent>(load));
+    CHECK(posOf(world, load).y < 7.0f);   // and it is falling
+}
+
+TEST_CASE("PhysicsWorld: a rope strong enough for its load never breaks")
+{
+    HorizonWorld world;
+    const Entity hook = makeStaticBox(world,  "Hook", { 0.0f, 10.0f, 0.0f });
+    const Entity load = makeDynamicBox(world, "Load", { 0.0f,  8.0f, 0.0f });
+    jointTo(world, load, hook, JointType::Distance);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    // Zero is the default and means "never", so the first run is also the
+    // promise that no existing scene starts shedding its joints.
+    for (int i = 0; i < 60; ++i)
+    {
+        phys.step(world, kDt);
+        CHECK(phys.pollJointBroken().empty());
+    }
+    CHECK(phys.hasJoint(static_cast<uint32_t>(load)));
+
+    // A thousand newtons is far more than this load can pull.
+    CHECK(phys.setJointBreakForce(world, static_cast<uint32_t>(load), 1000.0f));
+    for (int i = 0; i < 60; ++i)
+    {
+        phys.step(world, kDt);
+        CHECK(phys.pollJointBroken().empty());
+    }
+    CHECK(phys.hasJoint(static_cast<uint32_t>(load)));
+}
+
+TEST_CASE("PhysicsWorld: a joint that was REMOVED did not break")
+{
+    // "It is gone" is not "it broke", and the code that plays a snapping sound
+    // has no use for the first. Same line pollCollisionExit draws for a
+    // destroyed body.
+    HorizonWorld world;
+    const Entity hook = makeStaticBox(world,  "Hook", { 0.0f, 10.0f, 0.0f });
+    const Entity load = makeDynamicBox(world, "Load", { 0.0f,  8.0f, 0.0f });
+    jointTo(world, load, hook, JointType::Distance);
+    jointOf(world, load).breakForce = 1000.0f;
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(load)));
+
+    CHECK(phys.removeJoint(world, static_cast<uint32_t>(load)));
+    phys.step(world, kDt);
+    CHECK(phys.pollJointBroken().empty());
+
+    // Nor did destroying the far end of one.
+    const Entity hook2 = makeStaticBox(world,  "Hook2", { 20.0f, 10.0f, 0.0f });
+    const Entity load2 = makeDynamicBox(world, "Load2", { 20.0f,  8.0f, 0.0f });
+    jointTo(world, load2, hook2, JointType::Distance);
+    jointOf(world, load2).breakForce = 1000.0f;
+    phys.addEntity(world, static_cast<uint32_t>(hook2));
+    phys.addEntity(world, static_cast<uint32_t>(load2));
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(load2)));
+    phys.removeEntity(static_cast<uint32_t>(hook2));
+    phys.step(world, kDt);
+    CHECK(phys.pollJointBroken().empty());
+}
+
+TEST_CASE("PhysicsWorld: clearing the world forgets the broken joints with it")
+{
+    HorizonWorld world;
+    const Entity hook = makeStaticBox(world,  "Hook", { 0.0f, 10.0f, 0.0f });
+    const Entity load = makeDynamicBox(world, "Load", { 0.0f,  8.0f, 0.0f });
+    jointTo(world, load, hook, JointType::Distance);
+    jointOf(world, load).breakForce = 2.0f;
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 30; ++i)
+        phys.step(world, kDt);
+
+    // An event nobody drained is about a scene that no longer exists; handing it
+    // over after a clear would name entities of the previous level.
+    phys.clear();
+    CHECK(phys.pollJointBroken().empty());
+}
+
+TEST_CASE("PhysicsWorld: a rebuilt body keeps the motor and the break force its component names")
+{
+    // addEntity is documented idempotent: it tears the body down and puts a new
+    // one up, which takes the joint with it. Everything the component says has
+    // to come back, or a collider change mid-game silently stops the lift.
+    HorizonWorld world;
+    const Entity rail     = makeStaticBox(world,  "Rail",     { 5.0f, 10.0f, 0.0f });
+    const Entity carriage = makeDynamicBox(world, "Carriage", { 0.0f, 10.0f, 0.0f });
+    jointTo(world, carriage, rail, JointType::Slider, glm::vec3(0.0f),
+            { 1.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    CHECK(phys.setJointMotor(world, static_cast<uint32_t>(carriage), 1.0f, 500.0f));
+
+    phys.addEntity(world, static_cast<uint32_t>(carriage));   // the rebuild
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(carriage)));
+
+    for (int i = 0; i < 60; ++i)
+        phys.step(world, kDt);
+    CHECK(posOf(world, carriage).x == doctest::Approx(1.0f).epsilon(0.1));
+}
+
+TEST_CASE("PhysicsWorld: positive means THIS entity moves along its own Axis")
+{
+    // The one sign in the whole joint surface, and it is worth a test because
+    // Jolt's own convention is the other way round: it measures the OTHER body
+    // relative to this one, so a door told to open to 90° would have swung the
+    // building. The axis is flipped once, where it crosses into Jolt, and the
+    // limits and the motor both inherit that — which is the property this test
+    // is really about, since a motor driving away from its own limit is the way
+    // that mistake shows up in a level.
+
+    // A hinge about +Y, arm out along +X: a POSITIVE rotation by the right-hand
+    // rule takes +X towards -Z.
+    {
+        HorizonWorld world;
+        const Entity frame = makeStaticBox(world,  "Frame", { 0.0f, 10.0f, 0.0f });
+        const Entity door  = makeDynamicBox(world, "Door",  { 1.0f, 10.0f, 0.0f });
+        jointTo(world, door, frame, JointType::Hinge, { -1.0f, 0.0f, 0.0f },
+                { 0.0f, 1.0f, 0.0f });
+        auto& jc = jointOf(world, door);
+        jc.motorTarget   = 1.0f;
+        jc.motorMaxForce = 200.0f;
+        PhysicsWorld phys;
+        phys.initialize(world);
+        for (int i = 0; i < 20; ++i)
+            phys.step(world, kDt);
+        CHECK(posOf(world, door).z < -0.1f);
+    }
+
+    // And the limits agree: 0 to 45 degrees allows that same direction and stops
+    // the other one dead.
+    {
+        const auto shoved = [](float impulseZ) {
+            HorizonWorld world;
+            const Entity frame = makeStaticBox(world,  "Frame", { 0.0f, 10.0f, 0.0f });
+            const Entity door  = makeDynamicBox(world, "Door",  { 1.0f, 10.0f, 0.0f });
+            jointTo(world, door, frame, JointType::Hinge, { -1.0f, 0.0f, 0.0f },
+                    { 0.0f, 1.0f, 0.0f }, 0.0f, 45.0f);
+            PhysicsWorld phys;
+            phys.initialize(world);
+            phys.addImpulse(static_cast<uint32_t>(door), { 0.0f, 0.0f, impulseZ });
+            for (int i = 0; i < 60; ++i)
+                phys.step(world, kDt);
+            return posOf(world, door).z;
+        };
+        CHECK(shoved(-5.0f) < -0.2f);   // into the range, and it travels
+        CHECK(shoved( 5.0f) < 0.05f);   // against the stop at 0, and it does not
+    }
+
+    // A slider is the same statement without the trigonometry: positive travel
+    // is along the authored axis.
+    {
+        HorizonWorld world;
+        const Entity rail     = makeStaticBox(world,  "Rail",     { 5.0f, 10.0f, 0.0f });
+        const Entity carriage = makeDynamicBox(world, "Carriage", { 0.0f, 10.0f, 0.0f });
+        jointTo(world, carriage, rail, JointType::Slider, glm::vec3(0.0f),
+                { 1.0f, 0.0f, 0.0f }, 0.0f, 0.5f);
+        PhysicsWorld phys;
+        phys.initialize(world);
+        phys.addImpulse(static_cast<uint32_t>(carriage), { 20.0f, 0.0f, 0.0f });
+        for (int i = 0; i < 60; ++i)
+            phys.step(world, kDt);
+        CHECK(posOf(world, carriage).x == doctest::Approx(0.5f).epsilon(0.05));
+    }
+}

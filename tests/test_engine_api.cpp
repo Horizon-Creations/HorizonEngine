@@ -4225,3 +4225,75 @@ TEST_CASE("Physics: the joint rows are neutral without a PhysicsWorld")
     REQUIRE(out.size() == 1);
     CHECK_FALSE(out[0].b);
 }
+
+TEST_CASE("Physics: the motor, the break force and the broken-joint queue have their own rows")
+{
+    using HE::api::find;
+
+    // Four rows rather than four more parameters on Add Joint. The reason is the
+    // one that shaped that row too: a node saved in a graph cannot grow an
+    // input, so a parameter added later reads as a silent zero in every graph
+    // that predates it. These three are also things a game changes while it
+    // runs, which a constructor argument could not express anyway.
+    const auto* motor = find("physics.setJointMotor");
+    REQUIRE(motor != nullptr);
+    CHECK(motor->isExec);
+    REQUIRE(motor->params.size() == 3);
+    CHECK(motor->params[0].name == std::string("entity"));
+    CHECK(motor->params[1].name == std::string("targetSpeed"));
+    CHECK(motor->params[1].type == P::Float);
+    CHECK(motor->params[2].name == std::string("maxForce"));
+    REQUIRE(motor->results.size() == 1);
+    CHECK(motor->results[0].type == P::Bool);
+
+    const auto* breakForce = find("physics.setJointBreakForce");
+    REQUIRE(breakForce != nullptr);
+    CHECK(breakForce->isExec);
+    REQUIRE(breakForce->params.size() == 2);
+    CHECK(breakForce->params[1].type == P::Float);
+
+    const auto* collide = find("physics.setJointCollideConnected");
+    REQUIRE(collide != nullptr);
+    REQUIRE(collide->params.size() == 2);
+    CHECK(collide->params[1].name == std::string("collide"));
+    CHECK(collide->params[1].type == P::Bool);
+
+    // Two PARALLEL arrays, like raycastAll's five: a graph value is a list of
+    // ONE type, so a pair of entities has to be taken apart. Exec, because
+    // reading it EMPTIES it — that is a side effect, and a pure node would let
+    // the graph read it twice and get nothing the second time.
+    const auto* poll = find("physics.pollJointBroken");
+    REQUIRE(poll != nullptr);
+    CHECK(poll->isExec);
+    CHECK(poll->params.empty());
+    REQUIRE(poll->results.size() == 2);
+    CHECK(poll->results[0].name == std::string("entitiesA"));
+    CHECK(poll->results[0].isArray);
+    CHECK(poll->results[1].name == std::string("entitiesB"));
+    CHECK(poll->results[1].isArray);
+}
+
+TEST_CASE("Physics: the new joint rows are neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::setJointMotor(c, 1, 1.0f, 100.0f));
+    CHECK_FALSE(HE::api::physics::setJointBreakForce(c, 1, 100.0f));
+    CHECK_FALSE(HE::api::physics::setJointCollideConnected(c, 1, true));
+    CHECK(HE::api::physics::pollJointBroken(c).empty());
+
+    // And through the thunks, which is the path a graph actually takes. The
+    // poll row must still hand back its two lists — an empty one each, not no
+    // outputs at all, or a For Each downstream reads a missing value.
+    auto out = HE::api::find("physics.pollJointBroken")->invoke(c, {});
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].isArray);
+    CHECK(out[0].items.empty());
+    CHECK(out[1].isArray);
+    CHECK(out[1].items.empty());
+
+    auto motorOut = HE::api::find("physics.setJointMotor")->invoke(c,
+        { Value::ofInt(1), Value::ofFloat(1.0f), Value::ofFloat(100.0f) });
+    REQUIRE(motorOut.size() == 1);
+    CHECK_FALSE(motorOut[0].b);
+}

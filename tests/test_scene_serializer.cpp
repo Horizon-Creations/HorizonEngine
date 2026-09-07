@@ -2200,6 +2200,10 @@ TEST_CASE("A joint survives a save and a load, target and all")
 	j.axis     = {  0.0f, 0.0f, 1.0f };
 	j.minLimit = -95.0f;
 	j.maxLimit =  12.5f;
+	j.motorTarget      = 2.5f;
+	j.motorMaxForce    = 400.0f;
+	j.breakForce       = 1500.0f;
+	j.collideConnected = true;
 	world.registry().emplace<JointComponent>(door, j);
 
 	SceneSerializer ser;
@@ -2226,6 +2230,12 @@ TEST_CASE("A joint survives a save and a load, target and all")
 	CHECK(out->axis.z    == doctest::Approx(1.0f));
 	CHECK(out->minLimit  == doctest::Approx(-95.0f));
 	CHECK(out->maxLimit  == doctest::Approx(12.5f));
+	// The four Step 6 added. A motor that did not survive the save would be a
+	// door that opens in the editor and stands still in the packaged build.
+	CHECK(out->motorTarget   == doctest::Approx(2.5f));
+	CHECK(out->motorMaxForce == doctest::Approx(400.0f));
+	CHECK(out->breakForce    == doctest::Approx(1500.0f));
+	CHECK(out->collideConnected);
 
 	// And the reference still points at the same entity in the loaded world.
 	CHECK(out->target == loaded.entityId(loadedAnchor));
@@ -2288,4 +2298,66 @@ TEST_CASE("A joint type from a newer build loads as Fixed rather than as itself"
 		++seen;
 	}
 	CHECK(seen == 1);
+}
+
+TEST_CASE("A joint saved before the motor existed loads with no motor and no break force")
+{
+	// A scene from Step 5 has none of the four keys Step 6 added, and what it
+	// meant is exactly what the defaults say: nothing drives it, nothing breaks
+	// it, and the two bodies do not collide. Written by hand rather than by the
+	// save path, because the save path cannot produce an old file any more.
+	HorizonWorld world;
+	const Entity anchor = world.createEntity("Anchor");
+	const Entity door   = world.createEntity("Door");
+	world.addComponent(anchor, TransformComponent{});
+	world.addComponent(door,   TransformComponent{});
+	{
+		JointComponent j;
+		j.type   = JointType::Slider;
+		j.target = world.entityId(anchor);
+		world.registry().emplace<JointComponent>(door, j);
+	}
+
+	const fs::path file = fs::temp_directory_path() / "he_test_joint_pre_motor.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	nlohmann::json scene;
+	{
+		std::ifstream in(file);
+		REQUIRE(in.good());
+		in >> scene;
+	}
+	bool stripped = false;
+	for (auto& e : scene["entities"])
+	{
+		auto comps = e.find("components");
+		if (comps == e.end() || !comps->contains("joint")) continue;
+		for (const char* key : { "motorTarget", "motorMaxForce", "breakForce",
+		                         "collideConnected" })
+			(*comps)["joint"].erase(key);
+		stripped = true;
+	}
+	REQUIRE(stripped);
+	{
+		std::ofstream out(file);
+		REQUIRE(out.good());
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	he_test::removeQuiet(file);
+	Entity loadedDoor = entt::null;
+	for (auto [e, n] : loaded.registry().view<NameComponent>().each())
+		if (n.name == "Door") loadedDoor = e;
+	REQUIRE(loadedDoor != Entity{ entt::null });
+
+	const auto* out = loaded.registry().try_get<JointComponent>(loadedDoor);
+	REQUIRE(out != nullptr);
+	CHECK(out->type == JointType::Slider);   // everything it DID say still arrives
+	CHECK(out->motorTarget   == doctest::Approx(0.0f));
+	CHECK(out->motorMaxForce == doctest::Approx(0.0f));
+	CHECK(out->breakForce    == doctest::Approx(0.0f));
+	CHECK_FALSE(out->collideConnected);
 }

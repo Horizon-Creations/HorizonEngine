@@ -27,6 +27,13 @@ using JointType = HE::JointType;
 //   Distance   anchorA AND anchorB — the one type that reads both, because a
 //              rope really does run from a point on A to a point on B
 //
+// The MOTOR (motorTarget/motorMaxForce) is Hinge's and Slider's alone: those are
+// the two types with a single degree of freedom to drive along. The other three
+// have nothing to turn or push, and a motor authored on one of them is refused
+// with a log rather than quietly doing nothing.
+//
+// collideConnected and breakForce read the same for all five.
+//
 // WHY NOT TWO ANCHORS EVERYWHERE: giving Point or Hinge two separate world
 // points tells Jolt to make them the same point, so the first step snaps the
 // two bodies together. One shared pivot is Jolt's own recipe (see the note in
@@ -75,4 +82,43 @@ struct JointComponent
     // does not is widened to include it, with a warning.
     float minLimit = 0.0f;
     float maxLimit = 0.0f;
+
+    // ── Motor: Hinge and Slider only ─────────────────────────────────────────
+    // What the joint drives itself towards, and how hard it is allowed to push.
+    //
+    // motorMaxForce IS THE SWITCH, not motorTarget. A motor with no force behind
+    // it is off — which is the default, so nothing an older scene carries starts
+    // moving — and a target of zero with force behind it is a BRAKE that holds
+    // the door shut. Reading the target as the switch would have made that
+    // perfectly ordinary setup unreachable.
+    //
+    // motorTarget is a RATE: RADIANS per second for a hinge, metres per second
+    // for a slider. Radians, unlike the limits above, for the reason the physics
+    // API gives at setAngularVelocity — a rate is not a pose, and every rate on
+    // this surface is in radians. Newtons for a slider, newton-metres for a
+    // hinge; both are a symmetric limit, so a motor can pull as hard as it
+    // pushes.
+    float motorTarget   = 0.0f;
+    float motorMaxForce = 0.0f;
+
+    // How much force the joint carries before it lets go, in newtons. 0 means it
+    // never breaks, which is the default.
+    //
+    // Breaking DESTROYS the joint and this component with it: a broken door is
+    // off its hinges, and leaving the component behind would rebuild the joint
+    // the next time the entity's body was rebuilt — or the next time the scene
+    // was loaded. PhysicsWorld::pollJointBroken reports the pair it was, once.
+    float breakForce = 0.0f;
+
+    // May the two jointed bodies touch each other?
+    //
+    // FALSE BY DEFAULT, which is what a chain wants: consecutive links overlap
+    // by construction, and letting them collide makes them fight the joint that
+    // holds them. Switch it on for the cases where the shapes genuinely stay
+    // apart and the contact matters — a door that must not swing through its
+    // own frame.
+    //
+    // This is not a Jolt flag. The pair is filtered in the contact listener, so
+    // it costs nothing per body and applies the moment the joint exists.
+    bool collideConnected = false;
 };
