@@ -20,6 +20,7 @@
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/Components/AnimationLayerComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/PropertyAnimatorComponent.h>
 #include <HorizonScene/Components/NavMeshComponent.h>
@@ -2197,6 +2198,24 @@ TEST_CASE("Every component the save path writes is a key the loader admits to kn
 	// loading perfectly. saveState and __name had the same gap, unnoticed.
 	HorizonWorld world;
 	populateEveryComponent(world);
+
+	// Two components the shared fixture does not carry, added HERE rather than
+	// to it: this test only needs them WRITTEN, and joining the fixture would
+	// also enlist them in the field-by-field round-trip below, which is a wider
+	// change than the gap being closed. The gap is real — "rootmotion" was
+	// written and read for months without ever being a known key, so every scene
+	// with root motion logged that it was being dropped while loading fine, and
+	// the guard that exists to catch exactly that never saw the component.
+	{
+		auto& reg = world.registry();
+		const Entity animated = world.createEntity("Animated");
+		reg.emplace<TransformComponent>(animated, TransformComponent{});
+		RootMotionComponent rm; rm.mode = RootMotionComponent::Mode::Transform;
+		reg.emplace<RootMotionComponent>(animated, rm);
+		AnimationLayerComponent lc;
+		lc.layers.push_back(AnimationLayerComponent::Layer{});
+		reg.emplace<AnimationLayerComponent>(animated, std::move(lc));
+	}
 
 	const fs::path file = fs::temp_directory_path() / "he_test_known_keys.hescene";
 	SceneSerializer ser;
