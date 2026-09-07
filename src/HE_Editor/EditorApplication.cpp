@@ -3536,6 +3536,11 @@ void EditorApplication::OnRender(float dt)
 		// able to connect and ask what is open before anything is, and get the
 		// honest answer that nothing is.
 		if (!m_mcpToolsRegistered) setupMcpTools();
+		// Pushed every frame rather than tracked across every project switch,
+		// scene load and new-scene: the gateway holds a raw pointer, and one path
+		// that forgets to update it is a handler writing into a destroyed world.
+		// Set here, one line before the tools that read it can run.
+		m_commands.setWorld(m_editorWorld.get());
 		m_mcp.setPort(static_cast<std::uint16_t>(
 			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
 		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
@@ -3543,6 +3548,9 @@ void EditorApplication::OnRender(float dt)
 		// ignores a value that has not changed, so this costs nothing.
 		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
 		m_mcp.update(nowMs);
+		// After the pump, because it is the pump that notices a client has gone —
+		// and a client going is what hands its locks back.
+		updateMcpLocks(nowMs);
 
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
@@ -5840,6 +5848,143 @@ void EditorApplication::setupMcpTools()
 	};
 
 	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+
+	// Placing and moving objects. Registered after the gateway is wired, because
+	// the tools capture a reference to it and the first `tools/call` may arrive
+	// in the same frame.
+	setupEditorCommands();
+	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+}
+
+// ─── The gateway, wired to this editor ───────────────────────────────────────
+// Everything EditorCommands asks of the editor, as functions. Two of them are
+// worth reading twice:
+//
+//   • `requestLock` records the subject in m_mcpLocks. Only an external command
+//     ever reaches it — checkLock skips Origin::Remote entirely and skips
+//     Origin::User while setLockUserCommands is off, which it is and stays,
+//     because turning it on would refuse a human's delete in the one frame
+//     between clicking an entity and the host granting the lock.
+//   • `afterCreate` deliberately does NOT call markSubtreeKnown. An entity a
+//     client just made must stay UNKNOWN to the structural diff for one more
+//     frame, because that diff is what publishes the create to the peers; the
+//     remote handlers mark it precisely because there the create has already
+//     happened elsewhere.
+void EditorApplication::setupEditorCommands()
+{
+	m_commandSnapshotSink = std::make_unique<HE::Ed::SnapshotUndoSink>(
+		&m_undo, [this] { return m_isPlaying; });
+	m_commandSessionSink = std::make_unique<HE::Ed::CollabUndoSink>(&m_collabUndo);
+	m_commands.setUndoSinks(m_commandSnapshotSink.get(), m_commandSessionSink.get());
+
+	HE::Ed::EditorCommands::Hooks h;
+	h.isPlaying = [this] { return m_isPlaying; };
+	h.inSession = [this] { return m_collab.inSession(); };
+	h.nowMs     = [] {
+		return static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+	};
+	h.subjectFor = [this](std::uint32_t handle) { return m_collab.subjectFor(handle); };
+	h.ownsLock   = [this](std::uint64_t s) { return m_collab.ownsLock(s); };
+	h.lockedByOther = [this](std::uint64_t s) { return mcpLockedByOther(s); };
+	h.requestLock = [this](std::uint64_t s) {
+		rememberMcpLock(s);
+		return m_collab.requestLock(s);
+	};
+	h.publishTransform = [this](std::uint64_t subject, const float pos[3],
+	                            const float rot[3], const float scale[3],
+	                            std::uint64_t nowMs) {
+		m_collab.publishTransform(subject, pos, rot, scale, nowMs);
+	};
+	h.publishComponents = [this](std::uint32_t handle,
+	                             const std::vector<std::uint8_t>& blob) {
+		m_collab.publishComponents(handle, blob);
+	};
+	h.beforeDestroy = [this](Entity e, HE::Ed::Origin) {
+		// Same order and the same reasons as deleteSelectedEntity: the bodies go
+		// first, because after destroyEntity the hierarchy that names them is
+		// gone, and the selection goes because a selected handle that no longer
+		// exists is what the inspector dereferences next frame.
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+		m_structureKnown.erase(e);
+	};
+	m_commands.setHooks(std::move(h));
+}
+
+// A subject an external client has taken. Kept in insertion order; the list is
+// at most as long as the number of entities one client touched in a session, so
+// a linear search is the right shape.
+void EditorApplication::rememberMcpLock(std::uint64_t subject)
+{
+	if (subject == 0) return;
+	for (const McpLock& l : m_mcpLocks)
+		if (l.subject == subject) return;
+	m_mcpLocks.push_back(McpLock{ subject, 0 });
+}
+
+bool EditorApplication::mcpLockedByOther(std::uint64_t subject)
+{
+	// The replicated table, read the same way assetLockedByOther reads it: a
+	// holder that is not us is a refusal the client can act on immediately,
+	// without a round trip.
+	const HE::Net::LockInfo* l = m_collab.lockFor(subject);
+	return l && l->owner != m_collab.localParticipant();
+}
+
+// Keeping an external client's locks alive, and handing them back when it goes.
+//
+// Alive, because they are not the selection's: followSelection releases whatever
+// it held the moment the human clicks elsewhere, and if the human happens to
+// click an entity a client is editing, that release takes the client's lock with
+// it. Re-asking is the whole repair — the lock table is replicated, so asking
+// again for something we already hold costs nothing and is skipped anyway.
+//
+// Handed back, because a lock nobody is behind any more blocks a human from
+// touching an entity for the rest of the session. Disconnect is the release
+// signal rather than a timer: a timer would drop the lock a few seconds after an
+// edit, and CollabUndo::dropUnowned would then throw the undo entry that edit
+// produced (docs/mcp-editor-integration-plan.md §4).
+void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
+{
+	if (m_mcpLocks.empty()) return;
+
+	if (!m_collab.inSession())
+	{
+		// The session ended; the locks went with it.
+		m_mcpLocks.clear();
+		return;
+	}
+	if (m_mcp.clientCount() == 0)
+	{
+		for (const McpLock& l : m_mcpLocks) m_collab.releaseLock(l.subject);
+		m_mcpLocks.clear();
+		return;
+	}
+
+	// Half a second between re-asks: a grant is one round trip, and asking every
+	// frame in the meantime would put sixty requests on the wire for one answer.
+	constexpr std::uint64_t kReaskMs = 500;
+	for (auto it = m_mcpLocks.begin(); it != m_mcpLocks.end();)
+	{
+		if (m_collab.ownsLock(it->subject)) { ++it; continue; }
+		if (mcpLockedByOther(it->subject))
+		{
+			// Someone else has it now. Forgetting it here is what keeps the next
+			// command's answer honest — it will be locked_by_other rather than a
+			// silent retry loop.
+			it = m_mcpLocks.erase(it);
+			continue;
+		}
+		if (nowMs - it->lastAskedMs >= kReaskMs)
+		{
+			m_collab.requestLock(it->subject);
+			it->lastAskedMs = nowMs;
+		}
+		++it;
+	}
 }
 
 void EditorApplication::syncStructuralChanges()

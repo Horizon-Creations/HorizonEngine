@@ -31,6 +31,7 @@
 #include <Net/RouterProbe.h>
 #include "GitController.h"
 #include "McpBridge.h"
+#include "EditorCommands.h"
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -692,6 +693,43 @@ private:
 	// play mode) that does not exist yet when the members are built.
 	bool m_mcpToolsRegistered = false;
 	void setupMcpTools();
+
+	// ── The command gateway ──────────────────────────────────────────────────
+	// One door into the scene (EditorCommands.h). Only the MCP tools go through
+	// it so far: the editor's own structural commands and the five remote
+	// handlers still run on their own wiring, and moving them is the unfinished
+	// half of the step that built this class — doing it here would be a
+	// behaviour change hidden inside a feature.
+	HE::Ed::EditorCommands m_commands;
+	// Held by pointer because both sinks need a reference to a member declared
+	// further down this class, and because setUndoSinks takes addresses that must
+	// not move.
+	std::unique_ptr<HE::Ed::SnapshotUndoSink> m_commandSnapshotSink;
+	std::unique_ptr<HE::Ed::CollabUndoSink>   m_commandSessionSink;
+	void setupEditorCommands();
+
+	// ── Locks an external client holds ───────────────────────────────────────
+	// A session lock taken on behalf of an MCP client, kept out of the one
+	// followSelection manages. Two things make this its own set rather than a
+	// reuse of that one:
+	//
+	//   • followSelection holds exactly ONE subject and releases the previous
+	//     one on every selection change, so a human clicking around would hand
+	//     back what a client is in the middle of editing;
+	//   • an external lock has to outlive the command that took it, or the undo
+	//     entry it produced is dropped by CollabUndo::dropUnowned the moment the
+	//     lock goes — an MCP edit would lose its undo seconds after it happened.
+	//     The plan's risk section decides it this way (§4, "Lock-Timeout gegen
+	//     dropUnowned"): external locks live until the client disconnects.
+	struct McpLock
+	{
+		std::uint64_t subject     = 0;
+		std::uint64_t lastAskedMs = 0;
+	};
+	std::vector<McpLock> m_mcpLocks;
+	void rememberMcpLock(std::uint64_t subject);
+	void updateMcpLocks(std::uint64_t nowMs);
+	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.

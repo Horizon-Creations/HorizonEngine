@@ -107,6 +107,10 @@ add_executable(HorizonEditor WIN32
 	# handshake is covered over a real socket in the test binary.
 	McpBridge.cpp
 	McpToolRegistry.cpp
+	# The tools that place and move objects. Separate from the registry because
+	# they are the first ones with a scene behind them: everything here goes
+	# through EditorCommands rather than touching the world.
+	McpToolsEntity.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp

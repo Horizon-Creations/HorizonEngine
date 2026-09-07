@@ -117,6 +117,7 @@ add_executable(he_tests
     test_collab_undo.cpp
     test_editor_commands.cpp
     test_mcp_bridge.cpp
+    test_mcp_tools_entity.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -159,6 +160,11 @@ add_executable(he_tests
     # exactly why the bridge takes its editor state as hooks.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolRegistry.cpp
+    # The entity tools. In here for the reason they were written this way at all:
+    # they take an EditorCommands reference and nothing else from the editor, so
+    # "does entity_set_transform actually move the entity, and does undo put it
+    # back" is a question this binary can answer.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsEntity.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.

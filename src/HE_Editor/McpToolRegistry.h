@@ -106,4 +106,23 @@ struct McpEditorHooks
 // through the same door.
 void registerCoreTools(McpToolRegistry& registry, McpEditorHooks hooks);
 
+class EditorCommands;
+
+// ─── Placing and moving objects ──────────────────────────────────────────────
+// The five mutating tools (create, destroy, reparent, set_transform,
+// set_components) and the two reading ones without which they cannot be used at
+// all: every address on this interface is a uuid, and a client that has no way
+// to learn a uuid can only ever address what it made itself.
+//
+// Every mutation goes through `cmds.execute(…, Origin::External)` — there is no
+// second path into the world from here, which is the whole reason the gateway
+// exists. Refusals keep the gateway's own wire names (`not_found`, `play_mode`,
+// `builtin`, `locked_by_other`, `lock_pending`, …), so the client reads the same
+// vocabulary the editor uses internally.
+//
+// The reference is captured, so `cmds` has to outlive the registry. In the
+// editor both are members of EditorApplication; in a test both are locals of the
+// same fixture.
+void registerEntityTools(McpToolRegistry& registry, EditorCommands& cmds);
+
 } // namespace HE::Ed
