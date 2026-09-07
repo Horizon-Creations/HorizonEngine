@@ -505,6 +505,15 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				HAsset::Reader::readVec(c->data, o, ch.values);
 			}
 		}
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANOT))
+		{
+			size_t  o    = 0;
+			uint8_t flag = 0;
+			// readPOD leaves the field alone and the offset unmoved when the bytes
+			// are not there, so a truncated chunk keeps the struct's defaults
+			// instead of taking a guess.
+			if (HAsset::Reader::readPOD(c->data, o, flag)) a.hasRootMotion = (flag != 0);
+		}
 		handle = m_animClipAssets.insert(std::move(a)); break;
 	}
 	default:
@@ -1627,6 +1636,14 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			HAsset::Writer::appendVec(b, ch.values);
 		}
 		w.addChunk(HAsset::CHUNK_ANIM, b.data(), b.size());
+
+		std::vector<uint8_t> n;
+		HAsset::Writer::appendPOD(n, static_cast<uint8_t>(a.hasRootMotion ? 1 : 0));
+		// The notify count is written now, at zero, so the chunk has its final
+		// shape from the first file: a reader that gains notify support later
+		// finds a well-formed empty list rather than a short chunk to special-case.
+		HAsset::Writer::appendPOD(n, static_cast<uint32_t>(0));
+		w.addChunk(HAsset::CHUNK_ANOT, n.data(), n.size());
 		break;
 	}
 	default:

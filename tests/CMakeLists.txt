@@ -71,6 +71,7 @@ add_executable(he_tests
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
     test_animationsystem.cpp
+    test_root_motion.cpp
     test_navigation.cpp
     test_particles.cpp
     test_ui.cpp

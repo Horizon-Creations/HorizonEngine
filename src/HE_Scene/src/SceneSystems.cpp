@@ -33,6 +33,7 @@
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
+#include "RootMotionApply.h"
 #include "ContentManager/ContentManager.h"
 #include "Renderer/IRenderer.h"
 #include "Diagnostics/Log.h"
@@ -192,17 +193,24 @@ void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager
 }
 
 void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
-                                 AnimatorHost* sync)
+                                 AnimatorHost* sync, HE::RootMotionContext* rootMotion)
 {
     HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickAnimation");
+
+    // Root motion brackets the drivers: one delta per entity per frame goes in,
+    // and a character nobody drove this frame gets its horizontal velocity handed
+    // back at the end (see RootMotionComponent::wroteVelocity).
+    HE::rootMotionBeginFrame(world);
 
     // Order within the phase is unchanged: the three skeletal drivers all write
     // SkeletalMeshComponent::boneMatrices, so the last one wins on an entity
     // that carries more than one of them (which nothing stops today).
-    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt); }
-    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt); }
-    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt, sync); }
+    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt, rootMotion); }
+    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt, rootMotion); }
+    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt, sync, rootMotion); }
     { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
+
+    HE::rootMotionEndFrame(world, rootMotion);
 }
 
 std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)

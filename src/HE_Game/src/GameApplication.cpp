@@ -19,6 +19,7 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RootMotion.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
@@ -2633,7 +2634,10 @@ void GameApplication::OnRender(float deltaTime)
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
-		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
+		// A packaged build has no edit mode, so root motion is always applied here.
+		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
+		                            &rootMotion);
 	}
 
 	// ── Renderer settings, in BOTH modes ─────────────────────────────────────

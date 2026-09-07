@@ -36,6 +36,7 @@
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/RootMotionComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
@@ -539,6 +540,20 @@ namespace
 				{ "playbackSpeed", ab->playbackSpeed },
 				{ "looping",       ab->looping },
 				{ "playing",       ab->playing },
+			};
+		}
+		if (auto* rm = registry.try_get<RootMotionComponent>(entity))
+		{
+			// Runtime fields (appliedThisFrame, wroteVelocity, lastDelta) are
+			// deliberately absent: they are one frame old by definition and are
+			// re-established on the next tick.
+			comps["rootmotion"] = {
+				{ "mode",            static_cast<int>(rm->mode) },
+				{ "rootJoint",       rm->options.rootJointName },
+				{ "translationXZ",   rm->options.extractTranslationXZ },
+				{ "translationY",    rm->options.extractTranslationY },
+				{ "yaw",             rm->options.extractYaw },
+				{ "lock",            static_cast<int>(rm->options.lock) },
 			};
 		}
 		if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
@@ -1190,6 +1205,20 @@ namespace
 			ab.looping       = c.value("looping",       ab.looping);
 			ab.playing       = c.value("playing",       ab.playing);
 			registry.emplace_or_replace<AnimatorBlendComponent>(entity, ab);
+		}
+		if (comps.contains("rootmotion"))
+		{
+			const json& c = comps["rootmotion"];
+			RootMotionComponent rm;
+			rm.mode = static_cast<RootMotionComponent::Mode>(
+				c.value("mode", static_cast<int>(rm.mode)));
+			rm.options.rootJointName        = c.value("rootJoint",     rm.options.rootJointName);
+			rm.options.extractTranslationXZ = c.value("translationXZ", rm.options.extractTranslationXZ);
+			rm.options.extractTranslationY  = c.value("translationY",  rm.options.extractTranslationY);
+			rm.options.extractYaw           = c.value("yaw",           rm.options.extractYaw);
+			rm.options.lock = static_cast<HE::RootMotionLock>(
+				c.value("lock", static_cast<int>(rm.options.lock)));
+			registry.emplace_or_replace<RootMotionComponent>(entity, rm);
 		}
 		if (comps.contains("propertyanimator"))
 		{

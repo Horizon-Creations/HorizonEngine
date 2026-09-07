@@ -124,6 +124,11 @@ namespace
 	{ "Component/Animator Blend", "Animator Blend",
 	  "Cross-fades two clips by weight — walk into run, aim into idle.",
 	  "", "systems#animation" },
+	{ "Component/Root Motion", "Root Motion",
+	  "Moves the entity by the motion the animator put into the root bone, and "
+	  "takes that motion back out of the pose. Without it a walk cycle slides on "
+	  "the spot; with it, and set to Off, nothing changes.",
+	  "", "systems#animation" },
 	{ "Component/Animator State Machine", "Animator State Machine",
 	  "Runs an animator state machine asset: states with clips, and transitions "
 	  "that fire on parameters. The graph decides which clip plays.",
@@ -939,6 +944,44 @@ namespace
 	  "", "systems#animation" },
 	{ "Animator State Machine/Speed", "",
 	  "Playback rate for whichever state is running.", "", "systems#animation" },
+	{ "Root Motion/Mode", "",
+	  "Off changes nothing. Transform moves the entity directly, for props and "
+	  "anything that is not a physical figure. Character Controller hands the "
+	  "motion to the physics character, which is what a walking figure wants: it "
+	  "keeps its own gravity and still collides with the world.",
+	  "", "systems#animation" },
+	{ "Root Motion/Root Joint", "",
+	  "Which bone carries the motion. Empty picks the skeleton's first root, "
+	  "which is right for almost every rig — name one only if the skeleton has "
+	  "several roots. A name that matches nothing suspends root motion and says "
+	  "so in the log, rather than moving the wrong bone.",
+	  "", "systems#animation" },
+	{ "Root Motion/Translation XZ", "",
+	  "Take the horizontal travel out of the pose and give it to the entity. "
+	  "This is the part that turns a walk cycle into walking.",
+	  "", "systems#animation" },
+	{ "Root Motion/Translation Y", "",
+	  "The same for the vertical. Off by default: a character controller owns its "
+	  "own up and down (gravity, a jump still in flight), and a clip pushing "
+	  "against that fights it every frame. Worth turning on for a clip that is "
+	  "meant to lift the figure, on the Transform mode.",
+	  "", "systems#animation" },
+	{ "Root Motion/Yaw", "",
+	  "Turn the entity by the turning in the clip, so a turn-in-place actually "
+	  "turns. While this is on it overrides Movement's Orient To Movement — two "
+	  "things turning one character is a jitter nobody can locate afterwards.",
+	  "", "systems#animation" },
+	{ "Root Motion/Lock", "",
+	  "What the root bone does in the pose once its motion has been taken out. "
+	  "Zero parks it at the origin. First Frame parks it where the clip starts, "
+	  "for clips authored away from the origin. Translation Only leaves the "
+	  "rotation in the pose — pair that one with Yaw off, or the turn happens twice.",
+	  "", "systems#animation" },
+	{ "Root Motion/Last Delta", "",
+	  "What the last frame actually moved, in metres and degrees. All zeroes "
+	  "while a clip carries no root motion — which is how you tell that apart "
+	  "from a joint name that matches nothing.",
+	  "", "systems#animation" },
 	{ "Property Animator/Speed", "",
 	  "Playback rate of the property clip: 1 is as authored, negative runs it "
 	  "backwards.",
@@ -4508,7 +4551,7 @@ namespace
 		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Character Controller", "Movement",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
-		"Animator State Machine", "Property Animator", "Particle System",
+		"Animator State Machine", "Root Motion", "Property Animator", "Particle System",
 		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};

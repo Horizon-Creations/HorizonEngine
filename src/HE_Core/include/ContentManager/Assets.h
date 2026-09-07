@@ -493,6 +493,19 @@ struct AnimationClipAsset : public RuntimeAsset
 {
 	float                         duration = 0.0f;  // total clip length in seconds
 	std::vector<AnimationChannel> channels;
+
+	// Does this clip's root bone carry motion that belongs on the entity?
+	//
+	// Per CLIP, next to RootMotionComponent's per ENTITY: an idle with a pinned
+	// root should not get the same treatment as a roll, and the entity should not
+	// have to be re-configured between the two.
+	//
+	// Defaults to TRUE and not false: nothing sets it yet (the glTF importer does
+	// not know, and the per-clip editor toggle is still to come), so a default of
+	// false would mean root motion never fires for any clip that exists today.
+	// Stored in CHUNK_ANOT, which old files simply do not have — for them this
+	// default is also the answer.
+	bool                          hasRootMotion = true;
 };
 
 // ── Property Animation ────────────────────────────────────────────────────────

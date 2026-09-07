@@ -52,6 +52,7 @@
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RootMotion.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/ScriptApi.h>
@@ -2866,7 +2867,15 @@ void EditorApplication::OnRender(float dt)
 			// The host is only running during PIE, so outside play the sync
 			// graphs stay silent and the parameters keep their authored defaults
 			// — the behaviour state machines had before sync graphs existed.
-			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost);
+			//
+			// Root motion hangs off the same session for a sharper reason: this
+			// tick is NOT gated on play mode, and a character walking across the
+			// scene while somebody authors it would be SAVED there. Outside play
+			// the context is null, so the motion is still taken out of the pose
+			// (the pose is identical either way) and simply not applied.
+			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
+			                            m_animatorHost.running() ? &rootMotion : nullptr);
 		}
 
 		// Remember what the gameplay half of this frame produced — pose AND the

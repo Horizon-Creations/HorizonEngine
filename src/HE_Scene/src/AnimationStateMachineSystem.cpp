@@ -3,9 +3,11 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include "AnimationEval.h"
+#include "RootMotionApply.h"
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
@@ -115,7 +117,7 @@ bool evalTransition(const AnimatorStateMachineComponent& sm, const HE::Animation
 void AnimationStateMachineSystem::markConfigDirty(AnimatorStateMachineComponent& sm) { sm.configDirty = true; }
 
 void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
-                                         AnimatorHost* sync)
+                                         AnimatorHost* sync, HE::RootMotionContext* rootMotion)
 {
     auto& reg  = world.registry();
     auto  view = reg.view<AnimatorStateMachineComponent, SkeletalMeshComponent>();
@@ -162,6 +164,12 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                             "the pose will not advance",
                             static_cast<uint32_t>(e), curState->name.c_str());
 
+        // A crossfade has TWO playheads, and each one needs the position it had
+        // BEFORE this frame's advance. Captured per playhead, not per entity —
+        // that distinction is the whole reason this is not one variable.
+        const float outPrev = sm.clipTime;
+        const float step    = dt * sm.playbackSpeed;
+
         // Advance current clip time
         if (curClip && curClip->duration > 0.0f)
         {
@@ -196,7 +204,10 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             }
         }
 
-        // Advance crossfade
+        // Advance crossfade. inPrev is read here and not earlier on purpose: a
+        // transition that STARTED above set transitionElapsed to 0, and 0 is
+        // exactly where its incoming playhead's first span begins.
+        const float inPrev = sm.transitionElapsed;
         if (sm.inTransition)
             sm.transitionElapsed += dt * sm.playbackSpeed;
 
@@ -205,6 +216,13 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         std::vector<JointTRS> trsOut(jointCount);
         if (curClip && curClip->duration > 0.0f)
             sampleClip(*curClip, sm.clipTime, trsOut);
+
+        auto* rmc = reg.try_get<RootMotionComponent>(e);
+        HE::RootMotionDelta deltaOut;
+        bool haveOut = false;
+        if (rmc && curClip)
+            haveOut = HE::rootMotionSampleClip(e, *rmc, *mesh, *curClip, outPrev, outPrev + step,
+                                               curState->looping, trsOut, deltaOut);
 
         std::vector<JointTRS> final_trs;
 
@@ -222,15 +240,36 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             const AnimationClipAsset* nextClip = nextState ? cm.getAnimationClip(nextState->clipId) : nullptr;
 
             std::vector<JointTRS> trsIn(jointCount);
+            HE::RootMotionDelta deltaIn;
+            bool haveIn = false;
             if (nextClip && nextClip->duration > 0.0f)
             {
                 float inTime = sm.transitionElapsed;
+                float inFrom = inPrev;
                 if (nextState->looping)
+                {
                     inTime = std::fmod(inTime, nextClip->duration);
+                    inFrom = std::fmod(inFrom, nextClip->duration);
+                }
                 else
+                {
                     inTime = std::min(inTime, nextClip->duration);
+                    inFrom = std::min(inFrom, nextClip->duration);
+                }
                 sampleClip(*nextClip, inTime, trsIn);
+
+                if (rmc)
+                    haveIn = HE::rootMotionSampleClip(e, *rmc, *mesh, *nextClip,
+                                                      inFrom, inFrom + step,
+                                                      nextState->looping, trsIn, deltaIn);
             }
+
+            // Both deltas, mixed with the alpha that mixes the pose. Letting only
+            // the heavier one through would make the character jump forward the
+            // moment the weight tipped over.
+            if (haveOut || haveIn)
+                HE::rootMotionApply(world, rootMotion, e, *rmc,
+                                    HE::blendRootMotion(deltaOut, deltaIn, alpha), dt);
 
             blendTRS(trsOut, trsIn, alpha, final_trs);
 
@@ -245,6 +284,7 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         }
         else
         {
+            if (haveOut) HE::rootMotionApply(world, rootMotion, e, *rmc, deltaOut, dt);
             final_trs = std::move(trsOut);
         }
 

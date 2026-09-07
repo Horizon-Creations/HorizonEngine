@@ -8,6 +8,7 @@ class ContentManager;
 class IRenderer;
 class PhysicsWorld;
 class AnimatorHost;
+namespace HE { struct RootMotionContext; }
 
 namespace SceneSystems
 {
@@ -59,8 +60,16 @@ namespace SceneSystems
     // than ticked separately because each graph must fire immediately before the
     // transitions it feeds; see AnimationStateMachineSystem::update. nullptr
     // outside a play session, where those graphs deliberately do not run.
+    //
+    // `rootMotion` is gated the same way and for a sharper reason: this phase is
+    // NOT gated on play mode, so root motion running while authoring would walk
+    // the entity across the scene — and that would be SAVED. Extraction and the
+    // root lock happen either way, so the pose an author sees is the pose the game
+    // produces; only the moving is gated. A play session passes a context holding
+    // the PhysicsWorld (needed for the character-controller mode).
     void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
-                       AnimatorHost* sync = nullptr);
+                       AnimatorHost* sync = nullptr,
+                       HE::RootMotionContext* rootMotion = nullptr);
 
     // Publish scene-side counters (entities, lights, live particles, rigid bodies,
     // audio sources, scripts, in-flight streaming) to the EngineProfiler. Called at
