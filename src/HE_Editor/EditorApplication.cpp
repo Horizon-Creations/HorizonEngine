@@ -54,8 +54,17 @@
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RootMotion.h>
+#include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
+#include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -1913,6 +1922,75 @@ void EditorApplication::appendPlayLog(HE::LogLevel level, const char* message)
 // its header because the header doesn't know the SDL key types.
 extern ImGuiKey ImGui_ImplSDL3_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode);
 
+// ── Root-motion preview ──────────────────────────────────────────────────────
+// Where the selected figure's current clip would take it, drawn as a line from
+// where it stands.
+//
+// This is the editor half of the gate in SceneSystems::tickAnimation: outside a
+// play session the tick gets a null RootMotionContext, so the motion is taken out
+// of the pose and applied to nothing — an authored clip animates in place instead
+// of walking the entity across the scene and INTO the save file. The line is what
+// was missing next to that: without it, "the motion was extracted and parked" and
+// "this clip carries no motion at all" look exactly the same on screen.
+//
+// Recomputed each frame rather than cached: it costs one clip sampling per
+// segment for ONE selected entity, and a cache would have to notice the clip
+// being re-authored in the tab next door — which is precisely when an artist is
+// watching this line.
+static void appendRootMotionPreview(HorizonWorld& world, ContentManager& cm,
+                                    entt::entity e, DebugDrawBuffer& out)
+{
+	auto& reg = world.registry();
+	const auto* rm   = reg.try_get<RootMotionComponent>(e);
+	const auto* skel = reg.try_get<SkeletalMeshComponent>(e);
+	const auto* tc   = reg.try_get<TransformComponent>(e);
+	if (!rm || !skel || !tc) return;
+
+	// Whichever of the three drivers poses this entity, and the clip it is on. A
+	// blend shows the dominant half — the same half kNotifyDominanceAlpha lets
+	// fire, so the preview and the events agree about which clip is in charge.
+	HE::UUID clipId;
+	if (const auto* a = reg.try_get<AnimatorComponent>(e))
+		clipId = a->clipAssetId;
+	else if (const auto* b = reg.try_get<AnimatorBlendComponent>(e))
+		clipId = (b->blendAlpha >= HE::kNotifyDominanceAlpha) ? b->clipBId : b->clipAId;
+	else if (const auto* sm = reg.try_get<AnimatorStateMachineComponent>(e))
+	{
+		for (const HE::AnimationState& s : sm->resolvedGraph.states)
+			if (s.name == sm->currentStateName) { clipId = s.clipId; break; }
+	}
+	if (clipId == HE::UUID{}) return;
+
+	const SkeletalMeshAsset*  mesh = cm.getSkeletalMesh(skel->meshAssetId);
+	const AnimationClipAsset* clip = cm.getAnimationClip(clipId);
+	if (!mesh || !clip) return;
+
+	std::vector<glm::vec3> path;
+	AnimationPreview::rootMotionPath(*mesh, *clip, rm->options, 48, path);
+	if (path.size() < 2) return;
+
+	// The path is in the character's own frame at the start of the clip, so it is
+	// rotated by where the entity faces and offset by where it stands.
+	// worldPositionOf rather than tc->worldMatrix: nothing propagates transforms
+	// inside tickWorld, so that matrix is a frame old for anything that moved.
+	const glm::quat yaw = glm::angleAxis(glm::radians(tc->rotation.y), glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::vec3 org = HE::worldPositionOf(world, e);
+
+	// Amber, the same colour the root-motion rows carry in the Details panel, and
+	// not the selection yellow it would otherwise be mistaken for.
+	const glm::vec3 col(0.90f, 0.69f, 0.34f);
+	glm::vec3 prev = org + yaw * path[0];
+	for (size_t i = 1; i < path.size(); ++i)
+	{
+		const glm::vec3 p = org + yaw * path[i];
+		out.line(prev, p, col);
+		prev = p;
+	}
+	// A tick at the end, so a path that ends where it started is still visible as
+	// a path that ran.
+	out.line(prev - glm::vec3(0.0f, 0.15f, 0.0f), prev + glm::vec3(0.0f, 0.35f, 0.0f), col);
+}
+
 // HE-PATCH(stuck-keys) watchdog: once a second, compare ImGui's idea of the
 // keyboard against SDL's. A key ImGui thinks is held while SDL says it is up
 // means a key-up never reached ImGui (see the HE-PATCH in imgui_impl_sdl3.cpp's
@@ -2526,6 +2604,11 @@ void EditorApplication::OnRender(float dt)
 			float         friction     = 0.0f;
 			float         restitution  = 0.0f;
 			bool          is2D         = false;
+			// The collision channel is baked into the body's ObjectLayer at
+			// creation, so changing it is a rebuild — without it here, picking a
+			// layer in the Details panel during play would do nothing until the
+			// scene was reloaded.
+			uint8_t       bodyLayer    = 0;
 			// ColliderComponent
 			ColliderShape shape        = ColliderShape::Box;
 			glm::vec3     halfExtents{};
@@ -2540,6 +2623,9 @@ void EditorApplication::OnRender(float dt)
 			float         stepHeight   = 0.0f;
 			float         skinWidth    = 0.0f;
 			float         charMass     = 0.0f;
+			// Same reason as bodyLayer: PhysicsWorld remembers the character's
+			// layer at build time, so a change only lands through a rebuild.
+			uint8_t       charLayer    = 0;
 			// TransformComponent: baked into the mesh/hull triangles, and into
 			// the primitive shapes' extents.
 			glm::vec3     scale{ 1.0f };
@@ -2576,6 +2662,7 @@ void EditorApplication::OnRender(float dt)
 				in.friction    = rb->friction;
 				in.restitution = rb->restitution;
 				in.is2D        = rb->is2D;
+				in.bodyLayer   = rb->collisionLayer;
 			}
 			if (const auto* c = reg.try_get<ColliderComponent>(e))
 			{
@@ -2601,6 +2688,7 @@ void EditorApplication::OnRender(float dt)
 				in.stepHeight   = cc->stepHeight;
 				in.skinWidth    = cc->skinWidth;
 				in.charMass     = cc->mass;
+				in.charLayer    = cc->collisionLayer;
 			}
 			return in;
 		};
@@ -2886,7 +2974,39 @@ void EditorApplication::OnRender(float dt)
 			// The host is only running during PIE, so outside play the sync
 			// graphs stay silent and the parameters keep their authored defaults
 			// — the behaviour state machines had before sync graphs existed.
-			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost);
+			//
+			// Root motion hangs off the same session for a sharper reason: this
+			// tick is NOT gated on play mode, and a character walking across the
+			// scene while somebody authors it would be SAVED there. Outside play
+			// the context is null, so the motion is still taken out of the pose
+			// (the pose is identical either way) and simply not applied.
+			//
+			// Notifies are gated on the same session, for the third form of the
+			// same argument: a null queue means they are not even evaluated, so an
+			// editor nobody plays in neither pays for them nor accumulates them.
+			const bool playing = m_animatorHost.running();
+			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
+			                            playing ? &rootMotion : nullptr,
+			                            playing ? &m_animNotifies : nullptr);
+
+			// Immediately after, and not at the collision drain above: that one
+			// sits in the frame BEFORE this phase and would cost every notify a
+			// frame. dispatch empties the queue.
+			//
+			// The SAME predicate that decided to collect, spelled the same way.
+			// Anything narrower here — a null check on the script context, say,
+			// which dispatch does for itself anyway — would be a frame that fills
+			// the queue and never empties it, and the queue would grow for as long
+			// as the session lasted.
+			if (playing)
+			{
+				HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
+				AnimationNotifySystem::dispatch(m_animNotifies, *m_editorWorld,
+				                                m_scriptContext.get(), m_scriptInstances,
+				                                &m_gameInstance.runtime(), m_entityHost.instances(),
+				                                &m_animatorHost);
+			}
 		}
 
 		// Remember what the gameplay half of this frame produced — pose AND the
@@ -3187,6 +3307,109 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// ── Joints ───────────────────────────────────────────────────────
+			// Drawn for every joint in the scene, like the colliders above and
+			// unlike the rope handles below: a joint is a relationship between
+			// two entities, and the thing an author most needs to see is that
+			// the line goes where they think it does — which they cannot check
+			// by selecting one end.
+			//
+			// From the COMPONENTS, never from Jolt. Jolt's own DrawConstraints
+			// needs JPH_DEBUG_RENDERER and a renderer this engine does not have,
+			// and it would only exist in play mode — the half of the time an
+			// author is not authoring.
+			{
+				auto& reg = m_editorWorld->registry();
+				for (auto [entity, joint] : reg.view<JointComponent>().each())
+				{
+					if (joint.target == HE::UUID{})
+						continue;
+					const Entity other = m_editorWorld->findByEntityId(joint.target);
+					if (other == entt::null || !reg.valid(other))
+						continue;   // dangling reference — the Details panel says so
+
+					// worldMatrixOf, not TransformComponent::worldMatrix: this
+					// block runs right after tickWorld, which propagates
+					// nothing, so the stored matrix is a frame old and plain
+					// identity for anything created this frame. Same reason the
+					// rope guides below walk the chain.
+					const glm::mat4 mA = HE::worldMatrixOf(*m_editorWorld, entity);
+					const glm::mat4 mB = HE::worldMatrixOf(*m_editorWorld, other);
+					const glm::vec3 originA = glm::vec3(mA[3]);
+					const glm::vec3 originB = glm::vec3(mB[3]);
+					const glm::vec3 anchorA = glm::vec3(mA * glm::vec4(joint.anchorA, 1.0f));
+					const glm::vec3 anchorB = glm::vec3(mB * glm::vec4(joint.anchorB, 1.0f));
+
+					// Amber for the selected entity's joint, dim orange for the
+					// rest — the same "this is the one you are editing" the
+					// selection marker above uses.
+					const bool      lit   = (entity == m_selectedEntity || other == m_selectedEntity);
+					const glm::vec3 color = lit ? glm::vec3(1.0f, 0.65f, 0.15f)
+					                            : glm::vec3(0.55f, 0.40f, 0.15f);
+					// A direction in A's space, drawn a metre long: an axis has
+					// no length of its own and the number an author types is a
+					// direction, so any fixed length is as honest as the next.
+					const float     kAxisLen = 1.0f;
+					const glm::vec3 axisWorld =
+						glm::length(joint.axis) > 1.0e-5f
+							? glm::normalize(glm::mat3(mA) * glm::normalize(joint.axis))
+							: glm::vec3(0.0f, 1.0f, 0.0f);
+
+					switch (joint.type)
+					{
+					case JointType::Fixed:
+						// No anchors to draw — the weld IS the pair, so the line
+						// between the two origins is the whole statement.
+						dbg.line(originA, originB, color);
+						break;
+					case JointType::Point:
+					case JointType::Hinge:
+						// ONE shared pivot, so one marker and two lines to it.
+						// Drawing two anchors here would show a joint that does
+						// not exist: the second one is never read.
+						dbg.sphere(anchorA, 0.08f, color);
+						dbg.line(originA, anchorA, color);
+						dbg.line(originB, anchorA, color);
+						if (joint.type == JointType::Hinge)
+							dbg.line(anchorA - axisWorld * kAxisLen * 0.5f,
+							         anchorA + axisWorld * kAxisLen * 0.5f, color);
+						break;
+					case JointType::Slider:
+					{
+						// The line of travel, through A's origin, with its stops
+						// marked where limits were authored. Unlimited draws the
+						// bare direction — there is nothing to mark.
+						const bool  limited = joint.minLimit < joint.maxLimit;
+						const float lo = limited ? joint.minLimit : -kAxisLen;
+						const float hi = limited ? joint.maxLimit :  kAxisLen;
+						const glm::vec3 a = originA + axisWorld * lo;
+						const glm::vec3 b = originA + axisWorld * hi;
+						dbg.line(a, b, color);
+						if (limited)
+						{
+							dbg.sphere(a, 0.06f, color);
+							dbg.sphere(b, 0.06f, color);
+						}
+						dbg.line(originB, originA, color);
+						break;
+					}
+					case JointType::Distance:
+						// The one type that reads both anchors, and the one
+						// whose picture is genuinely a line between two points.
+						dbg.sphere(anchorA, 0.06f, color);
+						dbg.sphere(anchorB, 0.06f, color);
+						dbg.line(anchorA, anchorB, color);
+						break;
+					default:
+						// A type this build does not know. PhysicsWorld builds it
+						// as a weld and logs once; the overlay says the same
+						// thing by drawing the pair and nothing else.
+						dbg.line(originA, originB, color);
+						break;
+					}
+				}
+			}
+
 			// ── Rope & trail guides, for the SELECTED entity only ────────────
 			// A rope is authored as a handful of points in a list, and until one
 			// of them is on screen the list is a set of numbers nobody can aim.
@@ -3390,6 +3613,13 @@ void EditorApplication::OnRender(float dt)
 					}
 				}
 			}
+
+			// Where the selected figure's root motion would carry it. Only for the
+			// selection: a scene full of characters would be a scene full of
+			// lines, and the question ("does this clip go where I meant it to")
+			// is asked about one figure at a time.
+			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
+				appendRootMotionPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
 
 			// The ground grid, last of the editor's own lines: it is the biggest
 			// contributor by far, and appending it after the gizmos keeps the
@@ -6474,6 +6704,13 @@ AppContext EditorApplication::makeContext()
 			if (m_projectManager.currentProject().appProject)
 				m_appPreviewRestartPending = true;
 		},
+		.applyCollisionLayers = [this]{
+			// Only while a simulation exists. Outside play mode there is nothing
+			// to update and nothing to be wrong: the next play start builds its
+			// PhysicsWorld and reads the matrix from the project itself.
+			if (m_physicsWorld)
+				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
@@ -6951,6 +7188,10 @@ void EditorApplication::setPlayMode(bool play)
 		// falls back to a box. Handed over afterwards, every such collider in the
 		// starting scene would silently be a crate.
 		m_physicsWorld->setContentManager(&contentManager());
+		// BEFORE initialize() as well: initialize() is what puts every body into
+		// its channel, and a matrix handed over afterwards would leave the
+		// opening scene simulating on the default one until something rebuilt.
+		m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is

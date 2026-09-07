@@ -2,6 +2,7 @@
 #include <Types/Defines.h>
 #include <Types/UUID.h>
 #include <Application/DocumentTypes.h>   // AppDocumentType (what the export declares)
+#include <Physics/CollisionLayers.h>     // the collision matrix the shipped build simulates with
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -92,6 +93,12 @@ struct HE_API ExportSettings {
     // "fontWeightBold"). True is what the engine always drew; the exported app
     // has to be told, or a project that chose regular body text ships bold.
     bool fontWeightBold = true;
+    // The project's collision matrix (.heproj "collisionLayers"). Copied across
+    // for the same reason as everything above it: default-constructed means
+    // "everything collides", so an export that forgets it ships a game whose
+    // bullets hit the things the author had switched off — a difference that
+    // shows up as gameplay, not as an error.
+    HE::CollisionLayerConfig collisionLayers;
     // ── What the shipped application IS to the system (plan A7) ─────────────
     // The icon is generated from a built-in icon name on a coloured plate, so
     // the export writes the .icns / .ico / .png itself. Empty name = no icon

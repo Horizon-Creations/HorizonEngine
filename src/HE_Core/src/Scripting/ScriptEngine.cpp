@@ -241,6 +241,28 @@ bool ScriptEngine::callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
     return pcall(2, 0);
 }
 
+// The three notify handlers differ only in the method name, so they share one
+// body — three copies of five lines is three places for a typo in a Lua method
+// name that would fail by simply never being called.
+bool ScriptEngine::callNotifyMethod(InstanceId id, const char* method, const std::string& name)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, method)) return true;
+    lua_pushlstring(m_L, name.c_str(), name.size());
+    return pcall(2, 0);
+}
+
+bool ScriptEngine::callOnAnimationNotify(InstanceId id, const std::string& name)
+{ return callNotifyMethod(id, "onAnimationNotify", name); }
+
+bool ScriptEngine::callOnAnimationNotifyBegin(InstanceId id, const std::string& name)
+{ return callNotifyMethod(id, "onAnimationNotifyBegin", name); }
+
+bool ScriptEngine::callOnAnimationNotifyEnd(InstanceId id, const std::string& name)
+{ return callNotifyMethod(id, "onAnimationNotifyEnd", name); }
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);

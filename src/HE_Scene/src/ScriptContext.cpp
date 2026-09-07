@@ -1504,6 +1504,24 @@ bool ScriptContext::callOnEndOverlap(ScriptEngine::InstanceId id, uint32_t other
     HE_SCRIPT_CALL("onEndOverlap", b->callOnEndOverlap(rawId(id), otherEntityId));
 }
 
+bool ScriptContext::callOnAnimationNotify(ScriptEngine::InstanceId id, const std::string& name)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onAnimationNotify", b->callOnAnimationNotify(rawId(id), name));
+}
+
+bool ScriptContext::callOnAnimationNotifyBegin(ScriptEngine::InstanceId id, const std::string& name)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onAnimationNotifyBegin", b->callOnAnimationNotifyBegin(rawId(id), name));
+}
+
+bool ScriptContext::callOnAnimationNotifyEnd(ScriptEngine::InstanceId id, const std::string& name)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onAnimationNotifyEnd", b->callOnAnimationNotifyEnd(rawId(id), name));
+}
+
 bool ScriptContext::callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;

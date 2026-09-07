@@ -1,6 +1,7 @@
 #include <Hpak/ProjectConfig.h>
 #include <cstdint>
 #include <ContentManager/HAsset.h>
+#include <nlohmann/json.hpp>
 #include <fstream>
 #include <cstring>
 
@@ -9,7 +10,12 @@ static constexpr char     k_magic[4] = {'H','C','F','G'};
 // v4: appends theme + themeMode (two strings) after that.
 // v5: appends bundleId (string) — the application's own name for itself, which
 //     the runtime needs to write an autostart entry that belongs to it.
-static constexpr uint16_t k_version  = 5;
+// v6: appends the collision matrix as one JSON string — the SAME shape the
+//     .heproj carries, so the two ends of the road cannot drift apart. A string
+//     rather than 136 packed bits because the block is sparse by construction
+//     (CollisionLayerConfig writes only the blocked pairs and the renamed
+//     channels), and because a bitfield would freeze kCount into the format.
+static constexpr uint16_t k_version  = 6;
 
 bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectConfig& cfg)
 {
@@ -26,7 +32,13 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     // Each tail is written only when it CARRIES something, so a project that
     // uses none of it keeps emitting the plain v2 every runtime can read.
     const bool hasTheme = !cfg.theme.empty() || !cfg.themeMode.empty();
-    const uint16_t version = !cfg.bundleId.empty() ? 5
+    // A project that never edited the matrix does not push the file to v6 — the
+    // default config IS "everything collides", so writing it would cost every
+    // such project a version an older runtime bundle refuses, in exchange for
+    // saying nothing.
+    const bool hasLayers = !cfg.collisionLayers.isDefault();
+    const uint16_t version = hasLayers ? 6
+                           : !cfg.bundleId.empty() ? 5
                            : hasTheme ? 4
                            : cfg.defaultSaveTemplate.empty() ? 2 : 3;
     HAsset::Writer::appendPOD(buf, version);
@@ -74,6 +86,12 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     }
     if (version >= 5)
         HAsset::Writer::appendString(buf, cfg.bundleId);
+    if (version >= 6)
+    {
+        nlohmann::json layers = nlohmann::json::object();
+        cfg.collisionLayers.toJson(layers);
+        HAsset::Writer::appendString(buf, layers.dump());
+    }
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
@@ -97,7 +115,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     if (!HAsset::Reader::readPOD(buf, off, reserved)) return false;
     // Every version this build knows. Each adds a tail; an older one simply has
     // fewer, and the reader stops where that version stopped.
-    if (version != 2 && version != 3 && version != 4 && version != 5) return false;
+    if (version < 2 || version > 6) return false;
 
     if (!HAsset::Reader::readString(buf, off, out.projectName))   return false;
     if (!HAsset::Reader::readString(buf, off, out.hpakFilename))  return false;
@@ -136,5 +154,18 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     }
     out.bundleId.clear();
     if (version >= 5 && !HAsset::Reader::readString(buf, off, out.bundleId)) return false;
+    out.collisionLayers = HE::CollisionLayerConfig{};
+    if (version >= 6)
+    {
+        std::string layers;
+        if (!HAsset::Reader::readString(buf, off, layers)) return false;
+        // Malformed JSON leaves the default in place rather than failing the
+        // whole load: a config that cannot say what its matrix is still names
+        // the pak, the scene and the key, and "everything collides" is the one
+        // fallback that cannot make a game unplayable.
+        const nlohmann::json j = nlohmann::json::parse(layers, nullptr, /*allow_exceptions=*/false);
+        if (!j.is_discarded())
+            out.collisionLayers.fromJson(j);
+    }
     return true;
 }

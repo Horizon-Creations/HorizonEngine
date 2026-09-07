@@ -1706,6 +1706,7 @@ inline HE::hccg::ClassSource fxEngineEvents()
     f.var("text", PT::String);
     f.var("sum", PT::Float);
     f.var("built", PT::Float);
+    f.var("notify", PT::String);
 
     auto append = [&f](int ev, const char* what) {
         const int s = f.setVar("trace", PT::String);
@@ -1736,6 +1737,15 @@ inline HE::hccg::ClassSource fxEngineEvents()
     const int sB = f.setVar("built", PT::Float);
     f.g.findNode(sB)->pinDefaults[0] = Value::ofFloat(1.0f);
     f.exec(evC, sB);
+
+    // A String argument on an event that carries NO element. The three notify
+    // events are the first of that shape, and the hook signature codegen emits
+    // for one is derived from the engine's table — so a wrong `elem` there would
+    // produce a method that overrides nothing and is never called.
+    const int evN = f.event("OnAnimationNotify", 0, true, PT::String);
+    const int sN  = f.setVar("notify", PT::String);
+    f.data(evN, 0, sN, 0);
+    f.exec(evN, sN);
     return f.done("engine_events");
 }
 

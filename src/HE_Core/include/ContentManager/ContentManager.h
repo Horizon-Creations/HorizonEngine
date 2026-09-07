@@ -91,6 +91,11 @@ public:
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
+	// Mutable for the same reason materials and graphs are: the editor's notify
+	// timeline edits the loaded clip in place and persists it with saveAsset().
+	// The loaded asset IS the edit buffer, so a notify moved on the timeline is
+	// already what the animators fire against — no copy to keep in step.
+	AnimationClipAsset*        getAnimationClipMutable(HE::UUID id);
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);

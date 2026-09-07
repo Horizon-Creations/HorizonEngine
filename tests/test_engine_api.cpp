@@ -185,8 +185,13 @@ TEST_CASE("EngineApi: side-effect classification is correct")
     CHECK(setPos->results.empty());
 
     const auto* ray = HE::api::find("physics.raycast");
-    REQUIRE(ray->results.size() == 5);
+    REQUIRE(ray->results.size() == 6);
     CHECK(ray->results[0].type == P::Bool);       // hit
+    // `layer` was APPENDED, never inserted: both backends read a result by
+    // index, so a graph saved before it existed keeps wiring 0..4 to the same
+    // five things. Inserting anywhere else would have moved every wire after it.
+    CHECK(ray->results[5].name == std::string("layer"));
+    CHECK(ray->results[5].type == P::Int);
 }
 
 // ═══ Marshalling round-trips against a real world ═════════════════════════════
@@ -663,12 +668,158 @@ TEST_CASE("Physics: forces, velocity, overlap and gravity are on the registry")
 
     const auto* sweep = find("physics.sphereCast");
     REQUIRE(sweep->params.size() == 4);      // origin, direction, radius, maxDistance
-    REQUIRE(sweep->results.size() == 5);     // same hit shape as raycast
+    REQUIRE(sweep->results.size() == 6);     // same hit shape as raycast
     CHECK(sweep->results[0].type == P::Bool);
+
+    // ── The layer-masked forms ───────────────────────────────────────────────
+    // They exist as their own names rather than as a fourth parameter on the
+    // three above, and this is the test that keeps it that way: a node saved
+    // before a new parameter passes one argument fewer, which reads back as a
+    // zero, and zero for a channel MASK means "see nothing". Every stored
+    // Raycast node would have kept its shape and stopped hitting anything.
+    for (const char* id : { "physics.raycast", "physics.sphereCast",
+                            "physics.overlapSphere" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        for (const auto& p : row->params)
+            CHECK(p.name != std::string("layerMask"));
+    }
+
+    const auto* rayL = find("physics.raycastLayers");
+    REQUIRE(rayL != nullptr);
+    CHECK_FALSE(rayL->isExec);
+    REQUIRE(rayL->params.size() == 4);        // + layerMask, last
+    CHECK(rayL->params[3].name == std::string("layerMask"));
+    CHECK(rayL->params[3].type == P::Int);
+    REQUIRE(rayL->results.size() == 6);       // the same hit shape as raycast
+
+    const auto* sweepL = find("physics.sphereCastLayers");
+    REQUIRE(sweepL != nullptr);
+    REQUIRE(sweepL->params.size() == 5);
+    CHECK(sweepL->params[4].name == std::string("layerMask"));
+    REQUIRE(sweepL->results.size() == 6);
+
+    const auto* overlapL = find("physics.overlapSphereLayers");
+    REQUIRE(overlapL != nullptr);
+    REQUIRE(overlapL->params.size() == 3);
+    CHECK(overlapL->params[2].name == std::string("layerMask"));
+    REQUIRE(overlapL->results.size() == 1);
+    CHECK(overlapL->results[0].isArray);
 
     // Lua and Python reach the whole group through horizon.physics.* — the flat
     // bindings only ever had raycast/setVelocity/isGrounded.
     CHECK(HE::api::isScriptGroup("physics"));
+}
+
+TEST_CASE("Physics: the oriented shapes carry their mask from the first day")
+{
+    using HE::api::find;
+
+    // The three sphere rows needed a second name each to gain a mask, because a
+    // stored node cannot grow an input. These four were born with it, so the
+    // mask is simply the last parameter and there is nothing to twin. The test
+    // exists to keep it that way: the moment one of them ships without the mask,
+    // adding it later costs another four names.
+    struct Row { const char* id; std::size_t params; };
+    for (const Row& r : { Row{ "physics.boxCast", 6 }, Row{ "physics.capsuleCast", 7 },
+                          Row{ "physics.overlapBox", 4 }, Row{ "physics.overlapCapsule", 5 },
+                          Row{ "physics.raycastAll", 4 } })
+    {
+        INFO("row: " << r.id);
+        const auto* row = find(r.id);
+        REQUIRE(row != nullptr);
+        CHECK_FALSE(row->isExec);                     // a query, not an action
+        REQUIRE(row->params.size() == r.params);
+        CHECK(row->params.back().name == std::string("layerMask"));
+        CHECK(row->params.back().type == P::Int);
+    }
+
+    // Rotation is a Vec3 of degrees, not a quaternion: the graph has no
+    // quaternion type and nobody types one by hand anyway.
+    const auto* box = find("physics.boxCast");
+    CHECK(box->params[1].name == std::string("halfExtents"));
+    CHECK(box->params[2].name == std::string("rotation"));
+    CHECK(box->params[2].type == P::Vec3);
+    REQUIRE(box->results.size() == 6);                // the same hit shape as raycast
+
+    // The capsule takes the two numbers the Collider component shows, in that
+    // order, so a character's own fields sweep that character's own shape.
+    const auto* capsule = find("physics.capsuleCast");
+    CHECK(capsule->params[1].name == std::string("radius"));
+    CHECK(capsule->params[2].name == std::string("height"));
+
+    // raycastAll is five PARALLEL arrays, because a graph value is a list of one
+    // type and there is no list of structs. All five must be arrays or index i
+    // stops meaning the same hit in each.
+    const auto* all = find("physics.raycastAll");
+    REQUIRE(all->results.size() == 5);
+    for (const auto& res : all->results)
+    {
+        INFO("result: " << res.name);
+        CHECK(res.isArray);
+    }
+    CHECK(all->results[0].type == P::Int);      // entities
+    CHECK(all->results[1].type == P::Vec3);     // points
+    CHECK(all->results[2].type == P::Vec3);     // normals
+    CHECK(all->results[3].type == P::Float);    // distances
+    CHECK(all->results[4].type == P::Int);      // layers
+
+    // The force pair and the spin pair: actions are exec, questions are not.
+    for (const char* id : { "physics.addForceAtPosition", "physics.addImpulseAtPosition",
+                            "physics.setAngularVelocity" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        CHECK(row->isExec);
+        REQUIRE(row->results.size() == 1);
+        CHECK(row->results[0].type == P::Bool);
+    }
+    const auto* atPoint = find("physics.addImpulseAtPosition");
+    REQUIRE(atPoint->params.size() == 3);
+    CHECK(atPoint->params[2].name == std::string("position"));
+
+    const auto* getSpin = find("physics.getAngularVelocity");
+    REQUIRE(getSpin != nullptr);
+    CHECK_FALSE(getSpin->isExec);
+    REQUIRE(getSpin->results.size() == 1);
+    CHECK(getSpin->results[0].type == P::Vec3);
+}
+
+TEST_CASE("Physics: the new rows are neutral without a PhysicsWorld too")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::boxCast(c, glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f),
+                                          glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK_FALSE(HE::api::physics::capsuleCast(c, glm::vec3(0.0f), 0.5f, 2.0f, glm::vec3(0.0f),
+                                              glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK(HE::api::physics::overlapBox(c, glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f),
+                                       0xFFFF).empty());
+    CHECK(HE::api::physics::overlapCapsule(c, glm::vec3(0.0f), 0.5f, 2.0f, glm::vec3(0.0f),
+                                           0xFFFF).empty());
+    CHECK(HE::api::physics::raycastAll(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 10.0f,
+                                       0xFFFF).empty());
+    CHECK_FALSE(HE::api::physics::addForceAtPosition(c, 1, glm::vec3(1.0f), glm::vec3(0.0f)));
+    CHECK_FALSE(HE::api::physics::addImpulseAtPosition(c, 1, glm::vec3(1.0f), glm::vec3(0.0f)));
+    CHECK_FALSE(HE::api::physics::setAngularVelocity(c, 1, glm::vec3(1.0f)));
+    CHECK(HE::api::physics::getAngularVelocity(c, 1) == glm::vec3(0.0f));
+
+    // Through the thunk, where the five arrays must come back as five EMPTY
+    // arrays rather than as scalars — a For Each wired to any of them reads the
+    // element type off the array itself, and a scalar zero would mistype it.
+    auto out = HE::api::find("physics.raycastAll")->invoke(c,
+        { Value::ofVec3(glm::vec3(0.0f)), Value::ofVec3(glm::vec3(0, 0, 1)),
+          Value::ofFloat(10.0f), Value::ofInt(0xFFFF) });
+    REQUIRE(out.size() == 5);
+    for (const auto& v : out)
+    {
+        CHECK(v.isArray);
+        CHECK(v.items.empty());
+    }
+    CHECK(out[1].type == P::Vec3);
 }
 
 TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
@@ -682,6 +833,9 @@ TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
     CHECK(HE::api::physics::getGravity(c) == glm::vec3(0.0f));
     CHECK(HE::api::physics::overlapSphere(c, glm::vec3(0.0f), 5.0f).empty());
     CHECK_FALSE(HE::api::physics::sphereCast(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f).hit);
+    CHECK_FALSE(HE::api::physics::raycastLayers(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK_FALSE(HE::api::physics::sphereCastLayers(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f, 0xFFFF).hit);
+    CHECK(HE::api::physics::overlapSphereLayers(c, glm::vec3(0.0f), 5.0f, 0xFFFF).empty());
     CHECK_NOTHROW(HE::api::physics::setGravity(c, glm::vec3(0.0f, -1.0f, 0.0f)));
     CHECK_NOTHROW(HE::api::physics::setVelocity(c, 1, glm::vec3(1.0f)));
 
@@ -4012,4 +4166,134 @@ TEST_CASE("EngineApi: nav and jump rows are safe with no world and no physics")
     CHECK(call("nav.remainingDistance", { id })[0].f == doctest::Approx(-1.0f));
     call("nav.stop",     { id });                        // must not crash
     call("nav.setSpeed", { id, Value::ofFloat(2.0f) });  // must not crash
+}
+
+TEST_CASE("Physics: the joint rows carry every field the five types read")
+{
+    using HE::api::find;
+
+    // The row is born with all eight parameters for the same reason boxCast was
+    // born with its mask: a stored node cannot grow an input, so a field left
+    // off today costs a second name tomorrow. Between them the five joint types
+    // read all of these — Fixed none, Point and Hinge the pivot, Slider the
+    // axis, Distance both anchors.
+    const auto* add = find("physics.addJoint");
+    REQUIRE(add != nullptr);
+    CHECK(add->isExec);                              // an action, not a question
+    REQUIRE(add->params.size() == 8);
+    CHECK(add->params[0].name == std::string("entityA"));
+    CHECK(add->params[1].name == std::string("entityB"));
+    CHECK(add->params[2].name == std::string("type"));
+    CHECK(add->params[2].type == P::Int);            // no enum type in the graph
+    CHECK(add->params[3].name == std::string("anchorA"));
+    CHECK(add->params[3].type == P::Vec3);
+    CHECK(add->params[4].name == std::string("anchorB"));
+    CHECK(add->params[5].name == std::string("axis"));
+    CHECK(add->params[6].name == std::string("minLimit"));
+    CHECK(add->params[6].type == P::Float);
+    CHECK(add->params[7].name == std::string("maxLimit"));
+    REQUIRE(add->results.size() == 1);
+    CHECK(add->results[0].type == P::Bool);
+
+    const auto* remove = find("physics.removeJoint");
+    REQUIRE(remove != nullptr);
+    CHECK(remove->isExec);
+    REQUIRE(remove->params.size() == 1);
+
+    // A question, so it is NOT exec — the same split the rest of the group has.
+    const auto* has = find("physics.hasJoint");
+    REQUIRE(has != nullptr);
+    CHECK_FALSE(has->isExec);
+    REQUIRE(has->results.size() == 1);
+    CHECK(has->results[0].type == P::Bool);
+}
+
+TEST_CASE("Physics: the joint rows are neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::addJoint(c, 1, 2, 0, glm::vec3(0.0f), glm::vec3(0.0f),
+                                           glm::vec3(0, 1, 0), 0.0f, 0.0f));
+    CHECK_FALSE(HE::api::physics::removeJoint(c, 1));
+    CHECK_FALSE(HE::api::physics::hasJoint(c, 1));
+
+    // And through the thunk, which is the path a graph actually takes.
+    auto out = HE::api::find("physics.addJoint")->invoke(c,
+        { Value::ofInt(1), Value::ofInt(2), Value::ofInt(2),
+          Value::ofVec3(glm::vec3(0.0f)), Value::ofVec3(glm::vec3(0.0f)),
+          Value::ofVec3(glm::vec3(0, 1, 0)), Value::ofFloat(0.0f), Value::ofFloat(0.0f) });
+    REQUIRE(out.size() == 1);
+    CHECK_FALSE(out[0].b);
+}
+
+TEST_CASE("Physics: the motor, the break force and the broken-joint queue have their own rows")
+{
+    using HE::api::find;
+
+    // Four rows rather than four more parameters on Add Joint. The reason is the
+    // one that shaped that row too: a node saved in a graph cannot grow an
+    // input, so a parameter added later reads as a silent zero in every graph
+    // that predates it. These three are also things a game changes while it
+    // runs, which a constructor argument could not express anyway.
+    const auto* motor = find("physics.setJointMotor");
+    REQUIRE(motor != nullptr);
+    CHECK(motor->isExec);
+    REQUIRE(motor->params.size() == 3);
+    CHECK(motor->params[0].name == std::string("entity"));
+    CHECK(motor->params[1].name == std::string("targetSpeed"));
+    CHECK(motor->params[1].type == P::Float);
+    CHECK(motor->params[2].name == std::string("maxForce"));
+    REQUIRE(motor->results.size() == 1);
+    CHECK(motor->results[0].type == P::Bool);
+
+    const auto* breakForce = find("physics.setJointBreakForce");
+    REQUIRE(breakForce != nullptr);
+    CHECK(breakForce->isExec);
+    REQUIRE(breakForce->params.size() == 2);
+    CHECK(breakForce->params[1].type == P::Float);
+
+    const auto* collide = find("physics.setJointCollideConnected");
+    REQUIRE(collide != nullptr);
+    REQUIRE(collide->params.size() == 2);
+    CHECK(collide->params[1].name == std::string("collide"));
+    CHECK(collide->params[1].type == P::Bool);
+
+    // Two PARALLEL arrays, like raycastAll's five: a graph value is a list of
+    // ONE type, so a pair of entities has to be taken apart. Exec, because
+    // reading it EMPTIES it — that is a side effect, and a pure node would let
+    // the graph read it twice and get nothing the second time.
+    const auto* poll = find("physics.pollJointBroken");
+    REQUIRE(poll != nullptr);
+    CHECK(poll->isExec);
+    CHECK(poll->params.empty());
+    REQUIRE(poll->results.size() == 2);
+    CHECK(poll->results[0].name == std::string("entitiesA"));
+    CHECK(poll->results[0].isArray);
+    CHECK(poll->results[1].name == std::string("entitiesB"));
+    CHECK(poll->results[1].isArray);
+}
+
+TEST_CASE("Physics: the new joint rows are neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::setJointMotor(c, 1, 1.0f, 100.0f));
+    CHECK_FALSE(HE::api::physics::setJointBreakForce(c, 1, 100.0f));
+    CHECK_FALSE(HE::api::physics::setJointCollideConnected(c, 1, true));
+    CHECK(HE::api::physics::pollJointBroken(c).empty());
+
+    // And through the thunks, which is the path a graph actually takes. The
+    // poll row must still hand back its two lists — an empty one each, not no
+    // outputs at all, or a For Each downstream reads a missing value.
+    auto out = HE::api::find("physics.pollJointBroken")->invoke(c, {});
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].isArray);
+    CHECK(out[0].items.empty());
+    CHECK(out[1].isArray);
+    CHECK(out[1].items.empty());
+
+    auto motorOut = HE::api::find("physics.setJointMotor")->invoke(c,
+        { Value::ofInt(1), Value::ofFloat(1.0f), Value::ofFloat(100.0f) });
+    REQUIRE(motorOut.size() == 1);
+    CHECK_FALSE(motorOut[0].b);
 }
