@@ -412,6 +412,64 @@ TEST_CASE("McpBridge: a bad request after auth is answered, not punished")
 	CHECK(f.bridge.clientCount() == 1);
 }
 
+TEST_CASE("McpBridge: valid JSON with wrong-typed fields does not take the editor down")
+{
+	// The frame below parses cleanly and only then goes wrong: nlohmann's
+	// value(key, default) THROWS when the key exists with another type, and this
+	// runs inside the editor's frame loop. An unauthenticated peer must not be
+	// able to end the process with one well-formed message — that is the exact
+	// boundary this file exists to hold, and the "{not json" case above does not
+	// reach it (the parser catches that one before any accessor runs).
+	Fixture f;
+
+	TestClient hostile;
+	REQUIRE(hostile.connect(f.bridge.port()));
+	REQUIRE(pumpUntil(f.bridge, { &hostile },
+	                  [&] { return f.bridge.connectionCount() == 1; }));
+	hostile.send(json{ { "jsonrpc", "2.0" }, { "id", 1 }, { "method", 123 } });
+	REQUIRE(pumpUntil(f.bridge, { &hostile },
+	                  [&] { return f.bridge.connectionCount() == 0; }));
+
+	// A number where the token belongs, on a fresh connection.
+	TestClient hostile2;
+	REQUIRE(hostile2.connect(f.bridge.port()));
+	REQUIRE(pumpUntil(f.bridge, { &hostile2 },
+	                  [&] { return f.bridge.connectionCount() == 1; }));
+	hostile2.send(json{ { "jsonrpc", "2.0" },
+	                    { "id", 1 },
+	                    { "method", "auth" },
+	                    { "params", json{ { "token", 5 } } } });
+	REQUIRE(pumpUntil(f.bridge, { &hostile2 },
+	                  [&] { return f.bridge.connectionCount() == 0; }));
+
+	// The bridge is still there — which is the whole assertion. A client that
+	// arrives afterwards gets in normally.
+	TestClient c;
+	REQUIRE(f.authenticate(c, 50));
+
+	// And after the handshake the same shape is answered rather than punished.
+	// The id survives, which matters: an answer with a null id is one the client
+	// cannot match to the request that caused it. That only holds because the
+	// fields are read through a helper that returns "" for a wrong type instead
+	// of throwing — the catch in update() is the backstop, not the mechanism.
+	c.send(json{ { "jsonrpc", 2.0 }, { "id", 51 }, { "method", "ping" } });
+	REQUIRE(pumpUntil(f.bridge, { &c }, [&] { return replyWithId(c, 51) != nullptr; }));
+	CHECK((*replyWithId(c, 51))["error"]["code"] == -32600);
+
+	c.send(json{ { "jsonrpc", "2.0" },
+	             { "id", 52 },
+	             { "method", "tools/call" },
+	             { "params", json{ { "name", 5 } } } });
+	REQUIRE(pumpUntil(f.bridge, { &c }, [&] { return replyWithId(c, 52) != nullptr; }));
+	CHECK((*replyWithId(c, 52))["error"]["code"] == -32602);
+
+	// Same connection, still usable.
+	c.send(json{ { "jsonrpc", "2.0" }, { "id", 53 }, { "method", "ping" } });
+	REQUIRE(pumpUntil(f.bridge, { &c }, [&] { return replyWithId(c, 53) != nullptr; }));
+	CHECK((*replyWithId(c, 53))["result"]["pong"] == true);
+	CHECK(f.bridge.clientCount() == 1);
+}
+
 TEST_CASE("McpBridge: a notification is executed and left unanswered")
 {
 	Fixture    f;

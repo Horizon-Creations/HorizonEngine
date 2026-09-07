@@ -35,10 +35,20 @@ constexpr int kParseError     = -32700;
 constexpr int kInvalidRequest = -32600;
 constexpr int kMethodNotFound = -32601;
 constexpr int kInvalidParams  = -32602;
-// Application range: not authenticated. The connection is dropped anyway, so
-// this is documentation more than signal — but a shim that sees it knows its
-// token is stale rather than its editor gone.
-constexpr int kUnauthorized   = -32001;
+
+// Read a string field, or "" when it is absent OR present with another type.
+//
+// NOT nlohmann's value(key, default): that one THROWS on a type mismatch, so
+// `{"method": 123}` — valid JSON, past the parser, from a peer that has not
+// authenticated yet — would come out of the accessor as an exception in the
+// editor's frame loop. Every field a stranger can set is read through here.
+std::string strField(const json& j, const char* key)
+{
+	if (!j.is_object()) return {};
+	const auto it = j.find(key);
+	if (it == j.end() || !it->is_string()) return {};
+	return it->get<std::string>();
+}
 
 // Fill with CSPRNG bytes, falling back to std::random_device when no crypto
 // backend is compiled in — the same shape SessionDirectory uses, and for the
@@ -212,7 +222,35 @@ void McpBridge::update(std::uint64_t nowMs)
 			m_clients.erase(ev.conn);
 			break;
 		case NetEventType::Data:
-			handleFrame(ev.conn, ev.data);
+			// The one catch site, and it is not belt-and-braces. nlohmann's
+			// `value(key, default)` THROWS when the key exists with another type
+			// — `{"method": 123}` is valid JSON, so it sails past the parser and
+			// then blows up in the accessor. Without this, an unauthenticated
+			// peer could kill the editor with one well-formed frame, which is
+			// precisely the boundary this whole file exists to hold.
+			try
+			{
+				handleFrame(ev.conn, ev.data);
+			}
+			catch (const nlohmann::json::exception& e)
+			{
+				auto it = m_clients.find(ev.conn);
+				const bool authed = (it != m_clients.end()) && it->second.authed;
+				HE_LOG_WARN(Editor, "MCP: malformed request from connection %u (%s)",
+				            static_cast<unsigned>(ev.conn), e.what());
+				if (authed)
+				{
+					// Same rule as any other bad request after the handshake:
+					// answered, not punished.
+					sendError(ev.conn, json(nullptr), kInvalidRequest,
+					          "request field has the wrong type");
+				}
+				else if (it != m_clients.end())
+				{
+					m_transport->disconnect(ev.conn);
+					m_clients.erase(it);
+				}
+			}
 			break;
 		}
 	}
@@ -244,11 +282,9 @@ void McpBridge::handleFrame(ConnectionId id, const std::vector<std::uint8_t>& da
 	// an unauthenticated caller WHY it failed is how a scanner maps a service.
 	if (!it->second.authed)
 	{
-		const bool isAuth = parsed && msg.is_object() &&
-		                    msg.value("method", std::string()) == "auth";
-		const std::string given = (parsed && msg.is_object() && msg.contains("params") &&
-		                           msg["params"].is_object())
-		                              ? msg["params"].value("token", std::string())
+		const bool isAuth = parsed && strField(msg, "method") == "auth";
+		const std::string given = (parsed && msg.is_object() && msg.contains("params"))
+		                              ? strField(msg["params"], "token")
 		                              : std::string();
 
 		if (!isAuth || m_token.empty() || !tokenEquals(given, m_token))
@@ -256,12 +292,13 @@ void McpBridge::handleFrame(ConnectionId id, const std::vector<std::uint8_t>& da
 			HE_LOG_WARN(Editor, "MCP: dropping connection %u — %s",
 			            static_cast<unsigned>(id),
 			            isAuth ? "wrong token" : "first message was not auth");
-			// The reply is sent to a client that got its token wrong (a stale
-			// endpoint file is the everyday cause) and then the link goes down
-			// regardless. A caller that never authenticated correctly learns
-			// only that the connection closed.
-			if (isAuth) sendError(id, msg.contains("id") ? msg["id"] : json(nullptr),
-			                      kUnauthorized, "invalid token");
+			// No answer, on purpose and by construction: TcpTransport::disconnect
+			// discards whatever is still queued, so a reply written here would
+			// never reach the wire anyway — and telling an unauthenticated caller
+			// WHICH of the two things it got wrong is how a scanner maps a
+			// service. A shim with a stale token sees the connection close, which
+			// is the signal it needs (re-read the endpoint file) without being a
+			// signal to anybody else.
 			m_transport->disconnect(id);
 			m_clients.erase(id);
 			return;
@@ -294,7 +331,7 @@ void McpBridge::handleFrame(ConnectionId id, const std::vector<std::uint8_t>& da
 		sendError(id, json(nullptr), kParseError, "frame is not valid JSON");
 		return;
 	}
-	if (!msg.is_object() || msg.value("jsonrpc", std::string()) != "2.0" ||
+	if (!msg.is_object() || strField(msg, "jsonrpc") != "2.0" ||
 	    !msg.contains("method") || !msg["method"].is_string())
 	{
 		sendError(id, msg.is_object() && msg.contains("id") ? msg["id"] : json(nullptr),
@@ -349,7 +386,7 @@ bool McpBridge::dispatch(ConnectionId id, const std::string& method, const json&
 
 	if (method == "tools/call")
 	{
-		const std::string name = params.value("name", std::string());
+		const std::string name = strField(params, "name");
 		const json args = (params.contains("arguments") && params["arguments"].is_object())
 		                      ? params["arguments"] : json::object();
 		if (name.empty())
