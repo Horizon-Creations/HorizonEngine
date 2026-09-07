@@ -720,6 +720,38 @@ bool hasPhysics(Ctx& c, Entity e)
 {
     return c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e));
 }
+
+// A joint needs the WORLD as well as the PhysicsWorld: the component it writes
+// lives in the registry, and the entity it names is resolved through the UUIDs
+// that registry keeps. Without a world there is nowhere to put the joint, so
+// this is one of the few rows that needs both halves of the Ctx.
+bool addJoint(Ctx& c, Entity a, Entity b, int type, const glm::vec3& anchorA,
+              const glm::vec3& anchorB, const glm::vec3& axis,
+              float minLimit, float maxLimit)
+{
+    if (!c.physics || !c.world) return false;
+    PhysicsWorld::JointDesc desc;
+    // Out of range becomes Fixed, the type that reads no other field — the same
+    // answer the scene loader gives a joint type it does not know, rather than
+    // casting an arbitrary integer into an enum.
+    desc.type     = (type >= 0 && type <= static_cast<int>(HE::JointType::Distance))
+                        ? static_cast<HE::JointType>(type) : HE::JointType::Fixed;
+    desc.anchorA  = anchorA;
+    desc.anchorB  = anchorB;
+    desc.axis     = axis;
+    desc.minLimit = minLimit;
+    desc.maxLimit = maxLimit;
+    return c.physics->addJoint(*c.world, static_cast<uint32_t>(a),
+                               static_cast<uint32_t>(b), desc);
+}
+bool removeJoint(Ctx& c, Entity a)
+{
+    return c.physics && c.world && c.physics->removeJoint(*c.world, static_cast<uint32_t>(a));
+}
+bool hasJoint(Ctx& c, Entity a)
+{
+    return c.physics && c.physics->hasJoint(static_cast<uint32_t>(a));
+}
 } // namespace physics
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -4802,6 +4834,25 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setPositionAndReset(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
         t.push_back({ "physics.hasPhysics", "Physics", false, {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasPhysics",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasPhysics(c, (Entity)aI(a, 0))) }; } });
+        // Joints. Every field the five types read is a parameter from the first
+        // day — a stored node cannot grow an input later, and this row would
+        // otherwise need a second name to gain the one field it forgot. Which of
+        // them a given type reads is on JointComponent; the description below
+        // says the short version.
+        t.push_back({ "physics.addJoint", "Physics", true,
+            {{"entityA", P::Int}, {"entityB", P::Int}, {"type", P::Int},
+             {"anchorA", P::Vec3}, {"anchorB", P::Vec3}, {"axis", P::Vec3},
+             {"minLimit", P::Float}, {"maxLimit", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::physics::addJoint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addJoint(
+                c, (Entity)aI(a, 0), (Entity)aI(a, 1), aI(a, 2), aV3(a, 3), aV3(a, 4),
+                aV3(a, 5), aF(a, 6), aF(a, 7))) }; } });
+        t.push_back({ "physics.removeJoint", "Physics", true,
+            {{"entity", P::Int}}, {{"ok", P::Bool}}, "HE::api::physics::removeJoint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::removeJoint(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "physics.hasJoint", "Physics", false,
+            {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasJoint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasJoint(c, (Entity)aI(a, 0))) }; } });
 
         // Materials
         t.push_back({ "material.getParam", "Material", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Color}}, "HE::api::material::getParam",
@@ -5988,6 +6039,8 @@ const std::vector<ApiFn>& registry()
             { "physics.getAngularVelocity", "Get Angular Velocity" },
             { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },
             { "physics.hasPhysics", "Has Physics" },
+            { "physics.addJoint", "Add Joint" },       { "physics.removeJoint", "Remove Joint" },
+            { "physics.hasJoint", "Has Joint" },
             // Suffixed for the same reason as Get Velocity below: Transform owns
             // the unqualified "Set Position", and the add menu lists both flat.
             { "physics.setPosition", "Set Position (Physics)" },

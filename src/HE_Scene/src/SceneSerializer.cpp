@@ -15,6 +15,7 @@
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
@@ -377,6 +378,21 @@ namespace
 				{ "radius",    col->radius },
 				{ "height",    col->height },
 				{ "isTrigger", col->isTrigger },
+			};
+		}
+		if (auto* j = registry.try_get<JointComponent>(entity))
+		{
+			// `target` is an ENTITY reference, written like RopeComponent's
+			// attachments — the same [hi, lo] pair, so a joint survives a merge
+			// of two branches that each added entities.
+			comps["joint"] = {
+				{ "type",     static_cast<uint8_t>(j->type) },
+				{ "target",   uuidToJson(j->target) },
+				{ "anchorA",  { j->anchorA.x, j->anchorA.y, j->anchorA.z } },
+				{ "anchorB",  { j->anchorB.x, j->anchorB.y, j->anchorB.z } },
+				{ "axis",     { j->axis.x, j->axis.y, j->axis.z } },
+				{ "minLimit", j->minLimit },
+				{ "maxLimit", j->maxLimit },
 			};
 		}
 		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
@@ -984,6 +1000,29 @@ namespace
 			if (c.contains("halfEx") && c["halfEx"].is_array() && c["halfEx"].size() == 3)
 				col.halfExtents = { c["halfEx"][0], c["halfEx"][1], c["halfEx"][2] };
 			registry.emplace_or_replace<ColliderComponent>(entity, col);
+		}
+		if (comps.contains("joint"))
+		{
+			const json& c = comps["joint"];
+			JointComponent j;
+			// An unknown type is loaded as Fixed rather than cast straight
+			// through — the same lesson jsonToColliderShape learned, where a
+			// value from a newer build silently became shape 0 and nothing said
+			// so. Fixed is the type that needs no other field to make sense.
+			const auto rawType = c.value("type", static_cast<uint8_t>(j.type));
+			if (rawType <= static_cast<uint8_t>(JointType::Distance))
+				j.type = static_cast<JointType>(rawType);
+			else
+				HE_LOG_WARN(Serialize, "Scene contains unknown joint type %u — loading it as "
+				                       "Fixed (scene written by a newer build; SAVING IT BACK "
+				                       "MAKES THAT PERMANENT)", static_cast<unsigned>(rawType));
+			j.target   = jsonToUuid(c.value("target", json()));
+			j.anchorA  = jsonToVec3(c.value("anchorA", json()), j.anchorA);
+			j.anchorB  = jsonToVec3(c.value("anchorB", json()), j.anchorB);
+			j.axis     = jsonToVec3(c.value("axis",    json()), j.axis);
+			j.minLimit = c.value("minLimit", j.minLimit);
+			j.maxLimit = c.value("maxLimit", j.maxLimit);
+			registry.emplace_or_replace<JointComponent>(entity, j);
 		}
 		if (comps.contains("characterController"))
 		{
@@ -1855,7 +1894,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"animator", "animatorblend", "animstatemachine", "audiolistener",
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
 		"movement",
-		"decal", "environment", "foliage", "light", "lod", "material", "mesh",
+		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem", "propertyanimator",
 		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
 		"trail",

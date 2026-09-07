@@ -4167,3 +4167,61 @@ TEST_CASE("EngineApi: nav and jump rows are safe with no world and no physics")
     call("nav.stop",     { id });                        // must not crash
     call("nav.setSpeed", { id, Value::ofFloat(2.0f) });  // must not crash
 }
+
+TEST_CASE("Physics: the joint rows carry every field the five types read")
+{
+    using HE::api::find;
+
+    // The row is born with all eight parameters for the same reason boxCast was
+    // born with its mask: a stored node cannot grow an input, so a field left
+    // off today costs a second name tomorrow. Between them the five joint types
+    // read all of these — Fixed none, Point and Hinge the pivot, Slider the
+    // axis, Distance both anchors.
+    const auto* add = find("physics.addJoint");
+    REQUIRE(add != nullptr);
+    CHECK(add->isExec);                              // an action, not a question
+    REQUIRE(add->params.size() == 8);
+    CHECK(add->params[0].name == std::string("entityA"));
+    CHECK(add->params[1].name == std::string("entityB"));
+    CHECK(add->params[2].name == std::string("type"));
+    CHECK(add->params[2].type == P::Int);            // no enum type in the graph
+    CHECK(add->params[3].name == std::string("anchorA"));
+    CHECK(add->params[3].type == P::Vec3);
+    CHECK(add->params[4].name == std::string("anchorB"));
+    CHECK(add->params[5].name == std::string("axis"));
+    CHECK(add->params[6].name == std::string("minLimit"));
+    CHECK(add->params[6].type == P::Float);
+    CHECK(add->params[7].name == std::string("maxLimit"));
+    REQUIRE(add->results.size() == 1);
+    CHECK(add->results[0].type == P::Bool);
+
+    const auto* remove = find("physics.removeJoint");
+    REQUIRE(remove != nullptr);
+    CHECK(remove->isExec);
+    REQUIRE(remove->params.size() == 1);
+
+    // A question, so it is NOT exec — the same split the rest of the group has.
+    const auto* has = find("physics.hasJoint");
+    REQUIRE(has != nullptr);
+    CHECK_FALSE(has->isExec);
+    REQUIRE(has->results.size() == 1);
+    CHECK(has->results[0].type == P::Bool);
+}
+
+TEST_CASE("Physics: the joint rows are neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::addJoint(c, 1, 2, 0, glm::vec3(0.0f), glm::vec3(0.0f),
+                                           glm::vec3(0, 1, 0), 0.0f, 0.0f));
+    CHECK_FALSE(HE::api::physics::removeJoint(c, 1));
+    CHECK_FALSE(HE::api::physics::hasJoint(c, 1));
+
+    // And through the thunk, which is the path a graph actually takes.
+    auto out = HE::api::find("physics.addJoint")->invoke(c,
+        { Value::ofInt(1), Value::ofInt(2), Value::ofInt(2),
+          Value::ofVec3(glm::vec3(0.0f)), Value::ofVec3(glm::vec3(0.0f)),
+          Value::ofVec3(glm::vec3(0, 1, 0)), Value::ofFloat(0.0f), Value::ofFloat(0.0f) });
+    REQUIRE(out.size() == 1);
+    CHECK_FALSE(out[0].b);
+}

@@ -30,6 +30,14 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
+#include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Body/BodyLockMulti.h>
+#include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SliderConstraint.h>
+#include <Jolt/Physics/Constraints/DistanceConstraint.h>
 
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
@@ -43,6 +51,8 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
+#include "HorizonScene/Components/EntityIdComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
@@ -376,6 +386,71 @@ struct PhysicsWorld::Impl
         return it != characterLayer.end()
             ? it->second
             : HELayers::encode(HE::CollisionLayerConfig::kCharacter, true);
+    }
+
+    // ── Joints ────────────────────────────────────────────────────────────────
+    // One live constraint per entity, keyed by the entity whose JointComponent
+    // authored it ("entity A"). `partner` is remembered beside the Ref because
+    // the reverse question — which joints does THIS body appear in — has to be
+    // answerable when the partner is destroyed, and a Jolt constraint will not
+    // hand its bodies back as entity ids.
+    struct JointRecord
+    {
+        JPH::Ref<JPH::TwoBodyConstraint> constraint;
+        uint32_t                         partner = 0;   // entity B
+    };
+    std::unordered_map<uint32_t, JointRecord> joints;
+
+    // Joints that are authored but not built: the partner has not spawned yet,
+    // or the entity's own body was just torn down for a rebuild. Retried after
+    // every successful body build.
+    //
+    // `attempts` is what keeps this from becoming a leak. It is reset to zero on
+    // every pass that resolved ANYTHING, because a chain resolves one link per
+    // pass and the entries at the far end would otherwise be dropped for being
+    // patient. Only a pass in which nothing at all moved counts against them.
+    struct PendingJoint
+    {
+        uint32_t entityId = 0;
+        int      attempts = 0;
+    };
+    std::vector<PendingJoint> pendingJoints;
+
+    // Give up after this many fruitless passes and say so once. The number is
+    // "more than any plausible spawn order needs" rather than a tuned value.
+    static constexpr int kMaxJointAttempts = 8;
+
+    void queueJoint(uint32_t entityId)
+    {
+        for (const auto& p : pendingJoints)
+            if (p.entityId == entityId)
+                return;
+        pendingJoints.push_back({ entityId, 0 });
+    }
+
+    // Remove just the joint this entity AUTHORED, and leave alone the ones other
+    // entities aimed AT it. That is what addJoint and removeJoint mean by "this
+    // entity's joint"; PhysicsWorld::destroyJointsInvolving is the wider sweep,
+    // and it is wider because a dying BODY takes both directions with it.
+    bool destroyOwnJoint(uint32_t entityId)
+    {
+        const auto it = joints.find(entityId);
+        const bool had = it != joints.end();
+        if (had)
+        {
+            physicsSystem.RemoveConstraint(it->second.constraint);
+            joints.erase(it);
+        }
+        unqueueJoint(entityId);
+        return had;
+    }
+
+    void unqueueJoint(uint32_t entityId)
+    {
+        pendingJoints.erase(
+            std::remove_if(pendingJoints.begin(), pendingJoints.end(),
+                           [entityId](const PendingJoint& p) { return p.entityId == entityId; }),
+            pendingJoints.end());
     }
 
     // Where ColliderShape::Mesh / ::ConvexHull get their triangles. Nullable —
@@ -1295,6 +1370,302 @@ bool PhysicsWorld::buildTerrainBodyFor(HorizonWorld& world, uint32_t entityId)
     return true;
 }
 
+// ─── Joints ───────────────────────────────────────────────────────────────────
+namespace {
+
+// A hinge needs a second axis to say where angle zero is; a slider needs one to
+// pin down the rotation it forbids. Any perpendicular does, as long as BOTH
+// bodies are given the SAME one — that is what defines the current pose as the
+// zero pose, which is Jolt's own recipe for setting a constraint up in world
+// space.
+glm::vec3 anyPerpendicular(const glm::vec3& axis)
+{
+    // Cross with whichever cardinal the axis is least parallel to, or the result
+    // is a zero-length vector and the joint's frame is undefined.
+    const glm::vec3 reference = std::abs(axis.y) < 0.9f ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                        : glm::vec3(1.0f, 0.0f, 0.0f);
+    return glm::normalize(glm::cross(reference, axis));
+}
+
+JPH::Vec3 toJolt(const glm::vec3& v) { return JPH::Vec3(v.x, v.y, v.z); }
+
+} // namespace
+
+bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
+{
+    auto&        reg    = world.registry();
+    const Entity entity = static_cast<Entity>(entityId);
+    if (!reg.valid(entity))
+        return false;
+
+    const auto* jc = reg.try_get<JointComponent>(entity);
+    if (!jc)
+        return false;
+
+    // A hard refusal drops the entry: retrying it every spawn for the rest of
+    // the session would log the same complaint forever. A "not ready yet" leaves
+    // it queued and stays silent — that is the normal state halfway through
+    // building a chain.
+    const auto refuse = [&](const char* why) {
+        HE_LOG_ERROR(Physics, "Entity %u: joint not built — %s", entityId, why);
+        m_impl->unqueueJoint(entityId);
+        return false;
+    };
+
+    if (jc->target == HE::UUID{})
+        return refuse("it names no other entity");
+
+    const Entity targetEntity = world.findByEntityId(jc->target);
+    if (targetEntity == entt::null)
+        return false;   // not spawned yet — the pending list is for exactly this
+    const uint32_t targetId = static_cast<uint32_t>(targetEntity);
+    if (targetId == entityId)
+        return refuse("it names itself");
+
+    const auto itA = m_impl->entityToBody.find(entityId);
+    const auto itB = m_impl->entityToBody.find(targetId);
+    if (itA == m_impl->entityToBody.end() || itB == m_impl->entityToBody.end())
+    {
+        // Both entities are here and one of them has no BODY. That is a
+        // different thing from "not spawned yet" and it is worth saying out
+        // loud, because the usual cause is a Character Controller on the other
+        // end: a CharacterVirtual is not a body and cannot be jointed to. Still
+        // a soft failure — a body can arrive later — so it stays queued and the
+        // give-up message has the last word.
+        HE_LOG_WARN(Physics, "Entity %u: joint waiting — entity %u has no rigid body "
+                             "(a Character Controller is not one)",
+                    entityId, itA == m_impl->entityToBody.end() ? entityId : targetId);
+        return false;
+    }
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const JPH::EMotionType motionA = bodyInterface.GetMotionType(itA->second);
+    const JPH::EMotionType motionB = bodyInterface.GetMotionType(itB->second);
+    if (motionA == JPH::EMotionType::Static && motionB == JPH::EMotionType::Static)
+        return refuse("both bodies are Static, so nothing could ever move");
+
+    // The anchors are LOCAL and the axis is a LOCAL direction; Jolt is told about
+    // them in world space. The walk goes through the parent chain here and now,
+    // never through TransformComponent::worldMatrix — a joint built the frame an
+    // entity spawned would read the identity out of that field and anchor the
+    // whole chain at the origin, where it would not crash but would slowly pull
+    // everything to (0, 0, 0).
+    const glm::mat4  matA  = HE::worldMatrixOf(world, entity);
+    const glm::mat4  matB  = HE::worldMatrixOf(world, targetEntity);
+    const glm::vec3  worldAnchorA = glm::vec3(matA * glm::vec4(jc->anchorA, 1.0f));
+    const glm::vec3  worldAnchorB = glm::vec3(matB * glm::vec4(jc->anchorB, 1.0f));
+
+    // The axis is a DIRECTION, so it takes the rotation and not the translation.
+    glm::vec3 worldAxis{ 0.0f };
+    const bool needsAxis = jc->type == JointType::Hinge || jc->type == JointType::Slider;
+    if (needsAxis)
+    {
+        if (glm::length(jc->axis) < 1.0e-5f)
+            return refuse("its axis has no length, so there is no direction to hinge or slide on");
+        worldAxis = glm::normalize(decomposeWorld(matA).rotation * glm::normalize(jc->axis));
+    }
+
+    // Limits arrive in DEGREES for an angle and metres for a distance, and
+    // min >= max is the authored way of saying "no limit". Jolt additionally
+    // requires the range to contain zero — the pose the joint is built in is
+    // position zero — and asserts in a debug build if it does not. Widening is
+    // the friendlier answer than refusing: "the door opens from 10° to 90°"
+    // means a door that opens 90°, and saying so is more use than dropping the
+    // joint.
+    const bool  limited = jc->minLimit < jc->maxLimit;
+    float       loLimit = jc->minLimit;
+    float       hiLimit = jc->maxLimit;
+    if (limited && (loLimit > 0.0f || hiLimit < 0.0f))
+    {
+        HE_LOG_WARN(Physics, "Entity %u: joint limits %.2f..%.2f do not contain 0, which is the "
+                             "pose the joint is built in — widened to %.2f..%.2f",
+                    entityId, loLimit, hiLimit,
+                    std::min(loLimit, 0.0f), std::max(hiLimit, 0.0f));
+        loLimit = std::min(loLimit, 0.0f);
+        hiLimit = std::max(hiLimit, 0.0f);
+    }
+
+    // Built on the stack and handed to Create() below; Jolt copies what it needs.
+    JPH::FixedConstraintSettings    fixedSettings;
+    JPH::PointConstraintSettings    pointSettings;
+    JPH::HingeConstraintSettings    hingeSettings;
+    JPH::SliderConstraintSettings   sliderSettings;
+    JPH::DistanceConstraintSettings distanceSettings;
+    JPH::TwoBodyConstraintSettings* settings = nullptr;
+
+    switch (jc->type)
+    {
+    case JointType::Fixed:
+        // No anchors: a weld keeps the relative pose the two bodies are ALREADY
+        // in, which is what an author who broke one object into pieces means.
+        fixedSettings.mSpace           = JPH::EConstraintSpace::WorldSpace;
+        fixedSettings.mAutoDetectPoint = true;
+        settings = &fixedSettings;
+        break;
+
+    case JointType::Point:
+        // ONE shared pivot, from anchorA. Two separate points would tell Jolt to
+        // make them coincide, and the first step would snap the two bodies
+        // together — the classic way an authored joint destroys a scene.
+        pointSettings.mSpace  = JPH::EConstraintSpace::WorldSpace;
+        pointSettings.mPoint1 = pointSettings.mPoint2 = toJolt(worldAnchorA);
+        settings = &pointSettings;
+        break;
+
+    case JointType::Hinge:
+    {
+        const glm::vec3 normal = anyPerpendicular(worldAxis);
+        hingeSettings.mSpace       = JPH::EConstraintSpace::WorldSpace;
+        hingeSettings.mPoint1      = hingeSettings.mPoint2      = toJolt(worldAnchorA);
+        hingeSettings.mHingeAxis1  = hingeSettings.mHingeAxis2  = toJolt(worldAxis);
+        hingeSettings.mNormalAxis1 = hingeSettings.mNormalAxis2 = toJolt(normal);
+        // Jolt wants radians and takes min from [-pi, 0], max from [0, pi].
+        hingeSettings.mLimitsMin = limited
+            ? std::max(glm::radians(loLimit), -JPH::JPH_PI) : -JPH::JPH_PI;
+        hingeSettings.mLimitsMax = limited
+            ? std::min(glm::radians(hiLimit),  JPH::JPH_PI) :  JPH::JPH_PI;
+        settings = &hingeSettings;
+        break;
+    }
+
+    case JointType::Slider:
+        // mAutoDetectPoint, like Fixed: the pose the drawer was authored in is
+        // travel zero, so the limits an author types are measured from where the
+        // thing already sits.
+        sliderSettings.mSpace           = JPH::EConstraintSpace::WorldSpace;
+        sliderSettings.mAutoDetectPoint = true;
+        sliderSettings.SetSliderAxis(toJolt(worldAxis));
+        sliderSettings.mLimitsMin = limited ? loLimit : -FLT_MAX;
+        sliderSettings.mLimitsMax = limited ? hiLimit :  FLT_MAX;
+        settings = &sliderSettings;
+        break;
+
+    case JointType::Distance:
+        // The one type that reads BOTH anchors, because a rope really does run
+        // from a point on one thing to a point on another.
+        distanceSettings.mSpace  = JPH::EConstraintSpace::WorldSpace;
+        distanceSettings.mPoint1 = toJolt(worldAnchorA);
+        distanceSettings.mPoint2 = toJolt(worldAnchorB);
+        // Negative means "whatever they are apart right now", which is the taut
+        // rope an author placed by hand. A distance cannot be negative, so the
+        // widening above is undone here for the lower end.
+        distanceSettings.mMinDistance = limited ? std::max(loLimit, 0.0f) : -1.0f;
+        distanceSettings.mMaxDistance = limited ? std::max(hiLimit, 0.0f) : -1.0f;
+        settings = &distanceSettings;
+        break;
+
+    default:
+        return refuse("its type is not one this engine builds");
+    }
+
+    // Create() needs the Body objects themselves, not their ids. Both are locked
+    // at once rather than one after the other: two single locks taken in the
+    // order the map happens to hand them out is the shape of a deadlock, and
+    // BodyLockMultiWrite sorts them for exactly that reason.
+    JPH::Ref<JPH::TwoBodyConstraint> constraint;
+    {
+        const JPH::BodyID ids[2] = { itA->second, itB->second };
+        JPH::BodyLockMultiWrite lock(m_impl->physicsSystem.GetBodyLockInterface(), ids, 2);
+        JPH::Body* bodyA = lock.GetBody(0);
+        JPH::Body* bodyB = lock.GetBody(1);
+        if (!bodyA || !bodyB)
+            return false;
+        constraint = settings->Create(*bodyA, *bodyB);
+    }
+    if (constraint == nullptr)
+        return refuse("Jolt refused to create the constraint");
+
+    m_impl->physicsSystem.AddConstraint(constraint);
+    m_impl->joints[entityId] = Impl::JointRecord{ constraint, targetId };
+    m_impl->unqueueJoint(entityId);
+
+    // A settled crate does not feel a rope that was tied to it while it slept:
+    // Jolt only solves constraints between active bodies.
+    if (motionA != JPH::EMotionType::Static) bodyInterface.ActivateBody(itA->second);
+    if (motionB != JPH::EMotionType::Static) bodyInterface.ActivateBody(itB->second);
+    return true;
+}
+
+void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
+{
+    if (!requeue)
+        m_impl->unqueueJoint(entityId);
+    if (m_impl->joints.empty())
+        return;
+
+    // Both sides, not just the one this entity authored. A chain whose MIDDLE
+    // link dies has a joint pointing at it from the link behind, and a Jolt
+    // constraint holds raw Body pointers — leaving that one in place is a read
+    // of freed memory on the next step, with no assertion anywhere to catch it.
+    std::vector<uint32_t> owners;
+    for (const auto& [owner, record] : m_impl->joints)
+        if (owner == entityId || record.partner == entityId)
+            owners.push_back(owner);
+
+    for (const uint32_t owner : owners)
+    {
+        const auto it = m_impl->joints.find(owner);
+        if (it == m_impl->joints.end())
+            continue;
+        m_impl->physicsSystem.RemoveConstraint(it->second.constraint);
+        m_impl->joints.erase(it);
+        // A REBUILD wants the joint back — addEntity tears the old body down and
+        // puts a new one up, and the chain it was part of has to survive that.
+        // Every owner, including this entity's own joint: it is a rebuild for
+        // that one too. A permanent removal instead lets the entries fall off
+        // the list on their own, which is where the give-up message comes from.
+        if (requeue)
+            m_impl->queueJoint(owner);
+    }
+}
+
+void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
+{
+    if (m_impl->pendingJoints.empty())
+        return;
+
+    // A snapshot, because buildJointFor removes its own entry on success and on
+    // a refusal — both of which would invalidate an iterator over the list.
+    std::vector<uint32_t> ids;
+    ids.reserve(m_impl->pendingJoints.size());
+    for (const auto& p : m_impl->pendingJoints)
+        ids.push_back(p.entityId);
+
+    bool progress = false;
+    for (const uint32_t id : ids)
+    {
+        const Entity entity = static_cast<Entity>(id);
+        if (!world.registry().valid(entity) || !world.registry().all_of<JointComponent>(entity))
+        {
+            m_impl->unqueueJoint(id);   // nothing left to build — not a failure
+            continue;
+        }
+        if (buildJointFor(world, id))
+            progress = true;
+    }
+
+    // A chain resolves one link per pass, so the entries at the far end are
+    // patient rather than broken: a pass that built ANYTHING forgives all of
+    // them. Only a pass in which nothing moved counts against the survivors.
+    for (auto& p : m_impl->pendingJoints)
+        p.attempts = progress ? 0 : p.attempts + 1;
+
+    const auto giveUp = [this](const Impl::PendingJoint& p) {
+        if (p.attempts < Impl::kMaxJointAttempts)
+            return false;
+        // Said once, at the point it stops being tried. Anything else would
+        // either repeat every spawn or say nothing at all, and "my joint does
+        // not exist and nothing mentioned it" is the expensive kind of silence.
+        HE_LOG_WARN(Physics, "Entity %u: its joint was never built — the entity it names has no "
+                             "rigid body (a Character Controller is not one). Giving up on it.",
+                    p.entityId);
+        return true;
+    };
+    m_impl->pendingJoints.erase(
+        std::remove_if(m_impl->pendingJoints.begin(), m_impl->pendingJoints.end(), giveUp),
+        m_impl->pendingJoints.end());
+}
+
 void PhysicsWorld::initialize(HorizonWorld& world)
 {
     clear();
@@ -1325,6 +1696,7 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     // one, because a landscape you fall through is never what was meant.
     const std::vector<uint32_t> landscapes =
         collect(reg.view<TerrainComponent, TransformComponent>());
+    const std::vector<uint32_t> jointed = collect(reg.view<JointComponent>());
 
     for (uint32_t entityId : bodies)
         buildBodyFor(world, entityId);
@@ -1335,12 +1707,27 @@ void PhysicsWorld::initialize(HorizonWorld& world)
         if (buildTerrainBodyFor(world, entityId))
             ++terrains;
 
+    // PHASE TWO, and it has to be a second pass: a joint needs both bodies to
+    // exist, and the order entt hands entities out guarantees nothing about
+    // which of the two comes first. Half a chain would build and the other half
+    // would not, differently on every run.
+    //
+    // Nothing goes on the pending list here. Every body a scene HAS was built in
+    // phase one, so a joint that cannot be built now names something that has no
+    // body at all — buildJointFor says so and drops it, rather than leaving an
+    // entry that would resolve on the first unrelated spawn.
+    std::size_t builtJoints = 0;
+    for (uint32_t entityId : jointed)
+        if (buildJointFor(world, entityId))
+            ++builtJoints;
+
     m_impl->physicsSystem.OptimizeBroadPhase();
     m_impl->initialized = true;
 
     HE_LOG_INFO(Physics, "Physics world initialised: %zu rigid body/-ies (%zu landscape), "
-                         "%zu character controller(s)",
-                m_impl->entityToBody.size(), terrains, m_impl->entityToCharacter.size());
+                         "%zu character controller(s), %zu joint(s)",
+                m_impl->entityToBody.size(), terrains, m_impl->entityToCharacter.size(),
+                builtJoints);
     if (m_impl->entityToBody.size() > Impl::kMaxBodies * 9 / 10)
         HE_LOG_WARN(Physics, "Body count %zu is close to the hard limit of %u",
                     m_impl->entityToBody.size(), Impl::kMaxBodies);
@@ -1369,6 +1756,19 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
     built      = buildCharacterFor(world, entityId) || built;
     if (!built)
         built = buildTerrainBodyFor(world, entityId);
+
+    // A new body may be the missing half of somebody else's joint — the second
+    // link of a chain, the wall a grapple was already fired at. It may equally
+    // be the REBUILT half of one: removeEntity above tore the old body down and
+    // put every joint that named it back on the list. Both cases are the same
+    // pass, and so is the entity's OWN joint, which nothing else would have put
+    // on the list the first time it is spawned.
+    if (built)
+    {
+        if (reg.all_of<JointComponent>(entity))
+            m_impl->queueJoint(entityId);
+        resolvePendingJoints(world);
+    }
 
     // Deliberately no OptimizeBroadPhase() here: it rebuilds the entire broad
     // phase tree, and Jolt inserts single bodies incrementally on purpose. Doing
@@ -1475,8 +1875,103 @@ bool PhysicsWorld::hasCharacter(uint32_t entityId) const
     return m_impl->entityToCharacter.count(entityId) != 0;
 }
 
+bool PhysicsWorld::addJoint(HorizonWorld& world, uint32_t entityA, uint32_t entityB,
+                            const JointDesc& desc)
+{
+    if (!m_impl)
+        return false;
+
+    m_impl->world = &world;
+    auto&        reg = world.registry();
+    const Entity a   = static_cast<Entity>(entityA);
+    const Entity b   = static_cast<Entity>(entityB);
+    if (!reg.valid(a) || !reg.valid(b))
+    {
+        HE_LOG_ERROR(Physics, "addJoint(%u, %u): one of the two entities does not exist",
+                     entityA, entityB);
+        return false;
+    }
+    if (entityA == entityB)
+    {
+        HE_LOG_ERROR(Physics, "addJoint(%u, %u): an entity cannot be jointed to itself",
+                     entityA, entityB);
+        return false;
+    }
+
+    // The COMPONENT is written, and then the joint is built from it — never the
+    // other way round. A constraint that lived only inside Jolt would be gone
+    // the next time the scene was saved and loaded, so a grapple hooked up at
+    // runtime would silently stop existing on a checkpoint reload.
+    JointComponent jc;
+    jc.type     = desc.type;
+    jc.target   = world.entityId(b);
+    jc.anchorA  = desc.anchorA;
+    jc.anchorB  = desc.anchorB;
+    jc.axis     = desc.axis;
+    jc.minLimit = desc.minLimit;
+    jc.maxLimit = desc.maxLimit;
+    if (jc.target == HE::UUID{})
+    {
+        // Every entity gets an identity in createEntity, so this is a world
+        // built by some path that bypassed it rather than an ordinary miss.
+        HE_LOG_ERROR(Physics, "addJoint(%u, %u): entity %u has no stable identity, so nothing "
+                              "could name it in a saved scene", entityA, entityB, entityB);
+        return false;
+    }
+
+    // Idempotent, like addEntity: an existing joint is torn down first, so this
+    // call is also how a joint's type or limits are changed. Only this entity's
+    // OWN joint — a joint some other entity aimed at this one is that entity's,
+    // and jointing A to B has never been a reason to cut C loose from A.
+    m_impl->destroyOwnJoint(entityA);
+    reg.emplace_or_replace<JointComponent>(a, jc);
+
+    if (buildJointFor(world, entityA))
+        return true;
+
+    // Authored but not built — the partner may still be on its way. Queue it and
+    // say so with the return value; buildJointFor has already logged whichever
+    // of the two reasons applies.
+    m_impl->queueJoint(entityA);
+    return false;
+}
+
+bool PhysicsWorld::removeJoint(HorizonWorld& world, uint32_t entityA)
+{
+    if (!m_impl)
+        return false;
+
+    const Entity a = static_cast<Entity>(entityA);
+    auto&        reg = world.registry();
+    const bool   had = m_impl->joints.count(entityA) != 0 ||
+                       (reg.valid(a) && reg.all_of<JointComponent>(a));
+
+    m_impl->destroyOwnJoint(entityA);
+    // The component goes too. Leaving it would make the joint reappear on the
+    // next scene load, which is the same "two sources of truth" the write side
+    // of addJoint exists to avoid.
+    if (reg.valid(a))
+        reg.remove<JointComponent>(a);
+    return had;
+}
+
+bool PhysicsWorld::hasJoint(uint32_t entityA) const
+{
+    if (!m_impl)
+        return false;
+    return m_impl->joints.count(entityA) != 0;
+}
+
 void PhysicsWorld::destroyBodyFor(uint32_t entityId)
 {
+    // FIRST, before the body goes anywhere. A Jolt constraint keeps raw Body
+    // pointers, so a constraint left behind by a destroyed body reads freed
+    // memory on the next step — and unlike a dangling BodyID there is no
+    // assertion anywhere that catches it. Requeued rather than forgotten,
+    // because addEntity's documented idempotence tears a body down in order to
+    // put a new one up, and the joints have to come back with it.
+    destroyJointsInvolving(entityId, /*requeue=*/true);
+
     const auto it = m_impl->entityToBody.find(entityId);
     if (it == m_impl->entityToBody.end())
         return;
@@ -2722,6 +3217,15 @@ void PhysicsWorld::clear()
     if (!m_impl->entityToBody.empty() || !m_impl->entityToCharacter.empty())
         HE_LOG_DEBUG(Physics, "Clearing physics world: %zu body/-ies, %zu character(s)",
                      m_impl->entityToBody.size(), m_impl->entityToCharacter.size());
+
+    // Every constraint before every body, and not one body earlier: a constraint
+    // holds Body pointers, so destroying the bodies out from under the solver
+    // and only then removing the constraints is a use-after-free with nothing to
+    // announce it.
+    for (auto& [owner, record] : m_impl->joints)
+        m_impl->physicsSystem.RemoveConstraint(record.constraint);
+    m_impl->joints.clear();
+    m_impl->pendingJoints.clear();
 
     // Same Remove-then-Destroy pair removeEntity() uses, in bulk. The per-entity
     // contact purge is skipped because reset() below drops the whole table at

@@ -8,6 +8,7 @@
 class HorizonWorld;
 class ContentManager;
 namespace HE { struct CollisionLayerConfig; }
+#include <Types/Enums.h>   // HE::JointType, named by JointDesc below
 
 // PIMPL wrapper around Jolt PhysicsSystem.
 // Keeps all Jolt headers out of the public API.
@@ -412,6 +413,54 @@ public:
     bool      setAngularVelocity(uint32_t entityId, const glm::vec3& angularVelocity);
     glm::vec3 getAngularVelocity(uint32_t entityId) const;
 
+    // ── Joints ───────────────────────────────────────────────────────────────
+    // A door on its frame, a link in a chain, a rope between a grapple and a
+    // wall. Everything an author can set lives on JointComponent, which is the
+    // ONE source of truth: the runtime calls below write it and then build from
+    // it, so a joint hooked up mid-game is still there after a save and a load.
+    //
+    // The per-type table of which fields mean anything lives on the component;
+    // it is not repeated here, because two copies of it would disagree.
+    struct JointDesc
+    {
+        HE::JointType type = HE::JointType::Fixed;
+        glm::vec3 anchorA{ 0.0f };   // LOCAL to entity A — see the component
+        glm::vec3 anchorB{ 0.0f };   // LOCAL to entity B, and read by Distance alone
+        glm::vec3 axis{ 0.0f, 1.0f, 0.0f };  // LOCAL to A; hinge axis / slider direction
+        float     minLimit = 0.0f;   // DEGREES (hinge) or metres (slider)
+        float     maxLimit = 0.0f;   // min >= max means unlimited
+    };
+
+    // Join entityA to entityB. Writes entityA's JointComponent from `desc` — the
+    // component is the source of truth, and a joint that only existed inside
+    // Jolt would vanish the next time the scene was saved.
+    //
+    // IDEMPOTENT, like addEntity: an entity that already has a joint has it torn
+    // down first, so this is also how a joint is changed.
+    //
+    // BOTH SIDES NEED A RIGID BODY. A CharacterController is not a body
+    // (CharacterVirtual has none), so an entity that only has a controller
+    // cannot be jointed to anything — that is refused with a log, not silently
+    // ignored. Two STATIC bodies are refused for the same reason: nothing could
+    // ever move, so the joint would be a lie in the outliner.
+    //
+    // Returns whether the joint now exists in the simulation. It can answer
+    // false while leaving the component behind: a partner that has not spawned
+    // yet is a legitimate order to build the joint later, and it is retried as
+    // each following entity gains its body.
+    bool addJoint(HorizonWorld& world, uint32_t entityA, uint32_t entityB,
+                  const JointDesc& desc);
+
+    // Undo that: the constraint goes and so does the component. Removing the
+    // component too is the other half of "the component is the truth" — leaving
+    // it would resurrect the joint on the next scene load.
+    bool removeJoint(HorizonWorld& world, uint32_t entityA);
+
+    // Is there a LIVE constraint on this entity? Not the same question as "does
+    // it have a JointComponent": a joint whose partner has not spawned yet is
+    // authored but not yet built, and this answers about the simulation.
+    bool hasJoint(uint32_t entityA) const;
+
     // Set the movement velocity for a CharacterController entity (m/s).
     // Has no effect if the entity has no active character controller.
     void setCharacterVelocity(uint32_t entityId, const glm::vec3& velocity);
@@ -512,8 +561,32 @@ private:
     // The implicit landscape collider: a static height field for a terrain
     // entity that carries no RigidBodyComponent of its own.
     bool buildTerrainBodyFor(HorizonWorld& world, uint32_t entityId);
+    // The joint half of the same pair: one builder both the bulk path and the
+    // runtime path go through, reading the entity's JointComponent and nothing
+    // else. Returns whether a constraint now exists.
+    bool buildJointFor(HorizonWorld& world, uint32_t entityId);
+
+    // Destroy every joint that names this entity on EITHER side — the one its
+    // own JointComponent authored, and the ones other entities aimed at it.
+    // A Jolt constraint holds raw Body pointers, so a body destroyed underneath
+    // one leaves the solver reading freed memory: this must run BEFORE the body
+    // goes, from every path that destroys a body.
+    //
+    // `requeue` puts the affected owners back on the pending list, which is what
+    // a REBUILD wants (addEntity tears the old body down and builds a new one,
+    // and the chain the entity was part of has to come back) and what a removal
+    // does not.
+    void destroyJointsInvolving(uint32_t entityId, bool requeue);
+
+    // Try to build every joint that is authored but not yet in the simulation.
+    // Run after each body is built, because "the partner does not exist yet" is
+    // the normal state halfway through a spawn. Gives up on an entry that has
+    // failed too often, so the list cannot become a leak.
+    void resolvePendingJoints(HorizonWorld& world);
+
     // The teardown half, shared by clear(), removeEntity() and the reap in
-    // step(). Includes dropping the entity's contact bookkeeping.
+    // step(). Includes dropping the entity's contact bookkeeping and every joint
+    // the body was part of.
     void destroyBodyFor(uint32_t entityId);
 
     struct Impl;

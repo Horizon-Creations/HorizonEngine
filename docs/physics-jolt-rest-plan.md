@@ -662,8 +662,14 @@ einer, der beim Loeschen einer Entity abstuerzt.
    Ergebnis ueber einen bereichsgepruefen Index, ein ANGEHAENGTER Ausgang ist
    fuer einen alten Node unsichtbar. Deshalb hat `raycast`/`sphereCast` jetzt
    `layer` als sechsten Ausgang, waehrend die Maske unter drei neuen Namen kommt.
-2. **Constraint-Limit** — fuehrt `PhysicsSystem::Init`s `max contact constraints`
-   auch die `TwoBodyConstraint`s, oder gibt es kein eigenes Limit (§ 6.4)?
+2. ~~**Constraint-Limit**~~ — **beantwortet in Schritt 5: es gibt keins.**
+   `ConstraintManager::mConstraints` ist ein dynamisches `JPH::Array`
+   (`ConstraintManager.h:96`), das `max contact constraints` aus
+   `PhysicsSystem::Init` zaehlt ausschliesslich Kontakte. Gelenke brauchen also
+   weder ein Limit noch eine Zaehlung noch eine Warnung wie `kMaxBodies`. Die
+   alte Frage steht darunter, damit man sieht, was gefragt war:
+   ~~fuehrt `PhysicsSystem::Init`s `max contact constraints`
+   auch die `TwoBodyConstraint`s, oder gibt es kein eigenes Limit (§ 6.4)?~~
 3. ~~**`.heproj`-Durchreichung**~~ — **beantwortet in Schritt 3: jedes Feld
    braucht seine eigene Zeile**, an fuenf Stellen. `ProjectData`
    (`ProjectManager.h`) + Lesen/Schreiben (`ProjectManager.cpp:1525/1631`),
@@ -761,3 +767,91 @@ einer, der beim Loeschen einer Entity abstuerzt.
   den Elementtyp generisch vom Array, ein Test haelt das fest.
 - 122/122 ctest-Ziele gruen (3 uebersprungene `runtime_size`-Ziele wie immer),
   22 neue Testfaelle/Bloecke in `test_physics.cpp` und `test_engine_api.cpp`.
+
+---
+
+## 11. Was Schritt 5 gebaut hat (Constraints, Kern)
+
+`HE::JointType` (fuenf Werte, append-only wie `ColliderShape`), `JointComponent`,
+`PhysicsWorld::buildJointFor` samt zweiphasiger `initialize`, Warteliste,
+Aufraeumung in `destroyBodyFor`/`clear`, Serializer, Laufzeit-API und drei
+Registry-Zeilen.
+
+### 11.1 Vier Abweichungen vom Entwurf in § 4.3/§ 4.4
+
+- **Limits sind GRAD, nicht Radiant.** § 4.3 sagte Radiant. `PhysicsWorld.h:401`
+  sagt aber ausdruecklich, die Winkelgeschwindigkeit sei „the one place in this
+  API that is not in degrees, because it is a rate rather than a pose" — ein
+  Hinge-Limit ist eine Pose. `glm::radians()` an der Jolt-Grenze.
+- **`target` ist `HE::UUID`, nicht `std::string`.** Das Haus-Muster fuer eine
+  Entity-Referenz (`RopeComponent::attachStart`, `CameraRigComponent::target`),
+  aufgeloest ueber `HorizonWorld::findByEntityId`.
+- **Anker pro Typ, nicht zwei Anker fuer alle.** Zwei getrennte Weltanker sagen
+  Jolt „mache diese beiden Punkte zu einem" und reissen ein Point- oder
+  Hinge-Gelenk im ersten Schritt zusammen. Die Tabelle steht im Header von
+  `JointComponent`, im Stil von `ColliderComponent.h:12-24`:
+  Fixed liest nichts (`mAutoDetectPoint`), Point und Hinge nehmen `anchorA` als
+  EINEN gemeinsamen Drehpunkt, Slider nimmt `axis` (plus `mAutoDetectPoint`),
+  und Distance ist der einzige Typ, der beide Anker liest.
+- **Motor, Bruch und `collideConnected` kommen nicht mit** — weder als
+  Komponentenfeld noch als Parameter. Sie gehoeren nach § 7 zu Schritt 6, und
+  § 4.6 sagt selbst, dass ein serialisiertes Feld, das nichts tut, schlimmer ist
+  als keins. Die Arity-Falle trifft sie nicht: `setJointMotor` und
+  `pollJointBroken` sind ohnehin eigene Registry-Zeilen.
+
+### 11.2 Die drei Lebenszyklus-Fallen, wie sie geloest sind
+
+- **(a) Zerstoerung.** `destroyJointsInvolving(entityId, requeue)` laeuft als
+  ERSTES in `destroyBodyFor`, vor jedem `RemoveBody`. Beide Richtungen: das
+  Gelenk, das die Entity selbst geschrieben hat, UND jedes, das auf sie zeigt
+  (das mittlere Kettenglied). Ein Jolt-Constraint haelt rohe `Body*`, und dafuer
+  gibt es keine Assertion — ein zurueckgelassenes Constraint liest im naechsten
+  Step freigegebenen Speicher. `clear()` raeumt alle Constraints vor allen
+  Bodies ab.
+- **(b) Wiederaufbau.** `destroyBodyFor` setzt die betroffenen Besitzer mit
+  `requeue=true` zurueck auf die Warteliste; `addEntity` arbeitet sie nach jedem
+  erfolgreichen Body-Bau ab. Ein Collider-Wechsel im laufenden Spiel verliert
+  also weder das eigene Gelenk noch die halbe Kette.
+- **(c) Reihenfolge.** `initialize()` ist zweiphasig: erst alle Bodies, dann in
+  einem zweiten Durchlauf alle Gelenke. Ein Test baut dieselbe Szene in beiden
+  Erzeugungsreihenfolgen — der Fehler waere in genau einer davon unsichtbar.
+  Die Warteliste (`Impl::pendingJoints`) traegt einen Zaehler, der bei JEDEM
+  Durchlauf mit Fortschritt auf null geht: eine Kette loest sich pro Durchlauf
+  um ein Glied auf, und die hinteren Eintraege sind geduldig, nicht kaputt. Erst
+  acht folgenlose Durchlaeufe geben auf, mit einer Meldung.
+- **(d) Partner ohne Body.** Warnt und bleibt in der Warteliste (ein Body kann
+  spaeter kommen); die Aufgabe-Meldung hat das letzte Wort. Zwei statische
+  Bodies, ein Selbstbezug, eine Achse ohne Laenge und ein leeres `target` sind
+  dagegen harte Absagen mit `HE_LOG_ERROR` und fliegen sofort von der Liste.
+
+### 11.3 Was noch nicht geht — eine Luecke, die aelter ist als dieser Schritt
+
+**Prefab-Instanziierung remappt KEINE Entity-Referenzen.** `applyPrefabJson`
+(`SceneSerializer.cpp:1745ff`) praegt frische UUIDs und ruft `applyComponents`
+mit den Rohdaten auf; ein `target`, ein `RopeComponent::attachStart` und ein
+`CameraRigComponent::target` zeigen danach auf die Entity im QUELL-Baum (oder
+ins Leere), nicht auf das Geschwister in derselben Prefab-Instanz. Das trifft
+also alle drei Komponenten gleichermassen und ist nicht durch die Gelenke
+entstanden. § 4.5 (c) hoffte, `addEntityTree` erledige „Prefab mit Kette" von
+selbst — das stimmt fuer die BODIES, nicht fuer die Referenzen. Ein
+`idMap`-Durchlauf ueber die drei Felder in `applyPrefabJson` waere die
+Reparatur; sie gehoert nicht in dieses Thema.
+
+### 11.4 Restliches
+
+- `HorizonWorld::reserveComponentStorage()` reserviert den `JointComponent`-Pool
+  mit: `physics.addJoint` SCHREIBT die Komponente, ein hot-geladenes
+  Game-Logic-dylib waere sonst der erste, der den Pool anfasst.
+- Der Serializer behandelt einen unbekannten `type` wie `jsonToColliderShape`
+  einen unbekannten Shape: Fixed, und eine Warnung, statt eines stillen Casts
+  auf 0. `"joint"` steht in `isKnownComponentKey` (sonst warnt der Loader, eine
+  Komponente werde VERWORFEN, waehrend sie einwandfrei laedt).
+- Drei Registry-Zeilen: `physics.addJoint` (acht Parameter, alle von Anfang an —
+  ein gespeicherter Node kann keinen Eingang nachwachsen lassen),
+  `physics.removeJoint`, `physics.hasJoint`. Anzeigenamen und
+  `HcNodeDocs`-Beschreibungen dazu.
+- 122/122 ctest-Ziele gruen, 19 neue Testfaelle in `test_physics.cpp`,
+  `test_scene_serializer.cpp` und `test_engine_api.cpp` — darunter je einer pro
+  Gelenktyp mit einer messbaren physikalischen Aussage (das Pendel behaelt
+  seinen Radius, der Slider traegt das Gewicht, das Seil faengt den Fall) und
+  einer, der einen Anker an einer 100 m entfernten Elternkette prueft.

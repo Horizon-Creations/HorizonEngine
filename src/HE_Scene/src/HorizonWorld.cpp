@@ -10,6 +10,7 @@
 #include "HorizonScene/Components/EntityIdComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -63,6 +64,10 @@ void HorizonWorld::reserveComponentStorage()
     // any game code runs, which is why the list is not simply all of them.
     (void)m_registry.storage<RopeComponent>();
     (void)m_registry.storage<TrailComponent>();
+    // And for the same reason: physics.addJoint WRITES a JointComponent, so the
+    // grapple line a dlopen'd game logic hooks at runtime would otherwise be the
+    // first thing ever to touch this pool.
+    (void)m_registry.storage<JointComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const

@@ -498,6 +498,42 @@ namespace physics {
     bool setPosition(Ctx&, Entity e, const glm::vec3& position);
     bool setPositionAndReset(Ctx&, Entity e, const glm::vec3& position);
 
+    // ── Joints ──────────────────────────────────────────────────────────────
+    // Tie two rigid bodies together: a door on its frame, a link in a chain, a
+    // rope between a grapple and the wall it stuck to.
+    //
+    // `type` is HE::JointType as an int — 0 Fixed, 1 Point, 2 Hinge, 3 Slider,
+    // 4 Distance — because the graph has no enum type. WHICH OF THE OTHER
+    // ARGUMENTS MATTERS DEPENDS ON IT, and the table lives on JointComponent
+    // where the fields do; the short version is that Fixed reads none of them,
+    // Point and Hinge use `anchorA` as one shared pivot, Slider uses `axis`, and
+    // Distance is the only one that reads `anchorB`.
+    //
+    // The anchors are LOCAL to their own entity, by the rule that governs this
+    // whole surface — unlike addForceAtPosition's world point, an anchor IS a
+    // pose, and a prefab has to carry it wherever it is dropped.
+    //
+    // `minLimit`/`maxLimit` are DEGREES for a hinge and metres for a slider, and
+    // min >= max means no limit at all.
+    //
+    // Writes the entity's Joint component and builds from it, so a joint made at
+    // runtime is still there after a save and a load. Idempotent: an entity that
+    // already has a joint has it replaced. False when it could not be built —
+    // most often because one of the two has no rigid body (a Character
+    // Controller is not one), and the log says which.
+    bool addJoint(Ctx&, Entity a, Entity b, int type, const glm::vec3& anchorA,
+                  const glm::vec3& anchorB, const glm::vec3& axis,
+                  float minLimit, float maxLimit);
+
+    // Cut it loose again — the constraint and the component both, so it does not
+    // come back on the next load. True when there was one to remove.
+    bool removeJoint(Ctx&, Entity a);
+
+    // Is this entity jointed to something RIGHT NOW? A joint whose partner has
+    // not spawned yet is authored but not built, and this answers about the
+    // simulation rather than about the component.
+    bool hasJoint(Ctx&, Entity a);
+
     // Does this entity have a body or a character controller at all? The guard
     // to ask before pushing, and the one honest answer to "why did my impulse do
     // nothing" — false without a PhysicsWorld too.

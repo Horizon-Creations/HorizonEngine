@@ -5,6 +5,7 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
+#include <HorizonScene/Components/JointComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
@@ -2360,4 +2361,402 @@ TEST_CASE("PhysicsWorld: a push at a point refuses exactly what a push at the ce
     CHECK_FALSE(phys.addImpulseAtPosition(static_cast<uint32_t>(wall), { 1, 0, 0 }, { 0, 0, 0 }));
     CHECK_FALSE(phys.addForceAtPosition(static_cast<uint32_t>(ghost), { 1, 0, 0 }, { 0, 0, 0 }));
     CHECK_FALSE(phys.addImpulseAtPosition(99999u, { 1, 0, 0 }, { 0, 0, 0 }));
+}
+
+// ─── Joints ───────────────────────────────────────────────────────────────────
+
+namespace {
+    // Author a joint the way the editor does: a component on A that names B by
+    // UUID. The runtime path (addJoint) writes exactly this, so a test that used
+    // only the runtime path would never exercise what a saved scene loads.
+    void jointTo(HorizonWorld& world, Entity a, Entity b, JointType type,
+                 const glm::vec3& anchorA = glm::vec3(0.0f),
+                 const glm::vec3& axis    = glm::vec3(0.0f, 1.0f, 0.0f),
+                 float minLimit = 0.0f, float maxLimit = 0.0f,
+                 const glm::vec3& anchorB = glm::vec3(0.0f))
+    {
+        JointComponent j;
+        j.type     = type;
+        j.target   = world.entityId(b);
+        j.anchorA  = anchorA;
+        j.anchorB  = anchorB;
+        j.axis     = axis;
+        j.minLimit = minLimit;
+        j.maxLimit = maxLimit;
+        world.registry().emplace_or_replace<JointComponent>(a, j);
+    }
+
+    glm::vec3 posOf(HorizonWorld& world, Entity e)
+    {
+        return world.registry().get<TransformComponent>(e).position;
+    }
+}
+
+TEST_CASE("PhysicsWorld: a Fixed joint holds a body up that would otherwise fall")
+{
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+    jointTo(world, hung, anchor, JointType::Fixed);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    // Welded to something that cannot move, so two seconds of gravity does
+    // nothing at all. Without the joint this is a body 19 m lower.
+    CHECK(posOf(world, hung).y == doctest::Approx(10.0f).epsilon(0.02));
+    CHECK(posOf(world, hung).x == doctest::Approx(2.0f).epsilon(0.02));
+}
+
+TEST_CASE("PhysicsWorld: a Point joint is a pendulum — it swings but never leaves its pivot")
+{
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity arm    = makeDynamicBox(world, "Arm",    { 2.0f, 10.0f, 0.0f });
+    // The pivot is ONE point: A's own (-2, 0, 0) is the anchor's position in the
+    // world. Two separate anchors here would tell Jolt to make them coincide and
+    // the first step would snap the arm into the anchor.
+    jointTo(world, arm, anchor, JointType::Point, { -2.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(arm)));
+
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    const glm::vec3 pivot{ 0.0f, 10.0f, 0.0f };
+    CHECK(glm::length(posOf(world, arm) - pivot) == doctest::Approx(2.0f).epsilon(0.05));
+    CHECK(posOf(world, arm).y < 9.5f);   // it did swing down; it is not welded
+}
+
+TEST_CASE("PhysicsWorld: a Hinge's limits are degrees, and they stop the swing")
+{
+    const auto swing = [](float minLimit, float maxLimit) {
+        HorizonWorld world;
+        const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+        const Entity door   = makeDynamicBox(world, "Door",   { 2.0f, 10.0f, 0.0f });
+        jointTo(world, door, anchor, JointType::Hinge, { -2.0f, 0.0f, 0.0f },
+                { 0.0f, 0.0f, 1.0f }, minLimit, maxLimit);
+        PhysicsWorld phys;
+        phys.initialize(world);
+        REQUIRE(phys.hasJoint(static_cast<uint32_t>(door)));
+        for (int i = 0; i < kSteps2s; ++i)
+            phys.step(world, kDt);
+        return posOf(world, door);
+    };
+
+    // min >= max is the authored way of saying "no limit": the arm swings all
+    // the way down like the point joint above.
+    CHECK(swing(0.0f, 0.0f).y < 9.5f);
+
+    // Five degrees either side of the pose it was built in. Five degrees of a
+    // two-metre arm is 2·sin(5°) ≈ 0.17 m of drop — and it is degrees that make
+    // that number: read as radians, five would be most of a full turn and the
+    // arm would hang straight down.
+    const glm::vec3 held = swing(-5.0f, 5.0f);
+    CHECK(held.y > 9.7f);
+    CHECK(held.y < 10.0f);   // it moved a little, so the limit is a limit and not a weld
+}
+
+TEST_CASE("PhysicsWorld: a Slider on a horizontal axis carries the body's weight")
+{
+    HorizonWorld world;
+    const Entity rail    = makeStaticBox(world,  "Rail",    { 5.0f, 10.0f, 0.0f });
+    const Entity carriage = makeDynamicBox(world, "Carriage", { 0.0f, 10.0f, 0.0f });
+    // Travel along X only, limited to half a metre either way.
+    jointTo(world, carriage, rail, JointType::Slider, glm::vec3(0.0f),
+            { 1.0f, 0.0f, 0.0f }, -0.5f, 0.5f);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(carriage)));
+
+    phys.addImpulse(static_cast<uint32_t>(carriage), { 20.0f, 0.0f, 0.0f });
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    // Gravity is taken by the rail: a slider forbids every direction but its own.
+    CHECK(posOf(world, carriage).y == doctest::Approx(10.0f).epsilon(0.02));
+    // And the push spent itself against the stop rather than sending it away.
+    CHECK(posOf(world, carriage).x > 0.2f);
+    CHECK(posOf(world, carriage).x < 0.7f);
+}
+
+TEST_CASE("PhysicsWorld: a Distance joint is a rope — it catches the fall at its own length")
+{
+    HorizonWorld world;
+    const Entity hook = makeStaticBox(world,  "Hook", { 0.0f, 10.0f, 0.0f });
+    const Entity load = makeDynamicBox(world, "Load", { 0.0f,  5.0f, 0.0f });
+    // Unlimited means "however far apart they are right now", which is the taut
+    // rope an author placed by hand: five metres.
+    jointTo(world, load, hook, JointType::Distance);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(load)));
+
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    CHECK(glm::length(posOf(world, load) - glm::vec3(0.0f, 10.0f, 0.0f))
+              == doctest::Approx(5.0f).epsilon(0.05));
+}
+
+TEST_CASE("PhysicsWorld: destroying the other end takes the joint with it")
+{
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+    jointTo(world, hung, anchor, JointType::Fixed);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // The joint belongs to `hung`, but it is `anchor` that is going away. A
+    // constraint keeps raw Jolt Body pointers, so a joint left behind here reads
+    // freed memory on the next step — with nothing to announce it.
+    phys.removeEntity(static_cast<uint32_t>(anchor));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    for (int i = 0; i < 30; ++i)
+        phys.step(world, kDt);
+    CHECK(posOf(world, hung).y < 9.9f);   // nothing holds it any more
+}
+
+TEST_CASE("PhysicsWorld: the middle link of a chain can die without taking the process with it")
+{
+    HorizonWorld world;
+    const Entity top    = makeStaticBox(world,  "Top",    { 0.0f, 10.0f, 0.0f });
+    const Entity middle = makeDynamicBox(world, "Middle", { 0.0f,  8.0f, 0.0f });
+    const Entity bottom = makeDynamicBox(world, "Bottom", { 0.0f,  6.0f, 0.0f });
+    jointTo(world, middle, top,    JointType::Distance);
+    jointTo(world, bottom, middle, JointType::Distance);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(middle)));
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(bottom)));
+
+    // `middle` is named by the joint BELOW it, which nothing else knows about:
+    // a bookkeeping that only mapped owner → joint would leave that one behind.
+    world.destroyEntity(middle);
+    for (int i = 0; i < 30; ++i)
+        phys.step(world, kDt);   // the reap runs here
+
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(middle)));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(bottom)));
+    CHECK(posOf(world, bottom).y < 6.0f);
+}
+
+TEST_CASE("PhysicsWorld: rebuilding a body puts its joint back")
+{
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+    jointTo(world, hung, anchor, JointType::Fixed);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // addEntity is documented idempotent — it tears the old body down and builds
+    // a new one, which is what changing a collider at runtime goes through. The
+    // joint has to survive that, and so does a joint pointing AT the rebuilt one.
+    ColliderComponent col; col.shape = ColliderShape::Sphere; col.radius = 0.5f;
+    world.addComponent(anchor, col);
+    CHECK(phys.addEntity(world, static_cast<uint32_t>(anchor)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    CHECK(phys.addEntity(world, static_cast<uint32_t>(hung)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+    CHECK(posOf(world, hung).y == doctest::Approx(10.0f).epsilon(0.02));
+}
+
+TEST_CASE("PhysicsWorld: a joint whose partner spawns later is built when it arrives")
+{
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    // The grapple line is hooked up before the thing at the other end exists —
+    // built at runtime, entity by entity, in whatever order the spawn produces.
+    const Entity hung = makeDynamicBox(world, "Hung", { 2.0f, 10.0f, 0.0f });
+    jointTo(world, hung, anchor, JointType::Fixed);
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));   // no body yet
+
+    CHECK(phys.addEntity(world, static_cast<uint32_t>(hung)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+}
+
+TEST_CASE("PhysicsWorld: the joint pass does not depend on the order entities were created")
+{
+    // The failure this guards against is invisible in one direction: entt hands
+    // entities out in creation order, so a one-pass build works whenever the
+    // partner happens to come first and fails silently when it does not.
+    const auto hang = [](bool anchorFirst) {
+        HorizonWorld world;
+        Entity anchor = entt::null, hung = entt::null;
+        if (anchorFirst)
+        {
+            anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+            hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+        }
+        else
+        {
+            hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+            anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+        }
+        jointTo(world, hung, anchor, JointType::Fixed);
+        PhysicsWorld phys;
+        phys.initialize(world);
+        return phys.hasJoint(static_cast<uint32_t>(hung));
+    };
+    CHECK(hang(true));
+    CHECK(hang(false));
+}
+
+TEST_CASE("PhysicsWorld: a joint to something that is not a rigid body is refused, not ignored")
+{
+    HorizonWorld world;
+    const Entity box = makeDynamicBox(world, "Box", { 0.0f, 10.0f, 0.0f });
+
+    // A character controller is not a body — CharacterVirtual has none — so it
+    // cannot be one end of a joint. The usual way to discover that is a chain
+    // that simply does not exist.
+    const Entity player = world.createEntity("Player");
+    { TransformComponent t; t.position = { 2.0f, 10.0f, 0.0f }; world.addComponent(player, t); }
+    world.addComponent(player, CharacterControllerComponent{});
+
+    const Entity nowhere = world.createEntity("Nowhere");
+    { TransformComponent t; world.addComponent(nowhere, t); }
+
+    jointTo(world, box, player, JointType::Fixed);
+    PhysicsWorld phys;
+    phys.initialize(world);
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(box)));
+
+    // Two static bodies could never move, and a joint naming nothing at all is a
+    // component somebody added and never filled in. Both are refused.
+    const Entity wallA = makeStaticBox(world, "WallA", { 20.0f, 0.0f, 0.0f });
+    const Entity wallB = makeStaticBox(world, "WallB", { 24.0f, 0.0f, 0.0f });
+    PhysicsWorld::JointDesc desc;
+    CHECK_FALSE(phys.addJoint(world, static_cast<uint32_t>(wallA),
+                              static_cast<uint32_t>(wallB), desc));
+    CHECK_FALSE(phys.addJoint(world, static_cast<uint32_t>(box),
+                              static_cast<uint32_t>(box), desc));
+    CHECK_FALSE(phys.addJoint(world, static_cast<uint32_t>(box),
+                              static_cast<uint32_t>(nowhere), desc));
+
+    // A hinge with no axis has no direction to turn about; that is a refusal
+    // rather than a NaN in the solver.
+    desc.type = JointType::Hinge;
+    desc.axis = glm::vec3(0.0f);
+    const Entity other = makeDynamicBox(world, "Other", { 40.0f, 10.0f, 0.0f });
+    phys.addEntity(world, static_cast<uint32_t>(other));
+    CHECK_FALSE(phys.addJoint(world, static_cast<uint32_t>(box),
+                              static_cast<uint32_t>(other), desc));
+}
+
+TEST_CASE("PhysicsWorld: addJoint writes the component, removeJoint takes it away again")
+{
+    HorizonWorld world;
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    PhysicsWorld::JointDesc desc;
+    desc.type     = JointType::Hinge;
+    desc.anchorA  = { -2.0f, 0.0f, 0.0f };
+    desc.axis     = { 0.0f, 0.0f, 1.0f };
+    desc.minLimit = -30.0f;
+    desc.maxLimit =  30.0f;
+    CHECK(phys.addJoint(world, static_cast<uint32_t>(hung),
+                        static_cast<uint32_t>(anchor), desc));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // The COMPONENT is the source of truth: a joint that only lived inside Jolt
+    // would be gone the next time the scene was saved and loaded.
+    const auto* jc = world.registry().try_get<JointComponent>(hung);
+    REQUIRE(jc != nullptr);
+    CHECK(jc->type == JointType::Hinge);
+    CHECK(jc->target == world.entityId(anchor));
+    CHECK(jc->minLimit == doctest::Approx(-30.0f));
+
+    // Idempotent, like addEntity: the second call replaces rather than stacks.
+    desc.type = JointType::Fixed;
+    CHECK(phys.addJoint(world, static_cast<uint32_t>(hung),
+                        static_cast<uint32_t>(anchor), desc));
+    CHECK(world.registry().get<JointComponent>(hung).type == JointType::Fixed);
+
+    CHECK(phys.removeJoint(world, static_cast<uint32_t>(hung)));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));
+    CHECK_FALSE(world.registry().all_of<JointComponent>(hung));
+    CHECK_FALSE(phys.removeJoint(world, static_cast<uint32_t>(hung)));   // nothing left
+}
+
+TEST_CASE("PhysicsWorld: clearing a world full of joints destroys them before the bodies")
+{
+    HorizonWorld world;
+    const Entity top    = makeStaticBox(world,  "Top",    { 0.0f, 10.0f, 0.0f });
+    const Entity middle = makeDynamicBox(world, "Middle", { 0.0f,  8.0f, 0.0f });
+    const Entity bottom = makeDynamicBox(world, "Bottom", { 0.0f,  6.0f, 0.0f });
+    jointTo(world, middle, top,    JointType::Distance);
+    jointTo(world, bottom, middle, JointType::Distance);
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(bottom)));
+
+    phys.clear();
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(middle)));
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(bottom)));
+
+    // And the whole thing can be stood back up on the same world.
+    phys.initialize(world);
+    CHECK(phys.hasJoint(static_cast<uint32_t>(middle)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(bottom)));
+    for (int i = 0; i < 30; ++i)
+        phys.step(world, kDt);
+}
+
+TEST_CASE("PhysicsWorld: a joint anchor is local, so a parented body hangs where it stands")
+{
+    // The anchor is authored in the entity's OWN space, and the entity here is a
+    // child standing 100 m from its parent's origin. Read as a world point, or
+    // composed from TransformComponent::worldMatrix (which nothing has
+    // propagated yet), the pivot would land at the origin and the whole thing
+    // would be dragged there instead of swinging in place.
+    HorizonWorld world;
+    const Entity zone = world.createEntity("Zone");
+    { TransformComponent t; t.position = { 100.0f, 0.0f, 0.0f }; world.addComponent(zone, t); }
+
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+    const Entity arm    = makeDynamicBox(world, "Arm",    { 2.0f, 10.0f, 0.0f });
+    world.reparentEntity(anchor, zone);
+    world.reparentEntity(arm,    zone);
+    jointTo(world, arm, anchor, JointType::Point, { -2.0f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.hasJoint(static_cast<uint32_t>(arm)));
+
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    // Still hanging off its own pivot 100 m out, not pulled to the origin.
+    const glm::vec3 worldPos = HE::worldPositionOf(world, arm);
+    CHECK(glm::length(worldPos - glm::vec3(100.0f, 10.0f, 0.0f))
+              == doctest::Approx(2.0f).epsilon(0.05));
 }

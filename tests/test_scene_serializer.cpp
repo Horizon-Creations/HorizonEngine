@@ -10,6 +10,7 @@
 #include <HorizonScene/Components/MovementComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/JointComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
@@ -2177,4 +2178,114 @@ TEST_CASE("Every component survives a round-trip with non-default values in ever
 		REQUIRE(ser.loadFromMemory(loaded, blob));
 		verifyEveryComponent(loaded, authored);
 	}
+}
+
+TEST_CASE("A joint survives a save and a load, target and all")
+{
+	// The joint is the first component whose interesting field is a reference to
+	// ANOTHER ENTITY, so the round trip has to carry a UUID that still resolves
+	// on the other side — the reason the component names its partner that way
+	// rather than by entt handle in the first place.
+	HorizonWorld world;
+	const Entity anchor = world.createEntity("Anchor");
+	const Entity door   = world.createEntity("Door");
+	world.addComponent(anchor, TransformComponent{});
+	world.addComponent(door,   TransformComponent{});
+
+	JointComponent j;
+	j.type     = JointType::Hinge;
+	j.target   = world.entityId(anchor);
+	j.anchorA  = { -0.5f, 0.0f, 0.25f };
+	j.anchorB  = {  1.5f, 2.0f, -3.0f };
+	j.axis     = {  0.0f, 0.0f, 1.0f };
+	j.minLimit = -95.0f;
+	j.maxLimit =  12.5f;
+	world.registry().emplace<JointComponent>(door, j);
+
+	SceneSerializer ser;
+	std::vector<uint8_t> blob;
+	REQUIRE(ser.saveToMemory(world, blob));
+	HorizonWorld loaded;
+	REQUIRE(ser.loadFromMemory(loaded, blob));
+
+	Entity loadedDoor = entt::null, loadedAnchor = entt::null;
+	for (auto [e, n] : loaded.registry().view<NameComponent>().each())
+	{
+		if (n.name == "Door")   loadedDoor   = e;
+		if (n.name == "Anchor") loadedAnchor = e;
+	}
+	REQUIRE(loadedDoor   != Entity{ entt::null });
+	REQUIRE(loadedAnchor != Entity{ entt::null });
+
+	const auto* out = loaded.registry().try_get<JointComponent>(loadedDoor);
+	REQUIRE(out != nullptr);
+	CHECK(out->type == JointType::Hinge);
+	CHECK(out->anchorA.x == doctest::Approx(-0.5f));
+	CHECK(out->anchorA.z == doctest::Approx(0.25f));
+	CHECK(out->anchorB.y == doctest::Approx(2.0f));
+	CHECK(out->axis.z    == doctest::Approx(1.0f));
+	CHECK(out->minLimit  == doctest::Approx(-95.0f));
+	CHECK(out->maxLimit  == doctest::Approx(12.5f));
+
+	// And the reference still points at the same entity in the loaded world.
+	CHECK(out->target == loaded.entityId(loadedAnchor));
+	CHECK(loaded.findByEntityId(out->target) == loadedAnchor);
+
+	// A key the save path writes and the loader does not admit to knowing warns
+	// that it is being DROPPED while it loads perfectly — the false alarm on the
+	// one message whose job is to flag real data loss.
+	CHECK(SceneSerializer::isKnownComponentKey("joint"));
+}
+
+TEST_CASE("A joint type from a newer build loads as Fixed rather than as itself")
+{
+	// The same protection the collider shape got: an out-of-range raw value
+	// silently became type 0 and nothing said so. Fixed is still the answer —
+	// there is nothing better to fall back to — but it is now the DELIBERATE
+	// answer, and the loader says it out loud.
+	HorizonWorld world;
+	const Entity a = world.createEntity("A");
+	const Entity b = world.createEntity("B");
+	world.addComponent(a, TransformComponent{});
+	world.addComponent(b, TransformComponent{});
+	JointComponent j;
+	j.type   = JointType::Slider;
+	j.target = world.entityId(b);
+	world.registry().emplace<JointComponent>(a, j);
+
+	const fs::path file = fs::temp_directory_path() / "he_test_joint_future_type.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	nlohmann::json scene;
+	{
+		std::ifstream in(file);
+		REQUIRE(in.good());
+		in >> scene;
+	}
+	bool patched = false;
+	for (auto& e : scene["entities"])
+	{
+		auto comps = e.find("components");
+		if (comps == e.end() || !comps->contains("joint")) continue;
+		(*comps)["joint"]["type"] = 200;   // a type this build has never heard of
+		patched = true;
+	}
+	REQUIRE(patched);
+	{
+		std::ofstream out(file);
+		REQUIRE(out.good());
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	he_test::removeQuiet(file);
+	int seen = 0;
+	for (auto [e, jc] : loaded.registry().view<JointComponent>().each())
+	{
+		CHECK(jc.type == JointType::Fixed);
+		++seen;
+	}
+	CHECK(seen == 1);
 }

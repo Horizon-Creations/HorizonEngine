@@ -181,6 +181,20 @@ namespace
 	  "first. The five outputs are parallel arrays, so index 3 of Points belongs "
 	  "to index 3 of Entities. A shot that passes through two enemies, or a line "
 	  "of sight that has to know it crossed a window. Each entity appears once." },
+	{ "physics.addJoint",
+	  "Ties two rigid bodies together. Type picks the kind: 0 Fixed welds them, "
+	  "1 Point is a ball socket, 2 Hinge turns on one axis, 3 Slider travels "
+	  "along one, 4 Distance keeps two points apart like a rope. Anchors are "
+	  "local to their own entity, Min and Max Limit are degrees for a hinge and "
+	  "metres for a slider, and Min above Max means no limit." },
+	{ "physics.removeJoint",
+	  "Cuts an entity's joint, both the constraint and the component, so it does "
+	  "not come back the next time the scene is loaded. The call that drops a "
+	  "grapple line or breaks a chain apart on purpose." },
+	{ "physics.hasJoint",
+	  "True while this entity is actually jointed to something in the "
+	  "simulation. A joint whose other end has not spawned yet is authored but "
+	  "not built, and this reports the simulation rather than the component." },
 	{ "physics.setVelocity",
 	  "Sets a body's velocity in metres per second outright, discarding whatever "
 	  "it had. For a nudge use Add Impulse, which adds to the motion instead of "
