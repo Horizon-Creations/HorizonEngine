@@ -141,6 +141,79 @@ namespace
 	{ "physics.overlapSphere",
 	  "Every entity whose collider overlaps this sphere, as an array. The "
 	  "explosion-radius query; walk the result with a For Each." },
+	{ "physics.raycastLayers",
+	  "Raycast, but it only sees the collision layers you name. Layer Mask is a "
+	  "bitfield and not a layer number: add 1 for layer 0, 2 for layer 1, 4 for "
+	  "layer 2 and so on, or pass 65535 for every layer. Zero sees nothing at "
+	  "all. The layer names live in Project Settings under Collision Layers." },
+	{ "physics.sphereCastLayers",
+	  "Sphere Cast restricted to the collision layers in Layer Mask, which is a "
+	  "bitfield: 1 is layer 0, 2 is layer 1, 4 is layer 2, 65535 is all of them. "
+	  "What a camera boom wants, so it stops on walls and ignores the player." },
+	{ "physics.overlapSphereLayers",
+	  "Overlap Sphere restricted to the collision layers in Layer Mask, a "
+	  "bitfield in the same shape as the two casts above. An explosion that hurts "
+	  "enemies and leaves the scenery alone is this node with one bit set." },
+	{ "physics.boxCast",
+	  "Sweeps a box along a direction and reports the first thing it touches. "
+	  "Half Extents is half the box's size on each axis, Rotation is its tilt in "
+	  "degrees, the same numbers the Details panel shows for an entity. Layer "
+	  "Mask is a bitfield: 1 is layer 0, 2 is layer 1, 65535 is all of them. "
+	  "Distance is where the box's centre stopped, not where it touched." },
+	{ "physics.capsuleCast",
+	  "Sweeps a capsule along a direction: the query that asks whether a "
+	  "character fits through a gap, using that character's own Radius and "
+	  "Height. Height is the full height including both rounded ends. Rotation "
+	  "tilts the capsule in degrees, Layer Mask is a bitfield as on the other "
+	  "casts." },
+	{ "physics.overlapBox",
+	  "Every entity whose collider is inside this box right now, as an array. "
+	  "Half Extents is half the box's size on each axis and Rotation turns it, "
+	  "both in the same units the Details panel uses. A room, a corridor or a "
+	  "selection rectangle, where Overlap Sphere would also catch the corners." },
+	{ "physics.overlapCapsule",
+	  "Every entity inside an upright capsule, as an array. Height is the full "
+	  "height including both ends, and Rotation lays it on its side if you want "
+	  "that. The query a respawn makes before it puts a player somewhere: is "
+	  "anybody already standing there?" },
+	{ "physics.raycastAll",
+	  "Fires a ray and reports EVERY body along it rather than the first, nearest "
+	  "first. The five outputs are parallel arrays, so index 3 of Points belongs "
+	  "to index 3 of Entities. A shot that passes through two enemies, or a line "
+	  "of sight that has to know it crossed a window. Each entity appears once." },
+	{ "physics.addJoint",
+	  "Ties two rigid bodies together. Type picks the kind: 0 Fixed welds them, "
+	  "1 Point is a ball socket, 2 Hinge turns on one axis, 3 Slider travels "
+	  "along one, 4 Distance keeps two points apart like a rope. Anchors are "
+	  "local to their own entity, Min and Max Limit are degrees for a hinge and "
+	  "metres for a slider, and Min above Max means no limit." },
+	{ "physics.removeJoint",
+	  "Cuts an entity's joint, both the constraint and the component, so it does "
+	  "not come back the next time the scene is loaded. The call that drops a "
+	  "grapple line or breaks a chain apart on purpose." },
+	{ "physics.hasJoint",
+	  "True while this entity is actually jointed to something in the "
+	  "simulation. A joint whose other end has not spawned yet is authored but "
+	  "not built, and this reports the simulation rather than the component." },
+	{ "physics.setJointMotor",
+	  "Drives a hinge or a slider under its own power: the door swings open, the "
+	  "platform rises. Target Speed is radians per second for a hinge and metres "
+	  "per second for a slider. Max Force is the switch — zero turns the motor "
+	  "off, and a target of zero with force behind it is a brake that holds the "
+	  "joint still. The other three joint types have no motor." },
+	{ "physics.setJointBreakForce",
+	  "How much force this joint carries before it lets go, in newtons; 0 never "
+	  "breaks. When it breaks the joint is gone for good — the component with it "
+	  "— and the pair shows up once in Poll Joint Broken." },
+	{ "physics.setJointCollideConnected",
+	  "Whether the two jointed bodies may touch each other. Off by default, "
+	  "which is what a chain of overlapping links needs; on for a door that must "
+	  "not swing through its own frame." },
+	{ "physics.pollJointBroken",
+	  "Every joint that BROKE since the last call, as two parallel arrays: index "
+	  "i of Entities A owned the joint, index i of Entities B was the other end. "
+	  "Reading empties the list, so read it in one place. A joint that was "
+	  "removed or whose entity was destroyed never appears here." },
 	{ "physics.setVelocity",
 	  "Sets a body's velocity in metres per second outright, discarding whatever "
 	  "it had. For a nudge use Add Impulse, which adds to the motion instead of "
@@ -160,6 +233,23 @@ namespace
 	  "once, not every frame." },
 	{ "physics.addTorque",
 	  "Adds rotational force about the world axes, spinning the body." },
+	{ "physics.addForceAtPosition",
+	  "A continuous force applied at a point rather than through the middle, so "
+	  "it turns the body as well as moving it. Position is a point in the WORLD, "
+	  "not an offset inside the entity, so a raycast hit point can be wired "
+	  "straight into it. Call it every frame while it should push." },
+	{ "physics.addImpulseAtPosition",
+	  "An instant push at a point rather than through the middle: the crate "
+	  "tumbles away from the blast instead of sliding away from it. Position is a "
+	  "point in the WORLD, so a hit point wires straight in. Call it once, not "
+	  "every frame." },
+	{ "physics.setAngularVelocity",
+	  "Sets how fast the body spins, in RADIANS per second about the world axes "
+	  "and not in degrees. One full turn a second is about 6.28. It turns rigid "
+	  "bodies only: a character controller is kept upright and does not spin." },
+	{ "physics.getAngularVelocity",
+	  "How fast the body is spinning, in RADIANS per second about the world axes "
+	  "and not in degrees. Zero for an entity without a rigid body." },
 	{ "physics.setGravity",
 	  "Sets gravity for the WHOLE physics world, not for one entity. The default "
 	  "is (0, -9.81, 0)." },
@@ -198,6 +288,11 @@ namespace
 	{ "animator.getState",
 	  "The name of the state playing right now, as the animator asset spells it. "
 	  "Empty when there is no state machine." },
+	{ "animator.notifiesOf",
+	  "The notify names written on an animation clip's timeline, by the clip's "
+	  "asset path. Notify names are free text with nothing checking them, so a "
+	  "misspelled one fires nothing and says nothing — this is how to see what a "
+	  "clip actually carries. Empty for an unknown path or a clip without any." },
 
 	// ── Particles ────────────────────────────────────────────────────────────
 	{ "particle.burst",

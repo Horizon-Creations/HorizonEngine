@@ -15,6 +15,7 @@
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
@@ -36,6 +37,7 @@
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/RootMotionComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
@@ -366,6 +368,7 @@ namespace
 				{ "friction",    r->friction },
 				{ "restitution", r->restitution },
 				{ "is2D",        r->is2D },
+				{ "layer",       r->collisionLayer },
 			};
 		}
 		if (auto* col = registry.try_get<ColliderComponent>(entity))
@@ -376,6 +379,25 @@ namespace
 				{ "radius",    col->radius },
 				{ "height",    col->height },
 				{ "isTrigger", col->isTrigger },
+			};
+		}
+		if (auto* j = registry.try_get<JointComponent>(entity))
+		{
+			// `target` is an ENTITY reference, written like RopeComponent's
+			// attachments — the same [hi, lo] pair, so a joint survives a merge
+			// of two branches that each added entities.
+			comps["joint"] = {
+				{ "type",     static_cast<uint8_t>(j->type) },
+				{ "target",   uuidToJson(j->target) },
+				{ "anchorA",  { j->anchorA.x, j->anchorA.y, j->anchorA.z } },
+				{ "anchorB",  { j->anchorB.x, j->anchorB.y, j->anchorB.z } },
+				{ "axis",     { j->axis.x, j->axis.y, j->axis.z } },
+				{ "minLimit", j->minLimit },
+				{ "maxLimit", j->maxLimit },
+				{ "motorTarget",      j->motorTarget },
+				{ "motorMaxForce",    j->motorMaxForce },
+				{ "breakForce",       j->breakForce },
+				{ "collideConnected", j->collideConnected },
 			};
 		}
 		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
@@ -392,6 +414,7 @@ namespace
 				{ "mass",       cc->mass       },
 				{ "gravity",    cc->gravity    },
 				{ "jumpSpeed",  cc->jumpSpeed  },
+				{ "layer",      cc->collisionLayer },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -539,6 +562,20 @@ namespace
 				{ "playbackSpeed", ab->playbackSpeed },
 				{ "looping",       ab->looping },
 				{ "playing",       ab->playing },
+			};
+		}
+		if (auto* rm = registry.try_get<RootMotionComponent>(entity))
+		{
+			// Runtime fields (appliedThisFrame, wroteVelocity, lastDelta) are
+			// deliberately absent: they are one frame old by definition and are
+			// re-established on the next tick.
+			comps["rootmotion"] = {
+				{ "mode",            static_cast<int>(rm->mode) },
+				{ "rootJoint",       rm->options.rootJointName },
+				{ "translationXZ",   rm->options.extractTranslationXZ },
+				{ "translationY",    rm->options.extractTranslationY },
+				{ "yaw",             rm->options.extractYaw },
+				{ "lock",            static_cast<int>(rm->options.lock) },
 			};
 		}
 		if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
@@ -964,6 +1001,10 @@ namespace
 			r.friction    = c.value("friction",    r.friction);
 			r.restitution = c.value("restitution", r.restitution);
 			r.is2D        = c.value("is2D",        r.is2D);
+			// Defaulted from the fresh component, so a scene written before
+			// collision layers existed loads every body into Default (0) — which
+			// is the channel it effectively had.
+			r.collisionLayer = c.value("layer", r.collisionLayer);
 			registry.emplace_or_replace<RigidBodyComponent>(entity, r);
 		}
 		if (comps.contains("collider"))
@@ -979,6 +1020,36 @@ namespace
 				col.halfExtents = { c["halfEx"][0], c["halfEx"][1], c["halfEx"][2] };
 			registry.emplace_or_replace<ColliderComponent>(entity, col);
 		}
+		if (comps.contains("joint"))
+		{
+			const json& c = comps["joint"];
+			JointComponent j;
+			// An unknown type is loaded as Fixed rather than cast straight
+			// through — the same lesson jsonToColliderShape learned, where a
+			// value from a newer build silently became shape 0 and nothing said
+			// so. Fixed is the type that needs no other field to make sense.
+			const auto rawType = c.value("type", static_cast<uint8_t>(j.type));
+			if (rawType <= static_cast<uint8_t>(JointType::Distance))
+				j.type = static_cast<JointType>(rawType);
+			else
+				HE_LOG_WARN(Serialize, "Scene contains unknown joint type %u — loading it as "
+				                       "Fixed (scene written by a newer build; SAVING IT BACK "
+				                       "MAKES THAT PERMANENT)", static_cast<unsigned>(rawType));
+			j.target   = jsonToUuid(c.value("target", json()));
+			j.anchorA  = jsonToVec3(c.value("anchorA", json()), j.anchorA);
+			j.anchorB  = jsonToVec3(c.value("anchorB", json()), j.anchorB);
+			j.axis     = jsonToVec3(c.value("axis",    json()), j.axis);
+			j.minLimit = c.value("minLimit", j.minLimit);
+			j.maxLimit = c.value("maxLimit", j.maxLimit);
+			// Absent in every scene written before the motor existed, and the
+			// defaults are exactly what those scenes meant: no motor, never
+			// breaks, and the two bodies do not collide.
+			j.motorTarget      = c.value("motorTarget",      j.motorTarget);
+			j.motorMaxForce    = c.value("motorMaxForce",    j.motorMaxForce);
+			j.breakForce       = c.value("breakForce",       j.breakForce);
+			j.collideConnected = c.value("collideConnected", j.collideConnected);
+			registry.emplace_or_replace<JointComponent>(entity, j);
+		}
 		if (comps.contains("characterController"))
 		{
 			const json& c = comps["characterController"];
@@ -992,6 +1063,9 @@ namespace
 			// field existed loads with the 5 m/s default rather than a zero that
 			// would silently refuse every jump.
 			cc.jumpSpeed  = c.value("jumpSpeed",  cc.jumpSpeed);
+			// Same rule: an older scene loads into the Character channel, which
+			// under the default all-true matrix is the walk it always had.
+			cc.collisionLayer = c.value("layer", cc.collisionLayer);
 			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
 		}
 		if (comps.contains("saveState"))
@@ -1190,6 +1264,19 @@ namespace
 			ab.looping       = c.value("looping",       ab.looping);
 			ab.playing       = c.value("playing",       ab.playing);
 			registry.emplace_or_replace<AnimatorBlendComponent>(entity, ab);
+		}
+		if (comps.contains("rootmotion"))
+		{
+			const json& c = comps["rootmotion"];
+			RootMotionComponent rm;
+			rm.mode = RootMotionComponent::modeFromInt(c.value("mode", static_cast<int>(rm.mode)));
+			rm.options.rootJointName        = c.value("rootJoint",     rm.options.rootJointName);
+			rm.options.extractTranslationXZ = c.value("translationXZ", rm.options.extractTranslationXZ);
+			rm.options.extractTranslationY  = c.value("translationY",  rm.options.extractTranslationY);
+			rm.options.extractYaw           = c.value("yaw",           rm.options.extractYaw);
+			rm.options.lock = HE::rootMotionLockFromInt(
+				c.value("lock", static_cast<int>(rm.options.lock)));
+			registry.emplace_or_replace<RootMotionComponent>(entity, rm);
 		}
 		if (comps.contains("propertyanimator"))
 		{
@@ -1846,7 +1933,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"animator", "animatorblend", "animstatemachine", "audiolistener",
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
 		"movement",
-		"decal", "environment", "foliage", "light", "lod", "material", "mesh",
+		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem", "propertyanimator",
 		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
 		"trail",

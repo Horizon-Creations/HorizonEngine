@@ -210,6 +210,25 @@ namespace HE
                           // and meaningless on an entity without a terrain.
     };
 
+    // What kind of joint holds two rigid bodies together. Like ColliderShape
+    // above, the raw uint8 lands in .hescene, so these values are APPEND-ONLY.
+    //
+    // Which of JointComponent's fields a type actually reads differs per type —
+    // the table lives on the component, next to the fields it is about.
+    //
+    // The two Jolt types deliberately absent are SwingTwist and SixDOF. Those
+    // are the ragdoll pair: they only pay off with JPH::Ragdoll and a skeleton
+    // mapping behind them, which is a topic of its own beside the skeletal
+    // animation work rather than a sixth line here.
+    enum class JointType : uint8_t
+    {
+        Fixed    = 0,  // weld: no relative movement at all
+        Point    = 1,  // ball socket: rotates freely about one shared point
+        Hinge    = 2,  // door, lid, wheel — one axis, optionally limited
+        Slider   = 3,  // drawer, lift, piston — one direction, optionally limited
+        Distance = 4,  // rope, grapple, spring suspension — two points kept apart
+    };
+
     enum class SerializeFormat : uint8_t
     {
         JSON,    // editor — human-readable, versioned

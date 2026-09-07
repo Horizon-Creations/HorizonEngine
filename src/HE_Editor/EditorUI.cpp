@@ -689,7 +689,10 @@ void EditorUI::render(AppContext& ctx, float dt)
 // gates the tab's dirty mark, forgetTabState (a panel missing from the list has its
 // unsaved graph dropped when the tab closes) and the Quit/Close-Project guard. That
 // is exactly how the Particle and Animator-State-Machine graphs used to be lost.
-// View-only panels (Static/Skeletal Mesh) have nothing to lose and stay out.
+// The Static Mesh viewer has nothing to lose and stays out. The Skeletal Mesh tab
+// is in, but under a DIFFERENT path than the tab's: what it edits is the clip
+// scrubbed in it (notifies, the per-clip root-motion switch), so it answers for
+// clip paths and never for the mesh it is named after.
 // The virtual tabs (Level Script / Game Instance) edit the world, so their dirty
 // state is the scene's (ctx.sceneDirty) and is guarded separately.
 // Public (declared in EditorUI.h) because the OS-level quit veto in
@@ -708,7 +711,8 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       TypeAssetPanel::isDirty(assetPath)           ||
 	       ThemeAssetPanel::isDirty(assetPath)          ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
-	       AnimatorStateMachineEditorPanel::isDirty(assetPath);
+	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
+	       SkeletalMeshEditorPanel::isDirty(assetPath);
 }
 
 // Every unsaved asset, INCLUDING ones whose tab the user already closed.
@@ -729,6 +733,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	ThemeAssetPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
+	SkeletalMeshEditorPanel::appendDirtyPaths(out);
 	std::sort(out.begin(), out.end());
 	out.erase(std::unique(out.begin(), out.end()), out.end());
 	return out;
@@ -753,6 +758,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = ThemeAssetPanel::save(ctx, assetPath)                       && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
+	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
 	// a save that reported success but left the state dirty.
 	return ok && !tabHasUnsavedEdits(assetPath);
@@ -1015,6 +1021,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		if (!saveAsset(ctx, path))
 			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+		// One tab edits an asset it is not named after: the Skeletal Mesh viewer
+		// authors the NOTIFIES of the clip scrubbed in it. Saving the tab's own
+		// path finds nothing to write and reports success, so without this the
+		// shortcut would be a keystroke that quietly did nothing. Routed here and
+		// not through a second Ctrl+S owner inside the panel — two handlers for
+		// one key is how a Save starts saving the scene as well.
+		if (const std::string clip = SkeletalMeshEditorPanel::dirtyClipForTab(path); !clip.empty())
+			if (!saveAsset(ctx, clip))
+				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + clip).c_str());
 	};
 	// ── Save All (Ctrl/Cmd+Shift+S): every unsaved asset, then the scene ────
 	// unsavedAssetPaths() is panel-driven, so this also catches assets whose tab

@@ -47,6 +47,7 @@ add_library(HorizonCore SHARED
 	src/HorizonCode/HorizonCodeGenSupport.cpp
 	src/HorizonCode/HcCompiledLoader.cpp
 	src/Renderer/UIFont.cpp
+	src/Physics/CollisionLayers.cpp
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp

@@ -1290,6 +1290,9 @@ void startExport(AppContext& ctx)
                     es.allowNetwork   = ctx.projectManager->currentProject().allowNetwork;
                     es.fontScripts    = ctx.projectManager->currentProject().fontScripts;
                     es.fontWeightBold = ctx.projectManager->currentProject().fontWeightBold;
+                    // The collision matrix, so the shipped build's physics
+                    // separates the same channels the preview did.
+                    es.collisionLayers = ctx.projectManager->currentProject().collisionLayers;
                     // What the application is to the system it lands on: the
                     // icon is generated at export time from these three.
                     es.appIconName  = ctx.projectManager->currentProject().appIconName;
