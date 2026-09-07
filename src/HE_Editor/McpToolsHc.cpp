@@ -13,7 +13,7 @@
 #include <vector>
 
 // ─── Authoring HorizonCode from outside the editor ───────────────────────────
-// Twelve tools over a visual script: read it, add and remove nodes, wire and
+// Thirteen tools over a visual script: read it, add and remove nodes, wire and
 // unwire pins, set parameters, save.
 //
 // The rule of this file is the one stated on `registerHcTools` in the header:
@@ -28,6 +28,16 @@
 //   • In a live session the panel's own DocMirror diff sees the change in the
 //     next frame and publishes it. This file contains the word "collab" only in
 //     an include and in comments.
+//
+// The second bullet holds where `publishDocDeltas` already runs: the level
+// script and the GameInstance graph are diffed every frame we hold their lock,
+// and a class asset is diffed once its tab reports unsaved edits, which is what
+// the `endEdit` hook marks. It does NOT hold for a class whose tab is CLOSED
+// (nothing walks it), and it does not hold when a PEER holds the lock — nothing
+// here asks, so such an edit lands locally, is never published, and is lost to
+// the peer's next whole-file update. A `canEdit(key)` hook is the fix and is
+// not built; until it is, this interface trusts the human not to author against
+// a locked asset.
 //
 // Wiring is the deliberate exception. `IDocAdapter::upsert(Kind::Link, …)` only
 // checks that both endpoints exist — a peer's link was validated on the peer —
@@ -1358,10 +1368,10 @@ void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks)
 		t.description =
 			"Replace one variable declaration with the object given in 'variable' — "
 			"the same shape hc_get returns. Read it, change what you mean, send the "
-			"whole object back. The 'name' inside it is the identity: sending a "
-			"different one declares a second variable and leaves the first, which is "
-			"why renaming is not done this way (the Get/Set nodes that reference the "
-			"old name would keep referencing it).";
+			"whole object back. The 'name' inside it is the identity, and a name this "
+			"graph does not declare is refused rather than created: renaming is not "
+			"done this way, because the Get Variable and Set Variable nodes that "
+			"reference the old name would go on referencing it.";
 		t.inputSchema = objectSchema(json{
 			{ "key",      keyProp() },
 			{ "variable", json{ { "type", "object" },

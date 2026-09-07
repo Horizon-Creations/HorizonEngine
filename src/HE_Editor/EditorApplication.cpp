@@ -5862,12 +5862,27 @@ void EditorApplication::setupMcpTools()
 	HE::Ed::McpHcHooks hc;
 	hc.isPlaying = [this] { return m_isPlaying; };
 
+	// What the level script's own add menu refuses (LevelScriptPanel.cpp,
+	// kMenus.addExcluded) — the SUBSET that is a real restriction rather than a
+	// routing decision. A level script has no self-widget and no elements, so
+	// Show/Hide Self and Get/Set Property have nothing to act on there; the rest
+	// of that list (Event, Function, Get/Set Variable) is excluded only because
+	// the palette offers those through its own sections, and mirroring it here
+	// would refuse an MCP client the primary thing it is for.
+	static const std::vector<std::string> kLevelScriptExcluded = {
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::GetProperty),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::SetProperty),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::ShowSelf),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::HideSelf),
+	};
+
 	hc.documents = [this] {
 		std::vector<HE::Ed::McpHcDoc> out;
 		if (m_editorWorld)
 			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
 			                "Level Script", "level",
-			                m_undo.revision() != m_savedRevision, {}, {} });
+			                m_undo.revision() != m_savedRevision,
+			                {}, kLevelScriptExcluded });
 		if (!m_projectManager.currentProject().name.empty())
 			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
 			                "Game Instance", "gameinstance",
@@ -5882,10 +5897,11 @@ void EditorApplication::setupMcpTools()
 		HorizonCodeClassPanel::appendHeld(held);
 		for (HorizonCodeClassPanel::Held& h : held)
 			out.push_back({ h.contentPath, h.contentPath, "class", h.dirty, {}, {} });
-		// apiGroups / excludedNodeTypes stay empty on all three: the level
-		// script, the GameInstance graph and a class asset all pass an
-		// unrestricted MenuOpts today (only the Animator sync graph restricts,
-		// and that is not a HorizonCode document a client can address).
+		// apiGroups stays empty everywhere: none of these three frontends
+		// restricts the engine registry today (only the Animator sync graph
+		// does, and that is not a document a client can address). Only the
+		// level script names excluded types — see kLevelScriptExcluded above;
+		// the GameInstance graph and a class asset offer everything.
 		return out;
 	};
 

@@ -170,8 +170,13 @@ struct McpHcDoc
 
 	// The frontend's own restrictions, mirrored from HcGraphHost::MenuOpts so
 	// that MCP cannot insert what the add menu refuses to offer. Both empty =
-	// no restriction, which is what the level script, the GameInstance graph
-	// and a class asset all pass today.
+	// no restriction.
+	//
+	// Only the part of `addExcluded` that is a real restriction belongs here.
+	// That list also holds types the palette merely offers through a DIFFERENT
+	// route (Event through its own section, Get/Set Variable through the
+	// sidebar), and mirroring those would refuse a client the very thing it
+	// came for. See kLevelScriptExcluded in EditorApplication::setupMcpTools.
 	std::vector<std::string> apiGroups;           // HE::api groups, e.g. "math"
 	std::vector<std::string> excludedNodeTypes;   // stored node-type names
 };
