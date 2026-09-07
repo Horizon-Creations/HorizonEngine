@@ -711,6 +711,25 @@ unbenutzbar (Entscheidung aus Schritt 4).
   die hier nur angehakt dastünde, wäre eine Lüge über genau das, wofür sie da
   ist.
 
+**Locks gelten auch für die HorizonCode-Werkzeuge.** Nachgereicht nach dem
+Abschluss-Review. Die `hc_*`-Werkzeuge laufen nicht über `EditorCommands` — sie
+schreiben über den `CollabDocSync`-Adapter — und hatten damit auch das
+Lock-Gate aus 2.4/Punkt 7 nicht. Ein Fremd-Lock war für einen Menschen ein
+bewusster Kompromiss (er sieht das Read-only-Banner), für einen entfernten
+Client ist es stiller Datenverlust: der Edit landet lokal, wird nie
+veröffentlicht (`publishDocDeltas` sendet nur, was wir halten) und stirbt beim
+nächsten Ganzdatei-Update des Peers. Alle zehn schreibenden Werkzeuge fragen
+jetzt in `openDoc` `McpHcHooks::lockedByOther(key)` und lehnen mit
+`locked_by_other` ab; die drei lesenden sind unberührt, gemeinsam lesen ist der
+Sinn einer Session. Bewusst **nur** die Fremd-Lock-Hälfte von
+`EditorCommands::checkLock`: kein `lock_pending`, weil die Asset-Politik des
+Editors optimistisch ist (`beginAssetEdit` — ein verlorener Asset-Edit wird von
+der Platte nachgeladen, eine gelöschte Entity nicht) und weil hier kein eigener
+Lock-Satz gehalten wird, auf dessen Gewährung man warten könnte. Der
+Schlüssel wird dabei so übersetzt, wie `collabSyncKey` es tut: die beiden
+editor-eigenen Graphen *sind* ihr Tab-Pfad in der Lock-Tabelle, ein
+Klassen-Asset ist schon content-relativ.
+
 Die Richtung ist einseitig und soll es bleiben: Preferences schreibt
 ausschließlich `EditorConfig::McpServerEnabled`, der Frameloop schiebt das
 jedes Frame in `setEnabled`. Der `McpBridge*` in `AppContext` ist für die UI

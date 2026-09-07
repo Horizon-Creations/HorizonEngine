@@ -5965,6 +5965,23 @@ void EditorApplication::setupMcpTools()
 		return HorizonCodeClassPanel::saveByContentPath(ctx, key);
 	};
 
+	// A peer's lock on the document, asked before every mutating hc_ tool. The
+	// human's own path has a read-only banner to look at and an optimistic claim
+	// underneath it; a remote client has neither, so for it the foreign lock is
+	// a hard refusal (McpToolsHc.cpp, `openDoc`).
+	//
+	// The translation is the same one collabSyncKey does: the two editor-owned
+	// graphs ARE their reserved tab path in the lock table, and a class asset's
+	// MCP key is already the content-relative path collabSyncKey produces for a
+	// content asset (HorizonCodeClassPanel keeps that form as ClassState::path),
+	// so it passes through untouched.
+	hc.lockedByOther = [this](const std::string& key) {
+		std::string subject = key;
+		if (key == HE::Ed::kMcpDocLevelScript)       subject = LevelScriptPanel::kTabPath;
+		else if (key == HE::Ed::kMcpDocGameInstance) subject = GameInstancePanel::kTabPath;
+		return m_collab.assetLockedByOther(subject);
+	};
+
 	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
 
 	// The engine's own API, one tool per pure row of HE::api::registry(). No

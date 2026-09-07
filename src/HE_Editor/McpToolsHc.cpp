@@ -32,12 +32,21 @@
 // The second bullet holds where `publishDocDeltas` already runs: the level
 // script and the GameInstance graph are diffed every frame we hold their lock,
 // and a class asset is diffed once its tab reports unsaved edits, which is what
-// the `endEdit` hook marks. It does NOT hold for a class whose tab is CLOSED
-// (nothing walks it), and it does not hold when a PEER holds the lock — nothing
-// here asks, so such an edit lands locally, is never published, and is lost to
-// the peer's next whole-file update. A `canEdit(key)` hook is the fix and is
-// not built; until it is, this interface trusts the human not to author against
-// a locked asset.
+// the `endEdit` hook marks. It does NOT hold for a class whose tab is CLOSED —
+// nothing walks it — which is why `documents` only ever offers the tabs the
+// editor holds.
+//
+// The other case it does not hold for is a PEER holding the document's lock: an
+// edit made then lands locally, is never published, and is thrown away by the
+// peer's next whole-file update. That was a deliberate compromise while a human
+// was the only caller — they can see the read-only banner. A remote client
+// cannot, so `McpHcHooks::lockedByOther` is now asked BEFORE every mutation and
+// the answer is a `locked_by_other` refusal rather than a silent local write.
+// The check sits in `openDoc`, which is the one door all ten mutating tools go
+// through, and it sits there rather than in the handlers so that `beginEdit`
+// never runs for a refused call — for the level script that hook is
+// `m_undo.snapshotNow()`, and a refusal that dirtied the scene would be its own
+// small bug.
 //
 // Wiring is the deliberate exception. `IDocAdapter::upsert(Kind::Link, …)` only
 // checks that both endpoints exist — a peer's link was validated on the peer —
@@ -67,6 +76,7 @@ constexpr const char* kNotFound   = "not_found";
 constexpr const char* kPlayMode   = "play_mode";
 constexpr const char* kBadPayload = "invalid_payload";
 constexpr const char* kFailed     = "failed";
+constexpr const char* kLockedByOther = "locked_by_other";   // EditorCommands' word
 constexpr const char* kRefused    = "refused_by_policy";   // the frontend hides it
 constexpr const char* kSaveFailed = "save_failed";
 
@@ -443,6 +453,22 @@ Doc openDoc(const McpHcHooks& h, const json& args, bool mutating)
 			           "and the human has to open its tab first.");
 		return d;
 	}
+
+	// After the resolve, so an unknown key is still `not_found` rather than a
+	// lock answer about a document that does not exist. Before anything else,
+	// so no `beginEdit` and no partial write happens for a refused call.
+	if (mutating && h.lockedByOther && h.lockedByOther(key))
+	{
+		d.failure = ToolResult::fail(
+			kLockedByOther,
+			"Another peer in the collaboration session holds '" + key + "'. Writing "
+			"anyway would change only this copy: the edit is never published while "
+			"someone else owns the document, and their next update overwrites it. "
+			"Reading is unaffected — hc_get still works. Ask the user to have the "
+			"other peer close or release it, then retry.");
+		return d;
+	}
+
 	d.ok = true;
 	return d;
 }

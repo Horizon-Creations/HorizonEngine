@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 
 // ─── Authoring HorizonCode from outside the editor ───────────────────────────
@@ -50,6 +51,7 @@ struct Fixture
 	int         begins = 0, ends = 0, saves = 0;
 	bool        playing = false;
 	bool        saveWorks = true;
+	bool        foreignLock = false;   // a collaboration peer holds the document
 
 	McpToolRegistry registry;
 
@@ -68,6 +70,9 @@ struct Fixture
 		h.endEdit   = [this](const std::string&) { ++ends; };
 		h.save      = [this](const std::string&) { ++saves; return saveWorks; };
 		h.isPlaying = [this] { return playing; };
+		h.lockedByOther = [this](const std::string& key) {
+			return foreignLock && key == doc.key;
+		};
 		HE::Ed::registerHcTools(registry, std::move(h));
 	}
 
@@ -637,6 +642,107 @@ TEST_CASE("hc tools: hc_save goes through the editor and reports a refusal as on
 	const ToolResult r = f.call("hc_save");
 	CHECK(r.isError);
 	CHECK(r.errorCode == "save_failed");
+}
+
+TEST_CASE("hc tools: a peer's lock refuses every write, and only the writes")
+{
+	// Before MCP, this file's own header called the missing check a compromise
+	// it made for a human, who can see the read-only banner. A remote client
+	// cannot, and an edit made under a peer's lock is never published and is
+	// overwritten by their next update — silent divergence rather than a
+	// refusal. So: every mutating tool asks first.
+	Fixture f;
+
+	// Built while the document is free, so each call below is one that WOULD
+	// land. A test that sent nonsense would pass on `invalid_payload` and prove
+	// nothing about the lock.
+	const int ev     = f.addNode("Event", "OnLevelLoaded", 10, 20);
+	const int br     = f.addNode("Branch", "", 200, 20);
+	const int sec    = f.addNode("Branch", "", 400, 20);
+	const int doomed = f.addNode("Print", "", 600, 20);
+	f.ok("hc_connect", json{ { "srcNode", ev },  { "srcPin", "exec" },
+	                         { "dstNode", br },  { "dstPin", "exec" } });
+	f.ok("hc_add_variable", json{ { "name", "Score" }, { "type", "Int" } });
+
+	const HC::NodeSig sig = HC::signatureOf(*f.graph.findNode(br));
+	const int execOut0 = static_cast<int>(sig.execIns.size());
+	const int dataIn0  = static_cast<int>(sig.execIns.size() + sig.execOuts.size());
+	json node = f.ok("hc_get", json{ { "nodeIds", json::array({ sec }) } })["nodes"][0];
+	node["pos"] = json::array({ 640, 480 });
+	json variable = json::parse(HC::variableToJson(f.graph.variables[0]));
+	variable["access"] = 1;
+
+	// Every write, with the arguments that would work — and in an order in
+	// which they still work when replayed one after another at the end.
+	const std::vector<std::pair<const char*, json>> writes = {
+		{ "hc_add_node",        json{ { "type", "Print" }, { "position", json::array({ 0, 300 }) } } },
+		{ "hc_set_node",        json{ { "node", node } } },
+		{ "hc_connect",         json{ { "srcNode", br },  { "srcPin", execOut0 },
+		                              { "dstNode", sec }, { "dstPin", 0 } } },
+		{ "hc_disconnect",      json{ { "srcNode", ev },  { "srcPin", "exec" },
+		                              { "dstNode", br },  { "dstPin", "exec" } } },
+		{ "hc_set_pin_default", json{ { "node", br }, { "pin", dataIn0 }, { "value", true } } },
+		{ "hc_add_variable",    json{ { "name", "Lives" }, { "type", "Int" } } },
+		{ "hc_set_variable",    json{ { "variable", variable } } },
+		{ "hc_remove_variable", json{ { "name", "Score" } } },
+		{ "hc_remove_node",     json{ { "id", doomed } } },
+		{ "hc_save",            json::object() },
+	};
+
+	const std::string before = HC::toJson(f.graph);
+	const int beginsBefore = f.begins, endsBefore = f.ends, savesBefore = f.saves;
+
+	f.foreignLock = true;
+	for (const auto& w : writes)
+	{
+		const ToolResult r = f.call(w.first, w.second);
+		INFO("tool: " << w.first);
+		CHECK(r.isError);
+		CHECK(r.errorCode == "locked_by_other");
+		// The peer has to be findable from the message alone — the client sees
+		// nothing else.
+		CHECK(r.errorMessage.find("collaboration") != std::string::npos);
+	}
+
+	// Not one of them wrote, and — because the check sits in openDoc rather than
+	// in the handlers — not one of them took an undo snapshot or dirtied a tab
+	// on the way to being refused. For the level script beginEdit is
+	// snapshotNow(), so a refusal that ran it would mark the scene unsaved.
+	CHECK(HC::toJson(f.graph) == before);
+	CHECK(f.begins == beginsBefore);
+	CHECK(f.ends   == endsBefore);
+	CHECK(f.saves  == savesBefore);
+
+	// Reading together is the point of a session, so the lock touches neither
+	// reading tool.
+	CHECK_FALSE(f.call("hc_get").isError);
+	CHECK_FALSE(f.call("hc_documents").isError);
+	CHECK_FALSE(f.call("hc_node_types").isError);
+
+	// And it is the lock, not the arguments: the same calls land once the peer
+	// lets go.
+	f.foreignLock = false;
+	for (const auto& w : writes)
+	{
+		INFO("tool after release: " << w.first);
+		CHECK_FALSE(f.call(w.first, w.second).isError);
+	}
+	CHECK(f.saves == savesBefore + 1);
+}
+
+TEST_CASE("hc tools: under a lock an unknown key is still not_found")
+{
+	// The order inside openDoc, asserted: a key that names no document gets the
+	// answer about the key. Reversing the two would tell a client that a
+	// document it mistyped is held by someone — a refusal it could only respond
+	// to by waiting forever.
+	Fixture f;
+	f.foreignLock = true;
+	const ToolResult other = f.call("hc_add_node", json{
+		{ "key", "Content/Other.hasset" },
+		{ "type", "Print" }, { "position", json::array({ 0, 0 }) } });
+	CHECK(other.isError);
+	CHECK(other.errorCode == "not_found");
 }
 
 TEST_CASE("hc tools: hc_documents is the only place a key comes from")

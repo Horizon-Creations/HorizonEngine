@@ -206,6 +206,23 @@ struct McpHcHooks
 	// Play-in-editor. Unlike the entity tools there is no gateway underneath
 	// this file to refuse for us, so the check lives here.
 	std::function<bool()> isPlaying;
+
+	// Does a PEER of the collaboration session hold this document right now?
+	// Same reason as the line above: there is no EditorCommands underneath these
+	// tools to answer it, so the question is asked here — once, in `openDoc`,
+	// for every mutating tool.
+	//
+	// Deliberately only the foreign-lock half of EditorCommands::checkLock. The
+	// entity gateway also refuses `lock_pending` while its own claim is in
+	// flight; documents do not, because the editor's asset policy is optimistic
+	// by design (CollabController::beginAssetEdit — an asset edit that loses the
+	// race is reloaded from disk, unlike a destroyed entity) and because nothing
+	// here holds a document lock of its own to wait for.
+	//
+	// Absent hook, or no session, reads as "nobody else has it", which is the
+	// truth outside a session: CollabController::assetLockedByOther answers
+	// false when there is no session and excludes our own claim.
+	std::function<bool(const std::string& key)> lockedByOther;
 };
 
 void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks);
