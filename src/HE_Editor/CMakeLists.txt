@@ -179,6 +179,7 @@ add_executable(HorizonEditor WIN32
 	CollabPresenceBar.cpp
 	CollabUndo.cpp
 	EngineContentSyncBar.cpp
+	McpStatusBar.cpp
 	EngineContentPublishDialog.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp
