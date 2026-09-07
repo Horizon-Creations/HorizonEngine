@@ -6,9 +6,12 @@
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <Physics/CollisionLayers.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -1527,4 +1530,358 @@ TEST_CASE("PhysicsWorld: jumpWith overrides the authored speed, and refuses a us
     const float highHop = peakAfter(8.0f);
     CHECK(lowHop  > 0.05f);
     CHECK(highHop > lowHop + 0.5f);
+}
+
+// ─── Collision layers ─────────────────────────────────────────────────────────
+// The matrix decides which of the sixteen named channels may touch which. What
+// these guard is that (a) it actually separates bodies, (b) the default config
+// is the simulation this class had before channels existed, and (c) nothing an
+// author can type into the uint8_t can reach Jolt as an out-of-range layer.
+
+namespace
+{
+    // A dynamic box dropped over a static floor, both in named channels. Returns
+    // the height the box ends up at after two seconds: resting on the floor
+    // (≈ 1) or somewhere below it (a fall through nothing).
+    struct LayerDrop
+    {
+        HorizonWorld world;
+        Entity       floor{};
+        Entity       box{};
+        PhysicsWorld phys;
+
+        LayerDrop(uint8_t floorLayer, uint8_t boxLayer)
+        {
+            floor = world.createEntity("Floor");
+            {
+                TransformComponent t;
+                t.position = { 0.0f, 0.0f, 0.0f };
+                t.scale    = { 40.0f, 0.5f, 40.0f };
+                world.addComponent(floor, t);
+                RigidBodyComponent rb;
+                rb.type           = RigidBodyType::Static;
+                rb.collisionLayer = floorLayer;
+                world.addComponent(floor, rb);
+            }
+            box = world.createEntity("Box");
+            {
+                TransformComponent t;
+                t.position = { 0.0f, 5.0f, 0.0f };
+                t.scale    = { 1.0f, 1.0f, 1.0f };
+                world.addComponent(box, t);
+                RigidBodyComponent rb;
+                rb.type           = RigidBodyType::Dynamic;
+                rb.mass           = 1.0f;
+                rb.collisionLayer = boxLayer;
+                world.addComponent(box, rb);
+            }
+        }
+
+        float settleY(int steps = kSteps2s)
+        {
+            for (int i = 0; i < steps; ++i)
+                phys.step(world, kDt);
+            return world.registry().get<TransformComponent>(box).position.y;
+        }
+    };
+
+    constexpr uint8_t kChanA = 5;   // two channels nothing else uses, so a test
+    constexpr uint8_t kChanB = 6;   // cannot be confused by a preset's meaning
+}
+
+TEST_CASE("CollisionLayerConfig: the default is everything collides")
+{
+    HE::CollisionLayerConfig cfg;
+    CHECK(cfg.isDefault());
+    for (int a = 0; a < HE::CollisionLayerConfig::kCount; ++a)
+        for (int b = 0; b < HE::CollisionLayerConfig::kCount; ++b)
+            CHECK(cfg.collides(a, b));
+
+    // The presets are named, everything past them is not.
+    CHECK(cfg.layerName(HE::CollisionLayerConfig::kDefault)   == "Default");
+    CHECK(cfg.layerName(HE::CollisionLayerConfig::kTerrain)   == "Terrain");
+    CHECK(cfg.layerName(HE::CollisionLayerConfig::kCharacter) == "Character");
+    CHECK(cfg.layerName(9)  == "Layer 9");
+    CHECK(cfg.layerName(-1) == "Layer -1");    // out of range answers, never throws
+    CHECK(cfg.layerName(99) == "Layer 99");
+}
+
+TEST_CASE("CollisionLayerConfig: a cell is written on both sides of the diagonal")
+{
+    HE::CollisionLayerConfig cfg;
+    cfg.setCollides(kChanA, kChanB, false);
+
+    // Jolt asks in whichever order the broadphase reached the two bodies in, so
+    // a half-written matrix would let a pair collide on some frames only.
+    CHECK_FALSE(cfg.collides(kChanA, kChanB));
+    CHECK_FALSE(cfg.collides(kChanB, kChanA));
+    CHECK_FALSE(cfg.isDefault());
+
+    // Nothing else moved.
+    CHECK(cfg.collides(kChanA, kChanA));
+    CHECK(cfg.collides(kChanA, 0));
+
+    // Out of range is a no-op, not a write past the array.
+    cfg.setCollides(99, 0, false);
+    cfg.setCollides(-3, 0, false);
+    CHECK(cfg.collides(0, 0));
+}
+
+TEST_CASE("CollisionLayerConfig: json round trip keeps names and blocked pairs")
+{
+    HE::CollisionLayerConfig cfg;
+    cfg.setLayerName(kChanA, "Bullets");
+    cfg.setCollides(kChanA, kChanB, false);
+    cfg.setCollides(0, 0, false);
+
+    nlohmann::json j;
+    cfg.toJson(j);
+
+    HE::CollisionLayerConfig back;
+    back.fromJson(j);
+    CHECK(back.layerName(kChanA) == "Bullets");
+    CHECK_FALSE(back.collides(kChanA, kChanB));
+    CHECK_FALSE(back.collides(kChanB, kChanA));
+    CHECK_FALSE(back.collides(0, 0));
+    CHECK(back.collides(1, 2));
+
+    // A block written by an older engine — or none at all — is the default, and
+    // loading twice does not accumulate the first load's blocked pairs.
+    back.fromJson(nlohmann::json::object());
+    CHECK(back.isDefault());
+    back.fromJson(nlohmann::json("not an object"));
+    CHECK(back.isDefault());
+
+    // A file that names only one half of a pair still loads symmetric: the
+    // reader goes through the same setter the editor does.
+    nlohmann::json half = { { "blocked", nlohmann::json::array(
+        { nlohmann::json::array({ kChanB, kChanA }) }) } };
+    back.fromJson(half);
+    CHECK_FALSE(back.collides(kChanA, kChanB));
+    CHECK_FALSE(back.collides(kChanB, kChanA));
+
+    // A fresh config carries nothing but the presets, so it must not grow a
+    // 136-entry blob in every .heproj.
+    nlohmann::json empty;
+    HE::CollisionLayerConfig{}.toJson(empty);
+    CHECK(empty.empty());
+}
+
+// MUTATION: drop the matrix lookup from ObjectLayerPairFilterImpl::ShouldCollide
+// (return true once the moving check has passed) — the box lands on the floor
+// and this fails.
+TEST_CASE("PhysicsWorld: a matrix cell set to false separates two bodies")
+{
+    // Same scene twice. The only difference is one cell.
+    float restingY = 0.0f;
+    {
+        LayerDrop drop(kChanA, kChanB);
+        drop.phys.initialize(drop.world);
+        restingY = drop.settleY();
+        // Sanity: with the default config this is the floor, at 0.25 + 0.5.
+        CHECK(restingY > 0.0f);
+    }
+    {
+        LayerDrop drop(kChanA, kChanB);
+        HE::CollisionLayerConfig cfg;
+        cfg.setCollides(kChanA, kChanB, false);
+        drop.phys.setCollisionLayers(cfg);
+        drop.phys.initialize(drop.world);
+        // Two seconds of free fall from 5 m is about -14 m; anything at or above
+        // the resting height means the floor is still stopping it.
+        CHECK(drop.settleY() < restingY - 5.0f);
+    }
+}
+
+TEST_CASE("PhysicsWorld: the matrix may be changed while the simulation runs")
+{
+    LayerDrop drop(kChanA, kChanB);
+    drop.phys.initialize(drop.world);
+    const float resting = drop.settleY();
+    REQUIRE(resting > 0.0f);   // it landed
+
+    // The floor is switched off underneath a body that is already asleep on it.
+    // Bodies keep the object layer they were built with — only the answer to
+    // "may these two touch" changes, and it has to change without a rebuild.
+    HE::CollisionLayerConfig cfg;
+    cfg.setCollides(kChanA, kChanB, false);
+    drop.phys.setCollisionLayers(cfg);
+
+    CHECK(drop.settleY() < resting - 3.0f);
+}
+
+TEST_CASE("PhysicsWorld: two channels that block each other leave a third alone")
+{
+    HorizonWorld world;
+    Entity floor = world.createEntity("Floor");
+    {
+        TransformComponent t;
+        t.position = { 0.0f, 0.0f, 0.0f };
+        t.scale    = { 40.0f, 0.5f, 40.0f };
+        world.addComponent(floor, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static; rb.collisionLayer = kChanA;
+        world.addComponent(floor, rb);
+    }
+    Entity ghost = world.createEntity("Ghost");     // blocked from the floor
+    {
+        TransformComponent t; t.position = { 0.0f, 5.0f, 0.0f }; t.scale = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(ghost, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.collisionLayer = kChanB;
+        world.addComponent(ghost, rb);
+    }
+    Entity solid = world.createEntity("Solid");     // Default — untouched
+    {
+        TransformComponent t; t.position = { 6.0f, 5.0f, 0.0f }; t.scale = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(solid, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic;
+        world.addComponent(solid, rb);
+    }
+
+    PhysicsWorld phys;
+    HE::CollisionLayerConfig cfg;
+    cfg.setCollides(kChanA, kChanB, false);
+    phys.setCollisionLayers(cfg);
+    phys.initialize(world);
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    CHECK(world.registry().get<TransformComponent>(ghost).position.y < -5.0f);
+    CHECK(world.registry().get<TransformComponent>(solid).position.y >  0.0f);
+}
+
+// MUTATION: delete the `if (!isMoving(a) && !isMoving(b)) return false;` line
+// from the pair filter — two overlapping statics start reporting contacts and
+// this fails.
+TEST_CASE("PhysicsWorld: static bodies still never collide with each other")
+{
+    HorizonWorld world;
+    // Two statics in the SAME channel, overlapping outright. The matrix says
+    // yes; the simulation must still say no, because that is what it always did
+    // and because a pair of immovable bodies has no contact to resolve.
+    makeStaticBox(world, "A", { 0.0f, 0.0f, 0.0f });
+    makeStaticBox(world, "B", { 0.2f, 0.0f, 0.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 30; ++i)
+        phys.step(world, kDt);
+
+    CHECK(phys.pollCollisionEnter().empty());
+}
+
+TEST_CASE("PhysicsWorld: an out-of-range collision layer falls back to Default")
+{
+    HorizonWorld world;
+    Entity floor = world.createEntity("Floor");
+    {
+        TransformComponent t; t.position = { 0.0f, 0.0f, 0.0f }; t.scale = { 40.0f, 0.5f, 40.0f };
+        world.addComponent(floor, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        rb.collisionLayer = 200;    // nothing validates this on the way in
+        world.addComponent(floor, rb);
+    }
+    Entity box = world.createEntity("Box");
+    {
+        TransformComponent t; t.position = { 0.0f, 5.0f, 0.0f }; t.scale = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(box, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic;
+        rb.collisionLayer = 255;
+        world.addComponent(box, rb);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    // Both bodies exist and behave as Default: the box is resting on the floor,
+    // not falling through it and not tripping an assert inside Jolt.
+    CHECK(world.registry().get<TransformComponent>(box).position.y > 0.0f);
+}
+
+// MUTATION: hand CharacterFilters the Default-moving layer instead of the
+// character's own — the character keeps standing and this fails.
+TEST_CASE("PhysicsWorld: a character walks in its own collision channel")
+{
+    const auto build = [](uint8_t floorLayer, uint8_t charLayer,
+                          const HE::CollisionLayerConfig& cfg) {
+        HorizonWorld world;
+        Entity floor = world.createEntity("Floor");
+        {
+            TransformComponent t; t.position = { 0.0f, 0.0f, 0.0f };
+            t.scale = { 40.0f, 0.5f, 40.0f };
+            world.addComponent(floor, t);
+            RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+            rb.collisionLayer = floorLayer;
+            world.addComponent(floor, rb);
+        }
+        Entity character = world.createEntity("Walker");
+        {
+            TransformComponent t; t.position = { 0.0f, 4.0f, 0.0f };
+            t.scale = { 1.0f, 1.0f, 1.0f };
+            world.addComponent(character, t);
+            CharacterControllerComponent cc;
+            cc.collisionLayer = charLayer;
+            world.addComponent(character, cc);
+        }
+
+        PhysicsWorld phys;
+        phys.setCollisionLayers(cfg);
+        phys.initialize(world);
+        for (int i = 0; i < kSteps2s; ++i)
+            phys.step(world, kDt);
+        return world.registry().get<CharacterControllerComponent>(character).isGrounded;
+    };
+
+    // Default config: the character stands, exactly as before channels existed.
+    CHECK(build(kChanA, kChanB, HE::CollisionLayerConfig{}));
+
+    // The character's channel is switched off against the floor's. Its ground
+    // check runs through the same matrix as everything else, so it falls.
+    HE::CollisionLayerConfig blocked;
+    blocked.setCollides(kChanA, kChanB, false);
+    CHECK_FALSE(build(kChanA, kChanB, blocked));
+
+    // …and a cell that names some OTHER pair leaves it standing.
+    HE::CollisionLayerConfig unrelated;
+    unrelated.setCollides(kChanA, 9, false);
+    CHECK(build(kChanA, kChanB, unrelated));
+}
+
+TEST_CASE("PhysicsWorld: the landscape sits in the Terrain channel")
+{
+    // The implicit height field is the one body nobody has a component to name a
+    // channel for, so its channel is fixed — and it is Terrain, not Default, so
+    // that "everything but the ground" is a thing a project can express.
+    HorizonWorld world;
+    Entity land = world.createEntity("Landscape");
+    {
+        TransformComponent t; t.position = { 0.0f, 0.0f, 0.0f }; t.scale = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(land, t);
+        TerrainComponent tc;
+        tc.resolution = 33;
+        tc.sizeX      = 64.0f;
+        tc.sizeZ      = 64.0f;
+        tc.seed       = 0;      // flat
+        world.addComponent(land, tc);
+    }
+    Entity box = world.createEntity("Box");
+    {
+        TransformComponent t; t.position = { 0.0f, 5.0f, 0.0f }; t.scale = { 1.0f, 1.0f, 1.0f };
+        world.addComponent(box, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.collisionLayer = kChanA;
+        world.addComponent(box, rb);
+    }
+
+    PhysicsWorld phys;
+    HE::CollisionLayerConfig cfg;
+    cfg.setCollides(HE::CollisionLayerConfig::kTerrain, kChanA, false);
+    phys.setCollisionLayers(cfg);
+    phys.initialize(world);
+    for (int i = 0; i < kSteps2s; ++i)
+        phys.step(world, kDt);
+
+    // Blocking Terrain × kChanA is enough to fall through the landscape — which
+    // it would not be if the height field had been left in Default.
+    CHECK(world.registry().get<TransformComponent>(box).position.y < -5.0f);
 }

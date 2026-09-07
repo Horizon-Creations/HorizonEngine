@@ -33,6 +33,7 @@ JPH_SUPPRESS_WARNINGS
 
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
+#include <Physics/CollisionLayers.h>
 
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/HorizonWorld.h"
@@ -55,10 +56,32 @@ JPH_SUPPRESS_WARNINGS
 
 // ─── Layer definitions ────────────────────────────────────────────────────────
 
+// An ObjectLayer carries TWO things: the project's collision channel and whether
+// the body moves.
+//
+//     ObjectLayer = (userLayer << 1) | isMoving          // 5 of 16 bits used
+//     BroadPhaseLayer = isMoving ? MOVING : NON_MOVING
+//
+// The broadphase stays at TWO layers on purpose. Jolt builds one quadtree per
+// broadphase layer, and "moves / does not move" is the split that pays for
+// itself; sixteen channels there would be sixteen trees and a step backwards.
+// The channel is decided one level down, in the object-pair filter, which is a
+// matrix lookup and costs nothing to widen.
 namespace HELayers {
-    static constexpr JPH::ObjectLayer NON_MOVING = 0;
-    static constexpr JPH::ObjectLayer MOVING     = 1;
-    static constexpr JPH::ObjectLayer NUM_LAYERS = 2;
+    static constexpr JPH::ObjectLayer NUM_LAYERS =
+        static_cast<JPH::ObjectLayer>(HE::CollisionLayerConfig::kCount) * 2;
+
+    static constexpr JPH::ObjectLayer encode(uint8_t userLayer, bool moving) {
+        return static_cast<JPH::ObjectLayer>(
+            (static_cast<JPH::ObjectLayer>(userLayer) << 1) | (moving ? 1u : 0u));
+    }
+    static constexpr int  channelOf(JPH::ObjectLayer layer) { return layer >> 1; }
+    static constexpr bool isMoving(JPH::ObjectLayer layer)  { return (layer & 1u) != 0u; }
+
+    // The two the class used before channels existed — the Default channel's
+    // pair. Still the right answer wherever no component can name a channel.
+    static constexpr JPH::ObjectLayer NON_MOVING = encode(HE::CollisionLayerConfig::kDefault, false);
+    static constexpr JPH::ObjectLayer MOVING     = encode(HE::CollisionLayerConfig::kDefault, true);
 }
 
 namespace HEBPLayers {
@@ -70,47 +93,72 @@ namespace HEBPLayers {
 class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface
 {
 public:
-    BPLayerInterfaceImpl() {
-        m_objectToBP[HELayers::NON_MOVING] = HEBPLayers::NON_MOVING;
-        m_objectToBP[HELayers::MOVING]     = HEBPLayers::MOVING;
-    }
     JPH::uint GetNumBroadPhaseLayers() const override { return HEBPLayers::NUM_LAYERS; }
     JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer layer) const override {
         JPH_ASSERT(layer < HELayers::NUM_LAYERS);
-        return m_objectToBP[layer];
+        return HELayers::isMoving(layer) ? HEBPLayers::MOVING : HEBPLayers::NON_MOVING;
     }
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer layer) const override {
         return (layer == HEBPLayers::NON_MOVING) ? "NON_MOVING" : "MOVING";
     }
 #endif
-private:
-    JPH::BroadPhaseLayer m_objectToBP[HELayers::NUM_LAYERS];
 };
 
 class ObjectVsBPLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayerFilter
 {
 public:
     bool ShouldCollide(JPH::ObjectLayer obj, JPH::BroadPhaseLayer bp) const override {
-        switch (obj) {
-        case HELayers::NON_MOVING: return bp == HEBPLayers::MOVING;
-        case HELayers::MOVING:     return true;
-        default: JPH_ASSERT(false); return false;
-        }
+        // A moving body has to visit both trees; a non-moving one only needs the
+        // moving tree, because nothing in its own can come to meet it. The
+        // channel plays no part here — it is decided in the pair filter below,
+        // after the broadphase has already thrown away the far-apart pairs.
+        return HELayers::isMoving(obj) ? true : bp == HEBPLayers::MOVING;
     }
 };
 
 class ObjectLayerPairFilterImpl : public JPH::ObjectLayerPairFilter
 {
 public:
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        switch (a) {
-        case HELayers::NON_MOVING: return b == HELayers::MOVING;
-        case HELayers::MOVING:     return true;
-        default: JPH_ASSERT(false); return false;
-        }
+    // Its OWN copy of the matrix, not a reference into the config the project
+    // owns. Two reasons: this is asked once per candidate pair per step, so it
+    // must not be a call across the HorizonCore DLL boundary; and the config the
+    // editor edits may be reassigned or destroyed while the simulation runs.
+    ObjectLayerPairFilterImpl() { setLayers(HE::CollisionLayerConfig{}); }
+
+    void setLayers(const HE::CollisionLayerConfig& config) {
+        for (int a = 0; a < HE::CollisionLayerConfig::kCount; ++a)
+            for (int b = 0; b < HE::CollisionLayerConfig::kCount; ++b)
+                m_matrix[a][b] = config.collides(a, b);
     }
+
+    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
+        // Two bodies that cannot move cannot resolve a contact between them —
+        // this line is the whole of the old behaviour and has nothing to do with
+        // the channels.
+        if (!HELayers::isMoving(a) && !HELayers::isMoving(b))
+            return false;
+        return m_matrix[HELayers::channelOf(a)][HELayers::channelOf(b)];
+    }
+
+private:
+    bool m_matrix[HE::CollisionLayerConfig::kCount][HE::CollisionLayerConfig::kCount];
 };
+
+// The channel a component asked for, made safe to use as an index. uint8_t goes
+// to 255 and nothing upstream validates it: an out-of-range value would index
+// past the matrix and trip Jolt's own assert in GetBroadPhaseLayer. Loud,
+// because a body silently in the wrong channel is a bug nobody can see.
+static uint8_t sanitizeChannel(uint8_t requested, uint32_t entityId, const char* what)
+{
+    if (requested < HE::CollisionLayerConfig::kCount)
+        return requested;
+    HE_LOG_WARN(Physics, "Entity %u: %s names collision layer %u, but only 0..%d exist "
+                         "— using Default (0)",
+                entityId, what, static_cast<unsigned>(requested),
+                HE::CollisionLayerConfig::kCount - 1);
+    return HE::CollisionLayerConfig::kDefault;
+}
 
 // ─── Process-global Jolt init (run once, never torn down) ─────────────────────
 // RegisterTypes / Factory are global state inside Jolt; re-registering after
@@ -304,6 +352,31 @@ struct PhysicsWorld::Impl
 
     // Entity id → CharacterVirtual (for CharacterControllerComponent entities)
     std::unordered_map<uint32_t, std::unique_ptr<JPH::CharacterVirtual>> entityToCharacter;
+
+    // Entity id → the character's object layer, remembered from the build. A
+    // CharacterVirtual has no layer of its own (it is not a body), but every
+    // query it makes needs one to be filtered against — so it is kept beside the
+    // character rather than read from the component at query time: a character
+    // whose collision layer changed must be rebuilt anyway (the editor's
+    // PlayPhysicsInputs fingerprint covers that), and reading it fresh would let
+    // the ground check and the slide disagree within one step.
+    //
+    // A parallel map rather than a struct in the one above, because the map is
+    // read as `unique_ptr` in a dozen places and the only writer of this one is
+    // the build. Never contains an entry the character map does not.
+    std::unordered_map<uint32_t, JPH::ObjectLayer> characterLayer;
+
+    // The layer to filter a character's queries with. Falls back to the Character
+    // channel for an id the build never recorded — that cannot happen today, but
+    // the fallback keeps a future caller from filtering against layer 0-static
+    // and quietly walking through walls.
+    JPH::ObjectLayer characterLayerOf(uint32_t entityId) const
+    {
+        const auto it = characterLayer.find(entityId);
+        return it != characterLayer.end()
+            ? it->second
+            : HELayers::encode(HE::CollisionLayerConfig::kCharacter, true);
+    }
 
     // Where ColliderShape::Mesh / ::ConvexHull get their triangles. Nullable —
     // see PhysicsWorld::setContentManager.
@@ -909,8 +982,13 @@ struct CharacterFilters
     JPH::BodyFilter                   body;
     JPH::ShapeFilter                  shape;
 
-    CharacterFilters(const ObjectVsBPLayerFilterImpl& ovbp, const ObjectLayerPairFilterImpl& oo)
-        : bp(ovbp, HELayers::MOVING), ol(oo, HELayers::MOVING) {}
+    // `layer` is the character's OWN object layer — what the matrix is consulted
+    // for. It is always a moving one (a character that cannot move is not a
+    // character), so only the channel varies from one character to the next, and
+    // that is why the filters are built per character rather than once per step.
+    CharacterFilters(const ObjectVsBPLayerFilterImpl& ovbp, const ObjectLayerPairFilterImpl& oo,
+                     JPH::ObjectLayer layer)
+        : bp(ovbp, layer), ol(oo, layer) {}
 };
 
 } // namespace
@@ -931,6 +1009,17 @@ void PhysicsWorld::setContentManager(ContentManager* content)
 {
     if (m_impl)
         m_impl->content = content;
+}
+
+void PhysicsWorld::setCollisionLayers(const HE::CollisionLayerConfig& config)
+{
+    if (!m_impl)
+        return;
+    // The filter is a member of Impl and Jolt only holds a pointer to it (handed
+    // over in PhysicsSystem::Init), so writing through it here is all it takes —
+    // no re-Init, no rebuild of any body. Bodies keep the object layer they were
+    // created with; only the answer to "may these two touch" changes.
+    m_impl->ooFilter.setLayers(config);
 }
 
 bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
@@ -968,21 +1057,26 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
     const JPH::Quat  jq { pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w };
     const JPH::RVec3 pos(pose.position.x, pose.position.y, pose.position.z);
 
+    // The authored channel travels with the body; the moving bit is decided by
+    // the motion type below and packed in at the end, so a downgrade to Static
+    // cannot leave the two disagreeing.
+    const uint8_t channel = sanitizeChannel(rb->collisionLayer, entityId, "its rigid body");
+
     JPH::EMotionType motionType;
-    JPH::ObjectLayer layer;
+    bool             moving;
     switch (rb->type)
     {
     case RigidBodyType::Dynamic:
         motionType = JPH::EMotionType::Dynamic;
-        layer      = HELayers::MOVING;
+        moving     = true;
         break;
     case RigidBodyType::Kinematic:
         motionType = JPH::EMotionType::Kinematic;
-        layer      = HELayers::MOVING;
+        moving     = true;
         break;
     default: // Static
         motionType = JPH::EMotionType::Static;
-        layer      = HELayers::NON_MOVING;
+        moving     = false;
         break;
     }
 
@@ -998,10 +1092,11 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
                              "Use Convex Hull for a body that has to move.",
                     entityId, rb->type == RigidBodyType::Dynamic ? "Dynamic" : "Kinematic");
         motionType = JPH::EMotionType::Static;
-        layer      = HELayers::NON_MOVING;
+        moving     = false;
     }
 
-    JPH::BodyCreationSettings bcs(build.result.Get(), pos, jq, motionType, layer);
+    JPH::BodyCreationSettings bcs(build.result.Get(), pos, jq, motionType,
+                                  HELayers::encode(channel, moving));
     // Gated on the FINAL motion type, not on rb->type: after a downgrade, asking
     // Jolt to calculate inertia for a static mesh body is a request it cannot
     // satisfy.
@@ -1112,6 +1207,11 @@ bool PhysicsWorld::buildCharacterFor(HorizonWorld& world, uint32_t entityId)
 
     m_impl->entityToCharacter[entityId] = std::make_unique<JPH::CharacterVirtual>(
         &cvs, pos, jq, static_cast<uint64_t>(entityId), &m_impl->physicsSystem);
+    // Always a MOVING layer: the character is the thing that walks, and a
+    // non-moving one would never be asked about the non-moving tree it needs to
+    // stand on.
+    m_impl->characterLayer[entityId] = HELayers::encode(
+        sanitizeChannel(cc->collisionLayer, entityId, "its character controller"), true);
     return true;
 }
 
@@ -1151,7 +1251,14 @@ bool PhysicsWorld::buildTerrainBodyFor(HorizonWorld& world, uint32_t entityId)
         shapeResult.Get(),
         JPH::RVec3(pose.position.x, pose.position.y, pose.position.z),
         JPH::Quat(pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w),
-        JPH::EMotionType::Static, HELayers::NON_MOVING);
+        JPH::EMotionType::Static,
+        // The implicit landscape gets the TERRAIN channel, not Default. Nobody
+        // has a component to write a choice into here, so the choice is made
+        // once and it is the useful one: a query that wants only the ground, or
+        // wants everything but the ground, is a common shape and needs a channel
+        // of its own to be expressible at all. With the default all-true matrix
+        // this changes no simulation.
+        HELayers::encode(HE::CollisionLayerConfig::kTerrain, false));
     bcs.mFriction = 0.5f;   // RigidBodyComponent's default, so an authored body matches
     bcs.mUserData = static_cast<uint64_t>(entityId);
 
@@ -1294,6 +1401,7 @@ void PhysicsWorld::removeEntity(uint32_t entityId)
     // set), so it appears in no raycast, overlap or contact — erasing the owning
     // pointer IS its complete removal.
     m_impl->entityToCharacter.erase(entityId);
+    m_impl->characterLayer.erase(entityId);
 }
 
 int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
@@ -1400,7 +1508,8 @@ bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, boo
 
         // See setTransform: without this the character keeps the ground contacts
         // of the place it left.
-        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter);
+        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
+                                 m_impl->characterLayerOf(entityId));
         character.RefreshContacts(filters.bp, filters.ol, filters.body, filters.shape,
                                   m_impl->tempAllocator);
     }
@@ -1478,7 +1587,8 @@ bool PhysicsWorld::setTransform(uint32_t entityId, const glm::vec3& position,
         // the floor it was standing on. Without this, IsSupported() and
         // GetGroundState() answer for the OLD place — a player teleported off a
         // ledge would keep reporting solid ground and never start falling.
-        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter);
+        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
+                                 m_impl->characterLayerOf(entityId));
         character.RefreshContacts(filters.bp, filters.ol, filters.body, filters.shape,
                                   m_impl->tempAllocator);
     }
@@ -1636,7 +1746,6 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     }
 
     // ── Character controller update ────────────────────────────────────────────
-    CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter);
     JPH::CharacterVirtual::ExtendedUpdateSettings euSettings;
 
     m_impl->stepCharacters.clear();
@@ -1682,6 +1791,16 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         const auto bodyIt = m_impl->entityToBody.find(entityId);
         const JPH::IgnoreSingleBodyFilter selfFilter(
             bodyIt != m_impl->entityToBody.end() ? bodyIt->second : JPH::BodyID());
+
+        // Per character, not once for the loop: the collision channel is per
+        // character, and it is what the matrix is consulted for. The filters are
+        // four-word value objects, so building one per character per step costs
+        // nothing next to the update itself — and it is the SAME construction
+        // RefreshContacts uses after a teleport, which is the property that
+        // matters: a character refreshed against different filters would resolve
+        // its ground against a different world than it walks in.
+        const CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
+                                       m_impl->characterLayerOf(entityId));
 
         character->ExtendedUpdate(dt, gravity, euSettings,
             filters.bp, filters.ol, selfFilter, filters.shape,
@@ -2267,6 +2386,7 @@ void PhysicsWorld::clear()
     }
     m_impl->entityToBody.clear();
     m_impl->entityToCharacter.clear();
+    m_impl->characterLayer.clear();
     // After the bodies are gone: drop the contact bookkeeping, otherwise the
     // OnContactRemoved callbacks Jolt fires for them would emit exit events
     // referring to entities that no longer exist.

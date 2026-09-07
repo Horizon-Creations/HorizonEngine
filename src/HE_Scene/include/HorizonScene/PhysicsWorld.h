@@ -7,6 +7,7 @@
 
 class HorizonWorld;
 class ContentManager;
+namespace HE { struct CollisionLayerConfig; }
 
 // PIMPL wrapper around Jolt PhysicsSystem.
 // Keeps all Jolt headers out of the public API.
@@ -56,6 +57,27 @@ public:
     // entity with no body at all is the failure this whole class was audited for.
     // Both applications set it right after constructing the world.
     void setContentManager(ContentManager* content);
+
+    // The project's collision matrix: which of the sixteen named channels may
+    // touch which. A body's channel comes from RigidBodyComponent::
+    // collisionLayer, a character's from CharacterControllerComponent::
+    // collisionLayer, and the implicit landscape height field is fixed to the
+    // Terrain channel.
+    //
+    // The editor calls this when a project is opened and whenever the matrix is
+    // edited; GameApplication calls it once at start from the packaged
+    // ProjectConfig. WITHOUT A CALL the default-constructed config applies —
+    // every channel collides with every other, which is exactly how this class
+    // behaved before channels existed. That is the contract: an existing project
+    // that never heard of layers simulates unchanged.
+    //
+    // Safe to call while the simulation runs: the matrix is copied into the
+    // filter Jolt holds, so the change takes effect from the next broadphase
+    // update. Contacts that already exist are resolved once more and then let
+    // go, so a pair switched off separates over a step rather than in the same
+    // instant — which is what anyone editing the matrix during play wants to
+    // see anyway.
+    void setCollisionLayers(const HE::CollisionLayerConfig& config);
 
     // Build one body per entity that has RigidBodyComponent + TransformComponent,
     // plus one character controller per CharacterControllerComponent, plus a

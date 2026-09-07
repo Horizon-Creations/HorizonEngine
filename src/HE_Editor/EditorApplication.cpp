@@ -2506,6 +2506,11 @@ void EditorApplication::OnRender(float dt)
 			float         friction     = 0.0f;
 			float         restitution  = 0.0f;
 			bool          is2D         = false;
+			// The collision channel is baked into the body's ObjectLayer at
+			// creation, so changing it is a rebuild — without it here, picking a
+			// layer in the Details panel during play would do nothing until the
+			// scene was reloaded.
+			uint8_t       bodyLayer    = 0;
 			// ColliderComponent
 			ColliderShape shape        = ColliderShape::Box;
 			glm::vec3     halfExtents{};
@@ -2520,6 +2525,9 @@ void EditorApplication::OnRender(float dt)
 			float         stepHeight   = 0.0f;
 			float         skinWidth    = 0.0f;
 			float         charMass     = 0.0f;
+			// Same reason as bodyLayer: PhysicsWorld remembers the character's
+			// layer at build time, so a change only lands through a rebuild.
+			uint8_t       charLayer    = 0;
 			// TransformComponent: baked into the mesh/hull triangles, and into
 			// the primitive shapes' extents.
 			glm::vec3     scale{ 1.0f };
@@ -2556,6 +2564,7 @@ void EditorApplication::OnRender(float dt)
 				in.friction    = rb->friction;
 				in.restitution = rb->restitution;
 				in.is2D        = rb->is2D;
+				in.bodyLayer   = rb->collisionLayer;
 			}
 			if (const auto* c = reg.try_get<ColliderComponent>(e))
 			{
@@ -2581,6 +2590,7 @@ void EditorApplication::OnRender(float dt)
 				in.stepHeight   = cc->stepHeight;
 				in.skinWidth    = cc->skinWidth;
 				in.charMass     = cc->mass;
+				in.charLayer    = cc->collisionLayer;
 			}
 			return in;
 		};

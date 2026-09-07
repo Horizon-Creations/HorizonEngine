@@ -1555,6 +1555,7 @@ namespace
 		a.rigidbody.friction    = 0.9f;
 		a.rigidbody.restitution = 0.15f;
 		a.rigidbody.is2D        = true;
+		a.rigidbody.collisionLayer = 7;
 		reg.emplace<RigidBodyComponent>(actor, a.rigidbody);
 
 		a.collider.shape       = ColliderShape::Capsule;
@@ -1569,6 +1570,7 @@ namespace
 		a.characterController.skinWidth  = 0.05f;
 		a.characterController.mass       = 82.0f;
 		a.characterController.gravity    = 12.5f;
+		a.characterController.collisionLayer = 11;
 		reg.emplace<CharacterControllerComponent>(actor, a.characterController);
 
 		a.script.scriptAssetId = HE::UUID::generate();
@@ -1858,6 +1860,7 @@ namespace
 			CHECK(r->friction    == doctest::Approx(a.rigidbody.friction));
 			CHECK(r->restitution == doctest::Approx(a.rigidbody.restitution));
 			CHECK(r->is2D        == a.rigidbody.is2D);
+			CHECK(r->collisionLayer == a.rigidbody.collisionLayer);
 		}
 		{
 			const auto* col = reg.try_get<ColliderComponent>(actor);
@@ -1876,6 +1879,7 @@ namespace
 			CHECK(cc->skinWidth  == doctest::Approx(a.characterController.skinWidth));
 			CHECK(cc->mass       == doctest::Approx(a.characterController.mass));
 			CHECK(cc->gravity    == doctest::Approx(a.characterController.gravity));
+			CHECK(cc->collisionLayer == a.characterController.collisionLayer);
 		}
 		{
 			const auto* s = reg.try_get<ScriptComponent>(actor);

@@ -366,6 +366,7 @@ namespace
 				{ "friction",    r->friction },
 				{ "restitution", r->restitution },
 				{ "is2D",        r->is2D },
+				{ "layer",       r->collisionLayer },
 			};
 		}
 		if (auto* col = registry.try_get<ColliderComponent>(entity))
@@ -392,6 +393,7 @@ namespace
 				{ "mass",       cc->mass       },
 				{ "gravity",    cc->gravity    },
 				{ "jumpSpeed",  cc->jumpSpeed  },
+				{ "layer",      cc->collisionLayer },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -964,6 +966,10 @@ namespace
 			r.friction    = c.value("friction",    r.friction);
 			r.restitution = c.value("restitution", r.restitution);
 			r.is2D        = c.value("is2D",        r.is2D);
+			// Defaulted from the fresh component, so a scene written before
+			// collision layers existed loads every body into Default (0) — which
+			// is the channel it effectively had.
+			r.collisionLayer = c.value("layer", r.collisionLayer);
 			registry.emplace_or_replace<RigidBodyComponent>(entity, r);
 		}
 		if (comps.contains("collider"))
@@ -992,6 +998,9 @@ namespace
 			// field existed loads with the 5 m/s default rather than a zero that
 			// would silently refuse every jump.
 			cc.jumpSpeed  = c.value("jumpSpeed",  cc.jumpSpeed);
+			// Same rule: an older scene loads into the Character channel, which
+			// under the default all-true matrix is the walk it always had.
+			cc.collisionLayer = c.value("layer", cc.collisionLayer);
 			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
 		}
 		if (comps.contains("saveState"))
