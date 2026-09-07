@@ -14,6 +14,14 @@ namespace
 {
     // Puts HOME somewhere harmless for the length of a case and gives it back
     // afterwards, so a test can never write into the real login items.
+    //
+    // setenv/unsetenv are POSIX; MSVC has no declaration for either, and a
+    // non-template class's member bodies are checked whether or not anything
+    // instantiates it. Windows never reaches this file's home-directory path
+    // (autostart lives in the registry there — see the guarded test case
+    // below), so the struct itself stays out of the Windows build entirely
+    // rather than growing an #ifdef per call.
+#ifndef _WIN32
     struct TempHome
     {
         std::filesystem::path dir;
@@ -35,6 +43,7 @@ namespace
             std::filesystem::remove_all(dir);
         }
     };
+#endif
 
     std::string readAll(const std::filesystem::path& p)
     {
