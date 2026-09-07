@@ -41,6 +41,42 @@ void blendTRS(const std::vector<JointTRS>& a,
               float                        alpha,
               std::vector<JointTRS>&       out);
 
+// ── Forward kinematics, in two halves ────────────────────────────────────────
+// `composeBoneMatrices` used to do both at once and threw the interesting half
+// away. IK works in MODEL space — a two-bone solver is arithmetic on the
+// positions of hip, knee and foot, and those only exist between the FK and the
+// inverse bind matrix. So the FK is its own call now, and the IBM is its own
+// call, and the old one is the two of them in a row (AnimationEval.h), byte for
+// byte what it was.
+
+// Accumulate model-space joint matrices from `localTRS` (parent < child assumed,
+// which every importer in this tree guarantees). No inverse bind matrix: these
+// are joint FRAMES, the thing you can measure a limb against.
+//
+// `outModel` is resized to the skeleton's joint count. A joint the pose does not
+// reach (a shorter localTRS) contributes a default TRS rather than reading past
+// the end.
+void composeModelMatrices(const SkeletalMeshAsset&     mesh,
+                          const std::vector<JointTRS>& localTRS,
+                          std::vector<glm::mat4>&      outModel);
+
+// Multiply each model matrix by its joint's inverse bind matrix — the step that
+// turns joint frames into the skinning matrices the renderer wants.
+void applyInverseBind(const SkeletalMeshAsset&      mesh,
+                      const std::vector<glm::mat4>& model,
+                      std::vector<glm::mat4>&       outBoneMatrices);
+
+// Re-run the FK for `root` and everything below it, after something (IK) has
+// rewritten local rotations in that subtree. Only the subtree: a full pass per
+// solved limb would be the whole kinematics three times over for a biped.
+//
+// Relies on the same parent < child ordering as composeModelMatrices, which is
+// what makes "everything below it" a single forward sweep and not a search.
+void refreshModelSubtree(const SkeletalMeshAsset&     mesh,
+                         const std::vector<JointTRS>& localTRS,
+                         int                          root,
+                         std::vector<glm::mat4>&      model);
+
 namespace HE {
 
 // How a layer's pose meets the pose beneath it.

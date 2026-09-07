@@ -119,25 +119,14 @@ void composeBoneMatrices(const SkeletalMeshAsset&      mesh,
                          const std::vector<JointTRS>& localTRS,
                          std::vector<glm::mat4>&       boneMatrices)
 {
-    const size_t jointCount = mesh.skeleton.size();
-    std::vector<glm::mat4> worldMats(jointCount);
-    for (size_t i = 0; i < jointCount; ++i)
-    {
-        const auto& trs   = (i < localTRS.size()) ? localTRS[i] : JointTRS{};
-        const glm::mat4 T = glm::translate(glm::mat4(1.0f), trs.translation);
-        const glm::mat4 R = glm::mat4_cast(trs.rotation);
-        const glm::mat4 S = glm::scale(glm::mat4(1.0f), trs.scale);
-        const glm::mat4 local = T * R * S;
-        const int32_t parent = mesh.skeleton[i].parent;
-        worldMats[i] = (parent < 0) ? local : worldMats[static_cast<size_t>(parent)] * local;
-    }
-    boneMatrices.resize(jointCount);
-    for (size_t i = 0; i < jointCount; ++i)
-    {
-        glm::mat4 ibm;
-        std::memcpy(&ibm, mesh.skeleton[i].inverseBindMatrix.data(), sizeof(glm::mat4));
-        boneMatrices[i] = worldMats[i] * ibm;
-    }
+    // The two halves, in a row. Not one loop any more, and deliberately not a
+    // second implementation of either: a driver with IK runs composeModelMatrices,
+    // solves in the model matrices it just got, and finishes with applyInverseBind
+    // — and a driver WITHOUT IK has to end up at the same numbers, bit for bit,
+    // or "no IK component changes nothing" would only be true to a tolerance.
+    std::vector<glm::mat4> model;
+    composeModelMatrices(mesh, localTRS, model);
+    applyInverseBind(mesh, model, boneMatrices);
 }
 
 // blendTRS now lives in AnimationPose.cpp — public, because the layer stage, the

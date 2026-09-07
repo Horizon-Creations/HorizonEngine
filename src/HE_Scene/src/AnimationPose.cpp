@@ -1,8 +1,10 @@
 #include <HorizonScene/AnimationPose.h>
 #include <Diagnostics/Log.h>
 
+#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace
 {
@@ -34,6 +36,78 @@ void blendTRS(const std::vector<JointTRS>& a,
         const JointTRS& ja = (i < a.size()) ? a[i] : kDefault;
         const JointTRS& jb = (i < b.size()) ? b[i] : kDefault;
         overrideJoint(ja, jb, alpha, out[i]);
+    }
+}
+
+namespace
+{
+// The one place a JointTRS becomes a matrix. Shared by the full FK and the
+// subtree refresh so the two cannot drift apart — a refresh that composed T*R*S
+// in a different order would move a solved limb by a rounding error every frame.
+inline glm::mat4 localMatrix(const JointTRS& trs)
+{
+    const glm::mat4 T = glm::translate(glm::mat4(1.0f), trs.translation);
+    const glm::mat4 R = glm::mat4_cast(trs.rotation);
+    const glm::mat4 S = glm::scale(glm::mat4(1.0f), trs.scale);
+    return T * R * S;
+}
+} // namespace
+
+void composeModelMatrices(const SkeletalMeshAsset&     mesh,
+                          const std::vector<JointTRS>& localTRS,
+                          std::vector<glm::mat4>&      outModel)
+{
+    const size_t jointCount = mesh.skeleton.size();
+    outModel.resize(jointCount);
+    for (size_t i = 0; i < jointCount; ++i)
+    {
+        const JointTRS  trs   = (i < localTRS.size()) ? localTRS[i] : JointTRS{};
+        const glm::mat4 local = localMatrix(trs);
+        const int32_t parent  = mesh.skeleton[i].parent;
+        outModel[i] = (parent < 0) ? local : outModel[static_cast<size_t>(parent)] * local;
+    }
+}
+
+void applyInverseBind(const SkeletalMeshAsset&      mesh,
+                      const std::vector<glm::mat4>& model,
+                      std::vector<glm::mat4>&       outBoneMatrices)
+{
+    const size_t jointCount = mesh.skeleton.size();
+    outBoneMatrices.resize(jointCount);
+    for (size_t i = 0; i < jointCount; ++i)
+    {
+        glm::mat4 ibm;
+        std::memcpy(&ibm, mesh.skeleton[i].inverseBindMatrix.data(), sizeof(glm::mat4));
+        const glm::mat4 m = (i < model.size()) ? model[i] : glm::mat4(1.0f);
+        outBoneMatrices[i] = m * ibm;
+    }
+}
+
+void refreshModelSubtree(const SkeletalMeshAsset&     mesh,
+                         const std::vector<JointTRS>& localTRS,
+                         int                          root,
+                         std::vector<glm::mat4>&      model)
+{
+    const size_t jointCount = mesh.skeleton.size();
+    if (root < 0 || static_cast<size_t>(root) >= jointCount) return;
+    if (model.size() != jointCount) { composeModelMatrices(mesh, localTRS, model); return; }
+
+    // "Below root" is decided by a flag that spreads from parent to child in one
+    // forward sweep — legal because parents come first. A recursive walk would
+    // need the child lists this skeleton does not store.
+    std::vector<char> dirty(jointCount, 0);
+    dirty[static_cast<size_t>(root)] = 1;
+    for (size_t i = static_cast<size_t>(root); i < jointCount; ++i)
+    {
+        const int32_t parent = mesh.skeleton[i].parent;
+        if (!dirty[i])
+        {
+            if (parent >= 0 && dirty[static_cast<size_t>(parent)]) dirty[i] = 1;
+            else continue;
+        }
+        const JointTRS  trs   = (i < localTRS.size()) ? localTRS[i] : JointTRS{};
+        const glm::mat4 local = localMatrix(trs);
+        model[i] = (parent < 0) ? local : model[static_cast<size_t>(parent)] * local;
     }
 }
 
