@@ -12,6 +12,8 @@ add_library(HorizonScene SHARED
     src/TerrainSystem.cpp
     src/TerrainPaint.cpp
     src/AnimationEval.cpp
+    src/AnimationPose.cpp
+    src/PoseFinalize.cpp
     src/RootMotion.cpp
     src/RootMotionApply.cpp
     src/AnimationNotify.cpp

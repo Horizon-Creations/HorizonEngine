@@ -387,6 +387,15 @@ struct ThemeAsset : public RuntimeAsset
 	std::string json;
 };
 
+// Which joints of a skeleton an animation layer is allowed to touch, by joint
+// NAME (HE::BoneMask round-trips the JSON). An asset rather than a field on the
+// layer because one "UpperBody" is shared by every layer of every humanoid in a
+// project — see BoneMask/BoneMask.h for the whole argument.
+struct BoneMaskAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;

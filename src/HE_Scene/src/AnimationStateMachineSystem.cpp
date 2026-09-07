@@ -8,6 +8,7 @@
 #include <ContentManager/Assets.h>
 #include "AnimationEval.h"
 #include "RootMotionApply.h"
+#include "PoseFinalize.h"
 #include "NotifyCollect.h"
 #include <Diagnostics/Log.h>
 
@@ -339,7 +340,12 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             final_trs = std::move(trsOut);
         }
 
-        composeBoneMatrices(*mesh, final_trs, smc.boneMatrices);
-        smc.dirty = true;
+        // Layer stack (if any) → FK → IBM. AFTER the crossfade, not before it: a
+        // layer is laid on a finished result — a reload on the upper body holds
+        // against whatever the legs are doing, idle, run or the blend between
+        // them. A layer applied before the crossfade would be mixed straight back
+        // out again. And after rootMotionApply, so it cannot write back the root
+        // translation that was just taken out.
+        HE::poseFinalize(world, cm, dt, e, *mesh, final_trs, smc, notifies);
     }
 }

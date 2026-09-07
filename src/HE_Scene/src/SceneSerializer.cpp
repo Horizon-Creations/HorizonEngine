@@ -38,6 +38,7 @@
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
 #include "HorizonScene/Components/RootMotionComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
@@ -563,6 +564,34 @@ namespace
 				{ "looping",       ab->looping },
 				{ "playing",       ab->playing },
 			};
+		}
+		if (auto* al = registry.try_get<AnimationLayerComponent>(entity))
+		{
+			json layers = json::array();
+			for (const auto& l : al->layers)
+			{
+				// notifiesPrimed and the mask resolution cache are deliberately
+				// absent: the first is a per-playhead flag that has to start
+				// fresh on the next tick, the second is derived from the mask
+				// asset and the skeleton and would go stale the moment either
+				// changed under a saved scene.
+				layers.push_back({
+					{ "name",              l.name },
+					{ "source",            static_cast<int>(l.source) },
+					{ "mode",              static_cast<int>(l.mode) },
+					{ "clip",              uuidToJson(l.clipId) },
+					{ "blendSpace",        uuidToJson(l.blendSpaceId) },
+					{ "mask",              uuidToJson(l.maskId) },
+					{ "weight",            l.weight },
+					{ "additiveRefClip",   uuidToJson(l.additiveRefClipId) },
+					{ "additiveRefTime",   l.additiveRefTime },
+					{ "playbackTime",      l.playbackTime },
+					{ "playbackSpeed",     l.playbackSpeed },
+					{ "looping",           l.looping },
+					{ "playing",           l.playing },
+				});
+			}
+			comps["animationlayers"] = { { "layers", std::move(layers) } };
 		}
 		if (auto* rm = registry.try_get<RootMotionComponent>(entity))
 		{
@@ -1264,6 +1293,36 @@ namespace
 			ab.looping       = c.value("looping",       ab.looping);
 			ab.playing       = c.value("playing",       ab.playing);
 			registry.emplace_or_replace<AnimatorBlendComponent>(entity, ab);
+		}
+		if (comps.contains("animationlayers"))
+		{
+			const json& c = comps["animationlayers"];
+			AnimationLayerComponent al;
+			for (const auto& lj : c.value("layers", json::array()))
+			{
+				AnimationLayerComponent::Layer l;
+				l.name   = lj.value("name", std::string());
+				// Guarded, not blind casts — see the two fromInt helpers. A file
+				// from a newer editor can name a source or a mode this build does
+				// not have, and an enum with no enumerator would fall through
+				// every branch that reads it.
+				l.source = AnimationLayerComponent::Layer::sourceFromInt(
+					lj.value("source", static_cast<int>(l.source)));
+				l.mode   = HE::layerBlendModeFromInt(
+					lj.value("mode", static_cast<int>(l.mode)));
+				l.clipId            = jsonToUuid(lj.value("clip",            json()));
+				l.blendSpaceId      = jsonToUuid(lj.value("blendSpace",      json()));
+				l.maskId            = jsonToUuid(lj.value("mask",            json()));
+				l.additiveRefClipId = jsonToUuid(lj.value("additiveRefClip", json()));
+				l.weight          = lj.value("weight",          l.weight);
+				l.additiveRefTime = lj.value("additiveRefTime", l.additiveRefTime);
+				l.playbackTime    = lj.value("playbackTime",    l.playbackTime);
+				l.playbackSpeed   = lj.value("playbackSpeed",   l.playbackSpeed);
+				l.looping         = lj.value("looping",         l.looping);
+				l.playing         = lj.value("playing",         l.playing);
+				al.layers.push_back(std::move(l));
+			}
+			registry.emplace_or_replace<AnimationLayerComponent>(entity, std::move(al));
 		}
 		if (comps.contains("rootmotion"))
 		{

@@ -6,6 +6,7 @@
 #include <ContentManager/ContentManager.h>
 #include "AnimationEval.h"
 #include "RootMotionApply.h"
+#include "PoseFinalize.h"
 #include "NotifyCollect.h"
 #include <Diagnostics/Log.h>
 
@@ -150,7 +151,8 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
 
         std::vector<JointTRS> blended;
         blendTRS(trsA, trsB, blend.blendAlpha, blended);
-        composeBoneMatrices(*mesh, blended, smc.boneMatrices);
-        smc.dirty = true;
+        // Layer stack (if any) → FK → IBM. After rootMotionApply on purpose: a
+        // layer must not write back the root translation that was just taken out.
+        HE::poseFinalize(world, cm, dt, e, *mesh, blended, smc, notifies);
     }
 }

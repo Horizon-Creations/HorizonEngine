@@ -13,6 +13,7 @@
 #include "Components/AnimatorComponent.h"
 #include "Components/AnimatorBlendComponent.h"
 #include "Components/RootMotionComponent.h"
+#include "Components/AnimationLayerComponent.h"
 #include "Components/AnimatorStateMachineComponent.h"
 #include "Components/PropertyAnimatorComponent.h"
 #include "Components/NavMeshComponent.h"

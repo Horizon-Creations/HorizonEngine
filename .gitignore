@@ -41,6 +41,12 @@ CMakeUserPresets.json
 *.log
 config.json
 /.vs
+# Any build tree, however it was named. `build-wt/` used to be the only one
+# spelled out, and a worktree that configured into `build-<something-else>/`
+# committed 45 000 lines of generated CMake and a 63 MB test binary before
+# anyone noticed. The pattern costs nothing and `build_errors.txt` (a tracked
+# file) is not matched by it — the trailing slash means directories only.
+build-*/
 build-wt/
 
 # Working screenshots and scratch output. Kept on disk, never committed: these

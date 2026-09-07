@@ -11,6 +11,7 @@
 #include "HorizonScene/Components/RopeComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/JointComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -68,6 +69,11 @@ void HorizonWorld::reserveComponentStorage()
     // grapple line a dlopen'd game logic hooks at runtime would otherwise be the
     // first thing ever to touch this pool.
     (void)m_registry.storage<JointComponent>();
+    // Same case as ropes and trails: a layer stack is something GAME LOGIC turns
+    // on — "give this character an aim offset while it holds a weapon" — so the
+    // dlopen'd dylib is a realistic first toucher of this pool, and a pool owned
+    // by a library that later unloads dangles the registry at teardown.
+    (void)m_registry.storage<AnimationLayerComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const

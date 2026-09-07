@@ -140,17 +140,6 @@ void composeBoneMatrices(const SkeletalMeshAsset&      mesh,
     }
 }
 
-void blendTRS(const std::vector<JointTRS>& a,
-              const std::vector<JointTRS>& b,
-              float                        alpha,
-              std::vector<JointTRS>&       out)
-{
-    const size_t count = std::min(a.size(), b.size());
-    out.resize(count);
-    for (size_t i = 0; i < count; ++i)
-    {
-        out[i].translation = glm::mix(a[i].translation, b[i].translation, alpha);
-        out[i].rotation    = glm::slerp(a[i].rotation,  b[i].rotation,    alpha);
-        out[i].scale       = glm::mix(a[i].scale,       b[i].scale,       alpha);
-    }
-}
+// blendTRS now lives in AnimationPose.cpp — public, because the layer stage, the
+// editor preview and the tests all blend poses and none of them can reach an
+// internal header.

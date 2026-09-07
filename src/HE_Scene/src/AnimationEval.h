@@ -2,18 +2,11 @@
 // Internal header: shared between the animation systems (clip, blend, state
 // machine, property). Not part of the public include path.
 #include <ContentManager/Assets.h>
+#include <HorizonScene/AnimationPose.h>   // JointTRS + blendTRS (public: preview and tests need them)
 #include <HorizonScene/RootMotion.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
-
-// Per-joint local transform (before FK + IBM).
-struct JointTRS
-{
-    glm::vec3 translation = glm::vec3(0.0f);
-    glm::quat rotation    = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z identity
-    glm::vec3 scale       = glm::vec3(1.0f);
-};
 
 // Advance a playhead by dt and wrap/stop it — the shared rule of the clip, blend
 // and property animators (the state machine's playhead has no `playing` flag and
@@ -39,13 +32,6 @@ void sampleClip(const AnimationClipAsset& clip, float t, std::vector<JointTRS>& 
 void composeBoneMatrices(const SkeletalMeshAsset& mesh,
                          const std::vector<JointTRS>& localTRS,
                          std::vector<glm::mat4>&       boneMatrices);
-
-// Per-joint linear blend between two TRS sets: lerp translation + scale, slerp rotation.
-// out is resized to min(a.size(), b.size()).
-void blendTRS(const std::vector<JointTRS>& a,
-              const std::vector<JointTRS>& b,
-              float                        alpha,
-              std::vector<JointTRS>&       out);
 
 // Neutralise the root joint in an already-sampled pose, so the motion that was
 // just extracted is not ALSO still in the mesh. Only what `opt` extracts is

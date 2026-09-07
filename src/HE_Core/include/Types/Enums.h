@@ -107,7 +107,8 @@ namespace HE
         StructType,       // user-defined struct (named typed fields) — see HE::TypeRegistry
         EnumType,         // user-defined enum (named int-backed entries) — see HE::TypeRegistry
         SaveGameTemplate, // savegame field schema (typed fields + defaults), consumed by HE::api::save
-        Theme             // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
+        Theme,            // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
+        BoneMask          // which joints an animation layer may touch, by joint NAME (HE::BoneMask)
     };
 
     // Does this kind of asset travel over a collaboration session?
@@ -147,6 +148,10 @@ namespace HE
             // is being changed — a theme edit is exactly what two people want to
             // see land live.
             case AssetType::Theme:
+            // A list of joint names and weights: a few hundred bytes, authored in
+            // the editor, and the sort of thing an animator and a rigger change
+            // while looking at the same character.
+            case AssetType::BoneMask:
                 return true;
 
             case AssetType::StaticMesh:

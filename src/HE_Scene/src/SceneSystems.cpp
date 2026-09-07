@@ -23,6 +23,7 @@
 #include "HorizonScene/Components/ParticleSystemComponent.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -34,6 +35,7 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "RootMotionApply.h"
+#include "PoseFinalize.h"
 #include "ContentManager/ContentManager.h"
 #include "Renderer/IRenderer.h"
 #include "Diagnostics/Log.h"
@@ -202,6 +204,10 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     // and a character nobody drove this frame gets its horizontal velocity handed
     // back at the end (see RootMotionComponent::wroteVelocity).
     HE::rootMotionBeginFrame(world);
+    // Same bracket, same reason, one stage later: the layer stack runs at the end
+    // of whichever driver got there first, and must not run a second time for a
+    // second driver on the same entity.
+    HE::poseBeginFrame(world);
 
     // Order within the phase is unchanged: the three skeletal drivers all write
     // SkeletalMeshComponent::boneMatrices, so the last one wins on an entity
@@ -212,6 +218,7 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
 
     HE::rootMotionEndFrame(world, rootMotion);
+    HE::poseEndFrame(world);
 }
 
 std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
@@ -228,6 +235,12 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
     for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  add(c.particleAssetId);
     for (auto [e, c] : reg.view<AnimatorComponent>().each())        add(c.clipAssetId);
     for (auto [e, c] : reg.view<AnimatorBlendComponent>().each())   { add(c.clipAId); add(c.clipBId); }
+    // Every layer's clip, its additive reference clip and its mask. What is not
+    // listed here is not packed, and a layer whose mask did not travel would go
+    // from "upper body only" to "affects nothing" in the packaged build.
+    for (auto [e, c] : reg.view<AnimationLayerComponent>().each())
+        for (const auto& l : c.layers)
+            { add(l.clipId); add(l.blendSpaceId); add(l.maskId); add(l.additiveRefClipId); }
     for (auto [e, c] : reg.view<PropertyAnimatorComponent>().each()) add(c.clipId);
     for (auto [e, c] : reg.view<AudioSourceComponent>().each())     add(c.assetId);
     for (auto [e, c] : reg.view<UIImageComponent>().each())         add(c.materialAssetId);

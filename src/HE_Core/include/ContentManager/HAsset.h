@@ -134,6 +134,7 @@ inline constexpr uint32_t CHUNK_STDF = makeChunkId('S','T','D','F'); // struct d
 inline constexpr uint32_t CHUNK_ENDF = makeChunkId('E','N','D','F'); // enum definition (JSON)
 inline constexpr uint32_t CHUNK_SGTP = makeChunkId('S','G','T','P'); // savegame template (JSON, struct-def shape)
 inline constexpr uint32_t CHUNK_THEM = makeChunkId('T','H','E','M'); // UI theme (JSON: colour roles × light/dark, sizes, shadows)
+inline constexpr uint32_t CHUNK_BMSK = makeChunkId('B','M','S','K'); // bone mask (JSON: joint names × weights)
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

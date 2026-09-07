@@ -6,6 +6,7 @@
 #include <ContentManager/ContentManager.h>
 #include "AnimationEval.h"
 #include "RootMotionApply.h"
+#include "PoseFinalize.h"
 #include "NotifyCollect.h"
 #include <Diagnostics/Log.h>
 
@@ -75,7 +76,8 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
                 HE::rootMotionApply(world, rootMotion, e, *rm, delta, dt);
         }
 
-        composeBoneMatrices(*mesh, localTRS, smc.boneMatrices);
-        smc.dirty = true;
+        // Layer stack (if any) → FK → IBM. After rootMotionApply on purpose: a
+        // layer must not write back the root translation that was just taken out.
+        HE::poseFinalize(world, cm, dt, e, *mesh, localTRS, smc, notifies);
     }
 }
