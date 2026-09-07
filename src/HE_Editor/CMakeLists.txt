@@ -101,6 +101,7 @@ add_executable(HorizonEditor WIN32
 	main.cpp
 	EditorApplication.cpp
 	EditorUndo.cpp
+	EditorCommands.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp

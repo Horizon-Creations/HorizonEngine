@@ -115,6 +115,7 @@ add_executable(he_tests
     test_net_collab.cpp
     test_collab_controller.cpp
     test_collab_undo.cpp
+    test_editor_commands.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -142,6 +143,13 @@ add_executable(he_tests
     # thing about "Schicht 0" that used to need a GPU and a pair of eyes.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRaster.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
+    # The single door every scene change goes through — the UI's structural
+    # commands, a peer's edit and, later, an external MCP client. It is
+    # deliberately free of ImGui and of EditorApplication (which is NOT in this
+    # binary), which is what lets the question the gateway exists to answer —
+    # "does undo put the world back exactly as it was, whoever asked" — be
+    # answered here rather than by hand in front of a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCommands.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
