@@ -609,6 +609,57 @@ Tests:
 
 ---
 
+## 4b. In Schritt 2 getroffene Abweichungen
+
+Schritt 2 (Root Motion) ist gebaut. Vier Stellen weichen bewusst von dem ab,
+was oben steht; sie stehen hier, damit Schritt 3 und 4 sie nicht zurückdrehen.
+
+1. **Kein `lastSampledTime` pro Playhead.** Die Spanne wird inline gerechnet:
+   `tPrev` ist der Playhead vor dem Vorrücken, `tEnd = tPrev + dt * speed`.
+   Für jeden in 2.2 aufgezählten Fall (frisch, geladene Szene, Transitionsstart,
+   Transitionsabschluss) kommt dieselbe Spanne heraus — und in dem einen Fall,
+   in dem sich beide unterscheiden, ist der gespeicherte Stand der falsche: ein
+   Skript, das `playbackTime` setzt, würde ein Delta über die alte Clipstelle
+   erzeugen, während die Pose schon von der neuen kommt. Die Figur teleportierte
+   mit dem Playhead.
+   **Für Schritt 3 heißt das:** `lastSampledTime` wird dort gebraucht, aber nur
+   für die `-ε`-Regel (ein Notify auf `time == 0`), und ist dort neu anzulegen.
+   Wer ihn anlegt, braucht zusätzlich ein `primed`-Flag, sonst schüttet eine
+   geladene Szene im ersten Frame die Spanne von 0 bis zum gespeicherten
+   Playhead aus.
+
+2. **Die Verschiebung wird gegen `q(0)` gerechnet, nicht gegen `q(tPrev)`.**
+   Die Formel in 2.1 (`inverse(q(tPrev)) * Δp`) legt die Verschiebung in den
+   vollen lokalen Rahmen der Wurzel. Ein Blender-Export trägt konstante −90° X
+   auf der Wurzel — genau die Neigung, vor der 2.2 beim Lock-Test warnt — und
+   damit wird aus einem waagerechten Schritt ein senkrechter: die Figur
+   klettert. Gerechnet wird darum
+   `heading(t) = yaw(q(t) · q(0)⁻¹)`,
+   `Δ.translation = R_y(−heading(tPrev)) · (p(t) − p(tPrev))`,
+   `Δ.yaw = yaw(q(t) · q(tPrev)⁻¹)`.
+   Für `q(0) = I` ist das die Formel aus 2.1. Der Lock ist dieselbe Rechnung
+   rückwärts (`R_y(−heading(t)) · q(t)`), also „die Drehung raus, die Neigung
+   drin" — deshalb ist `Zero` für die Rotation dasselbe wie `FirstFrame`, sie
+   unterscheiden sich nur in der Translation. Test 4b liegt zweimal vor, mit und
+   ohne Neigung.
+
+3. **`AnimationClipAsset::hasRootMotion` steht auf `true`.** Nichts setzt das
+   Feld heute (der glTF-Import weiß es nicht, siehe Risiko 4), ein
+   `false`-Standard hieße also: Root Motion feuert für keinen einzigen Clip, der
+   existiert. Wer die Import-Heuristik baut, kann den Standard mitdrehen.
+
+4. **`applyRootMotion` + `PhysicsWorld*` sind ein `HE::RootMotionContext*`**
+   statt zweier Parameter — `nullptr` heißt „extrahieren und sperren, aber nichts
+   bewegen". Damit wächst `tickAnimation` um einen Parameter statt um zwei, und
+   die Bauart ist die von `AnimatorHost* sync` daneben. Risiko 1 ist damit
+   entschärft, aber nicht erledigt: `NotifyQueue*` kommt in Schritt 3 dazu.
+
+Zu Risiko 2 (mehrere Pose-Treiber): entschieden wie empfohlen. Ein
+`appliedThisFrame`-Flag auf der Komponente, von `rootMotionBeginFrame` gelöscht;
+der zweite Treiber warnt gedrosselt und wendet nichts an.
+
+---
+
 ## 5. Risiken und offene Punkte
 
 1. **`PhysicsWorld*` in `tickAnimation`.** Die Signatur wächst um drei
