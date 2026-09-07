@@ -794,6 +794,91 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RootMotionComponent>(entity); }
 	}
 
+	// ── Animation Layers ────────────────────────────────────────────────────
+	// Poses laid on top of whichever of the three animators above posed this
+	// entity: an upper-body reload over a run, an aim offset over an idle. Like
+	// Root Motion, one section for all three of them, and for the same reason.
+	if (auto* alc = registry.try_get<AnimationLayerComponent>(entity))
+	{
+		if (componentHeader("Animation Layers", true, removed))
+		{
+			EditorWidgets::WrapText wrap;   // layer names are authored free text
+
+			int removeLayer = -1;
+			for (size_t i = 0; i < alc->layers.size(); ++i)
+			{
+				auto& l = alc->layers[i];
+				ImGui::PushID(static_cast<int>(i));
+				ImGui::Separator();
+
+				// The name is what the scripting API addresses, so it comes
+				// first. Edited in place like every other InputText row here
+				// (Root Joint above does the same): a script naming this layer
+				// misses it for the keystrokes between "U" and "UpperBody", which
+				// is the same half-typed window every named thing in the editor
+				// has and not worth a scratch buffer of its own.
+				Row::inputText("Name##al", &l.name); trackEdit();
+
+				static const char* kModes[] = { "Override", "Additive" };
+				int mode = static_cast<int>(l.mode);
+				if (Row::combo("Mode##al", &mode, kModes, IM_ARRAYSIZE(kModes)))
+				{ l.mode = HE::layerBlendModeFromInt(mode); trackEdit(); }
+
+				EditorWidgets::assetDropSlot(ctx, "Clip", l.clipId,
+					HE::AssetType::AnimationClip, "alclip");
+				// Changing the mask must invalidate the resolution cache. The
+				// cache checks the ids itself, so this is belt to that braces —
+				// but the flag is what makes the change land in the SAME frame.
+				if (EditorWidgets::assetDropSlot(ctx, "Mask", l.maskId,
+						HE::AssetType::BoneMask, "almask",
+						"(none — the whole skeleton)", "bone mask",
+						/*showClear=*/true) != EditorWidgets::SlotAction::None)
+					alc->masksDirty = true;
+
+				Row::sliderFloat("Weight##al", &l.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
+
+				if (l.mode == HE::LayerBlendMode::Additive)
+				{
+					EditorWidgets::assetDropSlot(ctx, "Reference Clip", l.additiveRefClipId,
+						HE::AssetType::AnimationClip, "alref",
+						"(none — this layer's own clip)", "animation clip",
+						/*showClear=*/true);
+					Row::dragFloat("Reference Time##al", &l.additiveRefTime, 0.01f, 0.0f, 999.0f, "%.3f s"); trackEdit();
+				}
+
+				Row::dragFloat("Speed##al", &l.playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+				Row::dragFloat("Time##al",  &l.playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+				EditorWidgets::checkbox("Looping##al", &l.looping); trackEdit();
+				ImGui::SameLine();
+				EditorWidgets::checkbox("Playing##al", &l.playing); trackEdit();
+
+				if (EditorWidgets::dangerSmallButton("Remove")) removeLayer = static_cast<int>(i);
+				ImGui::PopID();
+			}
+			if (removeLayer >= 0)
+			{
+				if (undo) undo->snapshotNow();
+				alc->layers.erase(alc->layers.begin() + removeLayer);
+				// The cache is index-parallel to the layer list, so a removal
+				// invalidates it wholesale rather than shifting it by hand.
+				alc->masksDirty = true;
+				trackEdit();
+			}
+
+			ImGui::Separator();
+			if (EditorWidgets::button("Add Layer", ImVec2(120.0f, 0.0f)))
+			{
+				if (undo) undo->snapshotNow();
+				AnimationLayerComponent::Layer l;
+				l.name = "Layer " + std::to_string(alc->layers.size() + 1);
+				alc->layers.push_back(std::move(l));
+				alc->masksDirty = true;
+				trackEdit();
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimationLayerComponent>(entity); }
+	}
+
 	// ── Property Animator ───────────────────────────────────────────────────
 	if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
 	{
@@ -2340,6 +2425,10 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// defaults to Off, so adding it changes nothing until asked.
 			if (registry.all_of<SkeletalMeshComponent>(entity))
 				addItem("Root Motion", RootMotionComponent{});
+			// And again: layers are laid on the pose of a skeleton. An empty
+			// stack does nothing, so adding it changes nothing until asked.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Animation Layers", AnimationLayerComponent{});
 
 			// Animator / Animator Blend / Property Animator, Character
 			// Controller, and the UI components are intentionally not offered

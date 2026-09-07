@@ -124,6 +124,12 @@ namespace
 	{ "Component/Animator Blend", "Animator Blend",
 	  "Cross-fades two clips by weight — walk into run, aim into idle.",
 	  "", "systems#animation" },
+	{ "Component/Animation Layers", "Animation Layers",
+	  "Poses laid on top of whatever the animator is doing: a reload on the "
+	  "upper body while the legs keep running, an aim offset over an idle. Each "
+	  "layer has its own clip, its own weight and a bone mask saying which part "
+	  "of the skeleton it may touch.",
+	  "", "systems#animation" },
 	{ "Component/Root Motion", "Root Motion",
 	  "Moves the entity by the motion the animator put into the root bone, and "
 	  "takes that motion back out of the pose. Without it a walk cycle slides on "
@@ -1064,6 +1070,51 @@ namespace
 	  "What the last frame actually moved, in metres and degrees. All zeroes "
 	  "while a clip carries no root motion — which is how you tell that apart "
 	  "from a joint name that matches nothing.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Name", "",
+	  "What this layer is called. Scripts address a layer by this name and not "
+	  "by its position in the list, so reordering the stack cannot silently fade "
+	  "a different body part. Two layers may share a name; the first one wins.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Mode", "",
+	  "Override replaces the pose underneath, weighted — what an upper-body "
+	  "reload wants. Additive adds this clip's DIFFERENCE against a reference "
+	  "pose on top of whatever is underneath, so a breathing wobble or an aim "
+	  "offset keeps the run running while it leans on it.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Weight", "",
+	  "How much of this layer reaches the pose, before its mask is applied. 0 is "
+	  "off, but the layer's own playhead keeps running — so fading it back in "
+	  "does not restart it mid-stride. This is the value gameplay sets while a "
+	  "weapon is raised or a reload plays.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Reference Time", "",
+	  "Where on the reference clip the additive difference is measured from. 0 "
+	  "is the ordinary answer: an additive clip is usually authored as \"the "
+	  "difference from where this animation starts\".",
+	  "", "systems#animation" },
+	{ "Animation Layers/Speed", "",
+	  "Playback rate of this layer's own clip. Each layer has its own playhead, "
+	  "so a slow flinch over a fast run is one number, not a compromise.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Time", "",
+	  "Where this layer's playhead stands, in seconds. Scrubbable, and the field "
+	  "a one-shot layer is set back to 0 in — or animator.playLayer from a "
+	  "script, which also re-arms the clip's frame-0 notify.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Looping", "",
+	  "Start over at the end. Off makes the layer a one-shot: it clamps at the "
+	  "last frame and stops, and playing it again means restarting the playhead.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Playing", "",
+	  "Whether this layer's playhead advances. Off freezes it where it stands "
+	  "and still blends it in — which is how a held pose is done. Not the same "
+	  "as Weight 0, which blends nothing and keeps running.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Add Layer", "",
+	  "Another pose on top of the stack. Layers are applied in order, each onto "
+	  "the result of the one before it, so the last one in the list has the last "
+	  "word wherever its mask lets it.",
 	  "", "systems#animation" },
 	{ "Property Animator/Speed", "",
 	  "Playback rate of the property clip: 1 is as authored, negative runs it "
@@ -2433,6 +2484,42 @@ namespace
 	  "light is, and one offset for the whole application is what makes a screen "
 	  "look lit rather than assembled.",
 	  "", "ui#elements" },
+	{ "New Asset/Bone Mask", "",
+	  "A list of joint names an animation layer is allowed to touch. Made here "
+	  "and edited in its own tab; a layer without one covers the whole skeleton.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Reference Skeleton", "",
+	  "A skeleton to pick joints from. It is this editor's own reference and is "
+	  "NOT saved into the mask: a mask holds joint names, so it works on every "
+	  "rig that spells them the same way, and baking one skeleton into it would "
+	  "quietly make it the only rig it fits.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Joint", "",
+	  "Whether a layer using this mask may touch this joint at all. Unticked "
+	  "means weight 0 — a mask is an allow-list, and one that matches no joint "
+	  "means the layer does nothing rather than everything.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Weight", "",
+	  "How strongly this one joint follows the layer, multiplied onto the "
+	  "layer's own weight. Values below 1 along a spine are what makes a "
+	  "masked layer fade into the base pose instead of ending at a hard edge.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Add Subtree", "",
+	  "Ticks this joint and everything below it, at weight 1. It expands to "
+	  "explicit names right now rather than storing \"and its children\": the "
+	  "mask carries no skeleton, so a subtree rule would mean different joints "
+	  "on two different rigs under the same name.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Clear Subtree", "",
+	  "The opposite: unticks this joint and everything below it. The quick way "
+	  "to say \"the upper body except the fingers\".",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Drop", "",
+	  "Removes a name the reference skeleton does not have. They are listed "
+	  "rather than hidden because at run time they weigh nothing, and a mask "
+	  "that silently stopped covering the joint it was written for looks exactly "
+	  "like a layer that stopped working for no reason.",
+	  "", "systems#animation" },
 	{ "UI Widget/Style", "",
 	  "Which of the theme's styles dresses this element — one decision for its "
 	  "whole look, instead of binding value after value below. The entry named "
@@ -4682,6 +4769,7 @@ namespace
 		{ "Audio Editor/",              "editor-animation", "Animation Editors", "Audio editor" },
 		{ "Mesh Viewer/",               "editor-animation", "Animation Editors", "Mesh viewer" },
 		{ "Notify Timeline/",           "editor-animation", "Animation Editors", "Notify timeline" },
+		{ "Bone Mask Editor/",          "editor-animation", "Animation Editors", "Bone mask editor" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },
@@ -4708,7 +4796,8 @@ namespace
 		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
-		"Animator State Machine", "Root Motion", "Property Animator", "Particle System",
+		"Animator State Machine", "Root Motion", "Animation Layers",
+		"Property Animator", "Particle System",
 		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};

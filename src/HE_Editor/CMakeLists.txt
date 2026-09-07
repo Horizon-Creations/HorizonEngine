@@ -113,6 +113,7 @@ add_executable(HorizonEditor WIN32
 	InputMappingModel.cpp
 	TypeAssetPanel.cpp
 	ThemeAssetPanel.cpp
+	BoneMaskPanel.cpp
 	SkeletalMeshEditorPanel.cpp
 	StaticMeshEditorPanel.cpp
 	ParticleGraphEditorPanel.cpp
