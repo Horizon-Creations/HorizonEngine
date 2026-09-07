@@ -11,7 +11,7 @@ namespace ToolchainDialog
 {
 	void DrawToolchainDialog(AppContext& ctx);
 
-	// Preferences ▸ Tools ▸ Status ▸ "Fix" on cmake / C++ compiler: force the
+	// Preferences ▸ Editor ▸ Tool Status ▸ "Fix" on cmake / C++ compiler: force the
 	// dialog open even when the user permanently suppressed it — an explicit
 	// user request should always show the result.
 	void requestShow();

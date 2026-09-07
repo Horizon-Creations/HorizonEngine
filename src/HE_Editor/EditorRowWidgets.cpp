@@ -2,6 +2,7 @@
 #include "EditorHelp.h"       // the tooltip table every labelled row is looked up in
 #include "EditorTheme.h"      // the brand accent behind primaryButton
 
+#include <misc/cpp/imgui_stdlib.h>   // the std::string rows below
 #include <imgui_internal.h>   // PushMultiItemsWidths (the splitter DragFloatN uses)
                               // + the window's WorkRect, which is what moves a
                               // SeparatorText's rule short of a trailing button
@@ -324,6 +325,21 @@ bool colorEdit4(const char* label, float* rgba, ImGuiColorEditFlags flags)
 bool inputText(const char* label, char* buf, size_t bufSize, ImGuiInputTextFlags flags)
 {
 	return row(label, [&]{ return ImGui::InputText("##v", buf, bufSize, flags); });
+}
+
+bool inputText(const char* label, std::string* s, ImGuiInputTextFlags flags)
+{
+	return row(label, [&]{ return ImGui::InputText("##v", s, flags); });
+}
+
+bool inputTextMultiline(const char* label, std::string* s, float height)
+{
+	// The width is what `row` already stretched; only the height is ours. A
+	// multi-line box that took its width from the caller would be the one row on
+	// the panel that reaches past the edge.
+	return row(label, [&]{
+		return ImGui::InputTextMultiline("##v", s, ImVec2(-FLT_MIN, height));
+	});
 }
 
 void labelText(const char* label, const char* fmt, ...)

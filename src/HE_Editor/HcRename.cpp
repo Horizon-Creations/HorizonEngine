@@ -1,8 +1,10 @@
 #include "HcRename.h"
 
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonScene/EngineApi.h>   // which parameter names an animation is the registry's answer
 
 #include <algorithm>
+#include <cstring>    // strcmp — ApiParam::name is a const char*
 
 namespace HcRename
 {
@@ -40,6 +42,68 @@ namespace
 		return s;
 	}
 
+	// ── The pins that name an animation clip ─────────────────────────────────
+	// Asked of the REGISTRY, not of a list of row ids kept here: an engine row
+	// takes an animation by having a String parameter called "animation", and
+	// four of them do today. A list here would be a second opinion about which
+	// rows those are, and the day somebody adds a fifth it would be wrong in the
+	// quiet way — a rename that silently misses one node.
+	//
+	// Returns the unified pin indices of this node's animation parameters, and
+	// (out) the widget Ref parameter's index, which is what says WHOSE animation
+	// it is. Empty for every node that names none.
+	std::vector<int> animationPinsOf(const HorizonCode::Node& n, int& outWidgetPin,
+	                                 bool& outWidgetDefaultsToSelf)
+	{
+		std::vector<int> pins;
+		outWidgetPin = -1;
+		outWidgetDefaultsToSelf = false;
+		if (n.type != NT::EngineCall) return pins;
+		const HE::api::ApiFn* fn = HE::api::find(n.s);
+		if (!fn) return pins;
+		const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
+		const int dataIn0 = (int)s.execIns.size() + (int)s.execOuts.size();
+		for (size_t i = 0; i < fn->params.size() && i < s.dataIns.size(); ++i)
+		{
+			const HE::api::ApiParam& p = fn->params[i];
+			// std::strcmp, not ==: ApiParam::name is a const char*, so == compares
+			// POINTERS. It even seems to work while the linker happens to fold
+			// both literals into one, which is the worst way for a bug like this
+			// to behave — right on this machine, wrong on the next.
+			const bool named = p.name && std::strcmp(p.name, "animation") == 0;
+			if (named && p.type == PT::String)
+				pins.push_back(dataIn0 + (int)i);
+			// The Ref that says whose animation. `selfDefault` is the registry's
+			// own word for "left empty, this is the calling instance", which is
+			// exactly the proof an unwired pin needs.
+			else if (p.type == PT::Ref && outWidgetPin < 0)
+			{
+				outWidgetPin = dataIn0 + (int)i;
+				outWidgetDefaultsToSelf = p.selfDefault;
+			}
+		}
+		return pins;
+	}
+
+	// What name a pin actually carries: its inline default, or a Const String
+	// wired to it. Anything else wired in (a variable, a joined string) is a name
+	// nobody can read from here, and `outReadable` says so — a rename must not
+	// pretend to have looked at it.
+	std::string nameAtPin(const HorizonCode::Graph& g, const HorizonCode::Node& n, int pin,
+	                      const HorizonCode::Node** outConst, bool& outReadable)
+	{
+		if (outConst) *outConst = nullptr;
+		outReadable = true;
+		if (const HorizonCode::Node* src = wiredInto(g, n.id, pin))
+		{
+			if (src->type != NT::ConstString) { outReadable = false; return {}; }
+			if (outConst) *outConst = src;
+			return src->s;
+		}
+		const auto it = n.pinDefaults.find(pin);
+		return it == n.pinDefaults.end() ? std::string{} : it->second.s;
+	}
+
 	// Which node types carry the name of THIS kind of member on another instance.
 	bool reachesIn(Member m, NT t)
 	{
@@ -48,6 +112,9 @@ namespace
 			case Member::Function: return t == NT::CallExternal;
 			case Member::Variable: return t == NT::GetExternal || t == NT::SetExternal;
 			case Member::Event:    return t == NT::BindEvent   || t == NT::EmitEvent;
+			// An animation is never named on the node — see the Member comment.
+			// Its own branch does the walking.
+			case Member::Animation: return false;
 		}
 		return false;
 	}
@@ -111,6 +178,82 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 {
 	Plan p;
 	if (t.oldName.empty() || t.newName.empty() || t.oldName == t.newName) return p;
+
+	// ── An animation clip, which is named in a pin rather than on a node ─────
+	// Same contract as everything below it: rename what this graph can PROVE is
+	// the renamed widget's clip, report what names it but cannot be proved, and
+	// touch nothing else.
+	if (t.member == Member::Animation)
+	{
+		// A Const String may feed more than one pin, and there is only ONE string
+		// to rewrite. So each literal is counted rather than judged: how many
+		// wires leave it, and how many of those land on a pin we just proved is
+		// ours. The same literal wired into a Set Text is a label on the screen,
+		// and rewriting it to fix a graph would be a rename changing words.
+		struct LitUse { const HorizonCode::Node* node; int ours = 0; };
+		std::vector<LitUse> lits;
+		auto litUse = [&](const HorizonCode::Node* n) -> LitUse& {
+			for (LitUse& u : lits) if (u.node == n) return u;
+			lits.push_back({ n, 0 });
+			return lits.back();
+		};
+
+		for (const HorizonCode::Node& n : g.nodes)
+		{
+			int widgetPin = -1;
+			bool defaultsToSelf = false;
+			const std::vector<int> pins = animationPinsOf(n, widgetPin, defaultsToSelf);
+			if (pins.empty()) continue;
+
+			// Whose animation is it? An unwired Target on a row that stands in
+			// for itself IS this graph's class; otherwise ask where the Ref came
+			// from, the same question every other member kind asks.
+			std::string key;
+			if (widgetPin >= 0)
+			{
+				if (const HorizonCode::Node* src = wiredInto(g, n.id, widgetPin))
+					key = classOfRefSource(g, *src, graphKey, giKey);
+				else if (defaultsToSelf)
+					key = graphKey;
+			}
+			const bool proven = !key.empty();
+			const bool ours   = proven && contains(targetKeys, key);
+
+			for (const int pin : pins)
+			{
+				const HorizonCode::Node* lit = nullptr;
+				bool readable = true;
+				const std::string named = nameAtPin(g, n, pin, &lit, readable);
+				// A name arriving through a variable is a name this cannot read.
+				// Silence is right: it is not evidence of the old name.
+				if (!readable || named != t.oldName) continue;
+				if (lit) { LitUse& u = litUse(lit); if (ours) ++u.ours; continue; }
+				if (ours) p.rename.push_back({ n.id, {}, line(n) });
+				// Provably somebody ELSE's widget: not ours, and reporting it
+				// would bury the real warnings under every same-named clip in
+				// the project. Only the unprovable ones are worth a line.
+				else if (!proven) p.unsure.push_back({ n.id, {}, line(n) });
+			}
+		}
+
+		for (const LitUse& u : lits)
+		{
+			if (u.ours == 0) continue;          // names it, but never for us
+			int outLinks = 0;
+			for (const HorizonCode::Link& l : g.links) if (l.srcNode == u.node->id) ++outLinks;
+			// Every wire out of it is one of ours, so the string means one thing
+			// and can be rewritten. Otherwise it is shared with something this
+			// rename has no business touching, and that is worth saying out loud.
+			if (u.ours == outLinks) p.rename.push_back({ u.node->id, {}, line(*u.node) });
+			else                    p.unsure.push_back({ u.node->id, {}, line(*u.node) });
+		}
+
+		dedupe(p.rename);
+		dedupe(p.unsure);
+		// The declaration is the widget's own clip list, not anything in a graph,
+		// so there is no Role::Declares half to run.
+		return p;
+	}
 
 	// ── What reaches in from here ────────────────────────────────────────────
 	bool boundHere = false;
@@ -198,6 +341,32 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 bool apply(HorizonCode::Graph& g, const Plan& p, const Target& t)
 {
 	bool changed = false;
+	// An animation's name lives in a PIN, so the write is a different one — a
+	// Const String gets its `s`, an engine call gets its default. Which pins
+	// those are is worked out again here rather than carried in the Hit: the plan
+	// stays a list of nodes, and re-asking cannot disagree with itself.
+	if (t.member == Member::Animation)
+	{
+		for (const Hit& h : p.rename)
+		{
+			HorizonCode::Node* n = h.node ? g.findNode(h.node) : nullptr;
+			if (!n) continue;
+			if (n->type == NT::ConstString)
+			{
+				if (n->s == t.oldName) { n->s = t.newName; changed = true; }
+				continue;
+			}
+			int widgetPin = -1;
+			bool defaultsToSelf = false;
+			for (const int pin : animationPinsOf(*n, widgetPin, defaultsToSelf))
+			{
+				const auto it = n->pinDefaults.find(pin);
+				if (it != n->pinDefaults.end() && it->second.s == t.oldName)
+				{ it->second.s = t.newName; changed = true; }
+			}
+		}
+		return changed;
+	}
 	for (const Hit& h : p.rename)
 	{
 		if (h.node)

@@ -1520,9 +1520,9 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
         seenGlsl = glsl; seenBackends = backends;
         std::vector<MaterialShaderVariant> vs;
         MaterialShaderVariant a; a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
-        a.vertex = "MV"; a.fragment = "MF"; vs.push_back(a);
+        a.vertex = "MV"; a.fragment = "MF"; a.uiVertex = "MUV"; vs.push_back(a);
         MaterialShaderVariant b; b.backend = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
-        b.vertex = "GV"; b.fragment = "GF"; vs.push_back(b);
+        b.vertex = "GV"; b.fragment = "GF"; b.uiVertex = "GUV"; vs.push_back(b);
         return HE::encodeMaterialShaderVariants(vs);
     };
 
@@ -1552,6 +1552,10 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     CHECK(gm->precompiledShaders[0].fragment == "MF");
     CHECK(gm->precompiledShaders[1].backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL));
     CHECK(gm->precompiledShaders[1].vertex == "GV");
+    // The UI half rides along (A3b): one variant, both draw paths. Without it a
+    // packaged app could put this material on a mesh but not on a widget.
+    CHECK(gm->precompiledShaders[0].uiVertex == "MUV");
+    CHECK(gm->precompiledShaders[1].uiVertex == "GUV");
 
     const MaterialAsset* pm = loaded.getMaterial(plainId);
     REQUIRE(pm != nullptr);
@@ -1559,6 +1563,73 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);
+}
+
+// ─── PSHD wire format: the record grew a field ───────────────────────────────
+// docs/he-apps-plan.md A3b added MaterialShaderVariant::uiVertex. The records
+// REPEAT, so a decoder that reads one byte too few does not lose a tail, it
+// mis-parses every variant after the first. Hence a version, and hence it hides
+// where a v1 blob can never be confused with it: v1 opens with the variant COUNT,
+// and an empty list encodes to nothing, so a leading 0 is impossible in v1.
+TEST_CASE("PSHD decodes v1 blobs (no uiVertex) and round-trips v2")
+{
+    // A v1 blob, byte for byte as the pre-A3b encoder wrote it: count, then
+    // {backend, string vertex, string fragment} per record. Two records, so a
+    // decoder that over-reads the first one corrupts the second — the whole
+    // reason this test hand-writes bytes instead of calling the encoder.
+    auto appendStr = [](std::vector<uint8_t>& b, const std::string& s) {
+        const uint32_t len = static_cast<uint32_t>(s.size());
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&len);
+        b.insert(b.end(), p, p + sizeof(len));
+        b.insert(b.end(), s.begin(), s.end());
+    };
+    std::vector<uint8_t> v1;
+    v1.push_back(2); // count
+    v1.push_back(static_cast<uint8_t>(HE::RendererBackend::Metal));
+    appendStr(v1, "MV"); appendStr(v1, "MF");
+    v1.push_back(static_cast<uint8_t>(HE::RendererBackend::OpenGL));
+    appendStr(v1, "GV"); appendStr(v1, "GF");
+
+    const auto old = HE::decodeMaterialShaderVariants(v1);
+    REQUIRE(old.size() == 2);
+    CHECK(old[0].backend  == static_cast<uint8_t>(HE::RendererBackend::Metal));
+    CHECK(old[0].vertex   == "MV");
+    CHECK(old[0].fragment == "MF");
+    CHECK(old[0].uiVertex.empty());   // absent, not garbage → renderer cross-compiles it
+    CHECK(old[1].backend  == static_cast<uint8_t>(HE::RendererBackend::OpenGL));
+    CHECK(old[1].vertex   == "GV");   // the second record survived the first
+    CHECK(old[1].fragment == "GF");
+    CHECK(old[1].uiVertex.empty());
+
+    // v2 round-trip, including a variant whose UI half failed to bake (empty is a
+    // legal answer and must stay distinguishable from "not written").
+    std::vector<MaterialShaderVariant> vs;
+    MaterialShaderVariant a; a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
+    a.vertex = "MV"; a.fragment = "MF"; a.uiVertex = "MUV"; vs.push_back(a);
+    MaterialShaderVariant b; b.backend = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+    b.vertex = "GV"; b.fragment = "GF"; vs.push_back(b); // no UI half
+    const auto blob = HE::encodeMaterialShaderVariants(vs);
+    REQUIRE(!blob.empty());
+    CHECK(blob[0] == 0); // the version mark — a v1 blob could never start with it
+
+    const auto back = HE::decodeMaterialShaderVariants(blob);
+    REQUIRE(back.size() == 2);
+    CHECK(back[0].uiVertex == "MUV");
+    CHECK(back[1].vertex   == "GV");
+    CHECK(back[1].fragment == "GF");
+    CHECK(back[1].uiVertex.empty());
+
+    // Particle variants share the codec template but have no UI vertex — their
+    // wire shape must NOT have moved (an old runtime still reads those paks).
+    std::vector<ParticleShaderVariant> ps;
+    ParticleShaderVariant p; p.backend = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+    p.vertex = "PV"; p.fragment = "PF"; ps.push_back(p);
+    const auto pblob = HE::encodeParticleShaderVariants(ps);
+    REQUIRE(!pblob.empty());
+    CHECK(pblob[0] == 1); // still the plain count, no version mark
+    const auto pback = HE::decodeParticleShaderVariants(pblob);
+    REQUIRE(pback.size() == 1);
+    CHECK(pback[0].fragment == "PF");
 }
 
 // shaderBackends == 0 (or a null callback) must not bake any PSHD chunk — the

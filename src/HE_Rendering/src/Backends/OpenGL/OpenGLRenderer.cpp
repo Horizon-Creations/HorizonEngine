@@ -4695,9 +4695,35 @@ in vec2 vLocal;
 uniform vec4 uColor;
 uniform float uMode;
 uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
-uniform float uCornerRadius; // px; min(w,h)/2 → circle
+uniform vec4  uCornerRadius; // px per corner: TL, TR, BR, BL; all at min(w,h)/2 → circle
+uniform float uBorderWidth;  // px, drawn INSIDE the quad; 0 = none
+uniform vec4  uBorderColor;
+uniform float uGradient;      // 0 = solid, 1 = linear fade to uGradientColor
+uniform vec4  uGradientColor;
+uniform float uGradientAngle; // degrees, clockwise from "down"
+uniform float uGradientShape; // 0 = linear along the angle, 1 = radial from the centre
+uniform float uBlur;          // px: > 0 = this quad IS a drop shadow (soft edge)
+uniform float uInnerBlur;     // px: > 0 = a shadow cast inwards from the edge
+uniform vec4  uInnerColor;
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
+// One rounded box, four radii. `p` is relative to the box's centre (y down),
+// `radii` is TL, TR, BR, BL: the quadrant `p` falls in picks its corner and the
+// rest is the ordinary rounded-box distance. Mirrors heRoundedBoxSDF in the
+// Metal path exactly — one rule, two languages. All four equal gives the
+// formula that stood here before, unchanged.
+float heRoundedBoxSDF(vec2 p, vec2 halfSz, vec4 radii)
+{
+    float r = (p.x > 0.0) ? ((p.y > 0.0) ? radii.z : radii.y)
+                          : ((p.y > 0.0) ? radii.w : radii.x);
+    r = min(r, min(halfSz.x, halfSz.y));
+    vec2 q = abs(p) - (halfSz - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float heMaxRadius(vec4 radii)
+{
+    return max(max(radii.x, radii.y), max(radii.z, radii.w));
+}
 // uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
 // quad (RGBA, tinted by uColor). Modes 1 and 2 share the sampler: a glyph run
 // binds the atlas on unit 0, an image its own texture.
@@ -4713,25 +4739,62 @@ void main()
     {
         vec4 t = texture(uFontAtlas, vUV);
         vec4 c = vec4(uColor.rgb * t.rgb, uColor.a * t.a);
-        if (uCornerRadius <= 0.0) { FragColor = c; return; }
+        if (heMaxRadius(uCornerRadius) <= 0.0) { FragColor = c; return; }
         // A rounded image is the solid path's SDF applied to the sampled alpha.
-        vec2 hs = uRect.zw * 0.5;
-        float rr = min(uCornerRadius, min(hs.x, hs.y));
-        vec2 pp = (vLocal - 0.5) * uRect.zw;
-        vec2 qq = abs(pp) - (hs - rr);
-        float dd = length(max(qq, 0.0)) + min(max(qq.x, qq.y), 0.0) - rr;
+        float dd = heRoundedBoxSDF((vLocal - 0.5) * uRect.zw, uRect.zw * 0.5, uCornerRadius);
         FragColor = vec4(c.rgb, c.a * clamp(0.5 - dd, 0.0, 1.0));
         return;
     }
-    if (uCornerRadius <= 0.0) { FragColor = uColor; return; } // square → crisp
-    // Solid quad with rounded corners.
-    vec2 halfsz = uRect.zw * 0.5;
-    float r = min(uCornerRadius, min(halfsz.x, halfsz.y));
-    vec2 p = (vLocal - 0.5) * uRect.zw;
-    vec2 q = abs(p) - (halfsz - r);
-    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-    float cov = clamp(0.5 - d, 0.0, 1.0); // ~1px antialiased edge (d in pixels)
-    FragColor = vec4(uColor.rgb, uColor.a * cov);
+    // The surface colour before any shape is cut out of it. Same rule as the
+    // Metal path (uiFragment): a fade along an angle clockwise from "down",
+    // projected onto the quad's own 0..1 space so it follows the box.
+    vec4 fill = uColor;
+    if (uGradient > 0.5)
+    {
+        float t;
+        if (uGradientShape > 0.5)
+        {
+            // Radial: centre out to the FARTHEST CORNER, measured in pixels so
+            // the circle follows the box instead of coming out an ellipse.
+            vec2 dpx = (vLocal - 0.5) * uRect.zw;
+            t = clamp(length(dpx) / max(1e-4, length(uRect.zw * 0.5)), 0.0, 1.0);
+        }
+        else
+        {
+            float a = uGradientAngle * 0.017453292;
+            vec2  dir = vec2(sin(a), cos(a));
+            t = clamp(dot(vLocal - 0.5, dir) + 0.5, 0.0, 1.0);
+        }
+        fill = mix(uColor, uGradientColor, t);
+    }
+    // Square AND borderless needs no distance field at all — the crisp fast path.
+    if (heMaxRadius(uCornerRadius) <= 0.0 && uBorderWidth <= 0.0 &&
+        uBlur <= 0.0 && uInnerBlur <= 0.0) { FragColor = fill; return; }
+    // A blurred quad IS a drop shadow: the producer grew the rect by the blur on
+    // every side, so the shape sits inset by exactly that much. Nothing else
+    // applies to it — one colour with a soft edge. Mirrors the Metal path.
+    vec2 halfsz = uRect.zw * 0.5 - uBlur;
+    float d = heRoundedBoxSDF((vLocal - 0.5) * uRect.zw, halfsz, uCornerRadius);
+    float cov = (uBlur > 0.0) ? (1.0 - smoothstep(-uBlur, uBlur, d))
+                              : clamp(0.5 - d, 0.0, 1.0);
+    if (uBlur > 0.0) { FragColor = vec4(fill.rgb, fill.a * cov); return; }
+    // The inner shadow: `d` is negative inside, so -d is how deep in this pixel
+    // is and the same falloff read the other way darkens the rim.
+    if (uInnerBlur > 0.0)
+    {
+        float t = 1.0 - smoothstep(0.0, uInnerBlur, -d);
+        float ia = uInnerColor.a * clamp(t, 0.0, 1.0);
+        fill = vec4(mix(fill.rgb, uInnerColor.rgb, ia), fill.a);
+    }
+    if (uBorderWidth <= 0.0) { FragColor = vec4(fill.rgb, fill.a * cov); return; }
+    // The ring between the shape and itself shrunk by the border width: `d` is a
+    // signed distance in pixels, so the inner edge is d + width. Mirrors the
+    // Metal path exactly (uiFragment) — one rule, two languages. The gradient is
+    // the fill's, not the outline's.
+    float inner = clamp(0.5 - (d + uBorderWidth), 0.0, 1.0);
+    vec3  rgb   = mix(uBorderColor.rgb, fill.rgb, inner);
+    float a     = mix(uBorderColor.a, fill.a, inner);
+    FragColor = vec4(rgb, a * cov);
 }
 )GLSL";
 
@@ -4962,7 +5025,15 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_giLocsUnlit    = FetchGISceneLocs(m_unlitProgram);
 }
 
-#if defined(HE_HAVE_SHADERC)
+// ─── Node-graph material path ────────────────────────────────────────────────
+// Compiled into EVERY build, HE_ENABLE_SHADERC=OFF included (docs/he-apps-plan.md
+// A3b): a packaged build gets its shaders from MaterialAsset::precompiledShaders,
+// and only the FALLBACK below — cross-compiling at load — needs the translator.
+// Gating this region out is what used to leave an application-sized build without
+// a UI material path at all instead of with a precompiled one; the shader library
+// links either way now (he_shadercompiler is the stub there) and simply answers
+// every compile with ok = false.
+
 // Resolve a material's custom shader via the shared, backend-agnostic library.
 bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                            std::string& vertBody)
@@ -5082,6 +5153,12 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 	glGenBuffers(1, &m_matParamUBO);
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 	glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+	// HeUI (D5 Schicht 1): rect, corner radii, interaction state — per QUAD, so
+	// unlike HeParams it is re-uploaded inside the UI loop rather than per draw
+	// call's material.
+	glGenBuffers(1, &m_matUIUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matUIUBO);
+	glBufferData(GL_UNIFORM_BUFFER, 64, nullptr, GL_DYNAMIC_DRAW); // 4 x vec4
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 }
 
@@ -5276,25 +5353,58 @@ unsigned int OpenGLRenderer::GetOrBuildParticleProgram(uint64_t key, const HE::P
 // repurposed — model[0]=rect px, model[1]=uvRect, model[2].xy=viewport px, color=
 // tint; see MaterialShaderLibrary::uiVertex). Same fragment hash as the mesh path,
 // but a different vertex → own cache. Cached by hash; 0 cached on failure.
-unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId)
+unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId,
+                                                        bool* usesBackdrop)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
+	if (usesBackdrop) *usesBackdrop = false;
 	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return 0; // no custom shader → solid-color quad
+	// Read off the SOURCE, not off a field on the asset: a packaged build skips
+	// the graph regeneration entirely (precompiled blobs) and a material instance
+	// takes a second road through syncMaterialInstance — the generated shader is
+	// the one thing all three configurations share.
+	if (usesBackdrop) *usesBackdrop = fragGlsl.find("heBackdrop") != std::string::npos;
 	// A UI quad can be the first material user of the session; same "before every
 	// return, memo hit included" rule as the mesh path.
 	EnsureMaterialUBOs();
 	if (auto it = m_uiMaterialPrograms.find(key); it != m_uiMaterialPrograms.end()) return it->second;
 
+	// Baked at export time (A3b): the same variant the MESH path already reads,
+	// paired with its UI vertex instead of the standard one — the fragment is
+	// literally the same string, which is why one variant can serve both. Present
+	// → no runtime cross-compile, so a packaged application needs no glslang to
+	// draw a widget with a material on it. Read out of the asset and copied at
+	// once: ContentManager's getters point into a dense vector, and the next load
+	// invalidates them.
 	using Backend = HE::MaterialShaderLibrary::Backend;
-	const auto& v = m_matShaderLib.uiVertex(Backend::GLSL410);
-	const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+	std::string vertSrc, fragSrc, log;
+	bool ok = false;
+	if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL) && !var.uiVertex.empty())
+			{
+				vertSrc = var.uiVertex; fragSrc = var.fragment;
+				ok = !fragSrc.empty();
+				break;
+			}
+	if (!ok)
+	{
+		// No baked UI half — loose editor assets, a pak from before the field
+		// existed, a backend the export skipped. Cross-compile, as before; in a
+		// build without the translator this simply fails and the quad falls back
+		// to its solid colour.
+		const auto& v = m_matShaderLib.uiVertex(Backend::GLSL410);
+		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log;
+		ok = v.ok && f.ok;
+	}
 
 	unsigned int program = 0;
-	if (v.ok && f.ok)
+	if (ok)
 	{
-		GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
-		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
 		glAttachShader(prog, vs);
 		glAttachShader(prog, fs);
@@ -5311,6 +5421,11 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 			if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, lIdx, 0);
 			const GLuint pIdx = glGetUniformBlockIndex(prog, "HeParams");
 			if (pIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, pIdx, 2);
+			// HeUI (D5 Schicht 1). Wiring it by name is not optional on GL 4.1:
+			// a block whose binding is never set defaults to 0, which here is
+			// HeLighting — the element would read the sun instead of itself.
+			const GLuint wIdx = glGetUniformBlockIndex(prog, "HeUI");
+			if (wIdx != GL_INVALID_INDEX) glUniformBlockBinding(prog, wIdx, 8);
 			glUseProgram(prog);
 			if (GLint l = glGetUniformLocation(prog, "heTex0"); l >= 0) glUniform1i(l, 0);
 			for (int k = 0; k < 4; ++k)
@@ -5318,6 +5433,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 				const std::string nm = "heTexP" + std::to_string(k);
 				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
 			}
+			// heBackdrop — unit 5, the first one free between the graph textures
+			// (1..4) and the GI/shadow maps (9..12).
+			if (GLint l = glGetUniformLocation(prog, "heBackdrop"); l >= 0) glUniform1i(l, 5);
 			// GI masks for heLitP() — units 9/10 (UI materials never sample them:
 			// giParams.z stays 0 on the UI path, but the units must be assigned).
 			if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
@@ -5341,12 +5459,11 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 	}
 	else
 		HE_LOG_ERROR(RHI, "%s",
-			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + v.log + f.log).c_str());
+			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + log).c_str());
 
 	m_uiMaterialPrograms[key] = program; // cache success AND failure (0)
 	return program;
 }
-#endif // HE_HAVE_SHADERC
 
 void OpenGLRenderer::CreateSkinnedPipeline()
 {
@@ -5759,6 +5876,15 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIRotation = glGetUniformLocation(m_uiProgram, "uRotation");
 		m_uUIMode     = glGetUniformLocation(m_uiProgram, "uMode");
 		m_uUICornerRadius = glGetUniformLocation(m_uiProgram, "uCornerRadius");
+		m_uUIBorderWidth  = glGetUniformLocation(m_uiProgram, "uBorderWidth");
+		m_uUIBorderColor  = glGetUniformLocation(m_uiProgram, "uBorderColor");
+		m_uUIGradient      = glGetUniformLocation(m_uiProgram, "uGradient");
+		m_uUIGradientColor = glGetUniformLocation(m_uiProgram, "uGradientColor");
+		m_uUIGradientAngle = glGetUniformLocation(m_uiProgram, "uGradientAngle");
+		m_uUIGradientShape = glGetUniformLocation(m_uiProgram, "uGradientShape");
+		m_uUIBlur       = glGetUniformLocation(m_uiProgram, "uBlur");
+		m_uUIInnerBlur  = glGetUniformLocation(m_uiProgram, "uInnerBlur");
+		m_uUIInnerColor = glGetUniformLocation(m_uiProgram, "uInnerColor");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
@@ -7870,9 +7996,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 	bool         basicBound    = false; // solid/glyph program currently active?
 	uint32_t     boundAtlasKey = 0;     // font atlas currently bound on unit 0
 	unsigned int boundMaterial = 0;     // material program currently active
-#if defined(HE_HAVE_SHADERC)
 	bool uiLightUploaded = false;       // HeLighting uploaded once per UI pass
-#endif
 	// Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
 	// emits its quads in tree order, so equally-clipped quads arrive in runs.
 	// GL's origin is bottom-left, the UI's is top-left, hence the flip.
@@ -7897,14 +8021,47 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		          static_cast<GLsizei>(std::max(0.0f, y1 - y0)));
 	};
 
+	// ── The backdrop snapshot (D5 Schicht 1) ─────────────────────────────────
+	// "Stale" from the start: the pass has drawn nothing yet, so the first
+	// frosted element still needs a picture — of the scene, which is exactly
+	// what is under it. Every quad drawn afterwards makes it stale again, so a
+	// dialog over a panel blurs the PANEL, not the scene the panel covers.
+	bool backdropStale = true;
+	auto snapshotBackdrop = [&]()
+	{
+		if (!m_uiBackdropTex || m_uiBackdropW != pw || m_uiBackdropH != ph)
+		{
+			if (!m_uiBackdropTex) glGenTextures(1, &m_uiBackdropTex);
+			glBindTexture(GL_TEXTURE_2D, m_uiBackdropTex);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pw, ph, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			// LINEAR_MIPMAP_LINEAR is the whole point: the blur radius picks a
+			// level, and a texture without a mip filter would answer every
+			// radius with level 0 — nine taps of noise instead of a blur.
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			m_uiBackdropW = pw; m_uiBackdropH = ph;
+		}
+		else
+			glBindTexture(GL_TEXTURE_2D, m_uiBackdropTex);
+		// Reads the bound framebuffer, and a copy is not a draw: the scissor
+		// this pass leaves standing does not clip it.
+		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, pw, ph);
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		backdropStale = false;
+	};
+
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
-		applyClip(obj.clipRect);
-#if defined(HE_HAVE_SHADERC)
 		// Custom material on an image quad → material program (the solid path below
 		// stays the fallback when the material has no custom shader / failed).
+		bool wantsBackdrop = false;
 		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? GetOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
+			? GetOrBuildUIMaterialProgram(obj.materialAssetId, &wantsBackdrop) : 0;
+		if (matProg && wantsBackdrop && backdropStale) snapshotBackdrop();
+		applyClip(obj.clipRect);
 		if (matProg)
 		{
 			if (boundMaterial != matProg)
@@ -7948,6 +8105,19 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 			glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting"
+			// HeUI: the element under the pixel, per QUAD (D5 Schicht 1).
+			// screen.z = 1: the backdrop snapshot is a copy OUT of the
+			// framebuffer, whose first row is the bottom of the screen — the
+			// shader flips its lookup rather than this backend flipping a texture.
+			const glm::vec4 heUI[4] = {
+				{ obj.size.x, obj.size.y, obj.position.x, obj.position.y },
+				obj.cornerRadius,
+				obj.uiState,
+				{ static_cast<float>(pw), static_cast<float>(ph), 1.0f, 0.0f },
+			};
+			glBindBuffer(GL_UNIFORM_BUFFER, m_matUIUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(heUI), heUI);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 8, m_matUIUBO);    // block "HeUI"
 
 			// HeParams + graph textures, mirroring the mesh path's bind points.
 			if (const MaterialAsset* ma = m_contentManager
@@ -7972,13 +8142,17 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			}
 			glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
 			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+			// The backdrop snapshot on unit 5 — white when none was taken (the
+			// material asks for it, but nothing was behind it yet).
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_2D, m_uiBackdropTex ? m_uiBackdropTex : m_whiteTex);
 			// Legacy/mesh texture slot 0 (heTex0) must be bound too — white dummy.
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, m_whiteTex);
 			glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+			backdropStale = true; // this quad is now part of what is "behind"
 			continue;
 		}
-#endif
 		if (!basicBound)
 		{
 			glUseProgram(m_uiProgram);
@@ -8014,8 +8188,22 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
 		glUniform4f(m_uUIRotation, obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
-		glUniform1f(m_uUICornerRadius, obj.cornerRadius);
+		glUniform4f(m_uUICornerRadius, obj.cornerRadius.x, obj.cornerRadius.y,
+		            obj.cornerRadius.z, obj.cornerRadius.w);
+		glUniform1f(m_uUIBorderWidth, obj.borderWidth);
+		glUniform4f(m_uUIBorderColor, obj.borderColor.r, obj.borderColor.g,
+		            obj.borderColor.b, obj.borderColor.a);
+		glUniform1f(m_uUIGradient, obj.gradient ? 1.0f : 0.0f);
+		glUniform4f(m_uUIGradientColor, obj.gradientColor.r, obj.gradientColor.g,
+		            obj.gradientColor.b, obj.gradientColor.a);
+		glUniform1f(m_uUIGradientAngle, obj.gradientAngleDeg);
+		glUniform1f(m_uUIGradientShape, obj.gradientShape == 1 ? 1.0f : 0.0f);
+		glUniform1f(m_uUIBlur, obj.blur);
+		glUniform1f(m_uUIInnerBlur, obj.innerShadowBlur);
+		glUniform4f(m_uUIInnerColor, obj.innerShadowColor.r, obj.innerShadowColor.g,
+		            obj.innerShadowColor.b, obj.innerShadowColor.a);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		backdropStale = true; // this quad is now part of what is "behind"
 	}
 
 	// Leave the state as it was found: the scissor test is global and nothing
@@ -10150,7 +10338,9 @@ void OpenGLRenderer::Shutdown()
 	m_retiredTextures.clear();
 
 	if (m_unlitProgram)     { glDeleteProgram(m_unlitProgram);     m_unlitProgram = 0; }
-#if defined(HE_HAVE_SHADERC)
+	// Material path — unconditional, like the path itself: these programs, UBOs and
+	// the backdrop snapshot exist in a shaderc-free build too (from precompiled
+	// variants), and a cleanup that skipped them there would simply leak.
 	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
 	m_materialPrograms.clear();
 	for (auto& [k, prog] : m_uiMaterialPrograms) if (prog) glDeleteProgram(prog);
@@ -10158,6 +10348,9 @@ void OpenGLRenderer::Shutdown()
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
 	if (m_matLightUBO) { glDeleteBuffers(1, &m_matLightUBO); m_matLightUBO = 0; }
 	if (m_matParamUBO) { glDeleteBuffers(1, &m_matParamUBO); m_matParamUBO = 0; }
+	if (m_matUIUBO)    { glDeleteBuffers(1, &m_matUIUBO);    m_matUIUBO    = 0; }
+	if (m_uiBackdropTex) { glDeleteTextures(1, &m_uiBackdropTex); m_uiBackdropTex = 0;
+	                       m_uiBackdropW = m_uiBackdropH = 0; }
 	if (m_previewColor) { glDeleteTextures(1, &m_previewColor);      m_previewColor = 0; }
 	if (m_previewDepth) { glDeleteRenderbuffers(1, &m_previewDepth); m_previewDepth = 0; }
 	if (m_previewFBO)   { glDeleteFramebuffers(1, &m_previewFBO);    m_previewFBO = 0; }
@@ -10166,9 +10359,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_previewVAO)   { glDeleteVertexArrays(1, &m_previewVAO);    m_previewVAO = 0; }
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
-#endif
-	// Content-Browser thumbnail target + its mesh program — outside the shaderc
-	// guard above, since the mesh path needs no cross-compiler.
+	// Content-Browser thumbnail target + its mesh program.
 	if (m_thumbColor)         { glDeleteTextures(1, &m_thumbColor);       m_thumbColor = 0; }
 	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
 	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }
@@ -12925,10 +13116,24 @@ void OpenGLRenderer::RenderWindow(HE::Window* window)
 	auto it = m_secondaryContexts.find(window->GetNativeWindow());
 	if (it == m_secondaryContexts.end()) return;
 
+	// It says so, once, instead of painting a black rectangle (A5,
+	// docs/he-apps-plan.md §13.3). There is no UI-only path here yet: Metal and
+	// the software rasterizer have one, this backend has a cleared buffer and a
+	// TODO, and a window that opens onto that is worse than one that does not
+	// open. GetCapabilities().supportsSecondaryWindows is false for exactly that
+	// reason, so createSecondaryWindow refuses before anything gets this far —
+	// this is the second line of defence, for a host that attached one anyway.
+	static bool warned = false;
+	if (!warned)
+	{
+		warned = true;
+		HE_LOG_WARN(RHI, "%s",
+			"OpenGLRenderer: no second-window draw path — nothing is drawn there "
+			"(Software and Metal have one)");
+	}
 	SDL_GL_MakeCurrent(window->GetNativeWindow(), static_cast<SDL_GLContext>(it->second));
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	// TODO: secondary-window draw calls
 	// SwapBuffers is called by Application::Run after this method returns
 }
 

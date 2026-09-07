@@ -5,10 +5,14 @@
 #include <Hpak/HpakReader.h>
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/ProjectConfig.h>
+#include <Application/SplashScreen.h>
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Types/UUID.h>
 #include "ProjectManager.h"
+#include <UIWidget/UIWidgetTree.h>
+#include <HorizonCode/HorizonCode.h>
+#include <fstream>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -577,6 +581,92 @@ TEST_CASE("Export fails when the runtime dir yields no binaries")
     he_test::removeAllQuiet(dir); he_test::removeAllQuiet(rt); he_test::removeAllQuiet(out);
 }
 
+// ─── E6: no game leftovers in a shipped application ───────────────────────────
+
+namespace
+{
+// The window half of what the export dialog writes into config.json, in the
+// shape GlobalState reads (the "CustomConfig" array — a flat object parses and
+// is then ignored).
+std::string windowConfigJson(const char* mode)
+{
+    nlohmann::json j;
+    j["CustomConfig"] = nlohmann::json::array({
+        nlohmann::json{ { "Key", "GameWindowWidth"  }, { "Value", "1280"  } },
+        nlohmann::json{ { "Key", "GameWindowHeight" }, { "Value", "720"   } },
+        nlohmann::json{ { "Key", "GameWindowMode"   }, { "Value", mode    } },
+    });
+    return j.dump(4);
+}
+
+// The GameWindowMode the export left in config.json, or "" when it wrote none.
+std::string shippedWindowMode(const fs::path& outDir)
+{
+    std::ifstream in(outDir / "config.json");
+    if (!in) return {};
+    const auto j = nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return {};
+    const auto entries = j.find("CustomConfig");
+    if (entries == j.end() || !entries->is_array()) return {};
+    for (const auto& e : *entries)
+        if (e.is_object() && e.value("Key", std::string{}) == "GameWindowMode")
+            return e.value("Value", std::string{});
+    return {};
+}
+
+// One export into a fresh directory pair, with a single asset so packing has
+// something to do. Returns the directory config.json lands in.
+fs::path exportWithWindowMode(const char* tag, bool appProject, const char* mode)
+{
+    const auto dir = fs::temp_directory_path() / (std::string("he_e6_src_")  + tag);
+    const auto out = fs::temp_directory_path() / (std::string("he_e6_out_")  + tag);
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
+    writeBlob(dir / "a.hasset", tinyHasset({ 0xE, 0x6 }, "a.hasset"));
+
+    ExportSettings s;
+    s.compress        = false;
+    s.appProject      = appProject;
+    s.gameConfigJson  = windowConfigJson(mode);
+    const auto r = ProjectExporter::exportProject(dir, tag, "", out, s);
+    REQUIRE_MESSAGE(r.success, r.errorMessage);
+    he_test::removeAllQuiet(dir);
+    return out;
+}
+} // namespace
+
+TEST_CASE("E6: an exported application never ships a fullscreen window mode")
+{
+    // The dialog remembers the window mode across exports, so a Fullscreen left
+    // standing from a game export is exactly what reaches an app export. The
+    // runtime opens an app windowed by itself, but config.json overrides that
+    // default — so this has to be corrected before it is written, not after.
+    const auto app = exportWithWindowMode("app", /*appProject=*/true, "Fullscreen");
+    CHECK(shippedWindowMode(app) == "Windowed");
+    he_test::removeAllQuiet(app);
+
+    // Borderless is NOT touched: a frameless window is what an application with
+    // its own title bar asks for, and the rule is about fullscreen.
+    const auto brdr = exportWithWindowMode("brdr", /*appProject=*/true, "Borderless");
+    CHECK(shippedWindowMode(brdr) == "Borderless");
+    he_test::removeAllQuiet(brdr);
+
+    // A GAME keeps what it was given. Fullscreen is the right default there, and
+    // this guard must not reach across into it.
+    const auto game = exportWithWindowMode("game", /*appProject=*/false, "Fullscreen");
+    CHECK(shippedWindowMode(game) == "Fullscreen");
+    he_test::removeAllQuiet(game);
+}
+
+TEST_CASE("E6: the engine's splash screen is off unless a host asks for it")
+{
+    // Every host links HorizonCore, a shipped game and a shipped application
+    // included. With this default flipped, each of them would open a window
+    // carrying the Horizon wordmark ahead of its own first frame — the engine
+    // advertising itself inside someone else's product. The editor is the only
+    // host that sets it, and it sets it explicitly.
+    CHECK_FALSE(HE::SplashConfig{}.enabled);
+}
+
 TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
 {
     const auto root = fs::temp_directory_path() / "he_bundle_root";
@@ -605,6 +695,155 @@ TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
     fs::create_directories(root / "empty" / "Game");
     fs::create_directories(root / "empty" / "Editor");
     CHECK(findRuntimeBundle(root / "empty" / "Editor", ExportPlatform::Linux).empty());
+
+    he_test::removeAllQuiet(root);
+}
+
+// ─── Runtime flavours (docs/he-apps-plan.md A3b) ──────────────────────────────
+//
+// Three runtimes per platform, told apart by one word. That word is spelled in
+// four places — this enum, HE_RUNTIME_DIR_NAME in the root CMakeLists.txt,
+// FLAVOR_DIRS in scripts/build_runtimes.py and DIR_TO_FLAVOR in
+// scripts/runtime_size.py — so the first thing worth pinning is the spelling
+// itself: a rename in one place and not the others produces an exporter that
+// looks in a directory nobody writes, and nothing else notices.
+
+TEST_CASE("runtimeFlavorName: the directory spelling is the enum's name")
+{
+    CHECK(std::string(runtimeFlavorName(RuntimeFlavor::Game))        == "Game");
+    CHECK(std::string(runtimeFlavorName(RuntimeFlavor::AppAdvanced)) == "AppAdvanced");
+    CHECK(std::string(runtimeFlavorName(RuntimeFlavor::AppBasic))    == "AppBasic");
+}
+
+TEST_CASE("runtimeFlavorFor: a game always takes the full runtime")
+{
+    // Advanced Shader Effects is an app-side question. For a game it decides
+    // nothing about the runtime, because a game may meet any GPU and dropping
+    // four of five backends from it is a support problem, not a size saving.
+    CHECK(runtimeFlavorFor(false, true)  == RuntimeFlavor::Game);
+    CHECK(runtimeFlavorFor(false, false) == RuntimeFlavor::Game);
+    CHECK(runtimeFlavorFor(true,  true)  == RuntimeFlavor::AppAdvanced);
+    CHECK(runtimeFlavorFor(true,  false) == RuntimeFlavor::AppBasic);
+}
+
+TEST_CASE("resolveRuntimeDir: Host is flat, cross-targets nest under the platform")
+{
+    const fs::path base = fs::path("/tmp") / "he_editor";
+    auto norm = [](const fs::path& p) { return p.lexically_normal(); };
+
+    // Host: the three deploy directories sit beside each other, because that is
+    // where the build writes them.
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Host, RuntimeFlavor::Game))
+          == norm(fs::path("/tmp") / "Game"));
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Host, RuntimeFlavor::AppAdvanced))
+          == norm(fs::path("/tmp") / "AppAdvanced"));
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Host, RuntimeFlavor::AppBasic))
+          == norm(fs::path("/tmp") / "AppBasic"));
+
+    // Cross-target: the game runtime keeps the path it always had — an editor
+    // updated to this change must still find a bundle a user dropped there
+    // before it existed.
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Windows, RuntimeFlavor::Game))
+          == norm(fs::path("/tmp") / "GameRuntimes" / "Windows"));
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Windows))
+          == norm(fs::path("/tmp") / "GameRuntimes" / "Windows"));
+    // The app flavours nest one level deeper: all three of a platform's runtimes
+    // arrive together, so they must not collide on one directory name.
+    CHECK(norm(resolveRuntimeDir(base, ExportPlatform::Linux, RuntimeFlavor::AppBasic))
+          == norm(fs::path("/tmp") / "GameRuntimes" / "Linux" / "AppBasic"));
+}
+
+TEST_CASE("findRuntimeBundle: the wanted flavour wins, Game is the fallback")
+{
+    const auto root = fs::temp_directory_path() / "he_flavor_root";
+    he_test::removeAllQuiet(root);
+    const auto editor = root / "deploy" / "Editor";
+    fs::create_directories(editor);
+
+    // Only the game runtime exists — the state of every checkout where nobody
+    // ran scripts/build_runtimes.py, and of every editor built before the app
+    // runtimes did. An app must still export: fatter beats not at all.
+    writeBlob(root / "deploy" / "Game" / "HorizonGame", fakeGameBinary(false));
+    RuntimeFlavor got = RuntimeFlavor::AppBasic;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppAdvanced, &got)
+          == (root / "deploy" / "Game").lexically_normal());
+    // And it must SAY so, or the fallback is a silent ~20 MB substitution.
+    CHECK(got == RuntimeFlavor::Game);
+
+    // Now the app runtime is there. It is preferred, and outFlavor confirms it.
+    writeBlob(root / "deploy" / "AppAdvanced" / "HorizonGame", fakeGameBinary(false));
+    got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppAdvanced, &got)
+          == (root / "deploy" / "AppAdvanced").lexically_normal());
+    CHECK(got == RuntimeFlavor::AppAdvanced);
+
+    // Asking for a flavour that was never built, while a DIFFERENT app flavour
+    // exists, still falls back to Game and never to the wrong app runtime — an
+    // app-basic tree has no GPU backend at all, shipping it for an advanced
+    // project would start and then render nothing.
+    got = RuntimeFlavor::AppAdvanced;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppBasic, &got)
+          == (root / "deploy" / "Game").lexically_normal());
+    CHECK(got == RuntimeFlavor::Game);
+
+    // The default argument is Game, so every caller written before the flavours
+    // existed keeps behaving exactly as it did.
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host)
+          == (root / "deploy" / "Game").lexically_normal());
+
+    he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("findRuntimeBundle: a distant app runtime beats a close game runtime")
+{
+    // The reason the search runs flavour-by-flavour and not directory-by-
+    // directory. The editor runs from a build tree with out/deploy/Game right
+    // beside it and the app runtime two levels up; walking the tree once and
+    // taking the first bundle found would hand back Game and silently ship
+    // ~20 MB of glslang the app never uses.
+    const auto root = fs::temp_directory_path() / "he_flavor_depth";
+    he_test::removeAllQuiet(root);
+    const auto editor = root / "inner" / "cmake-build" / "src" / "HE_Editor";
+    fs::create_directories(editor);
+    writeBlob(root / "inner" / "cmake-build" / "src" / "out" / "deploy" / "Game" / "HorizonGame",
+              fakeGameBinary(false));
+    writeBlob(root / "out" / "deploy" / "AppBasic" / "HorizonGame", fakeGameBinary(false));
+
+    RuntimeFlavor got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Host, RuntimeFlavor::AppBasic, &got)
+          == (root / "out" / "deploy" / "AppBasic").lexically_normal());
+    CHECK(got == RuntimeFlavor::AppBasic);
+
+    he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("findRuntimeBundle: cross-platform app runtimes nest under the platform")
+{
+    const auto root = fs::temp_directory_path() / "he_flavor_cross";
+    he_test::removeAllQuiet(root);
+    const auto editor = root / "deploy" / "Editor";
+    fs::create_directories(editor);
+    const auto rts = root / "deploy" / "GameRuntimes" / "Windows";
+    writeBlob(rts / "HorizonGame.exe", fakeGameBinary(false));
+    writeBlob(rts / "AppBasic" / "HorizonGame.exe", fakeGameBinary(false));
+
+    RuntimeFlavor got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Windows, RuntimeFlavor::AppBasic, &got)
+          == (rts / "AppBasic").lexically_normal());
+    CHECK(got == RuntimeFlavor::AppBasic);
+
+    // The nested one is not visible to a Game search: <platform>/AppBasic is a
+    // sub-directory of the game bundle, and isRuntimeBundle only looks at the
+    // directory it is handed.
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Windows, RuntimeFlavor::Game)
+          == rts.lexically_normal());
+
+    // Nothing at all for a platform: empty, and outFlavor is left at the wish
+    // rather than at some half-found value.
+    got = RuntimeFlavor::Game;
+    CHECK(findRuntimeBundle(editor, ExportPlatform::Linux, RuntimeFlavor::AppAdvanced, &got)
+          .empty());
+    CHECK(got == RuntimeFlavor::AppAdvanced);
 
     he_test::removeAllQuiet(root);
 }
@@ -1325,5 +1564,206 @@ TEST_CASE("project.hcfg: defaultSaveTemplate round-trips as v3, empty stays v2-c
     ProjectConfig back2;
     REQUIRE(ProjectConfigLoader::load(dir, back2));
     CHECK(back2.defaultSaveTemplate.empty());
+    he_test::removeAllQuiet(dir);
+}
+
+// The version word after the 4-byte magic of an exported project.hcfg.
+static uint16_t hcfgVersion(const fs::path& dir)
+{
+    std::ifstream f(dir / "project.hcfg", std::ios::binary);
+    REQUIRE(f.is_open());
+    char magic[4]; uint16_t version = 0;
+    f.read(magic, 4);
+    f.read(reinterpret_cast<char*>(&version), 2);
+    return version;
+}
+
+TEST_CASE("Export: a game keeps its project.hcfg readable by an older runtime bundle")
+{
+    const auto dir = fs::temp_directory_path() / "he_bundleid_src";
+    he_test::removeAllQuiet(dir);
+    writeBlob(dir / "a.hasset", tinyHasset({0x11, 0x22}, "a.hasset"));
+
+    const auto run = [&](const fs::path& out, const std::string& bundleId, bool appProject) {
+        he_test::removeAllQuiet(out);
+        ExportSettings s;
+        s.bundleId   = bundleId;
+        s.appProject = appProject;
+        return ProjectExporter::exportProject(dir, "Inc", "", out, s);
+    };
+
+    // A plain game: the id the exporter would derive is the id it has, so the
+    // field stays empty and the file is the v2 every runtime can read.
+    // BEFORE THE FIX: the exporter filled bundleId unconditionally, the writer
+    // chose v5, and a prebuilt runtime under GameRuntimes/<Platform>/ rejected
+    // it and booted without its pak.
+    const auto out1 = fs::temp_directory_path() / "he_bundleid_plain";
+    REQUIRE(run(out1, "", false).success);
+    CHECK(hcfgVersion(out1) == 2);
+    ProjectConfig plain;
+    REQUIRE(ProjectConfigLoader::load(out1, plain));
+    CHECK(plain.bundleId.empty());
+
+    // The same for a game that TYPED the derived id: it says nothing the
+    // runtime could not work out, so it costs nothing to leave out.
+    const auto out2 = fs::temp_directory_path() / "he_bundleid_same";
+    REQUIRE(run(out2, "com.horizonengine.inc", false).success);
+    CHECK(hcfgVersion(out2) == 2);
+
+    // A game with an id of its own has to say it, and pays the version for it.
+    const auto out3 = fs::temp_directory_path() / "he_bundleid_custom";
+    REQUIRE(run(out3, "dev.horizoncreations.inc", false).success);
+    CHECK(hcfgVersion(out3) == 5);
+    ProjectConfig custom;
+    REQUIRE(ProjectConfigLoader::load(out3, custom));
+    CHECK(custom.bundleId == "dev.horizoncreations.inc");
+
+    // An application always says it, derived or not: the autostart entry and
+    // the document types are filed under it, and no older runtime exists for
+    // applications to stay compatible with.
+    const auto out4 = fs::temp_directory_path() / "he_bundleid_app";
+    REQUIRE(run(out4, "", true).success);
+    CHECK(hcfgVersion(out4) == 5);
+    ProjectConfig app;
+    REQUIRE(ProjectConfigLoader::load(out4, app));
+    CHECK(app.bundleId == "com.horizonengine.inc");
+    CHECK(app.appMode);
+
+    he_test::removeAllQuiet(dir);
+    for (const auto& o : { out1, out2, out3, out4 }) he_test::removeAllQuiet(o);
+}
+
+// ─── What a project inherits that it never asked for ─────────────────────────
+// Two defaults from the application work reached game projects as well, and the
+// merge analysis (6.1 #7 and #8) says they should not: a new GAME still draws
+// bold body text, and a project written before the icon field existed still
+// exports without an icon instead of acquiring a generated one.
+
+TEST_CASE("A new game keeps bold body text, a new application does not")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_weightproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "WeightGame", ProjectPreset::Empty));
+    // BEFORE THE FIX: false — every new project was written regular, so a game
+    // author's next project looked different from every one already on disk.
+    // Checked twice on purpose: what the editor is holding, and what it wrote.
+    CHECK(pm.currentProject().fontWeightBold);
+    {
+        ProjectManager reopened;
+        REQUIRE(reopened.loadProject(pm.currentProject().path));
+        CHECK(reopened.currentProject().fontWeightBold);
+    }
+
+    const auto appDir = std::filesystem::temp_directory_path() / "he_test_weightapp";
+    he_test::removeAllQuiet(appDir);
+    ProjectManager app;
+    REQUIRE(app.createNewProject(appDir.string(), "WeightApp", ProjectPreset::Application,
+                                 ProjectScriptLanguage::HorizonCode, /*appProject=*/true));
+    CHECK_FALSE(app.currentProject().fontWeightBold);
+    {
+        ProjectManager reopened;
+        REQUIRE(reopened.loadProject(app.currentProject().path));
+        CHECK_FALSE(reopened.currentProject().fontWeightBold);
+    }
+
+    he_test::removeAllQuiet(dir);
+    he_test::removeAllQuiet(appDir);
+}
+
+TEST_CASE("A project written before appIconName loads with no icon, not with one")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_iconproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "OldGame", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+
+    // Take the key back out — this is what every .heproj written before the
+    // field existed looks like.
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        j.erase("appIconName");
+        std::ofstream out(heproj, std::ios::trunc);
+        out << j.dump(4);
+    }
+    ProjectManager reopened;
+    REQUIRE(reopened.loadProject(heproj));
+    // BEFORE THE FIX: "widgets" — and the exporter draws an icon for any name
+    // that is not empty, so the next export of an existing game acquired a
+    // generated plate nobody had chosen.
+    CHECK(reopened.currentProject().appIconName.empty());
+
+    he_test::removeAllQuiet(dir);
+}
+
+// ─── Application template ────────────────────────────────────────────────────
+// An app project that opens with an empty preview is indistinguishable from a
+// broken one, so the template has to lay down BOTH halves: the root widget, and
+// the GameInstance that creates it. Checked together, because either alone
+// still leaves a black window.
+
+TEST_CASE("Application template ships a root widget and a GameInstance that creates it")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_appproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "AppProj", ProjectPreset::Application));
+
+    // The manifest says what it is, and has no scene to start in.
+    CHECK(pm.currentProject().appProject);
+    CHECK(pm.currentProject().startupScene.empty());
+
+    // The root widget is a real .hasset: readable, typed, and carrying a tree
+    // with something on it.
+    const auto widgetPath = dir / "Content" / "UI" / "RootWidget.hasset";
+    REQUIRE(std::filesystem::exists(widgetPath));
+    {
+        HAsset::Reader r;
+        REQUIRE(r.open(widgetPath.string()));
+        const auto* tree = r.findChunk(HAsset::CHUNK_UIWT);
+        REQUIRE(tree != nullptr);
+        HE::UIWidgetTree parsed;
+        REQUIRE(HE::uiWidgetTreeFromJson(
+            std::string(reinterpret_cast<const char*>(tree->data.data()), tree->data.size()),
+            parsed));
+        CHECK(parsed.elements.size() >= 2);   // a panel and a label on it
+    }
+
+    // …and the GameInstance is a parseable graph whose OnInit reaches a Create
+    // Widget pointing at exactly that path. A graph with the two nodes but no
+    // link between them would draw nothing, so the LINK is the assertion.
+    const auto gi = dir / "GameInstance.hcode";
+    REQUIRE(std::filesystem::exists(gi));
+    {
+        std::ifstream f(gi);
+        const std::string text((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+        HorizonCode::Graph g;
+        REQUIRE(HorizonCode::fromJson(text, g));
+
+        int evId = 0, createId = 0;
+        for (const auto& n : g.nodes)
+        {
+            if (n.type == HorizonCode::NodeType::Event && n.s == "OnInit") evId = n.id;
+            if (n.type == HorizonCode::NodeType::CreateWidget)
+            {
+                createId = n.id;
+                CHECK(n.s == "UI/RootWidget.hasset");
+            }
+        }
+        REQUIRE(evId != 0);
+        REQUIRE(createId != 0);
+        bool linked = false;
+        for (const auto& l : g.links)
+            if (l.srcNode == evId && l.dstNode == createId) linked = true;
+        CHECK(linked);
+    }
+
     he_test::removeAllQuiet(dir);
 }

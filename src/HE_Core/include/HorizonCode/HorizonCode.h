@@ -343,6 +343,18 @@ enum class NodeType : uint8_t
     MapFindByValue,   // Map + V → the FIRST key holding it, + Found
     MapRemoveByValue, // Map + V → Map without EVERY pair holding it
 
+    // ── A property of an element of a REFERENCED widget ──────────────────────
+    // Get/Set Property reach an element of the widget the graph belongs to, by
+    // the id it has in that asset. These reach one through a REFERENCE, the way
+    // Get (Ref) / Set (Ref) reach another instance's variables: dataIn Target
+    // (Ref) + Element (a NAME), `s` = the property, `propType` = its type.
+    //
+    // By name and not by id, because an id is the asset's private business and
+    // a reference points at a widget this graph did not author. That is what
+    // makes them the pair you can write once and point anywhere: a function
+    // that takes a widget and fades whatever is called "Panel" inside it.
+    GetPropertyOn, SetPropertyOn,
+
     COUNT
 };
 
@@ -616,6 +628,21 @@ HE_API int inputActionChainFor(const Node& n, const std::string& eventName);
 HE_API std::string toJson(const Graph& g);
 HE_API bool        fromJson(const std::string& json, Graph& out);
 
+// ── Migration hint: Create Widget makes a HIDDEN widget ──────────────────────
+// Create Widget used to put its widget on screen by itself; it does not any
+// more (docs/he-apps-plan.md), and Show Widget is what makes one visible. There
+// is deliberately NO automatic migration — rewriting somebody's graph while
+// loading it is a change nobody can see happening — so the answer is a warning,
+// and this is what it is built from: the ids of the Create Widget nodes whose
+// widget never reaches anything that could show it.
+//
+// It stays QUIET wherever it cannot follow the reference: a widget handed to a
+// function, to an engine row, or to any node this does not know about counts as
+// shown. A hint that fires on a working graph is a hint people learn to skip.
+// Followed: the direct wire, and one variable name (Set Variable → Get Variable),
+// which is how a graph keeps a widget between two events.
+HE_API std::vector<int> widgetCreatorsWithoutShow(const Graph& g);
+
 // ── Item-level JSON ─────────────────────────────────────────────────────────
 // One node / one variable, in EXACTLY the form toJson() puts into the document's
 // arrays — toJson/fromJson are implemented on top of these. Collaboration
@@ -854,6 +881,13 @@ struct Context
 {
     std::function<Value(int elem, const std::string& prop)>              getProperty;
     std::function<void(int elem, const std::string& prop, const Value&)> setProperty;
+    // The same pair on a REFERENCED instance, by element NAME (Get/Set Property
+    // (Ref)). No instance id in the ones above because they always mean "mine";
+    // this one is handed the target the node's pin resolved to.
+    std::function<Value(uint32_t target, const std::string& elem, const std::string& prop)>
+        getPropertyOn;
+    std::function<void(uint32_t target, const std::string& elem, const std::string& prop,
+                       const Value&)> setPropertyOn;
     std::function<Value(const std::string& var)>              getVariable;
     std::function<void(const std::string& var, const Value&)> setVariable;
     std::function<void()> showSelf;

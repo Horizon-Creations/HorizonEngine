@@ -122,6 +122,71 @@ public:
     { fireEvent("OnCheckChanged", elem, Value::ofBool(checked)); }
     virtual void onSelectionChanged(int elem, int index)
     { fireEvent("OnSelectionChanged", elem, Value::ofInt(index)); }
+    // A day was picked in a calendar. The payload is the date as "YYYY-MM-DD".
+    virtual void onDateChanged(int elem, const std::string& isoDate)
+    { fireEvent("OnDateChanged", elem, Value::ofString(isoDate)); }
+    // A colour was picked. Four numbers, so it carries a Color rather than
+    // being squeezed through OnValueChanged.
+    virtual void onColorChanged(int elem, const glm::vec4& color)
+    { fireEvent("OnColorChanged", elem, Value::ofColor(color)); }
+    // List rows — the argument is the ITEM index in both cases.
+    virtual void onRowBind(int elem, int index)
+    { fireEvent("OnRowBind", elem, Value::ofInt(index)); }
+    virtual void onRowActivated(int elem, int index)
+    { fireEvent("OnRowActivated", elem, Value::ofInt(index)); }
+    // A table's column title was clicked. The argument is the COLUMN index —
+    // the list holds no items and can sort none, so this is a request to the
+    // owner and not a thing that happened to the data.
+    virtual void onHeaderClicked(int elem, int column)
+    { fireEvent("OnHeaderClicked", elem, Value::ofInt(column)); }
+    virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
+    // A file was dropped on this element from the desktop. One call per file,
+    // the argument being its absolute path — a drop of three files is three
+    // events, because "open what I gave you" is the same answer three times and
+    // a list would only make the simple case carry the hard one's weight.
+    virtual void onFileDropped(int elem, const std::string& path)
+    { fireEvent("OnFileDropped", elem, Value::ofString(path)); }
+    // An entry in the tray menu was chosen; the argument is its id.
+    virtual void onTrayItem(int elem, const std::string& id)
+    { fireEvent("OnTrayItem", elem, Value::ofString(id)); }
+    // An entry in the menu bar was chosen; the argument is its id.
+    virtual void onMenuItem(int elem, const std::string& id)
+    { fireEvent("OnMenuItem", elem, Value::ofString(id)); }
+    // A second window closed; the argument is the id window.open handed back.
+    virtual void onWindowClosed(int elem, int windowId)
+    { fireEvent("OnWindowClosed", elem, Value::ofInt(windowId)); }
+    // An HTTP request came back; the argument is its ticket, and the readers
+    // say what the answer was.
+    virtual void onHttpResponse(int elem, int ticket)
+    { fireEvent("OnHttpResponse", elem, Value::ofInt(ticket)); }
+    // A watched file or folder moved; the argument is the path, spelled the way
+    // the watch was.
+    virtual void onFileChanged(int elem, const std::string& path)
+    { fireEvent("OnFileChanged", elem, Value::ofString(path)); }
+    // A timer came due; the argument is the handle timer.after/every handed back.
+    virtual void onTimer(int elem, int handle)
+    { fireEvent("OnTimer", elem, Value::ofInt(handle)); }
+    // A link in a rich-text label. The argument is the link's id.
+    virtual void onLinkClicked(int elem, const std::string& id)
+    { fireEvent("OnLinkClicked", elem, Value::ofString(id)); }
+    // Dragging inside the application: picked up, let go over me, and over.
+    virtual void onDragStarted(int elem) { fireEvent("OnDragStarted", elem, Value{}); }
+    virtual void onDrop(int elem, const std::string& payload)
+    { fireEvent("OnDrop", elem, Value::ofString(payload)); }
+    virtual void onDragEnded(int elem, bool accepted)
+    { fireEvent("OnDragEnded", elem, Value::ofBool(accepted)); }
+    // An animation reached its target. The argument is the PROPERTY's name, not
+    // the element's: two animations on one element (fade it and slide it) end
+    // separately, and an event that could not say which one ended would be a
+    // "when it is done" that fires twice for two different things.
+    virtual void onAnimationFinished(int elem, const std::string& prop)
+    { fireEvent("OnAnimationFinished", elem, Value::ofString(prop)); }
+    // A named clip from the widget's timeline ended. On the WIDGET (elem 0):
+    // a clip belongs to the widget, not to any one element it moves.
+    virtual void onClipFinished(const std::string& clip)
+    { fireEvent("OnClipFinished", 0, Value::ofString(clip)); }
+    // Layers: this widget was closed (Escape, a click outside, a script).
+    virtual void onDismissed() { fireEvent("OnDismissed", 0, Value{}); }
     // GameInstance lifecycle.
     virtual void onInit()     { fireEvent("OnInit", 0, Value{}); }
     virtual void onShutdown() { fireEvent("OnShutdown", 0, Value{}); }

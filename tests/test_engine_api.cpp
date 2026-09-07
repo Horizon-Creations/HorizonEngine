@@ -1,5 +1,9 @@
 #include "doctest.h"
+#include <map>
+#include <set>
+#include <nlohmann/json.hpp>   // db.query hands its rows back as JSON text
 #include <HorizonScene/EngineApi.h>
+#include <Net/HttpsClient.h>   // http.available must answer what the backend says
 #include <Types/TypeRegistry.h>
 #include <HorizonGameServices.h>
 #include <ContentManager/ContentManager.h>
@@ -30,6 +34,7 @@
 #include <Hpak/ProjectExporter.h>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <glm/glm.hpp>
 #include <cmath>
 #include <unordered_map>
@@ -71,6 +76,26 @@ TEST_CASE("EngineApi: registry is populated and well-formed")
         CHECK(std::string(fn.id).length() > 0);
         // ids are unique
         CHECK(ids.insert(fn.id).second);
+    }
+}
+
+// A row without a display name falls back to its id, and the palette then shows
+// "widget.animateVec2" between "Play Animation" and "Set Theme" — which is what
+// the animation rows did for as long as they existed. The fallback is right (a
+// name is better missing than crashing); this is what stops it being used.
+TEST_CASE("EngineApi: every row has an editor name, not a raw id")
+{
+    std::unordered_map<std::string, std::string> nameToId;   // display → first id
+    for (const auto& fn : HE::api::registry())
+    {
+        INFO("row: " << std::string(fn.id));
+        REQUIRE(fn.displayName != nullptr);
+        CHECK(std::string(fn.displayName) != fn.id);
+        // Two rows under one name is the coin toss the flat drag-off menu makes
+        // you lose: the suffixed names ("Get Velocity (Physics)") exist for this.
+        const auto [it, fresh] = nameToId.emplace(fn.displayName, fn.id);
+        INFO("also claimed by: " << it->second);
+        CHECK(fresh);
     }
 }
 
@@ -699,6 +724,96 @@ TEST_CASE("App: quit calls the host's handler, and only warns without one")
     CHECK(quits == 2);
 }
 
+// The other two buttons a window that draws its own frame has to answer for
+// (plan F3). Close was app.quit from the start; these were the two that had
+// nothing behind them.
+TEST_CASE("App: minimize, maximize and isMaximized reach the host's window")
+{
+    const auto* mini = HE::api::find("app.minimize");
+    const auto* maxi = HE::api::find("app.maximize");
+    const auto* isMax = HE::api::find("app.isMaximized");
+    REQUIRE(mini != nullptr);
+    REQUIRE(maxi != nullptr);
+    REQUIRE(isMax != nullptr);
+    CHECK(mini->isExec);
+    CHECK(mini->params.empty());
+    CHECK(maxi->isExec);
+    REQUIRE(maxi->params.size() == 1);
+    CHECK(maxi->params[0].type == P::Bool);
+    CHECK_FALSE(isMax->isExec);
+    REQUIRE(isMax->results.size() == 1);
+    CHECK(isMax->results[0].type == P::Bool);
+
+    // Unbound is an ordinary state — an editor preview binds none of these, and
+    // the getter answers false rather than warning once per frame.
+    Ctx unbound{};
+    CHECK_NOTHROW(mini->invoke(unbound, {}));
+    CHECK_NOTHROW(maxi->invoke(unbound, { Value::ofBool(true) }));
+    CHECK(isMax->invoke(unbound, {})[0].b == false);
+
+    int  minimized = 0;
+    bool maximized = false;
+    Ctx c{};
+    c.minimizeWindow     = [&minimized]{ ++minimized; };
+    c.setWindowMaximized = [&maximized](bool on) { maximized = on; };
+    c.windowMaximized    = [&maximized]{ return maximized; };
+
+    mini->invoke(c, {});
+    CHECK(minimized == 1);
+    maxi->invoke(c, { Value::ofBool(true) });
+    CHECK(maximized);
+    CHECK(isMax->invoke(c, {})[0].b == true);
+    // The same bool restores it — one call for both, because one button does
+    // both, and a title bar wires it to the inverse of isMaximized.
+    HE::api::app::maximize(c, false);
+    CHECK_FALSE(maximized);
+    CHECK_FALSE(HE::api::app::isMaximized(c));
+}
+
+TEST_CASE("App: a menu row can be greyed out and ticked by its own id")
+{
+    const auto* setEn = HE::api::find("app.setMenuItemEnabled");
+    const auto* setCh = HE::api::find("app.setMenuItemChecked");
+    const auto* getEn = HE::api::find("app.menuItemEnabled");
+    const auto* getCh = HE::api::find("app.menuItemChecked");
+    REQUIRE(setEn != nullptr);
+    REQUIRE(setCh != nullptr);
+    REQUIRE(getEn != nullptr);
+    REQUIRE(getCh != nullptr);
+    CHECK(setEn->isExec);
+    REQUIRE(setEn->params.size() == 2);
+    CHECK(setEn->params[0].type == P::String);
+    CHECK(setEn->params[1].type == P::Bool);
+    CHECK_FALSE(getCh->isExec);
+    REQUIRE(getCh->params.size() == 1);
+    REQUIRE(getCh->results.size() == 1);
+    CHECK(getCh->results[0].type == P::Bool);
+
+    Ctx unbound{};
+    CHECK_NOTHROW(setEn->invoke(unbound, { Value::ofString("save"), Value::ofBool(false) }));
+    CHECK(getEn->invoke(unbound, { Value::ofString("save") })[0].b == false);
+
+    std::map<std::string, bool> enabled, checked;
+    Ctx c{};
+    c.setMenuItemEnabled = [&enabled](const std::string& id, bool on) { enabled[id] = on; };
+    c.setMenuItemChecked = [&checked](const std::string& id, bool on) { checked[id] = on; };
+    c.menuItemEnabled = [&enabled](const std::string& id) {
+        const auto it = enabled.find(id); return it != enabled.end() ? it->second : true; };
+    c.menuItemChecked = [&checked](const std::string& id) {
+        const auto it = checked.find(id); return it != checked.end() ? it->second : false; };
+
+    setEn->invoke(c, { Value::ofString("save"), Value::ofBool(false) });
+    CHECK(getEn->invoke(c, { Value::ofString("save") })[0].b == false);
+    CHECK(getEn->invoke(c, { Value::ofString("open") })[0].b == true);
+    setCh->invoke(c, { Value::ofString("toolbar"), Value::ofBool(true) });
+    CHECK(getCh->invoke(c, { Value::ofString("toolbar") })[0].b == true);
+
+    // Which entry? is a question with no sensible default, so an empty id is
+    // refused rather than aimed at whatever the first row happens to be.
+    HE::api::app::setMenuItemChecked(c, "", true);
+    CHECK(checked.size() == 1);
+}
+
 TEST_CASE("UI: pointerOverUI answers the last widget hit test")
 {
     ContentManager cm;
@@ -717,7 +832,11 @@ TEST_CASE("UI: pointerOverUI answers the last widget hit test")
 
     HorizonWorld world;
     Ctx c{ &world, nullptr, &cm };
-    REQUIRE(HE::api::widget::create(c, "mem://api_pointer.hasset") != 0);
+    // Create makes the instance; show puts it on screen. A hidden widget is not
+    // hit-tested, so the pointer rows below need both halves.
+    const int pointerWidget = HE::api::widget::create(c, "mem://api_pointer.hasset");
+    REQUIRE(pointerWidget != 0);
+    HE::api::widget::show(c, pointerWidget);
 
     const auto* row = HE::api::find("ui.pointerOverUI");
     REQUIRE(row != nullptr);
@@ -1404,6 +1523,13 @@ TEST_CASE("String: the registry's string library evaluates correctly")
     auto S = [](const char* s){ return Value::ofString(s); };
 
     CHECK(call("string.length",    { S("hello") })[0].i == 5);
+    // Exact and case-sensitive, and — the whole reason it exists — it tells two
+    // DIFFERENT texts apart, which the Equals operator node cannot: that one
+    // compares floats, and every string coerces to 0 on the way in.
+    CHECK(call("string.equals",    { S("open"), S("open") })[0].b == true);
+    CHECK(call("string.equals",    { S("open"), S("quit") })[0].b == false);
+    CHECK(call("string.equals",    { S("Open"), S("open") })[0].b == false);
+    CHECK(call("string.equals",    { S(""),     S("") })[0].b == true);
     CHECK(call("string.substring", { S("hello world"), Value::ofInt(6), Value::ofInt(5) })[0].s == "world");
     CHECK(call("string.contains",  { S("hello"), S("ell") })[0].b == true);
     CHECK(call("string.find",      { S("hello"), S("lo") })[0].i == 3);
@@ -1680,6 +1806,904 @@ TEST_CASE("fs: sandboxed I/O works inside the root and rejects escapes")
     CHECK(HE::api::fs::readText("../secret").empty());
 
     std::filesystem::remove_all(root, ec);
+}
+
+// ─── Permissions, and the two routes out of the sandbox ──────────────────────
+// The plan calls this a one-way street. The rule it settles on: the permission
+// is about what a SCRIPT may name on its own, never about what a PERSON may
+// choose. A path somebody picked in a dialog is granted either way.
+//
+// Every case here restores the shut default before it returns. These are
+// process-wide statics, and a test that left file access on would silently
+// license the escape assertions in the case above.
+
+namespace
+{
+    struct PermReset
+    {
+        ~PermReset()
+        {
+            HE::api::perm::set(HE::api::perm::Grants{});
+            HE::api::fs::clearGrants();
+            // Watches are process-wide statics for the same reason and with the
+            // same hazard: one left standing would keep reporting into the next
+            // case's queue, and a watch that outlived its grant would name a
+            // path the sandbox no longer opens.
+            HE::api::fs::clearWatches();
+        }
+    };
+
+    // Everything the poll queued, in order. The watcher hands out one path per
+    // call, exactly as the frame loop drains it.
+    std::vector<std::string> drainChanges()
+    {
+        std::vector<std::string> out;
+        std::string p;
+        while (HE::api::fs::takeChange(p)) out.push_back(p);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+}
+
+TEST_CASE("fs: an absolute path needs either a permission or somebody's choice")
+{
+    PermReset restore;
+    const auto root    = std::filesystem::temp_directory_path() / "he_api_perm_root";
+    const auto outside = std::filesystem::temp_directory_path() / "he_api_perm_out";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::create_directories(outside, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    const std::string target = (outside / "doc.txt").string();
+
+    // Shut by default, which is what every project written before permissions
+    // existed means.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    HE::api::fs::clearGrants();
+    CHECK_FALSE(HE::api::fs::writeText(target, "no"));
+    CHECK_FALSE(std::filesystem::exists(target, ec));
+
+    // Route one: the project says its scripts may name absolute paths.
+    { HE::api::perm::Grants g; g.files = true; HE::api::perm::set(g); }
+    CHECK(HE::api::fs::writeText(target, "yes"));
+    CHECK(HE::api::fs::readText(target) == "yes");
+
+    // Route two: nobody granted the blanket, but a person picked the folder.
+    // This is the model the plan asks for — the choosing IS the permission.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK(HE::api::fs::readText(target).empty());
+    HE::api::fs::grantPath(outside.string());
+    CHECK(HE::api::fs::readText(target) == "yes");
+
+    // A grant is a PREFIX of path components, not of characters. A sibling
+    // directory whose name merely starts the same way is a different folder, and
+    // string-prefix matching is exactly how that kind of hole gets made.
+    const auto sibling = std::filesystem::temp_directory_path() / "he_api_perm_out_private";
+    std::filesystem::create_directories(sibling, ec);
+    { std::ofstream f(sibling / "secret.txt"); f << "shh"; }
+    CHECK(HE::api::fs::readText((sibling / "secret.txt").string()).empty());
+
+    // …and a ".." is spent before the comparison, not after it, so a granted
+    // folder cannot be used as a doorway to its neighbour.
+    CHECK(HE::api::fs::readText(
+        (outside / ".." / "he_api_perm_out_private" / "secret.txt").string()).empty());
+
+    // The sandbox itself never depended on any of this.
+    CHECK(HE::api::fs::writeText("inside.txt", "hi"));
+    CHECK(HE::api::fs::readText("inside.txt") == "hi");
+
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::remove_all(sibling, ec);
+}
+
+TEST_CASE("fs: listing, measuring, renaming and copying")
+{
+    PermReset restore;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_fs2_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    REQUIRE(HE::api::fs::writeText("b.txt", "hello"));
+    REQUIRE(HE::api::fs::writeText("a.txt", "hi"));
+    REQUIRE(HE::api::fs::makeDir("sub"));
+
+    // Sorted, and names only: a directory's own order is the filesystem's
+    // business and differs between two machines showing "the same" folder.
+    const std::vector<std::string> names = HE::api::fs::list("");
+    REQUIRE(names.size() == 3);
+    CHECK(names[0] == "a.txt");
+    CHECK(names[1] == "b.txt");
+    CHECK(names[2] == "sub");
+
+    CHECK(HE::api::fs::isDir("sub"));
+    CHECK_FALSE(HE::api::fs::isDir("a.txt"));
+    CHECK(HE::api::fs::size("b.txt") == doctest::Approx(5.0));
+    CHECK(HE::api::fs::size("sub") == doctest::Approx(-1.0));        // not a file
+    CHECK(HE::api::fs::size("nope.txt") == doctest::Approx(-1.0));
+    // The same clock `datetime` speaks, so a file's age is a subtraction.
+    CHECK(HE::api::fs::modified("a.txt") > 1.6e9);
+    CHECK(HE::api::fs::modified("nope.txt") == doctest::Approx(-1.0));
+
+    CHECK(HE::api::fs::rename("a.txt", "sub/renamed.txt"));
+    CHECK_FALSE(HE::api::fs::exists("a.txt"));
+    CHECK(HE::api::fs::readText("sub/renamed.txt") == "hi");
+
+    CHECK(HE::api::fs::copy("b.txt", "sub/copy.txt"));
+    CHECK(HE::api::fs::readText("sub/copy.txt") == "hello");
+    // The one row here that could destroy a file the caller did not name. It
+    // refuses instead, because a lost document costs more than a false.
+    CHECK_FALSE(HE::api::fs::copy("sub/renamed.txt", "sub/copy.txt"));
+    CHECK(HE::api::fs::readText("sub/copy.txt") == "hello");   // untouched
+
+    // And none of the new rows found a way around the sandbox.
+    CHECK(HE::api::fs::list("..").empty());
+    CHECK_FALSE(HE::api::fs::rename("b.txt", "../escaped.txt"));
+    CHECK_FALSE(HE::api::fs::copy("b.txt", "/tmp/he_api_escaped.txt"));
+
+    std::filesystem::remove_all(root, ec);
+}
+
+// ─── The watcher ─────────────────────────────────────────────────────────────
+// The last open row of the plan's `fs` line. Everything here drives the poll by
+// hand rather than sleeping: the interval is a second, and a test that waited
+// one out would be the slowest and the flakiest in the file at the same time.
+TEST_CASE("fs: a watch reports what moved, spelled the way it was asked")
+{
+    PermReset restore;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_watch_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    REQUIRE(HE::api::fs::writeText("a.txt", "hello"));
+    REQUIRE(HE::api::fs::makeDir("sub"));
+
+    const int hFile = HE::api::fs::watch("a.txt");
+    const int hDir  = HE::api::fs::watch("sub");
+    REQUIRE(hFile != 0);
+    REQUIRE(hDir  != 0);
+    REQUIRE(hFile != hDir);
+
+    // Seeded at the watch, so the first poll is about what happened AFTER it and
+    // not about the state the file was already in.
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+
+    // A rewrite. The SIZE changes, deliberately: several filesystems carry the
+    // timestamp at one-second resolution, which is the poll interval itself, so
+    // a stamp that watched the clock alone could sleep through this.
+    REQUIRE(HE::api::fs::writeText("a.txt", "hello again"));
+    // …but not before the interval is up. The scan costs a stat per watch, and
+    // doing it every frame is the thing this accumulator exists to prevent.
+    HE::api::fs::pollWatches(0.1);
+    CHECK(drainChanges().empty());
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "a.txt" });
+
+    // A file appearing inside a watched directory is named with the directory's
+    // own spelling in front — "sub/new.txt", never the absolute path, which is
+    // exactly what the sandbox would refuse to open again.
+    REQUIRE(HE::api::fs::writeText("sub/new.txt", "x"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "sub/new.txt" });
+
+    // Changing and removing a child are both "something moved here".
+    REQUIRE(HE::api::fs::writeText("sub/new.txt", "xxxxxx"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "sub/new.txt" });
+    REQUIRE(HE::api::fs::remove("sub/new.txt"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "sub/new.txt" });
+
+    // A file that vanishes is reported, and so is one that comes back: the event
+    // says WHICH path, and fs.exists answers which of the three happened.
+    REQUIRE(HE::api::fs::remove("a.txt"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "a.txt" });
+    REQUIRE(HE::api::fs::writeText("a.txt", "back"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "a.txt" });
+
+    // Off again, by the handle the watch handed back.
+    HE::api::fs::unwatch(hFile);
+    REQUIRE(HE::api::fs::writeText("a.txt", "and nobody is listening"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+
+    HE::api::fs::unwatch(hDir);
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("fs: a watch is the sandbox's business too")
+{
+    PermReset restore;
+    const auto root    = std::filesystem::temp_directory_path() / "he_api_watch_perm";
+    const auto outside = std::filesystem::temp_directory_path() / "he_api_watch_out";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::create_directories(outside, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    REQUIRE(HE::api::fs::makeDir("here"));
+
+    // The row resolves like every other one, so it cannot be the hole the others
+    // are not: no escape, and no absolute path without a permission or a choice.
+    CHECK(HE::api::fs::watch("../elsewhere") == 0);
+    CHECK(HE::api::fs::watch(outside.string()) == 0);
+    HE::api::fs::grantPath(outside.string());
+    const int granted = HE::api::fs::watch(outside.string());
+    CHECK(granted != 0);
+    HE::api::fs::unwatch(granted);
+
+    // "" is the sandbox root, the one spelling `list` also allows and for the
+    // same reason: "what is at the top of my sandbox" has no second wording.
+    const int hRoot = HE::api::fs::watch("");
+    REQUIRE(hRoot != 0);
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+    REQUIRE(HE::api::fs::writeText("top.txt", "hi"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "top.txt" });
+    // One level deep, on purpose: a watch on a home folder must not become a
+    // full-disk walk every second.
+    REQUIRE(HE::api::fs::writeText("here/deep.txt", "hi"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges().empty());
+    HE::api::fs::unwatch(hRoot);
+
+    // A ceiling, so a script cannot turn a one-line call into an unbounded
+    // per-second cost. The row refuses rather than quietly scanning on.
+    std::vector<int> many;
+    for (int i = 0; i < HE::api::fs::kMaxWatches; ++i)
+    {
+        const int h = HE::api::fs::watch("here");
+        CHECK(h != 0);
+        many.push_back(h);
+    }
+    CHECK(HE::api::fs::watch("here") == 0);
+    // The same path twice is two watches: switching one off must not switch off
+    // somebody else's. And one change is still ONE event, because the queue is
+    // what dedupes, not the watch list.
+    REQUIRE(HE::api::fs::writeText("here/x.txt", "hi"));
+    HE::api::fs::pollWatches(2.0);
+    CHECK(drainChanges() == std::vector<std::string>{ "here/x.txt" });
+    for (const int h : many) HE::api::fs::unwatch(h);
+
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+}
+
+// ── Printing ─────────────────────────────────────────────────────────────────
+namespace
+{
+    std::string readWhole(const std::filesystem::path& p)
+    {
+        std::ifstream f(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+}
+
+TEST_CASE("print: it writes a PDF a reader can actually open")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_print";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    // Writing a PDF is writing a file, and the file rules are the file rules.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK_FALSE(HE::api::print::toPdf(c, "out.pdf", "hello", ""));
+    CHECK_FALSE(std::filesystem::exists(root / "out.pdf"));
+
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    REQUIRE(HE::api::print::toPdf(c, "sub/out.pdf", "hello\nworld", "A Title"));
+    const std::string pdf = readWhole(root / "sub" / "out.pdf");
+    REQUIRE(!pdf.empty());
+
+    // The four things that make a file a PDF rather than a file with text in it.
+    CHECK(pdf.rfind("%PDF-1.4", 0) == 0);
+    CHECK(pdf.find("/Type /Catalog") != std::string::npos);
+    CHECK(pdf.find("/BaseFont /Courier") != std::string::npos);
+    CHECK(pdf.find("%%EOF") != std::string::npos);
+    // The uncompressed stream is what lets a test read the words back — the
+    // whole reason it is uncompressed.
+    CHECK(pdf.find("(hello) Tj") != std::string::npos);
+    CHECK(pdf.find("(world) Tj") != std::string::npos);
+    CHECK(pdf.find("/Title (A Title)") != std::string::npos);
+
+    // startxref points at the xref table, and the offsets in it point at real
+    // objects. A PDF whose table is wrong opens in some readers and not others,
+    // which is the worst way to be broken.
+    const size_t sx = pdf.rfind("startxref");
+    REQUIRE(sx != std::string::npos);
+    const size_t at = std::stoul(pdf.substr(sx + 10));
+    CHECK(pdf.compare(at, 4, "xref") == 0);
+    // Object 1 is where its offset says it is.
+    const size_t firstEntry = pdf.find(" 65535 f \n", at);
+    REQUIRE(firstEntry != std::string::npos);
+    const size_t obj1 = std::stoul(pdf.substr(firstEntry + 10, 10));
+    CHECK(pdf.compare(obj1, 7, "1 0 obj") == 0);
+
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("print: the two things that would come out wrong on paper")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_print2";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+
+    // A bracket is a PDF delimiter. Unescaped, one of these ends the string and
+    // the rest of the line becomes operators — a file no reader opens.
+    REQUIRE(HE::api::print::toPdf(c, "esc.pdf", "a (b) c \\ d", ""));
+    const std::string esc = readWhole(root / "esc.pdf");
+    CHECK(esc.find("(a \\(b\\) c \\\\ d) Tj") != std::string::npos);
+
+    // A line wider than the page has to break, or it runs off the edge of the
+    // paper where nobody can see that it happened. Courier is exactly 0.6 em, so
+    // this is countable rather than approximate.
+    std::string wide(500, 'x');
+    REQUIRE(HE::api::print::toPdf(c, "wide.pdf", wide, ""));
+    const std::string w = readWhole(root / "wide.pdf");
+    CHECK(w.find(std::string(81, 'x')) == std::string::npos);   // no row over 80
+    CHECK(w.find("(" + std::string(80, 'x') + ") Tj") != std::string::npos);
+
+    // Enough lines for a second page, and the catalogue has to say so.
+    std::string many;
+    for (int i = 0; i < 130; ++i) many += "line " + std::to_string(i) + "\n";
+    REQUIRE(HE::api::print::toPdf(c, "many.pdf", many, ""));
+    const std::string m = readWhole(root / "many.pdf");
+    CHECK(m.find("/Count 3") != std::string::npos);   // 130 rows at 60 per page
+
+    // Non-ASCII survives as Latin-1 (an umlaut is a letter people's names are
+    // made of); anything beyond it becomes '?' rather than quietly vanishing.
+    REQUIRE(HE::api::print::toPdf(c, "u.pdf", "Grüße \xE2\x98\x85", ""));
+    const std::string u = readWhole(root / "u.pdf");
+    CHECK(u.find("(Gr\\374\\337e ?) Tj") != std::string::npos);
+
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("print: handing a file to the spooler is running a program")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_print3";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+
+    // Asking whether there is a printer runs nothing, so it answers without a
+    // permission — an application must be able to hide its Print button without
+    // first being allowed to print.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    const bool avail = HE::api::print::available(c);
+#if defined(_WIN32)
+    // Windows gets a false rather than a guess, the same answer notify gave.
+    CHECK_FALSE(avail);
+#else
+    (void)avail;   // depends on whether lp is installed; either answer is honest
+#endif
+
+    // …but handing a file over is running another program, and that is shut by
+    // default like every other row that does.
+    HE::api::perm::Grants files; files.files = true;
+    HE::api::perm::set(files);
+    REQUIRE(HE::api::print::toPdf(c, "doc.pdf", "hello", ""));
+    CHECK_FALSE(HE::api::print::file(c, "doc.pdf"));   // no `processes` permission
+
+    // With the permission it still refuses a file that is not there — and it is
+    // NOT actually printed here: a test that queues a job on the machine it runs
+    // on is a test that costs somebody paper.
+    HE::api::perm::Grants both; both.files = true; both.processes = true;
+    HE::api::perm::set(both);
+    CHECK_FALSE(HE::api::print::file(c, "nosuchfile.pdf"));
+
+    std::filesystem::remove_all(root, ec);
+}
+
+// ── SQLite ───────────────────────────────────────────────────────────────────
+
+TEST_CASE("db: a database is a file, and the file rules are the file rules")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_perm";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::db::closeAll();
+
+    // Shut by default, like every other row that touches the disk. A database
+    // that opened without the permission would be the way around all of them.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK(HE::api::db::open(c, "data.db") == 0);
+
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    const int h = HE::api::db::open(c, "data.db");
+    REQUIRE(h != 0);
+    CHECK(std::filesystem::exists(root / "data.db"));
+
+    // An escape is refused the same way a readText escape is: it goes through
+    // resolved(), which is the one place a script's string becomes a path.
+    HE::api::perm::set(HE::api::perm::Grants{});   // relative still works, absolute does not
+    CHECK(HE::api::db::open(c, "../outside.db") == 0);
+
+    HE::api::db::closeAll();
+    // …and closeAll really did close it: the handle is dead, not merely tidy.
+    CHECK(HE::api::db::changes(c, h) == 0);
+    CHECK(HE::api::db::lastError(c, h).empty());
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("db: SQL can name files too, and ATTACH is where that is stopped")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_attach";
+    const auto outside = std::filesystem::temp_directory_path() / "he_api_db_outside";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+    std::filesystem::create_directories(outside, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    HE::api::db::closeAll();
+
+    const int h = HE::api::db::open(c, "sandboxed.db");
+    REQUIRE(h != 0);
+
+    // The hole this closes: `open` goes through resolved(), but SQL names files
+    // in a STRING that no resolved() ever sees. Without the authorizer this one
+    // statement reaches anything on the disk.
+    const std::string other = (outside / "elsewhere.db").string();
+    CHECK_FALSE(HE::api::db::exec(c, h, "ATTACH DATABASE '" + other + "' AS other", ""));
+    CHECK_FALSE(HE::api::db::lastError(c, h).empty());
+    CHECK_FALSE(std::filesystem::exists(outside / "elsewhere.db"));
+    CHECK_FALSE(HE::api::db::exec(c, h, "DETACH DATABASE other", ""));
+
+    // …and the SECOND door of the same kind, which is easy to miss because it
+    // does not have ATTACH in its name: `VACUUM INTO` writes a copy of the whole
+    // database to any path a string can spell.
+    CHECK_FALSE(HE::api::db::exec(
+        c, h, "VACUUM INTO '" + (outside / "vacuumed.db").string() + "'", ""));
+    CHECK_FALSE(std::filesystem::exists(outside / "vacuumed.db"));
+
+    // Two pragmas name directories rather than settings, and would move where
+    // SQLite writes its temporary files.
+    CHECK_FALSE(HE::api::db::exec(
+        c, h, "PRAGMA temp_store_directory = '" + outside.string() + "'", ""));
+
+    // Ordinary SQL is untouched by the authorizer — a lock that also refused
+    // CREATE TABLE would be a lock on the whole group.
+    CHECK(HE::api::db::exec(c, h, "CREATE TABLE t(a INTEGER)", ""));
+
+    HE::api::db::closeAll();
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(outside, ec);
+}
+
+TEST_CASE("db: rows come back as JSON, and values go in as parameters")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_rows";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    HE::api::db::closeAll();
+
+    const int h = HE::api::db::open(c, "sub/people.db");
+    REQUIRE(h != 0);
+    // The parent folder was made: SQLite answers "unable to open database file"
+    // for a missing directory, which reads like a permission problem.
+    CHECK(std::filesystem::exists(root / "sub" / "people.db"));
+
+    REQUIRE(HE::api::db::exec(
+        c, h, "CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, height REAL, note TEXT)", ""));
+    REQUIRE(HE::api::db::exec(c, h, "INSERT INTO people(name, height, note) VALUES(?, ?, ?)",
+                              R"(["Ada", 1.7, null])"));
+    CHECK(HE::api::db::changes(c, h) == 1);
+    CHECK(HE::api::db::lastInsertId(c, h) == doctest::Approx(1.0));
+
+    // The value that makes this matter: an apostrophe pasted into SQL is
+    // somebody else's statement. Bound as a parameter it is a name.
+    REQUIRE(HE::api::db::exec(c, h, "INSERT INTO people(name, height) VALUES(?, ?)",
+                              R"(["O'Brien; DROP TABLE people;--", 1.82])"));
+    CHECK(HE::api::db::changes(c, h) == 1);
+
+    const std::string rows = HE::api::db::query(c, h, "SELECT * FROM people ORDER BY id", "");
+    const nlohmann::json j = nlohmann::json::parse(rows, nullptr, false);
+    REQUIRE(j.is_array());
+    REQUIRE(j.size() == 2);                 // the table is still there
+    CHECK(j[0]["name"] == "Ada");
+    CHECK(j[0]["height"].get<double>() == doctest::Approx(1.7));
+    CHECK(j[0]["id"].get<int>() == 1);
+    CHECK(j[0]["note"].is_null());          // SQL NULL is JSON null
+    CHECK(j[1]["name"] == "O'Brien; DROP TABLE people;--");
+    CHECK(HE::api::db::lastError(c, h).empty());
+
+    // A parameter in the WHERE, which is the other half of the same promise.
+    const nlohmann::json one = nlohmann::json::parse(
+        HE::api::db::query(c, h, "SELECT name FROM people WHERE height > ?", "[1.75]"),
+        nullptr, false);
+    REQUIRE(one.is_array());
+    REQUIRE(one.size() == 1);
+    CHECK(one[0]["name"] == "O'Brien; DROP TABLE people;--");
+
+    // Nothing matched and it failed are both "[]" — lastError is what tells
+    // them apart, which is why an error is never put in the result.
+    CHECK(HE::api::db::query(c, h, "SELECT * FROM people WHERE id = 999", "") == "[]");
+    CHECK(HE::api::db::lastError(c, h).empty());
+    CHECK(HE::api::db::query(c, h, "SELECT * FROM nosuchtable", "") == "[]");
+    CHECK_FALSE(HE::api::db::lastError(c, h).empty());
+    // …and the next successful call clears it, so nobody reads yesterday's.
+    CHECK(HE::api::db::exec(c, h, "DELETE FROM people WHERE id = 1", ""));
+    CHECK(HE::api::db::lastError(c, h).empty());
+    CHECK(HE::api::db::changes(c, h) == 1);
+
+    // A blob has no honest JSON shape and comes back as null rather than as a
+    // lie in the data.
+    REQUIRE(HE::api::db::exec(c, h, "CREATE TABLE b(x BLOB)", ""));
+    REQUIRE(HE::api::db::exec(c, h, "INSERT INTO b(x) VALUES(X'00FF00')", ""));
+    const nlohmann::json bj = nlohmann::json::parse(
+        HE::api::db::query(c, h, "SELECT x FROM b", ""), nullptr, false);
+    REQUIRE(bj.is_array());
+    REQUIRE(bj.size() == 1);
+    CHECK(bj[0]["x"].is_null());
+
+    // An unknown handle answers like a closed one, everywhere.
+    CHECK(HE::api::db::query(c, 9999, "SELECT 1", "") == "[]");
+    CHECK_FALSE(HE::api::db::exec(c, 9999, "SELECT 1", ""));
+    CHECK(HE::api::db::changes(c, 9999) == 0);
+    CHECK(HE::api::db::lastError(c, 9999).empty());
+
+    HE::api::db::close(c, h);
+    HE::api::db::closeAll();
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("db: the rows are in the registry and reach every frontend")
+{
+    PermReset restore;
+    HE::api::Ctx c;
+    const auto root = std::filesystem::temp_directory_path() / "he_api_db_rows2";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    HE::api::perm::Grants g; g.files = true;
+    HE::api::perm::set(g);
+    HE::api::db::closeAll();
+
+    const auto& reg = HE::api::registry();
+    auto row = [&](const char* id) -> const HE::api::ApiFn*
+    {
+        for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+        return nullptr;
+    };
+    for (const char* id : { "db.open", "db.close", "db.exec", "db.query",
+                            "db.changes", "db.lastInsertId", "db.lastError" })
+        CHECK_MESSAGE(row(id) != nullptr, id);
+
+    const auto opened = row("db.open")->invoke(c, { HorizonCode::Value::ofString("r.db") });
+    REQUIRE(opened.size() == 1);
+    const int h = opened[0].i;
+    REQUIRE(h != 0);
+    CHECK(row("db.exec")->invoke(c, { HorizonCode::Value::ofInt(h),
+                                      HorizonCode::Value::ofString("CREATE TABLE k(v TEXT)"),
+                                      HorizonCode::Value::ofString("") })[0].b);
+    CHECK(row("db.exec")->invoke(c, { HorizonCode::Value::ofInt(h),
+                                      HorizonCode::Value::ofString("INSERT INTO k VALUES(?)"),
+                                      HorizonCode::Value::ofString(R"(["v"])") })[0].b);
+    const std::string out = row("db.query")->invoke(
+        c, { HorizonCode::Value::ofInt(h),
+             HorizonCode::Value::ofString("SELECT v FROM k"),
+             HorizonCode::Value::ofString("") })[0].s;
+    CHECK(out == R"([{"v":"v"}])");
+    // …and the json group reads it, which is the whole reason the result is text.
+    CHECK(HE::api::json::getString(c, out, "[0].v", "") == "v");
+
+    CHECK(HE::api::isScriptGroup("db"));
+    HE::api::db::closeAll();
+    std::filesystem::remove_all(root, ec);
+}
+
+// ── Timers ───────────────────────────────────────────────────────────────────
+namespace
+{
+    // Everything the queue holds right now, in order. Timers are process-wide
+    // statics like the watches, so every case here starts and ends empty.
+    std::vector<int> drainTimers()
+    {
+        std::vector<int> out;
+        int h = 0;
+        while (HE::api::timer::takeFired(h)) out.push_back(h);
+        return out;
+    }
+}
+
+TEST_CASE("timer: one shot goes off once and stops existing")
+{
+    HE::api::timer::cancelAll();
+    const int h = HE::api::timer::after(0.5);
+    REQUIRE(h != 0);
+    CHECK(HE::api::timer::active(h));
+
+    // Not before it is due, and nothing is queued while it counts down.
+    HE::api::timer::poll(0.2);
+    CHECK(drainTimers().empty());
+    CHECK(HE::api::timer::active(h));
+
+    HE::api::timer::poll(0.4);
+    CHECK(drainTimers() == std::vector<int>{ h });
+    // …and it is gone: a one-shot that stayed "running" after it fired would
+    // make Timer Is Running a question nobody could use.
+    CHECK_FALSE(HE::api::timer::active(h));
+    HE::api::timer::poll(10.0);
+    CHECK(drainTimers().empty());
+    // Cancelling something that has already fired is not an error, it is just
+    // false — a caller cannot act differently on "already gone" and "never was".
+    CHECK_FALSE(HE::api::timer::cancel(h));
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: a repeat that was away fires ONCE, not a burst")
+{
+    HE::api::timer::cancelAll();
+    const int h = HE::api::timer::every(0.1);
+    REQUIRE(h != 0);
+
+    HE::api::timer::poll(0.1);
+    CHECK(drainTimers() == std::vector<int>{ h });
+    CHECK(HE::api::timer::active(h));   // it comes round again
+
+    // Five seconds away — an alt-tab, a breakpoint, a laptop lid. Fifty ticks
+    // arriving at once would do the same work fifty times over, which is never
+    // what a repeating timer was asked for.
+    HE::api::timer::poll(5.0);
+    CHECK(drainTimers() == std::vector<int>{ h });
+    // …and it did not lose its interval either: the next one is a tenth away.
+    CHECK(HE::api::timer::nextDueSeconds() == doctest::Approx(0.1));
+
+    CHECK(HE::api::timer::cancel(h));
+    CHECK_FALSE(HE::api::timer::active(h));
+    HE::api::timer::poll(10.0);
+    CHECK(drainTimers().empty());
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: what it refuses, and what it tells the loop")
+{
+    HE::api::timer::cancelAll();
+    // Nothing due: a negative answer, so the host leaves its heartbeat alone.
+    CHECK(HE::api::timer::nextDueSeconds() < 0.0);
+
+    // Not a length of time. Zero and negative are a "timer" that is the frame
+    // loop, and the graph already has that; a NaN would compare false against
+    // everything and count down forever.
+    CHECK(HE::api::timer::after(0.0) == 0);
+    CHECK(HE::api::timer::every(-1.0) == 0);
+    CHECK(HE::api::timer::after(std::nan("")) == 0);
+    CHECK(HE::api::timer::nextDueSeconds() < 0.0);
+
+    // The nearest one is what the loop is told about, not the first one made.
+    const int slow = HE::api::timer::after(2.0);
+    const int fast = HE::api::timer::after(0.25);
+    REQUIRE(slow != 0);
+    REQUIRE(fast != 0);
+    REQUIRE(slow != fast);
+    CHECK(HE::api::timer::nextDueSeconds() == doctest::Approx(0.25));
+
+    // …and cancelling it hands the answer back to the other one.
+    CHECK(HE::api::timer::cancel(fast));
+    CHECK(HE::api::timer::nextDueSeconds() == doctest::Approx(2.0));
+
+    // A cap, so one line of script cannot turn into an unbounded per-frame cost.
+    HE::api::timer::cancelAll();
+    for (int i = 0; i < HE::api::timer::kMaxTimers; ++i)
+        REQUIRE(HE::api::timer::every(1.0) != 0);
+    CHECK(HE::api::timer::after(1.0) == 0);
+    HE::api::timer::cancelAll();
+    CHECK(HE::api::timer::nextDueSeconds() < 0.0);
+    // …and cancelAll really did take them all with it.
+    CHECK(HE::api::timer::after(1.0) != 0);
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: cancelling in the same frame it fired takes the event with it")
+{
+    HE::api::timer::cancelAll();
+    const int a = HE::api::timer::after(0.1);
+    const int b = HE::api::timer::after(0.1);
+    REQUIRE(a != 0);
+    REQUIRE(b != 0);
+    HE::api::timer::poll(0.2);
+    // Both are due, but the host has not drained yet — and one of them is
+    // cancelled in between. Delivering it anyway would be the one case where
+    // cancel does not cancel.
+    CHECK(HE::api::timer::cancel(b) == false);   // a one-shot is already gone
+    HE::api::timer::cancelAll();
+    CHECK(drainTimers().empty());
+
+    // The same with a repeat, which IS still there to be cancelled.
+    const int r = HE::api::timer::every(0.1);
+    HE::api::timer::poll(0.2);
+    CHECK(HE::api::timer::cancel(r));
+    CHECK(drainTimers().empty());
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("timer: the rows are in the registry, unpermissioned, and reach every frontend")
+{
+    // Unpermissioned on purpose: a timer cannot read, start or reach anything.
+    // Locked down completely, the rows still work — which is what says the gate
+    // was never there rather than that it happened to be open.
+    PermReset restore;
+    HE::api::perm::set(HE::api::perm::Grants{});
+    HE::api::timer::cancelAll();
+
+    const auto& reg = HE::api::registry();
+    auto row = [&](const char* id) -> const HE::api::ApiFn*
+    {
+        for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+        return nullptr;
+    };
+    for (const char* id : { "timer.after", "timer.every", "timer.cancel",
+                            "timer.active", "timer.cancelAll" })
+        CHECK_MESSAGE(row(id) != nullptr, id);
+
+    HE::api::Ctx c;
+    const HE::api::ApiFn* after = row("timer.after");
+    REQUIRE(after);
+    const auto made = after->invoke(c, { HorizonCode::Value::ofFloat(0.5f) });
+    REQUIRE(made.size() == 1);
+    const int h = made[0].i;
+    CHECK(h != 0);
+
+    const HE::api::ApiFn* act = row("timer.active");
+    REQUIRE(act);
+    CHECK(act->invoke(c, { HorizonCode::Value::ofInt(h) })[0].b);
+    const HE::api::ApiFn* can = row("timer.cancel");
+    REQUIRE(can);
+    CHECK(can->invoke(c, { HorizonCode::Value::ofInt(h) })[0].b);
+    CHECK_FALSE(act->invoke(c, { HorizonCode::Value::ofInt(h) })[0].b);
+
+    // The group is on the list the flat frontends build their tables from, so
+    // a Lua or Python script reaches it too — without that a text script can
+    // sleep a coroutine but never ask to be called back.
+    CHECK(HE::api::isScriptGroup("timer"));
+    HE::api::timer::cancelAll();
+}
+
+TEST_CASE("process: shut by default, and asking is not running")
+{
+    PermReset restore;
+    Ctx c;
+    HE::api::perm::set(HE::api::perm::Grants{});
+
+    // Without the permission it runs nothing and says so in the result rather
+    // than by throwing: a graph has no way to catch anything.
+    const auto denied = HE::api::process::run(c, "echo", { "hello" }, 5.0);
+    CHECK_FALSE(denied.ok);
+    CHECK(denied.out.empty());
+    CHECK_FALSE(HE::api::process::openUrl(c, "https://example.invalid"));
+
+    // which() is deliberately NOT gated: asking whether a tool exists runs
+    // nothing, and "you need git for this" is exactly the message somebody needs
+    // in order to decide whether to grant the permission.
+    CHECK(HE::api::process::which(c, "definitely-not-a-real-program").empty());
+
+    { HE::api::perm::Grants g; g.processes = true; HE::api::perm::set(g); }
+#ifndef _WIN32
+    // A real subprocess, its output, and an honest exit code — the three things
+    // popen could not give (see Platform/Process.h).
+    const auto ran = HE::api::process::run(c, "echo", { "hello" }, 10.0);
+    CHECK(ran.ok);
+    CHECK(ran.exitCode == 0);
+    CHECK(ran.out.rfind("hello", 0) == 0);
+
+    // A non-zero exit is an ANSWER, not an error: `false` succeeds at failing.
+    const auto failed = HE::api::process::run(c, "false", {}, 10.0);
+    CHECK_FALSE(failed.ok);
+    CHECK(failed.exitCode == 1);
+#endif
+    // A program that is not there does not start, and does not pretend to.
+    const auto missing = HE::api::process::run(c, "definitely-not-a-real-program", {}, 5.0);
+    CHECK_FALSE(missing.ok);
+}
+
+TEST_CASE("notify: nothing bound means nothing shown, and it says so")
+{
+    // The banner itself belongs to the desktop, so what is checked here is the
+    // half that does not: an unbound host answers false instead of pretending,
+    // and a notification with nothing in it never reaches the host at all.
+    Ctx c;   // no host callbacks — this is the editor's situation exactly
+    CHECK_FALSE(HE::api::app::notify(c, "Done", "The export finished"));
+    CHECK_FALSE(HE::api::app::notifyAvailable(c));
+
+    // Bound, and now it goes through — with both halves of the text.
+    std::string sawTitle, sawBody;
+    int calls = 0;
+    c.notify = [&](const std::string& t, const std::string& b)
+    { sawTitle = t; sawBody = b; ++calls; return true; };
+    c.notifyAvailable = [] { return true; };
+
+    CHECK(HE::api::app::notify(c, "Done", "The export finished"));
+    CHECK(sawTitle == "Done");
+    CHECK(sawBody == "The export finished");
+    CHECK(HE::api::app::notifyAvailable(c));
+
+    // Empty on both sides is refused HERE rather than by each platform: an empty
+    // banner is drawn differently everywhere and means nothing anywhere.
+    CHECK_FALSE(HE::api::app::notify(c, "", ""));
+    CHECK(calls == 1);   // …and the host was never asked
+
+    // One of the two is enough: a line with no headline is still something to
+    // say, and the platform half decides how to draw it.
+    CHECK(HE::api::app::notify(c, "", "Just a line"));
+    CHECK(calls == 2);
+}
+
+TEST_CASE("http: shut by default, and a ticket is the only way in")
+{
+    // Nothing here touches the network — a test that needs a server is a test
+    // that fails on a train. What IS checkable without one: who may start a
+    // request, what a ticket that never existed answers, and that the readers
+    // are open to everybody.
+    PermReset restore;
+    Ctx c;
+    HE::api::perm::set(HE::api::perm::Grants{});
+
+    // Refused: 0, which is never a valid ticket, so "did it start" is one
+    // question everywhere.
+    CHECK(HE::api::http::get(c, "https://example.invalid/") == 0);
+    CHECK(HE::api::http::post(c, "https://example.invalid/", "", "{}") == 0);
+
+    { HE::api::perm::Grants g; g.network = true; HE::api::perm::set(g); }
+    // Permitted, and STILL 0 — because there is no URL. The gate is not the
+    // only reason a request does not start, and a caller that treats 0 as
+    // "forbidden" would be wrong here.
+    CHECK(HE::api::http::get(c, "") == 0);
+
+    // A ticket nobody was ever given: in flight, unknown, forgotten and evicted
+    // all answer the same, because a caller cannot act differently on them.
+    CHECK_FALSE(HE::api::http::done(c, 4242));
+    CHECK_FALSE(HE::api::http::ok(c, 4242));
+    CHECK(HE::api::http::status(c, 4242) == 0);
+    CHECK(HE::api::http::body(c, 4242).empty());
+    CHECK(HE::api::http::error(c, 4242).empty());
+    HE::api::http::forget(c, 4242);           // forgetting a stranger is not an error
+
+    // The readers are ungated on purpose: they answer about a request this
+    // process already made, and hiding that from the code that was allowed to
+    // ask would only make the failure harder to read.
+    HE::api::perm::set(HE::api::perm::Grants{});
+    CHECK_FALSE(HE::api::http::done(c, 4242));
+
+    // Whether this build can reach the network at all is its own question — on
+    // a Linux built without libcurl every request fails, and an application
+    // should be able to say so instead of discovering it per request.
+    CHECK(HE::api::http::available(c) == HE::Net::httpsAvailable());
+
+    // Nothing was ever queued, so this has no worker to stop and must not hang.
+    HE::api::http::shutdown();
+    int ticket = 0;
+    CHECK_FALSE(HE::api::http::takeFinished(ticket));
 }
 
 // A ContentManager holding one in-memory SaveGameTemplate ("mem://tpl") with
@@ -2364,6 +3388,133 @@ TEST_CASE("possession is one controller per character, both ways round")
     CHECK(player::character() == 0u);
 }
 
+// ─── JSON ─────────────────────────────────────────────────────────────────────
+// The path walker is the whole risk here: dotted keys, [i] indices, and a
+// refusal to invent values where a step is missing or the wrong kind.
+
+TEST_CASE("json: reading by dotted path")
+{
+    Ctx c;
+    const std::string doc =
+        R"({"user":{"name":"Ada","age":36,"admin":true},)"
+        R"("items":[{"id":10},{"id":20},{"id":30}],"empty":[]})";
+
+    using namespace HE::api;
+    CHECK(json::getString(c, doc, "user.name", "?") == "Ada");
+    CHECK(json::getNumber(c, doc, "user.age", -1.0) == doctest::Approx(36.0));
+    CHECK(json::getBool(c, doc, "user.admin", false) == true);
+    CHECK(json::getNumber(c, doc, "items[1].id", -1.0) == doctest::Approx(20.0));
+
+    // Missing, wrong type, and unparsable text all take the fallback — none of
+    // them are errors a graph should have to guard against.
+    CHECK(json::getString(c, doc, "user.nope", "fallback") == "fallback");
+    CHECK(json::getString(c, doc, "user.age", "fallback") == "fallback");   // wrong type
+    CHECK(json::getNumber(c, "not json at all", "a.b", 5.0) == doctest::Approx(5.0));
+    CHECK(json::getNumber(c, doc, "items[9].id", 5.0) == doctest::Approx(5.0)); // out of range
+
+    // A non-numeric index must NOT quietly read element 0.
+    CHECK(json::getNumber(c, doc, "items[x].id", -7.0) == doctest::Approx(-7.0));
+
+    CHECK(json::has(c, doc, "user.name"));
+    CHECK_FALSE(json::has(c, doc, "user.middleName"));
+    CHECK(json::count(c, doc, "items") == 3);
+    CHECK(json::count(c, doc, "empty") == 0);
+    CHECK(json::count(c, doc, "user") == 0);   // not an array
+}
+
+TEST_CASE("json: writing returns the whole document")
+{
+    Ctx c;
+    using namespace HE::api;
+
+    // Missing objects along the path are created.
+    const std::string built = json::setString(c, "", "window.title", "Notes");
+    CHECK(json::getString(c, built, "window.title", "?") == "Notes");
+
+    const std::string withNum = json::setNumber(c, built, "window.width", 640.0);
+    CHECK(json::getNumber(c, withNum, "window.width", -1.0) == doctest::Approx(640.0));
+    CHECK(json::getString(c, withNum, "window.title", "?") == "Notes"); // untouched
+
+    const std::string withBool = json::setBool(c, withNum, "window.maximized", true);
+    CHECK(json::getBool(c, withBool, "window.maximized", false) == true);
+
+    // Text that is neither empty nor valid JSON comes back unchanged: a setter
+    // must not silently discard whatever the caller was holding.
+    const std::string junk = "{ this is not json";
+    CHECK(json::setString(c, junk, "a", "b") == junk);
+}
+
+// ─── DateTime ────────────────────────────────────────────────────────────────
+
+TEST_CASE("datetime: fields and formatting agree with each other")
+{
+    Ctx c;
+    using namespace HE::api;
+
+    const double t = datetime::now(c);
+    CHECK(t > 1.6e9);   // any real clock is past 2020
+
+    // The parts and the formatted string are two views of the same instant, so
+    // they have to agree — which is what catches a UTC/local mix-up.
+    const std::string ymd = datetime::format(c, t, "%Y-%m-%d");
+    REQUIRE(ymd.size() == 10);
+    CHECK(std::stoi(ymd.substr(0, 4)) == datetime::year(c, t));
+    CHECK(std::stoi(ymd.substr(5, 2)) == datetime::month(c, t));
+    CHECK(std::stoi(ymd.substr(8, 2)) == datetime::day(c, t));
+
+    CHECK(datetime::month(c, t)   >= 1);
+    CHECK(datetime::month(c, t)   <= 12);
+    CHECK(datetime::hour(c, t)    <= 23);
+    CHECK(datetime::minute(c, t)  <= 59);
+    CHECK(datetime::weekday(c, t) <= 6);
+
+    // An empty format is not a reason to guess.
+    CHECK(datetime::format(c, t, "").empty());
+}
+
+// ─── Preferences ─────────────────────────────────────────────────────────────
+
+TEST_CASE("prefs: typed round-trip inside the fs sandbox")
+{
+    Ctx c;
+    using namespace HE::api;
+
+    const auto sandbox = std::filesystem::temp_directory_path() / "he_test_prefs";
+    std::filesystem::remove_all(sandbox);
+    fs::setSandboxRoot(sandbox.string());
+
+    // Start from a known state: the store is a process-wide singleton, so a
+    // previous test's keys would otherwise leak in.
+    prefs::clear(c);
+
+    CHECK_FALSE(prefs::has(c, "lastFolder"));
+    CHECK(prefs::getString(c, "lastFolder", "~") == "~");
+
+    prefs::setString(c, "lastFolder", "/tmp/work");
+    prefs::setNumber(c, "windowWidth", 1024.0);
+    prefs::setBool(c, "showTips", false);
+
+    CHECK(prefs::has(c, "lastFolder"));
+    CHECK(prefs::getString(c, "lastFolder", "~") == "/tmp/work");
+    CHECK(prefs::getNumber(c, "windowWidth", -1.0) == doctest::Approx(1024.0));
+    CHECK(prefs::getBool(c, "showTips", true) == false);
+
+    // Wrong type asked for → the fallback, not a coerced value.
+    CHECK(prefs::getNumber(c, "lastFolder", -1.0) == doctest::Approx(-1.0));
+
+    // Every set writes through, so the file is on disk by now.
+    CHECK(std::filesystem::exists(sandbox / "Prefs.json"));
+
+    CHECK(prefs::remove(c, "showTips"));
+    CHECK_FALSE(prefs::remove(c, "showTips"));   // already gone
+    CHECK(prefs::getBool(c, "showTips", true) == true);
+
+    prefs::clear(c);
+    CHECK_FALSE(prefs::has(c, "lastFolder"));
+
+    std::filesystem::remove_all(sandbox);
+}
+
 // ═══ Jumping and navigation, from a script's side of the wall ═════════════════
 
 namespace
@@ -2630,6 +3781,94 @@ TEST_CASE("EngineApi: particle rows are safe on an entity with no emitter, and d
     CHECK(HE::api::isScriptGroup("particle"));
 }
 
+// MUTATION: remove any of these names from isScriptGroup's list in
+// EngineApi.cpp — the group vanishes from horizon.<group> in Lua AND Python at
+// once, because both frontends build their tables from this one predicate.
+TEST_CASE("EngineApi: the application groups are script groups")
+{
+    // The merge analysis found the gap: the plan promises every registry group
+    // lights up in HorizonCode, Lua and Python at the same time, and the first
+    // eight of these were HorizonCode-only. The last three arrived already on
+    // the list. The language halves are in test_scripting_binding and
+    // test_python_scripting; this is the predicate they both hang on.
+    for (const char* g : { "widget", "theme", "dialog", "clipboard",
+                           "process", "json", "prefs", "datetime",
+                           "timer", "db", "print",
+                           // …and the second window (A5), which arrived with
+                           // the same promise attached.
+                           "window" })
+    {
+        CHECK(HE::api::isScriptGroup(g));
+        // …and the group is not empty, or listing it would expose nothing.
+        bool any = false;
+        const std::string prefix = std::string(g) + ".";
+        for (const HE::api::ApiFn& fn : HE::api::registry())
+            if (std::string_view(fn.id).substr(0, prefix.size()) == prefix) { any = true; break; }
+        CHECK(any);
+    }
+}
+
+// MUTATION: drop the `if (!c.openWindow)` guard in EngineApi.cpp's
+// window::open — a graph run in the editor (nothing bound) then calls through
+// an empty std::function and the whole editor goes down on a bad_function_call.
+TEST_CASE("EngineApi: the window group answers honestly when nothing is bound")
+{
+    HE::api::Ctx c{};
+    // No host: no window, and the id says so. 0 is the answer a graph can test.
+    CHECK(HE::api::window::open(c, "Tools", 400, 300) == 0);
+    // …and none of the others reaches into an unbound callback.
+    HE::api::window::close(c, 3);
+    HE::api::window::setTitle(c, 3, "x");
+    HE::api::window::setSize(c, 3, 100, 100);
+
+    // Bound: the title and the size arrive, and a size of nothing is refused
+    // rather than passed on to the platform.
+    std::string openedTitle;
+    uint32_t    openedW = 0, openedH = 0;
+    int         closed  = -1;
+    std::string titleOf;
+    uint32_t    sizeW = 0, sizeH = 0;
+    c.openWindow = [&](const std::string& t, uint32_t w, uint32_t h) -> uint32_t
+    { openedTitle = t; openedW = w; openedH = h; return 7; };
+    c.closeWindow      = [&](uint32_t id) { closed = static_cast<int>(id); };
+    c.setWindowTitleOf = [&](uint32_t, const std::string& t) { titleOf = t; };
+    c.setWindowSizeOf  = [&](uint32_t, uint32_t w, uint32_t h) { sizeW = w; sizeH = h; };
+
+    CHECK(HE::api::window::open(c, "Tools", 400, 300) == 7);
+    CHECK(openedTitle == "Tools");
+    CHECK(openedW == 400u);
+    CHECK(openedH == 300u);
+    // A window of no size is a window nobody finds again — clamped, not
+    // refused: the graph asked for a window.
+    CHECK(HE::api::window::open(c, "T", 0, -5) == 7);
+    CHECK(openedW == 640u);
+    CHECK(openedH == 480u);
+
+    HE::api::window::close(c, 7);
+    CHECK(closed == 7);
+    // 0 is the MAIN window, and closing that is app.quit — a different thing
+    // with a different name. It must not reach the callback.
+    closed = -1;
+    HE::api::window::close(c, 0);
+    CHECK(closed == -1);
+
+    HE::api::window::setTitle(c, 7, "Palette");
+    CHECK(titleOf == "Palette");
+    HE::api::window::setSize(c, 7, 800, 600);
+    CHECK(sizeW == 800u);
+    CHECK(sizeH == 600u);
+    sizeW = sizeH = 0;
+    HE::api::window::setSize(c, 7, 0, 600);
+    CHECK(sizeW == 0u);   // refused
+
+    // Window 0 falls through to the main-window rows, so a graph that says
+    // window.setTitle(0, …) lands where it expects.
+    std::string mainTitle;
+    c.setWindowTitle = [&](const std::string& t) { mainTitle = t; };
+    HE::api::window::setTitle(c, 0, "Main");
+    CHECK(mainTitle == "Main");
+}
+
 // MUTATION: in EngineApi.cpp's self-default post-pass, delete the two lines that
 // build `withSelf` and return `inner(c, a)` unchanged instead — the jump is then
 // asked of the world root, the character never leaves the floor, and the row
@@ -2707,27 +3946,52 @@ TEST_CASE("EngineApi: the Entity self-default is off where it would lie")
 // remembered per row — so it is asserted over the whole table, not over a list.
 TEST_CASE("EngineApi: every row that acts on an entity carries the self-default")
 {
-    size_t flagged = 0;
+    // The second family that has it: a widget's ANIMATION rows, where the empty
+    // pin means the widget whose graph is calling. Listed here rather than
+    // derived, because "leading widget param" is emphatically NOT the rule —
+    // Show, Destroy and Add Child lead with one too, and there an empty pin
+    // must stay empty rather than quietly mean the caller.
+    const std::set<std::string> widgetSelf = {
+        "widget.animate", "widget.animateColor", "widget.animateVec2",
+        "widget.stopAnimation", "widget.playAnimation", "widget.playAnimationLooped",
+        "widget.stopAnimationClip", "widget.isPlayingAnimation",
+        "widget.stopAllAnimations", "widget.restoreOriginalState",
+        "widget.childRef",
+    };
+
+    size_t flagged = 0, widgets = 0;
     for (const HE::api::ApiFn& fn : HE::api::registry())
     {
         const bool leads = !fn.params.empty() && std::strcmp(fn.params[0].name, "entity") == 0;
         const bool excluded = std::strcmp(fn.id, "entity.exists")  == 0 ||
                               std::strcmp(fn.id, "entity.destroy") == 0;
+        const bool widgetRow = widgetSelf.count(fn.id) != 0;
         if (leads && !excluded)
         {
             CHECK_MESSAGE(fn.params[0].selfDefault,
                           std::string("row without the self-default: ").append(fn.id).c_str());
             ++flagged;
         }
+        if (widgetRow)
+        {
+            REQUIRE(!fn.params.empty());
+            CHECK_MESSAGE(std::strcmp(fn.params[0].name, "widget") == 0,
+                          std::string("animation row not leading with widget: ").append(fn.id).c_str());
+            CHECK_MESSAGE(fn.params[0].selfDefault,
+                          std::string("animation row without the self-default: ").append(fn.id).c_str());
+            ++widgets;
+        }
         // Never on anything else — not on a later parameter, not on a row whose
         // first argument happens to be an int meaning something quite different
-        // (a widget id, a zone handle, a parent).
+        // (another widget, a zone handle, a parent).
+        const bool firstMayHaveIt = (leads && !excluded) || widgetRow;
         for (size_t i = 0; i < fn.params.size(); ++i)
-            if (i > 0 || !leads || excluded)
+            if (i > 0 || !firstMayHaveIt)
                 CHECK_MESSAGE(!fn.params[i].selfDefault,
                               std::string("unexpected self-default on ").append(fn.id).c_str());
     }
     CHECK(flagged > 40);   // it is a convention, not a handful of exceptions
+    CHECK(widgets == widgetSelf.size());   // every listed row still exists
 }
 
 // Would have been green before the change only in the sense that the rows did

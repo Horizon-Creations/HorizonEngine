@@ -1,0 +1,152 @@
+# What a shipped runtime weighs — on every platform, not just the one the
+# developer sits at.
+#
+# docs/he-apps-plan.md A3b split the runtime into three flavours (game,
+# app-advanced, app-basic). They were built and weighed on macOS/arm64 and
+# nowhere else, which left the claim blind on two of three platforms: a Windows
+# runtime carries the MSVC redistributable and a .exe, a Linux one stages its
+# third-party .so next to the binaries, and neither had ever been through
+# scripts/build_runtimes.py at all.
+#
+# This workflow is that measurement. It builds all three flavours on all three
+# platforms with the SAME recipe the shipped CI build uses (HE_PORTABLE_BUILD,
+# HE_PREFER_MBEDTLS), reports the size table for each, and then checks it
+# against the thresholds in scripts/runtime_size.py. A platform that has no
+# measured threshold yet is REPORTED and skipped rather than judged by another
+# platform's number — the same rule the script itself follows.
+#
+# Deliberately NOT part of ci.yml: this builds HorizonGame three times per
+# platform and nothing else, no editor and no tests. ci.yml stays the thing that
+# says whether the code is good; this says what it weighs.
+name: Runtime flavours
+
+on:
+  # ci.yml only fires on main, so a feature branch never learns what its runtime
+  # weighs until after the merge — which is the wrong end. The paths filter is
+  # what makes that affordable: only a change to the size scripts or to the
+  # CMake files that decide the backend set can move these numbers, so an
+  # ordinary commit on the branch does not spend an hour of runner time.
+  push:
+    branches:
+      - main
+      - 'claude/he-apps-ui-framework-**'
+    paths:
+      - 'scripts/build_runtimes.py'
+      - 'scripts/runtime_size.py'
+      - 'CMakeLists.txt'
+      - 'src/HE_Rendering/CMakeLists.txt'
+      - 'src/HE_Game/CMakeLists.txt'
+      - 'cmake/BundlePython.cmake'
+      - '.github/workflows/runtime-flavors.yml'
+  workflow_dispatch:
+
+jobs:
+  weigh:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-latest
+            name: Linux
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # Three full HorizonGame builds per platform, from cold on the first run.
+    # The default six hours would let a hung configure sit there all morning.
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Same dev packages ci.yml installs: SDL3 is compiled from source and
+      # needs the X11/Wayland, OpenGL/EGL, audio and udev/dbus headers, and the
+      # engine links Python and lz4/zstd.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev \
+            libcurl4-openssl-dev
+
+      # The FetchContent sources, not the objects. build_runtimes.py hands the
+      # first flavour's checkout to the next two via FETCHCONTENT_SOURCE_DIR, so
+      # one cached copy serves all three builds of the run.
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: out/runtime-builds/*/_deps
+          key: flavor-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      # HE_PORTABLE_BUILD and HE_PREFER_MBEDTLS are not decoration: they are the
+      # recipe ci.yml ships with, and both move the numbers. Portable forbids
+      # -march=native, mbedTLS replaces a 4,8 MB OpenSSL load-time edge with a
+      # 0,3 MB static one (docs/he-apps-plan.md A3a). Weighing a tree built any
+      # other way would measure a runtime nobody ships.
+      #
+      # --deploy-dir points at the workspace for the same reason ci.yml's does:
+      # the default on Windows is a hardcoded developer path that does not exist
+      # on a runner.
+      #
+      # No actions/setup-python here on purpose. ci.yml uses whatever Python the
+      # image provides, CMake bundles that one into the runtime, and its stdlib
+      # is over half of what these numbers measure. Pinning a different
+      # interpreter just for the scripts would quietly weigh a runtime nobody
+      # ships. `python3` is the name everywhere except a Windows image, hence
+      # the lookup.
+      - name: Build and weigh all three runtime flavours
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          echo "using $PY"
+          "$PY" scripts/build_runtimes.py \
+            --flavor game --flavor app-advanced --flavor app-basic \
+            --build-type Release \
+            --jobs 4 \
+            --deploy-dir "${{ github.workspace }}/package" \
+            --define HE_PORTABLE_BUILD=ON \
+            --define HE_PREFER_MBEDTLS=ON \
+            --size
+
+      # The step above only REPORTS. This one judges, and it is separate so the
+      # report survives a failure — the table is the thing one needs in order to
+      # decide whether a number moved for a good reason.
+      #
+      # Exit code 2 is the script's "nothing I may judge": an unmeasured
+      # platform or flavour. That has to stay green here, or the very first run
+      # on a new platform goes red for the honest state it is meant to establish.
+      - name: Check against the size thresholds
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          rc=0
+          for pair in "Game:game" "AppAdvanced:app-advanced" "AppBasic:app-basic"; do
+            dir="${pair%%:*}"; flavor="${pair##*:}"
+            echo "── $flavor ──────────────────────────────────────────────"
+            set +e
+            "$PY" scripts/runtime_size.py "${{ github.workspace }}/package/$dir" \
+              --check --flavor="$flavor" --build-type=Release
+            code=$?
+            set -e
+            if [ "$code" = "2" ]; then
+              echo "(no measured threshold yet — skipped)"
+            elif [ "$code" != "0" ]; then
+              rc=1
+            fi
+          done
+          exit $rc

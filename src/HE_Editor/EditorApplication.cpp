@@ -1,4 +1,5 @@
 #include "EditorApplication.h"
+#include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
@@ -9,6 +10,7 @@
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "HorizonVersion.h"
@@ -180,6 +182,20 @@ struct HostCtxParts
 	std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
 	std::function<void(uint32_t)> destroyObject;
 	std::function<void()>         quit;
+	// Two of the four window rows, and deliberately not the other two.
+	//
+	// windowSize and requestRedraw are answerable here: a previewed graph asking
+	// how big its surface is deserves a number rather than a silent zero, and
+	// asking for a frame is what an event-driven app does (A2).
+	//
+	// setWindowTitle and setWindowSize stay UNBOUND on purpose, and so do
+	// minimize/maximize (plan F3). A graph running in the preview must not
+	// rename, resize, minimise or maximise the editor — that is not the window
+	// it thinks it is talking to. Unbound is an ordinary state here: the row
+	// logs once and does nothing, which is the honest answer to "this host will
+	// not do that".
+	std::function<glm::vec2()> windowSize;
+	std::function<void()>      requestRedraw;
 };
 // One editor per process; cleared in OnShutdown so nothing here outlives the
 // object its lambdas capture.
@@ -202,6 +218,8 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.createObject  = g_host.createObject;
 	c.destroyObject = g_host.destroyObject;
 	c.requestQuit   = g_host.quit;
+	c.windowSize    = g_host.windowSize;
+	c.requestRedraw = g_host.requestRedraw;
 	return c;
 }
 } // namespace
@@ -215,6 +233,7 @@ std::string getRHIName(HE::RendererBackend backend)
 	case HE::RendererBackend::D3D12: return "D3D12";
 	case HE::RendererBackend::Vulkan: return "Vulkan";
 	case HE::RendererBackend::Metal: return "Metal";
+	case HE::RendererBackend::Software: return "Software";
 	default: return "Unknown";
 	}
 }
@@ -241,6 +260,9 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 		else if (s == "Vulkan")              cfg.backend = HE::RendererBackend::Vulkan;
 		else if (s == "D3D11")               cfg.backend = HE::RendererBackend::D3D11;
 		else if (s == "D3D12")               cfg.backend = HE::RendererBackend::D3D12;
+		// The CPU rasterizer, so a dump can witness what an application without a
+		// GPU actually draws — the whole point of being able to force a backend.
+		else if (s == "Software" || s == "SW") cfg.backend = HE::RendererBackend::Software;
 	}
 
 	// ── Startup splash ──────────────────────────────────────────────────────
@@ -425,6 +447,23 @@ void EditorApplication::OnInit()
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
+			// An application's preview shows the saved assets, so a save is the
+			// signal to rebuild it. Only for the kinds that change what the
+			// preview DOES — a texture or a font swaps itself in through the
+			// content manager, and restarting for one would throw away the app's
+			// state for nothing.
+			if (!m_projectManager.currentProject().appProject) return;
+			uint16_t type = 0;
+			if (!HAsset::readAssetTypeFromFile(fullPath, type)) return;
+			switch (static_cast<HE::AssetType>(type))
+			{
+			case HE::AssetType::Widget:
+			case HE::AssetType::HorizonCodeClass:
+			case HE::AssetType::Script:
+				m_appPreviewRestartPending = true;
+				break;
+			default: break;
+			}
 		});
 
 	m_collab.onAssetLockDenied([this](const std::string& relPath) {
@@ -1273,6 +1312,16 @@ void EditorApplication::OnInit()
 		// viewport is a preview, so its Exit button ends the preview. Parked
 		// rather than run — see m_playStopRequested.
 		g_host.quit     = [this]{ m_playStopRequested = true; };
+		// The window a previewed graph is actually looking at is the editor's,
+		// which it may ASK about and may not change. See HostCtxParts for why
+		// the other two rows stay unbound.
+		g_host.windowSize = [this] {
+			const HE::Window* w = window();
+			return w ? glm::vec2(static_cast<float>(w->GetWidth()),
+			                     static_cast<float>(w->GetHeight()))
+			         : glm::vec2(0.0f);
+		};
+		g_host.requestRedraw = [this] { requestRedraw(); };
 		g_host.createObject = [this](const std::string& p, const float* pos,
 		                          const float* rot) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
@@ -1379,6 +1428,20 @@ void EditorApplication::OnInit()
 			if (!projPath.empty())
 				HE::api::fs::setSandboxRoot(
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
+			// …and what this project permits, refreshed here for the same reason
+			// and at the same cost. The editor is gated by the SAME block as the
+			// shipped app on purpose: a preview that may delete a stranger's
+			// directory while the export may not is the worse of the two, because
+			// the damage lands on the author's own machine before anything could
+			// have been shipped.
+			{
+				const ProjectData& p = m_projectManager.currentProject();
+				HE::api::perm::Grants g;
+				g.files     = p.allowFiles;
+				g.processes = p.allowProcesses;
+				g.network   = p.allowNetwork;
+				HE::api::perm::set(g);
+			}
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
 			// So does the rest of the app-level half (audio, runtime, entity
@@ -1404,6 +1467,16 @@ void EditorApplication::OnInit()
 	m_projectManager.setOnProjectLoaded([this](const std::string& sceneAbsPath)
 	{
 		setWorld(m_editorWorld.get());
+
+		// Which scripts this project's text needs, as early as the project is
+		// known: the font atlas is baked ONCE and every backend uploads it once,
+		// so a mask that arrives after the first label was drawn cannot be
+		// applied. uiSetFontScripts says so rather than half-applying it, and
+		// Preferences ▸ Project ▸ Fonts turns that "no" into a sentence about
+		// restarting. Opening a second project with a different answer in one
+		// session is exactly that case.
+		HE::uiSetFontScripts(m_projectManager.currentProject().fontScripts);
+		HE::uiSetFontWeightBold(m_projectManager.currentProject().fontWeightBold);
 
 		// Point the ContentManager at this project's content folder so the
 		// renderer and the content browser can resolve asset references.
@@ -1448,6 +1521,15 @@ void EditorApplication::OnInit()
 			// Source/Generated/GameTypes.h (regenerated again on every panel save).
 			if (m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
 				HE::writeCppTypesHeader(projectPath);
+		}
+
+		// The project's theme, in the editor's own widget runtime. A project names
+		// one and the packaged application boots with it; without this the editor
+		// kept the built-in default, so the live preview and the widget designer
+		// both showed a theme the finished application never uses.
+		{
+			AppContext ctx = makeContext();
+			ThemeAssetPanel::applyProjectTheme(ctx);
 		}
 
 		// Script log lines say which language wrote them. Same rule as the type
@@ -1881,6 +1963,47 @@ void EditorApplication::OnRender(float dt)
 	const bool stepping   = m_isPaused && m_stepFrame;
 	m_stepFrame           = false;
 	const bool simulating = m_isPlaying && (!m_isPaused || stepping);
+
+	// ── Application projects have no play mode ───────────────────────────────
+	// Their UI is not something you start, it is something that is running: the
+	// viewport panel shows the app itself, and clicking a button in it has to do
+	// what that button does (docs/he-apps-plan.md E2). So everything that makes
+	// widgets LIVE — the tick, the pointer, the keyboard, the HorizonCode
+	// runtime — is gated on this instead of on `simulating`.
+	//
+	// Deliberately not "simulating || app": for a game nothing changes at all,
+	// and for an app there is no second state that could disagree with this one.
+	const bool uiLive = simulating || m_projectManager.currentProject().appProject;
+
+	// Start an application's UI once per project. The packaged runtime does this
+	// in OnInit; here there is no "start", so the first frame that finds an app
+	// project whose UI has not been started yet fires the GameInstance's OnInit —
+	// which is what creates the root widget. Keyed by project path so opening a
+	// different project starts that one instead of assuming one ever runs.
+	if (m_editorWorld && m_projectManager.currentProject().appProject &&
+	    m_appUiStartedFor != m_projectManager.currentProject().path)
+	{
+		m_appUiStartedFor = m_projectManager.currentProject().path;
+		HE_LOG_INFO(Editor, "%s", "Application project: starting the live preview "
+		                          "(GameInstance OnInit)");
+		m_gameInstance.fireInit();
+		m_appPreviewRestartPending = false;   // it just started; nothing to redo
+		// Say what came of it. "Nothing is previewed" has three possible causes —
+		// no graph, a graph that creates nothing, a widget that fails to load —
+		// and this line tells them apart without a debugger.
+		HE_LOG_INFO(Editor, "Application project: preview holds %zu widget(s) after OnInit "
+		                    "(GameInstance graph: %zu node(s))",
+		            m_editorWorld->widgets().count(), m_gameInstanceGraph.nodes.size());
+	}
+	// An edit landed since the last frame — rebuild the preview on it.
+	if (m_appPreviewRestartPending)
+	{
+		m_appPreviewRestartPending = false;
+		restartAppPreview(m_appPreviewKeepState);
+		// Back to keeping it: everything except the toolbar button means "an
+		// asset changed", and an asset change should not cost what was typed.
+		m_appPreviewKeepState = true;
+	}
 
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
 	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
@@ -2687,7 +2810,11 @@ void EditorApplication::OnRender(float dt)
 		// drive the menu doing the unpausing; the editor's transport has its own
 		// button for that, and a widget graph is script code — letting it free-run
 		// between steps would make "one step = one frame of world" a lie.
-		if (simulating && m_editorWorld)
+		// uiLive, not simulating: in an application project the widgets are the
+		// product and run without anyone pressing play (see uiLive above). The
+		// gameplay hosts below stay on `simulating` — an app has no players and
+		// no entity classes to tick.
+		if (uiLive && m_editorWorld)
 		{
 			// Raw dt — see the gameDt note above: the pause menu keeps ticking.
 			m_editorWorld->widgets().tick(dt);
@@ -2704,17 +2831,20 @@ void EditorApplication::OnRender(float dt)
 			// axis as well would turn every drag across the viewport into player
 			// input. Esc toggles the capture, so this is also how the author
 			// gets the cursor back without the game turning with it.
-			m_playerHost.tick(input(), gameDt,
-			                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
-			// Entity classes: Tick, plus reaping the ones whose entity is gone.
-			m_entityHost.tick(gameDt);
+			if (simulating)
+			{
+				m_playerHost.tick(input(), gameDt,
+				                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
+				// Entity classes: Tick, plus reaping the ones whose entity is gone.
+				m_entityHost.tick(gameDt);
+			}
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
 			// transition, so it doesn't fight ImGui's own text-input management.
 			if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
 			{
-				const bool want = m_editorWorld->widgets().hasFocusedTextField();
+				const bool want = m_editorWorld->widgets().isEditingText();
 				if (want != m_widgetTextInputActive)
 				{
 					if (want) SDL_StartTextInput(w); else SDL_StopTextInput(w);
@@ -2779,7 +2909,7 @@ void EditorApplication::OnRender(float dt)
 		// mouse capture is engaged there is no cursor, so the pointer is invalid.
 		// Frozen with the rest of the session: this ends in callOnUIEvent, and a
 		// click that runs script code while the world stands still is not a pause.
-		if (simulating && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
+		if (uiLive && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
 		{
 			// Widget pointer input first — widgets draw on top of entity UI. The
 			// answer is kept, not dropped: a click that landed on a widget must
@@ -2794,7 +2924,20 @@ void EditorApplication::OnRender(float dt)
 			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured && uiTakesInput;
 			const bool uiWantsPointer = m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
-				m_uiPointerDown, uiPointerLive);
+				m_uiPointerDown, uiPointerLive, m_uiPointerRight && uiPointerLive);
+
+			// A double-click means "open this": the word under it in a text
+			// field, and otherwise the list row under it. The same order the
+			// packaged game uses, so the preview and the build agree.
+			if (m_uiPointerDouble)
+			{
+				m_uiPointerDouble = false;
+				if (uiPointerLive &&
+				    !m_editorWorld->widgets().selectWordAtPointer(
+				        m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY))
+					m_editorWorld->widgets().activateAtPointer(
+						m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY);
+			}
 
 			// …and this frame's wheel, so a scroll box under the cursor gets it.
 			if (uiPointerLive && m_uiWheel != 0.0f)
@@ -2806,7 +2949,35 @@ void EditorApplication::OnRender(float dt)
 			// game uses: arrows or D-Pad move the focus, Enter/Space or the
 			// south button activate. Held state only, so the edges live here —
 			// and a focused text field keeps the arrows for its own text.
-			if (uiTakesInput && !m_editorWorld->widgets().hasFocusedTextField())
+			// ── Back, OUTSIDE the text-field gate ────────────────────────
+			// isEditingText() is "something has the keyboard", and
+			// showModal hands the keyboard to the dialog by construction — so
+			// inside the block below this would be switched off at exactly the
+			// moment a dialog is open, which is the one case it exists for. It
+			// must also work while a field in the dialog is being typed into.
+			if (uiTakesInput)
+			{
+				const bool back = input().IsKeyDown(SDL_SCANCODE_ESCAPE) ||
+				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
+				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
+				m_uiBackPrev = back;
+
+				// Tab through the form, outside the gate for the same reason:
+				// leaving a text field is exactly what it is for. Shift+Tab
+				// goes back.
+				const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
+				if (tab && !m_uiTabPrev)
+					m_editorWorld->widgets().focusNext(
+						input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
+						input().IsKeyDown(SDL_SCANCODE_RSHIFT),
+						m_uiViewportW, m_uiViewportH);
+				m_uiTabPrev = tab;
+			}
+			// The arrows reach the widgets when no text field has the keyboard —
+			// or when a list hangs open, because then they belong to the list
+			// whatever else has the focus.
+			if (uiTakesInput && (!m_editorWorld->widgets().isEditingText() ||
+			                     m_editorWorld->widgets().hasOpenDropdown()))
 			{
 				using Nav = WidgetManager::NavDir;
 				const struct { Nav dir; SDL_Scancode key; SDL_GamepadButton pad; } kNav[] = {
@@ -2845,8 +3016,14 @@ void EditorApplication::OnRender(float dt)
 					case HE::UICursor::Text:      mc = ImGuiMouseCursor_TextInput; break;
 					case HE::UICursor::ResizeWE:  mc = ImGuiMouseCursor_ResizeEW;  break;
 					case HE::UICursor::ResizeNS:  mc = ImGuiMouseCursor_ResizeNS;  break;
+					case HE::UICursor::ResizeNWSE:mc = ImGuiMouseCursor_ResizeNWSE;break;
+					case HE::UICursor::ResizeNESW:mc = ImGuiMouseCursor_ResizeNESW;break;
 					case HE::UICursor::Move:      mc = ImGuiMouseCursor_ResizeAll; break;
 					case HE::UICursor::No:        mc = ImGuiMouseCursor_NotAllowed;break;
+					case HE::UICursor::Wait:      mc = ImGuiMouseCursor_Wait;      break;
+					// Crosshair has no ImGui shape, so in the preview it stays
+					// the arrow. The packaged application gets the real one from
+					// SDL — this is the editor's limit, not the enum's.
 					default:                      mc = ImGuiMouseCursor_Arrow;     break;
 				}
 				ImGui::SetMouseCursor(mc);
@@ -5038,6 +5215,76 @@ void EditorApplication::dumpFrameHeadless()
 			 + "° -> " + std::to_string(endDeg) + "°").c_str());
 	}
 
+	// HE_DUMP_UITEST: put a sheet of "Schicht 0" samples on screen, so the UI
+	// style vocabulary can be LOOKED AT headless instead of only asserted about.
+	// Everything here goes through the ordinary path — a widget asset, the
+	// widget manager, the extractor, the backend's UI shader — so what the
+	// capture shows is what an application would get, not a demo drawn beside it.
+	if (const char* ui = std::getenv("HE_DUMP_UITEST"); ui && *ui && m_editorWorld)
+	{
+		HE::UIWidgetTree t;
+		t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+		t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+		// One tile per feature, laid out by hand: 4 across, each 260x110.
+		int col = 0, row = 0;
+		auto tile = [&](const std::function<void(HE::UIElement&)>& style)
+		{
+			const int id = t.add(HE::UIWidgetType::Panel);
+			HE::UIElement& e = *t.find(id);
+			HE::uiSetAnchorPreset(e, 0);
+			e.pivotX = e.pivotY = 0.0f;
+			e.posX = 60.0f + static_cast<float>(col) * 300.0f;
+			e.posY = 80.0f + static_cast<float>(row) * 170.0f;
+			e.sizeX = 240.0f; e.sizeY = 110.0f;
+			e.setProp("Color", HE::UIPropValue::ofColor({ 0.26f, 0.30f, 0.38f, 1.0f }));
+			style(e);
+			if (++col == 4) { col = 0; ++row; }
+		};
+		tile([](HE::UIElement&){});                                        // plain
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(24.0f); });   // all round
+		tile([](HE::UIElement& e){ e.cornerRadius = { 28.0f, 28.0f, 0.0f, 0.0f }; });  // a tab
+		tile([](HE::UIElement& e){ e.cornerRadius = { 30.0f, 0.0f, 30.0f, 0.0f }; });  // a leaf
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f);
+		                           e.borderWidth = 4.0f;
+		                           e.borderColor = glm::vec4(1.0f, 0.72f, 0.20f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.gradient = true;
+		                           e.gradientColor = glm::vec4(0.90f, 0.35f, 0.25f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.gradient = true;
+		                           e.gradientShape = 1;
+		                           e.gradientColor = glm::vec4(0.10f, 0.10f, 0.14f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.gradient = true;
+		                           e.gradientAngle = 90.0f;
+		                           e.gradientColor = glm::vec4(0.25f, 0.70f, 0.45f, 1.0f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.shadow = true;
+		                           e.shadowBlur = 18.0f; e.shadowOffsetY = 8.0f; });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(16.0f); e.innerShadow = true;
+		                           e.innerShadowBlur = 14.0f; });
+		tile([](HE::UIElement& e){ e.cornerRadius = { 30.0f, 4.0f, 30.0f, 4.0f };
+		                           e.shadow = true; e.shadowBlur = 14.0f;
+		                           e.shadowOffsetX = 6.0f; e.shadowOffsetY = 6.0f;
+		                           e.borderWidth = 2.0f;
+		                           e.borderColor = glm::vec4(1.0f, 1.0f, 1.0f, 0.55f); });
+		tile([](HE::UIElement& e){ e.cornerRadius = glm::vec4(55.0f);   // capsule (clamped)
+		                           e.gradient = true; e.gradientShape = 1;
+		                           e.gradientColor = glm::vec4(0.55f, 0.20f, 0.65f, 1.0f);
+		                           e.innerShadow = true; e.innerShadowBlur = 20.0f; });
+
+		UIWidgetAsset wa;
+		wa.type = HE::AssetType::Widget;
+		wa.name = "__uiStyleWitness";
+		wa.path = "__uiStyleWitness.hasset";
+		wa.treeJson = HE::uiWidgetTreeToJson(t);
+		const HE::UUID wid = contentManager().registerWidget(std::move(wa));
+		if (wid != HE::UUID{})
+		{
+			const int inst = m_editorWorld->widgets().createWidget(
+				contentManager(), "__uiStyleWitness.hasset");
+			if (inst) m_editorWorld->widgets().showWidget(inst);
+			else HE_LOG_WARN(Editor, "%s",
+				"EditorApplication: the UI style witness could not be instantiated");
+		}
+	}
+
 	// ── Rope & trail witness (HE_DUMP_ROPETEST) ──────────────────────────────
 	// Puts a tube rope, a ribbon rope and a motion trail in front of the camera
 	// and DRIVES THE REAL SYSTEM over a handful of ticks, because that is the
@@ -5508,6 +5755,10 @@ void EditorApplication::applyRemoteDocDeltas(
 	{
 		m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 		saveGameInstanceGraph();
+		// A collaborator's GameInstance edit rebuilds the preview here for the
+		// same reason our own does — see commitGameInstance.
+		if (m_projectManager.currentProject().appProject)
+			m_appPreviewRestartPending = true;
 	}
 	// Deliberately NOT marked dirty. The holder's whole-file autosave is what
 	// writes this into our project a moment later; flagging the tab here would
@@ -5823,11 +6074,21 @@ AppContext EditorApplication::makeContext()
 		.commitGameInstance  = [this]{
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 			saveGameInstanceGraph();
+			// The GameInstance is what BUILDS an application's UI, so editing it
+			// and not rebuilding the preview would leave the old widgets on
+			// screen with the new graph behind them.
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
+		.appLivePreview      = m_projectManager.currentProject().appProject,
+		// The toolbar button, and the ONE path that deliberately drops the
+		// state: it exists to get out of one.
+		.restartAppPreview   = [this]{ m_appPreviewRestartPending = true;
+		                               m_appPreviewKeepState = false; },
 		.isPaused            = m_isPaused,
 		.playLog             = &m_playLog,
 		.playLogMutex        = &m_playLogMutex,
@@ -5844,12 +6105,23 @@ AppContext EditorApplication::makeContext()
 			m_stepFrame = true;
 		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
-		                              bool down, bool valid, float wheel)
+		                              bool down, bool valid, float wheel,
+		                              bool rightDown, bool doubleClick)
 		{
 			m_uiPointerX = mx; m_uiPointerY = my;
 			m_uiViewportW = vpW; m_uiViewportH = vpH;
 			m_uiPointerDown = down; m_uiPointerValid = valid;
 			m_uiWheel = wheel;
+			m_uiPointerRight = rightDown;
+			// Sticky until consumed below: the panel reports it on the one frame
+			// ImGui saw it, and this block may run before or after that.
+			m_uiPointerDouble = m_uiPointerDouble || doubleClick;
+		},
+		.reportPlayUIRect = [this](float x, float y, float sx, float sy, unsigned win)
+		{
+			m_uiPanelX = x; m_uiPanelY = y;
+			m_uiPanelScaleX = sx; m_uiPanelScaleY = sy;
+			m_uiPanelWindow = win;
 		},
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,
@@ -5994,6 +6266,7 @@ AppContext EditorApplication::makeContext()
 		.cbTreeWidth         = m_editorConfig.CbTreeWidth,
 		.hubSelectedPreset   = m_hubSelectedPreset,
 		.hubSelectedLang     = m_hubSelectedLang,
+		.hubAdvancedShaderFx = m_hubAdvancedShaderFx,
 		.hubProjectName      = m_hubProjectName,
 		.hubProjectNameSize  = (int)sizeof(m_hubProjectName),
 		.hubProjectDir       = m_hubProjectDir,
@@ -6197,6 +6470,18 @@ void EditorApplication::setPlayMode(bool play)
 	if (play == m_isPlaying || !m_editorWorld)
 		return;
 
+	// An application project has no play mode at all (docs/he-apps-plan.md E2):
+	// its interface is already running in the panel, and there is no world to
+	// snapshot, wipe and restore. Refused HERE rather than only hidden in the
+	// toolbar, because a shortcut, a menu item or a script reaching this would
+	// otherwise tear the live preview's widgets down with the world.
+	if (m_projectManager.currentProject().appProject)
+	{
+		HE_LOG_INFO(Editor, "%s", "Application project: no play mode — the live preview "
+		                          "is already running (restart it instead)");
+		return;
+	}
+
 	// Either direction lands unpaused: a pause is play-session state, and a
 	// session that started frozen would look exactly like an editor that hung.
 	m_isPaused  = false;
@@ -6384,7 +6669,11 @@ void EditorApplication::setPlayMode(bool play)
 		ScriptApi::setCursorHook([this](bool show){ setPlayMouseCaptured(!show); });
 
 		// Capture the mouse so PIE plays like the packaged game (Esc toggles it).
-		setPlayMouseCaptured(true);
+		// Not in an application project: there is nothing to look around in, and
+		// swallowing the cursor is the opposite of what an app wants — its whole
+		// interface is things you point at.
+		if (!m_projectManager.currentProject().appProject)
+			setPlayMouseCaptured(true);
 
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: entering play mode");
 	}
@@ -6421,6 +6710,15 @@ void EditorApplication::setPlayMode(bool play)
 		// across PIE runs and even project switches); the play-mode gate closes.
 		HE::api::save::close();
 		HE::api::save::setPlayMode(false);
+		// …and the three other process-wide tables a play session can fill. They
+		// are statics in EngineApi, so without this every PIE run leaks: the
+		// timers of the last one keep counting, its file watches keep stat-ing,
+		// and after sixteen runs that opened a database `db.open` simply refuses
+		// until the editor is restarted. The packaged host does the same three
+		// at shutdown — a play session IS that host's whole life.
+		HE::api::timer::cancelAll();
+		HE::api::fs::clearWatches();
+		HE::api::db::closeAll();
 
 		// The entity host borrows the physics world and end() deliberately does
 		// not clear that pointer (the apps set it before begin()), so it is
@@ -6474,6 +6772,46 @@ void EditorApplication::setPlayMode(bool play)
 }
 
 // ─── Game Instance (app-wide HorizonCode script) ────────────────────────────────
+void EditorApplication::restartAppPreview(bool keepState)
+{
+	if (!m_editorWorld || !m_projectManager.currentProject().appProject) return;
+
+	// What the preview is HOLDING, taken before anything is torn down: the text
+	// somebody typed, where they had scrolled, which field had the caret. A
+	// rebuild after every save is right; losing a half-filled form to a one-word
+	// label fix is not (docs/he-apps-plan.md E4, Stufe 3).
+	WidgetManager::StateSnapshot snapshot;
+	if (keepState) snapshot = m_editorWorld->widgets().captureState();
+
+	// Down in the reverse order it came up. fireShutdown before the widgets go,
+	// so a graph's OnShutdown still finds the things it is about to let go of.
+	m_gameInstance.fireShutdown();
+	m_editorWorld->widgets().clear();
+
+	// Re-register the graph rather than assuming the host still holds the right
+	// one: the edit that triggered this restart may BE a GameInstance edit, and
+	// setGraph is also what resets its variables to their authored defaults.
+	m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+	m_gameInstance.fireInit();
+
+	// …and back on, AFTER OnInit has built the new widgets. Anything the edit
+	// removed or restructured finds no home and keeps the authored value.
+	const int landed = keepState ? m_editorWorld->widgets().restoreState(snapshot) : 0;
+	HE_LOG_INFO(Editor, "Application project: live preview restarted — %zu widget(s)%s",
+	            m_editorWorld->widgets().count(),
+	            keepState ? (landed > 0 ? ", state kept" : ", nothing to keep") : "");
+	// Said out loud rather than left in a log line nobody reads: a rebuild that
+	// found the widgets rearranged has thrown away what was in them, and "my form
+	// emptied itself" is exactly the kind of thing somebody spends an hour on.
+	// Only when there WAS something to lose.
+	if (keepState && landed == 0 && !snapshot.elements.empty())
+		HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+		               "Live preview: none of what it was holding fitted the new layout",
+		               "Text, scroll positions and selections are back to what the assets "
+		               "were authored with. Elements that were deleted or retyped cannot "
+		               "be matched up again.");
+}
+
 std::string EditorApplication::gameInstancePath()
 {
 	std::filesystem::path p = m_projectManager.currentProject().path;
@@ -7037,13 +7375,114 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 	if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)      m_gameInstance.setWindowFocus(true);
 	else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)   m_gameInstance.setWindowFocus(false);
 
+	// ── A file dragged onto the live preview (docs/he-apps-plan.md B7) ───────
+	// The same gesture the packaged application takes, aimed at the panel: the
+	// drop arrives in the window's own points and the widgets live in
+	// render-target pixels, so it is turned around by the rectangle the viewport
+	// panel reported. Only inside the image — a file dropped on the Outliner is
+	// not a file dropped on the application.
+	if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION ||
+	    event.type == SDL_EVENT_DROP_FILE  || event.type == SDL_EVENT_DROP_COMPLETE)
+	{
+		const bool live = m_editorWorld &&
+			(m_isPlaying || m_projectManager.currentProject().appProject) &&
+			m_uiViewportW > 0.0f && m_uiViewportH > 0.0f &&
+			m_uiPanelWindow != 0 && event.drop.windowID == m_uiPanelWindow;
+		if (event.type != SDL_EVENT_DROP_COMPLETE)
+		{
+			m_dropX = (event.drop.x - m_uiPanelX) * m_uiPanelScaleX;
+			m_dropY = (event.drop.y - m_uiPanelY) * m_uiPanelScaleY;
+			m_dropInPreview = live &&
+				m_dropX >= 0.0f && m_dropX <= m_uiViewportW &&
+				m_dropY >= 0.0f && m_dropY <= m_uiViewportH;
+		}
+		if (live)
+		{
+			WidgetManager& wm = m_editorWorld->widgets();
+			switch (event.type)
+			{
+			case SDL_EVENT_DROP_BEGIN:
+				m_dropPaths.clear();
+				break;
+			case SDL_EVENT_DROP_POSITION:
+				wm.dropHover(m_uiViewportW, m_uiViewportH, m_dropX, m_dropY,
+				             m_dropInPreview);
+				break;
+			case SDL_EVENT_DROP_FILE:
+				if (event.drop.data) m_dropPaths.emplace_back(event.drop.data);
+				break;
+			default:   // SDL_EVENT_DROP_COMPLETE
+				if (m_dropInPreview)
+				{
+					// The drop is the permission, the same way picking a file in
+					// a dialog is — see the twin in GameApplication. Only for a
+					// drop that actually reached the application: a file let go
+					// over the Outliner was never handed to it.
+					for (const std::string& p : m_dropPaths) HE::api::fs::grantPath(p);
+					wm.processDrop(m_uiViewportW, m_uiViewportH, m_dropX, m_dropY,
+					               m_dropPaths);
+				}
+				else
+					wm.dropHover(m_uiViewportW, m_uiViewportH, 0.0f, 0.0f, false);
+				m_dropPaths.clear();
+				m_dropInPreview = false;
+				break;
+			}
+			// Only a drop that landed IN the preview is answered here; one that
+			// missed it stays available to whatever the editor grows next.
+			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
+
+	// A focused selectable label (PIE) takes only the keys that select and copy.
+	// The packaged game's twin says why this is its own block and not a wider
+	// version of the one below.
+	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().isSelectingText() &&
+	    event.type == SDL_EVENT_KEY_DOWN)
+	{
+		WidgetManager& wm = m_editorWorld->widgets();
+		using TE = WidgetManager::TextEdit;
+		const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+		const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+		const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
+		switch (event.key.key)
+		{
+		case SDLK_LEFT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);  return true;
+		case SDLK_RIGHT:
+			wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift); return true;
+		case SDLK_HOME: wm.editFocusedText(TE::Home, shift); return true;
+		case SDLK_END:  wm.editFocusedText(TE::End,  shift); return true;
+		case SDLK_UP:   wm.editFocusedText(TE::Up,   shift); return true;
+		case SDLK_DOWN: wm.editFocusedText(TE::Down, shift); return true;
+		case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+		case SDLK_C:
+			if (ctrl)
+			{
+				const std::string sel = wm.focusedSelection();
+				if (!sel.empty()) SDL_SetClipboardText(sel.c_str());
+				return true;
+			}
+			break;
+		default: break;
+		}
+	}
+
 	// A focused in-game text field (PIE) owns the keyboard: route text + edit keys
 	// to the widget. Checked before Esc so typing works, but Esc still releases.
-	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().hasFocusedTextField())
+	if (m_isPlaying && m_editorWorld && m_editorWorld->widgets().isEditingText())
 	{
 		if (event.type == SDL_EVENT_TEXT_INPUT)
 		{
 			m_editorWorld->widgets().inputText(event.text.text);
+			return true;
+		}
+		// The in-progress composition of an input method — see the packaged
+		// game's twin for what it is and why an empty string ends it.
+		if (event.type == SDL_EVENT_TEXT_EDITING)
+		{
+			m_editorWorld->widgets().inputComposition(event.edit.text ? event.edit.text : "",
+			                                          event.edit.start);
 			return true;
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)
@@ -7054,17 +7493,43 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			using TE = WidgetManager::TextEdit;
 			const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
 			const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+			const bool alt   = (event.key.mod & SDL_KMOD_ALT) != 0;
 			switch (event.key.key)
 			{
-			case SDLK_BACKSPACE: wm.inputBackspace(); return true;
+			// Word-wise variants first: Ctrl (Cmd on a Mac) and Alt both mean
+			// "by word" for the arrows and Backspace, which is what the two
+			// platform conventions expect and neither is wrong here.
+			case SDLK_BACKSPACE:
+				if (ctrl || alt) { wm.editFocusedText(TE::DeleteWordLeft, false); return true; }
+				wm.inputBackspace(); return true;
 			case SDLK_DELETE:    wm.editFocusedText(TE::Delete, false); return true;
-			case SDLK_LEFT:      wm.editFocusedText(TE::Left,  shift);  return true;
-			case SDLK_RIGHT:     wm.editFocusedText(TE::Right, shift);  return true;
+			case SDLK_LEFT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordLeft : TE::Left, shift);
+				return true;
+			case SDLK_RIGHT:
+				wm.editFocusedText((ctrl || alt) ? TE::WordRight : TE::Right, shift);
+				return true;
 			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
 			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
+			// Only a multiline field answers these; in a single-line one they do
+			// nothing and the key is still swallowed, because a focused text
+			// field owns the arrow keys either way.
+			case SDLK_UP:        wm.editFocusedText(TE::Up,    shift);  return true;
+			case SDLK_DOWN:      wm.editFocusedText(TE::Down,  shift);  return true;
 			case SDLK_RETURN:
 			case SDLK_KP_ENTER:  wm.inputSubmit(); return true;
 			case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+			case SDLK_Z:
+				// Ctrl+Z takes back, Ctrl+Shift+Z puts back — the chord every
+				// platform agrees on. Ctrl+Y is the Windows spelling of redo and
+				// is bound below for the people who reach for it.
+				if (ctrl)
+				{
+					if (shift) wm.redoFocusedText(); else wm.undoFocusedText();
+					return true;
+				}
+				break;
+			case SDLK_Y: if (ctrl) { wm.redoFocusedText(); return true; } break;
 			case SDLK_C:
 				if (ctrl)
 				{
@@ -7100,6 +7565,10 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 	if (m_isPlaying && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat
 	    && event.key.key == SDLK_ESCAPE)
 	{
+		// …but leaving a text field comes first, exactly as in the packaged
+		// game: Escape out of a search box means "stop typing", and the focus
+		// stays where it is so Tab carries on through the form.
+		if (m_editorWorld && m_editorWorld->widgets().stopEditingText()) return true;
 		setPlayMouseCaptured(!m_playMouseCaptured);
 		return true;
 	}

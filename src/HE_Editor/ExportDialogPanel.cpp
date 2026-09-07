@@ -189,6 +189,10 @@ static std::string s_exportNewProfileName;
 // shows up on reopen.
 static std::string           s_exportBundleKey;
 static std::filesystem::path s_exportBundleCache;
+// Which flavour that cached path actually IS — not necessarily the one asked
+// for, since findRuntimeBundle falls back to the game runtime when the app one
+// was never built (docs/he-apps-plan.md A3b).
+static RuntimeFlavor         s_exportBundleFlavor = RuntimeFlavor::Game;
 // Worker-thread state. What the user watches while it runs — the steps, each
 // step's own progress, each step's log and the result — is BuildProgressDialog's
 // model, written by the worker itself; this panel owns the settings and the
@@ -332,11 +336,27 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 			             + vert.log + " " + frag.log).c_str());
 			continue; // skip this backend; runtime falls back to cross-compile
 		}
+		// The same fragment on the screen-space UI quad vertex (A3b): a widget with
+		// this material must not need glslang at load either. Failure here is NOT
+		// fatal for the variant — the mesh half is still worth shipping, and an
+		// empty uiVertex means the renderer cross-compiles that half as before.
+		// Baked per material even though the UI vertex is material-INDEPENDENT: it
+		// is one to two kilobytes, and the alternative (one blob per pak, or a
+		// checked-in generated copy) buys that back at the price of a second place
+		// where the UI vertex lives and can drift from kUIVertex.
+		const auto& uiVert = lib.uiVertex(lb);
+		if (!uiVert.ok)
+			HE_LOG_WARN(Editor, "%s",
+			            ("Export: UI vertex precompile failed for backend "
+			             + std::to_string(static_cast<int>(v)) + " — " + uiVert.log
+			             + " (materials on widgets will cross-compile at load)").c_str());
 
 		MaterialShaderVariant var;
 		var.backend  = v;
 		var.vertex   = (lb == LB::SpirV) ? spirvToBytes(vert.spirv) : vert.source;
 		var.fragment = (lb == LB::SpirV) ? spirvToBytes(frag.spirv) : frag.source;
+		if (uiVert.ok)
+			var.uiVertex = (lb == LB::SpirV) ? spirvToBytes(uiVert.spirv) : uiVert.source;
 		variants.push_back(std::move(var));
 	}
 
@@ -589,18 +609,33 @@ void render(AppContext& ctx)
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputText("##exportDir", &s_exportOutputDir);
 
-            ImGui::Text("Startup Scene:");
-            ImGui::SetNextItemWidth(-1.0f);
-            const char* scenePreview = s_exportStartupScene.empty()
-                ? "(currently open scene)" : s_exportStartupScene.c_str();
-            if (ImGui::BeginCombo("##exportScene", scenePreview))
+            // An application has no scene to start in — its GameInstance builds
+            // the UI and that is the whole picture (docs/he-apps-plan.md E5). The
+            // field is hidden rather than shown empty, and the value cleared, so a
+            // scene picked before the project was switched cannot ride along.
+            const bool exportingApp = ctx.projectManager &&
+                                      ctx.projectManager->currentProject().appProject;
+            if (exportingApp)
             {
-                if (EditorWidgets::selectable("(currently open scene)", s_exportStartupScene.empty()))
-                    s_exportStartupScene.clear();
-                for (const auto& sc : s_exportSceneChoices)
-                    if (ImGui::Selectable(sc.c_str(), sc == s_exportStartupScene))
-                        s_exportStartupScene = sc;
-                ImGui::EndCombo();
+                s_exportStartupScene.clear();
+                ImGui::TextDisabled("Application: no startup scene — the UI comes up from the "
+                                    "Game Instance.");
+            }
+            else
+            {
+                ImGui::Text("Startup Scene:");
+                ImGui::SetNextItemWidth(-1.0f);
+                const char* scenePreview = s_exportStartupScene.empty()
+                    ? "(currently open scene)" : s_exportStartupScene.c_str();
+                if (ImGui::BeginCombo("##exportScene", scenePreview))
+                {
+                    if (EditorWidgets::selectable("(currently open scene)", s_exportStartupScene.empty()))
+                        s_exportStartupScene.clear();
+                    for (const auto& sc : s_exportSceneChoices)
+                        if (ImGui::Selectable(sc.c_str(), sc == s_exportStartupScene))
+                            s_exportStartupScene = sc;
+                    ImGui::EndCombo();
+                }
             }
 
             ImGui::Text("Target Platform:");
@@ -640,22 +675,42 @@ void render(AppContext& ctx)
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
                 const ExportPlatform plat = exportPlatformFromName(s_exportPlatform);
-                if (s_exportBundleKey != s_exportPlatform)
+                // The flavour is part of the cache key: switching Advanced Shader
+                // Effects on the project changes which runtime this line has to
+                // name, and a key of the platform alone would keep showing the old
+                // one until the platform changed too.
+                const RuntimeFlavor wantFlavor = runtimeFlavorFor(
+                    exportingApp,
+                    !ctx.projectManager ||
+                        ctx.projectManager->currentProject().advancedShaderEffects);
+                const std::string bundleKey =
+                    s_exportPlatform + "/" + runtimeFlavorName(wantFlavor);
+                if (s_exportBundleKey != bundleKey)
                 {
-                    s_exportBundleKey   = s_exportPlatform;
-                    s_exportBundleCache = findRuntimeBundle(base, plat);
+                    s_exportBundleKey   = bundleKey;
+                    s_exportBundleCache = findRuntimeBundle(base, plat, wantFlavor,
+                                                            &s_exportBundleFlavor);
                 }
                 const auto& bundle = s_exportBundleCache;
                 if (!bundle.empty())
-                    ImGui::TextDisabled("Game runtime: %s",
+                {
+                    ImGui::TextDisabled("%s runtime: %s",
+                                        runtimeFlavorName(s_exportBundleFlavor),
                                         bundle.lexically_normal().string().c_str());
+                    if (s_exportBundleFlavor != wantFlavor)
+                        ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
+                            "No %s runtime built — the full game runtime ships instead "
+                            "(runs, but larger). scripts/build_runtimes.py builds it.",
+                            runtimeFlavorName(wantFlavor));
+                }
                 else
                     ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
                         plat == ExportPlatform::Host
                             ? "No game runtime found — build the HorizonGame target first."
                             : "No %s runtime bundle — place one at %s.",
                         s_exportPlatform.c_str(),
-                        resolveRuntimeDir(base, plat).lexically_normal().string().c_str());
+                        resolveRuntimeDir(base, plat, wantFlavor)
+                            .lexically_normal().string().c_str());
                 if (plat != ExportPlatform::Host)
                     ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
             }
@@ -665,54 +720,92 @@ void render(AppContext& ctx)
             // they stay editable after the fact — and so the graphics settings
             // this editor is set to reach the shipped build at all.
             ImGui::Spacing();
-            ImGui::Text("Game Window:");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(70.0f);
-            if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
-                s_exportWindowWidth = std::max(320, s_exportWindowWidth);
-            ImGui::SameLine();
-            ImGui::TextUnformatted("x");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(70.0f);
-            if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
-                s_exportWindowHeight = std::max(240, s_exportWindowHeight);
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
+            // An application does not choose a resolution and a display mode at
+            // export time. It opens as a window the way every other application
+            // does, and the user maximises it or drags it about; a fixed pixel
+            // size baked into the build is a game's idea. The values are still
+            // WRITTEN (config.json carries defaults either way) — they are just
+            // not asked about, and app mode pins them to a sane window.
+            if (exportingApp)
+                s_exportWindowMode = "Windowed";
+            else
             {
-                for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
-                    if (ImGui::Selectable(mode, s_exportWindowMode == mode))
-                        s_exportWindowMode = mode;
-                ImGui::EndCombo();
+                ImGui::Text("Game Window:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.0f);
+                if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
+                    s_exportWindowWidth = std::max(320, s_exportWindowWidth);
+                ImGui::SameLine();
+                ImGui::TextUnformatted("x");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.0f);
+                if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
+                    s_exportWindowHeight = std::max(240, s_exportWindowHeight);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(120.0f);
+                if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
+                {
+                    for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
+                        if (ImGui::Selectable(mode, s_exportWindowMode == mode))
+                            s_exportWindowMode = mode;
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                EditorWidgets::checkbox("VSync", &s_exportGameVSync);
             }
-            ImGui::SameLine();
-            EditorWidgets::checkbox("VSync", &s_exportGameVSync);
 
-            ImGui::Text("Graphics Backend:");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(140.0f);
-            if (ImGui::BeginCombo("##gameBackend",
-                                  s_exportBackend.empty() ? "(platform default)"
-                                                          : s_exportBackend.c_str()))
+            // An application does not pick a backend: it takes the platform's
+            // (Metal on macOS, OpenGL elsewhere — docs/he-apps-plan.md A0), and
+            // with Advanced Shader Effects OFF it takes the software renderer,
+            // which is what that switch has meant all along (Block G). This is
+            // the line that makes the checkbox at project creation mean
+            // something in the shipped build: no GPU, no driver, no shader
+            // translation, just the CPU drawing rectangles.
+            if (!exportingApp)
             {
-                if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
-                    s_exportBackend.clear();
-                for (const char* name : exportBackendChoices(s_exportPlatform))
-                    if (ImGui::Selectable(name, s_exportBackend == name))
-                        s_exportBackend = name;
-                ImGui::EndCombo();
+                ImGui::Text("Graphics Backend:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(140.0f);
+                if (ImGui::BeginCombo("##gameBackend",
+                                      s_exportBackend.empty() ? "(platform default)"
+                                                              : s_exportBackend.c_str()))
+                {
+                    if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
+                        s_exportBackend.clear();
+                    for (const char* name : exportBackendChoices(s_exportPlatform))
+                        if (ImGui::Selectable(name, s_exportBackend == name))
+                            s_exportBackend = name;
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
+                                    "the target runtime lacks falls back to its default.");
             }
-            ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
-                                "the target runtime lacks falls back to its default.");
+            else
+            {
+                const bool advanced =
+                    ctx.projectManager->currentProject().advancedShaderEffects;
+                s_exportBackend = advanced ? std::string() : std::string("Software");
+                if (!advanced)
+                    ImGui::TextDisabled("Advanced Shader Effects are off: this application "
+                                        "ships the software renderer and needs no GPU.");
+            }
 
             ImGui::Spacing();
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
             EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
-            EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
-            if (s_exportModSupport)
-                ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+            // Mods are a game's idea: a .hpak dropped next to the executable that
+            // replaces content. An application is not modded from outside, and a
+            // switch nobody should touch is worse than no switch.
+            if (!exportingApp)
+            {
+                EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
+                if (s_exportModSupport)
+                    ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+            }
+            else
+                s_exportModSupport = false;
             // The "(?)" marker and its tooltip are gone from the next three: the
             // sentence is the help entry now, the whole checkbox is the hover
             // target instead of a two-character mark beside it, and F1 opens it.
@@ -727,6 +820,15 @@ void render(AppContext& ctx)
                 (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
             if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
             EditorWidgets::checkbox("Compile HorizonCode",   &s_exportCompileHC);
+            // Kept in application projects, but said out loud that it is not the
+            // default answer there: an app's graphs run on events — a click, a
+            // typed character — where a few dozen interpreted nodes cost nothing
+            // anyone can measure. It earns its keep on per-frame work (a Tick that
+            // does real arithmetic, a list of thousands of rows), and it costs a
+            // toolchain at export plus a shipped library.
+            if (exportingApp && !s_exportCompileHC)
+                ImGui::TextDisabled("Not needed for most apps: interface logic runs on events, "
+                                    "where the interpreter is fast enough.");
             // What an untranslatable graph means. The default keeps compiling an
             // optimization; the other makes "everything is native" a build
             // guarantee — which is also what lets calls between compiled classes
@@ -773,6 +875,16 @@ void render(AppContext& ctx)
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
 
             // ── Precompiled material shaders ──────────────────────────────────
+            // Nothing to precompile without materials, and a project with Advanced
+            // Shader Effects off has none by construction — the editor never let it
+            // make one (docs/he-apps-plan.md E1b). An app WITH them keeps the
+            // choice: it has graphs, and shipping them precompiled is the same win
+            // there as anywhere.
+            const bool offerShaderPrecompile =
+                !exportingApp ||
+                (ctx.projectManager && ctx.projectManager->currentProject().advancedShaderEffects);
+            if (offerShaderPrecompile)
+            {
             ImGui::Spacing();
             ImGui::Text("Precompiled Material Shaders:");
             ImGui::SameLine();
@@ -805,6 +917,9 @@ void render(AppContext& ctx)
                     else           col = 0;
                 }
             }
+            }
+            else
+                s_exportShaderBackends = 0;   // nothing to cook
 
             if (running) ImGui::EndDisabled();
 
@@ -888,7 +1003,11 @@ void startExport(AppContext& ctx)
 
                 // Resolve the startup scene: the profile's project-relative choice,
                 // or the scene currently open in the editor.
-                std::string scenePath = ctx.currentScenePath;
+                // An application exports with NO scene at all. Without this the
+                // scene that happens to be open in the editor would be packed
+                // into it and the runtime would refuse to load it in app mode.
+                std::string scenePath =
+                    pm->currentProject().appProject ? std::string() : ctx.currentScenePath;
                 if (!s_exportStartupScene.empty() && !projectRoot.empty())
                     scenePath = (projectRoot / s_exportStartupScene).string();
                 std::string sceneName;
@@ -1076,7 +1195,19 @@ void startExport(AppContext& ctx)
                 const std::filesystem::path base =
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
-                const std::filesystem::path runtimeDir = findRuntimeBundle(base, platform);
+                // Which of the three runtimes this project ships with (A3b). The
+                // wish comes from what the project IS; what is on disk decides
+                // what it gets, and a fallback to Game is reported below rather
+                // than silently swallowed — the difference is ~20 MB and whether
+                // the export needs a GPU, so nobody may find out by accident.
+                const bool projAppMode = ctx.projectManager &&
+                                         ctx.projectManager->currentProject().appProject;
+                const bool projAdvanced = !ctx.projectManager ||
+                                          ctx.projectManager->currentProject().advancedShaderEffects;
+                const RuntimeFlavor wantFlavor = runtimeFlavorFor(projAppMode, projAdvanced);
+                RuntimeFlavor gotFlavor = wantFlavor;
+                const std::filesystem::path runtimeDir =
+                    findRuntimeBundle(base, platform, wantFlavor, &gotFlavor);
 
                 // ── The run's shape is known now: build the step list and show it.
                 //
@@ -1116,7 +1247,8 @@ void startExport(AppContext& ctx)
                         ? std::string("Error: no game runtime found — build the HorizonGame "
                                       "target, then export again.")
                         : "Error: no " + s_exportPlatform + " runtime bundle at "
-                          + resolveRuntimeDir(base, platform).lexically_normal().string()
+                          + resolveRuntimeDir(base, platform, wantFlavor)
+                                .lexically_normal().string()
                           + " — build the game runtime on " + s_exportPlatform
                           + " and place it there.";
                     Build::log(2, m);
@@ -1124,6 +1256,13 @@ void startExport(AppContext& ctx)
                 }
                 else
                 {
+                Build::log(0, std::string("Runtime: ") + runtimeFlavorName(gotFlavor)
+                              + " (" + runtimeDir.lexically_normal().string() + ")");
+                if (gotFlavor != wantFlavor)
+                    Build::log(1, std::string("No ") + runtimeFlavorName(wantFlavor)
+                                  + " runtime here — shipping the full game runtime instead. "
+                                    "It runs, it is just larger; run "
+                                    "scripts/build_runtimes.py to build the app runtimes.");
                 ExportSettings es;
                 es.compress         = s_exportCompress;
                 es.encrypt          = s_exportEncrypt;
@@ -1133,8 +1272,36 @@ void startExport(AppContext& ctx)
                 // The project's default SaveGameTemplate rides into project.hcfg
                 // so save.create() in the shipped game finds the same schema.
                 if (ctx.projectManager)
+                {
                     es.defaultSaveTemplate = ctx.projectManager->currentProject().defaultSaveTemplate;
+                    // What the application looks like travels with it — without
+                    // these two a shipped app boots on the built-in default and
+                    // the theme the author picked is simply not there.
+                    es.theme     = ctx.projectManager->currentProject().theme;
+                    es.themeMode = ctx.projectManager->currentProject().themeMode;
+                    // What KIND of thing is being exported. The runtime reads
+                    // both out of project.hcfg: appProject decides whether it
+                    // builds a world and draws on events, advancedShaderEffects
+                    // whether material graphs can appear at all.
+                    es.appProject            = ctx.projectManager->currentProject().appProject;
+                    es.advancedShaderEffects = ctx.projectManager->currentProject().advancedShaderEffects;
+                    es.allowFiles     = ctx.projectManager->currentProject().allowFiles;
+                    es.allowProcesses = ctx.projectManager->currentProject().allowProcesses;
+                    es.allowNetwork   = ctx.projectManager->currentProject().allowNetwork;
+                    es.fontScripts    = ctx.projectManager->currentProject().fontScripts;
+                    es.fontWeightBold = ctx.projectManager->currentProject().fontWeightBold;
+                    // What the application is to the system it lands on: the
+                    // icon is generated at export time from these three.
+                    es.appIconName  = ctx.projectManager->currentProject().appIconName;
+                    es.appIconColor = ctx.projectManager->currentProject().appIconColor;
+                    es.bundleId     = ctx.projectManager->currentProject().bundleId;
+                    es.appVersion   = ctx.projectManager->currentProject().appVersion;
+                    es.documentTypes = ctx.projectManager->currentProject().documentTypes;
+                }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
+                // Which icon container the output gets. Host resolves to what
+                // this editor is running on, so the exporter never has to guess.
+                es.iconPlatform     = exportPlatformFromName(s_exportPlatform);
                 // Texture-compression cook target, chosen automatically from the
                 // export target's GPU family (all encoding happens at pack time —
                 // the shipped game only uploads the resulting blocks). Values are

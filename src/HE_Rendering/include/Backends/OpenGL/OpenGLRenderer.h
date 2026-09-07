@@ -257,6 +257,7 @@ private:
 	unsigned int m_matObjUBO   = 0;  // per-object U   (mvp/model/color/flags/pbr), 176 B
 	unsigned int m_matLightUBO = 0;  // HeLighting     (sunDir/sunColor/ambient/camPos), 64 B
 	unsigned int m_matParamUBO = 0;  // HeParams       (exposed graph parameters), 256 B
+	unsigned int m_matUIUBO    = 0;  // HeUI           (the element under the pixel), 48 B
 	// Material-preview target (RenderMaterialPreview) — a small dedicated FBO + a
 	// lazily-built unit sphere, independent of the main viewport.
 	unsigned int m_previewFBO = 0, m_previewColor = 0, m_previewDepth = 0;
@@ -391,7 +392,16 @@ private:
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
-	unsigned int GetOrBuildUIMaterialProgram(const HE::UUID& materialId);
+	// The backdrop snapshot (D5 Schicht 1): the UI target copied out of the
+	// framebuffer immediately before a frosted element, with its mip chain — so
+	// a wide blur reads one level instead of a hundred taps. Upside down as a
+	// texture (GL's origin), which is what heUI.screen.z tells the shader.
+	unsigned int m_uiBackdropTex = 0;
+	int          m_uiBackdropW = 0, m_uiBackdropH = 0;
+	// usesBackdrop (optional out): this material samples heBackdrop, so the UI
+	// pass owes it a fresh copy of what it has drawn so far.
+	unsigned int GetOrBuildUIMaterialProgram(const HE::UUID& materialId,
+	                                         bool* usesBackdrop = nullptr);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;
@@ -746,6 +756,15 @@ private:
 	int          m_uUIRotation   = -1;  // { angle(rad), pivotX, pivotY, _ }
 	int          m_uUIMode       = -1;  // 0 = solid color, 1 = font-atlas glyph
 	int          m_uUICornerRadius = -1; // px; min(w,h)/2 → circle (rounded rects)
+	int          m_uUIBorderWidth = -1;  // px, inside the quad; 0 = no border
+	int          m_uUIBorderColor = -1;
+	int          m_uUIGradient      = -1; // 0 = solid, 1 = linear fade
+	int          m_uUIGradientColor = -1;
+	int          m_uUIGradientAngle = -1; // degrees, clockwise from "down"
+	int          m_uUIGradientShape = -1; // 0 = linear, 1 = radial from the centre
+	int          m_uUIBlur       = -1;    // px; > 0 = this quad is a drop shadow
+	int          m_uUIInnerBlur  = -1;    // px; > 0 = shadow cast inwards from the edge
+	int          m_uUIInnerColor = -1;
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;

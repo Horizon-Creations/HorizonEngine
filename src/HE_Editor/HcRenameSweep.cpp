@@ -231,7 +231,8 @@ int apply(ContentManager& cm, const Report& r, const HcRename::Target& t)
 	if (written)
 		HE_LOG_INFO(Editor, "Renamed %s \"%s\" to \"%s\" in %d other asset(s).",
 		            t.member == HcRename::Member::Function ? "function"
-		            : t.member == HcRename::Member::Variable ? "variable" : "event",
+		            : t.member == HcRename::Member::Variable ? "variable"
+		            : t.member == HcRename::Member::Animation ? "animation" : "event",
 		            t.oldName.c_str(), t.newName.c_str(), written);
 	return written;
 }

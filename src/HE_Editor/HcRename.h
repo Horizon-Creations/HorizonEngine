@@ -32,7 +32,15 @@ namespace HorizonCode { struct Graph; struct Node; }
 // caller's business (HcRenameSweep), and this part is what the tests can drive.
 namespace HcRename
 {
-	enum class Member { Function, Variable, Event };
+	// Animation is the odd one and worth the sentence: the other three are
+	// HorizonCode members whose name sits on the node itself (Node::s), so a
+	// graph names them by BEING a Call/Get/Bind node. A widget's animation clip
+	// is named by an engine row's `animation` PARAMETER instead — a value in a
+	// pin, or a Const String wired to it — and its declaration does not live in
+	// a graph at all but in UIWidgetTree::animations. Everything else about the
+	// rename is the same problem, which is why it lives here and not beside a
+	// second copy of this machinery.
+	enum class Member { Function, Variable, Event, Animation };
 
 	// What is being renamed. `classKey` is the asset path the renamed member's
 	// class is addressed by, which is exactly what Create Object, Cast and

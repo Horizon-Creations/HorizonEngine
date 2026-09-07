@@ -68,13 +68,20 @@ jobs:
       # out of CMakeCache.txt, and spares any quoting question about the password.
       # Unset secrets are simply empty: the build then reports "not configured" and
       # the Editor works as it did before the remote library existed.
+      # macOS uses static mbedTLS for the same reason Linux and Windows do, and it
+      # was the only one of the three that did not: libcrypto is a LOAD-TIME edge
+      # of libHorizonCore, so a shipped build carried 4,8 MB of Homebrew OpenSSL
+      # that no export could leave out. Statically linked mbedcrypto costs
+      # HorizonCore 0,3 MB and removes the dylib entirely — net −4,5 MB in every
+      # packaged game (docs/he-apps-plan.md A3a). It also removes a bundled
+      # third-party dylib from the deployment-target stamping problem.
       - name: Configure (macOS)
         if: runner.os == 'macOS'
         env:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       # Linux: build a self-contained editor package like Windows — bundle cmake so a
       # user only needs a C++ compiler, use static mbedTLS so there's no external

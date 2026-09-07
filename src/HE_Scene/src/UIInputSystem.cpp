@@ -51,7 +51,7 @@ void update(HorizonWorld& world, InputState& state,
                 mouseY < pos.y || mouseY > pos.y + size.y)
                 continue;
 
-            const int key = UISystem::sortKey(elem.layer, UISystem::nestingDepth(reg, e));
+            const int key = HE::uiSortKey(elem.layer, UISystem::nestingDepth(reg, e));
             if (top == 0 || key >= topKey)
             {
                 top = static_cast<uint32_t>(e);

@@ -1,6 +1,6 @@
 #include "EditorSettingsPanel.h"
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
-#include "ToolchainDialog.h"             // Tools > Status > cmake/compiler "Fix" opens the dialog
+#include "ToolchainDialog.h"             // Tool Status > cmake/compiler "Fix" opens the dialog
 #include "GitController.h"               // Source Control page
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
@@ -13,6 +13,8 @@
 #include <SourceControl/RepoStatus.h>
 #include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
+#include <Application/AppIcon.h>       // the generated app icon + its preview
+#include <Renderer/UIFont.h>           // icon names, and the plate colour parser
 #include <Types/Enums.h>
 #include <algorithm>
 #include <cfloat>
@@ -1186,6 +1188,363 @@ void statusRow(const char* name, StatusLevel level, const std::string& detail,
 	}
 }
 
+// ─── Project ▸ Permissions ───────────────────────────────────────────────────
+// What this project's scripts may reach outside the project (plan, Block C).
+// Three checkboxes, all off until somebody says otherwise, saved into the
+// .heproj and carried into the exported build.
+//
+// They bind the EDITOR too, not just the export. A preview that may delete a
+// stranger's directory while the shipped app may not is the worse of the two
+// failures: it happens on the author's machine, before anything shipped.
+void drawPermissionsPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Permissions");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData& p = ctx.projectManager->currentProject();
+
+	EditorWidgets::hint("These belong to the PROJECT, not to the editor: they are saved in "
+	                    "its .heproj and travel into the application you export. They also "
+	                    "bind scripts you run here, so the preview can never do more than "
+	                    "the shipped app.");
+	ImGui::Spacing();
+
+	bool changed = false;
+	changed |= ImGui::Checkbox("Files outside the project", &p.allowFiles);
+	EditorWidgets::helpForLabel("Files outside the project");
+	ImGui::TextDisabled("Off, a script reads and writes only inside the project's Saved folder.\n"
+	                    "A file the person using the app picks in a dialog is always allowed,\n"
+	                    "whatever this says — choosing it is the permission.");
+	ImGui::Spacing();
+
+	changed |= ImGui::Checkbox("Run other programs", &p.allowProcesses);
+	EditorWidgets::helpForLabel("Run other programs");
+	ImGui::TextDisabled("Covers Run Program and Open URL. Finding out whether a program is\n"
+	                    "installed needs no permission — that is how a script can tell\n"
+	                    "somebody what it would need.");
+	ImGui::Spacing();
+
+	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
+	EditorWidgets::helpForLabel("Network access");
+	ImGui::TextDisabled("Reserved: nothing reads this yet. It is here so a project that\n"
+	                    "already answered the question does not have to answer it again.");
+
+	if (changed)
+	{
+		// Written through immediately rather than on some later Save: a
+		// permission that is on in the panel and off on disk is the state that
+		// makes somebody spend an hour on why their script still cannot read a
+		// file. The runtime picks it up on the next call by itself (the api
+		// dispatch refreshes perm::set from here).
+		if (!ctx.projectManager->saveProject(p.path))
+			// Problem, not Warning: the panel now says one thing and the file
+			// another, and it stays that way until somebody acts.
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's permissions", p.path);
+	}
+}
+
+// ─── Project ▸ Application ───────────────────────────────────────────────────
+// What the application IS to the system it lands on (plan A7): its icon, its
+// identifier, its version. The icon is GENERATED from one of the built-in icons
+// on a coloured plate — the export writes the .icns, the .ico and the .png from
+// it — so a project has an icon on the day it is made and nobody produces the
+// same picture three times.
+//
+// The preview is a real texture of the real bytes, rebuilt only when the answer
+// changes: a picture of the icon rendered by some other code would be the one
+// thing on this page that can lie.
+void drawApplicationPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Application");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData& p = ctx.projectManager->currentProject();
+
+	EditorWidgets::hint("These belong to the PROJECT: saved in its .heproj and written into "
+	                    "the application you export.");
+	ImGui::Spacing();
+
+	// ── The icon ─────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Icon");
+
+	static std::string   s_previewKey;      // name + colour the texture was built from
+	static ImTextureID   s_previewTex = 0;
+	static void*         s_previewHandle = nullptr;
+	static const int     kPreviewPx = 128;
+
+	// The model is written per keystroke (so the preview follows the typing), but
+	// the FILE is written when an edit ends. A .heproj rewritten per character is
+	// a lot of temp-file churn for one word, and it is a versioned file with a
+	// watcher on it.
+	bool commit = false;
+
+	EditorWidgets::Row::inputText("Icon##appiconname", &p.appIconName);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Icon");
+	const bool nameOk = !p.appIconName.empty() && HE::uiIconCodepoint(p.appIconName) != 0;
+	if (!p.appIconName.empty() && !nameOk)
+		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+		                   "No built-in icon is called that — the export writes none.");
+	else
+		ImGui::TextDisabled("One of the %zu built-in icons, by name. The same names "
+		                    "<icon=…> uses in a label.", HE::uiIconCount());
+
+	// A few names that contain what was typed, so somebody who half-remembers one
+	// can find it without leaving the page. Ten is enough to recognise the
+	// pattern; a full list of two thousand is a different panel.
+	if (!p.appIconName.empty() && !nameOk)
+	{
+		std::string matches;
+		int found = 0;
+		for (std::size_t i = 0; i < HE::uiIconCount() && found < 10; ++i)
+		{
+			const char* n = HE::uiIconNameAt(i);
+			if (std::strstr(n, p.appIconName.c_str()))
+			{
+				matches += (found++ ? ", " : "");
+				matches += n;
+			}
+		}
+		if (found) ImGui::TextDisabled("Did you mean: %s", matches.c_str());
+	}
+	ImGui::Spacing();
+
+	{
+		glm::vec4 col(0.12f, 0.44f, 0.78f, 1.0f);
+		HE::uiParseRichColor(p.appIconColor, col);
+		float rgb[3] = { col.r, col.g, col.b };
+		if (EditorWidgets::Row::colorEdit3("Plate colour##appiconcolor", rgb))
+		{
+			char hex[8];
+			std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
+			              (int)std::lround(std::clamp(rgb[0], 0.0f, 1.0f) * 255.0f),
+			              (int)std::lround(std::clamp(rgb[1], 0.0f, 1.0f) * 255.0f),
+			              (int)std::lround(std::clamp(rgb[2], 0.0f, 1.0f) * 255.0f));
+			p.appIconColor = hex;
+		}
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+	}
+	EditorWidgets::helpForLabel("Plate colour");
+	ImGui::TextDisabled("The icon itself is white on a dark plate and near-black on a light "
+	                    "one, so there is one colour to choose and not two.");
+	ImGui::Spacing();
+
+	// ── The preview ──────────────────────────────────────────────────────────
+	const std::string key = p.appIconName + "|" + p.appIconColor;
+	if (key != s_previewKey && ctx.renderer)
+	{
+		s_previewKey = key;
+		if (s_previewHandle) { ctx.renderer->DestroyImGuiTexture(s_previewHandle); s_previewHandle = nullptr; }
+		s_previewTex = 0;
+		glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
+		HE::uiParseRichColor(p.appIconColor, bg);
+		const std::vector<std::uint8_t> rgba =
+			HE::heRenderAppIcon(p.appIconName, kPreviewPx, bg, HE::heAppIconForeground(bg));
+		if (!rgba.empty())
+			if (void* h = ctx.renderer->CreateImGuiTexture(rgba.data(), kPreviewPx, kPreviewPx))
+			{
+				s_previewHandle = h;
+				s_previewTex    = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(h));
+			}
+	}
+	if (s_previewTex)
+		ImGui::Image(s_previewTex, ImVec2((float)kPreviewPx, (float)kPreviewPx));
+	else
+		ImGui::TextDisabled("(no icon to show)");
+	ImGui::Spacing();
+
+	// ── Identity ─────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Identity");
+	EditorWidgets::Row::inputText("Bundle identifier##bundleid", &p.bundleId);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Bundle identifier");
+	ImGui::TextDisabled("Empty derives com.horizonengine.<project>, which is what every\n"
+	                    "export did before this field existed. Set it once you own a domain.");
+	ImGui::Spacing();
+	EditorWidgets::Row::inputText("Version##appversion", &p.appVersion);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	EditorWidgets::helpForLabel("Version");
+	ImGui::Spacing();
+
+	// ── The file types this application owns ─────────────────────────────────
+	ImGui::SeparatorText("File types");
+	ImGui::TextWrapped("Which files belong to this application. The export declares them the "
+	                   "way each system wants it: inside the bundle on macOS, as a .desktop "
+	                   "and a MIME file on Linux, as a .reg on Windows. Installing the last "
+	                   "two is an installer's job — the export writes what would be installed.");
+	ImGui::Spacing();
+
+	int removeAt = -1;
+	for (std::size_t i = 0; i < p.documentTypes.size(); ++i)
+	{
+		HE::AppDocumentType& t = p.documentTypes[i];
+		ImGui::PushID(static_cast<int>(i));
+		EditorWidgets::Row::inputText("Extension##docext", &t.extension);
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+		if (i == 0) EditorWidgets::helpForLabel("Extension");
+		if (!t.extension.empty() && !HE::heValidDocumentExtension(t.extension))
+			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+			                   "Letters and digits only, no dot, not starting with a digit — "
+			                   "this one is skipped.");
+		EditorWidgets::Row::inputText("Name##docname", &t.displayName);
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+		if (i == 0) EditorWidgets::helpForLabel("Name");
+		EditorWidgets::Row::inputText("Icon##docicon", &t.iconName);
+		commit |= ImGui::IsItemDeactivatedAfterEdit();
+		if (i == 0) EditorWidgets::helpForLabel("Icon##doc");
+		if (!t.iconName.empty() && HE::uiIconCodepoint(t.iconName) == 0)
+			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+			                   "No built-in icon is called that — the files wear the "
+			                   "application's icon.");
+		if (EditorWidgets::button("Remove")) removeAt = static_cast<int>(i);
+		EditorWidgets::helpForLabel("Remove");
+		ImGui::Separator();
+		ImGui::PopID();
+	}
+	if (removeAt >= 0)
+	{
+		p.documentTypes.erase(p.documentTypes.begin() + removeAt);
+		commit = true;
+	}
+	if (EditorWidgets::button("Add file type"))
+	{
+		p.documentTypes.push_back({ "", "Document", "" });
+		commit = true;
+	}
+	EditorWidgets::helpForLabel("Add file type");
+
+	if (commit)
+	{
+		// Straight to disk, as on the other project pages: a value that is in the
+		// panel and not in the file is the state somebody loses an evening to.
+		if (!ctx.projectManager->saveProject(p.path))
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's application settings", p.path);
+	}
+}
+
+// ─── Project ▸ Fonts ─────────────────────────────────────────────────────────
+// Which scripts this project's text is written in. The atlas always carries
+// Latin as it is actually written — umlauts, accents, the punctuation a text
+// field produces on its own — so most projects never open this page. The two
+// boxes here cost atlas area, which is the whole reason they are a question.
+//
+// The awkward part is honest and stays visible: the atlas is baked once per
+// process and every renderer backend uploads it once, so a change reaches THIS
+// editor session only after a restart. The page says which answer is live.
+void drawFontsPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Fonts");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData& p = ctx.projectManager->currentProject();
+
+	EditorWidgets::hint("These belong to the PROJECT: they are saved in its .heproj and "
+	                    "travel into the application you export, which has to bake its own "
+	                    "atlas on a machine that never saw this editor.");
+	ImGui::Spacing();
+
+	// ── Weight ───────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Text weight");
+	ImGui::TextWrapped("Which weight ordinary text is drawn in. Regular is what body text "
+	                   "usually is, and it is what gives <b> in rich text something to be "
+	                   "bolder than.");
+	ImGui::Spacing();
+
+	const bool wasBold = p.fontWeightBold;
+	if (ImGui::RadioButton("Regular", !p.fontWeightBold)) p.fontWeightBold = false;
+	EditorWidgets::helpForLabel("Regular");
+	ImGui::Spacing();
+	if (ImGui::RadioButton("Bold", p.fontWeightBold)) p.fontWeightBold = true;
+	EditorWidgets::helpForLabel("Bold");
+	ImGui::Indent();
+	EditorWidgets::hint("What the engine has always drawn, so an older project keeps it "
+	                    "until somebody says otherwise. With Bold as the base, <b> has "
+	                    "nothing bolder to reach for and draws the same letters.");
+	ImGui::Unindent();
+	ImGui::Spacing();
+
+	// No control, because there is nothing to decide: the icon face is baked the
+	// first time a label asks for one, and a project that shows no icon never
+	// pays for it. Said out loud anyway, because "how do I get an icon" is a
+	// question this page is where somebody looks for.
+	ImGui::SeparatorText("Icons");
+	ImGui::TextWrapped("%zu icons are built in, written as <icon=name> in a rich text "
+	                   "label (<icon=home>, <icon=settings>, <icon=save>). They are baked "
+	                   "only once a label actually asks for one, so a project without "
+	                   "icons carries none of it.",
+	                   HE::uiIconCount());
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Scripts");
+	ImGui::TextWrapped("Every project gets Latin: A to Z, the umlauts and accents of "
+	                   "Latin-1, the Central European letters of Latin Extended-A, the "
+	                   "typographic quotes and dashes, and the Euro sign. The two below "
+	                   "are added on top and cost room in the atlas.");
+	ImGui::Spacing();
+
+	const std::uint32_t before = p.fontScripts;
+	bool greek    = (p.fontScripts & HE::UIFontScriptGreek)    != 0;
+	bool cyrillic = (p.fontScripts & HE::UIFontScriptCyrillic) != 0;
+
+	if (ImGui::Checkbox("Greek", &greek))
+		p.fontScripts = greek ? (p.fontScripts | HE::UIFontScriptGreek)
+		                      : (p.fontScripts & ~HE::UIFontScriptGreek);
+	EditorWidgets::helpForLabel("Greek");
+	ImGui::Spacing();
+
+	if (ImGui::Checkbox("Cyrillic", &cyrillic))
+		p.fontScripts = cyrillic ? (p.fontScripts | HE::UIFontScriptCyrillic)
+		                         : (p.fontScripts & ~HE::UIFontScriptCyrillic);
+	EditorWidgets::helpForLabel("Cyrillic");
+	ImGui::Spacing();
+
+	if (p.fontScripts != before || p.fontWeightBold != wasBold)
+	{
+		// Straight to disk, like the permissions page: a setting that is on in
+		// the panel and off in the file is the state somebody spends an evening on.
+		if (!ctx.projectManager->saveProject(p.path))
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's font settings", p.path);
+	}
+
+	// What this session actually baked, said plainly. Asking for what is already
+	// live answers yes, and then there is nothing to report.
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	const bool weightLive = HE::uiSetFontWeightBold(p.fontWeightBold);
+	if (!HE::uiSetFontScripts(p.fontScripts) || !weightLive)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+		ImGui::TextWrapped("Saved, but not drawn yet: this editor session already baked its "
+		                   "font atlas, and every renderer holds that one texture. Restart "
+		                   "the editor to see the change. An exported application bakes on "
+		                   "its own start and needs no restart.");
+		ImGui::PopStyleColor();
+	}
+	else
+	{
+		const HE::BakedUIFont& f = HE::sharedUIFont();
+		ImGui::TextDisabled("Live: %zu characters in a %d x %d atlas, %s.",
+		                    f.glyphs.size(), f.atlasW, f.atlasH,
+		                    HE::uiFontWeightBold() ? "bold" : "regular");
+	}
+}
+
 void drawStatusPage(AppContext& ctx)
 {
 	HE::Ed::Help::Scope helpScope("Tool Status");
@@ -1455,8 +1814,16 @@ constexpr NavItem kGeneralItems[] = {
 	{ Page::Viewport,       "Viewport" },
 	{ Page::ContentBrowser, "Content Browser" },
 };
+// Everything the EDITOR does that is not the renderer, under one heading. The
+// three groups that used to stand alone here (Collaboration, Source Control,
+// Tools) were one page each: three headings for three rows made the rail long
+// and said nothing the page titles did not. The labels grew back what the
+// headings carried — "Sessions" under no heading is not a topic.
 constexpr NavItem kEditorItems[] = {
-	{ Page::HorizonCode, "HorizonCode" },
+	{ Page::HorizonCode,   "HorizonCode" },
+	{ Page::CollabGeneral, "Collaboration" },
+	{ Page::Repository,    "Source Control" },
+	{ Page::Status,        "Tool Status" },
 };
 constexpr NavItem kRenderingItems[] = {
 	{ Page::Display,            "Display" },
@@ -1464,24 +1831,21 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::GlobalIllumination, "Global Illumination" },
 	{ Page::Effects,            "Effects" },
 };
-constexpr NavItem kCollaborationItems[] = {
-	{ Page::CollabGeneral, "Sessions" },
-};
-constexpr NavItem kSourceControlItems[] = {
-	{ Page::Repository, "Repository" },
-};
-constexpr NavItem kToolsItems[] = {
-	{ Page::Status, "Status" },
+constexpr NavItem kProjectItems[] = {
+	{ Page::Application, "Application" },
+	{ Page::Permissions, "Permissions" },
+	{ Page::Fonts,       "Fonts" },
 };
 constexpr NavGroup kNavGroups[] = {
-	{ "General",        kGeneralItems,       IM_ARRAYSIZE(kGeneralItems) },
+	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
 	// Right behind General: these are the editor's own tools, so they belong
 	// next to the rest of "how the editor behaves" and ahead of the renderer.
-	{ "Editor",         kEditorItems,        IM_ARRAYSIZE(kEditorItems) },
-	{ "Rendering",      kRenderingItems,     IM_ARRAYSIZE(kRenderingItems) },
-	{ "Collaboration",  kCollaborationItems, IM_ARRAYSIZE(kCollaborationItems) },
-	{ "Source Control", kSourceControlItems, IM_ARRAYSIZE(kSourceControlItems) },
-	{ "Tools",          kToolsItems,         IM_ARRAYSIZE(kToolsItems) },
+	{ "Editor",    kEditorItems,    IM_ARRAYSIZE(kEditorItems) },
+	{ "Rendering", kRenderingItems, IM_ARRAYSIZE(kRenderingItems) },
+	// Last, and named "Project" rather than folded into one of the groups above:
+	// everything else on this tab follows the EDITOR from project to project,
+	// and this one travels with the project and into its exported build.
+	{ "Project",   kProjectItems,   IM_ARRAYSIZE(kProjectItems) },
 };
 
 // Engine-settings pages map onto one catalog category each; the rest have
@@ -1589,6 +1953,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
 	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
+	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
+	else if (s_page == Page::Fonts)       drawFontsPage(ctx);
+	else if (s_page == Page::Application) drawApplicationPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

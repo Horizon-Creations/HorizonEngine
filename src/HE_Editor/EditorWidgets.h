@@ -156,6 +156,13 @@ namespace Row
 	bool colorEdit3(const char* label, float* rgb, ImGuiColorEditFlags flags = 0);
 	bool colorEdit4(const char* label, float* rgba, ImGuiColorEditFlags flags = 0);
 	bool inputText(const char* label, char* buf, size_t bufSize, ImGuiInputTextFlags flags = 0);
+	// The same row for a std::string, which is what every editable value that is
+	// not a fixed-size buffer actually is (an element's Text, a component's
+	// Label). Same layout rule as the rest: the name goes ABOVE the field, so a
+	// full-width control does not push its own label off to the side.
+	bool inputText(const char* label, std::string* s, ImGuiInputTextFlags flags = 0);
+	// A box several lines tall, for the values that hold paragraphs.
+	bool inputTextMultiline(const char* label, std::string* s, float height);
 	// Read-only value line, laid out like the editable rows above it.
 	void labelText(const char* label, const char* fmt, ...) IM_FMTARGS(2);
 }

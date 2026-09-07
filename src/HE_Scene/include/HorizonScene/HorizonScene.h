@@ -46,7 +46,7 @@
 #include "Components/UIImageComponent.h"
 #include "Components/UIButtonComponent.h"
 #include "UISystem.h"
-#include "WidgetManager.h"
+#include <UIWidget/WidgetManager.h>
 #include "TerrainMeshGenerator.h"
 #include "TerrainSystem.h"
 

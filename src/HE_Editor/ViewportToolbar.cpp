@@ -572,7 +572,11 @@ void render(AppContext& ctx, State& st)
 		// The one control in the bar that is not a cell(), so it asks for its
 		// help itself. Worth the entry more than any other: what play mode
 		// DISCARDS when it stops is the thing nobody is told until it bites.
-		EditorWidgets::helpForKey("viewport.play");
+		// An application project has no play mode — this same button restarts its
+		// live preview instead, which is the only transport that means anything
+		// there. Same place, same affordance, different verb.
+		EditorWidgets::helpForKey(ctx.appLivePreview ? "viewport.restartPreview"
+		                                            : "viewport.play");
 		if (hovered || held)
 			dl->AddRectFilled(p0, ImVec2(p0.x + playW, p0.y + m.cell),
 			                  held ? kDownBg : kHoverBg, kCellRound);
@@ -588,7 +592,11 @@ void render(AppContext& ctx, State& st)
 		else if (playing) iconStop(dl, c, g, fg);
 		else              iconPlay(dl, c, g, fg);
 
-		if (pressed && ctx.setPlayMode) ctx.setPlayMode(!playing);
+		if (pressed)
+		{
+			if (ctx.appLivePreview) { if (ctx.restartAppPreview) ctx.restartAppPreview(); }
+			else if (ctx.setPlayMode)                            ctx.setPlayMode(!playing);
+		}
 
 		// Pause freezes the world tick — physics, scripts, animation, particles —
 		// while the viewport keeps drawing, which is what makes a frozen frame

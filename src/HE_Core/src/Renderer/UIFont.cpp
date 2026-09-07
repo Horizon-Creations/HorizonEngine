@@ -4,29 +4,190 @@
 // Roboto Condensed Bold — the same smooth TTF the editor UI uses, so live
 // widgets render like the designer preview (was the blocky ProggyClean bitmap).
 #include <Roboto_ttf.h>
+// …and the same family's Regular, so a project can have ordinary body text and
+// `<b>` can mean something. Shipped as the variable file; stb_truetype reads its
+// default master, which is Regular (SIL OFL 1.1, EditorDeps/Fonts/).
+#include <RobotoRegular_ttf.h>
+// …and the icon face: 2234 pictures in the Private Use Area, addressed by name.
+// The names live beside the outlines because a TTF knows that E88A has a shape,
+// never that the shape is called "home" (Apache 2.0, EditorDeps/Fonts/).
+#include <MaterialIcons_ttf.h>
+#include <MaterialIcons_names.h>
 
 #include <Renderer/UIFont.h>
 #include <algorithm>
+#include <string>      // std::stof — the markup's size value
 #include <unordered_map>
 
 namespace HE {
 
+// ── UTF-8 ────────────────────────────────────────────────────────────────────
 namespace
 {
-    // Bake ASCII 32..127 of `ttf` into `f` (using f.atlasW/atlasH/bakePx). Fills
-    // pixels + glyphs + ascent + ok. `f` must have its atlas dims/size set.
-    void bakeInto(const unsigned char* ttf, BakedUIFont& f)
+    // A continuation byte is 10xxxxxx: never a character boundary.
+    bool isUtf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+}
+
+std::size_t uiUtf8Prev(const std::string& s, std::size_t i)
+{
+    if (i == 0) return 0;
+    if (i > s.size()) i = s.size();
+    --i;
+    while (i > 0 && isUtf8Cont(s[i])) --i;
+    return i;
+}
+
+std::size_t uiUtf8Next(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) return s.size();
+    ++i;
+    while (i < s.size() && isUtf8Cont(s[i])) ++i;
+    return i;
+}
+
+std::size_t uiUtf8Clamp(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) return s.size();
+    while (i > 0 && isUtf8Cont(s[i])) --i;
+    return i;
+}
+
+std::uint32_t uiUtf8Decode(const std::string& s, std::size_t& i)
+{
+    if (i >= s.size()) { i = s.size(); return 0; }
+    const unsigned char b0 = static_cast<unsigned char>(s[i]);
+    // How many bytes the lead byte PROMISES, and the bits it contributes.
+    int extra = 0;
+    std::uint32_t cp = 0;
+    if      (b0 < 0x80) { ++i; return b0; }
+    else if ((b0 & 0xE0) == 0xC0) { extra = 1; cp = b0 & 0x1Fu; }
+    else if ((b0 & 0xF0) == 0xE0) { extra = 2; cp = b0 & 0x0Fu; }
+    else if ((b0 & 0xF8) == 0xF0) { extra = 3; cp = b0 & 0x07u; }
+    else { ++i; return b0; } // a continuation byte or 0xFE/0xFF standing alone
+    // A promise the string does not keep is not a character: hand back the lead
+    // byte and move one, so a truncated sequence costs one glyph and not the
+    // rest of the line.
+    for (int k = 1; k <= extra; ++k)
     {
+        if (i + k >= s.size() || !isUtf8Cont(s[i + k])) { ++i; return b0; }
+        cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3Fu);
+    }
+    i += extra + 1;
+    return cp;
+}
+
+namespace
+{
+    // One block of codepoints to bake.
+    struct CpRange { std::uint32_t first, count; };
+
+    // Icons are baked once at this size and scaled to whatever a label asks for.
+    // 40 px is what puts all of them into a 2048² atlas with stb's shelf packer
+    // (48 does not), and an icon in a user interface is drawn at 16 to 32, so it
+    // is a downscale rather than a blur.
+    constexpr float kIconBakePx = 40.0f;
+
+    // The base set plus whatever `scripts` asks for, ascending. The base is the
+    // promise every project gets without deciding anything: Latin as it is
+    // actually written, including the punctuation a text field produces on its
+    // own (U+2022 is the password dot).
+    std::vector<CpRange> rangesFor(std::uint32_t scripts)
+    {
+        std::vector<CpRange> r;
+        r.push_back({ 0x0020, 0x5F });                       // ASCII 0x20..0x7E
+        r.push_back({ 0x00A0, 0x60 });                       // Latin-1 Supplement
+        r.push_back({ 0x0100, 0x80 });                       // Latin Extended-A
+        if (scripts & UIFontScriptGreek)    r.push_back({ 0x0370, 0x90 });
+        if (scripts & UIFontScriptCyrillic) r.push_back({ 0x0400, 0x100 });
+        r.push_back({ 0x2010, 0x18 });                       // dashes, quotes, bullet, ellipsis
+        r.push_back({ 0x20AC, 0x01 });                       // €
+        return r;
+    }
+
+    // One packing attempt at the atlas size `f` currently carries. Leaves f.pixels
+    // /glyphs/ranges filled on success and undefined (about to be retried or
+    // replaced) on failure.
+    //
+    // Gather/pack/render by hand rather than stbtt_PackFontRanges, for one
+    // reason: with skip_missing on, that function reports failure for every
+    // codepoint the FONT does not have. "Roboto has no Cyrillic" would then read
+    // exactly like "the atlas is too small", the growth below would double the
+    // atlas three times over nothing and still end in the fallback. Here the
+    // rectangles answer the only question that matters — did everything the font
+    // does have find a place.
+    bool packOnce(const unsigned char* ttf, BakedUIFont& f, const std::vector<CpRange>& rs)
+    {
+        stbtt_fontinfo info;
+        if (!stbtt_InitFont(&info, ttf, 0)) return false;
+
         f.pixels.assign(static_cast<size_t>(f.atlasW) * f.atlasH, 0);
-        stbtt_bakedchar chars[96];
-        const int r = stbtt_BakeFontBitmap(ttf, 0, f.bakePx, f.pixels.data(),
-                                           f.atlasW, f.atlasH, 32, 96, chars);
-        f.ok = r > 0;
-        for (int i = 0; i < 96; ++i)
+        f.glyphs.clear();
+        f.ranges.clear();
+
+        std::vector<stbtt_pack_range> pr(rs.size());
+        std::vector<std::vector<stbtt_packedchar>> chars(rs.size());
+        std::size_t total = 0;
+        for (size_t i = 0; i < rs.size(); ++i)
         {
-            f.glyphs[i] = { (float)chars[i].x0, (float)chars[i].y0,
-                            (float)chars[i].x1, (float)chars[i].y1,
-                            chars[i].xoff, chars[i].yoff, chars[i].xadvance };
+            chars[i].assign(rs[i].count, stbtt_packedchar{});
+            pr[i] = stbtt_pack_range{};
+            // POSITIVE size, which is stbtt_ScaleForPixelHeight — the same scale
+            // stbtt_BakeFontBitmap used before this. STBTT_POINT_SIZE would ask
+            // for ScaleForMappingEmToPixels instead and move every glyph in every
+            // label that already exists.
+            pr[i].font_size                        = f.bakePx;
+            pr[i].first_unicode_codepoint_in_range = static_cast<int>(rs[i].first);
+            pr[i].num_chars                        = static_cast<int>(rs[i].count);
+            pr[i].chardata_for_range               = chars[i].data();
+            total += rs[i].count;
+        }
+
+        stbtt_pack_context spc;
+        if (!stbtt_PackBegin(&spc, f.pixels.data(), f.atlasW, f.atlasH, 0, 1, nullptr))
+            return false;
+        // A codepoint the font does not have stays zeroed rather than becoming the
+        // font's box glyph: BakedUIFont::glyph reads that as "not carried", and a
+        // gap is honest where a box would claim the character was drawn.
+        stbtt_PackSetSkipMissingCodepoints(&spc, 1);
+
+        std::vector<stbrp_rect> rects(total);
+        const int n = stbtt_PackFontRangesGatherRects(&spc, &info, pr.data(),
+                                                      static_cast<int>(pr.size()), rects.data());
+        stbtt_PackFontRangesPackRects(&spc, rects.data(), n);
+        bool fits = true;
+        for (int i = 0; i < n; ++i)
+            if (rects[i].w > 0 && rects[i].h > 0 && !rects[i].was_packed) { fits = false; break; }
+        if (fits)
+            stbtt_PackFontRangesRenderIntoRects(&spc, &info, pr.data(),
+                                                static_cast<int>(pr.size()), rects.data());
+        stbtt_PackEnd(&spc);
+        if (!fits) return false;
+
+        for (size_t i = 0; i < rs.size(); ++i)
+        {
+            f.ranges.push_back({ rs[i].first, rs[i].count,
+                                 static_cast<std::uint32_t>(f.glyphs.size()) });
+            for (const stbtt_packedchar& pc : chars[i])
+                f.glyphs.push_back({ (float)pc.x0, (float)pc.y0, (float)pc.x1, (float)pc.y1,
+                                     pc.xoff, pc.yoff, pc.xadvance });
+        }
+        return true;
+    }
+
+    // Pack `want` at the size `f` asks for, doubling the atlas rather than losing
+    // a range: Latin alone fits 1024², Cyrillic on top of it might not, and an
+    // atlas one size too small would drop exactly the characters somebody asked
+    // for. Fills pixels + glyphs + ranges + ascent; leaves `ok` to the caller,
+    // which is the one that knows what to do with a failure.
+    bool bakeRanges(const unsigned char* ttf, BakedUIFont& f, const std::vector<CpRange>& want)
+    {
+        bool ok = false;
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            if (packOnce(ttf, f, want)) { ok = true; break; }
+            if (f.atlasW >= 4096 && f.atlasH >= 4096) break;
+            f.atlasW = std::min(4096, f.atlasW * 2);
+            f.atlasH = std::min(4096, f.atlasH * 2);
         }
         stbtt_fontinfo info;
         if (stbtt_InitFont(&info, ttf, 0))
@@ -35,15 +196,58 @@ namespace
             stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
             f.ascent = ascent * stbtt_ScaleForPixelHeight(&info, f.bakePx);
         }
+        return ok;
     }
+
+    // Bake `ttf` into `f` (using f.atlasW/atlasH/bakePx as the REQUEST) as a TEXT
+    // face: the base set plus whatever scripts were asked for.
+    void bakeInto(const unsigned char* ttf, BakedUIFont& f, std::uint32_t scripts)
+    {
+        f.scripts = scripts;
+        const int reqW = f.atlasW, reqH = f.atlasH;
+        f.ok = bakeRanges(ttf, f, rangesFor(scripts));
+        if (!f.ok)
+        {
+            // Nothing fits, so fall back to ASCII at the size that was asked for.
+            // A missing script is a gap in a sentence; a failed bake is an
+            // application with no text at all, and that is the worse of the two.
+            f.atlasW  = reqW;
+            f.atlasH  = reqH;
+            f.scripts = 0;
+            f.ok      = packOnce(ttf, f, { { 0x0020, 0x5F } });
+        }
+    }
+
+    std::uint32_t g_scripts = 0;
+    bool          g_sharedBaked = false;
+    bool          g_weightBold  = true;   // what the engine has always drawn
 }
+
+bool uiSetFontWeightBold(bool bold)
+{
+    if (g_sharedBaked) return bold == g_weightBold;
+    g_weightBold = bold;
+    return true;
+}
+
+bool uiFontWeightBold() { return g_weightBold; }
+
+bool uiSetFontScripts(std::uint32_t scripts)
+{
+    if (g_sharedBaked) return scripts == g_scripts;
+    g_scripts = scripts;
+    return true;
+}
+
+std::uint32_t uiFontScripts() { return g_scripts; }
 
 const BakedUIFont& sharedUIFont()
 {
     static BakedUIFont s_font = []
     {
         BakedUIFont f; // atlasW/atlasH/bakePx default to the shared-atlas constants
-        bakeInto(Roboto_data, f);
+        bakeInto(g_weightBold ? Roboto_data : RobotoRegular_data, f, g_scripts);
+        g_sharedBaked = true;
         return f;
     }();
     return s_font;
@@ -51,12 +255,101 @@ const BakedUIFont& sharedUIFont()
 
 BakedUIFont bakeDefaultUIFont(float bakePx, int atlasW, int atlasH)
 {
+    // Deliberately the BOLD face whatever the project asked for: the one caller
+    // is the editor's own splash screen, and editor chrome does not change its
+    // look because a project it is about to open prefers Regular body text.
     BakedUIFont f;
     f.bakePx = std::clamp(bakePx, 6.0f, 256.0f);
     f.atlasW = std::clamp(atlasW, 64, 4096);
     f.atlasH = std::clamp(atlasH, 64, 4096);
-    bakeInto(Roboto_data, f);
+    bakeInto(Roboto_data, f, g_scripts);
     return f;
+}
+
+namespace
+{
+    // The icon font's table directory, parsed once. Cheap next to a bake: this
+    // answers "does that outline exist" without touching the atlas, which is what
+    // lets a NAME be checked while parsing markup rather than while drawing it.
+    const stbtt_fontinfo* iconFontInfo()
+    {
+        static stbtt_fontinfo s_info;
+        static const bool s_ok = stbtt_InitFont(&s_info, MaterialIcons_data, 0) != 0;
+        return s_ok ? &s_info : nullptr;
+    }
+}
+
+std::uint32_t uiIconCodepoint(const std::string& name)
+{
+    // Binary search over the generated table: sorted at generation time, so the
+    // lookup a rich label does per icon per frame is a handful of comparisons.
+    std::size_t lo = 0, hi = MaterialIcons_name_count;
+    while (lo < hi)
+    {
+        const std::size_t mid = (lo + hi) / 2;
+        const int c = name.compare(MaterialIcons_names[mid].name);
+        if (c < 0) { hi = mid; continue; }
+        if (c > 0) { lo = mid + 1; continue; }
+        // Asked of the FONT, not just of the list: the two are separate files and
+        // a name whose outline is not in this cut has to behave like a typo — the
+        // tag stays as the text somebody typed — instead of inserting a character
+        // nobody can see. (Today all 2234 resolve; 46 of them are aliases, which
+        // is why there are fewer outlines than names.)
+        const std::uint32_t cp = MaterialIcons_names[mid].cp;
+        const stbtt_fontinfo* info = iconFontInfo();
+        return (info && stbtt_FindGlyphIndex(info, (int)cp)) ? cp : 0;
+    }
+    return 0;
+}
+
+const char* uiIconNameAt(std::size_t i)
+{
+    return i < MaterialIcons_name_count ? MaterialIcons_names[i].name : "";
+}
+
+bool uiRasterizeIcon(const std::string& name, int px, std::vector<std::uint8_t>& out)
+{
+    const std::uint32_t cp = uiIconCodepoint(name);
+    const stbtt_fontinfo* info = iconFontInfo();
+    if (cp == 0 || !info || px <= 0) return false;
+
+    // 0.62 of the box: Material icons are drawn to fill their em, and an icon
+    // that touched the edges of an app icon would look like a mistake. The tight
+    // box is then CENTRED, so icons of different shapes sit alike rather than
+    // each on its own baseline.
+    const float scale = stbtt_ScaleForPixelHeight(info, px * 0.62f);
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    stbtt_GetCodepointBitmapBox(info, (int)cp, scale, scale, &x0, &y0, &x1, &y1);
+    const int gw = x1 - x0, gh = y1 - y0;
+    if (gw <= 0 || gh <= 0) return false;
+
+    std::vector<std::uint8_t> glyph((std::size_t)gw * gh, 0);
+    stbtt_MakeCodepointBitmap(info, glyph.data(), gw, gh, gw, scale, scale, (int)cp);
+
+    out.assign((std::size_t)px * px, 0);
+    const int ox = (px - gw) / 2, oy = (px - gh) / 2;
+    for (int y = 0; y < gh; ++y)
+        for (int x = 0; x < gw; ++x)
+        {
+            const int dx = ox + x, dy = oy + y;
+            if (dx < 0 || dx >= px || dy < 0 || dy >= px) continue;
+            out[(std::size_t)dy * px + dx] = glyph[(std::size_t)y * gw + x];
+        }
+    return true;
+}
+
+std::size_t uiIconCount()
+{
+    static const std::size_t s_count = []
+    {
+        const stbtt_fontinfo* info = iconFontInfo();
+        if (!info) return std::size_t{ 0 };
+        std::size_t n = 0;
+        for (unsigned i = 0; i < MaterialIcons_name_count; ++i)
+            if (stbtt_FindGlyphIndex(info, (int)MaterialIcons_names[i].cp)) ++n;
+        return n;
+    }();
+    return s_count;
 }
 
 namespace UIFontCache
@@ -74,8 +367,11 @@ namespace UIFontCache
     {
         if (ttf.empty()) return 0;
         const int px = std::clamp((int)(bakePx + 0.5f), 8, 120);
-        // Fold the font id + bake size into a non-zero 32-bit key.
+        // Fold the font id + bake size + the scripts into a non-zero 32-bit key:
+        // an imported font baked for Latin and one baked for Cyrillic are two
+        // atlases, and the renderer uploads them under two keys.
         std::uint64_t h = stableId * 1099511628211ull ^ (std::uint64_t)px;
+        h ^= (std::uint64_t)uiFontScripts() * 0x9E3779B97F4A7C15ull;
         std::uint32_t key = (std::uint32_t)(h ^ (h >> 32));
         if (key == 0) key = 1;
         auto& c = cache();
@@ -83,7 +379,7 @@ namespace UIFontCache
         {
             BakedUIFont f;
             f.atlasW = 1024; f.atlasH = 1024; f.bakePx = (float)px;
-            bakeInto(ttf.data(), f);
+            bakeInto(ttf.data(), f, uiFontScripts());
             if (!f.ok) return 0; // baking failed → caller uses the shared font
             c.emplace(key, std::move(f));
         }
@@ -99,15 +395,63 @@ namespace UIFontCache
     }
 }
 
+// Down here rather than beside sharedUIFont(): the icon face is put into the
+// cache directly, and the cache is defined just above.
+std::uint32_t uiEngineFaceKey(UIFontFace face)
+{
+    switch (face)
+    {
+    case UIFontFace::Bold:
+    {
+        // Nothing is bolder than bold. Answering 0 here is what makes `<b>` a
+        // visible no-op in a project whose base weight IS bold, instead of a
+        // second atlas that draws the same glyphs.
+        if (g_weightBold) return 0;
+        static const std::uint32_t s_key = UIFontCache::keyFor(
+            0x8B01D0FACEull,
+            std::vector<uint8_t>(Roboto_data, Roboto_data + Roboto_size),
+            BakedUIFont::kBakePx);
+        return s_key;
+    }
+    case UIFontFace::Icon:
+    {
+        // Baked on the FIRST icon anybody draws, never before: an application
+        // without icons pays neither the four megabytes nor the bake. And baked
+        // WHOLE, so the atlas never grows afterwards — six backends upload it
+        // once, and a texture whose glyphs moved under them is the one failure
+        // this file is arranged to avoid.
+        static const std::uint32_t s_key = []() -> std::uint32_t
+        {
+            constexpr std::uint32_t kKey = 0x1C0F0117u;
+            BakedUIFont f;
+            f.atlasW = 2048;
+            f.atlasH = 2048;
+            f.bakePx = kIconBakePx;
+            // The whole Private Use Area: the codepoints the font does not use
+            // cost one empty rectangle each and nothing in the atlas, and asking
+            // for the range is simpler than asking for a list of 2234.
+            if (!bakeRanges(MaterialIcons_data, f, { { 0xE000, 0x1900 } })) return 0;
+            f.ok = true;
+            UIFontCache::cache().emplace(kKey, std::move(f));
+            return kKey;
+        }();
+        return s_key;
+    }
+    default:
+        return 0;
+    }
+}
+
 namespace
 {
-    // Advance width of one line at `sizePx` (glyphs outside ASCII 32..127 have no
-    // metrics and contribute nothing, exactly as the emit loop skips them).
+    // Advance width of one line at `sizePx`. A character the atlas does not carry
+    // has no metrics and contributes nothing, exactly as the emit loop draws
+    // nothing for it — the two have to agree or the caret lands beside the glyph.
     float lineWidth(const BakedUIFont& font, const std::string& s, float scale)
     {
         float w = 0.0f;
-        for (unsigned char ch : s)
-            if (ch >= 32 && ch < 128) w += font.glyphs[ch - 32].xadvance * scale;
+        for (std::size_t i = 0; i < s.size(); )
+            if (const BakedGlyph* g = font.glyph(uiUtf8Decode(s, i))) w += g->xadvance * scale;
         return w;
     }
 } // namespace
@@ -127,6 +471,19 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
         else if (c != '\r') cur.push_back(c);
     }
     lines.push_back(cur);
+    // ── A trailing break does not start a line ───────────────────────────────
+    // "Option 2\n" is one line, not one line and an empty one. It matters far
+    // more than it looks: an empty last line is half the block's height, so a
+    // vertically centred label with a stray newline is drawn hard against the
+    // top of its rect — which is exactly what an author gets by pressing Enter
+    // in the Text box to mean "done". ImGui's own CalcTextSizeA drops it too,
+    // which is why the designer showed such a label correctly while the engine
+    // did not, and a designer that disagrees with the engine is worse than
+    // either being wrong.
+    //
+    // Exactly ONE is dropped, so a deliberate blank line ("a\n\n") still leaves
+    // one, and an empty string is still one (empty) line rather than none.
+    if (lines.size() > 1 && lines.back().empty()) lines.pop_back();
 
     if (!wrap || wrapWidth <= 0.0f) return lines;
 
@@ -163,11 +520,17 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
             while (acc.empty() && word.size() > 1 &&
                    lineWidth(font, trimmed(word), scale) > wrapWidth)
             {
+                // Character by character, not byte by byte: a break inside a
+                // two-byte umlaut would leave half a character on each line, and
+                // neither half is anything.
                 std::string head;
-                for (char c : word)
+                for (std::size_t k = 0; k < word.size(); )
                 {
-                    if (!head.empty() && lineWidth(font, head + c, scale) > wrapWidth) break;
-                    head.push_back(c);
+                    const std::size_t next = uiUtf8Next(word, k);
+                    const std::string ch = word.substr(k, next - k);
+                    if (!head.empty() && lineWidth(font, head + ch, scale) > wrapWidth) break;
+                    head += ch;
+                    k = next;
                 }
                 wrapped.push_back(head);
                 word.erase(0, head.size());
@@ -177,6 +540,574 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
         wrapped.push_back(trimmed(acc));
     }
     return wrapped;
+}
+
+// ── Rich text markup ─────────────────────────────────────────────────────────
+
+bool uiParseRichColor(const std::string& s, glm::vec4& out)
+{
+    if (s.size() != 7 && s.size() != 9) return false;
+    if (s[0] != '#') return false;
+    auto hex = [](char c, int& v) {
+        if (c >= '0' && c <= '9') { v = c - '0';      return true; }
+        if (c >= 'a' && c <= 'f') { v = c - 'a' + 10; return true; }
+        if (c >= 'A' && c <= 'F') { v = c - 'A' + 10; return true; }
+        return false;
+    };
+    float ch[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const int count = s.size() == 7 ? 3 : 4;
+    for (int i = 0; i < count; ++i)
+    {
+        int hi = 0, lo = 0;
+        if (!hex(s[1 + i * 2], hi) || !hex(s[2 + i * 2], lo)) return false;
+        ch[i] = static_cast<float>(hi * 16 + lo) / 255.0f;
+    }
+    out = glm::vec4(ch[0], ch[1], ch[2], ch[3]);
+    return true;
+}
+
+namespace
+{
+    // A run of attributes while the parser is inside a tag. The stack IS the
+    // nesting: `<link=x><color=#f00>a</>b</>` gives "a" both and "b" only the
+    // link, which is what anyone who has written markup expects.
+    struct RichScope
+    {
+        std::string color; float sizeScale = 1.0f; std::string link;
+        UIFontFace  face = UIFontFace::Base;
+    };
+
+    // Does `s` at `i` start a tag this parser understands, and where does it end?
+    // Returns false for everything else — the one rule the whole format rests on:
+    // a tag that is not fully understood is TEXT. No special case per mistake,
+    // nothing silently swallowed, and a stray '<' in a sentence stays a '<'.
+    bool readTag(const std::string& s, std::size_t i, std::size_t& outEnd,
+                 std::string& outName, std::string& outValue)
+    {
+        if (i >= s.size() || s[i] != '<') return false;
+        const std::size_t close = s.find('>', i + 1);
+        if (close == std::string::npos) return false;
+        const std::string body = s.substr(i + 1, close - i - 1);
+        outEnd = close + 1;
+        if (body == "/") { outName = "/"; outValue.clear(); return true; }
+        // The one tag with no value: `<b>` … `</>`. Closed the same way as every
+        // other scope, so there is one closing form to remember and not two.
+        if (body == "b") { outName = "b"; outValue.clear(); return true; }
+        const std::size_t eq = body.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= body.size()) return false;
+        outName  = body.substr(0, eq);
+        outValue = body.substr(eq + 1);
+        if (outName == "color")
+        { glm::vec4 ignored{}; return uiParseRichColor(outValue, ignored); }
+        if (outName == "size")
+        {
+            try { const float v = std::stof(outValue); return v > 0.0f && v < 100.0f; }
+            catch (...) { return false; }
+        }
+        if (outName == "link") return true;   // any id will do; it is the graph's word
+        // An icon name is checked HERE, against the face's own list, so a
+        // misspelled one falls under the same rule as everything else and shows
+        // up as the text somebody typed instead of as an invisible nothing.
+        if (outName == "icon") return uiIconCodepoint(outValue) != 0;
+        return false;                          // unknown name: text, like everything else
+    }
+
+    // Append `cp` to `s` as UTF-8. Icons live above 0xE000, so this is the
+    // three-byte case; the rest is here so the function is not a lie.
+    void appendUtf8(std::string& s, std::uint32_t cp)
+    {
+        if (cp < 0x80) { s.push_back((char)cp); return; }
+        if (cp < 0x800)
+        {
+            s.push_back((char)(0xC0 | (cp >> 6)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+            return;
+        }
+        if (cp < 0x10000)
+        {
+            s.push_back((char)(0xE0 | (cp >> 12)));
+            s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+            return;
+        }
+        s.push_back((char)(0xF0 | (cp >> 18)));
+        s.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        s.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+} // namespace
+
+UIRichText uiParseRichText(const std::string& markup)
+{
+    UIRichText out;
+    std::vector<RichScope> stack;
+    // The run being built. Flushed whenever the attributes change, so the run
+    // list covers the plain text exactly once with no empty runs in it.
+    UITextRun cur;
+    auto attrs = [&]() -> RichScope { return stack.empty() ? RichScope{} : stack.back(); };
+    auto flush = [&]() {
+        cur.end = out.text.size();
+        if (cur.end > cur.begin) out.runs.push_back(cur);
+        cur = UITextRun{};
+        cur.begin = out.text.size();
+        const RichScope a = attrs();
+        cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+        cur.face  = a.face;
+    };
+
+    for (std::size_t i = 0; i < markup.size(); )
+    {
+        // The escape, before anything else looks at a '<'.
+        if (markup[i] == '<' && i + 1 < markup.size() && markup[i + 1] == '<')
+        { out.text.push_back('<'); i += 2; continue; }
+
+        std::size_t end = 0;
+        std::string name, value;
+        if (markup[i] == '<' && readTag(markup, i, end, name, value))
+        {
+            if (name == "/")
+            {
+                // Nothing open: a `</>` that closes nothing is text, by the one
+                // rule. It is also the only way to write one literally.
+                if (stack.empty()) { out.text += "</>"; i = end; continue; }
+                flush();
+                stack.pop_back();
+                const RichScope a = attrs();
+                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+                cur.face  = a.face;
+            }
+            else if (name == "icon")
+            {
+                // The one tag that does not open a scope: it INSERTS a character
+                // and is done. It inherits colour, size and link from where it
+                // stands — an icon inside a link is part of the link, and an
+                // icon in a coloured run is that colour — because the alternative
+                // is explaining which attributes reach it and which do not.
+                flush();
+                const RichScope a = attrs();
+                UITextRun ic;
+                ic.begin = out.text.size();
+                appendUtf8(out.text, uiIconCodepoint(value));
+                ic.end       = out.text.size();
+                ic.color     = a.color;
+                ic.sizeScale = a.sizeScale;
+                ic.link      = a.link;
+                ic.face      = UIFontFace::Icon;
+                out.runs.push_back(ic);
+                cur = UITextRun{};
+                cur.begin     = out.text.size();
+                cur.color     = a.color;
+                cur.sizeScale = a.sizeScale;
+                cur.link      = a.link;
+                cur.face      = a.face;
+                i = end;
+                continue;
+            }
+            else
+            {
+                flush();
+                RichScope a = attrs();
+                if (name == "color") a.color = value;
+                else if (name == "size") a.sizeScale = std::stof(value);
+                else if (name == "link") { a.link = value; out.hasLinks = true; }
+                else if (name == "b") a.face = UIFontFace::Bold;
+                stack.push_back(a);
+                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+                cur.face  = a.face;
+            }
+            i = end;
+            continue;
+        }
+        out.text.push_back(markup[i]);
+        ++i;
+    }
+    // An unclosed tag simply runs to the end — the alternative is dropping text
+    // somebody wrote because they forgot four characters.
+    cur.end = out.text.size();
+    if (cur.end > cur.begin) out.runs.push_back(cur);
+    // A label with no markup at all is ONE run over the whole string, which is
+    // what makes every consumer able to treat plain and rich text alike.
+    if (out.runs.empty() && !out.text.empty())
+        out.runs.push_back({ 0, out.text.size(), {}, 1.0f, {} });
+    return out;
+}
+
+namespace
+{
+    // Which baked atlas a run's glyphs come from, and under which key the
+    // renderer knows it. One function, used by the measure AND the draw, for the
+    // same reason the layout itself is one function.
+    struct ResolvedFace { const BakedUIFont* font; std::uint32_t key; };
+
+    ResolvedFace resolveFace(const BakedUIFont& base, std::uint32_t baseKey, UIFontFace face)
+    {
+        if (face == UIFontFace::Base) return { &base, baseKey };
+        // An element drawing in an imported Font asset has no engine bold of ITS
+        // family, so `<b>` there stays in the family it is in — a Roboto bold
+        // word inside somebody's serif label is worse than an unbolded one. An
+        // icon is not a weight of anything, so it is not subject to that.
+        if (face == UIFontFace::Bold && baseKey != 0) return { &base, baseKey };
+        const std::uint32_t k = uiEngineFaceKey(face);
+        if (k == 0) return { &base, baseKey };
+        const BakedUIFont* f = UIFontCache::find(k);
+        return (f && f->ok) ? ResolvedFace{ f, k } : ResolvedFace{ &base, baseKey };
+    }
+} // namespace
+
+UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
+                              const glm::vec2& rectPos, const glm::vec2& rectSize,
+                              float sizePx, const UITextLayout& opts,
+                              std::uint32_t baseKey)
+{
+    UIRichLayout out;
+    if (!font.ok || sizePx <= 0.0f || rt.text.empty()) return out;
+
+    // Which run a byte belongs to. The runs cover the text exactly once and in
+    // order, so this walks forward with the scan rather than searching.
+    std::size_t runCursor = 0;
+    auto runAt = [&](std::size_t b) {
+        while (runCursor + 1 < rt.runs.size() && b >= rt.runs[runCursor].end) ++runCursor;
+        while (runCursor > 0 && b < rt.runs[runCursor].begin) --runCursor;
+        return runCursor;
+    };
+    auto sizeAt = [&](std::size_t b) {
+        if (rt.runs.empty()) return sizePx;
+        return sizePx * rt.runs[runAt(b)].sizeScale;
+    };
+    auto faceAt = [&](std::size_t b) {
+        return resolveFace(font, baseKey,
+                           rt.runs.empty() ? UIFontFace::Base : rt.runs[runAt(b)].face);
+    };
+    // Advance of the CHARACTER at `b` — the byte walks below all step with
+    // uiUtf8Next, so `b` is always a character boundary and a two-byte umlaut is
+    // measured once, not twice. Scaled by ITS OWN face's bake size: the icon face
+    // is baked smaller than the text one, and dividing by the wrong one would
+    // make every icon the wrong size in a way that only shows up next to text.
+    auto advanceAt = [&](std::size_t b) {
+        const ResolvedFace rf = faceAt(b);
+        std::size_t j = b;
+        const BakedGlyph* g = rf.font->glyph(uiUtf8Decode(rt.text, j));
+        return g ? g->xadvance * (sizeAt(b) / rf.font->bakePx) : 0.0f;
+    };
+
+    // ── Lines ────────────────────────────────────────────────────────────────
+    // Byte ranges, because a piece has to name bytes to know its run. Hard breaks
+    // always; greedy word wrap on top when asked, measured with each character's
+    // OWN size — a wrap that measured everything at the element's size would put
+    // a large word past the edge.
+    struct Line { std::size_t begin = 0, end = 0; };
+    std::vector<Line> lines;
+    {
+        Line cur{ 0, 0 };
+        std::size_t i = 0;
+        float width = 0.0f;          // of what is on the line, trailing spaces included
+        float sinceBreak = 0.0f;     // width of the word being built
+        std::size_t lastBreak = std::string::npos;   // byte after the last space run
+        auto push = [&](std::size_t end) {
+            cur.end = end;
+            lines.push_back(cur);
+            cur = Line{ end, end };
+            width = sinceBreak = 0.0f;
+            lastBreak = std::string::npos;
+        };
+        while (i < rt.text.size())
+        {
+            const char c = rt.text[i];
+            if (c == '\r') { ++i; continue; }
+            if (c == '\n') { push(i); cur.begin = i + 1; ++i; continue; }
+            const float adv = advanceAt(i);
+            const bool wrapHere = opts.wrap && rectSize.x > 0.0f &&
+                                  width + adv > rectSize.x && i > cur.begin;
+            if (wrapHere)
+            {
+                // Break at the last space if the line has one, otherwise inside
+                // the word — a single word wider than the line must never
+                // overflow the rect, the same rule the plain path follows.
+                if (lastBreak != std::string::npos && lastBreak > cur.begin)
+                {
+                    const std::size_t at = lastBreak;
+                    push(at);
+                    cur.begin = at;
+                    i = at;
+                    // Re-measure the word that moved down with us.
+                    continue;
+                }
+                push(i);
+                cur.begin = i;
+                continue;
+            }
+            if (c == ' ') { lastBreak = i + 1; sinceBreak = 0.0f; }
+            else sinceBreak += adv;
+            width += adv;
+            i = uiUtf8Next(rt.text, i);
+        }
+        cur.end = rt.text.size();
+        lines.push_back(cur);
+        // A trailing break does not start a line — the same rule (and the same
+        // reason) as layoutUITextLines: an empty last line is half a line of
+        // height, and a centred label with a stray newline sits too high.
+        if (lines.size() > 1 && lines.back().begin >= lines.back().end) lines.pop_back();
+    }
+
+    // ── Where each line sits ─────────────────────────────────────────────────
+    // A line is as tall as its TALLEST run, and every piece on it shares one
+    // baseline. With one size throughout, all of this collapses to the plain
+    // path's formula, which is what keeps existing labels exactly where they are.
+    std::vector<float> lineSize(lines.size(), sizePx), lineWidthPx(lines.size(), 0.0f);
+    for (std::size_t li = 0; li < lines.size(); ++li)
+    {
+        float mx = 0.0f, w = 0.0f;
+        std::size_t lastInk = lines[li].begin;
+        for (std::size_t b = lines[li].begin; b < lines[li].end; )
+        {
+            const std::size_t next = uiUtf8Next(rt.text, b);
+            mx = std::max(mx, sizeAt(b));
+            w += advanceAt(b);
+            if (rt.text[b] != ' ') lastInk = next;
+            b = next;
+        }
+        // Trailing spaces neither widen the line nor shift a centred one.
+        float trimmed = 0.0f;
+        for (std::size_t b = lines[li].begin; b < lastInk; b = uiUtf8Next(rt.text, b))
+            trimmed += advanceAt(b);
+        lineSize[li]    = mx > 0.0f ? mx : sizePx;
+        lineWidthPx[li] = lines[li].end > lines[li].begin ? trimmed : 0.0f;
+        (void)w;
+    }
+    float blockHeight = lineSize.empty() ? 0.0f : lineSize.back();
+    for (std::size_t li = 0; li + 1 < lines.size(); ++li)
+        blockHeight += lineSize[li] * opts.lineSpacing;
+
+    float blockTop = rectPos.y + (rectSize.y - blockHeight) * 0.5f;      // 1 = middle
+    if (opts.alignV == 0)      blockTop = rectPos.y;
+    else if (opts.alignV == 2) blockTop = rectPos.y + rectSize.y - blockHeight;
+
+    // ── Pieces ───────────────────────────────────────────────────────────────
+    float centre = blockTop + (lines.empty() ? 0.0f : lineSize[0] * 0.5f);
+    for (std::size_t li = 0; li < lines.size(); ++li)
+    {
+        const float ls = lineSize[li];
+        const float slack = std::max(0.0f, rectSize.x - lineWidthPx[li]);
+        float x = rectPos.x + (opts.alignH == 1 ? slack * 0.5f
+                             : opts.alignH == 2 ? slack : 0.0f);
+        // The BASE font's ascent, deliberately, even where a piece is in another
+        // face: one line has one baseline. Taking each run's own ascent would put
+        // a bold word a pixel off its neighbours, which reads as a wobble rather
+        // than as emphasis.
+        const float baseline = centre + (font.ascent * (ls / font.bakePx)) * 0.5f - ls * 0.08f;
+        std::size_t b = lines[li].begin;
+        while (b < lines[li].end)
+        {
+            const std::size_t r = runAt(b);
+            std::size_t e = b;
+            float w = 0.0f;
+            while (e < lines[li].end && runAt(e) == r)
+            { w += advanceAt(e); e = uiUtf8Next(rt.text, e); }
+            UIRichPiece pc;
+            pc.run = r; pc.begin = b; pc.end = e;
+            pc.line = static_cast<int>(li);
+            pc.x = x; pc.width = w;
+            pc.sizePx = rt.runs.empty() ? sizePx : sizePx * rt.runs[r].sizeScale;
+            pc.face   = rt.runs.empty() ? UIFontFace::Base : rt.runs[r].face;
+            pc.baseline = baseline;
+            pc.top = centre - ls * 0.5f; pc.height = ls;
+            out.pieces.push_back(pc);
+            x += w;
+            b = e;
+        }
+        out.size.x = std::max(out.size.x, lineWidthPx[li]);
+        if (li + 1 < lines.size()) centre += ls * opts.lineSpacing;
+    }
+    out.size.y = blockHeight;
+    return out;
+}
+
+void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
+                    const UIRichText& rt, const UIRichLayout& layout,
+                    const glm::vec4& defaultColor, int layer,
+                    std::vector<UIRenderObject>& out)
+{
+    if (!font.ok) return;
+    for (const UIRichPiece& pc : layout.pieces)
+    {
+        // Per piece, because a piece is exactly the stretch that shares one face:
+        // its atlas, its bake size and the key the renderer samples all come from
+        // the same answer the layout already measured with.
+        const ResolvedFace rf = resolveFace(font, atlasKey, pc.face);
+        const float invW = 1.0f / (float)rf.font->atlasW;
+        const float invH = 1.0f / (float)rf.font->atlasH;
+        glm::vec4 colour = defaultColor;
+        if (pc.run < rt.runs.size() && !rt.runs[pc.run].color.empty())
+        {
+            glm::vec4 c{};
+            // Alpha travels with the element's own: a run says which colour, the
+            // element says how visible it is (inherited opacity is applied to
+            // every quad afterwards anyway, so this only keeps a run from being
+            // MORE opaque than the label it sits in).
+            if (uiParseRichColor(rt.runs[pc.run].color, c))
+                colour = glm::vec4(glm::vec3(c), c.a * defaultColor.a);
+        }
+        const float scale = pc.sizePx / rf.font->bakePx;
+        float penX = pc.x;
+        std::size_t b = pc.begin;
+        while (b < pc.end && b < rt.text.size())
+        {
+            const BakedGlyph* gp = rf.font->glyph(uiUtf8Decode(rt.text, b));
+            if (!gp) continue;
+            const BakedGlyph& g = *gp;
+            UIRenderObject ro;
+            ro.position = { penX + g.xoff * scale, pc.baseline + g.yoff * scale };
+            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
+            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
+            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
+            ro.color    = colour;
+            ro.type     = 2;
+            ro.layer    = layer;
+            ro.fontAtlasKey = rf.key;
+            out.push_back(std::move(ro));
+            penX += g.xadvance * scale;
+        }
+    }
+}
+
+std::string uiRichLinkAt(const UIRichText& rt, const UIRichLayout& layout,
+                         float x, float y)
+{
+    for (const UIRichPiece& pc : layout.pieces)
+    {
+        if (pc.run >= rt.runs.size() || rt.runs[pc.run].link.empty()) continue;
+        if (x < pc.x || x > pc.x + pc.width) continue;
+        if (y < pc.top || y > pc.top + pc.height) continue;
+        return rt.runs[pc.run].link;
+    }
+    return {};
+}
+
+std::vector<UITextLineRange> uiTextLineRanges(const std::string& text)
+{
+    std::vector<UITextLineRange> lines;
+    std::size_t begin = 0;
+    for (std::size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] != '\n') continue;
+        std::size_t end = i;
+        // A CRLF's '\r' is not part of the line's text, but it IS part of its
+        // bytes — so it is left OUT of the range's end and the next line starts
+        // after the '\n' regardless. That keeps the ranges a partition of the
+        // string even for text pasted from a Windows editor.
+        if (end > begin && text[end - 1] == '\r') --end;
+        lines.push_back({ begin, end });
+        begin = i + 1;
+    }
+    // The tail, always — this is the trailing empty line the label splitter
+    // drops on purpose and an editor must keep (see the header).
+    lines.push_back({ begin, text.size() });
+    return lines;
+}
+
+std::vector<UITextVisualLine> uiTextVisualLines(const std::string& text)
+{
+    const std::vector<UITextLineRange> hard = uiTextLineRanges(text);
+    std::vector<UITextVisualLine> out;
+    out.reserve(hard.size());
+    for (std::size_t i = 0; i < hard.size(); ++i)
+        // The row below starts where the next authored line does; the last one
+        // has nothing after it, so `next` is its own end. That is what makes
+        // `byte < next` a usable question at every row including the last.
+        out.push_back({ hard[i].begin, hard[i].end,
+                        i + 1 < hard.size() ? hard[i + 1].begin : hard[i].end, true });
+    return out;
+}
+
+std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font, const std::string& text,
+                                               float sizePx, float wrapWidth)
+{
+    if (!font.ok || sizePx <= 0.0f || wrapWidth <= 0.0f) return uiTextVisualLines(text);
+    const float scale = sizePx / font.bakePx;
+    auto isBlank = [](char c) { return c == ' ' || c == '\t'; };
+    // Width of a byte run, measured exactly the way the glyphs are emitted.
+    auto widthOf = [&](std::size_t from, std::size_t to)
+    { return lineWidth(font, text.substr(from, to - from), scale); };
+
+    const std::vector<UITextLineRange> hard = uiTextLineRanges(text);
+    std::vector<UITextVisualLine> out;
+    for (std::size_t li = 0; li < hard.size(); ++li)
+    {
+        const UITextLineRange& ln = hard[li];
+        const std::size_t e = ln.end;
+        std::size_t segStart = ln.begin;   // where this row starts
+        std::size_t visEnd   = ln.begin;   // …and how far its text reaches so far
+        std::size_t cur      = ln.begin;   // the scan
+        while (cur < e)
+        {
+            // One word, then the run of blanks behind it. A row that begins on
+            // blanks takes one of them as its "word" so the scan cannot stall.
+            std::size_t wEnd = cur;
+            while (wEnd < e && !isBlank(text[wEnd])) ++wEnd;
+            if (wEnd == cur) ++wEnd;
+            std::size_t sEnd = wEnd;
+            while (sEnd < e && isBlank(text[sEnd])) ++sEnd;
+
+            // Measured to the end of the WORD, never past it: the blanks behind
+            // it are what the break eats, and counting them would wrap a line
+            // that fits.
+            const float w = widthOf(segStart, wEnd);
+            if (w > wrapWidth && visEnd > segStart)
+            {
+                // Something is on the row already — send the word down and
+                // measure it again there, alone.
+                out.push_back({ segStart, visEnd, cur, false });
+                segStart = visEnd = cur;
+                continue;
+            }
+            if (w > wrapWidth && uiUtf8Next(text, segStart) < wEnd)
+            {
+                // Alone and still too wide. Break inside it, at the longest
+                // prefix that fits and never at less than one CHARACTER — a
+                // break by bytes would leave half an umlaut on each row, and
+                // neither half is anything.
+                std::size_t k = uiUtf8Next(text, segStart), fit = k;
+                while (k < wEnd)
+                {
+                    if (widthOf(segStart, k) > wrapWidth) break;
+                    fit = k;
+                    k = uiUtf8Next(text, k);
+                }
+                out.push_back({ segStart, fit, fit, false });
+                segStart = visEnd = cur = fit;
+                continue;
+            }
+            visEnd = wEnd;
+            cur    = sEnd;
+        }
+        // The row the authored line ends on reaches that line's end, trailing
+        // blanks and all: the caret has to be able to sit behind what somebody
+        // typed, even when it is a space. Where the row below begins is the
+        // NEXT authored line's own answer rather than "one past the '\n'" —
+        // a CRLF has two bytes there, and this way nobody has to remember it.
+        out.push_back({ segStart, e,
+                        li + 1 < hard.size() ? hard[li + 1].begin : e, true });
+    }
+    return out;
+}
+
+std::size_t uiVisualLineOfOffset(const std::vector<UITextVisualLine>& lines, std::size_t byte)
+{
+    if (lines.empty()) return 0;
+    for (std::size_t i = 0; i + 1 < lines.size(); ++i)
+        if (byte < lines[i].next) return i;
+    return lines.size() - 1;
+}
+
+std::size_t uiLineOfOffset(const std::vector<UITextLineRange>& lines, std::size_t byte)
+{
+    if (lines.empty()) return 0;
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        // `<= end` and not `< end`: the caret sits at the END of a line as often
+        // as inside it, and that position belongs to THIS line rather than to
+        // the start of the next one.
+        if (byte <= lines[i].end) return i;
+    return lines.size() - 1;
 }
 
 glm::vec2 measureUIText(const BakedUIFont& font, const std::string& text, float sizePx,
@@ -211,11 +1142,15 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
     const std::vector<std::string> lines =
         layoutUITextLines(font, text, sizePx, rectSize.x, opts.wrap);
 
-    // The block is centred vertically in the rect; line i sits `step` below i-1.
-    // For a single line this collapses to the original formula exactly (the
-    // block centre IS the rect centre), so existing widgets don't shift.
-    const float step       = sizePx * opts.lineSpacing;
-    const float blockCentre = rectPos.y + rectSize.y * 0.5f;
+    // Where the whole block of lines sits vertically. Middle is the historic
+    // behaviour and the default; Top and Bottom put the block's own height
+    // against the matching edge. Line i sits `step` below i-1 either way.
+    const float step        = sizePx * opts.lineSpacing;
+    const float blockHeight = static_cast<float>(lines.size() - 1) * step + sizePx;
+    float blockCentre = rectPos.y + rectSize.y * 0.5f;              // 1 = middle
+    if (opts.alignV == 0) blockCentre = rectPos.y + blockHeight * 0.5f;
+    else if (opts.alignV == 2)
+        blockCentre = rectPos.y + rectSize.y - blockHeight * 0.5f;
     const float firstCentre = blockCentre - static_cast<float>(lines.size() - 1) * step * 0.5f;
 
     const float invW = 1.0f / (float)font.atlasW;
@@ -227,17 +1162,22 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
         if (line.empty()) continue;                    // blank line still advances
 
         const float runW = lineWidth(font, line, scale);
-        const float x = rectPos.x
-            + (opts.centerH ? std::max(0.0f, (rectSize.x - runW) * 0.5f) : 0.0f);
+        // Per LINE, not per block: centring a paragraph centres each of its
+        // lines, which is what centring text means.
+        const float slack = std::max(0.0f, rectSize.x - runW);
+        const float x = rectPos.x + (opts.alignH == 1 ? slack * 0.5f
+                                   : opts.alignH == 2 ? slack
+                                                      : 0.0f);
         // Baseline: line centre shifted down by half the ascent (as before).
         const float baseline = firstCentre + static_cast<float>(li) * step
                              + (font.ascent * scale) * 0.5f - sizePx * 0.08f;
 
         float penX = 0.0f;
-        for (unsigned char ch : line)
+        for (std::size_t b = 0; b < line.size(); )
         {
-            if (ch < 32 || ch >= 128) continue;
-            const BakedGlyph& g = font.glyphs[ch - 32];
+            const BakedGlyph* gp = font.glyph(uiUtf8Decode(line, b));
+            if (!gp) continue;
+            const BakedGlyph& g = *gp;
             UIRenderObject ro;
             ro.position = { x + penX + g.xoff * scale, baseline + g.yoff * scale };
             ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
@@ -259,7 +1199,7 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
                       const glm::vec4& color, int layer, bool centerH,
                       std::vector<UIRenderObject>& out)
 {
-    UITextLayout opts; opts.centerH = centerH;   // no wrapping unless asked for
+    UITextLayout opts; opts.alignH = centerH ? 1 : 0;   // no wrapping unless asked for
     emitUITextGlyphs(font, atlasKey, text, rectPos, rectSize, sizePx, color, layer, opts, out);
 }
 

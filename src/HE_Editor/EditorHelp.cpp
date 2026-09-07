@@ -1369,6 +1369,15 @@ namespace
 	  "A screen — HUD, menu, dialog — laid out in the widget designer, with its "
 	  "own graph for what its buttons do.",
 	  "", "ui#designer" },
+	{ "New Asset/Theme", "",
+	  "What the whole application looks like: ten colour ROLES — background, "
+	  "surface, border, text, muted text, accent, accent text, warning, error, "
+	  "success — each "
+	  "in a light and a dark value, plus the size steps and the shadows. Elements "
+	  "point at a role instead of carrying a colour, so one edit here changes "
+	  "every one of them, and light/dark becomes a switch instead of a second set "
+	  "of widgets. A new theme starts as a copy of the shipped default.",
+	  "", "ui#elements" },
 	{ "New Asset/HorizonCode Class", "",
 	  "A visual-scripting class: variables, functions and events, instantiated "
 	  "at run time or put on an entity.",
@@ -1477,6 +1486,14 @@ namespace
 	  "", "editor#play-mode" },
 
 	// ── Project Hub and the reader itself ────────────────────────────────────
+	{ "Project Hub/Advanced Shader Effects", "",
+	  "Whether this application may author MATERIALS — shader graphs of its own. "
+	  "Off, the editor offers none and the packaged build ships the small renderer: "
+	  "widgets are still styled with rounded corners, borders, gradients and "
+	  "shadows, which is what an interface actually uses. On, everything a game "
+	  "has is available and the build carries a GPU renderer. Offered for "
+	  "applications only, and it cannot be changed afterwards.",
+	  "", "editor#project-hub" },
 	{ "Project Hub/Remove from list", "",
 	  "Takes the project off this list. The project itself is untouched on disk "
 	  "— this is the list of what you have opened, not of what exists.",
@@ -1562,6 +1579,12 @@ namespace
 	  "Runs the scene in the viewport: scripts start, physics ticks and the game's "
 	  "own camera takes over. Stopping restores the scene exactly as it was — "
 	  "changes made while playing are not kept.",
+	  "", "editor#play-mode" },
+	{ "viewport.restartPreview", "Restart Live Preview",
+	  "An application has no play mode: its interface is already running in the "
+	  "panel. This builds it again from the saved assets — the same thing a save "
+	  "does automatically, for when the preview has been driven into a state you "
+	  "want out of. Whatever it was holding (typed text, scroll positions) is gone.",
 	  "", "editor#play-mode" },
 	{ "viewport.pause", "Pause",
 	  "Freezes a running session without ending it. Everything stays where it is, "
@@ -1831,7 +1854,7 @@ namespace
 	  "pinned settings and the project itself are untouched.",
 	  "", "editor#preferences" },
 
-	// ── Preferences » Source Control ─────────────────────────────────────────
+	// ── Preferences » Editor » Source Control ────────────────────────────────
 	// The one-time setup page: is git usable on this machine, and is this
 	// project in a repository. Its own scope rather than "Preferences" because
 	// its labels are about a repository, not about the editor — and because the
@@ -1885,7 +1908,117 @@ namespace
 	  "repository rather than about the last time you looked.",
 	  "", "editor#preferences" },
 
-	// ── Preferences » Tools ──────────────────────────────────────────────────
+	// ── Preferences » Project ────────────────────────────────────────────────
+	// The pages on this tab that edit the PROJECT. Everything else here follows
+	// the editor from project to project; these travel with the project and into
+	// the application it exports.
+	{ "Permissions/Files outside the project", "Files outside the project",
+	  "Off, a script reads and writes only inside the project's Saved folder — an "
+	  "absolute path is simply refused. On, it may name any path on the machine.\n\n"
+	  "This is about what a SCRIPT may name on its own, never about what a PERSON "
+	  "may choose: a file somebody picks in a file dialog is allowed either way, "
+	  "because choosing it IS the permission. Most applications never need this "
+	  "switch — they need the dialog.",
+	  "", "editor#preferences" },
+	{ "Permissions/Run other programs", "Run other programs",
+	  "Whether Run Program and Open URL work. Off, they do nothing and say so in "
+	  "the log.\n\n"
+	  "Find Program is deliberately outside this: asking whether something is "
+	  "installed runs nothing, so a script can still say \"this needs git\" — "
+	  "which is the message somebody needs in order to decide whether to grant "
+	  "the permission at all.",
+	  "", "editor#preferences" },
+	{ "Permissions/Network access", "Network access",
+	  "Reserved. Nothing reads it yet — the `http` group is a later wave. It is "
+	  "here so that a project which has already thought about what it may reach "
+	  "does not have to be asked a second time when that group arrives.",
+	  "", "editor#preferences" },
+	{ "Application/Icon", "Icon",
+	  "The name of one of the engine's built-in icons — the same names <icon=…> "
+	  "uses in a rich text label. The export GENERATES the icon from it: a .icns "
+	  "for macOS, an .ico for Windows and a .png the runtime uses as its window "
+	  "icon, all from one picture on a coloured plate.\n\n"
+	  "So there is nothing to draw and nothing to keep in three formats. Leave it "
+	  "empty and the export writes no icon at all, which is what it did before "
+	  "this existed.",
+	  "", "editor#preferences" },
+	{ "Application/Plate colour", "Plate colour",
+	  "The rounded square the icon sits on. The icon itself is white on a dark "
+	  "plate and near-black on a light one, so this is one choice and not two — "
+	  "white on yellow is not an option somebody should be able to pick by "
+	  "accident.",
+	  "", "editor#preferences" },
+	{ "Application/Bundle identifier", "Bundle identifier",
+	  "What the system calls this application: CFBundleIdentifier on macOS, and "
+	  "the name every later per-app setting hangs off. Empty derives "
+	  "com.horizonengine.<project>, which is what every export did before this "
+	  "field existed — set it to your own reverse domain once you have one.\n\n"
+	  "Changing it after release makes the system treat the result as a DIFFERENT "
+	  "application: new settings, new permissions, new place in the Dock.",
+	  "", "editor#preferences" },
+	{ "Application/Version", "Version",
+	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle. "
+	  "Free-form text; \"1.4\" and \"1.4.2\" are both fine.",
+	  "", "editor#preferences" },
+	{ "Application/Extension", "Extension",
+	  "The file ending this type owns, without the dot: \"hnote\". Letters and "
+	  "digits only, because the system's own name for the type is derived from "
+	  "it — the UTI on macOS, the MIME type on Linux, the ProgId on Windows — and "
+	  "those may not contain anything else.\n\n"
+	  "Deriving rather than asking is deliberate: three names that can disagree "
+	  "with each other is how a file ends up opening in the wrong application.",
+	  "", "editor#preferences" },
+	{ "Application/Name", "Name",
+	  "What a file dialog calls this type — \"Horizon Note\", not \"hnote\". It "
+	  "is what somebody reads in an Open panel and in the Get Info window.",
+	  "", "editor#preferences" },
+	{ "Application/Icon##doc", "Icon",
+	  "The built-in icon these files wear, on the same plate as the application. "
+	  "Empty gives them the application's own icon, which is fine — a folder of "
+	  "files that all look alike is only a problem once there are two types.",
+	  "", "editor#preferences" },
+	{ "Application/Remove", "Remove",
+	  "Drops this file type. The declaration disappears from the next export; a "
+	  "system that already learned the association keeps it until something "
+	  "replaces it, which is the system's business and not the export's.",
+	  "", "editor#preferences" },
+	{ "Application/Add file type", "Add file type",
+	  "Adds a file type this application owns. It takes effect at the next "
+	  "export: a declaration only means something to a system that has an "
+	  "application installed to read it.",
+	  "", "editor#preferences" },
+	{ "Fonts/Regular", "Regular",
+	  "Ordinary body text, and the setting a new project starts with. It is also "
+	  "what makes <b> in rich text visible: a bold run is drawn in the same "
+	  "family's Bold, which only looks like anything if the text around it is "
+	  "not already bold.",
+	  "", "editor#preferences" },
+	{ "Fonts/Bold", "Bold",
+	  "What the engine has always drawn, so a project made before this setting "
+	  "existed keeps it and nothing moves.\n\n"
+	  "With Bold as the base weight there is nothing bolder to reach for, so <b> "
+	  "draws the same letters. That is deliberate: the alternative is a second "
+	  "atlas holding the same glyphs and a tag that pretends.",
+	  "", "editor#preferences" },
+	{ "Fonts/Greek", "Greek",
+	  "Adds the Greek alphabet to the font atlas. Off by default, like Cyrillic: "
+	  "the base set (Latin, its umlauts and accents, the punctuation and the Euro "
+	  "sign) is always there, and everything past it costs room in a texture "
+	  "every project pays for.\n\n"
+	  "A character the atlas does not carry draws nothing at all — no box, no "
+	  "gap in the width — so a Greek label in a project that never ticked this "
+	  "is simply blank.",
+	  "", "editor#preferences" },
+	{ "Fonts/Cyrillic", "Cyrillic",
+	  "Adds the Cyrillic alphabet to the font atlas. See Greek above for what the "
+	  "base set already covers.\n\n"
+	  "Both take effect when the atlas is baked, which happens once per run. The "
+	  "exported application bakes on its own start and gets this immediately; "
+	  "this editor session has to be restarted, and the page says so when that "
+	  "is the case.",
+	  "", "editor#preferences" },
+
+	// ── Preferences » Editor » Tool Status ───────────────────────────────────
 	// One table of every external thing the editor leans on. The rows are text;
 	// only these two are controls.
 	{ "Tool Status/Fix", "Fix",
@@ -1930,7 +2063,8 @@ namespace
 	  "", "horizoncode#compiler" },
 	{ "Build Tools/Don't show this again", "",
 	  "Stops this dialog appearing at startup. The tools stay missing, and "
-	  "Preferences » Tools still says so — this only silences the interruption.",
+	  "Preferences » Editor » Tool Status still says so — this only silences the "
+	  "interruption.",
 	  "", "horizoncode#compiler" },
 	{ "Build Tools/Recheck", "Recheck",
 	  "Probes for cmake and a compiler again. A clean result closes this dialog "
@@ -2001,6 +2135,12 @@ namespace
 	  "mesh's material already carries. That is what makes one graph work for many "
 	  "different meshes.",
 	  "", "materials#nodes" },
+	{ "Material Function/Default", "Default",
+	  "What a caller's pin is worth while nothing is wired to it. One number, used "
+	  "for every component of a vector input — enough for a shipped effect to mean "
+	  "something the moment it is dropped into a graph, instead of showing nothing "
+	  "until every pin is connected.",
+	  "", "materials#functions" },
 	{ "Material Node/Open Function", "Open Function",
 	  "Opens the material function this node calls, in its own tab. "
 	  "Double-clicking the node does the same.",
@@ -2097,6 +2237,659 @@ namespace
 	  "What this widget is called. The graph finds it by this name, so renaming "
 	  "one that the logic already refers to is worth doing deliberately.",
 	  "", "ui#designer" },
+	// ── The theme's styles ───────────────────────────────────────────────────
+	// A role is one colour; a style is a whole kind of element, and the only
+	// place a hover or a pressed colour can be themed at all.
+	{ "Theme Styles/Add Variant", "",
+	  "A named KIND of this type — \"success\", \"danger\", \"ghost\" — that an "
+	  "element opts into with its Tag. It layers ON TOP of the plain type's style: "
+	  "a variant that names one colour keeps the rounding, the border and "
+	  "everything else the base decided, which is the whole reason to write a "
+	  "variant instead of a second style. This is CSS's Button.success, with the "
+	  "same cascade and none of its combinators.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Add Named Style", "",
+	  "A look that is not tied to one element type. An element points at it by "
+	  "name, and it layers over whatever its type already said — so \"Card\" can "
+	  "round a Panel and a Button the same way without either of them stopping "
+	  "being what it is.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Add Value", "",
+	  "Which further property this VARIANT decides. A variant holds only what is "
+	  "different about it — everything it does not name comes from the plain "
+	  "type's style above, which already holds every value that type has. The "
+	  "list is the element's own: whatever a type exposes, a style can answer "
+	  "for, which is why hover and pressed are here and no role vocabulary has "
+	  "them.",
+	  "", "ui#elements" },
+	{ "Theme Styles/Remove Style", "",
+	  "Drops this variant or named style. Elements that followed it keep the "
+	  "values they last got "
+	  "rather than turning white — the same rule a renamed role follows, because "
+	  "visible and fixable beats vanished.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Start from", "",
+	  "Replaces every value below with one of the palettes the engine ships: the "
+	  "neutral Default, or Amber, which is the editor's own. They are a starting "
+	  "point and not a link — once taken, the theme is yours and editing it "
+	  "changes nothing else. The asset keeps its own name.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Use for this Project", "",
+	  "Makes this the theme the project's interface resolves against, and the one "
+	  "an exported application boots with. It is stored in the project, not in "
+	  "this asset — a project has one theme, a folder may hold several.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Starts in", "",
+	  "Which of the two the application opens in. \"System\" follows the desktop "
+	  "and keeps following it while the application runs, which is why what is "
+	  "stored is the QUESTION and not today's answer — writing down \"Dark\" "
+	  "because the machine that built it was dark would ship as dark for "
+	  "everybody. A script can still change it later with Set Theme Mode.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Blur", "",
+	  "How far this shadow fades out past the shape, in canvas pixels. Raised is "
+	  "a card lying on the page, Overlay is a dialog floating well above it.",
+	  "", "ui#elements" },
+	{ "Theme Editor/Offset", "",
+	  "How far the shadow is pushed from the shape, x then y. It is where the "
+	  "light is, and one offset for the whole application is what makes a screen "
+	  "look lit rather than assembled.",
+	  "", "ui#elements" },
+	{ "UI Widget/Style", "",
+	  "Which of the theme's styles dresses this element — one decision for its "
+	  "whole look, instead of binding value after value below. The entry named "
+	  "after the element's TYPE is the theme's answer for every element of that "
+	  "type, and it is what a newly placed element follows. A name of your own "
+	  "(\"Card\", \"Danger\") is one you point at deliberately. \"None\" means the "
+	  "theme's styles leave this element alone, which is where every widget "
+	  "authored before styles existed starts.",
+	  "", "ui#elements" },
+	{ "UI Widget/Tag", "",
+	  "Which KIND of its type this element is: a Button with the tag \"success\" "
+	  "takes the theme's Button style and then Button.success on top of it, value "
+	  "by value. That is CSS's class, and the layering is the point — the variant "
+	  "only says what is different, everything else still comes from the plain "
+	  "type. The list is what the theme in the toolbar defines for this type, so a "
+	  "tag is picked from what exists rather than typed from memory; a tag the "
+	  "theme does not define leaves the element an ordinary one of its type.",
+	  "", "ui#elements" },
+	{ "UI Widget/None (this element decides for itself)", "",
+	  "No style. The values below are this element's own and nothing but a role "
+	  "binding will change them.",
+	  "", "ui#elements" },
+	{ "UI Widget/Locked (keep this value)", "",
+	  "Holds this one value against the theme: no role and no style may write it. "
+	  "Different from \"Literal\", which only means nothing is bound — a style "
+	  "answers for properties nobody bound, and this is what keeps it out. It is "
+	  "what a component parameter sets when a page tells a component what colour "
+	  "to be.",
+	  "", "ui#elements" },
+	{ "UI Widget/Literal (type it here)", "",
+	  "Where this colour comes from. \"Literal\" means you typed it and it is "
+	  "yours; picking one of the ten theme ROLES instead means the theme decides "
+	  "it, every element with that role changes together, and light/dark switches "
+	  "it for you. A bound colour's swatch is read-only, because editing it would "
+	  "be overwritten the next time the theme or the mode changes.",
+	  "", "ui#elements" },
+	{ "UI Widget/Cell (col, row)", "",
+	  "Which cell of the Grid this element sits in, counted from 0 at the top "
+	  "left. -1 on either number means \"the next free cell\", which is what almost "
+	  "everything wants: fill a form from the top and never type a coordinate. "
+	  "Naming a cell PINS the element there, and pinned ones are placed first — so "
+	  "an element that asked for a cell cannot have it taken by one that did not "
+	  "care but happened to come earlier.",
+	  "", "ui#elements" },
+	{ "UI Widget/Span (cols, rows)", "",
+	  "How many cells this element covers, at least one of each. A span takes the "
+	  "gaps it crosses with it, so two columns and the space between them are one "
+	  "wide cell — that is how a heading sits over a whole form. Cells under a span "
+	  "are taken: everything placed automatically steps around it.",
+	  "", "ui#elements" },
+	{ "UI Widget/Column Sizes", "",
+	  "One entry per column, in order. \"120\" is a fixed width, \"*\" is one share of "
+	  "whatever is left over, \"2*\" is two shares, and \"auto\" is as wide as the "
+	  "widest thing in that column. A form is usually \"auto\" for the labels and "
+	  "\"*\" for the fields, which is exactly what two stacked boxes cannot do. "
+	  "Anything unreadable is treated as \"*\" — a track you can see and fix beats "
+	  "one that collapsed to nothing and hid the typo.",
+	  "", "ui#elements" },
+	{ "UI Widget/Row Sizes", "",
+	  "The same, downwards. If there are more children than declared rows, the LAST "
+	  "entry is repeated for as many rows as they need — a settings page with twenty "
+	  "rows does not have to declare twenty.",
+	  "", "ui#elements" },
+	{ "UI Widget/Row Spacing", "",
+	  "The gap between two ROWS of a Grid. Spacing is the gap between two columns; "
+	  "two numbers because a form almost always wants its rows further apart than "
+	  "its columns.",
+	  "", "ui#elements" },
+	// ── The palette: what each element type IS ───────────────────────────────
+	// One line per widget type, because a palette of nineteen bare nouns is a
+	// list you have to place things from to find out what they are.
+	//
+	// These are keyed by the type's own NAME (uiWidgetTypeName), which is why
+	// the coverage audit cannot see them: the palette draws ImGui::Button with a
+	// computed label, and the scan only reads literals. A runtime test in
+	// test_editor_help.cpp asks the registry instead — every registered type must
+	// have an entry here, and a new widget type fails that test until it does.
+	{ "UI Palette/Panel", "",
+	  "A rectangle of one colour, and the plainest container there is. What you "
+	  "reach for to give a group of things a background, a border or a rounding.",
+	  "", "ui#elements" },
+	{ "UI Palette/Image", "",
+	  "A picture. Point it at a texture; nine-slice settings let a small source "
+	  "stretch into a big frame without the corners smearing.",
+	  "", "ui#elements" },
+	{ "UI Palette/Text", "",
+	  "A run of text. Alignment in nine positions, optional word wrap, and Auto "
+	  "Size to make the element fit what it says.",
+	  "", "ui#elements" },
+	{ "UI Palette/Button", "",
+	  "A surface that reacts to the pointer and fires OnClicked. What is written "
+	  "ON it is a child — a Text, an Image, or both — which is what lets a button "
+	  "carry an icon beside its caption.",
+	  "", "ui#elements" },
+	{ "UI Palette/CheckBox", "",
+	  "A box that is ticked or not, with a label beside it. Fires OnValueChanged "
+	  "when it flips.",
+	  "", "ui#elements" },
+	{ "UI Palette/Slider", "",
+	  "A value between a minimum and a maximum, dragged with the pointer.",
+	  "", "ui#elements" },
+	{ "UI Palette/ProgressBar", "",
+	  "A fill between 0 and 1 that shows how far something got. Read-only: it is "
+	  "told, it does not ask.",
+	  "", "ui#elements" },
+	{ "UI Palette/TextInput", "",
+	  "An editable field. Placeholder, maximum length, password dots, an input "
+	  "filter for numbers-only — and Multiline for a box that holds paragraphs.",
+	  "", "ui#elements" },
+	{ "UI Palette/ComboBox", "",
+	  "A list to pick one entry from, shown as a dropdown. The entries are the "
+	  "Options list; Selected Index is which one it shows.",
+	  "", "ui#elements" },
+	{ "UI Palette/VerticalBox", "",
+	  "Stacks its children top to bottom, spaced and padded. A child in a box "
+	  "does not place itself — the box decides — and Slot Fill lets one of them "
+	  "take the space left over.",
+	  "", "ui#elements" },
+	{ "UI Palette/HorizontalBox", "",
+	  "The same, left to right. A row of buttons with one Spacer set to fill is "
+	  "how you push the last of them to the far end.",
+	  "", "ui#elements" },
+	{ "UI Palette/ScrollBox", "",
+	  "A vertical box whose content may be taller than it is. Scrolls with the "
+	  "wheel and clips what hangs out.",
+	  "", "ui#elements" },
+	{ "UI Palette/Spacer", "",
+	  "Nothing, with a size. It draws no pixel and takes no click; all it does is "
+	  "occupy its slot, which in a box is what pushes everything after it along.",
+	  "", "ui#elements" },
+	{ "UI Palette/ListView", "",
+	  "A list of any length built from ONE authored row. It holds a COUNT and a "
+	  "row widget, not the items — so ten thousand entries cost the rows the "
+	  "window can show, and you answer OnRowBind for the ones on screen.",
+	  "", "ui#elements" },
+	{ "UI Palette/WrapBox", "",
+	  "A row until it cannot be one: children run left to right and break onto a "
+	  "new line when the next will not fit. Tags, chips, a toolbar that has to "
+	  "survive a narrow window.",
+	  "", "ui#elements" },
+	{ "UI Palette/Grid", "",
+	  "Rows and columns, with spans. What a FORM is made of: a label column that "
+	  "fits its labels beside a field column that takes the rest — which two "
+	  "stacked boxes can only fake, and only by hand-matching sizes.",
+	  "", "ui#elements" },
+	{ "UI Palette/TabBox", "",
+	  "Pages behind a strip of tabs, one showing at a time. Its CHILDREN are the "
+	  "pages and each child's NAME is its tab label, so there is no second list "
+	  "to keep in step.",
+	  "", "ui#elements" },
+	{ "UI Palette/Splitter", "",
+	  "Two panes and a divider you can drag. Exactly two: a three-pane layout is "
+	  "a splitter inside a splitter, which says the same thing with the "
+	  "arithmetic already solved.",
+	  "", "ui#elements" },
+	{ "UI Palette/Accordion", "",
+	  "A stack of sections you fold open, several at once. Its CHILDREN are the "
+	  "sections and each child's NAME is its heading, the same design the Tab Box "
+	  "uses. Not a Tab Box with another skin: a folded section is zero high, so "
+	  "everything below an opened one moves down, and the stack scrolls when it "
+	  "outgrows its frame.",
+	  "", "ui#elements" },
+	{ "UI Palette/DatePicker", "",
+	  "A month at a time, as a grid of days you can click. Built in rather than "
+	  "hanging out of its own frame: put it in a form, or — if it should float — "
+	  "in a modal, which is the same thing without a second mechanism. Six rows "
+	  "always, so paging through the months does not move what is under it.",
+	  "", "ui#elements" },
+	{ "UI Palette/ColorPicker", "",
+	  "A saturation/value field with a hue strip beside it, and an alpha strip "
+	  "when Show Alpha is on. The field and the strip are ordinary gradient "
+	  "quads and are EXACT, not an approximation: the hue wheel runs straight in "
+	  "RGB across every 60 degrees.",
+	  "", "ui#elements" },
+	{ "UI Palette/WidgetRef", "",
+	  "Another widget, used here as one element. Not offered in the palette as a "
+	  "bare type — you pick the widget itself from Components or User Defined, "
+	  "which is the same thing without an empty slot to point somewhere first.",
+	  "", "ui#elements" },
+
+	// ── Lining elements up while dragging ────────────────────────────────────
+	{ "ui.snap", "Snap",
+	  "While you drag or resize an element, its edges and its middle catch on "
+	  "the edges and middles of its neighbours and of the frame around it — the "
+	  "parent, or the canvas for an element that has none. A line shows what it "
+	  "caught: solid for an edge, dashed for a middle. Hold ALT to ignore it for "
+	  "one drag, which is quicker than turning it off and back on. A resize only "
+	  "snaps the edge you have hold of; the other side stands still. Nothing "
+	  "here is stored in the widget — it is a way of dragging, not a property.",
+	  "", "ui#designer" },
+
+	// ── Looking at the widget under another theme ────────────────────────────
+	// The toolbar cell and the six entries of its popup. All of it is a way of
+	// LOOKING: nothing here is stored in the widget, and nothing reaches the
+	// running preview.
+	{ "ui.theme-preview", "Theme",
+	  "Which theme the canvas resolves bound colours against, and in which mode. "
+	  "Only the picture changes — the widget keeps its bindings, the preview keeps "
+	  "its theme, and nothing is written to the asset. What it is for is the "
+	  "question every themed widget raises: does this still read on somebody "
+	  "else's palette?",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/From the preview", "",
+	  "Draw with the theme the running preview uses, which is what the widget "
+	  "will actually look like when the application runs. The default, and where "
+	  "you go back to.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Default", "",
+	  "The engine's built-in theme — the one a project has before it sets one. "
+	  "Worth a look because it is what an element falls back to when a binding "
+	  "no longer resolves.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Amber", "",
+	  "The editor's own palette, shipped as a theme. A second real palette to "
+	  "check against without authoring one first.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Follow the preview", "",
+	  "Light or dark as the preview resolved it — which, when the project follows "
+	  "the desktop, is whatever this machine is set to.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Light", "",
+	  "Force the light half of every role, whatever the preview is in. Each role "
+	  "carries both values, so this is the same theme read the other way, not a "
+	  "second one.",
+	  "", "ui#designer" },
+	{ "UI Theme Preview/Dark", "",
+	  "Force the dark half. The pair with Light is the cheap way to find the "
+	  "colour somebody typed as a literal instead of binding to a role: it is the "
+	  "one that does not change.",
+	  "", "ui#designer" },
+
+	{ "Canvas/Theme", "",
+	  "The theme THIS widget resolves against, overriding the project's. Empty is "
+	  "the normal answer — a project has one theme and everything follows it — and "
+	  "this is for the widget that must not: a launcher, an overlay, a screen that "
+	  "has to look like somebody else's product. It covers everything embedded in "
+	  "this widget too; one widget, one theme, no cascade of themes down the tree. "
+	  "The designer draws with it as soon as it is set, since that is what the "
+	  "running application would do.",
+	  "", "ui#elements" },
+	{ "Canvas/Follow the Theme", "",
+	  "Switches every element of this widget over to the theme's styles at once. "
+	  "An element read from a file that predates styles follows none — that is "
+	  "what keeps opening an old widget from repainting it — and this is the one "
+	  "button that undoes that decision for the whole widget. Each element still "
+	  "follows the style named after its own TYPE unless you point it somewhere "
+	  "else, and anything locked or bound to a role stays where it is.",
+	  "", "ui#elements" },
+
+	// ── The timeline: animations a widget owns ───────────────────────────────
+	// A track is one property of one element, a key is what that property is at
+	// a moment, and the easing sits on the key. The same three words every
+	// animation editor uses, in the vocabulary this one already had.
+	{ "UI Timeline/Animation", "",
+	  "Which of this widget's animations the timeline below is showing. They "
+	  "belong to the widget and travel with it, so a component brings its own — "
+	  "and a page that embeds it can play them by name.",
+	  "", "ui#elements" },
+	{ "UI Timeline/New", "",
+	  "Makes an animation and names it. The name is the identity: a graph plays "
+	  "it by name. Renaming it later is safe — \"Rename\" carries this widget's "
+	  "own Play and Stop nodes with it and asks about the rest of the project.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Rename", "",
+	  "Renames this animation and retargets what plays it. The Play and Stop "
+	  "nodes in this widget's own graph follow immediately; every other asset "
+	  "that names it is listed first and only rewritten once you say so. A node "
+	  "that names it but whose target cannot be proved — a Play on a widget this "
+	  "graph was handed rather than one it made — is reported and left alone, "
+	  "because renaming it on the strength of the name would break graphs that "
+	  "were correct.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Length", "",
+	  "How much time you have room to work in, which is not the same as how "
+	  "long the animation runs: playing stops at the LAST KEY, and the lane "
+	  "greys out everything after it. Keys past the end still exist and still "
+	  "hold their value — shortening the clip hides them rather than throwing "
+	  "them away, so lengthening it again brings them back.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Loop", "",
+	  "Runs it again from the start instead of ending. A looping animation never "
+	  "reports finished — the only way it ends is somebody stopping it — which is "
+	  "what a spinner or a pulse wants.",
+	  "", "ui#elements" },
+	{ "ui.timeline-play", "Play",
+	  "Plays the animation in the DESIGNER — the running application is not "
+	  "involved — and stops at the last key, exactly where the running one "
+	  "would. Drag the ruler to scrub by hand; either way the canvas shows the "
+	  "clip at the playhead. To see the widget's own values again, pick "
+	  "\"(none)\" as the animation.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Zoom In", "",
+	  "Spreads the time axis out around the playhead, so keys milliseconds "
+	  "apart become separate things you can grab. The ruler follows: its labels "
+	  "turn from seconds into milliseconds by themselves. The wheel over the "
+	  "lane does the same around the pointer, and Shift+wheel slides along.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Zoom Out", "",
+	  "Back towards the whole clip in one lane. Zoom stops at fit — there is "
+	  "nothing outside an animation to look at.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Fit", "",
+	  "The whole clip across the lane again, from the start. The way back when "
+	  "zooming has left you somewhere in the middle of a long animation.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Time", "",
+	  "When the selected key happens. The playhead follows while you drag it, "
+	  "so the canvas keeps showing the key you are moving — the same thing "
+	  "dragging its diamond does, with a number for when you know the number.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Value", "",
+	  "What the animated property IS at this key. This is where an animation is "
+	  "edited: the Details panel writes the widget's own values, which is what "
+	  "the widget looks like with no animation playing.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Ease", "",
+	  "The curve leading INTO this key — how the value arrives from the one "
+	  "before it. On the first key it means nothing; there is nothing to come "
+	  "from. Out curves land softly, In curves leave softly, and Out Back "
+	  "overshoots and settles, which is what makes a dialog land.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Add Track", "",
+	  "Adds a row for one property of the SELECTED element. Only what can be "
+	  "interpolated is offered — a number, a colour, a point — because a string "
+	  "has no halfway and a track that snapped at the end would be a duration "
+	  "that means nothing. The new track starts with a key holding the value the "
+	  "element has right now.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Key", "",
+	  "Adds a key at the playhead, holding whatever the animation already shows "
+	  "there, and replaces one that was already at that moment. Adding it "
+	  "changes nothing on its own — that is the point: you place the moment "
+	  "first, then type what should happen at it in the row below.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Delete Key", "",
+	  "Removes this key. The track keeps the others, and a track with one key "
+	  "left is simply a constant.",
+	  "", "ui#elements" },
+
+	// ── Components: what a widget offers whoever embeds it ───────────────────
+	{ "Canvas/Parameter Name", "",
+	  "What a page that embeds this widget calls this knob — \"Label\", \"Help Text\", "
+	  "\"Icon\". This name is what the page STORES, not the element and property "
+	  "underneath it, which is why you can rebuild the inside of this widget and "
+	  "every page that uses it keeps working. Rename it and the pages that set it "
+	  "fall back to the default, so rename early or not at all.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "Canvas/Element", "",
+	  "Which element inside this widget the parameter writes. Listed by the same "
+	  "names the hierarchy shows, so what you pick here is findable up there — "
+	  "which is a reason to name the element before exposing it.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "Canvas/Property", "",
+	  "Which of that element's properties the parameter sets. Only the ones the "
+	  "element really has are offered, and picking a different element clears this "
+	  "again: a parameter naming a property that is not there would write nothing "
+	  "at all, quietly.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "Canvas/Help", "",
+	  "One sentence, shown to whoever sets this parameter on a page. Worth writing "
+	  "for anything whose name does not already say it — the person setting it is "
+	  "looking at your component from the outside and cannot see what it does.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "Canvas/Add Parameter", "",
+	  "Adds a knob to this widget, pointed at whatever is selected. A widget with "
+	  "no parameters is a page: it can be embedded, but every copy of it looks "
+	  "exactly the same. One with parameters is a component — the same form row "
+	  "used twenty times with twenty different labels.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "UI Widget/Default", "",
+	  "Stops setting this parameter on this copy, so it shows whatever the widget "
+	  "itself was authored with. Not the same as clearing the field: an empty text "
+	  "box is a label that says nothing, this is a label that says what its "
+	  "component says.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "UI Widget/Parameters", "",
+	  "What the embedded widget lets this page set. Each row is a knob that widget "
+	  "declared for itself; what you see before touching one is the default it was "
+	  "authored with, and \"Default\" gives that back. The values are written in when "
+	  "the widget is created and not again — this is a starting state, not a live "
+	  "link, so anything that has to change while the app runs changes through a "
+	  "script.",
+	  // The handbook has no "components" section yet (the docs live in the
+	  // Website repository). Pointed at the one that exists rather than at one
+	  // that would 404 — a dead link teaches people the button does nothing.
+	  "", "ui#widgets" },
+	{ "UI Widget/Line Spacing", "",
+	  "The gap between two LINES of a Wrap Box. Its own number beside Spacing, "
+	  "which is the gap between two items on the same line — a row of chips almost "
+	  "always wants to sit tighter sideways than it does downwards, and one number "
+	  "for both would force a compromise nobody wants.",
+	  "", "ui#elements" },
+	{ "UI Widget/Tooltip", "",
+	  "What this element says about itself when the pointer rests on it for half a "
+	  "second. Empty means nothing to say, which is most elements. The DELAY is the "
+	  "point: a hint that appears the instant you cross a button is a hint in the "
+	  "way of using it. The nearest element upwards that has one wins, so putting "
+	  "it on a button covers the caption sitting on that button too.",
+	  "", "ui#elements" },
+	{ "UI Widget/Row Widget", "",
+	  "The widget one row of this list is made of — authored once, in this same "
+	  "designer, and repeated. The list keeps no items: the running application "
+	  "says how many there are (Set List Count) and the list asks On Row Bind to "
+	  "fill in each row it actually puts on screen. That is why ten thousand items "
+	  "cost the ten rows you can see instead of ten thousand elements. Without a "
+	  "row widget a list can never show anything, which the designer says on the "
+	  "list itself.",
+	  "", "ui#elements" },
+	{ "UI Widget/Selection", "",
+	  "What clicking a row does. \"None\" is a list you only read. \"Single\" picks "
+	  "one and drops the one before it. \"Multiple\" toggles each row you click, so "
+	  "a second one adds rather than replaces — no key held down. Either way the "
+	  "list fires On Selection Changed with the item's index, and Get List Selected "
+	  "answers it later.",
+	  "", "ui#elements" },
+	{ "UI Widget/Show Header", "",
+	  "Turns a list into a table: a band of column titles above the rows. The "
+	  "titles are the NAMES of the elements in the row widget — rename the cell "
+	  "and you rename the column, so the two can never say different things. The "
+	  "row widget has to be a single Horizontal Box whose cells do not use Slot "
+	  "Fill; anything else and the header shows nothing and says why once.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Height", "",
+	  "How tall the band of titles is, in canvas units. It comes off the top of "
+	  "the room the rows have, so a taller header is fewer rows and not a taller "
+	  "list.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Color", "",
+	  "What the band behind the column titles is filled with. Fully transparent "
+	  "leaves it showing the list's own back colour, which is what a table inside "
+	  "an already-dark card usually wants.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Text Color", "",
+	  "The colour of the column titles, and of the thin seams between them. Its "
+	  "own colour rather than the row text's: a header that reads exactly as loud "
+	  "as its rows is a header nobody sees.",
+	  "", "ui#elements" },
+	{ "UI Widget/Header Font Size", "",
+	  "How big the column titles are. Separate from anything in the row widget, "
+	  "because the titles are drawn by the LIST and the rows draw themselves.",
+	  "", "ui#elements" },
+	{ "UI Widget/Resizable Columns", "",
+	  "Whether the seams between the titles can be dragged. A drag takes from the "
+	  "column on the right exactly what it gives the one on the left, so the "
+	  "total stays the width of the list — nothing here scrolls sideways, and a "
+	  "column dragged wider has to come from somewhere.",
+	  "", "ui#elements" },
+	{ "UI Widget/Column Widths", "",
+	  "The column widths as text: \"120,80,200\". Read as PROPORTIONS, so a list "
+	  "twice as wide gives every column twice the room and the numbers keep "
+	  "meaning something after a resize. Too many entries are dropped and missing "
+	  "ones take an average share, which is what makes adding a cell to the row "
+	  "widget safe. Dragging a seam writes this, and it is carried across a "
+	  "preview reload like anything else a person arranged by hand.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sort Column", "",
+	  "Which column shows the little sort marker, or -1 for none. It sorts "
+	  "NOTHING: the list holds no items and cannot. A click on a title fires On "
+	  "Header Clicked with the column index, the owner sorts its own array, calls "
+	  "Refresh List and sets this to say which column it went by — the same "
+	  "division of labour that lets ten thousand rows cost ten elements.",
+	  "", "ui#elements" },
+	{ "UI Widget/Sort Ascending", "",
+	  "Which way the sort marker points. Like Sort Column it is a picture of what "
+	  "the owner did, not an instruction to the list.",
+	  "", "ui#elements" },
+	{ "UI Widget/Expanded", "",
+	  "Which sections of an accordion are folded open, as a bitmask — one bit per "
+	  "child, the first section is bit 1. The tick boxes above set it; a graph can "
+	  "set the number directly to open a set of sections at once. At most 32 "
+	  "sections, because that is how many bits there are.",
+	  "", "ui#elements" },
+	{ "UI Widget/Allow Multiple", "",
+	  "On, any number of sections can be open at the same time. Off, opening one "
+	  "folds the rest — which is a Tab Box that stacks, and sometimes exactly what "
+	  "is wanted. Closing the last open one is allowed either way.",
+	  "", "ui#elements" },
+	{ "UI Widget/Open Header Color", "",
+	  "What the heading band of an OPEN section is filled with. It is the one "
+	  "thing that says open from closed, so it should not be the same colour as "
+	  "Header Color.",
+	  "", "ui#elements" },
+	{ "UI Widget/Body Color", "",
+	  "What is drawn behind an open section's content, under whatever the section "
+	  "itself draws. Fully transparent by default: the section is usually a panel "
+	  "with its own background.",
+	  "", "ui#elements" },
+	{ "UI Widget/Text Indent", "",
+	  "How far in from the left edge a heading's text starts, in canvas units.",
+	  "", "ui#elements" },
+	{ "UI Widget/Bar Width", "",
+	  "On anything that scrolls, how wide the scrollbar on the right edge is, in "
+	  "canvas units — zero hides it and the wheel still works. On a Color Picker "
+	  "the name means the hue strip beside the field instead.",
+	  "", "ui#elements" },
+	{ "UI Widget/Bar Color", "",
+	  "What a scrollbar's thumb is filled with. There is no track behind it — an "
+	  "empty groove is furniture nobody reads.",
+	  "", "ui#elements" },
+	{ "UI Widget/Corner Radius", "",
+	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
+	  "number for all four; at half the shorter side the shape becomes a capsule, "
+	  "and no further. Text and the layout boxes do not have it, because they have "
+	  "no surface to round.",
+	  "", "ui#elements" },
+	{ "UI Widget/Per corner", "",
+	  "Rounds each corner on its own: the four fields are laid out where the "
+	  "corners are, top row first. A tab, a chat bubble and the head of a card are "
+	  "all one rounded and one square pair. Switching back off keeps the top-left "
+	  "value and gives it to the other three.",
+	  "", "ui#elements" },
+	{ "UI Widget/Border Width", "",
+	  "An outline drawn INSIDE the surface, following its rounding. Inside rather "
+	  "than around it, so a thicker line never overlaps the neighbours: the "
+	  "element's rectangle is what the layout gave it and does not grow.",
+	  "", "ui#elements" },
+	{ "UI Widget/Border Color", "",
+	  "The outline's colour. Its own alpha, so a faint hairline over a dark "
+	  "surface needs no second element.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient", "",
+	  "Fades the surface from its own colour to a second one instead of filling it "
+	  "flat. It is a property, not a shader: it costs no material, shows in the "
+	  "designer straight away, and works in every backend.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient Color", "",
+	  "The colour the surface fades TO. It starts at the element's own colour, so "
+	  "a gradient is two colours and an angle and nothing else.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient Shape", "",
+	  "Linear fades along an angle, across the whole surface. Radial fades out of "
+	  "the middle to the farthest corner — a glow behind a dialog, a spotlit card, "
+	  "the soft centre of a button. A radial fade has no direction, so the angle "
+	  "is not offered while it is picked.",
+	  "", "ui#elements" },
+	{ "UI Widget/Gradient Angle", "",
+	  "Which way the fade runs, clockwise from straight down: 0 fades top to "
+	  "bottom, 90 left to right. Down at zero because a vertical fade is what a "
+	  "button or a header almost always wants, and the common case should need no "
+	  "number typed into it.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow", "",
+	  "A drop shadow: the element's own shape drawn again underneath it, in one "
+	  "colour, offset and softened. It is not a blur pass — it is one more "
+	  "rectangle, which is why it costs nothing and works everywhere.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow Color", "",
+	  "The shadow's colour, alpha included. Real shadows are not black: a shadow "
+	  "tinted towards the surface under it looks like light instead of like dirt.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow Blur", "",
+	  "How far the shadow fades out past the shape, in canvas pixels. Small and "
+	  "tight reads as a card lying on the page, wide and faint as something "
+	  "floating well above it.",
+	  "", "ui#elements" },
+	{ "UI Widget/Shadow Offset", "",
+	  "How far the shadow is pushed from the shape, x then y, positive being right "
+	  "and down. It is where the light is: one offset for everything on a screen "
+	  "looks lit, a different one per element looks broken.",
+	  "", "ui#elements" },
+	{ "UI Widget/Inner Shadow", "",
+	  "The same falloff cast INWARDS from the element's own edge, drawn on its "
+	  "surface: a pressed key, a well, a field sunk into the page. Independent of "
+	  "the drop shadow — an element may have both, one, or neither.",
+	  "", "ui#elements" },
+	{ "UI Widget/Inner Shadow Color", "",
+	  "The colour darkening the inside of the rim, alpha included.",
+	  "", "ui#elements" },
+	{ "UI Widget/Inner Shadow Blur", "",
+	  "How deep into the element the rim shading reaches, in canvas pixels.",
+	  "", "ui#elements" },
+	{ "UI Widget/Text Align", "",
+	  "Where the text sits inside its own box: the nine cells are left/centre/right "
+	  "across and top/middle/bottom down. This is not the anchor — the anchor places "
+	  "the element in its parent, this places the letters in the element. A caption "
+	  "stretched across a button needs this one.",
+	  "", "ui#designer" },
 	{ "UI Widget/Slot Fill", "",
 	  "0 keeps the widget's own size along the box's axis. Above 0 it takes a "
 	  "share of the space left over instead, split between the filling children "
@@ -2130,6 +2923,16 @@ namespace
 	  "The point of the widget that its position refers to, and the point it "
 	  "rotates about. 0,0 is the top left corner, 0.5,0.5 the middle, 1,1 the "
 	  "bottom right.",
+	  "", "ui#designer" },
+	{ "UI Widget/Min Size", "",
+	  "The width and height this widget never goes below, whoever decides its "
+	  "size: a layout box, an anchor stretched across the parent, or its own "
+	  "content. 0 on an axis means no floor there.",
+	  "", "ui#designer" },
+	{ "UI Widget/Max Size", "",
+	  "The width and height it never goes above. 0 on an axis means no ceiling "
+	  "there. A ceiling below the floor loses, because \"never smaller than "
+	  "this\" is the promise a layout can keep.",
 	  "", "ui#designer" },
 	{ "UI Widget/Left/Right", "",
 	  "The margins from the parent's left and right edges. They replace position "
@@ -2180,10 +2983,71 @@ namespace
 	  "through it to whatever is behind. For decoration that must not swallow "
 	  "input.",
 	  "", "ui#runtime" },
+	{ "UI Widget/Window drag", "",
+	  "Pressing here moves the WINDOW, the way a title bar does. For an "
+	  "application that draws its own title bar and asked the system for a "
+	  "window without one (window mode Borderless). Independent of hit-testable: "
+	  "a title bar is usually a container the pointer passes through, and "
+	  "anything clickable sitting on it — a close button — keeps its click.",
+	  "", "ui#runtime" },
 	{ "UI Widget/Clip children", "",
 	  "Cuts everything inside this widget off at its own edge. Clipped pixels are "
 	  "neither drawn nor clickable — it is what makes a list longer than its box "
 	  "look like a list in a box instead of spilling across the screen.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Focus frame", "",
+	  "While anything INSIDE this element has the keyboard focus, the focus ring "
+	  "is drawn around this element instead of around whatever holds it. A "
+	  "search field is a rounded frame with an icon and a text field inset "
+	  "between them: the field takes the keys, but the frame is what a person "
+	  "sees as the control, and a ring around the field alone is a small "
+	  "rectangle floating inside a pill. Set it on the frame.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Tab index", "",
+	  "Where Tab goes next. Left at 0 the route follows the tree on the left, "
+	  "parents before their children, which is the order you arranged and the "
+	  "only one you can predict. A number above 0 pulls the element to the front "
+	  "of the route, ahead of every 0, in ascending order: that is how a grid "
+	  "that reads down its columns gets tabbed down its columns. A number below "
+	  "0 takes it off the route altogether, and only off the route — a click and "
+	  "the arrow keys still reach it.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Accepts drop", "",
+	  "Makes this element a drop zone: a file dragged in from the desktop and let "
+	  "go over it fires On File Dropped, once per file, with the file's path. The "
+	  "drop travels UP from whatever the pointer met to the first element that "
+	  "accepts one, so set it on the panel and not on the label inside it. Where "
+	  "nothing accepts, the window took it and the Game Instance hears it instead.",
+	  "", "ui#widgets" },
+	{ "UI Widget/RichText", "",
+	  "Reads the Text as MARKUP instead of as plain words. What it understands: "
+	  "<color=#ff8800>, <size=1.5>, <b> and <link=id>, each closed by </>, plus "
+	  "<icon=home> for one of the built-in icons and << for a literal '<'. An "
+	  "icon inserts a single character and inherits the colour, size and link it "
+	  "stands in. <b> needs the project's text weight to be Regular, since "
+	  "nothing is bolder than bold (Preferences > Project > Fonts). A link makes "
+	  "that stretch of words "
+	  "clickable — the pointer turns into a hand over it and On Link Clicked "
+	  "fires with the id — while the rest of the label stays as inert as any "
+	  "other text. Anything the parser does not fully understand is left as "
+	  "text, so a stray '<' shows up as one rather than eating the sentence. "
+	  "Off by default: a label written before this may hold a '<' that means a "
+	  "'<'. Sizes are a MULTIPLE of Font Size, not pixels.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Draggable", "",
+	  "Lets this element be picked up and carried onto a drop zone. The drag "
+	  "begins at a DISTANCE, not at the press, so a draggable element can still "
+	  "be clicked. It fires On Drag Started when it lifts and On Drag Ended when "
+	  "it lands, with a bool saying whether anything took it; the zone it was "
+	  "dropped on gets On Drop. Like Accepts drop, this bubbles: pressing the "
+	  "label of a draggable card carries the card.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Drag payload", "",
+	  "What this element calls itself when it is dropped somewhere: the string "
+	  "the target receives with On Drop. A list row writes its index in here, a "
+	  "tool button its tool. Left empty it falls back to the element's name, "
+	  "which is enough for dragging one named thing onto another without a line "
+	  "of logic.",
 	  "", "ui#widgets" },
 
 	{ "UI Graph/Event Graph", "Event Graph",
@@ -2197,6 +3061,26 @@ namespace
 	{ "UI Graph/Set", "Set",
 	  "Adds a node that WRITES it. A function-local variable can only be used "
 	  "inside its own function, which is why this is sometimes greyed out.",
+	  "", "ui#graph" },
+	{ "UI Graph/Get Ref", "Get Ref",
+	  "The same read, but through a REFERENCE: the node takes a widget and the "
+	  "element's NAME instead of being tied to this one element. Leave its "
+	  "Target unwired and it means this widget, so it behaves like the plain "
+	  "Get — wire one in and the same node reads the same element of a widget "
+	  "somewhere else. That is what lets one function serve every card on a "
+	  "page instead of one node per card.",
+	  "", "ui#graph" },
+	{ "UI Graph/Set Ref", "Set Ref",
+	  "The same write through a reference. Needs the element to have a name, "
+	  "because a name is what a reference can carry — an id belongs to the asset "
+	  "that made it and means nothing in another widget.",
+	  "", "ui#graph" },
+	{ "UI Graph/Get Widget Ref", "Get Widget Ref",
+	  "A reference to the COMPONENT sitting in this slot. A component is a class "
+	  "like any other, so from here you can call its functions, bind its events "
+	  "and read its public variables — and tell one of three identical cards "
+	  "apart. Offered only on a slot, because only a slot holds an instance; "
+	  "everything else on this menu is a property.",
 	  "", "ui#graph" },
 	{ "UI Graph/Show the node that failed", "Show the node that failed",
 	  "Jumps to the node the compile check stopped at, opening its sub-graph and "
@@ -3002,6 +3886,75 @@ namespace
 	  "a renamed or moved scene cannot leave a path behind that no longer points "
 	  "anywhere.",
 	  "", "horizoncode#palette" },
+	{ "Node Parameter/Animation", "Animation",
+	  "Which of the widget's animations this call plays or asks about, picked "
+	  "from the ones it actually has — its own and the ones its embedded "
+	  "components brought with them. A typed name that does not match plays "
+	  "nothing and says nothing, which is the whole reason this is a list.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Direction", "Direction",
+	  "Which way the animation runs: forwards, backwards, or out and back. "
+	  "Backwards reads the same animation from its end, so \"the way it came in, "
+	  "in reverse\" is a setting rather than a second animation to maintain. "
+	  "Ping Pong takes twice as long, and with Loop it is the shape every "
+	  "breathing animation has.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Easing", "Easing",
+	  "The curve the value travels along. Out curves land softly, In curves "
+	  "leave softly, In Out does both, and Out Back overshoots and settles, "
+	  "which is what makes a dialog land instead of arrive.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Element", "Element",
+	  "Which element of this widget the call acts on, by the name it carries in "
+	  "the Designer. Only named elements are offered: a name is what a graph can "
+	  "hold on to, and an element without one is the asset's private business.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Property", "Property",
+	  "Which property of the element named beside it. The list follows that "
+	  "element, so picking another one changes what is on offer — and on an "
+	  "Animate call it holds only what can be moved: a number, a colour, a "
+	  "point.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/List", "List",
+	  "Which list this call drives. Only ListView elements are offered, because "
+	  "a Set List Count pointed at a button is a call that cannot work.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Parent", "Parent",
+	  "Which element the new child is placed under, by name.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Function", "Function",
+	  "Which function to call. The list holds this widget's own public "
+	  "functions; a function on a widget somebody else made cannot be listed "
+	  "from here, so that one is typed.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Mode", "Mode",
+	  "Light, Dark, or System. The third is a rule and not a colour: an "
+	  "application set to System follows the desktop, and follows it again when "
+	  "the desktop changes while it is running.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Button", "Button",
+	  "Which gamepad button, in the names the platform layer uses. Picked "
+	  "rather than typed, because a name that does not match is a button that "
+	  "is simply never down.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Axis", "Axis",
+	  "Which gamepad axis, in the names the platform layer uses. A name that "
+	  "does not match reads zero for ever, and says nothing.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Class", "Class",
+	  "Which HorizonCode class to spawn, from the ones in the project.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/Asset", "Asset",
+	  "Which asset this call uses, from the ones in the project. Picked rather "
+	  "than typed: a moved or renamed asset would otherwise leave a path behind "
+	  "that points nowhere, and fails silently.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/WidgetAsset", "Widget Asset",
+	  "Which widget to instantiate, from the ones in the project.",
+	  "", "horizoncode#palette" },
+	{ "Node Parameter/ThemeAsset", "Theme Asset",
+	  "Which theme to switch to, from the ones in the project.",
+	  "", "horizoncode#palette" },
 	{ "HorizonCode Node/Type", "",
 	  "The type of the external variable this node reads or writes, so the node's "
 	  "value pin matches the variable on the other side. Changing it drops the "
@@ -3471,6 +4424,17 @@ namespace
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
+		// The palette's element types get their own section of the UI chapter:
+		// "what can I put on a page" is the first question somebody has, and it
+		// deserves a list rather than being scattered through the designer's
+		// controls.
+		{ "UI Palette/",     "editor-ui", "UI Designer", "The elements" },
+		// The pages on the Preferences tab that edit the PROJECT rather than the
+		// editor, which is why they get their own sections rather than sitting
+		// under "Preferences".
+		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
+		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
+		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────
@@ -3480,11 +4444,14 @@ namespace
 		{ "Material Parameter/", "editor-materials", "Material Editor", "Parameters" },
 		{ "Material Settings/",  "editor-materials", "Material Editor", "Material settings" },
 		{ "Material Preview/",   "editor-materials", "Material Editor", "The preview" },
+		{ "Material Function/",  "editor-materials", "Material Editor", "Function interface" },
 		{ "ui.",             "editor-ui", "UI Designer", "Widget designer" },
 		{ "UI Hierarchy/",   "editor-ui", "UI Designer", "The hierarchy" },
 		{ "Canvas/",         "editor-ui", "UI Designer", "The canvas" },
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
+		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
+		{ "UI Timeline/",    "editor-ui", "UI Designer", "The timeline" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
 		{ "input.",         "editor-input", "Input Reference", "Input assets" },
@@ -3501,6 +4468,8 @@ namespace
 		{ "Node Parameter/",             "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
 		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },
+		{ "Theme Editor/",               "editor-ui", "UI Designer", "Theme" },
+		{ "Theme Styles/",               "editor-ui", "UI Designer", "Theme styles" },
 		{ "terrain.",             "editor-landscape", "Landscape Tools", "Terrain brush" },
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },

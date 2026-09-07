@@ -2,6 +2,7 @@
 #include <Types/Enums.h>
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -72,20 +73,31 @@ namespace HcEditorUtil
 	// scene-path dropdown on scene.* Engine Call nodes.
 	std::vector<ClassRef> listScenes(ContentManager* cm);
 
-	// If `n` is an Engine Call with a String "scene"/"path" param (scene.load /
-	// scene.loadAdditive), draw a dropdown of project scenes and write the pick to
-	// that param's inline pin default — so the level to load is CHOSEN, not typed
-	// (a bare "123.hescene" mismatches the packed/resolved project-relative path).
-	// Returns true when changed; no-op (returns false, draws nothing) otherwise.
-	bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm);
+	// One line under an engine call's body saying where its listed values come
+	// from, or null. The lists themselves are drawn at the pins; this is the
+	// half of the old scene/save-field pickers that was worth keeping.
+	const char* engineParamHint(const HorizonCode::Node& n);
 
-	// If `n` is a save.* Engine Call with a String "field" param, draw a
-	// dropdown of the PROJECT DEFAULT SaveGameTemplate's fields — filtered to
-	// the types the accessor touches (save.getNumber lists Float/Int/Enum
-	// fields, save.getStruct lists Struct fields, …) — and write the pick to
-	// that param's inline pin default. So the field is CHOSEN, never remembered.
-	// Returns true when changed; no-op otherwise.
-	bool drawSaveFieldParamPicker(HorizonCode::Node& n, ContentManager* cm);
+	// What a STRING parameter of an engine call is allowed to be, when the
+	// answer is a list: the easing curves, a play direction, the project's
+	// scenes, its HorizonCode classes, a savegame template's fields.
+	//
+	// Typing those was never a real choice. A misspelled easing plays Linear, a
+	// misspelled animation plays nothing at all, a misspelled scene path loads
+	// nothing, and none of the three says so — the whole class of bug a list
+	// makes impossible. Empty means "there is no list", and the pin falls back
+	// to a text box, which is the honest answer for a name, a title or a URL.
+	//
+	// The NODE, not just the parameter name: which field a save call may touch
+	// depends on the accessor (getNumber lists the numbers), and which
+	// properties an element has depends on which element the node names.
+	//
+	// This is the shared half. A host that knows more about the asset being
+	// edited — which animations THIS widget carries, what its elements are
+	// called — answers first (HcGraphHost::Host::paramChoices).
+	std::vector<std::string> engineParamChoices(const HorizonCode::Node& n,
+	                                            const std::string& param,
+	                                            ContentManager* cm);
 
 	// ── HC class registry ─────────────────────────────────────────────────────
 	// The public interface of one HorizonCode class the editor knows about — an
@@ -392,7 +404,18 @@ namespace HcEditorUtil
 	// `pinSupportsInlineDefault` gates per unified pin; the editor draws inside
 	// the GraphEditor's positioned per-pin child. `committed` = snapshot time.
 	bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin);
-	void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed);
+	// `choices` answers what a string pin may hold (engineParamChoices plus
+	// whatever the host knows). A pin with a list gets a DROPDOWN instead of a
+	// text box; without one, or with an empty list, the text box stays — a
+	// widget that has no animations yet still has to be able to author a name.
+	using ParamChoices =
+		std::function<std::vector<std::string>(const HorizonCode::Node&, const std::string&)>;
+	void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
+	                          const ParamChoices& choices = {});
+	// How much room that editor needs, in graph units (0 = the canvas's default
+	// slot). A string pin asks for more: a name has to be readable to be
+	// checkable, and as a dropdown it carries an arrow as well.
+	float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin);
 
 	// ── Drag-off compatibility ────────────────────────────────────────────────
 	// First unified pin index on a FRESH node of `t` (propType seeded with the

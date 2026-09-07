@@ -108,6 +108,47 @@ TEST_CASE("ProjectConfigLoader save/load round-trip")
     he_test::removeAllQuiet(tmpDir);
 }
 
+// The application flags ride in the existing flags word rather than a new
+// version, so two things have to hold at once: they survive a round-trip, and a
+// config written before they existed still reads as a game WITH materials. The
+// second half is why advancedShaderEffects is stored negated — a default-
+// constructed ProjectConfig (bit clear) must come back as `true`.
+TEST_CASE("ProjectConfigLoader application flags round-trip")
+{
+    auto tmpDir = std::filesystem::temp_directory_path() / "he_test_pcfg_app";
+    std::filesystem::create_directories(tmpDir);
+
+    SUBCASE("application without advanced shader effects")
+    {
+        ProjectConfig cfg;
+        cfg.projectName           = "TestApp";
+        cfg.hpakFilename          = "TestApp.hpak";
+        cfg.appMode               = true;
+        cfg.advancedShaderEffects = false;
+        REQUIRE(ProjectConfigLoader::save(tmpDir, cfg));
+
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(tmpDir, loaded));
+        CHECK(loaded.appMode               == true);
+        CHECK(loaded.advancedShaderEffects == false);
+    }
+
+    SUBCASE("a game keeps both defaults")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "TestGame";
+        cfg.hpakFilename = "TestGame.hpak";
+        REQUIRE(ProjectConfigLoader::save(tmpDir, cfg));
+
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(tmpDir, loaded));
+        CHECK(loaded.appMode               == false);
+        CHECK(loaded.advancedShaderEffects == true);
+    }
+
+    he_test::removeAllQuiet(tmpDir);
+}
+
 TEST_CASE("ProjectConfigLoader returns false for missing file")
 {
     ProjectConfig cfg;

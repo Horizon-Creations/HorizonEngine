@@ -200,6 +200,12 @@ struct Model
     // show one. `pinHasInlineEditor` decides per (node, pin).
     std::function<bool(int node, int pin)> pinHasInlineEditor;
     std::function<void(int node, int pin)> drawPinInlineEditor;
+    // How much room that editor needs, in GRAPH units (unset, or 0, = the
+    // default). The slot is clipped to this and the node grows to hold it, so a
+    // control that is wider than a number box — a dropdown, which has to show a
+    // name AND its arrow — asks for the room instead of being cut off in a slot
+    // sized for "1.0".
+    std::function<float(int node, int pin)> pinInlineEditorWidth;
     // Decorations drawn behind / in front of the nodes in the canvas transform
     // (comments, preview halos). origin/pan/zoom map graph→screen:
     // screen = origin + pan + graph*zoom.
@@ -261,6 +267,9 @@ constexpr float kNodeW  = 176.0f;
 constexpr float kTitleH = 24.0f;
 constexpr float kRowH   = 20.0f;
 constexpr float kPinR   = 5.0f;
+// The slot an inline pin editor gets when the host asks for nothing else. Wide
+// enough for a number or a checkbox, which is what it was invented for.
+constexpr float kPinEditorW = 58.0f;
 
 // ── Hit geometry ─────────────────────────────────────────────────────────────
 // What the mouse has to hit is deliberately BIGGER than what the eye sees. A

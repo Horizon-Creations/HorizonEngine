@@ -283,6 +283,54 @@ else()
     set(HE_HAVE_ZSTD TRUE)
 endif()
 
+# ─── SQLite (the `db` script group, docs/he-apps-plan.md Block C) ─────────────
+# The AMALGAMATION, not the git repository: sqlite's own tree is built by a tcl
+# script and ships no usable CMakeLists, while the amalgamation is two files and
+# a header that every platform compiles the same way. The URL is versioned and
+# hashed, so a build either gets exactly this SQLite or fails loudly.
+#
+# NOT the system libsqlite3, even though macOS ships one in its SDK: it is there
+# on macOS, usually there on Linux and never there on Windows, so linking it
+# would make `db` a feature that exists on two of the three platforms. A vendored
+# 1.5 MB is the cheaper answer than a script row that is missing on Windows.
+message(STATUS "HorizonEngine: fetching SQLite 3.47.2 (amalgamation) for the db script group")
+FetchContent_Declare(
+    sqlite3
+    URL      https://sqlite.org/2024/sqlite-amalgamation-3470200.zip
+    URL_HASH SHA256=aa73d8748095808471deaa8e6f34aa700e37f2f787f4425744f53fdd15a89c40
+)
+FetchContent_GetProperties(sqlite3)
+if(NOT sqlite3_POPULATED)
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
+    FetchContent_Populate(sqlite3)
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 NEW)
+    endif()
+endif()
+enable_language(C)
+add_library(sqlite3_static STATIC "${sqlite3_SOURCE_DIR}/sqlite3.c")
+target_include_directories(sqlite3_static PUBLIC "${sqlite3_SOURCE_DIR}")
+# Everything an embedded database in a desktop application does not need. Each
+# line is size or attack surface that would otherwise ship in every runtime:
+#   OMIT_LOAD_EXTENSION — loading a .so through SQL is exactly the hole the
+#     authorizer in EngineApi.cpp closes; switched off at compile time as well,
+#     because two locks on that door cost nothing.
+#   THREADSAFE=0 — every call happens on the frame thread, like the rest of the
+#     script API, and the mutexes would be paid for on every statement.
+#   OMIT_DEPRECATED / OMIT_COMPLETE — nothing here calls them.
+target_compile_definitions(sqlite3_static PRIVATE
+    SQLITE_OMIT_LOAD_EXTENSION=1
+    SQLITE_THREADSAFE=0
+    SQLITE_OMIT_DEPRECATED=1
+    SQLITE_OMIT_COMPLETE=1
+    SQLITE_DQS=0
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_DEFAULT_FOREIGN_KEYS=1
+)
+set_target_properties(sqlite3_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # ─── Crypto backend (hpak AES-256-GCM encryption) ─────────────────────────────
 # Encryption of shipped assets is obfuscation against casual ripping, NOT a
 # security boundary (the key ships with the game). The primary backend is system
@@ -514,6 +562,40 @@ if(HE_ENABLE_ASTC)
     endif()
 endif()
 
+# ─── Runtime flavour (docs/he-apps-plan.md A3b) ────────────────────────────────
+# The exporter copies a runtime directory verbatim into a packaged build. There
+# are THREE of them per platform, and they differ in exactly two things: which
+# renderers are linked, and whether a shader cross-compiler is present.
+#
+#   game          all backends of the platform, shaderc ON      — as before
+#   app-advanced  one forward renderer (Metal/GL), shaderc OFF  — tool with material graphs
+#   app-basic     RendererSoftware alone,         shaderc OFF   — tool without effects
+#
+# This is a whole-tree switch and not a per-target one, because both differences
+# are: HE_ENABLE_SHADERC decides whether glslang is even fetched, and the backend
+# set is baked into one shared HorizonRendering. So an app runtime is its OWN
+# build directory (scripts/build_runtimes.py drives them), never a second output
+# of the game build — which is also what keeps the game build byte-identical to
+# what it was before this switch existed.
+set(HE_RUNTIME_FLAVOR "game" CACHE STRING
+    "Which runtime this tree builds: game | app-advanced | app-basic")
+set_property(CACHE HE_RUNTIME_FLAVOR PROPERTY STRINGS game app-advanced app-basic)
+if(NOT HE_RUNTIME_FLAVOR MATCHES "^(game|app-advanced|app-basic)$")
+    message(FATAL_ERROR "HE_RUNTIME_FLAVOR must be game, app-advanced or app-basic "
+                        "(got '${HE_RUNTIME_FLAVOR}')")
+endif()
+if(NOT HE_RUNTIME_FLAVOR STREQUAL "game")
+    # Forcing it silently would produce an app runtime that still carries the 5 MB
+    # of glslang + SPIRV-Cross and measures like the game — the one thing the size
+    # threshold exists to notice. So say it, once, and force it.
+    if(HE_ENABLE_SHADERC)
+        message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}' — shader "
+                       "cross-compiler forced OFF (it ships precompiled variants)")
+    endif()
+    set(HE_ENABLE_SHADERC OFF CACHE BOOL "" FORCE)
+endif()
+message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}'")
+
 # ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
 # Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
 # The backbone for the cross-backend material system (docs/material-system-design.md).
@@ -579,6 +661,26 @@ if(HE_ENABLE_SHADERC)
     endif()
 endif()
 
+# No glslang (switched off, or the fetch found nothing)? The TARGET still exists — it is
+# just built from the stub, which answers every compile with "this build has no shader
+# compiler" (src/HE_Tools/ShaderCompiler/ShaderCompilerStub.cpp).
+#
+# docs/he-apps-plan.md A3b: this is what makes the "App, Advanced an" runtime flavour a
+# build option instead of a second renderer. Everything downstream — he_materialshader
+# and through it all five backends — links the same target and the same header either
+# way, so the material path stays COMPILED IN and keeps working from the precompiled
+# variants in the .hpak. Only HE_HAVE_SHADERC is absent, and that now means exactly one
+# thing: "no cross-compile at runtime", not "no materials".
+if(NOT TARGET he_shadercompiler)
+    add_library(he_shadercompiler STATIC
+        ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler/ShaderCompilerStub.cpp)
+    target_include_directories(he_shadercompiler PUBLIC
+        ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler)
+    target_compile_features(he_shadercompiler PUBLIC cxx_std_20)
+    target_compile_definitions(he_shadercompiler PUBLIC HE_SHADERC_STUB=1)
+    message(STATUS "HorizonEngine: he_shadercompiler is the STUB — shaders must come precompiled")
+endif()
+
 # ─── Tracy (optional profiling) ────────────────────────────────────────────────
 # Enable with:  cmake -DHE_ENABLE_TRACY=ON ...
 # Default OFF so production/CI builds have zero overhead.
@@ -622,8 +724,27 @@ else()
     set(_default_deploy_dir "${CMAKE_SOURCE_DIR}/out/deploy")
 endif()
 set(DEPLOY_DIR "${_default_deploy_dir}" CACHE PATH "Where the editor/game POST_BUILD deploys")
-set(DEPLOY_GAME   "${DEPLOY_DIR}/Game")
+# One deploy root, one directory per runtime flavour (A3b): the exporter looks
+# for them by these names next to the editor, and scripts/runtime_size.py weighs
+# each of them separately.
+if(HE_RUNTIME_FLAVOR STREQUAL "app-advanced")
+    set(HE_RUNTIME_DIR_NAME "AppAdvanced")
+elseif(HE_RUNTIME_FLAVOR STREQUAL "app-basic")
+    set(HE_RUNTIME_DIR_NAME "AppBasic")
+else()
+    set(HE_RUNTIME_DIR_NAME "Game")
+endif()
+set(DEPLOY_GAME   "${DEPLOY_DIR}/${HE_RUNTIME_DIR_NAME}")
 set(DEPLOY_EDITOR "${DEPLOY_DIR}/Editor")
+# An app-flavour tree must never write into the editor deploy. It builds a
+# Software-only (or one-backend, shaderc-free) libHorizonRendering, and
+# he_deploy_dll copies every engine library into DEPLOY_EDITOR unconditionally —
+# a flavour build would quietly replace the editor's renderer with one that
+# cannot compile a shader. Building only --target HorizonGame does not save you:
+# the libraries are its dependencies, so their POST_BUILD steps run too.
+if(NOT HE_RUNTIME_FLAVOR STREQUAL "game")
+    set(DEPLOY_EDITOR "${CMAKE_BINARY_DIR}/deploy-editor-unused")
+endif()
 
 # ─── Linux: find bundled .so next to the executable ($ORIGIN) ───────────────────
 # The editor/game POST_BUILD copies the engine .so (HorizonCore/Scene/Rendering/
@@ -709,7 +830,13 @@ add_subdirectory(src/HE_Python)
 add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
-add_subdirectory(src/HE_Editor)
+# An app-flavour tree builds a runtime, not an editor. Skipping the subdirectory
+# is not a saving of build time alone: HE_Editor links every backend by name
+# (ImGui has a backend file per renderer), so keeping it would drag exactly the
+# libraries this flavour exists to leave out back into the tree.
+if(HE_RUNTIME_FLAVOR STREQUAL "game")
+    add_subdirectory(src/HE_Editor)
+endif()
 
 # Building the editor always (re)builds + deploys the game runtime: the editor's
 # Build > Export ships those binaries, and a stale/missing out/deploy/Game

@@ -33,9 +33,10 @@ namespace
 	{
 		switch (m)
 		{
-			case HcRename::Member::Function: return "function";
-			case HcRename::Member::Variable: return "variable";
-			case HcRename::Member::Event:    return "event";
+			case HcRename::Member::Function:  return "function";
+			case HcRename::Member::Variable:  return "variable";
+			case HcRename::Member::Event:     return "event";
+			case HcRename::Member::Animation: return "animation";
 		}
 		return "member";
 	}

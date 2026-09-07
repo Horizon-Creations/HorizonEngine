@@ -92,6 +92,8 @@ public:
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
+	const ThemeAsset*            getTheme(HE::UUID id) const;
+	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const SaveGameTemplateAsset* getSaveGameTemplate(HE::UUID id) const;
 	SaveGameTemplateAsset*       getSaveGameTemplateMutable(HE::UUID id);
 	const StructTypeAsset*     getStructType(HE::UUID id) const;
@@ -168,6 +170,7 @@ public:
 	HE::UUID registerStructType(StructTypeAsset asset);
 	HE::UUID registerEnumType(EnumTypeAsset asset);
 	HE::UUID registerSaveGameTemplate(SaveGameTemplateAsset asset);
+	HE::UUID registerTheme(ThemeAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -592,6 +595,7 @@ private:
 	SlotMap<StructTypeAsset>         m_structTypeAssets;
 	SlotMap<EnumTypeAsset>           m_enumTypeAssets;
 	SlotMap<SaveGameTemplateAsset>   m_saveTemplateAssets;
+	SlotMap<ThemeAsset>              m_themeAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {

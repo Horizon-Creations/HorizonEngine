@@ -206,8 +206,11 @@ void render(AppContext& ctx)
         ImGui::Text("Template");
         ImGui::SetCursorPosX(padding);
         ImGui::PushItemWidth(panelW - padding * 2.0f);
+        // Every template visible at once. It used to show five of them, which was
+        // all of them until Application became the sixth — and a template you
+        // have to scroll to find is a template nobody picks.
         ImGui::ListBox("##Presets", &ctx.hubSelectedPreset,
-            kPresetNames, kPresetCount, 5);
+            kPresetNames, kPresetCount, kPresetCount);
         ImGui::PopItemWidth();
 
         ImGui::SetCursorPosX(padding);
@@ -248,6 +251,22 @@ void render(AppContext& ctx)
             ImGui::SetCursorPosX(padding);
             ImGui::TextDisabled("C++ needs cmake + a C++ compiler (not found on this machine).");
         }
+
+        // Advanced Shader Effects — applications only, and forced on otherwise.
+        // See the New Project popup's twin in EditorUI.cpp for why it is not
+        // offered for a game.
+        if (isAppPreset(static_cast<ProjectPreset>(ctx.hubSelectedPreset)))
+        {
+            ImGui::Spacing();
+            ImGui::SetCursorPosX(padding);
+            ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
+            ImGui::SetCursorPosX(padding);
+            ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
+                ? "Materials and material graphs are available."
+                : "No materials: corner radius, borders, gradients and shadows instead.");
+        }
+        else
+            ctx.hubAdvancedShaderFx = true;
         ImGui::SetCursorPosX(padding);
         ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
         ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
@@ -373,7 +392,8 @@ void render(AppContext& ctx)
             bool ok = ctx.projectManager->createNewProject(
                 projRoot.string(), name,
                 static_cast<ProjectPreset>(ctx.hubSelectedPreset),
-                static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang));
+                static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang),
+                /*appProject*/ false, ctx.hubAdvancedShaderFx);
             if (ok)
             {
                 const std::string& heprojPath = ctx.projectManager->currentProject().path;

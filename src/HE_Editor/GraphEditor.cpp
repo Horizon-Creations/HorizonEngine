@@ -59,6 +59,11 @@ struct Drawn
     float  gw = kNodeW;      // graph-space width
     float  gTitleH = kTitleH;// graph-space title-bar height
     bool   compact = false;  // no exec pins → compact style
+    // Where an inline pin editor starts, in graph units from the node's left
+    // edge. ONE column for the whole node, past its longest input label: three
+    // controls each starting wherever its own label happened to end is a node
+    // that reads as debris, and the eye cannot scan a column that is not one.
+    float  gEditorX = 0.0f;
     std::vector<Pin>    pins;
     std::vector<ImVec2> pinPos; // parallel to pins (screen)
 };
@@ -278,9 +283,36 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         d.compact = model.compactPureNodes && !hasBody && isCompactNode(d.pins);
         d.gTitleH = d.compact ? kCompactTitleH : kTitleH;
         d.gw = d.compact ? compactGraphWidth(model.title(nid), d.pins) : kNodeW;
-        if (d.compact)
+        // The widest inline editor on this node decides how much room the pin
+        // column needs. A compact node has none of its own and adds the whole
+        // slot; a framed one already has a column and only grows by whatever a
+        // control asks for beyond the default. A dropdown that does not fit is
+        // a dropdown whose arrow is outside the node, which is what this is for.
+        {
+            // Pin labels are drawn at 13 graph px whatever the UI font is, so
+            // the column is measured in the same units the labels are in.
+            const float labelScale = 13.0f / ImGui::GetFontSize();
+            float widest = 0.0f, labelW = 0.0f;
             for (const auto& p : d.pins)
-                if (p.input && !p.isExec && pinInlineEditor(nid, p.id)) { d.gw += 64.0f; break; }
+            {
+                if (!p.input || p.isExec) continue;
+                if (!p.label.empty())
+                    labelW = std::max(labelW, ImGui::CalcTextSize(p.label.c_str()).x * labelScale);
+                if (!pinInlineEditor(nid, p.id)) continue;
+                widest = std::max(widest, model.pinInlineEditorWidth
+                    ? std::max(model.pinInlineEditorWidth(nid, p.id), kPinEditorW)
+                    : kPinEditorW);
+            }
+            if (widest > 0.0f)
+            {
+                d.gEditorX = 8.0f + labelW + 6.0f;
+                d.gw += d.compact ? widest + 6.0f : widest - kPinEditorW;
+                // …and if the labels are long enough that the column would push
+                // the control out of the box, the box gives way. The alternative
+                // is a control that is cut in half, which is what this is about.
+                d.gw = std::max(d.gw, d.gEditorX + widest + 8.0f);
+            }
+        }
         const float gh = nodeGraphHeight(model, nid, d.pins, d.gTitleH);
         d.size = ImVec2(d.gw * st.zoom, gh * st.zoom);
 
@@ -653,15 +685,30 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 // The clip rect replaces the child's other job, keeping a wide
                 // widget inside the node — for hit-testing too, since ItemAdd
                 // honours it.
-                const float ew = 58.0f * st.zoom, eh = 17.0f * st.zoom;
-                const ImVec2 emin(labelEndX, pp.y - eh * 0.5f);
+                const float gew = model.pinInlineEditorWidth
+                    ? std::max(model.pinInlineEditorWidth(n.id, p.id), kPinEditorW)
+                    : kPinEditorW;
+                const float ew = gew * st.zoom, eh = 17.0f * st.zoom;
+                // The node's column, not this label's end (see Drawn::gEditorX).
+                const ImVec2 emin(n.gEditorX > 0.0f ? n.pos.x + n.gEditorX * st.zoom : labelEndX,
+                                  pp.y - eh * 0.5f);
                 ImGui::PushID(n.id * 4096 + p.id);
                 ImGui::PushClipRect(emin, ImVec2(emin.x + ew, emin.y + eh), true);
                 ImGui::SetCursorScreenPos(emin);
                 ImGui::BeginGroup();
-                ImGui::SetWindowFontScale(st.zoom);
+                // The SAME size the pin labels are drawn at, not the UI font's:
+                // an editor sitting between two labels in a bigger face reads as
+                // a foreign object stuck to the node, which is exactly what it
+                // looked like. 13 px is the number the label draw above uses.
+                ImGui::SetWindowFontScale(13.0f * st.zoom / ImGui::GetFontSize());
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f * st.zoom, 1.0f * st.zoom));
+                // The width the editor may use, rather than "to the window's
+                // right edge": a widget laid out to the CANVAS and then clipped
+                // to the slot loses whatever sits at its right end, which for a
+                // dropdown is the arrow and half the name.
+                ImGui::PushItemWidth(ew);
                 model.drawPinInlineEditor(n.id, p.id);
+                ImGui::PopItemWidth();
                 ImGui::PopStyleVar();
                 ImGui::SetWindowFontScale(1.0f);
                 ImGui::EndGroup();

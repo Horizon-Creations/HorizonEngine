@@ -20,8 +20,13 @@ namespace
 	// Small enough that a linear lookup beats a map, and it keeps the item
 	// registration in one place: heAddItem records, setToggleState finds.
 	std::vector<std::pair<MacMenuBar::Cmd, NSMenuItem*>> s_toggleItems;
+	// Rows that only mean something in a GAME: scene operations, the ground grid,
+	// the level script. Hidden wholesale in an application project — see
+	// MacMenuBar::setAppProject.
+	std::vector<NSMenuItem*>    s_gameOnlyItems;
 	bool s_installed     = false;
 	bool s_projectLoaded = false;
+	bool s_appProject    = false;
 }
 
 // Menu target: every custom item routes here; the Cmd rides in the item's tag.
@@ -144,17 +149,21 @@ void install()
 		heAddItem(file, @"Open Project…", C::OpenProject, @"o", NSEventModifierFlagCommand, false);
 		heAddItem(file, @"Close Project", C::CloseProject, @"w", NSEventModifierFlagCommand, true);
 		[file addItem:[NSMenuItem separatorItem]];
-		heAddItem(file, @"New Scene",            C::NewScene,        nil, 0, true);
-		heAddItem(file, @"Open Scene…",          C::OpenScene,       nil, 0, true);
-		heAddItem(file, @"Add Scene Additive…",  C::AddSceneAdditive, nil, 0, true);
+		s_gameOnlyItems.push_back(
+			heAddItem(file, @"New Scene",            C::NewScene,        nil, 0, true));
+		s_gameOnlyItems.push_back(
+			heAddItem(file, @"Open Scene…",          C::OpenScene,       nil, 0, true));
+		s_gameOnlyItems.push_back(
+			heAddItem(file, @"Add Scene Additive…",  C::AddSceneAdditive, nil, 0, true));
 		// ⌘S saves the tab in front, ⇧⌘S saves everything — Save As has to move
 		// off ⇧⌘S, or the menu would swallow that keystroke before Save All ever
 		// sees it (a key equivalent wins over anything the app does with the key).
 		heAddItem(file, @"Save",                 C::Save,        @"s", NSEventModifierFlagCommand, true);
 		heAddItem(file, @"Save All",             C::SaveAll,     @"s",
 		          NSEventModifierFlagCommand | NSEventModifierFlagShift, true);
-		heAddItem(file, @"Save Scene As…",       C::SaveSceneAs, @"s",
-		          NSEventModifierFlagCommand | NSEventModifierFlagOption, true);
+		s_gameOnlyItems.push_back(
+			heAddItem(file, @"Save Scene As…",       C::SaveSceneAs, @"s",
+			          NSEventModifierFlagCommand | NSEventModifierFlagOption, true));
 	}
 
 	// ── Edit ───────────────────────────────────────────────────────────────
@@ -199,10 +208,16 @@ void install()
 		// The world grid is not a panel, but it is a View toggle the user looks
 		// for in this menu — on macOS the viewport toolbar's options popup is
 		// otherwise its only route.
-		s_toggleItems.emplace_back(C::ToggleGroundGrid,
-			heAddItem(view, @"Ground Grid",           C::ToggleGroundGrid,  nil, 0, true));
+		{
+			NSMenuItem* grid = heAddItem(view, @"Ground Grid", C::ToggleGroundGrid, nil, 0, true);
+			s_toggleItems.emplace_back(C::ToggleGroundGrid, grid);
+			s_gameOnlyItems.push_back(grid);
+		}
 		[view addItem:[NSMenuItem separatorItem]];
-		heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true);
+		s_gameOnlyItems.push_back(
+			heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true));
+		// The Game Instance stays: it is the one script an application really does
+		// own — the thing whose OnInit builds its interface.
 		heAddItem(view, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
 	}
 
@@ -271,6 +286,15 @@ void setProjectLoaded(bool loaded)
 {
 	s_projectLoaded = loaded;   // ~10 items; cheap enough to set every frame
 	for (NSMenuItem* it : s_projectItems) it.enabled = loaded ? YES : NO;
+}
+
+void setAppProject(bool isApp)
+{
+	// Called every frame like setProjectLoaded, so it only touches the items when
+	// the answer actually changed: assigning `hidden` marks the menu for redisplay.
+	if (isApp == s_appProject) return;
+	s_appProject = isApp;
+	for (NSMenuItem* it : s_gameOnlyItems) it.hidden = isApp ? YES : NO;
 }
 
 void setToggleState(Cmd cmd, bool on)

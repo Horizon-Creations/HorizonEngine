@@ -55,6 +55,11 @@ namespace MacMenuBar
 	bool available();
 	// Enable/disable the project-scoped items (scene ops, import, export, …).
 	void setProjectLoaded(bool loaded);
+	// An APPLICATION project has no scenes, no ground and no level script, so the
+	// rows that act on them are HIDDEN rather than greyed out (docs/he-apps-plan.md
+	// E2): a disabled row still says "this exists here", which is the wrong thing
+	// to say. Kept in step with the same trimming in the ImGui menu bar.
+	void setAppProject(bool isApp);
 
 	// Tick or untick a toggle item. The ImGui menu row shows a panel's open
 	// state through MenuItem's `selected` argument; the native menu has no such

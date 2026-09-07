@@ -75,6 +75,18 @@ namespace HE
 		// Called every frame between PollEvents() and SwapBuffers().
 		virtual void OnRender(float deltaTime) { (void)deltaTime; }
 
+		// Event-driven mode only (setEventDriven): asked right AFTER OnRender, to
+		// decide whether this frame is worth putting on screen. It runs after
+		// OnRender rather than before, because whether anything changed is only
+		// known once the frame's logic has run — a script's Delay expiring and
+		// rewriting a label is exactly the case that has no input event behind it.
+		//
+		// The default is true: a subclass that does not answer keeps the old
+		// behaviour of drawing every frame it runs. An application answers with
+		// "did the UI change", which is what turns a woken-up heartbeat into a
+		// tick that costs no GPU at all.
+		virtual bool WantsPresent() { return true; }
+
 		// How much GAME time the frame just rendered was worth, for the
 		// fixed-step tick that drives the C++ game-logic module (IGameLogic).
 		//
@@ -89,6 +101,14 @@ namespace HE
 
 		// Called once after the loop exits, before the window is destroyed.
 		virtual void OnShutdown() {}
+
+		// A secondary window is about to go — closed by the user, by
+		// destroyWindow, or by the shutdown that takes them all. It still
+		// EXISTS while this runs, which is the whole point: the host tears down
+		// what it put in there (its widgets, and the graph event that says so)
+		// before the renderer detaches and the Window object is deleted.
+		// Without it a WidgetManager keeps naming a window that is gone.
+		virtual void OnWindowClosing(WindowHandle handle) { (void)handle; }
 
 		// Override to supply a concrete renderer. Called once before OnInit().
 		// Link against HorizonRendering and use RendererFactory::Create() here.
@@ -129,6 +149,13 @@ namespace HE
 		// ── Runtime window changes ─────────────────────────────────────────
 		void setWindowTitle(const std::string& title);
 		void setWindowSize(uint32_t width, uint32_t height);
+		// The other two title-bar buttons (plan F3). setWindowMaximized(false)
+		// is "restore", which is why this is one bool and not two calls at this
+		// level: the application's answer to a title bar is a state, and the
+		// two SDL calls behind it are Window's business.
+		void setWindowMinimized();
+		void setWindowMaximized(bool maximized);
+		bool windowMaximized() const;
 		void setVSync(bool enabled);
 		void setWindowMode(WindowMode mode);
 		// Optional frame-rate ceiling applied only when VSync is OFF (0 = unlimited).
@@ -136,6 +163,40 @@ namespace HE
 		// cut needless GPU load) while defaulting to fully uncapped.
 		void  setMaxFps(float fps) { m_maxFps = fps > 0.0f ? fps : 0.0f; }
 		float maxFps() const       { return m_maxFps; }
+
+		// ── Event-driven drawing (docs/he-apps-plan.md A2) ────────────────
+		// A game redraws 60 times a second because the world moved. An
+		// application redraws because something CHANGED, and an app that burns
+		// a core while its window just sits there is not shippable. When this
+		// is on, the loop sleeps in SDL until an event arrives (or the
+		// heartbeat below expires) and skips the whole render when nothing
+		// happened.
+		//
+		// Off by default: a game must not accidentally inherit it.
+		void setEventDriven(bool on)  { m_eventDriven = on; }
+		bool eventDriven() const      { return m_eventDriven; }
+		// Draw one more frame even though no event arrived. Anything that
+		// changes what is on screen without an OS event behind it — a script
+		// setting a widget's text, a finished asset load, an animation step —
+		// calls this. Cleared by the loop once the frame is drawn.
+		void requestRedraw()          { m_redrawRequested = true; }
+		// Longest an event-driven loop may sleep before drawing anyway, in
+		// milliseconds. The safety net under requestRedraw(): whatever fails to
+		// invalidate still appears within this long, at a cost of a few frames
+		// per second instead of sixty.
+		void  setIdleHeartbeatMs(int ms) { m_idleHeartbeatMs = ms > 0 ? ms : 1; }
+		int   idleHeartbeatMs() const    { return m_idleHeartbeatMs; }
+		// …and a one-shot shortening of it, for the frame that already KNOWS
+		// something is due sooner. A script's timer set to 16 ms would otherwise
+		// arrive on the 100 ms heartbeat, which is a clock that runs late on
+		// every tick.
+		//
+		// One-shot on purpose, and the smallest ask wins: it is consumed by the
+		// frame that follows, and a host that still wants it says so again next
+		// frame. A flag somebody forgot to clear would pin an idle application
+		// at full speed with nothing on screen to show for it.
+		void  askWakeWithinMs(int ms)
+		{ if (ms >= 0 && (m_nextWakeMs < 0 || ms < m_nextWakeMs)) m_nextWakeMs = ms; }
 
 		// ── Multi-window API ──────────────────────────────────────────────
 		// Open a new secondary window.  The renderer's AttachWindow() is called
@@ -152,6 +213,12 @@ namespace HE
 		// vsync (so frame times reflect true cost, not the refresh rate) and on
 		// stop it restores the previous vsync state and writes a dump.
 		void toggleProfilerCapture();
+
+		// What the process was started with, minus argv[0]. Kept because
+		// "open with" hands an application its document as an argument on Windows
+		// and Linux (macOS sends an event instead), and by the time anything can
+		// act on that, main() is long gone.
+		const std::vector<std::string>& launchArguments() const { return m_launchArgs; }
 
 	protected:
 		// Frames completed by the main loop. Stamped onto every log record (see
@@ -179,10 +246,20 @@ namespace HE
 		// destroying the splash's 2D renderer can leave no context current.
 		void closeSplash();
 
+		std::vector<std::string>   m_launchArgs;   // see launchArguments()
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture
 		float                      m_maxFps       = 0.0f;  // VSync-off frame cap (0 = unlimited)
+		bool                       m_eventDriven     = false; // see setEventDriven
+		bool                       m_redrawRequested = false; // see requestRedraw
+		// The app's CLOCK resolution, not its redraw rate — those became two
+		// different things once WantsPresent() existed. A heartbeat frame runs the
+		// logic (a Delay expiring, a timer, an animation step) and then draws only
+		// if that logic changed something, so 100 ms buys a responsive clock while
+		// an idle app still presents nothing at all.
+		int                        m_idleHeartbeatMs = 100;   // see setIdleHeartbeatMs
+		int                        m_nextWakeMs      = -1;    // see askWakeWithinMs
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;
 		// Opened at the very top of Run(), closed before the main loop. A

@@ -347,7 +347,13 @@ void render(AppContext& ctx, float dt)
 		// ── Toolbar (always at top of Scene, works docked or floating) ────────
 		// Zones, wells and the centred transport live in ViewportToolbar; it
 		// leaves the cursor on the first row below the strip.
-		ViewportToolbar::render(ctx, s_tb);
+		//
+		// An application project has none of what the bar edits: no gizmo, no
+		// snapping, no camera speed, no play transport (docs/he-apps-plan.md E2).
+		// The whole strip goes rather than being greyed out — a row of disabled
+		// controls is a promise that they mean something here.
+		if (!ctx.appLivePreview)
+			ViewportToolbar::render(ctx, s_tb);
 
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 
@@ -426,7 +432,9 @@ void render(AppContext& ctx, float dt)
 				// position, landing it exactly where the look-drag began). Shared with the
 				// tab-switch safety release (releaseViewportLookCapture, file scope).
 				auto endLookCapture = [&]() { releaseViewportLookCapture(sdlWin); };
-				if (ctx.editorCamera && ctx.isPlaying)
+				// An application's preview is always live, so its pointer is fed
+				// every frame rather than only during play (ctx.appLivePreview).
+				if (ctx.editorCamera && (ctx.isPlaying || ctx.appLivePreview))
 				{
 					endLookCapture();
 					ctx.renderer->SetEditorCamera(EditorCameraOverride{}); // active=false
@@ -443,7 +451,23 @@ void render(AppContext& ctx, float dt)
 							static_cast<float>(s_viewportPxH),
 							ImGui::IsMouseDown(ImGuiMouseButton_Left),
 							viewportHovered,
-							viewportHovered ? io.MouseWheel : 0.0f);
+							viewportHovered ? io.MouseWheel : 0.0f,
+							ImGui::IsMouseDown(ImGuiMouseButton_Right),
+							viewportHovered &&
+								ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
+					}
+					// Where the image IS, for the drags that are not the mouse.
+					// The corner is measured against the panel's own platform
+					// viewport rather than the desktop: a file drop arrives in
+					// window coordinates, and a panel torn out into a window of
+					// its own would otherwise be offset by wherever that window
+					// happens to sit on the screen.
+					if (ctx.reportPlayUIRect)
+					{
+						const ImGuiViewport* vp = ImGui::GetWindowViewport();
+						ctx.reportPlayUIRect(rectMin.x - vp->Pos.x, rectMin.y - vp->Pos.y,
+							fbScale.x, fbScale.y,
+							static_cast<unsigned>(reinterpret_cast<intptr_t>(vp->PlatformHandle)));
 					}
 				}
 				else if (ctx.editorCamera)

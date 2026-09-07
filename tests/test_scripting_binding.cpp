@@ -772,3 +772,38 @@ TEST_CASE("ScriptContext: horizon.entity.spawnClass spawns a furnished entity (L
     host.end();
     std::filesystem::remove_all(root, ec);
 }
+
+// The eleven groups the application work added (widget/theme/dialog/clipboard/
+// process/json/prefs/datetime, and then timer/db/print). They lived in
+// HorizonCode only until isScriptGroup learned them; this is the test that says
+// both text languages reach them, one function per group. Presence, not effect:
+// dialog.confirm and process.which want a host and a machine, db.open wants a
+// permission, and this test wants none of the three.
+static const char* kLuaAppGroups = R"lua(
+local names = { { 'widget', 'setListCount' }, { 'theme', 'getMode' },
+                { 'dialog', 'confirm' },      { 'clipboard', 'hasText' },
+                { 'process', 'which' },       { 'json', 'getNumber' },
+                { 'prefs', 'has' },           { 'datetime', 'year' },
+                { 'timer', 'cancel' },        { 'db', 'lastError' },
+                { 'print', 'available' },     { 'window', 'open' } }
+local found = 0
+for _, n in ipairs(names) do
+    local t = horizon[n[1]]
+    if type(t) == 'table' and type(t[n[2]]) == 'function' then found = found + 1 end
+end
+_G._found = found
+_G._json  = horizon.json.getNumber('{"a":42}', 'a', 0)
+)lua";
+
+TEST_CASE("ScriptContext: the application groups reach Lua")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(kLuaAppGroups));
+    // BEFORE THE CHANGE: 0 — isScriptGroup knew none of them, so
+    // registerEngineApiGroups skipped every one of their rows.
+    CHECK(engine.getGlobalNumber("_found") == doctest::Approx(12.0));
+    // …and one of them actually dispatches, not just exists.
+    CHECK(engine.getGlobalNumber("_json") == doctest::Approx(42.0));
+}

@@ -3,6 +3,8 @@
 #include "EditorWidgets.h"
 #include "EditorHelp.h"                  // scopes for the context and create menus
 #include <HorizonScene/HorizonScene.h>
+#include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
+#include <functional>
 #include <Diagnostics/Logger.h>
 #include <cstdio>
 #include <cstring>
@@ -154,6 +156,80 @@ void render(AppContext& ctx)
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("World Outliner");
     if (ctx.fontHeading) ImGui::PopFont();
+
+    // ── Application projects: the widget hierarchy, not the world ───────────
+    // An app has no entities to list (docs/he-apps-plan.md E2). What it does have
+    // is whatever its GameInstance built, so the panel shows THAT — the live
+    // instances and their elements, read from the manager's own copies, which is
+    // also what makes it a diagnosis: an empty panel says "nothing was created",
+    // which is exactly the question an empty preview raises.
+    if (ctx.appLivePreview && ctx.world)
+    {
+        // The wrap guard gets its OWN scope, closing before ImGui::End() below.
+        // Sharing a scope with the End() means the pop runs after it — on
+        // whatever window is current by then, which for a top-level panel is
+        // ImGui's Debug window, and ImGui says so with "Calling PopTextWrapPos()
+        // too many times!". The entity branch below documents the same trap; this
+        // branch has an early return, which is what made it easy to walk into.
+        {
+        EditorWidgets::WrapText wrap;
+        const WidgetManager& wm = ctx.world->widgets();
+        const std::vector<int> ids = wm.liveIds();
+        if (ids.empty())
+        {
+            ImGui::TextDisabled("No widgets.");
+            ImGui::Spacing();
+            ImGui::TextWrapped("The Game Instance creates the interface in its OnInit. "
+                               "If this stays empty, that graph is not reaching a "
+                               "Create Widget node.");
+        }
+        // Draw one element and its children. Recursive by lambda so it stays next
+        // to the only place that uses it.
+        std::function<void(const HE::UIWidgetTree&, int)> drawElem =
+            [&](const HE::UIWidgetTree& tree, int parentId)
+        {
+            for (const auto& ep : tree.elements)
+            {
+                if (!ep || ep->parentId != parentId) continue;
+                const HE::UIElement& e = *ep;
+                bool hasChildren = false;
+                for (const auto& c : tree.elements)
+                    if (c && c->parentId == e.id) { hasChildren = true; break; }
+
+                ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
+                                           ImGuiTreeNodeFlags_DefaultOpen;
+                if (!hasChildren) flags |= ImGuiTreeNodeFlags_Leaf |
+                                           ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                const std::string label = (e.name.empty() ? std::string(e.typeName())
+                                                          : e.name) +
+                                          "##el" + std::to_string(e.id);
+                const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+                // The type beside the name, dimmed: two elements called "Row" are
+                // told apart by what they ARE, and the name alone will not say.
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s%s", e.typeName(), e.visible ? "" : " (hidden)");
+                if (open && hasChildren) { drawElem(tree, e.id); ImGui::TreePop(); }
+            }
+        };
+
+        for (const int id : ids)
+        {
+            const HE::UIWidgetTree* tree = wm.tree(id);
+            if (!tree) continue;
+            const std::string title = "Widget " + std::to_string(id) +
+                                      (wm.isVisible(id) ? "" : " (hidden)") +
+                                      "##w" + std::to_string(id);
+            if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen |
+                                                 ImGuiTreeNodeFlags_SpanAvailWidth))
+            {
+                drawElem(*tree, 0);
+                ImGui::TreePop();
+            }
+        }
+        }   // wrap guard pops HERE, while this panel is still the current window
+        ImGui::End();
+        return;
+    }
 
     if (ctx.world)
     {

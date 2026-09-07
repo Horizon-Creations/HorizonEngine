@@ -20,6 +20,7 @@
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
 #include "HorizonScene/EntityHost.h"
+#include <UIWidget/UIShortcut.h>   // a menu entry's chord is checked where it is taken in
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
@@ -33,14 +34,28 @@
 #include <Types/TypeRegistry.h>   // save-template schemas + struct field values
 #include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
 #include <DebugDraw/DebugDraw.h>
+#include <Platform/Process.h>      // the process group runs on HE::Proc
+#include <Net/HttpsClient.h>       // …and the http group on the platform TLS stack
+#include <atomic>                  // the file dialogs answer on another thread
+#include <condition_variable>      // the http worker sleeps between requests
+#include <deque>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <thread>
 #include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
+// The `db` group only. Kept out of EngineApi.h on purpose: no sqlite3* ever
+// leaves this file, so nothing above HorizonScene has to know SQLite exists.
+#include <sqlite3.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>   // datetime::now
+#include <ctime>    // datetime: strftime + localtime_r/localtime_s
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -955,7 +970,85 @@ void hide(Ctx& c, int id)                           { if (c.world) ScriptApi::hi
 void setZOrder(Ctx& c, int id, int z)               { if (c.world) ScriptApi::setWidgetZOrder(*c.world, id, z); }
 bool isVisible(Ctx& c, int id)                      { return c.world ? ScriptApi::isWidgetVisible(*c.world, id) : false; }
 bool callFunction(Ctx& c, int id, const std::string& fn) { return c.world ? ScriptApi::callWidgetFunction(*c.world, id, fn) : false; }
+int  addChild(Ctx& c, int id, const std::string& parent, const std::string& asset)
+{ return c.world ? ScriptApi::addWidgetChild(*c.world, c.content, id, parent, asset) : 0; }
+bool removeChild(Ctx& c, int id, int childId)
+{ return c.world ? ScriptApi::removeWidgetChild(*c.world, id, childId) : false; }
+int  clearChildren(Ctx& c, int id, const std::string& parent)
+{ return c.world ? ScriptApi::clearWidgetChildren(*c.world, id, parent) : 0; }
+bool setListCount(Ctx& c, int id, const std::string& list, int count)
+{ return c.world ? ScriptApi::setListCount(*c.world, id, list, count) : false; }
+int  listCount(Ctx& c, int id, const std::string& list)
+{ return c.world ? ScriptApi::listCount(*c.world, id, list) : 0; }
+int  listRow(Ctx& c, int id, const std::string& list, int index)
+{ return c.world ? ScriptApi::listRow(*c.world, id, list, index) : 0; }
+bool refreshList(Ctx& c, int id, const std::string& list)
+{ return c.world ? ScriptApi::refreshList(*c.world, id, list) : false; }
+bool setListSelected(Ctx& c, int id, const std::string& list, int index, bool sel)
+{ return c.world ? ScriptApi::setListSelected(*c.world, id, list, index, sel) : false; }
+int  listSelected(Ctx& c, int id, const std::string& list)
+{ return c.world ? ScriptApi::listSelected(*c.world, id, list) : -1; }
+bool scrollListToItem(Ctx& c, int id, const std::string& list, int index)
+{ return c.world ? ScriptApi::scrollListToItem(*c.world, id, list, index) : false; }
+
+bool animate(Ctx& c, int id, const std::string& element, const std::string& prop,
+             float to, float seconds, const std::string& easing)
+{ return c.world ? ScriptApi::animateNumber(*c.world, id, element, prop, to, seconds, easing)
+                 : false; }
+bool animateColor(Ctx& c, int id, const std::string& element, const std::string& prop,
+                  const glm::vec4& to, float seconds, const std::string& easing)
+{ return c.world ? ScriptApi::animateColor(*c.world, id, element, prop, to, seconds, easing)
+                 : false; }
+bool animateVec2(Ctx& c, int id, const std::string& element, const std::string& prop,
+                 const glm::vec2& to, float seconds, const std::string& easing)
+{ return c.world ? ScriptApi::animateVec2(*c.world, id, element, prop, to, seconds, easing)
+                 : false; }
+int stopAnimation(Ctx& c, int id, const std::string& element, const std::string& prop)
+{ return c.world ? ScriptApi::stopAnimation(*c.world, id, element, prop) : 0; }
+
+uint32_t childRef(Ctx& c, int id, const std::string& element)
+{ return c.world ? ScriptApi::childWidget(*c.world, id, element) : 0u; }
+
+bool playAnimation(Ctx& c, int id, const std::string& clip, bool restore,
+                   const std::string& direction)
+{ return c.world ? ScriptApi::playClipAsAuthored(*c.world, id, clip, restore, direction)
+                 : false; }
+bool playAnimationLooped(Ctx& c, int id, const std::string& clip, bool loop,
+                         const std::string& direction)
+{ return c.world ? ScriptApi::playClip(*c.world, id, clip, loop, direction) : false; }
+int stopAnimationClip(Ctx& c, int id, const std::string& clip)
+{ return c.world ? ScriptApi::stopClip(*c.world, id, clip) : 0; }
+bool isPlayingAnimation(Ctx& c, int id, const std::string& clip)
+{ return c.world ? ScriptApi::isClipPlaying(*c.world, id, clip) : false; }
+int stopAllAnimations(Ctx& c, int id)
+{ return c.world ? ScriptApi::stopAllAnimations(*c.world, id) : 0; }
+int restoreOriginalState(Ctx& c, int id)
+{ return c.world ? ScriptApi::restoreOriginalState(*c.world, id) : 0; }
+void showModal(Ctx& c, int id)
+{ if (c.world) ScriptApi::showModalWidget(*c.world, id); }
+void openPopup(Ctx& c, int id, float x, float y)
+{ if (c.world) ScriptApi::openWidgetPopup(*c.world, id, x, y); }
+void openPopupAtPointer(Ctx& c, int id)
+{ if (c.world) ScriptApi::openWidgetPopupAtPointer(*c.world, id); }
+bool closeTopLayer(Ctx& c)
+{ return c.world ? ScriptApi::closeTopLayer(*c.world) : false; }
 } // namespace widget
+
+// ── Theme ────────────────────────────────────────────────────────────────────
+namespace theme {
+bool set(Ctx& c, const std::string& p)
+{ return c.world ? ScriptApi::setTheme(*c.world, c.content, p) : false; }
+void setMode(Ctx& c, const std::string& m)
+{ if (c.world) ScriptApi::setThemeMode(*c.world, m); }
+std::string mode(Ctx& c)
+{ return c.world ? ScriptApi::themeMode(*c.world) : std::string("Dark"); }
+std::string preference(Ctx& c)
+{ return c.world ? ScriptApi::themePreference(*c.world) : std::string("System"); }
+void setFontScale(Ctx& c, float s)
+{ if (c.world) ScriptApi::setFontScale(*c.world, s); }
+float fontScale(Ctx& c)
+{ return c.world ? ScriptApi::fontScale(*c.world) : 1.0f; }
+} // namespace theme
 
 // ── Cursor ───────────────────────────────────────────────────────────────────
 namespace cursor {
@@ -976,7 +1069,572 @@ void quit(Ctx& c)
     }
     c.requestQuit();
 }
+
+void setTitle(Ctx& c, const std::string& title)
+{
+    if (!c.setWindowTitle)
+    {
+        HE_LOG_WARN(Script, "%s", "app.setTitle: no window bound by the host — ignored");
+        return;
+    }
+    c.setWindowTitle(title);
+}
+
+void showTray(Ctx& c, const std::string& tooltip)
+{
+    if (!c.showTray)
+    {
+        HE_LOG_WARN(Script, "%s", "app.showTray: no tray bound by the host — ignored");
+        return;
+    }
+    c.showTray(tooltip);
+}
+
+void hideTray(Ctx& c)
+{
+    if (!c.hideTray)
+    {
+        HE_LOG_WARN(Script, "%s", "app.hideTray: no tray bound by the host — ignored");
+        return;
+    }
+    c.hideTray();
+}
+
+void addTrayItem(Ctx& c, const std::string& id, const std::string& label)
+{
+    if (!c.addTrayItem)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addTrayItem: no tray bound by the host — ignored");
+        return;
+    }
+    // An entry with no id could never be told apart in OnTrayItem, so it is
+    // refused here rather than becoming a menu row that does nothing.
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.addTrayItem: an entry needs an id — ignored");
+        return;
+    }
+    c.addTrayItem(id, label.empty() ? id : label);
+}
+
+void clearTrayMenu(Ctx& c)
+{
+    if (!c.clearTrayMenu)
+    {
+        HE_LOG_WARN(Script, "%s", "app.clearTrayMenu: no tray bound by the host — ignored");
+        return;
+    }
+    c.clearTrayMenu();
+}
+
+void addMenu(Ctx& c, const std::string& id, const std::string& label)
+{
+    if (!c.addMenu)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenu: no menu bar bound by the host — ignored");
+        return;
+    }
+    // A menu with no id could never be filled, since addMenuItem names it.
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenu: a menu needs an id — ignored");
+        return;
+    }
+    c.addMenu(id, label.empty() ? id : label);
+}
+
+void addMenuItem(Ctx& c, const std::string& menuId, const std::string& id,
+                 const std::string& label, const std::string& shortcut)
+{
+    if (!c.addMenuItem)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenuItem: no menu bar bound by the host — ignored");
+        return;
+    }
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenuItem: an entry needs an id — ignored");
+        return;
+    }
+    // A chord that does not parse is dropped and SAID, not carried along: it
+    // would be drawn beside an entry that never answers to it, which is a lie
+    // told to the person reading the menu. The entry itself still arrives —
+    // losing a whole menu row over a typo in its shortcut helps nobody.
+    std::string chord = shortcut;
+    if (!chord.empty())
+    {
+        HE::UIShortcut parsed;
+        if (!HE::uiParseShortcut(chord, parsed))
+        {
+            HE_LOG_WARN(Script, "app.addMenuItem: '%s' is not a shortcut this engine can "
+                                "express — entry '%s' gets none",
+                        chord.c_str(), id.c_str());
+            chord.clear();
+        }
+    }
+    c.addMenuItem(menuId, id, label.empty() ? id : label, chord);
+}
+
+void addMenuSeparator(Ctx& c, const std::string& menuId)
+{
+    if (!c.addMenuSeparator)
+    {
+        HE_LOG_WARN(Script, "%s", "app.addMenuSeparator: no menu bar bound by the host — ignored");
+        return;
+    }
+    c.addMenuSeparator(menuId);
+}
+
+void setMenuItemEnabled(Ctx& c, const std::string& id, bool enabled)
+{
+    if (!c.setMenuItemEnabled)
+    {
+        HE_LOG_WARN(Script, "%s",
+                    "app.setMenuItemEnabled: no menu bar bound by the host — ignored");
+        return;
+    }
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.setMenuItemEnabled: which entry? — ignored");
+        return;
+    }
+    c.setMenuItemEnabled(id, enabled);
+}
+
+void setMenuItemChecked(Ctx& c, const std::string& id, bool checked)
+{
+    if (!c.setMenuItemChecked)
+    {
+        HE_LOG_WARN(Script, "%s",
+                    "app.setMenuItemChecked: no menu bar bound by the host — ignored");
+        return;
+    }
+    if (id.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.setMenuItemChecked: which entry? — ignored");
+        return;
+    }
+    c.setMenuItemChecked(id, checked);
+}
+
+bool menuItemEnabled(Ctx& c, const std::string& id)
+{
+    // Silent, like every other getter here: a graph that reads this to decide
+    // what to draw reads it every frame.
+    return c.menuItemEnabled ? c.menuItemEnabled(id) : false;
+}
+
+bool menuItemChecked(Ctx& c, const std::string& id)
+{ return c.menuItemChecked ? c.menuItemChecked(id) : false; }
+
+void clearMenuBar(Ctx& c)
+{
+    if (!c.clearMenuBar)
+    {
+        HE_LOG_WARN(Script, "%s", "app.clearMenuBar: no menu bar bound by the host — ignored");
+        return;
+    }
+    c.clearMenuBar();
+}
+
+bool notify(Ctx& c, const std::string& title, const std::string& body)
+{
+    if (!c.notify)
+    {
+        HE_LOG_WARN(Script, "%s",
+                    "app.notify: no notification centre bound by the host — ignored");
+        return false;
+    }
+    // A banner with nothing on it is a banner nobody can act on, and every
+    // platform draws the title differently when it is missing.
+    if (title.empty() && body.empty())
+    {
+        HE_LOG_WARN(Script, "%s", "app.notify: neither title nor text — ignored");
+        return false;
+    }
+    return c.notify(title, body);
+}
+
+bool notifyAvailable(Ctx& c)
+{ return c.notifyAvailable ? c.notifyAvailable() : false; }
+
+void setAutostart(Ctx& c, bool enabled)
+{
+    // The permission first: this asks the system to run a program at every
+    // login, which is a bigger thing than running one now, not a smaller one.
+    if (!perm::allowed(perm::get().processes, "app.setAutostart")) return;
+    if (!c.setAutostart)
+    {
+        HE_LOG_WARN(Script, "%s", "app.setAutostart: no host support — ignored");
+        return;
+    }
+    if (!c.setAutostart(enabled))
+        HE_LOG_WARN(Script, "app.setAutostart: the system refused to %s the entry",
+                    enabled ? "write" : "remove");
+}
+
+bool autostart(Ctx& c)
+{
+    // Reading it needs no permission: an application may always ask what it is
+    // set to do, and refusing the question would only make a checkbox lie.
+    if (!c.autostart) return false;
+    return c.autostart();
+}
+
+void setSize(Ctx& c, int width, int height)
+{
+    if (!c.setWindowSize)
+    {
+        HE_LOG_WARN(Script, "%s", "app.setSize: no window bound by the host — ignored");
+        return;
+    }
+    // A window of zero or negative size is not a window. Rejected here rather
+    // than passed on, because SDL's behaviour for it differs per platform and
+    // "my app vanished" is a miserable thing to debug.
+    if (width <= 0 || height <= 0)
+    {
+        HE_LOG_WARN(Script, "app.setSize(%d, %d): both sides must be positive — ignored",
+                    width, height);
+        return;
+    }
+    c.setWindowSize(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+}
+
+glm::vec2 size(Ctx& c)
+{
+    // Silent zero rather than a warning: this is a getter, and a graph polling
+    // the window size every tick would drown the log.
+    return c.windowSize ? c.windowSize() : glm::vec2(0.0f);
+}
+
+void minimize(Ctx& c)
+{
+    if (!c.minimizeWindow)
+    {
+        HE_LOG_WARN(Script, "%s", "app.minimize: no window bound by the host — ignored");
+        return;
+    }
+    c.minimizeWindow();
+}
+
+void maximize(Ctx& c, bool maximized)
+{
+    if (!c.setWindowMaximized)
+    {
+        HE_LOG_WARN(Script, "%s", "app.maximize: no window bound by the host — ignored");
+        return;
+    }
+    c.setWindowMaximized(maximized);
+}
+
+bool isMaximized(Ctx& c)
+{
+    // Silent like size(): a title bar asks this to decide which of two icons to
+    // draw, which is every frame.
+    return c.windowMaximized ? c.windowMaximized() : false;
+}
+
+void requestRedraw(Ctx& c)
+{
+    // Deliberately silent when unbound: a game host binds nothing here because a
+    // game already draws every frame, and asking for a redraw there is a
+    // harmless no-op rather than a mistake worth reporting.
+    if (c.requestRedraw) c.requestRedraw();
+}
 } // namespace app
+
+// ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────────────
+namespace window {
+
+int open(Ctx& c, const std::string& title, int width, int height)
+{
+    if (!c.openWindow)
+    {
+        // Loud, because "my tool window never appears" is unexplainable from
+        // the graph otherwise: the row is bound, the HOST is what has no
+        // windows to give (the editor, a test rig) — or the renderer has no
+        // path to draw into one, which is where the host's own warning names
+        // the backend.
+        HE_LOG_WARN(Script, "%s",
+            "window.open: no window service bound by the host — nothing opened");
+        return 0;
+    }
+    // A window of no size is a window nobody can find again. Clamped rather
+    // than refused: the graph asked for a window, and the smallest useful one
+    // is a better answer than none.
+    const uint32_t w = static_cast<uint32_t>(width  > 0 ? width  : 640);
+    const uint32_t h = static_cast<uint32_t>(height > 0 ? height : 480);
+    return static_cast<int>(c.openWindow(title, w, h));
+}
+
+void close(Ctx& c, int id)
+{
+    if (id <= 0)
+    {
+        // 0 is the main window, and closing THAT is app.quit — a different
+        // thing with a different name, and not something to reach by accident.
+        HE_LOG_WARN(Script, "%s",
+            "window.close: 0 is the main window — use app.quit to end the application");
+        return;
+    }
+    if (!c.closeWindow)
+    {
+        HE_LOG_WARN(Script, "%s",
+            "window.close: no window service bound by the host — ignored");
+        return;
+    }
+    c.closeWindow(static_cast<uint32_t>(id));
+}
+
+void setTitle(Ctx& c, int id, const std::string& title)
+{
+    // The main window keeps its own row, so a graph that says window.setTitle(0)
+    // lands where it expects rather than being told off for it.
+    if (id <= 0) { app::setTitle(c, title); return; }
+    if (!c.setWindowTitleOf)
+    {
+        HE_LOG_WARN(Script, "%s",
+            "window.setTitle: no window service bound by the host — ignored");
+        return;
+    }
+    c.setWindowTitleOf(static_cast<uint32_t>(id), title);
+}
+
+void setSize(Ctx& c, int id, int width, int height)
+{
+    if (id <= 0) { app::setSize(c, width, height); return; }
+    if (!c.setWindowSizeOf)
+    {
+        HE_LOG_WARN(Script, "%s",
+            "window.setSize: no window service bound by the host — ignored");
+        return;
+    }
+    if (width <= 0 || height <= 0)
+    {
+        HE_LOG_WARN(Script, "window.setSize: %dx%d is not a size — ignored", width, height);
+        return;
+    }
+    c.setWindowSizeOf(static_cast<uint32_t>(id),
+                      static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+}
+
+void show(Ctx& c, int id, int widgetId)
+{
+    if (c.world) ScriptApi::showWidgetInWindow(*c.world, widgetId,
+                                               id > 0 ? static_cast<uint32_t>(id) : 0u);
+}
+
+} // namespace window
+
+// ── Clipboard ────────────────────────────────────────────────────────────────
+namespace clipboard {
+std::string getText(Ctx&)
+{
+    // SDL hands back an owned copy even when the clipboard is empty (an empty
+    // string), and null only on failure. Freed either way.
+    char* raw = SDL_GetClipboardText();
+    if (!raw) return {};
+    std::string out(raw);
+    SDL_free(raw);
+    return out;
+}
+
+void setText(Ctx&, const std::string& text)
+{
+    if (!SDL_SetClipboardText(text.c_str()))
+        HE_LOG_WARN(Script, "clipboard.setText failed: %s", SDL_GetError());
+}
+
+bool hasText(Ctx&) { return SDL_HasClipboardText(); }
+} // namespace clipboard
+
+// ── Native dialogs ───────────────────────────────────────────────────────────
+namespace dialog {
+void message(Ctx&, const std::string& title, const std::string& text, int kind)
+{
+    const SDL_MessageBoxFlags flag = kind == 2 ? SDL_MESSAGEBOX_ERROR
+                                   : kind == 1 ? SDL_MESSAGEBOX_WARNING
+                                               : SDL_MESSAGEBOX_INFORMATION;
+    // Null parent window: HE_Scene has no window handle, and a modeless box is
+    // better than none. The call blocks until the user dismisses it, which is
+    // the whole point of reaching for a native dialog.
+    if (!SDL_ShowSimpleMessageBox(flag, title.c_str(), text.c_str(), nullptr))
+        HE_LOG_WARN(Script, "dialog.message failed: %s", SDL_GetError());
+}
+
+bool confirm(Ctx&, const std::string& title, const std::string& text,
+             const std::string& affirmative, const std::string& negative)
+{
+    // Button 0 is the affirmative one and carries BOTH default flags: Return
+    // takes it, Escape takes the other. A dialog where Escape does nothing traps
+    // a keyboard user.
+    SDL_MessageBoxButtonData buttons[2] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1,
+          affirmative.empty() ? "OK" : affirmative.c_str() },
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0,
+          negative.empty() ? "Cancel" : negative.c_str() },
+    };
+    SDL_MessageBoxData data{};
+    data.flags      = SDL_MESSAGEBOX_INFORMATION;
+    data.title      = title.c_str();
+    data.message    = text.c_str();
+    data.numbuttons = 2;
+    data.buttons    = buttons;
+
+    int chosen = 0;
+    if (!SDL_ShowMessageBox(&data, &chosen))
+    {
+        // Answering "no" on failure is the safe direction: the caller asked
+        // whether to go ahead with something, and an unanswered question is not
+        // a yes.
+        HE_LOG_WARN(Script, "dialog.confirm failed: %s — answering no", SDL_GetError());
+        return false;
+    }
+    return chosen == 1;
+}
+
+// ── Picking a file or a folder ───────────────────────────────────────────────
+namespace {
+// SDL answers a file dialog through a callback, and says outright that it may
+// arrive on another thread. It also does not take the dialog back: once shown,
+// it WILL call back eventually, however long the person leaves it open.
+//
+// So the shared box lives on the HEAP and is owned by whoever finishes last.
+// The stack version of this was a real crash: on the wait's deadline the caller
+// returned, its frame went away, and SDL still held a pointer into it — one
+// click after a long phone call and the callback writes through dead stack. The
+// filter strings had the same lifetime, and SDL's own header says they must
+// outlive the callback.
+//
+// `state` is the handover, and every transition is a CAS so exactly one side
+// frees: 0 = waiting, 1 = the callback answered, 2 = the caller gave up. Whoever
+// loses its CAS knows the other side has left and deletes the box.
+struct PickState
+{
+    std::mutex        m;
+    std::string       path;
+    std::atomic<int>  state{ 0 };
+    // Held here for the same reason: SDL keeps the filter list until it calls
+    // back, so it cannot live in the frame that starts the dialog.
+    std::string                  filterName, filterExt;
+    std::vector<SDL_DialogFileFilter> filters;
+};
+
+void SDLCALL pickCallback(void* userdata, const char* const* filelist, int)
+{
+    auto* st = static_cast<PickState*>(userdata);
+    {
+        std::lock_guard<std::mutex> lock(st->m);
+        // NULL is an error, an empty list is a cancel, and both leave the path
+        // empty — a caller cannot act differently on the two anyway, and SDL has
+        // already logged the error.
+        if (filelist && filelist[0]) st->path = filelist[0];
+    }
+    int expected = 0;
+    if (!st->state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+        delete st;   // the caller gave up; this box is ours to let go of
+}
+
+// "Text files:txt;md" → one SDL filter, stored IN the box (SDL keeps the list
+// until it calls back). Empty spec = no filter at all, because SDL reads a null
+// list as "show everything" and a filter that matches nothing is worse than none.
+void parseFilterInto(PickState& st, const std::string& spec)
+{
+    if (spec.empty()) return;
+    const std::size_t colon = spec.find(':');
+    if (colon == std::string::npos) { st.filterName = spec; st.filterExt = "*"; }
+    else
+    {
+        st.filterName = spec.substr(0, colon);
+        st.filterExt  = spec.substr(colon + 1);
+    }
+    if (st.filterName.empty()) st.filterName = "Files";
+    if (st.filterExt.empty())  st.filterExt  = "*";
+    st.filters.push_back({ st.filterName.c_str(), st.filterExt.c_str() });
+}
+
+// Run one of the three pickers to an answer. `show` does the SDL call; this owns
+// the waiting and the handover, which are the same for all three.
+std::string runPicker(const char* who, const std::string& filter,
+                      const std::function<void(PickState&, SDL_DialogFileCallback, void*)>& show)
+{
+    auto* st = new PickState();
+    parseFilterInto(*st, filter);
+    show(*st, pickCallback, st);
+
+    // A person may take a long time to find a file, so the deadline is generous
+    // and exists only so a picker that never answers cannot hold this call
+    // forever. SDL calls back on cancel and on error too, so reaching it means
+    // something is genuinely wrong.
+    constexpr int kMaxWaitMs = 5 * 60 * 1000;
+    int waited = 0;
+    while (st->state.load(std::memory_order_acquire) == 0 && waited < kMaxWaitMs)
+    {
+        // PUMP, never poll. Pumping is what the portal-based pickers need on
+        // Linux, and it leaves every event in the queue for the application's
+        // own loop — dispatching here would run script code inside a script
+        // call, which is the one thing a modal must not do.
+        SDL_PumpEvents();
+        SDL_Delay(8);
+        waited += 8;
+    }
+
+    if (st->state.load(std::memory_order_acquire) == 0)
+    {
+        // Give up, but only if the callback has not just won the race. The
+        // dialog is still on screen and SDL still holds this pointer, so the box
+        // is handed OVER rather than freed — the callback deletes it whenever
+        // the person finally clicks.
+        int expected = 0;
+        if (st->state.compare_exchange_strong(expected, 2, std::memory_order_acq_rel))
+        {
+            HE_LOG_WARN(Script, "%s: the file dialog is still open after five minutes — "
+                                "giving up on the answer", who);
+            return {};
+        }
+        // Lost the race: the callback answered, so the box is ours after all.
+    }
+
+    std::string path;
+    { std::lock_guard<std::mutex> lock(st->m); path = st->path; }
+    delete st;
+    // The choosing IS the permission: whatever came back is open to the scripts
+    // from here on, with nothing set in the project. This is the ONLY caller of
+    // grantPath — a row that granted its own argument would permit everything.
+    if (!path.empty()) fs::grantPath(path);
+    return path;
+}
+} // namespace
+
+std::string openFile(Ctx&, const std::string& filter)
+{
+    return runPicker("dialog.openFile", filter,
+        [](PickState& st, SDL_DialogFileCallback cb, void* ud) {
+            SDL_ShowOpenFileDialog(cb, ud, nullptr,
+                                   st.filters.empty() ? nullptr : st.filters.data(),
+                                   static_cast<int>(st.filters.size()), nullptr,
+                                   /*allow_many=*/false);
+        });
+}
+
+std::string saveFile(Ctx&, const std::string& filter)
+{
+    return runPicker("dialog.saveFile", filter,
+        [](PickState& st, SDL_DialogFileCallback cb, void* ud) {
+            SDL_ShowSaveFileDialog(cb, ud, nullptr,
+                                   st.filters.empty() ? nullptr : st.filters.data(),
+                                   static_cast<int>(st.filters.size()), nullptr);
+        });
+}
+
+std::string pickFolder(Ctx&)
+{
+    return runPicker("dialog.pickFolder", {},
+        [](PickState&, SDL_DialogFileCallback cb, void* ud) {
+            SDL_ShowOpenFolderDialog(cb, ud, nullptr, nullptr, /*allow_many=*/false);
+        });
+}
+} // namespace dialog
 
 // ── Camera ───────────────────────────────────────────────────────────────────
 namespace {
@@ -1297,10 +1955,31 @@ void collect(float dt, std::vector<DebugLine>& out)
 }
 } // namespace debug
 
+// ── Permissions ──────────────────────────────────────────────────────────────
+namespace perm {
+namespace {
+Grants& state() { static Grants g; return g; }
+} // namespace
+void          set(const Grants& g) { state() = g; }
+const Grants& get() { return state(); }
+bool allowed(bool granted, const char* row)
+{
+    if (granted) return true;
+    // Throttled rather than once-ever: a graph that calls this every tick would
+    // otherwise print one line at startup and then look like it was working.
+    HE_LOG_THROTTLE(Config, Warning, 10.0,
+                    "%s: this project does not permit it. Turn the matching "
+                    "permission on in the project's settings.", row);
+    return false;
+}
+} // namespace perm
+
 // ── Sandboxed fs + save store ────────────────────────────────────────────────
 namespace fs {
 namespace {
 std::string& root() { static std::string r; return r; }
+std::vector<std::string>& grants() { static std::vector<std::string> g; return g; }
+
 // A sandbox-relative path is valid when it has no root and no ".." component.
 bool validRel(const std::string& rel)
 {
@@ -1314,14 +1993,76 @@ bool validRel(const std::string& rel)
         if (part == "..") return false;
     return true;
 }
+
+// Is `p` at or under `base`? Compared on the LEXICALLY NORMAL forms, never as
+// strings: "/home/me/docs" must not grant "/home/me/docs-private", and a "/.."
+// inside the path must be spent before the comparison rather than after it.
+bool under(const std::filesystem::path& p, const std::filesystem::path& base)
+{
+    const auto a = p.lexically_normal();
+    const auto b = base.lexically_normal();
+    auto ai = a.begin(); auto bi = b.begin();
+    for (; bi != b.end(); ++ai, ++bi)
+    {
+        if (ai == a.end()) return false;
+        if (*ai != *bi) return false;
+    }
+    return true;
+}
+
+// Somebody picked this path, or something above it, in a dialog.
+bool isGranted(const std::filesystem::path& p)
+{
+    for (const std::string& g : grants())
+        if (under(p, std::filesystem::path(g))) return true;
+    return false;
+}
+
+// The ONE place a script's string becomes a real path, which is what lets the
+// two routes into the filesystem stay two and not eleven:
+//
+//   relative  → always, under the sandbox root (what every row did before);
+//   absolute  → only when the project granted `perm::files`, or when the user
+//               picked this path (or a directory above it) in a dialog.
+//
+// An empty return means "no", and every row already treats it that way.
 std::filesystem::path resolved(const std::string& rel)
 {
+    const std::filesystem::path p(rel);
+    if (!p.empty() && (p.is_absolute() || p.has_root_name() || p.has_root_directory()))
+    {
+        // A ".." is spent by lexically_normal before `under` compares, so a
+        // granted "/home/me/docs" plus "/home/me/docs/../.ssh" does not resolve.
+        if (perm::get().files || isGranted(p)) return p.lexically_normal();
+        HE_LOG_THROTTLE(Config, Warning, 10.0,
+                        "fs: '%s' is outside the project's sandbox. Either let the "
+                        "user pick it in a file dialog, or turn on file access in "
+                        "the project's settings.", rel.c_str());
+        return {};
+    }
     if (root().empty() || !validRel(rel)) return {};
     return std::filesystem::path(root()) / rel;
 }
 } // namespace
 void setSandboxRoot(const std::string& absDir) { root() = absDir; }
 std::string sandboxRoot() { return root(); }
+void grantPath(const std::string& absPath)
+{
+    if (absPath.empty()) return;
+    const std::filesystem::path p = std::filesystem::path(absPath).lexically_normal();
+    // A file grants its own path; a directory grants everything under it. Which
+    // it is, is asked of the DISK and not of the string: a dialog's "save as"
+    // names a file that does not exist yet, and treating that as a directory
+    // would hand over the whole folder it sits in.
+    std::error_code ec;
+    const std::string s = p.string();
+    for (const std::string& g : grants()) if (g == s) return;
+    grants().push_back(s);
+    HE_LOG_INFO(Config, "fs: granted '%s'%s", s.c_str(),
+                std::filesystem::is_directory(p, ec) ? " (and everything under it)" : "");
+}
+const std::vector<std::string>& grantedPaths() { return grants(); }
+void clearGrants() { grants().clear(); }
 bool writeText(const std::string& rel, const std::string& text)
 {
     const auto p = resolved(rel);
@@ -1362,7 +2103,1398 @@ bool makeDir(const std::string& rel)
     return !p.empty() && (std::filesystem::create_directories(p, ec) ||
                           std::filesystem::is_directory(p, ec));
 }
+
+bool isDir(const std::string& path)
+{
+    const auto p = resolved(path);
+    std::error_code ec;
+    return !p.empty() && std::filesystem::is_directory(p, ec);
+}
+
+double size(const std::string& path)
+{
+    const auto p = resolved(path);
+    std::error_code ec;
+    if (p.empty() || !std::filesystem::is_regular_file(p, ec)) return -1.0;
+    const auto n = std::filesystem::file_size(p, ec);
+    return ec ? -1.0 : static_cast<double>(n);
+}
+
+double modified(const std::string& path)
+{
+    const auto p = resolved(path);
+    std::error_code ec;
+    if (p.empty()) return -1.0;
+    const auto ft = std::filesystem::last_write_time(p, ec);
+    if (ec) return -1.0;
+    // Two clocks, converted by reading both at nearly the same instant. The
+    // tidy C++20 route (file_clock::to_sys) is not equally present across the
+    // three standard libraries this ships against, and a header that fails to
+    // compile on the CI I cannot run is a worse trade than a conversion whose
+    // error is the microseconds between these two calls.
+    const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        ft - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+    return std::chrono::duration<double>(sys.time_since_epoch()).count();
+}
+
+std::vector<std::string> list(const std::string& dir)
+{
+    std::vector<std::string> out;
+    // "" is the sandbox root itself. validRel refuses an empty string for every
+    // other row, and rightly — there it would name the root DIRECTORY as a file
+    // to read or delete. But "what is at the top of my sandbox" is an ordinary
+    // question with no other spelling, so this row answers it and only this one.
+    const auto p = dir.empty() ? std::filesystem::path(root()) : resolved(dir);
+    std::error_code ec;
+    if (p.empty() || !std::filesystem::is_directory(p, ec)) return out;
+    // skip_permission_denied so one unreadable child does not turn the whole
+    // listing into nothing — the caller asked what is in the folder, and "most
+    // of it" is a better answer than "an error".
+    for (std::filesystem::directory_iterator it(
+             p, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec))
+        out.push_back(it->path().filename().string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool rename(const std::string& from, const std::string& to)
+{
+    const auto a = resolved(from), b = resolved(to);
+    if (a.empty() || b.empty()) return false;
+    std::error_code ec;
+    std::filesystem::rename(a, b, ec);
+    return !ec;
+}
+
+bool copy(const std::string& from, const std::string& to)
+{
+    const auto a = resolved(from), b = resolved(to);
+    std::error_code ec;
+    if (a.empty() || b.empty() || !std::filesystem::is_regular_file(a, ec)) return false;
+    // Never overwrite. This is the one row here that can destroy a file the
+    // caller did not name, and skip_existing turning that into a plain false is
+    // cheaper to debug than a lost document.
+    if (std::filesystem::exists(b, ec)) return false;
+    std::filesystem::create_directories(b.parent_path(), ec);
+    ec.clear();
+    return std::filesystem::copy_file(
+        a, b, std::filesystem::copy_options::skip_existing, ec) && !ec;
+}
+
+// ── Watching ─────────────────────────────────────────────────────────────────
+namespace {
+// What "unchanged" means here. Not the timestamp alone: several filesystems
+// carry it at one-second resolution, which is exactly the poll interval, so a
+// file written twice inside one second would look untouched. Existence, kind
+// and size answer the cases the timestamp sleeps through.
+struct WatchStamp
+{
+    bool      exists = false;
+    bool      isDir  = false;
+    uintmax_t size   = 0;
+    int64_t   mtime  = 0;
+    bool operator!=(const WatchStamp& o) const
+    {
+        return exists != o.exists || isDir != o.isDir || size != o.size || mtime != o.mtime;
+    }
+};
+
+WatchStamp stampOf(const std::filesystem::path& p)
+{
+    WatchStamp s;
+    std::error_code ec;
+    const auto st = std::filesystem::status(p, ec);
+    if (ec || !std::filesystem::exists(st)) return s;
+    s.exists = true;
+    s.isDir  = std::filesystem::is_directory(st);
+    if (std::filesystem::is_regular_file(st))
+    {
+        const auto n = std::filesystem::file_size(p, ec);
+        if (!ec) s.size = n;
+        ec.clear();
+    }
+    // The file clock's own ticks, never converted to wall time: this number is
+    // only ever compared with the previous one, and `fs.modified` already owns
+    // the conversion (and its rounding) for the callers who need a date.
+    const auto ft = std::filesystem::last_write_time(p, ec);
+    if (!ec) s.mtime = static_cast<int64_t>(ft.time_since_epoch().count());
+    return s;
+}
+
+struct WatchEntry
+{
+    int                               handle = 0;
+    std::string                       spelling;  // exactly what the caller typed
+    std::filesystem::path             path;      // …and what it meant on disk
+    WatchStamp                        self;
+    std::map<std::string, WatchStamp> children;  // while `path` is a directory
+    bool                              tooBig = false;  // see kMaxWatchEntries
+};
+
+std::vector<WatchEntry>&  watches()     { static std::vector<WatchEntry> w;  return w; }
+std::vector<std::string>& changeQueue() { static std::vector<std::string> q; return q; }
+int&    nextWatchHandle() { static int h = 0;      return h; }
+double& watchAccum()      { static double a = 0.0; return a; }
+
+// A child's name appended to the caller's spelling, so the event names the file
+// the way `fs.list` and `fs.readText` would.
+std::string joinSpelling(const std::string& base, const std::string& name)
+{
+    if (base.empty()) return name;
+    const char last = base.back();
+    return (last == '/' || last == '\\') ? base + name : base + "/" + name;
+}
+
+void queueChange(std::string p)
+{
+    auto& q = changeQueue();
+    // One event per path per drain. A save that rewrites a file twice inside a
+    // poll interval is one change to whoever asked, not two.
+    for (const std::string& s : q) if (s == p) return;
+    if (q.size() >= 256) q.erase(q.begin());
+    q.push_back(std::move(p));
+}
+
+// False when the directory holds more entries than kMaxWatchEntries — the
+// caller then degrades instead of comparing a list that costs more every second
+// than the answer is worth.
+bool readChildren(const std::filesystem::path& dir, std::map<std::string, WatchStamp>& out)
+{
+    out.clear();
+    std::error_code ec;
+    size_t n = 0;
+    for (std::filesystem::directory_iterator it(
+             dir, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec))
+    {
+        if (++n > kMaxWatchEntries) { out.clear(); return false; }
+        WatchStamp s = stampOf(it->path());
+        // A child DIRECTORY is watched for its coming and going, never for its
+        // timestamp. That stamp moves when something is created inside it, on
+        // some filesystems and not on others — so honouring it would make "one
+        // level deep" mean one thing on Linux and another on Windows, and would
+        // report a subfolder for a change the caller was told it would not hear
+        // about.
+        if (s.isDir) { s.size = 0; s.mtime = 0; }
+        out.emplace(it->path().filename().string(), s);
+    }
+    return true;
+}
+} // namespace
+
+int watch(const std::string& path)
+{
+    // "" is the sandbox root, exactly as in `list` and for the same reason:
+    // "tell me when anything at the top of my sandbox moves" has no second
+    // spelling, and validRel rightly refuses the empty string everywhere else.
+    const auto p = path.empty() ? std::filesystem::path(root()) : resolved(path);
+    if (p.empty()) return 0;
+    if (static_cast<int>(watches().size()) >= kMaxWatches)
+    {
+        HE_LOG_WARN(Config, "fs.watch: already watching %d paths, refusing '%s'.",
+                    kMaxWatches, path.c_str());
+        return 0;
+    }
+    // The same path twice is two watches with two handles, deliberately: one
+    // caller's unwatch must not switch off another's. The queue's per-path
+    // dedupe is what keeps that from doubling the events.
+    WatchEntry w;
+    w.handle   = ++nextWatchHandle();
+    w.spelling = path;
+    w.path     = p;
+    // Seeded now, so the first poll reports what happened AFTER the watch began
+    // and not the state the file was already in.
+    w.self     = stampOf(p);
+    if (w.self.isDir) w.tooBig = !readChildren(p, w.children);
+    watches().push_back(std::move(w));
+    return watches().back().handle;
+}
+
+void unwatch(int handle)
+{
+    auto& w = watches();
+    for (size_t i = 0; i < w.size(); ++i)
+        if (w[i].handle == handle) { w.erase(w.begin() + static_cast<ptrdiff_t>(i)); return; }
+}
+
+void clearWatches() { watches().clear(); changeQueue().clear(); watchAccum() = 0.0; }
+
+bool takeChange(std::string& path)
+{
+    auto& q = changeQueue();
+    if (q.empty()) return false;
+    path = std::move(q.front());
+    q.erase(q.begin());
+    return true;
+}
+
+void pollWatches(double dtSeconds)
+{
+    if (watches().empty()) return;
+    watchAccum() += dtSeconds > 0.0 ? dtSeconds : 0.0;
+    if (watchAccum() < kWatchIntervalSeconds) return;
+    watchAccum() = 0.0;
+
+    for (WatchEntry& w : watches())
+    {
+        const WatchStamp now = stampOf(w.path);
+        const bool selfChanged = now != w.self;
+        const bool wasDir      = w.self.isDir;
+        w.self = now;
+
+        if (!now.isDir)
+        {
+            // A file, or a directory that has just stopped being one. Either way
+            // its children are no longer anybody's business, and the one event
+            // is about the path itself — reporting every vanished child of a
+            // deleted folder would bury the fact that the folder is gone.
+            w.children.clear();
+            w.tooBig = false;
+            if (selfChanged) queueChange(w.spelling);
+            continue;
+        }
+
+        std::map<std::string, WatchStamp> fresh;
+        if (!readChildren(w.path, fresh))
+        {
+            if (!w.tooBig)
+                HE_LOG_WARN(Config, "fs.watch: '%s' holds more than %zu entries — reporting "
+                                    "the directory itself instead of its children.",
+                            w.spelling.c_str(), kMaxWatchEntries);
+            w.tooBig = true;
+            w.children.clear();
+            // The directory's own timestamp still moves when a child comes or
+            // goes, so this degradation still answers "something in there".
+            if (selfChanged) queueChange(w.spelling);
+            continue;
+        }
+        if (w.tooBig)  // it shrank back under the cap: reseed, report nothing
+        {
+            w.tooBig = false;
+            w.children.swap(fresh);
+            continue;
+        }
+        // The directory itself is only reported when it APPEARED (it was not a
+        // directory a moment ago). Its timestamp moves whenever a child does,
+        // and reporting both would fire twice for one save.
+        if (selfChanged && !wasDir) queueChange(w.spelling);
+        for (const auto& [name, st] : fresh)
+        {
+            const auto it = w.children.find(name);
+            if (it == w.children.end() || it->second != st)
+                queueChange(joinSpelling(w.spelling, name));
+        }
+        for (const auto& [name, st] : w.children)
+        {
+            (void)st;
+            if (fresh.find(name) == fresh.end()) queueChange(joinSpelling(w.spelling, name));
+        }
+        w.children.swap(fresh);
+    }
+}
 } // namespace fs
+
+// ── Running another program ──────────────────────────────────────────────────
+namespace process {
+RunResult run(Ctx&, const std::string& exe, const std::vector<std::string>& args,
+              double timeoutSeconds)
+{
+    RunResult r;
+    if (!perm::allowed(perm::get().processes, "process.run")) return r;
+    if (exe.empty()) return r;
+
+    HE::Proc::Options o;
+    o.exe  = exe;
+    o.args = args;
+    // A graph node that never returns freezes the frame it was called on, so a
+    // zero here is NOT "wait forever" the way HE::Proc reads it — it is the
+    // default, thirty seconds. A script that really means forever has no way to
+    // say so, which is the correct thing for a synchronous row on the UI thread.
+    o.timeoutMs = static_cast<std::uint32_t>(
+        (timeoutSeconds > 0.0 ? timeoutSeconds : 30.0) * 1000.0);
+
+    const HE::Proc::Result res = HE::Proc::run(o);
+    r.ok       = res.ok();
+    r.exitCode = res.exitCode;
+    r.out      = res.out;
+    r.err      = res.err;
+    if (res.launchFailed)
+        HE_LOG_WARN(Config, "process.run: could not start '%s' — is it installed and on PATH?",
+                    exe.c_str());
+    else if (res.timedOut)
+        HE_LOG_WARN(Config, "process.run: '%s' was killed after %.0f s", exe.c_str(),
+                    timeoutSeconds > 0.0 ? timeoutSeconds : 30.0);
+    return r;
+}
+
+bool openUrl(Ctx&, const std::string& url)
+{
+    if (!perm::allowed(perm::get().processes, "process.openUrl")) return false;
+    if (url.empty()) return false;
+    // SDL's own opener rather than a shelled-out "open"/"xdg-open"/"start": it is
+    // the one that already knows what this platform does, and it is not a shell,
+    // so a URL with a quote in it is a URL and not an injection.
+    if (SDL_OpenURL(url.c_str())) return true;
+    HE_LOG_WARN(Config, "process.openUrl: %s", SDL_GetError());
+    return false;
+}
+
+std::string which(Ctx&, const std::string& exe)
+{
+    // Deliberately NOT gated: asking whether a tool is installed runs nothing.
+    // A script that has to say "you need git for this" should be able to, in a
+    // project that has not been given permission to run it — that is the message
+    // the person needs in order to decide whether to grant it.
+    if (exe.empty()) return {};
+    const auto p = HE::Proc::which(exe);
+    return p ? p->string() : std::string();
+}
+} // namespace process
+
+// ── HTTP ─────────────────────────────────────────────────────────────────────
+namespace http {
+namespace {
+
+struct Pending
+{
+    int         ticket = 0;
+    std::string url, method, contentType, body;
+};
+
+struct Finished
+{
+    bool        ok = false;
+    int         status = 0;
+    std::string body, error;
+};
+
+// ONE worker, started on the first request and joined at shutdown. Not a thread
+// per request: libcurl's implicit global init is not thread-safe, and a detached
+// thread outliving these statics would write into freed memory on the way out.
+// One queue, one thread, and shutdown has exactly one thing to wait for.
+std::mutex                     g_mtx;
+std::condition_variable        g_cv;
+std::deque<Pending>            g_queue;        // waiting to go out
+std::map<int, Finished>        g_done;         // answered, waiting to be read
+std::deque<int>                g_doneOrder;    // eviction order, oldest first
+std::deque<int>                g_delivery;     // finished, not yet handed to the frame
+std::thread                    g_worker;
+bool                           g_stop = false;
+bool                           g_running = false;
+int                            g_nextTicket = 1;
+
+// How many answers are kept. A response nobody reads is a leak with a slow
+// fuse, and an application that fires a request per second would find it.
+constexpr std::size_t kMaxKept = 32;
+// Shorter than HttpsClient's own 10 s default because shutdown waits for the
+// request in flight: five seconds of "closing…" is a long time already.
+constexpr int kTimeoutMs = 5000;
+
+void workerLoop()
+{
+    for (;;)
+    {
+        Pending job;
+        {
+            std::unique_lock<std::mutex> lk(g_mtx);
+            g_cv.wait(lk, [] { return g_stop || !g_queue.empty(); });
+            // Stop wins over a full queue: what is still waiting was never sent,
+            // and answering it during teardown helps nobody.
+            if (g_stop) return;
+            job = g_queue.front();
+            g_queue.pop_front();
+        }
+
+        const std::vector<std::string> headers =
+            job.method == "POST" ? std::vector<std::string>{ "Content-Type: " + job.contentType }
+                                 : std::vector<std::string>{};
+        const HE::Net::HttpsResponse r =
+            HE::Net::httpsRequest(job.url, job.method, headers, job.body, kTimeoutMs);
+
+        std::lock_guard<std::mutex> lk(g_mtx);
+        Finished f;
+        f.ok     = r.ok;
+        f.status = r.statusCode;
+        f.body   = r.body;
+        f.error  = r.error;
+        g_done[job.ticket] = std::move(f);
+        g_doneOrder.push_back(job.ticket);
+        while (g_doneOrder.size() > kMaxKept)
+        {
+            g_done.erase(g_doneOrder.front());
+            g_doneOrder.pop_front();
+        }
+        g_delivery.push_back(job.ticket);
+    }
+}
+
+// Queue a request and answer with its ticket. 0 = it never started, and the
+// caller has already been told why.
+int start(const char* row, const std::string& url, const std::string& method,
+          const std::string& contentType, const std::string& body)
+{
+    if (!perm::allowed(perm::get().network, row)) return 0;
+    if (url.empty())
+    {
+        HE_LOG_WARN(Script, "%s: no URL — ignored", row);
+        return 0;
+    }
+    if (!HE::Net::httpsAvailable())
+    {
+        // Worth its own message: on a Linux built without libcurl EVERY request
+        // fails, and "the network is broken" is the wrong thing to conclude.
+        HE_LOG_WARN(Net, "%s: this build has no HTTP backend (%s)", row,
+                    HE::Net::httpsBackendName());
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (!g_running)
+    {
+        g_stop = false;
+        g_worker = std::thread(workerLoop);
+        g_running = true;
+    }
+    const int ticket = g_nextTicket++;
+    g_queue.push_back({ ticket, url, method, contentType, body });
+    g_cv.notify_one();
+    return ticket;
+}
+
+// The answer for a ticket, or nullptr while it is in flight, unknown, forgotten
+// or evicted. All four are the same answer on purpose: a caller cannot act
+// differently on them, and pretending otherwise would invite it to try.
+const Finished* look(int ticket)
+{
+    const auto it = g_done.find(ticket);
+    return it == g_done.end() ? nullptr : &it->second;
+}
+
+} // namespace
+
+int get(Ctx&, const std::string& url)
+{ return start("http.get", url, "GET", {}, {}); }
+
+int post(Ctx&, const std::string& url, const std::string& contentType,
+         const std::string& body)
+{
+    return start("http.post", url, "POST",
+                 contentType.empty() ? std::string("application/json") : contentType, body);
+}
+
+bool done(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); return look(ticket) != nullptr; }
+
+bool ok(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f && f->ok; }
+
+int status(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f ? f->status : 0; }
+
+std::string body(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f ? f->body : std::string(); }
+
+std::string error(Ctx&, int ticket)
+{ std::lock_guard<std::mutex> lk(g_mtx); const Finished* f = look(ticket); return f ? f->error : std::string(); }
+
+void forget(Ctx&, int ticket)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_done.erase(ticket) == 0) return;
+    for (auto it = g_doneOrder.begin(); it != g_doneOrder.end(); ++it)
+        if (*it == ticket) { g_doneOrder.erase(it); break; }
+}
+
+bool available(Ctx&) { return HE::Net::httpsAvailable(); }
+
+bool takeFinished(int& ticket)
+{
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_delivery.empty()) return false;
+    ticket = g_delivery.front();
+    g_delivery.pop_front();
+    return true;
+}
+
+void shutdown()
+{
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (!g_running) return;
+        g_stop = true;
+        g_running = false;
+        worker.swap(g_worker);
+    }
+    // Notified and joined OUTSIDE the lock: the worker takes it the moment it
+    // wakes, and joining while holding it is the deadlock that writes itself.
+    g_cv.notify_all();
+    if (worker.joinable()) worker.join();
+
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_queue.clear();
+    g_delivery.clear();
+    g_done.clear();
+    g_doneOrder.clear();
+}
+
+} // namespace http
+
+// ── Printing ─────────────────────────────────────────────────────────────────
+namespace print {
+namespace {
+// A4 in points, and the numbers a page of text is laid out with. Courier at 10
+// with 12 of leading gives 80 columns and 60 rows on a 2 cm margin, which is a
+// page of text as everyone has always known it.
+constexpr float kPageW   = 595.0f;
+constexpr float kPageH   = 842.0f;
+constexpr float kMargin  = 56.0f;
+constexpr float kFontPt  = 10.0f;
+constexpr float kLeading = 12.0f;
+// Courier is 0.6 em wide, every glyph — the whole reason it is the font here.
+constexpr int   kCols = static_cast<int>((kPageW - 2 * kMargin) / (kFontPt * 0.6f));
+constexpr int   kRows = static_cast<int>((kPageH - 2 * kMargin) / kLeading);
+
+// UTF-8 in, WinAnsi out, as a PDF literal string. Three things happen here:
+// the two delimiters and the backslash are escaped, a byte the encoding shares
+// with Latin-1 is written as an octal escape (so the file stays 7-bit and no
+// editor re-encodes it), and anything else becomes '?'.
+//
+// '?' rather than dropping it: a missing character is a word that quietly
+// changed, a '?' is a word that visibly did not survive the encoding.
+std::string pdfString(const std::string& utf8)
+{
+    std::string out;
+    out.reserve(utf8.size() + 8);
+    for (size_t i = 0; i < utf8.size(); )
+    {
+        const unsigned char b = static_cast<unsigned char>(utf8[i]);
+        if (b < 0x80)
+        {
+            if (b == '(' || b == ')' || b == '\\') { out += '\\'; out += static_cast<char>(b); }
+            else if (b >= 0x20 && b < 0x7F)        { out += static_cast<char>(b); }
+            else                                    { out += '?'; }   // control bytes
+            ++i;
+            continue;
+        }
+        // A multi-byte sequence. Only its CODE POINT matters, and only the
+        // Latin-1 range of it survives — WinAnsi and Latin-1 agree from A0 up.
+        uint32_t cp = 0;
+        size_t   len = 1;
+        if      ((b & 0xE0) == 0xC0) { cp = b & 0x1Fu; len = 2; }
+        else if ((b & 0xF0) == 0xE0) { cp = b & 0x0Fu; len = 3; }
+        else if ((b & 0xF8) == 0xF0) { cp = b & 0x07u; len = 4; }
+        else                         { out += '?'; ++i; continue; }
+        if (i + len > utf8.size()) { out += '?'; break; }
+        bool ok = true;
+        for (size_t k = 1; k < len; ++k)
+        {
+            const unsigned char n = static_cast<unsigned char>(utf8[i + k]);
+            if ((n & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (n & 0x3Fu);
+        }
+        if (ok && cp >= 0xA0 && cp <= 0xFF)
+        {
+            char esc[8];
+            std::snprintf(esc, sizeof(esc), "\\%03o", static_cast<unsigned>(cp));
+            out += esc;
+        }
+        else
+            out += '?';
+        i += ok ? len : 1;
+    }
+    return out;
+}
+
+// The text as the rows it will be printed as: '\n' always breaks, and a line
+// longer than the page breaks at the last space that fits (or inside the word,
+// when there is no space to break at — a run that overflowed the margin would
+// simply be lost off the edge of the paper).
+std::vector<std::string> layoutRows(const std::string& text)
+{
+    std::vector<std::string> rows;
+    std::string line;
+    auto flush = [&](std::string s)
+    {
+        // Measured in CHARACTERS, which for Courier is the same thing as points.
+        while (static_cast<int>(s.size()) > kCols)
+        {
+            size_t at = s.rfind(' ', static_cast<size_t>(kCols));
+            if (at == std::string::npos || at == 0) at = static_cast<size_t>(kCols);
+            rows.push_back(s.substr(0, at));
+            // The space the break ate does not start the next row.
+            s.erase(0, at < s.size() && s[at] == ' ' ? at + 1 : at);
+        }
+        rows.push_back(std::move(s));
+    };
+    for (char ch : text)
+    {
+        if (ch == '\n')      { flush(line); line.clear(); }
+        else if (ch != '\r') { line += ch; }
+    }
+    flush(line);
+    return rows;
+}
+} // namespace
+
+bool toPdf(Ctx&, const std::string& path, const std::string& text, const std::string& title)
+{
+    if (!perm::allowed(perm::get().files, "print.toPdf")) return false;
+    const std::filesystem::path p = fs::resolved(path);
+    if (p.empty()) return false;
+
+    const std::vector<std::string> rows = layoutRows(text);
+    const int pages = std::max(1, (static_cast<int>(rows.size()) + kRows - 1) / kRows);
+
+    // Object numbering, fixed up front so the references can be written as the
+    // objects are: 1 catalog, 2 pages, 3 font, then a page and a content stream
+    // each, and the document info last.
+    const int firstPageObj = 4;
+    const int infoObj      = firstPageObj + pages * 2;
+
+    std::string out = "%PDF-1.4\n";
+    std::vector<size_t> offsets(static_cast<size_t>(infoObj) + 1, 0);
+    auto begin = [&](int n) { offsets[static_cast<size_t>(n)] = out.size();
+                              out += std::to_string(n) + " 0 obj\n"; };
+    auto end   = [&]()      { out += "endobj\n"; };
+
+    begin(1);
+    out += "<< /Type /Catalog /Pages 2 0 R >>\n";
+    end();
+
+    begin(2);
+    out += "<< /Type /Pages /Count " + std::to_string(pages) + " /Kids [";
+    for (int i = 0; i < pages; ++i)
+        out += " " + std::to_string(firstPageObj + i * 2) + " 0 R";
+    out += " ] >>\n";
+    end();
+
+    begin(3);
+    // Base-14: no font file to embed and no licence to think about, which is the
+    // other half of why this is Courier.
+    out += "<< /Type /Font /Subtype /Type1 /BaseFont /Courier "
+           "/Encoding /WinAnsiEncoding >>\n";
+    end();
+
+    for (int pg = 0; pg < pages; ++pg)
+    {
+        const int pageObj = firstPageObj + pg * 2;
+        const int contObj = pageObj + 1;
+        begin(pageObj);
+        out += "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " +
+               std::to_string(static_cast<int>(kPageW)) + " " +
+               std::to_string(static_cast<int>(kPageH)) + "]"
+               " /Resources << /Font << /F1 3 0 R >> >> /Contents " +
+               std::to_string(contObj) + " 0 R >>\n";
+        end();
+
+        std::string body = "BT\n/F1 " + std::to_string(static_cast<int>(kFontPt)) + " Tf\n" +
+                           std::to_string(static_cast<int>(kLeading)) + " TL\n" +
+                           std::to_string(static_cast<int>(kMargin)) + " " +
+                           std::to_string(static_cast<int>(kPageH - kMargin - kFontPt)) + " Td\n";
+        for (int r = 0; r < kRows; ++r)
+        {
+            const size_t idx = static_cast<size_t>(pg) * kRows + static_cast<size_t>(r);
+            if (idx >= rows.size()) break;
+            body += "(" + pdfString(rows[idx]) + ") Tj\nT*\n";
+        }
+        body += "ET\n";
+
+        begin(contObj);
+        out += "<< /Length " + std::to_string(body.size()) + " >>\nstream\n";
+        out += body;
+        out += "endstream\n";
+        end();
+    }
+
+    begin(infoObj);
+    out += "<< /Producer (Horizon Engine)";
+    if (!title.empty()) out += " /Title (" + pdfString(title) + ")";
+    out += " >>\n";
+    end();
+
+    // The cross-reference table. Byte offsets, ten digits, and object 0 is the
+    // head of the free list — the shape is fixed by the spec, not by taste.
+    const size_t xref = out.size();
+    out += "xref\n0 " + std::to_string(infoObj + 1) + "\n";
+    out += "0000000000 65535 f \n";
+    for (int n = 1; n <= infoObj; ++n)
+    {
+        char line[32];
+        std::snprintf(line, sizeof(line), "%010zu 00000 n \n", offsets[static_cast<size_t>(n)]);
+        out += line;
+    }
+    out += "trailer\n<< /Size " + std::to_string(infoObj + 1) +
+           " /Root 1 0 R /Info " + std::to_string(infoObj) + " 0 R >>\nstartxref\n" +
+           std::to_string(xref) + "\n%%EOF\n";
+
+    std::error_code ec;
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary);
+    if (!f) return false;
+    f.write(out.data(), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(f);
+}
+
+bool available(Ctx&)
+{
+#if defined(_WIN32)
+    // Windows gets a false rather than a guess. Its printing goes through the
+    // shell's "print" verb or through the spooler API, and neither is a program
+    // to run with arguments — that is its own piece of work, the same answer
+    // `notify` gave on this platform.
+    return false;
+#else
+    // Asking whether a tool is installed runs nothing, so this is ungated for
+    // the reason process::which is: an application should be able to say "there
+    // is no printing here" without first being allowed to print.
+    return HE::Proc::which("lp").has_value();
+#endif
+}
+
+bool file(Ctx& c, const std::string& path)
+{
+    if (!perm::allowed(perm::get().processes, "print.file")) return false;
+    if (!available(c))
+    {
+        HE_LOG_WARN(Config, "%s", "print.file: this build has no spooler to hand a file to.");
+        return false;
+    }
+    // Its own resolved() as well: printing a file is reading it, and the path
+    // arrives from a script exactly like every other one.
+    const std::filesystem::path p = fs::resolved(path);
+    if (p.empty()) return false;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec)) return false;
+#if defined(_WIN32)
+    return false;   // unreachable: available() already said no
+#else
+    // An argv vector and never a command line, so a file called
+    // "; rm -rf ~" is a file name.
+    HE::Proc::Options o;
+    o.exe       = "lp";
+    o.args      = { p.string() };
+    o.timeoutMs = 15000;
+    const HE::Proc::Result res = HE::Proc::run(o);
+    if (!res.ok())
+        HE_LOG_WARN(Config, "print.file: lp returned %d: %s", res.exitCode, res.err.c_str());
+    return res.ok();
+#endif
+}
+
+} // namespace print
+
+// ── SQLite ───────────────────────────────────────────────────────────────────
+namespace db {
+namespace {
+struct Conn
+{
+    int          handle = 0;
+    sqlite3*     db     = nullptr;
+    std::string  err;             // what the last call on this connection said
+};
+std::vector<Conn>& conns()      { static std::vector<Conn> c; return c; }
+int& nextDbHandle()             { static int h = 0;          return h; }
+
+Conn* find(int handle)
+{
+    for (Conn& c : conns()) if (c.handle == handle) return &c;
+    return nullptr;
+}
+
+// SQL can name files that no `resolved()` ever sees: `ATTACH DATABASE '/etc/x'`
+// is one statement away from reading anything on the disk, and it arrives as a
+// string rather than as a path argument. This is where those doors are shut.
+//
+// There are THREE of them, and only the first has the word ATTACH in it:
+//   ATTACH/DETACH, the obvious one;
+//   `VACUUM INTO '<path>'`, which writes a copy of the whole database anywhere
+//     a string can spell — SQLite runs it through an internal attach, so the
+//     same case catches it (the test is what says so, not the documentation);
+//   `PRAGMA temp_store_directory` / `data_store_directory`, which move where
+//     SQLite writes its own files. Deprecated by SQLite, still accepted, and a
+//     pragma rather than a statement — which is why a lock aimed only at ATTACH
+//     would have walked straight past them.
+//
+// The extension loader is compiled out as well (SQLITE_OMIT_LOAD_EXTENSION); it
+// is refused here for the case where somebody turns that back on.
+int authorize(void*, int action, const char* a1, const char*, const char*, const char*)
+{
+    switch (action)
+    {
+    case SQLITE_ATTACH:
+    case SQLITE_DETACH:
+        return SQLITE_DENY;
+    case SQLITE_PRAGMA:
+    {
+        // Pragmas as a whole stay open: they are how a caller asks for foreign
+        // keys, a journal mode or the schema. Only the two that name a
+        // DIRECTORY are refused.
+        if (!a1) return SQLITE_OK;
+        const std::string_view p(a1);
+        if (p == "temp_store_directory" || p == "data_store_directory")
+            return SQLITE_DENY;
+        return SQLITE_OK;
+    }
+    default:
+        return SQLITE_OK;
+    }
+}
+
+// The JSON array in front of the `?`s. Anything the array does not cover stays
+// NULL, which is what an unbound parameter already is — a statement with more
+// placeholders than values is the caller's mistake to see in the result, not a
+// reason to refuse the whole call.
+void bindParams(sqlite3_stmt* st, const std::string& params)
+{
+    if (params.empty()) return;
+    nlohmann::json j = nlohmann::json::parse(params, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_array()) return;
+    const int want = sqlite3_bind_parameter_count(st);
+    for (size_t i = 0; i < j.size() && static_cast<int>(i) < want; ++i)
+    {
+        const nlohmann::json& v = j[i];
+        const int at = static_cast<int>(i) + 1;
+        if      (v.is_null())            sqlite3_bind_null(st, at);
+        else if (v.is_boolean())         sqlite3_bind_int(st, at, v.get<bool>() ? 1 : 0);
+        else if (v.is_number_integer())  sqlite3_bind_int64(st, at, v.get<int64_t>());
+        else if (v.is_number())          sqlite3_bind_double(st, at, v.get<double>());
+        else
+        {
+            // Everything else — a string, and an object or array written out as
+            // its own JSON. A nested value bound as text is at least readable
+            // again; refusing it would make one bad element throw the whole
+            // statement away.
+            const std::string s = v.is_string() ? v.get<std::string>() : v.dump();
+            sqlite3_bind_text(st, at, s.c_str(), static_cast<int>(s.size()),
+                              SQLITE_TRANSIENT);
+        }
+    }
+}
+} // namespace
+
+int open(Ctx&, const std::string& path)
+{
+    if (!perm::allowed(perm::get().files, "db.open")) return 0;
+    if (static_cast<int>(conns().size()) >= kMaxConnections)
+    {
+        HE_LOG_WARN(Config, "db.open: %d connections are already open, refusing '%s'.",
+                    kMaxConnections, path.c_str());
+        return 0;
+    }
+    // The same one place every other row that names a file goes through. A
+    // database that opened its own path would be the hole in Block C's model.
+    const std::filesystem::path p = fs::resolved(path);
+    if (p.empty()) return 0;
+    // The directory has to exist — SQLite would answer "unable to open database
+    // file" for a missing folder, which reads like a permission problem.
+    std::error_code ec;
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+
+    sqlite3* h = nullptr;
+    const int rc = sqlite3_open_v2(p.string().c_str(), &h,
+                                   SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+    if (rc != SQLITE_OK || !h)
+    {
+        HE_LOG_WARN(Config, "db.open: could not open '%s': %s", path.c_str(),
+                    h ? sqlite3_errmsg(h) : "out of memory");
+        if (h) sqlite3_close(h);
+        return 0;
+    }
+    sqlite3_set_authorizer(h, &authorize, nullptr);
+    Conn c;
+    c.handle = ++nextDbHandle();
+    c.db     = h;
+    conns().push_back(c);
+    return c.handle;
+}
+
+void close(Ctx&, int handle)
+{
+    auto& v = conns();
+    for (size_t i = 0; i < v.size(); ++i)
+        if (v[i].handle == handle)
+        {
+            sqlite3_close(v[i].db);
+            v.erase(v.begin() + static_cast<ptrdiff_t>(i));
+            return;
+        }
+}
+
+void closeAll()
+{
+    for (Conn& c : conns()) sqlite3_close(c.db);
+    conns().clear();
+}
+
+bool exec(Ctx&, int handle, const std::string& sql, const std::string& params)
+{
+    Conn* c = find(handle);
+    if (!c) return false;
+    c->err.clear();
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(c->db, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
+    {
+        c->err = sqlite3_errmsg(c->db);
+        return false;
+    }
+    bindParams(st, params);
+    // Stepped to the end even for a statement that returns rows: `exec` on a
+    // SELECT is a caller who wanted the side effect and not the answer, and
+    // stopping at the first row would leave a half-run statement behind.
+    int rc = sqlite3_step(st);
+    while (rc == SQLITE_ROW) rc = sqlite3_step(st);
+    const bool ok = (rc == SQLITE_DONE);
+    if (!ok) c->err = sqlite3_errmsg(c->db);
+    sqlite3_finalize(st);
+    return ok;
+}
+
+std::string query(Ctx&, int handle, const std::string& sql, const std::string& params)
+{
+    Conn* c = find(handle);
+    if (!c) return "[]";
+    c->err.clear();
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(c->db, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
+    {
+        c->err = sqlite3_errmsg(c->db);
+        return "[]";
+    }
+    bindParams(st, params);
+
+    nlohmann::json rows = nlohmann::json::array();
+    const int cols = sqlite3_column_count(st);
+    int n = 0;
+    int rc = SQLITE_OK;
+    bool truncated = false;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+    {
+        if (n >= kMaxRows) { truncated = true; break; }
+        nlohmann::json row = nlohmann::json::object();
+        for (int i = 0; i < cols; ++i)
+        {
+            const char* name = sqlite3_column_name(st, i);
+            if (!name) continue;
+            switch (sqlite3_column_type(st, i))
+            {
+            case SQLITE_INTEGER:
+                row[name] = static_cast<int64_t>(sqlite3_column_int64(st, i));
+                break;
+            case SQLITE_FLOAT:
+                row[name] = sqlite3_column_double(st, i);
+                break;
+            case SQLITE_TEXT:
+            {
+                const unsigned char* t = sqlite3_column_text(st, i);
+                row[name] = t ? reinterpret_cast<const char*>(t) : "";
+                break;
+            }
+            // NULL and BLOB both. A blob has no honest JSON shape (see the
+            // header), and pretending otherwise would put a lie in the data
+            // rather than in the error.
+            default:
+                row[name] = nullptr;
+                break;
+            }
+        }
+        rows.push_back(std::move(row));
+        ++n;
+    }
+    if (!truncated && rc != SQLITE_DONE) c->err = sqlite3_errmsg(c->db);
+    sqlite3_finalize(st);
+    if (truncated)
+        c->err = "the result was cut off at " + std::to_string(kMaxRows) +
+                 " rows — use LIMIT to ask for fewer";
+    return rows.dump();
+}
+
+int changes(Ctx&, int handle)
+{
+    Conn* c = find(handle);
+    return c ? sqlite3_changes(c->db) : 0;
+}
+
+double lastInsertId(Ctx&, int handle)
+{
+    Conn* c = find(handle);
+    return c ? static_cast<double>(sqlite3_last_insert_rowid(c->db)) : 0.0;
+}
+
+std::string lastError(Ctx&, int handle)
+{
+    Conn* c = find(handle);
+    return c ? c->err : std::string();
+}
+
+} // namespace db
+
+// ── Timers ───────────────────────────────────────────────────────────────────
+namespace timer {
+namespace {
+struct Entry
+{
+    int    handle    = 0;
+    double interval  = 0.0;   // what a repeat is reset to
+    double remaining = 0.0;   // …and how much of it is left
+    bool   repeat    = false;
+};
+std::vector<Entry>& timers()    { static std::vector<Entry> t;  return t; }
+std::vector<int>&   firedQueue(){ static std::vector<int> q;    return q; }
+int& nextTimerHandle()          { static int h = 0;             return h; }
+
+// The one place a timer is made, so `after` and `every` cannot drift apart on
+// what counts as a refusal.
+int start(double seconds, bool repeat)
+{
+    // Not a number, not a length of time, or shorter than the shortest interval
+    // worth having: a "timer" that fires every frame is the frame loop, and the
+    // graph already has that.
+    if (!(seconds >= kMinIntervalSeconds)) return 0;
+    if (static_cast<int>(timers().size()) >= kMaxTimers)
+    {
+        HE_LOG_WARN(Config, "timer: already running %d timers, refusing a new one.",
+                    kMaxTimers);
+        return 0;
+    }
+    Entry e;
+    e.handle    = ++nextTimerHandle();
+    e.interval  = seconds;
+    e.remaining = seconds;
+    e.repeat    = repeat;
+    timers().push_back(e);
+    return e.handle;
+}
+} // namespace
+
+int  after(double seconds) { return start(seconds, /*repeat=*/false); }
+int  every(double seconds) { return start(seconds, /*repeat=*/true);  }
+
+bool cancel(int handle)
+{
+    auto& t = timers();
+    for (size_t i = 0; i < t.size(); ++i)
+        if (t[i].handle == handle)
+        {
+            t.erase(t.begin() + static_cast<ptrdiff_t>(i));
+            // Anything of its already in the queue goes too. A one-shot
+            // cancelled in the same frame it fired has not fired as far as the
+            // caller is concerned, and delivering it anyway would be the one
+            // case where cancel does not cancel.
+            auto& q = firedQueue();
+            q.erase(std::remove(q.begin(), q.end(), handle), q.end());
+            return true;
+        }
+    return false;
+}
+
+bool active(int handle)
+{
+    for (const Entry& e : timers()) if (e.handle == handle) return true;
+    return false;
+}
+
+double nextDueSeconds()
+{
+    double best = -1.0;
+    for (const Entry& e : timers())
+        if (best < 0.0 || e.remaining < best) best = e.remaining;
+    return best;
+}
+
+void cancelAll() { timers().clear(); firedQueue().clear(); }
+
+bool takeFired(int& handle)
+{
+    auto& q = firedQueue();
+    if (q.empty()) return false;
+    handle = q.front();
+    q.erase(q.begin());
+    return true;
+}
+
+void poll(double dtSeconds)
+{
+    if (timers().empty() || !(dtSeconds > 0.0)) return;
+    auto& t = timers();
+    // One pass, and the one-shots are removed AFTER it: erasing inside the walk
+    // would move the entries under it, and a timer that skipped its turn
+    // because its neighbour fired is the kind of bug nobody finds twice.
+    for (Entry& e : t)
+    {
+        e.remaining -= dtSeconds;
+        if (e.remaining > 0.0) continue;
+        firedQueue().push_back(e.handle);
+        // ASSIGNED, not decremented by the interval: an application that was
+        // away for five seconds owes a 100 ms timer one tick, not fifty.
+        if (e.repeat) e.remaining = e.interval;
+        else          e.remaining = -1.0;   // marked, swept below
+    }
+    t.erase(std::remove_if(t.begin(), t.end(),
+                           [](const Entry& e){ return !e.repeat && e.remaining < 0.0; }),
+            t.end());
+    // A queue nobody drains is a leak with a slow fuse — a host that never
+    // learned about OnTimer would grow one entry per tick forever.
+    auto& q = firedQueue();
+    if (q.size() > 256) q.erase(q.begin(), q.begin() + static_cast<ptrdiff_t>(q.size() - 256));
+}
+
+} // namespace timer
+
+// ── JSON ─────────────────────────────────────────────────────────────────────
+namespace json {
+namespace {
+// Walk a dotted path with optional [i] indices. Returns nullptr when any step is
+// missing or the wrong kind. An empty path is the document itself, which is what
+// makes count(text, "") work on a top-level array.
+const nlohmann::json* walk(const nlohmann::json& doc, const std::string& path)
+{
+    const nlohmann::json* cur = &doc;
+    size_t i = 0;
+    while (i < path.size() && cur)
+    {
+        if (path[i] == '.') { ++i; continue; }
+        if (path[i] == '[')
+        {
+            const size_t close = path.find(']', i);
+            if (close == std::string::npos || !cur->is_array()) return nullptr;
+            const std::string num = path.substr(i + 1, close - i - 1);
+            // Reject anything that is not a plain non-negative integer: "[x]"
+            // silently becoming index 0 would be a bug that reads like data.
+            if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos)
+                return nullptr;
+            const size_t idx = static_cast<size_t>(std::stoull(num));
+            if (idx >= cur->size()) return nullptr;
+            cur = &(*cur)[idx];
+            i = close + 1;
+            continue;
+        }
+        const size_t next = path.find_first_of(".[", i);
+        const std::string key = path.substr(i, next == std::string::npos ? std::string::npos : next - i);
+        if (!cur->is_object()) return nullptr;
+        const auto it = cur->find(key);
+        if (it == cur->end()) return nullptr;
+        cur = &(*it);
+        i = (next == std::string::npos) ? path.size() : next;
+    }
+    return cur;
+}
+
+// The setter twin: creates missing OBJECT steps on the way down (an array index
+// is never created — growing an array by writing past its end is a different
+// operation and one nobody asked for). Null when the path runs through a
+// non-object.
+nlohmann::json* walkCreate(nlohmann::json& doc, const std::string& path)
+{
+    nlohmann::json* cur = &doc;
+    size_t i = 0;
+    while (i < path.size() && cur)
+    {
+        if (path[i] == '.') { ++i; continue; }
+        if (path[i] == '[')
+        {
+            const size_t close = path.find(']', i);
+            if (close == std::string::npos || !cur->is_array()) return nullptr;
+            const std::string num = path.substr(i + 1, close - i - 1);
+            if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos)
+                return nullptr;
+            const size_t idx = static_cast<size_t>(std::stoull(num));
+            if (idx >= cur->size()) return nullptr;
+            cur = &(*cur)[idx];
+            i = close + 1;
+            continue;
+        }
+        const size_t next = path.find_first_of(".[", i);
+        const std::string key = path.substr(i, next == std::string::npos ? std::string::npos : next - i);
+        if (cur->is_null()) *cur = nlohmann::json::object();
+        if (!cur->is_object()) return nullptr;
+        cur = &(*cur)[key];
+        i = (next == std::string::npos) ? path.size() : next;
+    }
+    return cur;
+}
+
+nlohmann::json parse(const std::string& text)
+{
+    return nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+}
+
+// Shared tail of the three setters: parse, walk, assign, re-serialise. Returns
+// the input untouched on every failure, which is the documented contract.
+template <typename T>
+std::string setAt(const std::string& text, const std::string& path, T&& value)
+{
+    nlohmann::json doc = parse(text);
+    if (doc.is_discarded())
+    {
+        // An empty (or blank) document is not a parse failure worth refusing —
+        // building one up from nothing is the normal way to write JSON here.
+        if (text.find_first_not_of(" \t\r\n") != std::string::npos) return text;
+        doc = nlohmann::json::object();
+    }
+    nlohmann::json* slot = walkCreate(doc, path);
+    if (!slot) return text;
+    *slot = std::forward<T>(value);
+    return doc.dump();
+}
+} // namespace
+
+std::string getString(Ctx&, const std::string& text, const std::string& path,
+                      const std::string& fallback)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return fallback;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_string()) ? v->get<std::string>() : fallback;
+}
+
+double getNumber(Ctx&, const std::string& text, const std::string& path, double fallback)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return fallback;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_number()) ? v->get<double>() : fallback;
+}
+
+bool getBool(Ctx&, const std::string& text, const std::string& path, bool fallback)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return fallback;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_boolean()) ? v->get<bool>() : fallback;
+}
+
+bool has(Ctx&, const std::string& text, const std::string& path)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return false;
+    return walk(doc, path) != nullptr;
+}
+
+int count(Ctx&, const std::string& text, const std::string& path)
+{
+    const nlohmann::json doc = parse(text);
+    if (doc.is_discarded()) return 0;
+    const nlohmann::json* v = walk(doc, path);
+    return (v && v->is_array()) ? static_cast<int>(v->size()) : 0;
+}
+
+std::string setString(Ctx&, const std::string& text, const std::string& path,
+                      const std::string& value) { return setAt(text, path, value); }
+std::string setNumber(Ctx&, const std::string& text, const std::string& path, double value)
+{ return setAt(text, path, value); }
+std::string setBool(Ctx&, const std::string& text, const std::string& path, bool value)
+{ return setAt(text, path, value); }
+} // namespace json
+
+// ── Preferences ──────────────────────────────────────────────────────────────
+namespace prefs {
+namespace {
+constexpr const char* kFile = "Prefs.json";
+
+nlohmann::json& doc()
+{
+    static nlohmann::json d = nlohmann::json::object();
+    static bool loaded = false;
+    if (!loaded)
+    {
+        loaded = true;   // set FIRST: a failed read must not retry on every call
+        const std::string text = fs::readText(kFile);
+        if (!text.empty())
+        {
+            nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+            if (parsed.is_object()) d = std::move(parsed);
+            else
+                HE_LOG_WARN(Script, "%s", "prefs: Prefs.json is not a JSON object — starting empty");
+        }
+    }
+    return d;
+}
+
+void store()
+{
+    // Every set writes. These are a handful of keys, and the alternative is
+    // losing the user's settings to a crash for the sake of an fwrite.
+    if (!fs::writeText(kFile, doc().dump(2)))
+        HE_LOG_WARN(Script, "%s", "prefs: could not write Prefs.json — settings will not persist");
+}
+} // namespace
+
+std::string getString(Ctx&, const std::string& key, const std::string& fallback)
+{
+    const auto it = doc().find(key);
+    return (it != doc().end() && it->is_string()) ? it->get<std::string>() : fallback;
+}
+double getNumber(Ctx&, const std::string& key, double fallback)
+{
+    const auto it = doc().find(key);
+    return (it != doc().end() && it->is_number()) ? it->get<double>() : fallback;
+}
+bool getBool(Ctx&, const std::string& key, bool fallback)
+{
+    const auto it = doc().find(key);
+    return (it != doc().end() && it->is_boolean()) ? it->get<bool>() : fallback;
+}
+void setString(Ctx&, const std::string& key, const std::string& value)
+{ doc()[key] = value; store(); }
+void setNumber(Ctx&, const std::string& key, double value) { doc()[key] = value; store(); }
+void setBool  (Ctx&, const std::string& key, bool value)   { doc()[key] = value; store(); }
+bool has      (Ctx&, const std::string& key) { return doc().contains(key); }
+bool remove   (Ctx&, const std::string& key)
+{
+    if (!doc().contains(key)) return false;
+    doc().erase(key);
+    store();
+    return true;
+}
+void clear(Ctx&) { doc() = nlohmann::json::object(); store(); }
+} // namespace prefs
+
+// ── Date and time ────────────────────────────────────────────────────────────
+namespace datetime {
+namespace {
+// localtime_r/localtime_s rather than localtime: this is called from script
+// threads and the shared static buffer is exactly the kind of race that shows up
+// once a month as a wrong timestamp.
+std::tm localParts(double epochSeconds)
+{
+    const std::time_t t = static_cast<std::time_t>(epochSeconds);
+    std::tm out{};
+#ifdef _WIN32
+    localtime_s(&out, &t);
+#else
+    localtime_r(&t, &out);
+#endif
+    return out;
+}
+} // namespace
+
+double now(Ctx&)
+{
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+std::string format(Ctx&, double epochSeconds, const std::string& fmt)
+{
+    if (fmt.empty()) return {};
+    const std::tm parts = localParts(epochSeconds);
+    // 512 is generous for a timestamp; a format that still overruns it gets an
+    // empty string rather than a truncated half-date pretending to be one.
+    char buf[512];
+    const size_t n = std::strftime(buf, sizeof(buf), fmt.c_str(), &parts);
+    return n > 0 ? std::string(buf, n) : std::string();
+}
+
+int year   (Ctx&, double s) { return localParts(s).tm_year + 1900; }
+int month  (Ctx&, double s) { return localParts(s).tm_mon + 1; }
+int day    (Ctx&, double s) { return localParts(s).tm_mday; }
+int hour   (Ctx&, double s) { return localParts(s).tm_hour; }
+int minute (Ctx&, double s) { return localParts(s).tm_min; }
+int second (Ctx&, double s) { return localParts(s).tm_sec; }
+int weekday(Ctx&, double s) { return localParts(s).tm_wday; }
+} // namespace datetime
 
 namespace save {
 namespace {
@@ -1993,6 +4125,8 @@ std::string substring(const std::string& s, int start, int count)
     if (start >= (int)s.size() || count <= 0) return {};
     return s.substr((size_t)start, (size_t)count);
 }
+bool equals(const std::string& a, const std::string& b)
+{ return a == b; }
 bool contains(const std::string& s, const std::string& needle)
 { return needle.empty() || s.find(needle) != std::string::npos; }
 int find(const std::string& s, const std::string& needle)
@@ -2585,14 +4719,425 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::isVisible(c, (int)aR(a, 0))) }; } });
         t.push_back({ "widget.callFunction", "Widget", true, {{"widget", P::Ref}, {"function", P::String}}, {{"ok", P::Bool}}, "HE::api::widget::callFunction",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::callFunction(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        // Building the interface while it runs. The child comes back as a Ref
+        // for the same reason the widget goes in as one: it IS a live object,
+        // and Set External / Call External / Bind Event are how one talks to it.
+        t.push_back({ "widget.addChild", "Widget", true,
+            {{"widget", P::Ref}, {"parent", P::String}, {"widgetAsset", P::String}},
+            {{"child", P::Ref}}, "HE::api::widget::addChild",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
+                (uint64_t)widget::addChild(c, (int)aR(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "widget.removeChild", "Widget", true,
+            {{"widget", P::Ref}, {"child", P::Ref}}, {{"ok", P::Bool}},
+            "HE::api::widget::removeChild",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::removeChild(c, (int)aR(a, 0), (int)aR(a, 1))) }; } });
+        t.push_back({ "widget.clearChildren", "Widget", true,
+            {{"widget", P::Ref}, {"parent", P::String}}, {{"removed", P::Int}},
+            "HE::api::widget::clearChildren",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::clearChildren(c, (int)aR(a, 0), aS(a, 1))) }; } });
+
+        // Lists. The list is addressed by the NAME of its element, the way
+        // addChild addresses a parent — an id is a number nobody can look up.
+        // No row travels through these except as a Ref: the list holds a count
+        // and a template, and the items stay where they already are.
+        t.push_back({ "widget.setListCount", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}, {"count", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::widget::setListCount",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::setListCount(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "widget.listCount", "Widget", false,
+            {{"widget", P::Ref}, {"list", P::String}}, {{"count", P::Int}},
+            "HE::api::widget::listCount",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::listCount(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.listRow", "Widget", false,
+            {{"widget", P::Ref}, {"list", P::String}, {"index", P::Int}}, {{"row", P::Ref}},
+            "HE::api::widget::listRow",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
+                (uint64_t)widget::listRow(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "widget.refreshList", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}}, {{"ok", P::Bool}},
+            "HE::api::widget::refreshList",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::refreshList(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.setListSelected", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}, {"index", P::Int}, {"selected", P::Bool}},
+            {{"ok", P::Bool}}, "HE::api::widget::setListSelected",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::setListSelected(c, (int)aR(a, 0), aS(a, 1), aI(a, 2), aB(a, 3))) }; } });
+        t.push_back({ "widget.listSelected", "Widget", false,
+            {{"widget", P::Ref}, {"list", P::String}}, {{"index", P::Int}},
+            "HE::api::widget::listSelected",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::listSelected(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.scrollListToItem", "Widget", true,
+            {{"widget", P::Ref}, {"list", P::String}, {"index", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::widget::scrollListToItem",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::scrollListToItem(c, (int)aR(a, 0), aS(a, 1), aI(a, 2))) }; } });
+
+        // Animation. Three rows for three pin types, not one row that takes
+        // "some value": a graph author wires a pin, and a pin has a type.
+        // `easing` is a NAME so the row survives a curve being added
+        // (HE::uiEaseName); an unknown one plays Linear rather than nothing.
+        t.push_back({ "widget.animate", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String},
+             {"to", P::Float}, {"seconds", P::Float}, {"easing", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::animate",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::animate(c, (int)aR(a, 0), aS(a, 1), aS(a, 2),
+                                aF(a, 3), aF(a, 4), aS(a, 5))) }; } });
+        t.push_back({ "widget.animateColor", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String},
+             {"to", P::Color}, {"seconds", P::Float}, {"easing", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::animateColor",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::animateColor(c, (int)aR(a, 0), aS(a, 1), aS(a, 2),
+                                     aV4(a, 3), aF(a, 4), aS(a, 5))) }; } });
+        t.push_back({ "widget.animateVec2", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String},
+             {"to", P::Vec2}, {"seconds", P::Float}, {"easing", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::animateVec2",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::animateVec2(c, (int)aR(a, 0), aS(a, 1), aS(a, 2),
+                                    aV2(a, 3), aF(a, 4), aS(a, 5))) }; } });
+        t.push_back({ "widget.stopAnimation", "Widget", true,
+            {{"widget", P::Ref}, {"element", P::String}, {"property", P::String}},
+            {{"stopped", P::Int}}, "HE::api::widget::stopAnimation",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::stopAnimation(c, (int)aR(a, 0), aS(a, 1), aS(a, 2))) }; } });
+
+        // The widget's own authored clips, by name. `widget` left unwired means
+        // the widget whose graph is calling (widget::selfWidget), so playing
+        // one's own animation is "pick it from the dropdown" and nothing else.
+        //
+        // `restore` is the shortcut for the commonest pair of calls there is:
+        // play something, put it back. `direction` is a UIAnimDirection name
+        // ("Forward", "Backward", "Ping Pong"), a NAME for the same reason the
+        // easing is one — a row that survives the vocabulary growing.
+        t.push_back({ "widget.playAnimation", "Widget", true,
+            {{"widget", P::Ref}, {"animation", P::String},
+             {"restoreAfterCompleted", P::Bool}, {"direction", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::playAnimation",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::playAnimation(c, (int)aR(a, 0), aS(a, 1), aB(a, 2), aS(a, 3))) }; } });
+        t.push_back({ "widget.playAnimationLooped", "Widget", true,
+            {{"widget", P::Ref}, {"animation", P::String}, {"loop", P::Bool},
+             {"direction", P::String}},
+            {{"ok", P::Bool}}, "HE::api::widget::playAnimationLooped",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::playAnimationLooped(c, (int)aR(a, 0), aS(a, 1), aB(a, 2),
+                                            aS(a, 3))) }; } });
+        t.push_back({ "widget.stopAnimationClip", "Widget", true,
+            {{"widget", P::Ref}, {"animation", P::String}}, {{"stopped", P::Int}},
+            "HE::api::widget::stopAnimationClip",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::stopAnimationClip(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.isPlayingAnimation", "Widget", false,
+            {{"widget", P::Ref}, {"animation", P::String}}, {{"playing", P::Bool}},
+            "HE::api::widget::isPlayingAnimation",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                widget::isPlayingAnimation(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        // A reference to the component sitting in one of this widget's slots.
+        // Pure: it is a lookup, not an action. What makes a component reachable
+        // the way any other class is — its functions, its events, its public
+        // variables — instead of only through the elements it grafted in.
+        t.push_back({ "widget.childRef", "Widget", false,
+            {{"widget", P::Ref}, {"element", P::String}}, {{"child", P::Ref}},
+            "HE::api::widget::childRef",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(
+                widget::childRef(c, (int)aR(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "widget.stopAllAnimations", "Widget", true,
+            {{"widget", P::Ref}}, {{"stopped", P::Int}},
+            "HE::api::widget::stopAllAnimations",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::stopAllAnimations(c, (int)aR(a, 0))) }; } });
+        t.push_back({ "widget.restoreOriginalState", "Widget", true,
+            {{"widget", P::Ref}}, {{"restored", P::Int}},
+            "HE::api::widget::restoreOriginalState",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                widget::restoreOriginalState(c, (int)aR(a, 0))) }; } });
+
+        // Layers. A dialog and a menu are the same thing to the engine: input
+        // belongs to them until they let go. Only the leaving differs.
+        t.push_back({ "widget.showModal", "Widget", true,
+            {{"widget", P::Ref}}, {}, "HE::api::widget::showModal",
+            [](Ctx& c, const VV& a){ widget::showModal(c, (int)aR(a, 0)); return VV{}; } });
+        t.push_back({ "widget.openPopup", "Widget", true,
+            {{"widget", P::Ref}, {"x", P::Float}, {"y", P::Float}}, {},
+            "HE::api::widget::openPopup",
+            [](Ctx& c, const VV& a){ widget::openPopup(c, (int)aR(a, 0), aF(a, 1), aF(a, 2)); return VV{}; } });
+        t.push_back({ "widget.openPopupAtPointer", "Widget", true,
+            {{"widget", P::Ref}}, {}, "HE::api::widget::openPopupAtPointer",
+            [](Ctx& c, const VV& a){ widget::openPopupAtPointer(c, (int)aR(a, 0)); return VV{}; } });
+        t.push_back({ "widget.closeTopLayer", "Widget", true,
+            {}, {{"closed", P::Bool}}, "HE::api::widget::closeTopLayer",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(widget::closeTopLayer(c)) }; } });
+
+        // Theme — one place decides what the whole application looks like.
+        t.push_back({ "theme.set", "Theme", true, {{"themeAsset", P::String}}, {{"ok", P::Bool}},
+            "HE::api::theme::set",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(theme::set(c, aS(a, 0))) }; } });
+        t.push_back({ "theme.setMode", "Theme", true, {{"mode", P::String}}, {},
+            "HE::api::theme::setMode",
+            [](Ctx& c, const VV& a){ theme::setMode(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "theme.getMode", "Theme", false, {}, {{"mode", P::String}},
+            "HE::api::theme::mode",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(theme::mode(c)) }; } });
+        t.push_back({ "theme.getPreference", "Theme", false, {}, {{"preference", P::String}},
+            "HE::api::theme::preference",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(theme::preference(c)) }; } });
+        // The reader's text size, beside the theme because it is the same kind
+        // of setting: one switch for the whole application (B10).
+        t.push_back({ "theme.setFontScale", "Theme", true, {{"scale", P::Float}}, {},
+            "HE::api::theme::setFontScale",
+            [](Ctx& c, const VV& a){ theme::setFontScale(c, aF(a, 0)); return VV{}; } });
+        t.push_back({ "theme.getFontScale", "Theme", false, {}, {{"scale", P::Float}},
+            "HE::api::theme::fontScale",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(theme::fontScale(c)) }; } });
 
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
             [](Ctx& c, const VV& a){ cursor::setVisible(c, aB(a, 0)); return VV{}; } });
 
-        // Application — what a main menu's last button does.
+        // Application — what a main menu's last button does, plus the window an
+        // application owns (docs/he-apps-plan.md A4). A game leaves the window
+        // rows unbound, so they warn once and do nothing there.
         t.push_back({ "app.quit", "App", true, {}, {}, "HE::api::app::quit",
             [](Ctx& c, const VV&){ app::quit(c); return VV{}; } });
+        t.push_back({ "app.setTitle", "App", true, {{"title", P::String}}, {}, "HE::api::app::setTitle",
+            [](Ctx& c, const VV& a){ app::setTitle(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "app.setSize", "App", true, {{"width", P::Int}, {"height", P::Int}}, {},
+            "HE::api::app::setSize",
+            [](Ctx& c, const VV& a){ app::setSize(c, aI(a, 0), aI(a, 1)); return VV{}; } });
+        t.push_back({ "app.size", "App", false, {}, {{"size", P::Vec2}}, "HE::api::app::size",
+            [](Ctx& c, const VV&){ return VV{ Value::ofVec2(app::size(c)) }; } });
+        t.push_back({ "app.requestRedraw", "App", true, {}, {}, "HE::api::app::requestRedraw",
+            [](Ctx& c, const VV&){ app::requestRedraw(c); return VV{}; } });
+        // The other two title-bar buttons (plan F3). One bool covers maximise
+        // and restore, because one button does both.
+        t.push_back({ "app.minimize", "App", true, {}, {}, "HE::api::app::minimize",
+            [](Ctx& c, const VV&){ app::minimize(c); return VV{}; } });
+        t.push_back({ "app.maximize", "App", true, {{"maximized", P::Bool}}, {},
+            "HE::api::app::maximize",
+            [](Ctx& c, const VV& a){ app::maximize(c, aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.isMaximized", "App", false, {}, {{"maximized", P::Bool}},
+            "HE::api::app::isMaximized",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::isMaximized(c)) }; } });
+        // The tray. Bound by the packaged application and by nothing else, so a
+        // graph previewed in the editor logs once and leaves the menu bar alone.
+        t.push_back({ "app.showTray", "App", true, {{"tooltip", P::String}}, {},
+            "HE::api::app::showTray",
+            [](Ctx& c, const VV& a){ app::showTray(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "app.hideTray", "App", true, {}, {}, "HE::api::app::hideTray",
+            [](Ctx& c, const VV&){ app::hideTray(c); return VV{}; } });
+        t.push_back({ "app.addTrayItem", "App", true,
+            {{"id", P::String}, {"label", P::String}}, {}, "HE::api::app::addTrayItem",
+            [](Ctx& c, const VV& a){ app::addTrayItem(c, aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "app.clearTrayMenu", "App", true, {}, {}, "HE::api::app::clearTrayMenu",
+            [](Ctx& c, const VV&){ app::clearTrayMenu(c); return VV{}; } });
+        // A SECOND window (A5). Its own group and not more pins on app.*: pin
+        // indices are what a saved graph holds on to. Unbound in the editor and
+        // on a renderer that cannot draw into one — open answers 0 there.
+        t.push_back({ "window.open", "Window", true,
+            {{"title", P::String}, {"width", P::Int}, {"height", P::Int}},
+            {{"window", P::Int}}, "HE::api::window::open",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofInt(window::open(c, aS(a, 0), aI(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "window.close", "Window", true, {{"window", P::Int}}, {},
+            "HE::api::window::close",
+            [](Ctx& c, const VV& a){ window::close(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "window.setTitle", "Window", true,
+            {{"window", P::Int}, {"title", P::String}}, {}, "HE::api::window::setTitle",
+            [](Ctx& c, const VV& a){ window::setTitle(c, aI(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "window.setSize", "Window", true,
+            {{"window", P::Int}, {"width", P::Int}, {"height", P::Int}}, {},
+            "HE::api::window::setSize",
+            [](Ctx& c, const VV& a){ window::setSize(c, aI(a, 0), aI(a, 1), aI(a, 2));
+                                     return VV{}; } });
+        t.push_back({ "window.show", "Window", true,
+            {{"window", P::Int}, {"widget", P::Ref}}, {}, "HE::api::window::show",
+            [](Ctx& c, const VV& a){ window::show(c, aI(a, 0), (int)aR(a, 1)); return VV{}; } });
+        // The menu bar, built row by row from a graph.
+        t.push_back({ "app.addMenu", "App", true,
+            {{"id", P::String}, {"label", P::String}}, {}, "HE::api::app::addMenu",
+            [](Ctx& c, const VV& a){ app::addMenu(c, aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "app.addMenuItem", "App", true,
+            // The chord goes LAST, so every graph that was drawn before it
+            // existed keeps its three pins where they were and the fourth simply
+            // arrives empty, which is exactly what "no shortcut" is.
+            {{"menu", P::String}, {"id", P::String}, {"label", P::String},
+             {"shortcut", P::String}}, {},
+            "HE::api::app::addMenuItem",
+            [](Ctx& c, const VV& a){ app::addMenuItem(c, aS(a, 0), aS(a, 1), aS(a, 2), aS(a, 3)); return VV{}; } });
+        t.push_back({ "app.addMenuSeparator", "App", true, {{"menu", P::String}}, {},
+            "HE::api::app::addMenuSeparator",
+            [](Ctx& c, const VV& a){ app::addMenuSeparator(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "app.clearMenuBar", "App", true, {}, {}, "HE::api::app::clearMenuBar",
+            [](Ctx& c, const VV&){ app::clearMenuBar(c); return VV{}; } });
+        // The two things about a row that change while the program runs. By the
+        // ENTRY's id — the id OnMenuItem carries — not by menu and position.
+        t.push_back({ "app.setMenuItemEnabled", "App", true,
+            {{"id", P::String}, {"enabled", P::Bool}}, {},
+            "HE::api::app::setMenuItemEnabled",
+            [](Ctx& c, const VV& a){ app::setMenuItemEnabled(c, aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "app.setMenuItemChecked", "App", true,
+            {{"id", P::String}, {"checked", P::Bool}}, {},
+            "HE::api::app::setMenuItemChecked",
+            [](Ctx& c, const VV& a){ app::setMenuItemChecked(c, aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "app.menuItemEnabled", "App", false, {{"id", P::String}},
+            {{"enabled", P::Bool}}, "HE::api::app::menuItemEnabled",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(app::menuItemEnabled(c, aS(a, 0))) }; } });
+        t.push_back({ "app.menuItemChecked", "App", false, {{"id", P::String}},
+            {{"checked", P::Bool}}, "HE::api::app::menuItemChecked",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(app::menuItemChecked(c, aS(a, 0))) }; } });
+        // A notification is exec (it does something out there) and answers
+        // whether the system took it, not whether anybody read it.
+        t.push_back({ "app.notify", "App", true,
+            {{"title", P::String}, {"text", P::String}}, {{"shown", P::Bool}},
+            "HE::api::app::notify",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(app::notify(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "app.notifyAvailable", "App", false, {}, {{"available", P::Bool}},
+            "HE::api::app::notifyAvailable",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::notifyAvailable(c)) }; } });
+        t.push_back({ "app.setAutostart", "App", true, {{"enabled", P::Bool}}, {},
+            "HE::api::app::setAutostart",
+            [](Ctx& c, const VV& a){ app::setAutostart(c, aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.autostart", "App", false, {}, {{"enabled", P::Bool}},
+            "HE::api::app::autostart",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::autostart(c)) }; } });
+
+        // Clipboard — the same system clipboard Ctrl+C/V already use in a focused
+        // text field, reachable from a graph.
+        t.push_back({ "clipboard.getText", "Clipboard", false, {}, {{"text", P::String}},
+            "HE::api::clipboard::getText",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(clipboard::getText(c)) }; } });
+        t.push_back({ "clipboard.setText", "Clipboard", true, {{"text", P::String}}, {},
+            "HE::api::clipboard::setText",
+            [](Ctx& c, const VV& a){ clipboard::setText(c, aS(a, 0)); return VV{}; } });
+        t.push_back({ "clipboard.hasText", "Clipboard", false, {}, {{"has", P::Bool}},
+            "HE::api::clipboard::hasText",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(clipboard::hasText(c)) }; } });
+
+        // Native dialogs — the blocking, OS-drawn kind.
+        t.push_back({ "dialog.message", "Dialog", true,
+            {{"title", P::String}, {"text", P::String}, {"kind", P::Int}}, {},
+            "HE::api::dialog::message",
+            [](Ctx& c, const VV& a){ dialog::message(c, aS(a, 0), aS(a, 1), aI(a, 2)); return VV{}; } });
+        t.push_back({ "dialog.confirm", "Dialog", true,
+            {{"title", P::String}, {"text", P::String},
+             {"affirmative", P::String}, {"negative", P::String}},
+            {{"confirmed", P::Bool}}, "HE::api::dialog::confirm",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofBool(dialog::confirm(c, aS(a, 0), aS(a, 1), aS(a, 2), aS(a, 3))) }; } });
+        // The three pickers. What they return is GRANTED to the file rows for
+        // the rest of the session, which is why they belong to the same wave as
+        // unlocking `fs`: without them there is no way to hand a script a path
+        // that nobody had to type a permission for.
+        t.push_back({ "dialog.openFile", "Dialog", true,
+            {{"filter", P::String}}, {{"path", P::String}},
+            "HE::api::dialog::openFile",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(dialog::openFile(c, aS(a, 0))) }; } });
+        t.push_back({ "dialog.saveFile", "Dialog", true,
+            {{"filter", P::String}}, {{"path", P::String}},
+            "HE::api::dialog::saveFile",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(dialog::saveFile(c, aS(a, 0))) }; } });
+        t.push_back({ "dialog.pickFolder", "Dialog", true,
+            {}, {{"path", P::String}},
+            "HE::api::dialog::pickFolder",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(dialog::pickFolder(c)) }; } });
+
+        // JSON — text in, text out, addressed by a dotted path. Numbers cross as
+        // Float, which is what every numeric pin in a graph already is.
+        t.push_back({ "json.getString", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"fallback", P::String}},
+            {{"value", P::String}}, "HE::api::json::getString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::getString(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "json.getNumber", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"fallback", P::Float}},
+            {{"value", P::Float}}, "HE::api::json::getNumber",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat((float)json::getNumber(c, aS(a, 0), aS(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "json.getBool", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"fallback", P::Bool}},
+            {{"value", P::Bool}}, "HE::api::json::getBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(json::getBool(c, aS(a, 0), aS(a, 1), aB(a, 2))) }; } });
+        t.push_back({ "json.has", "JSON", false,
+            {{"text", P::String}, {"path", P::String}}, {{"present", P::Bool}}, "HE::api::json::has",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(json::has(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "json.count", "JSON", false,
+            {{"text", P::String}, {"path", P::String}}, {{"count", P::Int}}, "HE::api::json::count",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(json::count(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "json.setString", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"value", P::String}},
+            {{"result", P::String}}, "HE::api::json::setString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::setString(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "json.setNumber", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"value", P::Float}},
+            {{"result", P::String}}, "HE::api::json::setNumber",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::setNumber(c, aS(a, 0), aS(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "json.setBool", "JSON", false,
+            {{"text", P::String}, {"path", P::String}, {"value", P::Bool}},
+            {{"result", P::String}}, "HE::api::json::setBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(json::setBool(c, aS(a, 0), aS(a, 1), aB(a, 2))) }; } });
+
+        // Preferences — small persistent settings, separate from the save system.
+        t.push_back({ "prefs.getString", "Prefs", false,
+            {{"key", P::String}, {"fallback", P::String}}, {{"value", P::String}},
+            "HE::api::prefs::getString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(prefs::getString(c, aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "prefs.getNumber", "Prefs", false,
+            {{"key", P::String}, {"fallback", P::Float}}, {{"value", P::Float}},
+            "HE::api::prefs::getNumber",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat((float)prefs::getNumber(c, aS(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "prefs.getBool", "Prefs", false,
+            {{"key", P::String}, {"fallback", P::Bool}}, {{"value", P::Bool}},
+            "HE::api::prefs::getBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::getBool(c, aS(a, 0), aB(a, 1))) }; } });
+        t.push_back({ "prefs.setString", "Prefs", true,
+            {{"key", P::String}, {"value", P::String}}, {}, "HE::api::prefs::setString",
+            [](Ctx& c, const VV& a){ prefs::setString(c, aS(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "prefs.setNumber", "Prefs", true,
+            {{"key", P::String}, {"value", P::Float}}, {}, "HE::api::prefs::setNumber",
+            [](Ctx& c, const VV& a){ prefs::setNumber(c, aS(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "prefs.setBool", "Prefs", true,
+            {{"key", P::String}, {"value", P::Bool}}, {}, "HE::api::prefs::setBool",
+            [](Ctx& c, const VV& a){ prefs::setBool(c, aS(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "prefs.has", "Prefs", false,
+            {{"key", P::String}}, {{"present", P::Bool}}, "HE::api::prefs::has",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::has(c, aS(a, 0))) }; } });
+        t.push_back({ "prefs.remove", "Prefs", true,
+            {{"key", P::String}}, {{"removed", P::Bool}}, "HE::api::prefs::remove",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::remove(c, aS(a, 0))) }; } });
+        t.push_back({ "prefs.clear", "Prefs", true, {}, {}, "HE::api::prefs::clear",
+            [](Ctx& c, const VV&){ prefs::clear(c); return VV{}; } });
+
+        // Date and time — the WALL clock, unlike the time group.
+        t.push_back({ "datetime.now", "DateTime", false, {}, {{"epochSeconds", P::Float}},
+            "HE::api::datetime::now",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat((float)datetime::now(c)) }; } });
+        t.push_back({ "datetime.format", "DateTime", false,
+            {{"epochSeconds", P::Float}, {"format", P::String}}, {{"text", P::String}},
+            "HE::api::datetime::format",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(datetime::format(c, aF(a, 0), aS(a, 1))) }; } });
+        {
+            // One row per field, all the same shape.
+            struct Part { const char* id; const char* cpp; int (*fn)(Ctx&, double); };
+            static const Part kParts[] = {
+                { "datetime.year",    "HE::api::datetime::year",    &datetime::year    },
+                { "datetime.month",   "HE::api::datetime::month",   &datetime::month   },
+                { "datetime.day",     "HE::api::datetime::day",     &datetime::day     },
+                { "datetime.hour",    "HE::api::datetime::hour",    &datetime::hour    },
+                { "datetime.minute",  "HE::api::datetime::minute",  &datetime::minute  },
+                { "datetime.second",  "HE::api::datetime::second",  &datetime::second  },
+                { "datetime.weekday", "HE::api::datetime::weekday", &datetime::weekday },
+            };
+            for (const Part& p : kParts)
+                t.push_back({ p.id, "DateTime", false, {{"epochSeconds", P::Float}},
+                    {{"value", P::Int}}, p.cpp,
+                    [fn = p.fn](Ctx& c, const VV& a){ return VV{ Value::ofInt(fn(c, aF(a, 0))) }; } });
+        }
 
         // Math (pure)
         auto unary  = [&](const char* id, const char* cpp, float(*fn)(float)) {
@@ -2895,6 +5440,155 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::remove(aS(a, 0))) }; } });
         t.push_back({ "fs.makeDir", "File", true, {{"path", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::makeDir",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::makeDir(aS(a, 0))) }; } });
+        t.push_back({ "fs.isDir", "File", false, {{"path", P::String}}, {{"isDir", P::Bool}}, "HE::api::fs::isDir",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::isDir(aS(a, 0))) }; } });
+        t.push_back({ "fs.size", "File", false, {{"path", P::String}}, {{"bytes", P::Float}}, "HE::api::fs::size",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::size(aS(a, 0))) }; } });
+        t.push_back({ "fs.modified", "File", false, {{"path", P::String}}, {{"time", P::Float}}, "HE::api::fs::modified",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::modified(aS(a, 0))) }; } });
+        t.push_back({ "fs.list", "File", false, {{"dir", P::String}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::fs::list",
+            [](Ctx&, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& n : fs::list(aS(a, 0))) arr.items.push_back(Value::ofString(std::move(n)));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "fs.rename", "File", true, {{"from", P::String}, {"to", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::rename",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::rename(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "fs.copy", "File", true, {{"from", P::String}, {"to", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::copy",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::copy(aS(a, 0), aS(a, 1))) }; } });
+        // Watching. The handle is what turns it off again; 0 means it never
+        // started, the same shape http.get's ticket has.
+        t.push_back({ "fs.watch", "File", true, {{"path", P::String}}, {{"handle", P::Int}}, "HE::api::fs::watch",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(fs::watch(aS(a, 0))) }; } });
+        t.push_back({ "fs.unwatch", "File", true, {{"handle", P::Int}}, {}, "HE::api::fs::unwatch",
+            [](Ctx&, const VV& a){ fs::unwatch(aI(a, 0)); return VV{}; } });
+
+        // ── Printing ─────────────────────────────────────────────────────────
+        // Two permissions, because these are two different things: writing a
+        // PDF is writing a file, handing one to the spooler is running another
+        // program. `available` is neither and is therefore ungated, like
+        // process.which — an application must be able to say "no printing here"
+        // without first being allowed to print.
+        t.push_back({ "print.toPdf", "Print", true,
+            {{"path", P::String}, {"text", P::String}, {"title", P::String}},
+            {{"ok", P::Bool}}, "HE::api::print::toPdf",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofBool(print::toPdf(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "print.file", "Print", true, {{"path", P::String}}, {{"ok", P::Bool}},
+            "HE::api::print::file",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(print::file(c, aS(a, 0))) }; } });
+        t.push_back({ "print.available", "Print", false, {}, {{"available", P::Bool}},
+            "HE::api::print::available",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(print::available(c)) }; } });
+
+        // ── SQLite ───────────────────────────────────────────────────────────
+        // `open` is behind the project's file permission and goes through the
+        // same resolved() every other path does. The readers are ungated for
+        // the reason the HTTP readers are: they answer about a connection this
+        // application already opened.
+        t.push_back({ "db.open", "Database", true, {{"path", P::String}}, {{"handle", P::Int}},
+            "HE::api::db::open",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(db::open(c, aS(a, 0))) }; } });
+        t.push_back({ "db.close", "Database", true, {{"handle", P::Int}}, {}, "HE::api::db::close",
+            [](Ctx& c, const VV& a){ db::close(c, aI(a, 0)); return VV{}; } });
+        // `params` is a JSON array bound to the `?`s — the reason a graph never
+        // has to paste a value into its SQL, which is the reason it never has
+        // an injection hole.
+        t.push_back({ "db.exec", "Database", true,
+            {{"handle", P::Int}, {"sql", P::String}, {"params", P::String}},
+            {{"ok", P::Bool}}, "HE::api::db::exec",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofBool(db::exec(c, aI(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "db.query", "Database", true,
+            {{"handle", P::Int}, {"sql", P::String}, {"params", P::String}},
+            {{"rows", P::String}}, "HE::api::db::query",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofString(db::query(c, aI(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "db.changes", "Database", false, {{"handle", P::Int}}, {{"rows", P::Int}},
+            "HE::api::db::changes",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(db::changes(c, aI(a, 0))) }; } });
+        // An Int pin, not a Float one: a row id is a whole number, and a 32-bit
+        // float stops counting exactly at 2^24 — a table with more rows than
+        // that would hand back an id that is off by one and looks fine.
+        t.push_back({ "db.lastInsertId", "Database", false, {{"handle", P::Int}}, {{"id", P::Int}},
+            "HE::api::db::lastInsertId",
+            [](Ctx& c, const VV& a){
+                return VV{ Value::ofInt(static_cast<int>(db::lastInsertId(c, aI(a, 0)))) }; } });
+        t.push_back({ "db.lastError", "Database", false, {{"handle", P::Int}}, {{"error", P::String}},
+            "HE::api::db::lastError",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(db::lastError(c, aI(a, 0))) }; } });
+
+        // ── Timers ───────────────────────────────────────────────────────────
+        // Unpermissioned on purpose: a timer cannot read, start or reach
+        // anything, and what it fires is this application's own graph. The
+        // handle comes back with On Timer, which is what tells two of them
+        // apart — the shape fs.watch and the HTTP ticket already use.
+        t.push_back({ "timer.after", "Timer", true, {{"seconds", P::Float}}, {{"handle", P::Int}},
+            "HE::api::timer::after",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(timer::after(aF(a, 0))) }; } });
+        t.push_back({ "timer.every", "Timer", true, {{"seconds", P::Float}}, {{"handle", P::Int}},
+            "HE::api::timer::every",
+            [](Ctx&, const VV& a){ return VV{ Value::ofInt(timer::every(aF(a, 0))) }; } });
+        t.push_back({ "timer.cancel", "Timer", true, {{"handle", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::timer::cancel",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(timer::cancel(aI(a, 0))) }; } });
+        t.push_back({ "timer.active", "Timer", false, {{"handle", P::Int}}, {{"active", P::Bool}},
+            "HE::api::timer::active",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(timer::active(aI(a, 0))) }; } });
+        t.push_back({ "timer.cancelAll", "Timer", true, {}, {}, "HE::api::timer::cancelAll",
+            [](Ctx&, const VV&){ timer::cancelAll(); return VV{}; } });
+
+        // ── Running another program ──────────────────────────────────────────
+        // run() returns FOUR values rather than one: a caller that only wanted
+        // to know whether it worked reads `ok`, and one that has to explain a
+        // failure to a person needs the exit code and stderr. Folding them into
+        // a bool would make the second caller shell out a second time to find
+        // out why the first attempt failed.
+        t.push_back({ "process.run", "Process", true,
+            {{"exe", P::String}, {"args", P::String, /*isArray=*/true}, {"timeoutSeconds", P::Float}},
+            {{"ok", P::Bool}, {"exitCode", P::Int}, {"out", P::String}, {"err", P::String}},
+            "HE::api::process::run",
+            [](Ctx& c, const VV& a){
+                std::vector<std::string> args;
+                if (a.size() > 1) for (const Value& v : a[1].items) args.push_back(v.s);
+                const process::RunResult r =
+                    process::run(c, aS(a, 0), args, a.size() > 2 ? (double)a[2].f : 0.0);
+                return VV{ Value::ofBool(r.ok), Value::ofInt(r.exitCode),
+                           Value::ofString(r.out), Value::ofString(r.err) }; } });
+        t.push_back({ "process.openUrl", "Process", true, {{"url", P::String}}, {{"ok", P::Bool}}, "HE::api::process::openUrl",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(process::openUrl(c, aS(a, 0))) }; } });
+        t.push_back({ "process.which", "Process", false, {{"exe", P::String}}, {{"path", P::String}}, "HE::api::process::which",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(process::which(c, aS(a, 0))) }; } });
+
+        // HTTP: the two that START something are exec rows, the readers are pure.
+        // Both halves are needed because a request answers later — see the header.
+        t.push_back({ "http.get", "HTTP", true, {{"url", P::String}}, {{"ticket", P::Int}},
+            "HE::api::http::get",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(http::get(c, aS(a, 0))) }; } });
+        t.push_back({ "http.post", "HTTP", true,
+            {{"url", P::String}, {"contentType", P::String}, {"body", P::String}},
+            {{"ticket", P::Int}}, "HE::api::http::post",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(http::post(c, aS(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "http.done", "HTTP", false, {{"ticket", P::Int}}, {{"done", P::Bool}},
+            "HE::api::http::done",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(http::done(c, aI(a, 0))) }; } });
+        t.push_back({ "http.ok", "HTTP", false, {{"ticket", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::http::ok",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(http::ok(c, aI(a, 0))) }; } });
+        t.push_back({ "http.status", "HTTP", false, {{"ticket", P::Int}}, {{"status", P::Int}},
+            "HE::api::http::status",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(http::status(c, aI(a, 0))) }; } });
+        t.push_back({ "http.body", "HTTP", false, {{"ticket", P::Int}}, {{"body", P::String}},
+            "HE::api::http::body",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(http::body(c, aI(a, 0))) }; } });
+        t.push_back({ "http.error", "HTTP", false, {{"ticket", P::Int}}, {{"error", P::String}},
+            "HE::api::http::error",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(http::error(c, aI(a, 0))) }; } });
+        t.push_back({ "http.forget", "HTTP", true, {{"ticket", P::Int}}, {},
+            "HE::api::http::forget",
+            [](Ctx& c, const VV& a){ http::forget(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "http.available", "HTTP", false, {}, {{"available", P::Bool}},
+            "HE::api::http::available",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(http::available(c)) }; } });
 
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
@@ -2981,6 +5675,13 @@ const std::vector<ApiFn>& registry()
         // String library (pure)
         t.push_back({ "string.length", "String", false, {{"s", P::String}}, {{"length", P::Int}}, "HE::api::str::length",
             [](Ctx&, const VV& a){ return VV{ Value::ofInt(str::length(aS(a, 0))) }; } });
+        // The one a graph reaches for to route on an id. Its own row rather than
+        // an "Equals accepts strings too": the operator node's pins are Float on
+        // both sides, and widening them would change how every existing Equals
+        // in every project reads.
+        t.push_back({ "string.equals", "String", false,
+            {{"a", P::String}, {"b", P::String}}, {{"result", P::Bool}}, "HE::api::str::equals",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(str::equals(aS(a, 0), aS(a, 1))) }; } });
         t.push_back({ "string.substring", "String", false,
             {{"s", P::String}, {"start", P::Int}, {"count", P::Int}}, {{"result", P::String}}, "HE::api::str::substring",
             [](Ctx&, const VV& a){ return VV{ Value::ofString(str::substring(aS(a, 0), aI(a, 1), aI(a, 2))) }; } });
@@ -3052,7 +5753,11 @@ const std::vector<ApiFn>& registry()
             // Locomotion owns "Set Max Speed"; this one is the agent's pace.
             { "nav.setSpeed", "Set Agent Speed" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
-            { "physics.isGrounded", "Is Grounded" },
+            // Suffixed like Set Position and Get Velocity above, and for the
+            // same reason: Movement owns the unqualified "Is Grounded", and the
+            // drag-off menu lists the registry flat, where two rows under one
+            // name is a coin toss.
+            { "physics.isGrounded", "Is Grounded (Physics)" },
             { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
@@ -3076,8 +5781,85 @@ const std::vector<ApiFn>& registry()
             { "ui.pointerOverUI", "Is Pointer Over UI" },
             { "widget.setZOrder", "Set Widget Z-Order" }, { "widget.isVisible", "Is Widget Visible" },
             { "widget.callFunction", "Call Widget Function" },
+            { "widget.addChild", "Add Widget Child" },
+            { "widget.removeChild", "Remove Widget Child" },
+            { "widget.clearChildren", "Clear Widget Children" },
+            { "widget.setListCount", "Set List Count" },
+            { "widget.listCount", "Get List Count" },
+            { "widget.listRow", "Get List Row" },
+            { "widget.refreshList", "Refresh List" },
+            { "widget.setListSelected", "Set List Selected" },
+            { "widget.listSelected", "Get List Selected" },
+            { "widget.scrollListToItem", "Scroll List To Item" },
+            // Animation. "Animate" alone would be a coin toss in the flat
+            // drag-off list, so each says WHAT it animates — and the three
+            // typed rows say it in the words a graph author is thinking in
+            // ("a number", "a colour", "a point"), not in pin-type spelling.
+            { "widget.animate", "Animate Number" },
+            { "widget.animateColor", "Animate Color" },
+            { "widget.animateVec2", "Animate Position" },
+            { "widget.stopAnimation", "Stop Animating Property" },
+            { "widget.playAnimation", "Play Animation" },
+            { "widget.playAnimationLooped", "Play Animation Looped" },
+            { "widget.stopAnimationClip", "Stop Animation" },
+            { "widget.isPlayingAnimation", "Is Animation Playing" },
+            { "widget.childRef", "Get Child Widget" },
+            { "widget.stopAllAnimations", "Stop All Animations" },
+            { "widget.restoreOriginalState", "Restore Original State" },
+            { "widget.showModal", "Show Modal Widget" },
+            { "widget.openPopup", "Open Popup" },
+            { "widget.openPopupAtPointer", "Open Popup At Pointer" },
+            { "widget.closeTopLayer", "Close Top Layer" },
+            { "theme.set", "Set Theme" }, { "theme.setMode", "Set Theme Mode" },
+            { "theme.getMode", "Get Theme Mode" },
+            { "theme.getPreference", "Get Theme Preference" },
+            { "theme.setFontScale", "Set Text Size" },
+            { "theme.getFontScale", "Get Text Size" },
             { "cursor.setVisible", "Set Cursor Visible" },
             { "app.quit", "Quit Game" },
+            { "app.setTitle", "Set Window Title" }, { "app.setSize", "Set Window Size" },
+            { "app.size", "Get Window Size" },      { "app.requestRedraw", "Request Redraw" },
+            { "app.minimize", "Minimize Window" },   { "app.maximize", "Maximize Window" },
+            { "app.isMaximized", "Is Window Maximized" },
+            { "app.showTray", "Show Tray Icon" },    { "app.hideTray", "Hide Tray Icon" },
+            { "app.addTrayItem", "Add Tray Item" },  { "app.clearTrayMenu", "Clear Tray Menu" },
+            { "app.addMenu", "Add Menu" },           { "app.addMenuItem", "Add Menu Item" },
+            { "app.addMenuSeparator", "Add Menu Separator" },
+            { "app.notify", "Notify" },
+            { "app.notifyAvailable", "Notifications Available" },
+            { "app.clearMenuBar", "Clear Menu Bar" },
+            { "app.setMenuItemEnabled", "Set Menu Item Enabled" },
+            { "app.setMenuItemChecked", "Set Menu Item Checked" },
+            { "app.menuItemEnabled", "Is Menu Item Enabled" },
+            { "app.menuItemChecked", "Is Menu Item Checked" },
+            { "app.setAutostart", "Set Start at Login" },
+            { "app.autostart", "Starts at Login" },
+            { "window.open", "Open Window" },        { "window.close", "Close Window" },
+            { "window.setTitle", "Set Title Of Window" },
+            { "window.setSize", "Set Size Of Window" },
+            { "window.show", "Show Widget In Window" },
+            { "clipboard.getText", "Get Clipboard Text" },
+            { "clipboard.setText", "Set Clipboard Text" },
+            { "clipboard.hasText", "Has Clipboard Text" },
+            { "dialog.message", "Show Message Dialog" },
+            { "dialog.confirm", "Show Confirm Dialog" },
+            { "dialog.openFile", "Open File Dialog" },
+            { "dialog.saveFile", "Save File Dialog" },
+            { "dialog.pickFolder", "Pick Folder Dialog" },
+            { "json.getString", "JSON Get String" }, { "json.getNumber", "JSON Get Number" },
+            { "json.getBool", "JSON Get Bool" },     { "json.has", "JSON Has" },
+            { "json.count", "JSON Array Count" },
+            { "json.setString", "JSON Set String" }, { "json.setNumber", "JSON Set Number" },
+            { "json.setBool", "JSON Set Bool" },
+            { "prefs.getString", "Get Pref String" }, { "prefs.getNumber", "Get Pref Number" },
+            { "prefs.getBool", "Get Pref Bool" },     { "prefs.setString", "Set Pref String" },
+            { "prefs.setNumber", "Set Pref Number" }, { "prefs.setBool", "Set Pref Bool" },
+            { "prefs.has", "Has Pref" }, { "prefs.remove", "Remove Pref" },
+            { "prefs.clear", "Clear Prefs" },
+            { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
+            { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
+            { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },
+            { "datetime.second", "Second" }, { "datetime.weekday", "Weekday" },
             { "math.sin", "Sine" },   { "math.cos", "Cosine" }, { "math.tan", "Tangent" },
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },
@@ -3153,6 +5935,7 @@ const std::vector<ApiFn>& registry()
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
+            { "string.equals", "String Equals" },
             { "string.length", "String Length" },  { "string.substring", "Substring" },
             { "string.contains", "String Contains" }, { "string.find", "String Find" },
             { "string.replace", "String Replace" },   { "string.toUpper", "To Upper" },
@@ -3165,6 +5948,26 @@ const std::vector<ApiFn>& registry()
             { "fs.writeText", "Write Text File" }, { "fs.readText", "Read Text File" },
             { "fs.exists", "File Exists" },        { "fs.remove", "Delete File" },
             { "fs.makeDir", "Make Directory" },
+            { "fs.isDir", "Is Directory" },        { "fs.size", "File Size" },
+            { "fs.modified", "File Modified Time" },{ "fs.list", "List Directory" },
+            { "fs.rename", "Rename File" },        { "fs.copy", "Copy File" },
+            { "fs.watch", "Watch File" },          { "fs.unwatch", "Stop Watching File" },
+            { "print.toPdf", "Write PDF" },        { "print.file", "Print File" },
+            { "print.available", "Printing Available" },
+            { "db.open", "Open Database" },        { "db.close", "Close Database" },
+            { "db.exec", "Run SQL" },              { "db.query", "Query SQL" },
+            { "db.changes", "Rows Changed" },      { "db.lastInsertId", "Last Insert Id" },
+            { "db.lastError", "Database Error" },
+            { "timer.after", "Timer After" },      { "timer.every", "Timer Every" },
+            { "timer.cancel", "Cancel Timer" },    { "timer.active", "Timer Is Running" },
+            { "timer.cancelAll", "Cancel All Timers" },
+            { "process.run", "Run Program" },      { "process.openUrl", "Open URL" },
+            { "process.which", "Find Program" },
+            { "http.get", "HTTP Get" },              { "http.post", "HTTP Post" },
+            { "http.done", "Response Arrived" },     { "http.ok", "Response OK" },
+            { "http.status", "Response Status" },    { "http.body", "Response Body" },
+            { "http.error", "Response Error" },      { "http.forget", "Forget Response" },
+            { "http.available", "HTTP Available" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },
@@ -3267,6 +6070,56 @@ const std::vector<ApiFn>& registry()
             };
         }
 
+        // ── Third post-pass: the Widget pin of the ANIMATION rows ───────────
+        // The same courtesy for the same reason, on the rows where it is the
+        // overwhelming case: a widget's own graph playing its own animation.
+        // "Play Animation" with nothing wired but the name it picked from the
+        // dropdown is the whole point of that dropdown.
+        //
+        // Deliberately NOT every widget.* row. Show, Destroy and Add Child are
+        // mostly about a widget somebody else made — a silent "self" there would
+        // be a guess, and the loud kind of wrong: destroying the caller because
+        // a pin was empty is the mistake with no way back (the same argument
+        // that keeps entity.destroy off the list above).
+        static constexpr const char* kWidgetSelfRows[] = {
+            "widget.animate", "widget.animateColor", "widget.animateVec2",
+            "widget.stopAnimation",
+            "widget.playAnimation", "widget.playAnimationLooped",
+            "widget.stopAnimationClip", "widget.isPlayingAnimation",
+            "widget.stopAllAnimations", "widget.restoreOriginalState",
+            // Not an animation, same argument: "which component sits in my slot"
+            // is a question about oneself far more often than about a stranger.
+            "widget.childRef",
+        };
+        for (auto& fn : t)
+        {
+            bool wanted = false;
+            for (const char* id : kWidgetSelfRows)
+                if (std::strcmp(fn.id, id) == 0) { wanted = true; break; }
+            if (!wanted || fn.params.empty()) continue;
+
+            fn.params[0].selfDefault = true;
+            // Wrapped at the scripting edge, like the entity pass: the free C++
+            // widget::playAnimation(c, 0, …) still means widget 0, which is what
+            // a direct caller and the planned cppCall codegen read it as.
+            fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
+                        (Ctx& c, const VV& a) -> VV
+            {
+                if (a.empty() || a[0].ref != 0u || !c.world || !c.self) return inner(c, a);
+                const int me = ScriptApi::widgetOfScript(*c.world, c.self);
+                if (me == 0)
+                {
+                    HE_LOG_THROTTLE(Script, Warning, 5.0,
+                                    "%s: Widget is empty and the caller is not a widget - "
+                                    "wire a widget into the pin", id);
+                    return inner(c, a);
+                }
+                VV withSelf = a;
+                withSelf[0] = Value::ofRef(static_cast<uint32_t>(me));
+                return inner(c, withSelf);
+            };
+        }
+
         return t;
     }();
     return table;
@@ -3302,7 +6155,63 @@ bool isScriptGroup(std::string_view group)
                                                     // ui.pointerOverUI, which has no flat twin
                                                     // and is exactly what a script needs to
                                                     // stop a menu click reaching the game.
-                                                    "ui", "app" };
+                                                    // "http" has no flat twin at
+                                                    // all: without it here a text
+                                                    // script cannot reach the
+                                                    // network, which is the state
+                                                    // Welle 3 exists to end.
+                                                    "http",
+                                                    "ui", "app",
+                                                    // The eight groups the application work
+                                                    // (docs/he-apps-plan.md) added. They were
+                                                    // HorizonCode-only until the merge analysis
+                                                    // found the gap: the plan promises every
+                                                    // registry group "lights up in HorizonCode,
+                                                    // Lua and Python at the same time", and for
+                                                    // these it did not. Nothing else was needed —
+                                                    // a widget travels as a Ref, which is an
+                                                    // integer on both sides, and the two frontends
+                                                    // build their tables from this list alone.
+                                                    //
+                                                    // "widget" is lists, layers, animation and
+                                                    // live children; without it a text script can
+                                                    // show a widget and never fill it.
+                                                    "widget",
+                                                    // "theme" is the light/dark switch and the
+                                                    // text size, which an application's own
+                                                    // settings screen is expected to offer.
+                                                    "theme",
+                                                    // "dialog", "clipboard" and "process" are
+                                                    // gated by the project's permissions either
+                                                    // way (perm::allowed), so listing them here
+                                                    // opens no door the project did not open.
+                                                    "dialog", "clipboard", "process",
+                                                    // "json" and "prefs" are pure text and a
+                                                    // key/value store — the two things every
+                                                    // application script reaches for first.
+                                                    "json", "prefs",
+                                                    // "datetime" has no flat twin at all: without
+                                                    // it a text script can read the clock as a
+                                                    // number of seconds and never say what day
+                                                    // that is.
+                                                    "datetime",
+                                                    // "timer" is the repeating half of Delay, and
+                                                    // a text script has no twin for it either:
+                                                    // without this a Lua script can sleep a
+                                                    // coroutine but never ask to be called back.
+                                                    "timer",
+                                                    // "db" has no flat twin either, and it is the
+                                                    // one group a text script would otherwise have
+                                                    // to reimplement rather than route around.
+                                                    "db",
+                                                    // "print" likewise: writing a PDF by hand from
+                                                    // Lua is not a workaround, it is a project.
+                                                    "print",
+                                                    // "window" is the second window (A5). No flat
+                                                    // twin either: without it a Lua application can
+                                                    // build a tool panel and never put it anywhere
+                                                    // but on top of its own main page.
+                                                    "window" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

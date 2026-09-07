@@ -168,8 +168,8 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
                                    scaleX, scaleY, screenPos, screenSize))
                 continue;
 
-            // Children draw over their parents at equal layer (see sortKey).
-            const int sortLayer = sortKey(elem.layer, nestingDepth(reg, elemEnt));
+            // Children draw over their parents at equal layer (see HE::uiSortKey).
+            const int sortLayer = HE::uiSortKey(elem.layer, nestingDepth(reg, elemEnt));
 
             auto* img = reg.try_get<UIImageComponent>(elemEnt);
             auto* btn = reg.try_get<UIButtonComponent>(elemEnt);

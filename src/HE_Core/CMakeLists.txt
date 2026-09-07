@@ -1,5 +1,8 @@
 add_library(HorizonCore SHARED
 	src/Application/Application.cpp
+	src/Application/AppIcon.cpp
+	src/Application/DocumentTypes.cpp
+	src/Application/Autostart.cpp
 	src/Application/SplashScreen.cpp
 	src/Application/GameLoop.cpp
 	src/Application/GameLogicLoader.cpp
@@ -31,7 +34,12 @@ add_library(HorizonCore SHARED
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
+	src/UIWidget/UITheme.cpp
+	src/UIWidget/UIWidgetAnim.cpp
 	src/UIWidget/UIWidgetBinding.cpp
+	src/UIWidget/UIWindowFrame.cpp
+	src/UIWidget/UIShortcut.cpp
+	src/UIWidget/WidgetManager.cpp
 	src/HorizonCode/HorizonCode.cpp
 	src/HorizonCode/HorizonCodeRuntime.cpp
 	src/HorizonCode/HcClassResolve.cpp

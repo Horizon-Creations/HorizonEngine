@@ -625,6 +625,15 @@ inline Value getProperty(const Context& c, int elem, const char* prop)
 { return c.getProperty ? c.getProperty(elem, prop) : Value{}; }
 inline void setProperty(const Context& c, int elem, const char* prop, const Value& v)
 { if (c.setProperty) c.setProperty(elem, prop, v); }
+// The same pair on a referenced widget, by element name (Get/Set Property
+// (Ref)). std::string rather than const char* for the element because it comes
+// from a pin at runtime, not from the generated text.
+inline Value getPropertyOn(const Context& c, uint32_t target, const std::string& elem,
+                           const char* prop)
+{ return c.getPropertyOn ? c.getPropertyOn(target, elem, prop) : Value{}; }
+inline void setPropertyOn(const Context& c, uint32_t target, const std::string& elem,
+                          const char* prop, const Value& v)
+{ if (c.setPropertyOn) c.setPropertyOn(target, elem, prop, v); }
 inline Value getVariableCtx(const Context& c, const char* name)
 { return c.getVariable ? c.getVariable(name) : Value{}; }
 inline void setVariableCtx(const Context& c, const char* name, const Value& v)

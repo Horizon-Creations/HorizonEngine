@@ -1,12 +1,35 @@
 #pragma once
 #include <Types/Defines.h>
 #include <Types/UUID.h>
+#include <Application/DocumentTypes.h>   // AppDocumentType (what the export declares)
 #include <filesystem>
 #include <functional>
 #include <string>
 #include <utility>
 #include <vector>
 #include <cstdint>
+
+// ─── Export target platforms ──────────────────────────────────────────────────
+// The pak + project.hcfg are platform-neutral; the target only decides which
+// game-runtime binaries ship and (in the editor) the output sub-folder. Host =
+// the platform the editor is running on, served from <base>/../Game as always;
+// cross-targets are served from <base>/../GameRuntimes/<Name>/ — a prebuilt
+// runtime bundle the user drops there (built on that platform / CI).
+// Declared up here because ExportSettings names one.
+enum class ExportPlatform : uint8_t { Host = 0, Windows, MacOS, Linux };
+
+// Which of the three runtimes an export ships (docs/he-apps-plan.md A3b). They
+// differ in the two things that cost megabytes: how many renderers are linked,
+// and whether a shader cross-compiler is present. A project picks its flavour
+// from what it IS, not from a setting of its own — a game gets Game, an app gets
+// one of the two App runtimes depending on Advanced Shader Effects.
+//   Game        every backend of the platform, cross-compiler included
+//   AppAdvanced one forward renderer, shaders from precompiled variants
+//   AppBasic    the software rasterizer alone, no GPU stack at all
+// The directory names are the enum's name(), and they are also what
+// scripts/build_runtimes.py writes and HE_RUNTIME_DIR_NAME in the root
+// CMakeLists.txt spells — one word, three places, deliberately identical.
+enum class RuntimeFlavor : uint8_t { Game = 0, AppAdvanced, AppBasic };
 
 struct HE_API ExportSettings {
     bool    compress = true;
@@ -46,6 +69,53 @@ struct HE_API ExportSettings {
     // (.heproj "defaultSaveTemplate") — written into project.hcfg so
     // save.create() in the shipped game resolves the same schema.
     std::string defaultSaveTemplate;
+    // Application project (.heproj "appProject" / "advancedShaderEffects") —
+    // written straight into project.hcfg, where the runtime reads them to decide
+    // whether it builds a world at all and whether it draws on a clock or on
+    // events. See docs/he-apps-plan.md A0/A1/A2.
+    bool appProject = false;
+    bool advancedShaderEffects = true;
+    // What the shipped application may reach outside itself (.heproj
+    // "allowFiles"/"allowProcesses"/"allowNetwork"). All three default shut, so
+    // an export that forgets to copy them across ships an app that can do LESS
+    // than intended rather than more — the only direction a defaulted permission
+    // may fail in.
+    bool allowFiles     = false;
+    bool allowProcesses = false;
+    bool allowNetwork   = false;
+    // Which scripts the shipped application's font atlas carries beyond the base
+    // set (.heproj "fontScripts", a HE::UIFontScripts mask). Zero is Latin, and
+    // an export that forgets it ships an app whose Greek labels are blank — so
+    // it is copied across with the permissions above, from the same place.
+    std::uint32_t fontScripts = 0;
+    // The weight the shipped application draws text in (.heproj
+    // "fontWeightBold"). True is what the engine always drew; the exported app
+    // has to be told, or a project that chose regular body text ships bold.
+    bool fontWeightBold = true;
+    // ── What the shipped application IS to the system (plan A7) ─────────────
+    // The icon is generated from a built-in icon name on a coloured plate, so
+    // the export writes the .icns / .ico / .png itself. Empty name = no icon
+    // files, which is what every export did before this existed.
+    std::string appIconName;
+    std::string appIconColor = "#1e70c8";
+    // Empty = derived from the project name (com.horizonengine.<name>), the
+    // behaviour every earlier export had.
+    std::string bundleId;
+    std::string appVersion = "1.0";
+    // The file types the shipped application owns. They become the plist's
+    // document types on macOS, a .desktop plus a MIME file on Linux and a .reg
+    // on Windows — three words for one declaration.
+    std::vector<HE::AppDocumentType> documentTypes;
+    // Which system the output is FOR. The runtime binaries are chosen by the
+    // caller (gameRuntimeDir), but the icon has one container per platform and
+    // writing all three would leave two of them lying beside every build.
+    ExportPlatform iconPlatform = ExportPlatform::Host;
+    // The Theme asset the shipped application boots with (content-relative;
+    // empty = the engine's built-in default) and the mode it was asked for
+    // ("System"/"Light"/"Dark"). Both ride in project.hcfg, not config.json —
+    // config.json is settings a player may edit, this is what the project IS.
+    std::string theme;
+    std::string themeMode;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.
@@ -126,18 +196,20 @@ struct HE_API ExportResult {
     std::filesystem::path executablePath;
 };
 
-// ─── Export target platforms ──────────────────────────────────────────────────
-// The pak + project.hcfg are platform-neutral; the target only decides which
-// game-runtime binaries ship and (in the editor) the output sub-folder. Host =
-// the platform the editor is running on, served from <base>/../Game as always;
-// cross-targets are served from <base>/../GameRuntimes/<Name>/ — a prebuilt
-// runtime bundle the user drops there (built on that platform / CI).
-enum class ExportPlatform : uint8_t { Host = 0, Windows, MacOS, Linux };
-
+// ─── Export target platforms (the enum is declared at the top of this file) ───
 HE_API const char*    exportPlatformName(ExportPlatform p);   // "Host"/"Windows"/"macOS"/"Linux"
 HE_API ExportPlatform exportPlatformFromName(const std::string& name); // unknown → Host
 HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& editorBaseDir,
-                                               ExportPlatform p);
+                                               ExportPlatform p,
+                                               RuntimeFlavor f = RuntimeFlavor::Game);
+
+// "Game" / "AppAdvanced" / "AppBasic" — the directory name, and the word the
+// export log uses.
+HE_API const char*  runtimeFlavorName(RuntimeFlavor f);
+// Which runtime a project of this shape ships with: an app takes an app runtime,
+// and Advanced Shader Effects decides which of the two. One function so the
+// export dialog, the exporter and any test agree.
+HE_API RuntimeFlavor runtimeFlavorFor(bool appMode, bool advancedShaderEffects);
 
 // Locate a COMPLETE runtime bundle (a directory that actually contains
 // HorizonGame / HorizonGame.exe) for the target platform. resolveRuntimeDir
@@ -146,8 +218,17 @@ HE_API std::filesystem::path resolveRuntimeDir(const std::filesystem::path& edit
 // editorBaseDir (a few levels) checking <dir>/Game (Host) resp.
 // <dir>/GameRuntimes/<Name>, plus <dir>/out/deploy/... at each level.
 // Returns an empty path when no bundle with a game executable is found.
+//
+// The flavour is a WISH, not a requirement: an editor built before the app
+// runtimes existed, or a checkout where nobody ran scripts/build_runtimes.py,
+// has only Game — and an app that exports a working, merely fatter, runtime
+// beats an app that cannot be exported at all. outFlavor therefore reports what
+// was actually found, so the caller can say so in the log instead of quietly
+// shipping something else than it promised.
 HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseDir,
-                                               ExportPlatform p);
+                                               ExportPlatform p,
+                                               RuntimeFlavor  f = RuntimeFlavor::Game,
+                                               RuntimeFlavor* outFlavor = nullptr);
 
 // ─── Embedded pak key ─────────────────────────────────────────────────────────
 // The game executable carries a 64-byte patchable key block (see

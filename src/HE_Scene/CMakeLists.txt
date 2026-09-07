@@ -32,7 +32,6 @@ add_library(HorizonScene SHARED
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/UIInputSystem.cpp
-    src/WidgetManager.cpp
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
@@ -64,6 +63,10 @@ target_link_libraries(HorizonScene
             Jolt
             RecastNavigation::Recast
             RecastNavigation::Detour
+            # The `db` script group (EngineApi.cpp). PRIVATE: sqlite3.h appears
+            # in no header of ours, and the rows hand their results out as JSON
+            # text, so nothing above this library ever sees a sqlite3*.
+            sqlite3_static
 )
 
 if(APPLE)
