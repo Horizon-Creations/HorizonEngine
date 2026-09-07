@@ -13,6 +13,7 @@
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/AnimationLayerComponent.h>
 #include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/EngineApi.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -680,4 +681,71 @@ TEST_CASE("layer asset refs: every clip and every mask a layer names is collecte
     CHECK(has(l.clipId));
     CHECK(has(l.maskId));
     CHECK(has(l.additiveRefClipId));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  The script surface
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("EngineApi animator.*Layer* steers a layer from gameplay")
+{
+    // Through the same registry all four frontends (Lua, Python, HorizonCode,
+    // the C++ codegen) dispatch through — a row that works here works in all of
+    // them, and a row missing from here exists in none.
+    auto rig = makeRig(makeRotationClip("base", 1, 10.0f));
+    const HE::UUID layerClip = rig->addClip(makeNotifyClip("magazine", 0.0f));
+
+    AnimationLayerComponent lc;
+    AnimationLayerComponent::Layer l;
+    l.name = "UpperBody"; l.clipId = layerClip; l.weight = 0.0f;
+    lc.layers.push_back(l);
+    rig->world.addComponent(rig->entity, lc);
+
+    HE::api::Ctx ctx{ &rig->world, nullptr, &rig->cm };
+    const auto eid = (int)(HE::api::Entity)rig->entity;
+    auto call = [&](const char* id, std::vector<HorizonCode::Value> a)
+    { return HE::api::find(id)->invoke(ctx, a); };
+    using V = HorizonCode::Value;
+
+    const auto names = call("animator.layerNames", { V::ofInt(eid) })[0];
+    REQUIRE(names.items.size() == 1);
+    CHECK(names.items[0].s == "UpperBody");
+
+    CHECK(call("animator.getLayerWeight", { V::ofInt(eid), V::ofString("UpperBody") })[0].f
+          == doctest::Approx(0.0f));
+
+    call("animator.setLayerWeight", { V::ofInt(eid), V::ofString("UpperBody"), V::ofFloat(0.6f) });
+    CHECK(call("animator.getLayerWeight", { V::ofInt(eid), V::ofString("UpperBody") })[0].f
+          == doctest::Approx(0.6f));
+
+    // Clamped, and clamped where the read can see it: a script that writes 5 and
+    // reads back 5 would be told something the pose never used.
+    call("animator.setLayerWeight", { V::ofInt(eid), V::ofString("UpperBody"), V::ofFloat(5.0f) });
+    CHECK(call("animator.getLayerWeight", { V::ofInt(eid), V::ofString("UpperBody") })[0].f
+          == doctest::Approx(1.0f));
+
+    // playLayer restarts the playhead AND re-primes the notifies, so a one-shot
+    // layer fires its frame-0 event again instead of skipping it.
+    SceneSystems::tickAnimation(rig->world, rig->cm, 0.1f);
+    CHECK(rig->layers().layers[0].playbackTime == doctest::Approx(0.1f));
+
+    call("animator.playLayer", { V::ofInt(eid), V::ofString("UpperBody") });
+    CHECK(rig->layers().layers[0].playbackTime == doctest::Approx(0.0f));
+    CHECK_FALSE(rig->layers().layers[0].notifiesPrimed);
+
+    HE::NotifyQueue q;
+    SceneSystems::tickAnimation(rig->world, rig->cm, 0.1f, nullptr, nullptr, &q);
+    CHECK(countOf(q, "magazine") == 1);
+
+    // An unknown layer name, and an entity with no layers at all, answer rather
+    // than crash — a typo in a graph must be inert, not fatal.
+    CHECK_NOTHROW(call("animator.setLayerWeight", { V::ofInt(eid), V::ofString("nope"), V::ofFloat(1.0f) }));
+    CHECK(call("animator.getLayerWeight", { V::ofInt(eid), V::ofString("nope") })[0].f
+          == doctest::Approx(0.0f));
+
+    entt::entity bare = rig->world.createEntity();
+    rig->world.addComponent(bare, TransformComponent{});
+    const auto bid = (int)(HE::api::Entity)bare;
+    CHECK_NOTHROW(call("animator.setLayerWeight", { V::ofInt(bid), V::ofString("x"), V::ofFloat(1.0f) }));
+    CHECK(call("animator.layerNames", { V::ofInt(bid) })[0].items.empty());
 }

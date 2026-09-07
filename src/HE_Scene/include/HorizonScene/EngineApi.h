@@ -611,6 +611,33 @@ namespace animator {
     // and a second source for them would be a second thing that could be wrong.
     // Empty for an unknown path, a clip with no notifies, or no content manager.
     std::vector<std::string> notifiesOf(Ctx&, const std::string& clipPath);
+
+    // ── Animation layers ─────────────────────────────────────────────────────
+    // A layer's weight is the one thing about it that gameplay decides: the
+    // aim offset comes up while a weapon is raised, the reload layer fades in
+    // for the length of the reload, the hit reaction blends out over half a
+    // second. Everything else about a layer — which clip, which mask, override
+    // or additive — is authored, and authored things belong in the editor.
+    //
+    // Layers are addressed BY NAME rather than by index, because an index is
+    // the number that changes when somebody reorders the stack in the
+    // inspector, and a script that then fades the wrong body part is a bug with
+    // no visible cause. Names are the author's own labels.
+    //
+    // Unknown entity, no layer component or no layer by that name: setting is a
+    // no-op, reading gives 0. The clamp to 0..1 is the same one the blender
+    // applies, said here so a script reading back what it wrote gets what the
+    // pose actually used.
+    void  setLayerWeight(Ctx&, Entity e, const std::string& layerName, float weight);
+    float getLayerWeight(Ctx&, Entity e, const std::string& layerName);
+    // Restart a layer's own playhead from 0 and re-prime its notifies, so a
+    // one-shot layer (a reload, a flinch) plays again rather than resuming
+    // wherever it stopped. The weight is left alone — fading in is the caller's
+    // decision and usually happens over several frames.
+    void  playLayer(Ctx&, Entity e, const std::string& layerName);
+    // The layer names on this entity, in stack order. The read a debug view
+    // makes, and the read a graph makes instead of guessing at a typo'd name.
+    std::vector<std::string> layerNames(Ctx&, Entity e);
 }
 
 // ── Particles: firing an effect ──────────────────────────────────────────────

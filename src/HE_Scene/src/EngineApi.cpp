@@ -15,6 +15,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
@@ -829,6 +830,58 @@ std::vector<std::string> notifiesOf(Ctx& c, const std::string& clipPath)
     // same name twice (two footsteps), and de-duplicating here would answer a
     // question nobody asked while hiding one somebody might.
     for (const AnimationNotify& n : clip->notifies) out.push_back(n.name);
+    return out;
+}
+
+namespace {
+AnimationLayerComponent::Layer* layerOf(Ctx& c, Entity e, const std::string& name)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    if (!reg.valid(id)) return nullptr;
+    auto* lc = reg.try_get<AnimationLayerComponent>(id);
+    if (!lc) return nullptr;
+    // First match. Two layers may legitimately share a name (the inspector does
+    // not stop it), and picking the first is the only answer that stays the same
+    // when somebody adds a third.
+    for (auto& l : lc->layers)
+        if (l.name == name) return &l;
+    return nullptr;
+}
+}
+
+void setLayerWeight(Ctx& c, Entity e, const std::string& layerName, float weight)
+{
+    if (auto* l = layerOf(c, e, layerName))
+        l->weight = std::clamp(weight, 0.0f, 1.0f);
+}
+float getLayerWeight(Ctx& c, Entity e, const std::string& layerName)
+{
+    auto* l = layerOf(c, e, layerName);
+    return l ? l->weight : 0.0f;
+}
+void playLayer(Ctx& c, Entity e, const std::string& layerName)
+{
+    if (auto* l = layerOf(c, e, layerName))
+    {
+        l->playbackTime = 0.0f;
+        l->playing      = true;
+        // Un-primed, so a notify sitting exactly on frame 0 — which is how "the
+        // reload starts here" is written — fires on the restarted playhead's
+        // first frame instead of being missed by an open-at-the-origin span.
+        l->notifiesPrimed = false;
+    }
+}
+std::vector<std::string> layerNames(Ctx& c, Entity e)
+{
+    std::vector<std::string> out;
+    if (!c.world) return out;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    if (!reg.valid(id)) return out;
+    if (auto* lc = reg.try_get<AnimationLayerComponent>(id))
+        for (const auto& l : lc->layers) out.push_back(l.name);
     return out;
 }
 } // namespace animator
@@ -4963,6 +5016,21 @@ const std::vector<ApiFn>& registry()
                 for (const std::string& n : animator::notifiesOf(c, aS(a, 0)))
                     arr.items.push_back(Value::ofString(n));
                 return VV{ arr }; } });
+        // Animation layers — the weight is the one thing about a layer that
+        // gameplay decides. By NAME, not by index: an index is what changes when
+        // somebody reorders the stack in the inspector.
+        t.push_back({ "animator.setLayerWeight", "Animator", true, {{"entity", P::Int}, {"layer", P::String}, {"weight", P::Float}}, {}, "HE::api::animator::setLayerWeight",
+            [](Ctx& c, const VV& a){ animator::setLayerWeight(c, (Entity)aI(a, 0), aS(a, 1), aF(a, 2)); return VV{}; } });
+        t.push_back({ "animator.getLayerWeight", "Animator", false, {{"entity", P::Int}, {"layer", P::String}}, {{"weight", P::Float}}, "HE::api::animator::getLayerWeight",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(animator::getLayerWeight(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "animator.playLayer", "Animator", true, {{"entity", P::Int}, {"layer", P::String}}, {}, "HE::api::animator::playLayer",
+            [](Ctx& c, const VV& a){ animator::playLayer(c, (Entity)aI(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "animator.layerNames", "Animator", false, {{"entity", P::Int}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::animator::layerNames",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (const std::string& n : animator::layerNames(c, (Entity)aI(a, 0)))
+                    arr.items.push_back(Value::ofString(n));
+                return VV{ arr }; } });
 
         // Movement — the reads an animator asks for. Derived from the character
         // controller on the spot, so there is no second copy to go stale.
@@ -6077,6 +6145,10 @@ const std::vector<ApiFn>& registry()
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
             { "animator.getState", "Get Animator State" },
             { "animator.notifiesOf", "Get Clip Notifies" },
+            { "animator.setLayerWeight", "Set Layer Weight" },
+            { "animator.getLayerWeight", "Get Layer Weight" },
+            { "animator.playLayer", "Play Layer" },
+            { "animator.layerNames", "Get Layer Names" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
             { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
             { "movement.forwardAmount", "Get Forward Amount" },

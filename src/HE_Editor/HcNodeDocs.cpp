@@ -293,6 +293,22 @@ namespace
 	  "asset path. Notify names are free text with nothing checking them, so a "
 	  "misspelled one fires nothing and says nothing — this is how to see what a "
 	  "clip actually carries. Empty for an unknown path or a clip without any." },
+	{ "animator.setLayerWeight",
+	  "How strongly one animation layer is laid over the base pose, 0 to 1. The "
+	  "layer is named the way it is named in the Animation Layers component — by "
+	  "name and not by position, because reordering the stack must not silently "
+	  "fade a different body part. Clamped; unknown names do nothing." },
+	{ "animator.getLayerWeight",
+	  "The weight an animation layer is currently at. 0 for an unknown layer or "
+	  "an entity without an Animation Layers component." },
+	{ "animator.playLayer",
+	  "Restarts one layer's own playhead at 0, so a one-shot layer (a reload, a "
+	  "flinch) plays again instead of resuming where it stopped. The weight is "
+	  "left alone: fading in is a separate decision and usually takes frames." },
+	{ "animator.layerNames",
+	  "The layer names on an entity, in the order they are laid onto the base "
+	  "pose. Layer names are free text with nothing checking them, so this is how "
+	  "to see what a character actually carries." },
 
 	// ── Particles ────────────────────────────────────────────────────────────
 	{ "particle.burst",
