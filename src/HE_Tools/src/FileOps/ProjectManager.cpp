@@ -172,7 +172,13 @@ int shell(HE::UIWidgetTree& t, float padding = 0.0f, float spacing = 0.0f)
 {
 	t.canvasWidth  = 1280.0f;
 	t.canvasHeight = 720.0f;
-	const int root = panel(t, -1, "Root", kBack);
+	// 0, not -1: "direct child of the canvas" is spelled zero (UIElement.h:368),
+	// and every loop that enumerates roots looks for exactly that — the
+	// Outliner's drawElem(tree, 0), the Designer's childrenOf(0), the layout
+	// pass. A -1 here still DRAWS right, because parentRectOf falls back to the
+	// canvas rect when the parent cannot be found, so the app looked correct
+	// while every hierarchy list stayed empty.
+	const int root = panel(t, 0, "Root", kBack);
 	auto* r = t.find(root);
 	HE::uiSetAnchorPreset(*r, 15);            // stretched to all four edges
 	r->posX = r->posY = r->sizeX = r->sizeY = 0.0f;

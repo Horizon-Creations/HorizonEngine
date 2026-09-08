@@ -108,10 +108,124 @@ jobs:
       - name: Build
         run: cmake --build build -j 4
 
+      # -j because the suite waits far more than it computes: real git
+      # subprocesses, child-process kills, socket handshakes, polling sleeps.
+      # Serially that was 442 s here while the test bodies sum to ~31 s.
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure -j4
+
+      # ── The two app runtimes ────────────────────────────────────────────────────
+      # docs/app-runtimes-release-pipeline-plan.md. The build above deployed ONE
+      # runtime, Game, next to the editor. An exported HorizonApp wants a leaner one
+      # (app-advanced: the platform's forward renderer alone; app-basic:
+      # RendererSoftware alone, both without the shader cross-compiler), and until
+      # now nothing ever built them outside the size-measuring workflow — so
+      # findRuntimeBundle() fell back to Game and every app shipped the full engine.
+      #
+      # A flavour is a whole separate build tree (HE_ENABLE_SHADERC decides whether
+      # glslang is fetched at all, and the backend set is baked into one shared
+      # HorizonRendering), so this cannot be another output of the build above. It is
+      # roughly five minutes per flavour on macOS and Linux, nine on Windows.
+      #
+      # push-only. A pull request has no use for a complete editor package, and
+      # doubling its Windows job to keep one is the wrong trade.
+      #
+      # AFTER the tests on purpose: pulling the flavour builds before ctest would let
+      # a link error in a runtime nobody runs hold up the statement about whether the
+      # code is good. The two runtime_size ctest cases stay skipped because of that;
+      # the threshold check below is what judges the sizes instead.
+      #
+      # --source-tree hands over the editor tree's FetchContent checkouts (the one
+      # actions/cache restores as build/_deps), so the flavours reuse SDL, Jolt,
+      # Recast and Lua instead of cloning each of them twice more.
+      #
+      # DEPLOY_DIR differs by platform: Windows and Linux configure the editor with
+      # -DDEPLOY_DIR=<workspace>/package, macOS takes the default <source>/out/deploy
+      # because package_macos.sh reads exactly that path. The flavours have to land in
+      # the same root as Game either way.
+      - name: Build the two app runtimes
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            DEPLOY="${{ github.workspace }}/out/deploy"
+          else
+            DEPLOY="${{ github.workspace }}/package"
+          fi
+          echo "DEPLOY_ROOT=$DEPLOY" >> "$GITHUB_ENV"
+          "$PY" scripts/build_runtimes.py \
+            --flavor app-advanced --flavor app-basic \
+            --build-type Release \
+            --jobs 4 \
+            --deploy-dir "$DEPLOY" \
+            --source-tree "${{ github.workspace }}/build" \
+            --define HE_PORTABLE_BUILD=ON \
+            --define HE_PREFER_MBEDTLS=ON
+
+      # The size guard for main, moved here from runtime-flavors.yml — that workflow
+      # is now for feature branches only, and main would otherwise lose the watch on
+      # all three runtimes at once. Game is weighed too: the editor build deployed it.
+      #
+      # Exit code 2 is the script's "nothing I may judge" — a platform or flavour with
+      # no measured threshold yet. That stays green, or the first run on a new platform
+      # goes red for the honest state it exists to establish.
+      - name: Check the runtimes against the size thresholds
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          rc=0
+          for pair in "Game:game" "AppAdvanced:app-advanced" "AppBasic:app-basic"; do
+            dir="${pair%%:*}"; flavor="${pair##*:}"
+            echo "── $flavor ──────────────────────────────────────────────"
+            set +e
+            "$PY" scripts/runtime_size.py "$DEPLOY_ROOT/$dir" \
+              --check --flavor="$flavor" --build-type=Release
+            code=$?
+            set -e
+            if [ "$code" = "2" ]; then
+              echo "(no measured threshold yet — skipped)"
+            elif [ "$code" != "0" ]; then
+              rc=1
+            fi
+          done
+          exit $rc
+
+      # Windows and Linux ship package/Editor as a whole, so the runtimes have to move
+      # INTO it — the same place the editor's own POST_BUILD puts Editor/Game, and the
+      # only place findRuntimeBundle() looks once the editor is unzipped somewhere else
+      # entirely. macOS does the equivalent inside package_macos.sh, where the target is
+      # HorizonEditor.app/Contents/Resources.
+      #
+      # The .log and .ini are dev-time run droppings the deploy can accumulate; Game
+      # gets the same treatment in package_macos.sh.
+      - name: Stage the app runtimes into the editor package
+        if: github.event_name == 'push' && runner.os != 'macOS'
+        shell: bash
+        run: |
+          for name in AppAdvanced AppBasic; do
+            if [ -d "$DEPLOY_ROOT/$name" ]; then
+              rm -rf "$DEPLOY_ROOT/Editor/$name"
+              mv "$DEPLOY_ROOT/$name" "$DEPLOY_ROOT/Editor/$name"
+              rm -f "$DEPLOY_ROOT/Editor/$name/HorizonEngine.log" \
+                    "$DEPLOY_ROOT/Editor/$name/imgui.ini"
+              echo "staged $name"
+            else
+              echo "::error::$DEPLOY_ROOT/$name missing — the flavour build did not deploy it"
+              exit 1
+            fi
+          done
+
       # The editor POST_BUILD deployed a self-contained bundle into package/Editor:
       # HorizonEditor.exe + engine DLLs + SDL3 + EngineContent/Fonts/Images + Vulkan
-      # Shaders + the bundled cmake + the CPython runtime (python3XY.dll/.zip/._pth).
+      # Shaders + the bundled cmake + the CPython runtime (python3XY.dll/.zip/._pth),
+      # plus the Game runtime and — on a push — the two app runtimes staged above.
       # Zip it and upload as a downloadable artifact (the "Artifacts" box on the run).
+      #
+      # Moved below the tests so all three platforms package in the same place in the
+      # run. It used to sit before them, which meant Windows uploaded an editor even
+      # when ctest was red; it now behaves like macOS and Linux always have.
       - name: Package Windows editor
         if: runner.os == 'Windows'
         shell: pwsh
@@ -124,12 +238,6 @@ jobs:
           name: HorizonEditor-windows-x64
           path: HorizonEditor-windows-x64.zip
           if-no-files-found: error
-
-      # -j because the suite waits far more than it computes: real git
-      # subprocesses, child-process kills, socket handshakes, polling sleeps.
-      # Serially that was 442 s here while the test bodies sum to ~31 s.
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure -j4
 
       # ── macOS: build the self-contained .app + DMG installer ────────────────────
       # The `dmg` custom target runs scripts/package_macos.sh, which stages

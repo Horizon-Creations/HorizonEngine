@@ -74,3 +74,8 @@ imgui.ini
 # repository is public — these values never belong in a tracked file. CI gets
 # them from repository secrets instead; see src/HE_ContentSync/CMakeLists.txt.
 cmake/EngineContentCredentials.cmake
+
+# Python bytecode of the helper scripts in scripts/. A .pyc of build_runtimes.py
+# was committed once (e68ff8ed) simply because nothing here caught it.
+__pycache__/
+*.pyc

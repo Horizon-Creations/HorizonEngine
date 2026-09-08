@@ -88,6 +88,7 @@ add_executable(he_tests
     test_autostart.cpp
     test_software_raster.cpp
     test_app_todo.cpp
+    test_app_preview_outliner.cpp
     test_ui_theme.cpp
     test_postfx.cpp
     test_hpak.cpp

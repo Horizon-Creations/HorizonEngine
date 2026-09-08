@@ -189,21 +189,44 @@ EDITOR_DEPS="$SOURCE_DIR/EditorDeps"
 # fonts, …) the editor loads relative to its base path. Missing it → broken editor.
 [ -d "$EDITOR_DEPS/EngineContent" ] && cp -R "$EDITOR_DEPS/EngineContent" "$RES_PATH/"
 
-# The game runtime: exe + engine dylibs + SDL3 + Python + native deps, already
+# The runtimes: exe + engine dylibs + SDL3 + Python + native deps, already
 # @rpath-relocated + self-contained by the build (scripts/bundle_native_deps.sh).
-# findRuntimeBundle() walks up from SDL_GetBasePath() looking for <dir>/Game, so it
-# goes to Resources/Game. Without it a downloaded editor cannot export a runnable
-# game — the exporter finds no runtime bundle and produces a data-only export.
-if [ -d "$DEPLOY_DIR/Game" ]; then
-    echo "    Game/ runtime → Resources/Game"
-    rm -rf "$RES_PATH/Game"
-    cp -R "$DEPLOY_DIR/Game" "$RES_PATH/Game"
-    # Drop dev-time run artifacts that the deploy may have accumulated.
-    rm -f "$RES_PATH/Game/HorizonEngine.log" "$RES_PATH/Game/imgui.ini"
-else
-    echo "    WARNING: $DEPLOY_DIR/Game not found — the .app will NOT be able to export games."
-    echo "             Build HorizonEditor first (it deploys the game runtime alongside)."
-fi
+# findRuntimeBundle() walks up from SDL_GetBasePath() looking for <dir>/<Name>, so
+# they go to Resources/<Name>. Without Game a downloaded editor cannot export a
+# runnable game — the exporter finds no runtime bundle and produces a data-only
+# export; without AppAdvanced/AppBasic it exports an APP against the full Game
+# runtime, which works but ships the whole engine for a window with buttons.
+#
+# The three come from two places, and that is not an oversight. The editor's
+# POST_BUILD copies Game a second time into its own deploy ($DEPLOY_DIR, i.e.
+# out/deploy/Editor), because the editor running out of the build tree needs it
+# beside itself. The app flavours have no such second copy: scripts/build_runtimes.py
+# deploys them flat into out/deploy, one level up. Both are where findRuntimeBundle()
+# looks, from the respective binary.
+#
+# A missing app flavour is a warning, not an abort. Whoever runs `cmake --build
+# <dir> --target dmg` on a dev box has not built them — that takes ten minutes and
+# two extra build trees — and is entitled to a .app anyway. CI builds them first
+# (.github/workflows/ci.yml), so a published DMG has all three.
+#
+# All of this has to happen BEFORE the ad-hoc signature further down, or the
+# signature does not cover what was copied in afterwards.
+for _rt in Game AppAdvanced AppBasic; do
+    if [ "$_rt" = "Game" ]; then _src="$DEPLOY_DIR/Game"; else _src="$SOURCE_DIR/out/deploy/$_rt"; fi
+    if [ -d "$_src" ]; then
+        echo "    $_rt/ runtime → Resources/$_rt"
+        rm -rf "$RES_PATH/$_rt"
+        cp -R "$_src" "$RES_PATH/$_rt"
+        # Drop dev-time run artifacts that the deploy may have accumulated.
+        rm -f "$RES_PATH/$_rt/HorizonEngine.log" "$RES_PATH/$_rt/imgui.ini"
+    elif [ "$_rt" = "Game" ]; then
+        echo "    WARNING: $_src not found — the .app will NOT be able to export games."
+        echo "             Build HorizonEditor first (it deploys the game runtime alongside)."
+    else
+        echo "    note: $_src not found — app exports will fall back to the Game runtime."
+        echo "          scripts/build_runtimes.py builds it; CI does that before packaging."
+    fi
+done
 
 # Bundled cmake (present only when built with -DHE_BUNDLE_CMAKE=ON) so C++ codegen
 # export works from a downloaded editor without the user installing cmake. resolveCmake()
