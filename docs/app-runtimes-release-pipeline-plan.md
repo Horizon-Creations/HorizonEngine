@@ -535,3 +535,32 @@ beide fahren sauber herunter.
   auf main und auf PRs gegen main. Windows und Linux — sowohl der Auspraegungsbau
   als auch die `mv`-Kopie ins Editorpaket — sind bis zum Merge blind. Das ist eine
   Entscheidung fuer den Merge, kein Rest dieses Schritts.
+
+### 10.6 P0 auf allen drei Plattformen, jetzt abgewartet
+
+Lauf `34214918244` (`runtime-flavors.yml`, Commit `4d44bbd4`) ist durch und **gruen auf
+Linux, macOS und Windows**, 28 min 53 s auf dem laengsten Job. Damit ist der Blocker aus
+Abschnitt 0 erledigt und nicht nur lokal: `compileHlslPinned` im Stub linkt ueberall, alle
+drei Auspraegungen bauen auf allen drei Plattformen, und jede haelt ihre Schwelle.
+
+| | `game` gesamt / ohne Python | `app-advanced` | `app-basic` |
+|---|---|---|---|
+| Windows/x64 | 37,8 / 28,0 MB | 33,7 / 24,0 MB | 33,1 / 23,4 MB |
+| Linux/x64 | 54,8 / 32,1 MB | 48,0 / 25,2 MB | 47,1 / 24,3 MB |
+| macOS/arm64 | 56,6 / 25,6 MB | 50,6 / 19,5 MB | 49,8 / 18,8 MB |
+
+Alle neun `OK: within the … thresholds`. Die Zahlen liegen ueber denen vom 05.09.2026
+(Abschnitt 6), weil der Baum seither gewachsen ist, nicht weil sich der Schnitt verschoben
+haette: der Abstand zwischen `game` und `app-advanced` ist auf jeder Plattform derselbe wie
+vorher.
+
+Dieselbe Schleife, mit der `ci.yml` die Schwellen jetzt selbst prueft, wurde lokal Zeile fuer
+Zeile gefahren (`runtime_size.py --check` ueber `Game`, `AppAdvanced`, `AppBasic`, mit der
+Behandlung von Rueckgabecode 2): dreimal `OK`, Gesamtergebnis 0.
+
+**Was dieser Lauf NICHT beweist:** er ist `runtime-flavors.yml`, nicht `ci.yml`. Er
+beantwortet P0 und die Groessen, aber kein Bundle verlaesst dort den Runner. Der Schritt
+`Stage the app runtimes into the editor package` — `[ -d ]`, `mv`, `rm -f` auf einem Pfad wie
+`D:\a\HorizonEngine\HorizonEngine/package/AppAdvanced` — ist auf Windows noch nie gelaufen.
+Dass `build_runtimes.py` mit genau diesem Pfad umgehen kann, zeigt dieser Lauf; dass die
+MSYS-Bash-Werkzeuge es auch tun, ist wahrscheinlich und ungeprueft.

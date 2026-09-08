@@ -3062,8 +3062,24 @@ und die gemessene Verifikation stehen in `docs/app-runtimes-release-pipeline-pla
 Gemessen auf macOS: ein App-Export schrumpft von 25 auf **16 MB** (`AppAdvanced`) bzw.
 **15 MB** (`AppBasic`), `libHorizonRendering.dylib` von 5,8 auf 0,9 bzw. 0,3 MB, und der
 Export-Log sagt `Runtime: AppAdvanced` statt der Rückfallwarnung. Beide exportierten Apps
-starten, rendern und fahren sauber herunter. Windows und Linux sind bis zum Merge blind: die
-neuen Schritte hängen an `push` auf `main`.
+starten, rendern und fahren sauber herunter.
+
+Dass die App-Ausprägungen überhaupt wieder überall bauen, ist neu: seit dem 07.09.2026 fehlte
+`compileHlslPinned` im Shader-Compiler-Stub, und damit war `runtime-flavors.yml` auf allen
+drei Plattformen rot — die Decal- und SSR-Arbeit hatte die Funktion nur in die eine Hälfte des
+Vertrags eingetragen, und das fällt erst beim Linken einer Ausprägung auf, die niemand täglich
+baut. Lauf `34214918244` ist wieder grün, hier die frischen Zahlen (die über denen von Teil 3
+liegen, weil der Baum seither gewachsen ist, nicht weil der Schnitt sich verschoben hätte):
+
+| | `game` gesamt / ohne Python | `app-advanced` | `app-basic` |
+|---|---|---|---|
+| Windows/x64 | 37,8 / 28,0 MB | 33,7 / 24,0 MB | 33,1 / 23,4 MB |
+| Linux/x64 | 54,8 / 32,1 MB | 48,0 / 25,2 MB | 47,1 / 24,3 MB |
+| macOS/arm64 | 56,6 / 25,6 MB | 50,6 / 19,5 MB | 49,8 / 18,8 MB |
+
+**Was für Windows und Linux bis zum Merge offen bleibt:** die neuen `ci.yml`-Schritte hängen
+an `push` auf `main` und sind auf einem Feature-Zweig nicht auslösbar. Das Bauen der
+Ausprägungen ist dort durch den Lauf oben gedeckt, das Hineinlegen ins Editorpaket nicht.
 
 ---
 
