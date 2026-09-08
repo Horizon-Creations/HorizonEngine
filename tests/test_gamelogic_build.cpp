@@ -76,9 +76,17 @@ TEST_CASE("Game logic build: the editor's build path compiles and loads a real m
     REQUIRE(!engineRoot.empty());
     REQUIRE(std::filesystem::exists(engineRoot / "src" / "HE_Core" / "include" / "IGameLogic.h"));
 
-    if (!HE::hccg::toolchainAvailable())
+    // probeToolchain, not toolchainAvailable: the latter only asks whether cmake
+    // answers --version, and then a broken build path and a machine without a
+    // compiler would look the same — the test would print a line and pass. The
+    // probe runs a real throwaway configure, so once it says yes, a failed build
+    // below is OUR failure and is required to be red.
+    const HE::hccg::ToolchainProbe probe = HE::hccg::probeToolchain();
+    if (!probe.cmakeFound || !probe.compilerFound)
     {
-        MESSAGE("no cmake on this machine — the compile half cannot be exercised here");
+        MESSAGE("no C++ toolchain on this machine (cmake: " << probe.cmakeFound
+                << ", compiler: " << probe.compilerFound
+                << ") — the compile half cannot be exercised here");
         return;
     }
 
@@ -109,14 +117,10 @@ TEST_CASE("Game logic build: the editor's build path compiles and loads a real m
             if (line.find("rror") != std::string::npos) lastError = line;
         });
     INFO("build message: " << out.message << "  |  last error line: " << lastError);
-    if (!out.ok)
-    {
-        // A machine with cmake but no working compiler lands here. Say which of
-        // the two it was and stop — a red test would be about the machine.
-        MESSAGE("the toolchain could not build the scaffold here: " << out.message);
-        he_test::removeAllQuiet(root);
-        return;
-    }
+    // Required, not tolerated: the probe above already established that this
+    // machine can configure and compile, so anything that fails here fails
+    // because the engine handed the project the wrong thing.
+    REQUIRE(out.ok);
 
     // The name and the place the loader will look in — this is the pairing that
     // the HorizonCodeGen artifact list would have got wrong (no `lib` prefix).
