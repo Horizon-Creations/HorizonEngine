@@ -1262,7 +1262,7 @@ bleibt stehen, hier steht, wo die Umsetzung ihm gefolgt ist und wo nicht.
 | Knopf „Add to Claude" + „Look for Claude Again", auf einem Worker | `src/HE_Editor/EditorSettingsPanel.cpp:655` | `55431c3a` |
 | Verbindungsprobe (`claude mcp get`, echter Handschlag) — ImGui-frei | `src/HE_Editor/McpClaudeProbe.h/.cpp`, `tests/test_mcp_claude_probe.cpp` | `356a6c9d` |
 | Vier Zeilen auf **Tool Status**, `Recheck all` fasst sie mit | `EditorSettingsPanel.cpp:2100` | `356a6c9d` |
-| Handschlag-Zähler der Brücke, für den Gegencheck | `src/HE_Editor/McpBridge.h:110` (`authCount`, `lastAuthClient`) | `356a6c9d` |
+| Handschlag-Zähler der Brücke, für den Gegencheck | `src/HE_Editor/McpBridge.h:130` (`authCount`, `lastAuthClient`) | `356a6c9d` |
 | Auslieferung neben dem Editor und ins `.app`, mit Prüfzeile im Packaging | `src/HE_Editor/CMakeLists.txt`, `scripts/package_macos.sh` | `55431c3a` |
 | Handbuchkapitel, fünf Bedienelemente verlinkt | `collaboration.html#remote-control`, `EditorDeps/Docs/he-docs.json`, `EditorHelp.cpp:2161` | Schritt 5 |
 
