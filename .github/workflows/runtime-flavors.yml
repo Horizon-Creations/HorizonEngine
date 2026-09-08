@@ -21,15 +21,19 @@
 name: Runtime flavours
 
 on:
-  # ci.yml only fires on main, so a feature branch never learns what its runtime
-  # weighs until after the merge — which is the wrong end. The paths filter is
-  # what makes that affordable: only a change to the size scripts or to the
-  # CMake files that decide the backend set can move these numbers, so an
-  # ordinary commit on the branch does not spend an hour of runner time.
+  # Feature branches only. ci.yml now builds and weighs all three flavours on main
+  # itself (it has to: the two app runtimes go into the editor package it ships), so
+  # main here would be the same hour of runner time twice for the same numbers.
+  #
+  # What is left is the thing ci.yml genuinely cannot do: tell a branch what its
+  # runtime weighs BEFORE the merge, which is the only end at which the answer is
+  # still useful. The paths filter is what makes that affordable — only a change to
+  # the size scripts or to the CMake files that decide the backend set can move these
+  # numbers, so an ordinary commit on the branch does not spend an hour of runner
+  # time. workflow_dispatch stays, for a deliberate re-measure of anything.
   push:
     branches:
-      - main
-      - 'claude/he-apps-ui-framework-**'
+      - 'claude/**'
     paths:
       - 'scripts/build_runtimes.py'
       - 'scripts/runtime_size.py'

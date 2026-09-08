@@ -12,6 +12,14 @@
 // (MaterialShaderVariant); only the fallback that would cross-compile at load is gone.
 // The alternative — #ifdef-ing the material path out of the renderers — is what left a
 // shaderc-free build without a UI material path at all.
+//
+// That same property makes this file a standing obligation: ShaderCompiler.h and this
+// translation unit have to stay COMPLETE against each other. Every free function the
+// header declares needs a definition here, because the callers keep calling them. A
+// missing one does not show up when the header changes — it shows up as an undefined
+// symbol at LINK time, in a flavour nobody builds daily. compileHlslPinned was added for
+// SSR and Decals and entered only ShaderCompiler.cpp, and the two app flavours were
+// unbuildable on all three platforms from 07.09.2026 until it was noticed here.
 #include "ShaderCompiler.h"
 
 namespace he::shaderc
@@ -37,6 +45,15 @@ Result failed()
 Result compile(const std::string&, Stage, Target) { return failed(); }
 
 Result compileMslPinned(const std::string&, Stage, const std::vector<MslPin>&, const MslOptions&)
+{
+    return failed();
+}
+
+// SSR and the decal pass reach for this one through MaterialShaderLibrary. In a flavour
+// without the cross-compiler there is nothing to reach for and nothing to fall back to:
+// the D3D variants of those shaders are baked into the .hpak at export time like every
+// other one, and a runtime that has to ask for HLSL here has already lost.
+Result compileHlslPinned(const std::string&, Stage, const std::vector<HlslPin>&)
 {
     return failed();
 }
