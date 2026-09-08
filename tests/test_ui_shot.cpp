@@ -672,6 +672,107 @@ TEST_CASE("ui shot: the practical examples, in the manual that ships")
 	DocsPanel::close();
 }
 
+// ── Two notes are two boxes ──────────────────────────────────────────────────
+// Found by looking at the shot above, not by an assertion: every callout on a
+// page asked ImGui for the child window "##callout", so all of them WERE one
+// window. On "Practical Examples" — four notes, one per task — the reader drew a
+// single box near the top holding all four, each one pages away from the example
+// it explains, and every string assertion about the page stayed green because
+// the text was all still there.
+//
+// The witness is the tone bar: drawCallout paints one 3 px stripe in AccentHi
+// down the left edge of each box, so counting separated stripes counts boxes.
+TEST_CASE("ui shot: two callouts in one section are two boxes, not one")
+{
+	using namespace HE::Ed::Docs;
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	REQUIRE(lib.loaded());
+
+	auto note = [](const char* text) {
+		Block inner;
+		inner.kind = BlockKind::Paragraph;
+		inner.runs.push_back({ text, Style::Body, "" });
+		Block out;
+		out.kind = BlockKind::Callout;
+		out.tone = Tone::Note;
+		out.blocks.push_back(inner);
+		return out;
+	};
+
+	Block prose;
+	prose.kind = BlockKind::Paragraph;
+	prose.runs.push_back({ "Prose between the two, so they cannot merely touch.",
+	                       Style::Body, "" });
+
+	Section sec;
+	sec.id    = "notes";
+	sec.title = "Two Notes";
+	sec.text  = "two notes";
+	sec.blocks.push_back(note("The first note, about the first thing."));
+	sec.blocks.push_back(prose);
+	sec.blocks.push_back(note("The second note, about the second thing."));
+
+	Page page;
+	page.id      = "calloutfixture";
+	page.file    = "calloutfixture.html";
+	page.title   = "Callout Fixture";
+	page.summary = "Two notes with prose between them.";
+	page.sections.push_back(sec);
+	lib.appendPage(page);
+
+	DocsPanel::openTopic("calloutfixture#notes");
+	REQUIRE(DocsPanel::isOpen());
+
+	const he_ui::Image img = shoot("docs-two-callouts", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(img.valid());
+
+	// AccentHi through ImGui's float→u8 conversion, which saturates rather than
+	// rounding down: (219, 155, 55). Nothing else in the body column is that.
+	const ImVec4 t = HE::Ed::Theme::AccentHi;
+	const int tr = int(t.x * 255.0f + 0.5f);
+	const int tg = int(t.y * 255.0f + 0.5f);
+	const int tb = int(t.z * 255.0f + 0.5f);
+
+	// One row per scanline that holds any tone-bar pixel, then the runs of them.
+	// A gap of more than four rows is the space between two boxes; anything
+	// smaller is the anti-aliasing at a corner.
+	// From 260, not the 300 the other scenes use: the stripe sits on the very
+	// left edge of the box, a few pixels right of the sidebar, and a body column
+	// that starts at 300 walks straight past it.
+	int bars = 0, gap = 99;
+	for (int y = 90; y < H - 40; ++y)
+	{
+		bool onBar = false;
+		for (int x = 260; x < W - 20 && !onBar; ++x)
+		{
+			std::uint8_t r, g, b, a;
+			img.pixel(x, y, r, g, b, a);
+			onBar = std::abs(int(r) - tr) < 12 && std::abs(int(g) - tg) < 12 &&
+			        std::abs(int(b) - tb) < 12;
+		}
+		if (onBar)
+		{
+			if (gap > 4) ++bars;
+			gap = 0;
+		}
+		else
+			++gap;
+	}
+
+	INFO("tone bars found in the body column: " << bars);
+	CHECK(bars == 2);
+
+	DocsPanel::close();
+}
+
 TEST_CASE("ui shot: a node explains itself on hover")
 {
 	// What a graph author sees when the cursor rests on a node: the call's name,

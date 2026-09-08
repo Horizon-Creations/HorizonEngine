@@ -477,3 +477,112 @@ Zwei Wege:
 anders aussehen, ist genau die Sorte Drift, gegen die dieses ganze System gebaut
 ist. Aber es ist eine Aenderung an der Website und damit ausserhalb dieses
 Themas — deshalb hier als Frage und nicht als Beschluss.
+
+---
+
+# Abnahme-Protokoll (Schritt 4, 08.09.2026)
+
+Nachgemessen auf `claude/inengine-docs-example-switcher`, Debug-Build,
+macOS 27 (Darwin 27.0.0). Jede Zeile hier ist ein Lauf, kein Zitat aus einem
+frueheren Beitrag.
+
+## Abschnitt 6.2, Punkt fuer Punkt
+
+| Abnahmepunkt | Ergebnis | Beleg |
+|---|---|---|
+| `build_docs_bundle.py --check` | **rc 0**, „bundle is up to date"; 13 Seiten, 112 Abschnitte, 8 Bilder, 553 KB | Lauf gegen den Website-Checkout |
+| Volle Suite | **122/122 gruen**, 0 Fehlschlaege, 206 s | `ctest -j4`; 3 `runtime_size*` sind planmaessig `Skipped` (kein Release-Artefakt im Debug-Baum), das ist ihr Normalzustand |
+| `editor_help_audit` | **gruen**: 715 Bedienelemente, 715 gedeckt, **0 offen**, alle Baselines 0 | ctest 119 + Handlauf von `scripts/editor_help_audit.py` |
+| `test_docs_library` | gruen (1,40 s) | ctest 93 |
+| `test_editor_help` | gruen | ctest |
+| Sichtprobe | siehe unten, vier PNGs gelesen | `scripts/he_uishot.py` |
+| Suche `isGrounded` findet `scripting#examples` | gedeckt, aber **als Test, nicht von Hand** | `tests/test_docs_library.cpp:586` |
+| Sprachwahl haelt ueber Navigation | **per Quelltext belegt, nicht bedient**: `s_lang` ist ein Datei-Static in `DocsPanel.cpp` neben `s_page`/`s_section`, kein Zustand am Block | `src/HE_Editor/DocsPanel.cpp:107` |
+
+Die Deckung ist auf **715/715** gewachsen (das Register stand zuletzt bei
+600/600) — ohne einen einzigen neuen `IGNORE`-Eintrag, siehe die Abweichung
+unten.
+
+## Abweichung von Abschnitt 5.1: der Audit brauchte gar nichts
+
+Der Plan hat vorhergesagt, dass vier neue beschriftete Knoepfe in
+`DocsPanel.cpp` den Bereich `interface` auf 4 offene Bedienelemente heben und
+`editor_help_audit` deshalb rot faellt — mit `IGNORE`-Eintraegen als Loesung.
+**Eingetreten ist das nicht, und der Grund ist besser als die Loesung:** die
+Beschriftungen der Zellen sind gar keine Literale. `drawLangTabs` baut den
+Schluessel als `"Documentation/" + v.label` aus dem **Buendel**, und ein Scan,
+der die Quelldatei nach Knopftexten liest, sieht davon nichts. `IGNORE` ist
+deshalb unveraendert, `BASELINE` steht weiter auf 0.
+
+Was daraus folgt, steht so auch im Testkommentar: der **einzige** Waechter
+dieser vier Eintraege ist der Laufzeit-Lookup in
+`tests/test_editor_help.cpp:165` (`{"Documentation", "Lua"}` usw.). Benennt die
+Website einen Knopf um, faellt genau dieser Test — und sonst nichts.
+
+## Was die Sichtprobe beantwortet hat
+
+Vier Bilder gelesen, nicht nur erzeugt: `docs-examples`, `docs-lang-switcher`,
+`docs-lang-switcher-clicked`, `docs-two-callouts`.
+
+* **Sitzt die Bande in der Prosa?** Ja. Die Zellen stehen in einem
+  Well, das nur so breit ist wie die vier Beschriftungen, linksbuendig zur
+  Textspalte. Kein durchgehendes Band, keine Haarlinie darunter — nichts, was
+  die Seite in „Werkzeugleiste" und „Inhalt" teilen wuerde. `EditorToolbar::Bar`
+  wird nicht benutzt, nur seine Primitiven; die offene Frage aus Abschnitt 7
+  ist damit beantwortet.
+* **Liest sich die scharfgeschaltete Zelle als eine Wahl?** Ja. Genau eine
+  Zelle traegt die Amber-Fuellung, die drei anderen sind Text auf dem Well.
+* **Und die Wahl greift wirklich.** Im geklickten Bild ist „Python"
+  scharfgeschaltet, der dimme Dateiname darueber sagt `finder.py`, und im
+  Kasten steht der Python-Code. Der Umschalter ist damit in einem Bild
+  bedient worden, nicht nur in einer Zusicherung.
+* **Die Glyphenfrage aus 4.7** beantwortet die Sichtprobe **nicht** — die
+  Harness hat keine Mono-Schrift und gibt dem Reader die Body-Schrift. Sie ist
+  stattdessen an den Daten beantwortet: im ganzen `he-docs.json` kommt keines
+  der Zeichen `└ ◂ ▸ ├ │ ─` mehr vor (je 0 Treffer), und
+  `tests/test_docs_library.cpp:298` haelt das fest.
+
+## Ein Fund aus der Sichtprobe: vier Notizen in einer Box
+
+Das erste Bild von `scripting#examples` zeigte **alle vier Callouts der Seite
+gestapelt in einer einzigen Box oben**, jede weit weg von dem Beispiel, das sie
+erklaert. Ursache: `drawCallout` hat sein Kind seit jeher als `"##callout"`
+geoeffnet — ein fester Id fuer jeden Callout im selben Fenster, also fuer ImGui
+**dasselbe Kind**, in das der zweite Callout einfach hineinschrieb.
+
+* **Bestandsfehler, nicht aus diesem Thema.** Er trifft im alten Buendel schon
+  `collaboration#discovery`, `collaboration#starting` und `scripting-api#api`
+  (je 2 Callouts). Sichtbar wird er hier, weil „Practical Examples" der erste
+  Abschnitt mit **vier** ist.
+* **Fix**: `ImGui::PushID(&b)` um das Kind, dieselbe Zeile und dieselbe
+  Begruendung, die `drawCode` in Schritt 3 fuer Listings bekommen hat.
+* **Waechter**: `tests/test_ui_shot.cpp`, „two callouts in one section are two
+  boxes, not one" — eine Fixture-Seite mit zwei Notizen und Prosa dazwischen,
+  gezaehlt werden die getrennten Tonleisten (`AccentHi`, 3 px) in der
+  Textspalte. **Gegen den ausgebauten Fix wird der Test rot** (1 statt 2
+  Leisten); ohne diese Probe waere er nur eine Behauptung.
+* Warum ueberhaupt gefixt und nicht nur gemeldet: es ist die Seite, die dieses
+  Feature ausliefert, und der Fix ist eine Zeile eines Musters, das nebenan
+  schon steht. Wer ihn nicht will, nimmt die zwei Hunks in `DocsPanel.cpp` und
+  den Testfall wieder heraus.
+
+## Was offen bleibt
+
+* **Frage 8 (Abschnitt 8) ist faktisch nach Variante B entschieden**, ohne dass
+  sie je gestellt wurde: `substitute()` laeuft ueber *jeden* Text, also auch
+  ueber das Callout, und das Handbuch sagt jetzt in sich stimmig
+  „`\»` is the next node on it … `<` means this pin is fed by", waehrend die
+  Website `└▸` und `◂` sagt. Beide Systeme sind **fuer sich** richtig, sie
+  benennen nur verschiedene Zeichen. Variante A (Website umformulieren) bleibt
+  die bessere Antwort und braucht einen Ausflug ins Website-Repo plus Deploy —
+  **Entscheidung des Chefchens, hier bewusst nicht getroffen.**
+* **Tiefenlinks** auf ein einzelnes Beispiel (`scripting#ex-jump`) gibt es
+  weiterhin nicht (Abschnitt 5.2), F1 landet auf `scripting#examples`.
+* **Persistenz der Sprachwahl** ueber den Editor-Neustart: bewusst nicht
+  gebaut (Abschnitt 4.1). Die Wahl haelt innerhalb einer Sitzung.
+* **Die Suchreihenfolge fuer `addImpulse`** — die Benutzung in den Beispielen
+  rankt jetzt vor der Definition in der Node-Referenz. Von Schritt 3 gemeldet
+  und bewusst nicht gefixt; ein Ranking, das Definitionen vor Erwaehnungen
+  stellt, ist ein eigenes Thema.
+* **Der Reader ist nach wie vor nie in der echten GUI bedient worden.** Alles
+  hier ist Software-Rendering und Test.

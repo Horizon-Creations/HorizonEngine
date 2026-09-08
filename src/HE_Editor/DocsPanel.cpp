@@ -592,12 +592,19 @@ namespace
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, warm(0.135f));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+		// The block's address, for the same reason drawCode carries one: every
+		// callout on a page asked for the child "##callout", so ImGui handed all
+		// of them the SAME window — the second note appended to the first, and a
+		// page with four of them drew one box near the top holding all four,
+		// each one nowhere near the example it explains.
+		ImGui::PushID(static_cast<const void*>(&b));
 		ImGui::BeginChild("##callout", ImVec2(0.0f, 0.0f),
 		                  ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
 		{
 			for (const docs::Block& inner : b.blocks) drawBlock(ctx, inner);
 		}
 		ImGui::EndChild();
+		ImGui::PopID();
 		ImGui::PopStyleVar();
 		ImGui::PopStyleColor();
 		// The tone bar, painted over the child's left edge once its rect is
