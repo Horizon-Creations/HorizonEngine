@@ -1,12 +1,48 @@
-# App-Modus: Widget-Hierarchie im Outliner — Diagnose
+# App-Modus: Widget-Hierarchie im Outliner — Diagnose und Fix
 
 Stand 2026-09-08. Schritt 1 hat den Quelltext gelesen; Schritt 2 hat den
-Vorschaupfad **wirklich laufen lassen**. Die Ursache steht fest und ist per
-Probe bestaetigt. Der Fix ist hier NICHT eingebaut — das ist der naechste
-Schritt.
+Vorschaupfad **wirklich laufen lassen**; Schritt 3 hat den Fix eingebaut und
+gegen dieselbe Messung gehalten. Alles hier unten ist gebaut und ausgefuehrt,
+nicht abgeleitet.
 
 Belege: `tests/test_app_preview_outliner.cpp`, gebaut und ausgefuehrt gegen
 `build-tests/tests/he_tests`.
+
+## Der Fix (Schritt 3)
+
+Zwei Stellen, weil die Ursache zwei Leben hat: die eine schreibt sie, die
+andere gibt sie weiter.
+
+1. **`ProjectManager.cpp`, `shell()`** — `panel(t, -1, "Root", kBack)` wird
+   `panel(t, 0, ...)`. Damit schreibt kein neu angelegtes App-Projekt mehr eine
+   Wurzel, die keine ist.
+2. **`UIWidgetTree.cpp`, `uiWidgetTreeFromJson`** — beim Laden wird ein
+   `parentId < 0` auf 0 gezogen. Ids fangen bei 1 an, eine negative Zahl kann
+   also nie ein Element benennen; sie ist immer die alte Schreibweise fuer
+   „kein Elternteil". Ohne diesen Teil bekaeme ein Projekt, das **vor** dem Fix
+   angelegt wurde, seine Hierarchie nie zurueck, denn in seinem
+   `RootWidget.hasset` steht die `-1` schon auf der Platte.
+
+Bewusst **nicht** repariert: ein positives `parentId`, das ins Leere zeigt. Das
+ist eine kaputte Referenz, keine alte Schreibweise, und sie stillschweigend an
+die Canvas zu haengen wuerde einen Teilbaum verschieben, den niemand
+verschieben wollte. Ein Testfall haelt das fest.
+
+### Was der Fix messbar aendert
+
+Dieselbe Zeile aus demselben Test, vorher/nachher:
+
+| Preset | Elemente | erreichbar vorher | erreichbar nachher |
+| --- | --- | --- | --- |
+| Application | 2 | 2 | 2 |
+| AppSidebar | 20 | 0 | 20 |
+| AppWizard | 17 | 0 | 17 |
+| AppDashboard | 33 | 0 | 33 |
+| AppForm | 21 | 0 | 21 |
+| AppTool | 48 | 0 | 48 |
+
+Sechs Testfaelle in dieser Datei gruen, 166 Assertions; die ganze Suite
+**2546 von 2546**, 421420 Assertions.
 
 ## Die Ursache
 
@@ -43,7 +79,8 @@ richtig an".
 
 `-1` → `0` in dieser einen Zeile, neu gebaut, Tests gelaufen:
 **4 von 4 Testfaellen gruen, 114 von 114 Assertions**. Zurueckgedreht wieder
-2 von 4 rot. Die Probe steht nicht im Commit.
+2 von 4 rot. In Schritt 2 war das nur eine Probe und stand nicht im Commit;
+seit Schritt 3 steht sie drin.
 
 ## Was gemessen wurde (echter Lauf, kein Quelltext-Lesen)
 
@@ -115,7 +152,8 @@ Absicht, keinen Bug.
 
 ## Der Test
 
-`tests/test_app_preview_outliner.cpp`, vier Faelle. Er baut den
+`tests/test_app_preview_outliner.cpp`, sechs Faelle — vier aus Schritt 2, zwei
+aus Schritt 3. Er baut den
 Vorschaupfad ohne GUI nach: `createNewProject` → `setContentRoot`
 (`EditorApplication.cpp:1487`) → dieselben vier Widget-Services
 (`EditorApplication.cpp:1299`) → `GameInstance.hcode` per `fromJson`
@@ -125,11 +163,27 @@ Er prueft nicht „irgendein Element hat parentId 0", sondern **den echten
 Vertrag von `drawElem`**: von parentId 0 aus absteigen und zaehlen, was dabei
 erreicht wird. Was nicht erreicht wird, wird namentlich ausgegeben.
 
-**Zwei der vier Faelle sind absichtlich rot** und werden mit dem Einzeiler in
-`shell()` gruen. Wer den Fix baut, aendert am Test nichts.
+Zwei der vier Faelle aus Schritt 2 waren absichtlich rot; der Fix aus
+Schritt 3 macht sie gruen, ohne dass an ihnen etwas geaendert wurde.
 
-Die ganze Suite dazu gelaufen: **2544 Faelle, 2542 gruen, 2 rot** — genau die
-zwei hier. Sonst ist nichts angefasst.
+Die zwei neuen Faelle nageln je eine Haelfte des Fixes fuer sich fest, denn
+jede Haelfte allein wuerde die vier alten schon gruen machen:
+
+* **„App templates: no authored element carries a negative parent"** liest das
+  gespeicherte JSON roh (`"parent"`, `UIWidgetTree.cpp:1658`) statt einen
+  geladenen Baum. Der Loader repariert auf dem Weg hinein — das Template
+  koennte also weiter `-1` schreiben, ohne dass es auffiele.
+* **„Widget load: a stored negative parent is read as the canvas"** faehrt
+  handgeschriebenes JSON mit `parent: -1` durch `uiWidgetTreeFromJson`: das ist
+  der Fall des Nutzers, dessen Projekt schon existiert. Derselbe Fall prueft
+  auch, dass ein positives, ins Leere zeigendes `parentId` **nicht** angefasst
+  wird.
+
+Der Normalfall ist von den Faellen aus Schritt 2 gedeckt und laeuft ueber alle
+sechs App-Presets: ein frisch angelegtes Projekt hat nach `fireInit` einen
+Baum, in dem jedes Element von der Canvas aus erreichbar ist.
+
+Die ganze Suite dazu gelaufen: **2546 Faelle, 2546 gruen**, 421420 Assertions.
 
 ## Grenze dieses Durchlaufs
 

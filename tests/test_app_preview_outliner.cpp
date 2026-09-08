@@ -372,3 +372,93 @@ TEST_CASE("App preview: a manifest without the appProject key opens as a game")
 
     he_test::removeAllQuiet(dir);
 }
+
+// ─── Der Fix, an seinen zwei Stellen einzeln festgenagelt ───────────────────
+// The repair has two halves and they cover for each other: the templates no
+// longer WRITE a negative parent, and the loader no longer PASSES one through.
+// Asked together, either half alone would make the four cases above green — so
+// each gets a case that can only be answered by its own half.
+
+// Half one, at the source. Read out of the stored JSON rather than out of a
+// loaded tree, because the loader would have repaired it on the way in and the
+// template could keep writing -1 forever without anybody noticing.
+TEST_CASE("App templates: no authored element carries a negative parent")
+{
+    for (const auto& pc : kAppPresets)
+    {
+        const std::string presetName = pc.name;
+        CAPTURE(presetName);
+        Preview p("he_test_app_preview_authored_parent");
+        REQUIRE(p.create(pc.preset, "AuthoredProj"));
+        p.wire();
+
+        const HE::UUID assetId = p.cm.loadAsset("UI/RootWidget.hasset");
+        REQUIRE(assetId != HE::UUID{});
+        const UIWidgetAsset* a = p.cm.getWidget(assetId);
+        REQUIRE(a != nullptr);
+
+        const nlohmann::json j = nlohmann::json::parse(a->treeJson, nullptr, false);
+        REQUIRE_FALSE(j.is_discarded());
+        const auto elements = j.value("elements", nlohmann::json::array());
+        REQUIRE(elements.size() > 0);
+
+        // "parent" is the stored key for parentId (UIWidgetTree.cpp:1658), and
+        // ids start at 1, so anything below zero names nothing.
+        int negatives = 0, storedRoots = 0;
+        for (const auto& o : elements)
+        {
+            const int parent = o.value("parent", 0);
+            if (parent < 0)
+            {
+                ++negatives;
+                MESSAGE(presetName << ": stored parent " << parent << " on '"
+                        << o.value("name", std::string()) << "'");
+            }
+            if (parent == 0) ++storedRoots;
+        }
+        CHECK(negatives == 0);
+        CHECK(storedRoots >= 1);
+    }
+}
+
+// Half two, on the way in. A widget already saved with -1 — every app project
+// created before the template fix — has to come back with a hierarchy without
+// the user rebuilding anything.
+TEST_CASE("Widget load: a stored negative parent is read as the canvas")
+{
+    nlohmann::json j;
+    j["canvasWidth"]  = 1280.0f;
+    j["canvasHeight"] = 720.0f;
+    j["nextId"]       = 3;
+    j["elements"]     = nlohmann::json::array({
+        nlohmann::json::object({ { "type", "Panel" }, { "id", 1 },
+                                 { "parent", -1 }, { "name", "Root" } }),
+        nlohmann::json::object({ { "type", "VerticalBox" }, { "id", 2 },
+                                 { "parent", 1 }, { "name", "Content" } }),
+    });
+
+    HE::UIWidgetTree tree;
+    REQUIRE(HE::uiWidgetTreeFromJson(j.dump(), tree));
+    REQUIRE(tree.elements.size() == 2);
+
+    const HE::UIElement* root = tree.find(1);
+    REQUIRE(root != nullptr);
+    CHECK(root->parentId == 0);
+
+    // The two questions the panels ask, on the repaired tree.
+    const std::vector<int> canvasChildren = tree.childrenOf(0);
+    REQUIRE(canvasChildren.size() == 1);
+    CHECK(canvasChildren.front() == 1);
+    CHECK(reachableFromCanvas(tree).size() == 2);
+
+    // A positive parent is left alone even when it resolves to nothing: an id
+    // that names a missing element is a broken reference, not the old spelling
+    // of "no parent", and silently reparenting it to the canvas would move a
+    // subtree the user never asked to move.
+    nlohmann::json k = j;
+    k["elements"][0]["parent"] = 99;
+    HE::UIWidgetTree dangling;
+    REQUIRE(HE::uiWidgetTreeFromJson(k.dump(), dangling));
+    REQUIRE(dangling.find(1) != nullptr);
+    CHECK(dangling.find(1)->parentId == 99);
+}
