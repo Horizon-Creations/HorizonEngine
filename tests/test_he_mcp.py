@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 try:                                    # Python 3.8 does not have queue.SimpleQueue
@@ -115,6 +116,19 @@ class FakeBridge(object):
                 pass
         for thread in self._threads:
             thread.join(timeout=2.0)
+
+    def reset_connections(self):
+        """Drop the live connections with an RST, the way the bridge's
+        `disconnect()` does when Remote Control is switched off under a client.
+        The listener stays up: the editor is still there, this link is not."""
+        for conn in self._conns:
+            try:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                struct.pack("ii", 1, 0))
+                conn.close()
+            except OSError:
+                pass
+        self._conns = []
 
     def _accept_loop(self):
         while not self._stopping:
@@ -498,6 +512,27 @@ class TestReconnect(ShimTestCase):
         reply = shim.expect()
         self.assertEqual([t["name"] for t in reply["result"]["tools"]],
                          ["entity_create"])
+        self.assertEqual(shim.finish(), 0)
+
+    def test_a_link_dropped_while_idle_costs_one_reconnect_not_the_shim(self):
+        # Remote Control switched off and on again under a connected client: the
+        # socket is reset while nobody is reading it, so the break surfaces on
+        # the next SEND rather than on a read. That is the path where a missing
+        # try around sendall kills the process instead of reconnecting.
+        editor = self.bridge()
+        write_endpoint(self.endpoint, editor.port)
+        shim = self.start()
+        shim.expect()
+        editor.reset_connections()
+        time.sleep(0.2)
+
+        shim.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        broken = shim.expect()
+        self.assertEqual(broken["error"]["code"], -32000)
+        self.assertIsNone(shim.proc.poll())      # still alive, still serving
+
+        shim.send({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+        self.assertEqual(shim.expect()["result"]["tools"], editor.tools)
         self.assertEqual(shim.finish(), 0)
 
     def test_a_token_rewritten_under_us_is_retried_once(self):

@@ -177,7 +177,15 @@ def _send_frame(sock, obj):
     if len(payload) > MAX_FRAME_BYTES:
         raise ShimError("message of %d bytes exceeds the 4 MiB frame limit"
                         % len(payload))
-    sock.sendall(struct.pack(">I", len(payload)) + payload)
+    try:
+        sock.sendall(struct.pack(">I", len(payload)) + payload)
+    except OSError as exc:
+        # The half of the failure that is easy to forget: an editor that dropped
+        # us while we were idle (Remote Control switched off, `disconnect()` at
+        # the top of McpBridge::update) is noticed on the next SEND, not on a
+        # read. Unwrapped, that ends the shim with a traceback and takes the
+        # client's session with it, instead of one reconnect.
+        raise ShimError("the connection to the editor broke (%s)" % exc)
 
 
 def _recv_exactly(sock, count):
