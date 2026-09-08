@@ -351,7 +351,7 @@ Stand 08.09.2026, Commits `7362b42e` (P0, P1) und `009c54c7` (P2, P3, P5).
 | P1 | umgesetzt als `--source-tree DIR` (wiederholbar), vorne in der Liste von `existing_sources()`. |
 | P2 | umgesetzt. Zwei Schritte in `ci.yml` nach `Run tests`, beide `if: github.event_name == 'push'`: der Auspraegungsbau und die Groessenpruefung. Die Deploy-Wurzel wird plattformweise in einer Bash-Zeile bestimmt und ueber `GITHUB_ENV` an die folgenden Schritte weitergereicht. |
 | P3 | umgesetzt. Windows und Linux: ein `mv`-Schritt nach `package/Editor`. macOS: `package_macos.sh` hat statt des einen `Game`-Blocks eine Schleife ueber `Game AppAdvanced AppBasic`, an derselben Stelle, also weiterhin vor dem Signieren. |
-| P4 | siehe unten. |
+| P4 | umgesetzt fuer macOS, siehe Abschnitt 10. Windows und Linux bleiben offen, und zwar bis zum Merge nach main. |
 | P5 | umgesetzt. `runtime-flavors.yml` laeuft nur noch auf `claude/**`. |
 | P6 | bewusst nicht gemacht: Bequemlichkeit, nicht Pipeline. |
 
@@ -411,3 +411,127 @@ brauchen — der Push dieses Zweigs hat `runtime-flavors.yml` ausgeloest (Lauf
 abgewartet. Und der Satz `Runtime: AppAdvanced` im Export-Log, der die eigentliche Frage
 des Themas beantwortet: dafuer braucht es einen Editor aus diesem Zweig und einen echten
 App-Export.
+
+---
+
+## 10. P4: der Weg einmal ganz durchlaufen (08.09.2026, Schritt 5)
+
+Der Satz, um den es dem ganzen Thema geht, steht jetzt gemessen da:
+
+```
+Runtime: AppAdvanced (…/out/deploy/AppAdvanced)
+Runtime: AppBasic    (…/out/deploy/AppBasic)
+```
+
+Kein Rueckfall auf `Game`, keine Warnzeile. Was dahinter steckt und was
+ausdruecklich **nicht** dahinter steckt, steht hier vollstaendig.
+
+### 10.1 Der Editor wurde nicht neu gebaut, und warum das genuegt
+
+`git diff --stat 50abd19b..HEAD -- src/` ist eine einzige Datei:
+`ShaderCompilerStub.cpp`. Die uebersetzt ein Baum nur mit `HE_ENABLE_SHADERC=OFF`,
+also in den zwei App-Auspraegungen und nie im Editor. Ein Editor aus diesem Zweig
+waere derselbe Editor wie der aus main.
+
+Geprueft statt angenommen: das vorhandene `out/deploy/Editor/HorizonEditor`
+(08.09., 12:20) traegt den auspraegungsfaehigen Exporter — die Zeichenkette
+`shipping the full game runtime` steht drin, `AppAdvanced` in seinem
+`libHorizonCore.dylib`. Ein Editor **vor** A3b haette beide nicht gehabt und die
+Verifikation waere wertlos gewesen.
+
+**Also: „Editor gebaut" waere hier gelogen.** Was gebaut wurde, sind die zwei
+App-Runtimes und das `.app`; der Editor ist der aus dem Hauptcheckout, Stand nach
+PR #50, quelltextgleich mit diesem Zweig.
+
+### 10.2 Der Export, ohne die ImGui-Maske
+
+`ExportDialogPanel.cpp:1206-1264` macht vier Dinge: es liest die zwei
+Projekteigenschaften, ruft `runtimeFlavorFor`, dann `findRuntimeBundle` und
+danach `ProjectExporter::exportProject` mit `settings.gameRuntimeDir` auf das
+Gefundene. Ein 50-Zeilen-Programm, gegen das `libHorizonCore.dylib` **aus dem
+Auspraegungsbaum dieses Zweigs** gelinkt (`out/runtime-builds/app-advanced/src/
+HE_Core/`), macht dieselben vier Aufrufe mit denselben Argumenten:
+
+```
+clang++ -std=c++20 -Isrc/HE_Core/include verify_export.cpp \
+    out/runtime-builds/app-advanced/src/HE_Core/libHorizonCore.dylib
+verify_export <editorBaseDir> <contentDir> <name> <outDir> <appProject> <advanced>
+```
+
+Drei echte Projekte aus `~/HorizonEngineProjects`, keine Attrappen, und der dritte
+ist die Gegenprobe:
+
+| Projekt | `appProject` / `advanced` | gewuenscht | **gefunden** | Binaerdateien |
+|---|---|---|---|---|
+| `AppSide` | true / true | AppAdvanced | **AppAdvanced** | 8 |
+| `AppTest` | true / false | AppBasic | **AppBasic** | 8 |
+| `Test` | false / true | Game | **Game** | 13 (bzw. 12 im `.app`) |
+
+**Beide Fundorte, nicht nur einer.** Einmal mit `editorBaseDir =
+out/deploy/Editor/` — das ist der Editor aus dem Build-Baum, der Aufstieg findet
+`out/deploy/AppAdvanced` eine Ebene hoeher. Und einmal mit `editorBaseDir =
+out/dmg_staging/HorizonEditor.app/Contents/Resources/` — das ist der
+**ausgelieferte** Editor, und dort liegt die Auspraegung direkt daneben, weil
+`package_macos.sh` sie hineinkopiert hat. Der zurueckgegebene Pfad liegt in beiden
+Faellen dort, wo er hingehoert; im `.app`-Fall innerhalb des Bundles.
+
+Der zweite Fall ist der, der die Frage des Themas beantwortet: **wer den Editor
+herunterlaedt, exportiert die schlanke Auspraegung.**
+
+### 10.3 Die Groessen, gegen den Plan gehalten
+
+Runtime-Bundles, `scripts/runtime_size.py`, macOS/arm64:
+
+| | total | ohne Python | rendering | Schwelle |
+|---|---|---|---|---|
+| `Game` | 85,4 MB | 30,7 MB | 7,2 MB | 90 / 32 MB, eingehalten |
+| `AppAdvanced` | 74,5 MB | 19,8 MB | 1,2 MB | 85 / 26 MB, eingehalten |
+| `AppBasic` | 73,7 MB | 19,0 MB | 0,4 MB | 84 / 25 MB, eingehalten |
+
+Das sind dieselben Zahlen wie in Abschnitt 9, unabhaengig nachgemessen, und sie
+decken sich mit den Plan-Schwellen.
+
+Wichtiger ist aber, was beim **Export** herauskommt, denn das ist das, was ein
+Nutzer bekommt. Diese drei Projekte sind keine Python-Projekte, also faehrt keine
+Standardbibliothek mit, und die 74 MB des Bundles werden zu:
+
+| Export | Groesse | `libHorizonRendering.dylib` | `libcrypto` |
+|---|---|---|---|
+| `AppSide` (AppAdvanced) | **16 MB** | 0,9 MB | -- |
+| `AppTest` (AppBasic) | **15 MB** | 0,3 MB | -- |
+| `Test` (Game) | **25 MB** | 5,8 MB | 4,8 MB |
+
+**Rund 10 MB je App-Export**, also 40 Prozent, und der Unterschied ist genau der,
+den A3b versprochen hat: der Renderer und der Shader-Uebersetzer, die eine App
+nicht braucht.
+
+### 10.4 Die exportierten Apps starten auch
+
+Ein kopiertes Verzeichnis ist noch kein laufendes Programm, also wurden beide
+gestartet, jeweils rund elf Sekunden, dann abgeschossen:
+
+```
+AppTest  : runtime flavour 'app-basic'    → SoftwareRenderer: CPU rasterizer, user interface only
+           101 Frames, 0 errors, 0 critical
+AppSide  : runtime flavour 'app-advanced' → MetalRenderer: initialized on Apple M5, scene pass forward
+            35 Frames, 0 errors, 0 critical
+```
+
+Beide melden im Log die Auspraegung, mit der sie gebaut wurden, beide gehen in
+den Anwendungsmodus (`application mode — no world, no physics, no scene`) und
+beide fahren sauber herunter.
+
+### 10.5 Was NICHT verifiziert ist
+
+* **Die Export-Maske selbst wurde nicht bedient.** Geprueft ist der Weg, den sie
+  geht, nicht ihre Knoepfe. Ein Fehler, der zwischen dem Klick und
+  `runtimeFlavorFor` saesse, faende sich hier nicht — dafuer muesste jemand den
+  Editor oeffnen und exportieren.
+* Das Pruefprogramm reicht kein `gameInstanceJson` durch (der Dialog tut es), also
+  warnt `AppTest` beim Start ueber die fehlende GameInstance. Das ist eine Luecke
+  des Pruefstands, nicht des Exports.
+* **Die neuen `ci.yml`-Schritte sind auf diesem Zweig nie gelaufen und koennen es
+  nicht.** Sie haengen an `if: github.event_name == 'push'` und `ci.yml` laeuft nur
+  auf main und auf PRs gegen main. Windows und Linux — sowohl der Auspraegungsbau
+  als auch die `mv`-Kopie ins Editorpaket — sind bis zum Merge blind. Das ist eine
+  Entscheidung fuer den Merge, kein Rest dieses Schritts.

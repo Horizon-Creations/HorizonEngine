@@ -3043,6 +3043,28 @@ statt über `ctest`. Sie zu echten `ctest`-Zeilen zu machen hieße, den Auspräg
 `ci.yml` vor dessen `ctest`-Schritt zu ziehen — zwei zusätzliche `HorizonGame`-Builds pro
 Plattform und Lauf auf `main`. Das ist eine Kostenentscheidung, keine technische.
 
+### A3b Teil 4: die zwei App-Runtimes fahren jetzt mit (08.09.2026)
+
+Bis hierher waren die App-Ausprägungen **gewogen, aber nie ausgeliefert**. Beide Workflows
+bauten sie, keiner lud sie hoch, und jeder heruntergeladene Editor hatte nur `Game` neben
+sich — der Rückfall aus dem Absatz „Die Ausprägung ist ein Wunsch, keine Bedingung" war
+damit nicht der Ausnahmefall, sondern der Normalfall. Ein App-Export war rund 10 MB zu
+groß und schleppte einen Renderer und einen Shader-Übersetzer mit, die er nie anfasst.
+
+`.github/workflows/ci.yml` baut sie seit heute selbst, bei `push` auf `main`, nach `Run
+tests` und vor dem Verpacken, und legt sie in **dasselbe** Editorpaket: neben
+`HorizonEditor` auf Windows und Linux, in `Contents/Resources` auf macOS. `scripts/
+build_runtimes.py` ist damit Teil der Release-Pipeline; ein **lokaler** Editor-Build ruft es
+weiterhin nicht auf, und das bleibt Absicht — eine Ausprägung ist ein eigener Build-Baum,
+wer den Editor baut, baute sonst drei `HorizonGame`-Bäume statt einem. Entwurf, Begründung
+und die gemessene Verifikation stehen in `docs/app-runtimes-release-pipeline-plan.md`.
+
+Gemessen auf macOS: ein App-Export schrumpft von 25 auf **16 MB** (`AppAdvanced`) bzw.
+**15 MB** (`AppBasic`), `libHorizonRendering.dylib` von 5,8 auf 0,9 bzw. 0,3 MB, und der
+Export-Log sagt `Runtime: AppAdvanced` statt der Rückfallwarnung. Beide exportierten Apps
+starten, rendern und fahren sauber herunter. Windows und Linux sind bis zum Merge blind: die
+neuen Schritte hängen an `push` auf `main`.
+
 ---
 
 ## 11. Risiken und Fallen

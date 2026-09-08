@@ -25,6 +25,21 @@ Each flavour lands in <deploy>/AppAdvanced resp. <deploy>/AppBasic, next to the
 Game directory the editor already deploys — which is where findRuntimeBundle()
 looks for them.
 
+WHO CALLS THIS. Since 08.09.2026 the release pipeline does: .github/workflows/
+ci.yml runs it on a push to main, after `Run tests` and before packaging, and
+the two resulting bundles ride INTO the editor package — beside HorizonEditor on
+Windows and Linux, in Contents/Resources on macOS. A downloaded editor therefore
+exports an app runtime; it no longer falls back to the full game runtime.
+.github/workflows/runtime-flavors.yml still calls it for feature branches, but
+only to weigh all three flavours, nothing leaves that runner.
+
+A LOCAL editor build still does not call it, and that is a decision, not a gap
+(docs/app-runtimes-release-pipeline-plan.md §7): a flavour is a whole build tree
+of its own, so building the editor would build three HorizonGame trees instead
+of one. Whoever wants the app runtimes in their own out/deploy runs this script
+by hand, once; whoever does not gets the documented Game fallback plus its log
+warning.
+
 Usage:
     scripts/build_runtimes.py [--flavor game] [--flavor app-advanced]
                               [--flavor app-basic]
