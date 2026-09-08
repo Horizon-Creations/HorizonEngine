@@ -43,6 +43,12 @@ public:
     // actual port back with boundPort(). Returns nullptr on failure.
     static std::unique_ptr<TcpTransport> listen(std::uint16_t port);
 
+    // Host side, local only: bind 127.0.0.1 instead of every interface, so
+    // nothing outside this machine can even attempt a connection. This is what
+    // the MCP bridge listens on — see socketCreateListenerLoopback for why it is
+    // IPv4-only and why a client must use the literal "127.0.0.1".
+    static std::unique_ptr<TcpTransport> listenLoopback(std::uint16_t port);
+
     // Client side: begin connecting. Returns non-null as soon as the attempt
     // starts — completion is asynchronous, surfacing as a Connected event from
     // poll() (or a Disconnected event if it fails).
@@ -64,6 +70,16 @@ public:
     bool        poll(NetEvent& out) override;
     void        disconnect(ConnectionId conn) override;
     std::size_t connectionCount() const override;
+
+    // Tighten the per-frame ceiling below kMaxFrameSize.
+    //
+    // The default is sized for a late-join scene snapshot. A caller that will
+    // never legitimately see one — the MCP bridge, whose largest payload is a
+    // component patch — can lower it, and then a peer claiming more is dropped
+    // on the LENGTH PREFIX, before a single byte of it is buffered. Values above
+    // kMaxFrameSize are clamped to it; 0 restores the default.
+    void          setMaxFrameSize(std::uint32_t bytes);
+    std::uint32_t maxFrameSize() const { return m_maxFrameSize; }
 
     // Port actually bound in listen mode (0 otherwise).
     std::uint16_t boundPort() const { return m_boundPort; }
@@ -88,6 +104,7 @@ private:
 
     SocketHandle                             m_listener  = kInvalidSocket;
     std::uint16_t                            m_boundPort = 0;
+    std::uint32_t                            m_maxFrameSize = kMaxFrameSize;
     ConnectionId                             m_nextId    = 1;
     std::unordered_map<ConnectionId, Conn>   m_conns;
     std::deque<NetEvent>                     m_events;

@@ -526,6 +526,97 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "same silence.");
 	});
 
+	// ── Remote Control (the MCP bridge) ──────────────────────────────────────
+	// The human switch the security model was missing. Everything else about the
+	// gate was already in place — off by default, loopback only, a token in a
+	// 0600 endpoint file, a closed tool list — but the only way to turn it on was
+	// to edit config.json by hand or set HE_MCP=1. Which means in practice nobody
+	// could turn it on, and, worse, nobody could see that it WAS on. A gate whose
+	// state is invisible is not a gate, it is a hope.
+	row("mcpserver", "Remote Control", [&]{
+		EditorWidgets::checkbox("Allow External Tools to Control This Editor", &cfg.McpServerEnabled);
+		hint("Opens a listener on this machine — 127.0.0.1 only, so nothing on the "
+		     "network can reach it — that an external program can drive the editor "
+		     "through: list what is open, place and move objects, set properties, "
+		     "author HorizonCode graphs. Off by default, and that default is the "
+		     "point. While it is on, any program running as YOU that can read the "
+		     "endpoint file may change this scene, and it changes it through the "
+		     "same gateway you do: the edits land in Undo and travel to a "
+		     "collaboration session exactly like your own. Turn it on for the "
+		     "session you want it in, not once and for good.");
+
+		// What the checkbox alone cannot say, and why it is printed. setEnabled
+		// returns early when the value has not changed, so a start() that failed
+		// — port taken, endpoint file unwritable — is NEVER retried by the frame
+		// loop: the config says on, the bridge says on, and nothing is listening.
+		// A checkbox sitting there ticked would be lying about the single thing
+		// it exists to report.
+		if (ctx.mcp)
+		{
+			const bool wanted  = cfg.McpServerEnabled;
+			const bool running = ctx.mcp->isRunning();
+			if (running)
+			{
+				const std::size_t clients = ctx.mcp->clientCount();
+				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+				                   "Listening on 127.0.0.1:%u \xE2\x80\x94 %zu client%s connected",
+				                   static_cast<unsigned>(ctx.mcp->port()),
+				                   clients, clients == 1 ? "" : "s");
+				if (!wanted)
+					hint("Running because HE_MCP=1 was set for this run, not because of "
+					     "the setting above. The environment can only turn it on, never "
+					     "off, and it is not written back — the next editor started by "
+					     "hand has it off again.");
+			}
+			else if (wanted)
+			{
+				// The honest reading of a ticked box with a dead socket.
+				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+				                   "Enabled, but the listener is not up.");
+				hint("The port could not be opened, or the endpoint file could not be "
+				     "written; the editor log says which. Nothing is listening, so no "
+				     "external tool can connect. Free the port and try again, or set "
+				     "it back to 0 below and let the system pick one.");
+				if (EditorWidgets::button("Try Again"))
+				{
+					// Off and on again, spelled out rather than hidden behind a
+					// config write: this is the only retry path there is, because
+					// setEnabled ignores a value that has not changed — and the
+					// config already says on, so writing it would do nothing.
+					ctx.mcp->setEnabled(false);
+					ctx.mcp->setEnabled(true);
+				}
+			}
+			else
+			{
+				ImGui::TextDisabled("Not listening.");
+			}
+		}
+	});
+
+	row("mcpport", "Remote Control", [&]{
+		// Disabled while the listener is up, and not out of politeness: start()
+		// reads the requested port once, when it opens the socket. A number typed
+		// into a live listener would sit there looking applied and change nothing
+		// until the next editor start — the kind of control that teaches people
+		// not to believe the panel.
+		const bool running = ctx.mcp && ctx.mcp->isRunning();
+		ImGui::BeginDisabled(running);
+		Row::inputInt("Listening Port", &cfg.McpPort);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		ImGui::EndDisabled();
+		// 0 stays 0 (let the system choose); anything else is held inside the
+		// range a port can actually have.
+		cfg.McpPort = std::clamp(cfg.McpPort, 0, 65535);
+		if (running && hovered)
+			ImGui::SetTooltip("Cannot be changed while the listener is up \xE2\x80\x94 "
+			                  "turn it off first.");
+		hint("0 lets the system pick a free port, which is the right answer nearly "
+		     "always: the port is published in the endpoint file next to the access "
+		     "token, so a client reads it there rather than being told. Pin a "
+		     "number only for a client that cannot read that file.");
+	});
+
 	row("camspeed", "Viewport", [&]{
 		if (Row::sliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
 		    && ctx.editorCamera)
@@ -1990,6 +2081,7 @@ constexpr NavItem kGeneralItems[] = {
 constexpr NavItem kEditorItems[] = {
 	{ Page::HorizonCode,   "HorizonCode" },
 	{ Page::CollabGeneral, "Collaboration" },
+	{ Page::RemoteControl, "Remote Control" },
 	{ Page::Repository,    "Source Control" },
 	{ Page::Status,        "Tool Status" },
 };
@@ -2031,6 +2123,7 @@ const char* catalogCategory(Page p)
 	case Page::GlobalIllumination: return "Global Illumination";
 	case Page::Effects:            return "Effects";
 	case Page::CollabGeneral:      return "Collaboration";
+	case Page::RemoteControl:      return "Remote Control";
 	default:                       return nullptr;
 	}
 }
@@ -2162,6 +2255,16 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			// the session config carries as its own default (Config::maxAssetBytes,
 			// which is the asset ceiling now — the join snapshot keeps its own).
 			cfg.CollabMaxAssetMB  = 64;
+			// Remote control goes back OFF, unconditionally and whatever it is
+			// doing right now. Every other setting here resets to "what a fresh
+			// editor does"; for this one that default is also the security model's
+			// first line, so it is the last thing that should survive a reset —
+			// "Restore Defaults" leaving a listener open would be the exact
+			// surprise the default-off exists to prevent. The frame loop closes
+			// the socket on the next pump; a client on it is disconnected, which
+			// is the intended meaning of the button.
+			cfg.McpServerEnabled  = false;
+			cfg.McpPort           = 0;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

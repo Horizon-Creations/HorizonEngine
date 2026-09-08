@@ -38,6 +38,7 @@
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
+#include "McpStatusBar.h"           // is an external tool driving this editor — footer status
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
 #include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
@@ -2430,7 +2431,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// queue, in the same right-anchored group and for the same reason — the
 		// text is a sentence of unbounded length, and only a fixed edge keeps it
 		// out of the centred status label.
-		if (const float actW = CollabActivityBar::FooterWidth(ctx); actW > 0.0f)
+		// Hoisted out of the `if` it used to be scoped to: the block below needs
+		// this width too, and asking a second time would be asking a DIFFERENT
+		// question — clicking the activity line clears it, so a second call in
+		// the same frame returns 0 for a line that was just drawn, and everything
+		// to its left would jump one widget's width to the right for that frame.
+		const float actW = CollabActivityBar::FooterWidth(ctx);
+		if (actW > 0.0f)
 		{
 			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
@@ -2439,6 +2446,27 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			                - (syncW > 0.0f ? 16.0f : 0.0f));
 			if (CollabActivityBar::DrawFooter(ctx))
 				revealFloatingWindow(s_showCollab, "Collaboration");
+		}
+
+		// Is an external tool driving this editor? Left-most of the right-hand
+		// group, and the only one of these that is about who ELSE may be changing
+		// the scene without a face or a cursor to show for it. Draws nothing at
+		// all while remote control is off, which is almost every session — so
+		// when it does appear, it means something.
+		//
+		// The chain above is hand-maintained: this block subtracts the width of
+		// every widget to its right plus 16px per neighbour that is actually
+		// there. Being at the left end is what keeps the edit to one block —
+		// inserting anywhere else means editing everything to its left as well.
+		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW - mcpW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (syncW > 0.0f ? 16.0f : 0.0f)
+			                - (actW > 0.0f ? 16.0f : 0.0f));
+			McpStatusBar::DrawFooter(ctx);
 		}
 
 		// Middle — status

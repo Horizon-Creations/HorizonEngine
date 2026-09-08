@@ -31,6 +31,8 @@
 #endif
 #include <Net/RouterProbe.h>
 #include "GitController.h"
+#include "McpBridge.h"
+#include "EditorCommands.h"
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -102,6 +104,22 @@ struct EditorConfig
 	// is ahead of everything else the session wants to say. The cap is also the
 	// only thing bounding what one peer can make another allocate.
 	int CollabMaxAssetMB = 64;
+
+	// The MCP bridge: let an external client (a Claude instance, through the
+	// stdio shim) drive this editor — read what is open, and from a later step
+	// on place and move objects in the scene.
+	//
+	// OFF by default, and this default is the security model's first line. When
+	// it is on, a listener on 127.0.0.1 accepts anything that can read the
+	// endpoint file's token, and that file is readable by this user's processes.
+	// That is a decision a human makes for a session, not one they inherit from
+	// an installer. HE_MCP=1 turns it on for a headless run without touching the
+	// stored config; HE_MCP_PORT pins the port.
+	bool McpServerEnabled = false;
+	// 0 = let the OS pick. The port is published in the endpoint file, so nobody
+	// has to know it in advance; pinning one is for a client that cannot read
+	// the file.
+	int  McpPort = 0;
 
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
@@ -524,6 +542,16 @@ struct AppContext
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
 
+	// The MCP bridge, for the two places that have to show what it is actually
+	// doing: the Remote Control page in Preferences and the footer chip. READ
+	// ONLY from the UI — the on/off decision travels one way, from
+	// EditorConfig::McpServerEnabled through the frame loop's setEnabled, so the
+	// panel writes the config and nothing else. What the UI needs the pointer
+	// for is the half of the state the config cannot answer: whether the
+	// listener actually came up, on which port, and how many clients are on it.
+	// Null in a headless/test context.
+	HE::Ed::McpBridge* mcp = nullptr;
+
 	// Things that happened without the user asking — a peer that could not apply
 	// a delete, a scan that could not read a file, an asset nobody answered
 	// about. Posted from ANY thread (see NotificationStore), drawn by the footer
@@ -674,6 +702,58 @@ private:
 	// therefore carries its own mutex.
 	HE::Ed::NotificationStore m_notifications;
 	GitController    m_git;
+	// The local MCP listener. Pumped once per frame from OnRender, next to the
+	// collaboration pump and for the same reason: both apply things that came
+	// off a socket, and both have to do it on the main thread between the world
+	// settling and the UI reading it.
+	HE::Ed::McpBridge m_mcp;
+	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
+	// because the config is persisted and these must not be: a headless run must
+	// not leave the bridge switched on for the next interactive one.
+	bool m_mcpEnvEnabled = false;
+	int  m_mcpEnvPort    = 0;
+	// One-time wiring of the tool handlers, done on the first pump rather than
+	// in the constructor: the hooks close over editor state (world, project,
+	// play mode) that does not exist yet when the members are built.
+	bool m_mcpToolsRegistered = false;
+	void setupMcpTools();
+
+	// ── The command gateway ──────────────────────────────────────────────────
+	// One door into the scene (EditorCommands.h). Only the MCP tools go through
+	// it so far: the editor's own structural commands and the five remote
+	// handlers still run on their own wiring, and moving them is the unfinished
+	// half of the step that built this class — doing it here would be a
+	// behaviour change hidden inside a feature.
+	HE::Ed::EditorCommands m_commands;
+	// Held by pointer because both sinks need a reference to a member declared
+	// further down this class, and because setUndoSinks takes addresses that must
+	// not move.
+	std::unique_ptr<HE::Ed::SnapshotUndoSink> m_commandSnapshotSink;
+	std::unique_ptr<HE::Ed::CollabUndoSink>   m_commandSessionSink;
+	void setupEditorCommands();
+
+	// ── Locks an external client holds ───────────────────────────────────────
+	// A session lock taken on behalf of an MCP client, kept out of the one
+	// followSelection manages. Two things make this its own set rather than a
+	// reuse of that one:
+	//
+	//   • followSelection holds exactly ONE subject and releases the previous
+	//     one on every selection change, so a human clicking around would hand
+	//     back what a client is in the middle of editing;
+	//   • an external lock has to outlive the command that took it, or the undo
+	//     entry it produced is dropped by CollabUndo::dropUnowned the moment the
+	//     lock goes — an MCP edit would lose its undo seconds after it happened.
+	//     The plan's risk section decides it this way (§4, "Lock-Timeout gegen
+	//     dropUnowned"): external locks live until the client disconnects.
+	struct McpLock
+	{
+		std::uint64_t subject     = 0;
+		std::uint64_t lastAskedMs = 0;
+	};
+	std::vector<McpLock> m_mcpLocks;
+	void rememberMcpLock(std::uint64_t subject);
+	void updateMcpLocks(std::uint64_t nowMs);
+	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.

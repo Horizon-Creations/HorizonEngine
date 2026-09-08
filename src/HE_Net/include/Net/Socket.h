@@ -76,6 +76,24 @@ HE_NET_API bool socketBindListen(SocketHandle h, std::uint16_t port, int backlog
 // whichever address the directory observed — and an IPv4-only listener would
 // simply be unreachable for half of them.
 HE_NET_API SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog = 16);
+
+// Create a listening socket that ONLY the local machine can reach: bound to
+// 127.0.0.1 rather than to every interface.
+//
+// This exists for the MCP bridge, where "who may connect" is the whole security
+// model: an editor listener that accepted LAN peers would hand every machine on
+// the network the right to move objects in the open scene. Binding the loopback
+// address makes that impossible in the kernel rather than in a check somebody
+// can forget.
+//
+// IPv4-only, deliberately. One socket cannot serve both loopbacks: an AF_INET6
+// socket bound to ::1 accepts ::1 and nothing else, and clearing IPV6_V6ONLY
+// does not change that (v4-mapped peers arrive at ::ffff:127.0.0.1, which is a
+// different bind address). Two sockets would buy compatibility with clients that
+// insist on ::1 — and the only client is our own shim, which connects to the
+// literal "127.0.0.1". Do NOT "fix" that to "localhost": on macOS that resolves
+// to ::1 first and would not reach this listener at all.
+HE_NET_API SocketHandle socketCreateListenerLoopback(std::uint16_t port, int backlog = 16);
 // Actual bound port (useful after binding to 0). Returns 0 on failure.
 HE_NET_API std::uint16_t socketBoundPort(SocketHandle h);
 // Accept one pending connection. WouldBlock when none is queued. The accepted

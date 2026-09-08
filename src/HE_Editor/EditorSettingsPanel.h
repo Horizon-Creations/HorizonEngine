@@ -28,7 +28,12 @@ namespace EditorSettingsPanel
 		// the graph editor's look, the collaboration session, the repository
 		// (git install status and the repository share one page), and the status
 		// of the outside tools the editor needs.
-		HorizonCode, CollabGeneral, Repository, Status,
+		// RemoteControl is the MCP bridge: letting an external client drive this
+		// editor. It sits next to Collaboration because it is the same kind of
+		// question — who else may change this scene — and apart from it because
+		// the answer is a different one: a collaborator is a person who was
+		// invited, a remote client is a program on this machine.
+		HorizonCode, CollabGeneral, RemoteControl, Repository, Status,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
 		// Project — the pages that edit the PROJECT rather than the editor. They

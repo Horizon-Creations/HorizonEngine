@@ -6,6 +6,7 @@
 #include "EditorUI.h"
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
+#include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
@@ -13,6 +14,7 @@
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
+#include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
@@ -1118,6 +1120,24 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabLanDiscovery           = globalstate.getCustomConfigBool("CollabLanDiscovery", m_editorConfig.CollabLanDiscovery);
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
+	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
+	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
+	// The environment overrides the stored config in one direction only: it can
+	// turn the bridge ON for a single run (a headless test, a scripted session),
+	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
+	//
+	// Held in its own members rather than folded into m_editorConfig, because
+	// the config is written back on exit: a run started with HE_MCP=1 would
+	// otherwise leave the listener enabled for the next one the human starts by
+	// hand, which is exactly the surprise the default-off setting exists to
+	// prevent.
+	if (const char* envMcp = std::getenv("HE_MCP"))
+		m_mcpEnvEnabled = (envMcp[0] == '1');
+	if (const char* envMcpPort = std::getenv("HE_MCP_PORT"))
+	{
+		const int p = std::atoi(envMcpPort);
+		if (p > 0 && p < 65536) m_mcpEnvPort = p;
+	}
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	// The ground grid's switch. It lives in ViewportPanel next to the only code
@@ -3798,6 +3818,34 @@ void EditorApplication::OnRender(float dt)
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
 		m_collab.update(nowMs);
+
+		// ── The MCP bridge ────────────────────────────────────────────────
+		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
+		// has already landed and an external client reads the same world the
+		// humans in the session see; and before EditorUI::render, so whatever a
+		// client changed is on screen in the SAME frame rather than one late.
+		//
+		// Not gated on a project being loaded, on purpose. The listener's
+		// lifetime belongs to the editor, not to a scene — a client has to be
+		// able to connect and ask what is open before anything is, and get the
+		// honest answer that nothing is.
+		if (!m_mcpToolsRegistered) setupMcpTools();
+		// Pushed every frame rather than tracked across every project switch,
+		// scene load and new-scene: the gateway holds a raw pointer, and one path
+		// that forgets to update it is a handler writing into a destroyed world.
+		// Set here, one line before the tools that read it can run.
+		m_commands.setWorld(m_editorWorld.get());
+		m_mcp.setPort(static_cast<std::uint16_t>(
+			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
+		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
+		// Preferences panel then only ever writes the config, and setEnabled
+		// ignores a value that has not changed, so this costs nothing.
+		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
+		m_mcp.update(nowMs);
+		// After the pump, because it is the pump that notices a client has gone —
+		// and a client going is what hands its locks back.
+		updateMcpLocks(nowMs);
+
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
 
@@ -6057,6 +6105,352 @@ void EditorApplication::applyRemoteDocDeltas(
 	// put an unsaveable "*" on a read-only tab and offer it at the quit prompt.
 }
 
+// ─── What an external MCP client may ask this editor ─────────────────────────
+// Called once, on the first frame. The tools close over `this`, which is safe
+// for exactly one reason: the bridge is a member of this object and is pumped
+// from this object's frame loop, so a handler can only ever run while the editor
+// it reads is alive and on the main thread.
+//
+// The state the tools report is read through lambdas rather than passed as
+// values, because "what is open" changes with every project switch and the
+// registry is built once.
+void EditorApplication::setupMcpTools()
+{
+	m_mcpToolsRegistered = true;
+
+	// The endpoint file goes into the per-user data directory, NEVER into the
+	// project: a project directory is what ends up in git, and this file carries
+	// the token that authorises editing the scene.
+	m_mcp.setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
+
+	HE::Ed::McpEditorHooks hooks;
+	hooks.projectName = [this] { return m_projectManager.currentProject().name; };
+	hooks.scenePath   = [this] { return m_currentScenePath; };
+	// The same expression AppContext uses (see makeContext): the scene is dirty
+	// when the undo revision has moved past the one it was saved at.
+	hooks.sceneDirty  = [this] { return m_undo.revision() != m_savedRevision; };
+	hooks.isPlaying   = [this] { return m_isPlaying; };
+	hooks.inSession   = [this] { return m_collab.inSession(); };
+	hooks.entityCount = [this]() -> int {
+		// -1, not 0: "no world" and "an empty world" are different answers, and
+		// a client that cannot tell them apart would report an open scene with
+		// nothing in it when in truth no project is loaded.
+		if (!m_editorWorld) return -1;
+		int n = 0;
+		m_editorWorld->registry().view<entt::entity>().each([&](auto) { ++n; });
+		return n;
+	};
+
+	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+
+	// Placing and moving objects. Registered after the gateway is wired, because
+	// the tools capture a reference to it and the first `tools/call` may arrive
+	// in the same frame.
+	setupEditorCommands();
+	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+
+	// Authoring HorizonCode. The tools take the documents as hooks rather than
+	// a pointer to this object for the same reason the two above do: a graph is
+	// a value, so what they do to one is answerable in the test binary.
+	HE::Ed::McpHcHooks hc;
+	hc.isPlaying = [this] { return m_isPlaying; };
+
+	// What the level script's own add menu refuses (LevelScriptPanel.cpp,
+	// kMenus.addExcluded) — the SUBSET that is a real restriction rather than a
+	// routing decision. A level script has no self-widget and no elements, so
+	// Show/Hide Self and Get/Set Property have nothing to act on there; the rest
+	// of that list (Event, Function, Get/Set Variable) is excluded only because
+	// the palette offers those through its own sections, and mirroring it here
+	// would refuse an MCP client the primary thing it is for.
+	static const std::vector<std::string> kLevelScriptExcluded = {
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::GetProperty),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::SetProperty),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::ShowSelf),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::HideSelf),
+	};
+
+	hc.documents = [this] {
+		std::vector<HE::Ed::McpHcDoc> out;
+		if (m_editorWorld)
+			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
+			                "Level Script", "level",
+			                m_undo.revision() != m_savedRevision,
+			                {}, kLevelScriptExcluded });
+		if (!m_projectManager.currentProject().name.empty())
+			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
+			                "Game Instance", "gameinstance",
+			                // The GameInstance graph is committed (and written)
+			                // on every edit, so it is never "unsaved".
+			                false, {}, {} });
+		// Only the class tabs the editor already HOLDS. Loading one behind the
+		// class panel's back would make a second copy of the graph, and the
+		// human's next Save from that tab would write over everything an MCP
+		// client had done to ours.
+		std::vector<HorizonCodeClassPanel::Held> held;
+		HorizonCodeClassPanel::appendHeld(held);
+		for (HorizonCodeClassPanel::Held& h : held)
+			out.push_back({ h.contentPath, h.contentPath, "class", h.dirty, {}, {} });
+		// apiGroups stays empty everywhere: none of these three frontends
+		// restricts the engine registry today (only the Animator sync graph
+		// does, and that is not a document a client can address). Only the
+		// level script names excluded types — see kLevelScriptExcluded above;
+		// the GameInstance graph and a class asset offer everything.
+		return out;
+	};
+
+	hc.resolve = [this](const std::string& key) -> HorizonCode::Graph* {
+		if (key == HE::Ed::kMcpDocLevelScript)
+			return m_editorWorld ? &m_editorWorld->levelScript() : nullptr;
+		if (key == HE::Ed::kMcpDocGameInstance)
+			return m_projectManager.currentProject().name.empty()
+			           ? nullptr : &m_gameInstanceGraph;
+		return HorizonCodeClassPanel::liveGraph(key);
+	};
+
+	hc.beginEdit = [this](const std::string& key) {
+		// Captured BEFORE the mutation and pushed, which is what snapshotNow is
+		// for — so a human can Ctrl+Z what an MCP client did to the level script.
+		// It also bumps the undo revision, which is how the scene learns it is
+		// dirty and how the level script gets written with it.
+		//
+		// The other two have no undo stack of their own today (see the table in
+		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
+		// DocEdit command that step's plan describes and this step does not build.
+		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow();
+	};
+
+	hc.endEdit = [this](const std::string& key) {
+		if (key == HE::Ed::kMcpDocGameInstance)
+		{
+			// Exactly what the Game Instance tab does after a human's edit
+			// (LevelScriptPanel.cpp, GameInstancePanel::render): re-register the
+			// graph with the running host and write it. Skipping it would leave
+			// the app preview running the graph from before the edit.
+			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+			saveGameInstanceGraph();
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
+		}
+		else if (key != HE::Ed::kMcpDocLevelScript)
+		{
+			// A class tab. Without this the tab shows no "*" and its own Save
+			// refuses, believing it has nothing to write.
+			HorizonCodeClassPanel::markDirty(key);
+		}
+	};
+
+	hc.save = [this](const std::string& key) -> bool {
+		if (key == HE::Ed::kMcpDocLevelScript)
+		{
+			// The level script lives IN the scene, so saving it is saving the
+			// scene — there is no second file to write.
+			if (!m_editorWorld || m_currentScenePath.empty()) return false;
+			saveSceneToPath(m_currentScenePath);
+			return m_undo.revision() == m_savedRevision;
+		}
+		if (key == HE::Ed::kMcpDocGameInstance)
+		{
+			saveGameInstanceGraph();
+			return true;
+		}
+		AppContext ctx = makeContext();
+		return HorizonCodeClassPanel::saveByContentPath(ctx, key);
+	};
+
+	// A peer's lock on the document, asked before every mutating hc_ tool. The
+	// human's own path has a read-only banner to look at and an optimistic claim
+	// underneath it; a remote client has neither, so for it the foreign lock is
+	// a hard refusal (McpToolsHc.cpp, `openDoc`).
+	//
+	// The translation is the same one collabSyncKey does: the two editor-owned
+	// graphs ARE their reserved tab path in the lock table, and a class asset's
+	// MCP key is already the content-relative path collabSyncKey produces for a
+	// content asset (HorizonCodeClassPanel keeps that form as ClassState::path),
+	// so it passes through untouched.
+	hc.lockedByOther = [this](const std::string& key) {
+		std::string subject = key;
+		if (key == HE::Ed::kMcpDocLevelScript)       subject = LevelScriptPanel::kTabPath;
+		else if (key == HE::Ed::kMcpDocGameInstance) subject = GameInstancePanel::kTabPath;
+		return m_collab.assetLockedByOther(subject);
+	};
+
+	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
+
+	// The engine's own API, one tool per pure row of HE::api::registry(). No
+	// list here: what the engine registers is what a client can call, and the
+	// rows that CHANGE the world are refused by the policy in McpToolsApi.cpp
+	// rather than by an omission somebody has to maintain.
+	HE::Ed::McpApiHooks api;
+	// The editor's one Ctx factory — the same one Lua, Python and a previewed
+	// graph go through, so a row reached from outside finds exactly what it
+	// finds from inside. Read per call, because entering play mode replaces the
+	// physics world and a captured pointer would be the old one.
+	api.makeCtx = [this] {
+		return apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
+	};
+	// The registry speaks raw entt handles and every other tool on this
+	// interface speaks uuids, so this is the translation between them. -1 for an
+	// unknown uuid: 0 is a valid handle, and a miss that fell through to it
+	// would act on a stranger.
+	api.entityByUuid = [this](const std::string& uuid) -> std::int64_t {
+		if (!m_editorWorld) return -1;
+		const Entity e = HE::Ed::entityByUuid(*m_editorWorld, uuid);
+		if (e == entt::null) return -1;
+		return static_cast<std::int64_t>(entt::to_integral(e));
+	};
+	api.uuidOf = [this](std::uint32_t handle) -> std::string {
+		if (!m_editorWorld) return {};
+		const Entity e = static_cast<Entity>(handle);
+		if (!m_editorWorld->registry().valid(e)) return {};
+		return HE::Ed::uuidOf(*m_editorWorld, e);
+	};
+	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
+}
+
+// ─── The gateway, wired to this editor ───────────────────────────────────────
+// Everything EditorCommands asks of the editor, as functions. Two of them are
+// worth reading twice:
+//
+//   • `requestLock` records the subject in m_mcpLocks. Only an external command
+//     ever reaches it — checkLock skips Origin::Remote entirely and skips
+//     Origin::User while setLockUserCommands is off, which it is and stays,
+//     because turning it on would refuse a human's delete in the one frame
+//     between clicking an entity and the host granting the lock.
+//   • `afterCreate` deliberately does NOT call markSubtreeKnown. An entity a
+//     client just made must stay UNKNOWN to the structural diff for one more
+//     frame, because that diff is what publishes the create to the peers; the
+//     remote handlers mark it precisely because there the create has already
+//     happened elsewhere.
+void EditorApplication::setupEditorCommands()
+{
+	m_commandSnapshotSink = std::make_unique<HE::Ed::SnapshotUndoSink>(
+		&m_undo, [this] { return m_isPlaying; });
+	m_commandSessionSink = std::make_unique<HE::Ed::CollabUndoSink>(&m_collabUndo);
+	m_commands.setUndoSinks(m_commandSnapshotSink.get(), m_commandSessionSink.get());
+
+	HE::Ed::EditorCommands::Hooks h;
+	h.isPlaying = [this] { return m_isPlaying; };
+	h.inSession = [this] { return m_collab.inSession(); };
+	h.nowMs     = [] {
+		return static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+	};
+	h.subjectFor = [this](std::uint32_t handle) { return m_collab.subjectFor(handle); };
+	h.ownsLock   = [this](std::uint64_t s) { return m_collab.ownsLock(s); };
+	h.lockedByOther = [this](std::uint64_t s) { return mcpLockedByOther(s); };
+	h.requestLock = [this](std::uint64_t s) {
+		rememberMcpLock(s);
+		return m_collab.requestLock(s);
+	};
+	h.publishTransform = [this](std::uint64_t subject, const float pos[3],
+	                            const float rot[3], const float scale[3],
+	                            std::uint64_t nowMs) {
+		m_collab.publishTransform(subject, pos, rot, scale, nowMs);
+	};
+	h.publishComponents = [this](std::uint32_t handle,
+	                             const std::vector<std::uint8_t>& blob) {
+		m_collab.publishComponents(handle, blob);
+	};
+	h.beforeDestroy = [this](Entity e, HE::Ed::Origin origin) {
+		// Same order and the same reasons as deleteSelectedEntity: the bodies go
+		// first, because after destroyEntity the hierarchy that names them is
+		// gone, and the selection goes because a selected handle that no longer
+		// exists is what the inspector dereferences next frame.
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+
+		// ONLY for a peer's delete, and this is the echo protection rather than
+		// bookkeeping: syncStructuralChanges publishes a destroy for everything
+		// in m_structureKnown that no longer exists, so dropping the entry here
+		// is how onRemoteDestroy says "they already know". For an external
+		// delete it would be the opposite of what is wanted — the peers would
+		// never hear that the client removed anything. deleteSelectedEntity, the
+		// human's path, does not erase either.
+		if (origin == HE::Ed::Origin::Remote) m_structureKnown.erase(e);
+	};
+	m_commands.setHooks(std::move(h));
+}
+
+// A subject an external client has taken. Kept in insertion order; the list is
+// at most as long as the number of entities one client touched in a session, so
+// a linear search is the right shape.
+void EditorApplication::rememberMcpLock(std::uint64_t subject)
+{
+	if (subject == 0) return;
+	for (const McpLock& l : m_mcpLocks)
+		if (l.subject == subject) return;
+	// Stamped now, not zero: the caller has just asked for this lock, and a zero
+	// would make updateMcpLocks ask a second time in the same frame.
+	const auto nowMs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+	m_mcpLocks.push_back(McpLock{ subject, nowMs });
+}
+
+bool EditorApplication::mcpLockedByOther(std::uint64_t subject)
+{
+	// The replicated table, read the same way assetLockedByOther reads it: a
+	// holder that is not us is a refusal the client can act on immediately,
+	// without a round trip.
+	const HE::Net::LockInfo* l = m_collab.lockFor(subject);
+	return l && l->owner != m_collab.localParticipant();
+}
+
+// Keeping an external client's locks alive, and handing them back when it goes.
+//
+// Alive, because they are not the selection's: followSelection releases whatever
+// it held the moment the human clicks elsewhere, and if the human happens to
+// click an entity a client is editing, that release takes the client's lock with
+// it. Re-asking is the whole repair — the lock table is replicated, so asking
+// again for something we already hold costs nothing and is skipped anyway.
+//
+// Handed back, because a lock nobody is behind any more blocks a human from
+// touching an entity for the rest of the session. Disconnect is the release
+// signal rather than a timer: a timer would drop the lock a few seconds after an
+// edit, and CollabUndo::dropUnowned would then throw the undo entry that edit
+// produced (docs/mcp-editor-integration-plan.md §4).
+void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
+{
+	if (m_mcpLocks.empty()) return;
+
+	if (!m_collab.inSession())
+	{
+		// The session ended; the locks went with it.
+		m_mcpLocks.clear();
+		return;
+	}
+	if (m_mcp.clientCount() == 0)
+	{
+		for (const McpLock& l : m_mcpLocks) m_collab.releaseLock(l.subject);
+		m_mcpLocks.clear();
+		return;
+	}
+
+	// Half a second between re-asks: a grant is one round trip, and asking every
+	// frame in the meantime would put sixty requests on the wire for one answer.
+	constexpr std::uint64_t kReaskMs = 500;
+	for (auto it = m_mcpLocks.begin(); it != m_mcpLocks.end();)
+	{
+		if (m_collab.ownsLock(it->subject)) { ++it; continue; }
+		if (mcpLockedByOther(it->subject))
+		{
+			// Someone else has it now. Forgetting it here is what keeps the next
+			// command's answer honest — it will be locked_by_other rather than a
+			// silent retry loop.
+			it = m_mcpLocks.erase(it);
+			continue;
+		}
+		if (nowMs - it->lastAskedMs >= kReaskMs)
+		{
+			m_collab.requestLock(it->subject);
+			it->lastAskedMs = nowMs;
+		}
+		++it;
+	}
+}
+
 void EditorApplication::syncStructuralChanges()
 {
 	if (!m_editorWorld) return;
@@ -6581,6 +6975,7 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.mcp                 = &m_mcp,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
 		                              bool folder) { enqueueRetargetOnDisk(oldRel, newRel, folder); },
@@ -7440,6 +7835,13 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
 
+	// The MCP listener goes down here for the same reason, one step milder: the
+	// endpoint file it leaves behind names a port and a pid, and a shim that
+	// reads a stale one connects to whatever the OS handed that port to next.
+	// The destructor would do it too — this is so it happens before the long
+	// teardown below rather than after it.
+	m_mcp.stop();
+
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process).
 	EditorUI::joinPendingExport();
@@ -7611,6 +8013,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
+	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
+	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);
