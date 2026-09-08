@@ -2588,9 +2588,10 @@ namespace
 	  "not one: the middle of a container puts the widget inside it, and the top "
 	  "and bottom edges put it in front of or behind that row among its siblings "
 	  "— which is how a Spacer lands BETWEEN two children of a Vertical Box "
-	  "instead of only ever at the end. A row with no children has no inside, so "
-	  "its two halves are simply before and after. The line drawn while you drag "
-	  "is where the widget would land.\n\n"
+	  "instead of only ever at the end. A widget that cannot hold children at all "
+	  "— a label, an image, a spacer — has no inside, so its two halves are "
+	  "simply before and after; an empty box still has its middle. The line "
+	  "drawn while you drag is where the widget would land.\n\n"
 	  "What the order then means depends on the parent. In a box, a grid or "
 	  "another layout container it is the layout order, top to bottom or left to "
 	  "right. In a Panel, on a Button or at the top level it is the DRAWING "
@@ -2601,8 +2602,8 @@ namespace
 	{ "UI Hierarchy/Canvas", "Canvas",
 	  "The root of the widget tree. Selecting it selects nothing in particular, "
 	  "which is what puts the canvas settings in the details panel; dropping a "
-	  "widget on it moves that widget out to the top level, at the end. Between "
-	  "two top-level widgets is a drop on their own rows.",
+	  "widget on it moves that widget out to the top level, at the end. To put "
+	  "one between two top-level widgets, drop on one of their rows instead.",
 	  "", "ui#designer" },
 	{ "UI Hierarchy/Duplicate", "Duplicate",
 	  "Copies this widget and everything under it, as a sibling. The copy keeps "
