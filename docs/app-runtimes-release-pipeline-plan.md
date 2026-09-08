@@ -564,3 +564,64 @@ beantwortet P0 und die Groessen, aber kein Bundle verlaesst dort den Runner. Der
 `D:\a\HorizonEngine\HorizonEngine/package/AppAdvanced` — ist auf Windows noch nie gelaufen.
 Dass `build_runtimes.py` mit genau diesem Pfad umgehen kann, zeigt dieser Lauf; dass die
 MSYS-Bash-Werkzeuge es auch tun, ist wahrscheinlich und ungeprueft.
+
+### 10.7 Das Pruefprogramm, damit es jemand nachfahren kann
+
+Kein Teil des Baums, absichtlich: es haengt an einem gebauten
+`libHorizonCore.dylib` und an Projekten, die auf diesem Rechner liegen. Damit die
+Behauptungen oben nachpruefbar sind statt bloss geglaubt, steht es hier ganz.
+
+```cpp
+// Schritt-5-Verifikation: der Weg, den ExportDialogPanel.cpp:1206-1264 geht,
+// mit denselben Aufrufen und denselben Argumenten, nur ohne die ImGui-Maske.
+//   Projekt-Eigenschaften -> runtimeFlavorFor -> findRuntimeBundle -> exportProject
+#include <Hpak/ProjectExporter.h>
+#include <filesystem>
+#include <iostream>
+#include <string>
+
+int main(int argc, char** argv)
+{
+    // argv: <editorBaseDir> <contentDir> <projectName> <outputDir> <appMode 0/1> <advanced 0/1>
+    if (argc < 7) { std::cerr << "usage\n"; return 2; }
+    const std::filesystem::path base = argv[1];
+    const std::filesystem::path contentDir = argv[2];
+    const std::string name = argv[3];
+    const std::filesystem::path outputDir = argv[4];
+    const bool appMode  = std::string(argv[5]) == "1";
+    const bool advanced = std::string(argv[6]) == "1";
+
+    const RuntimeFlavor want = runtimeFlavorFor(appMode, advanced);
+    RuntimeFlavor got = want;
+    const std::filesystem::path runtimeDir =
+        findRuntimeBundle(base, ExportPlatform::Host, want, &got);
+
+    std::cout << "editor base : " << base.string() << "\n";
+    std::cout << "project     : " << name
+              << "  (appProject=" << appMode << ", advancedShaderEffects=" << advanced << ")\n";
+    std::cout << "wanted      : " << runtimeFlavorName(want) << "\n";
+    if (runtimeDir.empty()) { std::cout << "Error: no game runtime found\n"; return 1; }
+
+    // Wortgleich die zwei Log-Zeilen des Export-Dialogs.
+    std::cout << "Runtime: " << runtimeFlavorName(got)
+              << " (" << runtimeDir.lexically_normal().string() << ")\n";
+    if (got != want)
+        std::cout << "No " << runtimeFlavorName(want)
+                  << " runtime here - shipping the full game runtime instead.\n";
+
+    ExportSettings es;
+    es.compress = false;
+    es.gameRuntimeDir = runtimeDir;
+    es.appProject = appMode;
+    es.advancedShaderEffects = advanced;
+    es.engineContentDir = base / "EngineContent";
+    std::filesystem::create_directories(outputDir);
+    const ExportResult r = ProjectExporter::exportProject(contentDir, name, "", outputDir, es);
+    std::cout << "export success=" << r.success
+              << " assets=" << r.assetsPacked
+              << " binaries=" << r.binaryFilesCopied
+              << (r.errorMessage.empty() ? std::string() : "  err=" + r.errorMessage) << "\n";
+    std::cout << "exe: " << r.executablePath.string() << "\n";
+    return r.success ? 0 : 1;
+}
+```
