@@ -1,79 +1,140 @@
-# App-Modus: Widget-Hierarchie im Outliner — Zwischenbefund (Schritt 1, abgebrochen)
+# App-Modus: Widget-Hierarchie im Outliner — Diagnose
 
-Stand 2026-09-08. Schritt 1 (Reproduzieren + Diagnose) wurde vom Leitstand
-abgebrochen, bevor der Repro-Test gebaut und ausgefuehrt werden konnte. Alles
-hier unten ist am Quelltext GELESEN, nicht laufend gemessen. Kein Fix.
+Stand 2026-09-08. Schritt 1 hat den Quelltext gelesen; Schritt 2 hat den
+Vorschaupfad **wirklich laufen lassen**. Die Ursache steht fest und ist per
+Probe bestaetigt. Der Fix ist hier NICHT eingebaut — das ist der naechste
+Schritt.
 
-## Was der Code sagt (mit Belegen)
+Belege: `tests/test_app_preview_outliner.cpp`, gebaut und ausgefuehrt gegen
+`build-tests/tests/he_tests`.
 
-* Die Diagnose-Logzeile steht auf `src/HE_Editor/EditorApplication.cpp:1994`
-  (nicht ~2145, wie im Thema notiert). Sie meldet
-  `m_editorWorld->widgets().count()` und `m_gameInstanceGraph.nodes.size()`.
-* `uiLive` (`EditorApplication.cpp:1972`) und `appLivePreview`
-  (`EditorApplication.cpp:6087`) haengen BEIDE nur an
-  `currentProject().appProject`. Kein zweites Kriterium.
-* **Der Outliner liest denselben WidgetManager, den `fireInit` befuellt.**
-  `AppContext.world` ist `world()` (`EditorApplication.cpp:6070`), also
-  `Application::m_world` (`Application.h:140`), und `setWorld(m_editorWorld.get())`
-  laeuft in `EditorApplication.cpp:1455`. `svc.createWidget` schreibt in
-  `m_editorWorld->widgets()` (`EditorApplication.cpp:1299`).
-  → Ursache "Panel liest einen anderen Manager" ist damit ausgeschlossen.
-* `drawElem(*tree, 0)` (`OutlinerPanel.cpp:225`) passt zur Konvention
-  `parentId == 0` = Kind der Canvas (`UIElement.h:368`, `UIWidgetTree.h:152`).
-  → Der Einstiegspunkt ist richtig. ABER: `drawElem` zeigt still NICHTS von
-  einem Element, dessen `parentId` weder 0 noch die Id eines anderen Elements
-  im selben Baum ist. Ein Waisenkind faellt lautlos raus. Das ist der
-  plausibelste Kandidat fuer "zeigt die Hierarchie nicht RICHTIG an"
-  (im Unterschied zu "zeigt nichts") und ist noch nicht geprueft.
+## Die Ursache
 
-## Randbefund aus der Chefchen-Recherche: bestaetigt, und schaerfer
+`ProjectManager.cpp:175`, in `shell()` — dem Helfer, aus dem **alle fuenf
+geformten App-Templates** ihren Rahmen bauen:
 
-`ProjectManager.cpp:1506` liest `appProject` ohne ODER mit `isAppPreset(preset)`.
-Das laesst sich dort auch gar nicht nachruesten: **`ProjectData` hat ueberhaupt
-kein `preset`-Feld** (`ProjectManager.h:258-261`), und `loadProject` liest den
-Schluessel `"preset"` nirgends. Geschrieben wird er (`ProjectManager.cpp:1331`),
-gelesen nie.
+```cpp
+const int root = panel(t, -1, "Root", kBack);
+```
 
-Folge, praeziser als "Widget laedt nicht": Bei einem von Hand editierten oder
-alten `.heproj` mit App-Preset aber fehlendem/false `appProject`-Schluessel ist
-`appProject == false`. Dann ist `uiLive` false, `fireInit` laeuft NIE, die
-Diagnosezeile 1994 wird NIE ausgegeben, und der Outliner nimmt den
-Entity-Zweig — er zeigt also gar keine Widget-Hierarchie, sondern eine leere
-Entity-Liste. Fuer neu angelegte Projekte kann das nicht auftreten
-(`ProjectManager.cpp:1312` merged `appProject || isAppPreset(preset)` und 1333
-schreibt das Ergebnis).
+Das Wurzel-Panel bekommt `parentId = -1`. Die Konvention der Engine ist aber
+`parentId == 0` = direktes Kind der Canvas (`UIElement.h:368`), und daran
+haengt jede Stelle, die Wurzeln aufzaehlt:
 
-**Erste Frage an den Nutzer sollte deshalb sein: steht `"appProject": true` in
-seiner `.heproj`?** Das kostet nichts und schliesst den ganzen Zweig aus.
+* `OutlinerPanel.cpp:225` — `drawElem(*tree, 0)`
+* `UIEditorPanel.cpp:5637` — `st.tree.childrenOf(0)` (die Hierarchie-Liste des
+  UI-Designers)
+* `WidgetManager.cpp:951` — der Layout-Durchlauf ueber die Wurzeln
+* `WidgetManager.cpp:1512` — der Spalten-Leser fuer Table-Row-Templates
 
-## Noch nicht geprueft (fuer den naechsten Schritt)
+Bei `-1` findet keine dieser Schleifen etwas. Der Outliner zeigt den Kopf
+„Widget 1" **und darunter nichts**, obwohl die Vorschau 17 bis 48 Elemente
+haelt.
 
-1. **Waisen-Elemente**: `tpl::dashboard/form/tool`
-   (`ProjectManager.cpp:280/338/415`) auf Id/ParentId-Konsistenz pruefen, dazu
-   das Remapping in `WidgetManager::embedWidgetRefs` (Graft eingebetteter
-   Widgets, `WidgetManager.cpp:394ff`).
-2. **Der Restart-Pfad**: `restartAppPreview`
-   (`EditorApplication.cpp:6775-6812`) laeuft nach jeder Asset-Aenderung
-   (`UIEditorPanel.cpp:5817`). Zu pruefen: liest der ContentManager das
-   `UI/RootWidget.hasset` wirklich neu oder liefert er den Cache (=> veraltete
-   Hierarchie nach einer Bearbeitung), und was macht `restoreState`
-   (`WidgetManager.cpp:4608ff`) mit einem Baum, dessen Struktur sich geaendert
-   hat. "Ich habe im UI-Editor ein Kind hinzugefuegt und der Outliner zeigt es
-   nicht richtig" ist die wahrscheinlichste Nutzergeschichte.
-3. **Der Repro-Test selbst**, geplant als `tests/test_app_preview_outliner.cpp`
-   nach dem Muster von `tests/test_app_todo.cpp` (TempDir, ContentManager,
-   `HorizonCode::Runtime::Services` wie `EditorApplication.cpp:1299` gebunden,
-   `fireInit`): pro App-Preset `createProject`, `GameInstance.hcode` per
-   `fromJson` laden (3 Nodes, 3 Links erwartet), danach `count()==1`,
-   `liveIds().size()==1`, Baum nicht leer, mindestens ein Element mit
-   `parentId==0`, und — das ist der eigentliche Vertrag von `drawElem` —
-   JEDER `parentId` ist 0 oder eine existierende Element-Id.
+### Warum es niemandem vorher auffiel
 
-## Build
+Gezeichnet wird trotzdem richtig: `parentRectOf`
+(`UIWidgetTree.cpp:98-108`) macht `tree.find(-1)` → `nullptr` → faellt auf das
+Canvas-Rechteck zurueck. Die App **sieht** also korrekt aus, nur jede Liste der
+Hierarchie ist leer. Genau das ist „das Root-Widget zeigt die Hierarchie nicht
+richtig an".
 
-`build-tests/` ist in diesem Worktree bereits konfiguriert (Unix Makefiles,
-Debug, clang) und greift ueber `FETCHCONTENT_SOURCE_DIR_*` auf die schon
-heruntergeladenen Abhaengigkeiten in `<Haupt-Checkout>/build/_deps` zurueck, es
-wird also nichts neu geladen. `cmake --build build-tests --target he_tests -j10`
-ist noch nie gelaufen — der naechste Schritt muss mit einem kalten Build von
-HE_Core + HE_Scene + HE_Tools rechnen.
+### Bestaetigt, nicht vermutet
+
+`-1` → `0` in dieser einen Zeile, neu gebaut, Tests gelaufen:
+**4 von 4 Testfaellen gruen, 114 von 114 Assertions**. Zurueckgedreht wieder
+2 von 4 rot. Die Probe steht nicht im Commit.
+
+## Was gemessen wurde (echter Lauf, kein Quelltext-Lesen)
+
+Die Diagnosezeile von `EditorApplication.cpp:1994`, aus dem nachgebauten
+Vorschaupfad, fuer **jedes** der sechs App-Presets identisch:
+
+```
+Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+```
+
+Damit sind zwei der drei im Thema genannten Ursachen erledigt:
+
+| Vermutete Ursache | Befund |
+| --- | --- |
+| kein Graph | ausgeschlossen — 3 Nodes, geladen aus `GameInstance.hcode` |
+| Graph erzeugt nichts | ausgeschlossen — `count() == 1`, `liveIds().size() == 1` |
+| Widget laedt nicht | ausgeschlossen — `tree(id)` liefert 21–48 Elemente |
+
+Die vierte, im Thema nicht genannte Ursache ist die richtige: **das Widget
+laedt, und der Baum hat keinen Einstiegspunkt.**
+
+Pro Preset, aus dem Testlauf:
+
+| Preset | Elemente im Baum | Elemente mit `parentId == 0` | Outliner zeigt |
+| --- | --- | --- | --- |
+| Application | 2 | 1 | die Hierarchie, korrekt |
+| AppSidebar | 20 | 0 | nichts |
+| AppWizard | 17 | 0 | nichts |
+| AppDashboard | 33 | 0 | nichts |
+| AppForm | 21 | 0 | nichts |
+| AppTool | 48 | 0 | nichts |
+
+„Elemente mit `parentId == 0`" ist zugleich die Zahl der Elemente, die
+`drawElem` ueberhaupt erreicht: bei fuenf von sechs Templates keines von allen.
+
+`Application` ist heil, weil es nicht durch `shell()` geht, sondern durch
+`rootWidgetTreeJson` (`ProjectManager.cpp:~380`) — dort bleibt `parentId` auf
+seinem Default 0.
+
+## Was nebenbei gruen war
+
+* **Der Neustartpfad.** `restartAppPreview` nachgebaut (fireShutdown → clear →
+  setGraph → fireInit) nach einer Bearbeitung ueber
+  `ContentManager::getWidgetMutable` + `saveAsset`, so wie
+  `UIEditorPanel.cpp:463` speichert: `elements before=21 after=22`, die neue
+  Zeile ist nach dem Neustart da. **Kein Cache-Problem.** Die Sorge aus
+  Schritt 1 ist damit erledigt.
+* **Eindeutige Element-Ids.** Kein Duplikat in irgendeinem Template, auch nach
+  `embedWidgetRefs`.
+* **Das Manifest-Flag.** `createNewProject(..., appProject=false, ...)` mit
+  einem App-Preset setzt `appProject` trotzdem auf true — das Gate, an dem
+  `uiLive` haengt, ist heil.
+
+## Der Randbefund, jetzt gemessen
+
+`ProjectManager.cpp:1506` liest `appProject` und nichts sonst; `ProjectData`
+hat kein `preset`-Feld. Ein von Hand geschriebenes `.heproj` mit App-Preset
+aber ohne `appProject`-Schluessel laedt deshalb als **Spiel**:
+
+```
+hand-written manifest: loaded=true appProject=false
+```
+
+Kein OnInit, keine Diagnosezeile, eine leere Entity-Liste statt eines
+Widget-Baums. Fuer neu angelegte Projekte kann das nicht passieren
+(`ProjectManager.cpp:1312`). Im Test als `MESSAGE` + CHECK auf das heutige
+Verhalten festgehalten, nicht als Fehler — wer das aendern will, aendert eine
+Absicht, keinen Bug.
+
+## Der Test
+
+`tests/test_app_preview_outliner.cpp`, vier Faelle. Er baut den
+Vorschaupfad ohne GUI nach: `createNewProject` → `setContentRoot`
+(`EditorApplication.cpp:1487`) → dieselben vier Widget-Services
+(`EditorApplication.cpp:1299`) → `GameInstance.hcode` per `fromJson`
+(`loadGameInstanceGraph`) → `fireInit`.
+
+Er prueft nicht „irgendein Element hat parentId 0", sondern **den echten
+Vertrag von `drawElem`**: von parentId 0 aus absteigen und zaehlen, was dabei
+erreicht wird. Was nicht erreicht wird, wird namentlich ausgegeben.
+
+**Zwei der vier Faelle sind absichtlich rot** und werden mit dem Einzeiler in
+`shell()` gruen. Wer den Fix baut, aendert am Test nichts.
+
+Die ganze Suite dazu gelaufen: **2544 Faelle, 2542 gruen, 2 rot** — genau die
+zwei hier. Sonst ist nichts angefasst.
+
+## Grenze dieses Durchlaufs
+
+Gemessen wurde der Pfad, den der Outliner LIEST. Der Editor selbst wurde nicht
+gestartet und ImGui hat nichts gezeichnet — was das Panel malt, ist weiterhin
+nur aus dem Quelltext abgeleitet. Fuer die Ursache spielt das keine Rolle: ein
+Baum ohne Wurzel bei parentId 0 hat fuer `drawElem` keine erste Zeile,
+unabhaengig davon, wer sie zeichnen wuerde.
