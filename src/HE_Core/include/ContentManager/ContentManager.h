@@ -36,6 +36,13 @@ public:
 	bool unloadAsset(HE::UUID id);
 	bool isLoaded(HE::UUID id) const;
 	bool isLoaded(const std::string& relativePath) const;
+	// The UUID a content-relative path already resolves to, or a zero UUID when
+	// nothing here knows it. A pure LOOKUP: unlike loadAsset(path) — which
+	// answers the same question for a resident asset but reads the disk for one
+	// that is not — this never registers anything, so a caller asking "what is
+	// this?" cannot accidentally load it. That is what lets the scripting API
+	// unload or type-name an asset by the only handle a script has, its path.
+	HE::UUID idForPath(const std::string& relativePath) const;
 	bool saveAsset(RuntimeAsset& asset);
 
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
@@ -91,9 +98,18 @@ public:
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
+	// Mutable for the same reason materials and graphs are: the editor's notify
+	// timeline edits the loaded clip in place and persists it with saveAsset().
+	// The loaded asset IS the edit buffer, so a notify moved on the timeline is
+	// already what the animators fire against — no copy to keep in step.
+	AnimationClipAsset*        getAnimationClipMutable(HE::UUID id);
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
+	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
+	BoneMaskAsset*               getBoneMaskMutable(HE::UUID id);
+	const BlendSpaceAsset*       getBlendSpace(HE::UUID id) const;
+	BlendSpaceAsset*             getBlendSpaceMutable(HE::UUID id);
 	const SaveGameTemplateAsset* getSaveGameTemplate(HE::UUID id) const;
 	SaveGameTemplateAsset*       getSaveGameTemplateMutable(HE::UUID id);
 	const StructTypeAsset*     getStructType(HE::UUID id) const;
@@ -171,6 +187,8 @@ public:
 	HE::UUID registerEnumType(EnumTypeAsset asset);
 	HE::UUID registerSaveGameTemplate(SaveGameTemplateAsset asset);
 	HE::UUID registerTheme(ThemeAsset asset);
+	HE::UUID registerBoneMask(BoneMaskAsset asset);
+	HE::UUID registerBlendSpace(BlendSpaceAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -596,6 +614,8 @@ private:
 	SlotMap<EnumTypeAsset>           m_enumTypeAssets;
 	SlotMap<SaveGameTemplateAsset>   m_saveTemplateAssets;
 	SlotMap<ThemeAsset>              m_themeAssets;
+	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
+	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {

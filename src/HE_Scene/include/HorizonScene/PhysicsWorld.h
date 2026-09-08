@@ -2,11 +2,14 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 class HorizonWorld;
 class ContentManager;
+namespace HE { struct CollisionLayerConfig; }
+#include <Types/Enums.h>   // HE::JointType, named by JointDesc below
 
 // PIMPL wrapper around Jolt PhysicsSystem.
 // Keeps all Jolt headers out of the public API.
@@ -41,6 +44,13 @@ public:
         glm::vec3 point    = {};
         glm::vec3 normal   = {};
         float     distance = 0.0f;
+        // Which of the sixteen collision channels the thing that was hit sits
+        // in. Appended here rather than left to the caller because the only
+        // other way to it is looking the entity up in the registry and reading
+        // its RigidBodyComponent — a lookup to learn something the query
+        // already had in its hand. Meaningless when `hit` is false, like every
+        // field above it.
+        uint8_t   layer    = 0;
     };
 
     PhysicsWorld();
@@ -56,6 +66,27 @@ public:
     // entity with no body at all is the failure this whole class was audited for.
     // Both applications set it right after constructing the world.
     void setContentManager(ContentManager* content);
+
+    // The project's collision matrix: which of the sixteen named channels may
+    // touch which. A body's channel comes from RigidBodyComponent::
+    // collisionLayer, a character's from CharacterControllerComponent::
+    // collisionLayer, and the implicit landscape height field is fixed to the
+    // Terrain channel.
+    //
+    // The editor calls this when a project is opened and whenever the matrix is
+    // edited; GameApplication calls it once at start from the packaged
+    // ProjectConfig. WITHOUT A CALL the default-constructed config applies —
+    // every channel collides with every other, which is exactly how this class
+    // behaved before channels existed. That is the contract: an existing project
+    // that never heard of layers simulates unchanged.
+    //
+    // Safe to call while the simulation runs: the matrix is copied into the
+    // filter Jolt holds, so the change takes effect from the next broadphase
+    // update. Contacts that already exist are resolved once more and then let
+    // go, so a pair switched off separates over a step rather than in the same
+    // instant — which is what anyone editing the matrix during play wants to
+    // see anyway.
+    void setCollisionLayers(const HE::CollisionLayerConfig& config);
 
     // Build one body per entity that has RigidBodyComponent + TransformComponent,
     // plus one character controller per CharacterControllerComponent, plus a
@@ -113,6 +144,13 @@ public:
     // Destroy the entity's body and/or character. Silent no-op when it has
     // neither. Also drops the entity's pending contact bookkeeping, so a removal
     // never produces an exit event naming an entity that is already gone.
+    //
+    // This is a PERMANENT removal, and it takes the joints with it: the one this
+    // entity authored and the ones other entities aimed at it are destroyed
+    // outright, not put back on the pending list. A surviving partner's joint
+    // does not come back when this entity is added again — only rebuilding the
+    // OWNER of that joint brings it back. Anything else would leave an entry
+    // waiting for a body that was deliberately deleted.
     void removeEntity(uint32_t entityId);
     int  removeEntityTree(HorizonWorld& world, uint32_t rootEntityId);
 
@@ -164,6 +202,20 @@ public:
     // so the sentinel has to be a value the allocator never hands out.
     static constexpr uint32_t kNoEntity = 0xFFFFFFFFu;
 
+    // "Every channel" for the layerMask parameters below — the default, so a
+    // caller who does not care about channels writes nothing and sees what the
+    // query always reported.
+    //
+    // A MASK, not a channel index: a query asks "world and enemies, not
+    // triggers", which is a set. Bit i means channel i is eligible; sixteen of
+    // the thirty-two bits mean anything, and the rest simply never match, so an
+    // over-wide mask needs no validation. Note that this filters what the query
+    // may SEE — it has nothing to do with the collision matrix, which decides
+    // what the simulation resolves. A ray fired on the Player channel is not
+    // restricted to what a player collides with; it sees exactly what its mask
+    // names.
+    static constexpr uint32_t kAllLayers = 0xFFFFFFFFu;
+
     // Cast a ray from `origin` along `direction` (need not be normalised) up to
     // `maxDistance` metres. Returns the closest hit or RaycastHit{hit=false}.
     //
@@ -171,10 +223,17 @@ public:
     // something's own position reports that something, which is never what the
     // caller meant. Triggers ARE reported, as they always were; callers that
     // care check the hit entity.
+    //
+    // `layerMask` narrows what the ray may see to the channels whose bit is set
+    // (kAllLayers = every one, and the parameter is last so no existing caller
+    // changes). The filter sits in Jolt's OBJECT-LAYER slot, ahead of the narrow
+    // phase, so a ray that ignores fifteen channels also skips their triangle
+    // tests instead of doing them and discarding the answer.
     RaycastHit raycast(const glm::vec3& origin,
                        const glm::vec3& direction,
                        float            maxDistance = 1000.0f,
-                       uint32_t         ignoreEntityId = kNoEntity) const;
+                       uint32_t         ignoreEntityId = kNoEntity,
+                       uint32_t         layerMask = kAllLayers) const;
 
     // Sweep a sphere of `radius` from `origin` along `direction` up to
     // `maxDistance` metres, and report the first thing it touches.
@@ -187,11 +246,14 @@ public:
     // Unlike raycast, this one skips TRIGGERS. A sweep is asking "what would
     // block me", and a trigger volume blocks nothing — a checkpoint between the
     // player and the camera would otherwise yank the view in.
+    //
+    // `layerMask` as on raycast: which channels the sweep may see at all.
     RaycastHit sphereCast(const glm::vec3& origin,
                           const glm::vec3& direction,
                           float            radius,
                           float            maxDistance,
-                          uint32_t         ignoreEntityId = kNoEntity) const;
+                          uint32_t         ignoreEntityId = kNoEntity,
+                          uint32_t         layerMask = kAllLayers) const;
 
     // Every entity whose body overlaps a sphere at `center`. This is the query
     // an explosion and a melee swing are built from: everything in range in one
@@ -205,9 +267,89 @@ public:
     // query ("what is here"), not a sweep ("what would block me"). A
     // CharacterVirtual is not a body and only appears through its kinematic
     // collision proxy, which is what EntityHost gives every PlayerCharacter.
+    //
+    // `layerMask` as on raycast: which channels count as being "here".
     std::vector<uint32_t> overlapSphere(const glm::vec3& center,
                                         float            radius,
-                                        uint32_t         ignoreEntityId = kNoEntity) const;
+                                        uint32_t         ignoreEntityId = kNoEntity,
+                                        uint32_t         layerMask = kAllLayers) const;
+
+    // ── The same two questions, asked with a shape that has an orientation ───
+    // A sphere is the only shape that needs no rotation, which is why it came
+    // first and why these four arrive together: a box and a capsule are only
+    // useful once they can lie on their side.
+    //
+    // `rotationEuler` is in DEGREES and is read exactly as TransformComponent::
+    // rotation is (`glm::quat(glm::radians(euler))`, one shared expression) — so
+    // a box cast at (0, 45, 0) is the same box a body at (0, 45, 0) is, which is
+    // the only reason this parameter is worth having. A second Euler convention
+    // here would be a bug nobody could see.
+    //
+    // Everything else matches sphereCast/overlapSphere and is documented there:
+    // a CAST skips triggers and reports where the shape's ORIGIN stopped (not
+    // the contact point, so a camera does not end up inside the wall), an
+    // OVERLAP reports triggers and answers with entities. `ignoreEntityId` and
+    // `layerMask` mean what they mean everywhere else.
+    //
+    // A degenerate shape is a miss, not an assert: a half extent or a radius of
+    // zero or less answers "nothing" rather than reaching Jolt, which would
+    // trip an assertion in a debug build over what is really a caller's empty
+    // query.
+    RaycastHit boxCast(const glm::vec3& origin,
+                       const glm::vec3& halfExtents,
+                       const glm::vec3& rotationEuler,
+                       const glm::vec3& direction,
+                       float            maxDistance,
+                       uint32_t         ignoreEntityId = kNoEntity,
+                       uint32_t         layerMask = kAllLayers) const;
+
+    // `height` is the FULL height including both caps, the same number
+    // ColliderComponent::height carries — so a character's capsule can be swept
+    // ahead of the character by handing this its own two fields. A height of at
+    // most twice the radius is a sphere and is treated as one (the cylinder in
+    // the middle gets a hair of length rather than being refused).
+    RaycastHit capsuleCast(const glm::vec3& origin,
+                           float            radius,
+                           float            height,
+                           const glm::vec3& rotationEuler,
+                           const glm::vec3& direction,
+                           float            maxDistance,
+                           uint32_t         ignoreEntityId = kNoEntity,
+                           uint32_t         layerMask = kAllLayers) const;
+
+    std::vector<uint32_t> overlapBox(const glm::vec3& center,
+                                     const glm::vec3& halfExtents,
+                                     const glm::vec3& rotationEuler,
+                                     uint32_t         ignoreEntityId = kNoEntity,
+                                     uint32_t         layerMask = kAllLayers) const;
+
+    std::vector<uint32_t> overlapCapsule(const glm::vec3& center,
+                                         float            radius,
+                                         float            height,
+                                         const glm::vec3& rotationEuler,
+                                         uint32_t         ignoreEntityId = kNoEntity,
+                                         uint32_t         layerMask = kAllLayers) const;
+
+    // Every body along the ray, not just the first — a bullet that passes
+    // through two enemies, a line of sight that has to know it crossed glass
+    // before it reached the player.
+    //
+    // SORTED, nearest first. Jolt promises no order at all, and "the first thing
+    // the shot hits" is the question every caller actually asks, so the sort is
+    // done here rather than left as a trap.
+    //
+    // ONE ENTRY PER ENTITY, the nearest one. A concave mesh reports its entry
+    // and its far wall as two hits of the same body, and "the bullet passed
+    // through the house twice" is not what the caller meant — the same reason
+    // overlapSphere de-duplicates its sub-shape reports.
+    //
+    // Triggers are reported (it is a ray, and raycast reports them), and hit[0]
+    // is the same hit `raycast` would have returned for the same arguments.
+    std::vector<RaycastHit> raycastAll(const glm::vec3& origin,
+                                       const glm::vec3& direction,
+                                       float            maxDistance = 1000.0f,
+                                       uint32_t         ignoreEntityId = kNoEntity,
+                                       uint32_t         layerMask = kAllLayers) const;
 
     // ── Rigid bodies: the write half ─────────────────────────────────────────
     // What makes a crate pushable from a script. Each addresses the body the
@@ -227,6 +369,29 @@ public:
     bool addImpulse(uint32_t entityId, const glm::vec3& impulse);  // kg·m/s, at the centre of mass
     bool addTorque(uint32_t entityId, const glm::vec3& torque);    // N·m around the world axes
 
+    // The same push, applied somewhere OTHER than the centre of mass — so it
+    // spins the body as well as moving it. This is the difference between a
+    // crate sliding away from an explosion and a crate tumbling away from it,
+    // and it is the pair addTorque cannot express: a torque alone spins in
+    // place, a force at the centre alone never spins at all.
+    //
+    // `worldPosition` is a WORLD point, and it is the one place in this engine's
+    // gameplay surface where a position sitting next to an entity is not that
+    // entity's local space. The reason is that it is not a pose: it is where in
+    // the world the push lands, and every source of one — a raycast hit point,
+    // an explosion's centre, a contact — is already a world point. Converting it
+    // through the entity's parent chain would turn "push the door at its handle"
+    // into a push at some point that depends on what the door happens to be
+    // parented to. Same rule at the HE::api::physics level, said again there.
+    //
+    // A point far from the body pushes it just as hard: Jolt does not care
+    // whether the point is inside the shape. Passing the body's own centre makes
+    // these exactly addForce/addImpulse.
+    bool addForceAtPosition(uint32_t entityId, const glm::vec3& force,
+                            const glm::vec3& worldPosition);
+    bool addImpulseAtPosition(uint32_t entityId, const glm::vec3& impulse,
+                              const glm::vec3& worldPosition);
+
     // Linear velocity of whatever the entity moves by, in m/s.
     //
     // ONE pair for characters and rigid bodies, dispatching on which of the two
@@ -241,6 +406,124 @@ public:
     // rigid-body half.
     bool      setVelocity(uint32_t entityId, const glm::vec3& velocity);
     glm::vec3 getVelocity(uint32_t entityId) const;
+
+    // Spin, in RADIANS PER SECOND about the world axes. Radians because it is a
+    // RATE rather than a pose, and every physics number it is combined with (a
+    // torque, an inertia) is in radians. A full turn a second is (0, 6.283, 0).
+    //
+    // That is the rule the whole surface follows, not an exception: a POSE is in
+    // degrees (an entity's rotation, a shape cast's rotation, a hinge's limits)
+    // and a RATE is in radians. The other rate is setJointMotor's target speed
+    // for a hinge, and it says so where it lives.
+    //
+    // RIGID BODIES ONLY, and no character dispatch like the pair above: a
+    // CharacterVirtual has no angular velocity at all — it is kept upright by
+    // definition — so an entity that only has a controller reads zero and
+    // refuses the write. Kinematic bodies accept it (they are driven, and a
+    // driven platform may well rotate); a static one refuses and logs, like
+    // every other write here.
+    bool      setAngularVelocity(uint32_t entityId, const glm::vec3& angularVelocity);
+    glm::vec3 getAngularVelocity(uint32_t entityId) const;
+
+    // ── Joints ───────────────────────────────────────────────────────────────
+    // A door on its frame, a link in a chain, a rope between a grapple and a
+    // wall. Everything an author can set lives on JointComponent, which is the
+    // ONE source of truth: the runtime calls below write it and then build from
+    // it, so a joint hooked up mid-game is still there after a save and a load.
+    //
+    // The per-type table of which fields mean anything lives on the component;
+    // it is not repeated here, because two copies of it would disagree.
+    struct JointDesc
+    {
+        HE::JointType type = HE::JointType::Fixed;
+        glm::vec3 anchorA{ 0.0f };   // LOCAL to entity A — see the component
+        glm::vec3 anchorB{ 0.0f };   // LOCAL to entity B, and read by Distance alone
+        glm::vec3 axis{ 0.0f, 1.0f, 0.0f };  // LOCAL to A; hinge axis / slider direction
+        float     minLimit = 0.0f;   // DEGREES (hinge) or metres (slider)
+        float     maxLimit = 0.0f;   // min >= max means unlimited
+        // Hinge and Slider only. RADIANS per second / metres per second, and
+        // the FORCE is the switch — see the component.
+        float     motorTarget   = 0.0f;
+        float     motorMaxForce = 0.0f;
+        float     breakForce    = 0.0f;   // newtons; 0 never breaks
+        bool      collideConnected = false;   // may the two bodies touch
+    };
+
+    // Join entityA to entityB. Writes entityA's JointComponent from `desc` — the
+    // component is the source of truth, and a joint that only existed inside
+    // Jolt would vanish the next time the scene was saved.
+    //
+    // IDEMPOTENT, like addEntity: an entity that already has a joint has it torn
+    // down first, so this is also how a joint is changed.
+    //
+    // BOTH SIDES NEED A RIGID BODY. A CharacterController is not a body
+    // (CharacterVirtual has none), so an entity that only has a controller
+    // cannot be jointed to anything — that is refused with a log, not silently
+    // ignored. Two STATIC bodies are refused for the same reason: nothing could
+    // ever move, so the joint would be a lie in the outliner.
+    //
+    // Returns whether the joint now exists in the simulation. It can answer
+    // false while leaving the component behind: a partner that has not spawned
+    // yet is a legitimate order to build the joint later, and it is retried as
+    // each following entity gains its body.
+    bool addJoint(HorizonWorld& world, uint32_t entityA, uint32_t entityB,
+                  const JointDesc& desc);
+
+    // Undo that: the constraint goes and so does the component. Removing the
+    // component too is the other half of "the component is the truth" — leaving
+    // it would resurrect the joint on the next scene load.
+    bool removeJoint(HorizonWorld& world, uint32_t entityA);
+
+    // Is there a LIVE constraint on this entity? Not the same question as "does
+    // it have a JointComponent": a joint whose partner has not spawned yet is
+    // authored but not yet built, and this answers about the simulation.
+    bool hasJoint(uint32_t entityA) const;
+
+    // Drive the joint: the door opens, the platform rises, the wheel spins.
+    // HINGE AND SLIDER ONLY — the other three have no single axis to drive
+    // along, and asking is refused with a log rather than ignored.
+    //
+    // `targetSpeed` is RADIANS per second for a hinge and metres per second for
+    // a slider (a rate, so radians — see setAngularVelocity). `maxForce` is the
+    // switch: at or below zero the motor is OFF, and a target of zero with force
+    // behind it is a BRAKE that holds the joint where it is.
+    //
+    // Writes the component first and the live constraint second, like every
+    // other joint call, so a motor started mid-game survives a save, a load and
+    // a rebuild of either body.
+    bool setJointMotor(HorizonWorld& world, uint32_t entityA,
+                       float targetSpeed, float maxForce);
+
+    // How much force the joint carries before it lets go, in newtons; 0 never
+    // breaks. Live: no rebuild, and the joint that is already over the limit
+    // breaks on the next step.
+    bool setJointBreakForce(HorizonWorld& world, uint32_t entityA, float breakForce);
+
+    // May the two jointed bodies touch each other? False is the default and what
+    // a chain wants — see the component. Takes effect on the next step; contacts
+    // that already exist are not retro-actively removed, which matters for one
+    // frame and never again.
+    bool setJointCollideConnected(HorizonWorld& world, uint32_t entityA, bool collide);
+
+    // Every joint that broke since the last call, as the entity pair it joined —
+    // `entityA` is the one that owned the JointComponent. Drained by whoever
+    // calls this, like the contact queues, and for the same reason: an event
+    // nobody took is an event that happened once.
+    //
+    // Unlike the contact queues there is no dispatcher that drains this one on
+    // its own — CollisionSystem has a callback to deliver a contact to and none
+    // to deliver a broken joint to, so the only consumers are pollers. A session
+    // whose scripts never ask would therefore grow the queue forever, which is
+    // what kMaxBrokenJoints bounds: past it the OLDEST entry is dropped and a
+    // throttled warning says nobody is asking. A caller that polls never reaches
+    // the cap, so the contract above is exactly what it always was.
+    //
+    // A joint that was DESTROYED does not appear here — not through
+    // removeJoint, not because one of its bodies was deleted, not through
+    // clear(). Only a joint that lost to the forces on it. That is the same line
+    // pollCollisionExit draws: "it was destroyed" is not "it broke", and game
+    // code that plays a snapping sound has no use for the first.
+    std::vector<CollisionEvent> pollJointBroken();
 
     // Set the movement velocity for a CharacterController entity (m/s).
     // Has no effect if the entity has no active character controller.
@@ -324,6 +607,12 @@ public:
     // of a number like this drift the moment one of them is tuned.
     static constexpr float kFixedDt = 1.0f / 60.0f;
 
+    // How many broken joints wait for a pollJointBroken() that may never come.
+    // Public for the same reason kFixedDt is: a test that asserts the bound has
+    // to be able to name it rather than repeat the number. "More than any frame
+    // plausibly breaks" rather than a tuned value.
+    static constexpr std::size_t kMaxBrokenJoints = 256;
+
     // Remove and destroy all physics bodies without touching the ECS.
     void clear();
 
@@ -342,9 +631,47 @@ private:
     // The implicit landscape collider: a static height field for a terrain
     // entity that carries no RigidBodyComponent of its own.
     bool buildTerrainBodyFor(HorizonWorld& world, uint32_t entityId);
-    // The teardown half, shared by clear(), removeEntity() and the reap in
-    // step(). Includes dropping the entity's contact bookkeeping.
-    void destroyBodyFor(uint32_t entityId);
+    // The joint half of the same pair: one builder both the bulk path and the
+    // runtime path go through, reading the entity's JointComponent and nothing
+    // else. Returns whether a constraint now exists.
+    bool buildJointFor(HorizonWorld& world, uint32_t entityId);
+
+    // Destroy every joint that names this entity on EITHER side — the one its
+    // own JointComponent authored, and the ones other entities aimed at it.
+    // A Jolt constraint holds raw Body pointers, so a body destroyed underneath
+    // one leaves the solver reading freed memory: this must run BEFORE the body
+    // goes, from every path that destroys a body.
+    //
+    // `requeue` puts the affected owners back on the pending list, which is what
+    // a REBUILD wants (addEntity tears the old body down and builds a new one,
+    // and the chain the entity was part of has to come back) and what a removal
+    // does not.
+    void destroyJointsInvolving(uint32_t entityId, bool requeue);
+
+    // Break every joint whose component names a breakForce it exceeded in the
+    // step that just ran, and remember the pairs for pollJointBroken(). Runs
+    // from step() right after Update(), while the solver's accumulated impulses
+    // still describe the step they were solved for.
+    void breakOverloadedJoints(HorizonWorld& world, float dt);
+
+    // Try to build every joint that is authored but not yet in the simulation.
+    // Run after each body is built, because "the partner does not exist yet" is
+    // the normal state halfway through a spawn. Gives up on an entry that has
+    // failed too often, so the list cannot become a leak.
+    void resolvePendingJoints(HorizonWorld& world);
+
+    // The teardown half behind removeEntityImpl(). Includes dropping the
+    // entity's contact bookkeeping and every joint the body was part of.
+    // `requeueJoints` is passed straight to destroyJointsInvolving — see there
+    // for which of the two callers wants which.
+    void destroyBodyFor(uint32_t entityId, bool requeueJoints);
+
+    // The body of removeEntity(), with the one thing the two callers disagree
+    // about made explicit. A REBUILD (addEntity, which tears the old body down
+    // to put a new one up) wants the joints back; the public, permanent
+    // removeEntity() does not. Both used to arrive here with `true`, which put
+    // a surviving partner's joint on a list that could never resolve.
+    void removeEntityImpl(uint32_t entityId, bool requeueJoints);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

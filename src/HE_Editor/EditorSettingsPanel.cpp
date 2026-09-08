@@ -16,6 +16,7 @@
 #include <Application/AppIcon.h>       // the generated app icon + its preview
 #include <Renderer/UIFont.h>           // icon names, and the plate colour parser
 #include <Types/Enums.h>
+#include <Physics/CollisionLayers.h>   // the project collision matrix, Project ▸ Collision Layers
 #include <algorithm>
 #include <cfloat>
 #include <cstdio>
@@ -30,6 +31,7 @@ std::string getRHIName(HE::RendererBackend backend);
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>   // InputTextWithHint over std::string (layer names)
 #endif
 
 namespace EditorSettingsPanel
@@ -522,6 +524,97 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "lower, the refusal travels back and you are told whose limit stopped "
 		     "it — otherwise the obvious response, saving again, would produce the "
 		     "same silence.");
+	});
+
+	// ── Remote Control (the MCP bridge) ──────────────────────────────────────
+	// The human switch the security model was missing. Everything else about the
+	// gate was already in place — off by default, loopback only, a token in a
+	// 0600 endpoint file, a closed tool list — but the only way to turn it on was
+	// to edit config.json by hand or set HE_MCP=1. Which means in practice nobody
+	// could turn it on, and, worse, nobody could see that it WAS on. A gate whose
+	// state is invisible is not a gate, it is a hope.
+	row("mcpserver", "Remote Control", [&]{
+		EditorWidgets::checkbox("Allow External Tools to Control This Editor", &cfg.McpServerEnabled);
+		hint("Opens a listener on this machine — 127.0.0.1 only, so nothing on the "
+		     "network can reach it — that an external program can drive the editor "
+		     "through: list what is open, place and move objects, set properties, "
+		     "author HorizonCode graphs. Off by default, and that default is the "
+		     "point. While it is on, any program running as YOU that can read the "
+		     "endpoint file may change this scene, and it changes it through the "
+		     "same gateway you do: the edits land in Undo and travel to a "
+		     "collaboration session exactly like your own. Turn it on for the "
+		     "session you want it in, not once and for good.");
+
+		// What the checkbox alone cannot say, and why it is printed. setEnabled
+		// returns early when the value has not changed, so a start() that failed
+		// — port taken, endpoint file unwritable — is NEVER retried by the frame
+		// loop: the config says on, the bridge says on, and nothing is listening.
+		// A checkbox sitting there ticked would be lying about the single thing
+		// it exists to report.
+		if (ctx.mcp)
+		{
+			const bool wanted  = cfg.McpServerEnabled;
+			const bool running = ctx.mcp->isRunning();
+			if (running)
+			{
+				const std::size_t clients = ctx.mcp->clientCount();
+				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+				                   "Listening on 127.0.0.1:%u \xE2\x80\x94 %zu client%s connected",
+				                   static_cast<unsigned>(ctx.mcp->port()),
+				                   clients, clients == 1 ? "" : "s");
+				if (!wanted)
+					hint("Running because HE_MCP=1 was set for this run, not because of "
+					     "the setting above. The environment can only turn it on, never "
+					     "off, and it is not written back — the next editor started by "
+					     "hand has it off again.");
+			}
+			else if (wanted)
+			{
+				// The honest reading of a ticked box with a dead socket.
+				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+				                   "Enabled, but the listener is not up.");
+				hint("The port could not be opened, or the endpoint file could not be "
+				     "written; the editor log says which. Nothing is listening, so no "
+				     "external tool can connect. Free the port and try again, or set "
+				     "it back to 0 below and let the system pick one.");
+				if (EditorWidgets::button("Try Again"))
+				{
+					// Off and on again, spelled out rather than hidden behind a
+					// config write: this is the only retry path there is, because
+					// setEnabled ignores a value that has not changed — and the
+					// config already says on, so writing it would do nothing.
+					ctx.mcp->setEnabled(false);
+					ctx.mcp->setEnabled(true);
+				}
+			}
+			else
+			{
+				ImGui::TextDisabled("Not listening.");
+			}
+		}
+	});
+
+	row("mcpport", "Remote Control", [&]{
+		// Disabled while the listener is up, and not out of politeness: start()
+		// reads the requested port once, when it opens the socket. A number typed
+		// into a live listener would sit there looking applied and change nothing
+		// until the next editor start — the kind of control that teaches people
+		// not to believe the panel.
+		const bool running = ctx.mcp && ctx.mcp->isRunning();
+		ImGui::BeginDisabled(running);
+		Row::inputInt("Listening Port", &cfg.McpPort);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		ImGui::EndDisabled();
+		// 0 stays 0 (let the system choose); anything else is held inside the
+		// range a port can actually have.
+		cfg.McpPort = std::clamp(cfg.McpPort, 0, 65535);
+		if (running && hovered)
+			ImGui::SetTooltip("Cannot be changed while the listener is up \xE2\x80\x94 "
+			                  "turn it off first.");
+		hint("0 lets the system pick a free port, which is the right answer nearly "
+		     "always: the port is published in the endpoint file next to the access "
+		     "token, so a client reads it there rather than being told. Pin a "
+		     "number only for a client that cannot read that file.");
 	});
 
 	row("camspeed", "Viewport", [&]{
@@ -1248,6 +1341,172 @@ void drawPermissionsPage(AppContext& ctx)
 	}
 }
 
+// ─── Project ▸ Collision Layers ──────────────────────────────────────────────
+// The sixteen named collision channels and the matrix that says which pairs may
+// touch. A PROJECT setting, saved in the .heproj and carried into the exported
+// build, exactly like Permissions above.
+//
+// The matrix is drawn as a TRIANGLE, not a square. The two halves of a symmetric
+// matrix are the same answer written twice, and a square grid invites somebody
+// to tick one and not the other and then wonder why nothing changed —
+// CollisionLayerConfig writes both cells from either one, so the second half
+// would be a mirror that cannot be edited independently anyway.
+void drawCollisionLayersPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Collision Layers");
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+	{
+		ImGui::TextDisabled("No project is open.");
+		return;
+	}
+	ProjectData&              p   = ctx.projectManager->currentProject();
+	HE::CollisionLayerConfig& cfg = p.collisionLayers;
+	constexpr int kCount = HE::CollisionLayerConfig::kCount;
+
+	EditorWidgets::hint("A collision layer is a named channel. Every rigid body and every "
+	                    "character sits in one (Details ▸ Collision Layer), and the matrix "
+	                    "below decides which pairs of channels the simulation lets touch. "
+	                    "Belongs to the PROJECT: saved in its .heproj and carried into the "
+	                    "build you export.");
+	ImGui::Spacing();
+
+	// Written per keystroke into the model so the matrix labels follow the
+	// typing, and to the FILE when an edit ends — the same split the Application
+	// page makes, for the same reason: a .heproj rewritten per character is a lot
+	// of temp-file churn on a versioned file that has a watcher on it.
+	bool commit = false;
+
+	ImGui::SeparatorText("Names");
+	EditorWidgets::hint("A layer keeps its NUMBER for good — that is what a scene stores — so "
+	                    "renaming one relabels it everywhere and remaps nothing. Leave a name "
+	                    "empty and it reads as \"Layer <n>\".");
+
+	if (ImGui::BeginTable("##collisionlayernames", 2,
+	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+	{
+		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed,
+		                        ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f);
+		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
+		for (int i = 0; i < kCount; ++i)
+		{
+			ImGui::PushID(i);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextDisabled("%d", i);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			// The placeholder shows what an empty name READS BACK AS, which is
+			// not "Layer <n>" for all sixteen: the five presets answer with
+			// their built-in names. Asking a default-constructed config is the
+			// only spelling of that which cannot drift from layerName() itself.
+			static const HE::CollisionLayerConfig kDefaults;
+			const std::string placeholder = kDefaults.layerName(i);
+			std::string       name        = cfg.names[i];
+			if (ImGui::InputTextWithHint("##layername", placeholder.c_str(), &name))
+				cfg.setLayerName(i, name);
+			// By key, not by label: the control has no literal label of its own —
+			// sixteen rows share one row shape and the visible text is data.
+			EditorWidgets::helpForKey("Collision Layers/Name");
+			commit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Matrix");
+	EditorWidgets::hint("Ticked means the pair collides, which is how every project starts. "
+	                    "Clearing a box is what makes a channel pass through another one. "
+	                    "The diagonal is a layer against ITSELF.");
+
+	// 17 columns: the row's name plus one per channel. Numbers in the header
+	// rather than names — a sixteen-column grid has no room for words, and the
+	// list above is the key from number to name.
+	// The height is given EXPLICITLY because of ScrollX: a scrolling table with
+	// an outer size of zero becomes a child that eats all the height left in the
+	// page, which would put the button below it out of reach. Seventeen rows —
+	// the header and the sixteen channels.
+	const ImVec2 matrixSize(0.0f,
+		ImGui::GetFrameHeightWithSpacing() * (kCount + 1) + ImGui::GetStyle().CellPadding.y * 2.0f);
+	if (ImGui::BeginTable("##collisionmatrix", kCount + 1,
+	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg |
+	                      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollX,
+	                      matrixSize))
+	{
+		ImGui::TableSetupColumn("##rowname", ImGuiTableColumnFlags_WidthFixed);
+		for (int b = 0; b < kCount; ++b)
+		{
+			char head[8];
+			std::snprintf(head, sizeof(head), "%d", b);
+			ImGui::TableSetupColumn(head, ImGuiTableColumnFlags_WidthFixed);
+		}
+		// Scrolled sideways, the names column and the numbers have to stay: a
+		// grid of unlabelled boxes is not something anyone can aim at.
+		ImGui::TableSetupScrollFreeze(1, 1);
+		ImGui::TableHeadersRow();
+
+		for (int a = 0; a < kCount; ++a)
+		{
+			ImGui::PushID(a);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(cfg.layerName(a).c_str());
+			// Only the lower triangle carries a box. The upper half is the same
+			// answer read the other way round; drawing it would be two controls
+			// for one value.
+			for (int b = 0; b <= a; ++b)
+			{
+				ImGui::TableSetColumnIndex(b + 1);
+				ImGui::PushID(b);
+				bool on = cfg.collides(a, b);
+				if (ImGui::Checkbox("##cell", &on))
+				{
+					// setCollides, never matrix[][] by hand: it writes BOTH
+					// cells, and Jolt does not promise which way round it asks.
+					cfg.setCollides(a, b, on);
+					commit = true;
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s \xc3\x97 %s", cfg.layerName(a).c_str(),
+					                  cfg.layerName(b).c_str());
+				ImGui::PopID();
+			}
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	// The way back. A matrix somebody has switched most of off is otherwise
+	// 136 boxes to undo by hand, and "nothing collides any more" is exactly the
+	// state somebody reaches while finding out what these do.
+	if (EditorWidgets::button("Everything Collides"))
+	{
+		for (int a = 0; a < kCount; ++a)
+			for (int b = 0; b <= a; ++b)
+				cfg.setCollides(a, b, true);
+		commit = true;
+	}
+	EditorWidgets::helpForLabel("Everything Collides");
+	ImGui::TextDisabled("Ticks every box again. The names stay as they are.");
+
+	if (commit)
+	{
+		if (!ctx.projectManager->saveProject(p.path))
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			               "Could not save the project's collision layers", p.path);
+		// And into the running simulation, so a matrix edited during play takes
+		// effect where it can be seen. PhysicsWorld copies the matrix into the
+		// filter Jolt holds and wakes every body, so a box already lying on a
+		// floor that just stopped colliding does fall.
+		else if (ctx.applyCollisionLayers)
+			ctx.applyCollisionLayers();
+	}
+}
+
 // ─── Project ▸ Application ───────────────────────────────────────────────────
 // What the application IS to the system it lands on (plan A7): its icon, its
 // identifier, its version. The icon is GENERATED from one of the built-in icons
@@ -1822,6 +2081,7 @@ constexpr NavItem kGeneralItems[] = {
 constexpr NavItem kEditorItems[] = {
 	{ Page::HorizonCode,   "HorizonCode" },
 	{ Page::CollabGeneral, "Collaboration" },
+	{ Page::RemoteControl, "Remote Control" },
 	{ Page::Repository,    "Source Control" },
 	{ Page::Status,        "Tool Status" },
 };
@@ -1832,9 +2092,10 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::Effects,            "Effects" },
 };
 constexpr NavItem kProjectItems[] = {
-	{ Page::Application, "Application" },
-	{ Page::Permissions, "Permissions" },
-	{ Page::Fonts,       "Fonts" },
+	{ Page::Application,     "Application" },
+	{ Page::Permissions,     "Permissions" },
+	{ Page::Fonts,           "Fonts" },
+	{ Page::CollisionLayers, "Collision Layers" },
 };
 constexpr NavGroup kNavGroups[] = {
 	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
@@ -1862,6 +2123,7 @@ const char* catalogCategory(Page p)
 	case Page::GlobalIllumination: return "Global Illumination";
 	case Page::Effects:            return "Effects";
 	case Page::CollabGeneral:      return "Collaboration";
+	case Page::RemoteControl:      return "Remote Control";
 	default:                       return nullptr;
 	}
 }
@@ -1956,6 +2218,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
 	else if (s_page == Page::Fonts)       drawFontsPage(ctx);
 	else if (s_page == Page::Application) drawApplicationPage(ctx);
+	else if (s_page == Page::CollisionLayers) drawCollisionLayersPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────
@@ -1992,6 +2255,16 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			// the session config carries as its own default (Config::maxAssetBytes,
 			// which is the asset ceiling now — the join snapshot keeps its own).
 			cfg.CollabMaxAssetMB  = 64;
+			// Remote control goes back OFF, unconditionally and whatever it is
+			// doing right now. Every other setting here resets to "what a fresh
+			// editor does"; for this one that default is also the security model's
+			// first line, so it is the last thing that should survive a reset —
+			// "Restore Defaults" leaving a listener open would be the exact
+			// surprise the default-off exists to prevent. The frame loop closes
+			// the socket on the next pump; a client on it is disconnected, which
+			// is the intended meaning of the button.
+			cfg.McpServerEnabled  = false;
+			cfg.McpPort           = 0;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

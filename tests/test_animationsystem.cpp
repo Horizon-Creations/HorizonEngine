@@ -624,8 +624,8 @@ static AnimatorStateMachineComponent makeSimpleSM(
     float transitionDuration = 0.2f)
 {
     HE::AnimatorStateMachineGraph g;
-    g.states.push_back({ 1, "Idle", clipIdA, true, 0.0f, 0.0f });
-    g.states.push_back({ 2, "Walk", clipIdB, true, 0.0f, 0.0f });
+    g.states.push_back({ 1, "Idle", clipIdA, HE::UUID{}, true, 0.0f, 0.0f });
+    g.states.push_back({ 2, "Walk", clipIdB, HE::UUID{}, true, 0.0f, 0.0f });
     g.transitions.push_back({ "Idle", "Walk", "speed",
                                HE::TransitionOp::Greater, 0.5f, transitionDuration });
     g.startState = "Idle";
@@ -918,7 +918,7 @@ TEST_CASE("AnimationStateMachineSystem migrates a legacy inline-graph entity int
     // Component::LegacyConfig).
     AnimatorStateMachineComponent sm;
     sm.legacy.hasData = true;
-    sm.legacy.states.push_back({ 1, "Idle", clipAId, true, 5.0f, 5.0f });
+    sm.legacy.states.push_back({ 1, "Idle", clipAId, HE::UUID{}, true, 5.0f, 5.0f });
     sm.legacy.currentStateName = "Idle";
     reg.emplace<AnimatorStateMachineComponent>(e, sm);
 

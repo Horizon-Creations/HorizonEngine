@@ -32,6 +32,8 @@ add_library(HorizonCore SHARED
 	src/MaterialGraph/MaterialGraph.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
+	src/BoneMask/BoneMask.cpp
+	src/BlendSpace/BlendSpace.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UITheme.cpp
@@ -47,6 +49,7 @@ add_library(HorizonCore SHARED
 	src/HorizonCode/HorizonCodeGenSupport.cpp
 	src/HorizonCode/HcCompiledLoader.cpp
 	src/Renderer/UIFont.cpp
+	src/Physics/CollisionLayers.cpp
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp

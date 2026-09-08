@@ -10,6 +10,7 @@
 #include <HorizonScene/Components/MovementComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/JointComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
@@ -18,6 +19,8 @@
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/Components/AnimationLayerComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/PropertyAnimatorComponent.h>
 #include <HorizonScene/Components/NavMeshComponent.h>
@@ -517,6 +520,89 @@ TEST_CASE("SceneSerializer round-trips AnimatorBlendComponent")
 		CHECK(found);
 		he_test::removeQuiet(file);
 	}
+}
+
+TEST_CASE("SceneSerializer round-trips RootMotionComponent")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_rootmotion.hescene";
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+
+		RootMotionComponent rm;
+		// Every field away from its default, so a mistyped JSON key shows up as a
+		// value that fell back rather than as a value that happened to match.
+		rm.mode = RootMotionComponent::Mode::CharacterController;
+		rm.options.rootJointName        = "Hips";
+		rm.options.extractTranslationXZ = false;
+		rm.options.extractTranslationY  = true;
+		rm.options.extractYaw           = false;
+		rm.options.lock                 = HE::RootMotionLock::TranslationOnly;
+		world.registry().emplace<RootMotionComponent>(e, rm);
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		bool found = false;
+		for (auto [le, lrm] : loaded.registry().view<RootMotionComponent>().each())
+		{
+			found = true;
+			CHECK(lrm.mode == RootMotionComponent::Mode::CharacterController);
+			CHECK(lrm.options.rootJointName        == "Hips");
+			CHECK(lrm.options.extractTranslationXZ == false);
+			CHECK(lrm.options.extractTranslationY  == true);
+			CHECK(lrm.options.extractYaw           == false);
+			CHECK(lrm.options.lock == HE::RootMotionLock::TranslationOnly);
+		}
+		CHECK(found);
+		he_test::removeQuiet(file);
+	}
+}
+
+TEST_CASE("SceneSerializer: an out-of-range root motion mode loads as Off, not as a mode")
+{
+	// A file from a newer editor, or a hand-edit. Casting the int blind gives an
+	// enum with no enumerator, which passes `!= Off` and then fails
+	// `== Transform` — landing in the character-controller branch by accident.
+	const fs::path file = fs::temp_directory_path() / "he_test_rootmotion_bad.hescene";
+	{
+		HorizonWorld world;
+		auto e = world.createEntity("Character");
+		RootMotionComponent rm; rm.mode = RootMotionComponent::Mode::Transform;
+		world.registry().emplace<RootMotionComponent>(e, rm);
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+
+	{
+		std::ifstream in(file);
+		nlohmann::json scene; in >> scene; in.close();
+		REQUIRE(scene.contains("entities"));
+		bool patched = false;
+		for (auto& ent : scene["entities"])
+		{
+			if (!ent.contains("components") || !ent["components"].contains("rootmotion")) continue;
+			ent["components"]["rootmotion"]["mode"] = 99;
+			patched = true;
+		}
+		REQUIRE(patched);
+		std::ofstream out(file); out << scene.dump(4);
+	}
+
+	HorizonWorld loaded;
+	SceneSerializer ser;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	bool found = false;
+	for (auto [le, lrm] : loaded.registry().view<RootMotionComponent>().each())
+	{
+		found = true;
+		CHECK(lrm.mode == RootMotionComponent::Mode::Off);
+	}
+	CHECK(found);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("SceneSerializer round-trips PropertyAnimatorComponent")
@@ -1555,6 +1641,7 @@ namespace
 		a.rigidbody.friction    = 0.9f;
 		a.rigidbody.restitution = 0.15f;
 		a.rigidbody.is2D        = true;
+		a.rigidbody.collisionLayer = 7;
 		reg.emplace<RigidBodyComponent>(actor, a.rigidbody);
 
 		a.collider.shape       = ColliderShape::Capsule;
@@ -1569,6 +1656,7 @@ namespace
 		a.characterController.skinWidth  = 0.05f;
 		a.characterController.mass       = 82.0f;
 		a.characterController.gravity    = 12.5f;
+		a.characterController.collisionLayer = 11;
 		reg.emplace<CharacterControllerComponent>(actor, a.characterController);
 
 		a.script.scriptAssetId = HE::UUID::generate();
@@ -1858,6 +1946,7 @@ namespace
 			CHECK(r->friction    == doctest::Approx(a.rigidbody.friction));
 			CHECK(r->restitution == doctest::Approx(a.rigidbody.restitution));
 			CHECK(r->is2D        == a.rigidbody.is2D);
+			CHECK(r->collisionLayer == a.rigidbody.collisionLayer);
 		}
 		{
 			const auto* col = reg.try_get<ColliderComponent>(actor);
@@ -1876,6 +1965,7 @@ namespace
 			CHECK(cc->skinWidth  == doctest::Approx(a.characterController.skinWidth));
 			CHECK(cc->mass       == doctest::Approx(a.characterController.mass));
 			CHECK(cc->gravity    == doctest::Approx(a.characterController.gravity));
+			CHECK(cc->collisionLayer == a.characterController.collisionLayer);
 		}
 		{
 			const auto* s = reg.try_get<ScriptComponent>(actor);
@@ -2109,6 +2199,24 @@ TEST_CASE("Every component the save path writes is a key the loader admits to kn
 	HorizonWorld world;
 	populateEveryComponent(world);
 
+	// Two components the shared fixture does not carry, added HERE rather than
+	// to it: this test only needs them WRITTEN, and joining the fixture would
+	// also enlist them in the field-by-field round-trip below, which is a wider
+	// change than the gap being closed. The gap is real — "rootmotion" was
+	// written and read for months without ever being a known key, so every scene
+	// with root motion logged that it was being dropped while loading fine, and
+	// the guard that exists to catch exactly that never saw the component.
+	{
+		auto& reg = world.registry();
+		const Entity animated = world.createEntity("Animated");
+		reg.emplace<TransformComponent>(animated, TransformComponent{});
+		RootMotionComponent rm; rm.mode = RootMotionComponent::Mode::Transform;
+		reg.emplace<RootMotionComponent>(animated, rm);
+		AnimationLayerComponent lc;
+		lc.layers.push_back(AnimationLayerComponent::Layer{});
+		reg.emplace<AnimationLayerComponent>(animated, std::move(lc));
+	}
+
 	const fs::path file = fs::temp_directory_path() / "he_test_known_keys.hescene";
 	SceneSerializer ser;
 	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
@@ -2173,4 +2281,186 @@ TEST_CASE("Every component survives a round-trip with non-default values in ever
 		REQUIRE(ser.loadFromMemory(loaded, blob));
 		verifyEveryComponent(loaded, authored);
 	}
+}
+
+TEST_CASE("A joint survives a save and a load, target and all")
+{
+	// The joint is the first component whose interesting field is a reference to
+	// ANOTHER ENTITY, so the round trip has to carry a UUID that still resolves
+	// on the other side — the reason the component names its partner that way
+	// rather than by entt handle in the first place.
+	HorizonWorld world;
+	const Entity anchor = world.createEntity("Anchor");
+	const Entity door   = world.createEntity("Door");
+	world.addComponent(anchor, TransformComponent{});
+	world.addComponent(door,   TransformComponent{});
+
+	JointComponent j;
+	j.type     = JointType::Hinge;
+	j.target   = world.entityId(anchor);
+	j.anchorA  = { -0.5f, 0.0f, 0.25f };
+	j.anchorB  = {  1.5f, 2.0f, -3.0f };
+	j.axis     = {  0.0f, 0.0f, 1.0f };
+	j.minLimit = -95.0f;
+	j.maxLimit =  12.5f;
+	j.motorTarget      = 2.5f;
+	j.motorMaxForce    = 400.0f;
+	j.breakForce       = 1500.0f;
+	j.collideConnected = true;
+	world.registry().emplace<JointComponent>(door, j);
+
+	SceneSerializer ser;
+	std::vector<uint8_t> blob;
+	REQUIRE(ser.saveToMemory(world, blob));
+	HorizonWorld loaded;
+	REQUIRE(ser.loadFromMemory(loaded, blob));
+
+	Entity loadedDoor = entt::null, loadedAnchor = entt::null;
+	for (auto [e, n] : loaded.registry().view<NameComponent>().each())
+	{
+		if (n.name == "Door")   loadedDoor   = e;
+		if (n.name == "Anchor") loadedAnchor = e;
+	}
+	REQUIRE(loadedDoor   != Entity{ entt::null });
+	REQUIRE(loadedAnchor != Entity{ entt::null });
+
+	const auto* out = loaded.registry().try_get<JointComponent>(loadedDoor);
+	REQUIRE(out != nullptr);
+	CHECK(out->type == JointType::Hinge);
+	CHECK(out->anchorA.x == doctest::Approx(-0.5f));
+	CHECK(out->anchorA.z == doctest::Approx(0.25f));
+	CHECK(out->anchorB.y == doctest::Approx(2.0f));
+	CHECK(out->axis.z    == doctest::Approx(1.0f));
+	CHECK(out->minLimit  == doctest::Approx(-95.0f));
+	CHECK(out->maxLimit  == doctest::Approx(12.5f));
+	// The four Step 6 added. A motor that did not survive the save would be a
+	// door that opens in the editor and stands still in the packaged build.
+	CHECK(out->motorTarget   == doctest::Approx(2.5f));
+	CHECK(out->motorMaxForce == doctest::Approx(400.0f));
+	CHECK(out->breakForce    == doctest::Approx(1500.0f));
+	CHECK(out->collideConnected);
+
+	// And the reference still points at the same entity in the loaded world.
+	CHECK(out->target == loaded.entityId(loadedAnchor));
+	CHECK(loaded.findByEntityId(out->target) == loadedAnchor);
+
+	// A key the save path writes and the loader does not admit to knowing warns
+	// that it is being DROPPED while it loads perfectly — the false alarm on the
+	// one message whose job is to flag real data loss.
+	CHECK(SceneSerializer::isKnownComponentKey("joint"));
+}
+
+TEST_CASE("A joint type from a newer build loads as Fixed rather than as itself")
+{
+	// The same protection the collider shape got: an out-of-range raw value
+	// silently became type 0 and nothing said so. Fixed is still the answer —
+	// there is nothing better to fall back to — but it is now the DELIBERATE
+	// answer, and the loader says it out loud.
+	HorizonWorld world;
+	const Entity a = world.createEntity("A");
+	const Entity b = world.createEntity("B");
+	world.addComponent(a, TransformComponent{});
+	world.addComponent(b, TransformComponent{});
+	JointComponent j;
+	j.type   = JointType::Slider;
+	j.target = world.entityId(b);
+	world.registry().emplace<JointComponent>(a, j);
+
+	const fs::path file = fs::temp_directory_path() / "he_test_joint_future_type.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	nlohmann::json scene;
+	{
+		std::ifstream in(file);
+		REQUIRE(in.good());
+		in >> scene;
+	}
+	bool patched = false;
+	for (auto& e : scene["entities"])
+	{
+		auto comps = e.find("components");
+		if (comps == e.end() || !comps->contains("joint")) continue;
+		(*comps)["joint"]["type"] = 200;   // a type this build has never heard of
+		patched = true;
+	}
+	REQUIRE(patched);
+	{
+		std::ofstream out(file);
+		REQUIRE(out.good());
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	he_test::removeQuiet(file);
+	int seen = 0;
+	for (auto [e, jc] : loaded.registry().view<JointComponent>().each())
+	{
+		CHECK(jc.type == JointType::Fixed);
+		++seen;
+	}
+	CHECK(seen == 1);
+}
+
+TEST_CASE("A joint saved before the motor existed loads with no motor and no break force")
+{
+	// A scene from Step 5 has none of the four keys Step 6 added, and what it
+	// meant is exactly what the defaults say: nothing drives it, nothing breaks
+	// it, and the two bodies do not collide. Written by hand rather than by the
+	// save path, because the save path cannot produce an old file any more.
+	HorizonWorld world;
+	const Entity anchor = world.createEntity("Anchor");
+	const Entity door   = world.createEntity("Door");
+	world.addComponent(anchor, TransformComponent{});
+	world.addComponent(door,   TransformComponent{});
+	{
+		JointComponent j;
+		j.type   = JointType::Slider;
+		j.target = world.entityId(anchor);
+		world.registry().emplace<JointComponent>(door, j);
+	}
+
+	const fs::path file = fs::temp_directory_path() / "he_test_joint_pre_motor.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	nlohmann::json scene;
+	{
+		std::ifstream in(file);
+		REQUIRE(in.good());
+		in >> scene;
+	}
+	bool stripped = false;
+	for (auto& e : scene["entities"])
+	{
+		auto comps = e.find("components");
+		if (comps == e.end() || !comps->contains("joint")) continue;
+		for (const char* key : { "motorTarget", "motorMaxForce", "breakForce",
+		                         "collideConnected" })
+			(*comps)["joint"].erase(key);
+		stripped = true;
+	}
+	REQUIRE(stripped);
+	{
+		std::ofstream out(file);
+		REQUIRE(out.good());
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	he_test::removeQuiet(file);
+	Entity loadedDoor = entt::null;
+	for (auto [e, n] : loaded.registry().view<NameComponent>().each())
+		if (n.name == "Door") loadedDoor = e;
+	REQUIRE(loadedDoor != Entity{ entt::null });
+
+	const auto* out = loaded.registry().try_get<JointComponent>(loadedDoor);
+	REQUIRE(out != nullptr);
+	CHECK(out->type == JointType::Slider);   // everything it DID say still arrives
+	CHECK(out->motorTarget   == doctest::Approx(0.0f));
+	CHECK(out->motorMaxForce == doctest::Approx(0.0f));
+	CHECK(out->breakForce    == doctest::Approx(0.0f));
+	CHECK_FALSE(out->collideConnected);
 }

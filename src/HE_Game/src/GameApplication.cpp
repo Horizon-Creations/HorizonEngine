@@ -19,8 +19,10 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RootMotion.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
@@ -1212,13 +1214,26 @@ void GameApplication::OnInit()
 #endif
 	if (std::filesystem::exists(logicPath) && logicLoader().load(logicPath))
 	{
-		// Engine services (savegames) go in BEFORE onStart, so "load the save
-		// on startup" works from the first native line. The world resolves per
-		// call — scene switches stay transparent to the library.
-		m_saveServicesBinding.world   = [this]() { return m_world.get(); };
-		m_saveServicesBinding.content = &contentManager();
-		HE::api::fillSaveServices(m_saveServices, &m_saveServicesBinding);
-		logicLoader().injectServices(&m_saveServices);
+		// Engine services (savegames, physics, input, content) go in BEFORE
+		// onStart, so "load the save on startup", a first raycast or a warm-up
+		// load works from the first native line. World and physics resolve per
+		// call — both are replaced on a scene switch, which stays transparent to
+		// the library that way; the ContentManager outlives every switch and is
+		// bound once.
+		m_gameServicesBinding.world   = [this]() { return m_world.get(); };
+		m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
+		m_gameServicesBinding.content = &contentManager();
+		HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
+		HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
+		HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
+		HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
+		m_engineServices = {};
+		m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
+		m_engineServices.save       = &m_saveServices;
+		m_engineServices.physics    = &m_physicsServices;
+		m_engineServices.input      = &m_inputServices;
+		m_engineServices.content    = &m_contentServices;
+		logicLoader().injectServices(&m_engineServices);
 		logicLoader().logic()->onStart(*m_world);
 		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");
 	}
@@ -1543,6 +1558,13 @@ void GameApplication::startPhysics()
 	// packaged game has nothing but its log file, so this line is the only
 	// thing standing between a shipped level and crate-shaped houses.
 	m_physicsWorld->setContentManager(&contentManager());
+	// The project's collision matrix, from project.hcfg. BEFORE initialize() for
+	// the same reason as the line above it: initialize() is what puts every body
+	// into its channel, so a matrix arriving afterwards would leave the opening
+	// scene colliding the way an unconfigured project does. Default-constructed
+	// when the build predates the field — everything collides, which is how this
+	// engine behaved before channels existed.
+	m_physicsWorld->setCollisionLayers(m_config.collisionLayers);
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
 	// has to know where bodies are built. Set HERE rather than at the two call
@@ -2633,7 +2655,19 @@ void GameApplication::OnRender(float deltaTime)
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
-		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
+		// A packaged build has no edit mode, so root motion is always applied here.
+		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
+		                            &rootMotion, &m_animNotifies);
+
+		// Drained HERE and not at the collision drain up in the physics block:
+		// that one runs in the frame BEFORE the animation phase, so every notify
+		// would reach its handler a frame late. dispatch empties the queue.
+		HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
+		AnimationNotifySystem::dispatch(m_animNotifies, *m_world,
+		                                m_scriptContext.get(), m_scriptInstances,
+		                                &m_gameInstance.runtime(), m_entityHost.instances(),
+		                                &m_animatorHost);
 	}
 
 	// ── Renderer settings, in BOTH modes ─────────────────────────────────────

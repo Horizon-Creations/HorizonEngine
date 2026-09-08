@@ -134,6 +134,8 @@ inline constexpr uint32_t CHUNK_STDF = makeChunkId('S','T','D','F'); // struct d
 inline constexpr uint32_t CHUNK_ENDF = makeChunkId('E','N','D','F'); // enum definition (JSON)
 inline constexpr uint32_t CHUNK_SGTP = makeChunkId('S','G','T','P'); // savegame template (JSON, struct-def shape)
 inline constexpr uint32_t CHUNK_THEM = makeChunkId('T','H','E','M'); // UI theme (JSON: colour roles × light/dark, sizes, shadows)
+inline constexpr uint32_t CHUNK_BMSK = makeChunkId('B','M','S','K'); // bone mask (JSON: joint names × weights)
+inline constexpr uint32_t CHUNK_BLSP = makeChunkId('B','L','S','P'); // blend space (JSON: clip samples in a 1D/2D parameter space)
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes
@@ -148,6 +150,13 @@ inline constexpr uint32_t CHUNK_PFAB = makeChunkId('P','F','A','B'); // entity-s
 
 // Animation
 inline constexpr uint32_t CHUNK_ANIM = makeChunkId('A','N','I','M'); // duration + channels
+// Everything about a clip that is NOT keyframes: the root-motion flag, and the
+// notify list that comes next. A chunk of its own rather than a tail on ANIM,
+// because a build that predates it would read those bytes as further channels.
+// Absent (every clip written before this) = the struct defaults.
+// Layout: uint8 hasRootMotion, uint32 notifyCount, then that many notifies, each
+// a string name followed by float time and float duration.
+inline constexpr uint32_t CHUNK_ANOT = makeChunkId('A','N','O','T'); // root-motion flag + notifies
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Writer

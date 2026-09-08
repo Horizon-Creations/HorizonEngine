@@ -17,6 +17,10 @@ public:
 	// terminates the process.
 	static void joinPendingExport();
 
+	// The same rule for the second worker on the Build window: Build ▸ Build and
+	// Reload Game Logic compiles a C++ project's native module on its own thread.
+	static void joinPendingGameLogicBuild();
+
 	// Persist which DOCKED View-menu panels were open, so the next start brings
 	// the user's layout back whole. Normally written as it changes; this is the
 	// shutdown flush for a change made in the last moments before quitting.

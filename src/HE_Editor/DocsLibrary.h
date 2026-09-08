@@ -199,7 +199,10 @@ private:
 	// and must not re-lower 500 KB of text to answer.
 	struct Index
 	{
-		std::string title, eyebrow, text, pageTitle;
+		// `id` is searched too, and not as an afterthought: the node reference
+		// titles its entries in prose ("Add Impulse") and carries the call the
+		// user actually types in the id ("physics.addImpulse").
+		std::string title, id, eyebrow, text, pageTitle;
 	};
 	std::vector<std::vector<Index>> m_index;   // [page][section]
 

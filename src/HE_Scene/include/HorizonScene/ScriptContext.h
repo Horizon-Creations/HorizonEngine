@@ -108,6 +108,15 @@ public:
     bool callOnBeginOverlap(ScriptEngine::InstanceId id, uint32_t otherEntityId);
     bool callOnEndOverlap(ScriptEngine::InstanceId id, uint32_t otherEntityId);
 
+    // Call onAnimationNotify / onAnimationNotifyBegin / onAnimationNotifyEnd
+    // (self, name) — the events an artist put on an animation clip's timeline
+    // (snake_case in Python). The name is the whole payload; Begin/End are the
+    // edges of a notify STATE, the plain one is a point event. No-op if the
+    // script defines no such handler.
+    bool callOnAnimationNotify(ScriptEngine::InstanceId id, const std::string& name);
+    bool callOnAnimationNotifyBegin(ScriptEngine::InstanceId id, const std::string& name);
+    bool callOnAnimationNotifyEnd(ScriptEngine::InstanceId id, const std::string& name);
+
     // Call the UI pointer-event handler (onClick / onHoverEnter / onHoverExit,
     // snake_case in Python). No-op if not defined.
     bool callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev);

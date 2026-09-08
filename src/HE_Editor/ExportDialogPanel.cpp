@@ -209,43 +209,18 @@ namespace Build = BuildProgressDialog::Build;
 // Defined below render(), which is where a run is started from.
 void startExport(AppContext& ctx);
 
-// The C++ step's progress, read off the toolchain's own output: ninja prints
-// "[7/38] Building CXX object…", make "[ 45%] Building CXX object…". A line
-// that is neither leaves the ring spinning — during cmake's configure phase
-// there is genuinely nothing to measure, and inventing a number there would be
-// a lie that stalls at 10 % for a minute.
-static std::optional<float> parseToolchainProgress(const std::string& line)
-{
-	const auto open = line.find('[');
-	if (open == std::string::npos || open > 4) return std::nullopt;
-	const auto close = line.find(']', open);
-	if (close == std::string::npos || close <= open + 1 || close - open > 16) return std::nullopt;
-
-	std::string in;
-	for (size_t i = open + 1; i < close; ++i)
-		if (!std::isspace(static_cast<unsigned char>(line[i]))) in += line[i];
-	if (in.empty()) return std::nullopt;
-
-	if (in.back() == '%')
-	{
-		in.pop_back();
-		if (in.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
-		return std::clamp(std::stof(in) / 100.0f, 0.0f, 1.0f);
-	}
-	const auto slash = in.find('/');
-	if (slash == std::string::npos) return std::nullopt;
-	const std::string a = in.substr(0, slash), b = in.substr(slash + 1);
-	if (a.empty() || b.empty() ||
-	    a.find_first_not_of("0123456789") != std::string::npos ||
-	    b.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
-	const float total = std::stof(b);
-	if (total <= 0.0f) return std::nullopt;
-	return std::clamp(std::stof(a) / total, 0.0f, 1.0f);
-}
+// Moved to BuildProgressDialog: the game-logic build reports into the same
+// window and reads its rings the same way.
+using BuildProgressDialog::toolchainProgress;
 
 bool isOpen()
 {
-	return s_modalVisible || BuildProgressDialog::isOpen();
+	// The Build window counts only while it is showing an EXPORT: the interactive
+	// tutorial watches this to notice that the user found Build ▸ Export Project,
+	// and a game-logic compile in that same window is not that.
+	return s_modalVisible
+	    || (BuildProgressDialog::isOpen()
+	        && BuildProgressDialog::runKind() == BuildProgressDialog::Kind::Export);
 }
 
 void joinPendingExport()
@@ -932,8 +907,12 @@ void render(AppContext& ctx)
             // Build window now (BuildProgressDialog), which this one hands over
             // to on Export and gets handed back from on "Build Settings".
 
+            // Build::running() as well as our own flag: the game-logic compile
+            // is a second worker reporting into the same window, and starting an
+            // export on top of it would overwrite the run it is watching.
             const bool canExport = !s_exportOutputDir.empty()
-                                && ctx.contentManager && !running;
+                                && ctx.contentManager && !running
+                                && !BuildProgressDialog::Build::running();
             if (!canExport) ImGui::BeginDisabled();
             if (EditorWidgets::primaryButton("Export", ImVec2(110, 0)))
             {
@@ -955,11 +934,18 @@ void render(AppContext& ctx)
 
     // What the progress dialog's buttons asked for. Both run outside every
     // popup, for the same reason the Export button does.
-    switch (BuildProgressDialog::takeAction())
+    //
+    // Only for OUR runs: the Build window is shared with the native game-logic
+    // build, and taking the action of a run this panel did not start would turn
+    // its "Build Again" into a full project export.
+    if (BuildProgressDialog::runKind() == BuildProgressDialog::Kind::Export)
     {
-    case BuildProgressDialog::Action::Rebuild:     s_startRequest    = true; break;
-    case BuildProgressDialog::Action::BackToSetup: s_showExportModal = true; break;
-    case BuildProgressDialog::Action::None:                                  break;
+        switch (BuildProgressDialog::takeAction())
+        {
+        case BuildProgressDialog::Action::Rebuild:     s_startRequest    = true; break;
+        case BuildProgressDialog::Action::BackToSetup: s_showExportModal = true; break;
+        case BuildProgressDialog::Action::None:                                  break;
+        }
     }
 
     if (s_startRequest && !s_exportRunning.load())
@@ -1290,6 +1276,9 @@ void startExport(AppContext& ctx)
                     es.allowNetwork   = ctx.projectManager->currentProject().allowNetwork;
                     es.fontScripts    = ctx.projectManager->currentProject().fontScripts;
                     es.fontWeightBold = ctx.projectManager->currentProject().fontWeightBold;
+                    // The collision matrix, so the shipped build's physics
+                    // separates the same channels the preview did.
+                    es.collisionLayers = ctx.projectManager->currentProject().collisionLayers;
                     // What the application is to the system it lands on: the
                     // icon is generated at export time from these three.
                     es.appIconName  = ctx.projectManager->currentProject().appIconName;
@@ -1543,7 +1532,7 @@ void startExport(AppContext& ctx)
                                         Build::log(sev, line);
                                         // The toolchain's own count, mapped into the
                                         // Build ring's second 60 %.
-                                        if (const auto p = parseToolchainProgress(line))
+                                        if (const auto p = toolchainProgress(line))
                                             Build::stepProgress(0.4f + 0.6f * *p);
                                     });
                                 if (built.ok)

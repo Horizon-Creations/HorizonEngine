@@ -185,8 +185,13 @@ TEST_CASE("EngineApi: side-effect classification is correct")
     CHECK(setPos->results.empty());
 
     const auto* ray = HE::api::find("physics.raycast");
-    REQUIRE(ray->results.size() == 5);
+    REQUIRE(ray->results.size() == 6);
     CHECK(ray->results[0].type == P::Bool);       // hit
+    // `layer` was APPENDED, never inserted: both backends read a result by
+    // index, so a graph saved before it existed keeps wiring 0..4 to the same
+    // five things. Inserting anywhere else would have moved every wire after it.
+    CHECK(ray->results[5].name == std::string("layer"));
+    CHECK(ray->results[5].type == P::Int);
 }
 
 // ═══ Marshalling round-trips against a real world ═════════════════════════════
@@ -663,12 +668,158 @@ TEST_CASE("Physics: forces, velocity, overlap and gravity are on the registry")
 
     const auto* sweep = find("physics.sphereCast");
     REQUIRE(sweep->params.size() == 4);      // origin, direction, radius, maxDistance
-    REQUIRE(sweep->results.size() == 5);     // same hit shape as raycast
+    REQUIRE(sweep->results.size() == 6);     // same hit shape as raycast
     CHECK(sweep->results[0].type == P::Bool);
+
+    // ── The layer-masked forms ───────────────────────────────────────────────
+    // They exist as their own names rather than as a fourth parameter on the
+    // three above, and this is the test that keeps it that way: a node saved
+    // before a new parameter passes one argument fewer, which reads back as a
+    // zero, and zero for a channel MASK means "see nothing". Every stored
+    // Raycast node would have kept its shape and stopped hitting anything.
+    for (const char* id : { "physics.raycast", "physics.sphereCast",
+                            "physics.overlapSphere" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        for (const auto& p : row->params)
+            CHECK(p.name != std::string("layerMask"));
+    }
+
+    const auto* rayL = find("physics.raycastLayers");
+    REQUIRE(rayL != nullptr);
+    CHECK_FALSE(rayL->isExec);
+    REQUIRE(rayL->params.size() == 4);        // + layerMask, last
+    CHECK(rayL->params[3].name == std::string("layerMask"));
+    CHECK(rayL->params[3].type == P::Int);
+    REQUIRE(rayL->results.size() == 6);       // the same hit shape as raycast
+
+    const auto* sweepL = find("physics.sphereCastLayers");
+    REQUIRE(sweepL != nullptr);
+    REQUIRE(sweepL->params.size() == 5);
+    CHECK(sweepL->params[4].name == std::string("layerMask"));
+    REQUIRE(sweepL->results.size() == 6);
+
+    const auto* overlapL = find("physics.overlapSphereLayers");
+    REQUIRE(overlapL != nullptr);
+    REQUIRE(overlapL->params.size() == 3);
+    CHECK(overlapL->params[2].name == std::string("layerMask"));
+    REQUIRE(overlapL->results.size() == 1);
+    CHECK(overlapL->results[0].isArray);
 
     // Lua and Python reach the whole group through horizon.physics.* — the flat
     // bindings only ever had raycast/setVelocity/isGrounded.
     CHECK(HE::api::isScriptGroup("physics"));
+}
+
+TEST_CASE("Physics: the oriented shapes carry their mask from the first day")
+{
+    using HE::api::find;
+
+    // The three sphere rows needed a second name each to gain a mask, because a
+    // stored node cannot grow an input. These four were born with it, so the
+    // mask is simply the last parameter and there is nothing to twin. The test
+    // exists to keep it that way: the moment one of them ships without the mask,
+    // adding it later costs another four names.
+    struct Row { const char* id; std::size_t params; };
+    for (const Row& r : { Row{ "physics.boxCast", 6 }, Row{ "physics.capsuleCast", 7 },
+                          Row{ "physics.overlapBox", 4 }, Row{ "physics.overlapCapsule", 5 },
+                          Row{ "physics.raycastAll", 4 } })
+    {
+        INFO("row: " << r.id);
+        const auto* row = find(r.id);
+        REQUIRE(row != nullptr);
+        CHECK_FALSE(row->isExec);                     // a query, not an action
+        REQUIRE(row->params.size() == r.params);
+        CHECK(row->params.back().name == std::string("layerMask"));
+        CHECK(row->params.back().type == P::Int);
+    }
+
+    // Rotation is a Vec3 of degrees, not a quaternion: the graph has no
+    // quaternion type and nobody types one by hand anyway.
+    const auto* box = find("physics.boxCast");
+    CHECK(box->params[1].name == std::string("halfExtents"));
+    CHECK(box->params[2].name == std::string("rotation"));
+    CHECK(box->params[2].type == P::Vec3);
+    REQUIRE(box->results.size() == 6);                // the same hit shape as raycast
+
+    // The capsule takes the two numbers the Collider component shows, in that
+    // order, so a character's own fields sweep that character's own shape.
+    const auto* capsule = find("physics.capsuleCast");
+    CHECK(capsule->params[1].name == std::string("radius"));
+    CHECK(capsule->params[2].name == std::string("height"));
+
+    // raycastAll is five PARALLEL arrays, because a graph value is a list of one
+    // type and there is no list of structs. All five must be arrays or index i
+    // stops meaning the same hit in each.
+    const auto* all = find("physics.raycastAll");
+    REQUIRE(all->results.size() == 5);
+    for (const auto& res : all->results)
+    {
+        INFO("result: " << res.name);
+        CHECK(res.isArray);
+    }
+    CHECK(all->results[0].type == P::Int);      // entities
+    CHECK(all->results[1].type == P::Vec3);     // points
+    CHECK(all->results[2].type == P::Vec3);     // normals
+    CHECK(all->results[3].type == P::Float);    // distances
+    CHECK(all->results[4].type == P::Int);      // layers
+
+    // The force pair and the spin pair: actions are exec, questions are not.
+    for (const char* id : { "physics.addForceAtPosition", "physics.addImpulseAtPosition",
+                            "physics.setAngularVelocity" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        CHECK(row->isExec);
+        REQUIRE(row->results.size() == 1);
+        CHECK(row->results[0].type == P::Bool);
+    }
+    const auto* atPoint = find("physics.addImpulseAtPosition");
+    REQUIRE(atPoint->params.size() == 3);
+    CHECK(atPoint->params[2].name == std::string("position"));
+
+    const auto* getSpin = find("physics.getAngularVelocity");
+    REQUIRE(getSpin != nullptr);
+    CHECK_FALSE(getSpin->isExec);
+    REQUIRE(getSpin->results.size() == 1);
+    CHECK(getSpin->results[0].type == P::Vec3);
+}
+
+TEST_CASE("Physics: the new rows are neutral without a PhysicsWorld too")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::boxCast(c, glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f),
+                                          glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK_FALSE(HE::api::physics::capsuleCast(c, glm::vec3(0.0f), 0.5f, 2.0f, glm::vec3(0.0f),
+                                              glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK(HE::api::physics::overlapBox(c, glm::vec3(0.0f), glm::vec3(1.0f), glm::vec3(0.0f),
+                                       0xFFFF).empty());
+    CHECK(HE::api::physics::overlapCapsule(c, glm::vec3(0.0f), 0.5f, 2.0f, glm::vec3(0.0f),
+                                           0xFFFF).empty());
+    CHECK(HE::api::physics::raycastAll(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 10.0f,
+                                       0xFFFF).empty());
+    CHECK_FALSE(HE::api::physics::addForceAtPosition(c, 1, glm::vec3(1.0f), glm::vec3(0.0f)));
+    CHECK_FALSE(HE::api::physics::addImpulseAtPosition(c, 1, glm::vec3(1.0f), glm::vec3(0.0f)));
+    CHECK_FALSE(HE::api::physics::setAngularVelocity(c, 1, glm::vec3(1.0f)));
+    CHECK(HE::api::physics::getAngularVelocity(c, 1) == glm::vec3(0.0f));
+
+    // Through the thunk, where the five arrays must come back as five EMPTY
+    // arrays rather than as scalars — a For Each wired to any of them reads the
+    // element type off the array itself, and a scalar zero would mistype it.
+    auto out = HE::api::find("physics.raycastAll")->invoke(c,
+        { Value::ofVec3(glm::vec3(0.0f)), Value::ofVec3(glm::vec3(0, 0, 1)),
+          Value::ofFloat(10.0f), Value::ofInt(0xFFFF) });
+    REQUIRE(out.size() == 5);
+    for (const auto& v : out)
+    {
+        CHECK(v.isArray);
+        CHECK(v.items.empty());
+    }
+    CHECK(out[1].type == P::Vec3);
 }
 
 TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
@@ -682,6 +833,9 @@ TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
     CHECK(HE::api::physics::getGravity(c) == glm::vec3(0.0f));
     CHECK(HE::api::physics::overlapSphere(c, glm::vec3(0.0f), 5.0f).empty());
     CHECK_FALSE(HE::api::physics::sphereCast(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f).hit);
+    CHECK_FALSE(HE::api::physics::raycastLayers(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 10.0f, 0xFFFF).hit);
+    CHECK_FALSE(HE::api::physics::sphereCastLayers(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f, 0xFFFF).hit);
+    CHECK(HE::api::physics::overlapSphereLayers(c, glm::vec3(0.0f), 5.0f, 0xFFFF).empty());
     CHECK_NOTHROW(HE::api::physics::setGravity(c, glm::vec3(0.0f, -1.0f, 0.0f)));
     CHECK_NOTHROW(HE::api::physics::setVelocity(c, 1, glm::vec3(1.0f)));
 
@@ -2996,7 +3150,7 @@ TEST_CASE("save services: the C-ABI table drives the full save path for C++ Game
     CHECK(!he::save::create("slot1"));
     CHECK(he::save::activeId().empty());
 
-    HE::api::SaveServicesBinding binding;
+    HE::api::GameServicesBinding binding;
     binding.world   = [&worldPtr]() { return worldPtr; };
     binding.content = &rig.cm;
     HeSaveServices table{};
@@ -3004,11 +3158,20 @@ TEST_CASE("save services: the C-ABI table drives the full save path for C++ Game
     HE_SetEngineServices(&table);
     REQUIRE(he::save::available());
 
-    // An ABI mismatch is rejected, not half-used.
-    HeSaveServices wrong = table;
-    wrong.abiVersion = HE_SAVE_ABI_VERSION + 1;
-    HE_SetEngineServices(&wrong);
+    // A table OLDER than what this module was built against is rejected, not
+    // half-used: the module would read past what the engine filled and call
+    // through an uninitialised pointer.
+    HeSaveServices tooOld = table;
+    tooOld.abiVersion = HE_SAVE_ABI_VERSION - 1;
+    HE_SetEngineServices(&tooOld);
     CHECK(!he::save::available());
+
+    // A NEWER one is taken. Growth is append-only, so the module's view of the
+    // struct is a prefix of the engine's and reading that prefix is safe.
+    HeSaveServices newer = table;
+    newer.abiVersion = HE_SAVE_ABI_VERSION + 1;
+    HE_SetEngineServices(&newer);
+    CHECK(he::save::available());
     HE_SetEngineServices(&table);
 
     REQUIRE(he::save::create("cpp-run"));
@@ -4012,4 +4175,407 @@ TEST_CASE("EngineApi: nav and jump rows are safe with no world and no physics")
     CHECK(call("nav.remainingDistance", { id })[0].f == doctest::Approx(-1.0f));
     call("nav.stop",     { id });                        // must not crash
     call("nav.setSpeed", { id, Value::ofFloat(2.0f) });  // must not crash
+}
+
+// ═══ Content: residency, and the pointer that is never handed over ════════════
+
+namespace {
+
+// A content root with two real .hasset files on disk, so load() has something to
+// read and the SECOND load has something to move (the trap this whole group is
+// shaped around).
+struct ContentTestRig
+{
+    std::filesystem::path root;
+    ContentManager        cm;
+
+    ContentTestRig()
+        : root(std::filesystem::temp_directory_path() / "he_api_content_test" / "Content")
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(root.parent_path(), ec);
+        std::filesystem::create_directories(root);
+        cm.setContentRoot(root.string());
+
+        writeTexture("Rock.hasset", "Rock");
+        writeTexture("Moss.hasset", "Moss");
+        StaticMeshAsset mesh;
+        mesh.type = HE::AssetType::StaticMesh;
+        mesh.name = "Cube"; mesh.path = "Cube.hasset";
+        mesh.vertices = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+        mesh.indices  = { 0, 1, 2 };
+        cm.saveAsset(mesh);
+        // saveAsset registers what it writes; unload everything again so each
+        // test starts from "on disk, not resident".
+        for (const HE::UUID id : cm.enumerateIds()) cm.unloadAsset(id);
+    }
+    ~ContentTestRig()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(root.parent_path(), ec);
+    }
+
+    void writeTexture(const std::string& path, const std::string& name)
+    {
+        TextureAsset t;
+        t.type = HE::AssetType::Texture;
+        t.name = name; t.path = path;
+        t.width = 1; t.height = 1; t.channels = 4;
+        t.data = { 255, 255, 255, 255 };
+        cm.saveAsset(t);
+    }
+};
+
+} // namespace
+
+TEST_CASE("Content: load, type, unload — by path and by id")
+{
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+    // typeName must not become a load: asking what something is is a question.
+    CHECK(HE::api::content::typeName(c, "Rock.hasset").empty());
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+    // …and neither must unload.
+    CHECK_FALSE(HE::api::content::unload(c, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+
+    REQUIRE(HE::api::content::load(c, "Rock.hasset"));
+    CHECK(HE::api::content::isLoaded(c, "Rock.hasset"));
+    CHECK(HE::api::content::typeName(c, "Rock.hasset") == "Texture");
+    CHECK(HE::api::content::typeName(c, "Cube.hasset").empty());   // not loaded yet
+    REQUIRE(HE::api::content::load(c, "Cube.hasset"));
+    CHECK(HE::api::content::typeName(c, "Cube.hasset") == "StaticMesh");
+
+    CHECK(HE::api::content::unload(c, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::unload(c, "Rock.hasset"));   // gone already
+
+    // The id-keyed twins answer the same questions about the same asset.
+    const HE::UUID id = HE::api::content::loadId(c, "Rock.hasset");
+    REQUIRE(id != HE::UUID{});
+    CHECK(HE::api::content::isLoadedId(c, id));
+    CHECK(HE::api::content::typeNameId(c, id) == "Texture");
+    CHECK(HE::api::content::unloadId(c, id));
+    CHECK_FALSE(HE::api::content::isLoadedId(c, id));
+}
+
+// The lifetime lesson, as an assertion: an id keeps answering across the loads
+// that would have invalidated any pointer the manager handed out. This is the
+// reason nothing in the content group returns one.
+TEST_CASE("Content: an id survives the loads that move the asset pool")
+{
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+
+    const HE::UUID rock = HE::api::content::loadId(c, "Rock.hasset");
+    REQUIRE(rock != HE::UUID{});
+    // A pointer taken here would be dangling three lines down. Take the values
+    // instead and compare them afterwards.
+    const std::string typeBefore = HE::api::content::typeNameId(c, rock);
+
+    REQUIRE(HE::api::content::loadId(c, "Moss.hasset") != HE::UUID{});
+    REQUIRE(HE::api::content::loadId(c, "Cube.hasset") != HE::UUID{});
+
+    CHECK(HE::api::content::isLoadedId(c, rock));
+    CHECK(HE::api::content::typeNameId(c, rock) == typeBefore);
+    CHECK(typeBefore == "Texture");
+    // Unloading a DIFFERENT asset swap-and-pops the pool; the id still holds.
+    CHECK(HE::api::content::unloadId(c, HE::api::content::loadId(c, "Moss.hasset")));
+    CHECK(HE::api::content::isLoadedId(c, rock));
+    CHECK(HE::api::content::typeNameId(c, rock) == "Texture");
+}
+
+TEST_CASE("Content: no manager, unknown path and a zero id are states, not crashes")
+{
+    Ctx none{};   // no ContentManager at all
+    CHECK_FALSE(HE::api::content::load(none, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::unload(none, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::isLoaded(none, "Rock.hasset"));
+    CHECK(HE::api::content::typeName(none, "Rock.hasset").empty());
+    CHECK(HE::api::content::loadId(none, "Rock.hasset") == HE::UUID{});
+    CHECK_FALSE(HE::api::content::unloadId(none, HE::UUID{ 1, 2 }));
+    CHECK_FALSE(HE::api::content::isLoadedId(none, HE::UUID{ 1, 2 }));
+    CHECK(HE::api::content::typeNameId(none, HE::UUID{ 1, 2 }).empty());
+
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+    CHECK_FALSE(HE::api::content::load(c, "NoSuchThing.hasset"));
+    CHECK_FALSE(HE::api::content::load(c, ""));
+    CHECK_FALSE(HE::api::content::isLoaded(c, ""));
+    CHECK_FALSE(HE::api::content::unloadId(c, HE::UUID{}));
+    CHECK_FALSE(HE::api::content::isLoadedId(c, HE::UUID{}));
+    CHECK(HE::api::content::typeNameId(c, HE::UUID{}).empty());
+    // An id from nowhere is unknown, not a lookup into whatever sits in a slot.
+    CHECK_FALSE(HE::api::content::isLoadedId(c, HE::UUID{ 0xDEAD, 0xBEEF }));
+    CHECK(HE::api::content::typeNameId(c, HE::UUID{ 0xDEAD, 0xBEEF }).empty());
+}
+
+// The path-keyed four are the registry rows — what HorizonCode, Lua and Python
+// actually call, since none of them has a UUID to hold.
+TEST_CASE("Content: the registry rows are the path-keyed four")
+{
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const Value rock = Value::ofString("Rock.hasset");
+
+    REQUIRE(HE::api::find("content.load")      != nullptr);
+    REQUIRE(HE::api::find("content.unload")    != nullptr);
+    REQUIRE(HE::api::find("content.isLoaded")  != nullptr);
+    REQUIRE(HE::api::find("content.typeName")  != nullptr);
+    // Lua and Python build their tables from this list; without it the group is
+    // HorizonCode-only.
+    CHECK(HE::api::isScriptGroup("content"));
+
+    CHECK_FALSE(call("content.isLoaded", { rock })[0].b);
+    CHECK(call("content.load",     { rock })[0].b);
+    CHECK(call("content.isLoaded", { rock })[0].b);
+    CHECK(call("content.typeName", { rock })[0].s == "Texture");
+    CHECK(call("content.unload",   { rock })[0].b);
+    CHECK_FALSE(call("content.isLoaded", { rock })[0].b);
+
+    Ctx empty{};
+    auto neutral = [&](const char* id, std::vector<Value> a)
+    { return HE::api::find(id)->invoke(empty, a); };
+    CHECK_FALSE(neutral("content.load",     { rock })[0].b);
+    CHECK_FALSE(neutral("content.unload",   { rock })[0].b);
+    CHECK_FALSE(neutral("content.isLoaded", { rock })[0].b);
+    CHECK(neutral("content.typeName", { rock })[0].s.empty());
+}
+
+TEST_CASE("Content: the C-ABI table carries ids and names, never pointers")
+{
+    ContentTestRig rig;
+    HorizonWorld world;
+    HorizonWorld* worldPtr = &world;
+
+    HE::api::GameServicesBinding binding;
+    binding.world   = [&worldPtr]() { return worldPtr; };
+    binding.content = &rig.cm;
+    HeContentServices table{};
+    HE::api::fillContentServices(table, &binding);
+
+    // Before injection the wrappers are safe no-op defaults.
+    HeEngineServices none{};
+    none.abiVersion = HE_SERVICES_ABI_VERSION;
+    HE_SetEngineServicesV2(&none);
+    CHECK_FALSE(he::content::available());
+    CHECK_FALSE(he::content::load("Rock.hasset").valid());
+    CHECK(he::content::typeName(he::AssetId{ 1, 2 }).empty());
+
+    HeEngineServices umbrella{};
+    umbrella.abiVersion = HE_SERVICES_ABI_VERSION;
+    umbrella.content    = &table;
+    HE_SetEngineServicesV2(&umbrella);
+    REQUIRE(he::content::available());
+
+    const he::AssetId rock = he::content::load("Rock.hasset");
+    REQUIRE(rock.valid());
+    CHECK(he::content::isLoaded(rock));
+    CHECK(he::content::typeName(rock) == "Texture");
+    // Same asset, same id — a second load does not mint a new one.
+    CHECK(he::content::load("Rock.hasset") == rock);
+    // …and the id keeps answering after the load that moves the pool.
+    REQUIRE(he::content::load("Cube.hasset").valid());
+    CHECK(he::content::isLoaded(rock));
+    CHECK(he::content::typeName(rock) == "Texture");
+
+    CHECK_FALSE(he::content::load("NoSuchThing.hasset").valid());
+    CHECK(he::content::unload(rock));
+    CHECK_FALSE(he::content::isLoaded(rock));
+    CHECK_FALSE(he::content::unload(rock));
+
+    // The two-call string convention, straight at the table: a buffer that is
+    // too small still gets a NUL-terminated prefix and the FULL length back.
+    const he::AssetId cube = he::content::load("Cube.hasset");
+    REQUIRE(cube.valid());
+    HeAssetId cid{ cube.hi, cube.lo };
+    char tiny[4] = { 'x', 'x', 'x', 'x' };
+    const int need = table.assetTypeName(table.host, cid, tiny, (int)sizeof tiny);
+    CHECK(need == (int)std::strlen("StaticMesh"));
+    CHECK(std::string(tiny) == "Sta");
+    CHECK(he::content::typeName(cube) == "StaticMesh");   // the wrapper grows and retries
+
+    HE_SetEngineServicesV2(nullptr);
+}
+
+// An engine that predates the content table still hands over the three it has.
+// The umbrella is checked per POINTER, at the version that pointer appeared —
+// a module built today must not lose its savegame API on last month's engine.
+TEST_CASE("Content: an umbrella from before the content table costs only content")
+{
+    ContentTestRig rig;
+    HorizonWorld world;
+    HorizonWorld* worldPtr = &world;
+
+    HE::api::GameServicesBinding binding;
+    binding.world   = [&worldPtr]() { return worldPtr; };
+    binding.content = &rig.cm;
+    HeSaveServices    save{};    HE::api::fillSaveServices(save, &binding);
+    HeInputServices   input{};   HE::api::fillInputServices(input, &binding);
+    HeContentServices content{}; HE::api::fillContentServices(content, &binding);
+
+    HeEngineServices old{};
+    old.abiVersion = 1u;          // save/physics/input only
+    old.save       = &save;
+    old.input      = &input;
+    old.content    = &content;    // present in memory, but v1 says "do not read it"
+    HE_SetEngineServicesV2(&old);
+    CHECK(he::save::available());
+    CHECK(he::input::available());
+    CHECK_FALSE(he::content::available());
+
+    HeEngineServices now = old;
+    now.abiVersion = HE_SERVICES_ABI_VERSION;
+    HE_SetEngineServicesV2(&now);
+    CHECK(he::save::available());
+    CHECK(he::content::available());
+
+    // A content table older than this module was built against is refused
+    // outright rather than half-used.
+    HeContentServices tooOld = content;
+    tooOld.abiVersion = HE_CONTENT_ABI_VERSION - 1;
+    HeEngineServices mixed = now;
+    mixed.content = &tooOld;
+    HE_SetEngineServicesV2(&mixed);
+    CHECK(he::save::available());
+    CHECK_FALSE(he::content::available());
+
+    HE_SetEngineServicesV2(nullptr);
+}
+
+TEST_CASE("Physics: the joint rows carry every field the five types read")
+{
+    using HE::api::find;
+
+    // The row is born with all eight parameters for the same reason boxCast was
+    // born with its mask: a stored node cannot grow an input, so a field left
+    // off today costs a second name tomorrow. Between them the five joint types
+    // read all of these — Fixed none, Point and Hinge the pivot, Slider the
+    // axis, Distance both anchors.
+    const auto* add = find("physics.addJoint");
+    REQUIRE(add != nullptr);
+    CHECK(add->isExec);                              // an action, not a question
+    REQUIRE(add->params.size() == 8);
+    CHECK(add->params[0].name == std::string("entityA"));
+    CHECK(add->params[1].name == std::string("entityB"));
+    CHECK(add->params[2].name == std::string("type"));
+    CHECK(add->params[2].type == P::Int);            // no enum type in the graph
+    CHECK(add->params[3].name == std::string("anchorA"));
+    CHECK(add->params[3].type == P::Vec3);
+    CHECK(add->params[4].name == std::string("anchorB"));
+    CHECK(add->params[5].name == std::string("axis"));
+    CHECK(add->params[6].name == std::string("minLimit"));
+    CHECK(add->params[6].type == P::Float);
+    CHECK(add->params[7].name == std::string("maxLimit"));
+    REQUIRE(add->results.size() == 1);
+    CHECK(add->results[0].type == P::Bool);
+
+    const auto* remove = find("physics.removeJoint");
+    REQUIRE(remove != nullptr);
+    CHECK(remove->isExec);
+    REQUIRE(remove->params.size() == 1);
+
+    // A question, so it is NOT exec — the same split the rest of the group has.
+    const auto* has = find("physics.hasJoint");
+    REQUIRE(has != nullptr);
+    CHECK_FALSE(has->isExec);
+    REQUIRE(has->results.size() == 1);
+    CHECK(has->results[0].type == P::Bool);
+}
+
+TEST_CASE("Physics: the joint rows are neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::addJoint(c, 1, 2, 0, glm::vec3(0.0f), glm::vec3(0.0f),
+                                           glm::vec3(0, 1, 0), 0.0f, 0.0f));
+    CHECK_FALSE(HE::api::physics::removeJoint(c, 1));
+    CHECK_FALSE(HE::api::physics::hasJoint(c, 1));
+
+    // And through the thunk, which is the path a graph actually takes.
+    auto out = HE::api::find("physics.addJoint")->invoke(c,
+        { Value::ofInt(1), Value::ofInt(2), Value::ofInt(2),
+          Value::ofVec3(glm::vec3(0.0f)), Value::ofVec3(glm::vec3(0.0f)),
+          Value::ofVec3(glm::vec3(0, 1, 0)), Value::ofFloat(0.0f), Value::ofFloat(0.0f) });
+    REQUIRE(out.size() == 1);
+    CHECK_FALSE(out[0].b);
+}
+
+TEST_CASE("Physics: the motor, the break force and the broken-joint queue have their own rows")
+{
+    using HE::api::find;
+
+    // Four rows rather than four more parameters on Add Joint. The reason is the
+    // one that shaped that row too: a node saved in a graph cannot grow an
+    // input, so a parameter added later reads as a silent zero in every graph
+    // that predates it. These three are also things a game changes while it
+    // runs, which a constructor argument could not express anyway.
+    const auto* motor = find("physics.setJointMotor");
+    REQUIRE(motor != nullptr);
+    CHECK(motor->isExec);
+    REQUIRE(motor->params.size() == 3);
+    CHECK(motor->params[0].name == std::string("entity"));
+    CHECK(motor->params[1].name == std::string("targetSpeed"));
+    CHECK(motor->params[1].type == P::Float);
+    CHECK(motor->params[2].name == std::string("maxForce"));
+    REQUIRE(motor->results.size() == 1);
+    CHECK(motor->results[0].type == P::Bool);
+
+    const auto* breakForce = find("physics.setJointBreakForce");
+    REQUIRE(breakForce != nullptr);
+    CHECK(breakForce->isExec);
+    REQUIRE(breakForce->params.size() == 2);
+    CHECK(breakForce->params[1].type == P::Float);
+
+    const auto* collide = find("physics.setJointCollideConnected");
+    REQUIRE(collide != nullptr);
+    REQUIRE(collide->params.size() == 2);
+    CHECK(collide->params[1].name == std::string("collide"));
+    CHECK(collide->params[1].type == P::Bool);
+
+    // Two PARALLEL arrays, like raycastAll's five: a graph value is a list of
+    // ONE type, so a pair of entities has to be taken apart. Exec, because
+    // reading it EMPTIES it — that is a side effect, and a pure node would let
+    // the graph read it twice and get nothing the second time.
+    const auto* poll = find("physics.pollJointBroken");
+    REQUIRE(poll != nullptr);
+    CHECK(poll->isExec);
+    CHECK(poll->params.empty());
+    REQUIRE(poll->results.size() == 2);
+    CHECK(poll->results[0].name == std::string("entitiesA"));
+    CHECK(poll->results[0].isArray);
+    CHECK(poll->results[1].name == std::string("entitiesB"));
+    CHECK(poll->results[1].isArray);
+}
+
+TEST_CASE("Physics: the new joint rows are neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::setJointMotor(c, 1, 1.0f, 100.0f));
+    CHECK_FALSE(HE::api::physics::setJointBreakForce(c, 1, 100.0f));
+    CHECK_FALSE(HE::api::physics::setJointCollideConnected(c, 1, true));
+    CHECK(HE::api::physics::pollJointBroken(c).empty());
+
+    // And through the thunks, which is the path a graph actually takes. The
+    // poll row must still hand back its two lists — an empty one each, not no
+    // outputs at all, or a For Each downstream reads a missing value.
+    auto out = HE::api::find("physics.pollJointBroken")->invoke(c, {});
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].isArray);
+    CHECK(out[0].items.empty());
+    CHECK(out[1].isArray);
+    CHECK(out[1].items.empty());
+
+    auto motorOut = HE::api::find("physics.setJointMotor")->invoke(c,
+        { Value::ofInt(1), Value::ofFloat(1.0f), Value::ofFloat(100.0f) });
+    REQUIRE(motorOut.size() == 1);
+    CHECK_FALSE(motorOut[0].b);
 }

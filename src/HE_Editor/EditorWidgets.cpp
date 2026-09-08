@@ -40,6 +40,11 @@ namespace
 			case HE::AssetType::PropertyAnimClip:     return take(cm.getPropertyAnimClip(id));
 			case HE::AssetType::ParticleSystem:       return take(cm.getParticleGraph(id));
 			case HE::AssetType::AnimatorStateMachine: return take(cm.getAnimatorStateMachine(id));
+			// The fallback below would accept a bone mask too, via the type index —
+			// but it never fills nameOut, so the slot would show an accepted asset
+			// with no name on it. A typed getter exists; it belongs here.
+			case HE::AssetType::BoneMask:             return take(cm.getBoneMask(id));
+			case HE::AssetType::BlendSpace:           return take(cm.getBlendSpace(id));
 			default:                                  return cm.assetType(id) == want;
 		}
 	}

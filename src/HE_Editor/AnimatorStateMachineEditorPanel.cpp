@@ -451,7 +451,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			}
 			return created;
 		};
-		m.nodeBodyHeight = [](int) -> float { return 52.0f; }; // name + loop, clip slot
+		m.nodeBodyHeight = [](int) -> float { return 74.0f; }; // name + loop, clip slot, blend-space slot
 		m.drawNodeBody = [&st, &ctx, &structuralEdit](int id, ImVec2 bodyMin, ImVec2 bodyMax, float zoom)
 		{
 			HE::AnimationState* s = findStateById(st.graph, id);
@@ -492,6 +492,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y + 24.0f * zoom));
 			ImGui::SetNextItemAllowOverlap();
 			ImGui::InvisibleButton("##clipslot", ImVec2(std::max(bodyMax.x - bodyMin.x, 1.0f), 22.0f * zoom));
+			EditorWidgets::helpForKey("State Machine/Clip Slot");
 			// The graph's own dirty flag covers this (structuralEdit), so no world
 			// snapshot — hence the drop half only, not the whole slot widget.
 			if (const EditorWidgets::AssetDrop drop =
@@ -499,6 +500,33 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			{
 				s->clipId = drop.id;
 				structuralEdit = true;
+			}
+
+			// A blend space instead of the clip: several clips mixed by
+			// parameter. A set one WINS over the clip above, so the readout says
+			// which of the two the state is actually posing from — a state
+			// carrying both and quietly ignoring one is a state nobody can debug.
+			ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y + 46.0f * zoom));
+			const bool hasSpace = (s->blendSpaceId != HE::UUID{});
+			const std::string spaceState = !hasSpace ? std::string("(no blend space)")
+				: (ctx.contentManager && ctx.contentManager->assetType(s->blendSpaceId) == HE::AssetType::BlendSpace
+					? std::string("blend space — wins over clip") : std::string("(missing)"));
+			if (hasSpace) ImGui::TextUnformatted(spaceState.c_str());
+			else          ImGui::TextDisabled("%s", spaceState.c_str());
+			ImGui::SetCursorScreenPos(ImVec2(bodyMin.x, bodyMin.y + 46.0f * zoom));
+			ImGui::SetNextItemAllowOverlap();
+			ImGui::InvisibleButton("##bsslot", ImVec2(std::max(bodyMax.x - bodyMin.x, 1.0f), 22.0f * zoom));
+			EditorWidgets::helpForKey("State Machine/Blend Space Slot");
+			if (hasSpace && ImGui::IsItemClicked(ImGuiMouseButton_Right))
+			{
+				s->blendSpaceId = HE::UUID{};
+				structuralEdit  = true;
+			}
+			if (const EditorWidgets::AssetDrop drop =
+					EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::BlendSpace))
+			{
+				s->blendSpaceId = drop.id;
+				structuralEdit  = true;
 			}
 			popWidgetScale();
 		};
