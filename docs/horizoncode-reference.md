@@ -388,7 +388,11 @@ Notes:
   entity's stable UUID in the active save, `entity.applySavedState` re-applies what the
   save carries (partial by design) — play mode only. Native C++ GameLogic reaches the
   same API through `<HorizonGameServices.h>` (`he::save::*` / `he::entity::*`,
-  injected after the library loads; struct fields cross as JSON).
+  injected after the library loads; struct fields cross as JSON). The same header
+  carries `he::physics::*` (raycast/sphereCast/overlapSphere, force/impulse/torque,
+  velocity, teleport, gravity) and `he::input::*` (keys, mouse, gamepad, input
+  mode) — one injected C-ABI table per service, so a native module reaches what
+  Lua, Python and HorizonCode reach.
 - **User types**: Struct and Enum **assets** define project types once and light up
   everywhere — HorizonCode pins/variables (Make/Break Struct, Get/Set Struct Field,
   Enum Value, Switch on Enum, conversions; wires require the SAME definition; a

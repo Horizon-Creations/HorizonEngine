@@ -2996,7 +2996,7 @@ TEST_CASE("save services: the C-ABI table drives the full save path for C++ Game
     CHECK(!he::save::create("slot1"));
     CHECK(he::save::activeId().empty());
 
-    HE::api::SaveServicesBinding binding;
+    HE::api::GameServicesBinding binding;
     binding.world   = [&worldPtr]() { return worldPtr; };
     binding.content = &rig.cm;
     HeSaveServices table{};
@@ -3004,11 +3004,20 @@ TEST_CASE("save services: the C-ABI table drives the full save path for C++ Game
     HE_SetEngineServices(&table);
     REQUIRE(he::save::available());
 
-    // An ABI mismatch is rejected, not half-used.
-    HeSaveServices wrong = table;
-    wrong.abiVersion = HE_SAVE_ABI_VERSION + 1;
-    HE_SetEngineServices(&wrong);
+    // A table OLDER than what this module was built against is rejected, not
+    // half-used: the module would read past what the engine filled and call
+    // through an uninitialised pointer.
+    HeSaveServices tooOld = table;
+    tooOld.abiVersion = HE_SAVE_ABI_VERSION - 1;
+    HE_SetEngineServices(&tooOld);
     CHECK(!he::save::available());
+
+    // A NEWER one is taken. Growth is append-only, so the module's view of the
+    // struct is a prefix of the engine's and reading that prefix is safe.
+    HeSaveServices newer = table;
+    newer.abiVersion = HE_SAVE_ABI_VERSION + 1;
+    HE_SetEngineServices(&newer);
+    CHECK(he::save::available());
     HE_SetEngineServices(&table);
 
     REQUIRE(he::save::create("cpp-run"));

@@ -6254,20 +6254,45 @@ const ApiFn* find(const std::string& id)
 
 // ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────
 // Every bridge below is a captureless lambda decaying to a C function pointer;
-// `host` carries the SaveServicesBinding. Entity calls resolve the world PER
-// CALL through the binding so a scene switch never leaves a stale pointer in
-// the game library's hands.
+// `host` carries the GameServicesBinding. World and physics are resolved PER
+// CALL through the binding so a scene switch — which replaces both — never
+// leaves a stale pointer in the game library's hands.
+//
+// Nothing here reimplements engine behaviour: each row calls the matching
+// HE::api function, which is what keeps the C++ boundary honest. The rule that
+// makes it matter is the local↔world split — physics::setPosition takes a LOCAL
+// position and PhysicsWorld underneath speaks world poses, and the conversion
+// lives at that one boundary in this file. A second conversion out here would be
+// a fourth chance to get it wrong.
 
 namespace HE::api {
 namespace {
 
 Ctx bindingCtx(void* host)
 {
-    auto* b = static_cast<SaveServicesBinding*>(host);
+    auto* b = static_cast<GameServicesBinding*>(host);
     Ctx c;
     c.world   = b && b->world ? b->world() : nullptr;
+    c.physics = b && b->physics ? b->physics() : nullptr;
     c.content = b ? b->content : nullptr;
     return c;
+}
+// float[3]/float[2] ↔ glm, the only vector shapes that cross the C boundary.
+glm::vec3 toVec3(const float v[3])
+{ return v ? glm::vec3(v[0], v[1], v[2]) : glm::vec3(0.0f); }
+void copyVec3(const glm::vec3& v, float out[3])
+{ if (out) { out[0] = v.x; out[1] = v.y; out[2] = v.z; } }
+void copyVec2(const glm::vec2& v, float out[2])
+{ if (out) { out[0] = v.x; out[1] = v.y; } }
+void copyHit(const physics::RaycastHit& h, ::HeRaycastHit* out)
+{
+    if (!out) return;
+    *out = {};
+    out->hit      = h.hit;
+    out->entity   = (uint32_t)h.entity;
+    copyVec3(h.point, out->point);
+    copyVec3(h.normal, out->normal);
+    out->distance = h.distance;
 }
 // (host, buf, cap) string return: copy up to cap-1 bytes, always NUL-terminate,
 // report the FULL length so the caller can grow and retry.
@@ -6290,17 +6315,17 @@ std::string joinLines(const std::vector<std::string>& v)
 
 } // namespace
 
-void fillSaveServices(::HeSaveServices& out, SaveServicesBinding* binding)
+void fillSaveServices(::HeSaveServices& out, GameServicesBinding* binding)
 {
     out = {};
     out.abiVersion = HE_SAVE_ABI_VERSION;
     out.host       = binding;
 
     out.create = [](void* h, const char* id) {
-        auto* b = static_cast<SaveServicesBinding*>(h);
+        auto* b = static_cast<GameServicesBinding*>(h);
         return save::create(id ? id : "", b ? b->content : nullptr); };
     out.load = [](void* h, const char* id) {
-        auto* b = static_cast<SaveServicesBinding*>(h);
+        auto* b = static_cast<GameServicesBinding*>(h);
         return save::load(id ? id : "", b ? b->content : nullptr); };
     out.write      = [](void*) { return save::write(); };
     out.close      = [](void*) { save::close(); };
@@ -6334,6 +6359,102 @@ void fillSaveServices(::HeSaveServices& out, SaveServicesBinding* binding)
     out.entityApplySavedState = [](void* h, uint32_t e) {
         Ctx c = bindingCtx(h);
         return entity::applySavedState(c, e); };
+}
+
+void fillPhysicsServices(::HePhysicsServices& out, GameServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_PHYSICS_ABI_VERSION;
+    out.host       = binding;
+
+    out.raycast = [](void* h, const float o[3], const float d[3], float maxDist,
+                     ::HeRaycastHit* hit) {
+        Ctx c = bindingCtx(h);
+        copyHit(physics::raycast(c, toVec3(o), toVec3(d), maxDist), hit); };
+    out.sphereCast = [](void* h, const float o[3], const float d[3], float radius,
+                        float maxDist, ::HeRaycastHit* hit) {
+        Ctx c = bindingCtx(h);
+        copyHit(physics::sphereCast(c, toVec3(o), toVec3(d), radius, maxDist), hit); };
+    // Writes what fits and reports the FULL count, so a caller that guessed too
+    // small can grow and ask again instead of silently losing hits.
+    out.overlapSphere = [](void* h, const float center[3], float radius,
+                           uint32_t* buf, int cap) {
+        Ctx c = bindingCtx(h);
+        const std::vector<Entity> hits = physics::overlapSphere(c, toVec3(center), radius);
+        if (buf && cap > 0)
+        {
+            const int n = (int)std::min<size_t>(hits.size(), (size_t)cap);
+            for (int i = 0; i < n; ++i) buf[i] = (uint32_t)hits[(size_t)i];
+        }
+        return (int)hits.size(); };
+
+    out.addForce = [](void* h, uint32_t e, const float f[3]) {
+        Ctx c = bindingCtx(h);
+        return physics::addForce(c, e, toVec3(f)); };
+    out.addImpulse = [](void* h, uint32_t e, const float i[3]) {
+        Ctx c = bindingCtx(h);
+        return physics::addImpulse(c, e, toVec3(i)); };
+    out.addTorque = [](void* h, uint32_t e, const float t[3]) {
+        Ctx c = bindingCtx(h);
+        return physics::addTorque(c, e, toVec3(t)); };
+
+    out.setVelocity = [](void* h, uint32_t e, const float v[3]) {
+        Ctx c = bindingCtx(h);
+        physics::setVelocity(c, e, toVec3(v)); };
+    out.getVelocity = [](void* h, uint32_t e, float o[3]) {
+        Ctx c = bindingCtx(h);
+        copyVec3(physics::getVelocity(c, e), o); };
+    out.isGrounded = [](void* h, uint32_t e) {
+        Ctx c = bindingCtx(h);
+        return physics::isGrounded(c, e); };
+
+    // LOCAL position in, exactly like transform.setPosition — the conversion to
+    // the world pose PhysicsWorld wants happens inside physics::setPosition.
+    out.setPosition = [](void* h, uint32_t e, const float p[3]) {
+        Ctx c = bindingCtx(h);
+        return physics::setPosition(c, e, toVec3(p)); };
+    out.setPositionAndReset = [](void* h, uint32_t e, const float p[3]) {
+        Ctx c = bindingCtx(h);
+        return physics::setPositionAndReset(c, e, toVec3(p)); };
+    out.hasPhysics = [](void* h, uint32_t e) {
+        Ctx c = bindingCtx(h);
+        return physics::hasPhysics(c, e); };
+
+    out.setGravity = [](void* h, const float g[3]) {
+        Ctx c = bindingCtx(h);
+        physics::setGravity(c, toVec3(g)); };
+    out.getGravity = [](void* h, float o[3]) {
+        Ctx c = bindingCtx(h);
+        copyVec3(physics::getGravity(c), o); };
+}
+
+void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_INPUT_ABI_VERSION;
+    out.host       = binding;   // unused today: the snapshot is process-global
+
+    out.keyDown = [](void*, const char* name) {
+        return input::keyDown(name ? name : ""); };
+    out.mouseButton   = [](void*, int index) { return input::mouseButton(index); };
+    out.mousePosition = [](void*, float o[2]) { copyVec2(input::mousePosition(), o); };
+    out.mouseDelta    = [](void*, float o[2]) { copyVec2(input::mouseDelta(), o); };
+    out.scrollDelta   = [](void*) { return input::scrollDelta(); };
+
+    out.gamepadConnected = [](void*) { return input::gamepadConnected(); };
+    out.gamepadButton = [](void*, const char* name) {
+        return input::gamepadButton(name ? name : ""); };
+    out.gamepadAxis = [](void*, const char* name) {
+        return input::gamepadAxis(name ? name : ""); };
+
+    out.mode = [](void*) { return (int)input::mode(); };
+    // Range-checked rather than cast through: `Mode` is an enum class over a
+    // uint8_t, and a game library handing in a 7 would otherwise plant a value
+    // the routing switch has no case for. Out of range is ignored, which leaves
+    // the mode the host set.
+    out.setMode = [](void*, int m) {
+        if (m < (int)input::Mode::GameOnly || m > (int)input::Mode::UIOnly) return;
+        input::setMode((input::Mode)m); };
 }
 
 } // namespace HE::api

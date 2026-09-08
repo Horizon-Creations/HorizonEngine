@@ -14,7 +14,9 @@ class ContentManager;
 class AudioEngine;
 class EntityHost;
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
-struct HeSaveServices; // HorizonGameServices.h (global scope, C ABI)
+struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
+struct HePhysicsServices; //   "
+struct HeInputServices;   //   "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -1623,15 +1625,28 @@ namespace save {
 }
 
 // ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────
-// Fill the C-ABI table a GameLogic library receives via HE_SetEngineServices.
-// `binding` must outlive the table's use (the app owns both); world resolves
-// per call so scene switches stay transparent.
-struct SaveServicesBinding
+// Fill the C-ABI tables a GameLogic library receives via HE_SetEngineServicesV2.
+// `binding` must outlive the tables' use (the app owns both).
+//
+// The two handle kinds are deliberately different. `world` and `physics` are
+// RESOLVERS, called per bridge call: both are rebuilt on a scene switch (the
+// bodies belong to the world that is going away), and a raw pointer to either
+// would be a dangling one in the game library's hands the moment a level
+// changed. `content` is a raw pointer because the ContentManager belongs to the
+// Application and survives every scene switch.
+struct GameServicesBinding
 {
-    std::function<HorizonWorld*()> world;   // may return null (calls then no-op loud)
+    std::function<HorizonWorld*()> world;     // may return null (calls then no-op loud)
+    std::function<PhysicsWorld*()> physics;   // may return null (physics rows then neutral)
     ContentManager*                content = nullptr;
 };
-void fillSaveServices(::HeSaveServices& out, SaveServicesBinding* binding);
+void fillSaveServices(::HeSaveServices& out, GameServicesBinding* binding);
+void fillPhysicsServices(::HePhysicsServices& out, GameServicesBinding* binding);
+// Input is a process-global snapshot, so this one needs no binding at all —
+// `binding` is taken anyway so the three fill functions read the same at the
+// call site and a later input service that DOES need the world can be added
+// without changing every caller.
+void fillInputServices(::HeInputServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

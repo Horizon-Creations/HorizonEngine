@@ -122,4 +122,27 @@ bool GameLogicLoader::injectServices(const HeSaveServices* services)
 	return true;
 }
 
+bool GameLogicLoader::injectServices(const HeEngineServices* services)
+{
+	if (!isLoaded()) return false;
+
+	// The current export first: it hands over every table at once.
+	auto setV2 = reinterpret_cast<FnSetEngineServicesV2>(m_lib.getSymbol("HE_SetEngineServicesV2"));
+	if (setV2)
+	{
+		setV2(services);
+		HE_LOG_INFO(GameLogic, "%s", "GameLogicLoader: engine services injected (v2)");
+		return true;
+	}
+
+	// A library built before the umbrella existed still has the v1 export, and
+	// its savegame API has to keep working — losing it because the engine grew
+	// would be the opposite of compatible. Physics/input stay unavailable there.
+	HE_LOG_INFO(GameLogic, "%s",
+		"GameLogicLoader: library has no HE_SetEngineServicesV2 export (older scaffold) "
+		"— falling back to the save-only v1 table; he::physics/he::input read as "
+		"unavailable in game code");
+	return injectServices(services ? services->save : nullptr);
+}
+
 } // namespace HE

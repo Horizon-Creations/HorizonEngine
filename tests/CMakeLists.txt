@@ -104,6 +104,7 @@ add_executable(he_tests
     test_rope_trail.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
+    test_gamelogic_services.cpp
     test_crypto_x25519.cpp
     test_net_bitstream.cpp
     test_net_loopback.cpp
@@ -417,6 +418,21 @@ target_link_libraries(test_gamelogic PRIVATE HorizonCore HorizonScene)
 add_dependencies(he_tests test_gamelogic)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_GAMELOGIC_LIB="$<TARGET_FILE:test_gamelogic>")
+
+# ─── Engine-services fixture: a game module on the REAL scaffold diet ─────────
+# One include directory and NO link libraries, exactly what
+# CppScaffold::cmakeLists gives a generated C++ game project. The constraint is
+# the test: a <HorizonGameServices.h> that ever reached for glm, HE_Scene or an
+# engine library would fail to compile here instead of failing in a user's
+# project. test_gamelogic_services.cpp loads it and drives the injected physics
+# and input tables through it.
+add_library(test_gamelogic_services SHARED fixtures/test_gamelogic_services.cpp)
+target_include_directories(test_gamelogic_services PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/HE_Core/include")
+target_compile_features(test_gamelogic_services PRIVATE cxx_std_20)
+add_dependencies(he_tests test_gamelogic_services)
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_GAMELOGIC_SERVICES_LIB="$<TARGET_FILE:test_gamelogic_services>")
 
 # Real HorizonGame executable path, so the macOS .app-bundle test can exercise
 # codesign against a genuine Mach-O (fake bytes cannot be signed).

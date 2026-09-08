@@ -5,7 +5,8 @@
 #include <filesystem>
 
 class HorizonWorld;
-struct HeSaveServices;   // HorizonGameServices.h (global scope, C ABI)
+struct HeSaveServices;     // HorizonGameServices.h (global scope, C ABI)
+struct HeEngineServices;   //   "  (the umbrella carrying all the tables)
 
 namespace HE {
 
@@ -34,11 +35,17 @@ public:
     bool         isLoaded()  const;
     IGameLogic*  logic()     const;   // nullptr if not loaded
 
-    // Hand the loaded library its engine-services table (HorizonGameServices.h)
-    // through its optional HE_SetEngineServices export. Call after load() and
-    // BEFORE onStart, with a table that outlives the library. Returns false when
-    // the library predates the export (older scaffold) — save APIs then read as
-    // unavailable on the game side, which is a state, not an error.
+    // Hand the loaded library its engine-services tables (HorizonGameServices.h)
+    // through its optional receiving exports. Call after load() and BEFORE
+    // onStart, with tables that outlive the library.
+    //
+    // The umbrella overload prefers HE_SetEngineServicesV2 and falls back to the
+    // v1 HE_SetEngineServices with `services->save` — a library built against an
+    // older scaffold keeps its savegame API and reads the rest as unavailable.
+    // Returns false only when the library has NEITHER export, which is still a
+    // state and not an error: the game side then no-ops with defaults.
+    bool injectServices(const ::HeEngineServices* services);
+    // v1 form, kept for callers (and tests) that only have a save table.
     bool injectServices(const ::HeSaveServices* services);
 
 private:

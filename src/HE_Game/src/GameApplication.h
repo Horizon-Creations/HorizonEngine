@@ -14,9 +14,9 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
-#include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
+#include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
 #include <UIWidget/UIWindowFrame.h>   // the borderless window's own frame (F3)
-#include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
+#include <HorizonGameServices.h>      // the injected C-ABI tables + their umbrella
 
 class ScriptContext;
 
@@ -152,11 +152,15 @@ private:
     // m_gameInstance so it is destroyed BEFORE the runtime it references.
     WidgetManager m_widgets;
 
-    // C++ GameLogic services (HorizonGameServices.h): the table + its binding
+    // C++ GameLogic services (HorizonGameServices.h): the tables + their binding
     // must outlive the loaded library, so they live here. Filled + injected
-    // right after the library loads.
-    HE::api::SaveServicesBinding m_saveServicesBinding;
+    // right after the library loads. m_engineServices is the umbrella that
+    // points at the other three and is what the loader actually hands over.
+    HE::api::GameServicesBinding m_gameServicesBinding;
     HeSaveServices               m_saveServices{};
+    HePhysicsServices            m_physicsServices{};
+    HeInputServices              m_inputServices{};
+    HeEngineServices             m_engineServices{};
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
     // Last frame's UI-navigation buttons (bits: up/down/left/right/activate).
