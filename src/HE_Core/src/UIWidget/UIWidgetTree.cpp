@@ -63,6 +63,138 @@ int UIWidgetTree::add(UIWidgetType type)
     return add(std::move(e));
 }
 
+// ── Moving an element ────────────────────────────────────────────────────────
+
+namespace
+{
+    // Two containers hold a child INDEX rather than a child: a Tab Box knows
+    // which page shows as a number, an Accordion knows which sections are open
+    // as a bitmask over numbers. Reorder underneath them and those numbers go
+    // on pointing at the same PLACE while the children have moved — the shown
+    // page jumps, the open sections wander.
+    //
+    // So: read what those numbers MEAN before the move (which element is the
+    // active page, which elements are the open sections) and write them back
+    // from the new indices afterwards. Nothing to do for a Splitter, whose
+    // panes are the indices themselves — swapping its two children is exactly
+    // the wanted effect, not a thing to undo.
+    struct ChildIndexState
+    {
+        int              activeTabId  = 0;   // element id of the shown page
+        int              activeTabIdx = 0;   // …and where it sat, for the clamp
+        std::vector<int> openSectionIds;     // element ids of the open sections
+    };
+
+    ChildIndexState captureChildIndexState(const UIWidgetTree& tree, int parentId)
+    {
+        ChildIndexState s;
+        const UIElement* p = parentId == 0 ? nullptr : tree.find(parentId);
+        if (!p) return s;
+        const std::vector<int> kids = tree.childrenOf(parentId);
+        const int count = static_cast<int>(kids.size());
+        if (const auto* tb = dynamic_cast<const UITabBox*>(p))
+        {
+            // The same clamp hidesChild uses, so "which page is showing" here
+            // means what the user is actually looking at.
+            const int active = (tb->activeTab >= 0 && tb->activeTab < count) ? tb->activeTab : 0;
+            s.activeTabIdx = active;
+            if (active < count) s.activeTabId = kids[static_cast<std::size_t>(active)];
+        }
+        else if (const auto* ac = dynamic_cast<const UIAccordion*>(p))
+        {
+            const uint32_t m = ac->effectiveMask(count);
+            for (int i = 0; i < count && i < UIAccordion::kMaxSections; ++i)
+                if (m & (1u << static_cast<unsigned>(i)))
+                    s.openSectionIds.push_back(kids[static_cast<std::size_t>(i)]);
+        }
+        return s;
+    }
+
+    void applyChildIndexState(UIWidgetTree& tree, int parentId, const ChildIndexState& s)
+    {
+        UIElement* p = parentId == 0 ? nullptr : tree.find(parentId);
+        if (!p) return;
+        if (auto* tb = dynamic_cast<UITabBox*>(p))
+        {
+            const int idx = s.activeTabId ? uiChildIndexOf(tree, parentId, s.activeTabId) : -1;
+            if (idx >= 0) { tb->activeTab = idx; return; }
+            // The page that was showing left the box. hidesChild would fall
+            // back to page 0 on its own, but a silent jump to the front is
+            // worse than staying as near as possible to where one was.
+            const int count = uiChildCountOf(tree, parentId);
+            tb->activeTab = count > 0 ? std::min(s.activeTabIdx, count - 1) : 0;
+        }
+        else if (auto* ac = dynamic_cast<UIAccordion*>(p))
+        {
+            uint32_t m = 0u;
+            for (int openId : s.openSectionIds)
+            {
+                const int idx = uiChildIndexOf(tree, parentId, openId);
+                if (idx >= 0 && idx < UIAccordion::kMaxSections)
+                    m |= 1u << static_cast<unsigned>(idx);
+            }
+            // A section dragged IN gets no bit, i.e. arrives closed. Opening it
+            // is one click; a body that unfolds itself on a drop is a jump.
+            ac->expanded = static_cast<int>(m);
+        }
+    }
+}
+
+bool UIWidgetTree::canMoveElement(int id, int newParentId) const
+{
+    if (id == 0 || !find(id)) return false;
+    if (newParentId == 0) return true;          // the canvas always takes children
+    const UIElement* p = find(newParentId);
+    if (!p || !p->acceptsChildren()) return false;
+    // No element inside itself or inside its own subtree. isDescendantOf counts
+    // an element as its own ancestor, so this covers "dropped onto itself" too.
+    return !isDescendantOf(newParentId, id);
+}
+
+bool UIWidgetTree::moveElement(int id, int newParentId, int beforeSiblingId)
+{
+    if (!canMoveElement(id, newParentId)) return false;
+
+    UIElement* moved = find(id);
+    const int oldParentId = moved->parentId;
+
+    // Read before the order changes under them; see ChildIndexState.
+    const ChildIndexState oldState = captureChildIndexState(*this, oldParentId);
+    const ChildIndexState newState = newParentId == oldParentId
+                                   ? oldState : captureChildIndexState(*this, newParentId);
+
+    // A marker pointing at a place that is not there any more means the end,
+    // not a refusal — see the header.
+    if (beforeSiblingId == id) beforeSiblingId = 0;
+    if (beforeSiblingId != 0)
+    {
+        const UIElement* sib = find(beforeSiblingId);
+        if (!sib || sib->parentId != newParentId) beforeSiblingId = 0;
+    }
+
+    auto byId = [](int wanted) {
+        return [wanted](const std::unique_ptr<UIElement>& e){ return e && e->id == wanted; };
+    };
+    auto it = std::find_if(elements.begin(), elements.end(), byId(id));
+    if (it == elements.end()) return false;     // canMoveElement already said otherwise
+    std::unique_ptr<UIElement> owned = std::move(*it);
+    elements.erase(it);
+    owned->parentId = newParentId;
+
+    // The insertion point is looked up AFTER the erase, which is the whole
+    // reason this takes a sibling id: the index of anything past the old slot
+    // has just changed by one.
+    auto at = beforeSiblingId == 0
+            ? elements.end()
+            : std::find_if(elements.begin(), elements.end(), byId(beforeSiblingId));
+    if (at == elements.end()) elements.push_back(std::move(owned));
+    else                      elements.insert(at, std::move(owned));
+
+    applyChildIndexState(*this, oldParentId, oldState);
+    if (newParentId != oldParentId) applyChildIndexState(*this, newParentId, newState);
+    return true;
+}
+
 // ── Layout ───────────────────────────────────────────────────────────────────
 
 namespace

@@ -643,6 +643,11 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 
 	const std::string label = elementName(*n) + "##hn" + std::to_string(nodeId);
 	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+	// The row's box, taken while the tree node is still the last item: the three
+	// drop zones below are read out of it, and BeginDragDropSource submits no
+	// item of its own but the payload accept blocks do their own bookkeeping.
+	const ImVec2 rowMin = ImGui::GetItemRectMin();
+	const ImVec2 rowMax = ImGui::GetItemRectMax();
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
 		st.selected = nodeId;
 
@@ -655,20 +660,71 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	}
 	if (ImGui::BeginDragDropTarget())
 	{
-		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
+		// ── Three zones per row, not one ─────────────────────────────────────
+		// Onto the middle of a container still means "inside it"; the top and
+		// bottom edges mean "in front of this row" and "behind it", which is
+		// what puts a Spacer BETWEEN two children of a Vertical Box instead of
+		// only ever at the end. A leaf has no inside, so its middle falls to
+		// whichever edge is nearer — today a drop on a leaf does nothing at all.
+		//
+		// AcceptBeforeDelivery is what makes the zone known while the drag is
+		// still in the air, which is what the insertion marker is drawn from;
+		// AcceptNoDrawDefaultRect because a box around the row would say
+		// "inside" for all three of them. Applied only on IsDelivery().
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE",
+				ImGuiDragDropFlags_AcceptBeforeDelivery |
+				ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
 		{
 			const int dragged = *static_cast<const int*>(p->Data);
+			const float h   = rowMax.y - rowMin.y;
+			const float rel = h > 0.0f ? (ImGui::GetMousePos().y - rowMin.y) / h : 0.5f;
 			// Containers take children (see UIElement::acceptsChildren) — a
 			// Panel, a layout box, and a Button, whose caption and icon ARE
 			// children.
-			if (dragged != nodeId && !st.tree.isDescendantOf(nodeId, dragged) &&
-			    n->acceptsChildren())
+			const bool container = n->acceptsChildren();
+			const bool before = container ? rel < 0.30f : rel < 0.50f;
+			const bool after  = container ? rel > 0.70f : !before;
+
+			int targetParent = nodeId;   // "into"
+			int beforeSibling = 0;
+			if (before || after)
 			{
-				if (UIElement* d = st.tree.find(dragged))
+				targetParent = n->parentId;
+				beforeSibling = nodeId;
+				if (after)
 				{
-					d->parentId = nodeId;
-					structureEdit = true;
+					// "after this row" is "in front of the row after it", or the
+					// end when there is none — moveElement speaks only of what
+					// comes NEXT, because an index means something else the
+					// moment the dragged element leaves the vector.
+					beforeSibling = 0;
+					const auto sibs = st.tree.childrenOf(n->parentId);
+					for (std::size_t i = 0; i + 1 < sibs.size(); ++i)
+						if (sibs[i] == nodeId) { beforeSibling = sibs[i + 1]; break; }
 				}
+			}
+			// Dropping something in front of or behind itself is a gesture that
+			// asks for nothing; without this, "after A" while dragging the row
+			// that already follows A would read as "before A's next sibling",
+			// which is the dragged element, which moveElement reads as the end.
+			const bool noop = dragged == nodeId || (beforeSibling == dragged && dragged != 0);
+			if (!noop && st.tree.canMoveElement(dragged, targetParent))
+			{
+				// The marker: a line along the edge it would land at, at this
+				// row's indent so that "in front of the first child" does not
+				// look like "behind the box".
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				const ImU32 col = ImGui::GetColorU32(ImGuiCol_DragDropTarget);
+				if (before || after)
+				{
+					const float y = before ? rowMin.y : rowMax.y;
+					dl->AddLine(ImVec2(rowMin.x, y), ImVec2(rowMax.x, y), col, 2.0f);
+				}
+				else
+					dl->AddRect(rowMin, rowMax, col, 0.0f, 0, 2.0f);
+
+				if (p->IsDelivery() && st.tree.moveElement(dragged, targetParent, beforeSibling))
+					structureEdit = true;
 			}
 		}
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
@@ -5612,12 +5668,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NODE"))
 				{
+					// The Canvas row is the whole root, not a place in it: onto
+					// it means "out of every container, at the end". Dropping
+					// BETWEEN two roots is what the roots' own rows are for.
 					const int dragged = *static_cast<const int*>(p->Data);
-					if (UIElement* d = st.tree.find(dragged))
-					{
-						d->parentId = 0;
-						commitEdit(st, ctx);
-					}
+					if (st.tree.moveElement(dragged, 0, 0)) commitEdit(st, ctx);
 				}
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_NEW"))
 				{

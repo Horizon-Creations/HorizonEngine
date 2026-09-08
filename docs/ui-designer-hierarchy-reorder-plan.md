@@ -334,9 +334,14 @@ UI-Designer, und der Grid-Satz aus 3.4.
 
 ## 5. Reihenfolge der naechsten Schritte
 
-1. `UIWidgetTree::moveElement` + die Index-Umschreibungen aus 3.2, mit den Tests
-   aus 3.5. Reines HE_Core, kein Editor.
-2. Die beiden Drop-Stellen (`:669`, `:5618`) auf `moveElement` umstellen — schon
-   ohne neue Geste ist das der Fix fuer 1.3 („hinten" statt „unbestimmt").
-3. Die Drei-Zonen-Geste plus Einfuegemarke in `drawHierarchyNode`.
-4. Handbuch/Hilfe aus 3.6.
+1. **Erledigt.** `UIWidgetTree::moveElement` + `canMoveElement` + die
+   Index-Umschreibungen aus 3.2, mit den zwoelf Tests aus 3.5. Reines HE_Core,
+   kein Editor.
+2. **Erledigt.** Die beiden Drop-Stellen (`:669`, `:5618`) laufen ueber
+   `moveElement` — schon ohne neue Geste ist das der Fix fuer 1.3 („hinten"
+   statt „unbestimmt").
+3. **Erledigt.** Die Drei-Zonen-Geste plus Einfuegemarke in `drawHierarchyNode`.
+   Wie in 3.4 entschieden ohne Sperre nach Container-Typ: angeboten wird sie
+   ueberall, wo der Parent Kinder nimmt, und ein Blatt bekommt davor/dahinter
+   (bisher tat ein Drop auf ein Blatt gar nichts).
+4. **Offen.** Handbuch/Hilfe aus 3.6.

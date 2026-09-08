@@ -159,6 +159,38 @@ struct HE_API UIWidgetTree
     int  add(std::unique_ptr<UIElement> e);
     // Convenience: create + add a default element of `type`.
     int  add(UIWidgetType type);
+
+    // ── Moving an element, to a PLACE and not just to a parent ───────────────
+    // Sibling order in this tree IS the vector order filtered by parentId (see
+    // childrenOf), so where a Vertical Box stacks a child, which page a Tab Box
+    // calls its third, and which of two overlapping images covers the other are
+    // all the same question: where does this element sit among its siblings.
+    //
+    // Reparenting used to write `parentId` and leave the vector entry alone,
+    // which put the moved element wherever it HAPPENED to stand already — the
+    // end for something just added, the front for something dragged out of a
+    // later box. This moves the entry too, so the answer is always the one the
+    // caller asked for.
+    //
+    // `beforeSiblingId` names the child to land in FRONT of; 0 means the end.
+    // A sibling id rather than an index because an index means something else
+    // the moment the moved element leaves the vector, and that off-by-one is
+    // where reordering usually breaks. A `beforeSiblingId` that is not a child
+    // of `newParentId` (or is `id` itself) is read as "the end", not as an
+    // error: the caller pointed at a place that stopped existing.
+    //
+    // Only the entry of `id` moves. The subtree comes along because it hangs
+    // off parentId, not off a vector position.
+    //
+    // False, and the tree untouched, when the move is one that cannot be:
+    // unknown ids, a cycle, or a parent that does not take children.
+    bool moveElement(int id, int newParentId, int beforeSiblingId = 0);
+
+    // Would moveElement accept this? THE same guards, asked without moving —
+    // the designer needs the answer while the drag is still in the air, to
+    // decide whether to draw an insertion marker at all, and a second copy of
+    // the rules in the panel is a second copy that drifts.
+    bool canMoveElement(int id, int newParentId) const;
 };
 
 // ── Which child is this, among its parent's? ─────────────────────────────────
