@@ -1969,6 +1969,15 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
     {
         std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
         HE::graph::bumpNextId(t.nextId, e->id);
+        // ── Migration: a negative parent means the canvas ────────────────────
+        // Ids start at 1, so a parentId below zero can never name an element —
+        // it is the old app templates' way of writing "no parent"
+        // (ProjectManager's shell(), fixed at the source). Drawing coped with
+        // it, because parentRectOf falls back to the canvas rect, but every
+        // loop that enumerates roots asks for parentId == 0 and found nothing.
+        // Repaired on load so widgets already saved to disk get a hierarchy
+        // back without the user rebuilding the project.
+        if (e->parentId < 0) e->parentId = 0;
         // Keyed on the legacy JSON KEY, not on any field: once this widget has
         // been saved again the key is gone and the migration is inert, which is
         // what stops it from running twice and stacking up labels.

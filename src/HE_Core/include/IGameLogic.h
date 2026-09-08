@@ -5,9 +5,18 @@ class HorizonWorld;   // forward — GameLogic gets the world injected
 
 // Export decoration for the game DLL's factory functions. extern "C" alone does
 // NOT export a symbol from a Windows DLL — without __declspec(dllexport) the
-// GameLogicLoader's GetProcAddress finds nothing and load() fails. No-op elsewhere.
+// GameLogicLoader's GetProcAddress finds nothing and load() fails.
+//
+// Elsewhere this is normally redundant, because a shared library exports
+// everything by default — but only until someone builds their GameLogic with
+// -fvisibility=hidden (CMake's CXX_VISIBILITY_PRESET hidden), which is common
+// enough advice that it must not silently hide the two symbols the loader looks
+// for. Spelling the visibility out makes the decoration mean the same thing on
+// every platform: this one is exported, whatever the default is.
 #ifdef _WIN32
 #  define HE_GAME_API __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#  define HE_GAME_API __attribute__((visibility("default")))
 #else
 #  define HE_GAME_API
 #endif

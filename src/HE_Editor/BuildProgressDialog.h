@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,11 +19,23 @@ struct AppContext;
 // here is thread-safe and file-static in the .cpp — one export runs at a time.
 namespace BuildProgressDialog
 {
+	// Who the run belongs to. The window is shared — an export and a
+	// "Build and Reload" of the native game logic both report into it — and the
+	// two are told apart HERE rather than by whoever happens to poll first:
+	// takeAction() hands the finished run's buttons to exactly one owner, and
+	// the export panel starting an export because the user pressed "Build Again"
+	// on a game-logic build is the mix-up this prevents.
+	enum class Kind
+	{
+		Export,
+		GameLogic
+	};
+
 	// ── Model: called from the export worker (any thread) ────────────────────
 	namespace Build
 	{
 		// Start a run. Clears the previous run's steps and log. UI thread.
-		void begin(const std::vector<std::string>& stepNames);
+		void begin(const std::vector<std::string>& stepNames, Kind kind = Kind::Export);
 
 		// Move to a step; everything logged from here on belongs to it.
 		void stepBegin(int index);
@@ -55,6 +68,15 @@ namespace BuildProgressDialog
 		bool running();
 	}
 
+	// The C++ step's progress, read off the toolchain's own output: ninja prints
+	// "[7/38] Building CXX object…", make "[ 45%] Building CXX object…". A line
+	// that is neither returns nothing and leaves the ring spinning — during
+	// cmake's configure phase there is genuinely nothing to measure, and
+	// inventing a number there would be a lie that stalls at 10 % for a minute.
+	// Lives here rather than with the export because every cmake run reported
+	// into this window wants the same reading.
+	std::optional<float> toolchainProgress(const std::string& line);
+
 	// ── Dialog ───────────────────────────────────────────────────────────────
 
 	// What the user asked for on the finished run. Polled once per frame by the
@@ -74,8 +96,12 @@ namespace BuildProgressDialog
 	// Draw it. Call once per frame at the top level, not inside another popup.
 	void render(AppContext& ctx);
 
-	// Take the pending action, if any (resets it).
+	// Take the pending action, if any (resets it). Poll it only for runs of your
+	// own kind — see Kind.
 	Action takeAction();
+
+	// Which kind the last run that started belongs to.
+	Kind runKind();
 
 	// Whether the dialog drew this frame (the editor blocks input behind it).
 	bool isOpen();

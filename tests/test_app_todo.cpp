@@ -25,6 +25,18 @@
 #include <string>
 #include <vector>
 
+// The process id, for the per-run temp directory names below — and, on POSIX,
+// kill(pid, 0) to tell a leftover of a finished run from one still in use.
+#include <cerrno>
+#ifdef _WIN32
+#  include <process.h>
+#  define HE_TEST_GETPID _getpid
+#else
+#  include <signal.h>
+#  include <unistd.h>
+#  define HE_TEST_GETPID getpid
+#endif
+
 // ═══ Welle 1, die Abnahme: eine Todo-App ═════════════════════════════════════
 // docs/he-apps-plan.md names a todo app as what Wave 1 has to be able to build.
 // It is the acceptance because it is ordinary: a text field, a button, a list
@@ -45,12 +57,69 @@ using NT = HorizonCode::NodeType;
 
 namespace
 {
+    // ── One process, one temp directory ─────────────────────────────────────
+    // $TMPDIR is per USER, not per test run, so a fixed name under it is a name
+    // two he_tests processes on this machine SHARE: another worktree's ctest, a
+    // developer's -tc= run beside CI's, the same suite started twice.
+    //
+    // That is not a tidiness argument, it is the bug it caused. Everything below
+    // remove_all()s its directory before filling it, and the boot probe leaves a
+    // real application running in one for minutes while the backend compiles its
+    // pipelines. A second run arriving inside that window unlinks the first
+    // run's boot.log out from under it. The first process keeps writing to an
+    // inode with no name — its stdout is a FILE, so it is fully buffered and
+    // nothing has reached the disk yet — and at exit it flushes the whole log
+    // into nowhere. The probe then reads the fresh, empty boot.log the second
+    // run created and reports "did not reach a clean exit" about an application
+    // that shut down perfectly: exit code 1, an empty log, a screenshot present,
+    // and no crash anywhere to find.
+    //
+    // The pid is the suffix rather than a random token so a directory left
+    // behind can still be traced back to the run that left it.
+    std::string ownTempName(const std::string& name)
+    {
+        return name + "_p" + std::to_string(static_cast<long long>(HE_TEST_GETPID()));
+    }
+    std::filesystem::path ownTempDir(const std::string& name)
+    {
+        return std::filesystem::temp_directory_path() / ownTempName(name);
+    }
+
+    // …and the price of the suffix, paid: the exports below are deliberately
+    // LEFT BEHIND so they can be launched by hand, and a name that used to be
+    // reused is now a new ~200 MB directory per run. So each run clears out the
+    // ones whose process is gone — and only those. Sweeping a directory that
+    // still has an owner would be the very collision this suffix exists to stop,
+    // so a pid that is still alive (or that we cannot ask about) is left alone.
+    void sweepDeadTempDirs(const std::string& prefix)
+    {
+#ifndef _WIN32
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(
+                 std::filesystem::temp_directory_path(), ec))
+        {
+            const std::string name = e.path().filename().string();
+            if (name.rfind(prefix, 0) != 0) continue;
+            const size_t p = name.rfind("_p");
+            if (p == std::string::npos || p + 2 >= name.size()) continue;
+            const std::string digits = name.substr(p + 2);
+            if (digits.find_first_not_of("0123456789") != std::string::npos) continue;
+            const pid_t owner = static_cast<pid_t>(std::strtol(digits.c_str(), nullptr, 10));
+            if (owner <= 0) continue;
+            if (::kill(owner, 0) == 0 || errno != ESRCH) continue;   // still there
+            std::filesystem::remove_all(e.path(), ec);
+        }
+#else
+        (void)prefix;
+#endif
+    }
+
     struct TempDir
     {
         std::filesystem::path path;
         explicit TempDir(const char* name)
         {
-            path = std::filesystem::temp_directory_path() / name;
+            path = ownTempDir(name);
             std::filesystem::remove_all(path);
             std::filesystem::create_directories(path);
         }
@@ -336,8 +405,13 @@ static std::filesystem::path exportTodoApp(bool advancedShaderEffects,
 
     const std::string tag = std::string(advancedShaderEffects ? "advanced" : "software")
                           + (fullBleed ? "" : "_probe");
-    const auto proj = std::filesystem::temp_directory_path() / ("he_todo_project_" + tag);
-    const auto out  = std::filesystem::temp_directory_path() / ("he_todo_export_" + tag);
+    // Per process (see ownTempDir): this export is remove_all()d and then left
+    // behind with a running binary in it, which makes it exactly the directory
+    // two concurrent he_tests must not share.
+    sweepDeadTempDirs("he_todo_project_");
+    sweepDeadTempDirs("he_todo_export_");
+    const auto proj = ownTempDir("he_todo_project_" + tag);
+    const auto out  = ownTempDir("he_todo_export_" + tag);
     std::filesystem::remove_all(proj);
     std::filesystem::remove_all(out);
     std::filesystem::create_directories(proj / "UI");
@@ -696,6 +770,19 @@ namespace
             if (std::system(("kill -0 " + pid + " 2>/dev/null").c_str()) != 0)
             {
                 // Gone. Its own last line says whether it left on purpose.
+                //
+                // It has to be THIS file, not the engine's own HorizonEngine.log
+                // sitting beside it, and the reason is load-bearing enough to
+                // write down. "leaving cleanly" is logged when the frame budget
+                // is reached — before shutdown, not after it — and the engine
+                // log is flushed line by line, so it carries that sentence to
+                // disk immediately. A crash during teardown would leave it there
+                // and this probe would call the run clean. The redirect above
+                // makes stdout a FILE instead, which is fully buffered: nothing
+                // reaches boot.log until the process exits normally and flushes.
+                // That accident is the only thing here that can tell "it left"
+                // from "it died on the way out", so do not trade it for the log
+                // that is easier to read.
                 std::ifstream in(log);
                 const std::string text((std::istreambuf_iterator<char>(in)),
                                        std::istreambuf_iterator<char>());
@@ -715,16 +802,25 @@ namespace
     // and the file the message names lives on a runner that no longer exists.
     // The application says why it left; this carries that sentence into the
     // output that is actually kept.
+    // A captured stdout can be empty for reasons that have nothing to do with
+    // what the application did (see bootOnce), and "(empty log)" is the least
+    // useful sentence a failure can end on. So fall through to the engine's own
+    // log next to it, which is written whatever happens to the redirect.
     std::string logTail(const std::filesystem::path& log, size_t lines = 20)
     {
-        std::ifstream in(log);
-        if (!in) return "(no log)";
-        std::vector<std::string> all;
-        for (std::string line; std::getline(in, line); ) all.push_back(line);
-        std::string out;
-        for (size_t i = all.size() > lines ? all.size() - lines : 0; i < all.size(); ++i)
-            out += "  | " + all[i] + "\n";
-        return out.empty() ? "(empty log)" : "\n" + out;
+        const auto tail = [lines](const std::filesystem::path& p) {
+            std::ifstream in(p);
+            if (!in) return std::string();
+            std::vector<std::string> all;
+            for (std::string line; std::getline(in, line); ) all.push_back(line);
+            std::string out;
+            for (size_t i = all.size() > lines ? all.size() - lines : 0; i < all.size(); ++i)
+                out += "  | " + all[i] + "\n";
+            return out;
+        };
+        std::string out = tail(log);
+        if (out.empty()) out = tail(log.parent_path() / "HorizonEngine.log");
+        return out.empty() ? "(no log)" : "\n" + out;
     }
 }
 

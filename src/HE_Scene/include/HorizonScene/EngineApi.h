@@ -1,6 +1,7 @@
 #pragma once
 #include <HorizonCode/HorizonCode.h>          // HorizonCode::Value, PinType
 #include <HorizonCode/HorizonCodeRuntime.h>   // Ctx::runtime (who is calling)
+#include <Types/UUID.h>                       // HE::UUID (content::*Id asset handles)
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
@@ -14,7 +15,10 @@ class ContentManager;
 class AudioEngine;
 class EntityHost;
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
-struct HeSaveServices; // HorizonGameServices.h (global scope, C ABI)
+struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
+struct HePhysicsServices; //   "
+struct HeInputServices;   //   "
+struct HeContentServices; //   "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -352,6 +356,10 @@ namespace physics {
         glm::vec3 point{0.0f};
         glm::vec3 normal{0.0f};
         float     distance = 0.0f;
+        // Which collision channel the thing that was hit sits in — 0..15, an
+        // index into the project's collision layers. Appended last, so a script
+        // that never asked for it is unaffected.
+        int       layer = 0;
     };
     RaycastHit raycast(Ctx&, const glm::vec3& origin, const glm::vec3& dir, float maxDist);
     // A sphere is what a ray is not: it has width, so it does not slip through
@@ -364,12 +372,79 @@ namespace physics {
     // swing are both built from. Empty without physics.
     std::vector<Entity> overlapSphere(Ctx&, const glm::vec3& center, float radius);
 
+    // ── The same three, restricted to a set of collision channels ────────────
+    // `layerMask` is a BITFIELD, not a channel index: bit N means channel N may
+    // be seen. 65535 is every channel and reproduces the three above exactly;
+    // 0 sees nothing at all, which is a legal thing to ask for and a very easy
+    // thing to write by accident.
+    //
+    // Separate entries rather than a fourth parameter on the three above, and
+    // that is the whole reason they exist as their own names: a HorizonCode node
+    // saved before a parameter was added draws one input too few, and the value
+    // the missing one contributes is a zero — which for a mask means "see
+    // nothing". Every existing graph would have kept its shape and quietly
+    // stopped hitting anything. So the three originals keep their signatures
+    // forever and the mask arrives under a new name.
+    RaycastHit raycastLayers(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                             float maxDist, int layerMask);
+    RaycastHit sphereCastLayers(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                                float radius, float maxDist, int layerMask);
+    std::vector<Entity> overlapSphereLayers(Ctx&, const glm::vec3& center, float radius,
+                                            int layerMask);
+
+    // ── The shapes that have an orientation, and the ray that keeps going ────
+    // A sphere is the one shape that needs no rotation, which is why it was the
+    // one that existed. `rotation` is an Euler triple in DEGREES and is read
+    // exactly as an entity's own rotation is, so a box cast at (0, 45, 0) is the
+    // same box a body at (0, 45, 0) is.
+    //
+    // Each carries `layerMask` from its first day — a bitfield, as above — so
+    // none of these ever needs a second name to gain one.
+    //
+    // The capsule's `height` is its FULL height including the caps, the same
+    // number the Collider component shows, so a character's own two fields sweep
+    // that character's own shape.
+    RaycastHit boxCast(Ctx&, const glm::vec3& origin, const glm::vec3& halfExtents,
+                       const glm::vec3& rotation, const glm::vec3& dir, float maxDist,
+                       int layerMask);
+    RaycastHit capsuleCast(Ctx&, const glm::vec3& origin, float radius, float height,
+                           const glm::vec3& rotation, const glm::vec3& dir, float maxDist,
+                           int layerMask);
+    std::vector<Entity> overlapBox(Ctx&, const glm::vec3& center, const glm::vec3& halfExtents,
+                                   const glm::vec3& rotation, int layerMask);
+    std::vector<Entity> overlapCapsule(Ctx&, const glm::vec3& center, float radius, float height,
+                                       const glm::vec3& rotation, int layerMask);
+
+    // Every body on the line rather than the first, nearest first, one entry per
+    // entity. The shot that goes through two enemies, and the sight line that
+    // needs to know it crossed a window before it reached the player.
+    //
+    // The registry hands this out as PARALLEL ARRAYS — entities, points,
+    // normals, distances, layers — because a graph value is a list of one type
+    // and there is no list-of-structs. Index i of each names the same hit, and
+    // all five are the same length.
+    std::vector<RaycastHit> raycastAll(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                                       float maxDist, int layerMask);
+
     // Pushing a rigid body around. A force is continuous and has to be applied
     // every frame, an impulse lands once, a torque spins. All three need a
     // DYNAMIC rigid body on the entity and answer false when there is none.
     bool addForce(Ctx&, Entity e, const glm::vec3& force);
     bool addImpulse(Ctx&, Entity e, const glm::vec3& impulse);
     bool addTorque(Ctx&, Entity e, const glm::vec3& torque);
+
+    // The same push applied somewhere other than the centre of mass, so it turns
+    // the body as well as moving it: a crate that tumbles away from a blast
+    // instead of sliding away from it.
+    //
+    // `position` is a WORLD point — the one deliberate exception to the rule
+    // stated on setPosition below, that a position next to an entity is local.
+    // It is not a pose, it is where in the world the push lands, and every
+    // source of one (a raycast hit, an explosion's centre) is already world. Put
+    // through the parent chain instead, "push the door at its handle" would mean
+    // a different point depending on what the door is parented to.
+    bool addForceAtPosition(Ctx&, Entity e, const glm::vec3& force, const glm::vec3& position);
+    bool addImpulseAtPosition(Ctx&, Entity e, const glm::vec3& impulse, const glm::vec3& position);
 
     // Velocity in m/s — ONE pair for characters and rigid bodies. It addresses
     // the character controller when the entity has one and the rigid body
@@ -380,6 +455,16 @@ namespace physics {
     void       setVelocity(Ctx&, Entity e, const glm::vec3& v);
     glm::vec3  getVelocity(Ctx&, Entity e);
     bool       isGrounded(Ctx&, Entity e);
+
+    // Spin, in RADIANS per second about the world axes — the only value on this
+    // surface that is not in degrees, because it is a rate rather than a pose.
+    // A full turn a second is (0, 6.283, 0).
+    //
+    // Rigid bodies only, and no character dispatch like the pair above: a
+    // character controller has no spin to hold, so an entity that is only a
+    // controller reads zero and refuses the write.
+    bool       setAngularVelocity(Ctx&, Entity e, const glm::vec3& radiansPerSecond);
+    glm::vec3  getAngularVelocity(Ctx&, Entity e);
 
     // TELEPORT — where the entity IS, not a push towards it. Both write Jolt
     // directly and mirror the value into the transform in the same call, so the
@@ -417,6 +502,83 @@ namespace physics {
     bool setPosition(Ctx&, Entity e, const glm::vec3& position);
     bool setPositionAndReset(Ctx&, Entity e, const glm::vec3& position);
 
+    // ── Joints ──────────────────────────────────────────────────────────────
+    // Tie two rigid bodies together: a door on its frame, a link in a chain, a
+    // rope between a grapple and the wall it stuck to.
+    //
+    // `type` is HE::JointType as an int — 0 Fixed, 1 Point, 2 Hinge, 3 Slider,
+    // 4 Distance — because the graph has no enum type. WHICH OF THE OTHER
+    // ARGUMENTS MATTERS DEPENDS ON IT, and the table lives on JointComponent
+    // where the fields do; the short version is that Fixed reads none of them,
+    // Point and Hinge use `anchorA` as one shared pivot, Slider uses `axis`, and
+    // Distance is the only one that reads `anchorB`.
+    //
+    // The anchors are LOCAL to their own entity, by the rule that governs this
+    // whole surface — unlike addForceAtPosition's world point, an anchor IS a
+    // pose, and a prefab has to carry it wherever it is dropped.
+    //
+    // `minLimit`/`maxLimit` are DEGREES for a hinge and metres for a slider, and
+    // min >= max means no limit at all.
+    //
+    // Writes the entity's Joint component and builds from it, so a joint made at
+    // runtime is still there after a save and a load. Idempotent: an entity that
+    // already has a joint has it replaced. False when it could not be built —
+    // most often because one of the two has no rigid body (a Character
+    // Controller is not one), and the log says which.
+    bool addJoint(Ctx&, Entity a, Entity b, int type, const glm::vec3& anchorA,
+                  const glm::vec3& anchorB, const glm::vec3& axis,
+                  float minLimit, float maxLimit);
+
+    // Cut it loose again — the constraint and the component both, so it does not
+    // come back on the next load. True when there was one to remove.
+    bool removeJoint(Ctx&, Entity a);
+
+    // Is this entity jointed to something RIGHT NOW? A joint whose partner has
+    // not spawned yet is authored but not built, and this answers about the
+    // simulation rather than about the component.
+    bool hasJoint(Ctx&, Entity a);
+
+    // The three settings addJoint does NOT take. They are their own rows rather
+    // than four more arguments on that one because a node stored in a graph
+    // cannot grow an input later: a row that gained a parameter would silently
+    // read a zero for it in every graph saved before today. Each of these also
+    // does something on its own — a motor is started and stopped while the game
+    // runs, not authored once — so they would have needed a row regardless.
+    //
+    // Drive a HINGE or a SLIDER: the door opens, the platform rises.
+    // `targetSpeed` is RADIANS per second for a hinge and metres per second for
+    // a slider — a rate, so radians, the same rule setAngularVelocity follows.
+    // `maxForce` IS THE SWITCH: at or below zero the motor is off, and a target
+    // of zero with force behind it is a brake that holds the joint still.
+    // Refused with a log on the other three types, which have no axis to drive.
+    bool setJointMotor(Ctx&, Entity a, float targetSpeed, float maxForce);
+
+    // How much force the joint carries before it lets go, in newtons; 0 never
+    // breaks. When it does break, the joint AND its component are gone — the
+    // door is off its hinges — and the pair shows up in pollJointBroken once.
+    bool setJointBreakForce(Ctx&, Entity a, float breakForce);
+
+    // May the two jointed bodies touch each other? False by default, which is
+    // what a chain of overlapping links needs.
+    bool setJointCollideConnected(Ctx&, Entity a, bool collide);
+
+    // Every joint that BROKE since the last call, as two parallel lists: the
+    // entity that owned the joint and the one it was tied to. Drained, like the
+    // contact queues — whoever asks first gets them, so ask in one place.
+    //
+    // A joint that was removed, or whose entity was destroyed, does not appear:
+    // "it is gone" is not "it broke", and the sound that plays here is a snap.
+    //
+    // ONE function behind two output lists, like raycastAll: draining twice
+    // would hand the second caller nothing, so the split into parallel arrays
+    // happens after the single drain, in the registry row.
+    struct BrokenJoint
+    {
+        Entity a{};   // the entity that owned the joint
+        Entity b{};   // the one it was tied to
+    };
+    std::vector<BrokenJoint> pollJointBroken(Ctx&);
+
     // Does this entity have a body or a character controller at all? The guard
     // to ask before pushing, and the one honest answer to "why did my impulse do
     // nothing" — false without a PhysicsWorld too.
@@ -441,6 +603,45 @@ namespace animator {
     void        setParam(Ctx&, Entity e, const std::string& name, float value);
     float       getParam(Ctx&, Entity e, const std::string& name);   // 0 when unset
     std::string getState(Ctx&, Entity e);                            // "" when none
+
+    // The notify names written on an animation clip's timeline, by the clip's
+    // ASSET PATH — a clip is addressed by path everywhere else a script reaches
+    // an asset, and a UUID has no pin type to travel in.
+    //
+    // Notify names are free strings with no registry behind them, so a typo
+    // fires nothing and reports nothing. This is the answer to that: it is the
+    // read a debug view makes, and the read a graph makes instead of guessing.
+    // There is deliberately no way to FIRE one from here — notifies are received,
+    // and a second source for them would be a second thing that could be wrong.
+    // Empty for an unknown path, a clip with no notifies, or no content manager.
+    std::vector<std::string> notifiesOf(Ctx&, const std::string& clipPath);
+
+    // ── Animation layers ─────────────────────────────────────────────────────
+    // A layer's weight is the one thing about it that gameplay decides: the
+    // aim offset comes up while a weapon is raised, the reload layer fades in
+    // for the length of the reload, the hit reaction blends out over half a
+    // second. Everything else about a layer — which clip, which mask, override
+    // or additive — is authored, and authored things belong in the editor.
+    //
+    // Layers are addressed BY NAME rather than by index, because an index is
+    // the number that changes when somebody reorders the stack in the
+    // inspector, and a script that then fades the wrong body part is a bug with
+    // no visible cause. Names are the author's own labels.
+    //
+    // Unknown entity, no layer component or no layer by that name: setting is a
+    // no-op, reading gives 0. The clamp to 0..1 is the same one the blender
+    // applies, said here so a script reading back what it wrote gets what the
+    // pose actually used.
+    void  setLayerWeight(Ctx&, Entity e, const std::string& layerName, float weight);
+    float getLayerWeight(Ctx&, Entity e, const std::string& layerName);
+    // Restart a layer's own playhead from 0 and re-prime its notifies, so a
+    // one-shot layer (a reload, a flinch) plays again rather than resuming
+    // wherever it stopped. The weight is left alone — fading in is the caller's
+    // decision and usually happens over several frames.
+    void  playLayer(Ctx&, Entity e, const std::string& layerName);
+    // The layer names on this entity, in stack order. The read a debug view
+    // makes, and the read a graph makes instead of guessing at a typo'd name.
+    std::vector<std::string> layerNames(Ctx&, Entity e);
 }
 
 // ── Particles: firing an effect ──────────────────────────────────────────────
@@ -1084,6 +1285,43 @@ HE_ENV_FIELDS_COLOR(HE_ENV_DECL_COLOR)
 #undef HE_ENV_DECL_COLOR
 }
 
+// ── Content (Ctx.content — the app's ContentManager; null → neutral) ─────────
+// Residency, not access. There is no getStaticMesh row here and there will not
+// be one: the ContentManager hands out pointers into a dense SlotMap, and the
+// NEXT registration moves every asset in the pool — invalidating not just the
+// pointer but every std::string it owns. Inside one translation unit that is a
+// trap; across a scripting boundary, whose call order the engine does not know,
+// it would be a guarantee. What crosses here is values only: a UUID, a bool, a
+// name.
+//
+// Two spellings of the same four operations, because the two kinds of caller
+// hold different handles:
+//   · path-keyed (load/unload/isLoaded/typeName) — what the registry exposes,
+//     because a content-relative path is the only asset handle HorizonCode,
+//     Lua and Python have (PinType has no UUID pin, and inventing a text form
+//     for one would be new surface for nothing);
+//   · id-keyed (…Id) — what a native C++ module gets, because the UUID is what
+//     the manager is keyed by and it survives a rename.
+// Only `load` reads the disk. The path-keyed rest resolve through the manager's
+// path index and answer "no" for an asset that was never loaded, so asking a
+// question can never turn into a load.
+namespace content {
+    // Load (or return the already-resident) asset at a content-relative path.
+    bool        load(Ctx&, const std::string& path);
+    // Drop it again. false = it was not loaded in the first place.
+    bool        unload(Ctx&, const std::string& path);
+    bool        isLoaded(Ctx&, const std::string& path);
+    // The asset's kind, spelled as HE::assetTypeName does ("StaticMesh",
+    // "Texture", …). "" for an asset this manager does not know — load first.
+    std::string typeName(Ctx&, const std::string& path);
+
+    // The same four keyed by UUID. loadId returns a zero UUID on failure.
+    HE::UUID    loadId(Ctx&, const std::string& path);
+    bool        unloadId(Ctx&, const HE::UUID& id);
+    bool        isLoadedId(Ctx&, const HE::UUID& id);
+    std::string typeNameId(Ctx&, const HE::UUID& id);
+}
+
 // ── Audio (Ctx.audio — the app's AudioEngine; null → no-ops) ─────────────────
 namespace audio {
     // Play an audio ASSET (content-relative .hasset path). Returns a handle
@@ -1623,15 +1861,31 @@ namespace save {
 }
 
 // ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────
-// Fill the C-ABI table a GameLogic library receives via HE_SetEngineServices.
-// `binding` must outlive the table's use (the app owns both); world resolves
-// per call so scene switches stay transparent.
-struct SaveServicesBinding
+// Fill the C-ABI tables a GameLogic library receives via HE_SetEngineServicesV2.
+// `binding` must outlive the tables' use (the app owns both).
+//
+// The two handle kinds are deliberately different. `world` and `physics` are
+// RESOLVERS, called per bridge call: both are rebuilt on a scene switch (the
+// bodies belong to the world that is going away), and a raw pointer to either
+// would be a dangling one in the game library's hands the moment a level
+// changed. `content` is a raw pointer because the ContentManager belongs to the
+// Application and survives every scene switch.
+struct GameServicesBinding
 {
-    std::function<HorizonWorld*()> world;   // may return null (calls then no-op loud)
+    std::function<HorizonWorld*()> world;     // may return null (calls then no-op loud)
+    std::function<PhysicsWorld*()> physics;   // may return null (physics rows then neutral)
     ContentManager*                content = nullptr;
 };
-void fillSaveServices(::HeSaveServices& out, SaveServicesBinding* binding);
+void fillSaveServices(::HeSaveServices& out, GameServicesBinding* binding);
+void fillPhysicsServices(::HePhysicsServices& out, GameServicesBinding* binding);
+// Input is a process-global snapshot, so this one needs no binding at all —
+// `binding` is taken anyway so the three fill functions read the same at the
+// call site and a later input service that DOES need the world can be added
+// without changing every caller.
+void fillInputServices(::HeInputServices& out, GameServicesBinding* binding);
+// Content reaches the ContentManager through `binding->content` — the raw
+// pointer, for the reason the struct's comment gives.
+void fillContentServices(::HeContentServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

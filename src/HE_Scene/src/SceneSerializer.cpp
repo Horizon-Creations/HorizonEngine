@@ -15,6 +15,7 @@
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
@@ -36,6 +37,9 @@
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/AnimatorComponent.h"
 #include "HorizonScene/Components/AnimatorBlendComponent.h"
+#include "HorizonScene/Components/RootMotionComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/IkComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
@@ -366,6 +370,7 @@ namespace
 				{ "friction",    r->friction },
 				{ "restitution", r->restitution },
 				{ "is2D",        r->is2D },
+				{ "layer",       r->collisionLayer },
 			};
 		}
 		if (auto* col = registry.try_get<ColliderComponent>(entity))
@@ -376,6 +381,25 @@ namespace
 				{ "radius",    col->radius },
 				{ "height",    col->height },
 				{ "isTrigger", col->isTrigger },
+			};
+		}
+		if (auto* j = registry.try_get<JointComponent>(entity))
+		{
+			// `target` is an ENTITY reference, written like RopeComponent's
+			// attachments — the same [hi, lo] pair, so a joint survives a merge
+			// of two branches that each added entities.
+			comps["joint"] = {
+				{ "type",     static_cast<uint8_t>(j->type) },
+				{ "target",   uuidToJson(j->target) },
+				{ "anchorA",  { j->anchorA.x, j->anchorA.y, j->anchorA.z } },
+				{ "anchorB",  { j->anchorB.x, j->anchorB.y, j->anchorB.z } },
+				{ "axis",     { j->axis.x, j->axis.y, j->axis.z } },
+				{ "minLimit", j->minLimit },
+				{ "maxLimit", j->maxLimit },
+				{ "motorTarget",      j->motorTarget },
+				{ "motorMaxForce",    j->motorMaxForce },
+				{ "breakForce",       j->breakForce },
+				{ "collideConnected", j->collideConnected },
 			};
 		}
 		if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
@@ -392,6 +416,7 @@ namespace
 				{ "mass",       cc->mass       },
 				{ "gravity",    cc->gravity    },
 				{ "jumpSpeed",  cc->jumpSpeed  },
+				{ "layer",      cc->collisionLayer },
 			};
 		}
 		if (auto* s = registry.try_get<ScriptComponent>(entity))
@@ -539,6 +564,92 @@ namespace
 				{ "playbackSpeed", ab->playbackSpeed },
 				{ "looping",       ab->looping },
 				{ "playing",       ab->playing },
+			};
+		}
+		if (auto* al = registry.try_get<AnimationLayerComponent>(entity))
+		{
+			json layers = json::array();
+			for (const auto& l : al->layers)
+			{
+				// notifiesPrimed and the mask resolution cache are deliberately
+				// absent: the first is a per-playhead flag that has to start
+				// fresh on the next tick, the second is derived from the mask
+				// asset and the skeleton and would go stale the moment either
+				// changed under a saved scene.
+				layers.push_back({
+					{ "name",              l.name },
+					{ "source",            static_cast<int>(l.source) },
+					{ "mode",              static_cast<int>(l.mode) },
+					{ "clip",              uuidToJson(l.clipId) },
+					{ "blendSpace",        uuidToJson(l.blendSpaceId) },
+					{ "mask",              uuidToJson(l.maskId) },
+					{ "weight",            l.weight },
+					{ "additiveRefClip",   uuidToJson(l.additiveRefClipId) },
+					{ "additiveRefTime",   l.additiveRefTime },
+					{ "playbackTime",      l.playbackTime },
+					{ "playbackSpeed",     l.playbackSpeed },
+					{ "looping",           l.looping },
+					{ "playing",           l.playing },
+				});
+			}
+			comps["animationlayers"] = { { "layers", std::move(layers) } };
+		}
+		if (auto* rm = registry.try_get<RootMotionComponent>(entity))
+		{
+			// Runtime fields (appliedThisFrame, wroteVelocity, lastDelta) are
+			// deliberately absent: they are one frame old by definition and are
+			// re-established on the next tick.
+			comps["rootmotion"] = {
+				{ "mode",            static_cast<int>(rm->mode) },
+				{ "rootJoint",       rm->options.rootJointName },
+				{ "translationXZ",   rm->options.extractTranslationXZ },
+				{ "translationY",    rm->options.extractTranslationY },
+				{ "yaw",             rm->options.extractYaw },
+				{ "lock",            static_cast<int>(rm->options.lock) },
+			};
+		}
+		if (auto* ik = registry.try_get<IkComponent>(entity))
+		{
+			// Runtime fields are deliberately absent, and it is a longer list than
+			// usual: the smoothed offsets and angles describe a ground that was
+			// under the character in one frame of one session, the primed flags
+			// have to start false so the first frame after a load SNAPS rather
+			// than easing in from zero, and the resolved joint indices are
+			// derived from a skeleton that can be re-imported under a saved scene.
+			json feet = json::array();
+			for (const auto& f : ik->feet)
+			{
+				feet.push_back({
+					{ "foot",             f.footJoint },
+					{ "knee",             f.kneeJoint },
+					{ "hip",              f.hipJoint },
+					{ "weight",           f.weight },
+					{ "traceUp",          f.traceUp },
+					{ "traceDown",        f.traceDown },
+					{ "footHeightOffset", f.footHeightOffset },
+					{ "alignToNormal",    f.alignToNormal },
+					{ "maxPitch",         f.maxPitchDegrees },
+					{ "maxRoll",          f.maxRollDegrees },
+					{ "interpSpeed",      f.interpSpeed },
+				});
+			}
+			const auto& la = ik->lookAt;
+			comps["ik"] = {
+				{ "feet",         std::move(feet) },
+				{ "adjustPelvis", ik->adjustPelvis },
+				{ "pelvisJoint",  ik->pelvisJoint },
+				{ "lookAt", {
+					{ "enabled",      la.enabled },
+					{ "chain",        la.chain },
+					{ "chainWeights", la.chainWeights },
+					{ "targetEntity", uuidToJson(la.targetEntityId) },
+					{ "targetWorld",  { la.targetWorld.x, la.targetWorld.y, la.targetWorld.z } },
+					{ "forwardLocal", { la.forwardLocal.x, la.forwardLocal.y, la.forwardLocal.z } },
+					{ "weight",       la.weight },
+					{ "maxYaw",       la.maxYawDegrees },
+					{ "maxPitch",     la.maxPitchDegrees },
+					{ "interpSpeed",  la.interpSpeed },
+				} },
 			};
 		}
 		if (auto* pa = registry.try_get<PropertyAnimatorComponent>(entity))
@@ -964,6 +1075,10 @@ namespace
 			r.friction    = c.value("friction",    r.friction);
 			r.restitution = c.value("restitution", r.restitution);
 			r.is2D        = c.value("is2D",        r.is2D);
+			// Defaulted from the fresh component, so a scene written before
+			// collision layers existed loads every body into Default (0) — which
+			// is the channel it effectively had.
+			r.collisionLayer = c.value("layer", r.collisionLayer);
 			registry.emplace_or_replace<RigidBodyComponent>(entity, r);
 		}
 		if (comps.contains("collider"))
@@ -979,6 +1094,36 @@ namespace
 				col.halfExtents = { c["halfEx"][0], c["halfEx"][1], c["halfEx"][2] };
 			registry.emplace_or_replace<ColliderComponent>(entity, col);
 		}
+		if (comps.contains("joint"))
+		{
+			const json& c = comps["joint"];
+			JointComponent j;
+			// An unknown type is loaded as Fixed rather than cast straight
+			// through — the same lesson jsonToColliderShape learned, where a
+			// value from a newer build silently became shape 0 and nothing said
+			// so. Fixed is the type that needs no other field to make sense.
+			const auto rawType = c.value("type", static_cast<uint8_t>(j.type));
+			if (rawType <= static_cast<uint8_t>(JointType::Distance))
+				j.type = static_cast<JointType>(rawType);
+			else
+				HE_LOG_WARN(Serialize, "Scene contains unknown joint type %u — loading it as "
+				                       "Fixed (scene written by a newer build; SAVING IT BACK "
+				                       "MAKES THAT PERMANENT)", static_cast<unsigned>(rawType));
+			j.target   = jsonToUuid(c.value("target", json()));
+			j.anchorA  = jsonToVec3(c.value("anchorA", json()), j.anchorA);
+			j.anchorB  = jsonToVec3(c.value("anchorB", json()), j.anchorB);
+			j.axis     = jsonToVec3(c.value("axis",    json()), j.axis);
+			j.minLimit = c.value("minLimit", j.minLimit);
+			j.maxLimit = c.value("maxLimit", j.maxLimit);
+			// Absent in every scene written before the motor existed, and the
+			// defaults are exactly what those scenes meant: no motor, never
+			// breaks, and the two bodies do not collide.
+			j.motorTarget      = c.value("motorTarget",      j.motorTarget);
+			j.motorMaxForce    = c.value("motorMaxForce",    j.motorMaxForce);
+			j.breakForce       = c.value("breakForce",       j.breakForce);
+			j.collideConnected = c.value("collideConnected", j.collideConnected);
+			registry.emplace_or_replace<JointComponent>(entity, j);
+		}
 		if (comps.contains("characterController"))
 		{
 			const json& c = comps["characterController"];
@@ -992,6 +1137,9 @@ namespace
 			// field existed loads with the 5 m/s default rather than a zero that
 			// would silently refuse every jump.
 			cc.jumpSpeed  = c.value("jumpSpeed",  cc.jumpSpeed);
+			// Same rule: an older scene loads into the Character channel, which
+			// under the default all-true matrix is the walk it always had.
+			cc.collisionLayer = c.value("layer", cc.collisionLayer);
 			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
 		}
 		if (comps.contains("saveState"))
@@ -1190,6 +1338,93 @@ namespace
 			ab.looping       = c.value("looping",       ab.looping);
 			ab.playing       = c.value("playing",       ab.playing);
 			registry.emplace_or_replace<AnimatorBlendComponent>(entity, ab);
+		}
+		if (comps.contains("animationlayers"))
+		{
+			const json& c = comps["animationlayers"];
+			AnimationLayerComponent al;
+			for (const auto& lj : c.value("layers", json::array()))
+			{
+				AnimationLayerComponent::Layer l;
+				l.name   = lj.value("name", std::string());
+				// Guarded, not blind casts — see the two fromInt helpers. A file
+				// from a newer editor can name a source or a mode this build does
+				// not have, and an enum with no enumerator would fall through
+				// every branch that reads it.
+				l.source = AnimationLayerComponent::Layer::sourceFromInt(
+					lj.value("source", static_cast<int>(l.source)));
+				l.mode   = HE::layerBlendModeFromInt(
+					lj.value("mode", static_cast<int>(l.mode)));
+				l.clipId            = jsonToUuid(lj.value("clip",            json()));
+				l.blendSpaceId      = jsonToUuid(lj.value("blendSpace",      json()));
+				l.maskId            = jsonToUuid(lj.value("mask",            json()));
+				l.additiveRefClipId = jsonToUuid(lj.value("additiveRefClip", json()));
+				l.weight          = lj.value("weight",          l.weight);
+				l.additiveRefTime = lj.value("additiveRefTime", l.additiveRefTime);
+				l.playbackTime    = lj.value("playbackTime",    l.playbackTime);
+				l.playbackSpeed   = lj.value("playbackSpeed",   l.playbackSpeed);
+				l.looping         = lj.value("looping",         l.looping);
+				l.playing         = lj.value("playing",         l.playing);
+				al.layers.push_back(std::move(l));
+			}
+			registry.emplace_or_replace<AnimationLayerComponent>(entity, std::move(al));
+		}
+		if (comps.contains("rootmotion"))
+		{
+			const json& c = comps["rootmotion"];
+			RootMotionComponent rm;
+			rm.mode = RootMotionComponent::modeFromInt(c.value("mode", static_cast<int>(rm.mode)));
+			rm.options.rootJointName        = c.value("rootJoint",     rm.options.rootJointName);
+			rm.options.extractTranslationXZ = c.value("translationXZ", rm.options.extractTranslationXZ);
+			rm.options.extractTranslationY  = c.value("translationY",  rm.options.extractTranslationY);
+			rm.options.extractYaw           = c.value("yaw",           rm.options.extractYaw);
+			rm.options.lock = HE::rootMotionLockFromInt(
+				c.value("lock", static_cast<int>(rm.options.lock)));
+			registry.emplace_or_replace<RootMotionComponent>(entity, rm);
+		}
+		if (comps.contains("ik"))
+		{
+			const json& c = comps["ik"];
+			IkComponent ik;
+			for (const auto& fj : c.value("feet", json::array()))
+			{
+				IkComponent::FootIk f;
+				f.footJoint        = fj.value("foot", std::string());
+				f.kneeJoint        = fj.value("knee", std::string());
+				f.hipJoint         = fj.value("hip",  std::string());
+				f.weight           = fj.value("weight",           f.weight);
+				f.traceUp          = fj.value("traceUp",          f.traceUp);
+				f.traceDown        = fj.value("traceDown",        f.traceDown);
+				f.footHeightOffset = fj.value("footHeightOffset", f.footHeightOffset);
+				f.alignToNormal    = fj.value("alignToNormal",    f.alignToNormal);
+				f.maxPitchDegrees  = fj.value("maxPitch",         f.maxPitchDegrees);
+				f.maxRollDegrees   = fj.value("maxRoll",          f.maxRollDegrees);
+				f.interpSpeed      = fj.value("interpSpeed",      f.interpSpeed);
+				ik.feet.push_back(std::move(f));
+			}
+			ik.adjustPelvis = c.value("adjustPelvis", ik.adjustPelvis);
+			ik.pelvisJoint  = c.value("pelvisJoint",  ik.pelvisJoint);
+			if (c.contains("lookAt"))
+			{
+				const json& lj = c["lookAt"];
+				auto& la = ik.lookAt;
+				la.enabled        = lj.value("enabled",      la.enabled);
+				la.chain          = lj.value("chain",        std::vector<std::string>{});
+				la.chainWeights   = lj.value("chainWeights", std::vector<float>{});
+				la.targetEntityId = jsonToUuid(lj.value("targetEntity", json()));
+				const auto tw = lj.value("targetWorld",  std::vector<float>{});
+				if (tw.size() == 3) la.targetWorld  = { tw[0], tw[1], tw[2] };
+				const auto fl = lj.value("forwardLocal", std::vector<float>{});
+				// A zero forward would divide by zero in the solver, and a hand-
+				// edited scene is exactly where one comes from. Keep the default.
+				if (fl.size() == 3 && (fl[0] != 0.0f || fl[1] != 0.0f || fl[2] != 0.0f))
+					la.forwardLocal = { fl[0], fl[1], fl[2] };
+				la.weight          = lj.value("weight",      la.weight);
+				la.maxYawDegrees   = lj.value("maxYaw",      la.maxYawDegrees);
+				la.maxPitchDegrees = lj.value("maxPitch",    la.maxPitchDegrees);
+				la.interpSpeed     = lj.value("interpSpeed", la.interpSpeed);
+			}
+			registry.emplace_or_replace<IkComponent>(entity, std::move(ik));
 		}
 		if (comps.contains("propertyanimator"))
 		{
@@ -1843,10 +2078,16 @@ namespace
 bool SceneSerializer::isKnownComponentKey(const std::string& key)
 {
 	static const std::unordered_set<std::string> kKnown = {
-		"animator", "animatorblend", "animstatemachine", "audiolistener",
+		"animationlayers", "animator", "animatorblend", "animstatemachine",
+		// "rootmotion" was written and read for a while without ever being listed
+		// here, so every scene carrying it logged "unknown component — it is being
+		// dropped on load" while loading it perfectly well. Exactly the noise the
+		// comment on this function warns about, found while adding the line above.
+		"rootmotion",
+		"audiolistener",
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
 		"movement",
-		"decal", "environment", "foliage", "light", "lod", "material", "mesh",
+		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem", "propertyanimator",
 		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
 		"trail",

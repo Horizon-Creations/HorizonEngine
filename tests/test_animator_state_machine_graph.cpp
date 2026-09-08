@@ -93,7 +93,7 @@ TEST_CASE("ContentManager registers and retrieves an AnimatorStateMachineAsset")
     ContentManager cm;
 
     AnimatorStateMachineGraph g;
-    g.states.push_back({ 1, "Idle", HE::UUID::generate(), true, 0.0f, 0.0f });
+    g.states.push_back({ 1, "Idle", HE::UUID::generate(), HE::UUID{}, true, 0.0f, 0.0f });
     g.startState = "Idle";
 
     AnimatorStateMachineAsset asset;

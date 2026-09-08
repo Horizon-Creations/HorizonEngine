@@ -20,6 +20,14 @@ bool hasEntityNamed(HorizonWorld& world, const std::string& n)
     return false;
 }
 
+int countEntitiesNamed(HorizonWorld& world, const std::string& n)
+{
+    int count = 0;
+    for (auto [e, name] : world.registry().view<NameComponent>().each())
+        if (name.name == n) ++count;
+    return count;
+}
+
 float nativeEntityX(HorizonWorld& world)
 {
     for (auto [e, name, t] :
@@ -83,6 +91,61 @@ TEST_CASE("GameLogicLoader: reload works and unique hot-copies do not collide")
     CHECK(nativeEntityX(world) >= 0.0f);
 
     loader.unload(world);
+}
+
+// The editor's "Build and Reload" cycle, minus the compiler: the sequence the
+// button runs is one call, so no caller can get half of it right.
+TEST_CASE("GameLogicLoader: loadAndStart/reloadAndStart run the whole sequence")
+{
+    const std::filesystem::path libPath = HE_TEST_GAMELOGIC_LIB;
+    REQUIRE(std::filesystem::exists(libPath));
+
+    HorizonWorld world;
+    HE::GameLogicLoader loader;
+
+    // loadAndStart fires onStart itself — the marker entity is there without the
+    // caller having asked for it.
+    REQUIRE(loader.loadAndStart(libPath, world, nullptr));
+    REQUIRE(loader.isLoaded());
+    CHECK(countEntitiesNamed(world, "FromNativeLogic") == 1);
+    CHECK(countEntitiesNamed(world, "NativeLogicStopped") == 0);
+
+    loader.logic()->onUpdate(world, 1.0f / 60.0f);
+    CHECK(nativeEntityX(world) == doctest::Approx(1.0f));
+
+    // The hot swap: onStop on the outgoing image, onStart on the incoming one.
+    // The play session is what stays — the world is the same object throughout.
+    REQUIRE(loader.reloadAndStart(libPath, world, nullptr));
+    REQUIRE(loader.isLoaded());
+    CHECK(countEntitiesNamed(world, "NativeLogicStopped") == 1);
+    CHECK(countEntitiesNamed(world, "FromNativeLogic") == 2);
+
+    // A second swap on the same loader: the numbered hot-copies do not collide,
+    // which is what makes the button pressable more than once per session.
+    REQUIRE(loader.reloadAndStart(libPath, world, nullptr));
+    CHECK(countEntitiesNamed(world, "NativeLogicStopped") == 2);
+    CHECK(countEntitiesNamed(world, "FromNativeLogic") == 3);
+
+    loader.unload(world);
+    CHECK(!loader.isLoaded());
+}
+
+TEST_CASE("GameLogicLoader: a failed reloadAndStart still stopped the old image")
+{
+    const std::filesystem::path libPath = HE_TEST_GAMELOGIC_LIB;
+    REQUIRE(std::filesystem::exists(libPath));
+
+    HorizonWorld world;
+    HE::GameLogicLoader loader;
+    REQUIRE(loader.loadAndStart(libPath, world, nullptr));
+
+    // The library that was there is gone by the time the new one is found to be
+    // missing — its code is exactly what a rebuild replaces, so keeping it would
+    // be the dishonest outcome. onStop ran; nothing is loaded afterwards.
+    CHECK_FALSE(loader.reloadAndStart("/nonexistent/NoSuchGameLogic.dylib", world, nullptr));
+    CHECK_FALSE(loader.isLoaded());
+    CHECK(loader.logic() == nullptr);
+    CHECK(countEntitiesNamed(world, "NativeLogicStopped") == 1);
 }
 
 TEST_CASE("GameLogicLoader: missing file and double-load are rejected")

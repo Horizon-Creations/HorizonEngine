@@ -1,5 +1,6 @@
 #pragma once
 #include <Math/Math.h>
+#include <cstdint>
 
 struct CharacterControllerComponent {
     float     slopeLimit  = 45.0f;   // max walkable slope in degrees
@@ -17,6 +18,25 @@ struct CharacterControllerComponent {
     // would throw the player's velocity away for nothing, exactly as noted there
     // for gravity.
     float     jumpSpeed   = 5.0f;
+
+    // The collision channel the CHARACTER walks in — an index into the project's
+    // HE::CollisionLayerConfig. It decides what the character is BLOCKED BY:
+    // every query the CharacterVirtual makes (its ground check, its slide, its
+    // step-up) is filtered through the matrix row of this layer.
+    //
+    // It is a second field rather than a reuse of RigidBodyComponent's because a
+    // character controller does not require a rigid body, and because the two
+    // answer different questions on an entity that has both — the normal case,
+    // since EntityHost gives every PlayerCharacter a kinematic collision proxy.
+    // There, THIS layer is what the player is blocked by, and the proxy body's
+    // RigidBodyComponent::collisionLayer is what everything else SEES the player
+    // as. Set both when you want the player fully out of a channel.
+    //
+    // Defaults to CollisionLayerConfig::kCharacter (3) — a name for a thing that
+    // otherwise has none. With the default all-true matrix that is the same
+    // simulation as before layers existed. Out-of-range values are clamped to 0
+    // with a log when the character is built.
+    uint8_t   collisionLayer = 3;
 
     // Runtime state — written back by PhysicsWorld::step()
     glm::vec3 velocity    = {};      // current velocity (m/s), writable

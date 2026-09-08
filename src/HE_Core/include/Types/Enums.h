@@ -107,7 +107,9 @@ namespace HE
         StructType,       // user-defined struct (named typed fields) — see HE::TypeRegistry
         EnumType,         // user-defined enum (named int-backed entries) — see HE::TypeRegistry
         SaveGameTemplate, // savegame field schema (typed fields + defaults), consumed by HE::api::save
-        Theme             // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
+        Theme,            // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
+        BoneMask,         // which joints an animation layer may touch, by joint NAME (HE::BoneMask)
+        BlendSpace        // N clips in a 1D/2D parameter space, mixed by parameter (HE::BlendSpace)
     };
 
     // Does this kind of asset travel over a collaboration session?
@@ -147,6 +149,14 @@ namespace HE
             // is being changed — a theme edit is exactly what two people want to
             // see land live.
             case AssetType::Theme:
+            // A list of joint names and weights: a few hundred bytes, authored in
+            // the editor, and the sort of thing an animator and a rigger change
+            // while looking at the same character.
+            case AssetType::BoneMask:
+            // A handful of clip references with coordinates: a few hundred bytes,
+            // authored in the editor by dragging points around, and exactly the
+            // sort of thing two people tune while watching the same character run.
+            case AssetType::BlendSpace:
                 return true;
 
             case AssetType::StaticMesh:
@@ -163,6 +173,51 @@ namespace HE
         // Only reachable through a cast from an out-of-range value. Refusing is
         // the safe answer: an unrecognised kind does not go on the wire.
         return false;
+    }
+
+    // The enumerator's own spelling, for the boundaries that cannot carry the
+    // enum: the scripting API's content.typeName and the C-ABI table a native
+    // C++ game module reads it through (HorizonGameServices.h). The names are
+    // the enumerator names deliberately — they are what the editor, the docs and
+    // the asset headers already call these things, so a script comparing against
+    // "StaticMesh" is comparing against the one spelling in the project.
+    //
+    // Here beside the enum for isCollabSyncableAssetType's reason, and with NO
+    // default label for the same one: a new AssetType has to be named
+    // deliberately, and forgetting shows up as a warning on this switch instead
+    // of as an asset that reports itself as unknown.
+    inline constexpr const char* assetTypeName(AssetType t)
+    {
+        switch (t)
+        {
+            case AssetType::Unknown:              return "";
+            case AssetType::StaticMesh:           return "StaticMesh";
+            case AssetType::SkeletalMesh:         return "SkeletalMesh";
+            case AssetType::Texture:              return "Texture";
+            case AssetType::Material:             return "Material";
+            case AssetType::Scene:                return "Scene";
+            case AssetType::Script:               return "Script";
+            case AssetType::Audio:                return "Audio";
+            case AssetType::Font:                 return "Font";
+            case AssetType::Shader:               return "Shader";
+            case AssetType::Prefab:               return "Prefab";
+            case AssetType::AnimationClip:        return "AnimationClip";
+            case AssetType::PropertyAnimClip:     return "PropertyAnimClip";
+            case AssetType::MaterialFunction:     return "MaterialFunction";
+            case AssetType::Widget:               return "Widget";
+            case AssetType::HorizonCodeClass:     return "HorizonCodeClass";
+            case AssetType::InputAction:          return "InputAction";
+            case AssetType::InputMappingContext:  return "InputMappingContext";
+            case AssetType::ParticleSystem:       return "ParticleSystem";
+            case AssetType::AnimatorStateMachine: return "AnimatorStateMachine";
+            case AssetType::StructType:           return "StructType";
+            case AssetType::EnumType:             return "EnumType";
+            case AssetType::SaveGameTemplate:     return "SaveGameTemplate";
+            case AssetType::Theme:                return "Theme";
+        }
+        // Only reachable through a cast from an out-of-range value — the same
+        // "unknown" the enum's own first entry means.
+        return "";
     }
 
     enum class TextureFormat : uint32_t
@@ -208,6 +263,25 @@ namespace HE
                           // simplifying, so a dense mesh may build no shape at all.
         HeightField = 5,  // the entity's TerrainComponent height field. STATIC only,
                           // and meaningless on an entity without a terrain.
+    };
+
+    // What kind of joint holds two rigid bodies together. Like ColliderShape
+    // above, the raw uint8 lands in .hescene, so these values are APPEND-ONLY.
+    //
+    // Which of JointComponent's fields a type actually reads differs per type —
+    // the table lives on the component, next to the fields it is about.
+    //
+    // The two Jolt types deliberately absent are SwingTwist and SixDOF. Those
+    // are the ragdoll pair: they only pay off with JPH::Ragdoll and a skeleton
+    // mapping behind them, which is a topic of its own beside the skeletal
+    // animation work rather than a sixth line here.
+    enum class JointType : uint8_t
+    {
+        Fixed    = 0,  // weld: no relative movement at all
+        Point    = 1,  // ball socket: rotates freely about one shared point
+        Hinge    = 2,  // door, lid, wheel — one axis, optionally limited
+        Slider   = 3,  // drawer, lift, piston — one direction, optionally limited
+        Distance = 4,  // rope, grapple, spring suspension — two points kept apart
     };
 
     enum class SerializeFormat : uint8_t

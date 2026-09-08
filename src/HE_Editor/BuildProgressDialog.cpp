@@ -5,6 +5,7 @@
 #include <Diagnostics/Logger.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <mutex>
 #include <SDL3/SDL_process.h>
@@ -52,6 +53,10 @@ std::string           s_message;
 std::string           s_activity;        // what the running step is doing right now
 std::filesystem::path s_exePath;
 bool                  s_runnableHere = false;
+// Under the same lock as the rest of the model: begin() runs on the UI thread,
+// but the reader is the UI thread too and one lock for one model is the rule
+// this file already follows.
+Kind                  s_kind = Kind::Export;
 
 // ── UI-thread-only state ────────────────────────────────────────────────────
 bool   s_openRequest = false;
@@ -67,15 +72,45 @@ SDL_Process* s_launched = nullptr;
 
 } // namespace
 
+std::optional<float> toolchainProgress(const std::string& line)
+{
+	const auto open = line.find('[');
+	if (open == std::string::npos || open > 4) return std::nullopt;
+	const auto close = line.find(']', open);
+	if (close == std::string::npos || close <= open + 1 || close - open > 16) return std::nullopt;
+
+	std::string in;
+	for (size_t i = open + 1; i < close; ++i)
+		if (!std::isspace(static_cast<unsigned char>(line[i]))) in += line[i];
+	if (in.empty()) return std::nullopt;
+
+	if (in.back() == '%')
+	{
+		in.pop_back();
+		if (in.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
+		return std::clamp(std::stof(in) / 100.0f, 0.0f, 1.0f);
+	}
+	const auto slash = in.find('/');
+	if (slash == std::string::npos) return std::nullopt;
+	const std::string a = in.substr(0, slash), b = in.substr(slash + 1);
+	if (a.empty() || b.empty() ||
+	    a.find_first_not_of("0123456789") != std::string::npos ||
+	    b.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
+	const float total = std::stof(b);
+	if (total <= 0.0f) return std::nullopt;
+	return std::clamp(std::stof(a) / total, 0.0f, 1.0f);
+}
+
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 namespace Build
 {
 
-void begin(const std::vector<std::string>& stepNames)
+void begin(const std::vector<std::string>& stepNames, Kind kind)
 {
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
+		s_kind = kind;
 		s_steps.clear();
 		s_steps.reserve(stepNames.size());
 		for (const std::string& n : stepNames) s_steps.push_back(Step{n});
@@ -203,6 +238,12 @@ Action takeAction()
 	const Action a = s_action;
 	s_action = Action::None;
 	return a;
+}
+
+Kind runKind()
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	return s_kind;
 }
 
 // ─── Dialog ──────────────────────────────────────────────────────────────────
@@ -369,8 +410,10 @@ void render([[maybe_unused]] AppContext& ctx)
 	std::filesystem::path exePath;
 	bool runnable = false;
 	int current = -1;
+	Kind kind = Kind::Export;
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
+		kind     = s_kind;
 		steps    = s_steps;
 		running  = s_running;
 		finished = s_finished;
@@ -499,11 +542,17 @@ void render([[maybe_unused]] AppContext& ctx)
 	// window, and closing it here only to reopen it a frame later would flash.
 	if (EditorWidgets::button("Build Again", ImVec2(120.0f, 0.0f)))
 		s_action = Action::Rebuild;
-	ImGui::SameLine();
-	if (EditorWidgets::button("Build Settings", ImVec2(130.0f, 0.0f)))
+	// Only an export HAS settings. A game-logic build takes its orders from the
+	// project (its Source/ folder and the toolchain), so the row is left out
+	// rather than offered and then refused.
+	if (kind == Kind::Export)
 	{
-		s_action = Action::BackToSetup;
-		ImGui::CloseCurrentPopup();
+		ImGui::SameLine();
+		if (EditorWidgets::button("Build Settings", ImVec2(130.0f, 0.0f)))
+		{
+			s_action = Action::BackToSetup;
+			ImGui::CloseCurrentPopup();
+		}
 	}
 	ImGui::EndDisabled();
 

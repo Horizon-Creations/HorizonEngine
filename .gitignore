@@ -41,6 +41,12 @@ CMakeUserPresets.json
 *.log
 config.json
 /.vs
+# Any build tree, however it was named. `build-wt/` used to be the only one
+# spelled out, and a worktree that configured into `build-<something-else>/`
+# committed 45 000 lines of generated CMake and a 63 MB test binary before
+# anyone noticed. The pattern costs nothing and `build_errors.txt` (a tracked
+# file) is not matched by it — the trailing slash means directories only.
+build-*/
 build-wt/
 
 # Working screenshots and scratch output. Kept on disk, never committed: these
@@ -68,3 +74,8 @@ imgui.ini
 # repository is public — these values never belong in a tracked file. CI gets
 # them from repository secrets instead; see src/HE_ContentSync/CMakeLists.txt.
 cmake/EngineContentCredentials.cmake
+
+# Python bytecode of the helper scripts in scripts/. A .pyc of build_runtimes.py
+# was committed once (e68ff8ed) simply because nothing here caught it.
+__pycache__/
+*.pyc
