@@ -1,4 +1,4 @@
-# Outliner: Widgets an eine bestimmte Stelle der Hierarchie ziehen
+# UI-Designer: Widgets an eine bestimmte Stelle der Hierarchie ziehen
 
 Stand: 08.09.2026 — Schritt 1 (Orientierung + Entwurf). Noch kein Feature-Code.
 Zweig `claude/outliner-widgets-per-drag-drop-an-eine-bestimmte-stelle-in-d`,
