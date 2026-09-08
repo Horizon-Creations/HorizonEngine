@@ -430,3 +430,49 @@ Das Feature steht auf dem Branch, in fünf Schritten:
 
 - Der Ende-zu-Ende-Durchlauf aus Abschnitt 10.6 (echtes C++-Projekt anlegen, Knopf drücken, in PIE prüfen, Quelle ändern, wieder drücken) ist **nicht** gelaufen — er braucht einen Menschen am Editor.
 - Die Website ist nicht deployt. Die beiden HTML-Seiten liegen im Website-Checkout, das Bündel hier ist daraus gebaut.
+
+---
+
+## 13. Nachtrag: der Fehler, der nach dem Merge auf `main` sichtbar wurde (2026-09-08)
+
+Nach dem Merge dieses Themas nach `main` fiel `test_gamelogic_services` in **5 von 7 Fällen** deterministisch, auch isoliert und nach sauberem Rebuild: `servicesAvailableAtStart`, `contentAvailableAtStart`, `inputAvailableAtStart` und `doLoadAsset` nach `reloadAndStart` waren alle `false`. Der Fehler reproduzierte auf einem frischen Scratch-Checkout von `origin/main`, war also ein Bestandsfehler und keine Regression der beiden Themen, die zu dem Zeitpunkt gerade verifiziert wurden. Behoben in `0d130993`.
+
+### Was schiefging
+
+Der Injektionspfad war die ganze Zeit richtig. Der Loader fand `HE_SetEngineServicesV2`, rief es, und im geladenen Modul standen danach alle vier Tabellenzeiger korrekt. Trotzdem sagte `he::save::available()` `false`.
+
+`<HorizonGameServices.h>` besteht aus `inline`-Funktionen. Jedes Image, das eine davon benutzt, emittiert seine eigene Kopie als **weak definition**, und dyld vereinigt weak definitions über Images hinweg, wobei das Executable gewinnt. `he_tests` trägt den Header ebenfalls, samt `HE_IMPLEMENT_ENGINE_SERVICES()`, für die In-Process-Save-Tests in `test_engine_api.cpp`. Die Aufrufe der geladenen Fixture landeten deshalb in `he_tests`' `he::detail::svc()` und lasen `he_tests`' `g_heSaveServices`: Speicher, in den der Loader nie schreibt, weil er in den des Moduls schreibt.
+
+Das erklärt auch das schiefe 5-von-7-Muster. Welche der vier Accessoren `he_tests` out-of-line emittierte, war ein Zufall dessen, was seine anderen Tests anfassten. `physSvc()` fehlte dort, also funktionierte ausgerechnet Physik, während `save`, `input` und `content` stumm blieben. Jede neue Zeile in `test_engine_api.cpp` konnte die Fehlermenge wachsen lassen.
+
+### Warum es nicht auffiel
+
+Drei Dinge mussten zusammenkommen, und in der CI kam keines davon zusammen:
+
+1. **Nur macOS.** Weak-definition-Coalescing über Image-Grenzen ist ein dyld-Verhalten. Ein ELF-Executable exportiert seine Symbole ohne `-rdynamic` gar nicht an ein `dlopen`-Modul, und eine Windows-DLL vereinigt nie mit ihrem Host. Von den drei CI-Matrix-Einträgen (`macos-latest`, `windows-latest`, `ubuntu-latest`) war also nur einer überhaupt anfällig.
+2. **Nur ohne Optimierung.** Bei `-O2` inlinen die Accessoren weg, es bleibt kein out-of-line-Symbol übrig, das Kandidat für Coalescing wäre. Die CI baut in allen drei Jobs mit `-DCMAKE_BUILD_TYPE=Release` (`.github/workflows/ci.yml`), und auch die Verifikation aus Abschnitt 12 („voller Build (Release, Metal + GL) … 124/124 grün") lief Release. Nachgemessen an einer TU, die den Header wie `he_tests` benutzt:
+
+   | Header | `-O0` | `-O2` |
+   |---|---|---|
+   | vor `0d130993` | `weak external __ZN2he6detail3svcEv` (exportiert, coalescing-fähig) | Symbol gar nicht emittiert |
+   | nach `0d130993` | `weak private external` (nicht exportiert) | Symbol gar nicht emittiert |
+
+3. **Die Symptome sind legale Zustände.** Wenn es zuschlägt, gibt jeder Wrapper seinen dokumentierten „keine Engine injiziert"-Default zurück. Kein Absturz, kein Nullzeiger, kein Log. Das sah nach einem Loader aus, der aufgehört hatte zu injizieren, nicht nach einem Linker, der zwei Funktionen für eine gehalten hatte.
+
+Ein reiner Debug-Lauf auf einem Mac war damit der einzige Weg, den Fehler zu sehen, und genau der stand zwischen Merge und CI.
+
+### Warum der Fix im Header sitzt, nicht im Bauweg
+
+`#pragma GCC visibility push(hidden)` über den ganzen Wrapper-Namensraum in `HorizonGameServices.h`, hinter `#if defined(__GNUC__) || defined(__clang__)` (MSVC braucht es nicht und warnt mit C4068). Eine hidden weak definition ist kein Kandidat für Coalescing mehr, jedes Image löst also auf die Kopie neben seinen eigenen Globals auf.
+
+Ins CMake gehört das aus drei Gründen nicht: `VISIBILITY_INLINES_HIDDEN` greift nur bei inline-**Member**funktionen und hätte `he::detail::svc()` als freie Funktion nie erfasst; `CXX_VISIBILITY_PRESET hidden` hätte `HE_CreateGameLogic` mitversteckt, weil `HE_GAME_API` auf unix leer war; und vor allem setzt ein generiertes C++-Spielprojekt (`CppScaffold::cmakeLists`) überhaupt keine Sichtbarkeitsflags, dort muss die Regel aber genauso halten. Härtung nebenbei, kein Teil des Fehlers: `HE_GAME_API` trägt auf GCC/Clang jetzt `visibility("default")`, damit die Dekoration überall dasselbe bedeutet.
+
+### Der Regressionstest
+
+Die Probe (`tests/fixtures/test_gamelogic_probe.h`) meldet die Adressen der **eigenen** Accessoren und Globals des Moduls, ungefiltert an jedem `he::*`-Wrapper vorbei. Der Test nimmt dieselben Adressen in `he_tests` und verlangt Ungleichheit. Die Adressen im Test zu nehmen ist die halbe Miete: es erzwingt die Emission aller vier Kopien, statt sie dem Zufall zu überlassen, weshalb der Fall mit herausgenommenem Pragma auf alle vier Accessoren fällt, Physik eingeschlossen. Dazu zwei Zeilen in den bestehenden Fällen, die sie aus dem richtigen Grund bestehen lassen: nach `reloadAndStart` steht die Tabelle in der Storage des **neuen** Images (`saveTable == &rig.save`), nach dem bloßen `reload()` ist das Global des Moduls selbst leer (`saveTable == 0`). Beides konnte eine `available()`-Abfrage nicht unterscheiden.
+
+### Verifikation dieses Nachtrags
+
+Frisch gemergter Stand (`origin/main` in den Branch gemergt, Merge-Commit `7e89c00b`, danach zusaetzlich der Temp-Verzeichnis-Fix aus `98f232cd`), eigener Build `build-tests` (Unix Makefiles, **ohne** `CMAKE_BUILD_TYPE`, also `-O0`, genau die Konfiguration, in der der Fehler reproduzierte), macOS/arm64: Build ohne Fehler, volle Suite `ctest` **135/135 gruen** (drei `runtime_size*`-Faelle uebersprungen, sie brauchen einen deployten App-Runtime-Bundle), davon `GameLogic services*` 7 von 7. Die 124/124 aus Abschnitt 12 sind der ältere Release-Lauf vor drei Merges, die Zahl ist seitdem gewachsen und kein Widerspruch.
+
+Ein zweiter, unabhaengiger Fund waehrend derselben Verifikation: `test_app_todo` schlug zunaechst vereinzelt fehl, weil der Test einen FESTEN Namen unter `$TMPDIR` benutzte, den sich mehrere gleichzeitig laufende `he_tests`-Prozesse auf derselben Maschine teilten (z. B. Verifikationen in mehreren Worktrees parallel). Kein Zusammenhang mit dem `visibility(hidden)`-Fix oben, per `nm` belegt: keines der betroffenen Symbole landet ueberhaupt in einem ausgelieferten Image. Behoben in `98f232cd` durch einen Temp-Pfad pro Prozess-ID.
