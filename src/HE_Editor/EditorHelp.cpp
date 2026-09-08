@@ -2579,10 +2579,30 @@ namespace
 	// and "Position X" becomes "Left/Right", because on a stretched axis the
 	// element has no position, it has two margins. Each shape gets its own
 	// entry, and each says why it is the shape it is.
+	// The gesture, not a control: a drop zone has no label to hover, so this one
+	// is asked for by key from the "(?)" beside the tree's heading. The coverage
+	// audit counts labelled widgets and therefore never sees it — which is the
+	// reason it has to be written deliberately rather than waiting to go red.
+	{ "ui.hierarchy-drop", "Moving widgets in the tree",
+	  "Drag a row onto another one to move that widget. A row has THREE zones, "
+	  "not one: the middle of a container puts the widget inside it, and the top "
+	  "and bottom edges put it in front of or behind that row among its siblings "
+	  "— which is how a Spacer lands BETWEEN two children of a Vertical Box "
+	  "instead of only ever at the end. A row with no children has no inside, so "
+	  "its two halves are simply before and after. The line drawn while you drag "
+	  "is where the widget would land.\n\n"
+	  "What the order then means depends on the parent. In a box, a grid or "
+	  "another layout container it is the layout order, top to bottom or left to "
+	  "right. In a Panel, on a Button or at the top level it is the DRAWING "
+	  "order — of two overlapping elements on the same Layer, the later one is "
+	  "on top — so the same gesture is how you put one picture in front of "
+	  "another without touching a number.",
+	  "", "ui#designer" },
 	{ "UI Hierarchy/Canvas", "Canvas",
 	  "The root of the widget tree. Selecting it selects nothing in particular, "
 	  "which is what puts the canvas settings in the details panel; dropping a "
-	  "widget on it moves that widget out to the top level.",
+	  "widget on it moves that widget out to the top level, at the end. Between "
+	  "two top-level widgets is a drop on their own rows.",
 	  "", "ui#designer" },
 	{ "UI Hierarchy/Duplicate", "Duplicate",
 	  "Copies this widget and everything under it, as a sibling. The copy keeps "
@@ -2824,7 +2844,10 @@ namespace
 	  "everything wants: fill a form from the top and never type a coordinate. "
 	  "Naming a cell PINS the element there, and pinned ones are placed first — so "
 	  "an element that asked for a cell cannot have it taken by one that did not "
-	  "care but happened to come earlier.",
+	  "care but happened to come earlier. Pinned also means the order in the "
+	  "hierarchy no longer counts for this element: dragging it past its siblings "
+	  "moves it in the tree and changes nothing on screen, because the cell it "
+	  "named is where it goes.",
 	  "", "ui#elements" },
 	{ "UI Widget/Span (cols, rows)", "",
 	  "How many cells this element covers, at least one of each. A span takes the "

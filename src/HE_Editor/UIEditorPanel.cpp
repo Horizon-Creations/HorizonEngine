@@ -5657,6 +5657,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGui::EndChild();
 
 			ImGui::TextDisabled("Hierarchy");
+			// The drop zones are the one thing in this panel that cannot explain
+			// itself by being hovered: a zone is a third of a row, it has no
+			// label, and reading a tooltip while holding a drag is not a thing
+			// anybody does. So the heading carries it.
+			EditorWidgets::helpMarker("ui.hierarchy-drop");
 			ImGui::Separator();
 			ImGui::BeginChild("##uiw_tree", ImVec2(0.0f, 0.0f));
 

@@ -313,6 +313,24 @@ im Scope `"UI Hierarchy"` (der Scope existiert bereits, `UIEditorPanel.cpp:695`)
 sonst wird der Audit rot. Zusaetzlich: ein Absatz im Handbuchkapitel zum
 UI-Designer, und der Grid-Satz aus 3.4.
 
+**Umgesetzt.** Die Geste hat keine Beschriftung, an die sich eine Erklaerung
+haengen liesse, und niemand liest einen Tooltip mit gedrueckter Maustaste. Sie
+haengt deshalb als gepunkteter Schluessel `ui.hierarchy-drop` am `(?)` neben der
+Ueberschrift „Hierarchy" (`EditorWidgets::helpMarker`, `UIEditorPanel.cpp:5659`);
+gepunktete Schluessel werden ueber `ui.` dem Kapitel „UI Designer" zugeordnet und
+vom Audit nicht als Bedienelement gezaehlt — die Deckung bleibt 800/800.
+`UI Hierarchy/Canvas` sagt jetzt „ans Ende" statt nur „ans oberste Level", und
+der Grid-Satz aus 3.4 steht in `UI Widget/Cell (col, row)`.
+
+**Nicht umgesetzt, absichtlich:** der Absatz im *Handbuchkapitel*. Der Text im
+Docs-Reader kommt aus `EditorDeps/Docs/he-docs.json`, gebaut von
+`scripts/build_docs_bundle.py` aus `HorizonEngineDocs/` im Website-Repo
+(`DocsLibrary.h`: „Der Bundle ist DATEN, nicht Code"). Aus diesem Repo ist er
+nicht zu aendern. Der Satz, der dort in „UI Designer → The hierarchy" fehlt:
+eine Zeile im Baum hat drei Zonen, Mitte hinein, Ober- und Unterkante davor und
+dahinter, und die Geschwisterreihenfolge ist in Layout-Containern die
+Layout-Reihenfolge, in Panel/Button/Wurzel die Zeichenreihenfolge.
+
 ---
 
 ## 4. Ausdruecklich nicht in diesem Feature
@@ -344,4 +362,19 @@ UI-Designer, und der Grid-Satz aus 3.4.
    Wie in 3.4 entschieden ohne Sperre nach Container-Typ: angeboten wird sie
    ueberall, wo der Parent Kinder nimmt, und ein Blatt bekommt davor/dahinter
    (bisher tat ein Drop auf ein Blatt gar nichts).
-4. **Offen.** Handbuch/Hilfe aus 3.6.
+4. **Erledigt.** Hilfe aus 3.6: `ui.hierarchy-drop` am `(?)` der Ueberschrift,
+   Grid-Satz in `UI Widget/Cell (col, row)`, `UI Hierarchy/Canvas` nachgezogen.
+   Volle Suite zweimal gruen (135/135, drei `runtime_size*` planmaessig
+   uebersprungen), die zwoelf `moveElement`-Faelle einzeln 12/12 mit 66
+   Zusicherungen, `editor_help_audit` 800/800 und weiterhin 0 offen.
+   Offen bleibt allein der Absatz im Handbuchkapitel — anderes Repo, siehe 3.6.
+
+## 6. Was die Tests nicht abdecken
+
+Die Zonen-Arithmetik in `drawHierarchyNode` (0.30/0.70 beim Container, 0.5 beim
+Blatt, „dahinter" → naechstes Geschwister, der Selbst-Drop-Riegel) hat keinen
+Test. `drawHierarchyNode` nimmt `AppContext&`, damit ist sie auch fuer
+`scripts/he_uishot.py` unerreichbar — der rendert nur Panels, die ohne
+AppContext auskommen. Geprueft ist der Unterbau (`moveElement`/`canMoveElement`)
+und dass der Editor damit baut und laeuft; die Geste selbst ist bisher nur
+gelesen, nicht gefahren.
