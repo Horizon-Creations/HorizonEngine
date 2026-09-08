@@ -338,3 +338,38 @@ P3 stehen.
 Nicht Teil dieses Vorhabens: die geteilte Python-Standardbibliothek, die
 `GameRuntimes/<Plattform>`-Bundles fuer Cross-Exporte, und der rote
 `test_mcp_bridge` auf Windows.
+
+---
+
+## 9. Was davon umgesetzt ist
+
+Stand 08.09.2026, Commits `7362b42e` (P0, P1) und `009c54c7` (P2, P3, P5).
+
+| Nr. | Stand |
+|---|---|
+| P0 | umgesetzt. `compileHlslPinned` gibt im Stub `failed()` zurueck, wie die anderen drei. Der Dateikopf sagt jetzt ausdruecklich, dass Header und Stub zusammen vollstaendig bleiben muessen und warum das erst beim Linken auffaellt. |
+| P1 | umgesetzt als `--source-tree DIR` (wiederholbar), vorne in der Liste von `existing_sources()`. |
+| P2 | umgesetzt. Zwei Schritte in `ci.yml` nach `Run tests`, beide `if: github.event_name == 'push'`: der Auspraegungsbau und die Groessenpruefung. Die Deploy-Wurzel wird plattformweise in einer Bash-Zeile bestimmt und ueber `GITHUB_ENV` an die folgenden Schritte weitergereicht. |
+| P3 | umgesetzt. Windows und Linux: ein `mv`-Schritt nach `package/Editor`. macOS: `package_macos.sh` hat statt des einen `Game`-Blocks eine Schleife ueber `Game AppAdvanced AppBasic`, an derselben Stelle, also weiterhin vor dem Signieren. |
+| P4 | siehe unten. |
+| P5 | umgesetzt. `runtime-flavors.yml` laeuft nur noch auf `claude/**`. |
+| P6 | bewusst nicht gemacht: Bequemlichkeit, nicht Pipeline. |
+
+**Eine Nebenwirkung, die niemand ueberraschen darf:** das Windows-Verpacken stand bisher
+**vor** `Run tests` und lud den Editor deshalb auch dann hoch, wenn ctest rot war. Es steht
+jetzt dahinter, wie macOS und Linux es seit jeher tun, weil die App-Runtimes zwischen Test
+und Verpacken entstehen. Solange `test_mcp_bridge` auf Windows rot ist (Abschnitt 0,
+fremder Punkt), faellt damit das Windows-Artefakt aus. Der Tausch ist der richtige — die
+Alternative, den Auspraegungsbau `continue-on-error` zu setzen, lieferte stillschweigend
+einen Editor ohne App-Runtimes und damit genau den Fehler zurueck, gegen den dieses Thema
+angetreten ist —, aber er macht den Windows-Flake zur Vorbedingung fuer den naechsten
+Windows-Download.
+
+### Was verifiziert ist und was nicht
+
+Verifiziert wird das hier nachgetragen, sobald es gemessen ist; alles andere steht
+ausdruecklich als ungeprueft da. Was hier haengt, sind P0 und P1: der lokale
+Auspraegungsbau auf macOS ist der einzige Teil, den diese Maschine selbst beweisen kann.
+Windows und Linux, der DMG-Inhalt und der Satz `Runtime: AppAdvanced` im Export-Log
+brauchen einen CI-Lauf beziehungsweise einen vollen Editorbau und sind hier nicht
+gefallen.
