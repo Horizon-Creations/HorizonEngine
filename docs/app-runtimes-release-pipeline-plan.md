@@ -391,8 +391,23 @@ kein einziges Mal geklont; im Log steht keine einzige `Cloning into`-Zeile. Ohne
 `--source-tree` liefert `existing_sources()` in einem frischen Worktree eine leere Liste,
 mit ihm sieben Flags.
 
-**Nicht gefallen und hier auch nicht faelschbar:** Windows und Linux (brauchen einen
-CI-Lauf), der Inhalt von `HorizonEditor.app/Contents/Resources` (braucht einen vollen
-Editorbau auf dieser Maschine) und der Satz `Runtime: AppAdvanced` im Export-Log, der die
-eigentliche Frage des Themas beantwortet. `package_macos.sh` ist geaendert und
-`bash -n`-geprueft, aber nicht gelaufen.
+**P3 auf macOS gelaufen, nicht nur geschrieben.** `scripts/package_macos.sh` gegen den
+Release-Editor-Deploy des Hauptcheckouts (175 MB, hereinkopiert), Rueckgabecode 0:
+
+```
+Game/ runtime        → Resources/Game
+AppAdvanced/ runtime → Resources/AppAdvanced
+AppBasic/ runtime    → Resources/AppBasic
+```
+
+In allen dreien liegt `HorizonGame`, `codesign --verify --deep --strict` gibt 0 zurueck,
+die zwei neuen Verzeichnisse sind also von der Signatur gedeckt — die Kopie sitzt richtig
+vor dem Signieren. Das Editorbinary in diesem `.app` stammt aus dem Hauptcheckout und nicht
+aus diesem Zweig; getestet war der Packager, nicht der Editor.
+
+**Nicht gefallen und hier auch nicht faelschbar:** Windows und Linux, die einen CI-Lauf
+brauchen — der Push dieses Zweigs hat `runtime-flavors.yml` ausgeloest (Lauf
+`34214918244`), der P0 auf allen drei Plattformen beantwortet, aber niemand hat ihn
+abgewartet. Und der Satz `Runtime: AppAdvanced` im Export-Log, der die eigentliche Frage
+des Themas beantwortet: dafuer braucht es einen Editor aus diesem Zweig und einen echten
+App-Export.
