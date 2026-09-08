@@ -467,6 +467,158 @@ TEST_CASE("ui shot: the documentation reader lays a page out")
 	DocsPanel::close();
 }
 
+// ── The language switcher ────────────────────────────────────────────────────
+// The one block in the reader whose whole point is that a click changes what is
+// on screen, which is exactly what no string comparison can answer: "did the
+// well draw", "is one segment armed", "did the armed one move when it was
+// clicked". The page is synthetic on purpose — this is the widget under test,
+// not the manual's wording, and step 3 of this feature is what puts real
+// examples into the bundle.
+namespace
+{
+	// The armed segment paints EditorToolbar::kOnBg (168,100,30). Nothing else in
+	// this page is that colour: the theme's own amber is 206,124,36 and the gold
+	// 234,194,78, both well outside the tolerance.
+	struct AmberSpan { int count = 0, minX = 1 << 20, maxX = -1; };
+
+	AmberSpan armedSegment(const he_ui::Image& img, int x0, int x1, int y0, int y1)
+	{
+		AmberSpan s;
+		for (int y = y0; y < y1; ++y)
+			for (int x = x0; x < x1; ++x)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (std::abs(int(r) - 168) < 14 && std::abs(int(g) - 100) < 14 &&
+				    std::abs(int(b) - 30) < 14)
+				{
+					++s.count;
+					s.minX = std::min(s.minX, x);
+					s.maxX = std::max(s.maxX, x);
+				}
+			}
+		return s;
+	}
+
+	// A page with one worked example in three languages. The listings differ in
+	// length as well as in text, so switching is visible in more than the well.
+	HE::Ed::Docs::Page langsPage()
+	{
+		using namespace HE::Ed::Docs;
+		Block langs;
+		langs.kind = BlockKind::LangTabs;
+		// The language IDS are deliberately not the real ones: the reader keeps
+		// one choice for the whole manual in a file-static, and a fixture that
+		// answered to "lua" would be armed differently depending on what ran
+		// before it. Nothing matches these, so the block always opens on its
+		// first variant — which is what makes "the armed cell moved right" a
+		// statement about the click. The LABELS stay real, because those are
+		// what the help lookup is keyed by.
+		langs.vars.push_back({ "fixture-lua", "Lua", "finder.lua",
+		                       "local player = scene.find(\"Player\")\n"
+		                       "print(player)" });
+		langs.vars.push_back({ "fixture-python", "Python", "finder.py",
+		                       "player = scene.find(\"Player\")\n"
+		                       "print(player)\n"
+		                       "print(player.transform)" });
+		langs.vars.push_back({ "fixture-cpp", "C++", "Game.cpp",
+		                       "auto player = scene.find(\"Player\");" });
+
+		Block lead;
+		lead.kind = BlockKind::Lead;
+		lead.runs.push_back({ "Every later example needs a handle on something.",
+		                      Style::Body, "" });
+
+		Section sec;
+		sec.id      = "find";
+		sec.title   = "Find an entity";
+		sec.eyebrow = "Examples";
+		sec.text    = "scene find player";
+		sec.blocks.push_back(lead);
+		sec.blocks.push_back(langs);
+
+		Page page;
+		page.id      = "langswitch";
+		page.file    = "langswitch.html";
+		page.title   = "Switcher Fixture";
+		page.summary = "One task, three languages.";
+		page.sections.push_back(sec);
+		return page;
+	}
+} // namespace
+
+TEST_CASE("ui shot: the example switcher arms one language and swaps the listing")
+{
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	REQUIRE(lib.loaded());
+	// appendPage replaces by id, so running this twice in one binary is the same
+	// as running it once.
+	lib.appendPage(langsPage());
+
+	DocsPanel::openTopic("langswitch#find");
+	REQUIRE(DocsPanel::isOpen());
+
+	const he_ui::Image before = shoot("docs-lang-switcher", W, H, 4,
+	                                  [&](int) { DocsPanel::draw(host); });
+	REQUIRE(before.valid());
+
+	// The body column, right of the sidebar. Nothing chrome-coloured lives there
+	// on this page but the well.
+	const AmberSpan first = armedSegment(before, 300, W - 20, 90, H - 40);
+	INFO("armed-segment pixels: " << first.count << " x " << first.minX << ".."
+	     << first.maxX);
+	CHECK(first.count > 200);          // a segment, not a stray pixel
+	CHECK(first.maxX > first.minX);
+
+	// Nobody has chosen yet, so the block shows the first language it offers —
+	// and the armed cell is therefore the LEFTMOST one. Its neighbour sits just
+	// past it, two pixels of gap away.
+	const int clickX = first.maxX + 10;
+	int armedY = -1;
+	for (int y = 90; y < H - 40 && armedY < 0; ++y)
+	{
+		std::uint8_t r, g, b, a;
+		before.pixel(first.minX + 2, y, r, g, b, a);
+		if (std::abs(int(r) - 168) < 14 && std::abs(int(g) - 100) < 14 &&
+		    std::abs(int(b) - 30) < 14)
+			armedY = y + 6;
+	}
+	REQUIRE(armedY > 0);
+
+	// Press the second segment. ImGui reads its input queue in NewFrame, so an
+	// event posted while frame N is being built is acted on in frame N+1 — hence
+	// down on one frame, up on the next, and two more frames to settle.
+	ImGuiIO& io = ImGui::GetIO();
+	const he_ui::Image after = shoot("docs-lang-switcher-clicked", W, H, 6, [&](int i) {
+		if (i == 0)
+		{
+			io.AddMousePosEvent(float(clickX), float(armedY));
+			io.AddMouseButtonEvent(0, true);
+		}
+		if (i == 1) io.AddMouseButtonEvent(0, false);
+		// And off the well again, so the shot is not a picture of a hover.
+		if (i == 3) io.AddMousePosEvent(float(W) * 0.5f, float(H) - 10.0f);
+		DocsPanel::draw(host);
+	});
+	REQUIRE(after.valid());
+
+	const AmberSpan second = armedSegment(after, 300, W - 20, 90, H - 40);
+	INFO("after the click: " << second.count << " x " << second.minX << ".."
+	     << second.maxX);
+	CHECK(second.count > 200);
+	// The armed cell moved to the right — one choice, and the click made it.
+	CHECK(second.minX > first.minX);
+
+	DocsPanel::close();
+}
+
 TEST_CASE("ui shot: a node explains itself on hover")
 {
 	// What a graph author sees when the cursor rests on a node: the call's name,

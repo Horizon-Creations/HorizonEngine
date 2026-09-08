@@ -86,7 +86,16 @@ namespace
 	                      { "k": "ul", "items": [ [ { "t": "one", "s": "" } ],
 	                                              [ { "t": "two", "s": "" } ] ] },
 	                      { "k": "figure", "src": "shot.jpg", "alt": "A screenshot" },
-	                      { "k": "flow", "steps": [ { "label": "Extract", "sub": "scene" } ] } ] }
+	                      { "k": "flow", "steps": [ { "label": "Extract", "sub": "scene" } ] },
+	                      { "k": "langs", "vars": [
+	                          { "lang": "lua", "label": "Lua", "title": "finder.lua",
+	                            "text": "local e = scene.find(\"Player\")" },
+	                          { "lang": "python", "label": "Python", "title": "finder.py",
+	                            "text": "e = scene.find(\"Player\")" },
+	                          { "lang": "cpp", "label": "C++", "title": "Game.cpp",
+	                            "text": "auto e = scene.find(\"Player\");" },
+	                          { "lang": "broken", "label": "", "title": "no.label",
+	                            "text": "dropped" } ] } ] }
 	      ] }
 	  ]
 	})JSON";
@@ -310,7 +319,7 @@ TEST_CASE("docs library: blocks survive the round trip")
 	CHECK(shadows.blocks[2].blocks[0].runs[0].text == "Metal only.");
 
 	const Section& listings = lib.pages()[1].sections[0];
-	REQUIRE(listings.blocks.size() == 4);
+	REQUIRE(listings.blocks.size() == 5);
 	CHECK(listings.blocks[0].kind == BlockKind::Code);
 	CHECK(listings.blocks[0].title == "spin.lua");
 	CHECK(listings.blocks[0].text.find('\n') != std::string::npos);
@@ -318,6 +327,42 @@ TEST_CASE("docs library: blocks survive the round trip")
 	CHECK(listings.blocks[2].src == "shot.jpg");
 	REQUIRE(listings.blocks[3].steps.size() == 1);
 	CHECK(listings.blocks[3].steps[0].label == "Extract");
+
+	// The language switcher: one block, one variant per language, each carrying
+	// what a Code block carries. The fourth variant in the fixture has no button
+	// text, so it is dropped rather than drawn as a segment nobody can read.
+	const Block& langs = listings.blocks[4];
+	CHECK(langs.kind == BlockKind::LangTabs);
+	REQUIRE(langs.vars.size() == 3);
+	CHECK(langs.vars[0].lang  == "lua");
+	CHECK(langs.vars[0].label == "Lua");
+	CHECK(langs.vars[0].title == "finder.lua");
+	CHECK(langs.vars[2].lang  == "cpp");
+	CHECK(langs.vars[2].label == "C++");
+	CHECK(langs.vars[2].text.find("scene.find") != std::string::npos);
+}
+
+TEST_CASE("docs library: an unknown block kind is skipped, not refused")
+{
+	// The reason kSchemaVersion is NOT bumped when a block kind is added: an
+	// older editor reading a newer bundle loses that one block and keeps the
+	// rest of the manual, where a version bump would cost it the whole file.
+	const char* bundle = R"JSON({
+	  "version": 1, "generated": "2026-09-08", "baseUrl": "https://example.invalid/",
+	  "groups": [ { "title": "Manual", "pages": ["alpha"] } ],
+	  "pages": [ { "id": "alpha", "file": "alpha.html", "title": "Alpha", "summary": "",
+	    "sections": [ { "id": "one", "title": "One", "eyebrow": "", "text": "hello",
+	      "blocks": [ { "k": "sparkline", "vars": [ { "lang": "lua" } ] },
+	                  { "k": "p", "r": [ { "t": "Still here.", "s": "" } ] } ] } ] } ]
+	})JSON";
+
+	Library lib;
+	REQUIRE(lib.loadFromJson(bundle));
+	const Section& s = lib.pages()[0].sections[0];
+	REQUIRE(s.blocks.size() == 2);
+	CHECK(s.blocks[0].kind == BlockKind::Unknown);
+	CHECK(s.blocks[0].vars.empty());
+	CHECK(s.blocks[1].runs[0].text == "Still here.");
 }
 
 TEST_CASE("docs library: topics resolve, and a stale anchor still lands on its page")

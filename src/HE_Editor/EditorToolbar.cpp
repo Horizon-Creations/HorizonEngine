@@ -2,7 +2,8 @@
 #include "EditorHelp.h"      // the table a cell's helpKey names
 #include "EditorWidgets.h"   // helpForKey — the queued, late-drawn tooltip
 
-#ifdef HE_IMGUI_ENABLED
+// See the header: gated on ImGui being present, not on the editor build.
+#ifdef HE_EDITOR_TOOLBAR_IMPL
 
 #include <algorithm>
 #include <cmath>
@@ -669,4 +670,4 @@ void iconWave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 
 } // namespace EditorToolbar
 
-#endif // HE_IMGUI_ENABLED
+#endif // HE_EDITOR_TOOLBAR_IMPL

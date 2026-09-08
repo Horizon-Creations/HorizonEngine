@@ -157,6 +157,15 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Documentation", "Online" },
 		{ "Documentation", "Show me" },
 		{ "Documentation", "Open the manual online" },
+		// The language switcher above a worked example. Invisible to the static
+		// audit for a second reason on top of the scope: its labels are not
+		// literals at all — they come out of the bundle, and the panel looks the
+		// entry up as "Documentation/" + whatever the page called the button.
+		// If the website renames one, this is where it shows.
+		{ "Documentation", "Lua" },
+		{ "Documentation", "Python" },
+		{ "Documentation", "C++" },
+		{ "Documentation", "HorizonCode" },
 		// And one from every other panel scoped this round, so a scope renamed
 		// in the panel and not in the table fails here rather than in silence.
 		{ "File",            "Save All" },

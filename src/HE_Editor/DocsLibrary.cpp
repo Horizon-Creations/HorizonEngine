@@ -56,6 +56,7 @@ namespace
 		if (k == "flow")    return BlockKind::Flow;
 		if (k == "figure")  return BlockKind::Figure;
 		if (k == "tile")    return BlockKind::Tile;
+		if (k == "langs")   return BlockKind::LangTabs;
 		return BlockKind::Unknown;
 	}
 
@@ -139,6 +140,26 @@ namespace
 			b.title = str(j, "title");
 			b.sub   = str(j, "sub");
 			b.href  = str(j, "href");
+			break;
+		case BlockKind::LangTabs:
+			for (const json& v : j.value("vars", json::array()))
+			{
+				if (!v.is_object()) continue;
+				Block::Variant var;
+				var.lang  = str(v, "lang");
+				var.label = str(v, "label");
+				var.title = str(v, "title");
+				var.text  = str(v, "text");
+				// A variant with no name to put on its button cannot be offered,
+				// and one with no listing has nothing to show: either way it is
+				// a converter bug, and dropping it here beats drawing a blank
+				// segment that swallows the reader's click.
+				if (!var.lang.empty() && !var.label.empty() && !var.text.empty())
+					b.vars.push_back(std::move(var));
+			}
+			break;
+		case BlockKind::NodePreview:
+			// Built from the engine's registries at run time, never parsed.
 			break;
 		case BlockKind::Unknown:
 			break;

@@ -6,6 +6,7 @@
 #include "EditorReference.h"     // the editor reference, generated from the tooltips
 #include "EditorGuides.h"        // the guides — recipes, generated the same way
 #include "EditorTheme.h"
+#include "EditorToolbar.h"       // well + cell — the language switcher's look
 #include "EditorWidgets.h"
 #include "PanelSpotlight.h"
 
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -91,6 +93,18 @@ namespace
 	// The ImGui frame in which the reader was last opened. See
 	// DocsPanel::openedThisFrame() — F1 has two handlers in one frame.
 	int   s_openedFrame = -1;
+
+	// ── The scripting language the examples are read in ──────────────────────
+	// ONE choice for the whole reader, not one per listing: somebody reading the
+	// manual in Python wants the next example in Python too, and the website
+	// settled the same question the same way (docs-nav.js keeps it page-wide).
+	//
+	// Empty means "nobody has chosen yet", and then every block falls back to
+	// the first language IT offers rather than to a name hard-coded here — which
+	// is also the state after a restart, since this is a file-static like s_page
+	// and s_section beside it. Remembering it across sessions would be the
+	// reader's first piece of persistence and is deliberately not this.
+	std::string s_lang;
 
 	// Where the reader has been, so Back means what it does in a browser. Pairs
 	// of (page, section); -1 for "the top of the page".
@@ -452,20 +466,23 @@ namespace
 		ImGui::Spacing();
 	}
 
-	void drawCode(const Ctx& ctx, const docs::Block& b)
+	// One listing, framed: the dim file name, the box in the code font, the copy.
+	// Split out of drawCode because the language switcher draws exactly this for
+	// whichever variant is armed — a second listing renderer beside it would be
+	// two places for "how a code block looks" to be decided.
+	void drawListing(const Ctx& ctx, const std::string& title, const std::string& text)
 	{
-		ImGui::Spacing();
-		if (!b.title.empty())
+		if (!title.empty())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-			ImGui::TextUnformatted(b.title.c_str());
+			ImGui::TextUnformatted(title.c_str());
 			ImGui::PopStyleColor();
 		}
 
 		// Sized to the listing, capped: a forty-line example must not push the
 		// paragraph after it off the bottom of the panel.
 		int lines = 1;
-		for (char c : b.text) if (c == '\n') ++lines;
+		for (char c : text) if (c == '\n') ++lines;
 		if (ctx.code) ImGui::PushFont(ctx.code, 0.0f);
 		const float h = std::min(ImGui::GetTextLineHeightWithSpacing() * (lines + 1) + 8.0f,
 		                         340.0f);
@@ -476,13 +493,93 @@ namespace
 			// No WrapText guard on purpose: code is the one thing that must NOT
 			// wrap — a broken line changes what the example says. It scrolls
 			// horizontally instead.
-			ImGui::TextUnformatted(b.text.c_str());
+			ImGui::TextUnformatted(text.c_str());
 		}
 		ImGui::EndChild();
 		ImGui::PopStyleColor();
 		if (ctx.code) ImGui::PopFont();
 
-		if (ImGui::SmallButton("Copy##code")) ImGui::SetClipboardText(b.text.c_str());
+		if (ImGui::SmallButton("Copy##code")) ImGui::SetClipboardText(text.c_str());
+	}
+
+	void drawCode(const Ctx& ctx, const docs::Block& b)
+	{
+		ImGui::Spacing();
+		// Every listing on a page is "##code" inside the same window, and two
+		// child windows with one id is the collision ImGui does not forgive.
+		// The block's address is the id that is already unique per listing and
+		// needs nothing carried down from the loop that submits it.
+		ImGui::PushID(static_cast<const void*>(&b));
+		drawListing(ctx, b.title, b.text);
+		ImGui::PopID();
+		ImGui::Spacing();
+	}
+
+	// ── The same task, in each language ──────────────────────────────────────
+	// A row of segments in a well, then the one listing that is armed. The look
+	// is the editor's segmented choice (EditorToolbar's well + cells, as in the
+	// UI designer's Designer|Graph pair) rather than an ImGui tab bar: a tab bar
+	// owns its selection, and five of them on one page would each have to be
+	// argued back to the shared s_lang every frame — the fight EditorUI.cpp
+	// warns about where it does exactly that.
+	void drawLangTabs(const Ctx& ctx, const docs::Block& b)
+	{
+		if (b.vars.empty()) return;
+
+		// Which one is showing. A block that does not offer the chosen language
+		// falls back to its own first variant WITHOUT rewriting s_lang: the
+		// choice belongs to the reader, and a C++-less example must not silently
+		// move everybody else to Lua.
+		std::size_t active = 0;
+		for (std::size_t i = 0; i < b.vars.size(); ++i)
+			if (b.vars[i].lang == s_lang) { active = i; break; }
+
+		ImGui::Spacing();
+		ImGui::PushID(static_cast<const void*>(&b));
+
+		const ImVec2 origin = ImGui::GetCursorScreenPos();
+		const EditorToolbar::Metrics m = EditorToolbar::metrics(origin.y);
+
+		// Text-only cells, so the width is the label plus its padding —
+		// EditorToolbar::cellWidth() budgets for an icon these do not have.
+		std::vector<float> w(b.vars.size());
+		float wellW = EditorToolbar::kWellPad * 2.0f;
+		for (std::size_t i = 0; i < b.vars.size(); ++i)
+		{
+			w[i] = std::floor(ImGui::CalcTextSize(b.vars[i].label.c_str()).x
+			                  + EditorToolbar::kCellPadX * 2.0f);
+			wellW += w[i] + (i ? EditorToolbar::kSegGap : 0.0f);
+		}
+
+		EditorToolbar::well(m, origin.x, wellW);
+		float x = origin.x + EditorToolbar::kWellPad;
+		for (std::size_t i = 0; i < b.vars.size(); ++i)
+		{
+			const docs::Block::Variant& v = b.vars[i];
+			// The help entry is looked up under the reader's own scope by the
+			// label the PAGE gave the button. Where the table knows it the cell
+			// gets the full tooltip and F1 into that language's chapter; where it
+			// does not — a language the manual grows later — cell() falls back to
+			// the plain line below, which is why both are passed.
+			const std::string helpKey = "Documentation/" + v.label;
+			char id[16];
+			std::snprintf(id, sizeof(id), "##lang%zu", i);
+			if (EditorToolbar::cell(m, x, w[i], id, nullptr, v.label.c_str(),
+			                        i == active, true,
+			                        "Show this example in this language.",
+			                        helpKey.c_str()))
+				s_lang = v.lang;
+			x += w[i] + EditorToolbar::kSegGap;
+		}
+
+		// The cells placed themselves in screen space; hand the layout cursor
+		// back and reserve the strip, or whatever follows would be drawn on top
+		// of the well.
+		ImGui::SetCursorScreenPos(origin);
+		ImGui::Dummy(ImVec2(wellW, m.bar));
+
+		drawListing(ctx, b.vars[active].title, b.vars[active].text);
+		ImGui::PopID();
 		ImGui::Spacing();
 	}
 
@@ -813,6 +910,7 @@ namespace
 			break;
 		case docs::BlockKind::Table:   drawTable(ctx, b);   break;
 		case docs::BlockKind::Code:    drawCode(ctx, b);    break;
+		case docs::BlockKind::LangTabs: drawLangTabs(ctx, b); break;
 		case docs::BlockKind::Callout: drawCallout(ctx, b); break;
 		case docs::BlockKind::Flow:    drawFlow(ctx, b);    break;
 		case docs::BlockKind::Figure:  drawFigure(ctx, b);  break;

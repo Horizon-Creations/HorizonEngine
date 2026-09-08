@@ -1525,6 +1525,28 @@ namespace
 	  "Opens the panel this entry is about and outlines it, so \"where is that\" "
 	  "is answered by pointing rather than by describing.",
 	  "", "editor#layout" },
+	// The language switcher above a worked example. Four entries rather than
+	// one because each cell is its own control and F1 on it should land in that
+	// language's chapter — and the keys are the labels the PAGE puts on the
+	// buttons, which is what the panel looks them up by (DocsPanel::drawLangTabs
+	// builds "Documentation/" + the variant's label). A language the manual
+	// grows later shows the plain one-liner until it is given an entry here.
+	{ "Documentation/Lua", "",
+	  "Shows this example as a Lua script. The choice holds for the whole "
+	  "manual, so the next example is in Lua too.",
+	  "", "scripting#lua" },
+	{ "Documentation/Python", "",
+	  "Shows this example as a Python script. The choice holds for the whole "
+	  "manual, so the next example is in Python too.",
+	  "", "scripting#python" },
+	{ "Documentation/C++", "",
+	  "Shows this example as native game code. The choice holds for the whole "
+	  "manual, so the next example is in C++ too.",
+	  "", "scripting#cpp" },
+	{ "Documentation/HorizonCode", "",
+	  "Shows this example as a node graph, written out as a diagram. The choice "
+	  "holds for the whole manual, so the next example is a graph too.",
+	  "", "horizoncode#intro" },
 	{ "Tutorial/Start over", "",
 	  "Begins the guided tour again from its first step. What you built while "
 	  "following it stays where it is.",

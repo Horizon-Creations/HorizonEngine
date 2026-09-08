@@ -20,7 +20,15 @@
 
 struct AppContext;
 
-#ifdef HE_IMGUI_ENABLED
+// Gated on the HEADER rather than on HE_IMGUI_ENABLED, like EditorTheme and
+// DocsPanel: nothing below is anything but ImGui, so it compiles wherever ImGui
+// does. That is what lets the documentation reader borrow the well-and-cell look
+// for its language switcher in the test target, which renders the reader
+// headless and does NOT define HE_IMGUI_ENABLED — the alternative was copying
+// nine colour constants into DocsPanel.cpp, which is the exact drift this file
+// exists to prevent.
+#if defined(HE_IMGUI_ENABLED) || __has_include(<imgui.h>)
+#define HE_EDITOR_TOOLBAR_IMPL 1
 
 #include <imgui.h>
 
@@ -277,4 +285,4 @@ void iconWave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 
 } // namespace EditorToolbar
 
-#endif // HE_IMGUI_ENABLED
+#endif // HE_EDITOR_TOOLBAR_IMPL

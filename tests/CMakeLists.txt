@@ -194,6 +194,11 @@ add_executable(he_tests
     # panel rather than a stand-in. It is ImGui plus the library above; the two
     # files after it are what it leans on (window placement, the panel outline).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
+    # The toolbar look — wells and segmented cells. The reader's language
+    # switcher is one, and borrowing the primitives is what keeps it from being
+    # a second copy of the palette. ImGui-only by construction, so it compiles
+    # here without HE_IMGUI_ENABLED (see the guard at the top of its header).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorToolbar.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcEditorUtil.cpp
     # Renaming a HorizonCode member across assets. Deliberately free of ImGui and

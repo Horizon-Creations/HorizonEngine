@@ -55,6 +55,25 @@ enum class BlockKind : std::uint8_t
 	Flow,       // steps — the website's arrow diagrams, as an ordered list
 	Figure,     // src (a file in Docs/img) + alt
 	Tile,       // title + sub + href — a "read on" link card
+	// The same task written in each scripting language, as ONE block with a
+	// switch on top rather than four listings stacked on each other. The website
+	// draws it as a row of pills (.docs-langs); the reader draws it as a
+	// segmented well and shows the variant that is armed.
+	//
+	// Its shape in the bundle — the contract build_docs_bundle.py writes and
+	// parseBlock reads:
+	//
+	//   { "k": "langs",
+	//     "vars": [ { "lang":  "lua",        // the id the choice is remembered by
+	//                 "label": "Lua",        // the button's text, FROM THE PAGE
+	//                 "title": "finder.lua", // the listing's file name, optional
+	//                 "text":  "…" },        // the listing itself
+	//               … ] }
+	//
+	// `label` comes out of the page for the same reason nothing else here is
+	// hard-coded: a table {"cpp": "C++"} in the panel is a second place for the
+	// language's name to live, and the two would drift.
+	LangTabs,   // vars
 	// A picture of the node itself: its header in its own colour, its pins where
 	// they sit on it, in the glyphs and colours the canvas draws them with.
 	// Never comes from the website bundle — the node reference is built from the
@@ -100,6 +119,12 @@ struct Block
 	std::vector<Step>   steps;   // Flow
 	std::vector<Block>  blocks;  // Callout body
 	std::vector<PinRow> pins;    // Pins
+
+	// One language's answer to the task a LangTabs block poses. `title` and
+	// `text` are exactly what a Code block carries, so the reader draws the
+	// armed variant through the very same code path.
+	struct Variant { std::string lang, label, title, text; };
+	std::vector<Variant> vars;   // LangTabs
 };
 
 struct Section
