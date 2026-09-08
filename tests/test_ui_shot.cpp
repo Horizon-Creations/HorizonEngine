@@ -619,6 +619,59 @@ TEST_CASE("ui shot: the example switcher arms one language and swaps the listing
 	DocsPanel::close();
 }
 
+TEST_CASE("ui shot: the practical examples, in the manual that ships")
+{
+	// The one above proves the widget; this one proves the CONTENT. Five tasks,
+	// four languages each, converted out of the website — and the shot is the
+	// only place the question no assertion answers can be settled: does the
+	// well sit in the prose like a part of it, without the band and the hairline
+	// that EditorToolbar draws around a real toolbar.
+	//
+	// It does NOT answer the other one, whether the listings have the glyphs
+	// they need: hostOf hands the reader the body font, because the harness has
+	// no mono face. That belongs to the bundle and is asked there — see "no
+	// listing needs a glyph the CODE font cannot draw" in test_docs_library.
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	REQUIRE(lib.loaded());
+
+	DocsPanel::openTopic("scripting#examples");
+	REQUIRE(DocsPanel::isOpen());
+
+	const he_ui::Image img = shoot("docs-examples", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(img.valid());
+
+	// A well in the body column: the section opens on the first task, so the
+	// switcher for it is on screen without scrolling.
+	const AmberSpan armed = armedSegment(img, 300, W - 20, 90, H - 40);
+	INFO("armed-segment pixels: " << armed.count << " x " << armed.minX << ".."
+	     << armed.maxX);
+	CHECK(armed.count > 200);
+
+	// And the listing under it. A langs block that lost its variants would still
+	// draw the well — the body column has to carry the code as well.
+	int bodyInk = 0;
+	for (int y = 90; y < H - 40; ++y)
+		for (int x = 300; x < W - 20; ++x)
+		{
+			std::uint8_t r, g, b, a;
+			img.pixel(x, y, r, g, b, a);
+			const int lum = (int(r) * 30 + int(g) * 59 + int(b) * 11) / 100;
+			if (lum > 90) ++bodyInk;
+		}
+	INFO("bright pixels in the body column: " << bodyInk);
+	CHECK(bodyInk > 3000);
+
+	DocsPanel::close();
+}
+
 TEST_CASE("ui shot: a node explains itself on hover")
 {
 	// What a graph author sees when the cursor rests on a node: the call's name,

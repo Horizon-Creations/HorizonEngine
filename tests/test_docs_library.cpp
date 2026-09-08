@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -294,6 +295,52 @@ TEST_CASE("docs bundle: nothing in it needs a glyph the editor cannot draw")
 	}
 }
 
+TEST_CASE("docs bundle: no listing needs a glyph the CODE font cannot draw")
+{
+	// The case above is about the prose face. Listings are drawn in a second
+	// one — ImGui's built-in ProggyClean (EditorApplication: m_fontMono), picked
+	// because it is monospace and needs no extra TTF — and its repertoire ends
+	// at Latin-1. So the typography the case above deliberately allows through,
+	// em dash and ellipsis, is exactly what comes out as a box inside a code
+	// block; scripts/build_docs_bundle.py has a second substitution table for
+	// that.
+	//
+	// This is also where the HorizonCode examples are settled. Their graphs are
+	// drawn with box-drawing characters on the website, and no face in the
+	// editor has those. A UI screenshot cannot answer it — the shot harness has
+	// no mono face and hands the reader the body font — so the bundle is asked
+	// directly.
+	Library lib = loadShipped();
+	REQUIRE(lib.loaded());
+
+	auto scan = [](const std::string& s, const std::string& where) {
+		for (std::size_t i = 0; i < s.size(); ++i)
+			if (static_cast<unsigned char>(s[i]) >= 0x80)
+			{
+				// Latin-1 is two bytes in UTF-8 and never more; anything longer,
+				// or a lead byte above C3, is already past what the font has.
+				const unsigned char c = static_cast<unsigned char>(s[i]);
+				const bool latin1 = (c == 0xC2 || c == 0xC3);
+				CHECK_MESSAGE(latin1, "a listing needs a glyph past Latin-1: ", where);
+				if (!latin1) return;
+				++i;
+			}
+	};
+
+	std::function<void(const Block&, const std::string&)> visit =
+		[&](const Block& b, const std::string& where) {
+			if (b.kind == BlockKind::Code) scan(b.text, where + " " + b.title);
+			if (b.kind == BlockKind::LangTabs)
+				for (const Block::Variant& v : b.vars)
+					scan(v.text, where + " " + v.title);
+			for (const Block& inner : b.blocks) visit(inner, where);
+		};
+
+	for (const Page& p : lib.pages())
+		for (const Section& s : p.sections)
+			for (const Block& b : s.blocks) visit(b, p.id + "#" + s.id);
+}
+
 TEST_CASE("docs library: blocks survive the round trip")
 {
 	Library lib;
@@ -488,6 +535,60 @@ TEST_CASE("docs search: the shipped manual answers the questions it exists for")
 		CHECK_MESSAGE(onExpected, "query '", q.query, "' has no top-5 hit on page '",
 		              q.expectPage, "' (best: ", firstTitle(lib, hits), ")");
 	}
+}
+
+TEST_CASE("docs library: the practical examples arrive as one block per task")
+{
+	// The examples are not written in the engine — they are converted, and this
+	// asserts the conversion, not the prose. Before build_docs_bundle.py knew
+	// `.docs-langs`, the wrapper fell through to "unknown wrapper: keep the
+	// contents" and each task landed as four loose paragraphs holding the button
+	// captions plus four listings stacked on each other. That degrades quietly:
+	// nothing is missing, it is merely unreadable, and no test would have said
+	// so. So the shape is what is checked here.
+	Library lib = loadShipped();
+	REQUIRE(lib.loaded());
+
+	int page = -1, section = -1;
+	REQUIRE(lib.resolve("scripting#examples", page, section));
+	REQUIRE(section >= 0);
+	const Section& sec = lib.pages()[page].sections[section];
+
+	int tasks = 0;
+	for (const Block& b : sec.blocks)
+	{
+		if (b.kind != BlockKind::LangTabs) continue;
+		++tasks;
+		// Every task in every language: a switch that offers three of four is a
+		// converter that dropped one, and the reader would just not draw the
+		// segment.
+		CHECK(b.vars.size() == 4);
+		for (const Block::Variant& v : b.vars)
+		{
+			CHECK_FALSE(v.lang.empty());
+			CHECK_FALSE(v.label.empty());   // the caption comes from the page
+			CHECK_FALSE(v.text.empty());
+		}
+	}
+	CHECK(tasks == 5);
+
+	// And no leftovers: the captions used to arrive as paragraphs of their own.
+	for (const Block& b : sec.blocks)
+	{
+		if (b.kind != BlockKind::Paragraph || b.runs.size() != 1) continue;
+		const std::string& t = b.runs[0].text;
+		const bool isCaption = (t == "Lua" || t == "Python" ||
+		                        t == "C++" || t == "HorizonCode");
+		CHECK_MESSAGE(!isCaption, "a language button survived as a paragraph: ", t);
+	}
+
+	// Search has to reach every language, not the one that happens to be armed:
+	// the reader searches the bundle, and `isGrounded` is only in the Lua,
+	// Python and C++ listings of the jump example.
+	bool found = false;
+	for (const Hit& h : lib.search("isGrounded"))
+		if (h.page == page && h.section == section) found = true;
+	CHECK(found);
 }
 
 TEST_CASE("docs library: a broken bundle fails loudly and leaves nothing behind")

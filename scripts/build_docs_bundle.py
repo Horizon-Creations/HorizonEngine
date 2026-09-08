@@ -198,11 +198,39 @@ FONT_SUBSTITUTIONS = {
     "⇧": "Shift",  # ⇧
     "⌃": "Ctrl",   # ⌃
     "⌥": "Alt",    # ⌥
+    # The HorizonCode panels of the practical examples draw their graph as a
+    # tree with box-drawing characters. Neither face has them — and the code
+    # font is ImGui's built-in ProggyClean, which is narrower still (Basic Latin
+    # and Latin-1, nothing else), so the listings are where a missing glyph
+    # shows up first. `▸` deliberately keeps its `»` above: it is the menu-path
+    # separator everywhere else in the docs, and the graphs read fine with it.
+    "└": "\\",     # └  the branch that hangs off an exec chain
+    "◂": "<",      # ◂  "this pin is fed by"
+}
+
+# Listings are drawn in a SECOND face — ImGui's built-in ProggyClean, chosen
+# because it is monospace and needs no extra TTF (EditorApplication: m_fontMono)
+# — and its repertoire ends at Latin-1. So the typography the table above leaves
+# alone because Roboto Condensed carries it is exactly what comes out as a box
+# inside a code block. Only what actually occurs there is listed; the intent is
+# a listing without holes, not a second full transliteration.
+CODE_FONT_SUBSTITUTIONS = {
+    "—": "-",      # —  em dash, common in the comments of the examples
+    "–": "-",      # –
+    "…": "...",    # …
 }
 
 
 def substitute(text: str) -> str:
     for src, dst in FONT_SUBSTITUTIONS.items():
+        if src in text:
+            text = text.replace(src, dst)
+    return text
+
+
+def substitute_code(text: str) -> str:
+    text = substitute(text)
+    for src, dst in CODE_FONT_SUBSTITUTIONS.items():
         if src in text:
             text = text.replace(src, dst)
     return text
@@ -343,6 +371,10 @@ def block_of(k: Node, images: set[str]) -> list[dict]:
             if title:
                 b["title"] = title
             return b["text"].strip() and [b] or []
+        if k.has_class("docs-langs"):
+            return [langs_block(k, images)]
+        if k.has_class("docs-langs-bar"):
+            return []                      # consumed by langs_block
         if k.has_class("pipeline-diagram"):
             return [flow_block(k)]
         if k.has_class("pipeline-node") or k.has_class("pipeline-target"):
@@ -410,6 +442,57 @@ def flow_block(node: Node) -> dict:
             steps.append({"label": plain(name) if name is not None else "",
                           "sub": plain(api) if api is not None else ""})
     return {"k": "flow", "steps": [s for s in steps if s["label"]]}
+
+
+def langs_block(node: Node, images: set[str]) -> dict:
+    """The same task in every scripting language, as ONE block.
+
+    Without this the wrapper falls through to "unknown wrapper: keep the
+    contents" and the reader gets what the manual showed until now: four loose
+    paragraphs holding the button captions, then four listings stacked on each
+    other — five times over on the examples page alone.
+
+    The listings are NOT re-read here. A `.docs-lang-panel` also carries
+    `docs-code`, so `block_of` already knows how to turn it into a title and a
+    dedented text; asking it is the only way the two stay the same code block.
+    """
+    bar = find_first(node, "div", "docs-langs-bar")
+    labels: list[tuple[str, str]] = []          # (lang, button caption), in order
+    if bar is not None:
+        for btn in iter_tag(bar, "button"):
+            lang = btn.attrs.get("data-lang", "")
+            if lang:
+                labels.append((lang, plain(btn)))
+
+    panels: dict[str, dict] = {}
+    for panel in iter_tag(node, "div"):
+        if not panel.has_class("docs-lang-panel"):
+            continue
+        lang = panel.attrs.get("data-lang", "")
+        blocks = block_of(panel, images)
+        if lang and blocks:
+            panels[lang] = blocks[0]
+
+    # A button with no panel behind it draws a segment that shows nothing, a
+    # panel with no button can never be reached — both are a broken page, and
+    # neither survives to where anyone would notice: the reader drops a variant
+    # it cannot name without a word. So the converter is where it has to stop.
+    missing = [l for l, _ in labels if l not in panels]
+    orphans = [l for l in panels if l not in dict(labels)]
+    if missing or orphans or not labels:
+        raise SystemExit(
+            f"error: .docs-langs is inconsistent — buttons without a panel: "
+            f"{missing or '-'}, panels without a button: {orphans or '-'}, "
+            f"buttons found: {len(labels)}")
+
+    vars_ = []
+    for lang, label in labels:
+        b = panels[lang]
+        v = {"lang": lang, "label": label, "text": b["text"]}
+        if b.get("title"):
+            v["title"] = b["title"]
+        vars_.append(v)
+    return {"k": "langs", "vars": vars_}
 
 
 # ── Figures ──────────────────────────────────────────────────────────────────
@@ -492,7 +575,7 @@ def copy_figures(docs_dir: Path, img_dir: Path, images: set[str]) -> int:
 
 def dedent_code(text: str) -> str:
     """Strip the HTML indentation a <pre> inherits from its place in the page."""
-    lines = substitute(text.replace("\r\n", "\n")).split("\n")
+    lines = substitute_code(text.replace("\r\n", "\n")).split("\n")
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
@@ -518,6 +601,12 @@ def block_text(b: dict) -> str:
         return " ".join(parts)
     if k == "code":
         return (b.get("title", "") + " " + b["text"]).strip()
+    if k == "langs":
+        # Every variant, not just the one that happens to be armed: the reader
+        # searches the bundle, not the screen, and a query for `isGrounded`
+        # should find the examples page whichever language is showing.
+        return " ".join((v.get("title", "") + " " + v["text"]).strip()
+                        for v in b["vars"])
     if k == "callout":
         return " ".join(block_text(x) for x in b["blocks"])
     if k == "flow":

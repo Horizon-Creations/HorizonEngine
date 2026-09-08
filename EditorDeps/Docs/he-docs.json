@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-08-26",
+ "generated": "2026-09-08",
  "groups": [
   {
    "pages": [
@@ -1742,7 +1742,7 @@
       },
       {
        "k": "code",
-       "text": "# client -> host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host -> client — checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host -> client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk…     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host -> everyone else\nParticipantJoined\n# …and on disconnect\nParticipantLeft",
+       "text": "# client -> host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host -> client - checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host -> client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk...     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host -> everyone else\nParticipantJoined\n# ...and on disconnect\nParticipantLeft",
        "title": "join flow"
       },
       {
@@ -1821,7 +1821,7 @@
      ],
      "eyebrow": "Protocol",
      "id": "handshake",
-     "text": "Once the encrypted link is up, the collaboration protocol takes over. join flow # client -> host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host -> client — checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host -> client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk…     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host -> everyone else\nParticipantJoined\n# …and on disconnect\nParticipantLeft The order of the checks is deliberate. The version check runs first, so a peer on an older build is told it has the wrong build rather than the wrong project — an older build does not send a project key at all, and reading a missing field would produce exactly that wrong answer. The snapshot is captured before the peer is admitted. If the host cannot produce one, the join is refused instead of completing with a peer that sits on an empty scene believing it is in sync. It is sent in chunks rather than as one blob so the joiner gets a progress bar and never has to accept an arbitrary allocation announced by the other side. Joining replaces the joiner's open scene — it does not merge into it. That is why the project check matters so much: before it existed, joining with the wrong project cost you your own scene and handed you one whose every asset reference dangled.",
+     "text": "Once the encrypted link is up, the collaboration protocol takes over. join flow # client -> host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host -> client - checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host -> client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk...     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host -> everyone else\nParticipantJoined\n# ...and on disconnect\nParticipantLeft The order of the checks is deliberate. The version check runs first, so a peer on an older build is told it has the wrong build rather than the wrong project — an older build does not send a project key at all, and reading a missing field would produce exactly that wrong answer. The snapshot is captured before the peer is admitted. If the host cannot produce one, the join is refused instead of completing with a peer that sits on an empty scene believing it is in sync. It is sent in chunks rather than as one blob so the joiner gets a progress bar and never has to accept an arbitrary allocation announced by the other side. Joining replaces the joiner's open scene — it does not merge into it. That is why the project check matters so much: before it existed, joining with the wrong project cost you your own scene and handed you one whose every asset reference dangled.",
      "title": "The Join Handshake"
     },
     {
@@ -7143,7 +7143,16 @@
           },
           {
            "s": "",
-           "t": " Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved."
+           "t": " Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved. Native C++ game logic reloads the same way, one menu item later: "
+          },
+          {
+           "h": "#game-logic",
+           "s": "l",
+           "t": "Build » Build and Reload Game Logic"
+          },
+          {
+           "s": "",
+           "t": "."
           }
          ]
         }
@@ -7154,8 +7163,190 @@
      ],
      "eyebrow": "Test it",
      "id": "play-mode",
-     "text": "The Play button in the Scene toolbar starts a play-in-editor session; Escape (or the Stop button) ends it. Entering play initialises physics, fires Play on Start audio, starts scripts and spawns HorizonCode player classes. While playing, physics steps at a fixed timestep, scripts receive onUpdate, collision events dispatch, widgets tick, and input actions fire. The scene renders through the camera marked Main Camera (or the first camera found). On stop, the world is restored to its pre-play state and a Play Session Report window summarises the session. Animation, navigation and particle systems also run outside play mode so you can preview them while editing. Tip: Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved.",
+     "text": "The Play button in the Scene toolbar starts a play-in-editor session; Escape (or the Stop button) ends it. Entering play initialises physics, fires Play on Start audio, starts scripts and spawns HorizonCode player classes. While playing, physics steps at a fixed timestep, scripts receive onUpdate, collision events dispatch, widgets tick, and input actions fire. The scene renders through the camera marked Main Camera (or the first camera found). On stop, the world is restored to its pre-play state and a Play Session Report window summarises the session. Animation, navigation and particle systems also run outside play mode so you can preview them while editing. Tip: Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved. Native C++ game logic reloads the same way, one menu item later: Build » Build and Reload Game Logic.",
      "title": "Play Mode"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "c",
+         "t": "Build » Build and Reload Game Logic"
+        },
+        {
+         "s": "",
+         "t": " compiles a C++ project's "
+        },
+        {
+         "s": "c",
+         "t": "Source/"
+        },
+        {
+         "s": "",
+         "t": " folder into its native "
+        },
+        {
+         "s": "b",
+         "t": "GameLogic"
+        },
+        {
+         "s": "",
+         "t": " library and swaps the result into a running play session — the session keeps going, with the new code in it."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The compile runs in the same "
+        },
+        {
+         "s": "b",
+         "t": "Build"
+        },
+        {
+         "s": "",
+         "t": " window the export uses, in two steps: "
+        },
+        {
+         "s": "i",
+         "t": "Compile"
+        },
+        {
+         "s": "",
+         "t": ", then "
+        },
+        {
+         "s": "i",
+         "t": "Reload"
+        },
+        {
+         "s": "",
+         "t": ". The second one either happened or it did not, because "
+        },
+        {
+         "s": "i",
+         "t": "compiled"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "i",
+         "t": "running"
+        },
+        {
+         "s": "",
+         "t": " are different answers and the window has to be able to say which one it got to. Compiler warnings and errors are listed as they arrive; "
+        },
+        {
+         "s": "i",
+         "t": "Build Again"
+        },
+        {
+         "s": "",
+         "t": " repeats the module build, not a project export."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Outside Play mode"
+         },
+         {
+          "s": "",
+          "t": " it only builds. That is not a failure — the module that was just built is exactly what the next Play loads."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Entering Play"
+         },
+         {
+          "s": "",
+          "t": " loads the built module, hands it the engine service tables and calls "
+         },
+         {
+          "s": "c",
+          "t": "onStart"
+         },
+         {
+          "s": "",
+          "t": "; leaving Play calls "
+         },
+         {
+          "s": "c",
+          "t": "onStop"
+         },
+         {
+          "s": "",
+          "t": " and unloads it. With no module built yet, the log says which menu item builds one."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Other project languages"
+         },
+         {
+          "s": "",
+          "t": " get a note instead of a build: Lua, Python and HorizonCode script their gameplay in a language that needs no compiler."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Toolchain"
+         },
+         {
+          "s": "",
+          "t": " — needs CMake and a C++ compiler, and engine headers to compile against. "
+         },
+         {
+          "h": "#preferences",
+          "s": "l",
+          "t": "Preferences » Tools » Status"
+         },
+         {
+          "s": "",
+          "t": " shows what was found and can install what is missing."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What the module can reach once it is loaded — physics, input, content and savegames, through the injected service tables — is described under "
+        },
+        {
+         "h": "scripting.html#cpp",
+         "s": "l",
+         "t": "Scripting » Native C++"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "C++ projects",
+     "id": "game-logic",
+     "text": "Build » Build and Reload Game Logic compiles a C++ project's Source/ folder into its native GameLogic library and swaps the result into a running play session — the session keeps going, with the new code in it. The compile runs in the same Build window the export uses, in two steps: Compile, then Reload. The second one either happened or it did not, because compiled and running are different answers and the window has to be able to say which one it got to. Compiler warnings and errors are listed as they arrive; Build Again repeats the module build, not a project export. Outside Play mode it only builds. That is not a failure — the module that was just built is exactly what the next Play loads. Entering Play loads the built module, hands it the engine service tables and calls onStart; leaving Play calls onStop and unloads it. With no module built yet, the log says which menu item builds one. Other project languages get a note instead of a build: Lua, Python and HorizonCode script their gameplay in a language that needs no compiler. Toolchain — needs CMake and a C++ compiler, and engine headers to compile against. Preferences » Tools » Status shows what was found and can install what is missing. What the module can reach once it is loaded — physics, input, content and savegames, through the injected service tables — is described under Scripting » Native C++.",
+     "title": "Building Game Logic"
     },
     {
      "blocks": [
@@ -7488,6 +7679,23 @@
            "h": "export.html",
            "s": "l",
            "t": "Export ->"
+          },
+          {
+           "s": "",
+           "t": " · Build and Reload Game Logic — compiles a C++ project's "
+          },
+          {
+           "s": "c",
+           "t": "Source/"
+          },
+          {
+           "s": "",
+           "t": " and swaps it into the running play session. "
+          },
+          {
+           "h": "#game-logic",
+           "s": "l",
+           "t": "Game Logic ->"
           }
          ]
         ],
@@ -7567,7 +7775,7 @@
      ],
      "eyebrow": "Reference",
      "id": "menus",
-     "text": "Menu Items File New / Open / Close Project · New Scene, Open Scene…, Add Scene Additive…, Save Scene, Save Scene As… · Exit Edit Undo, Redo · Cut / Copy / Paste · Preferences View Toggle Fullscreen, Reset Layout · Performance Profiler, Environment · Level Script, Game Instance Assets Import Asset…, Refresh Assets Build Export Project… — profiles, target platform, compression, encryption, mod support, incremental packing, Compile HorizonCode. Export -> Help Documentation, About On macOS the same commands live in the native menu bar (CmdN, CmdO, CmdS, ShiftCmdS, Cmd,, CtrlCmdF …), plus the standard app and window menus.",
+     "text": "Menu Items File New / Open / Close Project · New Scene, Open Scene…, Add Scene Additive…, Save Scene, Save Scene As… · Exit Edit Undo, Redo · Cut / Copy / Paste · Preferences View Toggle Fullscreen, Reset Layout · Performance Profiler, Environment · Level Script, Game Instance Assets Import Asset…, Refresh Assets Build Export Project… — profiles, target platform, compression, encryption, mod support, incremental packing, Compile HorizonCode. Export -> · Build and Reload Game Logic — compiles a C++ project's Source/ and swaps it into the running play session. Game Logic -> Help Documentation, About On macOS the same commands live in the native menu bar (CmdN, CmdO, CmdS, ShiftCmdS, Cmd,, CtrlCmdF …), plus the standard app and window menus.",
      "title": "Menu Reference"
     },
     {
@@ -13351,7 +13559,7 @@
       },
       {
        "k": "code",
-       "text": "{\n  \"version\": \"1.1\",\n  \"entities\": [\n    {\n      \"id\": 1,\n      \"name\": \"Cube\",\n      \"parent\": 0,\n      \"children\": [],\n      \"components\": {\n        \"transform\": {\n          \"position\": [0, 1, 0],\n          \"rotation\": [0, 0, 0],\n          \"scale\":    [1, 1, 1]\n        },\n        \"mesh\":     { \"asset\": \"9f2c…\", \"castsShadow\": true },\n        \"material\": { \"asset\": \"b41a…\" }\n      }\n    }\n  ]\n}",
+       "text": "{\n  \"version\": \"1.1\",\n  \"entities\": [\n    {\n      \"id\": 1,\n      \"name\": \"Cube\",\n      \"parent\": 0,\n      \"children\": [],\n      \"components\": {\n        \"transform\": {\n          \"position\": [0, 1, 0],\n          \"rotation\": [0, 0, 0],\n          \"scale\":    [1, 1, 1]\n        },\n        \"mesh\":     { \"asset\": \"9f2c...\", \"castsShadow\": true },\n        \"material\": { \"asset\": \"b41a...\" }\n      }\n    }\n  ]\n}",
        "title": "scene.hescene"
       },
       {
@@ -13383,7 +13591,7 @@
      ],
      "eyebrow": "On disk",
      "id": "scene-files",
-     "text": "In the editor, scenes are versioned, human-readable JSON saved as .hescene. Every entity records its hierarchy and a component map; asset references (meshes, materials, scripts …) are stored as UUIDs so they survive file moves: scene.hescene {\n  \"version\": \"1.1\",\n  \"entities\": [\n    {\n      \"id\": 1,\n      \"name\": \"Cube\",\n      \"parent\": 0,\n      \"children\": [],\n      \"components\": {\n        \"transform\": {\n          \"position\": [0, 1, 0],\n          \"rotation\": [0, 0, 0],\n          \"scale\":    [1, 1, 1]\n        },\n        \"mesh\":     { \"asset\": \"9f2c…\", \"castsShadow\": true },\n        \"material\": { \"asset\": \"b41a…\" }\n      }\n    }\n  ]\n} Exported games ship scenes in a compact binary (CBOR) form packed into the .hpak archive. The Level Script graph is stored inside the scene file, so scene and logic travel together.",
+     "text": "In the editor, scenes are versioned, human-readable JSON saved as .hescene. Every entity records its hierarchy and a component map; asset references (meshes, materials, scripts …) are stored as UUIDs so they survive file moves: scene.hescene {\n  \"version\": \"1.1\",\n  \"entities\": [\n    {\n      \"id\": 1,\n      \"name\": \"Cube\",\n      \"parent\": 0,\n      \"children\": [],\n      \"components\": {\n        \"transform\": {\n          \"position\": [0, 1, 0],\n          \"rotation\": [0, 0, 0],\n          \"scale\":    [1, 1, 1]\n        },\n        \"mesh\":     { \"asset\": \"9f2c...\", \"castsShadow\": true },\n        \"material\": { \"asset\": \"b41a...\" }\n      }\n    }\n  ]\n} Exported games ship scenes in a compact binary (CBOR) form packed into the .hpak archive. The Level Script graph is stored inside the scene file, so scene and logic travel together.",
      "title": "Scene Files"
     },
     {
@@ -15317,11 +15525,29 @@
        "k": "code",
        "text": "local M = {}\n\nM.properties = { speed = 90.0 }  -- shows up in the Details panel\n\nfunction M.onStart(self)\n    self.angle = 0\nend\n\nfunction M.onUpdate(self, dt)\n    self.angle = self.angle + self.speed * dt\n    horizon.setRotation(self.entityId, 0, self.angle, 0)\nend\n\nreturn M",
        "title": "spinner.lua"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The same task written out in this shape and in the other three languages side by side is further down under "
+        },
+        {
+         "h": "#examples",
+         "s": "l",
+         "t": "Practical Examples"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
       }
      ],
      "eyebrow": "Default backend",
      "id": "lua",
-     "text": "A Lua script is a module that returns a table. Fields become per-instance state; functions become the callbacks: spinner.lua local M = {}\n\nM.properties = { speed = 90.0 }  -- shows up in the Details panel\n\nfunction M.onStart(self)\n    self.angle = 0\nend\n\nfunction M.onUpdate(self, dt)\n    self.angle = self.angle + self.speed * dt\n    horizon.setRotation(self.entityId, 0, self.angle, 0)\nend\n\nreturn M",
+     "text": "A Lua script is a module that returns a table. Fields become per-instance state; functions become the callbacks: spinner.lua local M = {}\n\nM.properties = { speed = 90.0 }  -- shows up in the Details panel\n\nfunction M.onStart(self)\n    self.angle = 0\nend\n\nfunction M.onUpdate(self, dt)\n    self.angle = self.angle + self.speed * dt\n    horizon.setRotation(self.entityId, 0, self.angle, 0)\nend\n\nreturn M The same task written out in this shape and in the other three languages side by side is further down under Practical Examples.",
      "title": "Lua"
     },
     {
@@ -15377,14 +15603,23 @@
         },
         {
          "s": "",
-         "t": " on miss)."
+         "t": " on miss). Every example under "
+        },
+        {
+         "h": "#examples",
+         "s": "l",
+         "t": "Practical Examples"
+        },
+        {
+         "s": "",
+         "t": " is written out in Python as well."
         }
        ]
       }
      ],
      "eyebrow": "CPython",
      "id": "python",
-     "text": "Python scripts run on an embedded real CPython interpreter — the full standard library is available, and exports bundle it with your game. A script file contains exactly one horizon.Behavior subclass; typed class attributes become editor-exposed properties: spinner.py import horizon\n\nclass Spinner(horizon.Behavior):\n    speed = 90.0  # exposed in the Details panel\n\n    def on_start(self):\n        self.angle = 0.0\n\n    def on_update(self, dt):\n        self.angle += self.speed * dt\n        horizon.setRotation(self.entity_id, 0, self.angle, 0) The API mirrors Lua exactly — the same function names, with vectors returned as tuples and raycast returning a dict (or None on miss).",
+     "text": "Python scripts run on an embedded real CPython interpreter — the full standard library is available, and exports bundle it with your game. A script file contains exactly one horizon.Behavior subclass; typed class attributes become editor-exposed properties: spinner.py import horizon\n\nclass Spinner(horizon.Behavior):\n    speed = 90.0  # exposed in the Details panel\n\n    def on_start(self):\n        self.angle = 0.0\n\n    def on_update(self, dt):\n        self.angle += self.speed * dt\n        horizon.setRotation(self.entity_id, 0, self.angle, 0) The API mirrors Lua exactly — the same function names, with vectors returned as tuples and raycast returning a dict (or None on miss). Every example under Practical Examples is written out in Python as well.",
      "title": "Python"
     },
     {
@@ -15868,6 +16103,585 @@
     {
      "blocks": [
       {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "Five tasks, each written once in every language. Pick a language once and every example on this page follows — the choice sticks across visits and can be linked to with "
+        },
+        {
+         "s": "c",
+         "t": "?lang=python"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The shapes differ, and the examples stay inside what all four can really do. A Lua or Python script runs "
+        },
+        {
+         "s": "b",
+         "t": "per entity"
+        },
+        {
+         "s": "",
+         "t": " — "
+        },
+        {
+         "s": "c",
+         "t": "self.entityId"
+        },
+        {
+         "s": "",
+         "t": " / "
+        },
+        {
+         "s": "c",
+         "t": "self.entity_id"
+        },
+        {
+         "s": "",
+         "t": " is the entity it sits on. A C++ "
+        },
+        {
+         "s": "c",
+         "t": "GameLogic"
+        },
+        {
+         "s": "",
+         "t": " runs "
+        },
+        {
+         "s": "b",
+         "t": "once for the whole game"
+        },
+        {
+         "s": "",
+         "t": ", implements all three "
+        },
+        {
+         "h": "#cpp",
+         "s": "l",
+         "t": "IGameLogic"
+        },
+        {
+         "s": "",
+         "t": " methods and looks its entities up itself. A HorizonCode graph on an Entity class gets "
+        },
+        {
+         "s": "c",
+         "t": "BeginPlay"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "c",
+         "t": "Tick"
+        },
+        {
+         "s": "",
+         "t": " and reaches the same registry through "
+        },
+        {
+         "s": "c",
+         "t": "Engine Call"
+        },
+        {
+         "s": "",
+         "t": ". The C++ service tables cover save, entity, physics, input and content — there is no transform read and no logging on that side, so positions below are passed in or come out of a hit."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Reading the graph panels:"
+          },
+          {
+           "s": "",
+           "t": " "
+          },
+          {
+           "s": "c",
+           "t": "Event"
+          },
+          {
+           "s": "",
+           "t": " starts a chain, "
+          },
+          {
+           "s": "c",
+           "t": "\\»"
+          },
+          {
+           "s": "",
+           "t": " is the next node on it, "
+          },
+          {
+           "s": "c",
+           "t": "»"
+          },
+          {
+           "s": "",
+           "t": " an exec branch, "
+          },
+          {
+           "s": "c",
+           "t": "·"
+          },
+          {
+           "s": "",
+           "t": " a pure node that is only wired, and "
+          },
+          {
+           "s": "c",
+           "t": "<"
+          },
+          {
+           "s": "",
+           "t": " means “this pin is fed by”. "
+          },
+          {
+           "s": "c",
+           "t": "Self"
+          },
+          {
+           "s": "",
+           "t": " is the "
+          },
+          {
+           "s": "c",
+           "t": "Get Owning Entity"
+          },
+          {
+           "s": "",
+           "t": " node, and a bare name like "
+          },
+          {
+           "s": "c",
+           "t": "Travelled"
+          },
+          {
+           "s": "",
+           "t": " is a graph variable, read with "
+          },
+          {
+           "s": "c",
+           "t": "Get Variable"
+          },
+          {
+           "s": "",
+           "t": ". Every "
+          },
+          {
+           "s": "c",
+           "t": "Engine Call"
+          },
+          {
+           "s": "",
+           "t": " is written with the name the node picker shows — see the "
+          },
+          {
+           "h": "horizoncode-nodes.html",
+           "s": "l",
+           "t": "node reference"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Find an entity"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Every later example needs a handle on something in the scene. A script already sits on one entity; a C++ module and a graph go looking."
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- findByName walks the scene: look the entity up once, not every frame.\nfunction M.onStart(self)\n    -- 0 means \"no such entity\" - the same answer C++ and a graph get.\n    self.player = horizon.entity.findByName(\"Player\")\nend\n\nreturn M",
+         "title": "finder.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Finder(horizon.Behavior):\n    # findByName walks the scene: look the entity up once, not every frame.\n    def on_start(self):\n        # 0 means \"no such entity\" - the same answer C++ and a graph get.\n        self.player = horizon.entity.findByName(\"Player\")",
+         "title": "finder.py"
+        },
+        {
+         "label": "C++",
+         "lang": "cpp",
+         "text": "#include <IGameLogic.h>\n#include <HorizonGameServices.h>\n\n// Once, in one .cpp: receives the engine's service tables on load.\nHE_IMPLEMENT_ENGINE_SERVICES()\n\nclass MyGame : public IGameLogic {\npublic:\n    void onStart(HorizonWorld&) override\n    {\n        // 0 means \"no such entity\" - the same answer a script gets.\n        m_player = he::entity::findByName(\"Player\");\n    }\n    void onUpdate(HorizonWorld&, float) override {}\n    void onStop(HorizonWorld&) override {}\n\nprivate:\n    uint32_t m_player = 0;   // every example below keeps using this\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; }",
+         "title": "Game.cpp"
+        },
+        {
+         "label": "HorizonCode",
+         "lang": "horizoncode",
+         "text": "Event  BeginPlay\n  \\» Set Variable  Player < Engine Call Find By Name (\"Player\")",
+         "title": "Finder (graph)"
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Move something every frame"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A platform that slides along +Z. All four keep the travelled distance themselves and write an absolute position — a write on an entity with a body is a teleport of that body."
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\nM.properties = { speed = 2.0 }  -- metres per second, in the Details panel\n\nfunction M.onStart(self)\n    self.travelled = 0.0\nend\n\nfunction M.onUpdate(self, dt)\n    self.travelled = self.travelled + self.speed * dt\n    horizon.physics.setPosition(self.entityId, 0, 0, self.travelled)\nend\n\nreturn M",
+         "title": "platform.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Platform(horizon.Behavior):\n    speed = 2.0  # metres per second, in the Details panel\n\n    def on_start(self):\n        self.travelled = 0.0\n\n    def on_update(self, dt):\n        self.travelled += self.speed * dt\n        horizon.physics.setPosition(self.entity_id, 0.0, 0.0, self.travelled)",
+         "title": "platform.py"
+        },
+        {
+         "label": "C++",
+         "lang": "cpp",
+         "text": "// inside MyGame - see \"Find an entity\" for the class around it.\nvoid onUpdate(HorizonWorld&, float dt) override\n{\n    m_travelled += kSpeed * dt;\n    he::physics::setPosition(m_platform, { 0.0f, 0.0f, m_travelled });\n}\n\nprivate:\nstatic constexpr float kSpeed = 2.0f;\nfloat    m_travelled = 0.0f;\nuint32_t m_platform  = 0;   // he::entity::findByName(\"Platform\") in onStart",
+         "title": "Game.cpp"
+        },
+        {
+         "label": "HorizonCode",
+         "lang": "horizoncode",
+         "text": "Event  Tick  -> Delta Seconds\n  \\» Set Variable  Travelled < Add (Travelled,\n                                    Multiply (Speed, Delta Seconds))\n  \\» Engine Call  Set Position (Physics)\n       Entity   < Self\n       Position < Make Vector 3 (0, 0, Travelled)",
+         "title": "Platform (graph)"
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "",
+           "t": "There is no position "
+          },
+          {
+           "s": "i",
+           "t": "read"
+          },
+          {
+           "s": "",
+           "t": " in the C++ service tables, so the module carries "
+          },
+          {
+           "s": "c",
+           "t": "m_travelled"
+          },
+          {
+           "s": "",
+           "t": " itself. The scripts could ask the engine with "
+          },
+          {
+           "s": "c",
+           "t": "horizon.getPosition"
+          },
+          {
+           "s": "",
+           "t": " — they keep their own count here so the four panels say the same thing."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Jump when a key is pressed"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Space, but only with both feet on the ground — and keeping the horizontal speed the character already had."
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\nM.properties = { jumpSpeed = 6.0 }\n\nfunction M.onUpdate(self, dt)\n    local me = self.entityId\n    if horizon.input.keyDown(\"Space\") and horizon.physics.isGrounded(me) then\n        local vx, _, vz = horizon.physics.getVelocity(me)\n        horizon.physics.setVelocity(me, vx, self.jumpSpeed, vz)\n    end\nend\n\nreturn M",
+         "title": "jump.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Jump(horizon.Behavior):\n    jump_speed = 6.0\n\n    def on_update(self, dt):\n        me = self.entity_id\n        if horizon.input.keyDown(\"Space\") and horizon.physics.isGrounded(me):\n            vx, _, vz = horizon.physics.getVelocity(me)\n            horizon.physics.setVelocity(me, vx, self.jump_speed, vz)",
+         "title": "jump.py"
+        },
+        {
+         "label": "C++",
+         "lang": "cpp",
+         "text": "// inside MyGame - see \"Find an entity\" for the class around it.\nvoid onUpdate(HorizonWorld&, float) override\n{\n    if (he::input::keyDown(\"Space\") && he::physics::isGrounded(m_player))\n    {\n        const he::Vec3 v = he::physics::getVelocity(m_player);\n        he::physics::setVelocity(m_player, { v.x, kJumpSpeed, v.z });\n    }\n}\n\nprivate:\nstatic constexpr float kJumpSpeed = 6.0f;",
+         "title": "Game.cpp"
+        },
+        {
+         "label": "HorizonCode",
+         "lang": "horizoncode",
+         "text": "Event  Tick\n  · X, Y, Z < Break Vector 3 < Engine Call Get Velocity (Physics) (Self)\n  \\» Branch < And (Engine Call Key Down (\"Space\"),\n                   Engine Call Is Grounded (Physics) (Self))\n       True » Engine Call  Set Velocity\n                Entity   < Self\n                Velocity < Make Vector 3 (X, 6.0, Z)",
+         "title": "Jump (graph)"
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Cast a ray and use the hit"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A jump pad casts a short ray straight up and launches whatever it finds. The origin is where the pad sits in the level."
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\nM.properties = { force = 8.0 }\n\n-- A jump pad: look straight up from the pad and launch what stands on it.\nfunction M.onUpdate(self, dt)\n    local hit = horizon.raycast(0, 0.5, 0, 0, 1, 0, 1.5)\n    if hit then\n        horizon.physics.addImpulse(hit.entity, 0, self.force, 0)\n    end\nend\n\nreturn M",
+         "title": "launchpad.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass LaunchPad(horizon.Behavior):\n    force = 8.0\n\n    # A jump pad: look straight up from the pad and launch what stands on it.\n    def on_update(self, dt):\n        hit = horizon.raycast(0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 1.5)\n        if hit is not None:\n            horizon.physics.addImpulse(hit[\"entity\"], 0.0, self.force, 0.0)",
+         "title": "launchpad.py"
+        },
+        {
+         "label": "C++",
+         "lang": "cpp",
+         "text": "// inside MyGame - see \"Find an entity\" for the class around it.\nvoid onUpdate(HorizonWorld&, float) override\n{\n    const he::RaycastHit hit = he::physics::raycast(\n        { 0.0f, 0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f }, 1.5f);\n    if (hit.hit)\n        he::physics::addImpulse(hit.entity, { 0.0f, kForce, 0.0f });\n}\n\nprivate:\nstatic constexpr float kForce = 8.0f;",
+         "title": "Game.cpp"
+        },
+        {
+         "label": "HorizonCode",
+         "lang": "horizoncode",
+         "text": "Event  Tick\n  · Hit, Entity, Point, Normal, Distance, Layer\n      < Engine Call Raycast (Make Vector 3 (0, 0.5, 0),\n                             Make Vector 3 (0, 1, 0), 1.5)\n  \\» Branch < Hit\n       True » Engine Call  Add Impulse\n                Entity  < Entity\n                Impulse < Make Vector 3 (0, 8.0, 0)",
+         "title": "LaunchPad (graph)"
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "",
+           "t": "The same query, three shapes for the answer: the flat script "
+          },
+          {
+           "s": "c",
+           "t": "raycast"
+          },
+          {
+           "s": "",
+           "t": " hands back a table (Lua) or dict (Python) and "
+          },
+          {
+           "s": "c",
+           "t": "nil"
+          },
+          {
+           "s": "",
+           "t": "/"
+          },
+          {
+           "s": "c",
+           "t": "None"
+          },
+          {
+           "s": "",
+           "t": " on a miss, C++ always returns a "
+          },
+          {
+           "s": "c",
+           "t": "he::RaycastHit"
+          },
+          {
+           "s": "",
+           "t": " whose "
+          },
+          {
+           "s": "c",
+           "t": "hit"
+          },
+          {
+           "s": "",
+           "t": " field says whether it landed, and the node carries every field as its own pin. Points and normals are in "
+          },
+          {
+           "s": "b",
+           "t": "world"
+          },
+          {
+           "s": "",
+           "t": " space everywhere."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Remember progress in the save game"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Open a slot when play starts, read the level out of it, and write it back on F5."
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\nfunction M.onStart(self)\n    if horizon.save.exists(\"slot1\") then\n        horizon.save.load(\"slot1\")\n    else\n        horizon.save.create(\"slot1\")\n    end\n    self.level   = horizon.save.getNumber(\"level\", 1)  -- the default is required\n    self.wasDown = false\nend\n\nfunction M.onUpdate(self, dt)\n    local down = horizon.input.keyDown(\"F5\")\n    if down and not self.wasDown then      -- keyDown is a state, not an event\n        horizon.save.setNumber(\"level\", self.level)\n        horizon.save.write()\n    end\n    self.wasDown = down\nend\n\nreturn M",
+         "title": "progress.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Progress(horizon.Behavior):\n    def on_start(self):\n        if horizon.save.exists(\"slot1\"):\n            horizon.save.load(\"slot1\")\n        else:\n            horizon.save.create(\"slot1\")\n        self.level    = horizon.save.getNumber(\"level\", 1)  # default is required\n        self.was_down = False\n\n    def on_update(self, dt):\n        down = horizon.input.keyDown(\"F5\")\n        if down and not self.was_down:      # keyDown is a state, not an event\n            horizon.save.setNumber(\"level\", self.level)\n            horizon.save.write()\n        self.was_down = down",
+         "title": "progress.py"
+        },
+        {
+         "label": "C++",
+         "lang": "cpp",
+         "text": "// inside MyGame - see \"Find an entity\" for the class around it.\nvoid onStart(HorizonWorld&) override\n{\n    if (he::save::exists(\"slot1\")) he::save::load(\"slot1\");\n    else                          he::save::create(\"slot1\");\n    m_level = he::save::getNumber(\"level\", 1.0f);\n}\n\nvoid onUpdate(HorizonWorld&, float) override\n{\n    const bool down = he::input::keyDown(\"F5\");\n    if (down && !m_wasDown)          // keyDown is a state, not an event\n    {\n        he::save::setNumber(\"level\", m_level);\n        he::save::write();\n    }\n    m_wasDown = down;\n}\n\nprivate:\nfloat m_level   = 1.0f;\nbool  m_wasDown = false;",
+         "title": "Game.cpp"
+        },
+        {
+         "label": "HorizonCode",
+         "lang": "horizoncode",
+         "text": "Event  BeginPlay\n  \\» Sequence\n       A » Branch < Engine Call Save Exists (\"slot1\")\n             True  » Engine Call Load Save (\"slot1\")\n             False » Engine Call Create Save (\"slot1\")\n       B » Set Variable  Level < Engine Call Save Get Number (\"level\", 1)\n\nEvent  Tick\n  · Down < Engine Call Key Down (\"F5\")\n  \\» Sequence\n       A » Branch < And (Down, Not (Was Down))\n             True » Engine Call Save Set Number (\"level\", Level)\n                  » Engine Call Write Save ()\n       B » Set Variable  Was Down < Down",
+         "title": "Progress (graph)"
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "c",
+           "t": "level"
+          },
+          {
+           "s": "",
+           "t": " has to be a field on the project’s SaveGame Template — every typed accessor is validated against it, on all four sides. The default that "
+          },
+          {
+           "s": "c",
+           "t": "getNumber"
+          },
+          {
+           "s": "",
+           "t": " takes is not optional in any of them."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      }
+     ],
+     "eyebrow": "Side by side",
+     "id": "examples",
+     "text": "Five tasks, each written once in every language. Pick a language once and every example on this page follows — the choice sticks across visits and can be linked to with ?lang=python. The shapes differ, and the examples stay inside what all four can really do. A Lua or Python script runs per entity — self.entityId / self.entity_id is the entity it sits on. A C++ GameLogic runs once for the whole game, implements all three IGameLogic methods and looks its entities up itself. A HorizonCode graph on an Entity class gets BeginPlay and Tick and reaches the same registry through Engine Call. The C++ service tables cover save, entity, physics, input and content — there is no transform read and no logging on that side, so positions below are passed in or come out of a hit. Reading the graph panels: Event starts a chain, \\» is the next node on it, » an exec branch, · a pure node that is only wired, and < means “this pin is fed by”. Self is the Get Owning Entity node, and a bare name like Travelled is a graph variable, read with Get Variable. Every Engine Call is written with the name the node picker shows — see the node reference. Find an entity Every later example needs a handle on something in the scene. A script already sits on one entity; a C++ module and a graph go looking. finder.lua local M = {}\n\n-- findByName walks the scene: look the entity up once, not every frame.\nfunction M.onStart(self)\n    -- 0 means \"no such entity\" - the same answer C++ and a graph get.\n    self.player = horizon.entity.findByName(\"Player\")\nend\n\nreturn M finder.py import horizon\n\nclass Finder(horizon.Behavior):\n    # findByName walks the scene: look the entity up once, not every frame.\n    def on_start(self):\n        # 0 means \"no such entity\" - the same answer C++ and a graph get.\n        self.player = horizon.entity.findByName(\"Player\") Game.cpp #include <IGameLogic.h>\n#include <HorizonGameServices.h>\n\n// Once, in one .cpp: receives the engine's service tables on load.\nHE_IMPLEMENT_ENGINE_SERVICES()\n\nclass MyGame : public IGameLogic {\npublic:\n    void onStart(HorizonWorld&) override\n    {\n        // 0 means \"no such entity\" - the same answer a script gets.\n        m_player = he::entity::findByName(\"Player\");\n    }\n    void onUpdate(HorizonWorld&, float) override {}\n    void onStop(HorizonWorld&) override {}\n\nprivate:\n    uint32_t m_player = 0;   // every example below keeps using this\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Finder (graph) Event  BeginPlay\n  \\» Set Variable  Player < Engine Call Find By Name (\"Player\") Move something every frame A platform that slides along +Z. All four keep the travelled distance themselves and write an absolute position — a write on an entity with a body is a teleport of that body. platform.lua local M = {}\n\nM.properties = { speed = 2.0 }  -- metres per second, in the Details panel\n\nfunction M.onStart(self)\n    self.travelled = 0.0\nend\n\nfunction M.onUpdate(self, dt)\n    self.travelled = self.travelled + self.speed * dt\n    horizon.physics.setPosition(self.entityId, 0, 0, self.travelled)\nend\n\nreturn M platform.py import horizon\n\nclass Platform(horizon.Behavior):\n    speed = 2.0  # metres per second, in the Details panel\n\n    def on_start(self):\n        self.travelled = 0.0\n\n    def on_update(self, dt):\n        self.travelled += self.speed * dt\n        horizon.physics.setPosition(self.entity_id, 0.0, 0.0, self.travelled) Game.cpp // inside MyGame - see \"Find an entity\" for the class around it.\nvoid onUpdate(HorizonWorld&, float dt) override\n{\n    m_travelled += kSpeed * dt;\n    he::physics::setPosition(m_platform, { 0.0f, 0.0f, m_travelled });\n}\n\nprivate:\nstatic constexpr float kSpeed = 2.0f;\nfloat    m_travelled = 0.0f;\nuint32_t m_platform  = 0;   // he::entity::findByName(\"Platform\") in onStart Platform (graph) Event  Tick  -> Delta Seconds\n  \\» Set Variable  Travelled < Add (Travelled,\n                                    Multiply (Speed, Delta Seconds))\n  \\» Engine Call  Set Position (Physics)\n       Entity   < Self\n       Position < Make Vector 3 (0, 0, Travelled) There is no position read in the C++ service tables, so the module carries m_travelled itself. The scripts could ask the engine with horizon.getPosition — they keep their own count here so the four panels say the same thing. Jump when a key is pressed Space, but only with both feet on the ground — and keeping the horizontal speed the character already had. jump.lua local M = {}\n\nM.properties = { jumpSpeed = 6.0 }\n\nfunction M.onUpdate(self, dt)\n    local me = self.entityId\n    if horizon.input.keyDown(\"Space\") and horizon.physics.isGrounded(me) then\n        local vx, _, vz = horizon.physics.getVelocity(me)\n        horizon.physics.setVelocity(me, vx, self.jumpSpeed, vz)\n    end\nend\n\nreturn M jump.py import horizon\n\nclass Jump(horizon.Behavior):\n    jump_speed = 6.0\n\n    def on_update(self, dt):\n        me = self.entity_id\n        if horizon.input.keyDown(\"Space\") and horizon.physics.isGrounded(me):\n            vx, _, vz = horizon.physics.getVelocity(me)\n            horizon.physics.setVelocity(me, vx, self.jump_speed, vz) Game.cpp // inside MyGame - see \"Find an entity\" for the class around it.\nvoid onUpdate(HorizonWorld&, float) override\n{\n    if (he::input::keyDown(\"Space\") && he::physics::isGrounded(m_player))\n    {\n        const he::Vec3 v = he::physics::getVelocity(m_player);\n        he::physics::setVelocity(m_player, { v.x, kJumpSpeed, v.z });\n    }\n}\n\nprivate:\nstatic constexpr float kJumpSpeed = 6.0f; Jump (graph) Event  Tick\n  · X, Y, Z < Break Vector 3 < Engine Call Get Velocity (Physics) (Self)\n  \\» Branch < And (Engine Call Key Down (\"Space\"),\n                   Engine Call Is Grounded (Physics) (Self))\n       True » Engine Call  Set Velocity\n                Entity   < Self\n                Velocity < Make Vector 3 (X, 6.0, Z) Cast a ray and use the hit A jump pad casts a short ray straight up and launches whatever it finds. The origin is where the pad sits in the level. launchpad.lua local M = {}\n\nM.properties = { force = 8.0 }\n\n-- A jump pad: look straight up from the pad and launch what stands on it.\nfunction M.onUpdate(self, dt)\n    local hit = horizon.raycast(0, 0.5, 0, 0, 1, 0, 1.5)\n    if hit then\n        horizon.physics.addImpulse(hit.entity, 0, self.force, 0)\n    end\nend\n\nreturn M launchpad.py import horizon\n\nclass LaunchPad(horizon.Behavior):\n    force = 8.0\n\n    # A jump pad: look straight up from the pad and launch what stands on it.\n    def on_update(self, dt):\n        hit = horizon.raycast(0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 1.5)\n        if hit is not None:\n            horizon.physics.addImpulse(hit[\"entity\"], 0.0, self.force, 0.0) Game.cpp // inside MyGame - see \"Find an entity\" for the class around it.\nvoid onUpdate(HorizonWorld&, float) override\n{\n    const he::RaycastHit hit = he::physics::raycast(\n        { 0.0f, 0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f }, 1.5f);\n    if (hit.hit)\n        he::physics::addImpulse(hit.entity, { 0.0f, kForce, 0.0f });\n}\n\nprivate:\nstatic constexpr float kForce = 8.0f; LaunchPad (graph) Event  Tick\n  · Hit, Entity, Point, Normal, Distance, Layer\n      < Engine Call Raycast (Make Vector 3 (0, 0.5, 0),\n                             Make Vector 3 (0, 1, 0), 1.5)\n  \\» Branch < Hit\n       True » Engine Call  Add Impulse\n                Entity  < Entity\n                Impulse < Make Vector 3 (0, 8.0, 0) The same query, three shapes for the answer: the flat script raycast hands back a table (Lua) or dict (Python) and nil/None on a miss, C++ always returns a he::RaycastHit whose hit field says whether it landed, and the node carries every field as its own pin. Points and normals are in world space everywhere. Remember progress in the save game Open a slot when play starts, read the level out of it, and write it back on F5. progress.lua local M = {}\n\nfunction M.onStart(self)\n    if horizon.save.exists(\"slot1\") then\n        horizon.save.load(\"slot1\")\n    else\n        horizon.save.create(\"slot1\")\n    end\n    self.level   = horizon.save.getNumber(\"level\", 1)  -- the default is required\n    self.wasDown = false\nend\n\nfunction M.onUpdate(self, dt)\n    local down = horizon.input.keyDown(\"F5\")\n    if down and not self.wasDown then      -- keyDown is a state, not an event\n        horizon.save.setNumber(\"level\", self.level)\n        horizon.save.write()\n    end\n    self.wasDown = down\nend\n\nreturn M progress.py import horizon\n\nclass Progress(horizon.Behavior):\n    def on_start(self):\n        if horizon.save.exists(\"slot1\"):\n            horizon.save.load(\"slot1\")\n        else:\n            horizon.save.create(\"slot1\")\n        self.level    = horizon.save.getNumber(\"level\", 1)  # default is required\n        self.was_down = False\n\n    def on_update(self, dt):\n        down = horizon.input.keyDown(\"F5\")\n        if down and not self.was_down:      # keyDown is a state, not an event\n            horizon.save.setNumber(\"level\", self.level)\n            horizon.save.write()\n        self.was_down = down Game.cpp // inside MyGame - see \"Find an entity\" for the class around it.\nvoid onStart(HorizonWorld&) override\n{\n    if (he::save::exists(\"slot1\")) he::save::load(\"slot1\");\n    else                          he::save::create(\"slot1\");\n    m_level = he::save::getNumber(\"level\", 1.0f);\n}\n\nvoid onUpdate(HorizonWorld&, float) override\n{\n    const bool down = he::input::keyDown(\"F5\");\n    if (down && !m_wasDown)          // keyDown is a state, not an event\n    {\n        he::save::setNumber(\"level\", m_level);\n        he::save::write();\n    }\n    m_wasDown = down;\n}\n\nprivate:\nfloat m_level   = 1.0f;\nbool  m_wasDown = false; Progress (graph) Event  BeginPlay\n  \\» Sequence\n       A » Branch < Engine Call Save Exists (\"slot1\")\n             True  » Engine Call Load Save (\"slot1\")\n             False » Engine Call Create Save (\"slot1\")\n       B » Set Variable  Level < Engine Call Save Get Number (\"level\", 1)\n\nEvent  Tick\n  · Down < Engine Call Key Down (\"F5\")\n  \\» Sequence\n       A » Branch < And (Down, Not (Was Down))\n             True » Engine Call Save Set Number (\"level\", Level)\n                  » Engine Call Write Save ()\n       B » Set Variable  Was Down < Down level has to be a field on the project’s SaveGame Template — every typed accessor is validated against it, on all four sides. The default that getNumber takes is not optional in any of them.",
+     "title": "Practical Examples"
+    },
+    {
+     "blocks": [
+      {
        "k": "p",
        "r": [
         {
@@ -15987,17 +16801,574 @@
         },
         {
          "s": "",
-         "t": " interface and works with the world directly — full engine headers, no wrapper layer:"
+         "t": " interface. It links against nothing and includes exactly two engine headers, "
+        },
+        {
+         "s": "c",
+         "t": "<IGameLogic.h>"
+        },
+        {
+         "s": "",
+         "t": " for the interface and "
+        },
+        {
+         "s": "c",
+         "t": "<HorizonGameServices.h>"
+        },
+        {
+         "s": "",
+         "t": " for everything the engine can do for it:"
         }
        ]
       },
       {
        "k": "code",
-       "text": "class MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; }",
+       "text": "#include <IGameLogic.h>\n#include <HorizonGameServices.h>\n\n// Once, in one .cpp: receives the engine's service tables on load.\nHE_IMPLEMENT_ENGINE_SERVICES()\n\nclass MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; }",
        "title": "GameLogic.cpp"
       },
       {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Engine services"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "c",
+         "t": "HorizonWorld&"
+        },
+        {
+         "s": "",
+         "t": " the three methods receive is an opaque handle: the library compiles against "
+        },
+        {
+         "s": "c",
+         "t": "HE_Core/include"
+        },
+        {
+         "s": "",
+         "t": " only, so it can hold the reference and pass it on, but not call into it. Everything the module does to the engine crosses through "
+        },
+        {
+         "s": "b",
+         "t": "service tables"
+        },
+        {
+         "s": "",
+         "t": " instead — plain C function pointers the engine injects right after the library loads, wrapped in header-only "
+        },
+        {
+         "s": "c",
+         "t": "he::"
+        },
+        {
+         "s": "",
+         "t": " helpers that speak "
+        },
+        {
+         "s": "c",
+         "t": "std::string"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "c",
+         "t": "Vec3"
+        },
+        {
+         "s": "",
+         "t": ". Five namespaces, each with an "
+        },
+        {
+         "s": "c",
+         "t": "available()"
+        },
+        {
+         "s": "",
+         "t": " that says whether its table arrived:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Namespace"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What it reaches"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::save"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Save lifecycle ("
+          },
+          {
+           "s": "c",
+           "t": "create"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "load"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "write"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "close"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "exists"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "remove"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "list"
+          },
+          {
+           "s": "",
+           "t": ") and typed field access against the project's SaveGame Template. Struct fields cross as JSON and pair with the generated "
+          },
+          {
+           "s": "c",
+           "t": "Generated/GameTypes.h"
+          },
+          {
+           "s": "",
+           "t": " types."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::entity"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "findByName"
+          },
+          {
+           "s": "",
+           "t": ", plus "
+          },
+          {
+           "s": "c",
+           "t": "saveState"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "hasSavedState"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "applySavedState"
+          },
+          {
+           "s": "",
+           "t": " for entities carrying a Save State component."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::physics"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "raycast"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "sphereCast"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "overlapSphere"
+          },
+          {
+           "s": "",
+           "t": "; "
+          },
+          {
+           "s": "c",
+           "t": "addForce"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "addImpulse"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "addTorque"
+          },
+          {
+           "s": "",
+           "t": ", get/set velocity, "
+          },
+          {
+           "s": "c",
+           "t": "isGrounded"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "setPosition"
+          },
+          {
+           "s": "",
+           "t": " and "
+          },
+          {
+           "s": "c",
+           "t": "setPositionAndReset"
+          },
+          {
+           "s": "",
+           "t": ", world gravity."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::input"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "keyDown"
+          },
+          {
+           "s": "",
+           "t": " (SDL scancode names), mouse position / delta / buttons / scroll, gamepad connected / button / axis (Xbox names, sticks -1..+1), and the input mode ("
+          },
+          {
+           "s": "c",
+           "t": "setModeGameOnly"
+          },
+          {
+           "s": "",
+           "t": " and friends)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::content"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Asset "
+          },
+          {
+           "s": "i",
+           "t": "residency"
+          },
+          {
+           "s": "",
+           "t": ": "
+          },
+          {
+           "s": "c",
+           "t": "load"
+          },
+          {
+           "s": "",
+           "t": " a path into an "
+          },
+          {
+           "s": "c",
+           "t": "he::AssetId"
+          },
+          {
+           "s": "",
+           "t": ", then "
+          },
+          {
+           "s": "c",
+           "t": "unload"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "isLoaded"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "typeName"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "code",
+       "text": "if (he::input::keyDown(\"Space\") && he::physics::isGrounded(player))\n    he::physics::addImpulse(player, { 0.0f, 6.0f, 0.0f });\n\nconst he::RaycastHit hit = he::physics::raycast(eye, forward, 50.0f);\nif (hit.hit) he::save::setString(\"lastLookedAt\", std::to_string(hit.entity));",
+       "title": "PlayerLevelScript.cpp"
+      },
+      {
        "items": [
+        [
+         {
+          "s": "b",
+          "t": "Never injected is a state, not an error"
+         },
+         {
+          "s": "",
+          "t": " — a module that runs under an engine which did not hand over a table gets safe no-ops with default return values, never a crash. The engine says so in the log; "
+         },
+         {
+          "s": "c",
+          "t": "available()"
+         },
+         {
+          "s": "",
+          "t": " lets the module say so too."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Same semantics as the scripts"
+         },
+         {
+          "s": "",
+          "t": " — every row is routed through the same engine API that backs "
+         },
+         {
+          "s": "c",
+          "t": "horizon"
+         },
+         {
+          "s": "",
+          "t": " in Lua and Python and the HorizonCode nodes, so a rule holds everywhere it applies. Including the awkward one: a raycast reports a "
+         },
+         {
+          "s": "i",
+          "t": "world"
+         },
+         {
+          "s": "",
+          "t": " point while "
+         },
+         {
+          "s": "c",
+          "t": "setPosition"
+         },
+         {
+          "s": "",
+          "t": " takes a "
+         },
+         {
+          "s": "i",
+          "t": "local"
+         },
+         {
+          "s": "",
+          "t": " one, exactly as in the script API. An entity is a "
+         },
+         {
+          "s": "c",
+          "t": "uint32_t"
+         },
+         {
+          "s": "",
+          "t": " — the same number a script reads as "
+         },
+         {
+          "s": "c",
+          "t": "self.entityId"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Only values cross"
+         },
+         {
+          "s": "",
+          "t": " — there is no call that hands back an asset object, on purpose: engine asset pointers are valid only until the next load. "
+         },
+         {
+          "s": "c",
+          "t": "he::content"
+         },
+         {
+          "s": "",
+          "t": " decides what is "
+         },
+         {
+          "s": "i",
+          "t": "resident"
+         },
+         {
+          "s": "",
+          "t": ", so the next scene's meshes can be paid for before they are needed."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "The ABI only grows at the end"
+         },
+         {
+          "s": "",
+          "t": " — each table carries its own version and is only ever appended to, and a module accepts a table whose version is at least the one it was built against. An older module keeps working under a newer engine; a newer module under an older engine loses the calls that engine never had, and nothing else."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Building and reloading"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "From the editor"
+         },
+         {
+          "s": "",
+          "t": " — "
+         },
+         {
+          "h": "editor.html#game-logic",
+          "s": "l",
+          "t": "Build » Build and Reload Game Logic"
+         },
+         {
+          "s": "",
+          "t": " compiles "
+         },
+         {
+          "s": "c",
+          "t": "Source/"
+         },
+         {
+          "s": "",
+          "t": " and swaps the result into a running preview without ending it. Outside Play mode it only builds, and that module is what the next Play loads."
+         }
+        ],
         [
          {
           "s": "b",
@@ -16005,7 +17376,7 @@
          },
          {
           "s": "",
-          "t": " — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives."
+          "t": " — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. The service tables are re-injected with every swap, so the fresh image starts out connected."
          }
         ],
         [
@@ -16056,7 +17427,7 @@
      ],
      "eyebrow": "Native",
      "id": "cpp",
-     "text": "C++ projects ship gameplay as one native GameLogic shared library. The editor scaffolds a compilable Source/ tree at project creation — game runtime, GameInstance, a per-scene level script and a CMakeLists.txt — visible as its own root in the Content Browser, with an in-editor class editor and a New C++ Class workflow. The library implements the three-method IGameLogic interface and works with the world directly — full engine headers, no wrapper layer: GameLogic.cpp class MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Hot reload — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. Toolchain — needs CMake and a C++ compiler; the editor checks at startup and can install them for you (Preferences » Tools » Status). Shipping — the export copies GameLogic.dll/.dylib/.so next to the game executable. Export ->",
+     "text": "C++ projects ship gameplay as one native GameLogic shared library. The editor scaffolds a compilable Source/ tree at project creation — game runtime, GameInstance, a per-scene level script and a CMakeLists.txt — visible as its own root in the Content Browser, with an in-editor class editor and a New C++ Class workflow. The library implements the three-method IGameLogic interface. It links against nothing and includes exactly two engine headers, <IGameLogic.h> for the interface and <HorizonGameServices.h> for everything the engine can do for it: GameLogic.cpp #include <IGameLogic.h>\n#include <HorizonGameServices.h>\n\n// Once, in one .cpp: receives the engine's service tables on load.\nHE_IMPLEMENT_ENGINE_SERVICES()\n\nclass MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Engine services The HorizonWorld& the three methods receive is an opaque handle: the library compiles against HE_Core/include only, so it can hold the reference and pass it on, but not call into it. Everything the module does to the engine crosses through service tables instead — plain C function pointers the engine injects right after the library loads, wrapped in header-only he:: helpers that speak std::string and Vec3. Five namespaces, each with an available() that says whether its table arrived: Namespace What it reaches he::save Save lifecycle (create / load / write / close / exists / remove / list) and typed field access against the project's SaveGame Template. Struct fields cross as JSON and pair with the generated Generated/GameTypes.h types. he::entity findByName, plus saveState / hasSavedState / applySavedState for entities carrying a Save State component. he::physics raycast, sphereCast, overlapSphere; addForce / addImpulse / addTorque, get/set velocity, isGrounded, setPosition and setPositionAndReset, world gravity. he::input keyDown (SDL scancode names), mouse position / delta / buttons / scroll, gamepad connected / button / axis (Xbox names, sticks -1..+1), and the input mode (setModeGameOnly and friends). he::content Asset residency: load a path into an he::AssetId, then unload / isLoaded / typeName. PlayerLevelScript.cpp if (he::input::keyDown(\"Space\") && he::physics::isGrounded(player))\n    he::physics::addImpulse(player, { 0.0f, 6.0f, 0.0f });\n\nconst he::RaycastHit hit = he::physics::raycast(eye, forward, 50.0f);\nif (hit.hit) he::save::setString(\"lastLookedAt\", std::to_string(hit.entity)); Never injected is a state, not an error — a module that runs under an engine which did not hand over a table gets safe no-ops with default return values, never a crash. The engine says so in the log; available() lets the module say so too. Same semantics as the scripts — every row is routed through the same engine API that backs horizon in Lua and Python and the HorizonCode nodes, so a rule holds everywhere it applies. Including the awkward one: a raycast reports a world point while setPosition takes a local one, exactly as in the script API. An entity is a uint32_t — the same number a script reads as self.entityId. Only values cross — there is no call that hands back an asset object, on purpose: engine asset pointers are valid only until the next load. he::content decides what is resident, so the next scene's meshes can be paid for before they are needed. The ABI only grows at the end — each table carries its own version and is only ever appended to, and a module accepts a table whose version is at least the one it was built against. An older module keeps working under a newer engine; a newer module under an older engine loses the calls that engine never had, and nothing else. Building and reloading From the editor — Build » Build and Reload Game Logic compiles Source/ and swaps the result into a running preview without ending it. Outside Play mode it only builds, and that module is what the next Play loads. Hot reload — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. The service tables are re-injected with every swap, so the fresh image starts out connected. Toolchain — needs CMake and a C++ compiler; the editor checks at startup and can install them for you (Preferences » Tools » Status). Shipping — the export copies GameLogic.dll/.dylib/.so next to the game executable. Export ->",
      "title": "Native C++"
     }
    ],
@@ -16423,6 +17794,34 @@
          [
           {
            "s": "b",
+           "t": "Animation Layers"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Poses laid on top of any of the above, through a bone mask — an upper body with a job of its own."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Inverse Kinematics"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Correcting the finished pose against the world — feet onto the ground, head onto a target."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
            "t": "Property Animator"
           }
          ],
@@ -16474,6 +17873,226 @@
        "r": [
         {
          "s": "",
+         "t": "Blend spaces"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A "
+        },
+        {
+         "s": "b",
+         "t": "Blend Space"
+        },
+        {
+         "s": "",
+         "t": " is an asset of its own: animation clips placed as points in a parameter space, and a mix of whichever points the parameters are currently standing between. One axis ("
+        },
+        {
+         "s": "i",
+         "t": "1D"
+        },
+        {
+         "s": "",
+         "t": ") is speed into walk / jog / run; two axes ("
+        },
+        {
+         "s": "i",
+         "t": "2D"
+        },
+        {
+         "s": "",
+         "t": ") are speed and direction into a whole strafe set. Its editor is a diagram with draggable dots and a preview cursor that computes its weights with the same function the running game uses."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "It goes wherever a clip goes — a state of a state machine or an animation layer can pose from one instead of from a single clip. All of a space's samples run on "
+        },
+        {
+         "s": "b",
+         "t": "one shared phase"
+        },
+        {
+         "s": "",
+         "t": " rather than on their own seconds, so clips of different length are always read at the same point in their own cycle and a blend never crosses the feet. The sampler clamps to the outermost sample and never extrapolates; at most four samples are evaluated at once."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Animation layers and bone masks"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "b",
+         "t": "Animation Layers"
+        },
+        {
+         "s": "",
+         "t": " component lays further poses on top of whatever posed the entity — a clip, a two-clip blend or a state machine, it does not care which. Each layer has its own source (a clip or a blend space), its own playhead, speed and weight, and a "
+        },
+        {
+         "s": "b",
+         "t": "Bone Mask"
+        },
+        {
+         "s": "",
+         "t": " saying which joints it may touch. A reload on the arms while the legs keep running is one layer plus one mask."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A layer is either "
+        },
+        {
+         "s": "i",
+         "t": "Override"
+        },
+        {
+         "s": "",
+         "t": ", replacing the pose underneath wherever its mask allows, or "
+        },
+        {
+         "s": "i",
+         "t": "Additive"
+        },
+        {
+         "s": "",
+         "t": ", adding its clip's difference against a reference pose on top of what is already there — a breathing wobble or a limp that keeps the run running while it leans on it. Additive works in local joint space; there is no mesh-space additive yet. Layers are applied in list order, each onto the result of the one before it, and gameplay addresses them by name ("
+        },
+        {
+         "s": "c",
+         "t": "animator.setLayerWeight"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "animator.playLayer"
+        },
+        {
+         "s": "",
+         "t": ")."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A bone mask is a list of joint "
+        },
+        {
+         "s": "i",
+         "t": "names"
+        },
+        {
+         "s": "",
+         "t": " with a weight each, not a skeleton: it works on every rig that spells its joints the same way. It is an allow-list — a joint that is not in it has weight 0 — and weights below 1 down a few spine joints are what fades a masked layer into the base pose instead of ending it at a hard edge across the waist."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Inverse kinematics"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "b",
+         "t": "Inverse Kinematics"
+        },
+        {
+         "s": "",
+         "t": " component corrects the finished pose against the world the character is standing in. Two independent halves: "
+        },
+        {
+         "s": "b",
+         "t": "foot placement"
+        },
+        {
+         "s": "",
+         "t": " puts each foot on the ground actually under it — a ray down from the foot, a two-bone solve up the leg, the foot tilted to the surface normal within a pitch and roll limit, and the pelvis lowered by the deepest foot's drop so the low leg does not have to overextend — and "
+        },
+        {
+         "s": "b",
+         "t": "look-at"
+        },
+        {
+         "s": "",
+         "t": " turns a chain of joints (spine, neck, head) towards a target entity or a world point, within a yaw and pitch limit, with the turn spread over the chain by weight."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Both are smoothed over time, because the ground under a foot really does jump by a whole step height in one frame at a stair edge; a character that is teleported is detected as such and snaps instead of easing. Foot placement needs a physics world, so it runs in play mode only and does nothing where there is no collider; look-at runs in the editor too."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "The order a pose is built in"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Each stage holds whatever the one before it came up with, and the order is fixed: the animator (clip, blend or state machine) decides the pose, root motion is taken out of it and turned into entity movement, the layer stack is applied on top of what is left, and inverse kinematics bends the result to the world. That order is what makes the four safe to add one at a time — and it is why an additive layer that moves the root joint moves the pose rather than the character."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
          "t": "Skeletal Mesh editor"
         }
        ]
@@ -16498,7 +18117,7 @@
      ],
      "eyebrow": "Move",
      "id": "animation",
-     "text": "Skeletal meshes are skinned on the GPU (up to 128 joints, four weighted influences per vertex) and posed by a family of animator components — from a single looping clip to a full state machine. All animation systems tick in the editor too, so previews work without pressing Play. Tool Use it for Animator Playing one clip — speed, time, looping. Animator Blend Mixing two clips with a blend alpha (e.g. walk <-> run). Animator State Machine Full character logic — see below. Property Animator Keyframed transform and material properties — cutscenes, moving platforms, pulsing materials. Animator State Machine A standalone asset edited on the shared graph canvas: states are nodes (each with an animation clip and a looping flag), transitions are links with a condition — a named float parameter compared against a threshold (greater / less / equal) — and a crossfade duration. The component on the entity references the asset and holds the live parameter values; gameplay code drives the parameters and the machine blends states automatically. One asset can drive any number of characters. Skeletal Mesh editor Double-click a skeletal mesh asset for a dedicated tab: the joint hierarchy as a tree, an orbit-camera preview with a Show Skeleton bone overlay, and an optional clip slot with play/pause and time scrubbing — inspect a rig without touching any scene.",
+     "text": "Skeletal meshes are skinned on the GPU (up to 128 joints, four weighted influences per vertex) and posed by a family of animator components — from a single looping clip to a full state machine. All animation systems tick in the editor too, so previews work without pressing Play. Tool Use it for Animator Playing one clip — speed, time, looping. Animator Blend Mixing two clips with a blend alpha (e.g. walk <-> run). Animator State Machine Full character logic — see below. Animation Layers Poses laid on top of any of the above, through a bone mask — an upper body with a job of its own. Inverse Kinematics Correcting the finished pose against the world — feet onto the ground, head onto a target. Property Animator Keyframed transform and material properties — cutscenes, moving platforms, pulsing materials. Animator State Machine A standalone asset edited on the shared graph canvas: states are nodes (each with an animation clip and a looping flag), transitions are links with a condition — a named float parameter compared against a threshold (greater / less / equal) — and a crossfade duration. The component on the entity references the asset and holds the live parameter values; gameplay code drives the parameters and the machine blends states automatically. One asset can drive any number of characters. Blend spaces A Blend Space is an asset of its own: animation clips placed as points in a parameter space, and a mix of whichever points the parameters are currently standing between. One axis (1D) is speed into walk / jog / run; two axes (2D) are speed and direction into a whole strafe set. Its editor is a diagram with draggable dots and a preview cursor that computes its weights with the same function the running game uses. It goes wherever a clip goes — a state of a state machine or an animation layer can pose from one instead of from a single clip. All of a space's samples run on one shared phase rather than on their own seconds, so clips of different length are always read at the same point in their own cycle and a blend never crosses the feet. The sampler clamps to the outermost sample and never extrapolates; at most four samples are evaluated at once. Animation layers and bone masks The Animation Layers component lays further poses on top of whatever posed the entity — a clip, a two-clip blend or a state machine, it does not care which. Each layer has its own source (a clip or a blend space), its own playhead, speed and weight, and a Bone Mask saying which joints it may touch. A reload on the arms while the legs keep running is one layer plus one mask. A layer is either Override, replacing the pose underneath wherever its mask allows, or Additive, adding its clip's difference against a reference pose on top of what is already there — a breathing wobble or a limp that keeps the run running while it leans on it. Additive works in local joint space; there is no mesh-space additive yet. Layers are applied in list order, each onto the result of the one before it, and gameplay addresses them by name (animator.setLayerWeight, animator.playLayer). A bone mask is a list of joint names with a weight each, not a skeleton: it works on every rig that spells its joints the same way. It is an allow-list — a joint that is not in it has weight 0 — and weights below 1 down a few spine joints are what fades a masked layer into the base pose instead of ending it at a hard edge across the waist. Inverse kinematics The Inverse Kinematics component corrects the finished pose against the world the character is standing in. Two independent halves: foot placement puts each foot on the ground actually under it — a ray down from the foot, a two-bone solve up the leg, the foot tilted to the surface normal within a pitch and roll limit, and the pelvis lowered by the deepest foot's drop so the low leg does not have to overextend — and look-at turns a chain of joints (spine, neck, head) towards a target entity or a world point, within a yaw and pitch limit, with the turn spread over the chain by weight. Both are smoothed over time, because the ground under a foot really does jump by a whole step height in one frame at a stair edge; a character that is teleported is detected as such and snaps instead of easing. Foot placement needs a physics world, so it runs in play mode only and does nothing where there is no collider; look-at runs in the editor too. The order a pose is built in Each stage holds whatever the one before it came up with, and the order is fixed: the animator (clip, blend or state machine) decides the pose, root motion is taken out of it and turned into entity movement, the layer stack is applied on top of what is left, and inverse kinematics bends the result to the world. That order is what makes the four safe to add one at a time — and it is why an additive layer that moves the root joint moves the pose rather than the character. Skeletal Mesh editor Double-click a skeletal mesh asset for a dedicated tab: the joint hierarchy as a tree, an orbit-camera preview with a Show Skeleton bone overlay, and an optional clip slot with play/pause and time scrubbing — inspect a rig without touching any scene.",
      "title": "Animation"
     },
     {

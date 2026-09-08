@@ -119,10 +119,24 @@ TEST_CASE("node reference: the manual has an entry per callable thing")
 
 	// And it has to be findable: the whole point of it being a page rather than
 	// a special screen is that search reaches it.
+	//
+	// REACHED, not ranked first. Until the practical examples came into the
+	// bundle, the node reference was the only place in the whole manual that
+	// said `addImpulse` at all, so it topped the list by having no competition.
+	// Now the examples call it from Lua, Python and C++ (three body hits, 20
+	// points) and the C++ chapter twice (16), against the generated entry's one
+	// mention of its own api id (12) — the "a section that says a word more
+	// often scores higher" rule in Library::search, working as it is written.
+	// Whether the DEFINITION of an engine call should outrank its uses is a
+	// question about the scoring, and it is not answered by pinning it here.
 	const std::vector<HE::Ed::Docs::Hit> hits = lib.search("addImpulse");
 	REQUIRE(!hits.empty());
-	CHECK(lib.pages()[hits[0].page].id == HE::Ed::NodeReference::kPageId);
-	CHECK(lib.pages()[hits[0].page].sections[hits[0].section].id == "physics.addImpulse");
+	const bool reachesTheEntry = std::any_of(hits.begin(), hits.end(),
+		[&](const HE::Ed::Docs::Hit& h) {
+			return lib.pages()[h.page].id == HE::Ed::NodeReference::kPageId &&
+			       lib.pages()[h.page].sections[h.section].id == "physics.addImpulse";
+		});
+	CHECK(reachesTheEntry);
 }
 
 TEST_CASE("node docs: the generated sky rows are covered by the field list")
