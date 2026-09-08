@@ -254,11 +254,14 @@ std::vector<Docs::Page> characterPages()
 			       link("Feet on the ground, eyes on the target",
 			            "guides-animation-ik"),
 			       run(".") }),
-			note("They stack, and they always run in that order", {
-				para("The state machine decides the pose, the layers are laid on top "
-				     "of it, root motion is taken out of it, and IK bends the result. "
-				     "Nothing you can configure changes that order, which is what "
-				     "makes the four of them safe to add one at a time."),
+			note("They stack, and always in the same order", {
+				para("The animator decides the pose, root motion is taken out of it "
+				     "and turned into movement, the layer stack is applied on top of "
+				     "what is left, and IK bends the result to the world. Nothing you "
+				     "can configure changes that order, which is what makes the four "
+				     "of them safe to add one at a time — and it is why an additive "
+				     "layer that moves the root joint moves the pose rather than the "
+				     "character."),
 			}),
 		}));
 
