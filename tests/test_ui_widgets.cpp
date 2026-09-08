@@ -16083,3 +16083,271 @@ TEST_CASE("A5: each window carries its own display scale")
     wm.setDisplayScale(8u, 0.0f);
     CHECK(wm.displayScale(8u) == doctest::Approx(1.0f));
 }
+
+// ── moveElement: a place in the hierarchy, not just a parent ─────────────────
+// docs/ui-designer-hierarchy-reorder-plan.md §3.5. Sibling order in a widget
+// tree IS the vector order filtered by parentId, so a Spacer dropped between
+// two children of a Vertical Box and a page dropped in front of another Tab
+// Box page are one operation. Everything here is HE_Core: no ImGui, no editor.
+
+namespace
+{
+    // A child of `parent`, named so a failing CHECK says which one it was.
+    int namedChild(HE::UIWidgetTree& t, int parent, const char* name,
+                   HE::UIWidgetType type = HE::UIWidgetType::Panel)
+    {
+        const int c = t.add(type);
+        HE::UIElement& e = *t.find(c);
+        e.parentId = parent;
+        e.name = name;
+        return c;
+    }
+
+    // childrenOf as one string, which is what the expectations below read like
+    // — and what keeps a braced list of names out of a doctest macro.
+    std::string childOrder(const HE::UIWidgetTree& t, int parent)
+    {
+        std::string out;
+        for (int c : t.childrenOf(parent))
+        {
+            if (!out.empty()) out += '|';
+            out += t.find(c)->name;
+        }
+        return out;
+    }
+}
+
+TEST_CASE("moveElement: reorders within one parent, forwards and backwards")
+{
+    HE::UIWidgetTree t;
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    const int a = namedChild(t, box, "A");
+    const int b = namedChild(t, box, "B");
+    const int c = namedChild(t, box, "C");
+    CHECK(childOrder(t, box) == "A|B|C");
+
+    // Backwards: C in front of A.
+    CHECK(t.moveElement(c, box, a));
+    CHECK(childOrder(t, box) == "C|A|B");
+
+    // Forwards: C in front of B. The interesting one — the moved element sits
+    // BEFORE its target in the vector, so an index-based version would land it
+    // one place short.
+    CHECK(t.moveElement(c, box, b));
+    CHECK(childOrder(t, box) == "A|C|B");
+
+    // 0 is the end.
+    CHECK(t.moveElement(a, box, 0));
+    CHECK(childOrder(t, box) == "C|B|A");
+}
+
+TEST_CASE("moveElement: into another parent, in front of a chosen sibling")
+{
+    HE::UIWidgetTree t;
+    const int left  = t.add(HE::UIWidgetType::VerticalBox);
+    const int right = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(left)->name = "Left"; t.find(right)->name = "Right";
+    const int a = namedChild(t, left, "A");
+    namedChild(t, left, "B");
+    const int x = namedChild(t, right, "X");
+    namedChild(t, right, "Y");
+
+    CHECK(t.moveElement(a, right, x));
+    CHECK(childOrder(t, left)  == "B");
+    CHECK(childOrder(t, right) == "A|X|Y");
+    CHECK(t.find(a)->parentId == right);
+}
+
+TEST_CASE("moveElement: a sibling that is not one means the end, not a refusal")
+{
+    HE::UIWidgetTree t;
+    const int box   = t.add(HE::UIWidgetType::VerticalBox);
+    const int other = t.add(HE::UIWidgetType::VerticalBox);
+    const int a = namedChild(t, box, "A");
+    namedChild(t, box, "B");
+    const int stranger = namedChild(t, other, "Stranger");
+
+    // Pointing at a child of somebody else — the marker was aimed at a place
+    // that is not in this list — appends rather than failing.
+    CHECK(t.moveElement(a, box, stranger));
+    CHECK(childOrder(t, box) == "B|A");
+    // …and so does an id that is nothing at all.
+    CHECK(t.moveElement(a, box, 99999));
+    CHECK(childOrder(t, box) == "B|A");
+}
+
+TEST_CASE("moveElement: into an empty container, and back out to the root")
+{
+    HE::UIWidgetTree t;
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(box)->name = "Box";
+    const int loose = t.add(HE::UIWidgetType::Button);
+    t.find(loose)->name = "Loose";
+    CHECK(childOrder(t, 0) == "Box|Loose");
+
+    CHECK(t.moveElement(loose, box, 0));
+    CHECK(childOrder(t, box) == "Loose");
+    CHECK(childOrder(t, 0)   == "Box");
+
+    // Back to the canvas, in front of the box it came out of.
+    CHECK(t.moveElement(loose, 0, box));
+    CHECK(childOrder(t, 0) == "Loose|Box");
+    CHECK(t.find(loose)->parentId == 0);
+}
+
+TEST_CASE("moveElement: refuses a cycle and leaves the tree alone")
+{
+    HE::UIWidgetTree t;
+    const int outer = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(outer)->name = "Outer";
+    const int inner = namedChild(t, outer, "Inner", HE::UIWidgetType::VerticalBox);
+    const int leaf  = namedChild(t, inner, "Leaf");
+
+    CHECK_FALSE(t.moveElement(outer, inner, 0));   // into its own child
+    CHECK_FALSE(t.moveElement(outer, leaf, 0));    // …or its own grandchild
+    CHECK_FALSE(t.moveElement(outer, outer, 0));   // …or itself
+    CHECK_FALSE(t.canMoveElement(outer, inner));
+    CHECK_FALSE(t.moveElement(4242, 0, 0));        // an id that is nothing
+    CHECK(t.find(outer)->parentId == 0);
+    CHECK(childOrder(t, outer) == "Inner");
+    CHECK(childOrder(t, inner) == "Leaf");
+}
+
+TEST_CASE("moveElement: a parent that takes no children is no target")
+{
+    HE::UIWidgetTree t;
+    const int list = t.add(HE::UIWidgetType::ListView);
+    const int text = t.add(HE::UIWidgetType::Text);
+    t.find(text)->name = "Text";
+    // A List View builds its rows from its own template; an element dropped in
+    // would be one the next frame throws away.
+    CHECK_FALSE(t.canMoveElement(text, list));
+    CHECK_FALSE(t.moveElement(text, list, 0));
+    CHECK(t.find(text)->parentId == 0);
+}
+
+TEST_CASE("moveElement: the whole subtree comes along")
+{
+    HE::UIWidgetTree t;
+    const int from = t.add(HE::UIWidgetType::VerticalBox);
+    const int to   = t.add(HE::UIWidgetType::HorizontalBox);
+    const int row  = namedChild(t, from, "Row", HE::UIWidgetType::HorizontalBox);
+    namedChild(t, row, "Label", HE::UIWidgetType::Text);
+    namedChild(t, row, "Field", HE::UIWidgetType::TextInput);
+    namedChild(t, to, "Sibling");
+
+    CHECK(t.moveElement(row, to, t.childrenOf(to).front()));
+    CHECK(childOrder(t, to)  == "Row|Sibling");
+    CHECK(childOrder(t, row) == "Label|Field");
+    CHECK(childOrder(t, from).empty());
+}
+
+TEST_CASE("moveElement: a Tab Box still shows the page it was showing")
+{
+    HE::UIWidgetTree t;
+    const int tabs = t.add(HE::UIWidgetType::TabBox);
+    const int p1 = namedChild(t, tabs, "One");
+    const int p2 = namedChild(t, tabs, "Two");
+    const int p3 = namedChild(t, tabs, "Three");
+    auto& tb = static_cast<HE::UITabBox&>(*t.find(tabs));
+    tb.activeTab = 2;                                  // "Three" is up
+
+    // Dragging the LAST page to the front renumbers everything behind it.
+    CHECK(t.moveElement(p3, tabs, p1));
+    CHECK(childOrder(t, tabs) == "Three|One|Two");
+    CHECK(tb.activeTab == 0);
+    CHECK_FALSE(t.find(tabs)->hidesChild(t, *t.find(p3)));
+    CHECK(t.find(tabs)->hidesChild(t, *t.find(p1)));
+
+    // The page that is up leaving the box clamps rather than jumping to 0.
+    tb.activeTab = 2;                                  // "Two", the last one
+    CHECK(t.moveElement(p2, 0, 0));
+    CHECK(tb.activeTab == 1);                          // two pages left: 0 and 1
+}
+
+TEST_CASE("moveElement: an Accordion keeps the same sections open")
+{
+    HE::UIWidgetTree t;
+    const int acc = t.add(HE::UIWidgetType::Accordion);
+    const int s1 = namedChild(t, acc, "One");
+    const int s2 = namedChild(t, acc, "Two");
+    const int s3 = namedChild(t, acc, "Three");
+    auto& ac = static_cast<HE::UIAccordion&>(*t.find(acc));
+    ac.allowMultiple = true;
+    ac.expanded = 0b101;                               // "One" and "Three" open
+
+    CHECK(t.moveElement(s3, acc, s1));                 // Three, One, Two
+    CHECK(childOrder(t, acc) == "Three|One|Two");
+    CHECK(ac.expanded == 0b011);                       // …still Three and One
+    CHECK_FALSE(t.find(acc)->hidesChild(t, *t.find(s1)));
+    CHECK_FALSE(t.find(acc)->hidesChild(t, *t.find(s3)));
+    CHECK(t.find(acc)->hidesChild(t, *t.find(s2)));
+
+    // A section dragged in from outside arrives closed: a body that unfolds
+    // itself on a drop is a stack that jumps.
+    const int outside = t.add(HE::UIWidgetType::Panel);
+    t.find(outside)->name = "Newcomer";
+    CHECK(t.moveElement(outside, acc, s3));
+    CHECK(t.find(acc)->hidesChild(t, *t.find(outside)));
+    CHECK_FALSE(t.find(acc)->hidesChild(t, *t.find(s3)));
+    CHECK_FALSE(t.find(acc)->hidesChild(t, *t.find(s1)));
+}
+
+TEST_CASE("moveElement: swapping a Splitter's children swaps its panes")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1000.0f; t.canvasHeight = 1000.0f;
+    const int sp = t.add(HE::UIWidgetType::Splitter);
+    HE::UIElement& s = *t.find(sp);
+    HE::uiSetAnchorPreset(s, 0);
+    s.pivotX = s.pivotY = 0.0f;
+    s.posX = 0.0f; s.posY = 0.0f; s.sizeX = 400.0f; s.sizeY = 300.0f;
+    const int first  = namedChild(t, sp, "First");
+    const int second = namedChild(t, sp, "Second");
+
+    CHECK(HE::uiElementRect(t, *t.find(first)).x <
+          HE::uiElementRect(t, *t.find(second)).x);
+    CHECK(t.moveElement(second, sp, first));
+    // Pane order IS child order here, so the swap is the whole point — nothing
+    // to preserve, unlike the Tab Box above.
+    CHECK(HE::uiElementRect(t, *t.find(second)).x <
+          HE::uiElementRect(t, *t.find(first)).x);
+}
+
+TEST_CASE("moveElement: the new order survives the JSON round trip")
+{
+    // Which is what makes undo work: the designer's history is whole-tree
+    // snapshots, so an order that does not come back out of the file is an
+    // order that Ctrl+Z destroys.
+    HE::UIWidgetTree t;
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(box)->name = "Box";
+    namedChild(t, box, "A");
+    namedChild(t, box, "B");
+    const int c = namedChild(t, box, "C");
+    REQUIRE(t.moveElement(c, box, t.childrenOf(box).front()));
+
+    HE::UIWidgetTree round;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), round));
+    const int rbox = round.childrenOf(0).front();
+    CHECK(childOrder(round, rbox) == "C|A|B");
+}
+
+TEST_CASE("moveElement: the order really moves the pixels")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f,
+                                    /*padding=*/10.0f, /*spacing=*/5.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    REQUIRE(kids.size() == 3);
+    const int last = kids[2];
+    CHECK(HE::uiElementRect(t, *t.find(last)).y == doctest::Approx(120.0f));
+
+    // Dropped in front of the first, it takes the first slot and pushes the
+    // other two down — the whole reason a place in the hierarchy is worth a
+    // gesture.
+    REQUIRE(t.moveElement(last, box, kids[0]));
+    CHECK(HE::uiElementRect(t, *t.find(last)).y    == doctest::Approx(10.0f));
+    CHECK(HE::uiElementRect(t, *t.find(kids[0])).y == doctest::Approx(65.0f));
+    CHECK(HE::uiElementRect(t, *t.find(kids[1])).y == doctest::Approx(120.0f));
+}
