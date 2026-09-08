@@ -30,6 +30,7 @@ Usage:
                               [--flavor app-basic]
                               [--build-type Release] [--jobs N]
                               [--deploy-dir DIR] [--build-root DIR]
+                              [--source-tree DIR ...]
                               [--define NAME=VALUE ...]
                               [--configure-only] [--size]
 
@@ -98,16 +99,25 @@ def find_generator():
     return []
 
 
-def existing_sources(build_root=None):
+def existing_sources(build_root=None, source_trees=None):
     """-DFETCHCONTENT_SOURCE_DIR_<PKG> for every dependency already checked out.
 
     A dev box has a build tree to borrow from; a CI runner starts with none, and
     there the first flavour of the run becomes the one the next two borrow from.
     That is why build_root is searched as well: without it, a three-flavour run
     clones SDL, Jolt and Recast three times over for nothing.
+
+    The guessed names below (cmake-build-release, cmake-build-debug) are the ones
+    CLion makes. A CI job that has already built the editor has its checkout
+    somewhere else entirely — ci.yml calls its tree `build` — and there is no
+    list of names that covers every caller. `source_trees` is that caller saying
+    where it is, and it goes FIRST: an explicitly named tree beats a guessed one.
+    Each entry is a build tree that CONTAINS a `_deps` (not a root of several,
+    which is what --build-root is).
     """
-    trees = [os.path.join(REPO, "cmake-build-release"),
-             os.path.join(REPO, "cmake-build-debug")]
+    trees = list(source_trees or [])
+    trees += [os.path.join(REPO, "cmake-build-release"),
+              os.path.join(REPO, "cmake-build-debug")]
     if build_root and os.path.isdir(build_root):
         trees += [os.path.join(build_root, d)
                   for d in sorted(os.listdir(build_root))]
@@ -139,7 +149,7 @@ def build(flavor, args):
                  # they link the editor-side tools this flavour deliberately drops.
                  "-DHE_BUILD_TESTS=OFF"]
     configure += [f"-D{d}" for d in args.define]
-    configure += find_generator() + existing_sources(args.build_root)
+    configure += find_generator() + existing_sources(args.build_root, args.source_tree)
     if subprocess.call(configure) != 0:
         print(f"build_runtimes: configure failed for {flavor}", file=sys.stderr)
         return False
@@ -175,6 +185,12 @@ def main(argv):
     p.add_argument("--jobs", type=int, default=0)
     p.add_argument("--deploy-dir", default=os.path.join(REPO, "out", "deploy"))
     p.add_argument("--build-root", default=os.path.join(REPO, "out", "runtime-builds"))
+    p.add_argument("--source-tree", action="append", default=[], metavar="DIR",
+                   help="repeatable; an existing build tree holding a _deps to "
+                        "borrow the FetchContent SOURCES from, searched before "
+                        "the guessed cmake-build-* names. A CI job that already "
+                        "built the editor passes its tree here so the flavour "
+                        "builds do not re-clone SDL, Jolt and Recast")
     p.add_argument("--define", action="append", default=[])
     p.add_argument("--configure-only", action="store_true")
     p.add_argument("--size", action="store_true",
