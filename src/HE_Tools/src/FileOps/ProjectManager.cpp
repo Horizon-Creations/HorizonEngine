@@ -1518,6 +1518,13 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// Absent means bold, which is what every project written before this was
 	// getting. New projects say false explicitly (see the template below).
 	m_currentProject.fontWeightBold = jsonBool(j, "fontWeightBold", true);
+	// Absent means the default matrix: everything collides, which is exactly how
+	// a project written before channels existed simulated. The block is written
+	// only once something was changed (see saveProject), so absence is the
+	// COMMON case and has to be the harmless one.
+	m_currentProject.collisionLayers = HE::CollisionLayerConfig{};
+	if (j.contains("collisionLayers") && j["collisionLayers"].is_object())
+		m_currentProject.collisionLayers.fromJson(j["collisionLayers"]);
 	// The application's identity. Absent icon name means NO icon, not a default
 	// one: a project written before this field existed shipped without an icon,
 	// and filling the gap here would put a generated "widgets" plate on the next
@@ -1618,6 +1625,15 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["allowNetwork"]          = m_currentProject.allowNetwork;
 	j["fontScripts"]           = m_currentProject.fontScripts;
 	j["fontWeightBold"]        = m_currentProject.fontWeightBold;
+	// Only once the matrix was actually touched, like theme/bundleId above: a
+	// default config would write a key that says "everything collides", which is
+	// what its absence already says, into every .heproj in existence.
+	if (!m_currentProject.collisionLayers.isDefault())
+	{
+		json layers = json::object();
+		m_currentProject.collisionLayers.toJson(layers);
+		j["collisionLayers"] = std::move(layers);
+	}
 	j["appIconName"]           = m_currentProject.appIconName;
 	j["appIconColor"]          = m_currentProject.appIconColor;
 	j["appVersion"]            = m_currentProject.appVersion;

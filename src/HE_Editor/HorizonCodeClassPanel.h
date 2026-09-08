@@ -41,4 +41,28 @@ namespace HorizonCodeClassPanel
 	// owner answers" dispatch as save() and reloadFromDisk().
 	CollabDocSync::DocBindings collabDocs(const std::string& assetPath);
 
+	// ── Authoring a class from outside the editor (McpToolRegistry.h) ────────
+	// The same state collabDocs wraps, handed out raw so the MCP tools can edit
+	// it. Null unless this panel already HOLDS the asset, which is the point: a
+	// class asset loaded behind the panel's back would be a second copy, and the
+	// human's next Save from the tab would write over everything MCP did to it.
+	// The caller does not load one — it asks for what is open and reports the
+	// rest as not addressable.
+	//
+	// These four take the CONTENT-RELATIVE path, not the tab key the functions
+	// above take: that is the address every other MCP tool uses, and a full
+	// filesystem path on that interface would put the user's home directory into
+	// a conversation for no gain.
+	HorizonCode::Graph* liveGraph(const std::string& contentPath);
+	// This tab has unsaved edits (an MCP edit is an edit; without this the tab
+	// shows no "*" and save() above refuses, believing it has nothing to write).
+	void markDirty(const std::string& contentPath);
+	// Every loaded class this panel holds, open or closed — what is addressable
+	// at all. Dirty comes along because the caller wants both and asking twice
+	// would mean scanning the map twice with a second path convention.
+	struct Held { std::string contentPath; bool dirty = false; };
+	void appendHeld(std::vector<Held>& out);
+	// save(), addressed the same way. True when the write went through.
+	bool saveByContentPath(AppContext& ctx, const std::string& contentPath);
+
 }

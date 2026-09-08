@@ -71,6 +71,11 @@ add_executable(he_tests
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
     test_animationsystem.cpp
+    test_root_motion.cpp
+    test_animation_notify.cpp
+    test_animation_layers.cpp
+    test_blend_space.cpp
+    test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
     test_ui.cpp
@@ -117,6 +122,11 @@ add_executable(he_tests
     test_net_collab.cpp
     test_collab_controller.cpp
     test_collab_undo.cpp
+    test_editor_commands.cpp
+    test_mcp_bridge.cpp
+    test_mcp_tools_entity.cpp
+    test_mcp_hc.cpp
+    test_mcp_api.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -144,6 +154,37 @@ add_executable(he_tests
     # thing about "Schicht 0" that used to need a GPU and a pair of eyes.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRaster.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
+    # The single door every scene change goes through — the UI's structural
+    # commands, a peer's edit and, later, an external MCP client. It is
+    # deliberately free of ImGui and of EditorApplication (which is NOT in this
+    # binary), which is what lets the question the gateway exists to answer —
+    # "does undo put the world back exactly as it was, whoever asked" — be
+    # answered here rather than by hand in front of a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCommands.cpp
+    # The MCP bridge and its tool registry. Compiled in for the same reason as
+    # the gateway above: the interesting questions — does an unauthenticated
+    # caller get dropped, does the endpoint file carry the token at 0600, does a
+    # fifth connection get refused — are about a real socket and a real file, and
+    # neither needs a window. EditorApplication is NOT in this binary, which is
+    # exactly why the bridge takes its editor state as hooks.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpBridge.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolRegistry.cpp
+    # The entity tools. In here for the reason they were written this way at all:
+    # they take an EditorCommands reference and nothing else from the editor, so
+    # "does entity_set_transform actually move the entity, and does undo put it
+    # back" is a question this binary can answer.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsEntity.cpp
+    # The HorizonCode authoring tools, in here for the same reason: they take the
+    # documents as hooks and a graph is a value, so "does a connect by pin LABEL
+    # land on the pin the client meant" and "does an edit through these tools
+    # come out of the collab diff as exactly one delta" are both answerable
+    # against a HorizonCode::Graph on the stack, with no panel and no window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsHc.cpp
+    # The engine API as tools. In here because the file is generated FROM a
+    # table: "does every row of HE::api::registry() turn into a tool with a
+    # legal name and a schema that matches its signature" is a question about
+    # two data structures, and the answer must not depend on a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsApi.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.

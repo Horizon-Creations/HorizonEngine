@@ -3,9 +3,14 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include "AnimationEval.h"
+#include "RootMotionApply.h"
+#include "PoseFinalize.h"
+#include "PoseSource.h"
+#include "NotifyCollect.h"
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
@@ -74,6 +79,10 @@ void resolveConfigIfNeeded(AnimatorStateMachineComponent& sm, ContentManager& cm
     sm.resolvedGraph       = graph;
     sm.resolvedFromAssetId = sm.stateMachineAssetId;
     sm.configDirty         = false;
+    // The parsed blend spaces belonged to the graph that just went away. Keeping
+    // them would mean a state whose blendSpaceId was just repointed still posing
+    // from the old space for as long as the entity lives.
+    sm.blendSpaces.clear();
 
     // Seed live params from the graph's defaults (only newly-appeared keys —
     // an in-flight edit shouldn't clobber a param a script already tweaked at
@@ -115,7 +124,8 @@ bool evalTransition(const AnimatorStateMachineComponent& sm, const HE::Animation
 void AnimationStateMachineSystem::markConfigDirty(AnimatorStateMachineComponent& sm) { sm.configDirty = true; }
 
 void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
-                                         AnimatorHost* sync)
+                                         AnimatorHost* sync, HE::RootMotionContext* rootMotion,
+                                         HE::NotifyQueue* notifies)
 {
     auto& reg  = world.registry();
     auto  view = reg.view<AnimatorStateMachineComponent, SkeletalMeshComponent>();
@@ -155,25 +165,42 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             continue;
         }
 
-        const AnimationClipAsset* curClip = cm.getAnimationClip(curState->clipId);
-        if (!curClip)
+        // One clip or a whole blend space, behind one interface — the state
+        // machine below never asks which. A state that has both keeps the blend
+        // space; see HE::makePoseSource.
+        const HE::PoseSource curSrc = HE::makePoseSource(cm, sm.blendSpaces, curState->clipId,
+                                                         curState->blendSpaceId, &sm.params);
+        if (!curSrc.valid())
             HE_LOG_THROTTLE(Animation, Warning, 5.0,
-                            "Entity %u: state '%s' references a missing animation clip — "
+                            "Entity %u: state '%s' has no usable pose source (%s) — "
                             "the pose will not advance",
-                            static_cast<uint32_t>(e), curState->name.c_str());
+                            static_cast<uint32_t>(e), curState->name.c_str(),
+                            curSrc.space ? "every blend-space sample is missing its clip"
+                                         : "missing or empty animation clip");
 
-        // Advance current clip time
-        if (curClip && curClip->duration > 0.0f)
+        const bool  curLooping = curSrc.looping(curState->looping);
+        const float curPeriod  = curSrc.period();
+
+        // A crossfade has TWO playheads, and each one needs the position it had
+        // BEFORE this frame's advance. Captured per playhead, not per entity —
+        // that distinction is the whole reason this is not one variable.
+        const float outPrev = sm.clipTime;
+        // In the playhead's own unit: seconds for a clip (rate 1), laps of the
+        // shared phase for a blend space (rate 1/weightedDuration).
+        const float step    = dt * sm.playbackSpeed * curSrc.rate();
+
+        // Advance the outgoing playhead
+        if (curSrc.valid() && curPeriod > 0.0f)
         {
-            sm.clipTime += dt * sm.playbackSpeed;
-            if (curState->looping)
+            sm.clipTime += step;
+            if (curLooping)
             {
-                sm.clipTime = std::fmod(sm.clipTime, curClip->duration);
-                if (sm.clipTime < 0.0f) sm.clipTime += curClip->duration;
+                sm.clipTime = std::fmod(sm.clipTime, curPeriod);
+                if (sm.clipTime < 0.0f) sm.clipTime += curPeriod;
             }
             else
             {
-                sm.clipTime = std::min(sm.clipTime, curClip->duration);
+                sm.clipTime = std::min(sm.clipTime, curPeriod);
             }
         }
 
@@ -192,19 +219,52 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                 sm.transitionTarget   = t.toState;
                 sm.transitionElapsed  = 0.0f;
                 sm.transitionDuration = t.duration;
+                // The incoming playhead is being set back to 0, so it gets a
+                // fresh first frame — and a notify on the incoming clip's frame 0
+                // is exactly what "the attack starts here" is written as.
+                sm.transitionNotifiesPrimed = false;
+                // A transition INTO a state starts that state at its beginning —
+                // second 0 for a clip, phase 0 for a blend space. The plan calls
+                // this out for blend spaces specifically; it was always true, it
+                // just used to be spelled `transitionElapsed = 0`.
+                sm.transitionPlayhead = 0.0f;
                 break;
             }
         }
 
-        // Advance crossfade
+        // Advance the crossfade CLOCK — seconds, and only seconds. It used to
+        // double as the incoming playhead, which works only as long as every
+        // state is a clip: a blend space's playhead is a phase advancing at
+        // 1/weightedDuration, and that duration moves while the parameters move.
+        //
+        // inPrev is read here and not earlier on purpose: a transition that
+        // STARTED above set transitionPlayhead to 0, and 0 is exactly where its
+        // incoming playhead's first span begins.
+        const float inPrev = sm.transitionPlayhead;
         if (sm.inTransition)
             sm.transitionElapsed += dt * sm.playbackSpeed;
 
-        // Sample outgoing clip
+        // The crossfade weight, needed before the pose branch below because BOTH
+        // playheads' notify collection has to agree on which of them is the one
+        // that fires. Outside a transition the outgoing playhead is the only one
+        // there is, so it always wins.
+        const float notifyAlpha = sm.inTransition
+            ? std::min(sm.transitionElapsed / sm.transitionDuration, 1.0f) : 0.0f;
+        const bool  outFires = !sm.inTransition || notifyAlpha < HE::kNotifyDominanceAlpha;
+
+        // The outgoing playhead: pose, root motion and notifies in one call. They
+        // are one call because a blend space cannot separate them — every sample's
+        // root has to come out of ITS OWN pose before the N-way mix, exactly as
+        // each side of a crossfade is locked before blendTRS.
         const size_t jointCount = mesh->skeleton.size();
+        auto* rmc = reg.try_get<RootMotionComponent>(e);
+
         std::vector<JointTRS> trsOut(jointCount);
-        if (curClip && curClip->duration > 0.0f)
-            sampleClip(*curClip, sm.clipTime, trsOut);
+        HE::RootMotionDelta   deltaOut;
+        bool                  haveOut = false;
+        curSrc.evaluate(e, *mesh, curLooping, outPrev, outPrev + step, sm.clipTime,
+                        rmc, outFires, sm.clipNotifiesPrimed, notifies,
+                        trsOut, deltaOut, haveOut);
 
         std::vector<JointTRS> final_trs;
 
@@ -219,18 +279,52 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                                 "Entity %u: transition targets state '%s', which does not "
                                 "exist in the graph — the crossfade blends to nothing",
                                 static_cast<uint32_t>(e), sm.transitionTarget.c_str());
-            const AnimationClipAsset* nextClip = nextState ? cm.getAnimationClip(nextState->clipId) : nullptr;
+            const HE::PoseSource inSrc = nextState
+                ? HE::makePoseSource(cm, sm.blendSpaces, nextState->clipId,
+                                     nextState->blendSpaceId, &sm.params)
+                : HE::PoseSource{};
+            const bool inLooping = nextState ? inSrc.looping(nextState->looping) : true;
 
             std::vector<JointTRS> trsIn(jointCount);
-            if (nextClip && nextClip->duration > 0.0f)
+            HE::RootMotionDelta deltaIn;
+            bool haveIn = false;
+            // The incoming playhead runs at ITS OWN rate, not the outgoing one's:
+            // fading from a clip into a blend space, one side counts seconds and
+            // the other counts phase, and `step` is only ever right for one of them.
+            const float inPeriod = inSrc.period();
+            const float inStep   = dt * sm.playbackSpeed * inSrc.rate();
+            if (inSrc.valid() && inPeriod > 0.0f)
             {
-                float inTime = sm.transitionElapsed;
-                if (nextState->looping)
-                    inTime = std::fmod(inTime, nextClip->duration);
+                sm.transitionPlayhead = inPrev + inStep;
+
+                float inTime = sm.transitionPlayhead;
+                float inFrom = inPrev;
+                if (inLooping)
+                {
+                    inTime = std::fmod(inTime, inPeriod);
+                    inFrom = std::fmod(inFrom, inPeriod);
+                }
                 else
-                    inTime = std::min(inTime, nextClip->duration);
-                sampleClip(*nextClip, inTime, trsIn);
+                {
+                    inTime = std::min(inTime, inPeriod);
+                    inFrom = std::min(inFrom, inPeriod);
+                }
+
+                // Pose, root motion and notifies for the incoming side. It is
+                // walked past even while it is the lighter half — that is what
+                // stops it from holding its first frame back and firing it the
+                // instant the weight tips over.
+                inSrc.evaluate(e, *mesh, inLooping, inFrom, inFrom + inStep, inTime,
+                               rmc, !outFires, sm.transitionNotifiesPrimed, notifies,
+                               trsIn, deltaIn, haveIn);
             }
+
+            // Both deltas, mixed with the alpha that mixes the pose. Letting only
+            // the heavier one through would make the character jump forward the
+            // moment the weight tipped over.
+            if (haveOut || haveIn)
+                HE::rootMotionApply(world, rootMotion, e, *rmc,
+                                    HE::blendRootMotion(deltaOut, deltaIn, alpha), dt);
 
             blendTRS(trsOut, trsIn, alpha, final_trs);
 
@@ -238,17 +332,48 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
             if (sm.transitionElapsed >= sm.transitionDuration)
             {
                 sm.currentStateName  = sm.transitionTarget;
-                sm.clipTime          = sm.transitionElapsed;
-                sm.inTransition      = false;
-                sm.transitionElapsed = 0.0f;
+                // The incoming playhead becomes the outgoing one, in whatever
+                // unit it was already counting. Wrapped the same way it was
+                // sampled: a crossfade longer than the cycle it fades INTO leaves
+                // a playhead past the end, and the pose is wrapped a line later
+                // anyway — but root motion reads this value BEFORE that wrap and
+                // would spend one frame with a span pinned to the end.
+                sm.clipTime = sm.transitionPlayhead;
+                if (inPeriod > 0.0f)
+                {
+                    if (inLooping)
+                    {
+                        sm.clipTime = std::fmod(sm.clipTime, inPeriod);
+                        if (sm.clipTime < 0.0f) sm.clipTime += inPeriod;
+                    }
+                    else
+                    {
+                        sm.clipTime = std::min(sm.clipTime, inPeriod);
+                    }
+                }
+                sm.inTransition       = false;
+                sm.transitionElapsed  = 0.0f;
+                sm.transitionPlayhead = 0.0f;
+                // The incoming playhead just became the outgoing one, so its
+                // priming travels with it — exactly as transitionElapsed travels
+                // onto clipTime a few lines up. Without this the surviving
+                // playhead would look fresh again and fire its frame-0 notify a
+                // second time in the frame the crossfade ends.
+                sm.clipNotifiesPrimed = sm.transitionNotifiesPrimed;
             }
         }
         else
         {
+            if (haveOut) HE::rootMotionApply(world, rootMotion, e, *rmc, deltaOut, dt);
             final_trs = std::move(trsOut);
         }
 
-        composeBoneMatrices(*mesh, final_trs, smc.boneMatrices);
-        smc.dirty = true;
+        // Layer stack (if any) → FK → IBM. AFTER the crossfade, not before it: a
+        // layer is laid on a finished result — a reload on the upper body holds
+        // against whatever the legs are doing, idle, run or the blend between
+        // them. A layer applied before the crossfade would be mixed straight back
+        // out again. And after rootMotionApply, so it cannot write back the root
+        // translation that was just taken out.
+        HE::poseFinalize(world, cm, dt, e, *mesh, final_trs, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
     }
 }

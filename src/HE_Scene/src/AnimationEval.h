@@ -2,17 +2,11 @@
 // Internal header: shared between the animation systems (clip, blend, state
 // machine, property). Not part of the public include path.
 #include <ContentManager/Assets.h>
+#include <HorizonScene/AnimationPose.h>   // JointTRS + blendTRS (public: preview and tests need them)
+#include <HorizonScene/RootMotion.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
-
-// Per-joint local transform (before FK + IBM).
-struct JointTRS
-{
-    glm::vec3 translation = glm::vec3(0.0f);
-    glm::quat rotation    = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z identity
-    glm::vec3 scale       = glm::vec3(1.0f);
-};
 
 // Advance a playhead by dt and wrap/stop it — the shared rule of the clip, blend
 // and property animators (the state machine's playhead has no `playing` flag and
@@ -24,6 +18,11 @@ struct JointTRS
 void advancePlayback(float& playbackTime, bool& playing,
                      float playbackSpeed, bool looping, float duration, float dt);
 
+// Sample ONE joint's channels at time t. The root-motion helpers need the root at
+// an arbitrary time (both ends of a span, plus frame 0) and paying for the whole
+// skeleton three times per frame to get it would be silly.
+JointTRS sampleJoint(const AnimationClipAsset& clip, uint32_t jointIndex, float t);
+
 // Sample all channels of clip at time t, writing one JointTRS per joint into localTRS.
 // localTRS must already be sized to the skeleton joint count (filled with defaults).
 void sampleClip(const AnimationClipAsset& clip, float t, std::vector<JointTRS>& localTRS);
@@ -34,9 +33,12 @@ void composeBoneMatrices(const SkeletalMeshAsset& mesh,
                          const std::vector<JointTRS>& localTRS,
                          std::vector<glm::mat4>&       boneMatrices);
 
-// Per-joint linear blend between two TRS sets: lerp translation + scale, slerp rotation.
-// out is resized to min(a.size(), b.size()).
-void blendTRS(const std::vector<JointTRS>& a,
-              const std::vector<JointTRS>& b,
-              float                        alpha,
-              std::vector<JointTRS>&       out);
+// Neutralise the root joint in an already-sampled pose, so the motion that was
+// just extracted is not ALSO still in the mesh. Only what `opt` extracts is
+// locked. No-op for rootJoint < 0.
+//
+// Call it per clip, BEFORE any blend: each clip's own root motion has to come out
+// against its own first frame, and a blended pose no longer knows which clip it
+// came from.
+void lockRootJoint(std::vector<JointTRS>& localTRS, int rootJoint,
+                   const AnimationClipAsset& clip, const HE::RootMotionOptions& opt);

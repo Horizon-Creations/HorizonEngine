@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/Defines.h>
+#include <Physics/CollisionLayers.h>
 #include <string>
 #include <filesystem>
 #include <cstdint>
@@ -92,6 +93,18 @@ struct HE_API ProjectConfig {
     // derives to, because filling it pushes the file to v5 and an older runtime
     // bundle rejects every version it does not know (see the writer).
     std::string  bundleId;
+
+    // The project's collision matrix — which of the sixteen named channels may
+    // touch which. Handed to PhysicsWorld::setCollisionLayers once at start
+    // (GameApplication), the same value the editor simulates with.
+    //
+    // Default-constructed means "everything collides", which is what this engine
+    // did before channels existed AND what a build written before this field
+    // existed has to keep meaning. That is why the writer leaves the whole tail
+    // out for a default config (see isDefault()): a project that never touched
+    // layers keeps emitting the file version it emitted before, and an older
+    // runtime bundle beside it still boots.
+    HE::CollisionLayerConfig collisionLayers;
 };
 
 class HE_API ProjectConfigLoader {

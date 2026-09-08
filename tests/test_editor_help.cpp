@@ -4,6 +4,7 @@
 #include "EditorHelp.h"
 #include "EditorGuides.h"
 #include "EditorReference.h"
+#include "HcNodeReference.h"   // the guides link into the generated node reference
 #include "EditorWidgets.h"
 
 #include <imgui.h>
@@ -663,4 +664,68 @@ TEST_CASE("guides: every recipe is installed and findable by search")
 	CHECK_MESSAGE(findsGuide("navmesh"), "no guide found for \"navmesh\"");
 	CHECK_MESSAGE(findsGuide("jump"),    "no guide found for \"jump\"");
 	CHECK_MESSAGE(findsGuide("trigger"), "no guide found for \"trigger\"");
+	// The recipes that came with layers, blend spaces and IK. Named one by one
+	// rather than counted: the point of the assertion is that the words a reader
+	// would type for THESE topics land on them, and a count would still pass
+	// after somebody deleted the page and left the others.
+	CHECK_MESSAGE(findsGuide("blend space"), "no guide found for \"blend space\"");
+	CHECK_MESSAGE(findsGuide("bone mask"),   "no guide found for \"bone mask\"");
+	CHECK_MESSAGE(findsGuide("kinematics"),  "no guide found for \"kinematics\"");
+}
+
+// ── Cross-links out of a guide ───────────────────────────────────────────────
+// The bundle's own links are checked in test_docs_library.cpp; the guides are
+// built in C++ and were not covered by anything. A guide that points at a page
+// id which does not exist is a dead end in the reader — and unlike a browser,
+// there is no address bar to get back from one.
+//
+// This runs against the FULL library the panel assembles, in DocsPanel's order:
+// bundle, then the node reference, then the control reference, then the guides.
+// All four are needed — a guide legitimately links into the website manual AND
+// into the two GENERATED reference pages, which are not in the bundle at all, so
+// a library without them would fail this on links that work in the editor.
+TEST_CASE("guides: every link out of a recipe lands somewhere")
+{
+	Docs::Library lib = shipped();
+	REQUIRE_MESSAGE(lib.loaded(), lib.error());
+	HE::Ed::NodeReference::install(lib);
+	HE::Ed::EditorReference::install(lib);
+	HE::Ed::Guides::install(lib);
+
+	const std::vector<std::string>& ids = HE::Ed::Guides::pageIds();
+	REQUIRE_FALSE(ids.empty());
+
+	int checked = 0;
+	auto checkRuns = [&](const std::vector<Docs::Run>& runs) {
+		for (const Docs::Run& r : runs)
+		{
+			if (r.style != Docs::Style::Link || r.href.empty()) continue;
+			if (r.href.rfind("http", 0) == 0 || r.href.rfind("mailto:", 0) == 0) continue;
+			if (r.href[0] == '#') continue;   // same-page anchor
+			int page = -1, section = -1;
+			CHECK_MESSAGE(lib.resolve(r.href, page, section),
+			              "dangling guide link: ", r.href);
+			++checked;
+		}
+	};
+	// Callouts hold blocks, so this walks rather than iterating — a link inside
+	// a tip or a warning is still a link.
+	auto walk = [&](auto&& self, const Docs::Block& b) -> void {
+		checkRuns(b.runs);
+		for (const Docs::Cell& c : b.items) checkRuns(c);
+		for (const Docs::Cell& c : b.head)  checkRuns(c);
+		for (const Docs::Cells& row : b.rows)
+			for (const Docs::Cell& c : row) checkRuns(c);
+		for (const Docs::Block& inner : b.blocks) self(self, inner);
+	};
+
+	for (const std::string& id : ids)
+	{
+		const int pi = lib.pageIndex(id);
+		REQUIRE(pi >= 0);
+		for (const Docs::Section& s : lib.pages()[static_cast<std::size_t>(pi)].sections)
+			for (const Docs::Block& b : s.blocks) walk(walk, b);
+	}
+	INFO("guide links checked: " << checked);
+	CHECK(checked > 0);
 }

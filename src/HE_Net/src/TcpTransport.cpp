@@ -50,6 +50,28 @@ std::unique_ptr<TcpTransport> TcpTransport::listen(std::uint16_t port) {
     return t;
 }
 
+std::unique_ptr<TcpTransport> TcpTransport::listenLoopback(std::uint16_t port) {
+    // The opposite trade-off from listen(): reachability is not wanted here,
+    // it is the thing being prevented.
+    SocketHandle s = socketCreateListenerLoopback(port);
+    if (s == kInvalidSocket) {
+        HE_LOG_ERROR(Net, "TCP loopback listen on port %u failed",
+                     static_cast<unsigned>(port));
+        return nullptr;
+    }
+
+    std::unique_ptr<TcpTransport> t(new TcpTransport());
+    t->m_listener  = s;
+    t->m_boundPort = socketBoundPort(s);
+    HE_LOG_INFO(Net, "TCP listening on 127.0.0.1:%u (requested %u, loopback only)",
+                static_cast<unsigned>(t->m_boundPort), static_cast<unsigned>(port));
+    return t;
+}
+
+void TcpTransport::setMaxFrameSize(std::uint32_t bytes) {
+    m_maxFrameSize = (bytes == 0 || bytes > kMaxFrameSize) ? kMaxFrameSize : bytes;
+}
+
 std::unique_ptr<TcpTransport> TcpTransport::connect(const std::string& host,
                                                     std::uint16_t port) {
     // Resolves the destination first and then creates a socket of the matching
@@ -222,7 +244,7 @@ void TcpTransport::extractFrames(ConnectionId id, Conn& c) {
     while (c.alive && c.inBuf.size() - offset >= kFrameHeaderSize) {
         const std::uint32_t len = readLengthPrefix(c.inBuf.data() + offset);
 
-        if (len > kMaxFrameSize) {
+        if (len > m_maxFrameSize) {
             // Corrupt or hostile prefix — never allocate what the peer claims.
             // Warning rather than Error: refusing it is the system working as
             // designed, but it is never normal, so it must be visible.
@@ -230,7 +252,7 @@ void TcpTransport::extractFrames(ConnectionId id, Conn& c) {
                         "TCP frame prefix claims %s (limit %s) on conn %llu — corrupt "
                         "stream or hostile peer; dropping connection",
                         detail::logBytes(len).c_str(),
-                        detail::logBytes(kMaxFrameSize).c_str(),
+                        detail::logBytes(m_maxFrameSize).c_str(),
                         static_cast<unsigned long long>(id));
             c.inBuf.clear();
             dropConnection(id, c, /*notify=*/true);
@@ -310,10 +332,10 @@ void TcpTransport::send(ConnectionId conn, const std::uint8_t* data,
                      detail::logBytes(len).c_str());
         return;
     }
-    if (len > kMaxFrameSize) {
+    if (len > m_maxFrameSize) {
         HE_LOG_ERROR(Net, "TCP send refused: %s exceeds the %s frame limit (conn %llu)",
                      detail::logBytes(len).c_str(),
-                     detail::logBytes(kMaxFrameSize).c_str(),
+                     detail::logBytes(m_maxFrameSize).c_str(),
                      static_cast<unsigned long long>(conn));
         return;   // refuse to emit what a peer must reject
     }

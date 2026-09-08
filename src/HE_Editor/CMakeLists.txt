@@ -101,6 +101,24 @@ add_executable(HorizonEditor WIN32
 	main.cpp
 	EditorApplication.cpp
 	EditorUndo.cpp
+	EditorCommands.cpp
+	# The local listener external MCP clients talk to, and the closed list of
+	# what they may ask for. Both are ImGui- and EditorApplication-free, so the
+	# handshake is covered over a real socket in the test binary.
+	McpBridge.cpp
+	McpToolRegistry.cpp
+	# The tools that place and move objects. Separate from the registry because
+	# they are the first ones with a scene behind them: everything here goes
+	# through EditorCommands rather than touching the world.
+	McpToolsEntity.cpp
+	# The HorizonCode authoring tools. Same shape one layer over: they take the
+	# documents as hooks and apply every item through the CollabDocSync adapter,
+	# so nothing here writes into a graph by hand either.
+	McpToolsHc.cpp
+	# The engine's own API as tools, generated from HE::api::registry() rather
+	# than written out — the sixth reader of that table after Lua, Python, the
+	# add menu, the node reference and the palette.
+	McpToolsApi.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp
@@ -113,6 +131,8 @@ add_executable(HorizonEditor WIN32
 	InputMappingModel.cpp
 	TypeAssetPanel.cpp
 	ThemeAssetPanel.cpp
+	BoneMaskPanel.cpp
+	BlendSpacePanel.cpp
 	SkeletalMeshEditorPanel.cpp
 	StaticMeshEditorPanel.cpp
 	ParticleGraphEditorPanel.cpp
@@ -162,6 +182,7 @@ add_executable(HorizonEditor WIN32
 	CollabPresenceBar.cpp
 	CollabUndo.cpp
 	EngineContentSyncBar.cpp
+	McpStatusBar.cpp
 	EngineContentPublishDialog.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp

@@ -15,6 +15,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
@@ -578,31 +579,117 @@ void setWorldPosition(Ctx& c, Entity e, const glm::vec3& p)
 
 // ── Physics ──────────────────────────────────────────────────────────────────
 namespace physics {
+// One conversion for all four cast entries. ScriptApi::RaycastResult does not
+// carry the channel and cannot grow one — it is the shape the flat Lua/Python
+// bindings return, and those are frozen (adding a field there changes a
+// script-visible arity, see the note in ScriptContext.cpp). So raycast reaches
+// PhysicsWorld directly like the others, and this is the single place that knows
+// how a PhysicsWorld hit becomes an api hit.
+static RaycastHit toApiHit(const PhysicsWorld::RaycastHit& r)
+{
+    return { r.hit, r.entityId, r.point, r.normal, r.distance, static_cast<int>(r.layer) };
+}
 RaycastHit raycast(Ctx& c, const glm::vec3& o, const glm::vec3& d, float maxDist)
 {
-    const auto r = ScriptApi::raycast(c.physics, o, d, maxDist);
-    return { r.hit, r.entityId, r.point, r.normal, r.distance };
+    if (!c.physics) return {};
+    return toApiHit(c.physics->raycast(o, d, maxDist));
 }
-// The rest reach PhysicsWorld directly rather than through ScriptApi. ScriptApi
-// exists to serve the flat Lua/Python bindings, and those are frozen (adding to
-// them changes a script-visible arity, see the note in ScriptContext.cpp) — a
-// shim there would be a function nothing can ever call.
 RaycastHit sphereCast(Ctx& c, const glm::vec3& o, const glm::vec3& d, float radius, float maxDist)
 {
-    RaycastHit out;
-    if (!c.physics) return out;
-    const PhysicsWorld::RaycastHit r = c.physics->sphereCast(o, d, radius, maxDist);
-    return { r.hit, r.entityId, r.point, r.normal, r.distance };
+    if (!c.physics) return {};
+    return toApiHit(c.physics->sphereCast(o, d, radius, maxDist));
 }
 std::vector<Entity> overlapSphere(Ctx& c, const glm::vec3& center, float radius)
 {
     return c.physics ? c.physics->overlapSphere(center, radius) : std::vector<Entity>{};
 }
+
+// The same three with a channel mask. The int comes from a script, so it is cast
+// rather than trusted to be sixteen bits: a negative value is every bit set,
+// which reads as "every channel" — the same thing the unmasked call does, and
+// the harmless answer for a number nobody meant.
+RaycastHit raycastLayers(Ctx& c, const glm::vec3& o, const glm::vec3& d, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->raycast(o, d, maxDist, PhysicsWorld::kNoEntity,
+                                       static_cast<uint32_t>(layerMask)));
+}
+RaycastHit sphereCastLayers(Ctx& c, const glm::vec3& o, const glm::vec3& d,
+                            float radius, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->sphereCast(o, d, radius, maxDist, PhysicsWorld::kNoEntity,
+                                          static_cast<uint32_t>(layerMask)));
+}
+std::vector<Entity> overlapSphereLayers(Ctx& c, const glm::vec3& center, float radius, int layerMask)
+{
+    return c.physics ? c.physics->overlapSphere(center, radius, PhysicsWorld::kNoEntity,
+                                                static_cast<uint32_t>(layerMask))
+                     : std::vector<Entity>{};
+}
+
+// The oriented shapes and the multi-hit ray. Each takes its mask as a real
+// parameter rather than a defaulted one: the row that calls it names five or
+// seven inputs, and the invariant test in test_engine_api holds every cppCall to
+// the arity its row declares.
+RaycastHit boxCast(Ctx& c, const glm::vec3& origin, const glm::vec3& halfExtents,
+                   const glm::vec3& rotation, const glm::vec3& d, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->boxCast(origin, halfExtents, rotation, d, maxDist,
+                                       PhysicsWorld::kNoEntity, static_cast<uint32_t>(layerMask)));
+}
+RaycastHit capsuleCast(Ctx& c, const glm::vec3& origin, float radius, float height,
+                       const glm::vec3& rotation, const glm::vec3& d, float maxDist, int layerMask)
+{
+    if (!c.physics) return {};
+    return toApiHit(c.physics->capsuleCast(origin, radius, height, rotation, d, maxDist,
+                                           PhysicsWorld::kNoEntity,
+                                           static_cast<uint32_t>(layerMask)));
+}
+std::vector<Entity> overlapBox(Ctx& c, const glm::vec3& center, const glm::vec3& halfExtents,
+                               const glm::vec3& rotation, int layerMask)
+{
+    return c.physics ? c.physics->overlapBox(center, halfExtents, rotation,
+                                             PhysicsWorld::kNoEntity,
+                                             static_cast<uint32_t>(layerMask))
+                     : std::vector<Entity>{};
+}
+std::vector<Entity> overlapCapsule(Ctx& c, const glm::vec3& center, float radius, float height,
+                                   const glm::vec3& rotation, int layerMask)
+{
+    return c.physics ? c.physics->overlapCapsule(center, radius, height, rotation,
+                                                 PhysicsWorld::kNoEntity,
+                                                 static_cast<uint32_t>(layerMask))
+                     : std::vector<Entity>{};
+}
+std::vector<RaycastHit> raycastAll(Ctx& c, const glm::vec3& o, const glm::vec3& d,
+                                   float maxDist, int layerMask)
+{
+    std::vector<RaycastHit> out;
+    if (!c.physics) return out;
+    const auto hits = c.physics->raycastAll(o, d, maxDist, PhysicsWorld::kNoEntity,
+                                            static_cast<uint32_t>(layerMask));
+    out.reserve(hits.size());
+    for (const auto& h : hits) out.push_back(toApiHit(h));
+    return out;
+}
 bool addForce(Ctx& c, Entity e, const glm::vec3& f)   { return c.physics && c.physics->addForce(e, f); }
 bool addImpulse(Ctx& c, Entity e, const glm::vec3& i) { return c.physics && c.physics->addImpulse(e, i); }
 bool addTorque(Ctx& c, Entity e, const glm::vec3& t)  { return c.physics && c.physics->addTorque(e, t); }
+// `p` is WORLD and is passed straight through — the exception to the local rule
+// that setPosition below obeys, argued in the header. Nothing to convert here is
+// the whole point: the caller's point is already the point.
+bool addForceAtPosition(Ctx& c, Entity e, const glm::vec3& f, const glm::vec3& p)
+{ return c.physics && c.physics->addForceAtPosition(e, f, p); }
+bool addImpulseAtPosition(Ctx& c, Entity e, const glm::vec3& i, const glm::vec3& p)
+{ return c.physics && c.physics->addImpulseAtPosition(e, i, p); }
 void setVelocity(Ctx& c, Entity e, const glm::vec3& v) { ScriptApi::setVelocity(c.physics, e, v); }
 glm::vec3 getVelocity(Ctx& c, Entity e)                { return c.physics ? c.physics->getVelocity(e) : glm::vec3(0.0f); }
+bool setAngularVelocity(Ctx& c, Entity e, const glm::vec3& w)
+{ return c.physics && c.physics->setAngularVelocity(e, w); }
+glm::vec3 getAngularVelocity(Ctx& c, Entity e)
+{ return c.physics ? c.physics->getAngularVelocity(e) : glm::vec3(0.0f); }
 bool isGrounded(Ctx& c, Entity e)                      { return ScriptApi::isGrounded(c.physics, e); }
 void setGravity(Ctx& c, const glm::vec3& g)            { if (c.physics) c.physics->setGravity(g); }
 glm::vec3 getGravity(Ctx& c)                           { return c.physics ? c.physics->gravity() : glm::vec3(0.0f); }
@@ -633,6 +720,63 @@ bool setPositionAndReset(Ctx& c, Entity e, const glm::vec3& p)
 bool hasPhysics(Ctx& c, Entity e)
 {
     return c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e));
+}
+
+// A joint needs the WORLD as well as the PhysicsWorld: the component it writes
+// lives in the registry, and the entity it names is resolved through the UUIDs
+// that registry keeps. Without a world there is nowhere to put the joint, so
+// this is one of the few rows that needs both halves of the Ctx.
+bool addJoint(Ctx& c, Entity a, Entity b, int type, const glm::vec3& anchorA,
+              const glm::vec3& anchorB, const glm::vec3& axis,
+              float minLimit, float maxLimit)
+{
+    if (!c.physics || !c.world) return false;
+    PhysicsWorld::JointDesc desc;
+    // Out of range becomes Fixed, the type that reads no other field — the same
+    // answer the scene loader gives a joint type it does not know, rather than
+    // casting an arbitrary integer into an enum.
+    desc.type     = (type >= 0 && type <= static_cast<int>(HE::JointType::Distance))
+                        ? static_cast<HE::JointType>(type) : HE::JointType::Fixed;
+    desc.anchorA  = anchorA;
+    desc.anchorB  = anchorB;
+    desc.axis     = axis;
+    desc.minLimit = minLimit;
+    desc.maxLimit = maxLimit;
+    return c.physics->addJoint(*c.world, static_cast<uint32_t>(a),
+                               static_cast<uint32_t>(b), desc);
+}
+bool removeJoint(Ctx& c, Entity a)
+{
+    return c.physics && c.world && c.physics->removeJoint(*c.world, static_cast<uint32_t>(a));
+}
+bool hasJoint(Ctx& c, Entity a)
+{
+    return c.physics && c.physics->hasJoint(static_cast<uint32_t>(a));
+}
+// The three below write the JointComponent, so they need the world for the same
+// reason addJoint does.
+bool setJointMotor(Ctx& c, Entity a, float targetSpeed, float maxForce)
+{
+    return c.physics && c.world &&
+           c.physics->setJointMotor(*c.world, static_cast<uint32_t>(a), targetSpeed, maxForce);
+}
+bool setJointBreakForce(Ctx& c, Entity a, float breakForce)
+{
+    return c.physics && c.world &&
+           c.physics->setJointBreakForce(*c.world, static_cast<uint32_t>(a), breakForce);
+}
+bool setJointCollideConnected(Ctx& c, Entity a, bool collide)
+{
+    return c.physics && c.world &&
+           c.physics->setJointCollideConnected(*c.world, static_cast<uint32_t>(a), collide);
+}
+std::vector<BrokenJoint> pollJointBroken(Ctx& c)
+{
+    std::vector<BrokenJoint> out;
+    if (!c.physics) return out;
+    for (const auto& ev : c.physics->pollJointBroken())
+        out.push_back({ static_cast<Entity>(ev.entityA), static_cast<Entity>(ev.entityB) });
+    return out;
 }
 } // namespace physics
 
@@ -671,6 +815,74 @@ std::string getState(Ctx& c, Entity e)
 {
     auto* sm = smOf(c, e);
     return sm ? sm->currentStateName : std::string();
+}
+std::vector<std::string> notifiesOf(Ctx& c, const std::string& clipPath)
+{
+    std::vector<std::string> out;
+    if (!c.content || clipPath.empty()) return out;
+    // loadAsset by path, the way the audio group reaches a sound: it resolves
+    // from the mounted paks or the disk registry and is a no-op for something
+    // already resident.
+    const AnimationClipAsset* clip = c.content->getAnimationClip(c.content->loadAsset(clipPath));
+    if (!clip) return out;
+    out.reserve(clip->notifies.size());
+    // In authoring order, duplicates included: a clip may legitimately carry the
+    // same name twice (two footsteps), and de-duplicating here would answer a
+    // question nobody asked while hiding one somebody might.
+    for (const AnimationNotify& n : clip->notifies) out.push_back(n.name);
+    return out;
+}
+
+namespace {
+AnimationLayerComponent::Layer* layerOf(Ctx& c, Entity e, const std::string& name)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    if (!reg.valid(id)) return nullptr;
+    auto* lc = reg.try_get<AnimationLayerComponent>(id);
+    if (!lc) return nullptr;
+    // First match. Two layers may legitimately share a name (the inspector does
+    // not stop it), and picking the first is the only answer that stays the same
+    // when somebody adds a third.
+    for (auto& l : lc->layers)
+        if (l.name == name) return &l;
+    return nullptr;
+}
+}
+
+void setLayerWeight(Ctx& c, Entity e, const std::string& layerName, float weight)
+{
+    if (auto* l = layerOf(c, e, layerName))
+        l->weight = std::clamp(weight, 0.0f, 1.0f);
+}
+float getLayerWeight(Ctx& c, Entity e, const std::string& layerName)
+{
+    auto* l = layerOf(c, e, layerName);
+    return l ? l->weight : 0.0f;
+}
+void playLayer(Ctx& c, Entity e, const std::string& layerName)
+{
+    if (auto* l = layerOf(c, e, layerName))
+    {
+        l->playbackTime = 0.0f;
+        l->playing      = true;
+        // Un-primed, so a notify sitting exactly on frame 0 — which is how "the
+        // reload starts here" is written — fires on the restarted playhead's
+        // first frame instead of being missed by an open-at-the-origin span.
+        l->notifiesPrimed = false;
+    }
+}
+std::vector<std::string> layerNames(Ctx& c, Entity e)
+{
+    std::vector<std::string> out;
+    if (!c.world) return out;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    if (!reg.valid(id)) return out;
+    if (auto* lc = reg.try_get<AnimationLayerComponent>(id))
+        for (const auto& l : lc->layers) out.push_back(l.name);
+    return out;
 }
 } // namespace animator
 
@@ -4590,22 +4802,28 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ transform::setWorldPosition(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
 
         // Physics
+        // `layer` is the SIXTH output and was appended, not inserted. A saved
+        // graph draws the outputs its own copy of the descriptor names, and both
+        // the interpreter and the codegen read a result BY INDEX with a bounds
+        // check — so an appended output is invisible to a node that predates it,
+        // while an inserted one would have shifted every wire after it. (Inputs
+        // are the dangerous direction; see physics.raycastLayers below.)
         t.push_back({ "physics.raycast", "Physics", false,
             {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}},
-            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
             "HE::api::physics::raycast",
             [](Ctx& c, const VV& a){ auto r = physics::raycast(c, aV3(a, 0), aV3(a, 1), aF(a, 2));
-                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance) }; } });
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
         t.push_back({ "physics.setVelocity", "Physics", true, {{"entity", P::Int}, {"velocity", P::Vec3}}, {}, "HE::api::physics::setVelocity",
             [](Ctx& c, const VV& a){ physics::setVelocity(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
         t.push_back({ "physics.isGrounded", "Physics", false, {{"entity", P::Int}}, {{"grounded", P::Bool}}, "HE::api::physics::isGrounded",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::isGrounded(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "physics.sphereCast", "Physics", false,
             {{"origin", P::Vec3}, {"direction", P::Vec3}, {"radius", P::Float}, {"maxDistance", P::Float}},
-            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
             "HE::api::physics::sphereCast",
             [](Ctx& c, const VV& a){ auto r = physics::sphereCast(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aF(a, 3));
-                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance) }; } });
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
         t.push_back({ "physics.overlapSphere", "Physics", false,
             {{"center", P::Vec3}, {"radius", P::Float}}, {{"entities", P::Int, /*isArray=*/true}},
             "HE::api::physics::overlapSphere",
@@ -4614,14 +4832,129 @@ const std::vector<ApiFn>& registry()
                 for (Entity e : physics::overlapSphere(c, aV3(a, 0), aF(a, 1)))
                     arr.items.push_back(Value::ofInt((int)e));
                 return VV{ std::move(arr) }; } });
+        // The same three queries restricted to a set of collision channels, as
+        // THREE MORE NAMES rather than one more parameter on the three above.
+        // The reason is the saved graph: a node keeps its own copy of the
+        // parameter list, and a node that predates a new parameter simply passes
+        // one argument fewer — the codegen pads with a zero literal and the
+        // interpreter's readers answer zero for an argument that is not there.
+        // Zero for a channel MASK means "see nothing", so every existing
+        // Raycast node in every existing project would have kept its shape and
+        // silently stopped hitting anything. The C++ side takes a defaulted
+        // parameter instead, because no stored caller exists there.
+        t.push_back({ "physics.raycastLayers", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::raycastLayers",
+            [](Ctx& c, const VV& a){ auto r = physics::raycastLayers(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aI(a, 3));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.sphereCastLayers", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"radius", P::Float}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::sphereCastLayers",
+            [](Ctx& c, const VV& a){ auto r = physics::sphereCastLayers(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aF(a, 3), aI(a, 4));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.overlapSphereLayers", "Physics", false,
+            {{"center", P::Vec3}, {"radius", P::Float}, {"layerMask", P::Int}}, {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapSphereLayers",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapSphereLayers(c, aV3(a, 0), aF(a, 1), aI(a, 2)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        // ── The oriented shapes ──────────────────────────────────────────────
+        // These carry `layerMask` from their first day, so they will never need
+        // a "(Layers)" twin the way the three sphere rows above did. `rotation`
+        // is an Euler triple in degrees, the same thing the Details panel shows
+        // for an entity — a Vec3 rather than a quaternion because the graph has
+        // no quaternion and because nobody types one by hand.
+        t.push_back({ "physics.boxCast", "Physics", false,
+            {{"origin", P::Vec3}, {"halfExtents", P::Vec3}, {"rotation", P::Vec3},
+             {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::boxCast",
+            [](Ctx& c, const VV& a){ auto r = physics::boxCast(c, aV3(a, 0), aV3(a, 1), aV3(a, 2), aV3(a, 3), aF(a, 4), aI(a, 5));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.capsuleCast", "Physics", false,
+            {{"origin", P::Vec3}, {"radius", P::Float}, {"height", P::Float}, {"rotation", P::Vec3},
+             {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}, {"layer", P::Int}},
+            "HE::api::physics::capsuleCast",
+            [](Ctx& c, const VV& a){ auto r = physics::capsuleCast(c, aV3(a, 0), aF(a, 1), aF(a, 2), aV3(a, 3), aV3(a, 4), aF(a, 5), aI(a, 6));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance), Value::ofInt(r.layer) }; } });
+        t.push_back({ "physics.overlapBox", "Physics", false,
+            {{"center", P::Vec3}, {"halfExtents", P::Vec3}, {"rotation", P::Vec3}, {"layerMask", P::Int}},
+            {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapBox",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapBox(c, aV3(a, 0), aV3(a, 1), aV3(a, 2), aI(a, 3)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "physics.overlapCapsule", "Physics", false,
+            {{"center", P::Vec3}, {"radius", P::Float}, {"height", P::Float}, {"rotation", P::Vec3}, {"layerMask", P::Int}},
+            {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapCapsule",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapCapsule(c, aV3(a, 0), aF(a, 1), aF(a, 2), aV3(a, 3), aI(a, 4)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        // Five PARALLEL arrays, not one array of hits: a graph value carries a
+        // list of ONE type and there is no list of structs, so the hit has to be
+        // taken apart. Index i of each names the same hit and all five are the
+        // same length, which is what makes a For Each over Entities able to read
+        // the other four by the loop's index.
+        t.push_back({ "physics.raycastAll", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}, {"layerMask", P::Int}},
+            {{"entities", P::Int, /*isArray=*/true}, {"points", P::Vec3, /*isArray=*/true},
+             {"normals", P::Vec3, /*isArray=*/true}, {"distances", P::Float, /*isArray=*/true},
+             {"layers", P::Int, /*isArray=*/true}},
+            "HE::api::physics::raycastAll",
+            [](Ctx& c, const VV& a){
+                Value entities; entities.isArray = true; entities.type = P::Int;
+                Value points;   points.isArray   = true; points.type   = P::Vec3;
+                Value normals;  normals.isArray  = true; normals.type  = P::Vec3;
+                Value dists;    dists.isArray    = true; dists.type    = P::Float;
+                Value layers;   layers.isArray   = true; layers.type   = P::Int;
+                for (const auto& h : physics::raycastAll(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aI(a, 3)))
+                {
+                    entities.items.push_back(Value::ofInt((int)h.entity));
+                    points.items.push_back(v3(h.point));
+                    normals.items.push_back(v3(h.normal));
+                    dists.items.push_back(Value::ofFloat(h.distance));
+                    layers.items.push_back(Value::ofInt(h.layer));
+                }
+                return VV{ std::move(entities), std::move(points), std::move(normals),
+                           std::move(dists), std::move(layers) }; } });
         t.push_back({ "physics.addForce", "Physics", true, {{"entity", P::Int}, {"force", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addForce",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addForce(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
         t.push_back({ "physics.addImpulse", "Physics", true, {{"entity", P::Int}, {"impulse", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addImpulse",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addImpulse(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
         t.push_back({ "physics.addTorque", "Physics", true, {{"entity", P::Int}, {"torque", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addTorque",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addTorque(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        // The point is a WORLD position, unlike setPosition's below — argued in
+        // the header, and the reason these two do not convert anything.
+        t.push_back({ "physics.addForceAtPosition", "Physics", true,
+            {{"entity", P::Int}, {"force", P::Vec3}, {"position", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::physics::addForceAtPosition",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addForceAtPosition(c, (Entity)aI(a, 0), aV3(a, 1), aV3(a, 2))) }; } });
+        t.push_back({ "physics.addImpulseAtPosition", "Physics", true,
+            {{"entity", P::Int}, {"impulse", P::Vec3}, {"position", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::physics::addImpulseAtPosition",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addImpulseAtPosition(c, (Entity)aI(a, 0), aV3(a, 1), aV3(a, 2))) }; } });
         t.push_back({ "physics.getVelocity", "Physics", false, {{"entity", P::Int}}, {{"velocity", P::Vec3}}, "HE::api::physics::getVelocity",
             [](Ctx& c, const VV& a){ return VV{ v3(physics::getVelocity(c, (Entity)aI(a, 0))) }; } });
+        // Radians per second, not degrees — the one rate on this surface, said
+        // again in the node description because nobody expects it.
+        t.push_back({ "physics.setAngularVelocity", "Physics", true,
+            {{"entity", P::Int}, {"angularVelocity", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::physics::setAngularVelocity",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setAngularVelocity(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.getAngularVelocity", "Physics", false,
+            {{"entity", P::Int}}, {{"angularVelocity", P::Vec3}},
+            "HE::api::physics::getAngularVelocity",
+            [](Ctx& c, const VV& a){ return VV{ v3(physics::getAngularVelocity(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "physics.setGravity", "Physics", true, {{"gravity", P::Vec3}}, {}, "HE::api::physics::setGravity",
             [](Ctx& c, const VV& a){ physics::setGravity(c, aV3(a, 0)); return VV{}; } });
         t.push_back({ "physics.getGravity", "Physics", false, {}, {{"gravity", P::Vec3}}, "HE::api::physics::getGravity",
@@ -4635,6 +4968,59 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setPositionAndReset(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
         t.push_back({ "physics.hasPhysics", "Physics", false, {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasPhysics",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasPhysics(c, (Entity)aI(a, 0))) }; } });
+        // Joints. Every field the five types read is a parameter from the first
+        // day — a stored node cannot grow an input later, and this row would
+        // otherwise need a second name to gain the one field it forgot. Which of
+        // them a given type reads is on JointComponent; the description below
+        // says the short version.
+        t.push_back({ "physics.addJoint", "Physics", true,
+            {{"entityA", P::Int}, {"entityB", P::Int}, {"type", P::Int},
+             {"anchorA", P::Vec3}, {"anchorB", P::Vec3}, {"axis", P::Vec3},
+             {"minLimit", P::Float}, {"maxLimit", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::physics::addJoint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addJoint(
+                c, (Entity)aI(a, 0), (Entity)aI(a, 1), aI(a, 2), aV3(a, 3), aV3(a, 4),
+                aV3(a, 5), aF(a, 6), aF(a, 7))) }; } });
+        t.push_back({ "physics.removeJoint", "Physics", true,
+            {{"entity", P::Int}}, {{"ok", P::Bool}}, "HE::api::physics::removeJoint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::removeJoint(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "physics.hasJoint", "Physics", false,
+            {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::physics::hasJoint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::hasJoint(c, (Entity)aI(a, 0))) }; } });
+        // The three settings addJoint does not take, each its own row rather
+        // than four more of its parameters: a stored node cannot grow an input,
+        // and all three are things a game changes while it runs anyway.
+        t.push_back({ "physics.setJointMotor", "Physics", true,
+            {{"entity", P::Int}, {"targetSpeed", P::Float}, {"maxForce", P::Float}},
+            {{"ok", P::Bool}}, "HE::api::physics::setJointMotor",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setJointMotor(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "physics.setJointBreakForce", "Physics", true,
+            {{"entity", P::Int}, {"breakForce", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::physics::setJointBreakForce",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setJointBreakForce(
+                c, (Entity)aI(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "physics.setJointCollideConnected", "Physics", true,
+            {{"entity", P::Int}, {"collide", P::Bool}}, {{"ok", P::Bool}},
+            "HE::api::physics::setJointCollideConnected",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::setJointCollideConnected(
+                c, (Entity)aI(a, 0), aB(a, 1))) }; } });
+        // Two PARALLEL arrays for the same reason raycastAll has five: a graph
+        // value is a list of ONE type. Index i of each names the same broken
+        // joint. Drained once, here — a second row that drained the same queue
+        // would hand whichever ran second an empty list.
+        t.push_back({ "physics.pollJointBroken", "Physics", true,
+            {}, {{"entitiesA", P::Int, /*isArray=*/true}, {"entitiesB", P::Int, /*isArray=*/true}},
+            "HE::api::physics::pollJointBroken",
+            [](Ctx& c, const VV&){
+                Value as; as.isArray = true; as.type = P::Int;
+                Value bs; bs.isArray = true; bs.type = P::Int;
+                for (const auto& j : physics::pollJointBroken(c))
+                {
+                    as.items.push_back(Value::ofInt((int)j.a));
+                    bs.items.push_back(Value::ofInt((int)j.b));
+                }
+                return VV{ std::move(as), std::move(bs) }; } });
 
         // Materials
         t.push_back({ "material.getParam", "Material", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Color}}, "HE::api::material::getParam",
@@ -4662,6 +5048,29 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(animator::getParam(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
         t.push_back({ "animator.getState", "Animator", false, {{"entity", P::Int}}, {{"state", P::String}}, "HE::api::animator::getState",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(animator::getState(c, (Entity)aI(a, 0))) }; } });
+        // Which notifies a clip carries. A read, and the only row in this group
+        // that takes a path instead of an entity: the question is about the ASSET.
+        t.push_back({ "animator.notifiesOf", "Animator", false, {{"clipPath", P::String}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::animator::notifiesOf",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (const std::string& n : animator::notifiesOf(c, aS(a, 0)))
+                    arr.items.push_back(Value::ofString(n));
+                return VV{ arr }; } });
+        // Animation layers — the weight is the one thing about a layer that
+        // gameplay decides. By NAME, not by index: an index is what changes when
+        // somebody reorders the stack in the inspector.
+        t.push_back({ "animator.setLayerWeight", "Animator", true, {{"entity", P::Int}, {"layer", P::String}, {"weight", P::Float}}, {}, "HE::api::animator::setLayerWeight",
+            [](Ctx& c, const VV& a){ animator::setLayerWeight(c, (Entity)aI(a, 0), aS(a, 1), aF(a, 2)); return VV{}; } });
+        t.push_back({ "animator.getLayerWeight", "Animator", false, {{"entity", P::Int}, {"layer", P::String}}, {{"weight", P::Float}}, "HE::api::animator::getLayerWeight",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(animator::getLayerWeight(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "animator.playLayer", "Animator", true, {{"entity", P::Int}, {"layer", P::String}}, {}, "HE::api::animator::playLayer",
+            [](Ctx& c, const VV& a){ animator::playLayer(c, (Entity)aI(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "animator.layerNames", "Animator", false, {{"entity", P::Int}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::animator::layerNames",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (const std::string& n : animator::layerNames(c, (Entity)aI(a, 0)))
+                    arr.items.push_back(Value::ofString(n));
+                return VV{ arr }; } });
 
         // Movement — the reads an animator asks for. Derived from the character
         // controller on the spot, so there is no second copy to go stale.
@@ -5790,6 +6199,11 @@ const std::vector<ApiFn>& registry()
             { "particle.isPlaying", "Is Effect Playing" },
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
             { "animator.getState", "Get Animator State" },
+            { "animator.notifiesOf", "Get Clip Notifies" },
+            { "animator.setLayerWeight", "Set Layer Weight" },
+            { "animator.getLayerWeight", "Get Layer Weight" },
+            { "animator.playLayer", "Play Layer" },
+            { "animator.layerNames", "Get Layer Names" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
             { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
             { "movement.forwardAmount", "Get Forward Amount" },
@@ -5814,10 +6228,34 @@ const std::vector<ApiFn>& registry()
             // name is a coin toss.
             { "physics.isGrounded", "Is Grounded (Physics)" },
             { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
+            // "(Layers)" and not "Masked" or "Filtered": the add menu is flat
+            // and alphabetical-ish, so the suffix has to name the EXTRA input
+            // the row carries. The word is the same one the project settings
+            // page and the Details combo use for the same thing.
+            { "physics.raycastLayers", "Raycast (Layers)" },
+            { "physics.sphereCastLayers", "Sphere Cast (Layers)" },
+            { "physics.overlapSphereLayers", "Overlap Sphere (Layers)" },
+            // No "(Layers)" twins for these four: they were born with the mask,
+            // so there is only ever one row per shape.
+            { "physics.boxCast", "Box Cast" },         { "physics.capsuleCast", "Capsule Cast" },
+            { "physics.overlapBox", "Overlap Box" },   { "physics.overlapCapsule", "Overlap Capsule" },
+            { "physics.raycastAll", "Raycast All" },
             { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
             { "physics.addTorque", "Add Torque" },
+            { "physics.addForceAtPosition", "Add Force At Position" },
+            { "physics.addImpulseAtPosition", "Add Impulse At Position" },
+            // Unsuffixed, unlike Get Velocity below: nothing else in the palette
+            // owns an angular one, so there is no coin toss to resolve.
+            { "physics.setAngularVelocity", "Set Angular Velocity" },
+            { "physics.getAngularVelocity", "Get Angular Velocity" },
             { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },
             { "physics.hasPhysics", "Has Physics" },
+            { "physics.addJoint", "Add Joint" },       { "physics.removeJoint", "Remove Joint" },
+            { "physics.hasJoint", "Has Joint" },
+            { "physics.setJointMotor", "Set Joint Motor" },
+            { "physics.setJointBreakForce", "Set Joint Break Force" },
+            { "physics.setJointCollideConnected", "Set Joint Collide Connected" },
+            { "physics.pollJointBroken", "Poll Joint Broken" },
             // Suffixed for the same reason as Get Velocity below: Transform owns
             // the unqualified "Set Position", and the add menu lists both flat.
             { "physics.setPosition", "Set Position (Physics)" },

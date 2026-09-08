@@ -98,9 +98,18 @@ public:
 	const ShaderAsset*         getShader(HE::UUID id) const;
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
+	// Mutable for the same reason materials and graphs are: the editor's notify
+	// timeline edits the loaded clip in place and persists it with saveAsset().
+	// The loaded asset IS the edit buffer, so a notify moved on the timeline is
+	// already what the animators fire against — no copy to keep in step.
+	AnimationClipAsset*        getAnimationClipMutable(HE::UUID id);
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
+	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
+	BoneMaskAsset*               getBoneMaskMutable(HE::UUID id);
+	const BlendSpaceAsset*       getBlendSpace(HE::UUID id) const;
+	BlendSpaceAsset*             getBlendSpaceMutable(HE::UUID id);
 	const SaveGameTemplateAsset* getSaveGameTemplate(HE::UUID id) const;
 	SaveGameTemplateAsset*       getSaveGameTemplateMutable(HE::UUID id);
 	const StructTypeAsset*     getStructType(HE::UUID id) const;
@@ -178,6 +187,8 @@ public:
 	HE::UUID registerEnumType(EnumTypeAsset asset);
 	HE::UUID registerSaveGameTemplate(SaveGameTemplateAsset asset);
 	HE::UUID registerTheme(ThemeAsset asset);
+	HE::UUID registerBoneMask(BoneMaskAsset asset);
+	HE::UUID registerBlendSpace(BlendSpaceAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -603,6 +614,8 @@ private:
 	SlotMap<EnumTypeAsset>           m_enumTypeAssets;
 	SlotMap<SaveGameTemplateAsset>   m_saveTemplateAssets;
 	SlotMap<ThemeAsset>              m_themeAssets;
+	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
+	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {

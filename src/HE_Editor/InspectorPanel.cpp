@@ -1,6 +1,7 @@
 #include "InspectorPanel.h"
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorUndo, panel plumbing
+#include <Physics/CollisionLayers.h>     // the project's sixteen collision channels
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include "EditorHelp.h"                  // per-component scope for the property tooltips
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
@@ -100,6 +101,62 @@ void render(AppContext& ctx)
 	(void)ctx;
 #endif // HE_IMGUI_ENABLED
 }
+
+#ifdef HE_IMGUI_ENABLED
+// The project's sixteen collision-channel names, as a combo's item list.
+//
+// The names come from the PROJECT (Preferences ▸ Project ▸ Collision Layers) and
+// are data, not literals — which is why the combo below asks for its help by key
+// rather than by label. Without a project open the default names stand, so the
+// row still reads "Default"/"Player"/… instead of sixteen blanks.
+struct CollisionLayerNames
+{
+	std::string names[HE::CollisionLayerConfig::kCount];
+	const char* items[HE::CollisionLayerConfig::kCount] = {};
+
+	explicit CollisionLayerNames(AppContext& ctx)
+	{
+		static const HE::CollisionLayerConfig kFallback;
+		const HE::CollisionLayerConfig& cfg =
+			ctx.projectManager ? ctx.projectManager->currentProject().collisionLayers : kFallback;
+		for (int i = 0; i < HE::CollisionLayerConfig::kCount; ++i)
+		{
+			names[i] = cfg.layerName(i);
+			items[i] = names[i].c_str();
+		}
+	}
+};
+
+// One combo for both components that carry a channel. The value is a uint8_t
+// that nothing on the way in validates, so it is clamped FOR THE WIDGET only and
+// never written back — the same rule the Collider's Shape row follows and for
+// the same reason: repairing a component from a draw call is a scene edit nobody
+// asked for, that no undo step covers and that would not even mark the scene
+// dirty. Returns true when the author picked a different channel.
+bool collisionLayerRow(const char* label, uint8_t* value,
+                       const CollisionLayerNames& layers, EditorUndo* undo)
+{
+	constexpr int kCount = HE::CollisionLayerConfig::kCount;
+	const int  raw     = static_cast<int>(*value);
+	const bool unknown = raw >= kCount;
+	int        shown   = unknown ? 0 : raw;
+	bool       changed = false;
+	// Row::combo asks for its own tooltip under the open component scope, so the
+	// entry this resolves to is "Rigid Body/Collision Layer" or "Character
+	// Controller/Collision Layer" depending on which section is drawing.
+	if (EditorWidgets::Row::combo(label, &shown, layers.items, kCount))
+	{
+		if (undo) undo->snapshotNow();
+		*value  = static_cast<uint8_t>(shown);
+		changed = true;
+	}
+	if (unknown && static_cast<int>(*value) == raw)
+		hint("This entity's collision layer (%d) is past the sixteen this project has, "
+		     "so physics puts the body on Default and the row above shows Default. "
+		     "Pick any other layer to store a real value in the scene.", raw);
+	return changed;
+}
+#endif // HE_IMGUI_ENABLED
 
 // The body of the Details panel: every component's rows, drawn against an
 // EXPLICIT world + entity instead of the editor's current selection. Split out
@@ -700,6 +757,303 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
+	}
+
+	// ── Root Motion ─────────────────────────────────────────────────────────
+	// One section for all three animators above: whichever of them poses this
+	// entity, its clip's root motion is taken out of the pose here and put onto
+	// the entity instead. Which is why this is a component of its own and not a
+	// group of fields on each of the three.
+	if (auto* rmc = registry.try_get<RootMotionComponent>(entity))
+	{
+		if (componentHeader("Root Motion", true, removed))
+		{
+			EditorWidgets::WrapText wrap;   // the joint name is authored free text
+
+			static const char* kModes[] = { "Off", "Transform", "Character Controller" };
+			int mode = static_cast<int>(rmc->mode);
+			if (Row::combo("Mode##rm", &mode, kModes, IM_ARRAYSIZE(kModes)))
+			{ rmc->mode = static_cast<RootMotionComponent::Mode>(mode); trackEdit(); }
+
+			Row::inputText("Root Joint##rm", &rmc->options.rootJointName); trackEdit();
+			EditorWidgets::checkbox("Translation XZ##rm", &rmc->options.extractTranslationXZ); trackEdit();
+			ImGui::SameLine();
+			EditorWidgets::checkbox("Translation Y##rm",  &rmc->options.extractTranslationY);  trackEdit();
+			EditorWidgets::checkbox("Yaw##rm",            &rmc->options.extractYaw);           trackEdit();
+
+			static const char* kLocks[] = { "Zero", "First Frame", "Translation Only" };
+			int lock = static_cast<int>(rmc->options.lock);
+			if (Row::combo("Lock##rm", &lock, kLocks, IM_ARRAYSIZE(kLocks)))
+			{ rmc->options.lock = static_cast<HE::RootMotionLock>(lock); trackEdit(); }
+
+			// The readout is the only way to tell "the clip carries nothing" from
+			// "the joint name is wrong" without reading the log.
+			Row::labelText("Last Delta##rm", "%.3f, %.3f, %.3f  |  %.2f°",
+				rmc->lastDelta.x, rmc->lastDelta.y, rmc->lastDelta.z, rmc->lastYawDelta);
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RootMotionComponent>(entity); }
+	}
+
+	// ── Animation Layers ────────────────────────────────────────────────────
+	// Poses laid on top of whichever of the three animators above posed this
+	// entity: an upper-body reload over a run, an aim offset over an idle. Like
+	// Root Motion, one section for all three of them, and for the same reason.
+	if (auto* alc = registry.try_get<AnimationLayerComponent>(entity))
+	{
+		if (componentHeader("Animation Layers", true, removed))
+		{
+			EditorWidgets::WrapText wrap;   // layer names are authored free text
+
+			int removeLayer = -1;
+			for (size_t i = 0; i < alc->layers.size(); ++i)
+			{
+				auto& l = alc->layers[i];
+				ImGui::PushID(static_cast<int>(i));
+				ImGui::Separator();
+
+				// The name is what the scripting API addresses, so it comes
+				// first. Edited in place like every other InputText row here
+				// (Root Joint above does the same): a script naming this layer
+				// misses it for the keystrokes between "U" and "UpperBody", which
+				// is the same half-typed window every named thing in the editor
+				// has and not worth a scratch buffer of its own.
+				Row::inputText("Name##al", &l.name); trackEdit();
+
+				static const char* kModes[] = { "Override", "Additive" };
+				int mode = static_cast<int>(l.mode);
+				if (Row::combo("Mode##al", &mode, kModes, IM_ARRAYSIZE(kModes)))
+				{ l.mode = HE::layerBlendModeFromInt(mode); trackEdit(); }
+
+				static const char* kSources[] = { "Clip", "Blend Space" };
+				int source = static_cast<int>(l.source);
+				if (Row::combo("Source##al", &source, kSources, IM_ARRAYSIZE(kSources)))
+				{ l.source = AnimationLayerComponent::Layer::sourceFromInt(source); trackEdit(); }
+
+				if (l.source == AnimationLayerComponent::Layer::Source::BlendSpace)
+					EditorWidgets::assetDropSlot(ctx, "Blend Space", l.blendSpaceId,
+						HE::AssetType::BlendSpace, "albs",
+						"(none — this layer poses nothing)", "blend space",
+						/*showClear=*/true);
+				else
+					EditorWidgets::assetDropSlot(ctx, "Clip", l.clipId,
+						HE::AssetType::AnimationClip, "alclip");
+				// Changing the mask must invalidate the resolution cache. The
+				// cache checks the ids itself, so this is belt to that braces —
+				// but the flag is what makes the change land in the SAME frame.
+				if (EditorWidgets::assetDropSlot(ctx, "Mask", l.maskId,
+						HE::AssetType::BoneMask, "almask",
+						"(none — the whole skeleton)", "bone mask",
+						/*showClear=*/true) != EditorWidgets::SlotAction::None)
+					alc->masksDirty = true;
+
+				Row::sliderFloat("Weight##al", &l.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
+
+				if (l.mode == HE::LayerBlendMode::Additive)
+				{
+					EditorWidgets::assetDropSlot(ctx, "Reference Clip", l.additiveRefClipId,
+						HE::AssetType::AnimationClip, "alref",
+						"(none — this layer's own clip)", "animation clip",
+						/*showClear=*/true);
+					Row::dragFloat("Reference Time##al", &l.additiveRefTime, 0.01f, 0.0f, 999.0f, "%.3f s"); trackEdit();
+				}
+
+				Row::dragFloat("Speed##al", &l.playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+				// The playhead's unit follows the source: seconds on a clip, a
+				// normalised phase in [0, 1) on a blend space. Showing " s" on a
+				// phase would be a lie in the one place an author checks it.
+				const bool bsSource = l.source == AnimationLayerComponent::Layer::Source::BlendSpace;
+				Row::dragFloat("Time##al", &l.playbackTime, 0.01f, 0.0f,
+				               bsSource ? 1.0f : 999.0f,
+				               bsSource ? "%.3f phase" : "%.3f s"); trackEdit();
+				EditorWidgets::checkbox("Looping##al", &l.looping); trackEdit();
+				ImGui::SameLine();
+				EditorWidgets::checkbox("Playing##al", &l.playing); trackEdit();
+
+				if (EditorWidgets::dangerSmallButton("Remove")) removeLayer = static_cast<int>(i);
+				ImGui::PopID();
+			}
+			if (removeLayer >= 0)
+			{
+				if (undo) undo->snapshotNow();
+				alc->layers.erase(alc->layers.begin() + removeLayer);
+				// The cache is index-parallel to the layer list, so a removal
+				// invalidates it wholesale rather than shifting it by hand.
+				alc->masksDirty = true;
+				trackEdit();
+			}
+
+			ImGui::Separator();
+			if (EditorWidgets::button("Add Layer", ImVec2(120.0f, 0.0f)))
+			{
+				if (undo) undo->snapshotNow();
+				AnimationLayerComponent::Layer l;
+				l.name = "Layer " + std::to_string(alc->layers.size() + 1);
+				alc->layers.push_back(std::move(l));
+				alc->masksDirty = true;
+				trackEdit();
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimationLayerComponent>(entity); }
+	}
+
+	// ── Inverse Kinematics ──────────────────────────────────────────────────
+	// The correction laid over whatever the animators and the layers above ended
+	// up with: feet onto the ground that is actually there, head onto the thing it
+	// is looking at. One section for all three drivers, like Root Motion.
+	if (auto* ik = registry.try_get<IkComponent>(entity))
+	{
+		if (componentHeader("Inverse Kinematics", true, removed))
+		{
+			EditorWidgets::WrapText wrap;   // joint names are authored free text
+
+			int removeFoot = -1;
+			for (size_t i = 0; i < ik->feet.size(); ++i)
+			{
+				auto& f = ik->feet[i];
+				ImGui::PushID(static_cast<int>(i));
+				ImGui::Separator();
+
+				// The three names invalidate the resolution cache, so they set the
+				// dirty flag rather than relying on it being noticed next frame.
+				if (Row::inputText("Foot Joint##ik", &f.footJoint)) { ik->jointsDirty = true; }
+				trackEdit();
+				if (Row::inputText("Knee Joint##ik", &f.kneeJoint)) { ik->jointsDirty = true; }
+				trackEdit();
+				if (Row::inputText("Hip Joint##ik",  &f.hipJoint))  { ik->jointsDirty = true; }
+				trackEdit();
+
+				Row::sliderFloat("Foot Weight##ik", &f.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
+				Row::dragFloat("Trace Up##ik",   &f.traceUp,   0.01f, 0.0f, 5.0f, "%.2f m"); trackEdit();
+				Row::dragFloat("Trace Down##ik", &f.traceDown, 0.01f, 0.0f, 5.0f, "%.2f m"); trackEdit();
+				Row::dragFloat("Sole Offset##ik", &f.footHeightOffset, 0.005f, -0.5f, 0.5f, "%.3f m"); trackEdit();
+				Row::dragFloat("Foot Interp Speed##ik", &f.interpSpeed, 0.1f, 0.0f, 60.0f, "%.1f"); trackEdit();
+				EditorWidgets::checkbox("Align To Normal##ik", &f.alignToNormal); trackEdit();
+				if (f.alignToNormal)
+				{
+					Row::dragFloat("Max Pitch##ik", &f.maxPitchDegrees, 0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+					Row::dragFloat("Max Roll##ik",  &f.maxRollDegrees,  0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+				}
+
+				if (EditorWidgets::dangerSmallButton("Remove Foot")) removeFoot = static_cast<int>(i);
+				ImGui::PopID();
+			}
+			if (removeFoot >= 0)
+			{
+				if (undo) undo->snapshotNow();
+				ik->feet.erase(ik->feet.begin() + removeFoot);
+				ik->jointsDirty = true;    // the cache is index-parallel to the list
+				trackEdit();
+			}
+
+			ImGui::Separator();
+			if (EditorWidgets::button("Add Foot", ImVec2(120.0f, 0.0f)))
+			{
+				if (undo) undo->snapshotNow();
+				ik->feet.push_back(IkComponent::FootIk{});
+				ik->jointsDirty = true;
+				trackEdit();
+			}
+
+			EditorWidgets::checkbox("Adjust Pelvis", &ik->adjustPelvis); trackEdit();
+			if (ik->adjustPelvis)
+			{
+				if (Row::inputText("Pelvis Joint", &ik->pelvisJoint)) { ik->jointsDirty = true; }
+				trackEdit();
+			}
+
+			ImGui::Separator();
+			auto& la = ik->lookAt;
+			EditorWidgets::checkbox("Look At", &la.enabled); trackEdit();
+			if (la.enabled)
+			{
+				// The chain is one line of comma-separated names rather than a
+				// list of rows: it is one to three joints, always the same three
+				// on a humanoid, and a row each with its own add and remove button
+				// would be more chrome than content.
+				std::string chainText;
+				for (size_t i = 0; i < la.chain.size(); ++i)
+				{ if (i) chainText += ", "; chainText += la.chain[i]; }
+				if (Row::inputText("Look Chain", &chainText))
+				{
+					la.chain.clear();
+					size_t start = 0;
+					while (start <= chainText.size())
+					{
+						const size_t comma = chainText.find(',', start);
+						std::string part = chainText.substr(
+							start, comma == std::string::npos ? std::string::npos : comma - start);
+						const size_t b = part.find_first_not_of(" \t");
+						const size_t e2 = part.find_last_not_of(" \t");
+						if (b != std::string::npos) la.chain.push_back(part.substr(b, e2 - b + 1));
+						if (comma == std::string::npos) break;
+						start = comma + 1;
+					}
+					ik->jointsDirty = true;
+					trackEdit();
+				}
+
+				// Same shape as the chain, and the same reason. Missing entries
+				// count as 1, so an empty box splits the turn evenly.
+				std::string weightText;
+				for (size_t i = 0; i < la.chainWeights.size(); ++i)
+				{
+					if (i) weightText += ", ";
+					char buf[32];
+					std::snprintf(buf, sizeof(buf), "%.2f", la.chainWeights[i]);
+					weightText += buf;
+				}
+				if (Row::inputText("Chain Weights", &weightText))
+				{
+					la.chainWeights.clear();
+					size_t start = 0;
+					while (start <= weightText.size())
+					{
+						const size_t comma = weightText.find(',', start);
+						const std::string part = weightText.substr(
+							start, comma == std::string::npos ? std::string::npos : comma - start);
+						try { la.chainWeights.push_back(std::stof(part)); } catch (...) {}
+						if (comma == std::string::npos) break;
+						start = comma + 1;
+					}
+					trackEdit();
+				}
+
+				// "(world point)" is not "no target" — it is the other kind of
+				// target, and the field below it is then the one that matters.
+				{
+					std::vector<const char*> names{ "(world point)" };
+					std::vector<HE::UUID>    ids{ HE::UUID{} };
+					int current = 0;
+					for (auto [e, name] : registry.view<NameComponent>().each())
+					{
+						if (e == entity || e == world.rootEntity()) continue;
+						if (!registry.all_of<TransformComponent>(e))  continue;
+						const HE::UUID id = world.entityId(e);
+						if (id == HE::UUID{}) continue;
+						if (id == la.targetEntityId) current = static_cast<int>(ids.size());
+						names.push_back(name.name.c_str());
+						ids.push_back(id);
+					}
+					if (Row::combo("Look Target", &current, names.data(), static_cast<int>(names.size())))
+					{ la.targetEntityId = ids[static_cast<size_t>(current)]; trackEdit(); }
+				}
+				if (la.targetEntityId == HE::UUID{})
+				{
+					Row::dragFloat3("Target Point", &la.targetWorld.x, 0.05f, -10000.0f, 10000.0f);
+					trackEdit();
+				}
+
+				Row::dragFloat3("Head Forward", &la.forwardLocal.x, 0.05f, -1.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Look Weight", &la.weight, 0.0f, 1.0f, "%.2f"); trackEdit();
+				Row::dragFloat("Max Yaw",   &la.maxYawDegrees,   0.5f, 0.0f, 180.0f, "%.0f°"); trackEdit();
+				// "Look Max Pitch" and not "Max Pitch": the label IS the help key,
+				// and a second "Max Pitch" under this component would hand the
+				// look-at row the foot's tooltip about tipping a toe.
+				Row::dragFloat("Look Max Pitch", &la.maxPitchDegrees, 0.5f, 0.0f, 90.0f, "%.0f°"); trackEdit();
+				Row::dragFloat("Look Interp Speed", &la.interpSpeed, 0.1f, 0.0f, 60.0f, "%.1f"); trackEdit();
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<IkComponent>(entity); }
 	}
 
 	// ── Property Animator ───────────────────────────────────────────────────
@@ -1420,6 +1774,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
+			// Which channel this body sits in — what the project's collision
+			// matrix looks up when it decides whether a pair may touch.
+			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
+			                  CollisionLayerNames(ctx), undo);
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -1523,6 +1881,174 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ColliderComponent>(entity); }
 	}
 
+	// ── Joint ─────────────────────────────────────────────────────────────────
+	// The rows follow the per-type table on JointComponent: a Fixed weld shows
+	// no anchors at all, a hinge shows its axis and its limits, and only the two
+	// types with one degree of freedom show a motor. Everything else would be a
+	// field the author can set and physics never reads — the same trap the
+	// Collider's shape switch avoids.
+	if (auto* joint = registry.try_get<JointComponent>(entity))
+	{
+		if (componentHeader("Joint", true, removed))
+		{
+			// 1:1 with HE::JointType, like the Collider's shape list, so the
+			// index IS the enumerator. Clamped for the widget only, and for the
+			// same reason: a scene from a newer build must not leave the combo
+			// showing nothing with no way back.
+			static const char* kJointTypes[] = { "Fixed", "Point", "Hinge", "Slider", "Distance" };
+			constexpr int kJointTypeCount = static_cast<int>(sizeof(kJointTypes) / sizeof(kJointTypes[0]));
+			const int  rawType     = static_cast<int>(joint->type);
+			const bool unknownType = rawType < 0 || rawType >= kJointTypeCount;
+			int        typeIndex   = unknownType ? 0 : rawType;
+			if (Row::combo("Type##joint", &typeIndex, kJointTypes, kJointTypeCount))
+			{
+				if (undo) undo->snapshotNow();
+				joint->type = static_cast<JointType>(typeIndex);
+			}
+			if (unknownType && static_cast<int>(joint->type) == rawType)
+				hint("This joint's type (%d) is not one this build knows, so physics builds "
+				     "it as a Fixed weld. Pick any other type above to store a real value.",
+				     rawType);
+			const JointType shownType = (static_cast<int>(joint->type) < 0 ||
+			                             static_cast<int>(joint->type) >= kJointTypeCount)
+			                                ? JointType::Fixed : joint->type;
+
+			// The other end, by UUID — the same picker the Rope's attachments
+			// and the Camera Rig's target use, because a raw handle survives
+			// neither a save nor a prefab.
+			//
+			// NOT filtered to entities that have a rigid body: an author places
+			// the joint and the body in either order, and a picker that hid the
+			// entity they are about to give a body to would read as a bug. The
+			// hints below say what is missing instead.
+			{
+				std::vector<const char*> names{ "(none)" };
+				std::vector<HE::UUID>    ids{ HE::UUID{} };
+				for (auto [e, name] : registry.view<NameComponent>().each())
+				{
+					if (e == entity || e == world.rootEntity()) continue;
+					if (!registry.all_of<TransformComponent>(e))  continue;
+					const HE::UUID id = world.entityId(e);
+					if (id == HE::UUID{}) continue;
+					names.push_back(name.name.c_str());
+					ids.push_back(id);
+				}
+				int current = 0;
+				for (size_t i = 1; i < ids.size(); ++i)
+					if (ids[i] == joint->target) { current = static_cast<int>(i); break; }
+				if (Row::combo("Target##joint", &current, names.data(),
+				               static_cast<int>(names.size())))
+				{
+					// A picker commits on the click that closes the popup, which
+					// leaves no deactivated item behind for trackEdit to see.
+					if (undo) undo->snapshotNow();
+					joint->target = ids[static_cast<size_t>(current)];
+				}
+			}
+
+			// What physics will refuse, said here rather than left to a log line
+			// the author finds after wondering why the door does not swing.
+			const auto* ownBody = registry.try_get<RigidBodyComponent>(entity);
+			if (!ownBody)
+				hint("This entity has no Rigid Body, so there is nothing to joint. A "
+				     "Character Controller is not one.");
+			if (joint->target == HE::UUID{})
+				hint("No other entity picked yet, so no joint is built.");
+			else
+			{
+				const Entity other = world.findByEntityId(joint->target);
+				const auto*  otherBody = (other != entt::null && registry.valid(other))
+				                             ? registry.try_get<RigidBodyComponent>(other)
+				                             : nullptr;
+				if (other == entt::null)
+					hint("The entity this points at is not in the scene, so no joint is built.");
+				else if (!otherBody)
+					hint("The entity this points at has no Rigid Body, so no joint is built.");
+				else if (ownBody && ownBody->type == RigidBodyType::Static &&
+				         otherBody->type == RigidBodyType::Static)
+					hint("Both bodies are Static, so nothing could ever move and the joint "
+					     "is refused. Make one of them Dynamic or Kinematic.");
+			}
+
+			switch (shownType)
+			{
+			case JointType::Fixed:
+				hint("Welds the two bodies in the pose they are already in — no anchors to "
+				     "author. For an object broken into pieces that should hold together "
+				     "until something hits it hard enough.");
+				break;
+			case JointType::Point:
+				Row::dragFloat3("Anchor A", &joint->anchorA.x, 0.01f, -10000.0f, 10000.0f);
+				trackEdit();
+				hint("One shared ball socket, in THIS entity's own space. Both bodies hang "
+				     "from that point and turn freely about it — the link of a chain.");
+				break;
+			case JointType::Hinge:
+				Row::dragFloat3("Anchor A", &joint->anchorA.x, 0.01f, -10000.0f, 10000.0f);
+				trackEdit();
+				Row::dragFloat3("Axis", &joint->axis.x, 0.01f, -1.0f, 1.0f);
+				trackEdit();
+				Row::dragFloat("Min Limit", &joint->minLimit, 1.0f, -180.0f, 180.0f, "%.1f°");
+				trackEdit();
+				Row::dragFloat("Max Limit", &joint->maxLimit, 1.0f, -180.0f, 180.0f, "%.1f°");
+				trackEdit();
+				break;
+			case JointType::Slider:
+				Row::dragFloat3("Axis", &joint->axis.x, 0.01f, -1.0f, 1.0f);
+				trackEdit();
+				Row::dragFloat("Min Limit", &joint->minLimit, 0.01f, -1000.0f, 1000.0f, "%.2f m");
+				trackEdit();
+				Row::dragFloat("Max Limit", &joint->maxLimit, 0.01f, -1000.0f, 1000.0f, "%.2f m");
+				trackEdit();
+				hint("Travel is measured from the pose the two bodies are authored in, so a "
+				     "drawer starts closed at 0.");
+				break;
+			case JointType::Distance:
+				Row::dragFloat3("Anchor A", &joint->anchorA.x, 0.01f, -10000.0f, 10000.0f);
+				trackEdit();
+				Row::dragFloat3("Anchor B", &joint->anchorB.x, 0.01f, -10000.0f, 10000.0f);
+				trackEdit();
+				Row::dragFloat("Min Limit", &joint->minLimit, 0.01f, 0.0f, 1000.0f, "%.2f m");
+				trackEdit();
+				Row::dragFloat("Max Limit", &joint->maxLimit, 0.01f, 0.0f, 1000.0f, "%.2f m");
+				trackEdit();
+				hint("The one type that reads both anchors — a rope runs from a point on "
+				     "this entity to a point on the other one.");
+				break;
+			}
+			if ((shownType == JointType::Hinge || shownType == JointType::Slider ||
+			     shownType == JointType::Distance) && joint->minLimit >= joint->maxLimit)
+				hint("Min at or above Max means NO limit: the hinge turns all the way round, "
+				     "the slider has no stops, the rope keeps whatever length it was placed "
+				     "at.");
+
+			// Motor: the two types with a single axis to drive along, and nobody
+			// else. Showing the rows on a Point joint would be offering a setting
+			// physics refuses.
+			if (shownType == JointType::Hinge || shownType == JointType::Slider)
+			{
+				ImGui::Spacing();
+				EditorWidgets::subHeading("Motor");
+				Row::dragFloat("Motor Target Speed", &joint->motorTarget, 0.05f,
+				               -100.0f, 100.0f,
+				               shownType == JointType::Hinge ? "%.2f rad/s" : "%.2f m/s");
+				trackEdit();
+				Row::dragFloat("Motor Max Force", &joint->motorMaxForce, 1.0f, 0.0f, 1000000.0f,
+				               shownType == JointType::Hinge ? "%.0f N·m" : "%.0f N");
+				trackEdit();
+				hint("Max Force is the switch: at 0 the motor is off. A target speed of 0 "
+				     "WITH force behind it is a brake that holds the joint where it is.");
+			}
+
+			ImGui::Spacing();
+			Row::dragFloat("Break Force", &joint->breakForce, 10.0f, 0.0f, 10000000.0f, "%.0f N");
+			trackEdit();
+			EditorWidgets::checkbox("Collide Connected", &joint->collideConnected);
+			trackEdit();
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<JointComponent>(entity); }
+	}
+
 	// ── Character Controller ──────────────────────────────────────────────────
 	if (auto* cc = registry.try_get<CharacterControllerComponent>(entity))
 	{
@@ -1536,6 +2062,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Jump height is not authored directly: it falls out of this against
 			// Gravity above, so the two rows sit next to each other.
 			Row::dragFloat("Jump Speed (m/s)",   &cc->jumpSpeed,  0.1f, 0.0f, 30.0f); trackEdit();
+			// The character's OWN channel, separate from the RigidBodyComponent's
+			// because a character need not have one. It decides what BLOCKS the
+			// character as it walks.
+			collisionLayerRow("Collision Layer##character", &cc->collisionLayer,
+			                  CollisionLayerNames(ctx), undo);
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
@@ -2040,6 +2571,7 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			addItem("Trail",        TrailComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
+			addItem("Joint",               JointComponent{});
 			addItem("Save State",          SaveStateComponent{});
 			// Offered in EVERY project. It used to be gated on Lua/Python,
 			// because back then the slot only took a .lua/.py asset and a
@@ -2065,6 +2597,19 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// dependency is the rule that makes it meaningful, not the absence.
 			if (registry.all_of<SkeletalMeshComponent>(entity))
 				addItem("Animator State Machine", AnimatorStateMachineComponent{});
+			// Same rule, same reason: root motion is about a skeleton's root
+			// bone, so it is offered exactly where there is a skeleton. It
+			// defaults to Off, so adding it changes nothing until asked.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Root Motion", RootMotionComponent{});
+			// And again: layers are laid on the pose of a skeleton. An empty
+			// stack does nothing, so adding it changes nothing until asked.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Animation Layers", AnimationLayerComponent{});
+			// And once more: IK corrects the pose of a skeleton. With no feet in
+			// the list and look-at off, adding it changes nothing until asked.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Inverse Kinematics", IkComponent{});
 
 			// Animator / Animator Blend / Property Animator, Character
 			// Controller, and the UI components are intentionally not offered

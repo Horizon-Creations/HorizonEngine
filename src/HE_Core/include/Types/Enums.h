@@ -107,7 +107,9 @@ namespace HE
         StructType,       // user-defined struct (named typed fields) — see HE::TypeRegistry
         EnumType,         // user-defined enum (named int-backed entries) — see HE::TypeRegistry
         SaveGameTemplate, // savegame field schema (typed fields + defaults), consumed by HE::api::save
-        Theme             // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
+        Theme,            // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
+        BoneMask,         // which joints an animation layer may touch, by joint NAME (HE::BoneMask)
+        BlendSpace        // N clips in a 1D/2D parameter space, mixed by parameter (HE::BlendSpace)
     };
 
     // Does this kind of asset travel over a collaboration session?
@@ -147,6 +149,14 @@ namespace HE
             // is being changed — a theme edit is exactly what two people want to
             // see land live.
             case AssetType::Theme:
+            // A list of joint names and weights: a few hundred bytes, authored in
+            // the editor, and the sort of thing an animator and a rigger change
+            // while looking at the same character.
+            case AssetType::BoneMask:
+            // A handful of clip references with coordinates: a few hundred bytes,
+            // authored in the editor by dragging points around, and exactly the
+            // sort of thing two people tune while watching the same character run.
+            case AssetType::BlendSpace:
                 return true;
 
             case AssetType::StaticMesh:
@@ -253,6 +263,25 @@ namespace HE
                           // simplifying, so a dense mesh may build no shape at all.
         HeightField = 5,  // the entity's TerrainComponent height field. STATIC only,
                           // and meaningless on an entity without a terrain.
+    };
+
+    // What kind of joint holds two rigid bodies together. Like ColliderShape
+    // above, the raw uint8 lands in .hescene, so these values are APPEND-ONLY.
+    //
+    // Which of JointComponent's fields a type actually reads differs per type —
+    // the table lives on the component, next to the fields it is about.
+    //
+    // The two Jolt types deliberately absent are SwingTwist and SixDOF. Those
+    // are the ragdoll pair: they only pay off with JPH::Ragdoll and a skeleton
+    // mapping behind them, which is a topic of its own beside the skeletal
+    // animation work rather than a sixth line here.
+    enum class JointType : uint8_t
+    {
+        Fixed    = 0,  // weld: no relative movement at all
+        Point    = 1,  // ball socket: rotates freely about one shared point
+        Hinge    = 2,  // door, lid, wheel — one axis, optionally limited
+        Slider   = 3,  // drawer, lift, piston — one direction, optionally limited
+        Distance = 4,  // rope, grapple, spring suspension — two points kept apart
     };
 
     enum class SerializeFormat : uint8_t

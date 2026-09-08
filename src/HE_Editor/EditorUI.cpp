@@ -13,6 +13,8 @@
 #include "InputAssetPanel.h"
 #include "TypeAssetPanel.h"
 #include "ThemeAssetPanel.h"
+#include "BoneMaskPanel.h"
+#include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -37,6 +39,7 @@
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
+#include "McpStatusBar.h"           // is an external tool driving this editor — footer status
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
 #include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
@@ -695,7 +698,10 @@ void EditorUI::render(AppContext& ctx, float dt)
 // gates the tab's dirty mark, forgetTabState (a panel missing from the list has its
 // unsaved graph dropped when the tab closes) and the Quit/Close-Project guard. That
 // is exactly how the Particle and Animator-State-Machine graphs used to be lost.
-// View-only panels (Static/Skeletal Mesh) have nothing to lose and stay out.
+// The Static Mesh viewer has nothing to lose and stays out. The Skeletal Mesh tab
+// is in, but under a DIFFERENT path than the tab's: what it edits is the clip
+// scrubbed in it (notifies, the per-clip root-motion switch), so it answers for
+// clip paths and never for the mesh it is named after.
 // The virtual tabs (Level Script / Game Instance) edit the world, so their dirty
 // state is the scene's (ctx.sceneDirty) and is guarded separately.
 // Public (declared in EditorUI.h) because the OS-level quit veto in
@@ -713,8 +719,11 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       InputAssetPanel::isDirty(assetPath)          ||
 	       TypeAssetPanel::isDirty(assetPath)           ||
 	       ThemeAssetPanel::isDirty(assetPath)          ||
+	       BoneMaskPanel::isDirty(assetPath)            ||
+	       BlendSpacePanel::isDirty(assetPath)          ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
-	       AnimatorStateMachineEditorPanel::isDirty(assetPath);
+	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
+	       SkeletalMeshEditorPanel::isDirty(assetPath);
 }
 
 // Every unsaved asset, INCLUDING ones whose tab the user already closed.
@@ -733,8 +742,11 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	InputAssetPanel::appendDirtyPaths(out);
 	TypeAssetPanel::appendDirtyPaths(out);
 	ThemeAssetPanel::appendDirtyPaths(out);
+	BoneMaskPanel::appendDirtyPaths(out);
+	BlendSpacePanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
+	SkeletalMeshEditorPanel::appendDirtyPaths(out);
 	std::sort(out.begin(), out.end());
 	out.erase(std::unique(out.begin(), out.end()), out.end());
 	return out;
@@ -757,8 +769,11 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = InputAssetPanel::save(ctx, assetPath)                       && ok;
 	ok = TypeAssetPanel::save(ctx, assetPath)                        && ok;
 	ok = ThemeAssetPanel::save(ctx, assetPath)                       && ok;
+	ok = BoneMaskPanel::save(ctx, assetPath)                         && ok;
+	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
+	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
 	// a save that reported success but left the state dirty.
 	return ok && !tabHasUnsavedEdits(assetPath);
@@ -798,6 +813,8 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	InputAssetPanel::forget(assetPath);
 	TypeAssetPanel::forget(assetPath);
 	ThemeAssetPanel::forget(assetPath);
+	BoneMaskPanel::forget(assetPath);
+	BlendSpacePanel::forget(assetPath);
 	ParticleGraphEditorPanel::forget(assetPath);
 	AnimatorStateMachineEditorPanel::forget(assetPath);
 	StaticMeshEditorPanel::forget(assetPath);
@@ -887,6 +904,8 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = InputAssetPanel::reloadFromDisk(assetPath)                      || any;
 	any = TypeAssetPanel::reloadFromDisk(assetPath)                       || any;
 	any = ThemeAssetPanel::reloadFromDisk(assetPath)                      || any;
+	any = BoneMaskPanel::reloadFromDisk(assetPath)                        || any;
+	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;
@@ -1021,6 +1040,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		if (!saveAsset(ctx, path))
 			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+		// One tab edits an asset it is not named after: the Skeletal Mesh viewer
+		// authors the NOTIFIES of the clip scrubbed in it. Saving the tab's own
+		// path finds nothing to write and reports success, so without this the
+		// shortcut would be a keystroke that quietly did nothing. Routed here and
+		// not through a second Ctrl+S owner inside the panel — two handlers for
+		// one key is how a Save starts saving the scene as well.
+		if (const std::string clip = SkeletalMeshEditorPanel::dirtyClipForTab(path); !clip.empty())
+			if (!saveAsset(ctx, clip))
+				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + clip).c_str());
 	};
 	// ── Save All (Ctrl/Cmd+Shift+S): every unsaved asset, then the scene ────
 	// unsavedAssetPaths() is panel-driven, so this also catches assets whose tab
@@ -2424,7 +2452,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// queue, in the same right-anchored group and for the same reason — the
 		// text is a sentence of unbounded length, and only a fixed edge keeps it
 		// out of the centred status label.
-		if (const float actW = CollabActivityBar::FooterWidth(ctx); actW > 0.0f)
+		// Hoisted out of the `if` it used to be scoped to: the block below needs
+		// this width too, and asking a second time would be asking a DIFFERENT
+		// question — clicking the activity line clears it, so a second call in
+		// the same frame returns 0 for a line that was just drawn, and everything
+		// to its left would jump one widget's width to the right for that frame.
+		const float actW = CollabActivityBar::FooterWidth(ctx);
+		if (actW > 0.0f)
 		{
 			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
@@ -2433,6 +2467,27 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			                - (syncW > 0.0f ? 16.0f : 0.0f));
 			if (CollabActivityBar::DrawFooter(ctx))
 				revealFloatingWindow(s_showCollab, "Collaboration");
+		}
+
+		// Is an external tool driving this editor? Left-most of the right-hand
+		// group, and the only one of these that is about who ELSE may be changing
+		// the scene without a face or a cursor to show for it. Draws nothing at
+		// all while remote control is off, which is almost every session — so
+		// when it does appear, it means something.
+		//
+		// The chain above is hand-maintained: this block subtracts the width of
+		// every widget to its right plus 16px per neighbour that is actually
+		// there. Being at the left end is what keeps the edit to one block —
+		// inserting anywhere else means editing everything to its left as well.
+		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW - mcpW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (syncW > 0.0f ? 16.0f : 0.0f)
+			                - (actW > 0.0f ? 16.0f : 0.0f));
+			McpStatusBar::DrawFooter(ctx);
 		}
 
 		// Middle — status
@@ -2840,6 +2895,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (ThemeAssetPanel::isThemeAsset(tabPath))
             ThemeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (BoneMaskPanel::isBoneMaskAsset(tabPath))
+            BoneMaskPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (BlendSpacePanel::isBlendSpaceAsset(tabPath))
+            BlendSpacePanel::render(ctx, tabPath, tabPos, tabSize);
         else if (TypeAssetPanel::isTypeAsset(tabPath))
             TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
