@@ -12,11 +12,11 @@
 //          #include <HorizonGameServices.h>
 //          HE_IMPLEMENT_ENGINE_SERVICES()
 //   2. The engine fills the tables (HE::api::fillSaveServices,
-//      fillPhysicsServices, fillInputServices), points an HeEngineServices
-//      umbrella at them and calls the export right after the library loads —
-//      before onStart.
-//   3. Game code uses the he::save / he::entity / he::physics / he::input
-//      wrappers below (or the raw tables). Before injection — or under an engine
+//      fillPhysicsServices, fillInputServices, fillContentServices), points an
+//      HeEngineServices umbrella at them and calls the export right after the
+//      library loads — before onStart.
+//   3. Game code uses the he::save / he::entity / he::physics / he::input /
+//      he::content wrappers below (or the raw tables). Before injection — or under an engine
 //      too old to inject — every wrapper is a safe no-op returning its default,
 //      mirroring the script API's loud-failure-not-crash contract (the engine
 //      side logs).
@@ -38,9 +38,12 @@
 #define HE_SAVE_ABI_VERSION     1u
 #define HE_PHYSICS_ABI_VERSION  1u
 #define HE_INPUT_ABI_VERSION    1u
+#define HE_CONTENT_ABI_VERSION  1u
 // The umbrella that carries the tables. Bumped when a table POINTER is appended
 // to HeEngineServices, not when a table itself grows.
-#define HE_SERVICES_ABI_VERSION 1u
+//   1 — save, physics, input
+//   2 — + content
+#define HE_SERVICES_ABI_VERSION 2u
 
 // Export decoration for the receiving symbol — same rule as <IGameLogic.h>,
 // defined here too so this header stands alone (e.g. in tests).
@@ -189,6 +192,40 @@ typedef struct HeInputServices
     void  (*setMode)(void* host, int mode);
 } HeInputServices;
 
+// ── Content (see HE::api::content) ───────────────────────────────────────────
+// An asset's identity, layout-identical to HE::UUID (Types/UUID.h). A struct of
+// two integers rather than a string because the project HAS no UUID↔text
+// conversion, and inventing one just to cross this boundary would be new surface
+// for nothing.
+typedef struct HeAssetId { uint64_t hi, lo; } HeAssetId;
+
+// Residency, and nothing else. There is no getStaticMesh row in this table and
+// there will not be one: the ContentManager's getters return pointers into a
+// dense pool that the NEXT load moves — invalidating the pointer AND every
+// std::string the asset owns. Inside the engine that is a documented trap; handed
+// across a dylib boundary, where the engine cannot know when the module will
+// dereference what it was given, it would be a crash waiting for a second load.
+// What crosses here is values: an id, a bool, a name.
+typedef struct HeContentServices
+{
+    uint32_t abiVersion;   // HE_CONTENT_ABI_VERSION
+    void*    host;         // opaque engine context — pass to every call
+
+    // Load (or return the already-resident) asset at a content-relative path
+    // ("Meshes/Rock.hasset"). Writes the id to `out` and returns false — leaving
+    // `out` zeroed — when the path is unknown or unreadable. The ONLY row here
+    // that reads the disk.
+    bool (*loadAsset)(void* host, const char* relativePath, HeAssetId* out);
+    // Drop it again. false = that id was not loaded.
+    bool (*unloadAsset)(void* host, HeAssetId id);
+    bool (*isLoadedId)(void* host, HeAssetId id);
+    // The asset's kind as text ("StaticMesh", "Texture", …; "" for an id this
+    // manager does not know). Same two-call convention as the save table's
+    // string getters: writes up to `cap` bytes including the NUL and returns the
+    // FULL length.
+    int  (*assetTypeName)(void* host, HeAssetId id, char* buf, int cap);
+} HeContentServices;
+
 // ── The umbrella ─────────────────────────────────────────────────────────────
 // Sibling tables rather than one growing table, and one export that hands them
 // over together. A new service appends a POINTER here and bumps
@@ -200,6 +237,7 @@ typedef struct HeEngineServices
     const HeSaveServices*    save;
     const HePhysicsServices* physics;
     const HeInputServices*   input;
+    const HeContentServices* content;      // umbrella v2
 } HeEngineServices;
 
 typedef void (*FnSetEngineServicesV2)(const HeEngineServices*);
@@ -208,6 +246,7 @@ typedef void (*FnSetEngineServicesV2)(const HeEngineServices*);
 extern const HeSaveServices*    g_heSaveServices;
 extern const HePhysicsServices* g_hePhysicsServices;
 extern const HeInputServices*   g_heInputServices;
+extern const HeContentServices* g_heContentServices;
 
 } // extern "C"
 
@@ -220,22 +259,33 @@ extern const HeInputServices*   g_heInputServices;
 //     g_heSaveServices is set and the rest reads unavailable.
 // Both are a STATE, not an error. HE_SetEngineServices touches nothing but the
 // save table: it is the v1 contract and stays exactly what it was.
+// The umbrella version is checked PER POINTER, at the version that pointer was
+// appended at — not once against HE_SERVICES_ABI_VERSION. The prefix rule is the
+// reason: an engine that only knows umbrella v1 wrote a struct that ends after
+// `input`, so reading `s->content` from it would read past its storage; but
+// save/physics/input ARE there and refusing them too would mean a module built
+// today loses its savegame API on last month's engine — exactly the failure the
+// V2 export was introduced to avoid.
 #define HE_IMPLEMENT_ENGINE_SERVICES() \
     extern "C" { \
     const HeSaveServices*    g_heSaveServices    = nullptr; \
     const HePhysicsServices* g_hePhysicsServices = nullptr; \
     const HeInputServices*   g_heInputServices   = nullptr; \
+    const HeContentServices* g_heContentServices = nullptr; \
     HE_GAME_API void HE_SetEngineServices(const HeSaveServices* s) \
     { g_heSaveServices = (s && s->abiVersion >= HE_SAVE_ABI_VERSION) ? s : nullptr; } \
     HE_GAME_API void HE_SetEngineServicesV2(const HeEngineServices* s) \
     { \
-        const bool ok = s && s->abiVersion >= HE_SERVICES_ABI_VERSION; \
-        g_heSaveServices = (ok && s->save && \
+        const bool v1 = s && s->abiVersion >= 1u; \
+        const bool v2 = s && s->abiVersion >= 2u; \
+        g_heSaveServices = (v1 && s->save && \
             s->save->abiVersion >= HE_SAVE_ABI_VERSION) ? s->save : nullptr; \
-        g_hePhysicsServices = (ok && s->physics && \
+        g_hePhysicsServices = (v1 && s->physics && \
             s->physics->abiVersion >= HE_PHYSICS_ABI_VERSION) ? s->physics : nullptr; \
-        g_heInputServices = (ok && s->input && \
+        g_heInputServices = (v1 && s->input && \
             s->input->abiVersion >= HE_INPUT_ABI_VERSION) ? s->input : nullptr; \
+        g_heContentServices = (v2 && s->content && \
+            s->content->abiVersion >= HE_CONTENT_ABI_VERSION) ? s->content : nullptr; \
     } \
     }
 
@@ -257,10 +307,23 @@ struct RaycastHit
     float    distance = 0.0f;
 };
 
+// An asset's identity as the engine hands it over. A value, not a handle into
+// anything: holding one across a load is safe, which is the whole reason this
+// boundary trades ids and never pointers.
+struct AssetId
+{
+    uint64_t hi = 0, lo = 0;
+    bool valid() const { return hi != 0 || lo != 0; }
+    bool operator==(const AssetId&) const = default;
+};
+
 namespace detail {
-inline const HeSaveServices*    svc()      { return g_heSaveServices; }
-inline const HePhysicsServices* physSvc()  { return g_hePhysicsServices; }
-inline const HeInputServices*   inputSvc() { return g_heInputServices; }
+inline const HeSaveServices*    svc()        { return g_heSaveServices; }
+inline const HePhysicsServices* physSvc()    { return g_hePhysicsServices; }
+inline const HeInputServices*   inputSvc()   { return g_heInputServices; }
+inline const HeContentServices* contentSvc() { return g_heContentServices; }
+inline ::HeAssetId toC(const AssetId& id)   { return ::HeAssetId{ id.hi, id.lo }; }
+inline AssetId     fromC(const ::HeAssetId& id) { return AssetId{ id.hi, id.lo }; }
 inline RaycastHit fromC(const HeRaycastHit& h)
 {
     RaycastHit r;
@@ -271,17 +334,20 @@ inline RaycastHit fromC(const HeRaycastHit& h)
     r.distance = h.distance;
     return r;
 }
-// Two-call string fetch through a (host, buf, cap) → length getter.
+// Two-call string fetch through a (host, buf, cap) → length getter. `host` is
+// passed in rather than read off the save table: every table carries its own,
+// and a shared helper that reached for one of them would hand the content
+// table's getter the save table's context — and return nothing at all whenever
+// save happened to be unavailable.
 template <typename Fn>
-inline std::string fetchString(Fn fn)
+inline std::string fetchString(void* host, Fn fn)
 {
-    const HeSaveServices* s = svc();
-    if (!s) return {};
     char small[256];
-    const int need = fn(s->host, small, (int)sizeof small);
+    const int need = fn(host, small, (int)sizeof small);
+    if (need < 0) return {};
     if (need < (int)sizeof small) return std::string(small);
     std::string big((size_t)need + 1, '\0');
-    fn(s->host, big.data(), (int)big.size());
+    fn(host, big.data(), (int)big.size());
     big.resize((size_t)need);
     return big;
 }
@@ -319,11 +385,11 @@ inline bool exists(const std::string& id)
 inline bool remove(const std::string& id)
 { auto* s = detail::svc(); return s && s->removeSave(s->host, id.c_str()); }
 inline std::string activeId()
-{ auto* s = detail::svc(); return s ? detail::fetchString(s->activeId) : std::string(); }
+{ auto* s = detail::svc(); return s ? detail::fetchString(s->host, s->activeId) : std::string(); }
 inline std::vector<std::string> list()
-{ auto* s = detail::svc(); return s ? detail::splitLines(detail::fetchString(s->listIds)) : std::vector<std::string>{}; }
+{ auto* s = detail::svc(); return s ? detail::splitLines(detail::fetchString(s->host, s->listIds)) : std::vector<std::string>{}; }
 inline std::vector<std::string> fields()
-{ auto* s = detail::svc(); return s ? detail::splitLines(detail::fetchString(s->fields)) : std::vector<std::string>{}; }
+{ auto* s = detail::svc(); return s ? detail::splitLines(detail::fetchString(s->host, s->fields)) : std::vector<std::string>{}; }
 
 inline bool setNumber(const std::string& field, float v)
 { auto* s = detail::svc(); return s && s->setNumber(s->host, field.c_str(), v); }
@@ -335,7 +401,7 @@ inline std::string getString(const std::string& field)
 {
     auto* s = detail::svc();
     if (!s) return {};
-    return detail::fetchString([&](void* h, char* b, int c){ return s->getString(h, field.c_str(), b, c); });
+    return detail::fetchString(s->host, [&](void* h, char* b, int c){ return s->getString(h, field.c_str(), b, c); });
 }
 inline bool setBool(const std::string& field, bool v)
 { auto* s = detail::svc(); return s && s->setBool(s->host, field.c_str(), v); }
@@ -347,7 +413,7 @@ inline std::string getStructJson(const std::string& field)
 {
     auto* s = detail::svc();
     if (!s) return {};
-    return detail::fetchString([&](void* h, char* b, int c){ return s->getStructJson(h, field.c_str(), b, c); });
+    return detail::fetchString(s->host, [&](void* h, char* b, int c){ return s->getStructJson(h, field.c_str(), b, c); });
 }
 } // namespace save
 
@@ -528,4 +594,43 @@ inline void setModeGameAndUI()
 inline void setModeUIOnly()
 { if (auto* s = detail::inputSvc()) s->setMode(s->host, (int)Mode::UIOnly); }
 } // namespace input
+
+// ── Content ──────────────────────────────────────────────────────────────────
+// Residency: get an asset into memory before the moment it is needed, and let
+// go of it afterwards. Deliberately NOT access — there is no getMesh here and
+// there will not be one. The engine's own accessors return pointers into a pool
+// the next load moves, together with every string those assets own; the only
+// safe thing to hand a module that the engine cannot see into is a value.
+//
+// So an AssetId is what you keep. It stays correct across any number of further
+// loads, which is exactly what a pointer would not.
+namespace content {
+inline bool available() { return detail::contentSvc() != nullptr; }
+
+// Load (or return the already-resident) asset at a content-relative path
+// ("Meshes/Rock.hasset"). An invalid id (valid() == false) means the path is
+// unknown or unreadable — or that no engine injected this table.
+inline AssetId load(const std::string& path)
+{
+    auto* s = detail::contentSvc();
+    if (!s) return {};
+    ::HeAssetId out{};
+    return s->loadAsset(s->host, path.c_str(), &out) ? detail::fromC(out) : AssetId{};
+}
+// Drop it again. false = it was not loaded.
+inline bool unload(const AssetId& id)
+{ auto* s = detail::contentSvc(); return s && s->unloadAsset(s->host, detail::toC(id)); }
+inline bool isLoaded(const AssetId& id)
+{ auto* s = detail::contentSvc(); return s && s->isLoadedId(s->host, detail::toC(id)); }
+// "StaticMesh", "Texture", "Material", … — "" for an id the engine does not
+// know. The same spelling the editor and the asset headers use.
+inline std::string typeName(const AssetId& id)
+{
+    auto* s = detail::contentSvc();
+    if (!s) return {};
+    const ::HeAssetId cid = detail::toC(id);
+    return detail::fetchString(s->host, [&](void* h, char* b, int c)
+    { return s->assetTypeName(h, cid, b, c); });
+}
+} // namespace content
 } // namespace he

@@ -1051,6 +1051,26 @@ namespace
 	  "Whether the picture is currently easing in from another camera. True "
 	  "until the blend has fully arrived." },
 
+	// ── Content ──────────────────────────────────────────────────────────────
+	{ "content.load",
+	  "Brings an asset into memory ahead of the moment it is needed — the mesh "
+	  "behind the door, the music for the next area. Already loaded is a "
+	  "success, not a second load. Reading the file is the slow part, so do it "
+	  "early rather than in the frame that needs it." },
+	{ "content.unload",
+	  "Lets go of an asset again and frees what it held. False means it was not "
+	  "loaded in the first place. Anything still using it — a mesh component, a "
+	  "playing sound — will stop finding it, so unload what you have left "
+	  "behind, not what is on screen." },
+	{ "content.isLoaded",
+	  "Whether this asset is in memory right now. Asking does not load it, so "
+	  "this is the safe way to check before deciding to." },
+	{ "content.typeName",
+	  "What kind of asset this is, as text: StaticMesh, Texture, Material, "
+	  "Widget and so on. Empty for an asset that is not loaded — Load Asset "
+	  "first. Useful when a path arrives from somewhere and you want to know "
+	  "what you were handed." },
+
 	// ── Audio ────────────────────────────────────────────────────────────────
 	{ "audio.play",
 	  "Plays a sound flat — the same in both ears, wherever the listener is. "

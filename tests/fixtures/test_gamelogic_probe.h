@@ -22,12 +22,14 @@ struct ITestServicesProbe : IGameLogic
     virtual bool servicesAvailableAtStart() const = 0;
     virtual bool physicsAvailableAtStart()  const = 0;
     virtual bool inputAvailableAtStart()    const = 0;
+    virtual bool contentAvailableAtStart()  const = 0;
     virtual int  updateCount()              const = 0;
     virtual bool physicsAvailableAtUpdate() const = 0;
 
     virtual bool saveAvailable()    const = 0;
     virtual bool physicsAvailable() const = 0;
     virtual bool inputAvailable()   const = 0;
+    virtual bool contentAvailable() const = 0;
 
     // ── Physics ─────────────────────────────────────────────────────────────
     virtual he::RaycastHit doRaycast(const he::Vec3& origin, const he::Vec3& dir,
@@ -64,4 +66,19 @@ struct ITestServicesProbe : IGameLogic
     // Straight at the table, past the three named setters — the only way to
     // reach the out-of-range guard the wrappers cannot produce.
     virtual void  doSetModeRaw(int mode)       const = 0;
+
+    // ── Content ─────────────────────────────────────────────────────────────
+    // An AssetId is a VALUE (two integers), which is the point: it crosses the
+    // boundary by copy and keeps answering after loads that would have moved
+    // anything the manager could have handed out a pointer to.
+    virtual he::AssetId doLoadAsset(const char* relativePath) const = 0;
+    virtual bool doUnloadAsset(const he::AssetId& id) const = 0;
+    virtual bool doIsAssetLoaded(const he::AssetId& id) const = 0;
+    // Through the he::content::typeName WRAPPER (so the module's own two-call
+    // string fetch is what gets exercised); writes up to `cap` bytes including
+    // the NUL and returns the full length.
+    virtual int  doAssetTypeName(const he::AssetId& id, char* buf, int cap) const = 0;
+    // Straight at the table, to reach the too-small-buffer path the wrapper
+    // hides by growing and retrying.
+    virtual int  doAssetTypeNameRaw(const he::AssetId& id, char* buf, int cap) const = 0;
 };

@@ -390,9 +390,18 @@ Notes:
   same API through `<HorizonGameServices.h>` (`he::save::*` / `he::entity::*`,
   injected after the library loads; struct fields cross as JSON). The same header
   carries `he::physics::*` (raycast/sphereCast/overlapSphere, force/impulse/torque,
-  velocity, teleport, gravity) and `he::input::*` (keys, mouse, gamepad, input
-  mode) — one injected C-ABI table per service, so a native module reaches what
-  Lua, Python and HorizonCode reach.
+  velocity, teleport, gravity), `he::input::*` (keys, mouse, gamepad, input mode)
+  and `he::content::*` (load/unload/isLoaded/typeName) — one injected C-ABI table
+  per service, so a native module reaches what Lua, Python and HorizonCode reach.
+- **Content**: `content.load` / `content.unload` / `content.isLoaded` /
+  `content.typeName` control an asset's **residency** — get it into memory before
+  the moment it is needed, let go of it afterwards. `typeName` answers with the
+  asset kind as text (`"StaticMesh"`, `"Texture"`, …), or `""` for an asset this
+  project has not loaded; only `load` reads the disk, so asking a question never
+  turns into a load. There is deliberately **no** node that hands out the asset
+  object itself: the engine's asset pointers are only valid until the next load,
+  and the group trades values (path, id, name) for exactly that reason. Native
+  C++ gets the same four keyed by `he::AssetId` instead of by path.
 - **User types**: Struct and Enum **assets** define project types once and light up
   everywhere — HorizonCode pins/variables (Make/Break Struct, Get/Set Struct Field,
   Enum Value, Switch on Enum, conversions; wires require the SAME definition; a

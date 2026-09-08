@@ -1990,6 +1990,12 @@ bool ContentManager::isLoaded(const std::string& relativePath) const
 	return m_pathToUUID.contains(relativePath);
 }
 
+HE::UUID ContentManager::idForPath(const std::string& relativePath) const
+{
+	const auto it = m_pathToUUID.find(relativePath);
+	return it == m_pathToUUID.end() ? HE::UUID{} : it->second;
+}
+
 // ─── Asset enumeration ───────────────────────────────────────────────────────
 std::vector<HE::UUID> ContentManager::enumerateIds() const
 {

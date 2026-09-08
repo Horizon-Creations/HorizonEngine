@@ -155,11 +155,12 @@ private:
     // C++ GameLogic services (HorizonGameServices.h): the tables + their binding
     // must outlive the loaded library, so they live here. Filled + injected
     // right after the library loads. m_engineServices is the umbrella that
-    // points at the other three and is what the loader actually hands over.
+    // points at the other four and is what the loader actually hands over.
     HE::api::GameServicesBinding m_gameServicesBinding;
     HeSaveServices               m_saveServices{};
     HePhysicsServices            m_physicsServices{};
     HeInputServices              m_inputServices{};
+    HeContentServices            m_contentServices{};
     HeEngineServices             m_engineServices{};
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists

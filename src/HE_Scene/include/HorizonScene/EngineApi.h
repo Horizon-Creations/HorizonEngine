@@ -1,6 +1,7 @@
 #pragma once
 #include <HorizonCode/HorizonCode.h>          // HorizonCode::Value, PinType
 #include <HorizonCode/HorizonCodeRuntime.h>   // Ctx::runtime (who is calling)
+#include <Types/UUID.h>                       // HE::UUID (content::*Id asset handles)
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
@@ -17,6 +18,7 @@ struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
 struct HePhysicsServices; //   "
 struct HeInputServices;   //   "
+struct HeContentServices; //   "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -1086,6 +1088,43 @@ HE_ENV_FIELDS_COLOR(HE_ENV_DECL_COLOR)
 #undef HE_ENV_DECL_COLOR
 }
 
+// ── Content (Ctx.content — the app's ContentManager; null → neutral) ─────────
+// Residency, not access. There is no getStaticMesh row here and there will not
+// be one: the ContentManager hands out pointers into a dense SlotMap, and the
+// NEXT registration moves every asset in the pool — invalidating not just the
+// pointer but every std::string it owns. Inside one translation unit that is a
+// trap; across a scripting boundary, whose call order the engine does not know,
+// it would be a guarantee. What crosses here is values only: a UUID, a bool, a
+// name.
+//
+// Two spellings of the same four operations, because the two kinds of caller
+// hold different handles:
+//   · path-keyed (load/unload/isLoaded/typeName) — what the registry exposes,
+//     because a content-relative path is the only asset handle HorizonCode,
+//     Lua and Python have (PinType has no UUID pin, and inventing a text form
+//     for one would be new surface for nothing);
+//   · id-keyed (…Id) — what a native C++ module gets, because the UUID is what
+//     the manager is keyed by and it survives a rename.
+// Only `load` reads the disk. The path-keyed rest resolve through the manager's
+// path index and answer "no" for an asset that was never loaded, so asking a
+// question can never turn into a load.
+namespace content {
+    // Load (or return the already-resident) asset at a content-relative path.
+    bool        load(Ctx&, const std::string& path);
+    // Drop it again. false = it was not loaded in the first place.
+    bool        unload(Ctx&, const std::string& path);
+    bool        isLoaded(Ctx&, const std::string& path);
+    // The asset's kind, spelled as HE::assetTypeName does ("StaticMesh",
+    // "Texture", …). "" for an asset this manager does not know — load first.
+    std::string typeName(Ctx&, const std::string& path);
+
+    // The same four keyed by UUID. loadId returns a zero UUID on failure.
+    HE::UUID    loadId(Ctx&, const std::string& path);
+    bool        unloadId(Ctx&, const HE::UUID& id);
+    bool        isLoadedId(Ctx&, const HE::UUID& id);
+    std::string typeNameId(Ctx&, const HE::UUID& id);
+}
+
 // ── Audio (Ctx.audio — the app's AudioEngine; null → no-ops) ─────────────────
 namespace audio {
     // Play an audio ASSET (content-relative .hasset path). Returns a handle
@@ -1647,6 +1686,9 @@ void fillPhysicsServices(::HePhysicsServices& out, GameServicesBinding* binding)
 // call site and a later input service that DOES need the world can be added
 // without changing every caller.
 void fillInputServices(::HeInputServices& out, GameServicesBinding* binding);
+// Content reaches the ContentManager through `binding->content` — the raw
+// pointer, for the reason the struct's comment gives.
+void fillContentServices(::HeContentServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

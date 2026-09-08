@@ -9,7 +9,10 @@
 // below crossed a dylib boundary as plain C.
 #include "doctest.h"
 #include "fixtures/test_gamelogic_probe.h"
+#include "TestFsUtil.h"
 #include <Application/GameLogicLoader.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
@@ -29,31 +32,70 @@
 
 namespace {
 
-// World + physics + the three tables under one umbrella, wired the way
+// World + physics + content + the four tables under one umbrella, wired the way
 // GameApplication wires them: resolvers for world and physics (both are replaced
-// on a scene switch), a raw pointer for content.
+// on a scene switch), a raw pointer for content (the manager outlives every
+// switch).
+//
+// The content root is a real temporary directory with real .hasset files in it,
+// because the module's load() reads the disk — and because a SECOND load is what
+// moves the asset pool, which is the thing this fixture has to be able to
+// provoke.
 struct ServicesRig
 {
-    HorizonWorld world;
-    PhysicsWorld physics;
+    std::filesystem::path contentRoot;
+    HorizonWorld   world;
+    PhysicsWorld   physics;
+    ContentManager content;
 
     HE::api::GameServicesBinding binding;
     HeSaveServices               save{};
     HePhysicsServices            phys{};
     HeInputServices              input{};
+    HeContentServices            assets{};
     HeEngineServices             umbrella{};
 
     ServicesRig()
+        : contentRoot(std::filesystem::temp_directory_path() / "he_gl_services_content" / "Content")
     {
+        he_test::removeAllQuiet(contentRoot.parent_path());
+        std::filesystem::create_directories(contentRoot);
+        content.setContentRoot(contentRoot.string());
+        writeTexture("Rock.hasset", "Rock");
+        writeTexture("Moss.hasset", "Moss");
+        StaticMeshAsset mesh;
+        mesh.type = HE::AssetType::StaticMesh;
+        mesh.name = "Cube"; mesh.path = "Cube.hasset";
+        mesh.vertices = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+        mesh.indices  = { 0, 1, 2 };
+        content.saveAsset(mesh);
+        // saveAsset registers what it wrote; drop it all again so the module
+        // starts from "on disk, not resident" and its load() really loads.
+        for (const HE::UUID id : content.enumerateIds()) content.unloadAsset(id);
+
         binding.world   = [this]() { return &world; };
         binding.physics = [this]() { return &physics; };
+        binding.content = &content;
         HE::api::fillSaveServices(save, &binding);
         HE::api::fillPhysicsServices(phys, &binding);
         HE::api::fillInputServices(input, &binding);
+        HE::api::fillContentServices(assets, &binding);
         umbrella.abiVersion = HE_SERVICES_ABI_VERSION;
         umbrella.save       = &save;
         umbrella.physics    = &phys;
         umbrella.input      = &input;
+        umbrella.content    = &assets;
+    }
+    ~ServicesRig() { he_test::removeAllQuiet(contentRoot.parent_path()); }
+
+    void writeTexture(const std::string& path, const std::string& name)
+    {
+        TextureAsset t;
+        t.type = HE::AssetType::Texture;
+        t.name = name; t.path = path;
+        t.width = 1; t.height = 1; t.channels = 4;
+        t.data = { 255, 255, 255, 255 };
+        content.saveAsset(t);
     }
 };
 
@@ -381,14 +423,29 @@ TEST_CASE("GameLogic services: a table with too small an ABI version is dropped 
     REQUIRE(loader.injectServices(&mixed));
     CHECK(probe->physicsAvailable());
 
-    // The umbrella itself carries the same rule, and a version it refuses takes
-    // every table with it — the module was handed a struct it cannot read.
+    // The umbrella carries the rule PER POINTER, at the version each pointer was
+    // appended at — not once for the whole struct. An older umbrella is still a
+    // valid prefix: what it does contain is readable, and only what came later
+    // has to be refused. Dropping everything instead would mean a module built
+    // today loses its savegame API on last month's engine, which is the failure
+    // the V2 export exists to avoid in the first place.
+    HeEngineServices olderUmbrella = rig.umbrella;
+    olderUmbrella.abiVersion = 1u;   // save/physics/input, no content
+    REQUIRE(loader.injectServices(&olderUmbrella));
+    CHECK(probe->saveAvailable());
+    CHECK(probe->physicsAvailable());
+    CHECK(probe->inputAvailable());
+    CHECK_FALSE(probe->contentAvailable());
+
+    // Below every version there is nothing left to read, and the whole struct
+    // goes.
     HeEngineServices badUmbrella = rig.umbrella;
-    badUmbrella.abiVersion = HE_SERVICES_ABI_VERSION - 1;
+    badUmbrella.abiVersion = 0u;
     REQUIRE(loader.injectServices(&badUmbrella));
     CHECK_FALSE(probe->saveAvailable());
     CHECK_FALSE(probe->physicsAvailable());
     CHECK_FALSE(probe->inputAvailable());
+    CHECK_FALSE(probe->contentAvailable());
 
     // A null table pointer is a state, not a crash.
     HeEngineServices sparse{};
@@ -418,5 +475,125 @@ TEST_CASE("GameLogic services: a library without the receiving exports is a stat
 
     // It still runs; it simply cannot reach the engine.
     loader.logic()->onStart(rig.world);
+    loader.unload(rig.world);
+}
+
+TEST_CASE("GameLogic services: content reaches a loaded C++ module as ids, never pointers")
+{
+    const std::filesystem::path libPath = HE_TEST_GAMELOGIC_SERVICES_LIB;
+    REQUIRE(std::filesystem::exists(libPath));
+
+    ServicesRig rig;
+    HE::GameLogicLoader loader;
+    REQUIRE(loader.load(libPath));
+    auto* probe = probeOf(loader);
+    REQUIRE(probe != nullptr);
+
+    // Before injection: no table, no crash, an invalid id.
+    CHECK_FALSE(probe->contentAvailable());
+    CHECK_FALSE(probe->doLoadAsset("Rock.hasset").valid());
+
+    REQUIRE(loader.injectServices(&rig.umbrella));
+    loader.logic()->onStart(rig.world);
+    CHECK(probe->contentAvailableAtStart());   // a warm-up load belongs in onStart
+    CHECK(probe->contentAvailable());
+
+    char name[64] = {};
+
+    SUBCASE("load, type, unload — every value a copy")
+    {
+        const he::AssetId rock = probe->doLoadAsset("Rock.hasset");
+        REQUIRE(rock.valid());
+        CHECK(probe->doIsAssetLoaded(rock));
+        // The engine agrees with what crossed: same asset, same identity.
+        CHECK(rig.content.isLoaded(HE::UUID{ rock.hi, rock.lo }));
+        CHECK(rig.content.idForPath("Rock.hasset") == HE::UUID{ rock.hi, rock.lo });
+
+        REQUIRE(probe->doAssetTypeName(rock, name, (int)sizeof name) == 7);
+        CHECK(std::string(name) == "Texture");
+
+        CHECK(probe->doUnloadAsset(rock));
+        CHECK_FALSE(probe->doIsAssetLoaded(rock));
+        CHECK_FALSE(rig.content.isLoaded(HE::UUID{ rock.hi, rock.lo }));
+        CHECK_FALSE(probe->doUnloadAsset(rock));   // already gone
+    }
+
+    // The reason this table trades ids: a pointer taken here would be dangling
+    // after the very next load, and the module's call order is not something the
+    // engine can see. An id is a value and simply keeps answering.
+    SUBCASE("an id keeps answering across the loads that move the asset pool")
+    {
+        const he::AssetId rock = probe->doLoadAsset("Rock.hasset");
+        REQUIRE(rock.valid());
+        REQUIRE(probe->doAssetTypeName(rock, name, (int)sizeof name) == 7);
+        CHECK(std::string(name) == "Texture");
+
+        // Two more registrations — this is what invalidates every pointer the
+        // ContentManager ever handed out, and every string those assets own.
+        const he::AssetId moss = probe->doLoadAsset("Moss.hasset");
+        const he::AssetId cube = probe->doLoadAsset("Cube.hasset");
+        REQUIRE(moss.valid());
+        REQUIRE(cube.valid());
+        CHECK_FALSE(moss == rock);
+
+        CHECK(probe->doIsAssetLoaded(rock));
+        char again[64] = {};
+        CHECK(probe->doAssetTypeName(rock, again, (int)sizeof again) == 7);
+        CHECK(std::string(again) == "Texture");
+        CHECK(probe->doAssetTypeName(cube, again, (int)sizeof again) == 10);
+        CHECK(std::string(again) == "StaticMesh");
+
+        // Unloading a DIFFERENT asset swap-and-pops the pool. Same answer.
+        CHECK(probe->doUnloadAsset(moss));
+        CHECK(probe->doIsAssetLoaded(rock));
+        CHECK(probe->doAssetTypeName(rock, again, (int)sizeof again) == 7);
+        CHECK(std::string(again) == "Texture");
+    }
+
+    SUBCASE("the name getter reports the full length into a buffer that is too small")
+    {
+        const he::AssetId cube = probe->doLoadAsset("Cube.hasset");
+        REQUIRE(cube.valid());
+        char tiny[4] = { 'x', 'x', 'x', 'x' };
+        // Straight at the table: cap-1 bytes plus a NUL, the FULL length back.
+        CHECK(probe->doAssetTypeNameRaw(cube, tiny, (int)sizeof tiny) == 10);
+        CHECK(std::string(tiny) == "Sta");
+        // Through the wrapper, which grows and retries for the caller.
+        CHECK(probe->doAssetTypeName(cube, name, (int)sizeof name) == 10);
+        CHECK(std::string(name) == "StaticMesh");
+    }
+
+    SUBCASE("an unknown path and a zero id are answers, not crashes")
+    {
+        CHECK_FALSE(probe->doLoadAsset("NoSuchThing.hasset").valid());
+        CHECK_FALSE(probe->doLoadAsset("").valid());
+        const he::AssetId zero{};
+        CHECK_FALSE(probe->doIsAssetLoaded(zero));
+        CHECK_FALSE(probe->doUnloadAsset(zero));
+        CHECK(probe->doAssetTypeName(zero, name, (int)sizeof name) == 0);
+        const he::AssetId invented{ 0xDEAD, 0xBEEF };
+        CHECK_FALSE(probe->doIsAssetLoaded(invented));
+        CHECK(probe->doAssetTypeName(invented, name, (int)sizeof name) == 0);
+    }
+
+    SUBCASE("an umbrella from before the content table costs only content")
+    {
+        HeEngineServices old = rig.umbrella;
+        old.abiVersion = 1u;   // save/physics/input only
+        REQUIRE(loader.injectServices(&old));
+        CHECK(probe->saveAvailable());
+        CHECK(probe->physicsAvailable());
+        CHECK(probe->inputAvailable());
+        CHECK_FALSE(probe->contentAvailable());
+        CHECK_FALSE(probe->doLoadAsset("Rock.hasset").valid());
+
+        // A null content pointer under a current umbrella is the same state.
+        HeEngineServices sparse = rig.umbrella;
+        sparse.content = nullptr;
+        REQUIRE(loader.injectServices(&sparse));
+        CHECK(probe->saveAvailable());
+        CHECK_FALSE(probe->contentAvailable());
+    }
+
     loader.unload(rig.world);
 }

@@ -165,6 +165,51 @@ namespace HE
         return false;
     }
 
+    // The enumerator's own spelling, for the boundaries that cannot carry the
+    // enum: the scripting API's content.typeName and the C-ABI table a native
+    // C++ game module reads it through (HorizonGameServices.h). The names are
+    // the enumerator names deliberately — they are what the editor, the docs and
+    // the asset headers already call these things, so a script comparing against
+    // "StaticMesh" is comparing against the one spelling in the project.
+    //
+    // Here beside the enum for isCollabSyncableAssetType's reason, and with NO
+    // default label for the same one: a new AssetType has to be named
+    // deliberately, and forgetting shows up as a warning on this switch instead
+    // of as an asset that reports itself as unknown.
+    inline constexpr const char* assetTypeName(AssetType t)
+    {
+        switch (t)
+        {
+            case AssetType::Unknown:              return "";
+            case AssetType::StaticMesh:           return "StaticMesh";
+            case AssetType::SkeletalMesh:         return "SkeletalMesh";
+            case AssetType::Texture:              return "Texture";
+            case AssetType::Material:             return "Material";
+            case AssetType::Scene:                return "Scene";
+            case AssetType::Script:               return "Script";
+            case AssetType::Audio:                return "Audio";
+            case AssetType::Font:                 return "Font";
+            case AssetType::Shader:               return "Shader";
+            case AssetType::Prefab:               return "Prefab";
+            case AssetType::AnimationClip:        return "AnimationClip";
+            case AssetType::PropertyAnimClip:     return "PropertyAnimClip";
+            case AssetType::MaterialFunction:     return "MaterialFunction";
+            case AssetType::Widget:               return "Widget";
+            case AssetType::HorizonCodeClass:     return "HorizonCodeClass";
+            case AssetType::InputAction:          return "InputAction";
+            case AssetType::InputMappingContext:  return "InputMappingContext";
+            case AssetType::ParticleSystem:       return "ParticleSystem";
+            case AssetType::AnimatorStateMachine: return "AnimatorStateMachine";
+            case AssetType::StructType:           return "StructType";
+            case AssetType::EnumType:             return "EnumType";
+            case AssetType::SaveGameTemplate:     return "SaveGameTemplate";
+            case AssetType::Theme:                return "Theme";
+        }
+        // Only reachable through a cast from an out-of-range value — the same
+        // "unknown" the enum's own first entry means.
+        return "";
+    }
+
     enum class TextureFormat : uint32_t
     {
         RGBA8 = 0,

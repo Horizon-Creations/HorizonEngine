@@ -1212,21 +1212,25 @@ void GameApplication::OnInit()
 #endif
 	if (std::filesystem::exists(logicPath) && logicLoader().load(logicPath))
 	{
-		// Engine services (savegames, physics, input) go in BEFORE onStart, so
-		// "load the save on startup" or a first raycast works from the first
-		// native line. World and physics resolve per call — both are replaced on
-		// a scene switch, which stays transparent to the library that way.
+		// Engine services (savegames, physics, input, content) go in BEFORE
+		// onStart, so "load the save on startup", a first raycast or a warm-up
+		// load works from the first native line. World and physics resolve per
+		// call — both are replaced on a scene switch, which stays transparent to
+		// the library that way; the ContentManager outlives every switch and is
+		// bound once.
 		m_gameServicesBinding.world   = [this]() { return m_world.get(); };
 		m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 		m_gameServicesBinding.content = &contentManager();
 		HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 		HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 		HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
+		HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 		m_engineServices = {};
 		m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 		m_engineServices.save       = &m_saveServices;
 		m_engineServices.physics    = &m_physicsServices;
 		m_engineServices.input      = &m_inputServices;
+		m_engineServices.content    = &m_contentServices;
 		logicLoader().injectServices(&m_engineServices);
 		logicLoader().logic()->onStart(*m_world);
 		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");

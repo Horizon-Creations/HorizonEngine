@@ -20,6 +20,7 @@ public:
 		m_saveAtStart    = he::save::available();
 		m_physicsAtStart = he::physics::available();
 		m_inputAtStart   = he::input::available();
+		m_contentAtStart = he::content::available();
 	}
 
 	void onUpdate(HorizonWorld&, float) override
@@ -33,12 +34,14 @@ public:
 	bool servicesAvailableAtStart() const override { return m_saveAtStart; }
 	bool physicsAvailableAtStart()  const override { return m_physicsAtStart; }
 	bool inputAvailableAtStart()    const override { return m_inputAtStart; }
+	bool contentAvailableAtStart()  const override { return m_contentAtStart; }
 	int  updateCount()              const override { return m_updates; }
 	bool physicsAvailableAtUpdate() const override { return m_physicsAtUpdate; }
 
 	bool saveAvailable()    const override { return he::save::available(); }
 	bool physicsAvailable() const override { return he::physics::available(); }
 	bool inputAvailable()   const override { return he::input::available(); }
+	bool contentAvailable() const override { return he::content::available(); }
 
 	he::RaycastHit doRaycast(const he::Vec3& o, const he::Vec3& d, float maxDist) const override
 	{ return he::physics::raycast(o, d, maxDist); }
@@ -81,10 +84,33 @@ public:
 	void  doSetModeRaw(int mode) const override
 	{ if (g_heInputServices) g_heInputServices->setMode(g_heInputServices->host, mode); }
 
+	he::AssetId doLoadAsset(const char* path) const override
+	{ return he::content::load(path ? path : ""); }
+	bool doUnloadAsset(const he::AssetId& id)  const override { return he::content::unload(id); }
+	bool doIsAssetLoaded(const he::AssetId& id) const override { return he::content::isLoaded(id); }
+	int  doAssetTypeName(const he::AssetId& id, char* buf, int cap) const override
+	{
+		const std::string name = he::content::typeName(id);
+		if (buf && cap > 0)
+		{
+			const int n = (int)name.size() < cap - 1 ? (int)name.size() : cap - 1;
+			for (int i = 0; i < n; ++i) buf[i] = name[(size_t)i];
+			buf[n] = '\0';
+		}
+		return (int)name.size();
+	}
+	int doAssetTypeNameRaw(const he::AssetId& id, char* buf, int cap) const override
+	{
+		if (!g_heContentServices) return 0;
+		const HeAssetId cid{ id.hi, id.lo };
+		return g_heContentServices->assetTypeName(g_heContentServices->host, cid, buf, cap);
+	}
+
 private:
 	bool m_saveAtStart      = false;
 	bool m_physicsAtStart   = false;
 	bool m_inputAtStart     = false;
+	bool m_contentAtStart   = false;
 	bool m_physicsAtUpdate  = false;
 	int  m_updates          = 0;
 };

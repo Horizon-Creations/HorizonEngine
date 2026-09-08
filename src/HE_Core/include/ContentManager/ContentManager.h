@@ -36,6 +36,13 @@ public:
 	bool unloadAsset(HE::UUID id);
 	bool isLoaded(HE::UUID id) const;
 	bool isLoaded(const std::string& relativePath) const;
+	// The UUID a content-relative path already resolves to, or a zero UUID when
+	// nothing here knows it. A pure LOOKUP: unlike loadAsset(path) — which
+	// answers the same question for a resident asset but reads the disk for one
+	// that is not — this never registers anything, so a caller asking "what is
+	// this?" cannot accidentally load it. That is what lets the scripting API
+	// unload or type-name an asset by the only handle a script has, its path.
+	HE::UUID idForPath(const std::string& relativePath) const;
 	bool saveAsset(RuntimeAsset& asset);
 
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).

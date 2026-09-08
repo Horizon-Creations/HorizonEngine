@@ -149,7 +149,7 @@ R"(// ── GameLogic entry point ───────────────
 
 // Receives the engine's service tables right after this library loads (see
 // <HorizonGameServices.h>) — he::save::* / he::entity::* / he::physics::* /
-// he::input::* work from onStart on.
+// he::input::* / he::content::* work from onStart on.
 HE_IMPLEMENT_ENGINE_SERVICES()
 
 namespace
@@ -344,6 +344,12 @@ std::string readme(const std::string& projectName)
 "- `he::input::*` — keyDown (SDL scancode names), mouse position/delta/buttons/\n"
 "  scroll, gamepad connected/button/axis (Xbox names, sticks -1..+1), and the\n"
 "  input mode (`setModeUIOnly()` and friends).\n"
+"- `he::content::*` — asset RESIDENCY: `load(\"Meshes/Rock.hasset\")` gives you an\n"
+"  `he::AssetId`, and `unload`/`isLoaded`/`typeName` take it from there. Load what\n"
+"  the next scene needs before it is needed, let go of what you left behind. There\n"
+"  is no call that hands you the asset OBJECT, and that is on purpose: the\n"
+"  engine's asset pointers are only valid until the next load, so only values\n"
+"  cross this boundary.\n"
 "\n"
 "## Files\n"
 "\n"

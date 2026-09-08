@@ -1881,6 +1881,46 @@ HE_ENV_FIELDS_COLOR(HE_ENV_IMPL_COLOR)
 #undef HE_ENV_IMPL_COLOR
 } // namespace env
 
+// ── Content ──────────────────────────────────────────────────────────────────
+// Residency only. Nothing here returns a pointer INTO the manager, on purpose:
+// the getters hand out addresses in a dense SlotMap, and the next registration
+// moves the whole pool (see the warning in ContentManager.h). Every value that
+// leaves this namespace is copied out.
+namespace content {
+
+bool     load(Ctx& c, const std::string& path)     { return loadId(c, path) != HE::UUID{}; }
+bool     unload(Ctx& c, const std::string& path)
+{
+    // idForPath, not loadAsset: a path this manager has never seen must answer
+    // "there was nothing to unload" rather than read it off the disk first.
+    if (!c.content || path.empty()) return false;
+    return unloadId(c, c.content->idForPath(path));
+}
+bool     isLoaded(Ctx& c, const std::string& path)
+{ return c.content && !path.empty() && c.content->isLoaded(path); }
+std::string typeName(Ctx& c, const std::string& path)
+{
+    if (!c.content || path.empty()) return {};
+    return typeNameId(c, c.content->idForPath(path));
+}
+
+HE::UUID loadId(Ctx& c, const std::string& path)
+{
+    if (!c.content || path.empty()) return {};
+    return c.content->loadAsset(path);
+}
+bool unloadId(Ctx& c, const HE::UUID& id)
+{ return c.content && id != HE::UUID{} && c.content->unloadAsset(id); }
+bool isLoadedId(Ctx& c, const HE::UUID& id)
+{ return c.content && id != HE::UUID{} && c.content->isLoaded(id); }
+std::string typeNameId(Ctx& c, const HE::UUID& id)
+{
+    if (!c.content || id == HE::UUID{}) return {};
+    return HE::assetTypeName(c.content->assetType(id));
+}
+
+} // namespace content
+
 // ── Audio ────────────────────────────────────────────────────────────────────
 namespace audio {
 namespace {
@@ -5389,6 +5429,21 @@ const std::vector<ApiFn>& registry()
 #undef HE_ENV_ROW_INT
 #undef HE_ENV_ROW_COLOR
 
+        // Content — residency by path, the only asset handle a graph or a text
+        // script holds. The id-keyed twins are not rows: PinType has no UUID.
+        t.push_back({ "content.load", "Content", true, {{"asset", P::String}},
+            {{"loaded", P::Bool}}, "HE::api::content::load",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(content::load(c, aS(a, 0))) }; } });
+        t.push_back({ "content.unload", "Content", true, {{"asset", P::String}},
+            {{"unloaded", P::Bool}}, "HE::api::content::unload",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(content::unload(c, aS(a, 0))) }; } });
+        t.push_back({ "content.isLoaded", "Content", false, {{"asset", P::String}},
+            {{"loaded", P::Bool}}, "HE::api::content::isLoaded",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(content::isLoaded(c, aS(a, 0))) }; } });
+        t.push_back({ "content.typeName", "Content", false, {{"asset", P::String}},
+            {{"type", P::String}}, "HE::api::content::typeName",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(content::typeName(c, aS(a, 0))) }; } });
+
         // Audio
         t.push_back({ "audio.play", "Audio", true,
             {{"asset", P::String}, {"volume", P::Float}, {"pitch", P::Float}, {"loop", P::Bool}},
@@ -5932,6 +5987,8 @@ const std::vector<ApiFn>& registry()
             HE_ENV_FIELDS_INT(HE_ENV_NAME_ROW)
             HE_ENV_FIELDS_COLOR(HE_ENV_NAME_ROW)
 #undef HE_ENV_NAME_ROW
+            { "content.load", "Load Asset" },      { "content.unload", "Unload Asset" },
+            { "content.isLoaded", "Is Asset Loaded" }, { "content.typeName", "Asset Type Name" },
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
@@ -6211,7 +6268,14 @@ bool isScriptGroup(std::string_view group)
                                                     // twin either: without it a Lua application can
                                                     // build a tool panel and never put it anywhere
                                                     // but on top of its own main page.
-                                                    "window" };
+                                                    "window",
+                                                    // "content" has no flat twin either. Assets
+                                                    // are reachable from a script only sideways
+                                                    // today (audio.play(path), theme.set(path)) —
+                                                    // nothing can say "have this ready before the
+                                                    // door opens" or "let go of the level I just
+                                                    // left", which is what residency control is.
+                                                    "content" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }
@@ -6455,6 +6519,33 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
     out.setMode = [](void*, int m) {
         if (m < (int)input::Mode::GameOnly || m > (int)input::Mode::UIOnly) return;
         input::setMode((input::Mode)m); };
+}
+
+void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_CONTENT_ABI_VERSION;
+    out.host       = binding;
+
+    // The id crosses as two integers and is copied on both sides — no pointer
+    // into the asset pool leaves the engine here, which is the whole rule this
+    // table exists under.
+    out.loadAsset = [](void* h, const char* path, ::HeAssetId* id) {
+        if (id) *id = {};
+        Ctx c = bindingCtx(h);
+        const HE::UUID uuid = content::loadId(c, path ? path : "");
+        if (uuid == HE::UUID{}) return false;
+        if (id) { id->hi = uuid.hi; id->lo = uuid.lo; }
+        return true; };
+    out.unloadAsset = [](void* h, ::HeAssetId id) {
+        Ctx c = bindingCtx(h);
+        return content::unloadId(c, HE::UUID{ id.hi, id.lo }); };
+    out.isLoadedId = [](void* h, ::HeAssetId id) {
+        Ctx c = bindingCtx(h);
+        return content::isLoadedId(c, HE::UUID{ id.hi, id.lo }); };
+    out.assetTypeName = [](void* h, ::HeAssetId id, char* buf, int cap) {
+        Ctx c = bindingCtx(h);
+        return copyOut(content::typeNameId(c, HE::UUID{ id.hi, id.lo }), buf, cap); };
 }
 
 } // namespace HE::api

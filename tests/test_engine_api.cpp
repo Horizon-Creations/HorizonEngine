@@ -4022,3 +4022,276 @@ TEST_CASE("EngineApi: nav and jump rows are safe with no world and no physics")
     call("nav.stop",     { id });                        // must not crash
     call("nav.setSpeed", { id, Value::ofFloat(2.0f) });  // must not crash
 }
+
+// ═══ Content: residency, and the pointer that is never handed over ════════════
+
+namespace {
+
+// A content root with two real .hasset files on disk, so load() has something to
+// read and the SECOND load has something to move (the trap this whole group is
+// shaped around).
+struct ContentTestRig
+{
+    std::filesystem::path root;
+    ContentManager        cm;
+
+    ContentTestRig()
+        : root(std::filesystem::temp_directory_path() / "he_api_content_test" / "Content")
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(root.parent_path(), ec);
+        std::filesystem::create_directories(root);
+        cm.setContentRoot(root.string());
+
+        writeTexture("Rock.hasset", "Rock");
+        writeTexture("Moss.hasset", "Moss");
+        StaticMeshAsset mesh;
+        mesh.type = HE::AssetType::StaticMesh;
+        mesh.name = "Cube"; mesh.path = "Cube.hasset";
+        mesh.vertices = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+        mesh.indices  = { 0, 1, 2 };
+        cm.saveAsset(mesh);
+        // saveAsset registers what it writes; unload everything again so each
+        // test starts from "on disk, not resident".
+        for (const HE::UUID id : cm.enumerateIds()) cm.unloadAsset(id);
+    }
+    ~ContentTestRig()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(root.parent_path(), ec);
+    }
+
+    void writeTexture(const std::string& path, const std::string& name)
+    {
+        TextureAsset t;
+        t.type = HE::AssetType::Texture;
+        t.name = name; t.path = path;
+        t.width = 1; t.height = 1; t.channels = 4;
+        t.data = { 255, 255, 255, 255 };
+        cm.saveAsset(t);
+    }
+};
+
+} // namespace
+
+TEST_CASE("Content: load, type, unload — by path and by id")
+{
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+    // typeName must not become a load: asking what something is is a question.
+    CHECK(HE::api::content::typeName(c, "Rock.hasset").empty());
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+    // …and neither must unload.
+    CHECK_FALSE(HE::api::content::unload(c, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+
+    REQUIRE(HE::api::content::load(c, "Rock.hasset"));
+    CHECK(HE::api::content::isLoaded(c, "Rock.hasset"));
+    CHECK(HE::api::content::typeName(c, "Rock.hasset") == "Texture");
+    CHECK(HE::api::content::typeName(c, "Cube.hasset").empty());   // not loaded yet
+    REQUIRE(HE::api::content::load(c, "Cube.hasset"));
+    CHECK(HE::api::content::typeName(c, "Cube.hasset") == "StaticMesh");
+
+    CHECK(HE::api::content::unload(c, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::isLoaded(c, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::unload(c, "Rock.hasset"));   // gone already
+
+    // The id-keyed twins answer the same questions about the same asset.
+    const HE::UUID id = HE::api::content::loadId(c, "Rock.hasset");
+    REQUIRE(id != HE::UUID{});
+    CHECK(HE::api::content::isLoadedId(c, id));
+    CHECK(HE::api::content::typeNameId(c, id) == "Texture");
+    CHECK(HE::api::content::unloadId(c, id));
+    CHECK_FALSE(HE::api::content::isLoadedId(c, id));
+}
+
+// The lifetime lesson, as an assertion: an id keeps answering across the loads
+// that would have invalidated any pointer the manager handed out. This is the
+// reason nothing in the content group returns one.
+TEST_CASE("Content: an id survives the loads that move the asset pool")
+{
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+
+    const HE::UUID rock = HE::api::content::loadId(c, "Rock.hasset");
+    REQUIRE(rock != HE::UUID{});
+    // A pointer taken here would be dangling three lines down. Take the values
+    // instead and compare them afterwards.
+    const std::string typeBefore = HE::api::content::typeNameId(c, rock);
+
+    REQUIRE(HE::api::content::loadId(c, "Moss.hasset") != HE::UUID{});
+    REQUIRE(HE::api::content::loadId(c, "Cube.hasset") != HE::UUID{});
+
+    CHECK(HE::api::content::isLoadedId(c, rock));
+    CHECK(HE::api::content::typeNameId(c, rock) == typeBefore);
+    CHECK(typeBefore == "Texture");
+    // Unloading a DIFFERENT asset swap-and-pops the pool; the id still holds.
+    CHECK(HE::api::content::unloadId(c, HE::api::content::loadId(c, "Moss.hasset")));
+    CHECK(HE::api::content::isLoadedId(c, rock));
+    CHECK(HE::api::content::typeNameId(c, rock) == "Texture");
+}
+
+TEST_CASE("Content: no manager, unknown path and a zero id are states, not crashes")
+{
+    Ctx none{};   // no ContentManager at all
+    CHECK_FALSE(HE::api::content::load(none, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::unload(none, "Rock.hasset"));
+    CHECK_FALSE(HE::api::content::isLoaded(none, "Rock.hasset"));
+    CHECK(HE::api::content::typeName(none, "Rock.hasset").empty());
+    CHECK(HE::api::content::loadId(none, "Rock.hasset") == HE::UUID{});
+    CHECK_FALSE(HE::api::content::unloadId(none, HE::UUID{ 1, 2 }));
+    CHECK_FALSE(HE::api::content::isLoadedId(none, HE::UUID{ 1, 2 }));
+    CHECK(HE::api::content::typeNameId(none, HE::UUID{ 1, 2 }).empty());
+
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+    CHECK_FALSE(HE::api::content::load(c, "NoSuchThing.hasset"));
+    CHECK_FALSE(HE::api::content::load(c, ""));
+    CHECK_FALSE(HE::api::content::isLoaded(c, ""));
+    CHECK_FALSE(HE::api::content::unloadId(c, HE::UUID{}));
+    CHECK_FALSE(HE::api::content::isLoadedId(c, HE::UUID{}));
+    CHECK(HE::api::content::typeNameId(c, HE::UUID{}).empty());
+    // An id from nowhere is unknown, not a lookup into whatever sits in a slot.
+    CHECK_FALSE(HE::api::content::isLoadedId(c, HE::UUID{ 0xDEAD, 0xBEEF }));
+    CHECK(HE::api::content::typeNameId(c, HE::UUID{ 0xDEAD, 0xBEEF }).empty());
+}
+
+// The path-keyed four are the registry rows — what HorizonCode, Lua and Python
+// actually call, since none of them has a UUID to hold.
+TEST_CASE("Content: the registry rows are the path-keyed four")
+{
+    ContentTestRig rig;
+    Ctx c{};
+    c.content = &rig.cm;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+    const Value rock = Value::ofString("Rock.hasset");
+
+    REQUIRE(HE::api::find("content.load")      != nullptr);
+    REQUIRE(HE::api::find("content.unload")    != nullptr);
+    REQUIRE(HE::api::find("content.isLoaded")  != nullptr);
+    REQUIRE(HE::api::find("content.typeName")  != nullptr);
+    // Lua and Python build their tables from this list; without it the group is
+    // HorizonCode-only.
+    CHECK(HE::api::isScriptGroup("content"));
+
+    CHECK_FALSE(call("content.isLoaded", { rock })[0].b);
+    CHECK(call("content.load",     { rock })[0].b);
+    CHECK(call("content.isLoaded", { rock })[0].b);
+    CHECK(call("content.typeName", { rock })[0].s == "Texture");
+    CHECK(call("content.unload",   { rock })[0].b);
+    CHECK_FALSE(call("content.isLoaded", { rock })[0].b);
+
+    Ctx empty{};
+    auto neutral = [&](const char* id, std::vector<Value> a)
+    { return HE::api::find(id)->invoke(empty, a); };
+    CHECK_FALSE(neutral("content.load",     { rock })[0].b);
+    CHECK_FALSE(neutral("content.unload",   { rock })[0].b);
+    CHECK_FALSE(neutral("content.isLoaded", { rock })[0].b);
+    CHECK(neutral("content.typeName", { rock })[0].s.empty());
+}
+
+TEST_CASE("Content: the C-ABI table carries ids and names, never pointers")
+{
+    ContentTestRig rig;
+    HorizonWorld world;
+    HorizonWorld* worldPtr = &world;
+
+    HE::api::GameServicesBinding binding;
+    binding.world   = [&worldPtr]() { return worldPtr; };
+    binding.content = &rig.cm;
+    HeContentServices table{};
+    HE::api::fillContentServices(table, &binding);
+
+    // Before injection the wrappers are safe no-op defaults.
+    HeEngineServices none{};
+    none.abiVersion = HE_SERVICES_ABI_VERSION;
+    HE_SetEngineServicesV2(&none);
+    CHECK_FALSE(he::content::available());
+    CHECK_FALSE(he::content::load("Rock.hasset").valid());
+    CHECK(he::content::typeName(he::AssetId{ 1, 2 }).empty());
+
+    HeEngineServices umbrella{};
+    umbrella.abiVersion = HE_SERVICES_ABI_VERSION;
+    umbrella.content    = &table;
+    HE_SetEngineServicesV2(&umbrella);
+    REQUIRE(he::content::available());
+
+    const he::AssetId rock = he::content::load("Rock.hasset");
+    REQUIRE(rock.valid());
+    CHECK(he::content::isLoaded(rock));
+    CHECK(he::content::typeName(rock) == "Texture");
+    // Same asset, same id — a second load does not mint a new one.
+    CHECK(he::content::load("Rock.hasset") == rock);
+    // …and the id keeps answering after the load that moves the pool.
+    REQUIRE(he::content::load("Cube.hasset").valid());
+    CHECK(he::content::isLoaded(rock));
+    CHECK(he::content::typeName(rock) == "Texture");
+
+    CHECK_FALSE(he::content::load("NoSuchThing.hasset").valid());
+    CHECK(he::content::unload(rock));
+    CHECK_FALSE(he::content::isLoaded(rock));
+    CHECK_FALSE(he::content::unload(rock));
+
+    // The two-call string convention, straight at the table: a buffer that is
+    // too small still gets a NUL-terminated prefix and the FULL length back.
+    const he::AssetId cube = he::content::load("Cube.hasset");
+    REQUIRE(cube.valid());
+    HeAssetId cid{ cube.hi, cube.lo };
+    char tiny[4] = { 'x', 'x', 'x', 'x' };
+    const int need = table.assetTypeName(table.host, cid, tiny, (int)sizeof tiny);
+    CHECK(need == (int)std::strlen("StaticMesh"));
+    CHECK(std::string(tiny) == "Sta");
+    CHECK(he::content::typeName(cube) == "StaticMesh");   // the wrapper grows and retries
+
+    HE_SetEngineServicesV2(nullptr);
+}
+
+// An engine that predates the content table still hands over the three it has.
+// The umbrella is checked per POINTER, at the version that pointer appeared —
+// a module built today must not lose its savegame API on last month's engine.
+TEST_CASE("Content: an umbrella from before the content table costs only content")
+{
+    ContentTestRig rig;
+    HorizonWorld world;
+    HorizonWorld* worldPtr = &world;
+
+    HE::api::GameServicesBinding binding;
+    binding.world   = [&worldPtr]() { return worldPtr; };
+    binding.content = &rig.cm;
+    HeSaveServices    save{};    HE::api::fillSaveServices(save, &binding);
+    HeInputServices   input{};   HE::api::fillInputServices(input, &binding);
+    HeContentServices content{}; HE::api::fillContentServices(content, &binding);
+
+    HeEngineServices old{};
+    old.abiVersion = 1u;          // save/physics/input only
+    old.save       = &save;
+    old.input      = &input;
+    old.content    = &content;    // present in memory, but v1 says "do not read it"
+    HE_SetEngineServicesV2(&old);
+    CHECK(he::save::available());
+    CHECK(he::input::available());
+    CHECK_FALSE(he::content::available());
+
+    HeEngineServices now = old;
+    now.abiVersion = HE_SERVICES_ABI_VERSION;
+    HE_SetEngineServicesV2(&now);
+    CHECK(he::save::available());
+    CHECK(he::content::available());
+
+    // A content table older than this module was built against is refused
+    // outright rather than half-used.
+    HeContentServices tooOld = content;
+    tooOld.abiVersion = HE_CONTENT_ABI_VERSION - 1;
+    HeEngineServices mixed = now;
+    mixed.content = &tooOld;
+    HE_SetEngineServicesV2(&mixed);
+    CHECK(he::save::available());
+    CHECK_FALSE(he::content::available());
+
+    HE_SetEngineServicesV2(nullptr);
+}
