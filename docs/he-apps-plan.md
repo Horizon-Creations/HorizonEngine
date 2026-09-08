@@ -1162,6 +1162,12 @@ Runtime-Arbeit, die diese beiden schon leisten. Was übrig bliebe, kann `datetim
 User nichts zeigt. IME ist zudem **nicht real geprüft** — dafür braucht es eine echte
 Eingabemethode, headless testbar ist nur die Zustandsmaschine.
 
+**Nachtrag 08.09.2026:** *warum* die Vorschau beim User nichts zeigte, ist inzwischen
+gemessen und behoben — der Outliner las eine Hierarchie, die keine Wurzel hatte. Siehe den
+Abschnitt „Die Widget-Hierarchie im Outliner" ganz unten und
+`docs/app-preview-outliner-diagnosis.md`. Die Abnahme selbst hat trotzdem noch niemand
+gefahren.
+
 **Zwischenfall bei der Projekterzeugung (behoben):** „Application" war die sechste Vorlage in
 einer Liste, die mit `height_in_items = 5` gezeichnet wurde — sie stand unterhalb des
 sichtbaren Bereichs, also legte jeder ein Empty-Projekt an und bekam folgerichtig keinen
@@ -4431,3 +4437,61 @@ dasselbe Fenster noch einmal schließt.
   Widget-*Klasse* gehört keinem Fenster, eine Instanz davon schon.
 - **OpenGL, Vulkan, D3D11 und D3D12 bleiben draußen.** Kein UI-only-Pfad, und
   deshalb sagt die Fähigkeit nein statt ein leeres Fenster aufzumachen.
+
+---
+
+### Die Widget-Hierarchie im Outliner: warum sie leer blieb (08.09.2026)
+
+Der Punkt, der seit dem dritten Durchgang als „die Live-Vorschau zeigt beim User nichts" im
+Plan stand, ist gemessen und behoben. Die lange Fassung steht in
+`docs/app-preview-outliner-diagnosis.md`, hier die kurze.
+
+**Der Befund.** Fünf der sechs App-Vorlagen bauen ihren Rahmen über `shell()`
+(`ProjectManager.cpp`), und dieser Helfer gab dem Wurzel-Panel `parentId = -1`. Die
+Konvention der Engine ist aber `parentId == 0` = direktes Kind der Canvas
+(`UIElement.h:368`), und daran hängt jede Stelle, die Wurzeln aufzählt: `drawElem(*tree, 0)`
+im Outliner (`OutlinerPanel.cpp:225`), `childrenOf(0)` in der Hierarchie-Liste des Designers
+(`UIEditorPanel.cpp:5637`), der Layout-Durchlauf im WidgetManager. Bei `-1` findet keine
+dieser Schleifen etwas. Gezeichnet wurde trotzdem richtig, weil `parentRectOf` bei einem
+unbekannten Elternteil auf das Canvas-Rechteck zurückfällt — die App **sah** korrekt aus, nur
+jede Liste ihrer Hierarchie war leer. Genau das ist „das Root-Widget zeigt die Hierarchie
+nicht richtig an".
+
+**Die Diagnosezeile hat nicht gelogen, sie hat nur nicht gereicht.** „preview holds 1
+widget(s) after OnInit (GameInstance graph: 3 node(s))" (`EditorApplication.cpp:1994`) kam
+für jede der sechs Vorlagen identisch. Damit sind die drei vermuteten Ursachen — kein Graph,
+Graph erzeugt nichts, Widget lädt nicht — alle ausgeschlossen. Die richtige war eine vierte:
+das Widget lädt, und der Baum hat keinen Einstiegspunkt.
+
+**Der Fix, zwei Hälften.** `shell()` schreibt jetzt `0` statt `-1`, und
+`uiWidgetTreeFromJson` zieht ein gespeichertes `parentId < 0` beim Laden auf 0. Die zweite
+Hälfte ist zugleich der **Migrationshinweis**: ein Projekt, das vor dem Fix angelegt wurde,
+hat die `-1` schon in seinem `RootWidget.hasset` stehen und bekäme seine Hierarchie sonst nie
+zurück — von Hand ist dort nichts zu tun, es reicht, das Projekt zu öffnen. Ein *positives*
+`parentId`, das ins Leere zeigt, wird bewusst **nicht** angefasst: das ist eine kaputte
+Referenz, keine alte Schreibweise, und sie stillschweigend an die Canvas zu hängen würde
+einen Teilbaum verschieben, den niemand verschieben wollte.
+
+**Gemessen, nicht abgeleitet.** `tests/test_app_preview_outliner.cpp` baut den Vorschaupfad
+ohne GUI nach (`createNewProject` → `setContentRoot` → dieselben vier Widget-Services →
+`GameInstance.hcode` → `fireInit`) und zählt nicht „irgendein Element hat parentId 0",
+sondern was `drawElem` von der Canvas aus tatsächlich erreicht:
+
+| Vorlage | Elemente | erreichbar vorher | erreichbar nachher |
+| --- | --- | --- | --- |
+| Application | 2 | 2 | 2 |
+| AppSidebar | 20 | 0 | 20 |
+| AppWizard | 17 | 0 | 17 |
+| AppDashboard | 33 | 0 | 33 |
+| AppForm | 21 | 0 | 21 |
+| AppTool | 48 | 0 | 48 |
+
+`Application` war heil, weil es nicht durch `shell()` geht.
+
+**Was weiterhin offen ist.** Gemessen wurde der Pfad, den der Outliner *liest*. Der Editor
+wurde dabei nicht gestartet, ImGui hat nichts gezeichnet, und der User hat die Vorschau nach
+dem Fix noch nicht selbst gesehen. Für die Ursache spielt das keine Rolle — ein Baum ohne
+Wurzel bei `parentId == 0` hat für `drawElem` keine erste Zeile, egal wer sie zeichnen würde
+—, für die Abnahme aus Welle 1 schon. Das In-Engine-Handbuch bleibt hiervon unberührt: es
+beschreibt den Outliner als Entity-Baum und sagt über den App-Modus nichts, was durch den Fix
+falsch geworden wäre.
