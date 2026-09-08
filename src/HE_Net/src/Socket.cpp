@@ -492,6 +492,38 @@ SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
     return h4;
 }
 
+SocketHandle socketCreateListenerLoopback(std::uint16_t port, int backlog) {
+    SocketHandle h = socketCreateTcp();   // already non-blocking, Nagle off
+    if (h == kInvalidSocket) {
+        HE_LOG_ERROR(Net, "Could not create a loopback listening socket");
+        return kInvalidSocket;
+    }
+    socketSetReuseAddr(h, true);
+
+    // INADDR_LOOPBACK, not INADDR_ANY — see the header. This is the security
+    // boundary, not a preference.
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(port);
+
+#ifdef _WIN32
+    const SOCKET s = static_cast<SOCKET>(h);
+#else
+    const int s = static_cast<int>(h);
+#endif
+    if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(s, backlog) != 0) {
+        HE_LOG_ERROR(Net, "Could not bind/listen on 127.0.0.1:%u — %s",
+                     static_cast<unsigned>(port), errText(lastError()).c_str());
+        socketClose(h);
+        return kInvalidSocket;
+    }
+    HE_LOG_INFO(Net, "Listening on 127.0.0.1:%u (loopback only)",
+                static_cast<unsigned>(socketBoundPort(h)));
+    return h;
+}
+
 SocketResult socketConnectPoll(SocketHandle h) {
     if (h == kInvalidSocket) return SocketResult::Error;
 

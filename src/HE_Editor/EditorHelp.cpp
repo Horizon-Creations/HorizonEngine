@@ -124,6 +124,23 @@ namespace
 	{ "Component/Animator Blend", "Animator Blend",
 	  "Cross-fades two clips by weight — walk into run, aim into idle.",
 	  "", "systems#animation" },
+	{ "Component/Animation Layers", "Animation Layers",
+	  "Poses laid on top of whatever the animator is doing: a reload on the "
+	  "upper body while the legs keep running, an aim offset over an idle. Each "
+	  "layer has its own clip, its own weight and a bone mask saying which part "
+	  "of the skeleton it may touch.",
+	  "", "systems#animation" },
+	{ "Component/Inverse Kinematics", "Inverse Kinematics",
+	  "Corrects the finished pose against the world it is standing in: feet onto "
+	  "the ground that is actually under them, head and spine turned towards "
+	  "something worth looking at. It runs after the animators and after the "
+	  "layers, so it holds whatever they came up with.",
+	  "", "systems#animation" },
+	{ "Component/Root Motion", "Root Motion",
+	  "Moves the entity by the motion the animator put into the root bone, and "
+	  "takes that motion back out of the pose. Without it a walk cycle slides on "
+	  "the spot; with it, and set to Off, nothing changes.",
+	  "", "systems#animation" },
 	{ "Component/Animator State Machine", "Animator State Machine",
 	  "Runs an animator state machine asset: states with clips, and transitions "
 	  "that fire on parameters. The graph decides which clip plays.",
@@ -272,6 +289,24 @@ namespace
 	  "Solve this body in the 2D solver — motion stays in the XY plane. For "
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
+	// Two entries, one per component scope, because that is what the combo
+	// resolves to: the Details panel sets the scope to the component it is
+	// drawing, so a single shared key would answer under neither. They say
+	// different things — a rigid body's channel is what everything else SEES,
+	// a character's is what BLOCKS it.
+	{ "Rigid Body/Collision Layer", "",
+	  "Which of the project's sixteen collision channels this body sits in. The "
+	  "matrix in Preferences (Project, Collision Layers) decides which pairs of "
+	  "channels may touch, so this is how a bullet passes through a ragdoll or a "
+	  "pickup volume only sees the player. A layer keeps its number, so renaming "
+	  "one relabels it and moves nothing.",
+	  "", "systems#physics" },
+	{ "Character Controller/Collision Layer", "",
+	  "Which collision channel the character walks in — it decides what BLOCKS "
+	  "the character, through the same matrix in Preferences (Project, Collision "
+	  "Layers). Separate from the Rigid Body row because a character need not "
+	  "have a rigid body at all.",
+	  "", "systems#physics" },
 	{ "Collider/Shape", "",
 	  "Box, Sphere or Capsule for a shape from the numbers below; Mesh, Convex "
 	  "Hull or Height Field to take the geometry from the entity itself. A "
@@ -291,6 +326,71 @@ namespace
 	{ "Collider/Is Trigger", "",
 	  "A trigger reports overlaps but stops nothing — doorways, pickup volumes, "
 	  "kill zones. Things pass straight through it.",
+	  "", "systems#physics" },
+	// ── Joint ────────────────────────────────────────────────────────────────
+	// Which rows are visible depends on Type, so several of these describe a
+	// control the author only ever sees for one or two of the five kinds. They
+	// say which, because a tooltip read on a hinge should not be about a rope.
+	{ "Joint/Type", "",
+	  "Fixed welds the two bodies in the pose they are in. Point is a ball socket "
+	  "— the link of a chain. Hinge turns on one axis, with limits and a motor: a "
+	  "door, a lid, a wheel. Slider travels along one axis, also with limits and a "
+	  "motor: a drawer, a lift. Distance keeps two points a given range apart: a "
+	  "rope, a grapple, a spring mount.",
+	  "", "systems#physics" },
+	{ "Joint/Target", "",
+	  "The other entity this one is jointed to. BOTH ends need a Rigid Body — a "
+	  "Character Controller is not one — and they cannot both be Static, or "
+	  "nothing could ever move. The joint lives on THIS entity: deleting the "
+	  "other end takes it with it.",
+	  "", "systems#physics" },
+	{ "Joint/Anchor A", "",
+	  "Where the joint attaches, in THIS entity's own space, so it travels with a "
+	  "prefab wherever it is dropped. For Point and Hinge it is the ONE shared "
+	  "pivot both bodies hang from; for Distance it is this end of the rope.",
+	  "", "systems#physics" },
+	{ "Joint/Anchor B", "",
+	  "The far end of a Distance joint, in the OTHER entity's own space. Distance "
+	  "is the only type that reads it — giving a Point or a Hinge two separate "
+	  "points would tell the solver to make them one and snap the bodies together.",
+	  "", "systems#physics" },
+	{ "Joint/Axis", "",
+	  "A direction in this entity's own space: what a Hinge turns about, and what "
+	  "a Slider travels along. Length does not matter, it is normalised — but it "
+	  "cannot be zero, or there is no direction and no joint is built.",
+	  "", "systems#physics" },
+	{ "Joint/Min Limit", "",
+	  "How far the joint may travel one way: DEGREES for a hinge, metres for a "
+	  "slider and for a rope's shortest length. Min at or above Max means no "
+	  "limit at all, which is the default.",
+	  "", "systems#physics" },
+	{ "Joint/Max Limit", "",
+	  "The other end of the same range. A hinge and a slider measure it from the "
+	  "pose the two bodies were authored in, so a door starts closed at 0 — which "
+	  "is also why a range that does not contain 0 is widened until it does.",
+	  "", "systems#physics" },
+	{ "Joint/Motor Target Speed", "",
+	  "How fast the motor drives the joint: radians per second for a hinge, "
+	  "metres per second for a slider. Radians because it is a rate rather than a "
+	  "pose, the same rule the limits above do not follow. A full turn a second "
+	  "is 6.28.",
+	  "", "systems#physics" },
+	{ "Joint/Motor Max Force", "",
+	  "How hard the motor may push, and the SWITCH that turns it on: at 0 there "
+	  "is no motor. Newton-metres for a hinge, newtons for a slider. A target "
+	  "speed of 0 with force behind it is a brake that holds the joint still.",
+	  "", "systems#physics" },
+	{ "Joint/Break Force", "",
+	  "How much force the joint carries before it lets go, in newtons; 0 never "
+	  "breaks. When it breaks it is gone for good — this component goes with it, "
+	  "so the door does not come back on its hinges the next time the scene "
+	  "loads. Game code hears about it once, through Poll Joint Broken.",
+	  "", "systems#physics" },
+	{ "Joint/Collide Connected", "",
+	  "Whether the two jointed bodies may touch each other. Off by default, which "
+	  "is what a chain needs: consecutive links overlap by construction and would "
+	  "otherwise fight the joint holding them. On for a door that must not swing "
+	  "through its own frame.",
 	  "", "systems#physics" },
 	{ "Character Controller/Slope Limit (deg)", "",
 	  "The steepest ground the character can still walk up. Anything steeper is "
@@ -939,6 +1039,225 @@ namespace
 	  "", "systems#animation" },
 	{ "Animator State Machine/Speed", "",
 	  "Playback rate for whichever state is running.", "", "systems#animation" },
+	{ "Root Motion/Mode", "",
+	  "Off changes nothing. Transform moves the entity directly, for props and "
+	  "anything that is not a physical figure. Character Controller hands the "
+	  "motion to the physics character, which is what a walking figure wants: it "
+	  "keeps its own gravity and still collides with the world.",
+	  "", "systems#animation" },
+	{ "Root Motion/Root Joint", "",
+	  "Which bone carries the motion. Empty picks the skeleton's first root, "
+	  "which is right for almost every rig — name one only if the skeleton has "
+	  "several roots. A name that matches nothing suspends root motion and says "
+	  "so in the log, rather than moving the wrong bone.",
+	  "", "systems#animation" },
+	{ "Root Motion/Translation XZ", "",
+	  "Take the horizontal travel out of the pose and give it to the entity. "
+	  "This is the part that turns a walk cycle into walking.",
+	  "", "systems#animation" },
+	{ "Root Motion/Translation Y", "",
+	  "The same for the vertical. Off by default: a character controller owns its "
+	  "own up and down (gravity, a jump still in flight), and a clip pushing "
+	  "against that fights it every frame. Worth turning on for a clip that is "
+	  "meant to lift the figure, on the Transform mode.",
+	  "", "systems#animation" },
+	{ "Root Motion/Yaw", "",
+	  "Turn the entity by the turning in the clip, so a turn-in-place actually "
+	  "turns. While this is on it overrides Movement's Orient To Movement — two "
+	  "things turning one character is a jitter nobody can locate afterwards.",
+	  "", "systems#animation" },
+	{ "Root Motion/Lock", "",
+	  "What the root bone does in the pose once its motion has been taken out. "
+	  "Zero parks it at the origin. First Frame parks it where the clip starts, "
+	  "for clips authored away from the origin. Translation Only leaves the "
+	  "rotation in the pose — pair that one with Yaw off, or the turn happens twice.",
+	  "", "systems#animation" },
+	{ "Root Motion/Last Delta", "",
+	  "What the last frame actually moved, in metres and degrees. All zeroes "
+	  "while a clip carries no root motion — which is how you tell that apart "
+	  "from a joint name that matches nothing.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Name", "",
+	  "What this layer is called. Scripts address a layer by this name and not "
+	  "by its position in the list, so reordering the stack cannot silently fade "
+	  "a different body part. Two layers may share a name; the first one wins.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Mode", "",
+	  "Override replaces the pose underneath, weighted — what an upper-body "
+	  "reload wants. Additive adds this clip's DIFFERENCE against a reference "
+	  "pose on top of whatever is underneath, so a breathing wobble or an aim "
+	  "offset keeps the run running while it leans on it.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Source", "",
+	  "Where this layer's pose comes from: one clip, or a blend space — several "
+	  "clips mixed by parameter, a strafe set over a run. A layer has no "
+	  "parameters of its own and reads the entity's state-machine parameters, so "
+	  "a layer and the state underneath it cannot disagree about the speed.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Blend Space", "",
+	  "The blend space this layer poses from. Its axes read the same parameters "
+	  "the state machine uses; without a state machine on the entity both axes "
+	  "read 0, which the clamp turns into the outermost sample.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Weight", "",
+	  "How much of this layer reaches the pose, before its mask is applied. 0 is "
+	  "off, but the layer's own playhead keeps running — so fading it back in "
+	  "does not restart it mid-stride. This is the value gameplay sets while a "
+	  "weapon is raised or a reload plays.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Reference Time", "",
+	  "Where on the reference clip the additive difference is measured from. 0 "
+	  "is the ordinary answer: an additive clip is usually authored as \"the "
+	  "difference from where this animation starts\".",
+	  "", "systems#animation" },
+	{ "Animation Layers/Speed", "",
+	  "Playback rate of this layer's own clip. Each layer has its own playhead, "
+	  "so a slow flinch over a fast run is one number, not a compromise.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Time", "",
+	  "Where this layer's playhead stands: SECONDS on a clip source, but a "
+	  "normalised phase between 0 and 1 on a blend space, whose samples share "
+	  "one cycle rather than one clock. Scrubbable, and the field a one-shot "
+	  "layer is set back to 0 in — or animator.playLayer from a script, which "
+	  "also re-arms the clip's frame-0 notify.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Looping", "",
+	  "Start over at the end. Off makes the layer a one-shot: it clamps at the "
+	  "last frame and stops, and playing it again means restarting the playhead.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Playing", "",
+	  "Whether this layer's playhead advances. Off freezes it where it stands "
+	  "and still blends it in — which is how a held pose is done. Not the same "
+	  "as Weight 0, which blends nothing and keeps running.",
+	  "", "systems#animation" },
+	{ "Animation Layers/Add Layer", "",
+	  "Another pose on top of the stack. Layers are applied in order, each onto "
+	  "the result of the one before it, so the last one in the list has the last "
+	  "word wherever its mask lets it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Foot Joint", "",
+	  "The ankle this leg ends at, by name. Everything else about the leg is "
+	  "found from here, so this is the one field that has to be right — a name "
+	  "the skeleton does not have switches this foot off and says so in the log.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Knee Joint", "",
+	  "Leave it empty and the joint above the foot is used, which is right on "
+	  "every humanoid rig. Fill it in for a leg that has an extra joint in the "
+	  "way — a dog or a bird bends two joints up from the paw, and bending the "
+	  "wrong two makes it walk on its ankles.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Hip Joint", "",
+	  "Same rule as the knee: empty means the joint above it. The hip is the top "
+	  "of the two-bone chain — it aims the leg, the knee bends it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Foot Weight", "",
+	  "How much of the correction this foot gets. 0 leaves the leg exactly as the "
+	  "animation posed it. Gameplay fades this down while a character is in the "
+	  "air or in a cutscene, and the solver also drops it to 0 by itself whenever "
+	  "the ground ray finds nothing.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Trace Up", "",
+	  "How far ABOVE the foot the ground ray starts. This is what finds a step "
+	  "the animation has already pushed the foot into: start the ray at the "
+	  "ankle and it begins inside the geometry and misses it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Trace Down", "",
+	  "How far below the foot the ray still looks. Past this the character counts "
+	  "as being in the air and the leg is left where the animation put it — so "
+	  "this is also the height a ledge has to be for the feet to let go of it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Sole Offset", "",
+	  "Ankle to sole, in metres. No skeleton knows this by itself: the foot joint "
+	  "sits inside the ankle, so putting the JOINT on the ground buries the foot "
+	  "up to it. Measure it once per character and it is right for every surface.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Foot Interp Speed", "",
+	  "How fast the foot catches up with ground that moved. Higher is more exact "
+	  "and more twitchy; 0 snaps. It exists because a stair edge moves the ground "
+	  "under a ray by a whole step in one frame, and a foot that follows that "
+	  "literally pops.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Align To Normal", "",
+	  "Tilt the foot to match the slope it landed on, instead of leaving it flat. "
+	  "Off is the right answer for a character that only ever walks on level "
+	  "ground, and one calculation cheaper.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Max Pitch", "",
+	  "How far the toe may tip up or down to follow a slope. The limit matters "
+	  "more than the value: a foot that finds a wall would otherwise stand itself "
+	  "up on end at 90°, which is the most recognisable IK failure there is.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Max Roll", "",
+	  "The same limit sideways, across the foot. Usually smaller than the pitch "
+	  "limit, because an ankle has less to give in that direction than a human "
+	  "one does.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Remove Foot", "",
+	  "Takes this leg out of the list. The other legs keep their settings.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Add Foot", "",
+	  "Another leg. Two is the usual answer; four works the same way and so does "
+	  "one, for anything that hops.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Adjust Pelvis", "",
+	  "Lower the whole body by the deepest foot's drop before solving the legs. "
+	  "This is the difference between IK and IK that works on stairs: without it "
+	  "the low leg has to reach further than it has bone and straightens out.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Pelvis Joint", "",
+	  "Which joint counts as the body. Empty means the parent of the first leg's "
+	  "hip, which on a normal rig is the pelvis.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look At", "",
+	  "Turn the head — and as much of the spine as you let it — towards a target. "
+	  "Unlike the feet this needs no physics at all, so it works in the editor "
+	  "and you can see what you are aiming.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Chain", "",
+	  "The joints that share the turn, root first, separated by commas — usually "
+	  "Spine, Neck, Head. One joint alone is the look of a bird; a spine that "
+	  "carries part of it is what makes a character look AT something.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Chain Weights", "",
+	  "How the turn is split over the chain, in the same order and separated by "
+	  "commas. They are normalised, so 1, 2, 3 and 0.17, 0.33, 0.5 mean the same "
+	  "thing. Empty splits it evenly.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Target", "",
+	  "The entity to look at. Its position is followed as it moves, so this is "
+	  "what a guard watching a player is. Set to \"(world point)\" to aim at a "
+	  "fixed place instead.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Target Point", "",
+	  "The place in the world to look at, when no target entity is chosen. In "
+	  "world coordinates, not relative to the character.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Head Forward", "",
+	  "Which way the head looks in its OWN frame. 0, 0, -1 is this engine's "
+	  "forward and the right answer for most rigs; an import from a tool with "
+	  "another convention needs its own axis here, and the sign of it is what "
+	  "decides whether the character looks at the target or away from it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Weight", "",
+	  "How much of the turn reaches the pose. Gameplay fades this in when a "
+	  "character notices something and back out when it looks away, which is the "
+	  "difference between a head that turns and a head that snaps.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Max Yaw", "",
+	  "How far the head may turn left or right before it gives up and stops "
+	  "following. Without a limit a target walking behind the character spins the "
+	  "head 180° and the neck with it.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Max Pitch", "",
+	  "How far the head may tip up or down. Separate from the yaw limit because a "
+	  "neck has far less of this to give: a character can look most of the way "
+	  "over its shoulder long before it can look at its own feet.",
+	  "", "systems#animation" },
+	{ "Inverse Kinematics/Look Interp Speed", "",
+	  "How fast the head follows a target that moved. Low is a slow, deliberate "
+	  "look; high is alert. It also softens the moment a target leaves the cone "
+	  "and the angle clamps.",
+	  "", "systems#animation" },
 	{ "Property Animator/Speed", "",
 	  "Playback rate of the property clip: 1 is as authored, negative runs it "
 	  "backwards.",
@@ -1245,6 +1564,13 @@ namespace
 	  "Packages the project as a standalone game: cooked assets, the runtime, "
 	  "and a config beside it. The export profile decides platform and packing.",
 	  "", "export#overview" },
+	{ "Build/Build and Reload Game Logic", "",
+	  "Compiles this project's Source/ folder into its native GameLogic library "
+	  "and swaps it into a running preview: the play session keeps going, with "
+	  "the new code in it. Outside play mode it only builds, and the module is "
+	  "what the next Play loads. Only for C++ projects — anything else scripts "
+	  "its gameplay in a language that needs no compiler.",
+	  "", "scripting#cpp" },
 	{ "Help/Documentation", "",
 	  "This manual, inside the editor. The reference half is generated from the "
 	  "editor itself, so it describes the build you are running.",
@@ -1810,6 +2136,21 @@ namespace
 	  "Send the big files to peers as well as the small ones. Off, everybody needs "
 	  "their own copy of the meshes and textures — but joining is instant.",
 	  "", "collaboration#bigassets" },
+	{ "Preferences/Remote Control/Allow External Tools to Control This Editor", "",
+	  "Lets a program on this machine drive the editor: place and move objects, "
+	  "set properties, author HorizonCode. Loopback only and token-guarded, but "
+	  "while it is on, anything running as you may change the scene. Off by "
+	  "default on purpose.",
+	  "", "" },
+	{ "Preferences/Remote Control/Listening Port", "",
+	  "0 lets the system pick, which is normal — the port is published in the "
+	  "endpoint file with the token. Pin one only for a client that cannot read "
+	  "that file. Fixed while the listener is up.",
+	  "", "" },
+	{ "Preferences/Remote Control/Try Again", "",
+	  "Reopens the listener after a failed start — the setting is on but the port "
+	  "could not be taken, and nothing retries that on its own.",
+	  "", "" },
 	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
@@ -1912,6 +2253,18 @@ namespace
 	// The pages on this tab that edit the PROJECT. Everything else here follows
 	// the editor from project to project; these travel with the project and into
 	// the application it exports.
+	// ── Project ▸ Collision Layers ───────────────────────────────────────────
+	{ "Collision Layers/Name", "Layer name",
+	  "What this channel is called, everywhere it is offered. The NUMBER is what "
+	  "a scene stores, so renaming a layer relabels it and moves nothing. Leave "
+	  "one empty and it reads back as its built-in name, which for the five "
+	  "presets is Default, Player, Trigger, Character or Terrain.",
+	  "", "systems#physics" },
+	{ "Collision Layers/Everything Collides", "Everything Collides",
+	  "Ticks every box in the matrix again, which is the state a new project "
+	  "starts in. The names are left alone. The way back out of a matrix with "
+	  "most of it switched off.",
+	  "", "systems#physics" },
 	{ "Permissions/Files outside the project", "Files outside the project",
 	  "Off, a script reads and writes only inside the project's Saved folder — an "
 	  "absolute path is simply refused. On, it may name any path on the machine.\n\n"
@@ -2295,6 +2648,118 @@ namespace
 	  "light is, and one offset for the whole application is what makes a screen "
 	  "look lit rather than assembled.",
 	  "", "ui#elements" },
+	{ "New Asset/Bone Mask", "",
+	  "A list of joint names an animation layer is allowed to touch. Made here "
+	  "and edited in its own tab; a layer without one covers the whole skeleton.",
+	  "", "systems#animation" },
+	{ "New Asset/Blend Space", "",
+	  "Several animation clips placed in a 1D or 2D parameter space and mixed by "
+	  "where the parameters stand — speed into walk/jog/run, direction and speed "
+	  "into a whole strafe set. Made here and edited in its own tab; a state or "
+	  "an animation layer then points at it instead of at a single clip.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Kind", "",
+	  "1D reads one parameter and interpolates along a line — speed into "
+	  "walk/jog/run. 2D reads two and mixes freely placed samples in a plane, "
+	  "which is what a strafe set needs. 1D is the 2D case that ignores Y, so "
+	  "switching keeps every sample where it is.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Parameter X", "",
+	  "The name of the animator parameter this axis reads — the same name a "
+	  "script writes with animator.setFloat. A name nothing writes reads 0, "
+	  "which the clamp turns into the leftmost sample rather than into nothing.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Parameter Y", "",
+	  "The second axis, for a 2D space. Direction is the usual one: X how fast, "
+	  "Y which way.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range X Min", "",
+	  "The left edge of the DIAGRAM, not of the mix. The sampler clamps to the "
+	  "outermost sample and never extrapolates, so widening this shows more empty "
+	  "space and changes no pose.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range X Max", "",
+	  "The right edge of the diagram. Same as the minimum: an editor axis, not a "
+	  "limit on the parameter.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range Y Min", "",
+	  "The bottom edge of the diagram in a 2D space.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Range Y Max", "",
+	  "The top edge of the diagram in a 2D space.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Looping", "",
+	  "Whether the shared cycle wraps at the end or stops there. It belongs to "
+	  "the SPACE and not to each place it is used, because all its samples run "
+	  "on one phase: a locomotion set either cycles or it does not.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Cursor X", "",
+	  "Where the preview cursor stands on the first axis. It is this editor's "
+	  "own question and is not saved into the asset — the weights under it are "
+	  "computed by the same function the game uses, so what you read here is "
+	  "what will play.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Cursor Y", "",
+	  "The preview cursor's second axis, for a 2D space.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Clip", "",
+	  "The animation this sample contributes. Every sample is read at the same "
+	  "point in its OWN cycle — at phase 0.5 a 1.2 s walk is read at 0.6 s and a "
+	  "0.8 s run at 0.4 s — which is what keeps clips of different length from "
+	  "drifting apart and crossing the feet mid-blend.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/X", "",
+	  "Where this sample sits on the first axis: the parameter value at which it "
+	  "plays alone, at full weight. Between two samples the mix is linear; "
+	  "outside the outermost ones it clamps.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Y", "",
+	  "Where this sample sits on the second axis of a 2D space. Samples may be "
+	  "placed anywhere — no grid, no triangulation.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Speed Scale", "",
+	  "A tempo correction for a clip whose author got the timing wrong. It does "
+	  "not run this one sample faster on its own — all samples share one phase — "
+	  "it shortens the seconds this sample contributes to the shared cycle, "
+	  "which speeds the whole mix up in proportion to its weight.",
+	  "", "systems#animation" },
+	{ "Blend Space Editor/Add Sample", "",
+	  "Another clip in the space, placed where the preview cursor stands. At most "
+	  "four samples are ever evaluated at once: a fifth with real weight means "
+	  "the space is packed tighter than anyone can see.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Reference Skeleton", "",
+	  "A skeleton to pick joints from. It is this editor's own reference and is "
+	  "NOT saved into the mask: a mask holds joint names, so it works on every "
+	  "rig that spells them the same way, and baking one skeleton into it would "
+	  "quietly make it the only rig it fits.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Joint", "",
+	  "Whether a layer using this mask may touch this joint at all. Unticked "
+	  "means weight 0 — a mask is an allow-list, and one that matches no joint "
+	  "means the layer does nothing rather than everything.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Weight", "",
+	  "How strongly this one joint follows the layer, multiplied onto the "
+	  "layer's own weight. Values below 1 along a spine are what makes a "
+	  "masked layer fade into the base pose instead of ending at a hard edge.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Add Subtree", "",
+	  "Ticks this joint and everything below it, at weight 1. It expands to "
+	  "explicit names right now rather than storing \"and its children\": the "
+	  "mask carries no skeleton, so a subtree rule would mean different joints "
+	  "on two different rigs under the same name.",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Clear Subtree", "",
+	  "The opposite: unticks this joint and everything below it. The quick way "
+	  "to say \"the upper body except the fingers\".",
+	  "", "systems#animation" },
+	{ "Bone Mask Editor/Drop", "",
+	  "Removes a name the reference skeleton does not have. They are listed "
+	  "rather than hidden because at run time they weigh nothing, and a mask "
+	  "that silently stopped covering the joint it was written for looks exactly "
+	  "like a layer that stopped working for no reason.",
+	  "", "systems#animation" },
 	{ "UI Widget/Style", "",
 	  "Which of the theme's styles dresses this element — one decision for its "
 	  "whole look, instead of binding value after value below. The entry named "
@@ -3594,6 +4059,24 @@ namespace
 	  "state does not leave by itself when the clip ends; only a transition moves "
 	  "the machine on.",
 	  "", "systems#animation" },
+	// The two slots on a state node. They carry no label — a node body has room
+	// for the readout and nothing else — so the audit cannot see them and they
+	// are hovered rather than read. Which is exactly why they need an entry: a
+	// drop target that says "(no blend space)" and nothing else does not explain
+	// what it would do with one.
+	{ "State Machine/Clip Slot", "Clip",
+	  "The animation this state poses from: drop an Animation Clip from the "
+	  "Content Browser onto it. A state with no clip holds the pose it entered "
+	  "with, which looks like a frozen character rather than like a missing "
+	  "asset — the readout on the node is what tells the two apart.",
+	  "", "systems#animation" },
+	{ "State Machine/Blend Space Slot", "Blend Space",
+	  "A blend space instead of the clip above: several clips mixed by where the "
+	  "animator's parameters stand, which is how walk, jog and run become one "
+	  "state. Drop one on, and it WINS over the clip — a state carrying both "
+	  "poses from the space and ignores the clip, which is what the node says out "
+	  "loud rather than leaving you to guess. Right-click takes it off again.",
+	  "", "systems#animation" },
 	{ "State Machine Transitions/From", "From State",
 	  "The state this transition leaves, written as that state's name. Names, not "
 	  "ids, are how a transition points at its endpoints, so a name matching no "
@@ -3684,9 +4167,69 @@ namespace
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "
-	  "Browser. Empty leaves it in its bind pose. It is preview state on this "
-	  "tab, so it is not saved with the asset and pushes no undo step.",
+	  "Browser. Empty leaves it in its bind pose. Choosing one is preview state on "
+	  "this tab and pushes no undo step — but the notifies and the Root Motion "
+	  "switch below are edits to the CLIP, and they are saved into it.",
 	  "", "systems#animation" },
+	{ "Mesh Viewer/Root Motion", "",
+	  "Does this clip's root bone carry motion that belongs on the character? On, "
+	  "the motion is taken out of the pose here and the figure animates in place, "
+	  "with the path beside the preview showing where it would travel. Off, the "
+	  "root stays in the pose — which is what an idle with a pinned root wants. "
+	  "It is a property of the CLIP; whether an entity acts on the motion is the "
+	  "Root Motion component's Mode.",
+	  "", "systems#animation" },
+	{ "Mesh Viewer/Name", "Notify Name",
+	  "The name gameplay listens for. It is the entire payload of a notify: a "
+	  "graph reacts to \"Footstep\", and a name nothing listens to fires nothing "
+	  "rather than failing. There is no list to pick from on purpose — a clip is "
+	  "authored against the graph that hears it.",
+	  "", "systems#animation" },
+	{ "Mesh Viewer/Time", "Notify Time",
+	  "Where on the clip the event sits, in seconds. Dragging the marker on the "
+	  "lane does the same thing, against a pose you can see — which is the reason "
+	  "this timeline lives in the mesh tab and not in an editor of its own.",
+	  "", "systems#animation" },
+	{ "Mesh Viewer/Duration", "Notify Duration",
+	  "Zero makes it a notify: it fires once as the playhead sweeps past. Anything "
+	  "above zero makes it a notify STATE, which fires Begin at Time and End at "
+	  "Time plus this — a hit window, an invulnerability, a trail. A state reaching "
+	  "past the end of its clip ends with the clip rather than never.",
+	  "", "systems#animation" },
+	{ "anim.notify-lane", "Notify Timeline",
+	  "The events on this clip's timeline. A diamond is a notify, a bar a notify "
+	  "state. Double-click empty space to add one, drag a marker to move it, "
+	  "right-click for the menu; clicking empty lane moves the playhead, so an "
+	  "event can be placed against the pose it belongs to. Everything here is "
+	  "saved into the clip, not into the mesh.",
+	  "", "systems#animation" },
+	{ "Notify Timeline/Add Notify", "",
+	  "Adds an event at the playhead that fires once when the animation sweeps "
+	  "past it. Give it the name the listening graph uses.",
+	  "", "systems#animation" },
+	{ "Notify Timeline/Add Notify State", "",
+	  "Adds an event with a length: it fires Begin when the playhead enters it and "
+	  "End when it leaves, so a window can be opened and closed by the animation "
+	  "that motivates it.",
+	  "", "systems#animation" },
+	{ "Notify Timeline/Delete", "",
+	  "Removes the selected event from the clip. Nothing else moves — the firing "
+	  "walk compares every entry against the span, so the order of the list has "
+	  "never meant anything.",
+	  "", "systems#animation" },
+	{ "anim.root-path", "Root Motion Path",
+	  "Where one lap of this clip would carry a character, seen from above, with "
+	  "the marker showing where the playhead stands on it and the metres covered "
+	  "printed underneath. Nothing moves for it: the motion is extracted, the root "
+	  "is locked, and the travel is drawn instead — the same line appears in the "
+	  "viewport under a selected entity that has a Root Motion component.",
+	  "", "systems#animation" },
+	{ "anim.clip-save", "Save Clip",
+	  "Writes this clip's notifies and its Root Motion switch back to the clip "
+	  "asset. Greyed out when there is nothing unsaved. Closing the tab keeps the "
+	  "edits, and the quit prompt lists the clip by its own name — the mesh in the "
+	  "title is not what changed, so the tab carries no unsaved mark of its own.",
+	  "Ctrl+S", "systems#animation" },
 
 	// ── HorizonCode: the panels around the graph ─────────────────────────────
 	// The node reference covers what each NODE does. This covers the panels that
@@ -4416,6 +4959,11 @@ namespace
 		{ "Preferences/Global Illumination/", "editor-settings", "Settings Reference", "Global Illumination" },
 		{ "Preferences/Effects/",             "editor-settings", "Settings Reference", "Effects" },
 		{ "Preferences/Collaboration/",       "editor-settings", "Settings Reference", "Collaboration" },
+		// Above the bare "Preferences/" fallback like the rest — without its own
+		// rule these three would land under the "Preferences" heading instead of
+		// their own, which is the silent kind of wrong: the entry exists, F1
+		// works, and it opens the wrong section.
+		{ "Preferences/Remote Control/",      "editor-settings", "Settings Reference", "Remote Control" },
 		{ "Preferences/Viewport/",            "editor-settings", "Settings Reference", "Viewport" },
 		{ "Preferences/Input/",               "editor-settings", "Settings Reference", "Input" },
 		{ "Preferences/Appearance/",          "editor-settings", "Settings Reference", "Appearance" },
@@ -4435,6 +4983,7 @@ namespace
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
+		{ "Collision Layers/", "editor-settings", "Settings Reference", "Collision layers" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────
@@ -4482,6 +5031,9 @@ namespace
 		{ "Sync Graph/",                "editor-animation", "Animation Editors", "Sync graph" },
 		{ "Audio Editor/",              "editor-animation", "Animation Editors", "Audio editor" },
 		{ "Mesh Viewer/",               "editor-animation", "Animation Editors", "Mesh viewer" },
+		{ "Notify Timeline/",           "editor-animation", "Animation Editors", "Notify timeline" },
+		{ "Bone Mask Editor/",          "editor-animation", "Animation Editors", "Bone mask editor" },
+		{ "Blend Space Editor/",        "editor-animation", "Animation Editors", "Blend space editor" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },
@@ -4505,10 +5057,12 @@ namespace
 	// editor.
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
-		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Character Controller", "Movement",
+		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
-		"Animator State Machine", "Property Animator", "Particle System",
+		"Animator State Machine", "Root Motion", "Animation Layers",
+		"Inverse Kinematics",
+		"Property Animator", "Particle System",
 		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};

@@ -20,6 +20,7 @@ nlohmann::json stateToJsonObj(const AnimationState& s)
 {
     return { { "id", s.id }, { "name", s.name },
              { "clipId", HE::graph::uuidToJson(s.clipId) },
+             { "blendSpaceId", HE::graph::uuidToJson(s.blendSpaceId) },
              { "looping", s.looping }, { "x", s.x }, { "y", s.y } };
 }
 
@@ -28,6 +29,9 @@ void stateFromJsonObj(const nlohmann::json& sj, AnimationState& s)
     s.id   = sj.value("id", 0);
     s.name = sj.value("name", std::string());
     if (auto c = sj.find("clipId"); c != sj.end()) s.clipId = HE::graph::uuidFromJson(*c);
+    // Absent in every graph saved before blend spaces existed, which is exactly
+    // what "keeps its clip" reads as: a null id, and clipId wins.
+    if (auto b = sj.find("blendSpaceId"); b != sj.end()) s.blendSpaceId = HE::graph::uuidFromJson(*b);
     s.looping = sj.value("looping", true);
     s.x = sj.value("x", 0.0f);
     s.y = sj.value("y", 0.0f);

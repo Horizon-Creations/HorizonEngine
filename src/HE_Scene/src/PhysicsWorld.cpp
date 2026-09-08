@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <unordered_set>
 
 JPH_SUPPRESS_WARNINGS
 
@@ -30,9 +31,18 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
+#include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Body/BodyLockMulti.h>
+#include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SliderConstraint.h>
+#include <Jolt/Physics/Constraints/DistanceConstraint.h>
 
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
+#include <Physics/CollisionLayers.h>
 
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/HorizonWorld.h"
@@ -42,6 +52,8 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
+#include "HorizonScene/Components/EntityIdComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
@@ -55,10 +67,32 @@ JPH_SUPPRESS_WARNINGS
 
 // ─── Layer definitions ────────────────────────────────────────────────────────
 
+// An ObjectLayer carries TWO things: the project's collision channel and whether
+// the body moves.
+//
+//     ObjectLayer = (userLayer << 1) | isMoving          // 5 of 16 bits used
+//     BroadPhaseLayer = isMoving ? MOVING : NON_MOVING
+//
+// The broadphase stays at TWO layers on purpose. Jolt builds one quadtree per
+// broadphase layer, and "moves / does not move" is the split that pays for
+// itself; sixteen channels there would be sixteen trees and a step backwards.
+// The channel is decided one level down, in the object-pair filter, which is a
+// matrix lookup and costs nothing to widen.
 namespace HELayers {
-    static constexpr JPH::ObjectLayer NON_MOVING = 0;
-    static constexpr JPH::ObjectLayer MOVING     = 1;
-    static constexpr JPH::ObjectLayer NUM_LAYERS = 2;
+    static constexpr JPH::ObjectLayer NUM_LAYERS =
+        static_cast<JPH::ObjectLayer>(HE::CollisionLayerConfig::kCount) * 2;
+
+    static constexpr JPH::ObjectLayer encode(uint8_t userLayer, bool moving) {
+        return static_cast<JPH::ObjectLayer>(
+            (static_cast<JPH::ObjectLayer>(userLayer) << 1) | (moving ? 1u : 0u));
+    }
+    static constexpr int  channelOf(JPH::ObjectLayer layer) { return layer >> 1; }
+    static constexpr bool isMoving(JPH::ObjectLayer layer)  { return (layer & 1u) != 0u; }
+
+    // The two the class used before channels existed — the Default channel's
+    // pair. Still the right answer wherever no component can name a channel.
+    static constexpr JPH::ObjectLayer NON_MOVING = encode(HE::CollisionLayerConfig::kDefault, false);
+    static constexpr JPH::ObjectLayer MOVING     = encode(HE::CollisionLayerConfig::kDefault, true);
 }
 
 namespace HEBPLayers {
@@ -70,47 +104,72 @@ namespace HEBPLayers {
 class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface
 {
 public:
-    BPLayerInterfaceImpl() {
-        m_objectToBP[HELayers::NON_MOVING] = HEBPLayers::NON_MOVING;
-        m_objectToBP[HELayers::MOVING]     = HEBPLayers::MOVING;
-    }
     JPH::uint GetNumBroadPhaseLayers() const override { return HEBPLayers::NUM_LAYERS; }
     JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer layer) const override {
         JPH_ASSERT(layer < HELayers::NUM_LAYERS);
-        return m_objectToBP[layer];
+        return HELayers::isMoving(layer) ? HEBPLayers::MOVING : HEBPLayers::NON_MOVING;
     }
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer layer) const override {
         return (layer == HEBPLayers::NON_MOVING) ? "NON_MOVING" : "MOVING";
     }
 #endif
-private:
-    JPH::BroadPhaseLayer m_objectToBP[HELayers::NUM_LAYERS];
 };
 
 class ObjectVsBPLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayerFilter
 {
 public:
     bool ShouldCollide(JPH::ObjectLayer obj, JPH::BroadPhaseLayer bp) const override {
-        switch (obj) {
-        case HELayers::NON_MOVING: return bp == HEBPLayers::MOVING;
-        case HELayers::MOVING:     return true;
-        default: JPH_ASSERT(false); return false;
-        }
+        // A moving body has to visit both trees; a non-moving one only needs the
+        // moving tree, because nothing in its own can come to meet it. The
+        // channel plays no part here — it is decided in the pair filter below,
+        // after the broadphase has already thrown away the far-apart pairs.
+        return HELayers::isMoving(obj) ? true : bp == HEBPLayers::MOVING;
     }
 };
 
 class ObjectLayerPairFilterImpl : public JPH::ObjectLayerPairFilter
 {
 public:
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        switch (a) {
-        case HELayers::NON_MOVING: return b == HELayers::MOVING;
-        case HELayers::MOVING:     return true;
-        default: JPH_ASSERT(false); return false;
-        }
+    // Its OWN copy of the matrix, not a reference into the config the project
+    // owns. Two reasons: this is asked once per candidate pair per step, so it
+    // must not be a call across the HorizonCore DLL boundary; and the config the
+    // editor edits may be reassigned or destroyed while the simulation runs.
+    ObjectLayerPairFilterImpl() { setLayers(HE::CollisionLayerConfig{}); }
+
+    void setLayers(const HE::CollisionLayerConfig& config) {
+        for (int a = 0; a < HE::CollisionLayerConfig::kCount; ++a)
+            for (int b = 0; b < HE::CollisionLayerConfig::kCount; ++b)
+                m_matrix[a][b] = config.collides(a, b);
     }
+
+    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
+        // Two bodies that cannot move cannot resolve a contact between them —
+        // this line is the whole of the old behaviour and has nothing to do with
+        // the channels.
+        if (!HELayers::isMoving(a) && !HELayers::isMoving(b))
+            return false;
+        return m_matrix[HELayers::channelOf(a)][HELayers::channelOf(b)];
+    }
+
+private:
+    bool m_matrix[HE::CollisionLayerConfig::kCount][HE::CollisionLayerConfig::kCount];
 };
+
+// The channel a component asked for, made safe to use as an index. uint8_t goes
+// to 255 and nothing upstream validates it: an out-of-range value would index
+// past the matrix and trip Jolt's own assert in GetBroadPhaseLayer. Loud,
+// because a body silently in the wrong channel is a bug nobody can see.
+static uint8_t sanitizeChannel(uint8_t requested, uint32_t entityId, const char* what)
+{
+    if (requested < HE::CollisionLayerConfig::kCount)
+        return requested;
+    HE_LOG_WARN(Physics, "Entity %u: %s names collision layer %u, but only 0..%d exist "
+                         "— using Default (0)",
+                entityId, what, static_cast<unsigned>(requested),
+                HE::CollisionLayerConfig::kCount - 1);
+    return HE::CollisionLayerConfig::kDefault;
+}
 
 // ─── Process-global Jolt init (run once, never torn down) ─────────────────────
 // RegisterTypes / Factory are global state inside Jolt; re-registering after
@@ -131,6 +190,39 @@ static void joltEnsureInit()
 class HEContactListener : public JPH::ContactListener
 {
 public:
+    // ── JointComponent::collideConnected, and the only place it is enforced ───
+    // Jolt has no per-constraint "these two may not touch" flag: a constraint
+    // and a contact are separate things to the solver. The alternative it does
+    // offer — collision GROUPS on the bodies — assigns one group per body, which
+    // cannot express "A ignores B, B ignores C, A still hits C", and that is
+    // exactly the shape of a chain.
+    //
+    // So the pair is rejected here, before the manifold is ever built. Cheaper
+    // than it looks: the set is empty in a scene with no joints, and even a
+    // ragdoll's worth of pairs is a handful of hashes on contacts that were
+    // going to be rejected anyway.
+    JPH::ValidateResult OnContactValidate(const JPH::Body& b1, const JPH::Body& b2,
+                                          JPH::RVec3Arg, const JPH::CollideShapeResult&) override
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_noCollidePairs.empty() &&
+                m_noCollidePairs.count(bodyPairKey(b1.GetID(), b2.GetID())) != 0)
+                return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        }
+        return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+    }
+
+    // Called from PhysicsWorld whenever a joint is born or dies — never from
+    // inside Update(), which is what makes the lock above uncontended in
+    // practice rather than only correct.
+    void setPairCollides(const JPH::BodyID& a, const JPH::BodyID& b, bool collides)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (collides) m_noCollidePairs.erase(bodyPairKey(a, b));
+        else          m_noCollidePairs.insert(bodyPairKey(a, b));
+    }
+
     void OnContactAdded(const JPH::Body& b1, const JPH::Body& b2,
                         const JPH::ContactManifold&, JPH::ContactSettings&) override
     {
@@ -217,6 +309,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_active.clear();
+        m_noCollidePairs.clear();
         m_entered.clear();
         m_exited.clear();
         m_enteredOverlap.clear();
@@ -280,6 +373,10 @@ private:
 
     std::mutex m_mutex;
     std::unordered_map<uint64_t, ActiveContact> m_active;
+    // Body pairs held together by a joint whose collideConnected is false.
+    // Keyed the same way m_active is, so a recycled body slot cannot inherit an
+    // old joint's exemption.
+    std::unordered_set<uint64_t> m_noCollidePairs;
     std::vector<PhysicsWorld::CollisionEvent> m_entered;
     std::vector<PhysicsWorld::CollisionEvent> m_exited;
     std::vector<PhysicsWorld::CollisionEvent> m_enteredOverlap;
@@ -304,6 +401,136 @@ struct PhysicsWorld::Impl
 
     // Entity id → CharacterVirtual (for CharacterControllerComponent entities)
     std::unordered_map<uint32_t, std::unique_ptr<JPH::CharacterVirtual>> entityToCharacter;
+
+    // Entity id → the character's object layer, remembered from the build. A
+    // CharacterVirtual has no layer of its own (it is not a body), but every
+    // query it makes needs one to be filtered against — so it is kept beside the
+    // character rather than read from the component at query time: a character
+    // whose collision layer changed must be rebuilt anyway (the editor's
+    // PlayPhysicsInputs fingerprint covers that), and reading it fresh would let
+    // the ground check and the slide disagree within one step.
+    //
+    // A parallel map rather than a struct in the one above, because the map is
+    // read as `unique_ptr` in a dozen places and the only writer of this one is
+    // the build. Never contains an entry the character map does not.
+    std::unordered_map<uint32_t, JPH::ObjectLayer> characterLayer;
+
+    // The layer to filter a character's queries with. Falls back to the Character
+    // channel for an id the build never recorded — that cannot happen today, but
+    // the fallback keeps a future caller from filtering against layer 0-static
+    // and quietly walking through walls.
+    JPH::ObjectLayer characterLayerOf(uint32_t entityId) const
+    {
+        const auto it = characterLayer.find(entityId);
+        return it != characterLayer.end()
+            ? it->second
+            : HELayers::encode(HE::CollisionLayerConfig::kCharacter, true);
+    }
+
+    // ── Joints ────────────────────────────────────────────────────────────────
+    // One live constraint per entity, keyed by the entity whose JointComponent
+    // authored it ("entity A"). `partner` is remembered beside the Ref because
+    // the reverse question — which joints does THIS body appear in — has to be
+    // answerable when the partner is destroyed, and a Jolt constraint will not
+    // hand its bodies back as entity ids.
+    struct JointRecord
+    {
+        JPH::Ref<JPH::TwoBodyConstraint> constraint;
+        uint32_t                         partner = 0;   // entity B
+        // The two bodies, kept because the contact filter for collideConnected
+        // is keyed by BodyID and a joint outlives the map lookup that found
+        // them: by the time a joint is torn down, entityToBody may already have
+        // lost the entry (destroyBodyFor erases the body it is about to remove).
+        JPH::BodyID                      bodyA;
+        JPH::BodyID                      bodyB;
+    };
+    std::unordered_map<uint32_t, JointRecord> joints;
+
+    // Take a joint out of the simulation: the constraint AND the contact
+    // exemption its collideConnected asked for. Every path that erases from
+    // `joints` goes through here, because forgetting the second half leaves two
+    // bodies permanently passing through each other after the joint that
+    // excused them is gone.
+    void detachJoint(const JointRecord& record)
+    {
+        physicsSystem.RemoveConstraint(record.constraint);
+        setJointedPairCollides(record.bodyA, record.bodyB, true);
+    }
+
+    // The exemption itself, plus the one thing that makes a CHANGE to it visible.
+    //
+    // Jolt caches the outcome of a body pair from the previous step and reuses
+    // it while neither body's cache is invalid (PhysicsSystem::ProcessBodyPair,
+    // mUseBodyPairContactCache) — and "these two do not collide" is an outcome
+    // like any other. Without this, OnContactValidate is simply not asked again
+    // and a joint that is cut, or a collideConnected switched on mid-game, has
+    // no effect at all until something else disturbs the pair. It is safe on a
+    // body that has already gone: the lock fails and the call does nothing.
+    void setJointedPairCollides(const JPH::BodyID& a, const JPH::BodyID& b, bool collides)
+    {
+        contactListener.setPairCollides(a, b, collides);
+        auto& bodyInterface = physicsSystem.GetBodyInterface();
+        bodyInterface.InvalidateContactCache(a);
+        bodyInterface.InvalidateContactCache(b);
+    }
+
+    // Joints that are authored but not built: the partner has not spawned yet,
+    // or the entity's own body was just torn down for a rebuild. Retried after
+    // every successful body build.
+    //
+    // `attempts` is what keeps this from becoming a leak. It is reset to zero on
+    // every pass that resolved ANYTHING, because a chain resolves one link per
+    // pass and the entries at the far end would otherwise be dropped for being
+    // patient. Only a pass in which nothing at all moved counts against them.
+    struct PendingJoint
+    {
+        uint32_t entityId = 0;
+        int      attempts = 0;
+    };
+    std::vector<PendingJoint> pendingJoints;
+
+    // Give up after this many fruitless passes and say so once. The number is
+    // "more than any plausible spawn order needs" rather than a tuned value.
+    static constexpr int kMaxJointAttempts = 8;
+
+    // Joints that BROKE, waiting for pollJointBroken(). Plain vector rather than
+    // the contact listener's mutex-guarded pair, because the only writer is
+    // step() on the calling thread — Jolt never reports a broken constraint,
+    // this class decides it.
+    std::vector<PhysicsWorld::CollisionEvent> brokenJoints;
+
+    void queueJoint(uint32_t entityId)
+    {
+        for (const auto& p : pendingJoints)
+            if (p.entityId == entityId)
+                return;
+        pendingJoints.push_back({ entityId, 0 });
+    }
+
+    // Remove just the joint this entity AUTHORED, and leave alone the ones other
+    // entities aimed AT it. That is what addJoint and removeJoint mean by "this
+    // entity's joint"; PhysicsWorld::destroyJointsInvolving is the wider sweep,
+    // and it is wider because a dying BODY takes both directions with it.
+    bool destroyOwnJoint(uint32_t entityId)
+    {
+        const auto it = joints.find(entityId);
+        const bool had = it != joints.end();
+        if (had)
+        {
+            detachJoint(it->second);
+            joints.erase(it);
+        }
+        unqueueJoint(entityId);
+        return had;
+    }
+
+    void unqueueJoint(uint32_t entityId)
+    {
+        pendingJoints.erase(
+            std::remove_if(pendingJoints.begin(), pendingJoints.end(),
+                           [entityId](const PendingJoint& p) { return p.entityId == entityId; }),
+            pendingJoints.end());
+    }
 
     // Where ColliderShape::Mesh / ::ConvexHull get their triangles. Nullable —
     // see PhysicsWorld::setContentManager.
@@ -909,8 +1136,13 @@ struct CharacterFilters
     JPH::BodyFilter                   body;
     JPH::ShapeFilter                  shape;
 
-    CharacterFilters(const ObjectVsBPLayerFilterImpl& ovbp, const ObjectLayerPairFilterImpl& oo)
-        : bp(ovbp, HELayers::MOVING), ol(oo, HELayers::MOVING) {}
+    // `layer` is the character's OWN object layer — what the matrix is consulted
+    // for. It is always a moving one (a character that cannot move is not a
+    // character), so only the channel varies from one character to the next, and
+    // that is why the filters are built per character rather than once per step.
+    CharacterFilters(const ObjectVsBPLayerFilterImpl& ovbp, const ObjectLayerPairFilterImpl& oo,
+                     JPH::ObjectLayer layer)
+        : bp(ovbp, layer), ol(oo, layer) {}
 };
 
 } // namespace
@@ -931,6 +1163,36 @@ void PhysicsWorld::setContentManager(ContentManager* content)
 {
     if (m_impl)
         m_impl->content = content;
+}
+
+void PhysicsWorld::setCollisionLayers(const HE::CollisionLayerConfig& config)
+{
+    if (!m_impl)
+        return;
+    // The filter is a member of Impl and Jolt only holds a pointer to it (handed
+    // over in PhysicsSystem::Init), so writing through it here is all it takes —
+    // no re-Init, no rebuild of any body. Bodies keep the object layer they were
+    // created with; only the answer to "may these two touch" changes.
+    m_impl->ooFilter.setLayers(config);
+
+    // …and then every body is woken, which is the half that is easy to miss. A
+    // SLEEPING body is not in Jolt's active set: nothing re-asks the broadphase
+    // about it, so switching the floor out from under a settled crate would
+    // leave it hanging in the air until something else disturbed it. That is
+    // precisely the case an author hits — edit the matrix during play, on a
+    // scene that has come to rest — so the wake-up is not an optimisation
+    // detail, it is what makes the promise above true.
+    //
+    // Statics are skipped by Jolt itself, and this runs once per matrix edit
+    // (the editor on a change, GameApplication before a single body exists), so
+    // it never touches the frame loop.
+    std::vector<JPH::BodyID> ids;
+    ids.reserve(m_impl->entityToBody.size());
+    for (const auto& [entityId, bodyId] : m_impl->entityToBody)
+        ids.push_back(bodyId);
+    if (!ids.empty())
+        m_impl->physicsSystem.GetBodyInterface().ActivateBodies(
+            ids.data(), static_cast<int>(ids.size()));
 }
 
 bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
@@ -968,21 +1230,26 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
     const JPH::Quat  jq { pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w };
     const JPH::RVec3 pos(pose.position.x, pose.position.y, pose.position.z);
 
+    // The authored channel travels with the body; the moving bit is decided by
+    // the motion type below and packed in at the end, so a downgrade to Static
+    // cannot leave the two disagreeing.
+    const uint8_t channel = sanitizeChannel(rb->collisionLayer, entityId, "its rigid body");
+
     JPH::EMotionType motionType;
-    JPH::ObjectLayer layer;
+    bool             moving;
     switch (rb->type)
     {
     case RigidBodyType::Dynamic:
         motionType = JPH::EMotionType::Dynamic;
-        layer      = HELayers::MOVING;
+        moving     = true;
         break;
     case RigidBodyType::Kinematic:
         motionType = JPH::EMotionType::Kinematic;
-        layer      = HELayers::MOVING;
+        moving     = true;
         break;
     default: // Static
         motionType = JPH::EMotionType::Static;
-        layer      = HELayers::NON_MOVING;
+        moving     = false;
         break;
     }
 
@@ -998,10 +1265,11 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
                              "Use Convex Hull for a body that has to move.",
                     entityId, rb->type == RigidBodyType::Dynamic ? "Dynamic" : "Kinematic");
         motionType = JPH::EMotionType::Static;
-        layer      = HELayers::NON_MOVING;
+        moving     = false;
     }
 
-    JPH::BodyCreationSettings bcs(build.result.Get(), pos, jq, motionType, layer);
+    JPH::BodyCreationSettings bcs(build.result.Get(), pos, jq, motionType,
+                                  HELayers::encode(channel, moving));
     // Gated on the FINAL motion type, not on rb->type: after a downgrade, asking
     // Jolt to calculate inertia for a static mesh body is a request it cannot
     // satisfy.
@@ -1112,6 +1380,11 @@ bool PhysicsWorld::buildCharacterFor(HorizonWorld& world, uint32_t entityId)
 
     m_impl->entityToCharacter[entityId] = std::make_unique<JPH::CharacterVirtual>(
         &cvs, pos, jq, static_cast<uint64_t>(entityId), &m_impl->physicsSystem);
+    // Always a MOVING layer: the character is the thing that walks, and a
+    // non-moving one would never be asked about the non-moving tree it needs to
+    // stand on.
+    m_impl->characterLayer[entityId] = HELayers::encode(
+        sanitizeChannel(cc->collisionLayer, entityId, "its character controller"), true);
     return true;
 }
 
@@ -1151,7 +1424,14 @@ bool PhysicsWorld::buildTerrainBodyFor(HorizonWorld& world, uint32_t entityId)
         shapeResult.Get(),
         JPH::RVec3(pose.position.x, pose.position.y, pose.position.z),
         JPH::Quat(pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w),
-        JPH::EMotionType::Static, HELayers::NON_MOVING);
+        JPH::EMotionType::Static,
+        // The implicit landscape gets the TERRAIN channel, not Default. Nobody
+        // has a component to write a choice into here, so the choice is made
+        // once and it is the useful one: a query that wants only the ground, or
+        // wants everything but the ground, is a common shape and needs a channel
+        // of its own to be expressible at all. With the default all-true matrix
+        // this changes no simulation.
+        HELayers::encode(HE::CollisionLayerConfig::kTerrain, false));
     bcs.mFriction = 0.5f;   // RigidBodyComponent's default, so an authored body matches
     bcs.mUserData = static_cast<uint64_t>(entityId);
 
@@ -1167,6 +1447,423 @@ bool PhysicsWorld::buildTerrainBodyFor(HorizonWorld& world, uint32_t entityId)
 
     m_impl->entityToBody[entityId] = bodyId;
     return true;
+}
+
+// ─── Joints ───────────────────────────────────────────────────────────────────
+namespace {
+
+// A hinge needs a second axis to say where angle zero is; a slider needs one to
+// pin down the rotation it forbids. Any perpendicular does, as long as BOTH
+// bodies are given the SAME one — that is what defines the current pose as the
+// zero pose, which is Jolt's own recipe for setting a constraint up in world
+// space.
+glm::vec3 anyPerpendicular(const glm::vec3& axis)
+{
+    // Cross with whichever cardinal the axis is least parallel to, or the result
+    // is a zero-length vector and the joint's frame is undefined.
+    const glm::vec3 reference = std::abs(axis.y) < 0.9f ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                        : glm::vec3(1.0f, 0.0f, 0.0f);
+    return glm::normalize(glm::cross(reference, axis));
+}
+
+JPH::Vec3 toJolt(const glm::vec3& v) { return JPH::Vec3(v.x, v.y, v.z); }
+
+// ── The motor, on the two types that have one ────────────────────────────────
+// Hinge and Slider are the joints with a single degree of freedom, which is what
+// there is to drive; the other three have nothing to turn or push. Returns false
+// for those, so the caller can say so rather than pretending it worked.
+//
+// THE FORCE IS THE SWITCH. At or below zero the motor is Off, which is the
+// default and so nothing an old scene carries starts moving; a target of zero
+// with force behind it is a brake, which is how a door is held shut. Reading the
+// target as the switch would have made that ordinary case unreachable.
+//
+// The limits are set BEFORE the state: Jolt asserts in SetMotorState that the
+// MotorSettings are valid, and a torque limit is part of being valid.
+bool applyJointMotor(JPH::TwoBodyConstraint& constraint, float targetSpeed, float maxForce)
+{
+    const bool on = maxForce > 0.0f;
+    switch (constraint.GetSubType())
+    {
+    case JPH::EConstraintSubType::Hinge:
+    {
+        auto& hinge = static_cast<JPH::HingeConstraint&>(constraint);
+        // Newton-METRES: an angular motor's budget is a torque, and Jolt reads
+        // the torque limit for a hinge and the force limit for a slider.
+        hinge.GetMotorSettings().SetTorqueLimit(on ? maxForce : 0.0f);
+        hinge.SetTargetAngularVelocity(targetSpeed);   // rad/s, Jolt's own unit
+        hinge.SetMotorState(on ? JPH::EMotorState::Velocity : JPH::EMotorState::Off);
+        return true;
+    }
+    case JPH::EConstraintSubType::Slider:
+    {
+        auto& slider = static_cast<JPH::SliderConstraint&>(constraint);
+        slider.GetMotorSettings().SetForceLimit(on ? maxForce : 0.0f);
+        slider.SetTargetVelocity(targetSpeed);         // m/s
+        slider.SetMotorState(on ? JPH::EMotorState::Velocity : JPH::EMotorState::Off);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// How hard the joint is pulling, in newtons, over a step of `dt`.
+//
+// The solver accumulates an IMPULSE per step (newton-seconds), so the force is
+// that over the step length — which is what an author types into a break force
+// and what the same number means for a body's weight. Each constraint type
+// spells its accumulator differently and none of them share a base class member
+// for it, hence the switch; the ROTATION lambdas are deliberately left out, so
+// what breaks a joint is the pull on it and not the twist.
+float jointForceMagnitude(const JPH::TwoBodyConstraint& constraint, float dt)
+{
+    if (dt <= 0.0f)
+        return 0.0f;
+    float impulse = 0.0f;
+    switch (constraint.GetSubType())
+    {
+    case JPH::EConstraintSubType::Fixed:
+        impulse = static_cast<const JPH::FixedConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Point:
+        impulse = static_cast<const JPH::PointConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Hinge:
+        impulse = static_cast<const JPH::HingeConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Slider:
+        // Two components, because a slider only constrains the two directions it
+        // does NOT travel along.
+        impulse = static_cast<const JPH::SliderConstraint&>(constraint)
+                      .GetTotalLambdaPosition().Length();
+        break;
+    case JPH::EConstraintSubType::Distance:
+        // One number, and a SIGNED one: a rope pulls at one end of its range and
+        // pushes at the other, and both count against the same limit.
+        impulse = std::abs(static_cast<const JPH::DistanceConstraint&>(constraint)
+                               .GetTotalLambdaPosition());
+        break;
+    default:
+        return 0.0f;
+    }
+    return impulse / dt;
+}
+
+} // namespace
+
+bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
+{
+    auto&        reg    = world.registry();
+    const Entity entity = static_cast<Entity>(entityId);
+    if (!reg.valid(entity))
+        return false;
+
+    const auto* jc = reg.try_get<JointComponent>(entity);
+    if (!jc)
+        return false;
+
+    // A hard refusal drops the entry: retrying it every spawn for the rest of
+    // the session would log the same complaint forever. A "not ready yet" leaves
+    // it queued and stays silent — that is the normal state halfway through
+    // building a chain.
+    const auto refuse = [&](const char* why) {
+        HE_LOG_ERROR(Physics, "Entity %u: joint not built — %s", entityId, why);
+        m_impl->unqueueJoint(entityId);
+        return false;
+    };
+
+    if (jc->target == HE::UUID{})
+        return refuse("it names no other entity");
+
+    const Entity targetEntity = world.findByEntityId(jc->target);
+    if (targetEntity == entt::null)
+        return false;   // not spawned yet — the pending list is for exactly this
+    const uint32_t targetId = static_cast<uint32_t>(targetEntity);
+    if (targetId == entityId)
+        return refuse("it names itself");
+
+    const auto itA = m_impl->entityToBody.find(entityId);
+    const auto itB = m_impl->entityToBody.find(targetId);
+    if (itA == m_impl->entityToBody.end() || itB == m_impl->entityToBody.end())
+    {
+        // Both entities are here and one of them has no BODY. That is a
+        // different thing from "not spawned yet" and it is worth saying out
+        // loud, because the usual cause is a Character Controller on the other
+        // end: a CharacterVirtual is not a body and cannot be jointed to. Still
+        // a soft failure — a body can arrive later — so it stays queued and the
+        // give-up message has the last word.
+        HE_LOG_WARN(Physics, "Entity %u: joint waiting — entity %u has no rigid body "
+                             "(a Character Controller is not one)",
+                    entityId, itA == m_impl->entityToBody.end() ? entityId : targetId);
+        return false;
+    }
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const JPH::EMotionType motionA = bodyInterface.GetMotionType(itA->second);
+    const JPH::EMotionType motionB = bodyInterface.GetMotionType(itB->second);
+    if (motionA == JPH::EMotionType::Static && motionB == JPH::EMotionType::Static)
+        return refuse("both bodies are Static, so nothing could ever move");
+
+    // The anchors are LOCAL and the axis is a LOCAL direction; Jolt is told about
+    // them in world space. The walk goes through the parent chain here and now,
+    // never through TransformComponent::worldMatrix — a joint built the frame an
+    // entity spawned would read the identity out of that field and anchor the
+    // whole chain at the origin, where it would not crash but would slowly pull
+    // everything to (0, 0, 0).
+    const glm::mat4  matA  = HE::worldMatrixOf(world, entity);
+    const glm::mat4  matB  = HE::worldMatrixOf(world, targetEntity);
+    const glm::vec3  worldAnchorA = glm::vec3(matA * glm::vec4(jc->anchorA, 1.0f));
+    const glm::vec3  worldAnchorB = glm::vec3(matB * glm::vec4(jc->anchorB, 1.0f));
+
+    // The axis is a DIRECTION, so it takes the rotation and not the translation.
+    glm::vec3 worldAxis{ 0.0f };
+    const bool needsAxis = jc->type == JointType::Hinge || jc->type == JointType::Slider;
+    if (needsAxis)
+    {
+        if (glm::length(jc->axis) < 1.0e-5f)
+            return refuse("its axis has no length, so there is no direction to hinge or slide on");
+        worldAxis = glm::normalize(decomposeWorld(matA).rotation * glm::normalize(jc->axis));
+        // NEGATED for Jolt, and this one sign is the whole authoring convention.
+        //
+        // Jolt measures a hinge's angle and a slider's travel as body2 moving
+        // along the axis relative to body1 — and body1 here is THIS entity, the
+        // one that owns the component. Handed the axis as authored, a positive
+        // limit and a positive motor speed would move the OTHER entity along it,
+        // which reads backwards for the case the whole component is shaped
+        // around: the door owns the joint and the frame is the target, so "open
+        // to 90°" has to mean the door swings, not the building.
+        //
+        // Flipping the axis flips both at once, which is why it happens here and
+        // not at the two places that consume it: the limits and the motor share
+        // Jolt's convention, and negating one of them alone would leave a motor
+        // driving away from the limit it was given.
+        worldAxis = -worldAxis;
+    }
+
+    // Limits arrive in DEGREES for an angle and metres for a distance, and
+    // min >= max is the authored way of saying "no limit". Jolt additionally
+    // requires the range to contain zero — the pose the joint is built in is
+    // position zero — and asserts in a debug build if it does not. Widening is
+    // the friendlier answer than refusing: "the door opens from 10° to 90°"
+    // means a door that opens 90°, and saying so is more use than dropping the
+    // joint.
+    const bool  limited = jc->minLimit < jc->maxLimit;
+    float       loLimit = jc->minLimit;
+    float       hiLimit = jc->maxLimit;
+    if (limited && (loLimit > 0.0f || hiLimit < 0.0f))
+    {
+        HE_LOG_WARN(Physics, "Entity %u: joint limits %.2f..%.2f do not contain 0, which is the "
+                             "pose the joint is built in — widened to %.2f..%.2f",
+                    entityId, loLimit, hiLimit,
+                    std::min(loLimit, 0.0f), std::max(hiLimit, 0.0f));
+        loLimit = std::min(loLimit, 0.0f);
+        hiLimit = std::max(hiLimit, 0.0f);
+    }
+
+    // Built on the stack and handed to Create() below; Jolt copies what it needs.
+    JPH::FixedConstraintSettings    fixedSettings;
+    JPH::PointConstraintSettings    pointSettings;
+    JPH::HingeConstraintSettings    hingeSettings;
+    JPH::SliderConstraintSettings   sliderSettings;
+    JPH::DistanceConstraintSettings distanceSettings;
+    JPH::TwoBodyConstraintSettings* settings = nullptr;
+
+    switch (jc->type)
+    {
+    case JointType::Fixed:
+        // No anchors: a weld keeps the relative pose the two bodies are ALREADY
+        // in, which is what an author who broke one object into pieces means.
+        fixedSettings.mSpace           = JPH::EConstraintSpace::WorldSpace;
+        fixedSettings.mAutoDetectPoint = true;
+        settings = &fixedSettings;
+        break;
+
+    case JointType::Point:
+        // ONE shared pivot, from anchorA. Two separate points would tell Jolt to
+        // make them coincide, and the first step would snap the two bodies
+        // together — the classic way an authored joint destroys a scene.
+        pointSettings.mSpace  = JPH::EConstraintSpace::WorldSpace;
+        pointSettings.mPoint1 = pointSettings.mPoint2 = toJolt(worldAnchorA);
+        settings = &pointSettings;
+        break;
+
+    case JointType::Hinge:
+    {
+        const glm::vec3 normal = anyPerpendicular(worldAxis);
+        hingeSettings.mSpace       = JPH::EConstraintSpace::WorldSpace;
+        hingeSettings.mPoint1      = hingeSettings.mPoint2      = toJolt(worldAnchorA);
+        hingeSettings.mHingeAxis1  = hingeSettings.mHingeAxis2  = toJolt(worldAxis);
+        hingeSettings.mNormalAxis1 = hingeSettings.mNormalAxis2 = toJolt(normal);
+        // Jolt wants radians and takes min from [-pi, 0], max from [0, pi].
+        hingeSettings.mLimitsMin = limited
+            ? std::max(glm::radians(loLimit), -JPH::JPH_PI) : -JPH::JPH_PI;
+        hingeSettings.mLimitsMax = limited
+            ? std::min(glm::radians(hiLimit),  JPH::JPH_PI) :  JPH::JPH_PI;
+        settings = &hingeSettings;
+        break;
+    }
+
+    case JointType::Slider:
+        // mAutoDetectPoint, like Fixed: the pose the drawer was authored in is
+        // travel zero, so the limits an author types are measured from where the
+        // thing already sits.
+        sliderSettings.mSpace           = JPH::EConstraintSpace::WorldSpace;
+        sliderSettings.mAutoDetectPoint = true;
+        sliderSettings.SetSliderAxis(toJolt(worldAxis));
+        sliderSettings.mLimitsMin = limited ? loLimit : -FLT_MAX;
+        sliderSettings.mLimitsMax = limited ? hiLimit :  FLT_MAX;
+        settings = &sliderSettings;
+        break;
+
+    case JointType::Distance:
+        // The one type that reads BOTH anchors, because a rope really does run
+        // from a point on one thing to a point on another.
+        distanceSettings.mSpace  = JPH::EConstraintSpace::WorldSpace;
+        distanceSettings.mPoint1 = toJolt(worldAnchorA);
+        distanceSettings.mPoint2 = toJolt(worldAnchorB);
+        // Negative means "whatever they are apart right now", which is the taut
+        // rope an author placed by hand. A distance cannot be negative, so the
+        // widening above is undone here for the lower end.
+        distanceSettings.mMinDistance = limited ? std::max(loLimit, 0.0f) : -1.0f;
+        distanceSettings.mMaxDistance = limited ? std::max(hiLimit, 0.0f) : -1.0f;
+        settings = &distanceSettings;
+        break;
+
+    default:
+        return refuse("its type is not one this engine builds");
+    }
+
+    // Create() needs the Body objects themselves, not their ids. Both are locked
+    // at once rather than one after the other: two single locks taken in the
+    // order the map happens to hand them out is the shape of a deadlock, and
+    // BodyLockMultiWrite sorts them for exactly that reason.
+    JPH::Ref<JPH::TwoBodyConstraint> constraint;
+    {
+        const JPH::BodyID ids[2] = { itA->second, itB->second };
+        JPH::BodyLockMultiWrite lock(m_impl->physicsSystem.GetBodyLockInterface(), ids, 2);
+        JPH::Body* bodyA = lock.GetBody(0);
+        JPH::Body* bodyB = lock.GetBody(1);
+        if (!bodyA || !bodyB)
+            return false;
+        constraint = settings->Create(*bodyA, *bodyB);
+    }
+    if (constraint == nullptr)
+        return refuse("Jolt refused to create the constraint");
+
+    m_impl->physicsSystem.AddConstraint(constraint);
+    m_impl->joints[entityId] =
+        Impl::JointRecord{ constraint, targetId, itA->second, itB->second };
+    m_impl->unqueueJoint(entityId);
+
+    // Both of these come from the COMPONENT and are re-applied on every build,
+    // which is what makes them survive a scene load and a rebuild of either
+    // body. A motor started from a script and then forgotten here would stop the
+    // first time the entity's collider changed.
+    if (jc->motorMaxForce != 0.0f || jc->motorTarget != 0.0f)
+    {
+        if (!applyJointMotor(*constraint, jc->motorTarget, jc->motorMaxForce))
+            HE_LOG_WARN(Physics, "Entity %u: a %s joint has no motor to drive — only a Hinge "
+                                 "or a Slider does, and the motor fields are ignored here",
+                        entityId, jc->type == JointType::Fixed    ? "Fixed"
+                                : jc->type == JointType::Point    ? "Point"
+                                                                  : "Distance");
+    }
+    m_impl->setJointedPairCollides(itA->second, itB->second, jc->collideConnected);
+
+    // A settled crate does not feel a rope that was tied to it while it slept:
+    // Jolt only solves constraints between active bodies.
+    if (motionA != JPH::EMotionType::Static) bodyInterface.ActivateBody(itA->second);
+    if (motionB != JPH::EMotionType::Static) bodyInterface.ActivateBody(itB->second);
+    return true;
+}
+
+void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
+{
+    if (!requeue)
+        m_impl->unqueueJoint(entityId);
+    if (m_impl->joints.empty())
+        return;
+
+    // Both sides, not just the one this entity authored. A chain whose MIDDLE
+    // link dies has a joint pointing at it from the link behind, and a Jolt
+    // constraint holds raw Body pointers — leaving that one in place is a read
+    // of freed memory on the next step, with no assertion anywhere to catch it.
+    std::vector<uint32_t> owners;
+    for (const auto& [owner, record] : m_impl->joints)
+        if (owner == entityId || record.partner == entityId)
+            owners.push_back(owner);
+
+    for (const uint32_t owner : owners)
+    {
+        const auto it = m_impl->joints.find(owner);
+        if (it == m_impl->joints.end())
+            continue;
+        m_impl->detachJoint(it->second);
+        m_impl->joints.erase(it);
+        // A REBUILD wants the joint back — addEntity tears the old body down and
+        // puts a new one up, and the chain it was part of has to survive that.
+        // Every owner, including this entity's own joint: it is a rebuild for
+        // that one too. A permanent removal instead lets the entries fall off
+        // the list on their own, which is where the give-up message comes from.
+        if (requeue)
+            m_impl->queueJoint(owner);
+    }
+}
+
+void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
+{
+    if (m_impl->pendingJoints.empty())
+        return;
+
+    // A snapshot, because buildJointFor removes its own entry on success and on
+    // a refusal — both of which would invalidate an iterator over the list.
+    std::vector<uint32_t> ids;
+    ids.reserve(m_impl->pendingJoints.size());
+    for (const auto& p : m_impl->pendingJoints)
+        ids.push_back(p.entityId);
+
+    bool progress = false;
+    for (const uint32_t id : ids)
+    {
+        const Entity entity = static_cast<Entity>(id);
+        if (!world.registry().valid(entity) || !world.registry().all_of<JointComponent>(entity))
+        {
+            m_impl->unqueueJoint(id);   // nothing left to build — not a failure
+            continue;
+        }
+        if (buildJointFor(world, id))
+            progress = true;
+    }
+
+    // A chain resolves one link per pass, so the entries at the far end are
+    // patient rather than broken: a pass that built ANYTHING forgives all of
+    // them. Only a pass in which nothing moved counts against the survivors.
+    for (auto& p : m_impl->pendingJoints)
+        p.attempts = progress ? 0 : p.attempts + 1;
+
+    const auto giveUp = [this](const Impl::PendingJoint& p) {
+        if (p.attempts < Impl::kMaxJointAttempts)
+            return false;
+        // Said once, at the point it stops being tried. Anything else would
+        // either repeat every spawn or say nothing at all, and "my joint does
+        // not exist and nothing mentioned it" is the expensive kind of silence.
+        // Deliberately naming BOTH ways an entry gets stuck. The first draft
+        // said only "has no rigid body", which is a lie for the other one — the
+        // partner was destroyed and the entity it names is gone — and this tree
+        // treats a log that misleads as worse than no log at all.
+        HE_LOG_WARN(Physics, "Entity %u: its joint was never built — the entity it names either "
+                             "never gained a rigid body (a Character Controller is not one) or "
+                             "no longer exists. Giving up on it.",
+                    p.entityId);
+        return true;
+    };
+    m_impl->pendingJoints.erase(
+        std::remove_if(m_impl->pendingJoints.begin(), m_impl->pendingJoints.end(), giveUp),
+        m_impl->pendingJoints.end());
 }
 
 void PhysicsWorld::initialize(HorizonWorld& world)
@@ -1199,6 +1896,7 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     // one, because a landscape you fall through is never what was meant.
     const std::vector<uint32_t> landscapes =
         collect(reg.view<TerrainComponent, TransformComponent>());
+    const std::vector<uint32_t> jointed = collect(reg.view<JointComponent>());
 
     for (uint32_t entityId : bodies)
         buildBodyFor(world, entityId);
@@ -1209,12 +1907,27 @@ void PhysicsWorld::initialize(HorizonWorld& world)
         if (buildTerrainBodyFor(world, entityId))
             ++terrains;
 
+    // PHASE TWO, and it has to be a second pass: a joint needs both bodies to
+    // exist, and the order entt hands entities out guarantees nothing about
+    // which of the two comes first. Half a chain would build and the other half
+    // would not, differently on every run.
+    //
+    // Nothing goes on the pending list here. Every body a scene HAS was built in
+    // phase one, so a joint that cannot be built now names something that has no
+    // body at all — buildJointFor says so and drops it, rather than leaving an
+    // entry that would resolve on the first unrelated spawn.
+    std::size_t builtJoints = 0;
+    for (uint32_t entityId : jointed)
+        if (buildJointFor(world, entityId))
+            ++builtJoints;
+
     m_impl->physicsSystem.OptimizeBroadPhase();
     m_impl->initialized = true;
 
     HE_LOG_INFO(Physics, "Physics world initialised: %zu rigid body/-ies (%zu landscape), "
-                         "%zu character controller(s)",
-                m_impl->entityToBody.size(), terrains, m_impl->entityToCharacter.size());
+                         "%zu character controller(s), %zu joint(s)",
+                m_impl->entityToBody.size(), terrains, m_impl->entityToCharacter.size(),
+                builtJoints);
     if (m_impl->entityToBody.size() > Impl::kMaxBodies * 9 / 10)
         HE_LOG_WARN(Physics, "Body count %zu is close to the hard limit of %u",
                     m_impl->entityToBody.size(), Impl::kMaxBodies);
@@ -1237,12 +1950,30 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
     // Overwriting the map entry alone would leave the previous Jolt body in the
     // world forever — invisible, blocking, and answering every raycast with this
     // same entity id.
-    removeEntity(entityId);
+    //
+    // The one place that asks for the joints BACK, and the reason removeEntity
+    // is not called here: a new body is going up in the same breath, so the
+    // chain this entity was part of has to survive the swap. resolvePendingJoints
+    // below rebuilds them.
+    removeEntityImpl(entityId, /*requeueJoints=*/true);
 
     bool built = buildBodyFor(world, entityId);
     built      = buildCharacterFor(world, entityId) || built;
     if (!built)
         built = buildTerrainBodyFor(world, entityId);
+
+    // A new body may be the missing half of somebody else's joint — the second
+    // link of a chain, the wall a grapple was already fired at. It may equally
+    // be the REBUILT half of one: removeEntity above tore the old body down and
+    // put every joint that named it back on the list. Both cases are the same
+    // pass, and so is the entity's OWN joint, which nothing else would have put
+    // on the list the first time it is spawned.
+    if (built)
+    {
+        if (reg.all_of<JointComponent>(entity))
+            m_impl->queueJoint(entityId);
+        resolvePendingJoints(world);
+    }
 
     // Deliberately no OptimizeBroadPhase() here: it rebuilds the entire broad
     // phase tree, and Jolt inserts single bodies incrementally on purpose. Doing
@@ -1287,13 +2018,23 @@ int PhysicsWorld::addEntityTree(HorizonWorld& world, uint32_t rootEntityId)
 
 void PhysicsWorld::removeEntity(uint32_t entityId)
 {
+    // Every caller of the PUBLIC entry point means it permanently: removeEntityTree,
+    // the two reaps in step(), the zone unloads in both applications, entity.destroy
+    // from a script. None of them is going to put the body back, so a joint aimed at
+    // this entity must not go on the pending list waiting for one.
+    removeEntityImpl(entityId, /*requeueJoints=*/false);
+}
+
+void PhysicsWorld::removeEntityImpl(uint32_t entityId, bool requeueJoints)
+{
     if (!m_impl)
         return;
-    destroyBodyFor(entityId);
+    destroyBodyFor(entityId, requeueJoints);
     // A CharacterVirtual has no Jolt body of its own (mInnerBodyShape is never
     // set), so it appears in no raycast, overlap or contact — erasing the owning
     // pointer IS its complete removal.
     m_impl->entityToCharacter.erase(entityId);
+    m_impl->characterLayer.erase(entityId);
 }
 
 int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
@@ -1348,8 +2089,277 @@ bool PhysicsWorld::hasCharacter(uint32_t entityId) const
     return m_impl->entityToCharacter.count(entityId) != 0;
 }
 
-void PhysicsWorld::destroyBodyFor(uint32_t entityId)
+bool PhysicsWorld::addJoint(HorizonWorld& world, uint32_t entityA, uint32_t entityB,
+                            const JointDesc& desc)
 {
+    if (!m_impl)
+        return false;
+
+    m_impl->world = &world;
+    auto&        reg = world.registry();
+    const Entity a   = static_cast<Entity>(entityA);
+    const Entity b   = static_cast<Entity>(entityB);
+    if (!reg.valid(a) || !reg.valid(b))
+    {
+        HE_LOG_ERROR(Physics, "addJoint(%u, %u): one of the two entities does not exist",
+                     entityA, entityB);
+        return false;
+    }
+    if (entityA == entityB)
+    {
+        HE_LOG_ERROR(Physics, "addJoint(%u, %u): an entity cannot be jointed to itself",
+                     entityA, entityB);
+        return false;
+    }
+
+    // The COMPONENT is written, and then the joint is built from it — never the
+    // other way round. A constraint that lived only inside Jolt would be gone
+    // the next time the scene was saved and loaded, so a grapple hooked up at
+    // runtime would silently stop existing on a checkpoint reload.
+    JointComponent jc;
+    jc.type     = desc.type;
+    jc.target   = world.entityId(b);
+    jc.anchorA  = desc.anchorA;
+    jc.anchorB  = desc.anchorB;
+    jc.axis     = desc.axis;
+    jc.minLimit = desc.minLimit;
+    jc.maxLimit = desc.maxLimit;
+    jc.motorTarget      = desc.motorTarget;
+    jc.motorMaxForce    = desc.motorMaxForce;
+    jc.breakForce       = desc.breakForce;
+    jc.collideConnected = desc.collideConnected;
+    if (jc.target == HE::UUID{})
+    {
+        // Every entity gets an identity in createEntity, so this is a world
+        // built by some path that bypassed it rather than an ordinary miss.
+        HE_LOG_ERROR(Physics, "addJoint(%u, %u): entity %u has no stable identity, so nothing "
+                              "could name it in a saved scene", entityA, entityB, entityB);
+        return false;
+    }
+
+    // Idempotent, like addEntity: an existing joint is torn down first, so this
+    // call is also how a joint's type or limits are changed. Only this entity's
+    // OWN joint — a joint some other entity aimed at this one is that entity's,
+    // and jointing A to B has never been a reason to cut C loose from A.
+    m_impl->destroyOwnJoint(entityA);
+    reg.emplace_or_replace<JointComponent>(a, jc);
+
+    if (buildJointFor(world, entityA))
+        return true;
+
+    // Authored but not built. Queue it only when it can still succeed — a
+    // missing body is a partner that may yet spawn, while every other refusal
+    // has already logged its reason and dropped the entry, and putting it back
+    // would repeat that same complaint on the next unrelated spawn.
+    if (!m_impl->entityToBody.count(entityA) || !m_impl->entityToBody.count(entityB))
+        m_impl->queueJoint(entityA);
+    return false;
+}
+
+bool PhysicsWorld::removeJoint(HorizonWorld& world, uint32_t entityA)
+{
+    if (!m_impl)
+        return false;
+
+    const Entity a = static_cast<Entity>(entityA);
+    auto&        reg = world.registry();
+    const bool   had = m_impl->joints.count(entityA) != 0 ||
+                       (reg.valid(a) && reg.all_of<JointComponent>(a));
+
+    m_impl->destroyOwnJoint(entityA);
+    // The component goes too. Leaving it would make the joint reappear on the
+    // next scene load, which is the same "two sources of truth" the write side
+    // of addJoint exists to avoid.
+    if (reg.valid(a))
+        reg.remove<JointComponent>(a);
+    return had;
+}
+
+bool PhysicsWorld::hasJoint(uint32_t entityA) const
+{
+    if (!m_impl)
+        return false;
+    return m_impl->joints.count(entityA) != 0;
+}
+
+// The three live edits below share a shape: find the component, write it,
+// then reach for the constraint if there is one. THE COMPONENT FIRST, always —
+// an entity whose joint is still on the pending list has no constraint to touch
+// yet, and the write has to survive until it is built. That is also why none of
+// them fail when only the constraint is missing.
+namespace {
+
+// The component of the joint this entity AUTHORED, or null with a log saying
+// which of the two possible misses it was. Shared by the three setters so the
+// message is one message rather than three that drift.
+JointComponent* jointComponentFor(HorizonWorld& world, uint32_t entityA, const char* what)
+{
+    const Entity a = static_cast<Entity>(entityA);
+    if (!world.registry().valid(a))
+    {
+        HE_LOG_ERROR(Physics, "%s(%u): the entity does not exist", what, entityA);
+        return nullptr;
+    }
+    auto* jc = world.registry().try_get<JointComponent>(a);
+    if (!jc)
+        HE_LOG_ERROR(Physics, "%s(%u): the entity has no joint — only the entity that AUTHORED "
+                              "a joint carries it, not the one it points at", what, entityA);
+    return jc;
+}
+
+} // namespace
+
+bool PhysicsWorld::setJointMotor(HorizonWorld& world, uint32_t entityA,
+                                 float targetSpeed, float maxForce)
+{
+    if (!m_impl)
+        return false;
+    m_impl->world = &world;
+
+    JointComponent* jc = jointComponentFor(world, entityA, "setJointMotor");
+    if (!jc)
+        return false;
+    if (jc->type != JointType::Hinge && jc->type != JointType::Slider)
+    {
+        HE_LOG_ERROR(Physics, "setJointMotor(%u): only a Hinge or a Slider has a motor — this "
+                              "joint has no single axis to drive along", entityA);
+        return false;
+    }
+
+    jc->motorTarget   = targetSpeed;
+    jc->motorMaxForce = maxForce;
+
+    const auto it = m_impl->joints.find(entityA);
+    if (it == m_impl->joints.end())
+        return true;   // authored, not built yet — the build applies it
+
+    applyJointMotor(*it->second.constraint, targetSpeed, maxForce);
+    // A motor cannot spin a sleeping body: Jolt stops solving a constraint the
+    // moment both its bodies are asleep, so a door told to open while nothing
+    // was moving would simply stay shut.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    if (bodyInterface.GetMotionType(it->second.bodyA) != JPH::EMotionType::Static)
+        bodyInterface.ActivateBody(it->second.bodyA);
+    if (bodyInterface.GetMotionType(it->second.bodyB) != JPH::EMotionType::Static)
+        bodyInterface.ActivateBody(it->second.bodyB);
+    return true;
+}
+
+bool PhysicsWorld::setJointBreakForce(HorizonWorld& world, uint32_t entityA, float breakForce)
+{
+    if (!m_impl)
+        return false;
+    m_impl->world = &world;
+
+    JointComponent* jc = jointComponentFor(world, entityA, "setJointBreakForce");
+    if (!jc)
+        return false;
+    // Nothing to push into Jolt: the limit is read straight off the component in
+    // step(), so there is no cached copy that could disagree with this one.
+    jc->breakForce = std::max(breakForce, 0.0f);
+    return true;
+}
+
+bool PhysicsWorld::setJointCollideConnected(HorizonWorld& world, uint32_t entityA, bool collide)
+{
+    if (!m_impl)
+        return false;
+    m_impl->world = &world;
+
+    JointComponent* jc = jointComponentFor(world, entityA, "setJointCollideConnected");
+    if (!jc)
+        return false;
+    jc->collideConnected = collide;
+
+    const auto it = m_impl->joints.find(entityA);
+    if (it != m_impl->joints.end())
+        m_impl->setJointedPairCollides(it->second.bodyA, it->second.bodyB, collide);
+    return true;
+}
+
+std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollJointBroken()
+{
+    if (!m_impl)
+        return {};
+    std::vector<CollisionEvent> result;
+    result.swap(m_impl->brokenJoints);
+    return result;
+}
+
+void PhysicsWorld::breakOverloadedJoints(HorizonWorld& world, float dt)
+{
+    if (m_impl->joints.empty())
+        return;
+
+    auto& reg = world.registry();
+
+    // Two passes, because breaking erases from the map being read. The first is
+    // the only one that touches Jolt's solver state, and it has to run before
+    // anything else in step() disturbs it.
+    std::vector<uint32_t> broken;
+    for (const auto& [owner, record] : m_impl->joints)
+    {
+        const Entity e = static_cast<Entity>(owner);
+        if (!reg.valid(e))
+            continue;   // the reap in step() has it — a destroyed joint is not a broken one
+        const auto* jc = reg.try_get<JointComponent>(e);
+        if (!jc || jc->breakForce <= 0.0f)
+            continue;
+        if (jointForceMagnitude(*record.constraint, dt) > jc->breakForce)
+            broken.push_back(owner);
+    }
+
+    for (const uint32_t owner : broken)
+    {
+        const auto it = m_impl->joints.find(owner);
+        if (it == m_impl->joints.end())
+            continue;
+        const uint32_t partner = it->second.partner;
+        HE_LOG_INFO(Physics, "Entity %u: its joint to entity %u broke", owner, partner);
+        m_impl->detachJoint(it->second);
+        m_impl->joints.erase(it);
+        m_impl->unqueueJoint(owner);
+        // The COMPONENT goes too, and that is the whole difference between a
+        // broken joint and a removed one. Left behind it would be rebuilt the
+        // next time the entity's body was — a door back on its hinges because
+        // its collider changed — and it would come back on the next scene load
+        // as well. A broken joint is gone the way removeJoint means gone.
+        const Entity e = static_cast<Entity>(owner);
+        if (reg.valid(e))
+            reg.remove<JointComponent>(e);
+        // Nobody drains this queue on their own: CollisionSystem::dispatch has a
+        // callback to hand a contact to and none to hand a broken joint to, so
+        // the only consumers are pollers. A session whose scripts never ask
+        // would grow it forever — bound it, dropping the OLDEST, because a
+        // caller that finally asks wants the news, not the archive.
+        if (m_impl->brokenJoints.size() >= kMaxBrokenJoints)
+        {
+            m_impl->brokenJoints.erase(m_impl->brokenJoints.begin());
+            HE_LOG_THROTTLE(Physics, Warning, 10.0,
+                            "%zu broken joints are waiting and nothing is calling "
+                            "pollJointBroken — the oldest are being dropped.",
+                            kMaxBrokenJoints);
+        }
+        m_impl->brokenJoints.push_back(CollisionEvent{ owner, partner });
+    }
+}
+
+void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
+{
+    // FIRST, before the body goes anywhere. A Jolt constraint keeps raw Body
+    // pointers, so a constraint left behind by a destroyed body reads freed
+    // memory on the next step — and unlike a dangling BodyID there is no
+    // assertion anywhere that catches it.
+    //
+    // Whether the affected joints come BACK is the caller's to say, and it used
+    // to be hardcoded to "yes": right for addEntity's documented idempotence,
+    // which tears a body down in order to put a new one up, and wrong for every
+    // permanent removal, where a surviving partner's joint was requeued to wait
+    // for a body nobody was going to build. It stayed on the list, was retried
+    // by every unrelated spawn after it, and gave up eight passes later with a
+    // warning about a joint that had nothing wrong with it.
+    destroyJointsInvolving(entityId, requeueJoints);
+
     const auto it = m_impl->entityToBody.find(entityId);
     if (it == m_impl->entityToBody.end())
         return;
@@ -1400,7 +2410,8 @@ bool PhysicsWorld::setPosition(uint32_t entityId, const glm::vec3& position, boo
 
         // See setTransform: without this the character keeps the ground contacts
         // of the place it left.
-        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter);
+        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
+                                 m_impl->characterLayerOf(entityId));
         character.RefreshContacts(filters.bp, filters.ol, filters.body, filters.shape,
                                   m_impl->tempAllocator);
     }
@@ -1478,7 +2489,8 @@ bool PhysicsWorld::setTransform(uint32_t entityId, const glm::vec3& position,
         // the floor it was standing on. Without this, IsSupported() and
         // GetGroundState() answer for the OLD place — a player teleported off a
         // ledge would keep reporting solid ground and never start falling.
-        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter);
+        CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
+                                 m_impl->characterLayerOf(entityId));
         character.RefreshContacts(filters.bp, filters.ol, filters.body, filters.shape,
                                   m_impl->tempAllocator);
     }
@@ -1537,6 +2549,11 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
     m_impl->physicsSystem.Update(dt, 1,
         &m_impl->tempAllocator, &m_impl->jobSystem);
+
+    // Immediately after Update and before anything else: a constraint's
+    // accumulated impulse describes the step that just ran, and the next call
+    // into Jolt is free to reset it.
+    breakOverloadedJoints(world, dt);
 
     auto& reg           = world.registry();
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
@@ -1636,7 +2653,6 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     }
 
     // ── Character controller update ────────────────────────────────────────────
-    CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter);
     JPH::CharacterVirtual::ExtendedUpdateSettings euSettings;
 
     m_impl->stepCharacters.clear();
@@ -1682,6 +2698,16 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         const auto bodyIt = m_impl->entityToBody.find(entityId);
         const JPH::IgnoreSingleBodyFilter selfFilter(
             bodyIt != m_impl->entityToBody.end() ? bodyIt->second : JPH::BodyID());
+
+        // Per character, not once for the loop: the collision channel is per
+        // character, and it is what the matrix is consulted for. The filters are
+        // four-word value objects, so building one per character per step costs
+        // nothing next to the update itself — and it is the SAME construction
+        // RefreshContacts uses after a teleport, which is the property that
+        // matters: a character refreshed against different filters would resolve
+        // its ground against a different world than it walks in.
+        const CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
+                                       m_impl->characterLayerOf(entityId));
 
         character->ExtendedUpdate(dt, gravity, euSettings,
             filters.bp, filters.ol, selfFilter, filters.shape,
@@ -1764,6 +2790,31 @@ private:
     bool     m_skipSensors;
 };
 
+// Which collision channels a QUERY may see at all.
+//
+// Deliberately an ObjectLayerFilter and not another test inside HEQueryFilter
+// above: an ObjectLayerFilter is asked in the BROAD phase, before Jolt has
+// walked a body's triangles, while a BodyFilter is only reached once the narrow
+// phase already has a candidate. A ray that ignores fifteen of sixteen channels
+// should not pay for their meshes and then throw the answers away.
+//
+// The mask names CHANNELS, so it is shifted by the channel, not by the raw
+// ObjectLayer — the moving bit lives in bit 0 and would double every index.
+// Bits above kCount are harmless: no encoded layer ever selects one.
+class HELayerMaskFilter final : public JPH::ObjectLayerFilter
+{
+public:
+    explicit HELayerMaskFilter(uint32_t mask) : m_mask(mask) {}
+
+    bool ShouldCollide(JPH::ObjectLayer layer) const override
+    {
+        return ((m_mask >> HELayers::channelOf(layer)) & 1u) != 0u;
+    }
+
+private:
+    uint32_t m_mask;
+};
+
 // Collects the ENTITIES an overlap test touched, rather than the hits.
 //
 // It has to be a custom collector: on the CollideShape path Jolt never fills
@@ -1798,6 +2849,129 @@ private:
     std::unordered_set<uint32_t> m_seen;
     std::vector<uint32_t>        m_entities;
 };
+
+// ── The one sweep and the one overlap ────────────────────────────────────────
+// Every cast below differs from every other in exactly one thing: which shape
+// it hands in. Everything else — the normalisation, the base offset, the
+// back-face rule, where the distance comes from, how the normal is turned round
+// — is the same, and each of those is a decision that was got wrong once and
+// fixed once. Copying sixty lines per shape would be copying four chances to
+// let one copy drift.
+//
+// Free functions rather than private members because their arguments are Jolt
+// types and no Jolt type may appear in PhysicsWorld.h. The caller owns the
+// shape's Ref for the duration — RShapeCast keeps a bare pointer to it.
+PhysicsWorld::RaycastHit castShapeImpl(const JPH::PhysicsSystem& system,
+                                       const JPH::Shape*         shape,
+                                       const glm::vec3&          origin,
+                                       const JPH::Quat&          rotation,
+                                       const glm::vec3&          direction,
+                                       float                     maxDistance,
+                                       uint32_t                  ignoreEntityId,
+                                       uint32_t                  layerMask)
+{
+    PhysicsWorld::RaycastHit result;
+    if (shape == nullptr || maxDistance <= 0.0f)
+        return result;
+
+    const float len = std::sqrt(direction.x * direction.x +
+                                direction.y * direction.y +
+                                direction.z * direction.z);
+    if (len < 1e-6f)
+        return result;
+    const glm::vec3 dir          = direction / len;
+    const glm::vec3 displacement = dir * maxDistance;
+    const JPH::RVec3 at(origin.x, origin.y, origin.z);
+
+    // The cast is expressed relative to inBaseOffset (the origin here), which is
+    // what keeps the numbers small and precise far from the world origin.
+    const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
+        shape,
+        JPH::Vec3::sReplicate(1.0f),
+        JPH::RMat44::sRotationTranslation(rotation, at),
+        JPH::Vec3(displacement.x, displacement.y, displacement.z));
+
+    JPH::ShapeCastSettings settings;
+    // A camera boom asks "how far can I go", so a surface it is already touching
+    // must not read as a hit at fraction 0 for the back face it is leaving.
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    // A sweep asks "what would block me", and a trigger volume blocks nothing.
+    const HEQueryFilter     bodyFilter(ignoreEntityId, /*skipSensors=*/true);
+    const HELayerMaskFilter layerFilter(layerMask);
+
+    system.GetNarrowPhaseQuery().CastShape(cast, settings, at, collector,
+                                           {}, layerFilter, bodyFilter);
+
+    if (!collector.HadHit())
+        return result;
+
+    // Distance comes from the FRACTION, not from the contact point: the fraction
+    // is where the shape's ORIGIN stopped, which already sits clear of the
+    // surface by whatever the shape's own extent is. Using the contact point
+    // would put the camera in the wall.
+    const float fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
+
+    result.hit      = true;
+    result.distance = fraction * maxDistance;
+    result.point    = origin + dir * result.distance;
+    result.normal   = { collector.mHit.mPenetrationAxis.GetX(),
+                        collector.mHit.mPenetrationAxis.GetY(),
+                        collector.mHit.mPenetrationAxis.GetZ() };
+    if (const float n = glm::length(result.normal); n > 1e-6f)
+        result.normal = -result.normal / n;   // penetration axis points INTO the hit surface
+
+    {
+        JPH::BodyLockRead lock(system.GetBodyLockInterface(), collector.mHit.mBodyID2);
+        if (lock.Succeeded())
+        {
+            const JPH::Body& body = lock.GetBody();
+            result.entityId = static_cast<uint32_t>(body.GetUserData());
+            result.layer    = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
+        }
+    }
+
+    return result;
+}
+
+std::vector<uint32_t> overlapShapeImpl(const JPH::PhysicsSystem& system,
+                                       const JPH::Shape*         shape,
+                                       const JPH::RMat44&        transform,
+                                       uint32_t                  ignoreEntityId,
+                                       uint32_t                  layerMask)
+{
+    if (shape == nullptr)
+        return {};
+
+    JPH::CollideShapeSettings settings;
+    HEOverlapCollector        collector;
+    // Sensors ARE reported: an overlap asks "what is here", and a trigger volume
+    // is here.
+    const HEQueryFilter       bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter   layerFilter(layerMask);
+
+    // Results are expressed relative to the shape's own position rather than the
+    // world origin, the same reason a cast passes its origin as the base offset:
+    // it is what keeps the test itself precise far from the origin.
+    const JPH::RVec3 at = transform.GetTranslation();
+    system.GetNarrowPhaseQuery().CollideShape(
+        shape, JPH::Vec3::sReplicate(1.0f), transform,
+        settings, at, collector, {}, layerFilter, bodyFilter);
+
+    return collector.take();
+}
+
+// Degrees to the quaternion Jolt wants, through the SAME expression
+// TransformHierarchy uses to compose an entity's rotation
+// (`glm::quat(glm::radians(euler))`). A second Euler convention would make a box
+// cast at (0, 45, 0) disagree with a box body at (0, 45, 0), and nothing on
+// screen would say which of the two was wrong.
+JPH::Quat joltRotationOf(const glm::vec3& rotationEuler)
+{
+    const glm::quat q = glm::quat(glm::radians(rotationEuler));
+    return JPH::Quat(q.x, q.y, q.z, q.w);
+}
 
 // The body a script's push should land on, plus why it cannot land when it
 // does not. The verdict is separated from the LOGGING so every public call can
@@ -1843,7 +3017,8 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     const glm::vec3& origin,
     const glm::vec3& direction,
     float            maxDistance,
-    uint32_t         ignoreEntityId) const
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
 {
     RaycastHit result;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
@@ -1863,10 +3038,11 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     };
     // Sensors stay visible to raycast — that is what it has always reported, and
     // a script asking "what is in front of me" may well mean a trigger.
-    const HEQueryFilter bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HEQueryFilter      bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter  layerFilter(layerMask);
 
     JPH::RayCastResult hit;
-    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit, {}, {}, bodyFilter))
+    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit, {}, layerFilter, bodyFilter))
         return result;
 
     result.hit      = true;
@@ -1889,6 +3065,10 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
             JPH::Vec3 n = body.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
             result.normal = { n.GetX(), n.GetY(), n.GetZ() };
             result.entityId = static_cast<uint32_t>(body.GetUserData());
+            // Read back out of the body rather than remembered per entity: this
+            // is the value the simulation is actually using, so it stays right
+            // through a rebuild that changed the component's channel.
+            result.layer = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
         }
     }
 
@@ -1900,92 +3080,194 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     const glm::vec3& direction,
     float            radius,
     float            maxDistance,
-    uint32_t         ignoreEntityId) const
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
 {
-    RaycastHit result;
-    if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f || radius <= 0.0f)
-        return result;
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return {};
 
-    const float len = std::sqrt(direction.x * direction.x +
-                                direction.y * direction.y +
-                                direction.z * direction.z);
-    if (len < 1e-6f)
-        return result;
-    const glm::vec3 dir         = direction / len;
-    const glm::vec3 displacement = dir * maxDistance;
+    const JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+    return castShapeImpl(m_impl->physicsSystem, sphere, origin, JPH::Quat::sIdentity(),
+                         direction, maxDistance, ignoreEntityId, layerMask);
+}
 
-    JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+PhysicsWorld::RaycastHit PhysicsWorld::boxCast(
+    const glm::vec3& origin,
+    const glm::vec3& halfExtents,
+    const glm::vec3& rotationEuler,
+    const glm::vec3& direction,
+    float            maxDistance,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized ||
+        halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+        return {};
 
-    // The cast is expressed relative to inBaseOffset (the origin here), which is
-    // what keeps the numbers small and precise far from the world origin.
-    const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
-        sphere,
-        JPH::Vec3::sReplicate(1.0f),
-        JPH::RMat44::sTranslation(JPH::RVec3(origin.x, origin.y, origin.z)),
-        JPH::Vec3(displacement.x, displacement.y, displacement.z));
+    // Jolt's own clamp (mConvexRadius = min(requested, smallest half extent))
+    // makes the default safe for a box of any size, which is why nothing is
+    // clamped here — and it is the same rounding a BOX COLLIDER on a body gets,
+    // so a sweep with a body's extents behaves like that body.
+    const JPH::Ref<JPH::Shape> box =
+        new JPH::BoxShape(JPH::Vec3(halfExtents.x, halfExtents.y, halfExtents.z));
+    return castShapeImpl(m_impl->physicsSystem, box, origin, joltRotationOf(rotationEuler),
+                         direction, maxDistance, ignoreEntityId, layerMask);
+}
 
-    JPH::ShapeCastSettings settings;
-    // A camera boom asks "how far can I go", so a surface it is already touching
-    // must not read as a hit at fraction 0 for the back face it is leaving.
-    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+PhysicsWorld::RaycastHit PhysicsWorld::capsuleCast(
+    const glm::vec3& origin,
+    float            radius,
+    float            height,
+    const glm::vec3& rotationEuler,
+    const glm::vec3& direction,
+    float            maxDistance,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return {};
 
-    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
-    const HEQueryFilter bodyFilter(ignoreEntityId, /*skipSensors=*/true);
-
-    m_impl->physicsSystem.GetNarrowPhaseQuery().CastShape(
-        cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector,
-        {}, {}, bodyFilter);
-
-    if (!collector.HadHit())
-        return result;
-
-    // Distance comes from the FRACTION, not from the contact point: the fraction
-    // is where the sphere's CENTRE stopped, which already sits one radius clear
-    // of the surface. Using the contact point would put the camera in the wall.
-    const float fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
-
-    result.hit      = true;
-    result.distance = fraction * maxDistance;
-    result.point    = origin + dir * result.distance;
-    result.normal   = { collector.mHit.mPenetrationAxis.GetX(),
-                        collector.mHit.mPenetrationAxis.GetY(),
-                        collector.mHit.mPenetrationAxis.GetZ() };
-    if (const float n = glm::length(result.normal); n > 1e-6f)
-        result.normal = -result.normal / n;   // penetration axis points INTO the hit surface
-
-    {
-        JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), collector.mHit.mBodyID2);
-        if (lock.Succeeded())
-            result.entityId = static_cast<uint32_t>(lock.GetBody().GetUserData());
-    }
-
-    return result;
+    // Same arithmetic ColliderComponent's capsule is built with — full height
+    // minus the two caps — except that Jolt asserts on a cylinder of zero
+    // length, so a height that is all caps keeps a sliver rather than being
+    // refused. What the caller drew is a sphere, and that is what they get.
+    const float halfCylinder = std::max(1e-3f, height * 0.5f - radius);
+    const JPH::Ref<JPH::Shape> capsule = new JPH::CapsuleShape(halfCylinder, radius);
+    return castShapeImpl(m_impl->physicsSystem, capsule, origin, joltRotationOf(rotationEuler),
+                         direction, maxDistance, ignoreEntityId, layerMask);
 }
 
 std::vector<uint32_t> PhysicsWorld::overlapSphere(
     const glm::vec3& center,
     float            radius,
-    uint32_t         ignoreEntityId) const
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
 {
-    std::vector<uint32_t> result;
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
-        return result;
+        return {};
 
-    JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
-    const JPH::RVec3     at(center.x, center.y, center.z);
+    const JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+    return overlapShapeImpl(m_impl->physicsSystem, sphere,
+                            JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z)),
+                            ignoreEntityId, layerMask);
+}
 
-    JPH::CollideShapeSettings settings;
-    HEOverlapCollector        collector;
-    const HEQueryFilter       bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+std::vector<uint32_t> PhysicsWorld::overlapBox(
+    const glm::vec3& center,
+    const glm::vec3& halfExtents,
+    const glm::vec3& rotationEuler,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized ||
+        halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+        return {};
 
-    // Results are expressed relative to `at` rather than the world origin, the
-    // same reason sphereCast passes its origin as the base offset: it is what
-    // keeps the test itself precise far from the origin.
-    m_impl->physicsSystem.GetNarrowPhaseQuery().CollideShape(
-        sphere, JPH::Vec3::sReplicate(1.0f), JPH::RMat44::sTranslation(at),
-        settings, at, collector, {}, {}, bodyFilter);
+    const JPH::Ref<JPH::Shape> box =
+        new JPH::BoxShape(JPH::Vec3(halfExtents.x, halfExtents.y, halfExtents.z));
+    return overlapShapeImpl(m_impl->physicsSystem, box,
+                            JPH::RMat44::sRotationTranslation(
+                                joltRotationOf(rotationEuler),
+                                JPH::RVec3(center.x, center.y, center.z)),
+                            ignoreEntityId, layerMask);
+}
 
-    return collector.take();
+std::vector<uint32_t> PhysicsWorld::overlapCapsule(
+    const glm::vec3& center,
+    float            radius,
+    float            height,
+    const glm::vec3& rotationEuler,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return {};
+
+    const float halfCylinder = std::max(1e-3f, height * 0.5f - radius);
+    const JPH::Ref<JPH::Shape> capsule = new JPH::CapsuleShape(halfCylinder, radius);
+    return overlapShapeImpl(m_impl->physicsSystem, capsule,
+                            JPH::RMat44::sRotationTranslation(
+                                joltRotationOf(rotationEuler),
+                                JPH::RVec3(center.x, center.y, center.z)),
+                            ignoreEntityId, layerMask);
+}
+
+std::vector<PhysicsWorld::RaycastHit> PhysicsWorld::raycastAll(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float            maxDistance,
+    uint32_t         ignoreEntityId,
+    uint32_t         layerMask) const
+{
+    std::vector<RaycastHit> hits;
+    if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
+        return hits;
+
+    const float len = std::sqrt(direction.x * direction.x +
+                                direction.y * direction.y +
+                                direction.z * direction.z);
+    if (len < 1e-6f)
+        return hits;
+    const glm::vec3 dir = direction / len;
+
+    const JPH::RRayCast ray{
+        JPH::RVec3(origin.x, origin.y, origin.z),
+        JPH::Vec3(dir.x, dir.y, dir.z) * maxDistance
+    };
+
+    // Every default here is what the single-hit CastRay does implicitly (ignore
+    // back faces, treat a convex shape as solid), so hits[0] is the hit raycast
+    // would have returned for the same arguments — a promise the header makes.
+    const JPH::RayCastSettings rayCastSettings;
+    JPH::AllHitCollisionCollector<JPH::CastRayCollector> collector;
+    const HEQueryFilter     bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+    const HELayerMaskFilter layerFilter(layerMask);
+
+    m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(
+        ray, rayCastSettings, collector, {}, layerFilter, bodyFilter);
+
+    if (!collector.HadHit())
+        return hits;
+
+    // Jolt collects in whatever order the trees were walked. Nearest first is
+    // the order every caller means by "what did the shot pass through".
+    collector.Sort();
+
+    std::unordered_set<uint32_t> seen;
+    hits.reserve(collector.mHits.size());
+    for (const JPH::RayCastResult& hit : collector.mHits)
+    {
+        RaycastHit out;
+        out.hit      = true;
+        out.distance = hit.mFraction * maxDistance;
+
+        const JPH::RVec3 hitPos = ray.GetPointOnRay(hit.mFraction);
+        out.point = {
+            static_cast<float>(hitPos.GetX()),
+            static_cast<float>(hitPos.GetY()),
+            static_cast<float>(hitPos.GetZ())
+        };
+
+        {
+            JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), hit.mBodyID);
+            if (!lock.Succeeded())
+                continue;   // the body went away between the query and the lock
+            const JPH::Body& body = lock.GetBody();
+            const JPH::Vec3  n = body.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, hitPos);
+            out.normal   = { n.GetX(), n.GetY(), n.GetZ() };
+            out.entityId = static_cast<uint32_t>(body.GetUserData());
+            out.layer    = static_cast<uint8_t>(HELayers::channelOf(body.GetObjectLayer()));
+        }
+
+        // One entry per entity, and the sort above means the one kept is the
+        // nearest. A mesh reports its near face and its far face as two hits of
+        // the same body, and "the bullet went through the house twice" is not an
+        // answer anybody asked for.
+        if (seen.insert(out.entityId).second)
+            hits.push_back(out);
+    }
+
+    return hits;
 }
 
 bool PhysicsWorld::addForce(uint32_t entityId, const glm::vec3& force)
@@ -2033,6 +3315,42 @@ bool PhysicsWorld::addTorque(uint32_t entityId, const glm::vec3& torque)
         return false;
     }
     bodyInterface.AddTorque(target.id, JPH::Vec3(torque.x, torque.y, torque.z));
+    return true;
+}
+
+bool PhysicsWorld::addForceAtPosition(uint32_t entityId, const glm::vec3& force,
+                                      const glm::vec3& worldPosition)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addForceAtPosition on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddForce(target.id, JPH::Vec3(force.x, force.y, force.z),
+                           JPH::RVec3(worldPosition.x, worldPosition.y, worldPosition.z));
+    return true;
+}
+
+bool PhysicsWorld::addImpulseAtPosition(uint32_t entityId, const glm::vec3& impulse,
+                                        const glm::vec3& worldPosition)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addImpulseAtPosition on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddImpulse(target.id, JPH::Vec3(impulse.x, impulse.y, impulse.z),
+                             JPH::RVec3(worldPosition.x, worldPosition.y, worldPosition.z));
     return true;
 }
 
@@ -2087,6 +3405,43 @@ glm::vec3 PhysicsWorld::getVelocity(uint32_t entityId) const
     // A static body answers zero without complaint: that is its true velocity,
     // not a lookup that failed.
     const JPH::Vec3 v = m_impl->physicsSystem.GetBodyInterface().GetLinearVelocity(body->second);
+    return { v.GetX(), v.GetY(), v.GetZ() };
+}
+
+bool PhysicsWorld::setAngularVelocity(uint32_t entityId, const glm::vec3& angularVelocity)
+{
+    if (!m_impl) return false;
+
+    // No character branch, unlike setVelocity: a CharacterVirtual has no spin to
+    // set. An entity that carries both a controller and a kinematic proxy body
+    // gets the spin on the body, which is the only thing that can hold one.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.movable)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "setAngularVelocity on entity %u did nothing: %s",
+                        entityId,
+                        target.exists ? "its rigid body is Static, which never turns"
+                                      : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.SetAngularVelocity(
+        target.id, JPH::Vec3(angularVelocity.x, angularVelocity.y, angularVelocity.z));
+    return true;
+}
+
+glm::vec3 PhysicsWorld::getAngularVelocity(uint32_t entityId) const
+{
+    if (!m_impl) return glm::vec3(0.0f);
+
+    const auto body = m_impl->entityToBody.find(entityId);
+    if (body == m_impl->entityToBody.end())
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "getAngularVelocity on entity %u reads zero: %s",
+                        entityId, kNoBodyReason);
+        return glm::vec3(0.0f);
+    }
+    const JPH::Vec3 v = m_impl->physicsSystem.GetBodyInterface().GetAngularVelocity(body->second);
     return { v.GetX(), v.GetY(), v.GetZ() };
 }
 
@@ -2256,6 +3611,20 @@ void PhysicsWorld::clear()
         HE_LOG_DEBUG(Physics, "Clearing physics world: %zu body/-ies, %zu character(s)",
                      m_impl->entityToBody.size(), m_impl->entityToCharacter.size());
 
+    // Every constraint before every body, and not one body earlier: a constraint
+    // holds Body pointers, so destroying the bodies out from under the solver
+    // and only then removing the constraints is a use-after-free with nothing to
+    // announce it.
+    for (auto& [owner, record] : m_impl->joints)
+        m_impl->physicsSystem.RemoveConstraint(record.constraint);
+    m_impl->joints.clear();
+    m_impl->pendingJoints.clear();
+    // The contact exemptions go with them; contactListener.reset() below drops
+    // the whole set in one go, which is why the per-joint detachJoint is not
+    // used here. The queue of broken joints goes too: an event nobody drained is
+    // about a scene that no longer exists.
+    m_impl->brokenJoints.clear();
+
     // Same Remove-then-Destroy pair removeEntity() uses, in bulk. The per-entity
     // contact purge is skipped because reset() below drops the whole table at
     // once — one pass instead of one scan per body.
@@ -2267,6 +3636,7 @@ void PhysicsWorld::clear()
     }
     m_impl->entityToBody.clear();
     m_impl->entityToCharacter.clear();
+    m_impl->characterLayer.clear();
     // After the bodies are gone: drop the contact bookkeeping, otherwise the
     // OnContactRemoved callbacks Jolt fires for them would emit exit events
     // referring to entities that no longer exist.

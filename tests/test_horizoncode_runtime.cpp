@@ -1385,6 +1385,12 @@ TEST_CASE("a class's event catalog is its whole chain, base first")
     CHECK(has(entity, "OnEndOverlap"));
     CHECK(has(entity, "OnHit"));
     CHECK(has(entity, "OnHitEnd"));
+    // The animation notifies land on Entity for the same reason the contacts do:
+    // they are addressed to a thing in the world, and the clip that fires them
+    // is played on one.
+    CHECK(has(entity, "OnAnimationNotify"));
+    CHECK(has(entity, "OnAnimationNotifyBegin"));
+    CHECK(has(entity, "OnAnimationNotifyEnd"));
     CHECK(has(player, "BeginPlay"));
     CHECK(has(player, "OnBeginOverlap"));
     // A plain Object has no world presence, so neither the game lifecycle nor

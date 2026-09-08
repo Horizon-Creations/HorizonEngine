@@ -103,6 +103,25 @@ bool GameLogicLoader::reload(const std::filesystem::path& dllPath, HorizonWorld&
 	return load(dllPath);
 }
 
+bool GameLogicLoader::loadAndStart(const std::filesystem::path& dllPath, HorizonWorld& world,
+                                   const HeEngineServices* services)
+{
+	if (!load(dllPath)) return false;
+	// BEFORE onStart, always: the tables are what onStart's first he::save or
+	// he::physics call reads. Skipped for a null table set — a module that was
+	// handed nothing is still a module.
+	if (services) injectServices(services);
+	m_logic->onStart(world);
+	return true;
+}
+
+bool GameLogicLoader::reloadAndStart(const std::filesystem::path& dllPath, HorizonWorld& world,
+                                     const HeEngineServices* services)
+{
+	unload(world);   // onStop on the outgoing image
+	return loadAndStart(dllPath, world, services);
+}
+
 bool GameLogicLoader::isLoaded() const { return m_logic != nullptr; }
 IGameLogic* GameLogicLoader::logic() const { return m_logic; }
 
@@ -120,6 +139,29 @@ bool GameLogicLoader::injectServices(const HeSaveServices* services)
 	setFn(services);
 	HE_LOG_INFO(GameLogic, "%s", "GameLogicLoader: engine services injected");
 	return true;
+}
+
+bool GameLogicLoader::injectServices(const HeEngineServices* services)
+{
+	if (!isLoaded()) return false;
+
+	// The current export first: it hands over every table at once.
+	auto setV2 = reinterpret_cast<FnSetEngineServicesV2>(m_lib.getSymbol("HE_SetEngineServicesV2"));
+	if (setV2)
+	{
+		setV2(services);
+		HE_LOG_INFO(GameLogic, "%s", "GameLogicLoader: engine services injected (v2)");
+		return true;
+	}
+
+	// A library built before the umbrella existed still has the v1 export, and
+	// its savegame API has to keep working — losing it because the engine grew
+	// would be the opposite of compatible. Physics/input stay unavailable there.
+	HE_LOG_INFO(GameLogic, "%s",
+		"GameLogicLoader: library has no HE_SetEngineServicesV2 export (older scaffold) "
+		"— falling back to the save-only v1 table; he::physics/he::input read as "
+		"unavailable in game code");
+	return injectServices(services ? services->save : nullptr);
 }
 
 } // namespace HE

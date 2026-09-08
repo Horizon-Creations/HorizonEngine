@@ -2322,6 +2322,17 @@ const std::vector<EngineEventDesc>& engineEvents()
         { "OnEndOverlap",         "onEndOverlap",         P::Int,    false },
         { "OnHit",                "onHit",                P::Int,    false },
         { "OnHitEnd",             "onHitEnd",             P::Int,    false },
+        // Animation notifies: what the artist wrote on the clip's timeline,
+        // arriving as the playhead sweeps over it. String payload — the notify's
+        // NAME is its entire content, and there is nothing else to carry (a
+        // notify names no second entity the way a contact does).
+        //
+        // Three events and not one with a kind argument, because a graph would
+        // otherwise have to put a comparison in front of every handler, and a
+        // footstep handler would be woken by every hit window closing.
+        { "OnAnimationNotify",      "onAnimationNotify",      P::String, false },
+        { "OnAnimationNotifyBegin", "onAnimationNotifyBegin", P::String, false },
+        { "OnAnimationNotifyEnd",   "onAnimationNotifyEnd",   P::String, false },
     };
     return k;
 }
@@ -2343,7 +2354,9 @@ const std::vector<EngineClassDesc>& engineClasses()
         { "Object",           "",       { "Construct", "Destruct" }, {} },
         { "Entity",           "Object", { "BeginPlay", "Tick",
                                           "OnBeginOverlap", "OnEndOverlap",
-                                          "OnHit", "OnHitEnd" },
+                                          "OnHit", "OnHitEnd",
+                                          "OnAnimationNotify", "OnAnimationNotifyBegin",
+                                          "OnAnimationNotifyEnd" },
                                         { { "Get Owning Entity", "entity.owned", 0 } } },
         { "PlayerCharacter",  "Entity", {},
                                         { { "Get Controller", "player.controllerOf", 0 } } },

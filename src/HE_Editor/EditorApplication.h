@@ -18,19 +18,25 @@
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/HcCodegen.h>
+#include <HorizonScene/EngineApi.h>   // GameServicesBinding + the fill* functions
+#include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/SftpProbe.h>
 #endif
 #include <Net/RouterProbe.h>
 #include "GitController.h"
+#include "McpBridge.h"
+#include "EditorCommands.h"
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <future>
@@ -101,6 +107,22 @@ struct EditorConfig
 	// is ahead of everything else the session wants to say. The cap is also the
 	// only thing bounding what one peer can make another allocate.
 	int CollabMaxAssetMB = 64;
+
+	// The MCP bridge: let an external client (a Claude instance, through the
+	// stdio shim) drive this editor — read what is open, and from a later step
+	// on place and move objects in the scene.
+	//
+	// OFF by default, and this default is the security model's first line. When
+	// it is on, a listener on 127.0.0.1 accepts anything that can read the
+	// endpoint file's token, and that file is readable by this user's processes.
+	// That is a decision a human makes for a session, not one they inherit from
+	// an installer. HE_MCP=1 turns it on for a headless run without touching the
+	// stored config; HE_MCP_PORT pins the port.
+	bool McpServerEnabled = false;
+	// 0 = let the OS pick. The port is published in the endpoint file, so nobody
+	// has to know it in advance; pinning one is for a client that cannot read
+	// the file.
+	int  McpPort = 0;
 
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
@@ -278,6 +300,16 @@ struct AppContext
 	// window). commitGameInstance re-registers it with the app runtime + saves it.
 	HorizonCode::Graph*   gameInstanceGraph = nullptr;
 	std::function<void()> commitGameInstance;
+
+	// Push the project's collision matrix into the RUNNING simulation. Bound by
+	// EditorApplication, which is the only thing that holds the PhysicsWorld;
+	// the settings page calls it after saving an edit.
+	//
+	// A callback rather than a PhysicsWorld pointer on this struct: the world is
+	// created at play start and destroyed at play stop, so a pointer here would
+	// be right for as long as nobody looked at it. Doing nothing outside play
+	// mode is correct — the next play start reads the matrix from the project.
+	std::function<void()> applyCollisionLayers;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
@@ -389,6 +421,14 @@ struct AppContext
 	bool toolchainInstalling  = false; // an install is currently running
 	bool toolchainInstallDone = false; // the last install finished (success or failure)
 	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
+
+	// Build ▸ Build and Reload Game Logic: hot-swap the module that was just
+	// compiled into the RUNNING play session (onStop the old image, load the new
+	// one, re-inject the service tables, onStart). Returns false when there is
+	// no session to swap into — the fresh module is then simply what the next
+	// Play loads, which is why the caller reports it rather than treating it as
+	// a failure. Must be called on the UI thread: it touches the world.
+	std::function<bool()> reloadGameLogic;
 
 	// Startup source-control probe (git, git-lfs, identity, credential helper),
 	// same shape as the toolchain one above: run once on a background thread,
@@ -513,6 +553,16 @@ struct AppContext
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
 
+	// The MCP bridge, for the two places that have to show what it is actually
+	// doing: the Remote Control page in Preferences and the footer chip. READ
+	// ONLY from the UI — the on/off decision travels one way, from
+	// EditorConfig::McpServerEnabled through the frame loop's setEnabled, so the
+	// panel writes the config and nothing else. What the UI needs the pointer
+	// for is the half of the state the config cannot answer: whether the
+	// listener actually came up, on which port, and how many clients are on it.
+	// Null in a headless/test context.
+	HE::Ed::McpBridge* mcp = nullptr;
+
 	// Things that happened without the user asking — a peer that could not apply
 	// a delete, a scan that could not read a file, an asset nobody answered
 	// about. Posted from ANY thread (see NotificationStore), drawn by the footer
@@ -594,6 +644,9 @@ private:
 	// Handed to the animation phase rather than ticked here, so each graph fires
 	// right before the transitions it feeds.
 	AnimatorHost       m_animatorHost;
+	// This frame's animation notifies — PIE only, and a member so its storage
+	// outlives the frame that emptied it.
+	HE::NotifyQueue    m_animNotifies;
 	HorizonCode::Graph m_gameInstanceGraph;
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
@@ -617,6 +670,41 @@ private:
 	// Lightweight ScriptEngine used only for reading M.properties in the inspector.
 	// Never creates instances; only loadScript + getScriptProperties.
 	std::unique_ptr<ScriptEngine> m_propScriptEngine;
+
+	// ── Native C++ game logic (PIE only) ─────────────────────────────────────
+	// The module a C++ project builds from its Source/ folder. Loaded when play
+	// mode starts and unloaded when it ends, so outside a session
+	// logicLoader().logic() is null: the base loop ticks whatever is loaded as
+	// soon as a world exists (Application.cpp), and a module started against the
+	// EDIT world would have had its onStart fired on the scene somebody is
+	// building.
+	//
+	// The tables and their binding must outlive the loaded library, so they live
+	// here — same argument, same layout as GameApplication's block. World and
+	// physics resolve per call (both are replaced on a scene switch and on every
+	// play session), the ContentManager is bound once because it outlives both.
+	HE::api::GameServicesBinding m_gameServicesBinding;
+	HeSaveServices               m_saveServices{};
+	HePhysicsServices            m_physicsServices{};
+	HeInputServices              m_inputServices{};
+	HeContentServices            m_contentServices{};
+	HeEngineServices             m_engineServices{};
+	// Fill the block above from the editor's own world/physics/content. Called
+	// before every injection — never once at startup: the binding's resolvers
+	// are what make a scene switch transparent, and the umbrella has to point at
+	// tables that were filled for THIS session.
+	void  bindGameServices();
+	// Where the current project's built GameLogic module is, or empty when the
+	// project is not a C++ one or nothing has been built yet.
+	std::filesystem::path builtGameLogicPath();
+	// Load it into the running play session (load → inject → onStart). No-op
+	// outside play mode and for a project without a built module.
+	void  startGameLogic();
+	// Hot-swap a freshly built module into the RUNNING session: onStop the old
+	// image, load the new one, hand it the tables again, onStart. False when
+	// there is no session to swap into — the module is then picked up by the
+	// next Play, which is a state and not a failure.
+	bool  reloadGameLogic();
 
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
@@ -660,6 +748,58 @@ private:
 	// therefore carries its own mutex.
 	HE::Ed::NotificationStore m_notifications;
 	GitController    m_git;
+	// The local MCP listener. Pumped once per frame from OnRender, next to the
+	// collaboration pump and for the same reason: both apply things that came
+	// off a socket, and both have to do it on the main thread between the world
+	// settling and the UI reading it.
+	HE::Ed::McpBridge m_mcp;
+	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
+	// because the config is persisted and these must not be: a headless run must
+	// not leave the bridge switched on for the next interactive one.
+	bool m_mcpEnvEnabled = false;
+	int  m_mcpEnvPort    = 0;
+	// One-time wiring of the tool handlers, done on the first pump rather than
+	// in the constructor: the hooks close over editor state (world, project,
+	// play mode) that does not exist yet when the members are built.
+	bool m_mcpToolsRegistered = false;
+	void setupMcpTools();
+
+	// ── The command gateway ──────────────────────────────────────────────────
+	// One door into the scene (EditorCommands.h). Only the MCP tools go through
+	// it so far: the editor's own structural commands and the five remote
+	// handlers still run on their own wiring, and moving them is the unfinished
+	// half of the step that built this class — doing it here would be a
+	// behaviour change hidden inside a feature.
+	HE::Ed::EditorCommands m_commands;
+	// Held by pointer because both sinks need a reference to a member declared
+	// further down this class, and because setUndoSinks takes addresses that must
+	// not move.
+	std::unique_ptr<HE::Ed::SnapshotUndoSink> m_commandSnapshotSink;
+	std::unique_ptr<HE::Ed::CollabUndoSink>   m_commandSessionSink;
+	void setupEditorCommands();
+
+	// ── Locks an external client holds ───────────────────────────────────────
+	// A session lock taken on behalf of an MCP client, kept out of the one
+	// followSelection manages. Two things make this its own set rather than a
+	// reuse of that one:
+	//
+	//   • followSelection holds exactly ONE subject and releases the previous
+	//     one on every selection change, so a human clicking around would hand
+	//     back what a client is in the middle of editing;
+	//   • an external lock has to outlive the command that took it, or the undo
+	//     entry it produced is dropped by CollabUndo::dropUnowned the moment the
+	//     lock goes — an MCP edit would lose its undo seconds after it happened.
+	//     The plan's risk section decides it this way (§4, "Lock-Timeout gegen
+	//     dropUnowned"): external locks live until the client disconnects.
+	struct McpLock
+	{
+		std::uint64_t subject     = 0;
+		std::uint64_t lastAskedMs = 0;
+	};
+	std::vector<McpLock> m_mcpLocks;
+	void rememberMcpLock(std::uint64_t subject);
+	void updateMcpLocks(std::uint64_t nowMs);
+	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.

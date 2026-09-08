@@ -147,8 +147,9 @@ R"(// ── GameLogic entry point ───────────────
 #include <memory>
 #include <string>
 
-// Receives the engine's savegame services right after this library loads (see
-// <HorizonGameServices.h>) — he::save::* / he::entity::* work from onStart on.
+// Receives the engine's service tables right after this library loads (see
+// <HorizonGameServices.h>) — he::save::* / he::entity::* / he::physics::* /
+// he::input::* / he::content::* work from onStart on.
 HE_IMPLEMENT_ENGINE_SERVICES()
 
 namespace
@@ -327,12 +328,28 @@ std::string readme(const std::string& projectName)
 "This project is authored in native C++. Gameplay lives here in `Source/` and\n"
 "compiles into a `GameLogic` shared library the engine loads at runtime.\n"
 "\n"
-"Savegames: `<HorizonGameServices.h>` gives you `he::save::*` (create/load/\n"
-"write/typed field access against the project's SaveGame Template) and\n"
-"`he::entity::*` (saveState/applySavedState on entities carrying a Save State\n"
-"component). The engine injects the services right after this library loads;\n"
-"`he::save::available()` tells you whether it did. Struct fields cross as JSON\n"
-"and pair with the generated `Generated/GameTypes.h` types.\n"
+"Engine services: `<HorizonGameServices.h>` is the one header that reaches the\n"
+"engine from here — this project links nothing, so everything crosses as plain C\n"
+"through tables the engine injects right after the library loads. Each namespace\n"
+"has an `available()` that tells you whether it did.\n"
+"\n"
+"- `he::save::*` (create/load/write/typed field access against the project's\n"
+"  SaveGame Template) and `he::entity::*` (saveState/applySavedState on entities\n"
+"  carrying a Save State component). Struct fields cross as JSON and pair with the\n"
+"  generated `Generated/GameTypes.h` types.\n"
+"- `he::physics::*` — raycast/sphereCast/overlapSphere, addForce/addImpulse/\n"
+"  addTorque, get/setVelocity, isGrounded, setPosition(AndReset), gravity.\n"
+"  Careful with one thing: a hit reports a WORLD point while `setPosition` takes\n"
+"  a LOCAL one, the same split the script API has.\n"
+"- `he::input::*` — keyDown (SDL scancode names), mouse position/delta/buttons/\n"
+"  scroll, gamepad connected/button/axis (Xbox names, sticks -1..+1), and the\n"
+"  input mode (`setModeUIOnly()` and friends).\n"
+"- `he::content::*` — asset RESIDENCY: `load(\"Meshes/Rock.hasset\")` gives you an\n"
+"  `he::AssetId`, and `unload`/`isLoaded`/`typeName` take it from there. Load what\n"
+"  the next scene needs before it is needed, let go of what you left behind. There\n"
+"  is no call that hands you the asset OBJECT, and that is on purpose: the\n"
+"  engine's asset pointers are only valid until the next load, so only values\n"
+"  cross this boundary.\n"
 "\n"
 "## Files\n"
 "\n"
@@ -348,6 +365,11 @@ std::string readme(const std::string& projectName)
 "- `CMakeLists.txt` — globs every `*.cpp` here into the `GameLogic` library.\n"
 "\n"
 "## Build\n"
+"\n"
+"In the editor: **Build > Build and Reload Game Logic**. It compiles this folder\n"
+"and, if a preview is running, swaps the new module into it without ending the\n"
+"play session. By hand it is the same build in the same directory, so the two can\n"
+"be mixed freely:\n"
 "\n"
 "```sh\n"
 "cd Source\n"

@@ -450,6 +450,20 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_themeAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::BoneMask:
+	{
+		BoneMaskAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_BMSK))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_boneMaskAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::BlendSpace:
+	{
+		BlendSpaceAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_BLSP))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		handle = m_blendSpaceAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -503,6 +517,35 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				ch.path = static_cast<AnimPathType>(pathByte);
 				HAsset::Reader::readVec(c->data, o, ch.times);
 				HAsset::Reader::readVec(c->data, o, ch.values);
+			}
+		}
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANOT))
+		{
+			size_t  o    = 0;
+			uint8_t flag = 0;
+			// readPOD leaves the field alone and the offset unmoved when the bytes
+			// are not there, so a truncated chunk keeps the struct's defaults
+			// instead of taking a guess.
+			if (HAsset::Reader::readPOD(c->data, o, flag)) a.hasRootMotion = (flag != 0);
+
+			// The count was written (as zero) from the very first ANOT chunk, so
+			// a clip saved by the build that only knew hasRootMotion still reads
+			// as a well-formed empty list rather than a short chunk.
+			uint32_t notifyCount = 0;
+			if (HAsset::Reader::readPOD(c->data, o, notifyCount))
+			{
+				a.notifies.reserve(notifyCount);
+				for (uint32_t i = 0; i < notifyCount; ++i)
+				{
+					AnimationNotify n;
+					// Bail on the first short read instead of appending halves: a
+					// truncated file gives the notifies it could prove, and the
+					// clip still plays.
+					if (!HAsset::Reader::readString(c->data, o, n.name))     break;
+					if (!HAsset::Reader::readPOD(c->data, o, n.time))        break;
+					if (!HAsset::Reader::readPOD(c->data, o, n.duration))    break;
+					a.notifies.push_back(std::move(n));
+				}
 			}
 		}
 		handle = m_animClipAssets.insert(std::move(a)); break;
@@ -1583,6 +1626,20 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			w.addChunk(HAsset::CHUNK_THEM, a.json.data(), a.json.size());
 		break;
 	}
+	case HE::AssetType::BoneMask:
+	{
+		auto& a = static_cast<BoneMaskAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_BMSK, a.json.data(), a.json.size());
+		break;
+	}
+	case HE::AssetType::BlendSpace:
+	{
+		auto& a = static_cast<BlendSpaceAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_BLSP, a.json.data(), a.json.size());
+		break;
+	}
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
@@ -1627,6 +1684,17 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			HAsset::Writer::appendVec(b, ch.values);
 		}
 		w.addChunk(HAsset::CHUNK_ANIM, b.data(), b.size());
+
+		std::vector<uint8_t> n;
+		HAsset::Writer::appendPOD(n, static_cast<uint8_t>(a.hasRootMotion ? 1 : 0));
+		HAsset::Writer::appendPOD(n, static_cast<uint32_t>(a.notifies.size()));
+		for (const auto& nf : a.notifies)
+		{
+			HAsset::Writer::appendString(n, nf.name);
+			HAsset::Writer::appendPOD(n, nf.time);
+			HAsset::Writer::appendPOD(n, nf.duration);
+		}
+		w.addChunk(HAsset::CHUNK_ANOT, n.data(), n.size());
 		break;
 	}
 	default:
@@ -1797,9 +1865,14 @@ AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachineMutable(HE::UU
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
+AnimationClipAsset*            ContentManager::getAnimationClipMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_animClipAssets, id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
 const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
 ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
+const BoneMaskAsset*         ContentManager::getBoneMask(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_boneMaskAssets, id); }
+BoneMaskAsset*               ContentManager::getBoneMaskMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_boneMaskAssets, id); }
+const BlendSpaceAsset*       ContentManager::getBlendSpace(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_blendSpaceAssets, id); }
+BlendSpaceAsset*             ContentManager::getBlendSpaceMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_blendSpaceAssets, id); }
 const SaveGameTemplateAsset* ContentManager::getSaveGameTemplate(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_saveTemplateAssets, id); }
 SaveGameTemplateAsset*       ContentManager::getSaveGameTemplateMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_saveTemplateAssets, id); }
 const StructTypeAsset*    ContentManager::getStructType(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_structTypeAssets, id); }
@@ -1898,6 +1971,8 @@ HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) {
 HE::UUID ContentManager::registerStructType(StructTypeAsset asset) { return registerRuntimeAsset(m_structTypeAssets, std::move(asset), HE::AssetType::StructType); }
 HE::UUID ContentManager::registerSaveGameTemplate(SaveGameTemplateAsset asset) { return registerRuntimeAsset(m_saveTemplateAssets, std::move(asset), HE::AssetType::SaveGameTemplate); }
 HE::UUID ContentManager::registerTheme(ThemeAsset asset) { return registerRuntimeAsset(m_themeAssets, std::move(asset), HE::AssetType::Theme); }
+HE::UUID ContentManager::registerBoneMask(BoneMaskAsset asset) { return registerRuntimeAsset(m_boneMaskAssets, std::move(asset), HE::AssetType::BoneMask); }
+HE::UUID ContentManager::registerBlendSpace(BlendSpaceAsset asset) { return registerRuntimeAsset(m_blendSpaceAssets, std::move(asset), HE::AssetType::BlendSpace); }
 HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
@@ -1959,7 +2034,8 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		tryRemove(m_widgetAssets)       || tryRemove(m_hcClassAssets)     ||
 		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
 		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
-		tryRemove(m_animatorStateMachineAssets);
+		tryRemove(m_animatorStateMachineAssets) || tryRemove(m_boneMaskAssets) ||
+		tryRemove(m_blendSpaceAssets);
 	if (!removed)
 		return false;
 
@@ -1988,6 +2064,12 @@ bool ContentManager::isLoaded(HE::UUID id) const
 bool ContentManager::isLoaded(const std::string& relativePath) const
 {
 	return m_pathToUUID.contains(relativePath);
+}
+
+HE::UUID ContentManager::idForPath(const std::string& relativePath) const
+{
+	const auto it = m_pathToUUID.find(relativePath);
+	return it == m_pathToUUID.end() ? HE::UUID{} : it->second;
 }
 
 // ─── Asset enumeration ───────────────────────────────────────────────────────

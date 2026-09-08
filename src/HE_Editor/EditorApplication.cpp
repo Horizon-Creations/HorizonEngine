@@ -6,6 +6,7 @@
 #include "EditorUI.h"
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
+#include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
@@ -13,6 +14,7 @@
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
+#include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
@@ -52,8 +54,18 @@
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RootMotion.h>
+#include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
+#include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
+#include <HorizonScene/AnimationIk.h>                  // findJointByName — the head the look-at line starts at
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/AnimatorBlendComponent.h>
+#include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -1108,6 +1120,24 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabLanDiscovery           = globalstate.getCustomConfigBool("CollabLanDiscovery", m_editorConfig.CollabLanDiscovery);
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
+	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
+	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
+	// The environment overrides the stored config in one direction only: it can
+	// turn the bridge ON for a single run (a headless test, a scripted session),
+	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
+	//
+	// Held in its own members rather than folded into m_editorConfig, because
+	// the config is written back on exit: a run started with HE_MCP=1 would
+	// otherwise leave the listener enabled for the next one the human starts by
+	// hand, which is exactly the surprise the default-off setting exists to
+	// prevent.
+	if (const char* envMcp = std::getenv("HE_MCP"))
+		m_mcpEnvEnabled = (envMcp[0] == '1');
+	if (const char* envMcpPort = std::getenv("HE_MCP_PORT"))
+	{
+		const int p = std::atoi(envMcpPort);
+		if (p > 0 && p < 65536) m_mcpEnvPort = p;
+	}
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	// The ground grid's switch. It lives in ViewportPanel next to the only code
@@ -1893,6 +1923,131 @@ void EditorApplication::appendPlayLog(HE::LogLevel level, const char* message)
 // its header because the header doesn't know the SDL key types.
 extern ImGuiKey ImGui_ImplSDL3_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode);
 
+// ── Root-motion preview ──────────────────────────────────────────────────────
+// Where the selected figure's current clip would take it, drawn as a line from
+// where it stands.
+//
+// This is the editor half of the gate in SceneSystems::tickAnimation: outside a
+// play session the tick gets a null RootMotionContext, so the motion is taken out
+// of the pose and applied to nothing — an authored clip animates in place instead
+// of walking the entity across the scene and INTO the save file. The line is what
+// was missing next to that: without it, "the motion was extracted and parked" and
+// "this clip carries no motion at all" look exactly the same on screen.
+//
+// Recomputed each frame rather than cached: it costs one clip sampling per
+// segment for ONE selected entity, and a cache would have to notice the clip
+// being re-authored in the tab next door — which is precisely when an artist is
+// watching this line.
+static void appendRootMotionPreview(HorizonWorld& world, ContentManager& cm,
+                                    entt::entity e, DebugDrawBuffer& out)
+{
+	auto& reg = world.registry();
+	const auto* rm   = reg.try_get<RootMotionComponent>(e);
+	const auto* skel = reg.try_get<SkeletalMeshComponent>(e);
+	const auto* tc   = reg.try_get<TransformComponent>(e);
+	if (!rm || !skel || !tc) return;
+
+	// Whichever of the three drivers poses this entity, and the clip it is on. A
+	// blend shows the dominant half — the same half kNotifyDominanceAlpha lets
+	// fire, so the preview and the events agree about which clip is in charge.
+	HE::UUID clipId;
+	if (const auto* a = reg.try_get<AnimatorComponent>(e))
+		clipId = a->clipAssetId;
+	else if (const auto* b = reg.try_get<AnimatorBlendComponent>(e))
+		clipId = (b->blendAlpha >= HE::kNotifyDominanceAlpha) ? b->clipBId : b->clipAId;
+	else if (const auto* sm = reg.try_get<AnimatorStateMachineComponent>(e))
+	{
+		for (const HE::AnimationState& s : sm->resolvedGraph.states)
+			if (s.name == sm->currentStateName) { clipId = s.clipId; break; }
+	}
+	if (clipId == HE::UUID{}) return;
+
+	const SkeletalMeshAsset*  mesh = cm.getSkeletalMesh(skel->meshAssetId);
+	const AnimationClipAsset* clip = cm.getAnimationClip(clipId);
+	if (!mesh || !clip) return;
+
+	std::vector<glm::vec3> path;
+	AnimationPreview::rootMotionPath(*mesh, *clip, rm->options, 48, path);
+	if (path.size() < 2) return;
+
+	// The path is in the character's own frame at the start of the clip, so it is
+	// rotated by where the entity faces and offset by where it stands.
+	// worldPositionOf rather than tc->worldMatrix: nothing propagates transforms
+	// inside tickWorld, so that matrix is a frame old for anything that moved.
+	const glm::quat yaw = glm::angleAxis(glm::radians(tc->rotation.y), glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::vec3 org = HE::worldPositionOf(world, e);
+
+	// Amber, the same colour the root-motion rows carry in the Details panel, and
+	// not the selection yellow it would otherwise be mistaken for.
+	const glm::vec3 col(0.90f, 0.69f, 0.34f);
+	glm::vec3 prev = org + yaw * path[0];
+	for (size_t i = 1; i < path.size(); ++i)
+	{
+		const glm::vec3 p = org + yaw * path[i];
+		out.line(prev, p, col);
+		prev = p;
+	}
+	// A tick at the end, so a path that ends where it started is still visible as
+	// a path that ran.
+	out.line(prev - glm::vec3(0.0f, 0.15f, 0.0f), prev + glm::vec3(0.0f, 0.35f, 0.0f), col);
+}
+
+// ── Look-at target ───────────────────────────────────────────────────────────
+// A cross where the selected figure is looking, and a line from its head to it.
+//
+// The same argument as the root-motion line above, one stage later: a target
+// point is three numbers in the Details panel, and three numbers do not tell
+// anybody whether the head can actually reach them. The line does — it is either
+// pointing at the cross or it is stopped short by the yaw limit, and both of
+// those are visible at a glance and neither is visible in the numbers.
+static void appendLookAtPreview(HorizonWorld& world, ContentManager& cm,
+                                entt::entity e, DebugDrawBuffer& out)
+{
+	auto& reg = world.registry();
+	const auto* ik   = reg.try_get<IkComponent>(e);
+	const auto* skel = reg.try_get<SkeletalMeshComponent>(e);
+	if (!ik || !skel || !ik->lookAt.enabled || ik->lookAt.chain.empty()) return;
+
+	glm::vec3 target = ik->lookAt.targetWorld;
+	if (ik->lookAt.targetEntityId != HE::UUID{})
+	{
+		const Entity t = world.findByEntityId(ik->lookAt.targetEntityId);
+		if (t == entt::null) return;
+		// worldPositionOf, never TransformComponent::worldMatrix — the same rule
+		// the solver itself follows, and for the same reason.
+		target = HE::worldPositionOf(world, t);
+	}
+
+	// Teal rather than the amber the root-motion line uses: on a figure that has
+	// both, two lines in one colour leaving the same body would read as one.
+	const glm::vec3 col(0.35f, 0.80f, 0.78f);
+	constexpr float r = 0.12f;
+	out.line(target - glm::vec3(r, 0.0f, 0.0f), target + glm::vec3(r, 0.0f, 0.0f), col);
+	out.line(target - glm::vec3(0.0f, r, 0.0f), target + glm::vec3(0.0f, r, 0.0f), col);
+	out.line(target - glm::vec3(0.0f, 0.0f, r), target + glm::vec3(0.0f, 0.0f, r), col);
+
+	// From the head, when there is a posed skeleton to find one in. The bone
+	// matrices carry the inverse bind matrix, so the joint's own frame is
+	// boneMatrix · bindMatrix — and the bind matrix is the inverse of what the
+	// skeleton stores. Without a pose yet, the line starts at the entity instead
+	// of not being drawn: the cross is the useful half anyway.
+	glm::vec3 from = HE::worldPositionOf(world, e);
+	const SkeletalMeshAsset* mesh = cm.getSkeletalMesh(skel->meshAssetId);
+	if (mesh && !skel->boneMatrices.empty())
+	{
+		const int head = HE::findJointByName(*mesh, ik->lookAt.chain.back());
+		if (head >= 0 && static_cast<size_t>(head) < skel->boneMatrices.size())
+		{
+			glm::mat4 ibm;
+			std::memcpy(&ibm, mesh->skeleton[static_cast<size_t>(head)].inverseBindMatrix.data(),
+			            sizeof(glm::mat4));
+			const glm::mat4 jointModel = skel->boneMatrices[static_cast<size_t>(head)] * glm::inverse(ibm);
+			from = glm::vec3(HE::worldMatrixOf(world, e) * glm::vec4(glm::vec3(jointModel[3]), 1.0f));
+		}
+	}
+	out.line(from, target, col);
+}
+
 // HE-PATCH(stuck-keys) watchdog: once a second, compare ImGui's idea of the
 // keyboard against SDL's. A key ImGui thinks is held while SDL says it is up
 // means a key-up never reached ImGui (see the HE-PATCH in imgui_impl_sdl3.cpp's
@@ -2506,6 +2661,11 @@ void EditorApplication::OnRender(float dt)
 			float         friction     = 0.0f;
 			float         restitution  = 0.0f;
 			bool          is2D         = false;
+			// The collision channel is baked into the body's ObjectLayer at
+			// creation, so changing it is a rebuild — without it here, picking a
+			// layer in the Details panel during play would do nothing until the
+			// scene was reloaded.
+			uint8_t       bodyLayer    = 0;
 			// ColliderComponent
 			ColliderShape shape        = ColliderShape::Box;
 			glm::vec3     halfExtents{};
@@ -2520,6 +2680,9 @@ void EditorApplication::OnRender(float dt)
 			float         stepHeight   = 0.0f;
 			float         skinWidth    = 0.0f;
 			float         charMass     = 0.0f;
+			// Same reason as bodyLayer: PhysicsWorld remembers the character's
+			// layer at build time, so a change only lands through a rebuild.
+			uint8_t       charLayer    = 0;
 			// TransformComponent: baked into the mesh/hull triangles, and into
 			// the primitive shapes' extents.
 			glm::vec3     scale{ 1.0f };
@@ -2556,6 +2719,7 @@ void EditorApplication::OnRender(float dt)
 				in.friction    = rb->friction;
 				in.restitution = rb->restitution;
 				in.is2D        = rb->is2D;
+				in.bodyLayer   = rb->collisionLayer;
 			}
 			if (const auto* c = reg.try_get<ColliderComponent>(e))
 			{
@@ -2581,6 +2745,7 @@ void EditorApplication::OnRender(float dt)
 				in.stepHeight   = cc->stepHeight;
 				in.skinWidth    = cc->skinWidth;
 				in.charMass     = cc->mass;
+				in.charLayer    = cc->collisionLayer;
 			}
 			return in;
 		};
@@ -2866,7 +3031,39 @@ void EditorApplication::OnRender(float dt)
 			// The host is only running during PIE, so outside play the sync
 			// graphs stay silent and the parameters keep their authored defaults
 			// — the behaviour state machines had before sync graphs existed.
-			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost);
+			//
+			// Root motion hangs off the same session for a sharper reason: this
+			// tick is NOT gated on play mode, and a character walking across the
+			// scene while somebody authors it would be SAVED there. Outside play
+			// the context is null, so the motion is still taken out of the pose
+			// (the pose is identical either way) and simply not applied.
+			//
+			// Notifies are gated on the same session, for the third form of the
+			// same argument: a null queue means they are not even evaluated, so an
+			// editor nobody plays in neither pays for them nor accumulates them.
+			const bool playing = m_animatorHost.running();
+			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
+			                            playing ? &rootMotion : nullptr,
+			                            playing ? &m_animNotifies : nullptr);
+
+			// Immediately after, and not at the collision drain above: that one
+			// sits in the frame BEFORE this phase and would cost every notify a
+			// frame. dispatch empties the queue.
+			//
+			// The SAME predicate that decided to collect, spelled the same way.
+			// Anything narrower here — a null check on the script context, say,
+			// which dispatch does for itself anyway — would be a frame that fills
+			// the queue and never empties it, and the queue would grow for as long
+			// as the session lasted.
+			if (playing)
+			{
+				HE_PROFILE_SCOPE_N("AnimationNotifyDispatch");
+				AnimationNotifySystem::dispatch(m_animNotifies, *m_editorWorld,
+				                                m_scriptContext.get(), m_scriptInstances,
+				                                &m_gameInstance.runtime(), m_entityHost.instances(),
+				                                &m_animatorHost);
+			}
 		}
 
 		// Remember what the gameplay half of this frame produced — pose AND the
@@ -3167,6 +3364,109 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// ── Joints ───────────────────────────────────────────────────────
+			// Drawn for every joint in the scene, like the colliders above and
+			// unlike the rope handles below: a joint is a relationship between
+			// two entities, and the thing an author most needs to see is that
+			// the line goes where they think it does — which they cannot check
+			// by selecting one end.
+			//
+			// From the COMPONENTS, never from Jolt. Jolt's own DrawConstraints
+			// needs JPH_DEBUG_RENDERER and a renderer this engine does not have,
+			// and it would only exist in play mode — the half of the time an
+			// author is not authoring.
+			{
+				auto& reg = m_editorWorld->registry();
+				for (auto [entity, joint] : reg.view<JointComponent>().each())
+				{
+					if (joint.target == HE::UUID{})
+						continue;
+					const Entity other = m_editorWorld->findByEntityId(joint.target);
+					if (other == entt::null || !reg.valid(other))
+						continue;   // dangling reference — the Details panel says so
+
+					// worldMatrixOf, not TransformComponent::worldMatrix: this
+					// block runs right after tickWorld, which propagates
+					// nothing, so the stored matrix is a frame old and plain
+					// identity for anything created this frame. Same reason the
+					// rope guides below walk the chain.
+					const glm::mat4 mA = HE::worldMatrixOf(*m_editorWorld, entity);
+					const glm::mat4 mB = HE::worldMatrixOf(*m_editorWorld, other);
+					const glm::vec3 originA = glm::vec3(mA[3]);
+					const glm::vec3 originB = glm::vec3(mB[3]);
+					const glm::vec3 anchorA = glm::vec3(mA * glm::vec4(joint.anchorA, 1.0f));
+					const glm::vec3 anchorB = glm::vec3(mB * glm::vec4(joint.anchorB, 1.0f));
+
+					// Amber for the selected entity's joint, dim orange for the
+					// rest — the same "this is the one you are editing" the
+					// selection marker above uses.
+					const bool      lit   = (entity == m_selectedEntity || other == m_selectedEntity);
+					const glm::vec3 color = lit ? glm::vec3(1.0f, 0.65f, 0.15f)
+					                            : glm::vec3(0.55f, 0.40f, 0.15f);
+					// A direction in A's space, drawn a metre long: an axis has
+					// no length of its own and the number an author types is a
+					// direction, so any fixed length is as honest as the next.
+					const float     kAxisLen = 1.0f;
+					const glm::vec3 axisWorld =
+						glm::length(joint.axis) > 1.0e-5f
+							? glm::normalize(glm::mat3(mA) * glm::normalize(joint.axis))
+							: glm::vec3(0.0f, 1.0f, 0.0f);
+
+					switch (joint.type)
+					{
+					case JointType::Fixed:
+						// No anchors to draw — the weld IS the pair, so the line
+						// between the two origins is the whole statement.
+						dbg.line(originA, originB, color);
+						break;
+					case JointType::Point:
+					case JointType::Hinge:
+						// ONE shared pivot, so one marker and two lines to it.
+						// Drawing two anchors here would show a joint that does
+						// not exist: the second one is never read.
+						dbg.sphere(anchorA, 0.08f, color);
+						dbg.line(originA, anchorA, color);
+						dbg.line(originB, anchorA, color);
+						if (joint.type == JointType::Hinge)
+							dbg.line(anchorA - axisWorld * kAxisLen * 0.5f,
+							         anchorA + axisWorld * kAxisLen * 0.5f, color);
+						break;
+					case JointType::Slider:
+					{
+						// The line of travel, through A's origin, with its stops
+						// marked where limits were authored. Unlimited draws the
+						// bare direction — there is nothing to mark.
+						const bool  limited = joint.minLimit < joint.maxLimit;
+						const float lo = limited ? joint.minLimit : -kAxisLen;
+						const float hi = limited ? joint.maxLimit :  kAxisLen;
+						const glm::vec3 a = originA + axisWorld * lo;
+						const glm::vec3 b = originA + axisWorld * hi;
+						dbg.line(a, b, color);
+						if (limited)
+						{
+							dbg.sphere(a, 0.06f, color);
+							dbg.sphere(b, 0.06f, color);
+						}
+						dbg.line(originB, originA, color);
+						break;
+					}
+					case JointType::Distance:
+						// The one type that reads both anchors, and the one
+						// whose picture is genuinely a line between two points.
+						dbg.sphere(anchorA, 0.06f, color);
+						dbg.sphere(anchorB, 0.06f, color);
+						dbg.line(anchorA, anchorB, color);
+						break;
+					default:
+						// A type this build does not know. PhysicsWorld builds it
+						// as a weld and logs once; the overlay says the same
+						// thing by drawing the pair and nothing else.
+						dbg.line(originA, originB, color);
+						break;
+					}
+				}
+			}
+
 			// ── Rope & trail guides, for the SELECTED entity only ────────────
 			// A rope is authored as a handful of points in a list, and until one
 			// of them is on screen the list is a set of numbers nobody can aim.
@@ -3371,6 +3671,18 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// Where the selected figure's root motion would carry it. Only for the
+			// selection: a scene full of characters would be a scene full of
+			// lines, and the question ("does this clip go where I meant it to")
+			// is asked about one figure at a time.
+			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
+				{
+					appendRootMotionPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+					// And where its head is aimed, for the same one-figure-at-a-time
+					// reason.
+					appendLookAtPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+				}
+
 			// The ground grid, last of the editor's own lines: it is the biggest
 			// contributor by far, and appending it after the gizmos keeps the
 			// things the user is actually working on at the front of the buffer.
@@ -3506,6 +3818,34 @@ void EditorApplication::OnRender(float dt)
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
 		m_collab.update(nowMs);
+
+		// ── The MCP bridge ────────────────────────────────────────────────
+		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
+		// has already landed and an external client reads the same world the
+		// humans in the session see; and before EditorUI::render, so whatever a
+		// client changed is on screen in the SAME frame rather than one late.
+		//
+		// Not gated on a project being loaded, on purpose. The listener's
+		// lifetime belongs to the editor, not to a scene — a client has to be
+		// able to connect and ask what is open before anything is, and get the
+		// honest answer that nothing is.
+		if (!m_mcpToolsRegistered) setupMcpTools();
+		// Pushed every frame rather than tracked across every project switch,
+		// scene load and new-scene: the gateway holds a raw pointer, and one path
+		// that forgets to update it is a handler writing into a destroyed world.
+		// Set here, one line before the tools that read it can run.
+		m_commands.setWorld(m_editorWorld.get());
+		m_mcp.setPort(static_cast<std::uint16_t>(
+			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
+		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
+		// Preferences panel then only ever writes the config, and setEnabled
+		// ignores a value that has not changed, so this costs nothing.
+		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
+		m_mcp.update(nowMs);
+		// After the pump, because it is the pump that notices a client has gone —
+		// and a client going is what hands its locks back.
+		updateMcpLocks(nowMs);
+
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
 
@@ -5765,6 +6105,352 @@ void EditorApplication::applyRemoteDocDeltas(
 	// put an unsaveable "*" on a read-only tab and offer it at the quit prompt.
 }
 
+// ─── What an external MCP client may ask this editor ─────────────────────────
+// Called once, on the first frame. The tools close over `this`, which is safe
+// for exactly one reason: the bridge is a member of this object and is pumped
+// from this object's frame loop, so a handler can only ever run while the editor
+// it reads is alive and on the main thread.
+//
+// The state the tools report is read through lambdas rather than passed as
+// values, because "what is open" changes with every project switch and the
+// registry is built once.
+void EditorApplication::setupMcpTools()
+{
+	m_mcpToolsRegistered = true;
+
+	// The endpoint file goes into the per-user data directory, NEVER into the
+	// project: a project directory is what ends up in git, and this file carries
+	// the token that authorises editing the scene.
+	m_mcp.setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
+
+	HE::Ed::McpEditorHooks hooks;
+	hooks.projectName = [this] { return m_projectManager.currentProject().name; };
+	hooks.scenePath   = [this] { return m_currentScenePath; };
+	// The same expression AppContext uses (see makeContext): the scene is dirty
+	// when the undo revision has moved past the one it was saved at.
+	hooks.sceneDirty  = [this] { return m_undo.revision() != m_savedRevision; };
+	hooks.isPlaying   = [this] { return m_isPlaying; };
+	hooks.inSession   = [this] { return m_collab.inSession(); };
+	hooks.entityCount = [this]() -> int {
+		// -1, not 0: "no world" and "an empty world" are different answers, and
+		// a client that cannot tell them apart would report an open scene with
+		// nothing in it when in truth no project is loaded.
+		if (!m_editorWorld) return -1;
+		int n = 0;
+		m_editorWorld->registry().view<entt::entity>().each([&](auto) { ++n; });
+		return n;
+	};
+
+	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+
+	// Placing and moving objects. Registered after the gateway is wired, because
+	// the tools capture a reference to it and the first `tools/call` may arrive
+	// in the same frame.
+	setupEditorCommands();
+	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+
+	// Authoring HorizonCode. The tools take the documents as hooks rather than
+	// a pointer to this object for the same reason the two above do: a graph is
+	// a value, so what they do to one is answerable in the test binary.
+	HE::Ed::McpHcHooks hc;
+	hc.isPlaying = [this] { return m_isPlaying; };
+
+	// What the level script's own add menu refuses (LevelScriptPanel.cpp,
+	// kMenus.addExcluded) — the SUBSET that is a real restriction rather than a
+	// routing decision. A level script has no self-widget and no elements, so
+	// Show/Hide Self and Get/Set Property have nothing to act on there; the rest
+	// of that list (Event, Function, Get/Set Variable) is excluded only because
+	// the palette offers those through its own sections, and mirroring it here
+	// would refuse an MCP client the primary thing it is for.
+	static const std::vector<std::string> kLevelScriptExcluded = {
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::GetProperty),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::SetProperty),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::ShowSelf),
+		HorizonCode::nodeDisplayName(HorizonCode::NodeType::HideSelf),
+	};
+
+	hc.documents = [this] {
+		std::vector<HE::Ed::McpHcDoc> out;
+		if (m_editorWorld)
+			out.push_back({ std::string(HE::Ed::kMcpDocLevelScript),
+			                "Level Script", "level",
+			                m_undo.revision() != m_savedRevision,
+			                {}, kLevelScriptExcluded });
+		if (!m_projectManager.currentProject().name.empty())
+			out.push_back({ std::string(HE::Ed::kMcpDocGameInstance),
+			                "Game Instance", "gameinstance",
+			                // The GameInstance graph is committed (and written)
+			                // on every edit, so it is never "unsaved".
+			                false, {}, {} });
+		// Only the class tabs the editor already HOLDS. Loading one behind the
+		// class panel's back would make a second copy of the graph, and the
+		// human's next Save from that tab would write over everything an MCP
+		// client had done to ours.
+		std::vector<HorizonCodeClassPanel::Held> held;
+		HorizonCodeClassPanel::appendHeld(held);
+		for (HorizonCodeClassPanel::Held& h : held)
+			out.push_back({ h.contentPath, h.contentPath, "class", h.dirty, {}, {} });
+		// apiGroups stays empty everywhere: none of these three frontends
+		// restricts the engine registry today (only the Animator sync graph
+		// does, and that is not a document a client can address). Only the
+		// level script names excluded types — see kLevelScriptExcluded above;
+		// the GameInstance graph and a class asset offer everything.
+		return out;
+	};
+
+	hc.resolve = [this](const std::string& key) -> HorizonCode::Graph* {
+		if (key == HE::Ed::kMcpDocLevelScript)
+			return m_editorWorld ? &m_editorWorld->levelScript() : nullptr;
+		if (key == HE::Ed::kMcpDocGameInstance)
+			return m_projectManager.currentProject().name.empty()
+			           ? nullptr : &m_gameInstanceGraph;
+		return HorizonCodeClassPanel::liveGraph(key);
+	};
+
+	hc.beginEdit = [this](const std::string& key) {
+		// Captured BEFORE the mutation and pushed, which is what snapshotNow is
+		// for — so a human can Ctrl+Z what an MCP client did to the level script.
+		// It also bumps the undo revision, which is how the scene learns it is
+		// dirty and how the level script gets written with it.
+		//
+		// The other two have no undo stack of their own today (see the table in
+		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
+		// DocEdit command that step's plan describes and this step does not build.
+		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow();
+	};
+
+	hc.endEdit = [this](const std::string& key) {
+		if (key == HE::Ed::kMcpDocGameInstance)
+		{
+			// Exactly what the Game Instance tab does after a human's edit
+			// (LevelScriptPanel.cpp, GameInstancePanel::render): re-register the
+			// graph with the running host and write it. Skipping it would leave
+			// the app preview running the graph from before the edit.
+			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+			saveGameInstanceGraph();
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
+		}
+		else if (key != HE::Ed::kMcpDocLevelScript)
+		{
+			// A class tab. Without this the tab shows no "*" and its own Save
+			// refuses, believing it has nothing to write.
+			HorizonCodeClassPanel::markDirty(key);
+		}
+	};
+
+	hc.save = [this](const std::string& key) -> bool {
+		if (key == HE::Ed::kMcpDocLevelScript)
+		{
+			// The level script lives IN the scene, so saving it is saving the
+			// scene — there is no second file to write.
+			if (!m_editorWorld || m_currentScenePath.empty()) return false;
+			saveSceneToPath(m_currentScenePath);
+			return m_undo.revision() == m_savedRevision;
+		}
+		if (key == HE::Ed::kMcpDocGameInstance)
+		{
+			saveGameInstanceGraph();
+			return true;
+		}
+		AppContext ctx = makeContext();
+		return HorizonCodeClassPanel::saveByContentPath(ctx, key);
+	};
+
+	// A peer's lock on the document, asked before every mutating hc_ tool. The
+	// human's own path has a read-only banner to look at and an optimistic claim
+	// underneath it; a remote client has neither, so for it the foreign lock is
+	// a hard refusal (McpToolsHc.cpp, `openDoc`).
+	//
+	// The translation is the same one collabSyncKey does: the two editor-owned
+	// graphs ARE their reserved tab path in the lock table, and a class asset's
+	// MCP key is already the content-relative path collabSyncKey produces for a
+	// content asset (HorizonCodeClassPanel keeps that form as ClassState::path),
+	// so it passes through untouched.
+	hc.lockedByOther = [this](const std::string& key) {
+		std::string subject = key;
+		if (key == HE::Ed::kMcpDocLevelScript)       subject = LevelScriptPanel::kTabPath;
+		else if (key == HE::Ed::kMcpDocGameInstance) subject = GameInstancePanel::kTabPath;
+		return m_collab.assetLockedByOther(subject);
+	};
+
+	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
+
+	// The engine's own API, one tool per pure row of HE::api::registry(). No
+	// list here: what the engine registers is what a client can call, and the
+	// rows that CHANGE the world are refused by the policy in McpToolsApi.cpp
+	// rather than by an omission somebody has to maintain.
+	HE::Ed::McpApiHooks api;
+	// The editor's one Ctx factory — the same one Lua, Python and a previewed
+	// graph go through, so a row reached from outside finds exactly what it
+	// finds from inside. Read per call, because entering play mode replaces the
+	// physics world and a captured pointer would be the old one.
+	api.makeCtx = [this] {
+		return apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
+	};
+	// The registry speaks raw entt handles and every other tool on this
+	// interface speaks uuids, so this is the translation between them. -1 for an
+	// unknown uuid: 0 is a valid handle, and a miss that fell through to it
+	// would act on a stranger.
+	api.entityByUuid = [this](const std::string& uuid) -> std::int64_t {
+		if (!m_editorWorld) return -1;
+		const Entity e = HE::Ed::entityByUuid(*m_editorWorld, uuid);
+		if (e == entt::null) return -1;
+		return static_cast<std::int64_t>(entt::to_integral(e));
+	};
+	api.uuidOf = [this](std::uint32_t handle) -> std::string {
+		if (!m_editorWorld) return {};
+		const Entity e = static_cast<Entity>(handle);
+		if (!m_editorWorld->registry().valid(e)) return {};
+		return HE::Ed::uuidOf(*m_editorWorld, e);
+	};
+	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
+}
+
+// ─── The gateway, wired to this editor ───────────────────────────────────────
+// Everything EditorCommands asks of the editor, as functions. Two of them are
+// worth reading twice:
+//
+//   • `requestLock` records the subject in m_mcpLocks. Only an external command
+//     ever reaches it — checkLock skips Origin::Remote entirely and skips
+//     Origin::User while setLockUserCommands is off, which it is and stays,
+//     because turning it on would refuse a human's delete in the one frame
+//     between clicking an entity and the host granting the lock.
+//   • `afterCreate` deliberately does NOT call markSubtreeKnown. An entity a
+//     client just made must stay UNKNOWN to the structural diff for one more
+//     frame, because that diff is what publishes the create to the peers; the
+//     remote handlers mark it precisely because there the create has already
+//     happened elsewhere.
+void EditorApplication::setupEditorCommands()
+{
+	m_commandSnapshotSink = std::make_unique<HE::Ed::SnapshotUndoSink>(
+		&m_undo, [this] { return m_isPlaying; });
+	m_commandSessionSink = std::make_unique<HE::Ed::CollabUndoSink>(&m_collabUndo);
+	m_commands.setUndoSinks(m_commandSnapshotSink.get(), m_commandSessionSink.get());
+
+	HE::Ed::EditorCommands::Hooks h;
+	h.isPlaying = [this] { return m_isPlaying; };
+	h.inSession = [this] { return m_collab.inSession(); };
+	h.nowMs     = [] {
+		return static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+	};
+	h.subjectFor = [this](std::uint32_t handle) { return m_collab.subjectFor(handle); };
+	h.ownsLock   = [this](std::uint64_t s) { return m_collab.ownsLock(s); };
+	h.lockedByOther = [this](std::uint64_t s) { return mcpLockedByOther(s); };
+	h.requestLock = [this](std::uint64_t s) {
+		rememberMcpLock(s);
+		return m_collab.requestLock(s);
+	};
+	h.publishTransform = [this](std::uint64_t subject, const float pos[3],
+	                            const float rot[3], const float scale[3],
+	                            std::uint64_t nowMs) {
+		m_collab.publishTransform(subject, pos, rot, scale, nowMs);
+	};
+	h.publishComponents = [this](std::uint32_t handle,
+	                             const std::vector<std::uint8_t>& blob) {
+		m_collab.publishComponents(handle, blob);
+	};
+	h.beforeDestroy = [this](Entity e, HE::Ed::Origin origin) {
+		// Same order and the same reasons as deleteSelectedEntity: the bodies go
+		// first, because after destroyEntity the hierarchy that names them is
+		// gone, and the selection goes because a selected handle that no longer
+		// exists is what the inspector dereferences next frame.
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+
+		// ONLY for a peer's delete, and this is the echo protection rather than
+		// bookkeeping: syncStructuralChanges publishes a destroy for everything
+		// in m_structureKnown that no longer exists, so dropping the entry here
+		// is how onRemoteDestroy says "they already know". For an external
+		// delete it would be the opposite of what is wanted — the peers would
+		// never hear that the client removed anything. deleteSelectedEntity, the
+		// human's path, does not erase either.
+		if (origin == HE::Ed::Origin::Remote) m_structureKnown.erase(e);
+	};
+	m_commands.setHooks(std::move(h));
+}
+
+// A subject an external client has taken. Kept in insertion order; the list is
+// at most as long as the number of entities one client touched in a session, so
+// a linear search is the right shape.
+void EditorApplication::rememberMcpLock(std::uint64_t subject)
+{
+	if (subject == 0) return;
+	for (const McpLock& l : m_mcpLocks)
+		if (l.subject == subject) return;
+	// Stamped now, not zero: the caller has just asked for this lock, and a zero
+	// would make updateMcpLocks ask a second time in the same frame.
+	const auto nowMs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+	m_mcpLocks.push_back(McpLock{ subject, nowMs });
+}
+
+bool EditorApplication::mcpLockedByOther(std::uint64_t subject)
+{
+	// The replicated table, read the same way assetLockedByOther reads it: a
+	// holder that is not us is a refusal the client can act on immediately,
+	// without a round trip.
+	const HE::Net::LockInfo* l = m_collab.lockFor(subject);
+	return l && l->owner != m_collab.localParticipant();
+}
+
+// Keeping an external client's locks alive, and handing them back when it goes.
+//
+// Alive, because they are not the selection's: followSelection releases whatever
+// it held the moment the human clicks elsewhere, and if the human happens to
+// click an entity a client is editing, that release takes the client's lock with
+// it. Re-asking is the whole repair — the lock table is replicated, so asking
+// again for something we already hold costs nothing and is skipped anyway.
+//
+// Handed back, because a lock nobody is behind any more blocks a human from
+// touching an entity for the rest of the session. Disconnect is the release
+// signal rather than a timer: a timer would drop the lock a few seconds after an
+// edit, and CollabUndo::dropUnowned would then throw the undo entry that edit
+// produced (docs/mcp-editor-integration-plan.md §4).
+void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
+{
+	if (m_mcpLocks.empty()) return;
+
+	if (!m_collab.inSession())
+	{
+		// The session ended; the locks went with it.
+		m_mcpLocks.clear();
+		return;
+	}
+	if (m_mcp.clientCount() == 0)
+	{
+		for (const McpLock& l : m_mcpLocks) m_collab.releaseLock(l.subject);
+		m_mcpLocks.clear();
+		return;
+	}
+
+	// Half a second between re-asks: a grant is one round trip, and asking every
+	// frame in the meantime would put sixty requests on the wire for one answer.
+	constexpr std::uint64_t kReaskMs = 500;
+	for (auto it = m_mcpLocks.begin(); it != m_mcpLocks.end();)
+	{
+		if (m_collab.ownsLock(it->subject)) { ++it; continue; }
+		if (mcpLockedByOther(it->subject))
+		{
+			// Someone else has it now. Forgetting it here is what keeps the next
+			// command's answer honest — it will be locked_by_other rather than a
+			// silent retry loop.
+			it = m_mcpLocks.erase(it);
+			continue;
+		}
+		if (nowMs - it->lastAskedMs >= kReaskMs)
+		{
+			m_collab.requestLock(it->subject);
+			it->lastAskedMs = nowMs;
+		}
+		++it;
+	}
+}
+
 void EditorApplication::syncStructuralChanges()
 {
 	if (!m_editorWorld) return;
@@ -6080,6 +6766,13 @@ AppContext EditorApplication::makeContext()
 			if (m_projectManager.currentProject().appProject)
 				m_appPreviewRestartPending = true;
 		},
+		.applyCollisionLayers = [this]{
+			// Only while a simulation exists. Outside play mode there is nothing
+			// to update and nothing to be wrong: the next play start builds its
+			// PhysicsWorld and reads the matrix from the project itself.
+			if (m_physicsWorld)
+				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
@@ -6209,6 +6902,7 @@ AppContext EditorApplication::makeContext()
 		.toolchainInstallOk  = m_installFinished.load(std::memory_order_acquire)
 		                           && m_installAttempted.load(std::memory_order_acquire)
 		                           && m_installExit.load(std::memory_order_acquire) == 0,
+		.reloadGameLogic     = [this]{ return reloadGameLogic(); },
 		.gitProbe            = m_gitChecked.load(std::memory_order_acquire)
 		                           ? &m_gitProbe : nullptr,
 		.recheckGit          = [this]{ startGitProbe(); },
@@ -6282,6 +6976,7 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.mcp                 = &m_mcp,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
 		                              bool folder) { enqueueRetargetOnDisk(oldRel, newRel, folder); },
@@ -6556,6 +7251,10 @@ void EditorApplication::setPlayMode(bool play)
 		// falls back to a box. Handed over afterwards, every such collider in the
 		// starting scene would silently be a crate.
 		m_physicsWorld->setContentManager(&contentManager());
+		// BEFORE initialize() as well: initialize() is what puts every body into
+		// its channel, and a matrix handed over afterwards would leave the
+		// opening scene simulating on the default one until something rebuilt.
+		m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -6615,6 +7314,14 @@ void EditorApplication::setPlayMode(bool play)
 		// Last: a player character spawned just above may be the very entity
 		// whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
+
+		// Native C++ game logic, before the scripts and before the level's
+		// OnLevelLoaded — the order the packaged game has (GameApplication:
+		// logic, then startScripts, then fireLevelLoaded). Loaded HERE and not
+		// at project open, because the base loop ticks whatever the loader holds
+		// as soon as a world exists: a module loaded outside play mode would
+		// have fired its onStart on the scene somebody is building.
+		startGameLogic();
 
 		// Lua/Python entity scripts start AFTER the hosts, the same order the
 		// packaged game has (GameApplication: hosts, then startScripts). PIE used
@@ -6679,6 +7386,13 @@ void EditorApplication::setPlayMode(bool play)
 	}
 	else
 	{
+		// The native module goes FIRST: its onStop runs against the world it was
+		// started on, and everything below this line takes that world apart. The
+		// module is unloaded rather than parked, so outside a play session
+		// logicLoader().logic() is null and the base loop has nothing to tick.
+		if (logicLoader().isLoaded())
+			logicLoader().unload(*m_editorWorld);
+
 		// Player instances go down first (their Destruct may still reference the
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
@@ -7127,6 +7841,86 @@ float EditorApplication::GameLogicDeltaTime(float rawDt)
 	return m_isPlaying ? HE::api::time::deltaTime() : 0.0f;
 }
 
+// ── Native C++ game logic in PIE ────────────────────────────────────────────
+
+void EditorApplication::bindGameServices()
+{
+	// Resolvers, not pointers, for the two things a play session replaces: the
+	// physics world is rebuilt on every Play and the editor world is what a
+	// scene switch clears. The ContentManager belongs to the Application and
+	// outlives both, so it is bound flat — the same split GameApplication makes,
+	// and the reason it is worth repeating is that getting it wrong leaves a
+	// dangling pointer inside a loaded dylib.
+	m_gameServicesBinding.world   = [this]() { return m_editorWorld.get(); };
+	m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
+	m_gameServicesBinding.content = &contentManager();
+	HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
+	HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
+	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
+	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
+	m_engineServices            = {};
+	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
+	m_engineServices.save       = &m_saveServices;
+	m_engineServices.physics    = &m_physicsServices;
+	m_engineServices.input      = &m_inputServices;
+	m_engineServices.content    = &m_contentServices;
+}
+
+std::filesystem::path EditorApplication::builtGameLogicPath()
+{
+	if (!m_projectLoaded) return {};
+	const auto& proj = m_projectManager.currentProject();
+	if (proj.scriptLanguage != ProjectScriptLanguage::Cpp) return {};
+	return HE::hccg::builtGameLogic(proj.path);
+}
+
+void EditorApplication::startGameLogic()
+{
+	if (!m_isPlaying || !m_editorWorld) return;
+	const std::filesystem::path lib = builtGameLogicPath();
+	if (lib.empty())
+	{
+		// Only worth a word in a project that HAS native game logic — anywhere
+		// else there is nothing missing.
+		if (m_projectLoaded &&
+		    m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
+			HE_LOG_INFO(Editor, "%s",
+				"EditorApplication: no built GameLogic module — run Build \xe2\x96\xb8 "
+				"Build and Reload Game Logic to compile the project's Source/ folder");
+		return;
+	}
+	bindGameServices();
+	if (logicLoader().loadAndStart(lib, *m_editorWorld, &m_engineServices))
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: native game logic started (" +
+			 lib.filename().string() + ")").c_str());
+}
+
+bool EditorApplication::reloadGameLogic()
+{
+	// No session, nothing to swap into. Not a failure: the module that was just
+	// built is exactly what the next Play loads.
+	if (!m_isPlaying || !m_editorWorld) return false;
+	const std::filesystem::path lib = builtGameLogicPath();
+	if (lib.empty()) return false;
+
+	bindGameServices();
+	// One call, because the sequence is the trap: reload() alone hands the fresh
+	// image no service tables and every he::* call in it becomes a silent no-op
+	// (GameLogicLoader.h).
+	if (!logicLoader().reloadAndStart(lib, *m_editorWorld, &m_engineServices))
+	{
+		HE_LOG_ERROR(Editor, "%s",
+			("EditorApplication: game logic reload failed — nothing is loaded now (" +
+			 lib.string() + ")").c_str());
+		return false;
+	}
+	HE_LOG_INFO(Editor, "%s",
+		("EditorApplication: game logic reloaded into the running session (" +
+		 lib.filename().string() + ")").c_str());
+	return true;
+}
+
 void EditorApplication::OnShutdown()
 {
 	// Give the network back what a session took, FIRST and synchronously: the
@@ -7137,9 +7931,26 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
 
+	// The MCP listener goes down here for the same reason, one step milder: the
+	// endpoint file it leaves behind names a port and a pid, and a shim that
+	// reads a stale one connects to whatever the OS handed that port to next.
+	// The destructor would do it too — this is so it happens before the long
+	// teardown below rather than after it.
+	m_mcp.stop();
+
 	// A project export may still be packing on its worker thread — wait for it
-	// (destroying a joinable std::thread would terminate the process).
+	// (destroying a joinable std::thread would terminate the process). Same rule
+	// for the game-logic compile, which is a second worker on the same window.
 	EditorUI::joinPendingExport();
+	EditorUI::joinPendingGameLogicBuild();
+
+	// Quitting straight out of a play session: the native module has to be let
+	// go while the world it was started on is still there, because unload() runs
+	// its onStop against that world. m_editorWorld is a member of THIS object
+	// and the loader a member of the base — the base is destroyed last, so
+	// waiting for either destructor would mean calling onStop on a dead world.
+	if (logicLoader().isLoaded() && m_editorWorld)
+		logicLoader().unload(*m_editorWorld);
 
 	// Which docked panels were open. Written as it changes during the session;
 	// this catches a toggle made in the last half-second before quitting. Before
@@ -7308,6 +8119,8 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
+	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
+	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

@@ -10,6 +10,9 @@
 #include "HorizonScene/Components/EntityIdComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
+#include "HorizonScene/Components/JointComponent.h"
+#include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/IkComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -63,6 +66,19 @@ void HorizonWorld::reserveComponentStorage()
     // any game code runs, which is why the list is not simply all of them.
     (void)m_registry.storage<RopeComponent>();
     (void)m_registry.storage<TrailComponent>();
+    // And for the same reason: physics.addJoint WRITES a JointComponent, so the
+    // grapple line a dlopen'd game logic hooks at runtime would otherwise be the
+    // first thing ever to touch this pool.
+    (void)m_registry.storage<JointComponent>();
+    // Same case as ropes and trails: a layer stack is something GAME LOGIC turns
+    // on — "give this character an aim offset while it holds a weapon" — so the
+    // dlopen'd dylib is a realistic first toucher of this pool, and a pool owned
+    // by a library that later unloads dangles the registry at teardown.
+    (void)m_registry.storage<AnimationLayerComponent>();
+    // And the same for IK: "put this character's feet on the ground" is a thing
+    // game logic switches on when a figure walks onto terrain, so the game dylib
+    // is a plausible first toucher here too.
+    (void)m_registry.storage<IkComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const

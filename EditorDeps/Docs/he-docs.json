@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-08-26",
+ "generated": "2026-09-08",
  "groups": [
   {
    "pages": [
@@ -7143,7 +7143,16 @@
           },
           {
            "s": "",
-           "t": " Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved."
+           "t": " Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved. Native C++ game logic reloads the same way, one menu item later: "
+          },
+          {
+           "h": "#game-logic",
+           "s": "l",
+           "t": "Build » Build and Reload Game Logic"
+          },
+          {
+           "s": "",
+           "t": "."
           }
          ]
         }
@@ -7154,8 +7163,190 @@
      ],
      "eyebrow": "Test it",
      "id": "play-mode",
-     "text": "The Play button in the Scene toolbar starts a play-in-editor session; Escape (or the Stop button) ends it. Entering play initialises physics, fires Play on Start audio, starts scripts and spawns HorizonCode player classes. While playing, physics steps at a fixed timestep, scripts receive onUpdate, collision events dispatch, widgets tick, and input actions fire. The scene renders through the camera marked Main Camera (or the first camera found). On stop, the world is restored to its pre-play state and a Play Session Report window summarises the session. Animation, navigation and particle systems also run outside play mode so you can preview them while editing. Tip: Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved.",
+     "text": "The Play button in the Scene toolbar starts a play-in-editor session; Escape (or the Stop button) ends it. Entering play initialises physics, fires Play on Start audio, starts scripts and spawns HorizonCode player classes. While playing, physics steps at a fixed timestep, scripts receive onUpdate, collision events dispatch, widgets tick, and input actions fire. The scene renders through the camera marked Main Camera (or the first camera found). On stop, the world is restored to its pre-play state and a Play Session Report window summarises the session. Animation, navigation and particle systems also run outside play mode so you can preview them while editing. Tip: Lua/Python scripts hot-reload during play — save the file and the new code is patched into live instances with their state preserved. Native C++ game logic reloads the same way, one menu item later: Build » Build and Reload Game Logic.",
      "title": "Play Mode"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "c",
+         "t": "Build » Build and Reload Game Logic"
+        },
+        {
+         "s": "",
+         "t": " compiles a C++ project's "
+        },
+        {
+         "s": "c",
+         "t": "Source/"
+        },
+        {
+         "s": "",
+         "t": " folder into its native "
+        },
+        {
+         "s": "b",
+         "t": "GameLogic"
+        },
+        {
+         "s": "",
+         "t": " library and swaps the result into a running play session — the session keeps going, with the new code in it."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The compile runs in the same "
+        },
+        {
+         "s": "b",
+         "t": "Build"
+        },
+        {
+         "s": "",
+         "t": " window the export uses, in two steps: "
+        },
+        {
+         "s": "i",
+         "t": "Compile"
+        },
+        {
+         "s": "",
+         "t": ", then "
+        },
+        {
+         "s": "i",
+         "t": "Reload"
+        },
+        {
+         "s": "",
+         "t": ". The second one either happened or it did not, because "
+        },
+        {
+         "s": "i",
+         "t": "compiled"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "i",
+         "t": "running"
+        },
+        {
+         "s": "",
+         "t": " are different answers and the window has to be able to say which one it got to. Compiler warnings and errors are listed as they arrive; "
+        },
+        {
+         "s": "i",
+         "t": "Build Again"
+        },
+        {
+         "s": "",
+         "t": " repeats the module build, not a project export."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Outside Play mode"
+         },
+         {
+          "s": "",
+          "t": " it only builds. That is not a failure — the module that was just built is exactly what the next Play loads."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Entering Play"
+         },
+         {
+          "s": "",
+          "t": " loads the built module, hands it the engine service tables and calls "
+         },
+         {
+          "s": "c",
+          "t": "onStart"
+         },
+         {
+          "s": "",
+          "t": "; leaving Play calls "
+         },
+         {
+          "s": "c",
+          "t": "onStop"
+         },
+         {
+          "s": "",
+          "t": " and unloads it. With no module built yet, the log says which menu item builds one."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Other project languages"
+         },
+         {
+          "s": "",
+          "t": " get a note instead of a build: Lua, Python and HorizonCode script their gameplay in a language that needs no compiler."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Toolchain"
+         },
+         {
+          "s": "",
+          "t": " — needs CMake and a C++ compiler, and engine headers to compile against. "
+         },
+         {
+          "h": "#preferences",
+          "s": "l",
+          "t": "Preferences » Tools » Status"
+         },
+         {
+          "s": "",
+          "t": " shows what was found and can install what is missing."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What the module can reach once it is loaded — physics, input, content and savegames, through the injected service tables — is described under "
+        },
+        {
+         "h": "scripting.html#cpp",
+         "s": "l",
+         "t": "Scripting » Native C++"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "C++ projects",
+     "id": "game-logic",
+     "text": "Build » Build and Reload Game Logic compiles a C++ project's Source/ folder into its native GameLogic library and swaps the result into a running play session — the session keeps going, with the new code in it. The compile runs in the same Build window the export uses, in two steps: Compile, then Reload. The second one either happened or it did not, because compiled and running are different answers and the window has to be able to say which one it got to. Compiler warnings and errors are listed as they arrive; Build Again repeats the module build, not a project export. Outside Play mode it only builds. That is not a failure — the module that was just built is exactly what the next Play loads. Entering Play loads the built module, hands it the engine service tables and calls onStart; leaving Play calls onStop and unloads it. With no module built yet, the log says which menu item builds one. Other project languages get a note instead of a build: Lua, Python and HorizonCode script their gameplay in a language that needs no compiler. Toolchain — needs CMake and a C++ compiler, and engine headers to compile against. Preferences » Tools » Status shows what was found and can install what is missing. What the module can reach once it is loaded — physics, input, content and savegames, through the injected service tables — is described under Scripting » Native C++.",
+     "title": "Building Game Logic"
     },
     {
      "blocks": [
@@ -7488,6 +7679,23 @@
            "h": "export.html",
            "s": "l",
            "t": "Export ->"
+          },
+          {
+           "s": "",
+           "t": " · Build and Reload Game Logic — compiles a C++ project's "
+          },
+          {
+           "s": "c",
+           "t": "Source/"
+          },
+          {
+           "s": "",
+           "t": " and swaps it into the running play session. "
+          },
+          {
+           "h": "#game-logic",
+           "s": "l",
+           "t": "Game Logic ->"
           }
          ]
         ],
@@ -7567,7 +7775,7 @@
      ],
      "eyebrow": "Reference",
      "id": "menus",
-     "text": "Menu Items File New / Open / Close Project · New Scene, Open Scene…, Add Scene Additive…, Save Scene, Save Scene As… · Exit Edit Undo, Redo · Cut / Copy / Paste · Preferences View Toggle Fullscreen, Reset Layout · Performance Profiler, Environment · Level Script, Game Instance Assets Import Asset…, Refresh Assets Build Export Project… — profiles, target platform, compression, encryption, mod support, incremental packing, Compile HorizonCode. Export -> Help Documentation, About On macOS the same commands live in the native menu bar (CmdN, CmdO, CmdS, ShiftCmdS, Cmd,, CtrlCmdF …), plus the standard app and window menus.",
+     "text": "Menu Items File New / Open / Close Project · New Scene, Open Scene…, Add Scene Additive…, Save Scene, Save Scene As… · Exit Edit Undo, Redo · Cut / Copy / Paste · Preferences View Toggle Fullscreen, Reset Layout · Performance Profiler, Environment · Level Script, Game Instance Assets Import Asset…, Refresh Assets Build Export Project… — profiles, target platform, compression, encryption, mod support, incremental packing, Compile HorizonCode. Export -> · Build and Reload Game Logic — compiles a C++ project's Source/ and swaps it into the running play session. Game Logic -> Help Documentation, About On macOS the same commands live in the native menu bar (CmdN, CmdO, CmdS, ShiftCmdS, Cmd,, CtrlCmdF …), plus the standard app and window menus.",
      "title": "Menu Reference"
     },
     {
@@ -15987,17 +16195,574 @@
         },
         {
          "s": "",
-         "t": " interface and works with the world directly — full engine headers, no wrapper layer:"
+         "t": " interface. It links against nothing and includes exactly two engine headers, "
+        },
+        {
+         "s": "c",
+         "t": "<IGameLogic.h>"
+        },
+        {
+         "s": "",
+         "t": " for the interface and "
+        },
+        {
+         "s": "c",
+         "t": "<HorizonGameServices.h>"
+        },
+        {
+         "s": "",
+         "t": " for everything the engine can do for it:"
         }
        ]
       },
       {
        "k": "code",
-       "text": "class MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; }",
+       "text": "#include <IGameLogic.h>\n#include <HorizonGameServices.h>\n\n// Once, in one .cpp: receives the engine's service tables on load.\nHE_IMPLEMENT_ENGINE_SERVICES()\n\nclass MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; }",
        "title": "GameLogic.cpp"
       },
       {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Engine services"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "c",
+         "t": "HorizonWorld&"
+        },
+        {
+         "s": "",
+         "t": " the three methods receive is an opaque handle: the library compiles against "
+        },
+        {
+         "s": "c",
+         "t": "HE_Core/include"
+        },
+        {
+         "s": "",
+         "t": " only, so it can hold the reference and pass it on, but not call into it. Everything the module does to the engine crosses through "
+        },
+        {
+         "s": "b",
+         "t": "service tables"
+        },
+        {
+         "s": "",
+         "t": " instead — plain C function pointers the engine injects right after the library loads, wrapped in header-only "
+        },
+        {
+         "s": "c",
+         "t": "he::"
+        },
+        {
+         "s": "",
+         "t": " helpers that speak "
+        },
+        {
+         "s": "c",
+         "t": "std::string"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "c",
+         "t": "Vec3"
+        },
+        {
+         "s": "",
+         "t": ". Five namespaces, each with an "
+        },
+        {
+         "s": "c",
+         "t": "available()"
+        },
+        {
+         "s": "",
+         "t": " that says whether its table arrived:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Namespace"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What it reaches"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::save"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Save lifecycle ("
+          },
+          {
+           "s": "c",
+           "t": "create"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "load"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "write"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "close"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "exists"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "remove"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "list"
+          },
+          {
+           "s": "",
+           "t": ") and typed field access against the project's SaveGame Template. Struct fields cross as JSON and pair with the generated "
+          },
+          {
+           "s": "c",
+           "t": "Generated/GameTypes.h"
+          },
+          {
+           "s": "",
+           "t": " types."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::entity"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "findByName"
+          },
+          {
+           "s": "",
+           "t": ", plus "
+          },
+          {
+           "s": "c",
+           "t": "saveState"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "hasSavedState"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "applySavedState"
+          },
+          {
+           "s": "",
+           "t": " for entities carrying a Save State component."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::physics"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "raycast"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "sphereCast"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "overlapSphere"
+          },
+          {
+           "s": "",
+           "t": "; "
+          },
+          {
+           "s": "c",
+           "t": "addForce"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "addImpulse"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "addTorque"
+          },
+          {
+           "s": "",
+           "t": ", get/set velocity, "
+          },
+          {
+           "s": "c",
+           "t": "isGrounded"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "setPosition"
+          },
+          {
+           "s": "",
+           "t": " and "
+          },
+          {
+           "s": "c",
+           "t": "setPositionAndReset"
+          },
+          {
+           "s": "",
+           "t": ", world gravity."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::input"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "keyDown"
+          },
+          {
+           "s": "",
+           "t": " (SDL scancode names), mouse position / delta / buttons / scroll, gamepad connected / button / axis (Xbox names, sticks -1..+1), and the input mode ("
+          },
+          {
+           "s": "c",
+           "t": "setModeGameOnly"
+          },
+          {
+           "s": "",
+           "t": " and friends)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "he::content"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Asset "
+          },
+          {
+           "s": "i",
+           "t": "residency"
+          },
+          {
+           "s": "",
+           "t": ": "
+          },
+          {
+           "s": "c",
+           "t": "load"
+          },
+          {
+           "s": "",
+           "t": " a path into an "
+          },
+          {
+           "s": "c",
+           "t": "he::AssetId"
+          },
+          {
+           "s": "",
+           "t": ", then "
+          },
+          {
+           "s": "c",
+           "t": "unload"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "isLoaded"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "typeName"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "code",
+       "text": "if (he::input::keyDown(\"Space\") && he::physics::isGrounded(player))\n    he::physics::addImpulse(player, { 0.0f, 6.0f, 0.0f });\n\nconst he::RaycastHit hit = he::physics::raycast(eye, forward, 50.0f);\nif (hit.hit) he::save::setString(\"lastLookedAt\", std::to_string(hit.entity));",
+       "title": "PlayerLevelScript.cpp"
+      },
+      {
        "items": [
+        [
+         {
+          "s": "b",
+          "t": "Never injected is a state, not an error"
+         },
+         {
+          "s": "",
+          "t": " — a module that runs under an engine which did not hand over a table gets safe no-ops with default return values, never a crash. The engine says so in the log; "
+         },
+         {
+          "s": "c",
+          "t": "available()"
+         },
+         {
+          "s": "",
+          "t": " lets the module say so too."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Same semantics as the scripts"
+         },
+         {
+          "s": "",
+          "t": " — every row is routed through the same engine API that backs "
+         },
+         {
+          "s": "c",
+          "t": "horizon"
+         },
+         {
+          "s": "",
+          "t": " in Lua and Python and the HorizonCode nodes, so a rule holds everywhere it applies. Including the awkward one: a raycast reports a "
+         },
+         {
+          "s": "i",
+          "t": "world"
+         },
+         {
+          "s": "",
+          "t": " point while "
+         },
+         {
+          "s": "c",
+          "t": "setPosition"
+         },
+         {
+          "s": "",
+          "t": " takes a "
+         },
+         {
+          "s": "i",
+          "t": "local"
+         },
+         {
+          "s": "",
+          "t": " one, exactly as in the script API. An entity is a "
+         },
+         {
+          "s": "c",
+          "t": "uint32_t"
+         },
+         {
+          "s": "",
+          "t": " — the same number a script reads as "
+         },
+         {
+          "s": "c",
+          "t": "self.entityId"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Only values cross"
+         },
+         {
+          "s": "",
+          "t": " — there is no call that hands back an asset object, on purpose: engine asset pointers are valid only until the next load. "
+         },
+         {
+          "s": "c",
+          "t": "he::content"
+         },
+         {
+          "s": "",
+          "t": " decides what is "
+         },
+         {
+          "s": "i",
+          "t": "resident"
+         },
+         {
+          "s": "",
+          "t": ", so the next scene's meshes can be paid for before they are needed."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "The ABI only grows at the end"
+         },
+         {
+          "s": "",
+          "t": " — each table carries its own version and is only ever appended to, and a module accepts a table whose version is at least the one it was built against. An older module keeps working under a newer engine; a newer module under an older engine loses the calls that engine never had, and nothing else."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Building and reloading"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "From the editor"
+         },
+         {
+          "s": "",
+          "t": " — "
+         },
+         {
+          "h": "editor.html#game-logic",
+          "s": "l",
+          "t": "Build » Build and Reload Game Logic"
+         },
+         {
+          "s": "",
+          "t": " compiles "
+         },
+         {
+          "s": "c",
+          "t": "Source/"
+         },
+         {
+          "s": "",
+          "t": " and swaps the result into a running preview without ending it. Outside Play mode it only builds, and that module is what the next Play loads."
+         }
+        ],
         [
          {
           "s": "b",
@@ -16005,7 +16770,7 @@
          },
          {
           "s": "",
-          "t": " — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives."
+          "t": " — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. The service tables are re-injected with every swap, so the fresh image starts out connected."
          }
         ],
         [
@@ -16056,7 +16821,7 @@
      ],
      "eyebrow": "Native",
      "id": "cpp",
-     "text": "C++ projects ship gameplay as one native GameLogic shared library. The editor scaffolds a compilable Source/ tree at project creation — game runtime, GameInstance, a per-scene level script and a CMakeLists.txt — visible as its own root in the Content Browser, with an in-editor class editor and a New C++ Class workflow. The library implements the three-method IGameLogic interface and works with the world directly — full engine headers, no wrapper layer: GameLogic.cpp class MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Hot reload — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. Toolchain — needs CMake and a C++ compiler; the editor checks at startup and can install them for you (Preferences » Tools » Status). Shipping — the export copies GameLogic.dll/.dylib/.so next to the game executable. Export ->",
+     "text": "C++ projects ship gameplay as one native GameLogic shared library. The editor scaffolds a compilable Source/ tree at project creation — game runtime, GameInstance, a per-scene level script and a CMakeLists.txt — visible as its own root in the Content Browser, with an in-editor class editor and a New C++ Class workflow. The library implements the three-method IGameLogic interface. It links against nothing and includes exactly two engine headers, <IGameLogic.h> for the interface and <HorizonGameServices.h> for everything the engine can do for it: GameLogic.cpp #include <IGameLogic.h>\n#include <HorizonGameServices.h>\n\n// Once, in one .cpp: receives the engine's service tables on load.\nHE_IMPLEMENT_ENGINE_SERVICES()\n\nclass MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Engine services The HorizonWorld& the three methods receive is an opaque handle: the library compiles against HE_Core/include only, so it can hold the reference and pass it on, but not call into it. Everything the module does to the engine crosses through service tables instead — plain C function pointers the engine injects right after the library loads, wrapped in header-only he:: helpers that speak std::string and Vec3. Five namespaces, each with an available() that says whether its table arrived: Namespace What it reaches he::save Save lifecycle (create / load / write / close / exists / remove / list) and typed field access against the project's SaveGame Template. Struct fields cross as JSON and pair with the generated Generated/GameTypes.h types. he::entity findByName, plus saveState / hasSavedState / applySavedState for entities carrying a Save State component. he::physics raycast, sphereCast, overlapSphere; addForce / addImpulse / addTorque, get/set velocity, isGrounded, setPosition and setPositionAndReset, world gravity. he::input keyDown (SDL scancode names), mouse position / delta / buttons / scroll, gamepad connected / button / axis (Xbox names, sticks -1..+1), and the input mode (setModeGameOnly and friends). he::content Asset residency: load a path into an he::AssetId, then unload / isLoaded / typeName. PlayerLevelScript.cpp if (he::input::keyDown(\"Space\") && he::physics::isGrounded(player))\n    he::physics::addImpulse(player, { 0.0f, 6.0f, 0.0f });\n\nconst he::RaycastHit hit = he::physics::raycast(eye, forward, 50.0f);\nif (hit.hit) he::save::setString(\"lastLookedAt\", std::to_string(hit.entity)); Never injected is a state, not an error — a module that runs under an engine which did not hand over a table gets safe no-ops with default return values, never a crash. The engine says so in the log; available() lets the module say so too. Same semantics as the scripts — every row is routed through the same engine API that backs horizon in Lua and Python and the HorizonCode nodes, so a rule holds everywhere it applies. Including the awkward one: a raycast reports a world point while setPosition takes a local one, exactly as in the script API. An entity is a uint32_t — the same number a script reads as self.entityId. Only values cross — there is no call that hands back an asset object, on purpose: engine asset pointers are valid only until the next load. he::content decides what is resident, so the next scene's meshes can be paid for before they are needed. The ABI only grows at the end — each table carries its own version and is only ever appended to, and a module accepts a table whose version is at least the one it was built against. An older module keeps working under a newer engine; a newer module under an older engine loses the calls that engine never had, and nothing else. Building and reloading From the editor — Build » Build and Reload Game Logic compiles Source/ and swaps the result into a running preview without ending it. Outside Play mode it only builds, and that module is what the next Play loads. Hot reload — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. The service tables are re-injected with every swap, so the fresh image starts out connected. Toolchain — needs CMake and a C++ compiler; the editor checks at startup and can install them for you (Preferences » Tools » Status). Shipping — the export copies GameLogic.dll/.dylib/.so next to the game executable. Export ->",
      "title": "Native C++"
     }
    ],
@@ -16423,6 +17188,34 @@
          [
           {
            "s": "b",
+           "t": "Animation Layers"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Poses laid on top of any of the above, through a bone mask — an upper body with a job of its own."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Inverse Kinematics"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Correcting the finished pose against the world — feet onto the ground, head onto a target."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
            "t": "Property Animator"
           }
          ],
@@ -16474,6 +17267,226 @@
        "r": [
         {
          "s": "",
+         "t": "Blend spaces"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A "
+        },
+        {
+         "s": "b",
+         "t": "Blend Space"
+        },
+        {
+         "s": "",
+         "t": " is an asset of its own: animation clips placed as points in a parameter space, and a mix of whichever points the parameters are currently standing between. One axis ("
+        },
+        {
+         "s": "i",
+         "t": "1D"
+        },
+        {
+         "s": "",
+         "t": ") is speed into walk / jog / run; two axes ("
+        },
+        {
+         "s": "i",
+         "t": "2D"
+        },
+        {
+         "s": "",
+         "t": ") are speed and direction into a whole strafe set. Its editor is a diagram with draggable dots and a preview cursor that computes its weights with the same function the running game uses."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "It goes wherever a clip goes — a state of a state machine or an animation layer can pose from one instead of from a single clip. All of a space's samples run on "
+        },
+        {
+         "s": "b",
+         "t": "one shared phase"
+        },
+        {
+         "s": "",
+         "t": " rather than on their own seconds, so clips of different length are always read at the same point in their own cycle and a blend never crosses the feet. The sampler clamps to the outermost sample and never extrapolates; at most four samples are evaluated at once."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Animation layers and bone masks"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "b",
+         "t": "Animation Layers"
+        },
+        {
+         "s": "",
+         "t": " component lays further poses on top of whatever posed the entity — a clip, a two-clip blend or a state machine, it does not care which. Each layer has its own source (a clip or a blend space), its own playhead, speed and weight, and a "
+        },
+        {
+         "s": "b",
+         "t": "Bone Mask"
+        },
+        {
+         "s": "",
+         "t": " saying which joints it may touch. A reload on the arms while the legs keep running is one layer plus one mask."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A layer is either "
+        },
+        {
+         "s": "i",
+         "t": "Override"
+        },
+        {
+         "s": "",
+         "t": ", replacing the pose underneath wherever its mask allows, or "
+        },
+        {
+         "s": "i",
+         "t": "Additive"
+        },
+        {
+         "s": "",
+         "t": ", adding its clip's difference against a reference pose on top of what is already there — a breathing wobble or a limp that keeps the run running while it leans on it. Additive works in local joint space; there is no mesh-space additive yet. Layers are applied in list order, each onto the result of the one before it, and gameplay addresses them by name ("
+        },
+        {
+         "s": "c",
+         "t": "animator.setLayerWeight"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "animator.playLayer"
+        },
+        {
+         "s": "",
+         "t": ")."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A bone mask is a list of joint "
+        },
+        {
+         "s": "i",
+         "t": "names"
+        },
+        {
+         "s": "",
+         "t": " with a weight each, not a skeleton: it works on every rig that spells its joints the same way. It is an allow-list — a joint that is not in it has weight 0 — and weights below 1 down a few spine joints are what fades a masked layer into the base pose instead of ending it at a hard edge across the waist."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Inverse kinematics"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "b",
+         "t": "Inverse Kinematics"
+        },
+        {
+         "s": "",
+         "t": " component corrects the finished pose against the world the character is standing in. Two independent halves: "
+        },
+        {
+         "s": "b",
+         "t": "foot placement"
+        },
+        {
+         "s": "",
+         "t": " puts each foot on the ground actually under it — a ray down from the foot, a two-bone solve up the leg, the foot tilted to the surface normal within a pitch and roll limit, and the pelvis lowered by the deepest foot's drop so the low leg does not have to overextend — and "
+        },
+        {
+         "s": "b",
+         "t": "look-at"
+        },
+        {
+         "s": "",
+         "t": " turns a chain of joints (spine, neck, head) towards a target entity or a world point, within a yaw and pitch limit, with the turn spread over the chain by weight."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Both are smoothed over time, because the ground under a foot really does jump by a whole step height in one frame at a stair edge; a character that is teleported is detected as such and snaps instead of easing. Foot placement needs a physics world, so it runs in play mode only and does nothing where there is no collider; look-at runs in the editor too."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "The order a pose is built in"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Each stage holds whatever the one before it came up with, and the order is fixed: the animator (clip, blend or state machine) decides the pose, root motion is taken out of it and turned into entity movement, the layer stack is applied on top of what is left, and inverse kinematics bends the result to the world. That order is what makes the four safe to add one at a time — and it is why an additive layer that moves the root joint moves the pose rather than the character."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
          "t": "Skeletal Mesh editor"
         }
        ]
@@ -16498,7 +17511,7 @@
      ],
      "eyebrow": "Move",
      "id": "animation",
-     "text": "Skeletal meshes are skinned on the GPU (up to 128 joints, four weighted influences per vertex) and posed by a family of animator components — from a single looping clip to a full state machine. All animation systems tick in the editor too, so previews work without pressing Play. Tool Use it for Animator Playing one clip — speed, time, looping. Animator Blend Mixing two clips with a blend alpha (e.g. walk <-> run). Animator State Machine Full character logic — see below. Property Animator Keyframed transform and material properties — cutscenes, moving platforms, pulsing materials. Animator State Machine A standalone asset edited on the shared graph canvas: states are nodes (each with an animation clip and a looping flag), transitions are links with a condition — a named float parameter compared against a threshold (greater / less / equal) — and a crossfade duration. The component on the entity references the asset and holds the live parameter values; gameplay code drives the parameters and the machine blends states automatically. One asset can drive any number of characters. Skeletal Mesh editor Double-click a skeletal mesh asset for a dedicated tab: the joint hierarchy as a tree, an orbit-camera preview with a Show Skeleton bone overlay, and an optional clip slot with play/pause and time scrubbing — inspect a rig without touching any scene.",
+     "text": "Skeletal meshes are skinned on the GPU (up to 128 joints, four weighted influences per vertex) and posed by a family of animator components — from a single looping clip to a full state machine. All animation systems tick in the editor too, so previews work without pressing Play. Tool Use it for Animator Playing one clip — speed, time, looping. Animator Blend Mixing two clips with a blend alpha (e.g. walk <-> run). Animator State Machine Full character logic — see below. Animation Layers Poses laid on top of any of the above, through a bone mask — an upper body with a job of its own. Inverse Kinematics Correcting the finished pose against the world — feet onto the ground, head onto a target. Property Animator Keyframed transform and material properties — cutscenes, moving platforms, pulsing materials. Animator State Machine A standalone asset edited on the shared graph canvas: states are nodes (each with an animation clip and a looping flag), transitions are links with a condition — a named float parameter compared against a threshold (greater / less / equal) — and a crossfade duration. The component on the entity references the asset and holds the live parameter values; gameplay code drives the parameters and the machine blends states automatically. One asset can drive any number of characters. Blend spaces A Blend Space is an asset of its own: animation clips placed as points in a parameter space, and a mix of whichever points the parameters are currently standing between. One axis (1D) is speed into walk / jog / run; two axes (2D) are speed and direction into a whole strafe set. Its editor is a diagram with draggable dots and a preview cursor that computes its weights with the same function the running game uses. It goes wherever a clip goes — a state of a state machine or an animation layer can pose from one instead of from a single clip. All of a space's samples run on one shared phase rather than on their own seconds, so clips of different length are always read at the same point in their own cycle and a blend never crosses the feet. The sampler clamps to the outermost sample and never extrapolates; at most four samples are evaluated at once. Animation layers and bone masks The Animation Layers component lays further poses on top of whatever posed the entity — a clip, a two-clip blend or a state machine, it does not care which. Each layer has its own source (a clip or a blend space), its own playhead, speed and weight, and a Bone Mask saying which joints it may touch. A reload on the arms while the legs keep running is one layer plus one mask. A layer is either Override, replacing the pose underneath wherever its mask allows, or Additive, adding its clip's difference against a reference pose on top of what is already there — a breathing wobble or a limp that keeps the run running while it leans on it. Additive works in local joint space; there is no mesh-space additive yet. Layers are applied in list order, each onto the result of the one before it, and gameplay addresses them by name (animator.setLayerWeight, animator.playLayer). A bone mask is a list of joint names with a weight each, not a skeleton: it works on every rig that spells its joints the same way. It is an allow-list — a joint that is not in it has weight 0 — and weights below 1 down a few spine joints are what fades a masked layer into the base pose instead of ending it at a hard edge across the waist. Inverse kinematics The Inverse Kinematics component corrects the finished pose against the world the character is standing in. Two independent halves: foot placement puts each foot on the ground actually under it — a ray down from the foot, a two-bone solve up the leg, the foot tilted to the surface normal within a pitch and roll limit, and the pelvis lowered by the deepest foot's drop so the low leg does not have to overextend — and look-at turns a chain of joints (spine, neck, head) towards a target entity or a world point, within a yaw and pitch limit, with the turn spread over the chain by weight. Both are smoothed over time, because the ground under a foot really does jump by a whole step height in one frame at a stair edge; a character that is teleported is detected as such and snaps instead of easing. Foot placement needs a physics world, so it runs in play mode only and does nothing where there is no collider; look-at runs in the editor too. The order a pose is built in Each stage holds whatever the one before it came up with, and the order is fixed: the animator (clip, blend or state machine) decides the pose, root motion is taken out of it and turned into entity movement, the layer stack is applied on top of what is left, and inverse kinematics bends the result to the world. That order is what makes the four safe to add one at a time — and it is why an additive layer that moves the root joint moves the pose rather than the character. Skeletal Mesh editor Double-click a skeletal mesh asset for a dedicated tab: the joint hierarchy as a tree, an orbit-camera preview with a Show Skeleton bone overlay, and an optional clip slot with play/pause and time scrubbing — inspect a rig without touching any scene.",
      "title": "Animation"
     },
     {

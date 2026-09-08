@@ -2549,6 +2549,48 @@ CollabDocSync::DocBindings HorizonCodeClassPanel::collabDocs(const std::string& 
 	return out;
 }
 
+// ── Addressing a held class by its content-relative path ─────────────────────
+// The state map is keyed by the TAB's path (what EditorUI hands render), while
+// everything outside the editor speaks content-relative. The ClassState knows
+// both, so the translation is a scan over the handful of open tabs rather than
+// a second index to keep honest.
+namespace
+{
+ClassState* classStateByContentPath(const std::string& contentPath)
+{
+	ClassState* hit = nullptr;
+	if (contentPath.empty()) return nullptr;
+	s_classStates.forEach([&](const std::string&, ClassState& st) {
+		if (!hit && st.loaded && st.path == contentPath) hit = &st;
+	});
+	return hit;
+}
+} // namespace
+
+HorizonCode::Graph* HorizonCodeClassPanel::liveGraph(const std::string& contentPath)
+{
+	ClassState* st = classStateByContentPath(contentPath);
+	return st ? &st->graph : nullptr;
+}
+
+void HorizonCodeClassPanel::markDirty(const std::string& contentPath)
+{
+	if (ClassState* st = classStateByContentPath(contentPath)) st->dirty = true;
+}
+
+void HorizonCodeClassPanel::appendHeld(std::vector<HorizonCodeClassPanel::Held>& out)
+{
+	s_classStates.forEach([&out](const std::string&, const ClassState& st) {
+		if (st.loaded && !st.path.empty()) out.push_back({ st.path, st.dirty });
+	});
+}
+
+bool HorizonCodeClassPanel::saveByContentPath(AppContext& ctx, const std::string& contentPath)
+{
+	ClassState* st = classStateByContentPath(contentPath);
+	return st && saveClassState(*st, ctx);
+}
+
 bool HorizonCodeClassPanel::reloadFromDisk(const std::string& assetPath)
 {
 	// A collaboration peer's change just landed in the file. Dropping `loaded`
