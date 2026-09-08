@@ -120,6 +120,7 @@ add_executable(HorizonEditor WIN32
 	AudioEditorPanel.cpp
 	EditorInput.cpp
 	ExportDialogPanel.cpp
+	GameLogicBuildPanel.cpp
 	BuildProgressDialog.cpp
 	ContentBrowserPanel.cpp
 	NotificationStore.cpp

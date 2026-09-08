@@ -6209,6 +6209,7 @@ AppContext EditorApplication::makeContext()
 		.toolchainInstallOk  = m_installFinished.load(std::memory_order_acquire)
 		                           && m_installAttempted.load(std::memory_order_acquire)
 		                           && m_installExit.load(std::memory_order_acquire) == 0,
+		.reloadGameLogic     = [this]{ return reloadGameLogic(); },
 		.gitProbe            = m_gitChecked.load(std::memory_order_acquire)
 		                           ? &m_gitProbe : nullptr,
 		.recheckGit          = [this]{ startGitProbe(); },
@@ -6616,6 +6617,14 @@ void EditorApplication::setPlayMode(bool play)
 		// whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
 
+		// Native C++ game logic, before the scripts and before the level's
+		// OnLevelLoaded — the order the packaged game has (GameApplication:
+		// logic, then startScripts, then fireLevelLoaded). Loaded HERE and not
+		// at project open, because the base loop ticks whatever the loader holds
+		// as soon as a world exists: a module loaded outside play mode would
+		// have fired its onStart on the scene somebody is building.
+		startGameLogic();
+
 		// Lua/Python entity scripts start AFTER the hosts, the same order the
 		// packaged game has (GameApplication: hosts, then startScripts). PIE used
 		// to start them first, so an onStart asking horizon.player.controller()
@@ -6679,6 +6688,13 @@ void EditorApplication::setPlayMode(bool play)
 	}
 	else
 	{
+		// The native module goes FIRST: its onStop runs against the world it was
+		// started on, and everything below this line takes that world apart. The
+		// module is unloaded rather than parked, so outside a play session
+		// logicLoader().logic() is null and the base loop has nothing to tick.
+		if (logicLoader().isLoaded())
+			logicLoader().unload(*m_editorWorld);
+
 		// Player instances go down first (their Destruct may still reference the
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
@@ -7127,6 +7143,86 @@ float EditorApplication::GameLogicDeltaTime(float rawDt)
 	return m_isPlaying ? HE::api::time::deltaTime() : 0.0f;
 }
 
+// ── Native C++ game logic in PIE ────────────────────────────────────────────
+
+void EditorApplication::bindGameServices()
+{
+	// Resolvers, not pointers, for the two things a play session replaces: the
+	// physics world is rebuilt on every Play and the editor world is what a
+	// scene switch clears. The ContentManager belongs to the Application and
+	// outlives both, so it is bound flat — the same split GameApplication makes,
+	// and the reason it is worth repeating is that getting it wrong leaves a
+	// dangling pointer inside a loaded dylib.
+	m_gameServicesBinding.world   = [this]() { return m_editorWorld.get(); };
+	m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
+	m_gameServicesBinding.content = &contentManager();
+	HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
+	HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
+	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
+	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
+	m_engineServices            = {};
+	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
+	m_engineServices.save       = &m_saveServices;
+	m_engineServices.physics    = &m_physicsServices;
+	m_engineServices.input      = &m_inputServices;
+	m_engineServices.content    = &m_contentServices;
+}
+
+std::filesystem::path EditorApplication::builtGameLogicPath()
+{
+	if (!m_projectLoaded) return {};
+	const auto& proj = m_projectManager.currentProject();
+	if (proj.scriptLanguage != ProjectScriptLanguage::Cpp) return {};
+	return HE::hccg::builtGameLogic(proj.path);
+}
+
+void EditorApplication::startGameLogic()
+{
+	if (!m_isPlaying || !m_editorWorld) return;
+	const std::filesystem::path lib = builtGameLogicPath();
+	if (lib.empty())
+	{
+		// Only worth a word in a project that HAS native game logic — anywhere
+		// else there is nothing missing.
+		if (m_projectLoaded &&
+		    m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
+			HE_LOG_INFO(Editor, "%s",
+				"EditorApplication: no built GameLogic module — run Build \xe2\x96\xb8 "
+				"Build and Reload Game Logic to compile the project's Source/ folder");
+		return;
+	}
+	bindGameServices();
+	if (logicLoader().loadAndStart(lib, *m_editorWorld, &m_engineServices))
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: native game logic started (" +
+			 lib.filename().string() + ")").c_str());
+}
+
+bool EditorApplication::reloadGameLogic()
+{
+	// No session, nothing to swap into. Not a failure: the module that was just
+	// built is exactly what the next Play loads.
+	if (!m_isPlaying || !m_editorWorld) return false;
+	const std::filesystem::path lib = builtGameLogicPath();
+	if (lib.empty()) return false;
+
+	bindGameServices();
+	// One call, because the sequence is the trap: reload() alone hands the fresh
+	// image no service tables and every he::* call in it becomes a silent no-op
+	// (GameLogicLoader.h).
+	if (!logicLoader().reloadAndStart(lib, *m_editorWorld, &m_engineServices))
+	{
+		HE_LOG_ERROR(Editor, "%s",
+			("EditorApplication: game logic reload failed — nothing is loaded now (" +
+			 lib.string() + ")").c_str());
+		return false;
+	}
+	HE_LOG_INFO(Editor, "%s",
+		("EditorApplication: game logic reloaded into the running session (" +
+		 lib.filename().string() + ")").c_str());
+	return true;
+}
+
 void EditorApplication::OnShutdown()
 {
 	// Give the network back what a session took, FIRST and synchronously: the
@@ -7138,8 +7234,18 @@ void EditorApplication::OnShutdown()
 	m_collab.shutdown();
 
 	// A project export may still be packing on its worker thread — wait for it
-	// (destroying a joinable std::thread would terminate the process).
+	// (destroying a joinable std::thread would terminate the process). Same rule
+	// for the game-logic compile, which is a second worker on the same window.
 	EditorUI::joinPendingExport();
+	EditorUI::joinPendingGameLogicBuild();
+
+	// Quitting straight out of a play session: the native module has to be let
+	// go while the world it was started on is still there, because unload() runs
+	// its onStop against that world. m_editorWorld is a member of THIS object
+	// and the loader a member of the base — the base is destroyed last, so
+	// waiting for either destructor would mean calling onStop on a dead world.
+	if (logicLoader().isLoaded() && m_editorWorld)
+		logicLoader().unload(*m_editorWorld);
 
 	// Which docked panels were open. Written as it changes during the session;
 	// this catches a toggle made in the last half-second before quitting. Before

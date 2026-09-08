@@ -20,6 +20,7 @@
 #include "EditorInput.h"    // pointer-device grammar frame cache
 #include "AnimatorStateMachineEditorPanel.h"
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
+#include "GameLogicBuildPanel.h"         // Build > Build and Reload Game Logic (C++ projects)
 #include "ContentBrowserPanel.h"         // bottom dock: folder tree + asset grid
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
@@ -317,6 +318,11 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+}
+
+void EditorUI::joinPendingGameLogicBuild()
+{
+	GameLogicBuildPanel::joinPendingBuild();
 }
 
 void EditorUI::savePanelVisibility(AppContext& ctx)
@@ -1350,6 +1356,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ImportAsset:     triggerImportAsset();                                  break;
 			case MC::RefreshAssets:   if (ctx.projectLoaded) ctx.contentRefreshPending = true; break;
 			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
+			// start() refuses (with a notification) for a project that has no
+			// native module — the native menu has no per-language gate, so the
+			// row is always live and the answer comes from the action.
+			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
 			case MC::Documentation:       DocsPanel::open();                                 break;
@@ -1536,6 +1546,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		HE::Ed::Help::Scope helpScope("Build");
 		if (EditorWidgets::menuItem("Export Project..."))
 			openExportDialog();
+		// Only a C++ project has a native module to build. Greyed rather than
+		// hidden: unlike an application project's missing scenes, "this project
+		// scripts its gameplay in another language" is worth saying, and the
+		// help entry is where it says it.
+		if (EditorWidgets::menuItem("Build and Reload Game Logic", nullptr, false,
+		                            GameLogicBuildPanel::available(ctx)))
+			GameLogicBuildPanel::start(ctx);
 		ImGui::EndMenu();
 	}
 	if (ImGui::BeginMenu("Help"))
@@ -1599,6 +1616,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     // ── Export Project modal ────────────────────────────────────────────────
     ExportDialogPanel::render(ctx);
+    // After the export panel, not before: both poll the Build window's pending
+    // action, and each takes only its own kind. A defined order means the same
+    // frame always resolves the same way.
+    GameLogicBuildPanel::render(ctx);
 
     // ── Hosting-a-session confirmation ──────────────────────────────────────
     // Ahead of the unsaved-changes prompt, because it is the question with the

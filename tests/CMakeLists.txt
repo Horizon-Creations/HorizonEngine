@@ -105,6 +105,7 @@ add_executable(he_tests
     test_weather.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
+    test_gamelogic_build.cpp
     test_crypto_x25519.cpp
     test_net_bitstream.cpp
     test_net_loopback.cpp
@@ -427,6 +428,13 @@ target_compile_definitions(he_tests PRIVATE
 # have, which a defaulted operator== already nearly was — would fail to compile
 # here instead of failing in a user's project. test_gamelogic_services.cpp loads
 # it and drives the injected physics, input and content tables through it.
+# The engine checkout, for test_gamelogic_build.cpp: it runs the editor's own
+# game-logic build against a scaffold CMakeLists, and that file wants exactly
+# one thing — HORIZON_ENGINE_DIR. In a deployed editor the same value comes out
+# of engineRootFromSdk(); here the build system already knows it.
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_ENGINE_ROOT="${CMAKE_SOURCE_DIR}")
+
 add_library(test_gamelogic_services SHARED fixtures/test_gamelogic_services.cpp)
 target_include_directories(test_gamelogic_services PRIVATE
     "${CMAKE_SOURCE_DIR}/src/HE_Core/include")

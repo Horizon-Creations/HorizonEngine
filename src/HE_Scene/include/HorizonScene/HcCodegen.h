@@ -177,4 +177,69 @@ struct BuildOutcome
 BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
                         const std::function<void(const std::string& line)>& onLine = {});
 
+// The same cmake run, told what it is building. The overload above is the
+// HorizonCode-codegen case expressed through this one; the editor's
+// "Build and Reload" uses it for a project's own Source/ folder, which produces
+// a DIFFERENTLY NAMED library (GameLogic.dylib — the scaffold sets PREFIX "", so
+// there is no `lib` in front) in a build directory that must not sit inside the
+// folder the project's CMakeLists globs its sources from.
+struct DylibBuildSpec
+{
+    std::filesystem::path    sourceDir;        // -S: the folder holding CMakeLists.txt
+    std::filesystem::path    buildDir;         // -B; empty ⇒ sourceDir/"build"
+    std::filesystem::path    logFile;          // empty ⇒ buildDir/"build.log"
+    // Looked for under buildDir and buildDir/Release, in this order. Empty ⇒ the
+    // three HorizonCodeGen names.
+    std::vector<std::string> artifactNames;
+    // Extra cmake cache entries as "NAME=value" (no -D). Everything the project
+    // being built needs to find its headers goes here — the caller decides,
+    // because a generated codegen project and a user's game project are told
+    // about the engine in different ways.
+    std::vector<std::string> defines;
+    // What the "nothing was produced" message calls the missing library.
+    std::string              what = "HorizonCodeGen library";
+};
+BuildOutcome buildDylib(const DylibBuildSpec& spec,
+                        const std::function<void(const std::string& line)>& onLine = {});
+
+// Where buildDylib would find an already-built artifact, without building one:
+// the same two directories (flat, then Release/) and the same name list. Empty
+// path when none of them is there. The editor needs this to load a module that
+// was built earlier in the session — or in a previous one.
+std::filesystem::path findBuiltArtifact(const std::filesystem::path& buildDir,
+                                        const std::vector<std::string>& artifactNames);
+
+// ── A C++ project's native GameLogic module ─────────────────────────────────
+// Where it is, what it is called and how it is built. It lives HERE rather than
+// in the editor panel that has the button, because "how this project's module is
+// built" is one answer that the build path, the play-mode loader and the test
+// that compiles a real scaffold all have to give identically. Every function
+// takes the .heproj FILE (ProjectManager::Project::path), not its folder.
+
+// GameLogic.{dylib,so,dll} — no `lib` prefix: the scaffold sets PREFIX "" so the
+// engine finds a library by the one name it looks for.
+const std::vector<std::string>& gameLogicArtifactNames();
+// <project>/Source — the folder the scaffold wrote, holding the CMakeLists that
+// globs it.
+std::filesystem::path gameLogicSourceDir(const std::filesystem::path& projectFile);
+// <project>/Source/build — the SAME directory the scaffold's README tells a user
+// to configure by hand, deliberately: one cmake cache, and a module built in a
+// terminal is the one the editor then loads.
+std::filesystem::path gameLogicBuildDir(const std::filesystem::path& projectFile);
+// The built module, or empty when nothing has been built yet.
+std::filesystem::path builtGameLogic(const std::filesystem::path& projectFile);
+
+// The engine ROOT a scaffold CMakeLists needs as HORIZON_ENGINE_DIR (it looks
+// for ${HORIZON_ENGINE_DIR}/src/HE_Core/include). Recovered from the SDK's own
+// include list: the entry that IS that directory names the root three parents
+// up. Empty when there is no such entry — a staged SDK has a flat include/ with
+// no src/ layout, and a caller that gets an empty path must refuse the build
+// rather than configure a project that cannot find its one header.
+std::filesystem::path engineRootFromSdk(const SdkInfo& sdk);
+
+// The build a "Build and Reload" runs, as data. `engineRoot` comes from
+// engineRootFromSdk (or is a checkout root, in a test).
+DylibBuildSpec gameLogicSpec(const std::filesystem::path& projectFile,
+                             const std::filesystem::path& engineRoot);
+
 } // namespace HE::hccg

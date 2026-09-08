@@ -3810,17 +3810,20 @@ SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir)
 }
 
 namespace {
-// Quote a path for the shell command line (v1: std::system on a worker thread).
-std::string shq(const std::filesystem::path& p)
+// Quote one argument for the shell command line (v1: std::system on a worker
+// thread). The string overload exists for arguments that are not paths but
+// CONTAIN one — a "-DNAME=<path>" cmake define has to survive as a single word.
+std::string shq(const std::string& s)
 {
 #if defined(_WIN32)
-    return "\"" + p.string() + "\"";
+    return "\"" + s + "\"";
 #else
-    std::string s = p.string(), out = "'";
+    std::string out = "'";
     for (const char c : s) { if (c == '\'') out += "'\\''"; else out += c; }
     return out + "'";
 #endif
 }
+std::string shq(const std::filesystem::path& p) { return shq(p.string()); }
 
 // macOS/Linux apps launched from Finder/Launchpad (a packaged .app, Spotlight, the
 // Dock) inherit a minimal PATH — typically "/usr/bin:/bin:/usr/sbin:/sbin" — that
@@ -4149,21 +4152,89 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
     return r;
 }
 
+std::filesystem::path findBuiltArtifact(const std::filesystem::path& buildDir,
+                                        const std::vector<std::string>& artifactNames)
+{
+    namespace fs = std::filesystem;
+    // Single-config generators put the library flat in the build dir; MSVC and
+    // Xcode put it under the configuration's own folder.
+    for (const std::string& n : artifactNames)
+        for (const fs::path& dir : { buildDir, buildDir / "Release" })
+        {
+            std::error_code ec;
+            if (fs::exists(dir / n, ec)) return dir / n;
+        }
+    return {};
+}
+
+const std::vector<std::string>& gameLogicArtifactNames()
+{
+    static const std::vector<std::string> kNames = {
+        "GameLogic.dylib", "GameLogic.so", "GameLogic.dll" };
+    return kNames;
+}
+
+std::filesystem::path gameLogicSourceDir(const std::filesystem::path& projectFile)
+{
+    if (projectFile.empty()) return {};
+    return projectFile.parent_path() / "Source";
+}
+
+std::filesystem::path gameLogicBuildDir(const std::filesystem::path& projectFile)
+{
+    const std::filesystem::path src = gameLogicSourceDir(projectFile);
+    return src.empty() ? src : src / "build";
+}
+
+std::filesystem::path builtGameLogic(const std::filesystem::path& projectFile)
+{
+    const std::filesystem::path dir = gameLogicBuildDir(projectFile);
+    if (dir.empty()) return {};
+    return findBuiltArtifact(dir, gameLogicArtifactNames());
+}
+
+std::filesystem::path engineRootFromSdk(const SdkInfo& sdk)
+{
+    for (const std::filesystem::path& inc : sdk.includeDirs)
+    {
+        if (inc.filename() != "include") continue;
+        const std::filesystem::path core = inc.parent_path();   // …/HE_Core
+        if (core.filename() != "HE_Core") continue;
+        const std::filesystem::path src = core.parent_path();   // …/src
+        if (src.filename() != "src") continue;
+        return src.parent_path();
+    }
+    return {};
+}
+
+DylibBuildSpec gameLogicSpec(const std::filesystem::path& projectFile,
+                             const std::filesystem::path& engineRoot)
+{
+    DylibBuildSpec spec;
+    spec.sourceDir     = gameLogicSourceDir(projectFile);
+    spec.buildDir      = gameLogicBuildDir(projectFile);
+    // Inside the build directory, not next to the sources: Source/ is a folder
+    // the user reads and the CMakeLists globs, and a build log is neither.
+    spec.logFile       = spec.buildDir.empty() ? spec.buildDir : spec.buildDir / "build.log";
+    spec.artifactNames = gameLogicArtifactNames();
+    // The ONE thing the scaffold's CMakeLists asks for. Deliberately not the SDK
+    // include list the codegen build passes: that list carries glm, and a game
+    // project compiles against <HE_Core/include> alone — letting it reach glm in
+    // the editor would give code that stops building the moment anyone builds it
+    // by hand.
+    spec.defines       = { "HORIZON_ENGINE_DIR=" + engineRoot.string() };
+    spec.what          = "GameLogic library";
+    return spec;
+}
+
 BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
                         const std::function<void(const std::string& line)>& onLine)
 {
-    namespace fs = std::filesystem;
     BuildOutcome out;
     out.logFile = genDir / "build.log";
     if (!sdk.valid())
     {
         out.message = "no codegen SDK found (HE_HCGEN_SDK, <editor>/SDK, he_sdk_config.json)";
-        return out;
-    }
-    const std::string cmake = resolveCmake();
-    if (cmake.empty())
-    {
-        out.message = "cmake not found (bundled next to the editor or on PATH)";
         return out;
     }
 
@@ -4173,18 +4244,46 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
         if (i) includes += ";";
         includes += sdk.includeDirs[i].string();
     }
-    const fs::path buildDir = genDir / "build";
+    DylibBuildSpec spec;
+    spec.sourceDir = genDir;
+    spec.defines   = { "HE_SDK_INCLUDE_DIRS=" + includes,
+                       "HE_SDK_LIB_DIR=" + sdk.libDir.string() };
+    return buildDylib(spec, onLine);
+}
+
+BuildOutcome buildDylib(const DylibBuildSpec& spec,
+                        const std::function<void(const std::string& line)>& onLine)
+{
+    namespace fs = std::filesystem;
+    static const std::vector<std::string> kCodegenNames = {
+        "libHorizonCodeGen.dylib", "libHorizonCodeGen.so", "HorizonCodeGen.dll" };
+    const std::vector<std::string>& names =
+        spec.artifactNames.empty() ? kCodegenNames : spec.artifactNames;
+    const fs::path buildDir =
+        spec.buildDir.empty() ? spec.sourceDir / "build" : spec.buildDir;
+
+    BuildOutcome out;
+    out.logFile = spec.logFile.empty() ? spec.sourceDir / "build.log" : spec.logFile;
+    const std::string cmake = resolveCmake();
+    if (cmake.empty())
+    {
+        out.message = "cmake not found (bundled next to the editor or on PATH)";
+        return out;
+    }
+
     std::string captured;
     const auto flushLog = [&]
     {
         std::ofstream f(out.logFile, std::ios::binary | std::ios::trunc);
         if (f) f << captured;
     };
-    const std::string configure =
-        cmake + " -S " + shq(genDir) + " -B " + shq(buildDir) +
-        " -DCMAKE_BUILD_TYPE=Release"
-        " \"-DHE_SDK_INCLUDE_DIRS=" + includes + "\""
-        " -DHE_SDK_LIB_DIR=" + shq(sdk.libDir);
+    std::string configure =
+        cmake + " -S " + shq(spec.sourceDir) + " -B " + shq(buildDir) +
+        " -DCMAKE_BUILD_TYPE=Release";
+    // Quoted as ONE argument each: a define's value is a path (or a whole
+    // semicolon-separated list of them) and may contain spaces.
+    for (const std::string& d : spec.defines)
+        configure += " " + shq("-D" + d);
     if (runStreaming(configure, onLine, captured) != 0)
     {
         flushLog();
@@ -4200,16 +4299,13 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
     }
     flushLog();
 
-    // Locate the artifact (single-config generators put it flat; MSVC under
-    // Release/).
-    const char* names[] = { "libHorizonCodeGen.dylib", "libHorizonCodeGen.so", "HorizonCodeGen.dll" };
-    for (const char* n : names)
-        for (const fs::path dir : { buildDir, buildDir / "Release" })
-        {
-            std::error_code ec;
-            if (fs::exists(dir / n, ec)) { out.artifact = dir / n; out.ok = true; return out; }
-        }
-    out.message = "build succeeded but no HorizonCodeGen library was produced";
+    if (fs::path found = findBuiltArtifact(buildDir, names); !found.empty())
+    {
+        out.artifact = std::move(found);
+        out.ok       = true;
+        return out;
+    }
+    out.message = "build succeeded but no " + spec.what + " was produced";
     return out;
 }
 

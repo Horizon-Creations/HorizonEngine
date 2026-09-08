@@ -597,3 +597,61 @@ TEST_CASE("GameLogic services: content reaches a loaded C++ module as ids, never
 
     loader.unload(rig.world);
 }
+
+// ── The hot-swap the editor's "Build and Reload" runs ────────────────────────
+// The failure this pins is the quiet one: a reload that forgets to inject
+// leaves an image whose every he::* call is a no-op with a default return. No
+// crash, no log, just a module that stopped doing anything — which is why the
+// sequence lives in the loader and both halves are checked here.
+TEST_CASE("GameLogic services: a hot swap re-injects, an unassisted reload does not")
+{
+    const std::filesystem::path libPath = HE_TEST_GAMELOGIC_SERVICES_LIB;
+    REQUIRE(std::filesystem::exists(libPath));
+
+    ServicesRig rig;
+    spawnStaticBody(rig.world, { 0.0f, 0.0f, 0.0f }, "Target");
+    rig.physics.initialize(rig.world);
+
+    HE::GameLogicLoader loader;
+    REQUIRE(loader.loadAndStart(libPath, rig.world, &rig.umbrella));
+    auto* first = probeOf(loader);
+    REQUIRE(first != nullptr);
+    CHECK(first->servicesAvailableAtStart());
+    CHECK(first->physicsAvailableAtStart());
+    CHECK(first->contentAvailableAtStart());
+    loader.logic()->onUpdate(rig.world, 1.0f / 60.0f);
+    CHECK(first->updateCount() == 1);
+
+    SUBCASE("reloadAndStart: the new image is live from ITS onStart on")
+    {
+        REQUIRE(loader.reloadAndStart(libPath, rig.world, &rig.umbrella));
+        auto* fresh = probeOf(loader);
+        REQUIRE(fresh != nullptr);
+        // A new object in a new image: the counter starts over.
+        CHECK(fresh->updateCount() == 0);
+        // …and the tables were there before onStart, not after it.
+        CHECK(fresh->servicesAvailableAtStart());
+        CHECK(fresh->physicsAvailableAtStart());
+        CHECK(fresh->inputAvailableAtStart());
+        CHECK(fresh->contentAvailableAtStart());
+        // Still answering real values across the boundary after the swap.
+        CHECK(fresh->doRaycast({ 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 50.0f).hit);
+        CHECK(fresh->doLoadAsset("Rock.hasset").valid());
+    }
+
+    SUBCASE("raw reload() + onStart: the module is silent, and that is the trap")
+    {
+        REQUIRE(loader.reload(libPath, rig.world));
+        auto* fresh = probeOf(loader);
+        REQUIRE(fresh != nullptr);
+        loader.logic()->onStart(rig.world);
+        CHECK_FALSE(fresh->servicesAvailableAtStart());
+        CHECK_FALSE(fresh->physicsAvailable());
+        CHECK_FALSE(fresh->contentAvailable());
+        // Not a crash — a default. Which is exactly what makes it hard to see.
+        CHECK_FALSE(fresh->doRaycast({ 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 50.0f).hit);
+        CHECK_FALSE(fresh->doLoadAsset("Rock.hasset").valid());
+    }
+
+    loader.unload(rig.world);
+}

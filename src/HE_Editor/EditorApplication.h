@@ -24,6 +24,8 @@
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/HcCodegen.h>
+#include <HorizonScene/EngineApi.h>   // GameServicesBinding + the fill* functions
+#include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/SftpProbe.h>
@@ -31,6 +33,7 @@
 #include <Net/RouterProbe.h>
 #include "GitController.h"
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <future>
@@ -390,6 +393,14 @@ struct AppContext
 	bool toolchainInstallDone = false; // the last install finished (success or failure)
 	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
 
+	// Build ▸ Build and Reload Game Logic: hot-swap the module that was just
+	// compiled into the RUNNING play session (onStop the old image, load the new
+	// one, re-inject the service tables, onStart). Returns false when there is
+	// no session to swap into — the fresh module is then simply what the next
+	// Play loads, which is why the caller reports it rather than treating it as
+	// a failure. Must be called on the UI thread: it touches the world.
+	std::function<bool()> reloadGameLogic;
+
 	// Startup source-control probe (git, git-lfs, identity, credential helper),
 	// same shape as the toolchain one above: run once on a background thread,
 	// null until it finishes. That null is load-bearing — without it the "Source
@@ -617,6 +628,41 @@ private:
 	// Lightweight ScriptEngine used only for reading M.properties in the inspector.
 	// Never creates instances; only loadScript + getScriptProperties.
 	std::unique_ptr<ScriptEngine> m_propScriptEngine;
+
+	// ── Native C++ game logic (PIE only) ─────────────────────────────────────
+	// The module a C++ project builds from its Source/ folder. Loaded when play
+	// mode starts and unloaded when it ends, so outside a session
+	// logicLoader().logic() is null: the base loop ticks whatever is loaded as
+	// soon as a world exists (Application.cpp), and a module started against the
+	// EDIT world would have had its onStart fired on the scene somebody is
+	// building.
+	//
+	// The tables and their binding must outlive the loaded library, so they live
+	// here — same argument, same layout as GameApplication's block. World and
+	// physics resolve per call (both are replaced on a scene switch and on every
+	// play session), the ContentManager is bound once because it outlives both.
+	HE::api::GameServicesBinding m_gameServicesBinding;
+	HeSaveServices               m_saveServices{};
+	HePhysicsServices            m_physicsServices{};
+	HeInputServices              m_inputServices{};
+	HeContentServices            m_contentServices{};
+	HeEngineServices             m_engineServices{};
+	// Fill the block above from the editor's own world/physics/content. Called
+	// before every injection — never once at startup: the binding's resolvers
+	// are what make a scene switch transparent, and the umbrella has to point at
+	// tables that were filled for THIS session.
+	void  bindGameServices();
+	// Where the current project's built GameLogic module is, or empty when the
+	// project is not a C++ one or nothing has been built yet.
+	std::filesystem::path builtGameLogicPath();
+	// Load it into the running play session (load → inject → onStart). No-op
+	// outside play mode and for a project without a built module.
+	void  startGameLogic();
+	// Hot-swap a freshly built module into the RUNNING session: onStop the old
+	// image, load the new one, hand it the tables again, onStart. False when
+	// there is no session to swap into — the module is then picked up by the
+	// next Play, which is a state and not a failure.
+	bool  reloadGameLogic();
 
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;

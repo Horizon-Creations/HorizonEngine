@@ -103,6 +103,25 @@ bool GameLogicLoader::reload(const std::filesystem::path& dllPath, HorizonWorld&
 	return load(dllPath);
 }
 
+bool GameLogicLoader::loadAndStart(const std::filesystem::path& dllPath, HorizonWorld& world,
+                                   const HeEngineServices* services)
+{
+	if (!load(dllPath)) return false;
+	// BEFORE onStart, always: the tables are what onStart's first he::save or
+	// he::physics call reads. Skipped for a null table set — a module that was
+	// handed nothing is still a module.
+	if (services) injectServices(services);
+	m_logic->onStart(world);
+	return true;
+}
+
+bool GameLogicLoader::reloadAndStart(const std::filesystem::path& dllPath, HorizonWorld& world,
+                                     const HeEngineServices* services)
+{
+	unload(world);   // onStop on the outgoing image
+	return loadAndStart(dllPath, world, services);
+}
+
 bool GameLogicLoader::isLoaded() const { return m_logic != nullptr; }
 IGameLogic* GameLogicLoader::logic() const { return m_logic; }
 

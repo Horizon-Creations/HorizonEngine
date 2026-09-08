@@ -241,6 +241,10 @@ void install()
 #endif
 		NSMenu* build = heAddSubmenu(main, @"Build");
 		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
+		// Mirrors EditorUI.cpp's ImGui Build menu. Project-scoped only: whether
+		// this project HAS a native module is answered by the action, because
+		// the menu is built once and the project changes under it.
+		heAddItem(build, @"Build and Reload Game Logic", C::BuildGameLogic, nil, 0, true);
 	}
 
 	// ── Window (standard minimize/zoom; registered so macOS lists windows) ──

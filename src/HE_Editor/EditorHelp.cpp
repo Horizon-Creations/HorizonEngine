@@ -1245,6 +1245,13 @@ namespace
 	  "Packages the project as a standalone game: cooked assets, the runtime, "
 	  "and a config beside it. The export profile decides platform and packing.",
 	  "", "export#overview" },
+	{ "Build/Build and Reload Game Logic", "",
+	  "Compiles this project's Source/ folder into its native GameLogic library "
+	  "and swaps it into a running preview: the play session keeps going, with "
+	  "the new code in it. Outside play mode it only builds, and the module is "
+	  "what the next Play loads. Only for C++ projects — anything else scripts "
+	  "its gameplay in a language that needs no compiler.",
+	  "", "scripting#cpp" },
 	{ "Help/Documentation", "",
 	  "This manual, inside the editor. The reference half is generated from the "
 	  "editor itself, so it describes the build you are running.",

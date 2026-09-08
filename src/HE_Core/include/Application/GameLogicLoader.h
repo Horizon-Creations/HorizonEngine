@@ -30,7 +30,31 @@ public:
 
     // Hot-reload: unload + load in one step.
     // Editor only — do not call in packaged builds.
+    //
+    // Deliberately RAW: it neither injects services nor calls onStart. A caller
+    // that wants a module which is actually running again wants
+    // reloadAndStart() below.
     bool reload(const std::filesystem::path& dllPath, HorizonWorld& world);
+
+    // The whole bring-up in one call: load → injectServices → onStart, in that
+    // order, because a game loads its save (or fires a first raycast) in
+    // onStart and the tables have to be live by then.
+    //
+    // Exists because the order is the trap. load() alone leaves an image with
+    // NO services: every he::* call in it is a silent no-op with a default
+    // return — not a crash, not a log line, just a module that does nothing and
+    // looks fine. The editor's "Build and Reload" is the path where that is
+    // easiest to get wrong, so the sequence lives here rather than at each
+    // call site. `services` may be null (a module that needs nothing).
+    bool loadAndStart(const std::filesystem::path& dllPath, HorizonWorld& world,
+                      const ::HeEngineServices* services);
+
+    // Hot-swap: onStop the running image, then loadAndStart the new one.
+    // Editor only. Returns false if the new library did not load — the old one
+    // is gone either way, which is the honest outcome: its code is what was
+    // just replaced on disk.
+    bool reloadAndStart(const std::filesystem::path& dllPath, HorizonWorld& world,
+                        const ::HeEngineServices* services);
 
     bool         isLoaded()  const;
     IGameLogic*  logic()     const;   // nullptr if not loaded

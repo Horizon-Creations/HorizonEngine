@@ -38,6 +38,11 @@ namespace MacMenuBar
 		ToggleConsole, ToggleGroundGrid,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, RefreshAssets, ExportProject,
+		// Build ▸ Build and Reload Game Logic. Project-scoped like the export,
+		// but NOT gated on the project's language here — the native menu is
+		// built once and a project can be swapped underneath it, so the row
+		// stays live and the action says what it did (GameLogicBuildPanel).
+		BuildGameLogic,
 		OpenTutorial, ReportIssue,
 		// Help ▸ Documentation opens the manual INSIDE the editor (DocsPanel);
 		// DocumentationOnline is the website. Both exist because they answer
