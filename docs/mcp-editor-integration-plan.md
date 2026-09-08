@@ -766,3 +766,386 @@ stehen ließe, wäre genau die Überraschung, gegen die der Standard-Aus existie
   es auch, solange das Shim fehlt.
 * Die Punkte aus Kapitel 4 bleiben, wo sie noch nicht durch Schritt 2
   entschieden wurden.
+
+---
+
+## 6. Das Shim und der Knopf: Entwurf
+
+Nachgetragen als Schritt 1 des Folgethemas („MCP stdio-Shim + Add to
+Claude-Knopf"). Schließt die erste Lücke aus 5.3 und den Nutzerwunsch daneben:
+ein Punkt in Preferences, der den Server bei einer vorhandenen `claude`-CLI
+registriert, und eine Anzeige auf der Seite **Tool Status**, die die Verbindung
+tatsächlich prüft statt sie zu behaupten.
+
+Alles hier ist Entwurf, kein Code. Was empirisch belegt ist, steht mit dem
+Befehl dabei, der es belegt hat; was noch offen ist, steht in 6.9.
+
+### 6.1 Was heute wirklich da ist (nachgemessen)
+
+**Die Brücke.** `McpBridge` lauscht auf `127.0.0.1`, Port aus
+`EditorConfig::McpPort` (0 = das System wählt). Rahmung ist
+`[uint32 big-endian Länge][JSON]` (`src/HE_Net/include/Net/TcpTransport.h:15`),
+Nutzlast rohes JSON-RPC 2.0. Die Endpunktdatei liegt unter
+`GlobalState::userDataDir() / "mcp-endpoint.json"`
+(`EditorApplication.cpp:6124`), Modus 0600, Inhalt
+(`McpBridge.cpp:463`):
+
+```json
+{ "port": 51234, "pid": 4711, "token": "…64 Hex…",
+  "protocolVersion": 1, "host": "127.0.0.1" }
+```
+
+**Der Handschlag.** Die erste Nachricht auf einer Verbindung MUSS
+`{"jsonrpc":"2.0","id":1,"method":"auth","params":{"token":"…"}}` sein. Alles
+andere — falscher Token, kaputtes JSON, eine andere Methode — schließt die
+Verbindung ohne Antwort (`McpBridge.cpp:283`). Danach kennt der Dispatcher vier
+Methoden: `ping`, `auth`, `tools/list`, `tools/call`
+(`McpBridge.cpp:362`).
+
+**Die Antwortformen sind schon MCP-Drahtform.** Das ist der Punkt, an dem das
+ganze Shim klein wird. `tools/list` liefert `{ "tools": [ { name, description,
+inputSchema } ] }`, `tools/call` liefert `{ content:[{type:"text",text}],
+isError, structuredContent }` — beides genau so, wie MCP es haben will
+(`McpToolRegistry.h:75`, `McpBridge.cpp:408`). Das Shim muss nichts übersetzen,
+nur weiterreichen.
+
+**Die Bedienoberfläche.** Preferences → Editor → **Remote Control** hat zwei
+Zeilen (`EditorSettingsPanel.cpp:536` und `:597`): die Checkbox mit
+Zustandszeile plus „Try Again", und den Port. Daneben, im selben Rail-Abschnitt
+„Editor", liegt **Tool Status** (`Page::Status`, `drawStatusPage`
+`EditorSettingsPanel.cpp:1807`) — eine Vier-Spalten-Tabelle Tool / State /
+Detail / Fix, gespeist aus Hintergrundproben (`ctx.gitProbe`,
+`ctx.toolchainProbe`). Dort gehört die Claude-Prüfung hin, nicht auf die
+Remote-Control-Seite: die Seite existiert für genau die Frage „ist das Werkzeug
+draußen da und tut es, was es soll".
+
+**Prozesse starten.** `HE::Proc` (`src/HE_Core/include/Platform/Process.h`) ist
+der richtige Weg und nicht der alte `popen`-Wrapper: argv-Vektor statt
+Shell-String (Pfade mit Leerzeichen sind damit ein Nicht-Problem), getrennte
+Ströme, ehrlicher Exit-Code, Timeout. `HE::Proc::which()` ruft
+`augmentToolPath()` selbst auf und behandelt auf Windows `.exe`/`.cmd`/`.bat`
+über `SearchPathW` (`Process.cpp:389`) — die zwei Fallen, um die
+`resolveBrew()` seinerzeit herumgebaut wurde, sind hier also schon erledigt.
+
+### 6.2 Die Entscheidung, die vorab fällt: welcher Python-Stack
+
+Das Thema sagt „mcp>=2". Die API dazu ist geprüft und steht in 6.4 — aber die
+Abhängigkeit selbst ist das größere Problem, und der Knopf hängt daran.
+
+Gemessen auf dieser Maschine:
+
+```
+$ python3 -c "import mcp"     → ModuleNotFoundError: No module named 'mcp'
+$ python3 -V                  → Python 3.14.5
+```
+
+Das ist der Normalfall, nicht die Ausnahme. Die drei anderen MCP-Server dieses
+Nutzers laufen jeweils aus einem eigenen `.venv`. Der mitgelieferte CPython des
+Editors hilft nicht: der ist ein eingebettetes Runtime-Zip mit `._pth` und ohne
+`pip` und ohne `python3`-Executable. Und auf Windows heißt der Interpreter
+`py`/`python`, `python3` gibt es dort auf PATH gar nicht.
+
+Konsequenz: `claude mcp add horizon-editor -- python3 …/he_mcp.py` erzeugt auf
+einer frischen Maschine einen Eintrag, der beim ersten Start
+`ModuleNotFoundError` wirft. Der Knopf würde also zuverlässig einen kaputten
+Eintrag anlegen — und die ehrliche Testanzeige daneben würde das brav melden.
+
+Zwei Wege stehen zur Wahl:
+
+**(a) `mcp>=2` wie im Thema.** Korrekte Bibliothek, weniger eigener Code, aber
+das Shim braucht eine Installation, die der Editor nicht mitbringt. Der Knopf
+müsste dann entweder ein `.venv` neben dem Editor anlegen und `pip install
+mcp` fahren (Netz, Minuten, kann scheitern, braucht ein eigenes
+Fortschrittsfenster wie `installToolchain`), oder der Nutzer installiert von
+Hand — womit der Knopf nur noch die halbe Zusage hält.
+
+**(b) Shim ohne Fremdabhängigkeit, nur stdlib.** MCP über stdio ist
+zeilengetrenntes JSON-RPC 2.0 auf stdin/stdout. Ein reiner Durchreicher braucht
+fünf Methoden: `initialize`, `notifications/initialized`, `ping`, `tools/list`,
+`tools/call`. Die Brücke liefert `tools/list` und `tools/call` bereits in
+MCP-Drahtform (6.1), das Weiterreichen ist damit fast wörtlich. Geschätzt 150
+bis 200 Zeilen `json` + `socket` + `sys`, keine Installation, läuft mit jedem
+Python ab 3.8.
+
+**Empfehlung: (b).** Der Knopf verspricht „einmal drücken und es geht". Mit (a)
+ist dieses Versprechen an einen `pip install` gekettet, den der Editor nicht
+kontrolliert; mit (b) ist es wahr, sobald irgendein Python auf der Maschine
+liegt. Die Bibliothek würde uns hier nichts abnehmen, was wir nicht ohnehin
+durchreichen — ihr Wert liegt im Definieren eigener Werkzeuge, und das Shim
+definiert ausdrücklich keine.
+
+**Das ist eine Chefchen-Entscheidung**, weil das Thema wörtlich `mcp>=2`
+vorgibt. Sie muss vor Schritt 2 fallen; alles andere in diesem Abschnitt gilt
+für beide Wege.
+
+Für den Fall, dass (a) gewählt wird, ist die API in 6.4 nachgeprüft — die
+Zeilen aus dem Gedächtnis stimmen nur zur Hälfte.
+
+### 6.3 `scripts/he_mcp.py`: Aufbau
+
+Reiner Durchreicher, ohne eigene Werkzeuge. Sechs Teile:
+
+1. **Endpunktdatei finden.** Reihenfolge:
+   `--endpoint <pfad>` (argv) → `$HE_MCP_ENDPOINT` → die plattformübliche
+   Ableitung von `userDataDir()`. Die Ableitung ist die Rückfallebene und nicht
+   der Normalweg: der Editor kennt den Pfad und gibt ihn bei der Registrierung
+   mit (6.6), damit eine Diskrepanz gar nicht erst entstehen kann. Für den
+   Handbetrieb repliziert das Shim `GlobalState.cpp:117-125` trotzdem:
+   `%APPDATA%\HorizonEngine`, `~/Library/Application Support/HorizonEngine`,
+   `$XDG_CONFIG_HOME/HorizonEngine` bzw. `~/.config/HorizonEngine`, jeweils
+   `+ /mcp-endpoint.json`.
+
+2. **Verbinden und anmelden.** `socket.create_connection((host, port))` mit
+   dem `host` aus der Datei (wörtlich `127.0.0.1` — `localhost` löst auf dem Mac
+   zuerst auf `::1` auf und läuft ins Leere, deshalb steht das Feld überhaupt
+   in der Datei). Dann als erstes Frame `auth` mit dem Token, und auf die
+   Antwort warten. Kommt keine, sondern ein Verbindungsabbruch: Token ist alt,
+   Datei neu lesen, einmal wiederholen.
+
+3. **Rahmung.** `struct.pack(">I", len(payload)) + payload` beim Senden; beim
+   Lesen vier Bytes Länge, dann exakt so viele Bytes (`recv` in einer Schleife,
+   `recv` liefert Teilstücke). Das Gegenstück refüsiert über
+   `kMaxFrameBytes = 4 MiB`; das Shim prüft dieselbe Grenze beim Lesen, damit
+   ein defekter Präfix nicht in eine Riesenallokation läuft.
+
+4. **stdio-Seite.** Eine Zeile lesen, JSON parsen, beantworten, `flush()`. Kein
+   Threading: MCP über stdio ist von Haus aus sequentiell, und die Brücke
+   beantwortet ohnehin ein Frame pro Frame auf dem Hauptthread. **Nichts außer
+   JSON-RPC darf auf stdout landen** — jede Diagnose geht nach stderr, sonst
+   ist der Strom vergiftet.
+
+5. **Die fünf Methoden.**
+   * `initialize` → beantwortet das Shim selbst mit
+     `protocolVersion`, `capabilities:{tools:{}}`, `serverInfo:{name:
+     "horizon-editor", version}`. Vorher muss die Verbindung zur Brücke stehen
+     und `auth` durch sein (siehe 6.7 — daran hängt, ob der Test ehrlich ist).
+   * `notifications/initialized` → schlucken, keine Antwort (Notification).
+   * `ping` → `{}`.
+   * `tools/list` → an die Brücke, Ergebnis unverändert zurück.
+   * `tools/call` → an die Brücke, Ergebnis unverändert zurück.
+   Alles andere → JSON-RPC-Fehler `-32601`, mit derselben id.
+
+6. **`--selftest`.** Kein MCP, sondern: Datei lesen, verbinden, `auth`,
+   `tools/list`, eine Zeile JSON nach stdout
+   (`{"ok":true,"port":…,"tools":233}`), Exit 0. Bei jedem Fehler eine Zeile
+   mit `"ok":false` und `"error"`, Exit 1. Das ist der Prüfstein, den der
+   Editor drücken kann, ohne die `claude`-CLI zu bemühen — und das, was ein
+   Mensch von Hand aufruft, wenn die Registrierung streitig ist.
+
+**Wiederverbinden.** Der Editor startet neu → neuer Port, neuer Token, alter
+Socket tot. Das Shim liest die Endpunktdatei bei jeder Anfrage neu, wenn der
+Socket weg ist, und prüft `pid` mit `os.kill(pid, 0)`: existiert der Prozess
+nicht mehr, ist die Datei verwaist (die Brücke löscht sie beim sauberen Stopp,
+aber nicht nach einem Absturz). **Zwei laufende Editoren teilen sich eine
+Endpunktdatei, der letzte Start gewinnt.** Das wird hier benannt und nicht
+gelöst — pro Instanz eine Datei zu schreiben verlangt, dass der Client wählt,
+und dafür gibt es noch keine Oberfläche.
+
+### 6.4 Falls doch `mcp>=2`: die API, nachgeprüft
+
+Gegen `mcp 2.0.0` in
+`~/VSCode/horizon-web-mcp/.venv` verifiziert. Was aus 1.x im Kopf ist, stimmt
+nicht mehr, und was in unserer Notiz stand, stimmt nur halb:
+
+* `mcp.server.MCPServer` gibt es (der FastMCP-Nachfolger), ist für einen
+  Durchreicher aber falsch: er registriert Werkzeuge statisch per Dekorator,
+  unsere Liste kommt zur Laufzeit vom Editor.
+* Richtig ist `mcp.server.lowlevel.Server` — und der hat **keine**
+  `@server.list_tools()` / `@server.call_tool()`-Dekoratoren mehr. Stattdessen
+  Konstruktorargumente:
+  `Server(name, version=…, on_list_tools=…, on_call_tool=…)`, beides
+  `async (ctx, params) -> ListToolsResult | CallToolResult`. Alternativ
+  `add_request_handler(method, params_type, handler)`.
+* Gefahren wird mit `mcp.server.stdio.stdio_server()` und
+  `server.run(read, write, server.create_initialization_options())`.
+* **Felder sind snake_case, aber die Aliase akzeptieren camelCase.** Geprüft:
+  `Tool.model_validate({... "inputSchema": …})` funktioniert und landet in
+  `.input_schema`; `CallToolResult.model_validate({"isError":…,
+  "structuredContent":…})` ebenso; `model_dump(by_alias=True)` schreibt wieder
+  camelCase heraus. Das heißt: auch auf Weg (a) wären die Antworten der Brücke
+  ohne Umbau einlesbar.
+* `ToolAnnotations` liegt in `mcp_types` und wird von `mcp.types`
+  re-exportiert; beide Importe gehen.
+
+### 6.5 Die `claude`-CLI finden
+
+`HE::Proc::which("claude")` ist der Kern und deckt das Meiste ab: es ruft
+`augmentToolPath()` (also `/opt/homebrew/bin`, `/usr/local/bin`) und behandelt
+die Windows-Endungen. Auf dieser Maschine reicht das —
+`/opt/homebrew/bin/claude` ist ein Symlink auf die npm-Installation.
+
+Die `kToolPrefixes` kennen aber nur Homebrew, und die CLI kommt auch anders auf
+die Platte. Deshalb nach dem `resolveBrew()`-Muster **zusätzlich** die
+kanonischen Orte direkt prüfen, bevor aufgegeben wird:
+
+* `~/.local/bin/claude` (nativer Installer)
+* `~/.claude/local/claude` (lokale Installation)
+* `~/.npm-global/bin/claude` und `$(npm prefix -g)/bin/claude`, wenn npm ohne
+  Homebrew installiert wurde
+* Windows: `%APPDATA%\npm\claude.cmd`
+
+Reihenfolge: `which` zuerst (das ist, was der Nutzer im Terminal bekäme), dann
+die Kandidaten. Gefunden oder nicht — die Antwort ist ein absoluter Pfad oder
+leer, und leer heißt: der Knopf ist ausgegraut und sagt warum, statt einen
+Befehl zu starten, der nicht existiert.
+
+### 6.6 Der Knopf: welcher Befehl genau
+
+```
+claude mcp add horizon-editor -s user \
+  -e HE_MCP_ENDPOINT=<abs. Pfad zu mcp-endpoint.json> \
+  -- <python> <abs. Pfad zu he_mcp.py>
+```
+
+Vier Dinge daran sind Entscheidungen:
+
+**`-s user`, nicht der Standard.** `claude mcp add` schreibt ohne Angabe in
+`local` — die projektbezogene Konfiguration, gebunden an das aktuelle
+Arbeitsverzeichnis. Ein aus dem Finder gestarteter Editor hat als
+Arbeitsverzeichnis `/`. Der Eintrag landete dort, wo ihn niemand je sieht.
+`-s user` ist die Konfiguration, die in allen Projekten gilt — genau das, was
+die anderen Server dieses Nutzers benutzen (`claude mcp get hive` →
+„Scope: User config").
+
+**`-e HE_MCP_ENDPOINT=…`.** Der Editor kennt den Pfad exakt; das Shim müsste
+ihn sonst raten (6.3). Ein Pfad mit Leerzeichen ist unkritisch, weil `HE::Proc`
+argv übergibt und keine Shell-Zeile baut.
+
+**Absolute Pfade.** Beide, Interpreter und Skript. Das hat einen Preis, der
+benannt gehört: **wird die `.app` später verschoben, zeigt der Eintrag ins
+Leere.** Die Testanzeige aus 6.7 findet das (Status „Failed to connect"), und
+der Knopf schreibt den Eintrag beim nächsten Druck neu. Ein relativer Pfad
+wäre schlechter, weil `claude` ihn gegen sein eigenes Arbeitsverzeichnis
+auflöste.
+
+**Doppelte Registrierung.** Gemessen:
+
+```
+$ claude mcp add he-probe-tmp -s user -- /bin/true      → "Added …", rc=0
+$ claude mcp add he-probe-tmp -s user -- /bin/true      → "MCP server he-probe-tmp already exists in user config", rc=0
+```
+
+**Der Exit-Code ist in beiden Fällen 0.** Der Knopf darf sich also nicht auf rc
+verlassen. Der saubere Weg ist `claude mcp remove horizon-editor -s user`
+(Fehler wird ignoriert, wenn nichts da war) und danach `add` — damit ist der
+Knopf idempotent *und* aktualisiert einen alten Eintrag mit falschem Pfad, was
+ein „existiert schon, lasse ich" nicht täte. Er heißt deshalb sinnvollerweise
+**„Add to Claude"** und schreibt, wenn schon einer da ist, kommentarlos neu.
+
+**Wo liegt `he_mcp.py` zur Laufzeit?** Quelle bleibt `scripts/he_mcp.py`. Der
+Editor sucht es unter `SDL_GetBasePath() / "he_mcp.py"` — dieselbe Grundlage
+wie `Docs/`, `EngineContent/` und das gebündelte cmake. Damit das in beiden
+Welten stimmt, zwei kleine Ergänzungen:
+
+* `src/HE_Editor/CMakeLists.txt`: ein POST_BUILD-`copy_if_different` nach
+  **beiden** Zielen, `$<TARGET_FILE_DIR:HorizonEditor>` und `${DEPLOY_EDITOR}`
+  — genau das Doppelziel-Muster, das der `HE_BUNDLE_CMAKE`-Block bei `:338`
+  schon benutzt. Der Entwicklerbaum ist damit abgedeckt.
+* `scripts/package_macos.sh`, Abschnitt 6: eine `cp`-Zeile nach
+  `Contents/Resources/`, neben denen für `Docs` und `EngineContent`.
+
+**Der Interpreter.** Auf macOS/Linux `HE::Proc::which("python3")`, auf Windows
+der Reihe nach `python3`, `python`, `py`. Wird keiner gefunden, ist der Knopf
+ausgegraut mit derselben Begründung wie bei fehlender CLI. Fällt Weg (a) aus
+6.2, kommt hier stattdessen der Interpreter aus dem angelegten `.venv` hin.
+
+### 6.7 Die Testanzeige: was sie prüfen muss, damit sie nicht lügt
+
+Auf **Tool Status**, im Idiom der Seite: `statusRow(Name, Level, Detail, Fix)`,
+gespeist von einer Hintergrundprobe nach dem Muster von `HE::Sc::GitProbe`
+(`src/HE_Scene/…/SourceControl/GitProbe.h`) — ein flaches Aggregat, einmal beim
+Öffnen der Seite gefüllt, dazu ein „Recheck".
+
+Vier Zeilen, weil die vier verschieden scheitern und verschiedene Antworten
+haben:
+
+| Zeile | Ok, wenn | Fix führt zu |
+|---|---|---|
+| `claude` CLI | gefunden (6.5) | Hinweis, wo man sie herbekommt |
+| Python für das Shim | Interpreter gefunden (und, auf Weg (a), `import mcp` geht) | dito |
+| Bei Claude registriert | `claude mcp get horizon-editor` findet den Eintrag | der „Add to Claude"-Knopf |
+| Verbindung steht | siehe unten | Remote Control einschalten |
+
+**Wie die letzte Zeile ehrlich wird.** Gemessen an einem absichtlich kaputten
+Eintrag:
+
+```
+$ claude mcp get he-probe-tmp
+  Status: ✘ Failed to connect
+  Issue: CONNECTION_CLOSED: Connection closed
+rc=0
+$ claude mcp get hive
+  Status: ✔ Connected
+rc=0
+```
+
+Zwei Dinge folgen daraus:
+
+* **Der Exit-Code ist auch hier nutzlos** — 0 in beiden Fällen. Geparst wird
+  die `Status:`-Zeile, und die `Issue:`-Zeile wandert unverändert in die
+  Detail-Spalte. Das ist die beste Fehlermeldung, die es gibt, weil sie von dem
+  kommt, der es versucht hat.
+* **`claude mcp get` startet den Server wirklich** und führt den
+  MCP-Handschlag. Das ist ein echter Durchlauf und keine Existenzprüfung.
+
+Damit „Connected" aber tatsächlich *diesen* Editor bedeutet, muss das Shim beim
+`initialize` schon an der Brücke hängen: **verbindet sich das Shim erst beim
+ersten `tools/list`, dann meldet ein Shim mit geschlossenem Editor brav
+„Connected" und die Anzeige lügt genau da, wo sie es nicht darf.** Also:
+`initialize` verbindet und authentifiziert zuerst und schlägt sonst fehl
+(Prozess beendet sich mit Code ≠ 0, `claude` zeigt „Failed to connect").
+Das ist die eine Stelle, an der die Reihenfolge im Shim eine
+Sicherheitsaussage trägt.
+
+**Der unabhängige Gegencheck.** Auch ein sauberes `Connected` sagt nicht, dass
+das Shim *diese* Editor-Instanz erreicht hat (zwei Editoren, 6.3). Das weiß nur
+die Brücke selbst: `McpBridge::clientCount()` steigt, während die Probe läuft.
+Der Test kann also zusätzlich den Zählerstand vor und nach dem `claude mcp
+get` vergleichen — steigt er, ist der Beweis vollständig und kostet nichts.
+Ein sauberer Ausbau davon wäre ein Kennungsfeld im `auth`-Frame
+(`params.client = "he_mcp/1"`), das die Brücke mitschreibt; das ist eine
+Bridge-Änderung und deshalb hier nur als Option benannt.
+
+**Threading.** `HE::Proc::run` ist synchron, und `claude mcp get`
+gesundheitsprüft für Sekunden. Das Settings-Panel läuft auf dem ImGui-Thread.
+Die Probe gehört also auf einen Worker, mit demselben Aufbau, den
+`installToolchain(onLine)` und `startGitProbe()` schon haben: Zustand
+„Checking" in der Tabelle, Ergebnis wird beim nächsten Frame gelesen. Der
+„Add to Claude"-Knopf ebenso — er ist schnell, aber nicht garantiert schnell.
+
+### 6.8 Was der Zuschnitt der Folgeschritte daraus macht
+
+1. **Entscheidung 6.2** (Chefchen): stdlib oder `mcp>=2`. Alles Weitere hängt
+   nur an der Interpreter-Zeile.
+2. **`scripts/he_mcp.py`** nach 6.3, plus `--selftest`. Prüfbar ohne Editor:
+   ein Python-Test kann die Brückenseite als Socket nachbauen (der Handschlag
+   ist zwölf Zeilen) und das Shim gegen `tools/list` fahren.
+3. **Auslieferung**: die zwei Kopierzeilen aus 6.6, und in `package_macos.sh`
+   die Prüfliste am Ende (`ok Resources/…`) mitziehen, damit ein fehlendes
+   Skript im DMG auffällt statt still zu fehlen.
+4. **CLI- und Interpreter-Suche** nach 6.5 als eigenes, testbares Stück —
+   kein ImGui darin.
+5. **Probe + Tool-Status-Zeilen** nach 6.7, auf einem Worker.
+6. **„Add to Claude"-Knopf** auf der Remote-Control-Seite nach 6.6.
+7. **Handbucheinträge** für jedes neue Bedienelement in `EditorHelp.cpp`,
+   `topic` leer wie bei den drei bestehenden Remote-Control-Einträgen
+   (`EditorHelp.cpp:2161`). Ohne sie färbt sich `editor_help_audit` rot —
+   das ist ein ctest (`tests/CMakeLists.txt:578`), kein Nice-to-have.
+8. **Der Durchlauf aus 5.3**, den es bisher nicht geben konnte: Editor auf,
+   Remote Control an, Knopf drücken, in einer Claude-Instanz einen Würfel
+   setzen, im Editor Undo sehen.
+
+### 6.9 Offen, absichtlich
+
+* **6.2 ist nicht entschieden.** Bewusst nicht selbst entschieden, weil das
+  Thema `mcp>=2` wörtlich vorgibt und die Empfehlung dagegen steht.
+* **Nur auf macOS gemessen.** Die `claude`-Ausgaben oben stammen aus einer
+  einzigen Installation. Die `Status:`-Zeile ist mit Unicode-Häkchen dekoriert
+  (`✔`/`✘`); der Parser sollte auf `Failed to connect` bzw. `Connected` im Text
+  prüfen und nicht auf das Zeichen. Ob eine andere CLI-Version anders
+  formatiert, ist ungeprüft — deshalb ist der Zählerstand-Gegencheck aus 6.7
+  mehr als Zierde.
+* **Zwei Editoren, eine Endpunktdatei.** Benannt in 6.3, nicht gelöst.
+* **Kein Handbuch-Kapitel.** Unverändert der Punkt aus 5.3; ein `claude mcp
+  add`-Rezept kann erst hinein, wenn das Skript ausgeliefert wird — dann aber
+  wirklich, und in `collaboration.html`.
