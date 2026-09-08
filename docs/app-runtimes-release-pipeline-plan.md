@@ -367,9 +367,32 @@ Windows-Download.
 
 ### Was verifiziert ist und was nicht
 
-Verifiziert wird das hier nachgetragen, sobald es gemessen ist; alles andere steht
-ausdruecklich als ungeprueft da. Was hier haengt, sind P0 und P1: der lokale
-Auspraegungsbau auf macOS ist der einzige Teil, den diese Maschine selbst beweisen kann.
-Windows und Linux, der DMG-Inhalt und der Satz `Runtime: AppAdvanced` im Export-Log
-brauchen einen CI-Lauf beziehungsweise einen vollen Editorbau und sind hier nicht
-gefallen.
+**Gemessen, macOS/arm64, 08.09.2026.** Beide Auspraegungen bauen und deployen wieder,
+Rueckgabecode 0:
+
+```
+scripts/build_runtimes.py --flavor app-basic --flavor app-advanced --build-type Release
+    --jobs 8 --define HE_PORTABLE_BUILD=ON --define HE_PREFER_MBEDTLS=ON
+    --source-tree <Hauptcheckout>/cmake-build-release
+```
+
+| | total | ohne python | rendering | Schwelle |
+|---|---|---|---|---|
+| `AppAdvanced` | 74,5 MB | 19,8 MB | 1,2 MB | 85 / 26 MB, eingehalten |
+| `AppBasic` | 73,7 MB | 19,0 MB | 0,4 MB | 84 / 25 MB, eingehalten |
+
+Das ist zugleich der Beweis fuer P0: `app-basic` und `app-advanced` linken beide gegen den
+Stub, und beide linken durch.
+
+**P1 gemessen, nicht nur geschrieben.** In den zwei Auspraegungsbaeumen liegen unter
+`_deps` nur `mbedtls-src` und `sqlite3-src`, also genau die zwei Pakete, die nicht in
+`SHARED_SOURCES` stehen. SDL3, glm, Jolt, Recast, Lua, nlohmann_json und astcenc wurden
+kein einziges Mal geklont; im Log steht keine einzige `Cloning into`-Zeile. Ohne
+`--source-tree` liefert `existing_sources()` in einem frischen Worktree eine leere Liste,
+mit ihm sieben Flags.
+
+**Nicht gefallen und hier auch nicht faelschbar:** Windows und Linux (brauchen einen
+CI-Lauf), der Inhalt von `HorizonEditor.app/Contents/Resources` (braucht einen vollen
+Editorbau auf dieser Maschine) und der Satz `Runtime: AppAdvanced` im Export-Log, der die
+eigentliche Frage des Themas beantwortet. `package_macos.sh` ist geaendert und
+`bash -n`-geprueft, aber nicht gelaufen.
