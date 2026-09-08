@@ -297,7 +297,7 @@ bool injectServices(const ::HeEngineServices* services);   // sucht V2, fällt a
 
 Der Rückfallpfad ist Pflicht: `HE_SetEngineServicesV2` fehlt → `HE_SetEngineServices` mit `services->save` versuchen → fehlt auch der, dann die vorhandene INFO-Zeile („older scaffold"). Die alte Signatur bleibt als Überladung stehen, damit bestehende Tests und Aufrufer sich nicht ändern müssen.
 
-### Editor (Schritt 3)
+### Editor (umgesetzt in Schritt 4)
 
 `EditorApplication` braucht dieselben Member. Die Bausteine sind da: `apiCtx(world, physics, content, …)` (EditorApplication.cpp:207) füllt bereits genau diese drei Dinge für PIE; das Binding wird aus denselben Quellen gespeist (`m_editorWorld`, `m_physicsWorld`).
 
@@ -402,3 +402,31 @@ Weiter zu beachten für Schritt 3:
 - Gibt es eine `HE::AssetType` → Name-Abbildung, oder muss `assetTypeName` eine schreiben? (Abschnitt 5.3)
 - Soll `HeSaveServices` bei dieser Gelegenheit von `==` auf `>=` umgestellt werden? Empfehlung: ja, mit einem Satz Begründung im Header. (Abschnitt 2)
 - Bekommt `HE::api::content` auch `typeName`, oder bleibt das erst einmal `load`/`unload`/`isLoaded`? Empfehlung: alle vier, sonst hat die C-Tabelle eine Zeile ohne Registry-Vorbild.
+
+---
+
+## 12. Stand nach Schritt 5 (Verifikation + Doku, 2026-09-08)
+
+Das Feature steht auf dem Branch, in fünf Schritten:
+
+| Schritt | Ergebnis | Commits |
+|---|---|---|
+| 1 | Dieses Design | `98962be` |
+| 2 | `HePhysicsServices` + `HeInputServices`, Dach `HeEngineServices` + V2-Export | `97c06c7` |
+| 3 | `HeContentServices` | `199efc7`, `ed2dd80` |
+| 4 | Build ▸ Build and Reload Game Logic, `loadAndStart`/`reloadAndStart`, PIE lädt das Modul | `d9b0ee5`, `293d18c` |
+| 5 | Handbuch, volle Suite | dieser |
+
+**Verifikation:** voller Build (Release, Metal + GL) und die ganze ctest-Suite, 124/124 grün, zwei Fälle übersprungen (`runtime_size_app_*` — die brauchen einen deployten App-Runtime, den ein Configure ohne Deploy-Schritt nicht hat). `editor_help_audit` 716/716. Das eingebettete Shader-Set übersetzt (41 GLSL; HLSL übersprungen, kein `fxc` auf dem Mac).
+
+**Handbucheinträge** (Quelle ist die Website, `Website/HorizonEngineDocs/`, das Bündel `EditorDeps/Docs/he-docs.json` wird daraus gebaut und ist eingecheckt):
+
+- `scripting.html#cpp` — der Satz „works with the world directly — full engine headers, no wrapper layer" war **falsch**, und zwar schon vor diesem Branch (Abschnitt 0): das Modul sieht `HorizonWorld` nur als Vorwärtsdeklaration. Er ist ersetzt durch das, was wirklich gilt — zwei Header, kein Link, alles über die Service-Tabellen. Dazu die Tabelle der fünf Namensräume, ein Beispiel, und die vier Regeln, die man nicht raten kann: nicht injiziert ist ein Zustand statt eines Fehlers, dieselbe Semantik wie in den Skripten (samt Welt/Lokal-Grenze), nur Werte über die Grenze, ABI wächst nur hinten.
+- `editor.html#game-logic` — neuer Abschnitt „Building Game Logic": was der Knopf tut, die zwei Schritte im Build-Fenster, die drei Fälle (außerhalb Play nur bauen, PIE lädt und entlädt, andere Projektsprachen bekommen eine Notiz), Toolchain. Dazu eine Zeile in der Menü-Referenz und ein Verweis aus dem Play-Mode-Tipp.
+
+**Ein Fund, der aus der Verifikation kam** (`test_hc_node_docs` wurde rot): die Suche des Handbuchs indizierte die **Id** eines Abschnitts nicht. Die Node-Referenz betitelt ihre Einträge in Prosa („Add Impulse") und trägt den Namen, den jemand tippt, in der Id (`physics.addImpulse`) — ein Titeltreffer kam dort also nie zustande. Damit gewann jede Seite, die den Namen **einmal** erwähnt (Textdeckel 8 + 6×4, und Prosa steht auf einer früheren Seite, was den Gleichstand falsch herum auflöst), gegen den Eintrag, der *für* den Aufruf da ist. Das ist keine Doku-Panne, sondern eine Lücke: sonst dürfte das C++-Handbuch keinen Aufruf beim Namen nennen, der eine Node-Entsprechung hat. `DocsLibrary`: Id wird mitindiziert und mit 100 gewichtet, direkt unter dem Titel (120), weit über Eyebrow (45).
+
+**Offen, bewusst:**
+
+- Der Ende-zu-Ende-Durchlauf aus Abschnitt 10.6 (echtes C++-Projekt anlegen, Knopf drücken, in PIE prüfen, Quelle ändern, wieder drücken) ist **nicht** gelaufen — er braucht einen Menschen am Editor.
+- Die Website ist nicht deployt. Die beiden HTML-Seiten liegen im Website-Checkout, das Bündel hier ist daraus gebaut.

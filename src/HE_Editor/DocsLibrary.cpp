@@ -403,7 +403,8 @@ void Library::buildIndex()
 		sections.reserve(p.sections.size());
 		const std::string pageTitle = lower(p.title);
 		for (const Section& s : p.sections)
-			sections.push_back({ lower(s.title), lower(s.eyebrow), lower(s.text), pageTitle });
+			sections.push_back({ lower(s.title), lower(s.id), lower(s.eyebrow),
+			                     lower(s.text), pageTitle });
 		m_index.push_back(std::move(sections));
 	}
 }
@@ -493,6 +494,14 @@ std::vector<Hit> Library::search(std::string_view query, int maxHits) const
 			auto scoreToken = [&](const std::string& t) {
 				float best = 0.0f;
 				if (containsWord(idx.title, t))        best = 120.0f;
+				// A section whose ID is what you typed, just under a heading that
+				// is. The node reference needs this: its entries are TITLED in
+				// prose ("Add Impulse") and carry the name that actually gets
+				// typed in the id ("physics.addImpulse"). Without it the entry FOR
+				// a call loses to any page that merely mentions it once — a body
+				// hit tops out at 8 + 6x4, and prose sits on an earlier page,
+				// which breaks the tie the wrong way round.
+				else if (containsWord(idx.id, t))      best = 100.0f;
 				else if (containsWord(idx.eyebrow, t)) best = 45.0f;
 				else if (containsWord(idx.pageTitle, t)) best = 35.0f;
 				if (const int n = countWordMatches(idx.text, t, 6); n > 0)
