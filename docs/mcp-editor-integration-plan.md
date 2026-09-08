@@ -742,6 +742,11 @@ stehen ließe, wäre genau die Überraschung, gegen die der Standard-Aus existie
 
 ### 5.3 Was offen ist
 
+> **Stand nach dem Folgethema (Schritt 5, 08.09.2026).** Die ersten beiden
+> Punkte sind zu, der dritte zur Hälfte. Der Text der Punkte bleibt stehen, wie
+> er geschrieben wurde; was ihn geschlossen hat, steht als `→` darunter und
+> ausführlich in Kapitel 7.
+
 * **`scripts/he_mcp.py` gibt es nicht.** Das ist die eine echte Lücke, und sie
   ist größer als sie aussieht: die Brücke spricht rohes JSON-RPC über einen
   gerahmten TCP-Socket, **nicht** MCP über stdio. Ein Client wie Claude Code
@@ -750,6 +755,12 @@ stehen ließe, wäre genau die Überraschung, gegen die der Standard-Aus existie
   keines darin. Das Shim braucht einen eigenen Schritt (reines Python,
   `mcp>=2`, liest Port und Token aus `<Config-Dir>/mcp-endpoint.json`, reicht
   `tools/list` und `tools/call` durch und kennt selbst keine Werkzeuge).
+  * → **Erledigt.** `scripts/he_mcp.py` steht (Schritt 2, `58a9da3d`), samt 28
+    Python-Tests gegen eine nachgebaute Brücke. Eine Abweichung von der Klammer
+    oben: **kein `mcp>=2`**, sondern reine Standardbibliothek — die
+    Chefchen-Entscheidung zu 6.2, begründet in 7.2. Ausgeliefert wird es neben
+    dem Editor (`CMakeLists.txt`, `package_macos.sh`), und registriert wird es
+    vom Knopf „Add to Claude" (Schritt 3, `55431c3a`).
 * **Kein Handbuch-Kapitel „Editor fernsteuern".** Das Kapitel läge nicht in
   diesem Repo: `EditorDeps/Docs/he-docs.json` wird von
   `scripts/build_docs_bundle.py` aus `~/VSCode/Website/HorizonEngineDocs/*.html`
@@ -760,10 +771,25 @@ stehen ließe, wäre genau die Überraschung, gegen die der Standard-Aus existie
   Wenn das Kapitel geschrieben ist: Abschnitt in `collaboration.html`, Bundle
   neu bauen, Bundle hier committen, Website **nicht** deployen — und erst dann
   die `topic`-Felder füllen.
+  * → **Erledigt, genau in dieser Reihenfolge.** Das Kapitel ist
+    `collaboration.html`, Abschnitt `#remote-control` („Remote Control", nach
+    „Notifications", mit Eintrag in der Seitenleiste). Bundle neu gebaut
+    (`EditorDeps/Docs/he-docs.json`, 112 → 113 Abschnitte, hier committet),
+    **Website nicht deployt** — das ist ein eigener, bestätigter Schritt des
+    Menschen. Danach die `topic`-Felder: alle **fünf** Remote-Control-Einträge
+    zeigen jetzt auf `collaboration#remote-control` (drei aus dem Vorthema, zwei
+    aus Schritt 3). Der Weg über F1 ist unverändert die generierte
+    Settings-Referenz; `topic` ist der Weiterlesen-Link daneben.
 * **Nie gegen einen echten Client gelaufen.** Alles hier ist durch Tests über
   einen echten Socket belegt, aber der Ende-zu-Ende-Durchlauf aus Schritt 7
   (Mensch am Bildschirm, Würfel platzieren, Undo sehen) steht aus — und kann
   es auch, solange das Shim fehlt.
+  * → **Halb.** Der Handschlag ist gelaufen: die Probe aus Schritt 4 startet
+    über `claude mcp get` wirklich das Shim, und die Zeile wird nur grün, wenn
+    der Zähler dieser Brücke dabei hochgeht (7.4). Der Rest des Durchlaufs —
+    Mensch am Bildschirm, Würfel setzen, Undo sehen — steht weiter aus und ist
+    aus einer Testsuite heraus auch nicht zu belegen. **Das bleibt offen** und
+    ist der einzige Punkt aus 5.3, der es tut.
 * Die Punkte aus Kapitel 4 bleiben, wo sie noch nicht durch Schritt 2
   entschieden wurden.
 
@@ -1193,8 +1219,13 @@ Python-Zählers. Das ist der Durchlauf aus 6.8 Punkt 8 und braucht ein Fenster.
 
 ### 6.9 Offen, absichtlich
 
+> Fortgeschrieben in Schritt 5. Erledigtes steht als `→` unter seinem Punkt;
+> was offen geblieben ist, steht in 7.6.
+
 * **6.2 ist nicht entschieden.** Bewusst nicht selbst entschieden, weil das
   Thema `mcp>=2` wörtlich vorgibt und die Empfehlung dagegen steht.
+  * → **Entschieden: Weg (b), reine Standardbibliothek.** Begründung und Folgen
+    in 7.2.
 * **Nur auf macOS gemessen.** Die `claude`-Ausgaben oben stammen aus einer
   einzigen Installation. Die `Status:`-Zeile ist mit Unicode-Häkchen dekoriert
   (`✔`/`✘`); der Parser sollte auf `Failed to connect` bzw. `Connected` im Text
@@ -1202,6 +1233,122 @@ Python-Zählers. Das ist der Durchlauf aus 6.8 Punkt 8 und braucht ein Fenster.
   formatiert, ist ungeprüft — deshalb ist der Zählerstand-Gegencheck aus 6.7
   mehr als Zierde.
 * **Zwei Editoren, eine Endpunktdatei.** Benannt in 6.3, nicht gelöst.
+  * → **Weiter nicht gelöst, aber nicht mehr unsichtbar.** Die Zeile
+    „Claude connection" wird nur grün, wenn der Handschlag-Zähler *dieser*
+    Brücke währenddessen hochgeht; hält ein zweiter Editor die Datei, sagt die
+    Zeile genau das (7.4). Wer die Datei bekommt, entscheidet weiter, wer zuerst
+    einschaltet.
 * **Kein Handbuch-Kapitel.** Unverändert der Punkt aus 5.3; ein `claude mcp
   add`-Rezept kann erst hinein, wenn das Skript ausgeliefert wird — dann aber
   wirklich, und in `collaboration.html`.
+  * → **Geschrieben.** `collaboration.html#remote-control`, mit dem Rezept
+    darin, weil das Skript jetzt ausgeliefert wird (7.5).
+
+---
+
+## 7. Das Shim und der Knopf: was gebaut wurde
+
+Nachgetragen zum Abschluss des Folgethemas (Schritt 5, 08.09.2026), im selben
+Verhältnis zu Kapitel 6 wie Kapitel 5 zu den Kapiteln davor: der Entwurf oben
+bleibt stehen, hier steht, wo die Umsetzung ihm gefolgt ist und wo nicht.
+
+### 7.1 Steht
+
+| Was | Wo | Aus |
+|---|---|---|
+| stdio-Shim, nur Standardbibliothek, ab Python 3.8, kennt selbst keine Werkzeuge | `scripts/he_mcp.py` | `58a9da3d`, `ecfddf2e` |
+| Testbrücke aus echtem Socket + echten Pipes, Shim als Unterprozess | `tests/test_he_mcp.py`, ctest `he_mcp_shim` | `58a9da3d` |
+| CLI-, Interpreter- und Skriptsuche, Argumentvektoren, Auswertung — ImGui-frei | `src/HE_Editor/McpClientSetup.h/.cpp`, `tests/test_mcp_client_setup.cpp` | `55431c3a` |
+| Knopf „Add to Claude" + „Look for Claude Again", auf einem Worker | `src/HE_Editor/EditorSettingsPanel.cpp:655` | `55431c3a` |
+| Verbindungsprobe (`claude mcp get`, echter Handschlag) — ImGui-frei | `src/HE_Editor/McpClaudeProbe.h/.cpp`, `tests/test_mcp_claude_probe.cpp` | `356a6c9d` |
+| Vier Zeilen auf **Tool Status**, `Recheck all` fasst sie mit | `EditorSettingsPanel.cpp:2100` | `356a6c9d` |
+| Handschlag-Zähler der Brücke, für den Gegencheck | `src/HE_Editor/McpBridge.h:110` (`authCount`, `lastAuthClient`) | `356a6c9d` |
+| Auslieferung neben dem Editor und ins `.app`, mit Prüfzeile im Packaging | `src/HE_Editor/CMakeLists.txt`, `scripts/package_macos.sh` | `55431c3a` |
+| Handbuchkapitel, fünf Bedienelemente verlinkt | `collaboration.html#remote-control`, `EditorDeps/Docs/he-docs.json`, `EditorHelp.cpp:2161` | Schritt 5 |
+
+### 7.2 Die Entscheidung zu 6.2, und was sie kostet
+
+Weg **(b)**: das Shim benutzt `json`, `socket`, `struct`, `sys`, `os` — sonst
+nichts. Kein `pip install`, kein Virtualenv, jedes Python ab 3.8.
+
+Der Grund ist der Knopf. „Add to Claude" verspricht eine Registrierung, die
+funktioniert; hinge sie an einem Paket, das der Editor nicht mitliefert, wäre
+das ein Versprechen, das er nicht halten kann — ein frisch installiertes Python
+ohne `mcp`-Modul ist der Normalfall, nicht die Ausnahme. Das im Thementext
+vorgegebene `mcp>=2` war die Grobvorgabe, gegen die der geprüfte Befund aus 6.2
+stand; die Entscheidung dagegen ist bewusst getroffen worden und nicht
+weggerutscht.
+
+Was es kostet: das Shim muss den Handschlag selbst beantworten (`initialize`,
+`notifications/initialized`, `tools/list`, `tools/call`) statt ihn einem SDK zu
+überlassen, und muss die Protokollversion des Clients zurückspiegeln. Das sind
+die rund vierzig Zeilen in `McpServer` — der Preis dafür, dass die einzige
+Voraussetzung „ein Python" heißt. 6.4 (die geprüfte `mcp`-2.x-API) bleibt im
+Dokument, falls die Rechnung sich einmal umdreht.
+
+### 7.3 Der Knopf: drei Dinge, die nicht offensichtlich sind
+
+* **`-s user`, nicht der Standard.** `claude mcp add` schreibt sonst in die
+  Konfiguration des *Arbeitsverzeichnisses* — und ein aus dem Finder
+  gestarteter Editor hat „/" als solches. Der Eintrag landete, wo nie jemand
+  hinsieht.
+* **Immer neu schreiben, nie verweigern.** `claude mcp add` auf einen
+  bestehenden Eintrag meldet „already exists" und beendet sich mit **Null**.
+  Der Rückgabewert allein kann „registriert" also nicht von „alten, falschen
+  Pfad stehengelassen" unterscheiden. Deshalb erst `mcp remove`, dann `mcp add`,
+  unter genau einem Namen (`horizon-editor`).
+* **Der Knopf ist nicht an den Schalter gekoppelt.** Registrieren schreibt eine
+  Zeile in Claudes Konfiguration und fasst den Listener nicht an. Ihn zu
+  sperren, solange Remote Control aus ist, würde nur ein Ritual beibringen, das
+  es nicht gibt. Was zusammengehört, sagt der Hilfetext: der Schalter muss an
+  sein, *wenn Claude fragt*.
+
+### 7.4 Die Zeile, die nicht behaupten kann
+
+Ausführlich in 6.7 unter „Was daraus gebaut wurde". Der Kern: `claude mcp get`
+**startet** das Shim und führt den Handschlag wirklich aus, und grün wird die
+Zeile nur, wenn zusätzlich der Handschlag-Zähler *dieser* Brücke währenddessen
+hochgegangen ist. „Connected" allein sagt nur, dass irgendein Editor geantwortet
+hat. Genau darum ist der Zähler und nicht `clientCount()` der Gegencheck: ein
+`update()` leert die ganze Ereignisschlange, und das Shim verbindet,
+authentifiziert und legt im selben Pump wieder auf.
+
+### 7.5 Das Handbuch, in der Reihenfolge, die 5.3 vorschreibt
+
+Der Abschnitt steht auf der Website-Seite `collaboration.html` als
+`#remote-control` („Remote Control", zwischen „Notifications" und
+„Message Reference", mit Eintrag in der Seitenleiste): Schalter und Port, die
+Endpunktdatei und ihre drei Plattformpfade, das Shim und warum es überhaupt
+existiert, der Befehl des Knopfes wörtlich, die vier Tool-Status-Zeilen mit dem,
+was Grün jeweils *bedeutet*, und was ein Client darf (undoable, Locks gelten).
+
+Danach `scripts/build_docs_bundle.py`: 112 → 113 Abschnitte, das Bundle liegt
+committet in `EditorDeps/Docs/he-docs.json` — Pflicht, weil ein frischer Klon
+und die CI ohne den Website-Checkout bauen müssen. Erst danach die
+`topic`-Felder, alle fünf Remote-Control-Einträge in `EditorHelp.cpp` auf
+`collaboration#remote-control`. Umgekehrt hätte `test_editor_help` rot gezeigt,
+und zwar zu Recht.
+
+**Die Website ist nicht deployt.** Der Text liegt im Geschwister-Checkout
+`Website/HorizonEngineDocs/collaboration.html` und wartet dort auf den
+Deploy-Schritt, den der Mensch bestätigt. Der Editor zeigt das Kapitel trotzdem
+schon: er liest das Bundle, nicht die Seite.
+
+Der Suchindex der Website (`HorizonEngineDocs/docs-index.json`) ist **bewusst
+nicht** mitgeneriert: `deploy.py` baut ihn selbst, und die Datei stand zu dem
+Zeitpunkt schon mit fremden Änderungen im Arbeitsverzeichnis — sie neu zu
+schreiben hätte fremde Arbeit überschrieben, um etwas vorzuziehen, das der
+Deploy ohnehin tut.
+
+### 7.6 Was offen bleibt
+
+* **Der Ende-zu-Ende-Durchlauf mit einem Menschen davor.** Der Handschlag ist
+  belegt (7.4), das Setzen eines Würfels aus einer echten Claude-Sitzung und das
+  Undo danach im Editor nicht. Aus einer Testsuite heraus ist es auch nicht zu
+  belegen — es braucht jemanden, der zusieht.
+* **Nur auf macOS gemessen.** Unverändert der Punkt aus 6.9: die
+  `claude`-Ausgaben, aus denen die Probe liest, stammen aus einer Installation.
+  Der Parser prüft auf die Wörter, nicht auf die Häkchen, und der Gegencheck
+  fängt eine falsche Zuordnung ab — aber Windows und Linux sind ungeprüft.
+* **Zwei Editoren, eine Endpunktdatei.** Sichtbar gemacht, nicht gelöst.
+* **Die Website ist nicht deployt** (7.5).
