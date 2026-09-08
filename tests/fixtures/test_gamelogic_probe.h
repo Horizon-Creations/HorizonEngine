@@ -14,8 +14,29 @@
 #include <IGameLogic.h>
 #include <HorizonGameServices.h>
 
+// Where the module's own copies of the header's inline accessors live, and what
+// its own services globals actually hold. Every one of these is read INSIDE the
+// loaded image; the test takes the same addresses in he_tests and requires them
+// to differ. That comparison is the only way to see a weak-symbol coalescing
+// bug, because when it strikes every OTHER value the probe reports is a
+// perfectly well-formed "no engine injected" default.
+struct TestServiceSymbols
+{
+    uintptr_t saveAccessor    = 0;   // &he::detail::svc
+    uintptr_t physicsAccessor = 0;   // &he::detail::physSvc
+    uintptr_t inputAccessor   = 0;   // &he::detail::inputSvc
+    uintptr_t contentAccessor = 0;   // &he::detail::contentSvc
+    uintptr_t saveGlobal      = 0;   // &g_heSaveServices — the storage
+    uintptr_t saveTable       = 0;   // g_heSaveServices  — what was written into it
+};
+
 struct ITestServicesProbe : IGameLogic
 {
+    // Deliberately not routed through any he::* wrapper: this one reports the
+    // module's raw symbol identities, so a wrapper that answers wrongly cannot
+    // also decide what the diagnosis says.
+    virtual TestServiceSymbols symbols() const = 0;
+
     // What the module saw at the two lifecycle points that matter: the tables
     // have to be live in onStart (a game loads its save there) and stay live
     // across onUpdate.

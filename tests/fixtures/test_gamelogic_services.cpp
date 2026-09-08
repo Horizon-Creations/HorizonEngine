@@ -31,6 +31,18 @@ public:
 
 	void onStop(HorizonWorld&) override {}
 
+	TestServiceSymbols symbols() const override
+	{
+		TestServiceSymbols s;
+		s.saveAccessor    = reinterpret_cast<uintptr_t>(&he::detail::svc);
+		s.physicsAccessor = reinterpret_cast<uintptr_t>(&he::detail::physSvc);
+		s.inputAccessor   = reinterpret_cast<uintptr_t>(&he::detail::inputSvc);
+		s.contentAccessor = reinterpret_cast<uintptr_t>(&he::detail::contentSvc);
+		s.saveGlobal      = reinterpret_cast<uintptr_t>(&g_heSaveServices);
+		s.saveTable       = reinterpret_cast<uintptr_t>(g_heSaveServices);
+		return s;
+	}
+
 	bool servicesAvailableAtStart() const override { return m_saveAtStart; }
 	bool physicsAvailableAtStart()  const override { return m_physicsAtStart; }
 	bool inputAvailableAtStart()    const override { return m_inputAtStart; }

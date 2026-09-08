@@ -637,6 +637,10 @@ TEST_CASE("GameLogic services: a hot swap re-injects, an unassisted reload does 
         // Still answering real values across the boundary after the swap.
         CHECK(fresh->doRaycast({ 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 50.0f).hit);
         CHECK(fresh->doLoadAsset("Rock.hasset").valid());
+        // The table landed in the NEW image's own storage, which is the part of
+        // "re-injects" that the available() flags above cannot distinguish from
+        // "reads someone else's globals and got lucky".
+        CHECK(fresh->symbols().saveTable == reinterpret_cast<uintptr_t>(&rig.save));
     }
 
     SUBCASE("raw reload() + onStart: the module is silent, and that is the trap")
@@ -651,7 +655,75 @@ TEST_CASE("GameLogic services: a hot swap re-injects, an unassisted reload does 
         // Not a crash — a default. Which is exactly what makes it hard to see.
         CHECK_FALSE(fresh->doRaycast({ 0.0f, 10.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 50.0f).hit);
         CHECK_FALSE(fresh->doLoadAsset("Rock.hasset").valid());
+        // And silent for the RIGHT reason: this image's own global is empty,
+        // not merely some other image's. A negative expectation is the easiest
+        // thing in this file to satisfy by accident.
+        CHECK(fresh->symbols().saveTable == 0);
     }
+
+    loader.unload(rig.world);
+}
+
+// ── The wrappers a loaded module runs have to be ITS OWN ─────────────────────
+// Everything else in this file asks what the module answered. This asks which
+// code answered, and it exists because for a while the answer was "the test
+// binary's".
+//
+// <HorizonGameServices.h> is all inline functions, so every image that uses one
+// emits its own copy as a weak definition — and dyld coalesces weak definitions
+// across images, the executable winning. he_tests contains this header too (it
+// carries HE_IMPLEMENT_ENGINE_SERVICES() for the in-process save tests in
+// test_engine_api.cpp), so the fixture's calls were resolving to he_tests'
+// he::detail::svc(), reading he_tests' g_heSaveServices — storage the loader
+// never injects into, because it injects into the module's.
+//
+// Nothing about that is visible from the outside. The tables were built, found,
+// and written correctly into the module's globals every single time; the module
+// just never read them. Every wrapper returned its documented "no engine
+// injected" default, which is a legitimate state, so the failure looked like a
+// loader that had stopped injecting rather than a linker that had merged two
+// functions. The fix is hidden visibility on the wrappers, in the header, and
+// only an address comparison can hold it in place.
+TEST_CASE("GameLogic services: a loaded module runs its own copy of the wrappers")
+{
+    const std::filesystem::path libPath = HE_TEST_GAMELOGIC_SERVICES_LIB;
+    REQUIRE(std::filesystem::exists(libPath));
+
+    // Taking these addresses HERE is half the test: it forces he_tests to emit
+    // its own out-of-line copy of all four accessors. Which of them existed used
+    // to be an accident of what the binary's other tests happened to touch —
+    // that is why physics kept working while save, input and content did not,
+    // and why growing an unrelated test file made the failure spread.
+    const uintptr_t hostSave    = reinterpret_cast<uintptr_t>(&he::detail::svc);
+    const uintptr_t hostPhysics = reinterpret_cast<uintptr_t>(&he::detail::physSvc);
+    const uintptr_t hostInput   = reinterpret_cast<uintptr_t>(&he::detail::inputSvc);
+    const uintptr_t hostContent = reinterpret_cast<uintptr_t>(&he::detail::contentSvc);
+    const uintptr_t hostGlobal  = reinterpret_cast<uintptr_t>(&g_heSaveServices);
+    // Whatever test_engine_api.cpp left in this binary's own global — the point
+    // is only that loading a module does not touch it, not what it holds.
+    const HeSaveServices* const hostTableBefore = g_heSaveServices;
+
+    ServicesRig rig;
+    HE::GameLogicLoader loader;
+    REQUIRE(loader.loadAndStart(libPath, rig.world, &rig.umbrella));
+    auto* probe = probeOf(loader);
+    REQUIRE(probe != nullptr);
+
+    const TestServiceSymbols mod = probe->symbols();
+    REQUIRE(mod.saveAccessor != 0);
+    CHECK(mod.saveAccessor    != hostSave);
+    CHECK(mod.physicsAccessor != hostPhysics);
+    CHECK(mod.inputAccessor   != hostInput);
+    CHECK(mod.contentAccessor != hostContent);
+    // The storage the accessors read has to be the module's too — a private
+    // accessor over shared globals would be the same bug wearing a hat.
+    CHECK(mod.saveGlobal != hostGlobal);
+
+    // What that buys, said in values: the module reads back the very table the
+    // rig handed the loader, and this binary's own global stays exactly where it
+    // was — the loader was never asked to write here.
+    CHECK(mod.saveTable == reinterpret_cast<uintptr_t>(&rig.save));
+    CHECK(g_heSaveServices == hostTableBefore);
 
     loader.unload(rig.world);
 }

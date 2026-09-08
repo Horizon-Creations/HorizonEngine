@@ -50,6 +50,8 @@
 #ifndef HE_GAME_API
 #  ifdef _WIN32
 #    define HE_GAME_API __declspec(dllexport)
+#  elif defined(__GNUC__) || defined(__clang__)
+#    define HE_GAME_API __attribute__((visibility("default")))
 #  else
 #    define HE_GAME_API
 #  endif
@@ -321,6 +323,33 @@ struct AssetId
     bool operator==(const AssetId& o) const { return hi == o.hi && lo == o.lo; }
     bool operator!=(const AssetId& o) const { return !(*this == o); }
 };
+
+// ── Why every wrapper below is HIDDEN ────────────────────────────────────────
+// These are inline functions in a header, so each image that uses one emits its
+// own out-of-line copy as a WEAK definition. dyld coalesces weak definitions
+// across images: if the host executable also contains this header — and a host
+// that runs an in-process test of the same wrappers does — then the dlopen'd
+// game module ends up calling the HOST's copy of detail::svc(), which reads the
+// HOST's g_heSaveServices. Those are never injected: the loader writes into the
+// module's globals, and the module's own accessors are the ones nobody calls.
+// The result is silent and total — every he::* call in the module returns its
+// "no engine injected" default while the tables sit right there, correctly
+// filled, one symbol away.
+//
+// Hidden visibility ends it at the source: a hidden weak definition is not a
+// candidate for coalescing, so each image resolves to the copy that sits next to
+// its own globals. It belongs in the header rather than in a build file because
+// the constraint is the header's, not any one project's — a generated C++ game
+// project (CppScaffold::cmakeLists) sets no visibility flags at all, and this
+// has to hold there too. Nothing here is meant to cross a library boundary: the
+// exported surface is HE_CreateGameLogic and HE_SetEngineServices*, and those
+// carry HE_GAME_API.
+//
+// Windows needs none of this — a DLL never coalesces with its host — and MSVC
+// warns (C4068) about the pragma it does not know, so it stays behind the guard.
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC visibility push(hidden)
+#endif
 
 namespace detail {
 inline const HeSaveServices*    svc()        { return g_heSaveServices; }
@@ -638,4 +667,8 @@ inline std::string typeName(const AssetId& id)
     { return s->assetTypeName(h, cid, b, c); });
 }
 } // namespace content
+
+#if defined(__GNUC__) || defined(__clang__)
+#  pragma GCC visibility pop
+#endif
 } // namespace he
