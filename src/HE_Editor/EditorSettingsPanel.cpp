@@ -1948,6 +1948,14 @@ void drawStatusPage(AppContext& ctx)
 	                   "the background at startup; nothing here changes any setting.");
 	ImGui::Spacing();
 
+	// The Claude rows are the one check that is not run at startup, so opening
+	// this page is what starts them — which is also the only honest place for it,
+	// since the check is a real connection attempt and costs seconds. Fires once:
+	// the moment it finishes, claudeProbe stops being null and this is a no-op
+	// until "Recheck all" is pressed.
+	if (!ctx.claudeProbe && !ctx.claudeProbing && ctx.recheckClaude)
+		ctx.recheckClaude();
+
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
 	                                   ImGuiTableFlags_SizingStretchProp;
 	if (ImGui::BeginTable("##statustable", 4, kFlags))
@@ -2087,19 +2095,113 @@ void drawStatusPage(AppContext& ctx)
 			                            "joined by address"));
 		}
 
+		// ── Remote control by Claude ─────────────────────────────────────────
+		// Four rows rather than one, because they fail in four different ways and
+		// only one of them is fixed by the button (plan §6.7). "Add to Claude"
+		// can only ever report that a config line was written; whether a Claude
+		// session actually reaches this editor is a different claim, and this is
+		// the place that makes it — by running `claude mcp get`, which starts the
+		// shim and performs the handshake for real.
+		const auto openRemoteControl = []{ s_page = Page::RemoteControl; };
+
+		if (!ctx.claudeProbe)
+		{
+			statusRow("Claude Code",       StatusLevel::Checking, "");
+			statusRow("MCP shim",          StatusLevel::Checking, "");
+			statusRow("Registered",        StatusLevel::Checking, "");
+			statusRow("Claude connection", StatusLevel::Checking, "");
+		}
+		else
+		{
+			namespace Claude = HE::Ed::McpClaudeProbe;
+			const Claude::Probe& c = *ctx.claudeProbe;
+
+			statusRow("Claude Code", c.tools.claude.empty() ? StatusLevel::Missing
+			                                                : StatusLevel::Ok,
+			          c.tools.claude.empty()
+			              ? std::string("not installed, or not where an installer puts it — "
+			                            "without it this editor cannot be registered")
+			              : c.tools.claude.string(),
+			          openRemoteControl);
+
+			// One row for both halves of "can the shim be started": an interpreter
+			// without the script and a script without an interpreter are the same
+			// dead end, and splitting them would put two rows on the page that are
+			// never separately actionable.
+			const bool shimOk = !c.tools.python.empty() && !c.tools.script.empty();
+			statusRow("MCP shim", shimOk ? StatusLevel::Ok : StatusLevel::Missing,
+			          shimOk ? c.tools.python.string() + " " + c.tools.script.string()
+			                 : (c.tools.python.empty()
+			                        ? std::string("no Python interpreter found — the bridge "
+			                                      "needs none, the script that connects Claude "
+			                                      "to it is Python")
+			                        : std::string("he_mcp.py is not next to the editor — a "
+			                                      "broken installation rather than a setting")),
+			          openRemoteControl);
+
+			StatusLevel regLevel = StatusLevel::Warn;
+			switch (c.registration)
+			{
+			case Claude::Registration::Ok:      regLevel = StatusLevel::Ok;      break;
+			case Claude::Registration::Missing: regLevel = StatusLevel::Missing; break;
+			// Amber, not red: there IS an entry and Claude will start something.
+			// It is the wrong something, which is worse to be told nothing about
+			// and not the same as having nothing at all.
+			case Claude::Registration::Stale:   regLevel = StatusLevel::Warn;    break;
+			case Claude::Registration::Unknown: regLevel = StatusLevel::Warn;    break;
+			}
+			statusRow("Registered", regLevel, c.registrationDetail, openRemoteControl);
+
+			// The row this whole section exists for. Green needs BOTH halves:
+			// `claude` saying it connected, and this editor's own handshake
+			// counter having moved while it said so. Without the second half a
+			// second editor holding the same endpoint file would paint this row
+			// green in the wrong window.
+			StatusLevel linkLevel = StatusLevel::Warn;
+			std::string linkDetail = c.linkDetail;
+			if (c.link == Claude::Link::Connected)
+			{
+				if (c.authSeen)
+				{
+					linkLevel  = StatusLevel::Ok;
+					linkDetail = "connected — " + (c.authClient.empty()
+					                                   ? std::string("a client")
+					                                   : c.authClient) +
+					             " completed the handshake with THIS editor while the check ran";
+				}
+				else
+				{
+					linkLevel  = StatusLevel::Warn;
+					linkDetail = "claude reports a connection, but no handshake reached this "
+					             "editor — another editor on this machine may be holding the "
+					             "endpoint file";
+				}
+			}
+			else if (c.link == Claude::Link::Failed)
+			{
+				linkLevel = StatusLevel::Missing;
+			}
+			statusRow("Claude connection", linkLevel, linkDetail, openRemoteControl);
+		}
+
 		ImGui::EndTable();
 	}
 
 	// ── Footer: recheck + the collaboration caveat ───────────────────────────
 	ImGui::Spacing();
 	ImGui::Separator();
-	const bool checking = !ctx.gitProbe || !ctx.toolchainProbe || !ctx.routerProbe;
+	const bool checking = !ctx.gitProbe || !ctx.toolchainProbe || !ctx.routerProbe ||
+	                      ctx.claudeProbing;
 	ImGui::BeginDisabled(checking);
 	if (EditorWidgets::button("Recheck all"))
 	{
 		if (ctx.recheckGit)       ctx.recheckGit();
 		if (ctx.recheckToolchain) ctx.recheckToolchain();
 		if (ctx.recheckRouter)    ctx.recheckRouter();
+		// Deliberately in here rather than on a button of its own: this is the
+		// press somebody makes after switching Remote Control on or moving the
+		// editor, and those are exactly the two things that change its answer.
+		if (ctx.recheckClaude)    ctx.recheckClaude();
 	}
 	ImGui::EndDisabled();
 	if (checking) { ImGui::SameLine(); ImGui::TextDisabled("Checking…"); }
@@ -2112,12 +2214,35 @@ void drawStatusPage(AppContext& ctx)
 	                   "really arrives is confirmed only once a session is open "
 	                   "(View \xe2\x96\xb8 Collaboration).");
 
+	// The counterpart for the Claude rows, and it says the opposite thing: that
+	// check is NOT read-only. It starts the shim and opens a connection, which is
+	// the only reason its verdict is worth anything — and worth saying out loud,
+	// because somebody watching the footer will see a client appear.
+	ImGui::Spacing();
+	ImGui::TextWrapped("The Claude check is not read-only: it runs `claude mcp get`, which "
+	                   "starts the shim and completes the handshake, so the footer briefly "
+	                   "shows a connected client. That is what makes the row a measurement "
+	                   "rather than a claim.");
+
 	if (ctx.routerProbe && !ctx.routerProbe->detail.empty())
 	{
 		ImGui::Spacing();
 		if (ImGui::TreeNode("Router probe log"))
 		{
 			ImGui::TextUnformatted(ctx.routerProbe->detail.c_str());
+			ImGui::TreePop();
+		}
+	}
+
+	// Folded away, and here for the one failure the rows above cannot word: a CLI
+	// version that phrases its answer differently. Then the only useful thing on
+	// the page is what it actually said.
+	if (ctx.claudeProbe && !ctx.claudeProbe->console.empty())
+	{
+		ImGui::Spacing();
+		if (ImGui::TreeNode("Claude check log"))
+		{
+			ImGui::TextUnformatted(ctx.claudeProbe->console.c_str());
 			ImGui::TreePop();
 		}
 	}

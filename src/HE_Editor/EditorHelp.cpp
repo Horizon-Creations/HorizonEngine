@@ -2413,9 +2413,12 @@ namespace
 	  "already in order.",
 	  "", "editor#preferences" },
 	{ "Tool Status/Recheck all", "Recheck all",
-	  "Runs all three probes again: git, the C++ toolchain, and the router. The "
-	  "results are cached from startup, so this is what to press after installing "
-	  "something or changing the network.",
+	  "Runs every probe again: git, the C++ toolchain, the router, and the Claude "
+	  "connection. The first three are cached from startup, so this is what to "
+	  "press after installing something or changing the network. The Claude check "
+	  "is the one that is not free — it starts the shim and completes a real "
+	  "handshake — so press it after switching Remote Control on or moving the "
+	  "editor, which are the two things that change its answer.",
 	  "", "editor#preferences" },
 
 	// ── The build-tools dialog ───────────────────────────────────────────────

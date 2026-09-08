@@ -34,6 +34,7 @@
 #include <Net/RouterProbe.h>
 #include "GitController.h"
 #include "McpBridge.h"
+#include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
 #include "EditorCommands.h"
 #include <atomic>
 #include <filesystem>
@@ -449,6 +450,20 @@ struct AppContext
 	// Preferences ▸ Editor ▸ Tool Status and in the Collaboration window.
 	const HE::Net::RouterProbe* routerProbe = nullptr;
 	std::function<void()> recheckRouter;
+
+	// Whether a Claude session can actually drive this editor. Unlike the three
+	// above this one does NOT run at startup, and the two states have to be told
+	// apart: null with claudeProbing false means nobody has asked yet, null with
+	// it true means the answer is on its way. Folding those together would be a
+	// "Recheck" button locked from the first frame of the session.
+	//
+	// It is left until asked for because asking is not free and not invisible:
+	// it starts the `claude` CLI, which starts the shim, which connects to this
+	// very editor. Doing that unbidden at every launch would spend seconds and
+	// make the footer blink about a client the user never invited.
+	const HE::Ed::McpClaudeProbe::Probe* claudeProbe = nullptr;
+	bool claudeProbing = false;
+	std::function<void()> recheckClaude;
 
 	// Source-control state for the panel and the Content Browser badges. Null in
 	// builds without the module.
@@ -1036,6 +1051,31 @@ private:
 	std::atomic<bool>  m_routerCancel{false};
 	HE::Net::RouterProbe m_routerProbe;
 	void startRouterProbe();
+
+	// "Can Claude reach this editor" — the one probe that is NOT started at
+	// startup (see AppContext::claudeProbe for why) and the one that needs two
+	// threads to agree on an answer.
+	//
+	// The worker runs `claude mcp get`, which is a real connection attempt; the
+	// half that says the connection landed in THIS editor is McpBridge's
+	// handshake counter, and that may only be read from the frame thread. So the
+	// baseline is taken here before the worker starts, and the comparison is
+	// made in the frame loop when the worker's flag flips — which is also the
+	// moment m_claudeResult becomes safe to read.
+	std::thread                          m_claudeThread;
+	std::atomic<bool>                    m_claudeWorkerDone{false};
+	HE::Ed::McpClaudeProbe::Probe        m_claudeResult;
+	// Frame thread only: 0 never asked, 1 running, 2 answered.
+	int                                  m_claudeState        = 0;
+	std::uint64_t                        m_claudeAuthBaseline = 0;
+	// Pumps counted after the worker returned, before the answer is read off.
+	// See pollClaudeProbe: the handshake is over on the wire long before this
+	// process has looked at the socket.
+	int                                  m_claudeSettleFrames = 0;
+	void startClaudeProbe();
+	// Called every frame: picks the worker's answer up and finishes it with the
+	// bridge-side cross-check. Cheap and does nothing while m_claudeState != 1.
+	void pollClaudeProbe();
 
 	// Auto-install worker (see startToolchainInstall / HcCodegen::installToolchain).
 	// Streams installer output into m_installLog under m_installLogMutex; the UI polls.

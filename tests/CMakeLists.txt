@@ -129,6 +129,7 @@ add_executable(he_tests
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
+    test_mcp_claude_probe.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -178,6 +179,12 @@ add_executable(he_tests
     # parts that are wrong most easily — a missing -s user, a path that stopped
     # being absolute, an exit code read as success.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpClientSetup.cpp
+    # And the reading of `claude mcp get`, which is where the Tool Status page's
+    # "Connected" row gets its verdict. The CLI exits ZERO whether the server
+    # connected or failed to, so the whole verdict hangs on parsing text — the
+    # kind of thing that is right until a wording changes, and the kind of thing
+    # a test can hold to the transcripts that were actually measured.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpClaudeProbe.cpp
     # The entity tools. In here for the reason they were written this way at all:
     # they take an EditorCommands reference and nothing else from the editor, so
     # "does entity_set_transform actually move the entity, and does undo put it

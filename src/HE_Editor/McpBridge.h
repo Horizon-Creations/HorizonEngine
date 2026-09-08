@@ -113,6 +113,23 @@ public:
 	std::size_t   connectionCount() const;
 	const std::string& token() const { return m_token; }
 
+	// How many handshakes have EVER succeeded, and who said it was them.
+	//
+	// clientCount() cannot answer "did somebody reach this editor just now": one
+	// update() drains the whole event queue, so a client that connects,
+	// authenticates and hangs up between two frames is born and buried inside a
+	// single pump and the count never leaves zero. That is exactly what `claude
+	// mcp get` does — start the shim, run the handshake, close it — so the Tool
+	// Status check needs a number that only goes up. Compared before and after,
+	// it is proof that the connection landed HERE and not in a second editor
+	// holding the same endpoint file (plan §6.7).
+	//
+	// `lastAuthClient` is the `params.client` the shim sends ("he_mcp/1"); empty
+	// for a client that did not name itself. Both are written on the frame thread
+	// in update() and are only safe to read there.
+	std::uint64_t      authCount() const { return m_authCount; }
+	const std::string& lastAuthClient() const { return m_lastAuthClient; }
+
 private:
 	struct Client
 	{
@@ -143,6 +160,8 @@ private:
 	std::uint16_t         m_requestedPort = 0;
 	bool                  m_enabled       = false;
 	std::uint64_t         m_nowMs         = 0;
+	std::uint64_t         m_authCount     = 0;   // monotonic; never reset by stop()
+	std::string           m_lastAuthClient;
 };
 
 } // namespace HE::Ed

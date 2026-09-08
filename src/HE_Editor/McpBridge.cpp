@@ -305,7 +305,17 @@ void McpBridge::handleFrame(ConnectionId id, const std::vector<std::uint8_t>& da
 		}
 
 		it->second.authed = true;
-		HE_LOG_INFO(Editor, "MCP: client %u authenticated", static_cast<unsigned>(id));
+		// Counted before anything else can go wrong with this connection: the
+		// Tool Status check reads this number across a `claude mcp get`, and that
+		// handshake is over before the next frame begins (see authCount()).
+		++m_authCount;
+		m_lastAuthClient = (msg.is_object() && msg.contains("params"))
+		                       ? strField(msg["params"], "client")
+		                       : std::string();
+		const std::string named = m_lastAuthClient.empty() ? std::string()
+		                                                   : " as " + m_lastAuthClient;
+		HE_LOG_INFO(Editor, "MCP: client %u authenticated%s", static_cast<unsigned>(id),
+		            named.c_str());
 		if (msg.contains("id") && !msg["id"].is_null())
 		{
 			sendJson(id, json{

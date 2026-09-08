@@ -1657,6 +1657,61 @@ void EditorApplication::startToolchainProbe()
 	});
 }
 
+// Ask the Claude CLI whether it can reach this editor, and take the bridge-side
+// baseline that makes the answer provable (plan §6.7).
+//
+// Started only when somebody looks at Tool Status, never at launch: the run
+// starts `claude`, which starts the shim, which opens a connection to this
+// process. That is the point — nothing weaker than a real handshake can tell
+// "registered" from "working" — but it is also why it is not something to do
+// behind the user's back on every start.
+void EditorApplication::startClaudeProbe()
+{
+	if (m_claudeState == 1) return;               // one in flight is enough
+	if (m_claudeThread.joinable()) m_claudeThread.join();
+
+	m_claudeWorkerDone.store(false, std::memory_order_release);
+	m_claudeState        = 1;
+	m_claudeSettleFrames = 0;
+	// Read HERE, on the frame thread, before anything can connect. The worker may
+	// not touch the bridge at all.
+	m_claudeAuthBaseline = m_mcp.authCount();
+
+	const char* basePtr = SDL_GetBasePath();
+	const std::filesystem::path base     = basePtr ? std::filesystem::path(basePtr)
+	                                               : std::filesystem::path();
+	const std::filesystem::path endpoint = m_mcp.endpointFile();
+
+	m_claudeThread = std::thread([this, base, endpoint]
+	{
+		HE::Ed::McpClaudeProbe::Probe p = HE::Ed::McpClaudeProbe::probeClaude(base, endpoint);
+		m_claudeResult = std::move(p);
+		m_claudeWorkerDone.store(true, std::memory_order_release);
+	});
+}
+
+void EditorApplication::pollClaudeProbe()
+{
+	if (m_claudeState != 1) return;
+	if (!m_claudeWorkerDone.load(std::memory_order_acquire)) return;
+
+	// Not finished the instant the CLI returns. The shim's connect, handshake and
+	// hang-up are over on the wire by then, but the counter only moves inside the
+	// pump, and this process has not necessarily looked at the socket yet. Three
+	// pumps of grace — imperceptible next to the seconds the run itself took, and
+	// the difference between a proven row and one that reports "did not reach
+	// this editor" about a connection that did.
+	if (++m_claudeSettleFrames < 3) return;
+
+	// The counter cannot have moved for any other reason worth worrying about:
+	// nothing else was invited during those seconds, and if a second client did
+	// authenticate in the same window, the honest reading of that is still "a
+	// client reached this editor while the check ran".
+	m_claudeResult.authSeen   = m_mcp.authCount() > m_claudeAuthBaseline;
+	m_claudeResult.authClient = m_mcp.lastAuthClient();
+	m_claudeState = 2;
+}
+
 void EditorApplication::startGitProbe()
 {
 	if (m_gitThread.joinable()) m_gitThread.join();
@@ -3845,6 +3900,9 @@ void EditorApplication::OnRender(float dt)
 		// After the pump, because it is the pump that notices a client has gone —
 		// and a client going is what hands its locks back.
 		updateMcpLocks(nowMs);
+		// Also after the pump, and for the mirror-image reason: the Tool Status
+		// check is finished by a handshake this pump is the one to see.
+		pollClaudeProbe();
 
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
@@ -6912,6 +6970,12 @@ AppContext EditorApplication::makeContext()
 		.routerProbe         = m_routerChecked.load(std::memory_order_acquire)
 		                           ? &m_routerProbe : nullptr,
 		.recheckRouter       = [this]{ startRouterProbe(); },
+		// Plain reads, no atomics: m_claudeState is written only in
+		// startClaudeProbe/pollClaudeProbe, and makeContext runs on the same
+		// thread as both.
+		.claudeProbe         = m_claudeState == 2 ? &m_claudeResult : nullptr,
+		.claudeProbing       = m_claudeState == 1,
+		.recheckClaude       = [this]{ startClaudeProbe(); },
 		.git                 = &m_git,
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
@@ -7967,6 +8031,10 @@ void EditorApplication::OnShutdown()
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	if (m_gitThread.joinable()) m_gitThread.join();
+	// Bounded by the 30 s timeout on its single CLI run, so it cannot hang the
+	// quit — but it is a joinable std::thread like the others, and destroying one
+	// terminates the process.
+	if (m_claudeThread.joinable()) m_claudeThread.join();
 #ifdef HE_HAVE_LIBSSH2
 	// Bounded by sftpTestConnection's own connect timeout, so this cannot hang shutdown.
 	if (m_sftpThread.joinable()) m_sftpThread.join();

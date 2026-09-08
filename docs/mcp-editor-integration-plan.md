@@ -1113,6 +1113,62 @@ Die Probe gehört also auf einen Worker, mit demselben Aufbau, den
 „Checking" in der Tabelle, Ergebnis wird beim nächsten Frame gelesen. Der
 „Add to Claude"-Knopf ebenso — er ist schnell, aber nicht garantiert schnell.
 
+**Was daraus gebaut wurde (6.8, Punkt 5), mit zwei Abweichungen vom Entwurf.**
+`src/HE_Editor/McpClaudeProbe.h/.cpp` (ImGui-frei wie `McpClientSetup`, geprüft
+in `tests/test_mcp_claude_probe.cpp` gegen die oben gemessenen Transkripte) plus
+vier Zeilen auf **Tool Status**: `Claude Code`, `MCP shim`, `Registered`,
+`Claude connection`. Beide Abweichungen sind Korrekturen an 6.7, nicht
+Auslassungen:
+
+* **Der Gegencheck zählt Handschläge, nicht Clients.** 6.7 schlägt vor,
+  `clientCount()` vor und nach dem `claude mcp get` zu vergleichen. Das kann
+  nicht funktionieren: **ein `update()` leert die ganze Ereignisschlange**, und
+  das Shim verbindet, authentifiziert und legt auf, bevor der nächste Frame
+  beginnt — Verbindung und Abbruch fallen also in denselben Pump und der Zähler
+  verlässt die Null nie. Stattdessen `McpBridge::authCount()`, monoton, plus
+  `lastAuthClient()` aus dem `params.client`-Feld, das das Shim ohnehin schon
+  schickt. Gelesen wird beides nur auf dem Frame-Thread, und erst drei Pumps
+  nachdem der Worker zurückkam: die Antwort der CLI ist da, bevor dieser Prozess
+  auf den Socket geschaut hat.
+* **Nicht beim Start, sondern beim Öffnen der Seite.** Wie in 6.7 vorgesehen,
+  aber es ist mehr als eine Terminfrage: der Check *ist* ein Verbindungsversuch.
+  Er startet die CLI, die das Shim startet, das sich mit genau diesem Editor
+  verbindet. Deshalb hat `AppContext` hier zwei Zustände statt des üblichen
+  Null-Zeigers (`claudeProbe` null + `claudeProbing` false heißt „noch niemand
+  hat gefragt"), und die Seite sagt ausdrücklich, dass dieser eine Check nicht
+  lesend ist.
+
+Dazu eine Zeile, die 6.7 nicht vorsieht und die das Einzige ist, was den Knopf
+je zum zweiten Mal nötig macht: `Registered` wird **amber statt grün**, wenn der
+Eintrag ein anderes Skript oder eine andere Endpunktdatei nennt als diese
+Installation heute schreiben würde. Ein verschobenes `.app` startet sonst
+nichts, und `claude mcp get` nennt das brav „registriert".
+
+**Beide Pfade einmal wirklich gefahren** (echte CLI, echtes Shim, Eintrag
+danach wieder entfernt), weil 6.7 nur die eine Hälfte gemessen hatte:
+
+```
+# Endpunktdatei existiert nicht  →  rc=0
+  Status: ✘ Failed to connect
+  Issue: -32000: cannot read the endpoint file /tmp/… (No such file or
+         directory) — the editor writes it while Preferences > Editor >
+         Remote Control is switched on
+# Brücke läuft (Fake-Bridge aus tests/test_he_mcp.py)  →  rc=0
+  Status: ✔ Connected
+  Environment:
+    HE_MCP_ENDPOINT=/tmp/…
+```
+
+Drei Dinge, die vorher nur angenommen waren: der `Environment:`-Block ist
+**eingerückt unter der Überschrift**, nicht in der Zeile (deshalb sucht der
+Parser die Variable im ganzen Text statt in einer Zeile); die `Issue:`-Zeile
+trägt die Fehlermeldung **des Shims selbst** durch, was die beste
+Diagnose ist, die die Seite haben kann; und die Brücke zählte während des
+`claude mcp get` **genau einen** Handschlag — das ist der Gegencheck aus 6.7,
+im Kleinen vorgeführt. Was damit weiterhin **nicht** verifiziert ist: dieselbe
+Zeile mit dem echten Editor dahinter, also `authCount()` statt eines
+Python-Zählers. Das ist der Durchlauf aus 6.8 Punkt 8 und braucht ein Fenster.
+
 ### 6.8 Was der Zuschnitt der Folgeschritte daraus macht
 
 1. **Entscheidung 6.2** (Chefchen): stdlib oder `mcp>=2`. Alles Weitere hängt

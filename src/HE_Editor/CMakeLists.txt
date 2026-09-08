@@ -112,6 +112,11 @@ add_executable(HorizonEditor WIN32
 	# here and checked in the test binary, so the panel is left with the parts
 	# that genuinely need a window.
 	McpClientSetup.cpp
+	# And the check that the registration actually works: running `claude mcp get`
+	# and reading its answer. ImGui-free for the third time and the same reason —
+	# a Tool Status row that claims a working connection is worth nothing unless
+	# what it claims can be held to a synthetic CLI answer in a test.
+	McpClaudeProbe.cpp
 	# The tools that place and move objects. Separate from the registry because
 	# they are the first ones with a scene behind them: everything here goes
 	# through EditorCommands rather than touching the world.
