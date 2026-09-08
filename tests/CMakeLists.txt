@@ -580,6 +580,19 @@ if(Python3_Interpreter_FOUND)
                      "${CMAKE_SOURCE_DIR}/scripts/editor_help_audit.py" --check)
 endif()
 
+# ── The stdio MCP shim ───────────────────────────────────────────────────────
+# scripts/he_mcp.py is what an MCP client actually starts; the editor's bridge
+# is on the far side of a socket. It is Python, so it is tested in Python — and
+# as a SUBPROCESS over real pipes, because the three ways it can break a client
+# (something other than JSON-RPC on stdout, an answer to a notification, a
+# missing flush) are invisible from inside the process. The editor side is a
+# fake TCP server in the test, so this needs no editor, no GUI and no build.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME he_mcp_shim
+             COMMAND ${Python3_EXECUTABLE}
+                     "${CMAKE_SOURCE_DIR}/tests/test_he_mcp.py")
+endif()
+
 # ── "How heavy is what we actually ship?" ────────────────────────────────────
 # docs/he-apps-plan.md A3 wrote a size table into the plan and got it wrong,
 # because the numbers came from a tree that was not a Release build. That is why
