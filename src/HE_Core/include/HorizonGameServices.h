@@ -314,7 +314,12 @@ struct AssetId
 {
     uint64_t hi = 0, lo = 0;
     bool valid() const { return hi != 0 || lo != 0; }
-    bool operator==(const AssetId&) const = default;
+    // Spelled out rather than `= default`: a generated C++ game project builds
+    // at C++17 (CppScaffold::cmakeLists), where defaulted comparison does not
+    // exist and != is not synthesised from ==. This header has to compile on the
+    // standard the scaffold hands out, not on the one the engine uses.
+    bool operator==(const AssetId& o) const { return hi == o.hi && lo == o.lo; }
+    bool operator!=(const AssetId& o) const { return !(*this == o); }
 };
 
 namespace detail {

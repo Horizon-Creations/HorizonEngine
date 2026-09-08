@@ -420,16 +420,17 @@ target_compile_definitions(he_tests PRIVATE
     HE_TEST_GAMELOGIC_LIB="$<TARGET_FILE:test_gamelogic>")
 
 # ─── Engine-services fixture: a game module on the REAL scaffold diet ─────────
-# One include directory and NO link libraries, exactly what
+# One include directory, NO link libraries and C++17, exactly what
 # CppScaffold::cmakeLists gives a generated C++ game project. The constraint is
 # the test: a <HorizonGameServices.h> that ever reached for glm, HE_Scene or an
-# engine library would fail to compile here instead of failing in a user's
-# project. test_gamelogic_services.cpp loads it and drives the injected physics
-# and input tables through it.
+# engine library — or for a language feature the scaffold's standard does not
+# have, which a defaulted operator== already nearly was — would fail to compile
+# here instead of failing in a user's project. test_gamelogic_services.cpp loads
+# it and drives the injected physics, input and content tables through it.
 add_library(test_gamelogic_services SHARED fixtures/test_gamelogic_services.cpp)
 target_include_directories(test_gamelogic_services PRIVATE
     "${CMAKE_SOURCE_DIR}/src/HE_Core/include")
-target_compile_features(test_gamelogic_services PRIVATE cxx_std_20)
+target_compile_features(test_gamelogic_services PRIVATE cxx_std_17)
 add_dependencies(he_tests test_gamelogic_services)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_GAMELOGIC_SERVICES_LIB="$<TARGET_FILE:test_gamelogic_services>")
