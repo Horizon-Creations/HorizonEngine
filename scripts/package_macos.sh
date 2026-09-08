@@ -188,6 +188,12 @@ EDITOR_DEPS="$SOURCE_DIR/EditorDeps"
 # EngineContent: the engine's read-only default assets (primitives, default material,
 # fonts, …) the editor loads relative to its base path. Missing it → broken editor.
 [ -d "$EDITOR_DEPS/EngineContent" ] && cp -R "$EDITOR_DEPS/EngineContent" "$RES_PATH/"
+# he_mcp.py: the stdio shim a Claude session starts to reach the editor's remote
+# control listener. "Add to Claude" in Preferences ▸ Remote Control writes
+# <Resources>/he_mcp.py as an absolute path into Claude's config, so without this
+# line the button in a downloaded editor registers a file that is not there — and
+# the failure only shows up later, inside Claude.
+[ -f "$DEPLOY_DIR/he_mcp.py"      ] && cp    "$DEPLOY_DIR/he_mcp.py"      "$RES_PATH/"
 
 # The runtimes: exe + engine dylibs + SDL3 + Python + native deps, already
 # @rpath-relocated + self-contained by the build (scripts/bundle_native_deps.sh).
@@ -351,7 +357,8 @@ for want in \
     "Images/HC_Logo.png" \
     "Docs/he-docs.json" \
     "Docs/img" \
-    "EngineContent"
+    "EngineContent" \
+    "he_mcp.py"
 do
     if [ -e "$RES_PATH/$want" ]; then
         echo "    ok   Resources/$want"

@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
+#include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
@@ -17,13 +18,18 @@
 #include <Renderer/UIFont.h>           // icon names, and the plate colour parser
 #include <Types/Enums.h>
 #include <Physics/CollisionLayers.h>   // the project collision matrix, Project ▸ Collision Layers
+#include <SDL3/SDL_filesystem.h>       // SDL_GetBasePath — where he_mcp.py sits at run time
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Forward declaration — defined in EditorApplication.cpp
@@ -111,6 +117,24 @@ namespace {
 
 using EditorWidgets::hint;
 namespace Row = EditorWidgets::Row;
+
+// ─── Remote Control ▸ "Add to Claude" ───────────────────────────────────────
+// One registration at a time, and its result kept until the next press so the
+// page can be closed and reopened without losing what the CLI said.
+//
+// A detached worker writes `outcome` and then flips `done`; the panel reads
+// `outcome` only after seeing `done` true. The release/acquire pair is what
+// makes that safe — and the shared_ptr is what makes it safe when the user
+// closes Preferences (or quits) while `claude` is still starting up: the state
+// outlives whichever of the two lets go of it last.
+struct ClaudeJob
+{
+	std::atomic<bool>               done{false};
+	HE::Ed::McpClientSetup::Outcome outcome;
+};
+std::shared_ptr<ClaudeJob>        s_claudeJob;      // null until the first press
+HE::Ed::McpClientSetup::Tools     s_claudeTools;    // the cached probe
+bool                              s_claudeProbed = false;
 
 // Sub-controls of an enabled/disabled group read better indented under their
 // checkbox, and the indent is what keeps "AO Radius" visibly subordinate to
@@ -615,6 +639,110 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "always: the port is published in the endpoint file next to the access "
 		     "token, so a client reads it there rather than being told. Pin a "
 		     "number only for a client that cannot read that file.");
+	});
+
+	// ── Add to Claude ────────────────────────────────────────────────────────
+	// The listener above is only half a connection: an MCP client cannot speak to
+	// a framed TCP socket, it starts a program and talks to it over stdin/stdout.
+	// scripts/he_mcp.py is that program, and this button is what tells Claude it
+	// exists — one `claude mcp add`, with the three absolute paths filled in from
+	// this machine rather than typed by the user out of a manual.
+	//
+	// Everything that can be decided without a window is in McpClientSetup; what
+	// is left here is the part that is genuinely UI: greyed out with a reason
+	// when a piece is missing, a worker thread so two Node startups do not stall
+	// the frame loop, and the CLI's own words printed rather than paraphrased.
+	row("mcpclaude", "Remote Control", [&]{
+		namespace Setup = HE::Ed::McpClientSetup;
+
+		// Probed once, not per frame: which() walks PATH and stats a directory
+		// per entry, and the answer only changes when somebody installs
+		// something — which is what "Look for Claude Again" is for.
+		if (!s_claudeProbed)
+		{
+			const char* base = SDL_GetBasePath();
+			s_claudeTools  = Setup::findTools(base ? std::filesystem::path(base)
+			                                       : std::filesystem::path());
+			s_claudeProbed = true;
+		}
+
+		const bool busy = s_claudeJob && !s_claudeJob->done.load(std::memory_order_acquire);
+		ImGui::BeginDisabled(busy || !s_claudeTools.ready());
+		const bool pressed = EditorWidgets::button("Add to Claude");
+		ImGui::EndDisabled();
+		// Deliberately NOT gated on the listener being up. Registration writes a
+		// line into Claude's config and touches nothing here; the order the two
+		// are done in does not matter, and refusing the button while the switch
+		// is off would only teach people that it needs a ritual.
+		hint("Registers this editor with the Claude command line tool, so a Claude "
+		     "session on this machine can drive it. Claude starts a small script "
+		     "that connects to the listener above \xE2\x80\x94 which has to be ON at "
+		     "the moment Claude asks, or there is nothing on the other end. Press "
+		     "it again after moving the editor: the entry holds the path this "
+		     "installation had when it was written.");
+
+		if (pressed)
+		{
+			// The endpoint path comes from the bridge, which is the one place it
+			// is decided; recomputing it here would be a second spelling of the
+			// same path, and the two would drift.
+			const std::filesystem::path endpoint = ctx.mcp ? ctx.mcp->endpointFile()
+			                                               : std::filesystem::path();
+			auto job = std::make_shared<ClaudeJob>();
+			s_claudeJob = job;
+			const char* base = SDL_GetBasePath();
+			const std::filesystem::path basePath = base ? std::filesystem::path(base)
+			                                            : std::filesystem::path();
+			// Detached, and it captures nothing but shared_ptrs and copies: the
+			// panel is a free function with no object to outlive, and both CLI
+			// runs carry a timeout, so the thread's life is bounded even when
+			// `claude` hangs.
+			std::thread([job, basePath, endpoint] {
+				// Re-resolved in here rather than reusing the cached probe: the
+				// press is the moment the answer matters, and the CLI may have
+				// been installed since the page was opened.
+				const Setup::Tools tools = Setup::findTools(basePath);
+				job->outcome = Setup::registerWithClaude(tools, endpoint);
+				job->done.store(true, std::memory_order_release);
+			}).detach();
+		}
+
+		// Asked AGAIN, after the press: on the frame the button is clicked the
+		// answer from the top of the row is about the PREVIOUS run, and reading
+		// `outcome` under it would mean reading a string the worker that was
+		// just started is writing.
+		const bool inFlight = s_claudeJob && !s_claudeJob->done.load(std::memory_order_acquire);
+
+		if (!s_claudeTools.ready())
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "%s",
+			                   s_claudeTools.blocker.c_str());
+			// Without this the blocked state is a dead end: the button that would
+			// re-probe is the one that is greyed out, so installing the CLI would
+			// need an editor restart to be noticed.
+			if (EditorWidgets::button("Look for Claude Again"))
+				s_claudeProbed = false;
+		}
+		else if (inFlight)
+		{
+			ImGui::TextDisabled("Registering\xE2\x80\xA6");
+		}
+		else if (s_claudeJob)
+		{
+			const Setup::Outcome& r = s_claudeJob->outcome;
+			ImGui::TextColored(r.ok ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f)
+			                        : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+			                   "%s", r.message.c_str());
+			// The transcript, collapsed. It is here for the failure that the one
+			// line above cannot explain — a CLI version that words its refusal
+			// differently, an npm shim that dies before it prints anything — and
+			// folded away because on the successful run nobody wants to read it.
+			if (!r.console.empty() && ImGui::TreeNode("What was run"))
+			{
+				ImGui::TextUnformatted(r.console.c_str());
+				ImGui::TreePop();
+			}
+		}
 	});
 
 	row("camspeed", "Viewport", [&]{

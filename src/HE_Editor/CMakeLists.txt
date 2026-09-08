@@ -107,6 +107,11 @@ add_executable(HorizonEditor WIN32
 	# handshake is covered over a real socket in the test binary.
 	McpBridge.cpp
 	McpToolRegistry.cpp
+	# Finding the claude CLI and building the `claude mcp add` command line. Also
+	# ImGui-free, and for the same reason: what the button will run is decided
+	# here and checked in the test binary, so the panel is left with the parts
+	# that genuinely need a window.
+	McpClientSetup.cpp
 	# The tools that place and move objects. Separate from the registry because
 	# they are the first ones with a scene behind them: everything here goes
 	# through EditorCommands rather than touching the world.
@@ -305,6 +310,18 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		"${EDITOR_DEPS_DIR}/Images/HC_Logo.png"
 		"$<TARGET_FILE_DIR:HorizonEditor>/Images/HC_Logo.png"
+	# The stdio shim an MCP client actually starts (scripts/he_mcp.py). It goes
+	# next to the editor because "Add to Claude" in Preferences ▸ Remote Control
+	# writes an ABSOLUTE path to it into Claude's config, and the path it writes
+	# is <SDL_GetBasePath()>/he_mcp.py. Not in EditorDeps/, so the copy is
+	# spelled out here: the script is source, and the source tree is where it is
+	# edited and tested.
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${CMAKE_SOURCE_DIR}/scripts/he_mcp.py"
+		"$<TARGET_FILE_DIR:HorizonEditor>/he_mcp.py"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${CMAKE_SOURCE_DIR}/scripts/he_mcp.py"
+		"${DEPLOY_EDITOR}/he_mcp.py"
 	# Stamp which configuration filled this deploy. The packagers read it: a Debug
 	# editor is ~70x slower to initialise the Metal renderer (83 s vs 1.2 s on an
 	# M5) and must never be handed out as a release build by accident. The stamp

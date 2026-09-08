@@ -2173,6 +2173,17 @@ namespace
 	  "Reopens the listener after a failed start — the setting is on but the port "
 	  "could not be taken, and nothing retries that on its own.",
 	  "", "" },
+	{ "Preferences/Remote Control/Add to Claude", "",
+	  "Tells the Claude command line tool about this editor, so a Claude session "
+	  "on this machine can drive it. It writes one entry with this installation's "
+	  "paths; press it again after moving the editor, and turn the switch above on "
+	  "before asking Claude to connect.",
+	  "", "" },
+	{ "Preferences/Remote Control/Look for Claude Again", "",
+	  "Searches for the Claude command line tool once more. For the case where it "
+	  "was installed while this editor was already running — the search happens "
+	  "when the page opens, and nothing notices an install on its own.",
+	  "", "" },
 	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",

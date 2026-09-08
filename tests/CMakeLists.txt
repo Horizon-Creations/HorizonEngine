@@ -128,6 +128,7 @@ add_executable(he_tests
     test_mcp_tools_entity.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
+    test_mcp_client_setup.cpp
     test_sourcecontrol_probe.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
@@ -170,6 +171,13 @@ add_executable(he_tests
     # exactly why the bridge takes its editor state as hooks.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpBridge.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolRegistry.cpp
+    # What "Add to Claude" will run before it runs it: the CLI search, the
+    # argument vector, and the reading of the result. In here because the button
+    # is a promise that a click works, and the parts of that promise which can be
+    # checked without Claude Code installed on the build machine are exactly the
+    # parts that are wrong most easily — a missing -s user, a path that stopped
+    # being absolute, an exit code read as success.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpClientSetup.cpp
     # The entity tools. In here for the reason they were written this way at all:
     # they take an EditorCommands reference and nothing else from the editor, so
     # "does entity_set_transform actually move the entity, and does undo put it
