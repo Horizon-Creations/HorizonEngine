@@ -850,6 +850,41 @@ fast; the C++ build is the cost — CMake's own incrementality already skips
 unchanged generated files since the emitter writes files only when contents
 differ).
 
+#### 8.5a The fallback is not silent (landed)
+
+Everything above was true and still not enough. Under the default
+`OnFailure::Interpret` a class the generator cannot translate ships interpreted
+and the export finishes green; the verdict existed only as one `INTERPRETED …`
+line in the build log — which a compiler that emits two hundred lines
+immediately buries — and in `_hcgen/hc_report.txt`, which nobody opens after an
+export that said OK. An export that compiled fifteen of sixteen classes was, on
+screen, indistinguishable from one that compiled all sixteen.
+
+The fallback behaviour is unchanged. What is new is that it is visible:
+
+- `HE_Editor/HcFallbackReport.{h,cpp}` — the model. `collect(sources, result)`
+  joins `Result::fallbacks` against the `ClassSource` list so each entry can name
+  the class by its LABEL rather than by registry key; `describe()` is the one
+  line the UI draws; `headline()` is the sentence above the list. Deliberately
+  free of ImGui and `AppContext`, so `tests/test_hc_fallback_report.cpp` drives
+  the real generator with graphs it genuinely refuses (an exec cycle with no
+  Delay in it) and asserts the class and its reason come out the other end.
+- The build window (`BuildProgressDialog`) draws that list as a warning band
+  between the step rings and the log — set through
+  `Build::setInterpretedClasses`, cleared by `Build::begin`, bounded in height
+  and scrollable so it cannot push the buttons off the bottom.
+- The export settings dialog repeats the last run's summary under
+  *Compile HorizonCode*, because the person who comes back to fix a graph has
+  closed the build window by then — and *Interpret on failure* was otherwise a
+  setting whose consequences never showed up on the only screen that offers it.
+- `headline()` distinguishes "1 of 16 ship interpreted" from "the library was
+  not built, so all 16 ship interpreted". The second case (generation failed,
+  or the toolchain failed) used to be reported with the validation-fallback
+  count, which reads as *fifteen classes compiled* when none did.
+
+Stop mode is untouched: there the export fails and `hcFatal` already names every
+offending class in the result line, so the band would only repeat it.
+
 ---
 
 ## 9. Runtime loading in the shipped game

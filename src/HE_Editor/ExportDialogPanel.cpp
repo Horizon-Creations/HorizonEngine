@@ -6,6 +6,7 @@
 #include "EditorHelp.h"                  // "Export/<label>" scope for the dialog's controls
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
+#include "HcFallbackReport.h"            // which classes ship interpreted, and why
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
@@ -842,6 +843,29 @@ void render(AppContext& ctx)
                 ImGui::SameLine();
                 if (ImGui::RadioButton("Stop on failure", &mode, 1)) s_exportHcStop = true;
                 EditorWidgets::helpForLabel("Stop on failure");
+
+                // What the LAST export actually shipped. The build window says
+                // it while it is open, but the person who comes back here to fix
+                // a graph has closed that window — and "Interpret on failure" is
+                // otherwise a setting whose consequences are invisible from the
+                // only screen that offers it. Text, not a control: nothing here
+                // to click, so nothing that needs a help entry.
+                const auto lastRun = BuildProgressDialog::interpretedClasses();
+                if (!lastRun.headline.empty())
+                {
+                    EditorWidgets::WrapText wrap(550.0f);
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                                       "Last export: %s", lastRun.headline.c_str());
+                    // Four is what the build window shows before it scrolls;
+                    // beyond that this is a summary and hc_report.txt is the list.
+                    const size_t shown = std::min<size_t>(lastRun.classes.size(), 4);
+                    for (size_t i = 0; i < shown; ++i)
+                        ImGui::TextDisabled("    %s",
+                            HcFallbackReport::describe(lastRun.classes[i]).c_str());
+                    if (lastRun.classes.size() > shown)
+                        ImGui::TextDisabled("    +%zu more — see _hcgen/hc_report.txt",
+                                            lastRun.classes.size() - shown);
+                }
                 ImGui::Unindent();
             }
             if (!hcCompileOk) ImGui::EndDisabled();
@@ -1516,6 +1540,11 @@ void startExport(AppContext& ctx)
                             const int total    = (int)hcSources.size();
                             const int fellBack = (int)gen.fallbacks.size();
                             std::string buildLine;
+                            // Whether a library came out of this at all. Without
+                            // one NOTHING ships compiled, however many classes
+                            // translated — which is what the warning band has to
+                            // say instead of "1 of 16".
+                            bool hcLibBuilt = false;
                             if (!hcFatal.empty())
                             {
                                 Build::log(2, hcFatal);
@@ -1548,6 +1577,7 @@ void startExport(AppContext& ctx)
                                     });
                                 if (built.ok)
                                 {
+                                    hcLibBuilt = true;
                                     esEff.horizonCodeGenLib = built.artifact;
                                     hcMsg = " — HorizonCode: "
                                         + std::to_string(total - fellBack) + " compiled"
@@ -1567,6 +1597,24 @@ void startExport(AppContext& ctx)
                                     Build::log(2, built.message + " — shipping interpreted");
                                     Build::stepFailed(stepBuild);
                                 }
+                            }
+
+                            // The same verdict, on screen. Stop mode is left
+                            // alone: there the export FAILS and hcFatal names
+                            // every offending class in the result line, so the
+                            // band would only repeat it. This is the Interpret
+                            // default, where the export succeeds and the only
+                            // trace of a class that did not compile used to be a
+                            // log line and hc_report.txt.
+                            if (!s_exportHcStop)
+                            {
+                                const auto interpreted = HcFallbackReport::collect(hcSources, gen);
+                                if (!interpreted.empty() || !hcLibBuilt)
+                                    Build::setInterpretedClasses(
+                                        HcFallbackReport::headline((size_t)total,
+                                                                   interpreted.size(),
+                                                                   !hcLibBuilt),
+                                        interpreted);
                             }
 
                             // Persist the per-class report beside the generated
