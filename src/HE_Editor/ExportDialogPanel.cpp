@@ -81,13 +81,9 @@ static std::string s_exportWindowMode = "Fullscreen";  // Windowed | Fullscreen 
 static bool   s_exportGameVSync    = true;
 static std::string s_exportBackend;                    // getRHIName value; empty = the target's default
 
-// The platform and the backend list both live in GameBackendRules.h now, shared
-// with the game runtime that reads what this dialog writes — see the header.
-static std::string exportTargetPlatformName(const std::string& platform)
-{
-    return HE::BackendRules::targetPlatformName(platform);
-}
-
+// The backend list lives in GameBackendRules.h now, shared with the game
+// runtime that reads what this dialog writes — see the header. ("Host" is
+// resolved there too, by targetPlatformName.)
 static std::vector<const char*> exportBackendChoices(const std::string& platform)
 {
     return HE::BackendRules::choicesFor(platform);
