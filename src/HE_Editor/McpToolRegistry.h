@@ -21,11 +21,15 @@
 // of a registry is that a test can walk it, and this one can be walked without a
 // window.
 
+#include <Scripting/ScriptTypes.h>
+#include <Types/Enums.h>
+
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
+class ContentManager;
 namespace HorizonCode { struct Graph; }
 
 namespace HE::Ed
@@ -226,5 +230,105 @@ struct McpHcHooks
 };
 
 void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks);
+
+// ─── The files a project is made of ──────────────────────────────────────────
+// Five tools — resolve, list, create, delete, move — and they are what turns the
+// entity and HorizonCode tools from a demo into something usable: every one of
+// those addresses assets (a mesh reference, a material, a class to spawn) by a
+// path or a uuid the client has no other way to learn.
+//
+// ── Why these do NOT go through EditorCommands ───────────────────────────────
+// The gateway knows five entity commands and records an undo entry for each.
+// Assets have none: "deleting an asset is the one Content Browser operation with
+// no undo" (AssetRefScan.h), and a rename is a filesystem move plus a rewrite of
+// every referrer on disk. Teaching the gateway to invert that would be inventing
+// an undo the editor itself does not offer — a behaviour change dressed as
+// plumbing. So this file follows the McpHcHooks precedent instead: the checks a
+// human gets from the Content Browser for free are asked here, once, through
+// hooks, and the refusals keep the same wire names the entity tools use.
+//
+// ── The one rule ─────────────────────────────────────────────────────────────
+// Everything below is confined to the content root. Every path argument is
+// content-relative, is resolved through ContentManager::resolveAbsolutePath and
+// is then checked to actually LAND inside a known root — the registry header
+// promises an external client no file access, and `../../.ssh/id_rsa` is a path
+// the content manager resolves quite happily.
+struct McpAssetHooks
+{
+	// Play-in-editor. Like the HorizonCode tools and unlike the entity ones,
+	// there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same answer shape and
+	// same optimistic asset policy as McpHcHooks::lockedByOther. The argument is
+	// the COLLAB KEY, not the content-relative path — see collabKey below.
+	std::function<bool(const std::string& collabKey)> lockedByOther;
+
+	// The key a collaboration session addresses a file by. Not always the
+	// content-relative path: a C++ class lives under <project>/Source, a sibling
+	// of Content, and reading its empty content-relative path as "no session"
+	// is how the Content Browser once turned a create and a delete into
+	// local-only operations (ContentBrowserPanel::collabKeyFor). Absent hook =
+	// the content-relative form, which is right for everything these tools touch.
+	std::function<std::string(const std::string& absPath, bool isFolder)> collabKey;
+
+	// ── Asking the host instead of doing it ──────────────────────────────────
+	// Inside a session a delete or a rename is a REQUEST, not an act: it breaks
+	// every reference to the old name, which is as much somebody else's problem
+	// as ours, and the host answers by broadcasting so every machine moves at
+	// once. Both return true when the session TOOK the request — in which case
+	// nothing happens locally yet, and the tool says exactly that rather than
+	// claiming a change it did not make.
+	//
+	// Absent hooks, or no session, answer false: just do it.
+	std::function<bool(const std::string& collabKey, bool folder)> requestDelete;
+	std::function<bool(const std::string& oldKey, const std::string& newKey,
+	                   bool folder)>                               requestMove;
+
+	// A create IS published, not requested — nothing refers to a brand-new asset
+	// yet, so there is nothing for the host to arbitrate.
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+
+	// Carry every stored reference over to the new path. Two halves, and the
+	// split is not ours to change: in-memory first (until it runs, the content
+	// manager still believes the asset lives at the old path and the very next
+	// save would write it back there), on-disk on the editor's single retarget
+	// queue (two walks over one file lose one of the two rewrites). Absent hook =
+	// the on-disk walk runs inline, which is what a test wants.
+	std::function<void(const std::string& oldRel, const std::string& newRel,
+	                   bool folder)> enqueueRetarget;
+
+	// Which asset types may be created here. The Content Browser's create menu
+	// gates on the project (no materials without Advanced Shader Effects, one
+	// scripting language per project, a short flat list for an app project), and
+	// the same principle as kLevelScriptExcluded applies: MCP must not create
+	// what the menu will not offer. Absent hook = everything
+	// `isCreatableAssetType` allows, which is what a test wants.
+	std::function<std::vector<HE::AssetType>()> creatableTypes;
+
+	// The project's scripting language, for a Script asset's CHUNK_SLNG. Absent
+	// hook = Lua.
+	std::function<HE::ScriptLanguage()> scriptLanguage;
+
+	// The editor's own bookkeeping after a file appeared, moved or went away:
+	// the type/thumbnail caches, tabs open on a path that is gone, the content
+	// refresh. Absent outside the editor, where none of that exists.
+	std::function<void(const std::string& absPath)> onAssetGone;      // deleted
+	std::function<void(const std::string& absPath)> onAssetAppeared;  // created
+	std::function<void(const std::string& oldAbs, const std::string& newAbs,
+	                   bool folder)>                onAssetMoved;
+
+	// Where the reference scan looks besides the content root: the .heproj
+	// manifest and a project-root GameInstance.hcode. Empty = skip that half.
+	std::function<std::string()> projectRoot;
+	// The content root's directory NAME ("Content"), which adds the
+	// project-relative rule form scene references use. Empty = skip that form.
+	std::function<std::string()> contentDirName;
+};
+
+// The reference is captured, so `content` has to outlive the registry — in the
+// editor both are members of EditorApplication.
+void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
+                        McpAssetHooks hooks);
 
 } // namespace HE::Ed

@@ -214,6 +214,13 @@ namespace HE
             case AssetType::EnumType:             return "EnumType";
             case AssetType::SaveGameTemplate:     return "SaveGameTemplate";
             case AssetType::Theme:                return "Theme";
+            // The two that were added after this switch was written and fell
+            // through to "" — the exact failure the comment above predicts, with
+            // the warning and everything. A BoneMask reported itself as unknown
+            // to content.typeName, to the C ABI and to anything listing assets by
+            // type name.
+            case AssetType::BoneMask:             return "BoneMask";
+            case AssetType::BlendSpace:           return "BlendSpace";
         }
         // Only reachable through a cast from an out-of-range value — the same
         // "unknown" the enum's own first entry means.

@@ -128,6 +128,7 @@ add_executable(he_tests
     test_editor_commands.cpp
     test_mcp_bridge.cpp
     test_mcp_tools_entity.cpp
+    test_mcp_tools_asset.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -203,6 +204,13 @@ add_executable(he_tests
     # legal name and a schema that matches its signature" is a question about
     # two data structures, and the answer must not depend on a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsApi.cpp
+    # The asset tools, and this is the one place their central claim can be put
+    # to the test: a real ContentManager over a temporary content root answers
+    # "did the file actually move", "did the material that named it follow" and
+    # "does a path with '..' in it get out of the root" — none of which a running
+    # editor could be asked without a project and a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsAsset.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.

@@ -129,6 +129,14 @@ add_executable(HorizonEditor WIN32
 	# than written out — the sixth reader of that table after Lua, Python, the
 	# add menu, the node reference and the palette.
 	McpToolsApi.cpp
+	# The asset tools: resolve, list, create, delete, move. No gateway underneath
+	# them because the editor has no undo for an asset operation either — the
+	# checks a human gets from the Content Browser are asked through hooks, and
+	# the create path shares the panel's stub writer rather than copying it.
+	McpToolsAsset.cpp
+	# What a newborn asset of each type contains. Extracted OUT of the Content
+	# Browser's create menu so the panel and the MCP tools write the same file.
+	AssetStubWriter.cpp
 	EditorCamera.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp
