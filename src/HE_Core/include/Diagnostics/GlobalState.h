@@ -103,6 +103,10 @@ public:
 	// Contents/Resources inside a .app). HE_CONFIG_DIR still wins: it is a
 	// deliberate developer override, and pointing a shipped build at a settings
 	// file by hand is exactly what it is for.
+	//
+	// An EMPTY path lifts the pin again and hands the search back to
+	// configFilePath()'s own order. That exists for the tests: doctest runs every
+	// case in one process, so a case that pins has to put it back.
 	static void useShippedConfig(const std::filesystem::path& dir);
 
 	// Where config.json actually lives.
