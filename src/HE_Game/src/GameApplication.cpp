@@ -513,6 +513,16 @@ void GameApplication::applyShippedConfig()
 		else if (!backendAvailable(wanted))
 			HE_LOG_WARN(Core, "GameApplication: graphics backend '%s' is not in this build — using the default",
 			            name.c_str());
+		// The software renderer draws NOTHING BUT UI (docs/he-apps-plan.md Block
+		// G). For an application that is the point; for a game it means a window
+		// filled with the one colour it clears to and no scene in it — which is
+		// exactly what a config.json carrying this name produced, with no error
+		// anywhere to point at it. m_appMode is already latched above, off the
+		// same project.hcfg peek, so the question can be asked here.
+		else if (wanted == HE::RendererBackend::Software && !m_appMode)
+			HE_LOG_WARN(Core, "%s",
+			            "GameApplication: the software renderer draws user interface only — "
+			            "a game would show an empty window; using the default instead");
 		else
 			m_backend = wanted;
 	}

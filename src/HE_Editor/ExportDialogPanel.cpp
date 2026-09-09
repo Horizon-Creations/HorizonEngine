@@ -105,6 +105,29 @@ static std::vector<const char*> exportBackendChoices(const std::string& platform
     return { "OpenGL", "Vulkan" };
 }
 
+// Which backend THIS export ships, as opposed to which one the dialog remembers.
+// A game ships the combo's value. An APPLICATION does not choose one at all: it
+// takes the platform default, or — with Advanced Shader Effects switched off —
+// the software renderer, which is what that switch has meant all along (Block G).
+//
+// Asked here, per export, and deliberately NOT written back into s_exportBackend.
+// That static is the GAME's choice; it is remembered across projects in the
+// editor's own settings under the key "GameBackend" and reloaded whenever the
+// dialog opens. Forcing "Software" into it while an app was being exported left
+// that word sitting there for the NEXT export, and a game shipped with it boots
+// the UI-only CPU rasterizer: a window filled edge to edge with the near-black
+// every backend clears to, no scene in it, and nothing in the log that looks
+// like an error. "Software" is in no platform's choices list, so the value could
+// only ever have arrived this way.
+static std::string effectiveExportBackend(const AppContext& ctx)
+{
+    if (!ctx.projectManager || !ctx.projectManager->currentProject().appProject)
+        return s_exportBackend;
+    return ctx.projectManager->currentProject().advancedShaderEffects
+             ? std::string()
+             : std::string("Software");
+}
+
 // The settings the shipped game boots with, written in config.json's own shape
 // (the "CustomConfig" array GlobalState reads — a flat object would parse and
 // then be ignored). The graphics half is the editor's LIVE configuration:
@@ -159,7 +182,8 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     // Left out entirely when no backend was picked: an absent key is what tells
     // the game to keep its own platform default, and that is a different answer
     // from naming a backend the target might not have.
-    if (!s_exportBackend.empty()) put("GameBackend", s_exportBackend);
+    if (const std::string backend = effectiveExportBackend(ctx); !backend.empty())
+        put("GameBackend", backend);
 
     json j;
     j["CustomConfig"] = std::move(entries);
@@ -494,6 +518,19 @@ void open(AppContext& ctx)
 		s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
 		s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
 		s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
+		// …and only if it is a backend this dialog would offer for SOME target.
+		// A settings file written by an editor that still forced "Software" into
+		// this key while exporting an application carries that word forever
+		// otherwise, and the next game export ships it. Dropping it means "the
+		// platform default", which is what the row shows when nothing was picked.
+		if (!s_exportBackend.empty())
+		{
+			bool offered = false;
+			for (const char* p : { "Windows", "macOS", "Linux" })
+				for (const char* b : exportBackendChoices(p))
+					if (s_exportBackend == b) { offered = true; break; }
+			if (!offered) s_exportBackend.clear();
+		}
 	}
 
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
@@ -782,9 +819,12 @@ void render(AppContext& ctx)
             }
             else
             {
+                // Told, not stored: effectiveExportBackend() answers the same
+                // question at export time. Writing the answer into
+                // s_exportBackend is what leaked "Software" into the next
+                // GAME export (see the comment there).
                 const bool advanced =
                     ctx.projectManager->currentProject().advancedShaderEffects;
-                s_exportBackend = advanced ? std::string() : std::string("Software");
                 if (!advanced)
                     ImGui::TextDisabled("Advanced Shader Effects are off: this application "
                                         "ships the software renderer and needs no GPU.");
