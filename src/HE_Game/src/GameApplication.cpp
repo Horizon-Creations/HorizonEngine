@@ -5,6 +5,7 @@
 #include <Hpak/ProjectConfig.h>
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
+#include <Application/GameBackendRules.h> // shared with the export dialog that writes config.json
 #ifdef __APPLE__
 #include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
 #include "AppNotify.h"                 // …and the notification centre
@@ -354,19 +355,9 @@ static HE::RendererBackend defaultBackend()
 	return RendererFactory::Default();
 }
 
-// Backends by NAME (the editor's getRHIName spelling), because config.json is a
-// file a player or a support ticket edits by hand: "Metal" survives a
-// renumbering of the enum, a bare 4 does not.
-bool backendFromName(const std::string& name, HE::RendererBackend& out)
-{
-	if (name == "OpenGL") { out = HE::RendererBackend::OpenGL; return true; }
-	if (name == "Vulkan") { out = HE::RendererBackend::Vulkan; return true; }
-	if (name == "D3D11")  { out = HE::RendererBackend::D3D11;  return true; }
-	if (name == "D3D12")  { out = HE::RendererBackend::D3D12;  return true; }
-	if (name == "Metal")  { out = HE::RendererBackend::Metal;  return true; }
-	if (name == "Software") { out = HE::RendererBackend::Software; return true; }
-	return false;
-}
+// Backends by NAME live in Application/GameBackendRules.h, next to the rules the
+// EXPORT DIALOG writes config.json by — the two halves of the same question, and
+// they disagreed once (see the header).
 
 // Whether THIS runtime can create that backend at all. RendererFactory throws
 // for one whose implementation was not compiled in, so the question has to be
@@ -508,15 +499,32 @@ void GameApplication::applyShippedConfig()
 
 	if (const std::string name = gs.getCustomConfigString("GameBackend"); !name.empty())
 	{
-		HE::RendererBackend wanted = defaultBackend();
-		if (!backendFromName(name, wanted))
+		// m_appMode is already latched above, off the same project.hcfg peek, so
+		// the software-renderer question can be asked here. The verdict itself is
+		// shared with the export dialog (Application/GameBackendRules.h).
+		HE::RendererBackend wanted = m_backend;
+		switch (HE::BackendRules::verdictForShipped(name, m_appMode, wanted, backendAvailable))
+		{
+		case HE::BackendRules::Shipped::Use:
+			m_backend = wanted;
+			break;
+		case HE::BackendRules::Shipped::UnknownName:
 			HE_LOG_WARN(Core, "GameApplication: unknown graphics backend '%s' — using the default",
 			            name.c_str());
-		else if (!backendAvailable(wanted))
+			break;
+		case HE::BackendRules::Shipped::NotBuilt:
 			HE_LOG_WARN(Core, "GameApplication: graphics backend '%s' is not in this build — using the default",
 			            name.c_str());
-		else
-			m_backend = wanted;
+			break;
+		case HE::BackendRules::Shipped::UiOnlyForGame:
+			// A config.json carrying this name produced a window filled with the
+			// one colour it clears to and no scene in it, with no error anywhere
+			// to point at it.
+			HE_LOG_WARN(Core, "%s",
+			            "GameApplication: the software renderer draws user interface only — "
+			            "a game would show an empty window; using the default instead");
+			break;
+		}
 	}
 }
 

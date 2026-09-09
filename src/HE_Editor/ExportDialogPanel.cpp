@@ -19,6 +19,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
+#include <Application/GameBackendRules.h>  // shared with the game runtime that reads config.json
 #include <HorizonRendering/ParticleShaderTemplates.h>
 
 #ifdef _WIN32
@@ -81,29 +82,26 @@ static std::string s_exportWindowMode = "Fullscreen";  // Windowed | Fullscreen 
 static bool   s_exportGameVSync    = true;
 static std::string s_exportBackend;                    // getRHIName value; empty = the target's default
 
-// The platform the export really lands on ("Host" resolved against this build).
-static std::string exportTargetPlatformName(const std::string& platform)
-{
-    if (platform != "Host") return platform;
-#if defined(_WIN32)
-    return "Windows";
-#elif defined(__APPLE__)
-    return "macOS";
-#else
-    return "Linux";
-#endif
-}
-
-// The graphics backends a game built for `platform` can create. The TARGET
-// decides, not this editor: offering DirectX for a Linux build would only hand
-// the player a name their runtime falls back from at startup. Names are the
-// getRHIName spelling — that is what the game parses.
+// The backend list lives in GameBackendRules.h now, shared with the game
+// runtime that reads what this dialog writes — see the header. ("Host" is
+// resolved there too, by targetPlatformName.)
 static std::vector<const char*> exportBackendChoices(const std::string& platform)
 {
-    const std::string target = exportTargetPlatformName(platform);
-    if (target == "Windows") return { "OpenGL", "Vulkan", "D3D11", "D3D12" };
-    if (target == "macOS")   return { "Metal", "OpenGL" };
-    return { "OpenGL", "Vulkan" };
+    return HE::BackendRules::choicesFor(platform);
+}
+
+// Which backend THIS export ships, as opposed to which one the dialog remembers.
+// Asked here, per export, and deliberately NOT written back into s_exportBackend:
+// that static is the GAME's choice, remembered across projects in the editor's
+// own settings under the key "GameBackend" and reloaded whenever the dialog
+// opens. The rule itself, and why writing to it was the bug, is in the header.
+static std::string effectiveExportBackend(const AppContext& ctx)
+{
+    const bool appProject = ctx.projectManager
+                         && ctx.projectManager->currentProject().appProject;
+    const bool advanced   = ctx.projectManager
+                         && ctx.projectManager->currentProject().advancedShaderEffects;
+    return HE::BackendRules::forExport(appProject, advanced, s_exportBackend);
 }
 
 // The settings the shipped game boots with, written in config.json's own shape
@@ -160,7 +158,8 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     // Left out entirely when no backend was picked: an absent key is what tells
     // the game to keep its own platform default, and that is a different answer
     // from naming a backend the target might not have.
-    if (!s_exportBackend.empty()) put("GameBackend", s_exportBackend);
+    if (const std::string backend = effectiveExportBackend(ctx); !backend.empty())
+        put("GameBackend", backend);
 
     json j;
     j["CustomConfig"] = std::move(entries);
@@ -470,6 +469,13 @@ void open(AppContext& ctx)
 		s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
 		s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
 		s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
+		// …and only if it is a backend this dialog would offer for SOME target.
+		// A settings file written by an editor that still forced "Software" into
+		// this key while exporting an application carries that word forever
+		// otherwise, and the next game export ships it. Dropping it means "the
+		// platform default", which is what the row shows when nothing was picked.
+		if (!s_exportBackend.empty() && !HE::BackendRules::isOffered(s_exportBackend))
+			s_exportBackend.clear();
 	}
 
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
@@ -758,9 +764,12 @@ void render(AppContext& ctx)
             }
             else
             {
+                // Told, not stored: effectiveExportBackend() answers the same
+                // question at export time. Writing the answer into
+                // s_exportBackend is what leaked "Software" into the next
+                // GAME export (see the comment there).
                 const bool advanced =
                     ctx.projectManager->currentProject().advancedShaderEffects;
-                s_exportBackend = advanced ? std::string() : std::string("Software");
                 if (!advanced)
                     ImGui::TextDisabled("Advanced Shader Effects are off: this application "
                                         "ships the software renderer and needs no GPU.");
