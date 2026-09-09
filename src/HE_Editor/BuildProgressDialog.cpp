@@ -57,6 +57,11 @@ bool                  s_runnableHere = false;
 // but the reader is the UI thread too and one lock for one model is the rule
 // this file already follows.
 Kind                  s_kind = Kind::Export;
+// The HorizonCode classes this run ships interpreted instead of compiled. Kept
+// beyond finish() on purpose — the export settings dialog reads it back when
+// the user returns to fix them.
+std::string                           s_hcHeadline;
+std::vector<HcFallbackReport::Notice> s_hcInterpreted;
 
 // ── UI-thread-only state ────────────────────────────────────────────────────
 bool   s_openRequest = false;
@@ -123,6 +128,10 @@ void begin(const std::vector<std::string>& stepNames, Kind kind)
 		s_activity.clear();
 		s_exePath.clear();
 		s_runnableHere = false;
+		// The previous run's fallbacks are not this run's — a rebuild after a
+		// fix must not keep showing the classes it just repaired.
+		s_hcHeadline.clear();
+		s_hcInterpreted.clear();
 	}
 	s_selected   = -1;
 	s_userPicked = false;
@@ -221,6 +230,14 @@ void setLaunchTarget(const std::filesystem::path& executable, bool runnableHere)
 	s_runnableHere = runnableHere;
 }
 
+void setInterpretedClasses(const std::string& headline,
+                           const std::vector<HcFallbackReport::Notice>& classes)
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	s_hcHeadline    = headline;
+	s_hcInterpreted = classes;
+}
+
 bool running()
 {
 	std::lock_guard<std::mutex> lk(s_mutex);
@@ -228,6 +245,12 @@ bool running()
 }
 
 } // namespace Build
+
+InterpretedSummary interpretedClasses()
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	return InterpretedSummary{ s_hcHeadline, s_hcInterpreted };
+}
 
 void requestOpen() { s_openRequest = true; }
 
@@ -411,6 +434,8 @@ void render([[maybe_unused]] AppContext& ctx)
 	bool runnable = false;
 	int current = -1;
 	Kind kind = Kind::Export;
+	std::string hcHeadline;
+	std::vector<HcFallbackReport::Notice> hcInterpreted;
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
 		kind     = s_kind;
@@ -423,6 +448,8 @@ void render([[maybe_unused]] AppContext& ctx)
 		exePath  = s_exePath;
 		runnable = s_runnableHere;
 		current  = s_current;
+		hcHeadline    = s_hcHeadline;
+		hcInterpreted = s_hcInterpreted;
 	}
 
 	// Which step's log is shown: the running one, until the user picks another.
@@ -472,6 +499,41 @@ void render([[maybe_unused]] AppContext& ctx)
 	}
 
 	ImGui::Separator();
+
+	// ── What shipped interpreted instead of compiled ─────────────────────────
+	// Between the rings and the log, not in the log: the log belongs to ONE step
+	// and scrolls, and a compiler that emits two hundred lines after the codegen
+	// carries this one out of sight. It is also the only thing a green, finished
+	// export can be quietly worth less for, so it goes where the result line is
+	// read. Text only — nothing here is a control, so nothing needs a help entry.
+	//
+	// The height is bounded and its own child, taken BEFORE the log's
+	// `-footerH` child is opened: a band that grew with the number of classes
+	// would push the buttons off the bottom, which is the exact failure this
+	// window was built to replace.
+	if (!hcHeadline.empty())
+	{
+		const ImVec4 warn(1.0f, 0.8f, 0.3f, 1.0f);   // the log's warning colour
+		{
+			// Scoped to the headline alone: the wrap position is absolute in
+			// WINDOW space, and leaving it pushed across the child below would
+			// wrap that child's lines against the outer window's column.
+			EditorWidgets::WrapText wrap(690.0f);
+			ImGui::TextColored(warn, "%s", hcHeadline.c_str());
+		}
+		if (!hcInterpreted.empty())
+		{
+			const float rows = static_cast<float>(std::min<size_t>(hcInterpreted.size(), 4));
+			ImGui::BeginChild("##hc_interpreted",
+			                  ImVec2(0.0f, rows * ImGui::GetTextLineHeightWithSpacing()
+			                               + ImGui::GetStyle().FramePadding.y * 2.0f),
+			                  ImGuiChildFlags_Borders);
+			for (const HcFallbackReport::Notice& n : hcInterpreted)
+				ImGui::TextColored(warn, "%s", HcFallbackReport::describe(n).c_str());
+			ImGui::EndChild();
+		}
+		ImGui::Separator();
+	}
 
 	// ── The selected step's log ──────────────────────────────────────────────
 	const std::string stepName = (s_selected >= 0 && s_selected < static_cast<int>(steps.size()))

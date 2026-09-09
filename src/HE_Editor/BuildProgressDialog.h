@@ -1,5 +1,7 @@
 #pragma once
 
+#include "HcFallbackReport.h"   // the interpreted-instead-of-compiled warning list
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -65,6 +67,16 @@ namespace BuildProgressDialog
 		// run it (false for a cross-platform target). Set before finish().
 		void setLaunchTarget(const std::filesystem::path& executable, bool runnableHere);
 
+		// The classes this export ships interpreted instead of compiled, with
+		// the reason each one could not be translated. Drawn as a warning band
+		// above the log, because this is the one thing a SUCCESSFUL export is
+		// quietly worth less for — and until now it existed only as a line in
+		// the log and in hc_report.txt. Cleared by begin(); only the Interpret
+		// path sets it (Stop mode fails the export and says so in the result
+		// line, which is unchanged).
+		void setInterpretedClasses(const std::string& headline,
+		                           const std::vector<HcFallbackReport::Notice>& classes);
+
 		bool running();
 	}
 
@@ -76,6 +88,16 @@ namespace BuildProgressDialog
 	// Lives here rather than with the export because every cmake run reported
 	// into this window wants the same reading.
 	std::optional<float> toolchainProgress(const std::string& line);
+
+	// What the last run shipped interpreted — the export settings dialog repeats
+	// it under "Compile HorizonCode", so the answer is still there when someone
+	// comes back to fix it. Empty headline = nothing to report.
+	struct InterpretedSummary
+	{
+		std::string                           headline;
+		std::vector<HcFallbackReport::Notice> classes;
+	};
+	InterpretedSummary interpretedClasses();
 
 	// ── Dialog ───────────────────────────────────────────────────────────────
 

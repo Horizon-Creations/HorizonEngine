@@ -53,6 +53,7 @@ add_executable(he_tests
     test_time_control.cpp
     test_type_registry.cpp
     test_horizoncode_types.cpp
+    test_hc_fallback_report.cpp
     test_horizoncode_containers.cpp
     test_python_scripting.cpp
     test_physics.cpp
@@ -260,6 +261,11 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorToolbar.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcEditorUtil.cpp
+    # Which HorizonCode classes an export shipped interpreted instead of
+    # compiled — the model behind the build window's warning band. ImGui-free
+    # by construction, so "does a fallback reach the list with its reason" is
+    # answerable without a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcFallbackReport.cpp
     # Renaming a HorizonCode member across assets. Deliberately free of ImGui and
     # of the content system, which is what lets the whole decision — whose call is
     # this, may it be rewritten — be asserted here instead of clicked through.

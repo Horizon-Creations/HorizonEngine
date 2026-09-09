@@ -177,6 +177,7 @@ add_executable(HorizonEditor WIN32
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
 	HcEditorUtil.cpp
+	HcFallbackReport.cpp
 	HcRename.cpp
 	HcRenameSweep.cpp
 	HcRenameDialog.cpp
