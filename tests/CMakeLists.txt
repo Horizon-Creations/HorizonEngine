@@ -91,6 +91,7 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    test_export_backend.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
     test_third_person_template.cpp

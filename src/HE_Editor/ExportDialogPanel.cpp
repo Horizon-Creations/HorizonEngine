@@ -18,6 +18,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
+#include <Application/GameBackendRules.h>  // shared with the game runtime that reads config.json
 #include <HorizonRendering/ParticleShaderTemplates.h>
 
 #ifdef _WIN32
@@ -80,52 +81,30 @@ static std::string s_exportWindowMode = "Fullscreen";  // Windowed | Fullscreen 
 static bool   s_exportGameVSync    = true;
 static std::string s_exportBackend;                    // getRHIName value; empty = the target's default
 
-// The platform the export really lands on ("Host" resolved against this build).
+// The platform and the backend list both live in GameBackendRules.h now, shared
+// with the game runtime that reads what this dialog writes — see the header.
 static std::string exportTargetPlatformName(const std::string& platform)
 {
-    if (platform != "Host") return platform;
-#if defined(_WIN32)
-    return "Windows";
-#elif defined(__APPLE__)
-    return "macOS";
-#else
-    return "Linux";
-#endif
+    return HE::BackendRules::targetPlatformName(platform);
 }
 
-// The graphics backends a game built for `platform` can create. The TARGET
-// decides, not this editor: offering DirectX for a Linux build would only hand
-// the player a name their runtime falls back from at startup. Names are the
-// getRHIName spelling — that is what the game parses.
 static std::vector<const char*> exportBackendChoices(const std::string& platform)
 {
-    const std::string target = exportTargetPlatformName(platform);
-    if (target == "Windows") return { "OpenGL", "Vulkan", "D3D11", "D3D12" };
-    if (target == "macOS")   return { "Metal", "OpenGL" };
-    return { "OpenGL", "Vulkan" };
+    return HE::BackendRules::choicesFor(platform);
 }
 
 // Which backend THIS export ships, as opposed to which one the dialog remembers.
-// A game ships the combo's value. An APPLICATION does not choose one at all: it
-// takes the platform default, or — with Advanced Shader Effects switched off —
-// the software renderer, which is what that switch has meant all along (Block G).
-//
-// Asked here, per export, and deliberately NOT written back into s_exportBackend.
-// That static is the GAME's choice; it is remembered across projects in the
-// editor's own settings under the key "GameBackend" and reloaded whenever the
-// dialog opens. Forcing "Software" into it while an app was being exported left
-// that word sitting there for the NEXT export, and a game shipped with it boots
-// the UI-only CPU rasterizer: a window filled edge to edge with the near-black
-// every backend clears to, no scene in it, and nothing in the log that looks
-// like an error. "Software" is in no platform's choices list, so the value could
-// only ever have arrived this way.
+// Asked here, per export, and deliberately NOT written back into s_exportBackend:
+// that static is the GAME's choice, remembered across projects in the editor's
+// own settings under the key "GameBackend" and reloaded whenever the dialog
+// opens. The rule itself, and why writing to it was the bug, is in the header.
 static std::string effectiveExportBackend(const AppContext& ctx)
 {
-    if (!ctx.projectManager || !ctx.projectManager->currentProject().appProject)
-        return s_exportBackend;
-    return ctx.projectManager->currentProject().advancedShaderEffects
-             ? std::string()
-             : std::string("Software");
+    const bool appProject = ctx.projectManager
+                         && ctx.projectManager->currentProject().appProject;
+    const bool advanced   = ctx.projectManager
+                         && ctx.projectManager->currentProject().advancedShaderEffects;
+    return HE::BackendRules::forExport(appProject, advanced, s_exportBackend);
 }
 
 // The settings the shipped game boots with, written in config.json's own shape
@@ -523,14 +502,8 @@ void open(AppContext& ctx)
 		// this key while exporting an application carries that word forever
 		// otherwise, and the next game export ships it. Dropping it means "the
 		// platform default", which is what the row shows when nothing was picked.
-		if (!s_exportBackend.empty())
-		{
-			bool offered = false;
-			for (const char* p : { "Windows", "macOS", "Linux" })
-				for (const char* b : exportBackendChoices(p))
-					if (s_exportBackend == b) { offered = true; break; }
-			if (!offered) s_exportBackend.clear();
-		}
+		if (!s_exportBackend.empty() && !HE::BackendRules::isOffered(s_exportBackend))
+			s_exportBackend.clear();
 	}
 
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
