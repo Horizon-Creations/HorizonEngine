@@ -141,23 +141,58 @@ std::filesystem::path GlobalState::engineContentCacheDir()
 }
 
 // ─── Where the settings live ─────────────────────────────────────────────────
+// A shipped build pins this to its own directory (useShippedConfig). Kept OUT of
+// the resolved-once static below on purpose: the pin can be set at any point —
+// a test sets it several times in one process — and a value baked into a
+// function-local static the first time anyone asked could not be moved again.
+static fs::path g_shippedConfigDir;
+
+void GlobalState::useShippedConfig(const std::filesystem::path& dir)
+{
+	g_shippedConfigDir = dir;
+
+	// Before the Application constructor reads anything, so the "there is no
+	// file" branch of readConfig() cannot write one into a player's home.
+	GlobalState& gs = getInstance();
+	gs.setConfigPersistent(false);
+
+	// Whatever was already loaded is, by definition, not the shipped config: it
+	// came from the per-user file or the working directory. The guarantee this
+	// function makes is "the config.json beside the executable is the ONLY
+	// config", not "the first one to be read wins".
+	gs.m_customConfig.clear();
+	gs.m_engineStatus.knownProjects.clear();
+	gs.m_engineStatus.lastProjectPath.clear();
+}
+
 std::filesystem::path GlobalState::configFilePath()
 {
+	// The developer override outranks even a shipped build's pin: pointing a
+	// packaged game at a settings file by hand is what it is for. Resolved once
+	// like the rest — only the pin below has to stay answerable at any time.
+	static const fs::path forced = [] {
+		const char* base = std::getenv("HE_CONFIG_DIR");
+		if (!base) return fs::path{};
+		std::error_code ec;
+		fs::path p = fs::path(base) / "config.json";
+		fs::create_directories(p.parent_path(), ec);
+		return p;
+	}();
+	if (!forced.empty()) return forced;
+
+	if (!g_shippedConfigDir.empty())
+		return g_shippedConfigDir / "config.json";
+
 	// Resolved once: the answer cannot change during a run, and every caller
 	// would otherwise repeat the same filesystem probing.
 	static const fs::path resolved = [] {
 		std::error_code ec;
 
-		// 1. A config.json sitting next to the executable wins. That keeps a
-		//    portable checkout and every existing development setup behaving
-		//    exactly as before, and means this change never relocates settings
-		//    somebody already has.
-		if (const char* base = std::getenv("HE_CONFIG_DIR"))
-		{
-			fs::path forced = fs::path(base) / "config.json";
-			fs::create_directories(forced.parent_path(), ec);
-			return forced;
-		}
+		// 1. A config.json in the working directory wins. That keeps a portable
+		//    checkout and every existing development setup behaving exactly as
+		//    before, and means this never relocates settings somebody already
+		//    has. (A SHIPPED build does not come this far: it is pinned above,
+		//    and its working directory is not its own.)
 		if (fs::exists("config.json", ec))
 			return fs::path("config.json");
 
