@@ -68,15 +68,42 @@ public:
 	void readConfig();
 	bool writeConfig();
 
-	// A packaged game turns this off. It lays the settings the export shipped
-	// next to it over the in-memory config, and configFilePath() resolves to the
-	// per-user file that is SHARED with the editor and every other Horizon game
-	// on the machine — so the write-back in ~Application would quietly stamp one
-	// game's shipped settings onto the developer's editor preferences. The game
-	// has nothing of its own to persist today, so refusing the write is the whole
-	// fix; a game that later grows a settings menu needs its own file, not this.
+	// A packaged game turns this off. configFilePath() would otherwise resolve to
+	// the per-user file that is SHARED with the editor and every other Horizon
+	// game on the machine, and the write-back in ~Application would quietly stamp
+	// one game's shipped settings onto the developer's editor preferences. The
+	// game has nothing of its own to persist today, so refusing the write is the
+	// whole fix; a game that later grows a settings menu needs its own file, not
+	// this. useShippedConfig() turns it off early enough to matter — see there.
 	void setConfigPersistent(bool on) { m_configPersistent = on; }
 	bool configPersistent() const     { return m_configPersistent; }
+
+	// ── A shipped build's settings are the config.json beside it, and nothing else
+	//
+	// Refusing the WRITE was only half of it. A packaged game still READ the
+	// per-user file, because that is where configFilePath() lands for anything
+	// launched with a working directory that is not its own — a macOS .app from
+	// Finder runs in "/". On a developer's machine that file belongs to the
+	// EDITOR, so every key the export did not write showed through from the
+	// editor's own preferences. "GameBackend" is deliberately one of them: the
+	// exporter leaves it out to mean "take the platform default". A game whose
+	// own config.json named no backend therefore booted on whatever backend the
+	// editor last remembered — and an editor that had once exported an
+	// application remembered "Software", the UI-only rasterizer that draws no
+	// scene at all. A fresh project, a fresh export and a clean config.json, and
+	// the window was still empty.
+	//
+	// Called from the game's main() BEFORE the Application constructor, because
+	// that constructor is what reads the config, and because readConfig()'s
+	// "there is no file" branch writes one — a shipped game was creating
+	// ~/Library/Application Support/HorizonEngine/config.json on a player's
+	// machine on first launch, before setConfigPersistent(false) had run.
+	//
+	// `dir` is the directory the executable's data sits in (SDL_GetBasePath —
+	// Contents/Resources inside a .app). HE_CONFIG_DIR still wins: it is a
+	// deliberate developer override, and pointing a shipped build at a settings
+	// file by hand is exactly what it is for.
+	static void useShippedConfig(const std::filesystem::path& dir);
 
 	// Where config.json actually lives.
 	//
@@ -90,6 +117,9 @@ public:
 	// A config.json next to the executable still wins if one is there, so a
 	// portable/dev checkout keeps behaving as before and nobody's existing
 	// settings move out from under them.
+	//
+	// After useShippedConfig() this is that directory's config.json and nothing
+	// else — no per-user fallback, no working directory.
 	static std::filesystem::path configFilePath();
 	void setCustomConfigEntry(const std::string& key, const json& value);
 

@@ -377,42 +377,15 @@ bool windowModeFromName(const std::string& name, HE::WindowMode& out)
 	return false;
 }
 
-// The settings the export wrote next to the game data, laid OVER whatever
-// GlobalState resolved. Reading them here rather than leaving it to GlobalState
-// is not redundancy: its search order is "the working directory, then the
-// per-user data dir", and a shipped game matches neither — a macOS .app
-// launched from Finder runs with "/" as its working directory, and the per-user
-// file is shared with the editor and every other Horizon game on the machine.
-// The overlay restores, on every platform, the precedence GlobalState documents
-// for an executable-adjacent config. Returns how many entries were applied.
-size_t overlayShippedConfig(const fs::path& exeDir)
-{
-	const fs::path path = exeDir / "config.json";
-	std::ifstream in(path);
-	if (!in) return 0;
-
-	const auto j = nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/false);
-	if (!j.is_object())
-	{
-		HE_LOG_WARN(Core, "GameApplication: %s is corrupt — running on the built-in settings",
-		            path.string().c_str());
-		return 0;
-	}
-	const auto entries = j.find("CustomConfig");
-	if (entries == j.end() || !entries->is_array()) return 0;
-
-	size_t applied = 0;
-	for (const auto& e : *entries)
-	{
-		if (!e.is_object()) continue;
-		const auto key   = e.find("Key");
-		const auto value = e.find("Value");
-		if (key == e.end() || !key->is_string() || value == e.end()) continue;
-		GlobalState::getInstance().setCustomConfigEntry(key->get<std::string>(), *value);
-		++applied;
-	}
-	return applied;
-}
+// The settings the export wrote next to the game data used to be read a SECOND
+// time here and laid over whatever GlobalState had resolved. That overlay is
+// gone, and with it the bug it could never have fixed: an overlay only covers
+// the keys it carries, and the exporter deliberately leaves "GameBackend" out to
+// mean "take the platform default" — so that one key kept showing through from
+// the file underneath, which on a developer's machine is the EDITOR's. main()
+// now pins GlobalState to this directory before the config is read at all
+// (GlobalState::useShippedConfig), so there is only ever one file and no
+// underneath to show through.
 } // namespace
 
 
@@ -427,12 +400,14 @@ void GameApplication::applyShippedConfig()
 {
 	m_backend = defaultBackend();
 
-	// Before a single shipped key is laid over the in-memory config: the game
-	// must not persist any of it. configFilePath() resolves to the per-user file
-	// the EDITOR uses on a developer machine, and ~Application writes it on the
-	// way out — so without this, running an export once would stamp that game's
-	// graphics settings onto the editor's preferences.
-	GlobalState::getInstance().setConfigPersistent(false);
+	// The shipped config.json is already in: main() pinned GlobalState to this
+	// directory before the base constructor read it, and every key below comes
+	// from there and from nowhere else. The belt-and-braces line that used to
+	// stand here — setConfigPersistent(false) — moved with it, because by the
+	// time this function runs the base constructor has already had its chance to
+	// CREATE a settings file in the player's home.
+	HE_LOG_INFO(Core, "GameApplication: settings from %s",
+	            GlobalState::configFilePath().string().c_str());
 
 	// SDL_GetBasePath needs no SDL_Init, and inside a macOS .app it resolves to
 	// Contents/Resources — the same directory OnInit reads project.hcfg and the
@@ -440,11 +415,8 @@ void GameApplication::applyShippedConfig()
 	const char* baseRaw = SDL_GetBasePath();
 	if (!baseRaw)
 		HE_LOG_WARN(Core, "%s",
-			"GameApplication: SDL_GetBasePath returned null — the shipped graphics "
-			"settings cannot be located");
-	else if (const size_t applied = overlayShippedConfig(fs::path(baseRaw)); applied > 0)
-		HE_LOG_INFO(Core, "GameApplication: applied %zu shipped setting(s) from config.json",
-		            applied);
+			"GameApplication: SDL_GetBasePath returned null — the shipped project "
+			"configuration cannot be located");
 
 	// ── An application opens in a WINDOW ─────────────────────────────────────
 	// The member's default is Fullscreen, which is right for a game and wrong
