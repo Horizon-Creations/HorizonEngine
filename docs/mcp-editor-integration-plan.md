@@ -1424,7 +1424,10 @@ zweite käme als schlichtes „nicht gefunden" zurück.
   legen die Dateien an und bewegen sie; was drin steht, sind die Schritte 3 bis
   6 dieses Themas. (Terrain hat seine eigenen Werkzeuge seit Schritt 9, siehe
   Kapitel 10; Widgets seit Schritt 4, siehe Kapitel 11; Input seit Schritt 5,
-  siehe Kapitel 12.)
+  siehe Kapitel 12; Materialien seit Schritt 6, siehe Kapitel 13.)
+* **Eine Material-Instanz** kann `asset_create` nicht anlegen: ein Stub ist immer
+  ein Master, und eine Datei ohne Graph **und** ohne Eltern ist das eine, was
+  eine Instanz nicht sein darf. Das macht `material_create_instance` (13.4).
 
 ### 8.5 Nebenbei gefunden
 
@@ -1843,3 +1846,159 @@ einmal, und danach folgt kein weiteres Laden mehr.
   Item-Level-Publikation eines Input-Edits gibt es in `CollabDocSync` nicht.
 * **`Engine/` ist schreibgeschützt** — dieselbe Sperre wie überall
   (`failEngineReadOnly`).
+
+## 13. Nachtrag: die Material-Werkzeuge (Folgethema 29, Schritt 6)
+
+`material_info`, `material_set_param`, `material_create_instance` — drei
+Werkzeuge für die Assetsorte, die `asset_create` zwar anlegen kann, aber leer:
+ein frisches Material ist ein Stub mit META-Chunk und sonst nichts. Kein Graph,
+kein Shader, keine Parameter. Ein Client konnte ein Material an ein Mesh hängen
+und hatte keinen Weg zu erfahren, was daran einstellbar ist, geschweige denn es
+einzustellen.
+
+Die Aufteilung ist die von `terrain_info`: **ohne** `path` die Liste, **mit**
+`path` das eine Material vollständig. Ein viertes Werkzeug namens
+`material_list` wäre dieselbe Frage mit zwei Antwortformen gewesen.
+
+### 13.1 Der eine Grund, der alles andere begründet: wo ein Wert wirklich wohnt
+
+Es gibt zwei Antworten, und die falsche schreibt eine Änderung, die später
+zurückgenommen wird, ohne dass zum Zeitpunkt des Schreibens etwas zu sehen wäre:
+
+* Auf einem **Master** ist der **Graph** die Wahrheit. Die Werte der Param-Knoten
+  sind die Defaults, die die Codegen emittiert, und
+  `MaterialEditorPanel::applyToMaterial` baut `shaderParamData` bei **jedem**
+  Edit komplett daraus neu, ohne etwas vom alten Block zu behalten. Ein Wert, der
+  nur in den Parameterblock geschrieben wurde, hält also genau so lange, bis ein
+  Mensch einen Knoten verschiebt.
+* Nur den Knoten zu schreiben ist derselbe Fehler gespiegelt.
+  `ContentManager::regenerateMaterialFromGraph` schnappt den Parameterblock
+  **nach Namen**, bevor die Codegen läuft, und legt ihn danach wieder darüber —
+  Werte werden ohne Neukompilieren editiert, der gebackene Block darf also
+  legitim von den Knoten-Defaults abweichen. Der Slot-Schreibvorgang muss daher
+  **vor** dem Regenerieren passieren, sonst legt das Regenerieren den alten Wert
+  über den neuen Default.
+* Auf einer **Instanz** gibt es überhaupt keinen Graphen. Die Wahrheit ist der
+  Parameterblock **plus** `instanceOverriddenParams`: ein dort genannter Slot
+  behält den Wert der Instanz, jeder andere folgt beim nächsten
+  `syncMaterialInstance` dem Eltern-Material. Einen Wert zu setzen und den
+  Override **nicht** zu markieren ist ein Wert, den der nächste Sync frisst.
+
+`material_set_param` schreibt deshalb auf einem Master **beides** — den
+Param-Knoten **und** den Slot, in dieser Reihenfolge — und markiert auf einer
+Instanz den Override. Der Test dazu hört nicht beim Zurücklesen des Assets auf:
+er lässt die Codegen laufen, die das Panel laufen lässt
+(`materialGraphFromJson` → `generateFragment` → `MatParamSlot::value`), und
+prüft **beide** Hälften an demselben Aufruf. Eine Implementierung, die nur eine
+davon schreibt, fällt an genau einer der beiden durch.
+
+### 13.2 Der dritte Fall, und er wird gesagt statt verschwiegen
+
+Ein Param-Knoten kann in einer **Material-Funktion** stehen, die der Graph
+aufruft. Dann existiert der Slot, aber kein Knoten **dieses** Graphen trägt den
+Namen: der Wert lässt sich setzen, die Renderer benutzen ihn, und der nächste
+Edit im Material-Editor setzt ihn auf den Default der Funktion zurück. Das
+Ergebnis sagt das (`graphDefaultUpdated: false`, `graphNodesUpdated: 0`, plus
+ein Satz, was den Wert wieder wegnimmt), statt den Client es selbst
+herausfinden zu lassen. `material_info` meldet dasselbe vorab als
+`inGraph: false` pro Parameter.
+
+### 13.3 Zwei Fallen, an denen ein stiller Fehler entstanden wäre
+
+* **Eine ParamFloat-Range wohnt in `p[1]`/`p[2]`** — also in denselben vier
+  Floats, in die der Wert geht. Geschrieben werden darum nur so viele
+  Komponenten, wie die Art des Parameters trägt
+  (`matParamKindComponents`): vier zu schreiben hätte die Range gefressen, die
+  aus dem Feld einen Schieberegler macht, und niemand hätte das mit diesem
+  Aufruf in Verbindung gebracht.
+* **Mehrere Knoten können einen Namen teilen.** `paramSlot` fasst gleichnamige
+  Param-Knoten zu **einem** Slot zusammen, ein Graph kann also drei davon
+  haben. Einen zu aktualisieren und zwei stehenzulassen heißt: das nächste
+  strukturelle Edit nimmt den, den die Codegen zuerst erreicht. Aktualisiert
+  werden alle Knoten des Namens — aber nur die mit der **passenden Art**, denn
+  der erste gesehene bestimmt die Art des Slots, und eine Farbe in das `p[]`
+  eines Float-Knotens zu schreiben ist wieder die Range-Falle.
+
+Die Slider-Range wird außerdem **durchgesetzt**: ein Wert außerhalb wird mit
+`out_of_range` abgelehnt, nicht stillschweigend geklemmt. Geklemmt wäre ein Wert,
+den niemand verlangt hat, als Erfolg gemeldet — und der Schieberegler im Editor
+lässt sich auch nicht aus seiner Range ziehen.
+
+### 13.4 Die Instanz, die `asset_create` nicht anlegen kann
+
+„Ein Master-Material, viele Varianten" ist die eine Materialform, die kein Stub
+sein kann: eine Instanz hat keinen eigenen Graphen, sie teilt den kompilierten
+Shader des Elternteils (gleicher Quell-Hash → **derselbe** Pipeline-Cache-Eintrag,
+kein Neukompilieren) und unterscheidet sich nur in den Werten, die sie
+überschreibt. `material_create_instance` geht den Weg des Content Browsers
+verbatim: mit `parentMaterialPath` registrieren, `syncMaterialInstance` die ganze
+Parameterschicht vom Elternteil ableiten lassen, Zeiger **danach** neu holen,
+speichern. Das Ergebnis trägt gleich die geerbten Parameter, damit der nächste
+Aufruf ein `material_set_param` sein kann.
+
+Das Eltern-Material darf unter `Engine/` liegen — aus einem Engine-Default
+abzuleiten ist genau der Normalfall, für den ausgelieferte Defaults da sind. Das
+neue Asset darf es nicht; ohne `path` landet das Kind dann im eigenen Content des
+Projekts statt neben dem Elternteil.
+
+### 13.5 Der offene Tab wird abgelehnt — wie bei Input, aber aus anderem Grund
+
+12.3 lehnt den offenen Input-Tab ab, weil das Panel **kein** Undo hat. Der
+Material-Editor hat eines (JSON-Schnappschüsse des Graphen) — und wird trotzdem
+abgelehnt. Der Grund ist ein anderer: die Wahrheit des Tabs ist sein eigener
+`State::graph`, und ein Edit dort hineinzusetzen heißt `applyToMaterial` — das
+Regenerieren, der Inline-Cross-Compile-Check, die Preview-Invalidierung, die
+Instanz-Propagation, der Collab-Mirror —, alles hinter einem `AppContext`, den
+diese Datei nicht haben kann. Ein Hook, der das freilegte, wäre ein **zweiter**
+Regenerierpfad, der mit dem ersten Schritt halten muss.
+
+Also: ein offener Tab **mit** ungespeicherten Änderungen wird mit `dirty`
+abgelehnt, ein **sauberer** bekommt dasselbe `reloadFromDisk`, über das auch die
+Änderung eines Kollaborationspeers hereinkommt. Ein `material_save` gibt es
+nicht — diese Werkzeuge lassen nichts Ungespeichertes hinter sich.
+
+### 13.6 Ein Leser lädt nicht — die Liste jedenfalls nicht
+
+Die **Listenform** beantwortet sich aus dem Header-Sniff
+(`EditorAssetTypeCache`), lädt also nichts: eine Frage darf ihre eigene Antwort
+nicht verändern, und ein `loadAsset` pro Material hieße den ganzen
+Material-Pool verschieben und zu jeder Instanz ihr Elternteil nachladen. Ein
+Material, das **schon** resident ist, darf dafür mehr sagen (`kind`, `parent`,
+`paramCount`) — das ist die einzige Stelle, an der Master und Instanz hier ohne
+Laden unterscheidbar sind.
+
+Die **Einzelform** lädt, wie `widget_tree`, und sagt das in ihrer Beschreibung:
+die Parameterschicht eines Materials steht nirgendwo sonst.
+
+Der Lauf über den Content-Ordner selbst (Dotfile-Regel, Sortierung,
+Obergrenze, Sniff statt Laden) ist mit diesem Schritt **ein** Helfer geworden,
+`walkContentAssets` in `McpToolCommon` — vorher hatten die Input-Werkzeuge ihre
+eigene Kopie. Der Ordner-Lauf von `asset_list` bleibt getrennt: der listet auch
+Ordner und filtert über Typ*namen*, ist also eine andere Frage.
+
+### 13.7 Was bewusst offen bleibt
+
+* **Der Graph selbst.** Knoten hinzufügen, verdrahten, den Output umstellen —
+  das ist das Material-Editor-Pendant zu den HorizonCode-Werkzeugen und ein
+  eigener Schritt. Wer einen Parameter *haben* will, den es noch nicht gibt,
+  braucht einen Menschen im Panel; `no_params` sagt das so.
+* **Die PBR-Skalare** (`baseColor`, `metallic`, `roughness`, `opacity`,
+  `doubleSided`). `material_info` meldet sie, gesetzt werden sie nicht: auf einer
+  Instanz folgen sie dem Elternteil (`syncMaterialInstance` überschreibt sie bei
+  jedem Sync), und auf einem Master sind sie der Legacy-Pfad neben dem Graphen.
+  Ein Setter dafür wäre ein zweiter Weg zu etwas, das der Graph ohnehin besser
+  ausdrückt.
+* **Statische Switches einer Instanz.** Ein Switch-Override backt eine andere
+  **Permutation** des Shaders (`instanceSwitchNames`/`…Values` → eigener
+  Quell-Hash, eigener Pipeline-Eintrag), das ist keine Wertänderung.
+  `material_info` meldet die vorhandenen Overrides, setzen kann man sie hier
+  nicht.
+* **Texturslots.** Welche Textur ein Texture-Sample-Knoten liest, steht im
+  Knoten, nicht im Parameterblock — also Graph-Arbeit, siehe oben.
+* **Kein Master anlegen.** Das ist `asset_create` mit Typ `Material`, aus
+  demselben Grund wie bei Input (12.6): ein zweiter Weg dorthin wäre eine zweite
+  Theorie davon, was in einer frischen Datei steckt.
+* **Kein Veröffentlichen eines Wert-Edits in eine Kollaborationssitzung.** Wie
+  beim Plattenweg der Widget-Werkzeuge und bei Input: der Fremd-Lock wird geprüft
+  und abgelehnt, aber eine Item-Level-Publikation gibt es in `CollabDocSync`
+  dafür nicht. Das Anlegen wird publiziert.

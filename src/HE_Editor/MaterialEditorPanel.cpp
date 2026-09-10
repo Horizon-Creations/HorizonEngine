@@ -1808,6 +1808,47 @@ bool reloadFromDisk(const std::string& assetPath)
 }
 
 
+// ── Addressed content-relatively (the MCP material tools) ───────────────────
+// This panel's states are keyed by the tab bar's ABSOLUTE path; MCP addresses
+// assets content-relatively. So the lookup is a walk on State::relPath, the same
+// shape InputAssetPanel and UIEditorPanel have and for the same reason: two
+// conventions, one of which is the tab bar's and not ours to change.
+// Deliberately NOT keyed on `loaded` — after a reload that flag is false while
+// the tab still holds the asset.
+namespace
+{
+State* stateByContentPath(const std::string& contentPath)
+{
+	if (contentPath.empty()) return nullptr;
+	State* found = nullptr;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!found && st.relPath == contentPath) found = &st;
+	});
+	return found;
+}
+} // namespace
+
+bool isDirtyByContentPath(const std::string& contentPath)
+{
+	const State* st = stateByContentPath(contentPath);
+	return st && st->dirty;
+}
+
+bool reloadByContentPath(const std::string& contentPath)
+{
+	State* st = stateByContentPath(contentPath);
+	if (!st) return false;
+	// Exactly what reloadFromDisk does, and the comment there explains every
+	// line: drop `loaded` so the next frame re-reads, clear the dirty mark (a
+	// refusal upstream means there was nothing precious in it) and drop the
+	// collab mirror so the first diff after the reload does not report the file's
+	// own content as our edit.
+	st->loaded = false;
+	st->dirty  = false;
+	st->collabMirror = {};
+	return true;
+}
+
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 

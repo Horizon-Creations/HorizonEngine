@@ -316,43 +316,16 @@ ToolResult writePayload(ContentManager& content, const McpInputHooks& h, Doc& d,
 }
 
 // ── Walking the project for input assets ─────────────────────────────────────
-// The same rules asset_list walks by: dotfiles are VCS/OS bookkeeping, the list
-// is sorted so two calls on an unchanged project answer identically, and the
-// count is capped so a large project cannot stall the editor's frame (MCP
-// handlers run on the frame thread — McpBridge.h).
+// The walk itself — the dotfile rule, the sort, the cap, the header sniff
+// instead of a load — is `walkContentAssets` in McpToolCommon, where the
+// material tools became its second caller. What is left here is the (rel, abs)
+// shape the reporting below reads.
 std::vector<std::pair<std::string, std::string>> findInputAssets(
 	ContentManager& content, HE::AssetType want, int limit, bool& truncated)
 {
 	std::vector<std::pair<std::string, std::string>> found;   // (rel, abs)
-	truncated = false;
-	const std::string root = content.contentRoot();
-	if (root.empty()) return found;
-
-	std::vector<std::string> absPaths;
-	std::error_code ec;
-	fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
-	const fs::recursive_directory_iterator end;
-	for (; !ec && it != end; it.increment(ec))
-	{
-		if (it->path().filename().string().rfind('.', 0) == 0)
-		{
-			std::error_code dirEc;
-			if (it->is_directory(dirEc)) it.disable_recursion_pending();
-			continue;
-		}
-		std::error_code e;
-		if (!it->is_regular_file(e)) continue;
-		if (it->path().extension() != ".hasset") continue;
-		absPaths.push_back(it->path().lexically_normal().string());
-	}
-	std::sort(absPaths.begin(), absPaths.end());
-
-	for (const std::string& abs : absPaths)
-	{
-		if (EditorAssetTypeCache::assetTypeOf(abs) != want) continue;
-		if (static_cast<int>(found.size()) >= limit) { truncated = true; break; }
-		found.emplace_back(content.toContentRelativePath(abs), abs);
-	}
+	for (const ContentAsset& a : walkContentAssets(content, { want }, limit, truncated))
+		found.emplace_back(a.rel, a.abs);
 	return found;
 }
 
