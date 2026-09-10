@@ -500,6 +500,11 @@ TEST_CASE("The runtime state the scene format cannot carry survives an edit")
 	CHECK_FALSE(tc2.regionDirty);
 	CHECK(tc2.weightmapTextureId == HE::UUID{ 0x1234u, 0x5678u });
 	CHECK_FALSE(tc2.dirty);
+	// And the heights the sculpt wrote are still there. Each tool re-serialises
+	// the WHOLE component, so a paint that rebuilt the terrain object from
+	// anything but the current state would quietly flatten the ground it was
+	// painting on.
+	CHECK(groundAt(f, e, 200.0f, -50.0f) == doctest::Approx(3.0f));
 }
 
 TEST_CASE("A landscape whose grid was never built is rebuilt whole, not by region")
