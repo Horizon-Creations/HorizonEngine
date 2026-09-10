@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+namespace HE { struct UIWidgetTree; }
+
 // The UI Widget editor (UMG-style) — a top-level editor tab opened by
 // double-clicking a UI Widget asset in the Content Browser. Edits the
 // HE::UIWidgetTree stored in the UIWidgetAsset (treeJson = source of truth):
@@ -46,5 +48,30 @@ namespace UIEditorPanel
 	// Empty when this panel does not hold `assetPath` — same "ask everyone, the
 	// owner answers" dispatch as save() and reloadFromDisk().
 	CollabDocSync::DocBindings collabDocs(const std::string& assetPath);
+
+	// ── Authoring a widget from outside the editor (McpToolRegistry.h) ───────
+	// The same tree collabDocs wraps, handed out raw so the MCP widget tools can
+	// edit it. Null unless this panel already HOLDS the asset, and that is the
+	// point: while a tab has it, the tab's tree is the truth and the loaded
+	// asset is only a copy the tab refreshes — an MCP edit written into that
+	// copy would be thrown away by the human's next Save.
+	//
+	// These four take the CONTENT-RELATIVE path, not the absolute one the
+	// functions above are keyed by: that is the address every MCP tool uses, and
+	// a full filesystem path on that interface would put the user's home
+	// directory into a conversation for no gain.
+	HE::UIWidgetTree* liveTree(const std::string& contentPath);
+	// Finish an edit of that tree: the undo snapshot, the dirty mark and the
+	// refresh of the loaded asset — commitEdit, which is what the panel itself
+	// calls after a human's edit, so the two leave the tab in the same state.
+	void markEdited(AppContext& ctx, const std::string& contentPath);
+	// Every widget this panel holds, open or closed — what is addressable at
+	// all. Dirty comes along because the caller wants both and asking twice
+	// would mean walking the map twice with a second path convention.
+	struct Held { std::string contentPath; bool dirty = false; };
+	void appendHeld(std::vector<Held>& out);
+	// isDirty()/save(), addressed the same way.
+	bool isDirtyByContentPath(const std::string& contentPath);
+	bool saveByContentPath(AppContext& ctx, const std::string& contentPath);
 
 }

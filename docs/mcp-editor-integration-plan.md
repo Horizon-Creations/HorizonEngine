@@ -1420,9 +1420,10 @@ zweite käme als schlichtes „nicht gefunden" zurück.
 * **Szenen anlegen** gehört Schritt 2 (`scene_create`): eine `.hescene` ist
   JSON, kein HAsset, und der Stub-Writer schriebe dort das Falsche. (Genau das
   tat der Content Browser bis dahin — siehe 9.4.)
-* **Material-, Widget-, Input- und Terrain-Inhalte** ändern die Werkzeuge nicht.
-  Sie legen die Dateien an und bewegen sie; was drin steht, sind die Schritte 3
-  bis 6 dieses Themas.
+* **Material-, Input- und Terrain-Inhalte** ändern die Werkzeuge nicht. Sie
+  legen die Dateien an und bewegen sie; was drin steht, sind die Schritte 3 bis
+  6 dieses Themas. (Terrain hat seine eigenen Werkzeuge seit Schritt 9, siehe
+  Kapitel 10; Widgets seit Schritt 4, siehe Kapitel 11.)
 
 ### 8.5 Nebenbei gefunden
 
@@ -1594,3 +1595,103 @@ anderer. `TerrainSculpt::ensureHeights` nimmt den Schnapp deshalb vorweg, und
 * **`heightmapTexture`** wird vom Szenen-Schreiber nie ausgegeben und von
   nichts gesetzt (Phase-2-Platzhalter). Die Werkzeuge tragen es deshalb auch
   nicht mit — das gehört zum Serialisierer, nicht hierher.
+
+## 11. Nachtrag: die Widget-Werkzeuge (Folgethema 29, Schritt 4)
+
+`widget_tree`, `widget_types`, `widget_add`, `widget_remove`, `widget_move`,
+`widget_set_properties`, `widget_set_anchor`, `widget_save` — acht Werkzeuge für
+den Elementbaum eines UI-Widget-Assets. Datei: `src/HE_Editor/McpToolsWidget.cpp`,
+Tests: `tests/test_mcp_tools_widget.cpp`.
+
+### 11.1 Warum Widgets eigene Werkzeuge brauchen
+
+Derselbe Grund wie beim Terrain, eine Schicht höher. Der ganze Inhalt eines
+UI-Widget-Assets ist ein String, `UIWidgetAsset::treeJson`, und die
+Asset-Werkzeuge können die Datei anlegen, verschieben und löschen — aber keinen
+einzigen Knopf hineinsetzen. Einem Client das JSON zum Umschreiben zu geben wäre
+der Base64-Fehler in hübscherer Kodierung: die Ids sind eine Nummerierung, die er
+selbst führen müsste, Geschwisterreihenfolge ist Vektorreihenfolge, und ein
+Umhängen, das nur `parentId` schreibt, lässt das Element dort stehen, wo es
+zufällig stand (siehe `UIWidgetTree::moveElement`).
+
+Die Werkzeuge sprechen deshalb die Sprache des Designers: eine Element-Id, ein
+Elternteil, ein Platz unter den Geschwistern, ein Anker aus den sechzehn
+UMG-Rechtecken, und Eigenschaften **beim Namen** aus genau der Tabelle, die das
+Details-Panel zeichnet (`UIElement::allProperties`).
+
+### 11.2 Zwei Orte, an denen ein Widget lebt — und immer nur einer davon
+
+Hält ein Designer-Tab das Asset, ist der Baum **dieses Tabs** die Wahrheit: das
+geladene Asset ist nur eine Kopie, die der Tab bei jedem Edit neu schreibt, und
+das nächste Save des Menschen schreibt den Tab. Eine Mutation geht deshalb in den
+LIVE-Baum (`McpWidgetHooks::liveTree`) und endet mit `markEdited` — Undo-Schnappschuss
+und Dirty-Mark, genau was das Panel nach einem menschlichen Edit tut. Auf die
+Platte kommt nichts: der Tab hat jetzt ungesicherte Änderungen, was der wahre
+Zustand ist, und `widget_save` schreibt sie.
+
+Hält kein Tab das Asset, gibt es keine zweite Kopie, mit der man kollidieren
+könnte — dann bearbeiten die Werkzeuge `treeJson` über den ContentManager und
+schreiben die Datei sofort.
+
+Das ist eine **bewusste Abweichung** vom `McpHcHooks`-Präzedenzfall, der ein
+Klassen-Asset ohne offenes Panel schlicht ablehnt. Die Ablehnung dort schützt vor
+einer zweiten Kopie, die das Save des Menschen überschreibt; ohne offenen Tab kann
+dieses Rennen nicht stattfinden, und ablehnen hieße, ein mit `asset_create`
+angelegtes Widget könnte nie gefüllt werden. Der Preis ist, dass der Plattenweg
+kein Undo hat — derselbe Preis, den die Asset-Werkzeuge schon zahlen. Jedes
+mutierende Ergebnis sagt in `target` (`"editor"` / `"disk"`), welchen Weg es
+genommen hat, damit ein Client nie raten muss, wo seine Änderung liegt.
+
+### 11.3 Drei Fallen, an denen ein stiller Fehler entstanden wäre
+
+* **`setPropAny` schreibt einen unbekannten Namen nirgendwohin** und sagt nichts
+  dazu. Auf dieser Schnittstelle hieße das: ein Client glaubt, er habe „Text" auf
+  einem Panel gesetzt, und sieht keinen Grund, noch einmal hinzusehen. Jeder Name
+  wird deshalb vorher in `allProperties()` nachgeschlagen; ein Fehlschlag ist eine
+  Ablehnung, die die vorhandenen Namen mitbringt.
+* **`uiWidgetTypeFromName` antwortet auf alles Unbekannte mit `Panel`.** Ein
+  ungeprüfter Typname wäre also stillschweigend ein Panel geworden. Der Name wird
+  gegen die Registry geprüft.
+* **`UIWidgetTree::add` setzt `parentId` nicht und fragt `acceptsChildren()`
+  nicht** — das tut nur `moveElement`. Das Elternteil wird deshalb hier geprüft,
+  `parentId` vor dem `add` geschrieben und ein gewünschter Platz unter den
+  Geschwistern als `moveElement` nachgeschoben.
+
+Dazu die Regel aus den anderen Dateien: erst alles lesen, dann schreiben. Eine
+abgelehnte `widget_set_properties` hat **nichts** geschrieben, auch nicht die
+gültigen Werte davor — ein halb angewendeter Aufruf ist der eine Fehler, aus dem
+ein Client nicht herausfindet, weil er nicht weiß, welche Hälfte gelandet ist.
+
+### 11.4 Nebenbei gefunden: was die Datei nicht mitträgt
+
+Ein paar Eigenschaften sind Laufzeitzustand, den das Widget-Format bewusst nicht
+persistiert — allen voran `Item Count` einer ListView („eine Anwendung, die mit
+der Zeilenzahl des letzten Laufs wieder aufmacht, zeigt Zeilen für Daten, die sie
+noch nicht geladen hat", `UIElements.h`). Setzen gelingt, liest sich als die
+gewünschte Zahl zurück, und ist beim nächsten Laden weg.
+
+Ein Client kann das nicht sehen. `widget_set_properties` fragt es deshalb selbst,
+mit der einzigen Methode, die nicht vom Schreiber abdriften kann: Baum
+serialisieren, zurücklesen, vergleichen. Was den eigenen Rundlauf nicht überlebt,
+steht im Ergebnis unter `notPersisted` statt später entdeckt zu werden.
+
+### 11.5 Was bewusst offen bleibt
+
+* **Die Leinwand selbst** (`canvasWidth/Height`, `scaleMode`, `description`,
+  `themeAsset`) wird gelesen, aber nicht geschrieben. Ein Stub kommt auf
+  1920×1080 zur Welt, was der Normalfall ist; ein `widget_set_canvas` ist die
+  naheliegende Ergänzung und gehört in denselben Schritt wie die
+  Widget-Parameter.
+* **Der Logikgraph** (`UIWidgetAsset::graphJson`) wird nicht angefasst. Das ist
+  ein HorizonCode-Graph und gehört den `hc_`-Werkzeugen; er hängt nur an einem
+  Dokumentschlüssel, den `McpHcDoc` heute nicht kennt.
+* **Widget-Parameter, Animationen, Theme-Bindungen** (`UIWidgetTree::params`,
+  `animations`, `UIElement::themeRoles`/`textKeys`) — jedes davon ist eine eigene
+  Vokabel, keine Eigenschaft.
+* **Der Plattenweg veröffentlicht nicht in eine Kollaborationssitzung.** Ein
+  Element-Edit ist Sache von `CollabDocSync`, und dessen Adapter hängt am Spiegel
+  eines offenen Tabs. In einer Sitzung arbeitet man am offenen Tab — der Weg, der
+  dann ohnehin genommen wird.
+* **Kein `widget_duplicate`.** Das Panel hat `duplicateSubtree`; als Werkzeug
+  wäre es nützlich und ist eine eigene Frage (welche Ids kommen zurück, was
+  passiert mit Namen), nicht ein Nebenprodukt dieses Schritts.

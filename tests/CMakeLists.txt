@@ -131,6 +131,7 @@ add_executable(he_tests
     test_mcp_tools_asset.cpp
     test_mcp_tools_scene.cpp
     test_mcp_tools_terrain.cpp
+    test_mcp_tools_widget.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -226,6 +227,12 @@ add_executable(he_tests
     # about a HorizonWorld on the stack — and the third one is invisible in a
     # running editor until a hundred paint calls have leaked a hundred textures.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTerrain.cpp
+    # The widget tools. In here for the reason the asset tools are: their
+    # central claim — an edit lands in the OPEN Designer tab and nowhere else,
+    # and on disk only when no tab holds the asset — is two code paths that
+    # cannot both be exercised in a running editor, because the second one needs
+    # the tab to not exist. A UIWidgetTree on the stack plays the tab.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsWidget.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp

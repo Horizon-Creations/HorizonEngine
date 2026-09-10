@@ -7,6 +7,7 @@
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
+#include "UIEditorPanel.h"         // …and the Designer tabs it may author widgets in
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
@@ -6528,6 +6529,33 @@ void EditorApplication::setupMcpTools()
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 	};
 	HE::Ed::registerTerrainTools(m_mcp.registry(), m_commands, std::move(terrain));
+
+	// ── The widget tree of a UI Widget asset ────────────────────────────────
+	// The one hook worth reading twice is `liveTree`. A widget open in the
+	// Designer is held by that tab, and the loaded asset is only a copy the tab
+	// rewrites on every edit — so an MCP edit has to land in the TAB or the
+	// human's next Save writes over it. When no tab holds it there is nothing
+	// to be behind and the tools write the file themselves; see McpWidgetHooks.
+	HE::Ed::McpWidgetHooks widget;
+	widget.isPlaying     = [this] { return m_isPlaying; };
+	widget.lockedByOther = [this](const std::string& rel) {
+		// A content asset's collab key IS its content-relative path (the same
+		// translation collabSyncKey makes), so it passes through untouched.
+		return m_collab.assetLockedByOther(rel);
+	};
+	widget.liveTree   = [](const std::string& rel) { return UIEditorPanel::liveTree(rel); };
+	widget.markEdited = [this](const std::string& rel) {
+		AppContext ctx = makeContext();
+		UIEditorPanel::markEdited(ctx, rel);
+	};
+	widget.save = [this](const std::string& rel) {
+		AppContext ctx = makeContext();
+		return UIEditorPanel::saveByContentPath(ctx, rel);
+	};
+	widget.isDirty = [](const std::string& rel) {
+		return UIEditorPanel::isDirtyByContentPath(rel);
+	};
+	HE::Ed::registerWidgetTools(m_mcp.registry(), contentManager(), std::move(widget));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

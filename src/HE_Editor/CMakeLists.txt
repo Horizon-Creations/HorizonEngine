@@ -143,6 +143,11 @@ add_executable(HorizonEditor WIN32
 	# interface. Speaks world positions and brushes instead, over the same
 	# TerrainSculpt/TerrainPaint maths the editor's own Landscape mode uses.
 	McpToolsTerrain.cpp
+	# The element tree of a UI Widget asset — the other content whose whole
+	# payload is one opaque string the asset tools can only move around. Speaks
+	# element ids, parents, sibling order, anchor presets and properties BY NAME
+	# out of the same table the Designer's details panel draws.
+	McpToolsWidget.cpp
 	# The argument readers and the ONE confinement rule both of the above use.
 	# Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

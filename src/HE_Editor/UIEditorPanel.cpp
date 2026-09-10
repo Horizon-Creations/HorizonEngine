@@ -5305,6 +5305,65 @@ CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
+// ── Addressed by content-relative path (the MCP widget tools) ────────────────
+// The state map is keyed by ABSOLUTE path, because that is the key EditorUI's
+// tab bar uses. MCP addresses assets content-relatively, and State::relPath is
+// the same string loadState put there — so the lookup is a walk, exactly as
+// HorizonCodeClassPanel::classStateByContentPath is, and for the same reason:
+// two conventions, one of which is the tab bar's and not ours to change.
+namespace
+{
+State* stateByContentPath(const std::string& contentPath)
+{
+	State* found = nullptr;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!found && st.loaded && !st.relPath.empty() && st.relPath == contentPath)
+			found = &st;
+	});
+	return found;
+}
+} // namespace
+
+HE::UIWidgetTree* liveTree(const std::string& contentPath)
+{
+	State* st = stateByContentPath(contentPath);
+	return st ? &st->tree : nullptr;
+}
+
+void markEdited(AppContext& ctx, const std::string& contentPath)
+{
+	State* st = stateByContentPath(contentPath);
+	if (!st) return;
+	// The selection is an id, and an MCP client may have just removed the
+	// element it names. Everything the details panel draws hangs off that
+	// lookup, so it is dropped HERE rather than left to fail one frame later —
+	// the same clean-up restoreSnapshot does after an undo, and for the same
+	// reason: a tree the panel did not change itself may have lost it.
+	if (st->selected != 0 && !st->tree.find(st->selected)) st->selected = 0;
+	commitEdit(*st, ctx);
+}
+
+void appendHeld(std::vector<Held>& out)
+{
+	s_states.forEach([&out](const std::string&, const State& st) {
+		if (st.loaded && !st.relPath.empty()) out.push_back({ st.relPath, st.dirty });
+	});
+}
+
+bool isDirtyByContentPath(const std::string& contentPath)
+{
+	const State* st = stateByContentPath(contentPath);
+	return st && st->dirty;
+}
+
+bool saveByContentPath(AppContext& ctx, const std::string& contentPath)
+{
+	State* st = stateByContentPath(contentPath);
+	// A path this panel does not hold has nothing to write, and the widget tools
+	// only ask about one it said it holds — so false here is a real failure.
+	return st && saveState(*st, ctx);
+}
+
 bool reloadFromDisk(const std::string& assetPath)
 {
 	// A collaboration peer's change just landed in the file. Dropping `loaded`

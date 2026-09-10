@@ -31,6 +31,7 @@
 
 class ContentManager;
 namespace HorizonCode { struct Graph; }
+namespace HE { struct UIWidgetTree; }
 
 namespace HE::Ed
 {
@@ -445,5 +446,85 @@ struct McpTerrainHooks
 // The reference is captured, so `cmds` has to outlive the registry.
 void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
                           McpTerrainHooks hooks);
+
+// ─── The widget tree of a UI Widget asset ────────────────────────────────────
+// Eight tools — two readers (widget_tree, widget_types) and six that change a
+// widget (add, remove, move, set_properties, set_anchor, save).
+//
+// ── Why a widget needs tools of its own ──────────────────────────────────────
+// The same reason terrain does, one layer up. A UI Widget asset's whole content
+// is one string, `UIWidgetAsset::treeJson`, and the asset tools can create that
+// file and move it and delete it and cannot put a single button in it. Handing a
+// client the JSON to rewrite would be the base64 mistake again with a nicer
+// encoding: the ids are a numbering it would have to keep itself, sibling order
+// is vector order, and a reparent that only writes `parentId` leaves the element
+// wherever it happened to stand (see UIWidgetTree::moveElement).
+//
+// So these speak the vocabulary the Designer speaks: an element id, a parent, a
+// place among its siblings, an anchor preset out of the sixteen UMG names, and
+// properties BY NAME out of the very table the details panel draws
+// (UIElement::allProperties). A client cannot author a widget the editor could
+// not have authored by hand, and it cannot invent a property that does not
+// exist — an unknown name is refused with the list rather than written nowhere,
+// which is what `setPropAny` does with one.
+//
+// ── Two places a widget can live, and only one of them at a time ─────────────
+// When a Designer tab HOLDS the asset, that tab's `UIWidgetTree` is the truth:
+// the loaded asset is only a copy the tab refreshes on every edit, and the
+// human's next Save writes the tab. So a mutation goes into the LIVE tree
+// (hooks.liveTree) and is finished with `markEdited` — an undo snapshot and the
+// dirty mark, exactly what the panel does after a human's edit. Nothing is
+// written to disk: the tab now has unsaved changes, which is the truthful state,
+// and `widget_save` is what writes them.
+//
+// When no tab holds it, there is no second copy to race with, so the tool edits
+// `UIWidgetAsset::treeJson` through the ContentManager and writes the file at
+// once. This is a deliberate DEVIATION from the McpHcHooks precedent, which
+// refuses a class asset the panel has not opened. The refusal there guards
+// against a second copy of a graph that the human's Save would overwrite; with
+// no tab open that race cannot happen, and refusing would mean a client could
+// create a widget with asset_create and then never put anything in it. The price
+// is that the disk path has no undo — the same price the asset tools already pay
+// (see McpAssetHooks) — and every mutating result says which path it took in
+// `target`, so a client never has to guess whether its change is on disk.
+//
+// What the disk path does NOT do is publish to a collaboration session: an
+// item-level widget edit is CollabDocSync's business and that adapter is bound
+// to an open tab's mirror. Inside a session, work on an open tab.
+struct McpWidgetHooks
+{
+	// Play-in-editor. Like the asset, scene and HorizonCode tools and unlike the
+	// entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// The tree behind an open Designer tab, or null when this panel does not
+	// hold the asset — which is the whole branch above. The pointer is used
+	// within the one call and never stored.
+	std::function<UIWidgetTree*(const std::string& contentRel)> liveTree;
+
+	// After a mutation of that live tree: push the panel's undo snapshot, mark
+	// the tab dirty and refresh the loaded asset so play-in-editor sees the
+	// edit — UIEditorPanel::commitEdit, in one call, so an MCP edit and a
+	// human's leave the tab in the same state.
+	std::function<void(const std::string& contentRel)> markEdited;
+
+	// Write an open tab to disk (UIEditorPanel::saveByContentPath). False = the
+	// editor could not. Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> save;
+
+	// Does that tab have edits the file does not? Reported by every tool that
+	// touched a live tree, so a client can see that its change is in the editor
+	// and not yet on disk — and that widget_save is what finishes it.
+	std::function<bool(const std::string& contentRel)> isDirty;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerWidgetTools(McpToolRegistry& registry, ContentManager& content,
+                         McpWidgetHooks hooks);
 
 } // namespace HE::Ed
