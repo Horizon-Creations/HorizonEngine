@@ -2002,3 +2002,8 @@ Ordner und filtert über Typ*namen*, ist also eine andere Frage.
   beim Plattenweg der Widget-Werkzeuge und bei Input: der Fremd-Lock wird geprüft
   und abgelehnt, aber eine Item-Level-Publikation gibt es in `CollabDocSync`
   dafür nicht. Das Anlegen wird publiziert.
+* **Keine Thumbnail-Invalidierung.** Der Save-Knopf des Panels ruft
+  `AssetThumbnailCache::invalidate`, ein `material_set_param` nicht — das Kärtchen
+  im Content Browser zeigt also bis zu seinem nächsten Staleness-Poll (ein, zwei
+  Sekunden) das alte Bild. Kosmetisch, und der Preis dafür, dass diese Datei die
+  Editor-Caches nicht kennt; ein Hook nur dafür wäre mehr Klempnerei als Nutzen.
