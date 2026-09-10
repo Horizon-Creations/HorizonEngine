@@ -26,6 +26,13 @@ namespace InputAssetPanel
 
 	// Re-read the file on the next frame (collab: a peer's change landed).
 	bool reloadFromDisk(const std::string& assetPath);
+
+	// The same two questions, addressed CONTENT-RELATIVELY — what the MCP input
+	// tools hold an asset by (see McpInputHooks). Both walk on the state's stored
+	// relPath rather than string-matching absolute paths, and both answer as if
+	// the panel never held the asset when it does not.
+	bool isDirtyByContentPath(const std::string& contentPath);
+	bool reloadByContentPath(const std::string& contentPath);
 	// Paths of every unsaved tab this panel holds, open or already closed.
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.

@@ -1695,3 +1695,150 @@ steht im Ergebnis unter `notPersisted` statt später entdeckt zu werden.
 * **Kein `widget_duplicate`.** Das Panel hat `duplicateSubtree`; als Werkzeug
   wäre es nützlich und ist eine eigene Frage (welche Ids kommen zurück, was
   passiert mit Namen), nicht ein Nebenprodukt dieses Schritts.
+
+## 12. Nachtrag: die Input-Werkzeuge (Folgethema 29, Schritt 5)
+
+`input_actions`, `input_mappings`, `input_bindable`, `input_action_set`,
+`input_mapping_bind`, `input_mapping_unbind` — sechs Werkzeuge für die beiden
+Asset-Typen, die entscheiden, ob eine Taste überhaupt etwas tut. Datei:
+`src/HE_Editor/McpToolsInput.cpp`, Tests: `tests/test_mcp_tools_input.cpp`
+(31 Testfälle).
+
+### 12.1 Der eine Grund, der alles andere begründet: der Loader schweigt
+
+Auch hier ist der Inhalt beider Assets je **ein** JSON-String
+(`InputActionAsset::json`, `InputMappingContextAsset::json`), die
+Asset-Werkzeuge können also die Dateien anlegen und bewegen und keine Taste
+hineinschreiben. Aber der Grund für eigene Werkzeuge ist diesmal ein anderer und
+ein schärferer als bei Widgets: **was der Loader mit einem Namen tut, den er
+nicht kennt.**
+
+`HE::applyInputMappingContext` **überspringt** ihn. Lautlos. Ein Kontext, in dem
+jeder Tastenname falsch geschrieben ist, lädt ohne eine einzige Meldung, zeichnet
+im Panel vollständig korrekt und ergibt ein Spiel, das die Tastatur ignoriert.
+„Spacebar" statt „Space" ist keine Fehlermeldung, sondern eine Bindung, die in
+der Datei steht, im Editor zu sehen ist und im Spiel nichts tut — und ein Client
+kann das per Konstruktion nicht bemerken.
+
+Deshalb wird die Vokabel **hier** geprüft, mit genau den Funktionen, die der
+Loader aufruft: `SDL_GetScancodeFromName`, `SDL_GetGamepadButtonFromString`,
+`HE::mouseButtonFromName`, `HE::axisSourceFromName`. Ein Treffer daneben ist eine
+Absage, und `input_bindable` ist das Werkzeug, aus dem ein Client die erlaubten
+Namen überhaupt erst liest (~240 Tastennamen mit Filter, die Pad-Namen mit dem
+Etikett, das ein Mensch darauf erkennt, die fünf Maustasten, die zehn
+Achsenquellen mit `isDelta`).
+
+Der zugehörige Test ist der einzige, der die Behauptung dieser Werkzeuge
+tatsächlich belegt: die geschriebene Datei wird über einen **zweiten**
+ContentManager gelesen und dann in `applyInputMappingContext` auf ein echtes
+`InputMapping` gegeben. Ein Rundlauf durch unseren eigenen Dekoder beweist
+nichts, weil unser Dekoder nicht der ist, der schweigt.
+
+### 12.2 Drei Fallen, an denen ein stiller Fehler entstanden wäre
+
+* **Der Werttyp der Action entscheidet die Form ihrer Bindungen.** Eine
+  Button-Action nimmt Tasten, Pad- und Maustasten (`mapAction`), eine Axis-Action
+  Achsenzeilen (`mapAxis`), eine Axis-2D-Action sie pro Komponente
+  (`mapAxis2D`). Eine Taste auf einer Axis-Action landet in einer Liste, die der
+  Runtime für diese Action **nie liest**: vorhanden, im Editor sichtbar, tot.
+  Also wird die Action zuerst aufgelöst (aus ihrer Datei) und die falsche Form
+  abgelehnt, mit der richtigen im Absagetext.
+
+* **Ein 2D-Eintrag muss `axesX` schreiben, auch wenn seine Y-Liste noch leer
+  ist.** `"axes"` registriert eine EINdimensionale Abbildung, und `axis2DValue()`
+  antwortet danach für immer 0,0. `decodeMapping` lässt `MapEntry::valueType` auf
+  -1, und die Rückfallregel des Encoders („2D, wenn eine Y-Liste existiert")
+  greift dann. Deshalb wird der Werttyp **jedes** Eintrags neu aufgelöst, bevor
+  irgendetwas kodiert wird — nicht nur der des angefassten. Sonst degradiert ein
+  Speichern, das einer ganz anderen Action galt, den 2D-Nachbarn im selben
+  Kontext still auf 1D. Genau dieser Fall ist ein Test: ein handgeschriebener
+  Kontext mit einem `axesX`-Eintrag, dann eine Bindung auf eine andere Action,
+  danach muss `axesX` noch da stehen und `wouldBind` **zwei** Gruppen melden.
+
+* **Eine Geräte-Zeile darf keine Tasten behalten.** Die Runtime liest die Paare
+  einer Zeile, was auch immer `source` sagt — Tasten auf einer Stick-Zeile binden
+  also unsichtbar weiter. Der Quellen-Auswahlkasten des Panels löscht sie
+  deshalb (`applyDetected`); hier ist es eine Absage, weil das stille Wegwerfen
+  der halben Anfrage genau das ist, was diese Schnittstelle nicht tun darf. Und
+  umgekehrt: eine `Key`-Zeile ohne jede Taste oder Pad-Taste wirft der Loader
+  weg, sie würde also aus einer Datei verschwinden, in die sie als geschrieben
+  gemeldet wurde.
+
+### 12.3 Der offene Tab wird abgelehnt, nicht beschrieben — Abweichung von 11.2
+
+Das ist die bewusste Gegenentscheidung zu den Widget-Werkzeugen, und der Grund
+ist, was die beiden Panels aufbewahren. `UIEditorPanel` hält pro Tab einen
+Undo-Stapel, ein MCP-Edit kann dort also als Schnappschuss landen und ist von dem
+eines Menschen nicht zu unterscheiden. `InputAssetPanel::PanelState` hält
+**überhaupt kein Undo** — nur `dirty`. Es gibt dort also kein sicheres Landen:
+in den Tab schreiben wäre eine Änderung, die der Mensch nicht zurücknehmen kann,
+und die Datei hinter dem Tab schreiben wäre eine, die sein nächstes Speichern
+still zurückdreht.
+
+Also: bei **unsauberem** Tab eine Absage mit `dirty` und dem Satz, was zu tun
+ist. Bei **sauberem** Tab (oder keinem) wird die Datei geschrieben und dem Tab
+gesagt, er soll sie neu lesen — derselbe `reloadFromDisk`-Weg, den die Änderung
+eines Kollaborationspartners nimmt, also die Antwort, die der Editor auf „die
+Datei hat sich unter einem offenen Tab geändert" schon hat. Verlieren kann man so
+in keiner der beiden Richtungen etwas, und ein `input_save` gibt es
+folgerichtig **nicht**: diese Werkzeuge lassen nie etwas Ungespeichertes hinter
+sich.
+
+Die Nachschlagerichtung dafür musste dazu: MCP adressiert content-relativ, die
+Tab-Zustände dieses Panels hängen am absoluten Pfad der Tableiste. Statt darauf
+zu vertrauen, dass zwei Schreibweisen eines absoluten Pfades als Strings
+zusammenfallen, trägt `PanelState` jetzt `relPath` und die beiden neuen Zugänge
+(`isDirtyByContentPath`, `reloadByContentPath`) laufen als Suche darüber —
+genau die Bauform, die `UIEditorPanel::stateByContentPath` aus demselben Grund
+hat.
+
+### 12.4 Ein Leser lädt nicht, auch hier nicht
+
+Beide Nutzlasten sind ein kleiner JSON-Chunk, also lesen die Leser die **Datei**
+(`HAsset::Reader` + `CHUNK_IACT`/`CHUNK_IMAP`) statt `loadAsset` zu rufen. Das
+ist dieselbe Regel wie in 8.2 und aus demselben Grund: `loadAsset` registriert
+das Asset, verschiebt den dichten Asset-Pool und macht jeden Zeiger ungültig, den
+der Editor in dem Moment hält. So kann `input_actions` die Actions eines ganzen
+Projekts auflisten, ohne anzufassen, was resident ist — und `input_mapping_bind`
+kann den Werttyp der Action nachsehen, ohne sich damit den Zeiger auf den Kontext
+unter den Füßen wegzuziehen. Geladen wird ausschließlich im Schreibpfad, genau
+einmal, und danach folgt kein weiteres Laden mehr.
+
+### 12.5 Was die Werkzeuge sagen, weil es sonst niemand sagt
+
+* **Namenskollisionen.** Ein Mapping referenziert eine Action über ihren
+  **Pfad**, Events und Bindungen laufen aber über den Dateistamm
+  (`inputActionNameFromPath`). Zwei `IA_Fire` in verschiedenen Ordnern sind für
+  die Runtime **eine** Action. `input_actions` meldet das als `duplicateNames`.
+* **Tote Namen.** `input_mappings` meldet pro Eintrag `deadNames`: die Namen, die
+  der Loader überspringen wird. Bei einer handgeschriebenen oder älteren Datei
+  ist das die einzige Stelle, an der „steht in der Datei" von „funktioniert im
+  Spiel" unterschieden wird.
+* **Was ein Umtypen kaputt gemacht hat.** `input_action_set` meldet bei
+  geändertem Werttyp jeden Mapping-Kontext, der diese Action bindet
+  (`affectedMappings`): deren Bindungen haben ab sofort die falsche Form.
+* **Verwaiste Einträge.** Ein Eintrag kann die Action überleben, die er nennt —
+  und genau der ist der, den jemand loswerden will. `input_mapping_unbind`
+  verlangt darum **nicht**, dass der Action-Pfad existiert; `input_mappings`
+  meldet ihn als `actionMissing`.
+
+### 12.6 Was bewusst offen bleibt
+
+* **Kein Anlegen.** Eine Input-Action oder ein Kontext wird mit `asset_create`
+  geboren (Typ `InputAction` / `InputMappingContext`, mit gültiger
+  Minimal-Nutzlast aus dem geteilten Stub-Writer) — ein zweiter Weg dorthin wäre
+  eine zweite Theorie davon, was in einer frischen Datei steckt.
+* **Kein Ersetzen einer einzelnen Bindung.** Ändern ist `unbind` + `bind`, zwei
+  Aufrufe. Das Panel hat dafür seine Bind-Knöpfe, die eine Zeile *an ihrem Platz*
+  überschreiben (`BindSlot`); als Werkzeug wäre das ein dritter Adressraum
+  (Liste, Index, Feld) für eine Operation, die aus zwei bestehenden zusammengeht.
+* **Keine Reihenfolge.** Bindungen werden angehängt; die Reihenfolge innerhalb
+  einer Liste bedeutet für die Runtime nichts (jede gesetzte Bindung löst aus),
+  im Gegensatz zur Geschwisterreihenfolge eines Widgets.
+* **Kein „Taste drücken zum Binden".** Das ist der ganze Sinn des Panels und
+  braucht ein Fenster, eine Tastatur und einen Menschen davor.
+* **Kein Veröffentlichen in eine Kollaborationssitzung.** Wie beim Plattenweg der
+  Widget-Werkzeuge: der Fremd-Lock wird geprüft und abgelehnt, aber eine
+  Item-Level-Publikation eines Input-Edits gibt es in `CollabDocSync` nicht.
+* **`Engine/` ist schreibgeschützt** — dieselbe Sperre wie überall
+  (`failEngineReadOnly`).

@@ -132,6 +132,7 @@ add_executable(he_tests
     test_mcp_tools_scene.cpp
     test_mcp_tools_terrain.cpp
     test_mcp_tools_widget.cpp
+    test_mcp_tools_input.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -233,6 +234,14 @@ add_executable(he_tests
     # cannot both be exercised in a running editor, because the second one needs
     # the tab to not exist. A UIWidgetTree on the stack plays the tab.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsWidget.cpp
+    # The input tools, and this binary is the only place their central claim is
+    # provable: "would the RUNTIME read this binding". A real ContentManager over
+    # a temporary content root plus a real InputMapping answers it — the file the
+    # tool wrote goes straight into applyInputMappingContext, which is the
+    # function that silently skips a name it cannot parse. No round trip through
+    # our own decoder can catch that, and a running editor could not be asked
+    # without a project, a window and a keyboard.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsInput.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp

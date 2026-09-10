@@ -527,4 +527,87 @@ struct McpWidgetHooks
 void registerWidgetTools(McpToolRegistry& registry, ContentManager& content,
                          McpWidgetHooks hooks);
 
+// ─── What the game is played with ────────────────────────────────────────────
+// Six tools — three readers (input_actions, input_mappings, input_bindable) and
+// three writers (input_action_set, input_mapping_bind, input_mapping_unbind) —
+// for the two asset types that decide whether a key does anything at all.
+//
+// ── Why input needs tools of its own ─────────────────────────────────────────
+// Both assets are one JSON string (`InputActionAsset::json`,
+// `InputMappingContextAsset::json`), so the asset tools can make the files and
+// move them and delete them and cannot put a single key in them. And handing a
+// client the JSON to write would be worse here than anywhere else, because of
+// what the loader does with a name it does not know: `applyInputMappingContext`
+// SKIPS it. Silently. A context whose every key name is misspelled loads
+// without a complaint and produces a game that ignores the keyboard. A client
+// cannot see that, so the vocabulary is checked HERE and a bad name is a
+// refusal — `SDL_GetScancodeFromName`, `SDL_GetGamepadButtonFromString`,
+// `HE::mouseButtonFromName`, `HE::axisSourceFromName` — and `input_bindable` is
+// what a client reads the legal names out of in the first place.
+//
+// Three more traps the handlers exist to cover:
+//
+//   • THE ACTION'S VALUE TYPE DECIDES THE SHAPE OF ITS BINDINGS. A Button action
+//     takes keys, pad buttons and mouse buttons; an Axis action takes axis rows;
+//     an Axis 2D action takes them per component. Mixing them writes bindings
+//     the runtime never reads (`mapAction` vs `mapAxis` vs `mapAxis2D`), so the
+//     action is resolved first and the wrong shape is refused with the right one
+//     spelled out.
+//
+//   • A 2D ENTRY WHOSE Y LIST IS STILL EMPTY MUST STILL ENCODE AS axesX. That is
+//     not cosmetic: "axes" registers a ONE-dimensional mapping and
+//     `axis2DValue()` then answers 0,0 forever (InputMappingModel.cpp says so at
+//     length). `decodeMapping` leaves `MapEntry::valueType` at -1, so EVERY
+//     entry's value type is re-resolved from its action before anything is
+//     encoded — not just the entry a call touched, or the other entries of a
+//     context would be quietly downgraded by a save that was about something
+//     else.
+//
+//   • A MOUSE OR STICK ROW MUST NOT CARRY KEYS. The runtime reads a Key row's
+//     pairs whatever the source says, so keys left on a row that became a stick
+//     keep binding invisibly — the same rule the source combo enforces by
+//     clearing them (InputMappingModel's `applyDetected`).
+//
+// ── Why an open tab is REFUSED here rather than edited ───────────────────────
+// This is a deliberate deviation from the widget tools, and the reason is what
+// the two panels keep. `UIEditorPanel` holds an undo stack per tab, so an MCP
+// edit can land in the tab as an undoable snapshot and be indistinguishable from
+// a human's. `InputAssetPanel::PanelState` holds no undo at all — just `dirty` —
+// so there is no such thing as landing in that tab safely: writing into it would
+// be an edit the human cannot take back, and writing the file behind it would be
+// an edit the human's next Save silently reverts.
+//
+// So: with unsaved edits in an open Input Asset tab, a mutation is REFUSED with
+// `dirty` and the message says to save or close the tab. With a CLEAN tab (or no
+// tab) the file is written and the tab is told to re-read it — the same
+// `reloadFromDisk` a collaboration peer's change goes through, which is the
+// editor's own answer to "the file changed under an open tab". Nothing can be
+// lost either way, and there is no `input_save`: these tools never leave
+// something unsaved behind them.
+struct McpInputHooks
+{
+	// Play-in-editor. Like the asset, scene, HorizonCode and widget tools and
+	// unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Input Asset tab have edits the file
+	// does not? That is the refusal above. Absent = there are no tabs, which is a
+	// test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset — which is how these tools report `reloadedInEditor` without needing a
+	// second "is it open" question. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerInputTools(McpToolRegistry& registry, ContentManager& content,
+                        McpInputHooks hooks);
+
 } // namespace HE::Ed
