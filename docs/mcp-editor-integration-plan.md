@@ -2007,3 +2007,297 @@ Ordner und filtert über Typ*namen*, ist also eine andere Frage.
   im Content Browser zeigt also bis zu seinem nächsten Staleness-Poll (ein, zwei
   Sekunden) das alte Bild. Kosmetisch, und der Preis dafür, dass diese Datei die
   Editor-Caches nicht kennt; ein Hook nur dafür wäre mehr Klempnerei als Nutzen.
+
+---
+
+## 14. Nachtrag: die Prefab-Werkzeuge (Folgethema 29, Schritt 7a)
+
+`prefab_info`, `prefab_instantiate`, `prefab_save`, `prefab_instances` — vier
+Werkzeuge für die einzige Einheit der Wiederverwendung, die der Editor kennt.
+
+### 14.1 Die Abweichung vom Auftrag, und warum
+
+Der Schritt war formuliert als „`prefab` in die Component-Whitelist aufnehmen
+(SceneSerializer.cpp:2078) für echte Prefab-Instanzen statt Einweg-Kopien bei
+`entity_create`". Beim Nachsehen stellte sich heraus, dass es **keine
+Prefab-Komponente gab**, die man hätte eintragen können: Prefabs sind an jeder
+Stelle des Editors Einweg-Kopien (`SceneSerializer::instantiatePrefab` prägt
+frische Identitäten auf), und die Whitelist ohne Leseseite einzutragen wäre
+genau der stille Verlust gewesen, vor dem der Kommentar an dieser Stelle warnt:
+`checkComponentKeys` hätte `components.prefab` bei `entity_create` **angenommen**
+und `applyComponents` hätte es wortlos fallen lassen.
+
+Also zwei Dinge statt einem, in dieser Reihenfolge:
+
+1. Prefabs überhaupt benutzbar machen — eigene Werkzeuge, kein neues Feld.
+2. Die Verknüpfung als echte Komponente: geschrieben, gelesen, in der Whitelist,
+   und mit einem Verbraucher (`prefab_instances`), der sie nicht zu einem toten
+   Etikett macht.
+
+Und ein eigenes `prefab_instantiate` statt `entity_create` mit einem
+Prefab-Schlüssel: `entity_create` baut **eine** Entity aus Komponenten-JSON, das
+der Client selbst schreibt. Ein Prefab ist das Gegenteil — ein ganzer authorierter
+Teilbaum, den jemand schon richtig hingestellt hat. Die beiden über einen Aufruf
+laufen zu lassen hieße, dass `components` und `path` sich gegenseitig
+widersprechen können, und die Frage „was passiert mit den Komponenten, die der
+Client mitschickt" hat keine Antwort, die nicht überrascht.
+
+### 14.2 Warum ein Prefab überhaupt Werkzeuge braucht
+
+`asset_create` lehnt den Typ ab, und zwar zu Recht (`AssetStubWriter`: „a prefab
+with no PFAB payload is an empty file, not an empty prefab"). Die Nutzlast ist
+CBOR. Ein Client konnte also sehen, dass `Prefabs/Lamp.hasset` existiert, und
+damit nichts anfangen, während ein Mensch dieselbe Datei ins Viewport zieht.
+
+`prefab_save` ist entsprechend der **einzige** Weg, ein Prefab-Asset anzulegen —
+anders als bei Input und Material, wo `asset_create` die Datei macht und die
+Fachwerkzeuge sie füllen. Der Unterschied ist nicht Geschmack: eine leere
+Prefab-Datei ist keine leere Definition, sondern kaputt.
+
+### 14.3 Die Platzierung ist EIN Kommando, und das Wichtige reitet im Blob
+
+`prefab_instantiate` ist ein einziges `Command::create` durch das Gateway. Die
+Position, die Rotation, die Skalierung, der Name und die Verknüpfung werden
+**in den Wurzel-Datensatz des Blobs gepatcht, bevor** das Kommando läuft.
+
+Der Grund ist der Undo-Stack. Ein zweites `Command::setTransform` hinterher wäre
+ein zweiter Eintrag: ein Strg+Z würde das Prefab an seinen authorierten Platz
+zurückstellen und in der Szene stehen lassen, statt es herauszunehmen. Dasselbe
+für die Verknüpfung — nachträglich in die Welt geschrieben stünde sie in keinem
+Undo-Eintrag, und das erste Redo brächte den Teilbaum ohne sie zurück.
+
+Gepatcht wird **nur, was der Client geschickt hat**. Die authorierte Rotation
+und Skalierung sind Teil dessen, was gespeichert wurde; sie zurückzusetzen, weil
+ein Aufruf sie nicht erwähnt hat, wäre stilles Ent-Authorieren. Dieselbe Regel
+befolgt das Drag-Drop im Viewport, das nur die Position überschreibt.
+
+### 14.4 Die Wurzel eines Blobs ist der Datensatz OHNE `parent`
+
+Das ist keine Konvention dieser Datei: `buildSubtreeJson` lässt den Schlüssel für
+die Wurzel absichtlich weg („naming an outside parent would make applyPrefabJson
+find no root and refuse everything"), und `applyPrefabJson` liest ihn genauso.
+Daraus folgen zwei Ablehnungen, die es vorher nirgends gab:
+
+* **Kein Datensatz ohne `parent`** → der Loader verweigert alles und gibt
+  `entt::null` zurück. Als `invalid_payload` abgelehnt, mit dem Grund.
+* **Zwei Datensätze ohne `parent`** → der Loader macht einen zur Wurzel und lässt
+  den anderen **oben in der Szene stehen**, ohne dass irgendetwas das sagt. Das
+  ist der unangenehmere Fall, weil er wie ein Erfolg aussieht.
+
+`prefab_info` meldet beide Formen vorab (`rootCount`), statt eine Datei für in
+Ordnung zu erklären, die der Schreiber gleich ablehnt.
+
+### 14.5 Nichts wird geladen — auch nicht zum Platzieren
+
+Die Nutzlast kommt aus dem PFAB-Chunk der Datei (`HAsset::Reader`), byteweise
+dasselbe, was `loadAsset` in `PrefabAsset::data` legen würde. Zwei Gründe, und
+der zweite ist der tragende: eine Frage darf ihre eigene Antwort nicht ändern
+(dieselbe Regel wie bei den Input- und Material-Lesern), und ein
+`PrefabAsset*` aus dem ContentManager ist ein Zeiger in einen dichten Vektor,
+den das nächste Laden mitsamt der Strings ungültig macht, die er besitzt.
+
+`prefab_save` ist die eine Ausnahme, und dort in der Reihenfolge des Outliners:
+**erst schreiben, dann registrieren.** `saveAsset` prägt die Identität einer
+frischen Datei, `registerRuntimeAsset` prägt nur eine, wenn keine da ist — so
+stimmen der Pfad→UUID-Eintrag und die Datei überein.
+
+### 14.6 Die Verknüpfung, und was sie ausdrücklich nicht ist
+
+`PrefabLinkComponent` hält die UUID des Prefab-Assets, auf der **Wurzel** der
+Platzierung (die Kinder sind Teil der Instanz, nicht eigene Instanzen).
+Schlüssel `"prefab"` im Szenenformat — geschrieben, gelesen **und** in
+`isKnownComponentKey`, alle drei, denn zwei von dreien sind der stille Verlust
+oder der falsche Alarm.
+
+Sie ist **keine Prefab-Vererbung**. Ein Edit am Asset erreicht die gesetzten
+Instanzen nicht, es gibt keine Override-Verfolgung, nichts wendet beim Laden
+etwas erneut an. Eine Platzierung bleibt eine Kopie; sie weiß jetzt nur, woher
+sie kam. Alles darüber hinaus muss beantworten, was mit einer Entity passiert,
+die ein Mensch nach dem Setzen bearbeitet hat, und das ist eine Entwurfsfrage mit
+mehreren vertretbaren Antworten, kein Feld.
+
+Drei Stellen, an denen sie sonst gelogen hätte:
+
+* **Nicht in `instantiatePrefab` geschrieben.** Die Funktion bedient auch
+  Einfügen, Duplizieren und den Create eines Peers — keines davon ist eine
+  Prefab-Platzierung. Der Link wird deshalb im Aufrufer gesetzt: im Werkzeug und
+  im Viewport-Drag-Drop. Ohne die drei Zeilen im Viewport wären ausgerechnet die
+  Prefabs, die ein **Mensch** setzt, die, die `prefab_instances` nicht sieht.
+* **`prefab_save` streift den Link der Wurzel ab.** Sonst trüge jede künftige
+  Platzierung des NEUEN Prefabs die UUID des alten. Ein Link auf einem **Kind**
+  bleibt, dort stimmt er: das Kind ist wirklich eine Platzierung eines anderen
+  Prefabs, die in diesem hier sitzt.
+* **UUID statt Pfad.** Ein Pfad in einer Szenendatei bricht beim Verschieben —
+  und weil `AssetRefScan` Asset-Referenzen in einer `.hescene` als `[hi, lo]`
+  **innerhalb** eines `components`-Blocks sucht, findet der Löschdialog eine
+  Instanz jetzt von selbst. Dafür war keine Zeile nötig, nur die richtige
+  Kodierung; der Test prüft es trotzdem, weil „von selbst" beim nächsten Umbau
+  aufhören kann.
+
+### 14.7 Was bewusst offen bleibt
+
+* **Prefab-Vererbung.** Siehe oben: Edits am Asset propagieren nicht, es gibt
+  keine Overrides, kein „Revert to Prefab". Das ist der große Punkt aus der
+  Lückenliste des Masterplans und mehr als ein Nachtrag.
+* **Kein Ersetzen eines bestehenden Prefabs.** `prefab_save` auf einen belegten
+  Pfad ist `already_exists`. Überschreiben würde jede künftige Platzierung ändern
+  und die schon gesetzten unberührt lassen — nichts, was aus Versehen passieren
+  sollte.
+* **Kein Undo für `prefab_save`.** Es ist eine Asset-Operation, wie bei den
+  Asset-Werkzeugen (8.1): der Gateway spricht Szenenänderungen, und beim Anlegen
+  einer Datei ändert sich in der Welt nichts.
+* **`PrefabLinkComponent` steht nicht im Inspector.** Es gibt keine Zeile im
+  Details-Panel, die „aus Prefabs/Lamp.hasset" anzeigt, und keinen Knopf, der
+  zur Quelle springt. Der Wert ist da und über MCP lesbar; die UI dafür ist ein
+  eigener kleiner Schritt.
+* **Keine Thumbnail-Invalidierung nach `prefab_save`**, aus demselben Grund wie
+  bei Material (13.7).
+
+---
+
+## 15. Nachtrag: die Typ-Werkzeuge (Folgethema 29, Schritt 7b)
+
+`type_info`, `type_field_set`, `type_field_remove`, `type_enum_set`,
+`type_enum_remove` — fünf Werkzeuge für die eigenen Typen eines Projekts.
+
+### 15.1 Der Grund: `asset_create` legt eine leere Definition an
+
+Ein Struct- oder Enum-Asset ist eine Definition, die danach **jedes** andere
+Frontend spricht: HorizonCode-Pins und -Variablen, Lua-Tabellen und
+Python-Dicts, der generierte C++-Header, Savegame-Felder. Die Datei anzulegen
+konnte `asset_create` schon; was sie anlegt, ist eine Definition ohne Felder und
+ohne Einträge, auf der sich nichts bauen lässt.
+
+Die Nutzlast selbst hinzulegen wäre der Base64-Fehler mit hübscheren Zeichen:
+`type` ist ein Integer-Enum, ein Container-Feld trägt **vier** gekoppelte Felder
+(`isArray`, `container`, `keyType`, `keyTypeName`), und die Kodierung des
+Vorgabewerts hängt am Typ des Feldes. Gesprochen wird deshalb die Sprache des
+Type Editors: ein Feldname, ein Typ an seiner Beschriftung („Float", „Vec3",
+„Enum"), ein Container an seinem Namen, ein Vorgabewert in der Form, die dieser
+Typ hat.
+
+### 15.2 Die vier gekoppelten Felder werden als eines geschrieben
+
+`isArray` ist „ist es überhaupt ein Container", `container` sagt **welcher**, und
+der Loader **repariert eine unzulässige Kombination stillschweigend**
+(`structFromJson`: „a kind present means container, full stop"). Wer also zwei
+der vier setzt und das dritte vergisst, bekommt ein Feld, das nicht das
+bestellte ist, und keinen Fehler dazu. Ein `container`-Argument setzt alle vier.
+
+Eine Zeile davon ist nicht offensichtlich: ein **Array** wird als
+`isArray = true, container = None` geschrieben, nicht als `container = Array`.
+Das ist die Legacy-Zeile, die `containerKindOf` als Array auflöst, und es ist
+genau das, was `structToJson` schreibt („so an array field keeps the exact bytes
+it had before containers existed").
+
+### 15.3 Ein Speichern ist mehr als die Datei
+
+`TypeAssetPanel::saveState` macht drei Dinge, und zwei davon auszulassen wäre
+eine stille Abweichung vom Panel:
+
+* Die Definition wird in `HE::TypeRegistry` **neu registriert** — daraus lesen
+  jedes Typ-Dropdown im Editor, der Skript-Bootstrap, der Savegame-Seeder und
+  die C++-Codegen. Nur die Datei zu schreiben heißt: der Editor zeigt weiter die
+  Felder von gestern, und nichts auf dem Bildschirm legt nahe, warum.
+* In einem **C++-Projekt** wird `Source/Generated/GameTypes.h` neu geschrieben.
+  Sonst kompiliert Gameplay-Code gegen ein Struct, das das Asset nicht mehr ist,
+  und der Fehler taucht später auf, ohne dass ihn jemand mit einem MCP-Aufruf in
+  Verbindung bringt. Das ist der Hook `onTypesChanged`.
+* Eine **Savegame-Vorlage** wird ausdrücklich **nicht** registriert. Auf der
+  Platte ist sie ein `StructDef` (deshalb nehmen die Feld-Werkzeuge sie mit),
+  aber ein Typ ist sie nicht, und sie zu registrieren hieße, sie in jedes
+  Typ-Dropdown des Editors zu legen.
+
+Die tragenden Tests fragen deshalb die **Registry**, nicht nur die Datei — und
+einer fragt `makeDefaultValue`, also die Antwort, mit der eine Instanz dieses
+Typs tatsächlich anfängt.
+
+### 15.4 Die zwei Wachen des Panels, unterschiedlich streng
+
+* **Ein Zyklus wird abgelehnt.** `structWouldCycle` ist, was der Save-Knopf des
+  Panels prüft, bevor er schreibt: ein Struct, das sich (direkt oder über ein
+  anderes) selbst enthält, kommt beim Seeden eines Defaults nie zum Ende.
+* **Eine Namenskollision wird gemeldet, nicht abgelehnt** (`nameCollision: true`).
+  Das Panel warnt und speichert ebenfalls, und das ist richtig: eine Datei muss
+  benennbar sein, bevor jemand sie umbenennen kann.
+
+Dazu eine, die es im Panel nur als Dropdown gibt und hier ausgesprochen werden
+muss: ein Enum- oder Struct-Feld muss eine Definition nennen, **die es gibt**.
+Ein Feld, das ins Leere zeigt, seedet jede Instanz mit einem leeren Wert, und
+nirgendwo steht, warum.
+
+### 15.5 Was bewusst offen bleibt
+
+* **Kein Anlegen und kein Umbenennen.** Eine neue Definition ist `asset_create`
+  mit Typ `StructType`/`EnumType`/`SaveGameTemplate`, ein neuer Name ist
+  `asset_move` — aus demselben Grund wie bei Input (12.6) und Material (13.7).
+* **Ein Feld umzubenennen ist Anlegen + Entfernen**, und das ist ehrlich so: der
+  Rename-Retarget für Struct-Felder fehlt in der ganzen Engine (Savegame-Lücke,
+  siehe das Masterplan-Logbuch). Weder das Panel noch diese Werkzeuge ziehen
+  HorizonCode-Graphen, Savegame-Vorlagen oder Skripte nach, die das alte Feld
+  nennen. Ein `type_field_rename` würde genau das versprechen.
+* **Keine authorierten Start-Elemente für Container.** Ein Array-, Set- oder
+  Map-Feld kann Elemente mitbringen (`defaultValue.items`/`keys`), gesetzt werden
+  sie hier nicht — `type_info` meldet nur ihre Anzahl. Das ist eine eigene
+  Vokabel („ein Wert je Element, in der Form des Elementtyps"), und das Panel
+  bietet sie ebenfalls nur inline.
+* **Kein Veröffentlichen in eine Kollaborationssitzung**, wie bei Input und
+  Material: der Fremd-Lock wird geprüft und abgelehnt, publiziert wird nichts.
+
+---
+
+## 16. Befund: Animation und Partikel (Folgethema 29, Schritt 7c/7d — NICHT gebaut)
+
+Der Schritt hatte vier Teile in fester Reihenfolge; (a) Prefabs und (b) Typen
+sind gebaut (Abschnitte 14 und 15), (c) Animation und (d) Partikel nicht — die
+Bitte aufzuhören kam vorher. Damit der nächste Durchgang nicht wieder bei null
+kartiert, hier der Stand der Vorarbeit, ehrlich als das, was er ist: eine
+Kartierung, kein Entwurf.
+
+### 16.1 Was schon steht (nachgesehen, nicht vermutet)
+
+| Asset | Chunk | Panel | Was das Panel anbietet |
+|---|---|---|---|
+| AnimatorStateMachine | `CHUNK_ASMG` (JSON) | `AnimatorStateMachineEditorPanel` | `isDirty`, `reloadFromDisk`, `save(ctx, assetPath)` |
+| ParticleSystem | `CHUNK_PTGR` (JSON) | `ParticleGraphEditorPanel` | `isDirty`, `reloadFromDisk`, `save(ctx, assetPath)` |
+| BlendSpace | `CHUNK_BLSP` (JSON) | `BlendSpacePanel` | `isDirty`, `reloadFromDisk`, `save(ctx, path)` |
+
+Alle drei haben also schon die Paarung, auf der die Input-, Material- und
+Typ-Werkzeuge stehen: ein Tab mit ungespeicherten Änderungen wird abgelehnt, ein
+sauberer liest die Datei neu. Was **fehlt**, ist bei allen dreien dasselbe wie
+beim Type-Panel vor Schritt 7b: die Adressierung ist die **absolute** Pfad des
+Tab-Bars, MCP adressiert content-relativ. Das sind pro Panel die ~20 Zeilen
+`stateByContentPath` + `isDirtyByContentPath`/`reloadByContentPath`, die
+`InputAssetPanel` und (seit 7b) `TypeAssetPanel` schon haben.
+
+### 16.2 Die Frage, die vor dem Entwurf zu beantworten ist
+
+Für Material war es „wo wohnt ein Wert wirklich", für Input „der Loader
+schweigt", für Typen „die Registry ist die Wahrheit, nicht die Datei". Für
+Animation und Partikel ist sie noch nicht beantwortet, und ohne sie wären die
+Werkzeuge eine JSON-Umschreibhilfe:
+
+* **AnimatorStateMachine** ist ein Graph mit Zuständen, Übergängen **und
+  Parametern**, und ein Übergang trägt Bedingungen, die diese Parameter beim
+  NAMEN nennen. Die erste Frage ist deshalb, was mit den Bedingungen passiert,
+  wenn ein Parameter verschwindet oder seinen Typ wechselt — dieselbe Klasse von
+  Problem wie der fehlende Rename-Retarget bei Struct-Feldern (15.5).
+* **Partikel-Graphen** sind ein Knotengraph wie der Material-Graph. Damit stellt
+  sich sofort dieselbe Frage, die für Material bewusst **offen gelassen** wurde
+  (13.7, „der Graph selbst"): Knoten hinzufügen und verdrahten ist ein eigener
+  Schritt, kein Nachtrag. Ein realistisches Minimum wäre hier das, was
+  `material_set_param` ist: die **Werte** vorhandener Knoten lesen und setzen,
+  nicht die Struktur.
+* **AnimationClip** ist gar kein authoriertes Asset, sondern importiert
+  (`AssetStubWriter` lehnt den Typ ab, wie Mesh und Textur). „Minimal editierbar"
+  kann dort also nicht heißen, was es bei den anderen beiden heißt — allenfalls
+  Notifies und Marker, die in einem eigenen Chunk liegen.
+
+### 16.3 Empfehlung für den nächsten Durchgang
+
+Nicht als ein Schritt. `particle_*` (Werte vorhandener Knoten, Vorbild
+`material_set_param`) und `animator_*` (Zustände, Übergänge, Parameter, mit einer
+Antwort auf 16.2) sind zwei Schritte mit zwei verschiedenen Fallen, und
+AnimationClip ist ein dritter, der wahrscheinlich mit „gar nicht, es ist ein
+Import" endet. Wer zuerst die drei `ByContentPath`-Paare nachrüstet, hat für
+beide danach dieselbe Grundlage wie Input, Material und Typen.
