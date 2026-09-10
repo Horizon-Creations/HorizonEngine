@@ -610,4 +610,95 @@ struct McpInputHooks
 void registerInputTools(McpToolRegistry& registry, ContentManager& content,
                         McpInputHooks hooks);
 
+// ─── What a surface looks like ───────────────────────────────────────────────
+// Three tools — `material_info` (the list and the one material, the same split
+// `terrain_info` uses), `material_set_param` and `material_create_instance`.
+//
+// ── Why a material needs tools of its own ────────────────────────────────────
+// `asset_create` already makes a material FILE, and that file is a stub: no
+// graph, no shader, no parameters. Everything that makes a material a material
+// lives in `MaterialAsset::nodeGraphJson` and in the param block generated from
+// it, and neither is reachable through a path-level tool. A client could assign
+// a material to a mesh and had no way to learn what could be tuned on it, let
+// alone tune it.
+//
+// ── The trap this file exists for: WHERE a parameter's value lives ───────────
+// There are two answers and picking the wrong one writes a change that is
+// reverted later, with nothing to see at the time:
+//
+//   • On a MASTER material the truth is the GRAPH. Param node values are the
+//     defaults the codegen emits, and `MaterialEditorPanel::applyToMaterial`
+//     rebuilds `shaderParamData` from them on EVERY edit, keeping nothing. So a
+//     value written only into the param block survives until the human moves a
+//     node, and then silently goes back. This tool writes BOTH: the Param
+//     node's `p[]` and the slot.
+//   • Writing only the node is the same mistake mirrored.
+//     `ContentManager::regenerateMaterialFromGraph` snapshots the param block by
+//     NAME before the codegen and restores it afterwards (values are edited
+//     without recompiling, so the baked block may legitimately differ from the
+//     node defaults) — so the slot write has to come FIRST, or the regenerate
+//     puts the old value back over the new default.
+//   • On an INSTANCE there is no graph at all. The truth is the param block plus
+//     `instanceOverriddenParams`: a slot listed there keeps the instance's value,
+//     every other one follows the parent on the next `syncMaterialInstance`. So
+//     setting a value and NOT marking the override is a value the next sync eats.
+//
+// A Param node declared inside a material FUNCTION this graph calls is a third
+// case, and the honest one: its slot can be set, but no node of this graph
+// carries it, so the next edit in the Material Editor resets it to the
+// function's default. The result says so (`graphDefaultUpdated: false`) instead
+// of leaving the client to find out.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input tools, for a different reason than theirs. That
+// panel has no undo; this one does (JSON graph snapshots). What it does not have
+// is a reachable edit path: the tab's truth is its own `State::graph`, and
+// landing an edit in it means `applyToMaterial` — regenerate, the inline
+// cross-compile check, the preview invalidation, the instance propagation, the
+// collaboration mirror — all of it behind an `AppContext` this file cannot have.
+// A hook that exposed it would be a SECOND regenerate path to keep in step with
+// the first. So: unsaved edits in an open Material Editor tab are refused with
+// `dirty`; a clean tab is told to re-read the file, which is the same
+// `reloadFromDisk` a collaboration peer's change goes through. There is no
+// `material_save` — these tools never leave something unsaved behind them.
+struct McpMaterialHooks
+{
+	// Play-in-editor. Like the asset, scene, HorizonCode, widget and input tools
+	// and unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Material Editor tab have edits the
+	// file does not? That is the refusal above. Absent = there are no tabs, which
+	// is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset — which is how these tools report `reloadedInEditor` without needing a
+	// second "is it open" question. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// Does THIS project author materials at all? The Content Browser's create menu
+	// and its "Create Material Instance" row are both gated on the project's
+	// Advanced Shader Effects setting, and the same rule as everywhere else
+	// applies: MCP must not create what the menu will not offer. Absent = yes,
+	// which is what a test wants.
+	std::function<bool()> materialsAllowed;
+
+	// A file that was not there before — the same pair the asset and scene tools
+	// carry, for the same two reasons: a create IS published (nothing refers to a
+	// brand-new file yet, so there is nothing for the host to arbitrate), and the
+	// editor's own bookkeeping has to hear that something appeared.
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
+                           McpMaterialHooks hooks);
+
 } // namespace HE::Ed

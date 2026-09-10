@@ -65,4 +65,29 @@ PathCheck checkPath(ContentManager& content, const std::string& raw, bool mustEx
 // machine.
 ToolResult failEngineReadOnly(const std::string& rel);
 
+// ── Finding every asset of a type in the project ─────────────────────────────
+// What the "list them all" half of a tool family needs, and the third caller is
+// what put it here (input first, then material). The rules are asset_list's and
+// they are all three load-bearing: dotfiles are VCS/OS bookkeeping rather than
+// content anyone put there, the result is SORTED so two calls on an unchanged
+// project answer identically (a client diffing its own earlier answer should see
+// its changes, not the directory order), and the count is capped because MCP
+// handlers run on the editor's frame thread (McpBridge.h) — a full walk of a
+// large project would stall it.
+//
+// The type comes from `EditorAssetTypeCache`, i.e. the HAsset header sniff:
+// nothing is loaded to answer this, so a question cannot change its own answer.
+// Only the PROJECT's content root is walked, never the engine's.
+struct ContentAsset
+{
+	std::string   rel;
+	std::string   abs;
+	HE::AssetType type = HE::AssetType::Unknown;
+};
+
+// `want` empty = every .hasset. `truncated` says the cap was reached.
+std::vector<ContentAsset> walkContentAssets(ContentManager& content,
+                                            const std::vector<HE::AssetType>& want,
+                                            int limit, bool& truncated);
+
 } // namespace HE::Ed

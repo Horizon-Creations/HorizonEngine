@@ -154,8 +154,13 @@ add_executable(HorizonEditor WIN32
 	# cannot read without a word: a misspelled key is a binding that sits in the
 	# file, shows in the editor and does nothing in the game.
 	McpToolsInput.cpp
-	# The argument readers and the ONE confinement rule both of the above use.
-	# Two copies of a boundary are two boundaries.
+	# Materials, where the trap is not the payload but WHICH of two places a
+	# parameter's value lives in: the graph's Param node on a master (the panel
+	# rebuilds the block from it on every edit) and the override list on an
+	# instance (the next sync re-derives everything that is not in it).
+	McpToolsMaterial.cpp
+	# The argument readers, the ONE confinement rule and the one content walk that
+	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp
 	# What a newborn asset of each type contains. Extracted OUT of the Content
 	# Browser's create menu so the panel and the MCP tools write the same file.

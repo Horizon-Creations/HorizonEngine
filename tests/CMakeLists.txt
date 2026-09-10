@@ -133,6 +133,7 @@ add_executable(he_tests
     test_mcp_tools_terrain.cpp
     test_mcp_tools_widget.cpp
     test_mcp_tools_input.cpp
+    test_mcp_tools_material.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -242,6 +243,11 @@ add_executable(he_tests
     # our own decoder can catch that, and a running editor could not be asked
     # without a project, a window and a keyboard.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsInput.cpp
+    # The material tools, and the same argument as the input ones: their central
+    # claim is "does the value survive the codegen the Material Editor re-runs on
+    # every edit", and only a real ContentManager over a temporary content root
+    # plus the real HE::generateFragment can answer it.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsMaterial.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp

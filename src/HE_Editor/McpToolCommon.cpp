@@ -1,5 +1,7 @@
 #include "McpToolCommon.h"
 
+#include "EditorAssetTypeCache.h"     // the header sniff walkContentAssets types by
+
 #include <ContentManager/ContentManager.h>
 
 #include <algorithm>
@@ -190,6 +192,52 @@ PathCheck checkPath(ContentManager& content, const std::string& raw, bool mustEx
 	p.engine = rel.rfind("Engine/", 0) == 0;
 	p.ok     = true;
 	return p;
+}
+
+std::vector<ContentAsset> walkContentAssets(ContentManager& content,
+                                            const std::vector<HE::AssetType>& want,
+                                            int limit, bool& truncated)
+{
+	namespace fs = std::filesystem;
+	std::vector<ContentAsset> found;
+	truncated = false;
+	const std::string root = content.contentRoot();
+	if (root.empty()) return found;
+
+	// Collected as paths first and sorted, so the per-entry work cannot disturb
+	// the walk and two calls answer in the same order.
+	std::vector<std::string> absPaths;
+	std::error_code ec;
+	fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+	const fs::recursive_directory_iterator end;
+	for (; !ec && it != end; it.increment(ec))
+	{
+		if (it->path().filename().string().rfind('.', 0) == 0)
+		{
+			// A dotfile that is a DIRECTORY must also stop the descent — '.git'
+			// alone is tens of thousands of files nobody asked about.
+			std::error_code dirEc;
+			if (it->is_directory(dirEc)) it.disable_recursion_pending();
+			continue;
+		}
+		std::error_code e;
+		if (!it->is_regular_file(e)) continue;
+		if (it->path().extension() != ".hasset") continue;
+		absPaths.push_back(it->path().lexically_normal().string());
+	}
+	std::sort(absPaths.begin(), absPaths.end());
+
+	for (const std::string& abs : absPaths)
+	{
+		const HE::AssetType type = EditorAssetTypeCache::assetTypeOf(abs);
+		if (!want.empty() && std::find(want.begin(), want.end(), type) == want.end())
+			continue;
+		if (static_cast<int>(found.size()) >= limit) { truncated = true; break; }
+		const std::string rel = content.toContentRelativePath(abs);
+		if (rel.empty()) continue;   // outside every root — not addressable
+		found.push_back(ContentAsset{ rel, abs, type });
+	}
+	return found;
 }
 
 ToolResult failEngineReadOnly(const std::string& rel)

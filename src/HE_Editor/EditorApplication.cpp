@@ -9,6 +9,7 @@
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
 #include "UIEditorPanel.h"         // …and the Designer tabs it may author widgets in
 #include "InputAssetPanel.h"       // …and the Input Asset tabs it must not write behind
+#include "MaterialEditorPanel.h"   // …and the Material Editor tabs, for the same reason
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
@@ -6576,6 +6577,35 @@ void EditorApplication::setupMcpTools()
 		return InputAssetPanel::reloadByContentPath(rel);
 	};
 	HE::Ed::registerInputTools(m_mcp.registry(), contentManager(), std::move(input));
+
+	// ── What a surface looks like ───────────────────────────────────────────
+	// The same decision as the input tools above — an open tab with unsaved
+	// edits is refused, a clean one is told to re-read — for a different reason
+	// than theirs: the Material Editor HAS undo, but the only way to land an
+	// edit in its tab is applyToMaterial, which needs an AppContext and would be
+	// a second regenerate path to keep in step with the first. See
+	// McpMaterialHooks.
+	HE::Ed::McpMaterialHooks material;
+	material.isPlaying     = [this] { return m_isPlaying; };
+	material.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	material.isDirty = [](const std::string& rel) {
+		return MaterialEditorPanel::isDirtyByContentPath(rel);
+	};
+	material.reloadFromDisk = [](const std::string& rel) {
+		return MaterialEditorPanel::reloadByContentPath(rel);
+	};
+	// The same gate the Content Browser's create menu and its "Create Material
+	// Instance" row sit behind (cbAllowMaterials).
+	material.materialsAllowed = [this] {
+		return m_projectManager.currentProject().advancedShaderEffects;
+	};
+	material.publishCreate = [this](const std::string& rel, const std::string& abs) {
+		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
+	};
+	material.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
+	HE::Ed::registerMaterialTools(m_mcp.registry(), contentManager(), std::move(material));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
