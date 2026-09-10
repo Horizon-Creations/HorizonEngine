@@ -130,6 +130,7 @@ add_executable(he_tests
     test_mcp_tools_entity.cpp
     test_mcp_tools_asset.cpp
     test_mcp_tools_scene.cpp
+    test_mcp_tools_terrain.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -217,6 +218,14 @@ add_executable(he_tests
     # scene_open with the same entities under the same uuids" — the round trip
     # a running editor could only be asked about with a project and a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsScene.cpp
+    # The terrain tools. In here because their central claim is only checkable
+    # against a real component: the brush runs on a copy and the result goes
+    # through the gateway as a component patch, so "did the ground move where it
+    # was asked, does undo put it back, and did the never-serialised runtime
+    # fields survive the round trip through the scene JSON" are three questions
+    # about a HorizonWorld on the stack — and the third one is invisible in a
+    # running editor until a hundred paint calls have leaked a hundred textures.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTerrain.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp

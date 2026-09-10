@@ -395,4 +395,55 @@ struct McpSceneHooks
 void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
                         McpSceneHooks hooks);
 
+// ─── Shaping the ground ──────────────────────────────────────────────────────
+// Four tools — info, heightmap, sculpt, paint — for the one component that
+// `entity_get` and `entity_set_components` cannot usefully address.
+//
+// ── Why terrain needs tools of its own ───────────────────────────────────────
+// A TerrainComponent's payload is two blobs: `sculptHeightsB64` (res² floats,
+// 263k of them at the resolution the chunk builder snaps to) and
+// `layerWeightsB64` (weightRes² RGBA texels). The generic component tools hand
+// those to a client as base64 and take them back the same way, which is not an
+// interface — it is the absence of one. A client cannot read a height out of it,
+// cannot change one without re-encoding the whole field, and has no way at all
+// to express "raise the ground here", which is what a landscape is edited by.
+//
+// So these four speak the vocabulary the Landscape mode speaks: a WORLD position,
+// a brush radius and falloff, an operation. The maths is TerrainSculpt (heights)
+// and TerrainPaint (layer weights) — the same functions the editor's own brushes
+// are built from, so a client cannot produce a landscape the editor could not
+// have produced by hand.
+//
+// ── Everything still goes through the gateway ────────────────────────────────
+// Unlike the asset and scene tools, this file DOES go through EditorCommands: a
+// terrain edit is a component change on an entity, which is exactly what
+// `Command::setComponents` is, and routing it there is what buys undo, the
+// publish to a collaboration session, the play-mode refusal and the lock gate
+// without a second copy of any of them. The brush runs on a COPY of the
+// component and the result is handed to the gateway as the component patch.
+//
+// ── The one thing done outside the gateway, and why ──────────────────────────
+// TerrainComponent carries fields that are explicitly never serialised: the
+// weightmap texture's uuid, the chunk grid the chunks were last built for, and
+// the region-dirty rect. The gateway rebuilds the component from the scene JSON,
+// which cannot carry them, so it lands with a fresh default: no weightmap texture
+// (the next tick REGISTERS A SECOND ONE and the first leaks), no known chunk grid
+// and `dirty`, i.e. a rebuild of all 64+ chunks for a brush dab of ten metres.
+// So after the command lands those runtime fields are carried over onto the new
+// component, and the dirty rect is set to the brush extent. That is a write to
+// the world outside the gateway and it is deliberately the smallest one possible:
+// it touches nothing a scene file, an undo entry or a peer would ever see.
+struct McpTerrainHooks
+{
+	// Rebuild what the edit invalidated — in the editor,
+	// TerrainSystem::updateTerrains with the content manager and the renderer,
+	// the same call the Landscape brush makes at the end of a stroke. Absent in
+	// a test, where there is neither and the component itself is the answer.
+	std::function<void()> regenerate;
+};
+
+// The reference is captured, so `cmds` has to outlive the registry.
+void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
+                          McpTerrainHooks hooks);
+
 } // namespace HE::Ed

@@ -34,6 +34,18 @@ int intArg(const json& args, const char* key, int fallback)
 	return (it != args.end() && it->is_number_integer()) ? it->get<int>() : fallback;
 }
 
+double numArg(const json& args, const char* key, double fallback)
+{
+	if (!args.is_object()) return fallback;
+	const auto it = args.find(key);
+	return (it != args.end() && it->is_number()) ? it->get<double>() : fallback;
+}
+
+bool hasArg(const json& args, const char* key)
+{
+	return args.is_object() && args.find(key) != args.end() && !args[key].is_null();
+}
+
 json objectSchema(json properties, std::vector<std::string> required)
 {
 	json s{
@@ -48,6 +60,11 @@ json objectSchema(json properties, std::vector<std::string> required)
 json stringProp(const char* what)
 {
 	return json{ { "type", "string" }, { "description", what } };
+}
+
+json numberProp(const char* what)
+{
+	return json{ { "type", "number" }, { "description", what } };
 }
 
 namespace

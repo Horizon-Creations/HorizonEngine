@@ -2075,6 +2075,20 @@ namespace
 // way: the load works fine, but the log claims data was dropped, and a warning
 // that cries wolf is a warning people stop reading. tests/test_scene_serializer
 // walks a world carrying every component and asserts this covers each key.
+// The scene format's own base64, handed out rather than copied — see the header.
+// Thin forwards on purpose: the implementation stays the one above that the
+// writer and the loader both call, so an outside caller cannot end up encoding
+// with a second one.
+std::string SceneSerializer::encodeBase64(const uint8_t* data, size_t len)
+{
+	return base64Encode(data, len);
+}
+
+std::vector<uint8_t> SceneSerializer::decodeBase64(const std::string& s)
+{
+	return base64Decode(s);
+}
+
 bool SceneSerializer::isKnownComponentKey(const std::string& key)
 {
 	static const std::unordered_set<std::string> kKnown = {
