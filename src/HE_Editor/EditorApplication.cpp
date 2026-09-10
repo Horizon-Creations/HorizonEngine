@@ -6606,6 +6606,24 @@ void EditorApplication::setupMcpTools()
 	};
 	material.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
 	HE::Ed::registerMaterialTools(m_mcp.registry(), contentManager(), std::move(material));
+
+	// ── The editor's unit of reuse ──────────────────────────────────────────
+	// The only tool family that takes both halves of the editor: the gateway,
+	// because a placement is a scene change and has to be undoable like every
+	// other one, and the content manager, because the thing being placed is an
+	// asset. No tab hooks — a prefab has no editor tab to be behind. See
+	// McpPrefabHooks.
+	HE::Ed::McpPrefabHooks prefab;
+	prefab.isPlaying     = [this] { return m_isPlaying; };
+	prefab.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	prefab.publishCreate = [this](const std::string& rel, const std::string& abs) {
+		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
+	};
+	prefab.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
+	HE::Ed::registerPrefabTools(m_mcp.registry(), contentManager(), m_commands,
+	                            std::move(prefab));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

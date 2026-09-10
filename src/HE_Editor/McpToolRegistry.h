@@ -701,4 +701,87 @@ struct McpMaterialHooks
 void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
                            McpMaterialHooks hooks);
 
+// ─── Placing an authored subtree: the prefab tools ───────────────────────────
+// Four tools: `prefab_info` (the catalogue, and one prefab's contents),
+// `prefab_instantiate` (place one in the open scene), `prefab_save` (turn a
+// scene subtree into a prefab asset) and `prefab_instances` (which entities in
+// the scene came from a given prefab).
+//
+// ── Why a prefab needs tools of its own ──────────────────────────────────────
+// `entity_create` builds ONE entity out of component JSON the client writes by
+// hand. A prefab is the opposite: a whole authored subtree — a vehicle with its
+// wheels, a lamp post with its light — that somebody already got right, and the
+// only unit of reuse the editor has. Neither of the two path-level tools reaches
+// it. `asset_create` refuses the type outright (AssetStubWriter: "a prefab with
+// no PFAB payload is an empty file, not an empty prefab"), and a client could
+// not have read the payload anyway: it is CBOR, and the one thing this whole
+// interface refuses to do is hand a model base64 to edit.
+//
+// So before these, an MCP client could see that Prefabs/Lamp.hasset exists and
+// do nothing whatsoever with it, while a human placed one by dragging it into
+// the viewport.
+//
+// ── The rule: one command, and the placement rides in the BLOB ───────────────
+// `prefab_instantiate` is a single `Command::create` through the gateway — the
+// same CBOR subtree that `Command::create` already takes for duplicate, paste
+// and a peer's create, so undo, the structural publish, the play-mode refusal
+// and the lock gate all come from the one place they come from everywhere else.
+// `preserveIds` stays FALSE: the blob carries the uuids of the entities it was
+// captured from, and two placements of one prefab must be two identities.
+//
+// Where the client's position/rotation/scale/name go is the part worth reading
+// twice: they are patched INTO the root record of the blob before the command,
+// not written afterwards with a second `Command::setTransform`. A second command
+// would be a second undo entry (one Ctrl+Z would move the prefab back to its
+// authored spot and leave it in the scene) and a second publish. Only the axes
+// the client actually sent are patched — the prefab's own authored transform is
+// part of what was saved, and resetting the rest of it would silently un-author
+// the thing, which is the reason the viewport's drag-drop only overwrites the
+// position too.
+//
+// ── prefab_save does NOT go through the gateway, on purpose ──────────────────
+// It reads the scene and writes a CONTENT file. The gateway speaks scene changes
+// (its five commands are all "the world now looks like this"), and a prefab
+// asset is not one — nothing in the world changes. Same decision, same reason as
+// the asset tools (8.1 of the plan): the asset half of the editor has its own
+// wiring, and pretending it is a scene command would only make the undo stack
+// promise something it cannot deliver.
+//
+// ── The link, and what it is not ─────────────────────────────────────────────
+// Every entity placed by `prefab_instantiate` (and by the viewport's drag-drop)
+// carries a `PrefabLinkComponent` naming the asset it came from — the "prefab"
+// key in the scene file. That is what makes `prefab_instances` answerable and
+// what makes deleting a prefab report the scenes that use it (AssetRefScan finds
+// any uuid inside a "components" block). It is NOT prefab inheritance: editing
+// the asset does not update placed instances, and there is no override tracking.
+// A placement is still a copy; it now knows where it came from.
+struct McpPrefabHooks
+{
+	// Play-in-editor. `prefab_instantiate` does not need it — the gateway refuses
+	// Origin::External while play runs — but `prefab_save` writes an asset file
+	// and has no gateway underneath, exactly like the asset and material tools.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// A file that was not there before — the same pair the asset, scene and
+	// material tools carry, for the same two reasons: a create IS published
+	// (nothing refers to a brand-new file yet, so there is nothing for the host to
+	// arbitrate), and the editor's own bookkeeping has to hear that something
+	// appeared. `publishCreate` is also what claims the name at the host, which is
+	// what stops two people saving an "Arm" prefab at the same moment from
+	// overwriting each other (see OutlinerPanel's "Save as Prefab").
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// Both references are captured, so `content` and `cmds` have to outlive the
+// registry. Two of them because a prefab lives on both sides of the editor: the
+// asset is content, the placement is a scene change.
+void registerPrefabTools(McpToolRegistry& registry, ContentManager& content,
+                         EditorCommands& cmds, McpPrefabHooks hooks);
+
 } // namespace HE::Ed
