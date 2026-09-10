@@ -65,11 +65,6 @@ namespace UIEditorPanel
 	// refresh of the loaded asset — commitEdit, which is what the panel itself
 	// calls after a human's edit, so the two leave the tab in the same state.
 	void markEdited(AppContext& ctx, const std::string& contentPath);
-	// Every widget this panel holds, open or closed — what is addressable at
-	// all. Dirty comes along because the caller wants both and asking twice
-	// would mean walking the map twice with a second path convention.
-	struct Held { std::string contentPath; bool dirty = false; };
-	void appendHeld(std::vector<Held>& out);
 	// isDirty()/save(), addressed the same way.
 	bool isDirtyByContentPath(const std::string& contentPath);
 	bool saveByContentPath(AppContext& ctx, const std::string& contentPath);

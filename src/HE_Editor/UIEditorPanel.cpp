@@ -5343,13 +5343,6 @@ void markEdited(AppContext& ctx, const std::string& contentPath)
 	commitEdit(*st, ctx);
 }
 
-void appendHeld(std::vector<Held>& out)
-{
-	s_states.forEach([&out](const std::string&, const State& st) {
-		if (st.loaded && !st.relPath.empty()) out.push_back({ st.relPath, st.dirty });
-	});
-}
-
 bool isDirtyByContentPath(const std::string& contentPath)
 {
 	const State* st = stateByContentPath(contentPath);
