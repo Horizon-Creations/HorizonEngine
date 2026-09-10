@@ -1423,7 +1423,8 @@ zweite käme als schlichtes „nicht gefunden" zurück.
 * **Material-, Input- und Terrain-Inhalte** ändern die Werkzeuge nicht. Sie
   legen die Dateien an und bewegen sie; was drin steht, sind die Schritte 3 bis
   6 dieses Themas. (Terrain hat seine eigenen Werkzeuge seit Schritt 9, siehe
-  Kapitel 10; Widgets seit Schritt 4, siehe Kapitel 11.)
+  Kapitel 10; Widgets seit Schritt 4, siehe Kapitel 11; Input seit Schritt 5,
+  siehe Kapitel 12.)
 
 ### 8.5 Nebenbei gefunden
 
