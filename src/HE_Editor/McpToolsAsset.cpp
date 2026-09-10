@@ -6,6 +6,7 @@
 #include <ContentManager/AssetRefRetarget.h>
 #include <ContentManager/AssetRefScan.h>
 #include <ContentManager/ContentManager.h>
+#include <HorizonCode/HorizonCode.h>     // the engine class taxonomy a new class may derive from
 
 #include <algorithm>
 #include <cctype>
@@ -245,9 +246,16 @@ ToolResult failEngineReadOnly(const std::string& rel)
 
 std::string typeNameOf(const std::string& abs)
 {
-	// The header sniff, cached editor-wide. Unknown for a .hescene (JSON, not an
-	// HAsset) and for anything that is not an asset at all.
-	return HE::assetTypeName(EditorAssetTypeCache::assetTypeOf(abs));
+	// The header sniff, cached editor-wide.
+	const HE::AssetType t = EditorAssetTypeCache::assetTypeOf(abs);
+	if (t != HE::AssetType::Unknown) return HE::assetTypeName(t);
+	// A scene is JSON, not an HAsset, so the sniff has nothing to find and every
+	// scene in the project would come back untyped — including the one
+	// asset_resolve's own description offers as an example. The extension is what
+	// identifies it, here as everywhere else in the editor.
+	if (std::filesystem::path(abs).extension() == ".hescene")
+		return HE::assetTypeName(HE::AssetType::Scene);
+	return std::string();
 }
 
 // The [hi, lo] pair, and NOT a prettier string: this is exactly the shape
@@ -275,14 +283,20 @@ json assetEntry(ContentManager& content, const std::string& rel, const std::stri
 
 	j["type"] = typeNameOf(abs);
 
-	// The resident id first — that is the one every other tool will accept
-	// today. The file's own META is the fallback, and the two agree by
-	// construction (the loader takes the id from the same chunk).
-	HE::UUID id = content.idForPath(rel);
+	// THE FILE'S OWN META FIRST, not the resident id — and the order matters in
+	// exactly the flow this interface steers a client into. `already_exists` tells
+	// them to delete the asset first, and a delete mirrors the Content Browser by
+	// NOT unloading: the old asset stays resident under the vacated path. Asking
+	// the path index would then answer for a file that no longer exists, and
+	// report the brand-new one created in its place as loaded, under a stranger's
+	// uuid. Disk is the truth about what is at a path; the index is the fallback
+	// for something that has no META of its own to read.
 	bool     unreadable = false;
-	if (id == HE::UUID{}) id = HE::AssetRefs::assetUuidOfFile(abs, &unreadable);
+	HE::UUID id = HE::AssetRefs::assetUuidOfFile(abs, &unreadable);
+	if (id == HE::UUID{} && !unreadable) id = content.idForPath(rel);
 	j["uuid"]   = uuidJson(id);
-	j["loaded"] = !(content.idForPath(rel) == HE::UUID{}) && content.isLoaded(rel);
+	// Asked about THAT id rather than about the path, for the same reason.
+	j["loaded"] = !(id == HE::UUID{}) && content.isLoaded(id);
 	// Stated rather than folded into a null uuid: "this file has no id" and "this
 	// file could not be read" are different answers, and the second one is a
 	// reason to look at the file rather than at the reference.
@@ -612,7 +626,22 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 			spec.scriptLanguage = h->scriptLanguage ? h->scriptLanguage()
 			                                        : HE::ScriptLanguage::Lua;
 			if (type == HE::AssetType::HorizonCodeClass)
-				spec.horizonCodeBaseClass = strArg(args, "baseClass");
+			{
+				const std::string base = strArg(args, "baseClass");
+				// Validated against the taxonomy rather than written through. An
+				// unknown name lands in CHUNK_HCBC, decides the event catalog and
+				// resolves to nothing — a class whose events silently do not exist,
+				// which is the kind of mistake that shows up three steps later in a
+				// graph the client has already built on top of it.
+				if (!base.empty() && !HorizonCode::findEngineClass(base))
+					return ToolResult::fail("invalid_payload",
+						"'" + base + "' is not an engine class. The taxonomy is Object "
+						"(the plain class — omit 'baseClass' for it), Entity, "
+						"PlayerCharacter and PlayerController. The base class decides "
+						"which events the class can handle, so it is not something to "
+						"guess at.");
+				spec.horizonCodeBaseClass = base;
+			}
 
 			const std::string name = std::filesystem::path(p.abs).stem().string();
 			if (!writeAssetStub(p.abs, p.rel, name, type, spec))

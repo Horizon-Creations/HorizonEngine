@@ -404,6 +404,112 @@ TEST_CASE("asset_create refuses rather than guessing")
 	}
 }
 
+TEST_CASE("a reused path answers for the file that is there NOW")
+{
+	// The flow this interface steers a client into: asset_create refuses an
+	// occupied path and says "delete that asset first". A delete mirrors the
+	// Content Browser and does NOT unload, so the old asset stays resident under
+	// the vacated path — and an answer taken from the path index would report the
+	// dead one's uuid for the live file, and call it loaded.
+	Fixture f("reused_path");
+	REQUIRE_FALSE(f.call("asset_create",
+		json{ { "path", "Thing.hasset" }, { "type", "Widget" } }).isError);
+
+	const HE::UUID first = f.content.loadAsset("Thing.hasset");
+	REQUIRE_FALSE(first == HE::UUID{});
+	REQUIRE(f.content.isLoaded(first));
+
+	REQUIRE_FALSE(f.call("asset_delete",
+		json{ { "path", "Thing.hasset" }, { "force", true } }).isError);
+	REQUIRE_FALSE(f.call("asset_create",
+		json{ { "path", "Thing.hasset" }, { "type", "Theme" } }).isError);
+
+	const ToolResult r = f.call("asset_resolve", json{ { "path", "Thing.hasset" } });
+	REQUIRE_FALSE(r.isError);
+	// The new file's own uuid, not the resident stranger's.
+	const std::uint64_t hi = r.content["uuid"][0].get<std::uint64_t>();
+	const std::uint64_t lo = r.content["uuid"][1].get<std::uint64_t>();
+	CHECK_FALSE((hi == first.hi && lo == first.lo));
+	CHECK(r.content["type"].get<std::string>() == "Theme");
+	CHECK(r.content["loaded"].get<bool>() == false);
+}
+
+TEST_CASE("asset_resolve types a scene by its extension")
+{
+	// A .hescene is JSON, not an HAsset, so the header sniff finds nothing —
+	// and every scene in the project, including the example this tool's own
+	// description gives, would come back untyped.
+	Fixture f("scene_type");
+	fs::create_directories(f.root / "Levels");
+	{ std::ofstream o(f.root / "Levels/Main.hescene"); o << "{\"entities\":[]}"; }
+
+	const ToolResult r = f.call("asset_resolve", json{ { "path", "Levels/Main.hescene" } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["type"].get<std::string>() == "Scene");
+}
+
+TEST_CASE("asset_create checks the base class against the taxonomy")
+{
+	Fixture f("base_class");
+	SUBCASE("a real one goes through")
+	{
+		const ToolResult r = f.call("asset_create", json{
+			{ "path", "Gameplay/Hero.hasset" },
+			{ "type", "HorizonCodeClass" },
+			{ "baseClass", "PlayerCharacter" },
+		});
+		REQUIRE_FALSE(r.isError);
+		CHECK(f.exists("Gameplay/Hero.hasset"));
+	}
+	SUBCASE("an invented one is refused rather than written")
+	{
+		// It would land in CHUNK_HCBC, decide the event catalog, and resolve to
+		// nothing — a class whose events silently do not exist.
+		const ToolResult r = f.call("asset_create", json{
+			{ "path", "Gameplay/Ghost.hasset" },
+			{ "type", "HorizonCodeClass" },
+			{ "baseClass", "Pawn" },
+		});
+		CHECK(r.isError);
+		CHECK(r.errorCode == "invalid_payload");
+		CHECK_FALSE(f.exists("Gameplay/Ghost.hasset"));
+	}
+	SUBCASE("omitting it is the plain Object class")
+	{
+		const ToolResult r = f.call("asset_create", json{
+			{ "path", "Gameplay/Plain.hasset" }, { "type", "HorizonCodeClass" },
+		});
+		REQUIRE_FALSE(r.isError);
+	}
+}
+
+TEST_CASE("a scan that could not finish is not read as 'nothing references this'")
+{
+	Fixture f("scan_incomplete");
+	// An .hasset that CLAIMS to be one — the magic is right — and then stops.
+	// That is the case assetUuidOfFile calls unreadable, and it has to be, because
+	// the scan then has no uuid to look for and scenes reference meshes and
+	// materials by id alone: an empty result would be an answer the scan never
+	// actually gave. (A file WITHOUT the magic is a legitimate null instead — a
+	// JSON scene is shorter than the header, and calling that unreadable would
+	// fire the warning on every delete until it meant nothing.)
+	{
+		std::ofstream o(f.root / "Broken.hasset", std::ios::binary);
+		o.write("HAST", 4);
+	}
+
+	const ToolResult r = f.call("asset_delete", json{ { "path", "Broken.hasset" } });
+	CHECK(r.isError);
+	CHECK(r.errorCode == "scan_incomplete");
+	CHECK(f.exists("Broken.hasset"));
+
+	// force is the way through, and it says nothing about references.
+	const ToolResult forced = f.call("asset_delete",
+		json{ { "path", "Broken.hasset" }, { "force", true } });
+	CHECK_FALSE(forced.isError);
+	CHECK_FALSE(f.exists("Broken.hasset"));
+}
+
 TEST_CASE("asset_create appends the suffix and makes the folder")
 {
 	Fixture f("create_suffix");
