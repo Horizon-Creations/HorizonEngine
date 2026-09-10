@@ -19,6 +19,7 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
+#include "HorizonScene/Components/PrefabLinkComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
@@ -438,6 +439,13 @@ namespace
 				{ "saveTransform",  ss->saveTransform },
 				{ "saveVisibility", ss->saveVisibility },
 			};
+		}
+		if (auto* pl = registry.try_get<PrefabLinkComponent>(entity))
+		{
+			// Written like every other asset reference — [hi, lo] inside the
+			// components block — which is also what makes AssetRefScan find an
+			// instance when someone deletes the prefab it came from.
+			comps["prefab"] = { { "asset", uuidToJson(pl->asset) } };
 		}
 		if (auto* e = registry.try_get<EnvironmentComponent>(entity))
 		{
@@ -1150,6 +1158,17 @@ namespace
 			ss.saveTransform  = c.value("saveTransform",  ss.saveTransform);
 			ss.saveVisibility = c.value("saveVisibility", ss.saveVisibility);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
+		}
+		if (comps.contains("prefab"))
+		{
+			const json& c = comps["prefab"];
+			PrefabLinkComponent pl;
+			pl.asset = jsonToUuid(c.value("asset", json()));
+			// A link to nothing is not a link. An asset id that failed to parse
+			// would otherwise leave the entity claiming to be an instance of the
+			// null prefab, which is a claim every reader has to special-case.
+			if (!(pl.asset == HE::UUID{}))
+				registry.emplace_or_replace<PrefabLinkComponent>(entity, pl);
 		}
 		if (comps.contains("script"))
 		{
@@ -2102,7 +2121,10 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
 		"movement",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
-		"navagent", "navmesh", "particlesystem", "propertyanimator",
+		"navagent", "navmesh", "particlesystem",
+		// Which prefab an entity was instantiated from (PrefabLinkComponent).
+		"prefab",
+		"propertyanimator",
 		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",

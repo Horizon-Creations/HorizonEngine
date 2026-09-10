@@ -19,6 +19,7 @@
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/PrefabLinkComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 
 #include <filesystem>
@@ -680,12 +681,185 @@ TEST_CASE("A name with a slash in it cannot reach into another folder")
 	CHECK_FALSE(fs::exists(f.root / "Prefabs/Arm"));
 }
 
+// ─── The link ────────────────────────────────────────────────────────────────
+
+TEST_CASE("A placement remembers which prefab it came from")
+{
+	Fixture f("link");
+	const Entity source = f.makeSubtree();
+	f.writePrefabFile("Prefabs/Lamp.hasset", source);
+	f.world.destroyEntity(source);
+	const HE::UUID assetId =
+		HE::AssetRefs::assetUuidOfFile((f.root / "Prefabs/Lamp.hasset").string());
+
+	const ToolResult r = f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	const Entity placed = HE::Ed::entityByUuid(f.world, r.content["uuid"]);
+	REQUIRE((placed != entt::null));
+
+	auto& reg = f.world.registry();
+	const auto* link = reg.try_get<PrefabLinkComponent>(placed);
+	REQUIRE(link != nullptr);
+	CHECK(link->asset == assetId);
+
+	// On the ROOT only — the children are part of this instance, not instances
+	// of their own, and a link on each of them would make prefab_instances count
+	// one placement three times.
+	const auto& kids = reg.get<HierarchyComponent>(placed).children;
+	REQUIRE(kids.size() == 1);
+	CHECK(reg.try_get<PrefabLinkComponent>(kids[0]) == nullptr);
+}
+
+TEST_CASE("The link rides in the command, so undo and redo keep it")
+{
+	Fixture f("link_undo");
+	const Entity source = f.makeSubtree();
+	f.writePrefabFile("Prefabs/Lamp.hasset", source);
+	f.world.destroyEntity(source);
+
+	const ToolResult r = f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	const std::string uuid = r.content["uuid"];
+
+	REQUIRE(f.snapshotUndo.undo());
+	CHECK((HE::Ed::entityByUuid(f.world, uuid) == entt::null));
+	REQUIRE(f.snapshotUndo.redo());
+
+	// Written into the blob rather than onto the world afterwards: a second
+	// write would sit outside the command the undo stack recorded, and the redo
+	// would bring the lamp back without its link.
+	const Entity again = HE::Ed::entityByUuid(f.world, uuid);
+	REQUIRE((again != entt::null));
+	CHECK(f.world.registry().try_get<PrefabLinkComponent>(again) != nullptr);
+}
+
+TEST_CASE("prefab_instances answers which entities came from a prefab")
+{
+	Fixture f("instances");
+	const Entity source = f.makeSubtree();
+	f.writePrefabFile("Prefabs/Lamp.hasset", source);
+	const Entity other = f.makeSubtree("Bench");
+	f.writePrefabFile("Prefabs/Bench.hasset", other);
+	f.world.destroyEntity(source);
+	f.world.destroyEntity(other);
+
+	f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+	f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+	f.call("prefab_instantiate", json{ { "path", "Prefabs/Bench.hasset" } });
+	// An entity that is not a placement at all, so a tool that just listed the
+	// scene would be caught.
+	f.world.createEntity("Handmade");
+
+	const ToolResult lamps = f.call("prefab_instances",
+	                                json{ { "path", "Prefabs/Lamp.hasset" } });
+	REQUIRE_MESSAGE(!lamps.isError, codeOf(lamps));
+	CHECK(lamps.content["prefab"] == "Prefabs/Lamp.hasset");
+	REQUIRE(lamps.content["instances"].size() == 2);
+	for (const json& i : lamps.content["instances"])
+	{
+		CHECK(i["name"] == "Lamp");
+		CHECK(i["prefab"] == "Prefabs/Lamp.hasset");
+	}
+
+	// Without a path: everything linked, with the path each id resolves to —
+	// which the editor only knows because the walk resolves it, since a prefab
+	// these tools placed was never loaded.
+	const ToolResult all = f.call("prefab_instances");
+	REQUIRE_MESSAGE(!all.isError, codeOf(all));
+	REQUIRE(all.content["instances"].size() == 3);
+	int benches = 0;
+	for (const json& i : all.content["instances"])
+		if (i["prefab"] == "Prefabs/Bench.hasset") ++benches;
+	CHECK(benches == 1);
+}
+
+TEST_CASE("Saving an instance as a new prefab does not bake in the old link")
+{
+	Fixture f("relink");
+	const Entity source = f.makeSubtree();
+	f.writePrefabFile("Prefabs/Lamp.hasset", source);
+	f.world.destroyEntity(source);
+
+	const ToolResult placed = f.call("prefab_instantiate",
+	                                 json{ { "path", "Prefabs/Lamp.hasset" } });
+	REQUIRE_MESSAGE(!placed.isError, codeOf(placed));
+
+	// Capture the placed instance as a NEW prefab…
+	const ToolResult saved = f.call("prefab_save", json{
+		{ "uuid", placed.content["uuid"] },
+		{ "path", "Prefabs/TallLamp.hasset" },
+	});
+	REQUIRE_MESSAGE(!saved.isError, codeOf(saved));
+
+	// …and place THAT. Without the strip, the new placement would carry the OLD
+	// prefab's uuid, and prefab_instances of Lamp.hasset would answer with
+	// entities that have nothing to do with it.
+	const ToolResult second = f.call("prefab_instantiate",
+	                                 json{ { "path", "Prefabs/TallLamp.hasset" } });
+	REQUIRE_MESSAGE(!second.isError, codeOf(second));
+
+	const HE::UUID tallId =
+		HE::AssetRefs::assetUuidOfFile((f.root / "Prefabs/TallLamp.hasset").string());
+	const Entity e = HE::Ed::entityByUuid(f.world, second.content["uuid"]);
+	REQUIRE((e != entt::null));
+	const auto* link = f.world.registry().try_get<PrefabLinkComponent>(e);
+	REQUIRE(link != nullptr);
+	CHECK(link->asset == tallId);
+
+	const ToolResult lamps = f.call("prefab_instances",
+	                                json{ { "path", "Prefabs/Lamp.hasset" } });
+	REQUIRE_MESSAGE(!lamps.isError, codeOf(lamps));
+	CHECK(lamps.content["instances"].size() == 1);   // the first placement, only
+}
+
+TEST_CASE("A link survives the scene file, and the delete dialog can see it")
+{
+	Fixture f("link_scene");
+	const Entity source = f.makeSubtree();
+	f.writePrefabFile("Prefabs/Lamp.hasset", source);
+	f.world.destroyEntity(source);
+	REQUIRE_FALSE(f.call("prefab_instantiate",
+	                     json{ { "path", "Prefabs/Lamp.hasset" } }).isError);
+
+	const fs::path scene = f.root / "Levels/Street.hescene";
+	fs::create_directories(scene.parent_path());
+	SceneSerializer ser;
+	REQUIRE(ser.save(f.world, scene, SerializeFormat::JSON));
+
+	HorizonWorld reloaded;
+	REQUIRE(ser.load(reloaded, scene, SerializeFormat::JSON));
+	const HE::UUID assetId =
+		HE::AssetRefs::assetUuidOfFile((f.root / "Prefabs/Lamp.hasset").string());
+	int linked = 0;
+	for (auto e : reloaded.registry().view<PrefabLinkComponent>())
+		if (reloaded.registry().get<PrefabLinkComponent>(e).asset == assetId) ++linked;
+	CHECK(linked == 1);
+
+	// And because the id sits where every other asset id sits — inside a
+	// "components" block — the reference scan finds the scene when someone goes
+	// to delete the prefab. That is the answer the delete dialog shows.
+	HE::AssetRefs::ScanTargets targets;
+	targets.uuids.push_back(assetId);
+	HE::AssetRefs::ScanRequest request;
+	request.contentRoot = f.root.string();
+	// The prefab file itself carries its own id in its META — a self-hit, which
+	// the delete dialog excludes because a file referencing itself says nothing
+	// about what breaks elsewhere.
+	request.excludeFiles.push_back((f.root / "Prefabs/Lamp.hasset").string());
+	const HE::AssetRefs::ScanResult found = HE::AssetRefs::findReferrers(targets, request);
+	bool sawScene = false;
+	for (const auto& r : found.referrers)
+		if (r.displayPath.find("Street.hescene") != std::string::npos) sawScene = true;
+	CHECK(sawScene);
+}
+
 // ─── The registration ────────────────────────────────────────────────────────
 
 TEST_CASE("Every prefab tool is registered with a schema a client can call")
 {
 	Fixture f("schema");
-	for (const char* name : { "prefab_info", "prefab_instantiate", "prefab_save" })
+	for (const char* name : { "prefab_info", "prefab_instantiate", "prefab_save",
+	                          "prefab_instances" })
 	{
 		const McpTool* t = f.registry.find(name);
 		REQUIRE_MESSAGE(t != nullptr, name);
@@ -693,6 +867,7 @@ TEST_CASE("Every prefab tool is registered with a schema a client can call")
 		CHECK_FALSE(t->description.empty());
 	}
 	CHECK_FALSE(f.registry.find("prefab_info")->mutates);
+	CHECK_FALSE(f.registry.find("prefab_instances")->mutates);
 	CHECK(f.registry.find("prefab_instantiate")->mutates);
 	CHECK(f.registry.find("prefab_save")->mutates);
 }

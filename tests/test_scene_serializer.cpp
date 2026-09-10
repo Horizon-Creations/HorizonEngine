@@ -35,6 +35,7 @@
 #include <HorizonScene/Components/AudioListenerComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
+#include <HorizonScene/Components/PrefabLinkComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
@@ -1496,6 +1497,7 @@ namespace
 		AudioListenerComponent         audioListener;
 		ParticleSystemComponent        particleSystem;
 		LODComponent                   lod;
+		PrefabLinkComponent            prefabLink;
 		NavAgentComponent              navAgent;
 		TerrainComponent               terrain;
 		FoliageComponent               foliage;
@@ -1737,6 +1739,14 @@ namespace
 			a.lod.levels = { lodNear, lodFar };
 		}
 		reg.emplace<LODComponent>(actor, a.lod);
+
+		// Which prefab this entity was placed from. A scene stores asset
+		// references by uuid, so this one field is the whole component — and it
+		// is the field whose loss would be invisible: everything renders and
+		// moves exactly the same, only nothing can tell any more that the lamp
+		// post came out of Prefabs/Lamp.hasset.
+		a.prefabLink.asset = HE::UUID::generate();
+		reg.emplace<PrefabLinkComponent>(actor, a.prefabLink);
 
 		a.navAgent.targetPos    = { 4.0f, 1.0f, -2.0f };
 		a.navAgent.speed        = 6.0f;
@@ -2075,6 +2085,11 @@ namespace
 				CHECK(lod->levels[i].maxDistance ==
 				      doctest::Approx(a.lod.levels[i].maxDistance));
 			}
+		}
+		{
+			const auto* pl = reg.try_get<PrefabLinkComponent>(actor);
+			REQUIRE(pl != nullptr);
+			CHECK(pl->asset == a.prefabLink.asset);
 		}
 		{
 			const auto* na = reg.try_get<NavAgentComponent>(actor);

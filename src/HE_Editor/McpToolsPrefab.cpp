@@ -14,6 +14,7 @@
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/PrefabLinkComponent.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -417,6 +418,17 @@ void addInstantiate(McpToolRegistry& registry, ContentManager& content,
 		if (!xf.contains("rotation")) xf["rotation"] = json::array({ 0.0, 0.0, 0.0 });
 		if (!xf.contains("scale"))    xf["scale"]    = json::array({ 1.0, 1.0, 1.0 });
 
+		// Where it came from, patched in for the same reason the transform is:
+		// written into the blob it is part of the ONE command, so it is in the
+		// entry the undo stack recorded and comes back with a redo. Written
+		// afterwards it would be a second touch of the world that no undo entry
+		// knows about — and the first redo would resurrect the subtree without
+		// its link. Only on the root: the children are part of this instance,
+		// not instances of their own. A prefab whose file carries no uuid at all
+		// gets no link rather than a link to nothing.
+		if (!(p.id == HE::UUID{}))
+			comps["prefab"] = json{ { "asset", uuidJson(p.id) } };
+
 		const Command cmd =
 			Command::create(parent, json::to_cbor(p.tree), /*preserveIds=*/false);
 		const Result res = c->execute(cmd, Origin::External);
@@ -554,6 +566,28 @@ void addSave(McpToolRegistry& registry, ContentManager& content, EditorCommands&
 				"environment's lights) has nothing a prefab could carry.");
 		const int entityCount = entityCountOf(tree);
 
+		// If the entity being captured is itself a placed instance, its own link
+		// must NOT go into the new file: every future placement of THIS prefab
+		// would then arrive claiming to be an instance of the OTHER one, and
+		// prefab_instances would answer with entities that have nothing to do
+		// with the prefab it was asked about. The root's link goes; a link on a
+		// CHILD stays, because there it is true — that child really is a
+		// placement of another prefab, sitting inside this one.
+		{
+			int rootCount = 0;
+			bool wasInstance = false;
+			if (json* rootRec = rootRecordOf(tree, rootCount))
+			{
+				const auto comps = rootRec->find("components");
+				if (comps != rootRec->end() && comps->is_object() && comps->contains("prefab"))
+				{
+					comps->erase("prefab");
+					wasInstance = true;
+				}
+			}
+			if (wasInstance) blob = json::to_cbor(tree);
+		}
+
 		std::filesystem::create_directories(std::filesystem::path(dst.abs).parent_path(), ec);
 
 		// Written and THEN registered, in the Outliner's order and for both of its
@@ -595,6 +629,95 @@ void addSave(McpToolRegistry& registry, ContentManager& content, EditorCommands&
 	registry.add(std::move(t));
 }
 
+// ── prefab_instances ─────────────────────────────────────────────────────────
+
+void addInstances(McpToolRegistry& registry, ContentManager& content, EditorCommands& cmds)
+{
+	ContentManager* cm = &content;
+	EditorCommands* c  = &cmds;
+	McpTool t;
+	t.name        = "prefab_instances";
+	t.description =
+		"Which entities in the open scene were placed from a given prefab. Without "
+		"'path': every linked entity, grouped by the prefab it came from. Remember what "
+		"the link is and is not — it records where a placement came from, it does not "
+		"keep it in step: editing the prefab asset does not change entities already in "
+		"the scene, and an entity a human has edited since still reports the link.";
+	t.inputSchema = objectSchema(json{
+		{ "path", stringProp("Content-relative path of one prefab, e.g. "
+		                     "'Prefabs/Lamp.hasset'. Omit for every linked entity in "
+		                     "the scene.") },
+	}, {});
+	t.handler = [cm, c](const json& args) -> ToolResult {
+		HorizonWorld* world = c->world();
+		if (!world) return failFor(CmdError::NoWorld, {});
+
+		HE::UUID want;
+		std::string wantRel;
+		if (!strArg(args, "path").empty())
+		{
+			// No payload needed — this asks about the id, and reading the subtree
+			// to answer would make a listing question cost a CBOR decode.
+			Prefab p = openPrefab(*cm, args, "path", /*needPayload=*/false);
+			if (!p.ok) return p.failure;
+			if (p.id == HE::UUID{})
+				return ToolResult::fail("invalid_payload",
+					"'" + p.rel + "' carries no asset uuid of its own, so nothing in a "
+					"scene could be linked to it. The file predates asset identities or "
+					"its header is damaged.");
+			want    = p.id;
+			wantRel = p.rel;
+		}
+
+		// The scene stores the id; a client thinks in paths. Resolved by the same
+		// walk prefab_info's catalogue uses — the editor does not otherwise know
+		// the path of a prefab it never loaded, and answering "which prefab" with
+		// a bare pair of integers would make this tool useless on its own. Built
+		// once, and only for the whole-scene question: with a path in hand the
+		// answer is already known.
+		std::vector<std::pair<HE::UUID, std::string>> byId;
+		if (wantRel.empty())
+		{
+			bool truncated = false;
+			for (const ContentAsset& a :
+			     walkContentAssets(*cm, { HE::AssetType::Prefab }, 500, truncated))
+				byId.emplace_back(HE::AssetRefs::assetUuidOfFile(a.abs), a.rel);
+		}
+
+		auto& reg = world->registry();
+		json list = json::array();
+		for (auto e : reg.view<PrefabLinkComponent>())
+		{
+			const HE::UUID id = reg.get<PrefabLinkComponent>(e).asset;
+			if (!wantRel.empty() && !(id == want)) continue;
+
+			const auto* n = reg.try_get<NameComponent>(e);
+			json j{
+				{ "uuid",       uuidOf(*world, e) },
+				{ "name",       n ? n->name : std::string() },
+				{ "prefabUuid", uuidJson(id) },
+			};
+			std::string rel = wantRel;
+			if (rel.empty())
+				for (const auto& [pid, prel] : byId)
+					if (pid == id) { rel = prel; break; }
+			// Empty when the prefab the entity names is not in the project any
+			// more — a deleted asset leaves its instances standing, and saying so
+			// is more useful than leaving the key out.
+			j["prefab"] = rel;
+			const Entity ep = structParentOf(reg, e);
+			j["parent"] = (ep == entt::null || ep == world->rootEntity())
+			              ? std::string() : uuidOf(*world, ep);
+			list.push_back(std::move(j));
+		}
+
+		json out{ { "instances", std::move(list) } };
+		if (!wantRel.empty()) out["prefab"] = wantRel;
+		return ToolResult::ok(std::move(out));
+	};
+	registry.add(std::move(t));
+}
+
 } // namespace
 
 void registerPrefabTools(McpToolRegistry& registry, ContentManager& content,
@@ -607,6 +730,7 @@ void registerPrefabTools(McpToolRegistry& registry, ContentManager& content,
 	addInfo(registry, content);
 	addInstantiate(registry, content, cmds);
 	addSave(registry, content, cmds, h);
+	addInstances(registry, content, cmds);
 }
 
 } // namespace HE::Ed
