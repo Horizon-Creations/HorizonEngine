@@ -1418,7 +1418,8 @@ zweite käme als schlichtes „nicht gefunden" zurück.
 * **`Engine/`** ist schreibgeschützt — dieselbe Sperre, die der Panel-Kontext
   `engineLocked` nennt.
 * **Szenen anlegen** gehört Schritt 2 (`scene_create`): eine `.hescene` ist
-  JSON, kein HAsset, und der Stub-Writer schriebe dort das Falsche.
+  JSON, kein HAsset, und der Stub-Writer schriebe dort das Falsche. (Genau das
+  tat der Content Browser bis dahin — siehe 9.4.)
 * **Material-, Widget-, Input- und Terrain-Inhalte** ändern die Werkzeuge nicht.
   Sie legen die Dateien an und bewegen sie; was drin steht, sind die Schritte 3
   bis 6 dieses Themas.
@@ -1430,3 +1431,80 @@ genau der Durchfall, den der Kommentar über dem Switch vorhersagt, samt Warnung
 Beide meldeten sich gegenüber `content.typeName`, der C-ABI und allem, was
 Assets nach Typnamen auflistet, als unbekannt. Ein Test hält Hin- und
 Rückrichtung jetzt zusammen.
+
+## 9. Nachtrag: die Szenen-Werkzeuge (Folgethema 29, Schritt 2)
+
+`scene_save`, `scene_create`, `scene_open` — die Hälfte, ohne die alles, was
+die Entity-Werkzeuge tun, mit der Sitzung stirbt. Ein Client konnte hundert
+Objekte setzen und hatte keinen Weg, davon irgendetwas zu behalten, keinen Weg,
+ein zweites Level anzufangen, und keinen Weg, zu einem vorhandenen zu wechseln.
+`scene_info` sagte ihm, die Szene sei dirty, und bot nichts dagegen an.
+
+### 9.1 Wieder kein EditorCommands darunter, und diesmal schärfer
+
+Das Gateway kennt fünf Entity-Befehle und schreibt zu jedem einen Undo-Eintrag,
+der ihn umkehrt. `openScene` **ersetzt die Welt und leert danach die
+Undo-Historie** (`EditorApplication::openScene`) — es gibt nichts umzukehren,
+und eine Inverse zu erfinden hieße, ein Undo zu erfinden, das der Editor selbst
+nicht anbietet. Also dieselbe Bauform wie bei den Asset-Werkzeugen: die Prüfungen,
+die ein Mensch von der Oberfläche geschenkt bekommt, werden hier einmal über
+Hooks gestellt, und die Ablehnungen behalten die Drahtnamen der Entity-Werkzeuge.
+
+`saveScene` und `openScene` in den Hooks sind die **eigenen Member** von
+`EditorApplication`, keine Nachbauten: ein MCP-Save nimmt damit das
+Szenen-Thumbnail auf und ein MCP-Open lädt die Asset-Referenzen vor und wärmt
+die Material-Pipelines, genau wie das Datei-Menü. Beide geben jetzt `bool`
+zurück — die UI-Aufrufer ignorieren das (Log und Titelleiste sagen es ihnen),
+der Client am anderen Ende kann weder das eine noch das andere sehen.
+
+### 9.2 Die eine Wache, die von Hand nachgebaut werden musste
+
+Ein Mensch erreicht `openScene` nie direkt: Datei > Szene öffnen läuft über
+`requestGuarded` (`EditorUI.cpp`), und das hebt bei einer dirty Szene die
+Speichern-Nachfrage. Ein Client sieht diesen Dialog nicht. Also lehnt
+`scene_open` eine dirty Szene mit `dirty` ab, solange er nicht
+`discard_changes: true` sagt. Eine Stunde Platzierungsarbeit still wegzuwerfen
+ist die Lüge, die hier am teuersten wäre, und sie ist für den Aufrufer
+prinzipiell unsichtbar. `scene_open` speichert deshalb auch **nicht** von selbst
+vorher: wer beides wollte, ruft `scene_save` und dann `scene_open` — ein
+ungefragter Save dagegen ließe sich nicht zurücknehmen.
+
+### 9.3 Play-Modus, alle drei
+
+Nicht Vorsicht: Play-in-Editor läuft **in** `m_editorWorld`, nachdem der
+Zustand in eine Temp-Datei geschnappt wurde (`setPlayMode`). Die Welt, die ein
+Save während des Spielens schriebe, ist also die, in der der Spieler gerade
+herumgelaufen ist — ein „Speichern", das drei Minuten Play-Physik über das
+gebaute Level legt, ist Datenverlust, der wie ein Erfolg aussieht.
+
+### 9.4 Nebenbei gefunden: „Neue Szene" im Content Browser war kaputt
+
+Die Zeile `tryCreate("NewScene", ".hescene", HE::AssetType::Scene)` rief
+`writeAssetStub` — und schrieb damit einen **binären HAsset-Container** an einen
+`.hescene`-Pfad. `SceneSerializer::loadJSON` liest den als „not valid JSON",
+`openScene` loggt einen Fehler und lässt eine leere Welt ohne Pfad stehen. Der
+Content Browser bot also eine Datei zum Öffnen an, die er selbst erzeugt hatte
+und die niemand öffnen konnte.
+
+Gefixt über einen geteilten Schreiber, dasselbe Prinzip wie beim Stub-Writer:
+`HE::Ed::writeEmptySceneFile` serialisiert eine **leere Welt** (statt ein
+Literal hinzuschreiben), das Panel und `scene_create` rufen ihn beide. Eine
+default-konstruierte `HorizonWorld` ist genau das, was Datei > Neue Szene
+hinterlässt — Root-Entity und sonst nichts, kein Himmel, kein Licht, keine
+Kamera. Ein Test hält beide Richtungen fest: der Stub an `.hescene` wird als
+Szene abgelehnt, die geschriebene leere Szene öffnet.
+
+### 9.5 Was bewusst offen bleibt
+
+* **Additives Laden** (`openSceneAdditive`) ist ein Merge in die laufende Welt
+  mit eigenen Physik- und Undo-Regeln, nicht Szenen-Persistenz.
+* **Eine „neue leere Szene" ohne Datei** gibt es nicht. `scene_create` schreibt
+  immer eine Datei; ein Werkzeug, dessen einzige Wirkung das Wegwerfen der
+  offenen Szene ist, wäre eine Waffe ohne Ziel.
+* **Keine Ablehnung in einer Collab-Sitzung.** Ein Mensch wird auch nicht
+  abgelehnt, und eine Sperre, die MCP hat und das Datei-Menü nicht, wäre eine
+  Verhaltensänderung als Klempnerei verkleidet. Der Sitzungszustand steht
+  stattdessen im Ergebnis.
+* **Die Endung ist nicht verhandelbar.** Fehlt sie, wird `.hescene` ergänzt
+  (wer „Levels/Main" sagt, meint „Levels/Main.hescene"); jede *andere* Endung
+  wird abgelehnt statt korrigiert.
