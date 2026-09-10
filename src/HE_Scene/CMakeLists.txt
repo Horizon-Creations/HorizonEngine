@@ -11,6 +11,7 @@ add_library(HorizonScene SHARED
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
     src/TerrainPaint.cpp
+    src/TerrainSculpt.cpp
     src/AnimationEval.cpp
     src/AnimationPose.cpp
     src/AnimationIk.cpp

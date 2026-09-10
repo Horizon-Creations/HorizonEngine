@@ -6516,6 +6516,18 @@ void EditorApplication::setupMcpTools()
 	scene.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
 
 	HE::Ed::registerSceneTools(m_mcp.registry(), contentManager(), std::move(scene));
+
+	// ── Shaping the ground ──────────────────────────────────────────────────
+	// Everything else about a terrain edit — undo, the publish to a session, the
+	// play-mode refusal — comes from the gateway, so the only thing the tools
+	// need from this class is the rebuild the Landscape brush also makes at the
+	// end of a stroke.
+	HE::Ed::McpTerrainHooks terrain;
+	terrain.regenerate = [this] {
+		if (!m_editorWorld) return;
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
+	};
+	HE::Ed::registerTerrainTools(m_mcp.registry(), m_commands, std::move(terrain));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

@@ -70,6 +70,20 @@ public:
     // answers true for every key the save path writes.
     static bool isKnownComponentKey(const std::string& key);
 
+    // Base64 (RFC 4648) over raw bytes — the encoding the scene format uses for
+    // the arrays that would otherwise be N JSON nodes (terrain sculptHeights and
+    // layerWeights, navmesh geometry).
+    //
+    // Public for the one caller that has to speak the scene format from outside
+    // it: a tool that edits a terrain's heights hands the result back as a
+    // component patch, and that patch has to carry `sculptHeightsB64` in exactly
+    // the spelling the loader reads. A second encoder written next to it would be
+    // a second definition of the scene format, and the one that quietly stops
+    // matching. Not a general-purpose base64 API — it exists so that there is
+    // only ever one.
+    static std::string          encodeBase64(const uint8_t* data, size_t len);
+    static std::vector<uint8_t> decodeBase64(const std::string& s);
+
     // Instantiate a prefab blob into the world. Creates fresh entities for
     // every entry in the prefab and re-wires their hierarchy. The new subtree
     // root is reparented to `parent` (world root if entt::null). Returns the

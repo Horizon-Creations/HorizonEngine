@@ -1508,3 +1508,89 @@ Szene abgelehnt, die geschriebene leere Szene öffnet.
 * **Die Endung ist nicht verhandelbar.** Fehlt sie, wird `.hescene` ergänzt
   (wer „Levels/Main" sagt, meint „Levels/Main.hescene"); jede *andere* Endung
   wird abgelehnt statt korrigiert.
+
+## 10. Nachtrag: die Terrain-Werkzeuge (Folgethema 29, Schritt 9)
+
+`terrain_info`, `terrain_heightmap`, `terrain_sculpt`, `terrain_paint` — vier
+Werkzeuge für die eine Komponente, die `entity_get` und
+`entity_set_components` nicht sinnvoll adressieren können.
+
+### 10.1 Warum Terrain eigene Werkzeuge braucht
+
+Die Nutzlast einer `TerrainComponent` sind zwei Blobs: `sculptHeightsB64`
+(res² Floats, 263k davon bei der Auflösung, auf die der Chunk-Bauer schnappt)
+und `layerWeightsB64` (weightRes² RGBA-Texel). Die generischen
+Komponenten-Werkzeuge reichen die als Base64 heraus und nehmen sie so wieder
+an — das ist keine Schnittstelle, sondern ihre Abwesenheit. Ein Client kann
+daraus keine Höhe lesen, keine einzelne ändern, ohne das ganze Feld neu zu
+kodieren, und „heb hier den Boden an" gar nicht erst ausdrücken.
+
+Die vier sprechen deshalb das Vokabular des Landscape-Modus: eine
+**Weltposition**, ein Pinselradius mit Falloff, eine Operation. Die Mathematik
+ist `TerrainSculpt` (Höhen, neu) und `TerrainPaint` (Layer-Gewichte,
+vorhanden) — dieselben Funktionen, aus denen die Pinsel des Editors gebaut
+sind, damit ein Client keine Landschaft erzeugen kann, die der Editor von Hand
+nicht auch erzeugt hätte.
+
+### 10.2 Diesmal doch durch das Gateway
+
+Anders als bei den Asset- und Szenen-Werkzeugen: eine Terrain-Änderung **ist**
+eine Komponenten-Änderung an einer Entity, also genau das, was
+`Command::setComponents` ist. Der Pinsel läuft auf einer **Kopie** der
+Komponente, das Ergebnis geht als Komponenten-Patch durch das Gateway — und
+damit sind Undo, das Publizieren in eine Collab-Sitzung, die
+Play-Modus-Ablehnung und das Lock-Gate ohne eine zweite Kopie von irgendetwas
+davon dabei.
+
+### 10.3 Die eine Schreiboperation außerhalb des Gateways
+
+`TerrainComponent` trägt Felder, die ausdrücklich nie serialisiert werden: die
+UUID der Weightmap-Textur, das Chunk-Gitter, für das die Chunks zuletzt gebaut
+wurden, und das Region-Dirty-Rechteck. Das Gateway baut die Komponente aus dem
+Szenen-JSON neu, das die nicht tragen kann — sie landet also mit dem Default:
+keine Weightmap-Textur (der nächste Tick registriert **eine zweite** und die
+erste ist verloren), kein bekanntes Chunk-Gitter und `dirty`, also ein Neubau
+aller 64+ Chunks für einen Pinselabdruck von zehn Metern. Nach dem Befehl
+werden diese Laufzeitfelder deshalb auf die neue Komponente übertragen und das
+Dirty-Rechteck auf die Pinselausdehnung gesetzt. Das ist ein Schreibzugriff auf
+die Welt am Gateway vorbei und bewusst der kleinstmögliche: er berührt nichts,
+was je eine Szenendatei, ein Undo-Eintrag oder ein Peer zu sehen bekäme. Ein
+Test setzt die drei Felder vorher und hält fest, dass sie den Umweg überleben.
+
+### 10.4 Eine Koordinate auf der ganzen Schnittstelle: Welt
+
+Jedes x, z und jede Höhe ist Weltraum, auch die Zahlen, die aus
+`terrain_heightmap` zurückkommen. Die Komponente speichert terrain-**lokal**,
+die Pinsel nehmen lokal — umgerechnet wird also genau einmal pro Werkzeug, am
+Rand, gegen `HE::worldPositionOf`. Nie gegen `tc.worldMatrix`: das Feld ist nur
+so frisch wie das letzte `propagateTransforms`, und ein Terrain, das in
+demselben Frame entstanden ist, antwortet mit der Identität. Lokale Koordinaten
+herauszureichen wäre weniger Code und die schlechtere Schnittstelle gewesen: bei
+einer Landschaft im Ursprung — und das sind die meisten — bleibt der Fehler bis
+zu dem einen Projekt unsichtbar, in dem sie es nicht ist.
+
+### 10.5 Der 2ⁿ+1-Schnapp, vorgezogen
+
+`TerrainSystem::updateTerrains` schnappt `resolution` auf 2ⁿ+1 und resampelt
+dabei das Höhenfeld, damit LOD0-Vertices exakt auf Quellgitterpunkten landen.
+Passiert das **nach** einem Schreibvorgang, sind die Zahlen, die ein Client
+gerade gesetzt hat, verschoben und der Gitterschritt, den er gemessen hat, ein
+anderer. `TerrainSculpt::ensureHeights` nimmt den Schnapp deshalb vorweg, und
+`terrain_info` meldet `resolutionSnapsTo`, solange er noch aussteht.
+
+### 10.6 Was bewusst offen bleibt
+
+* **Der interaktive Pinsel wurde nicht umgehängt.** `TerrainTools.cpp` ist
+  dt-getaktet und strichgebunden (Flatten-Ziel und Ramp-Start werden beim
+  Mausdruck erfasst); ein Umbau darauf ist eine Verhaltensänderung, die
+  headless nicht nachweisbar ist. Die Blendfaktoren in `TerrainSculpt` sind
+  bewusst dieselben, damit ein späterer Tausch eine Zeile ist.
+* **Ramp** hat keine Entsprechung: der Pinsel läuft zwischen zwei Punkten, die
+  ein Einzelabdruck nicht kennt.
+* **Kein Massen-Schreiber** (`terrain_set_heights`). Ein Höhenfeld aus einem
+  Zahlen-Array zu setzen ist die naheliegende Ergänzung, aber ein eigener
+  Schritt: die Frage, was mit einem Array passiert, das nicht auf das Gitter
+  passt, ist die ganze Arbeit daran.
+* **`heightmapTexture`** wird vom Szenen-Schreiber nie ausgegeben und von
+  nichts gesetzt (Phase-2-Platzhalter). Die Werkzeuge tragen es deshalb auch
+  nicht mit — das gehört zum Serialisierer, nicht hierher.

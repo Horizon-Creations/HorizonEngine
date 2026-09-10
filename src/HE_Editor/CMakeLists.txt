@@ -138,6 +138,11 @@ add_executable(HorizonEditor WIN32
 	# dies with the session — and the one place a guard had to be replicated by
 	# hand rather than reused, because a client cannot answer a save prompt.
 	McpToolsScene.cpp
+	# The landscape, which is the one component the generic entity tools cannot
+	# usefully address: its payload is two base64 blobs, and base64 is not an
+	# interface. Speaks world positions and brushes instead, over the same
+	# TerrainSculpt/TerrainPaint maths the editor's own Landscape mode uses.
+	McpToolsTerrain.cpp
 	# The argument readers and the ONE confinement rule both of the above use.
 	# Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

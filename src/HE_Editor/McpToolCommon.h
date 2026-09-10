@@ -33,8 +33,16 @@ std::string strArg (const nlohmann::json& args, const char* key);
 bool        boolArg(const nlohmann::json& args, const char* key, bool fallback = false);
 int         intArg (const nlohmann::json& args, const char* key, int fallback);
 
+// `is_number`, not `is_number_float`: a client that sends 5 where the schema
+// says number means 5.0, and refusing that is a refusal nobody can debug from
+// the schema. `hasArg` is the separate question of whether it was sent at all —
+// which for a coordinate is not the same as "sent 0".
+double numArg(const nlohmann::json& args, const char* key, double fallback);
+bool   hasArg(const nlohmann::json& args, const char* key);
+
 nlohmann::json objectSchema(nlohmann::json properties, std::vector<std::string> required);
 nlohmann::json stringProp(const char* what);
+nlohmann::json numberProp(const char* what);
 
 // ── Confinement ──────────────────────────────────────────────────────────────
 struct PathCheck
