@@ -148,6 +148,12 @@ add_executable(HorizonEditor WIN32
 	# element ids, parents, sibling order, anchor presets and properties BY NAME
 	# out of the same table the Designer's details panel draws.
 	McpToolsWidget.cpp
+	# The two input asset types, which are one JSON string each — so the asset
+	# tools can make the files and cannot put a key in them. Every name goes
+	# through the tables the RUNTIME parses with, because the runtime skips one it
+	# cannot read without a word: a misspelled key is a binding that sits in the
+	# file, shows in the editor and does nothing in the game.
+	McpToolsInput.cpp
 	# The argument readers and the ONE confinement rule both of the above use.
 	# Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

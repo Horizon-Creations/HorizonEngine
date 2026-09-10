@@ -8,6 +8,7 @@
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
 #include "UIEditorPanel.h"         // …and the Designer tabs it may author widgets in
+#include "InputAssetPanel.h"       // …and the Input Asset tabs it must not write behind
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
@@ -6556,6 +6557,25 @@ void EditorApplication::setupMcpTools()
 		return UIEditorPanel::isDirtyByContentPath(rel);
 	};
 	HE::Ed::registerWidgetTools(m_mcp.registry(), contentManager(), std::move(widget));
+
+	// ── What the game is played with ────────────────────────────────────────
+	// The opposite decision from the widget hooks above, and McpInputHooks says
+	// why: the Input Asset editor keeps no undo, so there is no safe way to land
+	// an MCP edit in an open tab. A tab with unsaved changes is refused; a clean
+	// one is told to re-read the file, which is the same path a collaboration
+	// peer's change takes.
+	HE::Ed::McpInputHooks input;
+	input.isPlaying     = [this] { return m_isPlaying; };
+	input.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	input.isDirty        = [](const std::string& rel) {
+		return InputAssetPanel::isDirtyByContentPath(rel);
+	};
+	input.reloadFromDisk = [](const std::string& rel) {
+		return InputAssetPanel::reloadByContentPath(rel);
+	};
+	HE::Ed::registerInputTools(m_mcp.registry(), contentManager(), std::move(input));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

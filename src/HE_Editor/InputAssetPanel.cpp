@@ -48,6 +48,12 @@ struct PanelState
 	bool  dirty  = false;
 	bool  isMapping = false;
 	std::string name;
+	// The content-relative path, which is NOT the key this state is stored under
+	// (that is the tab bar's absolute path). MCP addresses assets
+	// content-relatively, so the two lookups at the bottom of this file walk on
+	// this field rather than trusting two spellings of an absolute path to
+	// string-match — the same reason UIEditorPanel::stateByContentPath gives.
+	std::string relPath;
 	HE::UUID    assetId;
 	// Action payload
 	// 0 Button, 1 Axis, 2 Axis 2D — three now, so a bool no longer says it.
@@ -371,6 +377,44 @@ bool InputAssetPanel::reloadFromDisk(const std::string& assetPath)
 }
 
 
+// ── Addressed content-relatively (the MCP input tools) ──────────────────────
+// This panel's states are keyed by the tab bar's ABSOLUTE path; MCP addresses
+// assets content-relatively. So the lookup is a walk on PanelState::relPath, the
+// same shape UIEditorPanel::stateByContentPath has and for the same reason: two
+// conventions, one of which is the tab bar's and not ours to change. Deliberately
+// NOT keyed on `loaded` — after a reload that flag is false while the tab still
+// holds the asset.
+namespace
+{
+PanelState* stateByContentPath(const std::string& contentPath)
+{
+	if (contentPath.empty()) return nullptr;
+	PanelState* found = nullptr;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!found && st.relPath == contentPath) found = &st;
+	});
+	return found;
+}
+} // namespace
+
+bool InputAssetPanel::isDirtyByContentPath(const std::string& contentPath)
+{
+	const PanelState* st = stateByContentPath(contentPath);
+	return st && st->dirty;
+}
+
+bool InputAssetPanel::reloadByContentPath(const std::string& contentPath)
+{
+	PanelState* st = stateByContentPath(contentPath);
+	if (!st) return false;
+	// Same two lines reloadFromDisk sets, and safe for the same reason: the MCP
+	// tools refuse outright when this tab has unsaved edits (see McpInputHooks),
+	// so there is never anything precious to clear here.
+	st->loaded = false;
+	st->dirty  = false;
+	return true;
+}
+
 void InputAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 
 bool InputAssetPanel::save(AppContext& ctx, const std::string& path)
@@ -399,6 +443,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	if (!st.loaded && ctx.contentManager)
 	{
 		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);
+		st.relPath   = rel;
 		st.assetId   = ctx.contentManager->loadAsset(rel);
 		st.isMapping = isInputMappingAsset(assetPath);
 		if (const InputActionAsset* a = ctx.contentManager->getInputAction(st.assetId))
