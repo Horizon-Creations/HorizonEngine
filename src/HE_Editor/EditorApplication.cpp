@@ -15,6 +15,7 @@
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
+#include "TypeAssetPanel.h"        // the MCP type tools ask this tab whether it is dirty
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
@@ -6624,6 +6625,33 @@ void EditorApplication::setupMcpTools()
 	prefab.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
 	HE::Ed::registerPrefabTools(m_mcp.registry(), contentManager(), m_commands,
 	                            std::move(prefab));
+
+	// ── A project's own types ────────────────────────────────────────────────
+	// The same open-tab decision as input and material, plus one hook neither of
+	// those needs: in a C++ project the definitions ARE C++ types, so a write has
+	// to regenerate Source/Generated/GameTypes.h exactly as the panel's Save
+	// does — otherwise gameplay code compiles against yesterday's struct and the
+	// mismatch surfaces as a compile error nobody can trace to an MCP call.
+	HE::Ed::McpTypeHooks types;
+	types.isPlaying     = [this] { return m_isPlaying; };
+	types.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	types.isDirty = [](const std::string& rel) {
+		return TypeAssetPanel::isDirtyByContentPath(rel);
+	};
+	types.reloadFromDisk = [](const std::string& rel) {
+		return TypeAssetPanel::reloadByContentPath(rel);
+	};
+	types.onTypesChanged = [this] {
+		if (m_projectManager.currentProject().scriptLanguage != ProjectScriptLanguage::Cpp)
+			return;
+		std::filesystem::path projectPath = m_projectManager.currentProject().path;
+		if (std::filesystem::is_regular_file(projectPath))
+			projectPath = projectPath.parent_path();
+		if (!projectPath.empty()) HE::writeCppTypesHeader(projectPath);
+	};
+	HE::Ed::registerTypeTools(m_mcp.registry(), contentManager(), std::move(types));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

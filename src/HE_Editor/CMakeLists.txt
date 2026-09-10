@@ -163,6 +163,11 @@ add_executable(HorizonEditor WIN32
 	# asset_create refuses to make, because a prefab file without a subtree in it
 	# is an empty file rather than an empty prefab.
 	McpToolsPrefab.cpp
+	# A project's own Struct/Enum types — the definitions every other frontend
+	# then speaks (HorizonCode pins, Lua tables, the generated C++ header,
+	# savegame fields). asset_create makes the file; without these it stays an
+	# empty definition nothing can be built on.
+	McpToolsType.cpp
 	# The argument readers, the ONE confinement rule and the one content walk that
 	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

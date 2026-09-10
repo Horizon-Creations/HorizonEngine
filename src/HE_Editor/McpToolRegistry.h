@@ -784,4 +784,77 @@ struct McpPrefabHooks
 void registerPrefabTools(McpToolRegistry& registry, ContentManager& content,
                          EditorCommands& cmds, McpPrefabHooks hooks);
 
+// ─── A project's own types: the Struct / Enum tools ──────────────────────────
+// Five tools: `type_info` (the catalogue, and one definition in full),
+// `type_field_set` / `type_field_remove` (a struct's or a savegame template's
+// fields) and `type_enum_set` / `type_enum_remove` (an enum's entries).
+//
+// ── Why they need tools of their own ─────────────────────────────────────────
+// A Struct or Enum asset is a definition every other frontend then speaks:
+// HorizonCode pins and variables, Lua tables and Python dicts, the generated C++
+// header, savegame template fields. `asset_create` can make the file — and the
+// file it makes is an empty definition with no fields and no entries, which
+// nothing can be built on. The payload is the CHUNK_STDF / CHUNK_ENDF JSON, and
+// handing a model that to rewrite would be the base64 mistake with nicer
+// characters: `type` is an integer enum, a container field carries FOUR coupled
+// fields (isArray, container, keyType, keyTypeName) whose illegal combinations
+// the loader silently repairs, and the default value's encoding depends on the
+// field's own type.
+//
+// So these speak the vocabulary the Type Editor speaks: a field NAME, a type by
+// its editor label ("Float", "Vec3", "Enum"), a container by name, and a default
+// in the shape that type's default has.
+//
+// ── The two gates the panel has, and this must have too ──────────────────────
+//   • A CYCLE IS REFUSED. `structWouldCycle` is what the panel's Save checks
+//     before it writes, because a struct that (directly or through another one)
+//     contains itself never finishes seeding a default value. Refused here for
+//     the same reason and with the same question.
+//   • A NAME COLLISION IS REPORTED, NOT REFUSED. Two definitions with the same
+//     display name would generate colliding `horizon.enums.<Name>` and C++
+//     symbols. The panel WARNS and still saves (the file has to be nameable
+//     before it can be renamed), so the result carries `nameCollision` rather
+//     than refusing a write the human could have made.
+//
+// ── What a save does besides writing the file ────────────────────────────────
+// Two things, and skipping either is a silent divergence from the panel:
+// the definition is RE-REGISTERED in HE::TypeRegistry (or every type dropdown in
+// the editor still offers yesterday's fields), and in a C++ project the
+// generated types header is rewritten (or gameplay code compiles against a
+// struct that no longer matches the asset). The second one is `onTypesChanged`.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input and material tools: unsaved edits in an open Type
+// Editor tab are refused with `dirty`, a clean tab is told to re-read the file.
+// The panel's tab state is the truth while it is dirty, and there is no way to
+// land an edit in it that does not need an AppContext this file cannot have.
+struct McpTypeHooks
+{
+	// Play-in-editor. A definition change reaches the running session's script
+	// bootstrap and its type dropdowns, so it is refused like every other asset
+	// write while play runs.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Type Editor tab have edits the file
+	// does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// A definition changed: in a C++ project, rewrite the generated types header
+	// (HE::writeCppTypesHeader), exactly as TypeAssetPanel::saveState does. Absent
+	// = there is no project, which is a test.
+	std::function<void()> onTypesChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerTypeTools(McpToolRegistry& registry, ContentManager& content,
+                       McpTypeHooks hooks);
+
 } // namespace HE::Ed
